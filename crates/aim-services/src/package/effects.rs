@@ -9,22 +9,24 @@ impl std::fmt::Debug for Owner {
 }
 impl Owner {
     pub fn new(binder: Strong) -> Result<Arc<Self>, Exception> {
-        let reply = binder.transact(u32::from_be_bytes(*b"_NTF"), &Parcel::new(), false).map_err(transport)?;
+        let code = u32::from_be_bytes(*b"_NTF");
+        let reply = binder.transact(code, &Parcel::new(), false)
+            .map_err(|status| diagnostic(transport(status), code, binder.handle, "transact"))?;
         let mut reader = reply.reader();
-        if reader.read_string16().map_err(transport)?.as_deref() != Some(api::DESCRIPTOR) || reader.remaining() != 0 {
-            return Err(Exception::new(EX_ILLEGAL_STATE, "package effects descriptor differs"));
+        if reader.read_string16().map_err(|status| diagnostic(transport(status), code, binder.handle, "read"))?.as_deref() != Some(api::DESCRIPTOR) || reader.remaining() != 0 {
+            return Err(diagnostic(Exception::new(EX_ILLEGAL_STATE, "package effects descriptor differs"), code, binder.handle, "descriptor"));
         }
         Ok(Arc::new(Self { binder, revoked: AtomicBool::new(false) }))
     }
     pub fn revoke(&self) { self.revoked.store(true, Ordering::Release); }
     fn call<T>(&self, code: u32, write: impl FnOnce(&mut Parcel), read: impl FnOnce(&mut Reader<'_>) -> Result<T, i32>) -> Result<T, Exception> {
-        if self.revoked.load(Ordering::Acquire) { return Err(Exception::new(EX_ILLEGAL_STATE, "package effects owner revoked")); }
+        if self.revoked.load(Ordering::Acquire) { return Err(diagnostic(Exception::new(EX_ILLEGAL_STATE, "package effects owner revoked"), code, self.binder.handle, "admission")); }
         let mut request = Parcel::new(); write(&mut request);
-        let reply = self.binder.transact(code, &request, false).map_err(transport)?;
-        let mut reader = reply.reader(); reader.read_exception().map_err(transport)??;
-        let value = read(&mut reader).map_err(transport)?;
-        if reader.remaining() != 0 { return Err(Exception::new(EX_ILLEGAL_STATE, "package effects reply has trailing data")); }
-        if self.revoked.load(Ordering::Acquire) { return Err(Exception::new(EX_ILLEGAL_STATE, "package effects owner changed during callback")); }
+        let reply = self.binder.transact(code, &request, false)
+            .map_err(|status| diagnostic(transport(status), code, self.binder.handle, "transact"))?;
+        let mut reader = reply.reader();
+        let value = read_reply(code, self.binder.handle, &mut reader, read)?;
+        if self.revoked.load(Ordering::Acquire) { return Err(diagnostic(Exception::new(EX_ILLEGAL_STATE, "package effects owner changed during callback"), code, self.binder.handle, "owner_epoch")); }
         Ok(value)
     }
     pub fn require_installer_permission(&self, uid: i32) -> Result<bool, Exception> {
@@ -140,6 +142,17 @@ impl Owner {
     }
 }
 fn transport(status: i32) -> Exception { Exception::new(EX_ILLEGAL_STATE, format!("package effects transport: {status}")) }
+fn diagnostic(mut error: Exception, code: u32, handle: u32, phase: &str) -> Exception {
+    error.message = format!("{} [package effects tx={code} handle={handle} phase={phase}]", error.message);
+    error
+}
+fn read_reply<T>(code: u32, handle: u32, reader: &mut Reader<'_>, read: impl FnOnce(&mut Reader<'_>) -> Result<T, i32>) -> Result<T, Exception> {
+    reader.read_exception().map_err(|status| diagnostic(transport(status), code, handle, "read_exception"))?
+        .map_err(|error| diagnostic(error, code, handle, "read_exception"))?;
+    let value = read(reader).map_err(|status| diagnostic(transport(status), code, handle, "read"))?;
+    if reader.remaining() != 0 { return Err(diagnostic(Exception::new(EX_ILLEGAL_STATE, "package effects reply has trailing data"), code, handle, "trailing")); }
+    Ok(value)
+}
 
 /// The resolver rebuild uses every group referenced by each registered filter.
 /// Clearing preferred choices is needed only when that effective index changes.
@@ -170,4 +183,54 @@ pub fn mime_index_changed(before: &super::model::State, after: &super::model::St
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aim_binder_host::parcel::{EX_SERVICE_SPECIFIC, NOT_ENOUGH_DATA, UNKNOWN_TRANSACTION};
+
+    #[test]
+    fn effects_diagnostic_reply_preserves_results_and_reports_parse_stage() {
+        let mut reply = Parcel::new();
+        reply.write_no_exception();
+        reply.write_bool(true);
+        assert!(read_reply(api::REQUIRE_INSTALLER_PERMISSION, 17, &mut Reader::new(reply.data(), reply.objects()), |r| r.read_bool()).unwrap());
+        let mut empty = Reader::new(&[], &[]);
+        let error = read_reply(api::POST_INSTALL_PACKAGE, 17, &mut empty, |_| Ok(())).unwrap_err();
+        assert_eq!(error.code, EX_ILLEGAL_STATE);
+        assert!(error.message.contains(&format!("transport: {NOT_ENOUGH_DATA}")));
+        assert!(error.message.contains(&format!("tx={} handle=17 phase=read_exception", api::POST_INSTALL_PACKAGE)));
+        let mut reply = Parcel::new();
+        reply.write_no_exception();
+        let error = read_reply(api::REQUIRE_INSTALLER_PERMISSION, 19, &mut Reader::new(reply.data(), reply.objects()), |r| r.read_bool()).unwrap_err();
+        assert!(error.message.contains("handle=19 phase=read]"));
+        reply.write_i32(23);
+        let error = read_reply(api::POST_INSTALL_PACKAGE, 19, &mut Reader::new(reply.data(), reply.objects()), |_| Ok(())).unwrap_err();
+        assert!(error.message.contains("phase=trailing]"));
+    }
+
+    #[test]
+    fn effects_diagnostic_preserves_remote_service_and_parcelable_exceptions() {
+        let mut service = Exception::new(EX_SERVICE_SPECIFIC, "original owner failure");
+        service.service_specific = 71;
+        let mut payload = Parcel::new();
+        payload.write_string16(Some("original.OwnerException"));
+        payload.write_string16(Some("opaque owner payload"));
+        let parcelable = Exception::parcelable(Some("original parcelable failure"), &payload).unwrap();
+        for expected in [service, parcelable] {
+            let mut reply = Parcel::new();
+            reply.write_exception(&expected);
+            let error = read_reply::<()>(api::KILL_PACKAGE, 31, &mut Reader::new(reply.data(), reply.objects()), |_| panic!("failed exception must not read a return value")).unwrap_err();
+            assert_eq!(error.code, expected.code);
+            assert_eq!(error.service_specific, expected.service_specific);
+            assert_eq!(error.parcelable, expected.parcelable);
+            assert!(error.message.starts_with(&expected.message));
+            assert!(error.message.contains(&format!("tx={} handle=31 phase=read_exception", api::KILL_PACKAGE)));
+        }
+        let error = diagnostic(transport(UNKNOWN_TRANSACTION), api::KILL_PACKAGE, 31, "transact");
+        assert_eq!(error.code, EX_ILLEGAL_STATE);
+        assert!(error.message.contains(&format!("transport: {UNKNOWN_TRANSACTION}")));
+        assert!(error.message.contains(&format!("tx={} handle=31 phase=transact", api::KILL_PACKAGE)));
+    }
 }
