@@ -299,6 +299,21 @@ runtime replay is required to identify and fix that owner. The failed body stops
 with cleanup errors empty and no DATA mount or attachment; GMS300, donor capture,
 rollback and full66 remain not run.
 
+Runtime21c93296 repeats the complete signed v1/v2/uninstall and native session
+route, including exact installed hashes and the destroyed-session write denial.
+Its Calculator install identifies the final conflict as an active-domain
+inventory/order change rather than another value-only publication. This is the
+original domain owner adding the installing target's entry while the admitted
+candidate carries that same entry. Install publication now accepts only an
+append-only active-domain addition whose package is the target or a protected
+shared-UID sibling and whose complete candidate entry exactly equals the current
+owner; removals, reorder, duplicates, missing/different candidates, unknown or
+duplicate users and unrelated additions remain rejected. Three focused domain
+regressions and the existing final-publication regression pass in release mode.
+An actual rebuilt runtime replay remains required. Runtime21c93296 stops normally
+with cleanup errors empty, all children reaped, no DATA attachment/mount and an
+exclusive DATA lock.
+
 The app observer's inverted Success predicate is corrected with real normal
 installation plus three failure controls (#1341); AppInfo/storage/permissions
 have separate captures. ADB exec-out screencap returns a truncated PNG and the

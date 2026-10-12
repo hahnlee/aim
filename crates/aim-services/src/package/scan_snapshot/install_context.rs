@@ -56,13 +56,41 @@ pub(crate) fn install_user_rebase_conflict(base:&Snapshot,current:&Snapshot,cand
     }
     let before_domains=&base.owner().settings.domain_verification.active;
     let current_domains=&current.owner().settings.domain_verification.active;
-    let names=before_domains.iter().map(|package|&package.name).collect::<Vec<_>>();
-    if names!=current_domains.iter().map(|package|&package.name).collect::<Vec<_>>()
-        ||names.iter().copied().collect::<BTreeSet<_>>().len()!=names.len(){
-        return Ok(Some("domain active inventory/order changed".into()));
+    let before_names=before_domains.iter().map(|package|package.name.as_str()).collect::<Vec<_>>();
+    let current_names=current_domains.iter().map(|package|package.name.as_str()).collect::<Vec<_>>();
+    let candidate_names=candidate.settings.domain_verification.active.iter().map(|package|package.name.as_str()).collect::<Vec<_>>();
+    if before_names.iter().copied().collect::<BTreeSet<_>>().len()!=before_names.len()
+        ||current_names.iter().copied().collect::<BTreeSet<_>>().len()!=current_names.len()
+        ||candidate_names.iter().copied().collect::<BTreeSet<_>>().len()!=candidate_names.len(){
+        return Ok(Some("domain active inventory contains duplicate package names".into()));
+    }
+    if before_names!=current_names{
+        let retained=current_names.iter().copied().filter(|name|before_names.contains(name)).collect::<Vec<_>>();
+        let removed=before_names.iter().copied().filter(|name|!current_names.contains(name)).collect::<Vec<_>>();
+        let added=current_names.iter().copied().filter(|name|!before_names.contains(name)).collect::<Vec<_>>();
+        if !removed.is_empty()||retained!=before_names{
+            return Ok(Some(format!("domain active inventory/order changed: added={added:?}, removed={removed:?}, retained_order_changed={}",retained!=before_names)));
+        }
+        for name in &added{
+            let Some(after)=current_domains.iter().find(|package|package.name==*name)else{unreachable!()};
+            let values=candidate.settings.domain_verification.active.iter().filter(|package|package.name==*name).collect::<Vec<_>>();
+            let setting=current.owner().settings.packages.iter().chain(candidate.settings.packages.iter()).find(|setting|setting.name==*name);
+            let protected_addition=targets.contains(*name)||setting.is_some_and(|setting|protected.contains(&setting.uid_owner_id()));
+            if !protected_addition||values.as_slice()!=[after]{
+                return Ok(Some(format!("domain active inventory added competing package {name}: target_or_shared={protected_addition}, candidate_matches={}",values.as_slice()==[after])));
+            }
+            let users=current.owner().scanned_user_states(name).or_else(||candidate.scanned_user_states(name))
+                .ok_or("added active domain user owner unavailable")?;
+            let selected=after.users.iter().map(|user|user.id).collect::<BTreeSet<_>>();
+            if selected.len()!=after.users.len()||selected.iter().any(|user|!users.contains_key(user)){
+                return Ok(Some(format!("domain selection references unknown user: {name}")));
+            }
+        }
+        normalized.settings.domain_verification.active=current_domains.clone();
     }
     let mut domain_changes=Vec::new();
-    for (index,(before,after)) in before_domains.iter().zip(current_domains).enumerate(){
+    for before in before_domains{
+        let Some(after)=current_domains.iter().find(|package|package.name==before.name)else{continue;};
         if before==after{continue;}
         let setting=base.owner().settings.packages.iter().find(|setting|setting.name==before.name)
             .ok_or("changed active domain package has no settings owner")?;
@@ -81,7 +109,9 @@ pub(crate) fn install_user_rebase_conflict(base:&Snapshot,current:&Snapshot,cand
         if values.len()!=1||values[0]!=before&&values[0]!=after{
             return Ok(Some(format!("competing candidate domain state: {}",before.name)));
         }
-        normalized.settings.domain_verification.active[index]=after.clone();
+        let value=normalized.settings.domain_verification.active.iter_mut().find(|package|package.name==after.name)
+            .ok_or("validated normalized domain owner missing")?;
+        *value=after.clone();
         domain_changes.push(after.clone());
     }
     if base.usage().names().ne(current.usage().names()){return Ok(Some("usage package inventory differs".into()));}
@@ -407,6 +437,17 @@ mod permission_owner_tests {
         assert!(install_user_rebase_conflict(&base,&current,&mut candidate,&targets).unwrap().is_none(),"already-current domain projection is idempotent");
         let mut competing=base.owner().clone();competing.settings.domain_verification.active[2].users[0].enabled_hosts=vec!["fixture.example".into()];
         assert!(install_user_rebase_conflict(&base,&current,&mut competing,&targets).unwrap().unwrap().contains("competing candidate domain state"));
+    }
+    #[test]
+    fn install_domain_rebase_accepts_exact_new_target_owner_publication(){
+        let settings=domain_settings();let mut before=settings.clone();before.domain_verification.active.remove(0);
+        let base=domain_snapshot(before);let current=domain_snapshot(settings.clone());let targets=BTreeSet::from(["target".into()]);
+        let mut candidate=current.owner().clone();
+        assert!(install_user_rebase_conflict(&base,&current,&mut candidate,&targets).unwrap().is_none());
+        assert_eq!(candidate.settings.domain_verification.active,settings.domain_verification.active);
+        let mut competing=base.owner().clone();
+        let error=install_user_rebase_conflict(&base,&current,&mut competing,&targets).unwrap().unwrap();
+        assert!(error.contains("added competing package target")&&error.contains("candidate_matches=false"),"{error}");
     }
     #[test]
     fn install_domain_rebase_rejects_target_shared_identity_and_manifest_conflicts(){
