@@ -184,8 +184,9 @@ impl super::Store {
     )->Result<Arc<Snapshot>,super::CommitError>{
         let mut current=self.current.lock().unwrap();
         let targets=install_targets(base,&owner);
-        if !rebase_install_users(base,&current,&mut owner,&targets).map_err(|error|super::CommitError::Snapshot(super::Error::Invalid(error)))? {
-            return Err(super::CommitError::Snapshot(super::Error::Stale));
+        if let Some(reason)=install_user_rebase_conflict(base,&current,&mut owner,&targets)
+            .map_err(|error|super::CommitError::Snapshot(super::Error::Invalid(error)))? {
+            return Err(super::CommitError::Snapshot(super::Error::Invalid(format!("install publication owner changed: {reason}"))));
         }
         let usage=current.usage().for_install(owner.settings.packages.iter().map(|package|package.name.as_str()));
         crate::package::installer::permission_prepare::complete_candidate_runtime(&mut owner,&current,&usage)

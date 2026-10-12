@@ -272,7 +272,11 @@ mod install_regression {
         assert_eq!(snapshot.usage().times(&old.name).unwrap()[2],998);assert_eq!(snapshot.replica_runtime(&old.name,false).unwrap().unwrap().usage[2],998);
         assert_eq!(snapshot.usage().times(&new.name).unwrap(),&[0;8]);
         assert_eq!(snapshot.owner().loaded_packages()[&new.name].package.uid,new.app_id);assert_eq!(snapshot.owner().loaded_packages()[&new.name].package.path.as_deref(),Some(new.code_path.as_str()));
-        assert!(matches!(store.publish_install_after(&base,snapshot.owner().clone(),|_|Ok(())),Err(crate::package::scan_snapshot::CommitError::Snapshot(crate::package::scan_snapshot::Error::Stale))));
+        let error=store.publish_install_after(&base,snapshot.owner().clone(),|_|Ok(())).unwrap_err();
+        let crate::package::scan_snapshot::CommitError::Snapshot(crate::package::scan_snapshot::Error::Invalid(reason))=error else{panic!("unexpected publication result: {error:?}");};
+        assert!(reason.starts_with("install publication owner changed: "),"{reason}");
+        assert!(reason.contains("usage package inventory differs"),"{reason}");
+        assert!(!reason.contains("public_keys"),"diagnostic must not expose signing key material: {reason}");
         // Native uninstall must update installed-dependent library records
         // before writing restrictions, then retire code/UID without losing
         // retained user state or the other package's code/runtime owner.

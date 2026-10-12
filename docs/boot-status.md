@@ -287,8 +287,17 @@ groups are unchanged. Target and shared-UID sibling changes, competing
 candidate state, duplicate/unknown users and domain inventory/order or manifest
 identity changes remain conflicts. Two focused domain regressions and the prior
 normalized-owner and permission-handoff regressions pass without skips. An
-actual session replay remains required. The failed body stops with cleanup
-errors empty; UI, GMS300, donor capture, rollback and full66 remain not run.
+actual runtimecd116 replay passes create/write/live dump/commit, exact installed
+version/path/APK hash, abandon, the destroyed-session write rejection and the
+retained installed package hash. The following Calculator installation reaches
+final native publication but returns only `Native install generation changed:
+Stale`, so its competing owner is not yet identified and the app/UI route does
+not start. Final publication now preserves the strict rejection while returning
+the already computed owner-conflict field instead of collapsing it to `Stale`;
+the focused publication diagnostic regression passes without skips. A rebuilt
+runtime replay is required to identify and fix that owner. The failed body stops
+with cleanup errors empty and no DATA mount or attachment; GMS300, donor capture,
+rollback and full66 remain not run.
 
 The app observer's inverted Success predicate is corrected with real normal
 installation plus three failure controls (#1341); AppInfo/storage/permissions
