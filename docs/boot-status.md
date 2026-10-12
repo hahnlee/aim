@@ -212,10 +212,25 @@ Original logcat proves ArrayIndexOutOfBoundsException in the original new-user
 monitor called by our bridge with empty first-user arrays, rather than an AIDL
 version mismatch. The source guard follows original BroadcastHelper, and the
 new owner-cohort/Pending completion regression passes without skips. Matched
-image rebuild and actual signed update are pending; uninstall, sessions, GMS300,
-donor capture, rollback and full66 are not qualified by these partial bodies.
-The diagnostic terminal seal checks635 captured/persisted births gone, no DATA
-mount/both attachments and exclusive lock; original cleanup60 errors are kept.
+image rebuild at source4727c5e3 qualifies the matched Original/Native pair with
+common vendor jar SHA815a6603 and identities2d4419a3/28da7d59. Fresh Native1
+publishes70 files in291.23s (settings105.2s, boot223.2s, permissions230.1s),
+template SHA1bcccd11; all618 persisted namespace births end. Actual signed v1,
+same-signer v2 update and uninstall pass, including installed APK hashes and
+post-uninstall path absence. Real session create/write then fails before
+publication with a normalized Settings ownership conflict (#1346); its exact
+residual remains unqualified. Native2, fresh Original, GMS300, full donor capture,
+rollback and full66 remain unqualified.
+
+The error-only runtime15c1e9b8 replay installs v1 but reproduces #1329 during v2:
+original AMS monitor is held by notifyComponentUsed's synchronous native call,
+while our broadcast handler waits for that monitor. Original Watchdog kills
+SystemServer after72s; completion reports permission-GID transport -32 after
+canonical update. Native-side waiting owner is not established by Java stacks.
+This body never reaches the session conflict. All809 captured/persisted births
+end; Root normally detaches only its verified disposable DATA and checks both
+IORegistry classes, mount absence and exclusive lock. The failed60-second
+resident cleanup has no success receipt and is preserved, not relabeled PASS.
 
 The app observer's inverted Success predicate is corrected with real normal
 installation plus three failure controls (#1341); AppInfo/storage/permissions
