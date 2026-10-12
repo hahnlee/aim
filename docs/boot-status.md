@@ -219,7 +219,7 @@ template SHA1bcccd11; all618 persisted namespace births end. Actual signed v1,
 same-signer v2 update and uninstall pass, including installed APK hashes and
 post-uninstall path absence. Real session create/write then fails before
 publication with a normalized Settings ownership conflict (#1346); its exact
-residual remains unqualified. The second fresh Native factory with runtime15c1 publishes in280.50s, template
+residual is now identified below. The second fresh Native factory with runtime15c1 publishes in280.50s, template
 SHAf029075f (settings106.4s/boot224.1s/permissions230.0s). Matched Original with
 its explicit600s budget publishes in357.11s, template SHA401d6de3
 (settings206.0s/boot297.2s/permissions300.7s). Both keep input pins unchanged;
@@ -244,12 +244,13 @@ the existing compressed-install classifier regression pass without skips. The
 six-binary release build completes in63s; only guest-init changes, to SHA256
 `869cb9e90c4b1ff4128ba83ee2b8224d206cf2bdb8759631fc173dcf84d83741`.
 The typed compressed/system-install route retains its prior rebase contract
-until its exact lower-owner publication receipt is implemented (#1348). An
-actual signed/app replay remains required; the source tests and release build
-do not close #1329. The failed app body stops normally, leaves all744 captured
-and persisted births gone, no owned DATA mount or attachment, and an exclusive
-DATA lock. Its app, session, donor and conformance results remain failed or not
-run.
+until its exact lower-owner publication receipt is implemented (#1348). A fresh
+runtime49c5760b replay passes actual signed v1 installation, same-signer v2
+replacement with exact installed APK hashes, uninstall and missing-path checks;
+the former watchdog does not recur. The body then reaches a separate session
+commit conflict (#1346). It stops normally, leaves no owned DATA mount or either
+attachment, and obtains an exclusive DATA lock. Its remaining app, donor and
+conformance results are not run.
 
 A second15c1 diagnostic body passes the actual signed v1/update/uninstall and
 real create/write/commit/abandon transactions, with installed versions and APK
@@ -266,8 +267,28 @@ The next collector polls/reaps the held child during normal-stop wait.
 so that session-state dump coverage was not run. The native dump now selects
 actual retained installer registry/history and staged owners, preserving DUMP/
 app-op checks and typed errors. Three owner/argument regression tests pass with
-no skips. Fresh runtime build and live dump verification remain pending;
-original inputs and guest code are unchanged.
+no skips. On runtime49c5760b, a live dump reports active session611500795 with
+its actual user, installer, progress, lifecycle, params and stage path, plus two
+retained historical committed sessions and all three allocated native IDs. The
+session write succeeds; its later commit fails for the separately identified
+#1346 owner conflict. Original inputs and guest code are unchanged.
+
+That runtime49c5760b session commit establishes #1346's exact residual: while
+the retained installation targets only
+`android.incrementalinstall.incrementaltestapp` (appId10214), the original
+domain owner publishes a changed active entry for unrelated
+`com.google.android.gm` between package versions902 and910. The count and key
+order remain unchanged. Existing unrelated user-state rebasing does not yet
+merge that package-scoped domain publication, so that run returns
+`INSTALL_FAILED_INTERNAL_ERROR`. Installation rebasing now carries forward an
+unrelated active-domain status and known-user selection only when the package,
+domain ID, signature binding, auto-verify flag, host inventory and URI filter
+groups are unchanged. Target and shared-UID sibling changes, competing
+candidate state, duplicate/unknown users and domain inventory/order or manifest
+identity changes remain conflicts. Two focused domain regressions and the prior
+normalized-owner and permission-handoff regressions pass without skips. An
+actual session replay remains required. The failed body stops with cleanup
+errors empty; UI, GMS300, donor capture, rollback and full66 remain not run.
 
 The app observer's inverted Success predicate is corrected with real normal
 installation plus three failure controls (#1341); AppInfo/storage/permissions
