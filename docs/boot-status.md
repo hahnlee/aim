@@ -268,9 +268,20 @@ all selected users are valid; its final whole-owner comparison continues to
 protect package code/settings/signing/UID ownership. Target/shared-UID changes,
 competing candidates, unknown users and active-domain inventory/order changes
 remain conflicts. Five focused domain regressions pass without skips. A rebuilt
-runtime replay is pending. Both completed failure bodies stop normally, reap all
-owned children, leave no DATA mount or attachment and obtain the exclusive DATA
-lock. Donor capture, rollback and full66 remain not run.
+runtime8b60aca8 replay passes the signed v1/v2/uninstall and session commit/
+abandon gates with exact installed hashes, three Calculator launches, AppInfo,
+its storage and permission subpages. It then finds a storage-reset kernel gap:
+the original MediaProvider is killed after an ExternalStorageService ANR, and
+the native `vold.reset()` path leaves recursive installer/android-writable FUSE
+bind descendants attached. `onUserStarted(0)` fails with EINVAL, so restarted
+MediaProvider has no external-primary volume and original Settings crashes its
+storage dashboard (#1351). Linux `MNT_DETACH` now removes the selected mount and
+its newer descendants without resolving through a disconnected FUSE parent;
+ordinary unmount reports EBUSY while those child mounts remain. The actual
+recursive FUSE/data/obb clone regression and the existing mount/recursive-bind
+regressions pass without skips. The failed body stopped normally, reaped all
+owned children and reported no cleanup error. Matching live replay, donor
+capture, rollback and full66 remain not run.
 
 A second15c1 diagnostic body passes the actual signed v1/update/uninstall and
 real create/write/commit/abandon transactions, with installed versions and APK

@@ -191,6 +191,45 @@ fn fuse_transferred_mount_device_daemon_death_aborts_pending_lookup() {
 }
 
 #[test]
+fn detached_recursive_fuse_bind_leaves_no_cloned_descendant_mounts() {
+    if crate::sys::fdtab::isolated_kernel_test(
+        "sys::fuse::tests::detached_recursive_fuse_bind_leaves_no_cloned_descendant_mounts",
+    ) {
+        return;
+    }
+    let (_view, root) = crate::vfs::test_view();
+    let mut connection = Connection::new(); initialize(&connection);
+    let parent = root.join("dead-fuse-parent"); let anchor = root.join("dead-fuse-anchor");
+    let data = root.join("dead-fuse-data"); let obb = root.join("dead-fuse-obb");
+    for path in [&parent, &anchor, &data, &obb] { fs::create_dir_all(path).unwrap(); }
+    let options = super::super::fuse_mount::parse(b"fd=17,rootmode=40000,user_id=0,group_id=0,allow_other,").unwrap();
+    let source = "/mnt/aim-dead-source"; let fuse = "/mnt/aim-dead-source/emulated"; let alias = "/mnt/aim-dead-installer";
+    crate::vfs::add_mount(source, parent.clone(), crate::vfs::Area::Writable, "source", "bind").unwrap();
+    crate::vfs::add_fuse_mount(fuse, connection.key.transport().to_owned(), anchor, "fuse", &options, false).unwrap();
+    for (name, lower) in [("data", data), ("obb", obb)] {
+        crate::vfs::add_mount(&format!("{fuse}/0/Android/{name}"), lower, crate::vfs::Area::Writable, name, "bind").unwrap();
+    }
+    crate::vfs::bind_mount_recursive(source, alias, parent, crate::vfs::Area::Writable, true).unwrap();
+    for name in ["data", "obb"] { assert!(crate::vfs::is_mountpoint(&format!("{alias}/emulated/0/Android/{name}"))); }
+
+    // MediaProvider death closes the daemon device. Resolving through the
+    // disconnected parent no longer works. MNT_DETACH on the recursive bind
+    // root removes the cloned FUSE and Android/data + obb submounts without a
+    // daemon-served child lookup.
+    unsafe { libc::close(connection.fd); } connection.fd = -1;
+    connection.worker.take().unwrap().join().unwrap().unwrap();
+    assert!(crate::vfs::resolve(crate::vfs::LINUX_AT_FDCWD, format!("{alias}/emulated/0/Android/obb").as_bytes(), false).is_err());
+    let target = std::ffi::CString::new(alias).unwrap();
+    assert_eq!(super::super::mount::umount2([target.as_ptr() as u64, 8, 0, 0, 0, 0]), -(crate::errno::EBUSY as i64));
+    assert!(crate::vfs::is_mountpoint(&format!("{alias}/emulated/0/Android/obb")));
+    for mountpoint in [alias, source] {
+        let target = std::ffi::CString::new(mountpoint).unwrap();
+        assert_eq!(super::super::mount::umount2([target.as_ptr() as u64, 8 | 2, 0, 0, 0, 0]), 0, "umount {mountpoint}");
+        assert_eq!(crate::vfs::own_mounts_text().lines().filter_map(|line| line.split('\t').nth(1)).filter(|guest| *guest == mountpoint || guest.starts_with(&format!("{mountpoint}/"))).count(), 0, "detached descendants below {mountpoint}");
+    }
+}
+
+#[test]
 fn vfs_path_walk_releases_lookup_references_on_success_and_errors() {
  let (_guard, root) = crate::vfs::test_view();
  let connection = Connection::new(); initialize(&connection);

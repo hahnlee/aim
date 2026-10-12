@@ -36,6 +36,16 @@ const UMOUNT_NOFOLLOW: u64 = 8;
 
 const CAP_SYS_ADMIN: u32 = 21;
 
+fn remove_mount(guest: &str, flags: u64) -> Result<bool, crate::errno::Errno> {
+    if flags & MNT_DETACH != 0 {
+        vfs::detach_mount(guest)
+    } else if vfs::mount_has_children(guest)? {
+        Err(EBUSY)
+    } else {
+        vfs::remove_mount(guest)
+    }
+}
+
 pub fn unshare(a: [u64; 6]) -> i64 {
     // A process's files, cwd, SysV semaphore undo list and mount table are
     // already its own.
@@ -169,11 +179,34 @@ pub fn umount2(a: [u64; 6]) -> i64 {
     if !super::cred::capable(CAP_SYS_ADMIN) {
         return -(EPERM as i64);
     }
+    // A disconnected FUSE mount can no longer resolve children, but Linux
+    // still unmounts an exact mountpoint from the namespace's mount table.
+    // Try the canonical absolute spelling directly before walking the
+    // filesystem; relative paths and paths needing dot normalization keep the
+    // ordinary resolver semantics below.
+    let owned_path = match super::guest_cstr(a[0]) {
+        Ok(path) => path,
+        Err(error) => return -(error as i64),
+    };
+    if let Ok(path) = std::str::from_utf8(&owned_path)
+        && path.starts_with('/')
+        && (path == "/"
+            || path
+                .split('/')
+                .skip(1)
+                .all(|component| !component.is_empty() && component != "." && component != ".."))
+    {
+        match remove_mount(path, a[1]) {
+            Ok(true) => return 0,
+            Ok(false) => {}
+            Err(error) => return -(error as i64),
+        }
+    }
     let target = match resolve(a[0], a[1] & UMOUNT_NOFOLLOW == 0) {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let removed=match vfs::remove_mount(&target.guest){Ok(removed)=>removed,Err(error)=>return -(error as i64)};
+    let removed=match remove_mount(&target.guest,a[1]){Ok(removed)=>removed,Err(error)=>return -(error as i64)};
     if removed {
         0
     } else if target.guest == "/" {

@@ -247,6 +247,7 @@ fn apply_namespace_state(state:aim_storage::mount_namespace::State)->Result<(),E
     *vfs().mounts.write().unwrap()=base;
     for event in state.events {
         if let Some(guest)=event.strip_prefix("remove\t") { remove_mount(guest)?; }
+        else if let Some(guest)=event.strip_prefix("detach\t") { detach_mount(guest)?; }
         else if let Some(rest)=event.strip_prefix("propagation-flags\t") {
             let (guest,flags)=rest.rsplit_once('\t').ok_or(errno::EIO)?;set_mount_propagation(guest,flags.parse().map_err(|_|errno::EIO)?)?;
         } else if let Some(rest)=event.strip_prefix("move\t") {
@@ -643,6 +644,10 @@ fn namespace_backend_points(id:&str)->Result<Vec<MountPoint>,Errno>{
     for event in state.events {
         if let Some(guest)=event.strip_prefix("remove\t"){
             if let Some(index)=mounts.iter().position(|mount|mount.own&&mount.guest==guest){mounts.remove(index);}
+        }else if let Some(guest)=event.strip_prefix("detach\t"){
+            if let Some(target)=mounts.iter().find(|mount|mount.own&&mount.guest==guest).cloned(){
+                mounts.retain(|mount|!mount.own||(mount.seq!=target.seq&&(mount.seq<=target.seq||below(guest,&mount.guest).is_none())));
+            }
         }else if let Some(rest)=event.strip_prefix("move\t"){
             let(from,to)=rest.split_once('\t').ok_or(errno::EINVAL)?;
             for mount in mounts.iter_mut().filter(|mount|mount.own&&(mount.guest==from||below(from,&mount.guest).is_some())){mount.guest=format!("{to}{}",&mount.guest[from.len()..]);}
@@ -891,6 +896,37 @@ pub fn remove_mount(guest: &str) -> Result<bool,Errno> {
         }
         None => Ok(false),
     }
+}
+
+/// Whether the latest visible mount at `guest` has mounts attached below it.
+pub fn mount_has_children(guest: &str) -> Result<bool, Errno> {
+    refresh_namespace()?;
+    let mounts = vfs().mounts.read().unwrap();
+    let Some(target) = mounts.iter().find(|mount| mount.guest == guest && mount.own) else { return Ok(false); };
+    Ok(mounts.iter().any(|mount| mount.own && mount.seq > target.seq && below(guest, &mount.guest).is_some()))
+}
+
+/// Detach the latest mount at `guest` and every mount attached below that
+/// visible mount. Older descendants hidden before the target was mounted stay
+/// with the underlying mount tree.
+pub fn detach_mount(guest: &str) -> Result<bool, Errno> {
+    refresh_namespace()?;
+    let detached = {
+        let mounts = vfs().mounts.read().unwrap();
+        let Some(target) = mounts.iter().find(|mount| mount.guest == guest && mount.own) else { return Ok(false); };
+        mounts.iter().filter(|mount| mount.own && (mount.seq == target.seq || mount.seq > target.seq && below(guest, &mount.guest).is_some())).cloned().collect::<Vec<_>>()
+    };
+    if !REPLAYING_NAMESPACE.with(std::cell::Cell::get) && mount_namespace_id().is_some() {
+        namespace_event(&format!("detach\t{guest}"))?;
+        for mount in detached.iter().filter(|mount| mount.shared_fuse) { publish_fuse_route(&mount.guest, Path::new(""), "", None)?; }
+        return Ok(true);
+    }
+    if !REPLAYING_NAMESPACE.with(std::cell::Cell::get) {
+        for mount in detached.iter().filter(|mount| mount.shared_fuse) { publish_fuse_route(&mount.guest, Path::new(""), "", None)?; }
+    }
+    let identities = detached.iter().map(|mount| (mount.guest.as_str(), mount.seq)).collect::<Vec<_>>();
+    vfs().mounts.write().unwrap().retain(|mount| !identities.iter().any(|(guest, seq)| mount.guest == *guest && mount.seq == *seq));
+    Ok(true)
 }
 
 /// Move the latest mount at `from`, and this process's mounts below it, to
