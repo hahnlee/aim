@@ -220,6 +220,7 @@ pub(crate) fn capture_visibility_checked(
     mut capture:impl FnMut(&crate::package::settings::Package,&[i32])->Result<(u64,Vec<i32>),Failure>,
 )->Result<Vec<Vec<i32>>,Failure>{
     let targets=names.iter().cloned().collect();
+    let mut latest_coherent=None;
     for _ in 0..8 {
         let current=snapshots.capture();
         if !base.same_lineage(&current){return Err(failure(-110,"pre-install visibility capture lineage changed"));}
@@ -229,19 +230,36 @@ pub(crate) fn capture_visibility_checked(
             return Err(failure(-110,format!("pre-install visibility owner changed: base={} current={} metadata={}->{}: {conflict}",
                 base.version(),current.version(),base.metadata_revision(),current.metadata_revision())));
         }
-        let all_users=users()?;let mut values=Vec::with_capacity(names.len());let mut coherent=true;
+        let all_users=users()?;let mut values=Vec::with_capacity(names.len());let mut capture_version=None;
         for name in names {
             if let Some(setting)=current.owner().settings.packages.iter().find(|setting|&setting.name==name){
                 let(version,allowlist)=capture(setting,&all_users)?;
                 super::post_install::validate_visibility(&all_users,&allowlist).map_err(|error|failure(-110,error.message))?;
-                if version!=current.version(){coherent=false;break;}
+                if version<current.version()||capture_version.is_some_and(|expected|expected!=version){capture_version=None;values.clear();break;}
+                capture_version=Some(version);
                 values.push(allowlist);
             }else{values.push(Vec::new());}
         }
-        if coherent&&Arc::ptr_eq(&current,&snapshots.capture())&&users()?==all_users{return Ok(values);}
+        let latest=snapshots.capture();
+        if !base.same_lineage(&latest){return Err(failure(-110,"pre-install visibility capture lineage changed"));}
+        let mut checked=base.owner().clone();
+        if let Some(conflict)=crate::package::scan_snapshot::install_context::install_user_rebase_conflict(
+            base,&latest,&mut checked,&targets).map_err(|error|failure(-110,error))? {
+            return Err(failure(-110,format!("pre-install visibility owner changed: base={} current={} metadata={}->{}: {conflict}",
+                base.version(),latest.version(),base.metadata_revision(),latest.metadata_revision())));
+        }
+        let version_coherent=capture_version.is_none_or(|version|version<=latest.version());
+        if values.len()==names.len()&&users()?==all_users&&version_coherent {
+            if Arc::ptr_eq(&current,&latest)&&capture_version.is_none_or(|version|version==latest.version()){return Ok(values);}
+            latest_coherent=Some(values);
+        }
         // Only the read-only policy capture repeats; code/app-data/permission
         // preparation and the original admission base retain their ownership.
     }
+    // Continuous unrelated publications cannot invalidate a point-in-time
+    // original Computer capture. Target/shared-UID owners and users were
+    // revalidated above; canonical publication validates them again.
+    if let Some(values)=latest_coherent{return Ok(values);}
     let current=snapshots.capture();
     Err(failure(-110,format!("pre-install visibility capture did not stabilize: base={} current={} metadata={}->{}",
         base.version(),current.version(),base.metadata_revision(),current.metadata_revision())))

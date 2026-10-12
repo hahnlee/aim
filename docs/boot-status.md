@@ -320,7 +320,16 @@ boundary and kill the original process (#1350). Retained enabled-state rebasing
 now validates and applies only the scalar or component names changed by the
 plan, preserves concurrent changes to other components and still rejects two
 writers of the same component. Four focused rebase regressions pass in release
-mode. This correction still requires a rebuilt-runtime Chrome replay; no Chrome,
+mode. Runtime1aa1fd39 boots with that correction, owns both package services and
+passes signed v1 installation, but continuous unrelated metadata publications
+advance the native graph from528 to537 during the bounded original visibility
+capture for the v2 replacement (#1110). Each original reply is already bound to
+one immutable Computer generation. After the bounded recapture, the installer
+now retains the newest generation-coherent reply only after revalidating the
+lineage, target/shared-UID ownership and user inventory; a stale/future reply,
+mixed generations, target change or foreign lineage still fails. Six focused
+visibility regressions pass, including continuous unrelated publication. This
+correction still requires a rebuilt-runtime v2 and Chrome replay; no Chrome,
 WebView, GMS300, donor, rollback or full66 pass is claimed. Both failed app runs
 stop normally with cleanup errors empty, all children reaped, no DATA
 attachment/mount and an exclusive DATA lock. Runtime21c93296 has the same clean
