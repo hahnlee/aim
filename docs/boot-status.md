@@ -310,9 +310,21 @@ shared-UID sibling and whose complete candidate entry exactly equals the current
 owner; removals, reorder, duplicates, missing/different candidates, unknown or
 duplicate users and unrelated additions remain rejected. Three focused domain
 regressions and the existing final-publication regression pass in release mode.
-An actual rebuilt runtime replay remains required. Runtime21c93296 stops normally
-with cleanup errors empty, all children reaped, no DATA attachment/mount and an
-exclusive DATA lock.
+Runtime b3888125 then repeats the signed install/session route and installs
+Calculator successfully. Three cold launches each accept real `6×7=` input and
+render 42. Calculator AppInfo/storage/permissions, global storage/default-apps
+and the original PermissionController list all render their actual rows. Chrome
+first run reaches its original ChromeTabbedActivity, then concurrent component
+state publications for `com.android.chrome` collide at the whole-set rebase
+boundary and kill the original process (#1350). Retained enabled-state rebasing
+now validates and applies only the scalar or component names changed by the
+plan, preserves concurrent changes to other components and still rejects two
+writers of the same component. Four focused rebase regressions pass in release
+mode. This correction still requires a rebuilt-runtime Chrome replay; no Chrome,
+WebView, GMS300, donor, rollback or full66 pass is claimed. Both failed app runs
+stop normally with cleanup errors empty, all children reaped, no DATA
+attachment/mount and an exclusive DATA lock. Runtime21c93296 has the same clean
+terminal seal.
 
 The app observer's inverted Success predicate is corrected with real normal
 installation plus three failure controls (#1341); AppInfo/storage/permissions

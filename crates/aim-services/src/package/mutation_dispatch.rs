@@ -59,6 +59,48 @@ impl Prepared {
         *scan = candidate;
         Ok(())
     }
+    /// Apply a validated retained plan to the latest owner. Component enabled
+    /// settings own only the component names whose state they changed, so a
+    /// concurrent change to another component must survive publication.
+    pub fn apply_scan_rebased(&self, base: &SigningScan, scan: &mut SigningScan) -> Result<(), String> {
+        let mut desired = base.clone(); self.apply_scan(&mut desired)?;
+        let mut candidate = scan.clone();
+        for plan in &self.plans {
+            if !matches!(plan.change, Change::Enabled(_)) { plan.apply_scan(&mut candidate)?; continue; }
+            let user = plan.user.ok_or("mutation user absent")?;
+            let state = |owner: &SigningScan| owner.scanned_user_states(&plan.package)
+                .and_then(|users| users.get(&user)).cloned().ok_or("mutation user owner absent");
+            let old = state(base)?; let intended = state(&desired)?; let mut current = state(&candidate)?;
+            if old.enabled != intended.enabled { current.enabled = intended.enabled; }
+            if old.last_disable_app_caller != intended.last_disable_app_caller {
+                current.last_disable_app_caller = intended.last_disable_app_caller.clone();
+            }
+            let values = |value: &Option<Vec<String>>| value.clone().unwrap_or_default().into_iter().collect::<std::collections::BTreeSet<_>>();
+            let old_enabled = values(&old.enabled_components); let intended_enabled = values(&intended.enabled_components);
+            let old_disabled = values(&old.disabled_components); let intended_disabled = values(&intended.disabled_components);
+            let mut current_enabled = values(&current.enabled_components); let mut current_disabled = values(&current.disabled_components);
+            let changed: std::collections::BTreeSet<_> = old_enabled.symmetric_difference(&intended_enabled).chain(old_disabled.symmetric_difference(&intended_disabled)).cloned().collect();
+            for component in changed {
+                current_enabled.remove(&component); current_disabled.remove(&component);
+                if intended_enabled.contains(&component) { current_enabled.insert(component); }
+                else if intended_disabled.contains(&component) { current_disabled.insert(component); }
+            }
+            current.enabled_components = Some(current_enabled.into_iter().collect());
+            current.disabled_components = Some(current_disabled.into_iter().collect());
+            candidate.set_user_state(&plan.package, user, current)?;
+        }
+        match &self.global {
+            Some(Global::HiddenUntilInstalled(name, hidden)) => for packages in [&mut candidate.settings.packages, &mut candidate.settings.disabled_system_packages] {
+                if let Some(package) = packages.iter_mut().find(|package| package.name == *name) { package.transient.hidden_until_installed = *hidden; }
+            },
+            Some(Global::RequiredForSystemUser(name, required)) => {
+                let package = candidate.settings.packages.iter_mut().find(|package| package.name == *name).ok_or("required-for-system-user package absent")?;
+                if *required { package.private_flags |= 1 << 9; } else { package.private_flags &= !(1 << 9); }
+            },
+            None => {}
+        }
+        *scan = candidate; Ok(())
+    }
     pub fn persist(&self, disk: &mut super::owner::Store, scan: &SigningScan) -> Result<(), super::owner::WriteError> {
         if matches!(self.global, Some(Global::RequiredForSystemUser(..))) { return disk.commit_scan_settings_owner(scan); }
         let mut users = std::collections::BTreeSet::new();
@@ -326,7 +368,20 @@ impl Prepared {
                     let old=state(base)?;let current=state(latest)?;let intended=state(&desired)?;
                     macro_rules! user_field {($field:ident)=>{check(current.$field==old.$field,current.$field==intended.$field)?};}
                     match change {
-                        Change::Enabled(_)=>{user_field!(enabled);user_field!(last_disable_app_caller);user_field!(enabled_components);user_field!(disabled_components);},
+                        Change::Enabled(_)=>{
+                            if old.enabled != intended.enabled { user_field!(enabled); }
+                            if old.last_disable_app_caller != intended.last_disable_app_caller { user_field!(last_disable_app_caller); }
+                            let value=|state:&super::restrictions::UserState,component:&str|{
+                                if state.enabled_components.as_ref().is_some_and(|values|values.iter().any(|value|value==component)){1}
+                                else if state.disabled_components.as_ref().is_some_and(|values|values.iter().any(|value|value==component)){2}else{0}
+                            };
+                            let names:std::collections::BTreeSet<_>=old.enabled_components.clone().unwrap_or_default().into_iter()
+                                .chain(old.disabled_components.clone().unwrap_or_default()).chain(intended.enabled_components.clone().unwrap_or_default())
+                                .chain(intended.disabled_components.clone().unwrap_or_default()).collect();
+                            for component in names { let before=value(&old,&component);let after=value(&intended,&component);
+                                if before!=after { check(value(&current,&component)==before,value(&current,&component)==after)?; }
+                            }
+                        },
                         Change::Stopped{..}=>{user_field!(stopped);user_field!(not_launched);},
                         Change::Suspensions(_)=>user_field!(suspensions),Change::Distraction(_)=>user_field!(distraction_flags),Change::Hidden(_)=>user_field!(hidden),
                         Change::SplashTheme(_)=>user_field!(splash_screen_theme),Change::HarmfulWarning(_)=>user_field!(harmful_app_warning),Change::MinAspectRatio(_)=>user_field!(min_aspect_ratio),
@@ -389,6 +444,25 @@ mod prepared_rebase_tests {
         let mut state=latest.scanned_user_states("p").unwrap()[&0].clone();state.enabled=2;latest.set_user_state("p",0,state).unwrap();
         assert!(enabled.validate_rebase(&base,&latest).unwrap_err().contains("concurrent field conflict"));
         assert_eq!(latest.scanned_user_states("p").unwrap()[&0].enabled,2);
+    }
+    #[test]
+    fn enabled_plan_merges_disjoint_component_owner_and_rejects_same_component_conflict() {
+        let mut base=SigningScan::new(&Default::default(),&super::super::settings::Settings{
+            packages:vec![super::super::settings::Package{name:"p".into(),app_id:10100,..Default::default()}],..Default::default()},36).unwrap();
+        base.capture_user_states(BTreeMap::from([(("p".into(),false),super::super::scan::CapturedUsers{
+            states:BTreeMap::from([(0,super::super::restrictions::UserState{enabled_components:Some(vec!["existing".into()]),disabled_components:Some(vec![]),..Default::default()})]),active_aliases:Default::default(),
+        })])).unwrap();
+        let prepared=Prepared{code:pm::SET_COMPONENT_ENABLED_SETTING,plans:vec![Plan{package:"p".into(),user:Some(0),change:Change::Enabled(super::super::write::Enabled{
+            enabled_components:["existing".into(),"requested".into()].into_iter().collect(),disabled_components:Default::default(),..Default::default()
+        })}],global:None,finish:Finish::None,reply:Parcel::new(),distraction_cleanup:vec![]};
+        let mut latest=base.clone();let mut concurrent=latest.scanned_user_states("p").unwrap()[&0].clone();
+        concurrent.enabled_components=Some(vec!["existing".into(),"concurrent".into()]);latest.set_user_state("p",0,concurrent).unwrap();
+        prepared.validate_rebase(&base,&latest).unwrap();prepared.apply_scan_rebased(&base,&mut latest).unwrap();
+        let state=&latest.scanned_user_states("p").unwrap()[&0];let enabled=state.enabled_components.as_ref().unwrap();
+        assert!(enabled.contains(&"requested".into())&&enabled.contains(&"concurrent".into())&&enabled.contains(&"existing".into()));
+        let mut conflict=base.clone();let mut state=conflict.scanned_user_states("p").unwrap()[&0].clone();
+        state.disabled_components=Some(vec!["requested".into()]);conflict.set_user_state("p",0,state).unwrap();
+        assert!(prepared.validate_rebase(&base,&conflict).unwrap_err().contains("concurrent field conflict"));
     }
     #[test]
     fn ordinary_prepared_mutation_rejects_target_code_identity_and_preserves_idempotence(){

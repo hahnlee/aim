@@ -2908,9 +2908,10 @@ impl System {
         // Select latest while holding the publication coordinator, after the
         // disk lock. Freezer/other context publications cannot race this rebase.
         let latest = current.queries.clone().ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"prepared mutation current capture unavailable"))?;
-        if !Arc::ptr_eq(&latest,base) {
-            let result=if strict_code{prepared.validate_rebase(base.scan().owner(),latest.scan().owner())}
-                else{prepared.validate_rebase_after_install_side_effects(base.scan().owner(),latest.scan().owner())};
+        let source = base.clone(); let rebased = !Arc::ptr_eq(&latest, &source);
+        if rebased {
+            let result=if strict_code{prepared.validate_rebase(source.scan().owner(),latest.scan().owner())}
+                else{prepared.validate_rebase_after_install_side_effects(source.scan().owner(),latest.scan().owner())};
             result.map_err(|error|Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error))?;
         }
         let base = &latest;
@@ -2922,7 +2923,7 @@ impl System {
                 Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string()))?;
             disk.validate_committed_scan(&owner).map_err(|error|
                 Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string()))?;
-            prepared.apply_scan(&mut owner).map_err(|error|
+            if rebased { prepared.apply_scan_rebased(source.scan().owner(), &mut owner) } else { prepared.apply_scan(&mut owner) }.map_err(|error|
                 Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
             let update = base.prepare_package_update(owner.clone()).map_err(|error|
                 Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
