@@ -219,8 +219,13 @@ template SHA1bcccd11; all618 persisted namespace births end. Actual signed v1,
 same-signer v2 update and uninstall pass, including installed APK hashes and
 post-uninstall path absence. Real session create/write then fails before
 publication with a normalized Settings ownership conflict (#1346); its exact
-residual remains unqualified. Native2, fresh Original, GMS300, full donor capture,
-rollback and full66 remain unqualified.
+residual remains unqualified. The second fresh Native factory with runtime15c1 publishes in280.50s, template
+SHAf029075f (settings106.4s/boot224.1s/permissions230.0s). Matched Original with
+its explicit600s budget publishes in357.11s, template SHA401d6de3
+(settings206.0s/boot297.2s/permissions300.7s). Both keep input pins unchanged;
+independent namespace checks find all570/706 births gone. Those factory receipts
+are separate from live Role/inodes/ART/BootStats, GMS300, full donor capture,
+rollback and full66, which remain unqualified.
 
 The error-only runtime15c1e9b8 replay installs v1 but reproduces #1329 during v2:
 original AMS monitor is held by notifyComponentUsed's synchronous native call,
@@ -231,6 +236,24 @@ This body never reaches the session conflict. All809 captured/persisted births
 end; Root normally detaches only its verified disposable DATA and checks both
 IORegistry classes, mount absence and exclusive lock. The failed60-second
 resident cleanup has no success receipt and is preserved, not relabeled PASS.
+
+A second15c1 diagnostic body passes the actual signed v1/update/uninstall and
+real create/write/commit/abandon transactions, with installed versions and APK
+hashes. A write to the abandoned session is rejected with SecurityException,
+shell exit255. The observer expected exit1 and an ID-bearing message; its whole
+receipt remains failed. AMS watchdog and Settings conflict are not reproduced
+in this body, not fixed by it. Its independent normal-stop seal checks826 births
+gone, mount/both attachments absent, exclusive lock and resident receipt ok.
+The runner's retained controller child was a zombie until reaped; waiting for
+the stop client before polling that child caused a separate observer deadline.
+The next collector polls/reaps the held child during normal-stop wait.
+
+`dumpsys package installs` returned an unsupported message with exit0 (#1347),
+so that session-state dump coverage was not run. The native dump now selects
+actual retained installer registry/history and staged owners, preserving DUMP/
+app-op checks and typed errors. Three owner/argument regression tests pass with
+no skips. Fresh runtime build and live dump verification remain pending;
+original inputs and guest code are unchanged.
 
 The app observer's inverted Success predicate is corrected with real normal
 installation plus three failure controls (#1341); AppInfo/storage/permissions

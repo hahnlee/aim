@@ -14,6 +14,8 @@ use aim_binder_host::{
 use std::sync::{Arc, Mutex};
 #[path = "native_verification.rs"]
 mod native_verification;
+#[path = "native_dump.rs"]
+mod native_dump;
 pub type StagedExecutor = Arc<
     dyn Fn(
             i32,

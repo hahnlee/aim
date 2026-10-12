@@ -79,7 +79,11 @@ pub fn run(
             && super::info::user_state(package,user).installed).map(|package|package.name.clone()).collect::<Vec<_>>();
         let denial=allowed(pid,uid,&packages,|permission|if permission=="android.permission.DUMP"{Ok(true)}else{system.check_permission(permission,pid,uid)},
             |package|system.note_op_now(43,uid,package,None,""))?;
-        let text=match denial { Some(text)=>text, None=>render(&state,&request.args,|names|system.capture_package_dump_permissions(&state,names))? };
+        let text=match denial {
+            Some(text)=>text,
+            None if installs_requested(&request.args)=>system.package_installer_native_owner()?.dump_installs()?,
+            None=>render(&state,&request.args,|names|system.capture_package_dump_permissions(&state,names))?,
+        };
         request.out.write_all(text.as_bytes()).map_err(|error|Exception::new(EX_ILLEGAL_STATE,format!("package dump output: {error}")))?;
         Ok::<_,Exception>(())
     })();
@@ -108,13 +112,16 @@ pub(crate) fn sdk_versions(out: &mut String, setting: &super::model::PackageStat
     }
 }
 
+fn installs_requested(args:&[String])->bool {
+    args.iter().filter(|arg|!matches!(arg.as_str(),"-a"|"-f")).map(String::as_str).eq(["installs"])
+}
 fn render(state:&State,args:&[String],capture_permissions:impl FnOnce(&[String])->Result<std::collections::BTreeMap<i32,super::owner::legacy_permissions::State>,Exception>)->Result<String,Exception> {
     use std::fmt::Write;
     let mut out=String::new();let mut package=None;let mut all_components=false;let mut include_apex=false;
     for arg in args {
         match arg.as_str(){
             "-a"|"-f"=>{},"--all-components"=>all_components=true,"--include-apex"=>include_apex=true,
-            "-h"=>return Ok("Package manager native state dump:\n  [-a] [-f] [--all-components] [--include-apex] [packages|PACKAGE]\n".into()),
+            "-h"=>return Ok("Package manager native state dump:\n  [-a] [-f] [--all-components] [--include-apex] [packages|PACKAGE|installs]\n".into()),
             "p"|"packages"=>{},
             value if value=="android" || (!value.starts_with('-') && value.contains('.'))=>{package=Some(value);all_components=true;},
             value=>{let _=writeln!(out,"Unsupported native package dump argument: {value}; use -h for help");return Ok(out);}
@@ -359,3 +366,11 @@ mod tests {
         assert!(render_fixture(&state,&["p.absent".into()]).unwrap().contains("Unable to find package"));
     }
 }
+    #[test]
+    fn install_dump_selection_preserves_other_argument_rejection() {
+        assert!(installs_requested(&["installs".into()]));
+        assert!(installs_requested(&["-f".into(), "installs".into()]));
+        for args in [vec![], vec!["packages".into()], vec!["installs".into(), "unowned".into()], vec!["--unknown".into(), "installs".into()]] {
+            assert!(!installs_requested(&args));
+        }
+    }
