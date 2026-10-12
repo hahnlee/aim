@@ -80,6 +80,7 @@ fn allowed(code: u32) -> bool {
             | pm::GET_PACKAGE_INFO_VERSIONED
             | pm::GET_PACKAGE_UID
             | pm::GET_PERMISSION_CONTROLLER_PACKAGE_NAME
+            | pm::GET_PERMISSION_GROUP_INFO
             | pm::GET_PERSISTENT_APPLICATIONS
             | pm::GET_PRIVATE_FLAGS_FOR_UID
             | pm::GET_PROPERTY_AS_USER
@@ -224,7 +225,7 @@ mod tests {
             pm::GET_PAGE_SIZE_COMPAT_WARNING_MESSAGE, pm::ACTIVITY_SUPPORTS_INTENT_AS_USER,
             pm::FIND_PERSISTENT_PREFERRED_ACTIVITY, pm::RESOLVE_CONTENT_PROVIDER_FOR_UID, pm::IS_FIRST_BOOT, pm::IS_DEVICE_UPGRADING,
             pm::IS_SAFE_MODE, pm::GET_PERSISTENT_APPLICATIONS, pm::CHECK_PACKAGE_STARTABLE,
-            pm::QUERY_INTENT_ACTIVITY_OPTIONS] {
+            pm::QUERY_INTENT_ACTIVITY_OPTIONS, pm::GET_PERMISSION_GROUP_INFO] {
             assert!(allowed(code));
         }
     }
