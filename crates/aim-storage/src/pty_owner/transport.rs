@@ -429,7 +429,7 @@ impl Registry {
         {
             return Ok(false);
         }
-        let (tag, fd, eof) =
+        let (tag, fd, _eof) =
             super::carrier::event(header.id, words).ok_or_else(|| error(libc::EPROTO))?;
         let key = self
             .carriers
@@ -439,21 +439,10 @@ impl Registry {
         let Some(key) = key else {
             return Ok(true);
         };
-        if !eof {
-            return Err(error(libc::EPROTO));
-        }
         let carrier = self.carriers.remove(&key).unwrap();
-        let mut byte = 0;
-        let count = unsafe {
-            libc::read(
-                carrier.reader.as_raw_fd(),
-                (&mut byte as *mut i32).cast(),
-                1,
-            )
-        };
-        if count != 0 {
-            return Err(error(libc::EPROTO));
-        }
+        // A carrier is an opaque capability proof. Readability without EOF, or
+        // buffered data followed by EOF, invalidates that proof. Retire only
+        // this carrier so unrelated PTYs remain available through the owner.
         drop(carrier);
         Ok(true)
     }
@@ -907,20 +896,7 @@ impl Server {
             return Ok(());
         }
         if header.local != self.service.name {
-            if header.id != 70 || header.bits & 0x80000000 != 0 || header.size != 36 {
-                return Err(error(libc::EPROTO));
-            }
-            let description = self
-                .registry
-                .descriptions
-                .remove(&header.local)
-                .ok_or_else(|| error(libc::EPROTO))?;
-            let pair = description.pair.clone();
-            description.status.publish(true, true, description.flags);
-            drop(description);
-            pair.refresh()?;
-            if pair.peer_closed(Side::Slave)?{self.sessions.master_closed(&pair)?;}
-            return self.registry.notify_pair(&pair);
+            return self.description_event(header);
         }
         // The shared decoder also validates the real kernel audit generation.
         let request = decode(words)?;
@@ -939,6 +915,16 @@ impl Server {
                 .send(&frame, &[])?;
         }
         Ok(())
+    }
+    fn description_event(&mut self,header:&Header)->io::Result<()>{
+        if header.id!=70||header.bits&0x80000000!=0||header.size!=36{return Err(error(libc::EPROTO));}
+        let Some(description)=self.registry.descriptions.remove(&header.local)else{return Ok(());};
+        let pair=description.pair.clone();
+        description.status.publish(true,true,description.flags);
+        drop(description);
+        pair.refresh()?;
+        if pair.peer_closed(Side::Slave)?{self.sessions.master_closed(&pair)?;}
+        self.registry.notify_pair(&pair)
     }
     fn grant_slave(&mut self, pair: Arc<Pair>, request: &Message) -> io::Result<()> {
         let flags = request.frame.flags;
@@ -1530,6 +1516,80 @@ mod tests {
         assert_eq!(get(bytes, 4), 72);
         bytes[70] = 1;
         assert_eq!(decode(words).err().unwrap().raw_os_error(), Some(libc::EPROTO));
+    }
+    #[test]
+    fn written_carrier_retires_without_stopping_server() {
+        #[repr(C)]
+        struct CarrierEvent {
+            bits: u32,
+            size: u32,
+            remote: u32,
+            local: u32,
+            voucher: u32,
+            id: i32,
+            tag: u64,
+            fd: i32,
+            eof: u32,
+        }
+        let runtime = runtime();
+        let actual = ProcessIdentity::running(unsafe { libc::getpid() }).unwrap();
+        let name = format!("dev.aim.pty-written-carrier.{}", actual.host_pid);
+        let mut server = Server::register(&name, &runtime).unwrap();
+        let pair = Arc::new(Pair::allocate(&runtime).unwrap());
+        let capability = server.registry.grant(pair.clone(), Side::Master).unwrap();
+        let carrier = server.registry.carrier(&capability.right).unwrap();
+        let retained = server.registry.carriers.values().next().unwrap();
+        let mut words = [0u64; 600];
+        let message = CarrierEvent {
+            bits: 19,
+            size: 40,
+            remote: 0,
+            local: server.registry.bridge_port.as_ref().unwrap().name,
+            voucher: 0,
+            id: 0x50545943,
+            tag: retained.tag,
+            fd: retained.reader.as_raw_fd(),
+            eof: 0,
+        };
+        unsafe { words.as_mut_ptr().cast::<CarrierEvent>().write(message) };
+        let header = unsafe { &*words.as_ptr().cast::<Header>() };
+        assert!(server.registry.bridge_event(header, &words).unwrap());
+        assert!(server.registry.carriers.is_empty());
+        drop(carrier);drop(capability);drop(pair);
+
+        let worker = std::thread::spawn(move || server.run());
+        let client = Client::lookup(&name, actual).unwrap();
+        let master = client.allocate(2).unwrap();
+        let slave = client.open_slave(&master, 2).unwrap();
+        assert_eq!(client.write(&slave, b"x").unwrap(), 1);
+        let mut byte = [0];
+        assert_eq!(client.read(&master, &mut byte).unwrap(), 1);
+        assert_eq!(byte, *b"x");
+        drop(slave);drop(master);client.shutdown().unwrap();worker.join().unwrap().unwrap();
+        assert_eq!(fs::read_dir(&runtime).unwrap().count(), 0);fs::remove_dir(runtime).unwrap();
+    }
+    #[test]
+    fn stale_no_senders_notification_is_idempotent_and_server_accepts_next_pty() {
+        let runtime=runtime();let actual=ProcessIdentity::running(unsafe{libc::getpid()}).unwrap();
+        let name=format!("dev.aim.pty-stale-notification.{}",actual.host_pid);
+        let mut server=Server::register(&name,&runtime).unwrap();
+        let pair=Arc::new(Pair::allocate(&runtime).unwrap());
+        let capability=server.registry.grant(pair.clone(),Side::Master).unwrap();
+        let local=*server.registry.descriptions.keys().next().unwrap();
+        let notification=Header{size:36,local,id:70,..Default::default()};
+        server.description_event(&notification).unwrap();
+        drop(capability);
+        server.description_event(&notification).unwrap();
+        assert_eq!(server.description_event(&Header{size:36,local,id:71,..Default::default()}).unwrap_err().raw_os_error(),Some(libc::EPROTO));
+        drop(pair);
+
+        let worker=std::thread::spawn(move||server.run());
+        let client=Client::lookup(&name,actual).unwrap();
+        let master=client.allocate(2).unwrap();let slave=client.open_slave(&master,2).unwrap();
+        assert_eq!(client.write(&slave,b"x").unwrap(),1);let mut byte=[0];
+        assert_eq!(client.read(&master,&mut byte).unwrap(),1);assert_eq!(byte,*b"x");
+        drop(slave);drop(master);client.shutdown().unwrap();worker.join().unwrap().unwrap();
+        assert_eq!(fs::read_dir(&runtime).unwrap().count(),0);fs::remove_dir(runtime).unwrap();
     }
     #[test]
     #[ignore="real session child of virtual_session_detach_preserves_unread_output"]

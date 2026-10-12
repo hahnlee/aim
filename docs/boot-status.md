@@ -89,6 +89,23 @@ queries, and unchanged hashes. Comparison and resume revalidate each retained
 owner receipt before XML completion credit (#1321). The wrapper carries the
 actual frozen image and authenticates init by kernel birth (#1325);19 comparator
 and4 shell tests pass. This host probe executes zero Android CTS modules.
+The current native ParsingHost replay first identified the remaining adb EIO
+as a PTY owner `carrier-event` protocol failure before any reboot or external
+device interaction (#1356). A written opaque carrier, including readable data
+before EOF, now retires only that carrier and invalidates later imports instead
+of terminating the process-wide owner. Valid duplicate no-senders notifications
+are idempotent; malformed notifications still fail with EPROTO. Nine focused
+PTY transport tests pass, with two child fixtures intentionally ignored. The
+rebuilt runtime completes the official16_r1
+`CtsPackageManagerParsingHostTestCases` module with11 passes, zero failures,
+`done=true` and XML SHA256
+8ef3dd20da3c8de942546fef63bc62724f535a10db3df35f9486000cbb73f880.
+Tradefed's post-module responsiveness probe initially stalled while direct
+`pm path android` remained responsive; reconnecting the owned adb transport
+allowed the harness to finish normally. Its owner receipt reports complete
+cleanup, no remaining owned processes and no uncertainties. This qualifies the
+ParsingHost module; the remaining Native/Original FULL66 modules are not yet
+complete.
 The current-pair original reboot exposed stale namespace admission while native
 Binder/POSIX/PTY/verity owners were retiring (#1318). Init now withdraws the
 captured registration before stopping services, preserves replacement records,
