@@ -1,5 +1,5 @@
 //! Opaque PTY carriers are classified by their native endpoint owner.
-use aim_storage::pty_owner::transport::{Client, OwnerConfig};
+use aim_storage::{private_fd::PrivateFd,pty_owner::transport::{Client, OwnerConfig, RemoteEndpoint}};
 use std::{io, os::fd::BorrowedFd, sync::{Arc, RwLock}};
 
 pub const CLASS: u32 = aim_storage::pty_owner::transport::CLASS;
@@ -17,9 +17,29 @@ pub(crate) fn registered_class(fd: i32) -> io::Result<u32> {
     owner.classify(unsafe { BorrowedFd::borrow_raw(fd) })
 }
 
+/// A carrier resolved back to its owner endpoint for native Binder users.
+pub(crate) struct Retained { client:Arc<Client>,endpoint:RemoteEndpoint }
+impl Retained {
+    pub(crate) fn try_clone(&self)->io::Result<Self>{Ok(Self{client:self.client.clone(),endpoint:self.endpoint.try_clone()?})}
+    pub(crate) fn read(&self,bytes:&mut[u8])->io::Result<usize>{self.client.read(&self.endpoint,bytes)}
+    pub(crate) fn write(&self,bytes:&[u8])->io::Result<usize>{self.client.write(&self.endpoint,bytes)}
+    pub(crate) fn descriptor(&self)->BorrowedFd<'_>{self.endpoint.capability.descriptor()}
+}
+pub(crate) fn retain(carrier:BorrowedFd<'_>)->io::Result<Retained>{
+    use std::os::fd::{AsRawFd,FromRawFd,OwnedFd};
+    let Some(client)=OWNER.read().unwrap().clone()else{return Err(io::Error::from_raw_os_error(libc::ENODEV));};
+    let carrier=PrivateFd::allocate(||{
+        let fd=unsafe{libc::fcntl(carrier.as_raw_fd(),libc::F_DUPFD_CLOEXEC,0)};
+        if fd<0{Err(io::Error::last_os_error())}else{Ok(unsafe{OwnedFd::from_raw_fd(fd)})}
+    })?;
+    let endpoint=client.import_carrier(carrier)?;
+    Ok(Retained{client,endpoint})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::os::{fd::{AsFd, AsRawFd}, unix::fs::DirBuilderExt};
     #[test]
     fn authenticated_pipe_carrier_crosses_actual_binder_class_query() {
@@ -45,10 +65,16 @@ mod tests {
         assert_eq!(client.file_class(ordinary.as_raw_fd()).unwrap(), 0);
         let native_file = crate::server::file_from_fd(carrier.as_fd()).unwrap();
         assert_eq!(crate::server::file_class(&native_file), Some(CLASS));
+        let mut native=crate::server::file_fd(&native_file).unwrap();
         drop(slave);
         drop(carrier);
+        native.write_all(b"native Binder PTY output\n").unwrap();
+        let mut bytes=[0;32];let length=pty.read(&master,&mut bytes).unwrap();
+        assert_eq!(&bytes[..length],b"native Binder PTY output\r\n");
+        let retained=native.try_clone().unwrap();
+        drop(native_file);drop(native);
         assert!(!pty.readiness(&master).unwrap().hangup);
-        drop(native_file);
+        drop(retained);
         let mut event = libc::pollfd { fd: master.capability.notification().unwrap().as_raw_fd(), events: libc::POLLIN, revents: 0 };
         assert_eq!(unsafe { libc::poll(&mut event, 1, 2000) }, 1);
         assert!(weak.status.retired());

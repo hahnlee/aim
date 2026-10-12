@@ -171,7 +171,7 @@ pub fn file_class(file: &File) -> Option<u32> {
 /// A native descriptor retains the actual driver owner through its final close.
 /// Extracting a plain OwnedFd is allowed only for capabilities without regular
 /// metadata; a regular writer lease cannot be separated from its backing.
-pub struct RetainedFd { backing: std::fs::File, owner: File }
+pub struct RetainedFd { backing:std::fs::File,owner:File,pty:Option<crate::pty_file::Retained> }
 impl RetainedFd {
     fn access(&self,write:bool)->std::io::Result<()>{
         if let Some(metadata)=self.owner.downcast_ref::<FilePort>().and_then(|file|file.2.as_ref()).map(|regular|&regular.metadata){
@@ -181,23 +181,23 @@ impl RetainedFd {
         Ok(())
     }
     pub fn into_file_owner(self) -> File { self.owner }
-    pub fn try_clone(&self) -> std::io::Result<Self> { Ok(Self { backing:self.backing.try_clone()?, owner:self.owner.clone() }) }
+    pub fn try_clone(&self)->std::io::Result<Self>{Ok(Self{backing:self.backing.try_clone()?,owner:self.owner.clone(),pty:self.pty.as_ref().map(crate::pty_file::Retained::try_clone).transpose()?})}
     pub fn metadata(&self) -> std::io::Result<std::fs::Metadata> { self.backing.metadata() }
     pub fn set_len(&self, length:u64) -> std::io::Result<()> { self.access(true)?;self.backing.set_len(length) }
     pub fn sync_all(&self) -> std::io::Result<()> { self.backing.sync_all() }
     pub fn into_owned_fd(self) -> std::io::Result<std::os::fd::OwnedFd> {
-        if self.owner.downcast_ref::<FilePort>().is_some_and(|file| file.1==crate::regular_file::CLASS) {
+        if self.owner.downcast_ref::<FilePort>().is_some_and(|file| matches!(file.1,crate::regular_file::CLASS|crate::pty_file::CLASS)) {
             return Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP));
         }
         Ok(self.backing.into())
     }
 }
-impl std::os::fd::AsRawFd for RetainedFd { fn as_raw_fd(&self)->i32 { std::os::fd::AsRawFd::as_raw_fd(&self.backing) } }
-impl std::os::fd::AsFd for RetainedFd { fn as_fd(&self)->std::os::fd::BorrowedFd<'_> { std::os::fd::AsFd::as_fd(&self.backing) } }
-impl std::io::Read for RetainedFd { fn read(&mut self, bytes:&mut[u8])->std::io::Result<usize> { self.access(false)?;std::io::Read::read(&mut self.backing,bytes) } }
+impl std::os::fd::AsRawFd for RetainedFd { fn as_raw_fd(&self)->i32 { self.pty.as_ref().map_or_else(||std::os::fd::AsRawFd::as_raw_fd(&self.backing),|pty|std::os::fd::AsRawFd::as_raw_fd(&pty.descriptor())) } }
+impl std::os::fd::AsFd for RetainedFd { fn as_fd(&self)->std::os::fd::BorrowedFd<'_> { self.pty.as_ref().map_or_else(||std::os::fd::AsFd::as_fd(&self.backing),crate::pty_file::Retained::descriptor) } }
+impl std::io::Read for RetainedFd { fn read(&mut self,bytes:&mut[u8])->std::io::Result<usize>{self.access(false)?;match &self.pty{Some(pty)=>pty.read(bytes),None=>std::io::Read::read(&mut self.backing,bytes)}} }
 impl std::io::Write for RetainedFd {
-    fn write(&mut self, bytes:&[u8])->std::io::Result<usize> { self.access(true)?;std::io::Write::write(&mut self.backing,bytes) }
-    fn flush(&mut self)->std::io::Result<()> { std::io::Write::flush(&mut self.backing) }
+    fn write(&mut self,bytes:&[u8])->std::io::Result<usize>{self.access(true)?;match &self.pty{Some(pty)=>pty.write(bytes),None=>std::io::Write::write(&mut self.backing,bytes)}}
+    fn flush(&mut self)->std::io::Result<()> { if self.pty.is_some(){Ok(())}else{std::io::Write::flush(&mut self.backing)} }
 }
 impl std::io::Seek for RetainedFd { fn seek(&mut self, position:std::io::SeekFrom)->std::io::Result<u64> { std::io::Seek::seek(&mut self.backing,position) } }
 impl std::os::unix::fs::FileExt for RetainedFd {
@@ -206,9 +206,11 @@ impl std::os::unix::fs::FileExt for RetainedFd {
 }
 
 pub fn file_fd(file: &File) -> Option<RetainedFd> {
-    let port = file.downcast_ref::<FilePort>()?.0;
+    let fileport=file.downcast_ref::<FilePort>()?;let port=fileport.0;
     use std::os::fd::FromRawFd;
-    mach::port_to_fd(port).map(|fd| RetainedFd { backing:unsafe { std::fs::File::from_raw_fd(fd) }, owner:file.clone() })
+    let fd=mach::port_to_fd(port)?;let backing=unsafe{std::fs::File::from_raw_fd(fd)};
+    let pty=if fileport.1==crate::pty_file::CLASS{Some(crate::pty_file::retain(std::os::fd::AsFd::as_fd(&backing)).ok()?)}else{None};
+    Some(RetainedFd{backing,owner:file.clone(),pty})
 }
 
 /// A receive buffer: shared memory mapped read-write here and read-only in
