@@ -105,6 +105,45 @@ mod tests {
         pending.complete(12,||Ok(()),|_|Ok(()),|_|{calls.borrow_mut().push("cleanup");Ok(())}).unwrap();assert!(calls.borrow().is_empty(),"dont-kill must retain old code");
 
     }
+
+    #[test]
+    fn post_install_update_only_keeps_empty_new_users_and_delivers_update_effects() {
+        let user = |installed, instant_app| UserState { installed, instant_app, ..Default::default() };
+        let before = snapshot(true, BTreeMap::from([(0, user(true, false)), (10, user(true, true))]));
+        let after = snapshot(true, BTreeMap::from([(0, user(true, false)), (10, user(true, true))]));
+        let plan = Plan::capture(&before, &after, "fixture", 0, 0, 0, false, &[0, 10]).unwrap();
+        assert!(plan.replacing);
+        assert!(plan.first_users.is_empty() && plan.first_instant.is_empty());
+        assert_eq!(plan.update_users, vec![0]);
+        assert_eq!(plan.update_instant, vec![10]);
+        assert_eq!(plan.removed_users, vec![0]);
+        assert_eq!(plan.removed_instant, vec![10]);
+        plan.validate(&after).unwrap();
+        let pending = Pending::default();
+        pending.retain(71, vec![plan]).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let error = pending.complete(71, || Ok(()), |saved| {
+            assert!(saved.first_users.is_empty() && saved.first_instant.is_empty());
+            assert_eq!(saved.update_users, vec![0]);
+            assert_eq!(saved.update_instant, vec![10]);
+            calls.set(calls.get() + 1);
+            Err(Exception::security("actual update effect rejected"))
+        }, |_| panic!("failed effects must precede old-code cleanup")).unwrap_err();
+        assert_eq!(calls.get(), 1, "empty new users must not skip update completion");
+        assert_eq!(error.code, aim_binder_host::parcel::EX_SECURITY);
+        assert_eq!(error.message, "actual update effect rejected");
+
+        let fresh = Plan::capture(&snapshot(false, BTreeMap::new()), &after, "fixture", 0, 0, 0, false, &[0, 10]).unwrap();
+        assert_eq!(fresh.first_users, vec![0]);
+        assert_eq!(fresh.first_instant, vec![10]);
+        assert!(fresh.update_users.is_empty() && fresh.update_instant.is_empty());
+        let before = snapshot(true, BTreeMap::from([(0, user(true, false)), (10, user(false, false))]));
+        let mixed = Plan::capture(&before, &after, "fixture", 10, 0, 0, false, &[0, 10]).unwrap();
+        assert!(mixed.first_users.is_empty());
+        assert_eq!(mixed.first_instant, vec![10]);
+        assert_eq!(mixed.update_users, vec![0]);
+        assert!(mixed.update_instant.is_empty());
+    }
 }
 
 #[derive(Default)]

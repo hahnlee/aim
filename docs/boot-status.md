@@ -185,11 +185,37 @@ query using the authenticated original DevicePolicy managed-user leaf: only
 organization-managed users hide another app's update owner, with system and
 owner exemptions. Three focused generated-parcel/policy/visibility regressions
 pass without skips, and the release runtime builds in58.72s. Its guest-init SHA
-begins9cfaceec ; actual original PermissionController revalidation is pending. The terminal independent seal
+begins9cfaceec. Actual original PermissionController now renders the Calculator
+permissions list without the prior exception (#1343 closed); manual Root review
+deadlines still leave those whole-app bodies failed. The terminal independent seal
 finds all1217 recorded/persisted births gone, no mount or either IORegistry DATA
 attachment, and the exclusive DATA lock available. The original60-second runner
 cleanup error remains preserved; normal-stop follow-up and seal are separate
 cleanup evidence.
+
+The rebuilt-runtime Native factory at source171a420f/runtime b75ebb3c publishes
+70 files in288.18s: settings104.5s, boot220.2s and permissions226.2s. Template SHA
+begins99db18aa. Pins remain unchanged and an independent namespace seal finds
+all622 persisted births gone. On verified disposable Native DATA clones, original
+Settings storage/default-app rows pass; original Chrome factory and Trichrome
+library declaring version/APK SHA pass, normal first-run and two cold local DOM43/
+SVG checks pass with actual isolated renderer births. Original WebView provider
+133.0.6943.137/code694313732 passes real DOM/SVG, RELRO1/1 and isolated renderer.
+The static library observer uses the original explicit visibility flag (#1344
+closed); ordinary pm path correctly hides it from a nondependent shell.
+
+Signed official CTS v1 installation and exact installed SHA pass, but v2 commits
+canonical version2/UID/codePath and then fails completion (#1345). Error-only
+runtime5578a7e9/init7b4a5141 identifies effects tx24/handle7/transact. Actual Binder
+trace confirms both versions reach the same original SystemServer endpoint.
+Original logcat proves ArrayIndexOutOfBoundsException in the original new-user
+monitor called by our bridge with empty first-user arrays, rather than an AIDL
+version mismatch. The source guard follows original BroadcastHelper, and the
+new owner-cohort/Pending completion regression passes without skips. Matched
+image rebuild and actual signed update are pending; uninstall, sessions, GMS300,
+donor capture, rollback and full66 are not qualified by these partial bodies.
+The diagnostic terminal seal checks635 captured/persisted births gone, no DATA
+mount/both attachments and exclusive lock; original cleanup60 errors are kept.
 
 The app observer's inverted Success predicate is corrected with real normal
 installation plus three failure controls (#1341); AppInfo/storage/permissions

@@ -411,12 +411,14 @@ public final class NativePackageEffectsBridge extends IPackageMutationBridge.Stu
                 }
                 return;
             }
-            Bundle first=new Bundle();first.putInt(Intent.EXTRA_UID,appId);first.putInt(PackageInstaller.EXTRA_DATA_LOADER_TYPE,dataLoaderType);
-            SparseArray<int[]> firstAllow=current.getVisibilityAllowLists(name,firstUsers);
-            postInstallBroadcast(Intent.ACTION_PACKAGE_ADDED,name,first,0,null,firstUsers,firstInstantUsers,firstAllow,null);
-            if(safetyLabelsEnabled()) postInstallBroadcast(Intent.ACTION_PACKAGE_ADDED,name,first,0,context.getPackageManager().getPermissionControllerPackageName(),firstUsers,firstInstantUsers,firstAllow,null);
-            monitors.notifyPackageAddedForNewUsers(name,appId,firstUsers,firstInstantUsers,false,dataLoaderType,firstAllow,handler);
-            if(system||virtualPreload) for(int user:firstUsers) post(() -> bootCompleted(name,user,virtualPreload));
+            if(firstUsers.length!=0||firstInstantUsers.length!=0) {
+                Bundle first=new Bundle();first.putInt(Intent.EXTRA_UID,appId);first.putInt(PackageInstaller.EXTRA_DATA_LOADER_TYPE,dataLoaderType);
+                SparseArray<int[]> firstAllow=current.getVisibilityAllowLists(name,firstUsers);
+                postInstallBroadcast(Intent.ACTION_PACKAGE_ADDED,name,first,0,null,firstUsers,firstInstantUsers,firstAllow,null);
+                if(safetyLabelsEnabled()) postInstallBroadcast(Intent.ACTION_PACKAGE_ADDED,name,first,0,context.getPackageManager().getPermissionControllerPackageName(),firstUsers,firstInstantUsers,firstAllow,null);
+                monitors.notifyPackageAddedForNewUsers(name,appId,firstUsers,firstInstantUsers,false,dataLoaderType,firstAllow,handler);
+                if(system||virtualPreload) for(int user:firstUsers) post(() -> bootCompleted(name,user,virtualPreload));
+            }
             SparseArray<int[]> updates=current.getVisibilityAllowLists(name,updateUsers);
             postInstallBroadcast(Intent.ACTION_PACKAGE_ADDED,name,extras,0,null,updateUsers,updateInstantUsers,updates,null);
             if(targetInstaller!=null) postInstallBroadcast(Intent.ACTION_PACKAGE_ADDED,name,extras,0,targetInstaller,updateUsers,updateInstantUsers,null,null);

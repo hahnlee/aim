@@ -28,6 +28,14 @@ UID1000/capabilities0 call (#1328). This is same-observation binding; full
 consumer parity, the other fresh Native template and matched Original binding
 remain unverified.
 
+The native package effects bridge calls the retained original new-user monitor
+only when a real normal or instant first-install cohort exists (#1345), matching
+pinned BroadcastHelper. The original monitor assumes a nonempty cohort; calling
+it for an update caused ArrayIndexOutOfBoundsException, surfaced by JavaBinder
+as UNKNOWN_TRANSACTION. The owning bridge changes; the original helper and APKs
+stay unchanged. Actual signed update acceptance requires the rebuilt matched
+vendor/image cohort.
+
 ## Context
 
 ADR 0012 runs the pinned Android userspace unmodified on a Linux syscall
