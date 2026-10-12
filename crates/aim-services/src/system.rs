@@ -2842,7 +2842,7 @@ impl System {
 
     pub(crate) fn dispatch_package_mutation(
         &self, call: &mut Call<'_>, query: &crate::package::query::Query<'_>,
-        base: &Arc<crate::package::scan_snapshot::query_state::Capture>,
+        _base: &Arc<crate::package::scan_snapshot::query_state::Capture>,
     ) -> Option<Result<Parcel>> {
         if !crate::package::mutation_dispatch::handles(call.code) { return None; }
         let retained = {
@@ -2851,19 +2851,17 @@ impl System {
                 .map(|dependencies| (current.bridge.clone(), dependencies.clone())))
         };
         let (bridge, dependencies) = retained?;
-        let install = self.package_install_guard();
         let capture = match self.capture_package_queries() { Ok(capture)=>capture, Err(error)=>return Some(Err(error)) };
         let resolution = match capture.resolution() { Ok(value)=>value, Err(error)=>return Some(Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,format!("mutation current resolution: {error:?}")))) };
         let current_query = crate::package::query::Query{state:capture.state(),filter:&resolution.apps_filter,calling_uid:query.calling_uid};
-        // Classify the actual typed request, not broad transaction families.
-        // Component setters never enter the compressed installation owner.
-        if crate::package::mutation_dispatch::owns_install_side_effect(call.code,&mut call.data,&current_query) {
-            drop(install);
-            let prepared=crate::package::mutation_dispatch::prepare(call.code,&mut call.data,&current_query,call.sender_pid,&dependencies)?;
-            return Some(prepared.and_then(|prepared|self.publish_prepared_package_mutation(&bridge,&capture,prepared,&dependencies,call.sender_euid as i32)));
-        }
+        // Original policy leaves may reenter native PM while AMS is locked.
+        // Prepare outside the publication gate; validate retained targets on entry.
+        let owns_install=crate::package::mutation_dispatch::owns_install_side_effect(call.code,&mut call.data,&current_query);
         let prepared=crate::package::mutation_dispatch::prepare(call.code,&mut call.data,&current_query,call.sender_pid,&dependencies)?;
-        Some(prepared.and_then(|prepared|self.publish_prepared_package_mutation_guarded(&bridge,&capture,prepared,&dependencies,call.sender_euid as i32,install)))
+        Some(prepared.and_then(|prepared|{
+            let install=self.package_install_guard();
+            self.publish_prepared_package_mutation_with_admission(&bridge,&capture,prepared,&dependencies,call.sender_euid as i32,install,!owns_install)
+        }))
     }
 
     pub fn publish_prepared_package_mutation(
@@ -2876,14 +2874,24 @@ impl System {
         self.publish_prepared_package_mutation_guarded(bridge, base, prepared, dependencies, caller, install)
     }
 
-    /// Callers needing capture+prepare atomicity acquire the same native install
-    /// gate first and transfer it here. Original callbacks run after its release.
+    /// Pure native preparation may retain the publication gate. Preparation
+    /// requiring original RPC runs before acquiring it; callbacks run after release.
     pub(crate) fn publish_prepared_package_mutation_guarded(
         &self, bridge: &Arc<crate::package::bootstrap::Bridge>,
         base: &Arc<crate::package::scan_snapshot::query_state::Capture>,
         prepared: crate::package::mutation_dispatch::Prepared,
         dependencies: &crate::package::mutation_dispatch::Dependencies, caller: i32,
         install: std::sync::MutexGuard<'_, ()>,
+    ) -> Result<Parcel> {
+        self.publish_prepared_package_mutation_with_admission(bridge,base,prepared,dependencies,caller,install,true)
+    }
+
+    fn publish_prepared_package_mutation_with_admission(
+        &self, bridge: &Arc<crate::package::bootstrap::Bridge>,
+        base: &Arc<crate::package::scan_snapshot::query_state::Capture>,
+        prepared: crate::package::mutation_dispatch::Prepared,
+        dependencies: &crate::package::mutation_dispatch::Dependencies, caller: i32,
+        install: std::sync::MutexGuard<'_, ()>, strict_code: bool,
     ) -> Result<Parcel> {
         self.check_package_bootstrap(bridge)?;
         let persistence = self.package_bootstrap.lock().unwrap().current.as_ref()
@@ -2900,7 +2908,11 @@ impl System {
         // Select latest while holding the publication coordinator, after the
         // disk lock. Freezer/other context publications cannot race this rebase.
         let latest = current.queries.clone().ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"prepared mutation current capture unavailable"))?;
-        if !Arc::ptr_eq(&latest,base) { prepared.validate_rebase(base.scan().owner(),latest.scan().owner()).map_err(|error|Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error))?; }
+        if !Arc::ptr_eq(&latest,base) {
+            let result=if strict_code{prepared.validate_rebase(base.scan().owner(),latest.scan().owner())}
+                else{prepared.validate_rebase_after_install_side_effects(base.scan().owner(),latest.scan().owner())};
+            result.map_err(|error|Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error))?;
+        }
         let base = &latest;
         let before = base.state().clone();
         let mut written = Ok(());

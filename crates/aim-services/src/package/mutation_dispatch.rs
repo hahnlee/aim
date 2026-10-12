@@ -297,11 +297,20 @@ impl Prepared {
     /// A retained plan may cross an unrelated publication. Validate every field
     /// it writes against its source before applying it to the latest owner.
     pub(crate) fn validate_rebase(&self, base:&SigningScan, latest:&SigningScan)->Result<(),String>{
+        self.validate_rebase_mode(base,latest,true)
+    }
+    // Preserve the existing typed compressed/system-install route until its
+    // exact post-install code receipt is available; ordinary plans never use it.
+    pub(crate) fn validate_rebase_after_install_side_effects(&self,base:&SigningScan,latest:&SigningScan)->Result<(),String>{
+        self.validate_rebase_mode(base,latest,false)
+    }
+    fn validate_rebase_mode(&self, base:&SigningScan, latest:&SigningScan, strict_code:bool)->Result<(),String>{
         let mut desired=base.clone();self.apply_scan(&mut desired)?;
         for plan in &self.plans {
             let find=|scan:&SigningScan|scan.settings.packages.iter().find(|setting|setting.name==plan.package).cloned().ok_or("prepared mutation package removed");
             let old=find(base)?;let current=find(latest)?;let intended=find(&desired)?;
             if old.app_id!=current.app_id||old.signatures!=current.signatures||old.shared_app_id()!=current.shared_app_id(){return Err("prepared mutation package identity changed".into());}
+            if strict_code{validate_code_owner(base,latest,&old,&current,false)?;}
             let check=|unchanged:bool,already:bool|if unchanged||already{Ok(())}else{Err(format!("prepared mutation concurrent field conflict: {}",plan.package))};
             macro_rules! field {($field:ident)=>{check(current.$field==old.$field,current.$field==intended.$field)?};}
             match &plan.change {
@@ -332,6 +341,7 @@ impl Prepared {
                 let find=|scan:&SigningScan|{let list=if factory{&scan.settings.disabled_system_packages}else{&scan.settings.packages};list.iter().find(|setting|setting.name==*name).cloned()};
                 let old=find(base);let current=find(latest);let intended=find(&desired);
                 match (old,current,intended){(None,None,None)=>{},(Some(old),Some(current),Some(intended))=>{
+                    if strict_code{validate_code_owner(base,latest,&old,&current,factory)?;}
                     let valid=match global{Global::HiddenUntilInstalled(..)=>current.transient.hidden_until_installed==old.transient.hidden_until_installed||current.transient.hidden_until_installed==intended.transient.hidden_until_installed,
                         Global::RequiredForSystemUser(..)=>(current.private_flags&512)==(old.private_flags&512)||(current.private_flags&512)==(intended.private_flags&512)};
                     if !valid{return Err("prepared global mutation concurrent field conflict".into());}
@@ -340,6 +350,21 @@ impl Prepared {
         }
         Ok(())
     }
+}
+
+fn validate_code_owner(base:&SigningScan,latest:&SigningScan,old:&super::settings::Package,current:&super::settings::Package,factory:bool)->Result<(),String>{
+    if old.name!=current.name||old.app_id!=current.app_id||old.shared_user!=current.shared_user
+        ||old.shared_app_id()!=current.shared_app_id()||old.signatures!=current.signatures||old.key_set_data!=current.key_set_data {
+        return Err(format!("prepared mutation package identity changed: {} factory={factory}",old.name));
+    }
+    let before_code=if factory{base.disabled_loaded_packages().get(&old.name)}else{base.loaded_packages().get(&old.name)};
+    let current_code=if factory{latest.disabled_loaded_packages().get(&old.name)}else{latest.loaded_packages().get(&old.name)};
+    if old.code_path!=current.code_path||old.version_code!=current.version_code||old.target_sdk_version!=current.target_sdk_version
+        ||before_code.map(|code|&code.package)!=current_code.map(|code|&code.package){return Err(format!("prepared mutation accepted code changed: {} factory={factory}",old.name));}
+    if let Some(id)=old.shared_app_id(){
+        if base.settings.shared_users.iter().find(|group|group.app_id==id)!=latest.settings.shared_users.iter().find(|group|group.app_id==id){return Err(format!("prepared mutation shared UID owner changed: {} factory={factory}",old.name));}
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -364,6 +389,47 @@ mod prepared_rebase_tests {
         let mut state=latest.scanned_user_states("p").unwrap()[&0].clone();state.enabled=2;latest.set_user_state("p",0,state).unwrap();
         assert!(enabled.validate_rebase(&base,&latest).unwrap_err().contains("concurrent field conflict"));
         assert_eq!(latest.scanned_user_states("p").unwrap()[&0].enabled,2);
+    }
+    #[test]
+    fn ordinary_prepared_mutation_rejects_target_code_identity_and_preserves_idempotence(){
+        let mut base=SigningScan::new(&Default::default(),&super::super::settings::Settings{
+            packages:vec![super::super::settings::Package{name:"p".into(),app_id:10100,code_path:"/data/app/p".into(),version_code:1,..Default::default()}],..Default::default()},36).unwrap();
+        base.capture_user_states(BTreeMap::from([(("p".into(),false),super::super::scan::CapturedUsers{states:BTreeMap::from([(0,Default::default())]),active_aliases:Default::default()})])).unwrap();
+        let prepared=Prepared{code:pm::SET_COMPONENT_ENABLED_SETTING,plans:vec![Plan{package:"p".into(),user:Some(0),change:Change::Enabled(super::super::write::Enabled{enabled:1,..Default::default()})}],global:None,finish:Finish::None,reply:Parcel::new(),distraction_cleanup:vec![]};
+        let mut intended=base.clone();prepared.apply_scan(&mut intended).unwrap();
+        prepared.validate_rebase(&base,&intended).unwrap();
+        let mut user=intended.scanned_user_states("p").unwrap()[&0].clone();user.ce_data_inode=99;intended.set_user_state("p",0,user).unwrap();
+        prepared.validate_rebase(&base,&intended).unwrap();
+        for edit in [0,1,2,3,4,5]{
+            let mut latest=base.clone();let setting=&mut latest.settings.packages[0];
+            match edit{0=>setting.code_path="/data/app/replaced".into(),1=>setting.version_code=2,
+                2=>setting.app_id=10101,3=>setting.key_set_data.proper_signing_key_set=7,
+                4=>setting.signatures=Some(super::super::settings::Signatures{scheme_version:3,signatures:vec![b"changed opaque signer".to_vec()],..Default::default()}),
+                _=>setting.shared_user=true,}
+            assert!(prepared.validate_rebase(&base,&latest).is_err(),"target code/identity change {edit} was accepted");
+        }
+        let mut latest=base.clone();let mut user=latest.scanned_user_states("p").unwrap()[&0].clone();user.enabled=2;latest.set_user_state("p",0,user).unwrap();
+        assert!(prepared.validate_rebase(&base,&latest).unwrap_err().contains("concurrent field conflict"));
+        // The existing explicitly classified owned-install admission is kept
+        // separate; ordinary metadata publication cannot select this route.
+        let mut installed=base.clone();installed.settings.packages[0].code_path="/data/app/decompressed".into();
+        prepared.validate_rebase_after_install_side_effects(&base,&installed).unwrap();
+        assert!(prepared.validate_rebase(&base,&installed).is_err());
+    }
+    #[test]
+    fn prepared_global_mutation_preserves_active_factory_scope_and_code(){
+        let package=super::super::settings::Package{name:"p".into(),app_id:10100,code_path:"/data/app/p".into(),flags:1,..Default::default()};
+        let mut factory=package.clone();factory.code_path="/system/app/p".into();
+        let base=SigningScan::new(&Default::default(),&super::super::settings::Settings{packages:vec![package],disabled_system_packages:vec![factory],..Default::default()},36).unwrap();
+        for global in [Global::HiddenUntilInstalled("p".into(),true),Global::RequiredForSystemUser("p".into(),true)]{
+            let prepared=Prepared{code:0,plans:vec![],global:Some(global),finish:Finish::None,reply:Parcel::new(),distraction_cleanup:vec![]};
+            let mut intended=base.clone();prepared.apply_scan(&mut intended).unwrap();prepared.validate_rebase(&base,&intended).unwrap();
+            for (factory,change) in [(false,0),(true,0),(true,1),(true,2),(false,3)]{
+                let mut latest=base.clone();let packages=if factory{&mut latest.settings.disabled_system_packages}else{&mut latest.settings.packages};
+                match change{0=>packages[0].code_path.push_str("-changed"),1=>packages[0].key_set_data.proper_signing_key_set=7,2=>packages.clear(),_=>packages[0].shared_user=true,}
+                assert!(prepared.validate_rebase(&base,&latest).is_err(),"global scope factory={factory} change={change} was accepted");
+            }
+        }
     }
 }
 

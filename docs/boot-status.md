@@ -227,15 +227,29 @@ independent namespace checks find all570/706 births gone. Those factory receipts
 are separate from live Role/inodes/ART/BootStats, GMS300, full donor capture,
 rollback and full66, which remain unqualified.
 
-The error-only runtime15c1e9b8 replay installs v1 but reproduces #1329 during v2:
-original AMS monitor is held by notifyComponentUsed's synchronous native call,
-while our broadcast handler waits for that monitor. Original Watchdog kills
-SystemServer after72s; completion reports permission-GID transport -32 after
-canonical update. Native-side waiting owner is not established by Java stacks.
-This body never reaches the session conflict. All809 captured/persisted births
-end; Root normally detaches only its verified disposable DATA and checks both
-IORegistry classes, mount absence and exclusive lock. The failed60-second
-resident cleanup has no success receipt and is preserved, not relabeled PASS.
+Runtime6918 reproduces #1329 during the signed v2 update. The Binder trace binds
+native PackageManager transaction87 to an original `isStateProtected` leaf
+queued behind the original SystemServer pool while its parent still holds the
+native install gate. The original AMS thread holding the AMS monitor is
+simultaneously blocked in native `notifyComponentUsed`, whose handler needs that
+same gate. Its original ANR stack and Binder sender thread match; Watchdog kills
+SystemServer after72s and the update returns permission-owner transport -32.
+Native OS stack sampling produced no sample, so the Binder ownership chain and
+source gate lifetime are the available owner evidence. Common mutation prepare
+now performs original policy RPC outside the install gate, then acquires the
+gate for publication and validates the retained active/factory package code,
+version, parsed code, signing, key-set and shared-UID identity. Three rebase
+tests, the actual concurrent original-leaf/native-notification regression and
+the existing compressed-install classifier regression pass without skips. The
+six-binary release build completes in63s; only guest-init changes, to SHA256
+`869cb9e90c4b1ff4128ba83ee2b8224d206cf2bdb8759631fc173dcf84d83741`.
+The typed compressed/system-install route retains its prior rebase contract
+until its exact lower-owner publication receipt is implemented (#1348). An
+actual signed/app replay remains required; the source tests and release build
+do not close #1329. The failed app body stops normally, leaves all744 captured
+and persisted births gone, no owned DATA mount or attachment, and an exclusive
+DATA lock. Its app, session, donor and conformance results remain failed or not
+run.
 
 A second15c1 diagnostic body passes the actual signed v1/update/uninstall and
 real create/write/commit/abandon transactions, with installed versions and APK

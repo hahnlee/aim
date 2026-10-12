@@ -45,8 +45,11 @@ use std::{path::PathBuf,collections::BTreeMap,sync::atomic::{AtomicUsize,Orderin
             Self{driver,native,original:Vec::new(),system,root}
         }
         fn attach(&mut self)->Arc<crate::package::bootstrap::Bridge>{
+            self.attach_service(|_|Arc::new(OriginalBridge))
+        }
+        fn attach_service(&mut self,service:impl FnOnce(&Arc<LocalProcess>)->Arc<dyn Service>)->Arc<crate::package::bootstrap::Bridge>{
             let original=LocalProcess::open(&self.driver,Device::Binder,Credentials{pid:97110+self.original.len() as i32,euid:1000,security_context:None});
-            original.start();let node=original.add_service(Arc::new(OriginalBridge));
+            original.start();let node=original.add_service(service(&original));
             let mut request=Parcel::new();host::AttachPackageBootstrapBridge{bridge:Some(node)}.write(&mut request);
             let reply=original.strong(0).transact(host::ATTACH_PACKAGE_BOOTSTRAP_BRIDGE,&request,false).unwrap();
             host::read_attach_package_bootstrap_bridge_reply(&mut reply.reader()).unwrap().unwrap();
@@ -618,4 +621,85 @@ fn implicit_access_fast_capture_matches_complete_fresh_capture_without_metadata_
     assert!(Arc::ptr_eq(&before.resolution().unwrap(),&old_resolution));
     assert!(Arc::ptr_eq(&next.resolution().unwrap().state,next.state()));
     assert!(Arc::ptr_eq(&fresh.resolution().unwrap().state,fresh.state()));
+}
+
+#[test]
+fn mutation_prepare_original_leaf_allows_concurrent_native_component_notification() {
+    use crate::package::{mutation_dispatch::Dependencies, preferred::registry::{IdentityProvider,Identity,Registry}};
+    use aim_service_aidl::{dev_aim_server_ipackagemutationbridge as effects, android_content_pm_ipackagemanager as pm};
+    struct NoIdentities;
+    struct Named(&'static str,&'static str);
+    impl aim_service_aidl::WriteParcelable for Named {
+        fn write_to(&self,p:&mut Parcel){p.write_string16(Some(self.0));p.write_string16(Some(self.1));}
+    }
+    impl IdentityProvider for NoIdentities {
+        fn allocate(&self,_:crate::package::preferred::records::Record<'_>)->std::result::Result<Identity,String>{Err("this protected mutation must not allocate preference identities".into())}
+    }
+    struct Leaf {
+        system:std::sync::Weak<System>,
+        completed:Arc<std::sync::atomic::AtomicBool>,
+        threads:Arc<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>>,
+    }
+    impl Service for Leaf {
+        fn descriptor(&self)->&str{effects::DESCRIPTOR}
+        fn transact(&self,call:&mut Call<'_>)->Reply{
+            assert_eq!(call.code,effects::IS_STATE_PROTECTED);
+            let args=effects::IsStateProtected::read(&mut call.data)?;
+            assert_eq!(args.package_name.as_deref(),Some("p"));assert_eq!(args.user_id,0);assert_eq!(call.data.remaining(),0);
+            let system=self.system.upgrade().unwrap();let (send,receive)=std::sync::mpsc::channel();
+            let thread=std::thread::spawn(move||{
+                // Run the actual native notification owner and its gate admission.
+                // An absent package is a legitimate no-op after admission.
+                let result=system.internal_notify_component_used(Some("not-installed".into()),0,None,None,1000,0);
+                send.send(result).unwrap();
+            });
+            self.threads.lock().unwrap().push(thread);
+            let mut reply=Parcel::new();
+            match receive.recv_timeout(std::time::Duration::from_secs(2)){
+                Ok(Ok(()))=>{self.completed.store(true,Ordering::SeqCst);effects::write_is_state_protected_reply(&mut reply,true);},
+                Ok(Err(error))=>reply.write_exception(&error),
+                Err(error)=>reply.write_exception(&Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,format!("notification blocked during original policy callback: {error}"))),
+            }
+            Ok(reply)
+        }
+    }
+    struct BridgeWithEffects(Binder);
+    impl Service for BridgeWithEffects {
+        fn descriptor(&self)->&str{bootstrap::DESCRIPTOR}
+        fn transact(&self,call:&mut Call<'_>)->Reply{
+            if call.code==bootstrap::GET_PACKAGE_MUTATION_BRIDGE{
+                call.data.enforce_interface(bootstrap::DESCRIPTOR)?;assert_eq!(call.data.remaining(),0);
+                let mut reply=Parcel::new();bootstrap::write_get_package_mutation_bridge_reply(&mut reply,Some(self.0));Ok(reply)
+            }else{OriginalBridge.transact(call)}
+        }
+    }
+    let mut fixture=Fixture::new();
+    let completed=Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let threads=Arc::new(std::sync::Mutex::new(Vec::new()));
+    let weak=Arc::downgrade(&fixture.system);let done=completed.clone();let retained_threads=threads.clone();
+    let bridge=fixture.attach_service(move|original|{
+        let leaf=original.add_service(Arc::new(Leaf{system:weak,completed:done,threads:retained_threads}));
+        Arc::new(BridgeWithEffects(leaf))
+    });
+    let capture=publish(&fixture,&bridge);
+    let effects_owner=fixture.system.package_effects_owner(&bridge).unwrap();
+    let changes=fixture.system.package_bootstrap.lock().unwrap().current.as_ref().unwrap().changes.clone();
+    let dependencies=Arc::new(Dependencies{effects:effects_owner,changes,preferred:Arc::new(Registry::new(Arc::new(NoIdentities))),
+        shell_restricted:Box::new(|_|panic!("system caller does not read shell restrictions")),
+        enable_compressed:Box::new(|_,_|panic!("component setter does not install compressed code")),
+        commit_preferred:Box::new(|_|panic!("protected setter does not change preferences")),
+        system_install_state:Box::new(|_,_,_|panic!("component setter is not system install")),quarantine_enabled:false});
+    fixture.system.package_bootstrap.lock().unwrap().current.as_mut().unwrap().mutations=Some(dependencies);
+    let resolution=capture.resolution().unwrap();
+    let query=crate::package::query::Query{state:capture.state(),filter:&resolution.apps_filter,calling_uid:1000};
+    let mut parcel=Parcel::new();pm::SetComponentEnabledSetting{component_name:Some(Named("p","fixture.Component")),new_state:2,flags:0,user_id:0,calling_package:None}.write(&mut parcel);
+    let mut call=Call{code:pm::SET_COMPONENT_ENABLED_SETTING,flags:0,sender_pid:71,sender_euid:1000,data:parcel.reader()};
+    let error=fixture.system.dispatch_package_mutation(&mut call,&query,&capture).unwrap().unwrap_err();
+    // Join even on a regression: the callback timeout returns its error and
+    // unwinds the old gate, allowing its already-started notification to retire.
+    for thread in threads.lock().unwrap().drain(..){thread.join().unwrap();}
+    assert!(completed.load(Ordering::SeqCst),"native notification could not enter during original policy RPC");
+    assert_eq!(error.code,aim_binder_host::parcel::EX_SECURITY);
+    assert!(error.message.contains("protected package"));
+    assert!(Arc::ptr_eq(&capture,&fixture.system.capture_package_queries().unwrap()),"protected owner result must reject publication");
 }
