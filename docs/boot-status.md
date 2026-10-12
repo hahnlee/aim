@@ -165,9 +165,41 @@ boot completion222.9s and permissions228.2s; the producer exits0 in279.18s.
 The final seal has no captured live births, owned mounts or either IORegistry
 attachment; an independent check also finds all622 persisted namespace births
 gone. Input pins are unchanged. Published template SHA begins02db18a0.
-This qualifies one factory boot/publication only. Fresh consumer Role binding,
-ART/BootStats, apps, paired full66 and rollback still determine acceptance;
-signed Android installation has not yet qualified the installer change.
+This qualifies one factory boot/publication only. A fresh Native consumer on
+that template obtains two equal original Role helper digests, both matching
+stored primary/reserve packagesHash. Its UID1000/capabilities0 caller exits0,
+and nine owner files stay identical across that call (#1328). A wider external
+trace interval sees later package-restrictions changes, so whole-consumer parity
+is not accepted by this narrow binding. ART/BootStats, paired full66 and rollback
+remain unverified.
+
+Actual Native app execution on source b4085c05/runtime d9993a24 installs untouched
+Calculator v29 successfully and passes three cold launches with real button
+input and rendered6×7=42. Original Settings AppInfo and Calculator storage
+subpage also pass separately captured UI checks. Opening permissions instead
+crashes original PermissionController: native getInstallSourceInfo throws
+UnsupportedOperationException for an update owner visible to another app
+(#1343). Permission UI and whole-app acceptance fail; Chrome, WebView, signed
+installer sessions and rollback are not reached. Source b75ebb3c fixes the
+query using the authenticated original DevicePolicy managed-user leaf: only
+organization-managed users hide another app's update owner, with system and
+owner exemptions. Three focused generated-parcel/policy/visibility regressions
+pass without skips, and the release runtime builds in58.72s. Its guest-init SHA
+begins9cfaceec ; actual original PermissionController revalidation is pending. The terminal independent seal
+finds all1217 recorded/persisted births gone, no mount or either IORegistry DATA
+attachment, and the exclusive DATA lock available. The original60-second runner
+cleanup error remains preserved; normal-stop follow-up and seal are separate
+cleanup evidence.
+
+The app observer's inverted Success predicate is corrected with real normal
+installation plus three failure controls (#1341); AppInfo/storage/permissions
+have separate captures. ADB exec-out screencap returns a truncated PNG and the
+original compression error on its combined raw stream (#1342). Saving with
+original screencap to a guest file and pulling it instead passes exact guest/host
+SHA, PNG CRC, complete inflate and pixel-length checks. Actual UIAutomation on
+the diagnostic HOME takes15.96s, exceeding the old generic15s observer budget;
+the file capture uses an explicit60s command budget. These observations qualify
+the collector only, not the raw-stream owner or app conformance.
 `aimctl start/run --binder-trace FILE` now forwards the selected diagnostic
 path into guest-init and retains it in controller state. Three parser/state/
 forwarding regressions and the release controller build pass. The260.65s

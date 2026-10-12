@@ -21,7 +21,12 @@ unchanged. Appended vendor AIDL methods and generated codes provide this
 capability on both controlled read-only f742 image variants, built from the
 same 6bd vendor cohort. Compilation and original-image linkage pass. The
 native host source exposes it through a UID1000-only Binder dump to a regular output
-file; four host guard tests pass. Actual stored-hash binding remains NOT RUN.
+file; four host guard tests pass. A fresh controlled Native consumer on the
+f89 image/runtime d9993a24 obtains two equal original helper digests matching
+stored primary/reserve hashes with unchanged owner files around that actual
+UID1000/capabilities0 call (#1328). This is same-observation binding; full
+consumer parity, the other fresh Native template and matched Original binding
+remain unverified.
 
 ## Context
 
