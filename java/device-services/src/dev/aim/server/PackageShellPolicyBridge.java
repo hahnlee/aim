@@ -51,4 +51,30 @@ public final class PackageShellPolicyBridge extends IPackageShellPolicyBridge.St
                     output.getFileDescriptor(), error.getFileDescriptor(), arguments, null, null);
         } catch (java.io.IOException failure) { throw new IllegalStateException(failure); }
     }
+    @Override public int handleListUsersCommand(android.os.ParcelFileDescriptor input,
+            android.os.ParcelFileDescriptor output, android.os.ParcelFileDescriptor error) {
+        try (input; output; error) {
+            Objects.requireNonNull(input); Objects.requireNonNull(output); Objects.requireNonNull(error);
+            final class Result extends android.os.ResultReceiver {
+                private boolean received;
+                private int value;
+                Result() { super(null); }
+                @Override protected void onReceiveResult(int resultCode, android.os.Bundle data) {
+                    if (received) throw new IllegalStateException("Duplicate UserManager shell result");
+                    received=true;value=resultCode;
+                }
+                int get() {
+                    if (!received) throw new IllegalStateException("Missing UserManager shell result");
+                    return value;
+                }
+            }
+            var result=new Result();
+            com.android.server.pm.NativeUserManagerBridge.currentUserManagerOwner().asBinder()
+                    .shellCommand(input.getFileDescriptor(), output.getFileDescriptor(),
+                            error.getFileDescriptor(), new String[] { "list" }, null, result);
+            return result.get();
+        } catch (java.io.IOException | android.os.RemoteException failure) {
+            throw new IllegalStateException(failure);
+        }
+    }
 }

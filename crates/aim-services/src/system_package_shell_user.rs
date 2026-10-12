@@ -1,4 +1,4 @@
-//! Original User creation shell execution with real transferred descriptors and caller.
+//! Original UserManager shell execution with real transferred descriptors and caller.
 use super::*;
 use aim_binder_host::server::RetainedFd;
 use aim_service_aidl::{
@@ -24,6 +24,14 @@ fn read_user_reply(reader: &mut Reader<'_>) -> Result<i32> {
     }
     Ok(result)
 }
+fn read_list_users_reply(reader: &mut Reader<'_>) -> Result<i32> {
+    let result = user::read_handle_list_users_command_reply(reader)
+        .map_err(|status| failure(format!("User listing shell reply: {status}")))??;
+    if reader.remaining() != 0 {
+        return Err(failure("User listing shell reply tail"));
+    }
+    Ok(result)
+}
 fn transact_user_command(
     process: &Arc<LocalProcess>,
     owner: &Strong,
@@ -38,6 +46,21 @@ fn transact_user_command(
         .transact_preserving_inbound(owner.handle, user::HANDLE_CREATE_USER_COMMAND, request)
         .map_err(|status| failure(format!("User creation shell transport: {status}")))?;
     read_user_reply(&mut reply.reader())
+}
+fn transact_list_users_command(
+    process: &Arc<LocalProcess>,
+    owner: &Strong,
+    request: &Parcel,
+) -> Result<i32> {
+    if process.authenticated_inbound_identity().is_none() {
+        return Err(Exception::security(
+            "User listing shell forwarding requires live inbound provenance",
+        ));
+    }
+    let reply = process
+        .transact_preserving_inbound(owner.handle, user::HANDLE_LIST_USERS_COMMAND, request)
+        .map_err(|status| failure(format!("User listing shell transport: {status}")))?;
+    read_list_users_reply(&mut reply.reader())
 }
 impl System {
     pub fn shell_create_user_command(
@@ -69,6 +92,34 @@ impl System {
         // The original UserManager checks Binder.getCallingUid itself.
         // This forwards only the actual kernel-authenticated inbound identity.
         let result = transact_user_command(&self.process, &owner, &request)?;
+        self.check_package_bootstrap(&bridge)?;
+        Ok(result)
+    }
+    pub fn shell_list_users_command(
+        &self,
+        uid: u32,
+        pid: i32,
+        input: RetainedFd,
+        output: RetainedFd,
+        error: RetainedFd,
+    ) -> Result<i32> {
+        if self.process.authenticated_inbound_identity() != Some((pid, uid)) {
+            return Err(Exception::security(
+                "User listing shell caller lacks authenticated Binder provenance",
+            ));
+        }
+        let bridge = self.package_bootstrap()?;
+        self.check_package_bootstrap(&bridge)?;
+        let owner =
+            self.package_bootstrap_binder_leaf(&bridge, bootstrap::GET_PACKAGE_SHELL_POLICY_BRIDGE)?;
+        let mut request = Parcel::new();
+        user::HandleListUsersCommand {
+            input: Some(Descriptor(input.into_file_owner())),
+            output: Some(Descriptor(output.into_file_owner())),
+            error: Some(Descriptor(error.into_file_owner())),
+        }
+        .write(&mut request);
+        let result = transact_list_users_command(&self.process, &owner, &request)?;
         self.check_package_bootstrap(&bridge)?;
         Ok(result)
     }
@@ -205,6 +256,24 @@ mod tests {
         let mut reply = Parcel::new();
         reply.write_no_exception();
         assert!(read_user_reply(&mut reply.reader()).is_err());
+    }
+    #[test]
+    fn list_users_reply_propagates_original_exception_and_rejects_tail() {
+        let mut reply = Parcel::new();
+        reply.write_exception(&Exception::security("original user listing denied"));
+        let error = read_list_users_reply(&mut reply.reader()).unwrap_err();
+        assert_eq!(error.code, aim_binder_host::parcel::EX_SECURITY);
+        assert_eq!(error.message, "original user listing denied");
+        let mut reply = Parcel::new();
+        user::write_handle_list_users_command_reply(&mut reply, -19);
+        assert_eq!(read_list_users_reply(&mut reply.reader()).unwrap(), -19);
+        let mut reply = Parcel::new();
+        user::write_handle_list_users_command_reply(&mut reply, 0);
+        reply.write_i32(7);
+        assert_eq!(
+            read_list_users_reply(&mut reply.reader()).unwrap_err().message,
+            "User listing shell reply tail"
+        );
     }
     #[test]
     fn real_inbound_profile_forwarding_preserves_shell_identity_and_rejects_synthetic_calls() {

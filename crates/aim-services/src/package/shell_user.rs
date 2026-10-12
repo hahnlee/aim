@@ -1,13 +1,20 @@
-//! Pinned create-user CLI delegates to the retained original UserManager owner.
+//! Pinned package user CLIs delegate to the retained original UserManager owner.
 use super::shell::Context;
 use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
 
-fn supported(command: Option<&str>) -> bool { command == Some("create-user") }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Owned { Create, List }
+fn owned(arguments: &[String]) -> Option<Owned> {
+    if arguments.first().is_some_and(|command| command == "create-user") {
+        Some(Owned::Create)
+    } else if arguments.first().is_some_and(|command| command == "list")
+        && arguments.get(1).is_some_and(|noun| noun == "users") {
+        Some(Owned::List)
+    } else { None }
+}
 
 pub fn run(context: &mut Context<'_>) -> Result<Option<i32>, Exception> {
-    if !supported(context.command.command()) {
-        return Ok(None);
-    }
+    let Some(owned)=owned(&context.command.args) else{return Ok(None)};
     let missing = |name| {
         Exception::new(
             EX_ILLEGAL_STATE,
@@ -32,11 +39,11 @@ pub fn run(context: &mut Context<'_>) -> Result<Option<i32>, Exception> {
         .ok_or_else(|| missing("error"))?
         .try_clone()
         .map_err(|error| Exception::new(EX_ILLEGAL_STATE, error.to_string()))?;
-    let args = context.command.args.clone();
-    context
-        .system()?
-        .shell_create_user_command(context.uid, context.pid, input, output, error, args)
-        .map(Some)
+    let system=context.system()?;
+    match owned {
+        Owned::Create=>system.shell_create_user_command(context.uid,context.pid,input,output,error,context.command.args.clone()),
+        Owned::List=>system.shell_list_users_command(context.uid,context.pid,input,output,error),
+    }.map(Some)
 }
 
 
@@ -44,11 +51,14 @@ pub fn run(context: &mut Context<'_>) -> Result<Option<i32>, Exception> {
 mod tests {
     use super::*;
     #[test]
-    fn only_create_user_enters_original_user_owner() {
-        assert!(supported(Some("create-user")));
-        for command in ["remove-user", "install", "list", "create-user-extra", "", "CREATE-USER"] {
-            assert!(!supported(Some(command)));
+    fn only_owned_user_commands_enter_original_user_owner() {
+        assert_eq!(owned(&["create-user".into(),"fixture".into()]),Some(Owned::Create));
+        assert_eq!(owned(&["list".into(),"users".into()]),Some(Owned::List));
+        assert_eq!(owned(&["list".into(),"users".into(),"ignored".into()]),Some(Owned::List));
+        for arguments in [vec!["remove-user".into()],vec!["install".into()],
+            vec!["list".into()],vec!["list".into(),"packages".into()],
+            vec!["create-user-extra".into()],vec![],vec!["CREATE-USER".into()]] {
+            assert_eq!(owned(&arguments),None);
         }
-        assert!(!supported(None));
     }
 }

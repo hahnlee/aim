@@ -17,4 +17,7 @@ public class Binder implements IBinder {
     public String getInterfaceDescriptor() { throw new RuntimeException("stub"); }
     public boolean unlinkToDeath(DeathRecipient recipient, int flags) { throw new RuntimeException("stub"); }
     public final boolean transact(int code, Parcel data, Parcel reply, int flags) throws RemoteException { throw new RuntimeException("stub"); }
+    public void shellCommand(java.io.FileDescriptor input, java.io.FileDescriptor output,
+            java.io.FileDescriptor error, String[] arguments, ShellCallback callback,
+            ResultReceiver resultReceiver) throws RemoteException { throw new RuntimeException("stub"); }
 }

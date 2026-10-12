@@ -12,6 +12,9 @@ public interface IBinder {
     String getInterfaceDescriptor() throws RemoteException;
 
     boolean transact(int code, Parcel data, Parcel reply, int flags) throws RemoteException;
+    void shellCommand(java.io.FileDescriptor input, java.io.FileDescriptor output,
+            java.io.FileDescriptor error, String[] arguments, ShellCallback callback,
+            ResultReceiver resultReceiver) throws RemoteException;
 
     void linkToDeath(DeathRecipient recipient, int flags) throws RemoteException;
     boolean unlinkToDeath(DeathRecipient recipient, int flags);

@@ -7,4 +7,6 @@ interface IPackageShellPolicyBridge {
     String[] runtimePermissions(in String[] requested);
     int handleCreateUserCommand(in ParcelFileDescriptor input, in ParcelFileDescriptor output,
         in ParcelFileDescriptor error, in String[] arguments);
+    int handleListUsersCommand(in ParcelFileDescriptor input, in ParcelFileDescriptor output,
+        in ParcelFileDescriptor error);
 }

@@ -351,20 +351,34 @@ boundary and kill the original process (#1350). Retained enabled-state rebasing
 now validates and applies only the scalar or component names changed by the
 plan, preserves concurrent changes to other components and still rejects two
 writers of the same component. Four focused rebase regressions pass in release
-mode. Runtime1aa1fd39 boots with that correction, owns both package services and
-passes signed v1 installation, but continuous unrelated metadata publications
-advance the native graph from528 to537 during the bounded original visibility
-capture for the v2 replacement (#1110). Each original reply is already bound to
-one immutable Computer generation. After the bounded recapture, the installer
-now retains the newest generation-coherent reply only after revalidating the
-lineage, target/shared-UID ownership and user inventory; a stale/future reply,
-mixed generations, target change or foreign lineage still fails. Six focused
-visibility regressions pass, including continuous unrelated publication. This
-correction still requires a rebuilt-runtime v2 and Chrome replay; no Chrome,
-WebView, GMS300, donor, rollback or full66 pass is claimed. Both failed app runs
-stop normally with cleanup errors empty, all children reaped, no DATA
-attachment/mount and an exclusive DATA lock. Runtime21c93296 has the same clean
-terminal seal.
+mode. Runtime1aa1fd39 exposed continuous unrelated metadata publication during the
+bounded original visibility capture (#1110). Each original reply is bound to one
+immutable Computer generation; the installer now retains only the newest
+generation-coherent reply after revalidating lineage, target/shared-UID
+ownership and user inventory. Six focused regressions cover continuous
+publication, stale/future replies, mixed generations and owner changes. Runtime
+aedaf873 includes that correction and recursive `MNT_DETACH` cleanup (#1351).
+It passes signed v1 installation, same-signer v2 replacement, uninstall, native
+session create/write/dump/commit/abandon and destroyed-session rejection with
+exact APK hashes. Three Calculator launches render 6×7=42. Calculator
+AppInfo/storage/permissions, global storage/default-apps and the original
+PermissionController list render their actual rows; the storage dashboard has a
+mounted `VolumeInfo{emulated;0}`. Original Chrome completes first-run and two
+local DOM43/SVG loads with live renderer interaction. Original WebView
+133.0.6943.137 renders its DOM/SVG with an isolated renderer and RELRO1/1. A
+fresh-logcat GMS300 observation and the three donor package path/dump/hash
+bindings pass. The following strict donor capture stops at the standard
+`pm list users`: native PackageManager omitted the pinned forwarding to the
+original UserManager shell owner (#1353), so donor capture, rollback and full66
+remain unaccepted. The native route now forwards only `list users`, preserving
+the authenticated caller and its three descriptors and returning the actual
+UserManager result. Five focused Rust tests and the Java/AIDL device-services
+build pass. The matched runtime, derived image and userdata template rebuild
+with zero failures. A fresh disposable native boot reaches
+`sys.boot_completed=1`; `pm list users` and direct `cmd user list` both return
+zero with byte-identical stdout/stderr from the retained original UserManager,
+and the unaffected `pm list packages` path also returns zero. The strict donor
+capture, rollback and full66 still need replay on this rebuilt pair.
 
 The app observer's inverted Success predicate is corrected with real normal
 installation plus three failure controls (#1341); AppInfo/storage/permissions
