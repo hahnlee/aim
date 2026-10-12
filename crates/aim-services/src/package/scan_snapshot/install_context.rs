@@ -95,11 +95,10 @@ pub(crate) fn install_user_rebase_conflict(base:&Snapshot,current:&Snapshot,cand
         let setting=base.owner().settings.packages.iter().find(|setting|setting.name==before.name)
             .ok_or("changed active domain package has no settings owner")?;
         if targets.contains(&before.name)||protected.contains(&setting.uid_owner_id()){continue;}
-        if before.id!=after.id||before.signature!=after.signature||before.has_auto_verify_domains!=after.has_auto_verify_domains
-            ||before.domains.iter().map(|(host,_)|host).ne(after.domains.iter().map(|(host,_)|host))
-            ||before.uri_relative_filter_groups!=after.uri_relative_filter_groups{
-            return Ok(Some(format!("domain identity/host/URI inventory changed: {}",before.name)));
-        }
+        // An unrelated domain owner may publish its identity/manifest capture
+        // independently. Merge the whole row only when the candidate retains
+        // the base or current row; the final comparison still protects code,
+        // settings, signing and UID ownership.
         let users=base.owner().scanned_user_states(&before.name).ok_or("changed active domain user owner unavailable")?;
         let selected=after.users.iter().map(|user|user.id).collect::<BTreeSet<_>>();
         if selected.len()!=after.users.len()||selected.iter().any(|user|!users.contains_key(user)){
@@ -450,7 +449,7 @@ mod permission_owner_tests {
         assert!(error.contains("added competing package target")&&error.contains("candidate_matches=false"),"{error}");
     }
     #[test]
-    fn install_domain_rebase_rejects_target_shared_identity_and_manifest_conflicts(){
+    fn install_domain_rebase_rejects_target_shared_and_inventory_conflicts(){
         let settings=domain_settings();let base=domain_snapshot(settings.clone());let targets=BTreeSet::from(["target".into()]);
         for index in [0,1]{
             let mut changed=settings.clone();changed.domain_verification.active[index].domains[0].1=2;
@@ -458,7 +457,7 @@ mod permission_owner_tests {
             assert!(install_user_rebase_conflict(&base,&current,&mut candidate,&targets).unwrap().is_some());
             assert_eq!(candidate,base.owner().clone(),"rejected target/shared-UID change must not mutate candidate");
         }
-        for kind in 0..8{
+        for kind in 5..8{
             let mut changed=settings.clone();let domain=&mut changed.domain_verification.active[2];
             match kind{
                 0=>domain.id="00000000-0000-0000-0000-000000000099".into(),
@@ -473,6 +472,45 @@ mod permission_owner_tests {
             let current=domain_snapshot(changed);let mut candidate=base.owner().clone();
             assert!(install_user_rebase_conflict(&base,&current,&mut candidate,&targets).unwrap().is_some(),"domain identity/manifest/inventory change {kind} was accepted");
             assert_eq!(candidate,base.owner().clone());
+        }
+    }
+    #[test]
+    fn install_domain_rebase_preserves_unrelated_identity_and_manifest_capture(){
+        let settings=domain_settings();let base=domain_snapshot(settings.clone());let targets=BTreeSet::from(["target".into()]);
+        for kind in 0..5{
+            let mut changed=settings.clone();let domain=&mut changed.domain_verification.active[2];
+            match kind{
+                0=>domain.id="00000000-0000-0000-0000-000000000099".into(),
+                1=>domain.signature=Some("current-domain-signature-binding".into()),
+                2=>domain.domains[0].0=Some("current.example".into()),
+                3=>domain.uri_relative_filter_groups.push((Some("fixture.example".into()),vec![])),
+                _=>domain.has_auto_verify_domains=false,
+            }
+            let current=domain_snapshot(changed.clone());let mut candidate=base.owner().clone();
+            assert!(install_user_rebase_conflict(&base,&current,&mut candidate,&targets).unwrap().is_none(),"unrelated capture {kind}");
+            assert_eq!(candidate.settings.domain_verification.active[2],changed.domain_verification.active[2]);
+            assert_eq!(candidate.settings.domain_verification.active[..2],settings.domain_verification.active[..2]);
+            assert_eq!(base.owner().settings.domain_verification,settings.domain_verification);
+            assert!(install_user_rebase_conflict(&base,&current,&mut candidate,&targets).unwrap().is_none());
+            let mut competing=base.owner().clone();competing.settings.domain_verification.active[2].id="00000000-0000-0000-0000-000000000098".into();
+            let retained=competing.clone();
+            assert!(install_user_rebase_conflict(&base,&current,&mut competing,&targets).unwrap().unwrap().contains("competing candidate domain state"));
+            assert_eq!(competing,retained);
+        }
+    }
+    #[test]
+    fn install_domain_rebase_keeps_package_uid_and_user_ownership_strict(){
+        let settings=domain_settings();let base=domain_snapshot(settings.clone());let targets=BTreeSet::from(["target".into()]);
+        for kind in 0..3{
+            let mut changed=settings.clone();changed.domain_verification.active[2].domains[0].0=Some("current.example".into());
+            match kind{
+                0=>changed.packages[2].version_code+=1,
+                1=>changed.packages[2].app_id=10102,
+                _=>changed.domain_verification.active[2].users[0].id=10,
+            }
+            let current=domain_snapshot(changed);let mut candidate=base.owner().clone();let retained=candidate.clone();
+            assert!(install_user_rebase_conflict(&base,&current,&mut candidate,&targets).unwrap().is_some(),"ownership conflict {kind}");
+            assert_eq!(candidate,retained);
         }
     }
     #[test]

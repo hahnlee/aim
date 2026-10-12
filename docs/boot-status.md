@@ -253,11 +253,24 @@ waits on the install publication gate while that publisher reads original query
 compatibility through AMS. Canonical v2 metadata reaches generation632 before
 Watchdog retires SystemServer. The no-change component-use owner now returns
 from its retained immutable package state without entering the publication gate;
-the held-gate and original policy-reentry regressions pass without skips. Fresh
-live replay is pending. The earlier body then reached a separate session
-commit conflict (#1346). It stops normally, leaves no owned DATA mount or either
-attachment, and obtains an exclusive DATA lock. Its remaining app, donor and
-conformance results are not run.
+the held-gate and original policy-reentry regressions pass without skips. A fresh
+runtimed57a060b replay passes signed v1/v2 replacement, uninstall and the session
+route without the Watchdog cycle, then passes three Calculator launches, the six
+Settings/PermissionController surfaces, Chrome first-run and two local DOM/SVG
+loads, and original WebView with its isolated renderer. Its GMS observation stops
+only because the evidence harness queries a short-lived host `ps` child after it
+has already exited; the fixed wrapper retains that owned child for birth capture.
+A second replay again passes signed v1/v2/uninstall, but its session commit catches
+a later unrelated `com.google.android.gm` domain identity/host/URI publication.
+Installation rebasing now accepts the complete latest canonical domain row only
+for an unrelated package when the candidate still has the base or latest row and
+all selected users are valid; its final whole-owner comparison continues to
+protect package code/settings/signing/UID ownership. Target/shared-UID changes,
+competing candidates, unknown users and active-domain inventory/order changes
+remain conflicts. Five focused domain regressions pass without skips. A rebuilt
+runtime replay is pending. Both completed failure bodies stop normally, reap all
+owned children, leave no DATA mount or attachment and obtain the exclusive DATA
+lock. Donor capture, rollback and full66 remain not run.
 
 A second15c1 diagnostic body passes the actual signed v1/update/uninstall and
 real create/write/commit/abandon transactions, with installed versions and APK
