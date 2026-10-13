@@ -333,7 +333,7 @@ pub struct Boot {
     native_services: Option<Arc<NativeServices>>,
     /// Drops after executor's HostLauncher has killed and reaped its children.
     _verity_control: Option<aim_storage::verity_control::RunningServer>,
-    _posix_control: Option<Arc<aim_storage::posix_broker::Controller>>,
+    posix_control: Option<Arc<aim_storage::posix_broker::Controller>>,
     _pty_owner: Option<aim_storage::pty_owner::transport::RunningServer>,
     init_registration: Option<aim_storage::process_namespace::InitRegistration>,
     /// The native status bar runs (`start_status_bar`).
@@ -880,7 +880,7 @@ impl Boot {
             binder,
             native_services,
             _verity_control: verity_control,
-            _posix_control: posix_control,
+            posix_control,
             _pty_owner: pty_owner,
             init_registration,
             status_bar: false,
@@ -1316,6 +1316,13 @@ impl Boot {
             self.executor
                 .supervisor
                 .kill_all(self.executor.launcher.as_mut());
+            // The controller owns its holder children. Retire them before
+            // HostLauncher reaps the guest children and retires their
+            // corresponding owner records.
+            if let Some(controller) = self.posix_control.take()
+                && let Err(error) = controller.shutdown() {
+                self.executor.fatal.get_or_insert(format!("POSIX controller shutdown: {error}"));
+            }
             match self.executor.reap_all_processes() {
                 Ok(()) => {
                     self.sweep_memfds();

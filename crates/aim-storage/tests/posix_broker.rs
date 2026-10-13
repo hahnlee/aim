@@ -1,6 +1,6 @@
 //! Actual native-controller/holder process tests for #1189.
 use aim_storage::{posix_broker::{Config,Controller},posix_control::{Client,Frame,Operation,Owner,Range},process_namespace::ProcessIdentity,inode_lease::Identity};
-use std::{io::{BufRead,BufReader,Write},os::fd::{AsFd,AsRawFd},process::{Child,ChildStdin,ChildStdout,Command,Stdio},time::Duration};
+use std::{io::{BufRead,BufReader,Write},os::fd::{AsFd,AsRawFd},process::{Child,ChildStdin,ChildStdout,Command,Stdio},sync::Arc,time::Duration};
 #[test]
 #[ignore = "controlled child of controller_owns_two_guest_incarnations_and_real_lock_lifetimes"]
 fn posix_broker_guest_child(){
@@ -45,6 +45,18 @@ impl Guest {
  fn quit(&mut self){writeln!(self.input,"quit").unwrap();self.input.flush().unwrap();assert!(self.child.wait().unwrap().success());}
 }
 impl Drop for Guest{fn drop(&mut self){if self.child.try_wait().unwrap().is_none(){self.child.kill().unwrap();}self.child.wait().unwrap();}}
+#[test]
+fn explicit_shutdown_releases_endpoint_while_an_arc_is_retained(){
+ let endpoint=format!("com.aim.posix-controller-restart.{}.{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+ let config=Config{endpoint:endpoint.clone(),holder:std::path::PathBuf::from(env!("CARGO_BIN_EXE_aim-lock-holder")),startup_timeout:Duration::from_secs(3)};
+ let controller=Arc::new(Controller::start(config.clone()).unwrap());let retained=controller.clone();
+ let mut actor=Command::new("/bin/sleep").arg("20").spawn().unwrap();let owner=Owner{process:ProcessIdentity::running(actor.id()as i32).unwrap(),guest_pid:41003};
+ let holder=controller.register_guest(owner).unwrap();actor.kill().unwrap();
+ controller.shutdown().unwrap();assert!(!holder.is_live(),"controller retires its holder before the guest actor is reaped");
+ assert!(!actor.wait().unwrap().success());retained.guest_exited(owner).unwrap();
+ assert_eq!(retained.owner_config().unwrap_err().raw_os_error(),Some(libc::ESRCH));
+ let next=Controller::start(config).unwrap();next.shutdown().unwrap();
+}
 #[test]
 fn controller_owns_two_guest_incarnations_and_real_lock_lifetimes(){
  let directory=std::env::temp_dir().join(format!("aim-posix-controller-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));std::fs::create_dir(&directory).unwrap();let path=directory.join("file");std::fs::write(&path,b"real lock bytes").unwrap();

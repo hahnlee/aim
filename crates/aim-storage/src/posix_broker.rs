@@ -236,7 +236,7 @@ impl State {
   reply.send(response)
  }
 }
-pub struct Controller {config:Config,process:ProcessIdentity,state:Arc<State>,stop:Arc<AtomicBool>,thread:Option<thread::JoinHandle<io::Result<()>>>}
+pub struct Controller {config:Config,process:ProcessIdentity,state:Arc<State>,stop:Arc<AtomicBool>,thread:Mutex<Option<thread::JoinHandle<io::Result<()>>>>}
 impl Controller {
  pub fn start(config:Config)->io::Result<Self>{
   if config.startup_timeout.is_zero()||!config.holder.is_absolute()||!config.holder.is_file(){return Err(error(libc::EINVAL));}
@@ -260,7 +260,7 @@ impl Controller {
    for request in requests{match request.join(){Ok(Ok(()))=>{},Ok(Err(failure))=>serving.record(failure),Err(_)=>serving.record(error(libc::EIO))}}
    result.and(cleanup)
   })?;
-  Ok(Self{config,process,state,stop,thread:Some(thread)})
+  Ok(Self{config,process,state,stop,thread:Mutex::new(Some(thread))})
  }
  /// Bind the native namespace receipt directory, already verified by boot
  /// to be outside all guest-visible mounts.
@@ -299,8 +299,8 @@ impl Controller {
  }
  pub fn owner_config(&self)->io::Result<OwnerConfig>{if self.stop.load(Ordering::Acquire)||!self.process.is_live(){return Err(error(libc::ESRCH));}Ok(OwnerConfig{endpoint:self.config.endpoint.clone(),process:self.process})}
  pub fn failures(&self)->Vec<String>{self.state.failures.lock().unwrap().clone()}
- pub fn shutdown(mut self)->io::Result<()>{self.join()}
- fn join(&mut self)->io::Result<()>{self.stop.store(true,Ordering::Release);match self.thread.take(){Some(thread)=>thread.join().map_err(|_|error(libc::EIO))?,None=>Ok(())}}
+ pub fn shutdown(&self)->io::Result<()>{self.join()}
+ fn join(&self)->io::Result<()>{self.stop.store(true,Ordering::Release);let thread=self.thread.lock().map_err(|_|error(libc::EIO))?.take();match thread{Some(thread)=>thread.join().map_err(|_|error(libc::EIO))?,None=>Ok(())}}
 }
 impl Drop for Controller {fn drop(&mut self){if let Err(failure)=self.join(){eprintln!("POSIX controller shutdown: {failure}");}}}
 
