@@ -87,9 +87,17 @@ impl System {
             usage.notify(name, reason, time);
             if usage == *base.usage() { return Ok(()); }
             // AMS holds its own locks here. Prepare outside the coordinator and
-            // never wait for the install gate. During query lag, update only the
-            // canonical owner; the installer projects this latest usage later.
-            let projected = if Arc::ptr_eq(capture.scan(), &base) {
+            // never wait for the install gate. If a user/install transition owns
+            // that gate, advance only the canonical usage owner. That transition
+            // rebases this usage before publishing its already-resolved query.
+            let projection = match self.package_install_lock.try_lock() {
+                Ok(guard) => Some(guard),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(event_error("package install gate poisoned"));
+                }
+            };
+            let projected = if projection.is_some() && Arc::ptr_eq(capture.scan(), &base) {
                 Some(capture.prepare_usage_update(usage.clone()).map_err(event_error)?)
             } else { None };
             let candidate = if projected.is_some() {

@@ -269,6 +269,25 @@ pub(crate) struct PackageUpdate {
     pub(crate) capture: Arc<Capture>,
 }
 
+impl PackageUpdate {
+    /// Move an already-resolved user transition over a newer canonical scan.
+    /// The caller proves that its query Capture is still current, so the
+    /// expensive live permission/GID projection in `capture` remains valid.
+    pub(crate) fn rebase_user_transition(
+        self,
+        latest: &Arc<Snapshot>,
+        owner: crate::package::scan::SigningScan,
+    ) -> Result<Self, String> {
+        let version = latest.version().checked_add(1).ok_or("user package generation exhausted")?;
+        let store = super::Store::new_replica_after(latest, owner, latest.usage().clone(), version)
+            .map_err(|error| format!("user transition canonical rebase: {error:?}"))?;
+        let mut context = (*self.capture.context).clone();
+        context.scan_version = version;
+        let capture = Capture::new(store.capture(), context)?;
+        Ok(Self { store, capture })
+    }
+}
+
 /// Query code and the Java replica retain the same native package owner.
 pub struct Capture {
     scan: Arc<Snapshot>,

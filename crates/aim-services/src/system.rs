@@ -2583,8 +2583,8 @@ impl System {
         // Query and component owners may publish while the original user owner
         // is returning live permission state. Rebuild outside the publication
         // lock, then retain an exact CAS at the point the generation changes.
-        for attempt in 0..3 {
-            let update = preparation_base.prepare_user_transition(candidate.clone(), user, created, record.clone(), bridge)
+        loop {
+            let mut update = preparation_base.prepare_user_transition(candidate.clone(), user, created, record.clone(), bridge)
                 .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
             let mut state = self.package_bootstrap.lock().unwrap();
             let current = state.current.as_mut().filter(|current| Arc::ptr_eq(&current.bridge, bridge))
@@ -2592,14 +2592,24 @@ impl System {
             let published = current.queries.as_ref().ok_or_else(|| Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE, "user transition query owner unavailable"))?;
             if Arc::ptr_eq(published, &preparation_base) {
+                let canonical = current.snapshots.as_ref().ok_or_else(|| Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE, "user transition canonical owner unavailable"))?.capture();
+                if !Arc::ptr_eq(&canonical, preparation_base.scan()) {
+                    if let Some(reason) = rebase_created_user_scan(preparation_base.scan(), &canonical, &mut candidate)
+                        .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                            format!("user transition canonical rebase: {error}")))? {
+                        return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                            format!("user transition canonical base changed: {reason}")));
+                    }
+                    update = update.rebase_user_transition(&canonical, candidate.clone())
+                        .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
+                }
                 current.publish_snapshot(update.store);
                 current.queries = Some(update.capture.clone());
                 if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
                 state.version = update.capture.scan().version();
                 return Ok(update.capture);
             }
-            if attempt == 2 { return Err(Exception::new(
-                aim_binder_host::parcel::EX_ILLEGAL_STATE, "user transition base kept changing")); }
             let latest = published.clone();
             drop(state);
             if created {
@@ -2616,7 +2626,6 @@ impl System {
             }
             preparation_base = latest;
         }
-        unreachable!()
     }
 
     pub(crate) fn native_package_has_launcher(&self, package: &str, user: i32, flags: i64) -> Result<bool> {

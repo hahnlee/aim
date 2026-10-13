@@ -103,6 +103,48 @@ fn usage_preparation_releases_coordinator_and_retains_both_concurrent_updates(){
     assert_eq!(current.scan().owner().replica_runtime("p",false).unwrap().unwrap().usage,*times);
     assert_eq!(old.scan().usage().times("p").unwrap(),&[0;8]);
 }
+
+#[test]
+fn held_install_gate_defers_usage_query_projection_without_losing_canonical_usage() {
+    let mut fixture = Fixture::new();
+    let bridge = fixture.attach();
+    let query = publish(&fixture, &bridge);
+    let install = fixture.system.package_install_guard();
+    fixture.system.internal_notify_package_use(Some("p".into()), 2, 1000, 0).unwrap();
+    let state = fixture.system.package_bootstrap.lock().unwrap();
+    let current = state.current.as_ref().unwrap();
+    assert!(Arc::ptr_eq(current.queries.as_ref().unwrap(), &query));
+    let canonical = current.snapshots.as_ref().unwrap().capture();
+    assert!(!Arc::ptr_eq(&canonical, query.scan()));
+    assert!(canonical.usage().times("p").unwrap()[2] > 0);
+    assert_eq!(canonical.owner().replica_runtime("p", false).unwrap().unwrap().usage,
+        *canonical.usage().times("p").unwrap());
+    drop(state);
+    drop(install);
+}
+
+#[test]
+fn prepared_transition_rebases_over_deferred_canonical_usage() {
+    let mut fixture = Fixture::new();
+    let bridge = fixture.attach();
+    let query = publish(&fixture, &bridge);
+    let prepared = query.prepare_package_update(query.scan().owner().clone()).unwrap();
+    let install = fixture.system.package_install_guard();
+    fixture.system.internal_notify_package_use(Some("p".into()), 2, 1000, 0).unwrap();
+    let canonical = fixture.system.package_bootstrap.lock().unwrap().current.as_ref().unwrap()
+        .snapshots.as_ref().unwrap().capture();
+    let mut owner = prepared.capture.scan().owner().clone();
+    assert!(crate::package::scan_snapshot::install_context::rebase_user_transition(
+        query.scan(), &canonical, &mut owner,
+    ).unwrap().is_none(), "usage-only publication must rebase");
+    let rebased = prepared.rebase_user_transition(&canonical, owner).unwrap();
+    assert_eq!(rebased.capture.scan().version(), canonical.version() + 1);
+    assert_eq!(rebased.capture.scan().usage(), canonical.usage());
+    assert_eq!(rebased.capture.context().scan_version, rebased.capture.scan().version());
+    assert_eq!(rebased.capture.scan().owner().replica_runtime("p", false).unwrap().unwrap().usage,
+        *canonical.usage().times("p").unwrap());
+    drop(install);
+}
 #[test]
 fn prepared_usage_cannot_publish_into_retired_bootstrap_epoch(){
     let mut fixture=Fixture::new();let old_bridge=fixture.attach();let old=publish(&fixture,&old_bridge);
