@@ -100,5 +100,5 @@ pub fn create(system: &Arc<System>, bridge: &Arc<Bridge>, disk: Arc<Mutex<Store>
         }),
     };
     Ok(Arc::new(user_operations::Owner::new(disk, preferred, runtime, effects, lifecycle,
-        dependencies, fix_first_install_time, non_stopped)))
+        dependencies, system.package_install_gate(), fix_first_install_time, non_stopped)))
 }

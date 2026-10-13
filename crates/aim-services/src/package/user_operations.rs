@@ -46,6 +46,7 @@ pub struct Dependencies {
 }
 pub struct Owner {
     disk: Arc<Mutex<Store>>, pending: Mutex<BTreeMap<i32, Creation>>,
+    publication_gate: Arc<Mutex<()>>,
     preferred: Arc<preferred::registry::Registry>, runtime: Arc<Mutex<runtime_metadata::State>>,
     effects: Arc<effects::Owner>, lifecycle: Arc<lifecycle::Owner>,
     dependencies: Dependencies, fix_first_install_time: bool,
@@ -55,8 +56,8 @@ impl Owner {
     pub fn new(disk: Arc<Mutex<Store>>, preferred: Arc<preferred::registry::Registry>,
         runtime: Arc<Mutex<runtime_metadata::State>>, effects: Arc<effects::Owner>,
         lifecycle: Arc<lifecycle::Owner>, dependencies: Dependencies,
-        fix_first_install_time: bool, non_stopped: BTreeSet<String>) -> Self {
-        Self { disk, pending: Mutex::new(BTreeMap::new()), preferred, runtime, effects,
+        publication_gate: Arc<Mutex<()>>, fix_first_install_time: bool, non_stopped: BTreeSet<String>) -> Self {
+        Self { disk, pending: Mutex::new(BTreeMap::new()), publication_gate, preferred, runtime, effects,
             lifecycle, dependencies, fix_first_install_time, non_stopped }
     }
     pub fn create_user_state(&self, user: i32, installable: Option<Vec<Option<String>>>,
@@ -64,18 +65,23 @@ impl Owner {
         if user < 0 { return Err(Exception::illegal_argument("negative new user")); }
         let user_record = UserRecord::read(&user_record, user)?;
         if self.pending.lock().unwrap().contains_key(&user) { return Err(Exception::new(EX_ILLEGAL_STATE, "user creation already pending")); }
-        let capture = (self.dependencies.capture)()?;
+        // Native package publications share one generation gate. Hold it from
+        // capture through publication so an install or query mutation cannot
+        // replace the exact scan base while original UM creates this user.
         let installable = installable.map(|names| names.into_iter().flatten().collect::<BTreeSet<_>>());
         let disallowed: Vec<_> = disallowed.unwrap_or_default().into_iter().flatten().collect();
         let policy = CreationPolicy { current_time_millis, fix_system_apps_first_install_time: self.fix_first_install_time,
             stop_system_packages_by_default: stop_system_packages, initial_non_stopped_system_packages: self.non_stopped.clone() };
-        let creation = Creation::prepare(&capture, user, installable.as_ref(), &disallowed, &policy,
-            |name, user, flags| (self.dependencies.launcher)(name, user, flags)).map_err(failure)?;
-        let mut scan = capture.scan().owner().clone(); creation.apply_scan(&mut scan).map_err(failure)?;
-        // Original Settings changes live user state before installd runs. The
-        // original Java adapter owns the actual install lock during this call.
-        self.disk.lock().unwrap().register_package_user(user as u32).map_err(|error| failure(error.to_string()))?;
-        (self.dependencies.publish_user)(&capture, scan, user, true, Some(user_record))?;
+        let creation = serialized(&self.publication_gate, || {
+            let capture = (self.dependencies.capture)()?;
+            let creation = Creation::prepare(&capture, user, installable.as_ref(), &disallowed, &policy,
+                |name, user, flags| (self.dependencies.launcher)(name, user, flags)).map_err(failure)?;
+            let mut scan = capture.scan().owner().clone(); creation.apply_scan(&mut scan).map_err(failure)?;
+            // Original Settings changes live user state before installd runs.
+            self.disk.lock().unwrap().register_package_user(user as u32).map_err(|error| failure(error.to_string()))?;
+            (self.dependencies.publish_user)(&capture, scan, user, true, Some(user_record))?;
+            Ok(creation)
+        })?;
         for name in &creation.kernel_exclusions { (self.dependencies.kernel_exclusion)(name, user)?; }
         let mut response = Parcel::new();
         response.write_i32(i32::try_from(creation.app_data.len()).map_err(|error| failure(error.to_string()))?);
@@ -140,7 +146,40 @@ impl Owner {
         (self.dependencies.add_cross_profile)(filter, owner, source, target, flags)
     }
 }
+fn serialized<T>(gate: &Mutex<()>, operation: impl FnOnce() -> T) -> T {
+    let _publication = gate.lock().unwrap();
+    operation()
+}
 fn failure(message: impl Into<String>) -> Exception { Exception::new(EX_ILLEGAL_STATE, message.into()) }
+
+#[cfg(test)]
+mod tests {
+    use super::serialized;
+    use std::sync::{Arc, Barrier, Mutex, atomic::{AtomicBool, Ordering}};
+
+    #[test]
+    fn user_transition_gate_covers_capture_through_publication() {
+        let gate = Arc::new(Mutex::new(()));
+        let start = Arc::new(Barrier::new(2));
+        let attempted = Arc::new(AtomicBool::new(false));
+        let published = Arc::new(AtomicBool::new(false));
+        let competitor = {
+            let gate = gate.clone(); let start = start.clone(); let attempted = attempted.clone(); let published = published.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                attempted.store(true, Ordering::Release);
+                let _other_publication = gate.lock().unwrap();
+                assert!(published.load(Ordering::Acquire), "another generation entered before user publication");
+            })
+        };
+        serialized(&gate, || {
+            start.wait();
+            while !attempted.load(Ordering::Acquire) { std::thread::yield_now(); }
+            assert!(!published.swap(true, Ordering::AcqRel));
+        });
+        competitor.join().unwrap();
+    }
+}
 
 pub struct Endpoint(pub Arc<Owner>);
 struct Filter(IntentFilter);

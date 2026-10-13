@@ -685,6 +685,10 @@ impl System {
         self.package_install_lock.lock().unwrap()
     }
 
+    pub(crate) fn package_install_gate(&self) -> Arc<Mutex<()>> {
+        self.package_install_lock.clone()
+    }
+
     /// SDK filesystem work shares the package owner's install lock with code cleanup.
     pub fn reconcile_package_sdk_data(
         self: &Arc<Self>,
