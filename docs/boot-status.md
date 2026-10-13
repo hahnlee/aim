@@ -1956,9 +1956,15 @@ incorrectly requires an ordinary install reservation. The same cleanup through
 restoration now supplies the pinned all-users/default permission installation
 parameters and performs updated-code removal before factory-code addition in one
 original permission-owner preparation transaction, with explicit rollback or
-commit of its reservation. Four focused factory permission/location/state
-regressions pass and device-services links against the original image APIs;
-actual affected CTS replay of all eight PrivilegedUpdate cases remains pending. The
+commit of its reservation. A rebuilt matched cohort completes the official eight
+PrivilegedUpdate cases with four passes and four failures: the reboot case passes,
+but its cleanup now reports `permission candidate scan: Invalid("legacy package
+owner inventory differs")`, so the same four later factory-state assertions still
+observe the update flag. Enabling the factory setting now moves its captured
+legacy permission migration from the disabled owner to the active owner before
+candidate validation. Six focused factory permission/location/state/owner
+regressions and the library check pass; replay of the corrected cohort remains
+pending. The
 old failed C109/C110 cohorts remain NOT RUN evidence. A separate rollback on
 a clone of native-written data constructs original PMS (package owner PID equals
 SystemServer 50573), preserving five selected packages' UID/codepath/version,

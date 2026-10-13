@@ -104,6 +104,26 @@ impl SigningScan {
             .ok_or_else(|| "disabled legacy migration owner is not captured".into())
     }
 
+    /// Enabling a saved factory setting removes that SettingBase owner. Its
+    /// migration state seeds a newly constructed active setting when needed.
+    pub(super) fn take_disabled_legacy(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<Migration>, String> {
+        let Some(owners) = &mut self.legacy_permissions else {
+            return Ok(None);
+        };
+        let key = (name.into(), true);
+        let (_, _, migration) = owners
+            .packages
+            .remove(&key)
+            .ok_or("enabled factory legacy owner is missing")?;
+        if let Some(fixed) = &mut owners.install_fixed {
+            fixed.remove(&key);
+        }
+        Ok(Some(migration))
+    }
+
     /// A newly allocated SharedUserSetting owns an empty constructor state,
     /// even when a later scan fails. Do not create an absent import inventory.
     pub(super) fn legacy_shared_constructor(&mut self, name: &str, id: i32) -> Result<(), String> {

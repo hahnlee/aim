@@ -379,6 +379,7 @@ impl SigningScan {
         let factory = self.settings.disabled_system_packages.remove(at);
         self.disabled_users.remove(name);
         self.disabled_loaded.remove(name);
+        let inherited = self.take_disabled_legacy(name).ok()?;
         let active = self.settings.packages.iter().position(|p| p.name == name);
         let at = match active {
             Some(at) if self.settings.packages[at].app_id == factory.app_id => at,
@@ -406,6 +407,8 @@ impl SigningScan {
                     ..Default::default()
                 });
                 self.scanned_users.insert(name.into(), BTreeMap::new());
+                self.legacy_setting_constructor(name, false, inherited)
+                    .ok()?;
                 self.settings.packages.len() - 1
             }
         };
@@ -425,7 +428,9 @@ impl SigningScan {
         p.scanned_as_stopped_system_app = factory.scanned_as_stopped_system_app;
         p.transient.updated_system_app = false;
         p.install_source = factory.install_source;
-        Some(p.clone())
+        let enabled = p.clone();
+        self.validate_legacy_permissions().ok()?;
+        Some(enabled)
     }
 
     pub fn scanned_user_states(&self, name: &str) -> Option<&BTreeMap<i32, UserState>> {
@@ -1029,6 +1034,14 @@ mod tests {
         owner.loaded.insert(factory.name.clone(), std::sync::Arc::new(super::super::LoadedPackage::new(parsed.clone(), signing).unwrap()));
         let users = BTreeMap::from([(0, UserState { enabled: 3, first_install_time: 123, ..Default::default() })]);
         owner.scanned_users.insert(factory.name.clone(), users.clone());
+        let shared = owner.identities.shared_users.keys().map(|name|(
+            name.clone(), crate::package::owner::legacy_permissions::Migration::default()
+        )).collect();
+        owner.capture_legacy_permissions(
+            &[0],
+            [((factory.name.clone(), false), crate::package::owner::legacy_permissions::Migration::default())].into(),
+            shared,
+        ).unwrap();
         assert!(owner.disable_system_package(&factory.name).unwrap());
         let active = &mut owner.settings.packages[0];
         active.code_path = "/data/app/factory-update".into(); active.version_code = 2;
@@ -1045,6 +1058,7 @@ mod tests {
         assert_eq!(restored.app_id, factory.app_id); assert_eq!(restored.version_code, factory.version_code);
         assert_eq!(owner.identities, ids); assert_eq!(owner.scanned_users[&factory.name], users);
         assert!(owner.settings.disabled_system_packages.is_empty());
+        owner.legacy_permission_users().unwrap();
     }
 
     #[test]
