@@ -14,15 +14,25 @@ pub(super) fn install_users_for_snapshot(
     capture: &crate::package::scan_snapshot::query_state::Capture,
     base: &crate::package::scan_snapshot::Snapshot,
 ) -> Result<Vec<crate::package::scan::User>> {
-    if !capture.scan().same_metadata_generation(base) {
+    if !capture.scan().same_lineage(base) {
         return Err(environment_error("install user snapshot changed"));
     }
-    capture
+    let users = capture
         .state()
         .scan_users
         .as_ref()
         .and_then(|owner| owner.users.clone())
-        .ok_or_else(|| environment_error("environment actual scan users unavailable"))
+        .ok_or_else(|| environment_error("environment actual scan users unavailable"))?;
+    let ids = users.iter().map(|user| user.id).collect::<Vec<_>>();
+    let model_ids = capture.state().users.keys().copied().collect::<Vec<_>>();
+    let permission_ids = base
+        .owner()
+        .legacy_permission_users()
+        .map_err(environment_error)?;
+    if ids != model_ids || ids != permission_ids {
+        return Err(environment_error("install user snapshot changed"));
+    }
+    Ok(users)
 }
 pub struct EnvironmentBootInputs {
     pub factory_test: bool,

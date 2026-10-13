@@ -1965,8 +1965,20 @@ borrow their Rust-owned scan endpoints, and failed rollback still retires the
 reservation while returning its error. Successful factory activation also
 clears `FLAG_UPDATED_SYSTEM_APP` from both transient and saved setting owners.
 Eight focused factory-state tests, the aim-services library check, and the full
-device-services Java/AIDL/D8/original linkage build pass; replay of the corrected
-cohort remains pending. The
+device-services Java/AIDL/D8/original linkage build pass. The fresh matched
+`934918d1` replay completes the same selector 4/4: all four priority/restrict
+cases, including factory restore across reboot, pass. The remaining four cases
+fail in their next `setUp`, before their bodies, because factory restoration
+advances canonical package metadata from 516 to 533 while the still-valid query
+user owner retains its older package generation. Install-user capture incorrectly
+required equality of the complete package metadata generation and rejected each
+following APK with `install user snapshot changed`. Install-user admission now
+requires the same boot lineage and exact equality among the live scan-user IDs,
+live UM model IDs and the canonical permission-user inventory; unrelated package
+metadata lag no longer invalidates the user owner, while an actual inventory
+change still rejects. The focused deferred-publication and install-user tests
+pass with the aim-services library check; matched-image replay remains pending.
+The
 old failed C109/C110 cohorts remain NOT RUN evidence. A separate rollback on
 a clone of native-written data constructs original PMS (package owner PID equals
 SystemServer 50573), preserving five selected packages' UID/codepath/version,

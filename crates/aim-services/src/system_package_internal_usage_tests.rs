@@ -122,7 +122,23 @@ fn held_install_gate_defers_usage_query_projection_without_losing_canonical_usag
     let mut changed_owner=query.scan().owner().clone();
     changed_owner.settings.versions.push(crate::package::settings::Version{sdk_version:36,..Default::default()});
     let changed=query.prepare_package_update(changed_owner).unwrap();
-    assert!(super::package_environment_init::install_users_for_snapshot(&changed.capture,&canonical).is_err());
+    assert_eq!(super::package_environment_init::install_users_for_snapshot(&changed.capture,&canonical).unwrap(),
+        vec![crate::package::scan::User{id:0,pre_created:false,adb_install_disallowed:false}]);
+    let mut changed_users=query.scan().owner().clone();
+    changed_users.set_legacy_user_inventory(&[0,10]).unwrap();
+    let changed_users=query.prepare_package_update(changed_users).unwrap();
+    assert!(super::package_environment_init::install_users_for_snapshot(&query,changed_users.capture.scan()).is_err());
+    let mut mismatched_context=(**query.context()).clone();
+    mismatched_context.users.insert(10,crate::package::model::User{id:10,..Default::default()});
+    for inputs in mismatched_context.packages.values_mut() {
+        inputs.users.insert(10,crate::package::scan_snapshot::query_state::UserInputs{
+            gids:vec![],granted_permissions:vec![],domain_selection:None,
+        });
+    }
+    let mismatched=crate::package::scan_snapshot::query_state::Capture::new(query.scan().clone(),mismatched_context).unwrap();
+    assert!(super::package_environment_init::install_users_for_snapshot(&mismatched,&canonical).is_err());
+    let foreign=crate::package::scan_snapshot::Store::new(query.scan().owner().clone(),query.scan().usage().clone()).unwrap();
+    assert!(super::package_environment_init::install_users_for_snapshot(&query,&foreign.capture()).is_err());
     assert!(canonical.usage().times("p").unwrap()[2] > 0);
     assert_eq!(canonical.owner().replica_runtime("p", false).unwrap().unwrap().usage,
         *canonical.usage().times("p").unwrap());
