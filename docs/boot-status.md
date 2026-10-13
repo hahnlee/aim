@@ -164,17 +164,21 @@ invalid owned spawn-file-action EBADF preserves errno/stage and survives closed
 stderr; actual broker child admission succeeds after the producer proof is closed,
 and parent POSIX locks are not inherited. The678d5f3c release build of linux-run,
 guest-init and both native holder binaries passes in56.47s. The new kernel is
-c3ad24a3 and init isdeff6975; display and binderd hashes remain unchanged. This
-qualifies diagnostics only; precise native IO site and owner repair remain pending.
-The current Original standalone PackageVisibility diagnostic first qualifies one
-real SDK reboot (offline, SystemServer18380→19442 with distinct kernel birth,
-renewed namespace, boot1 and SDK UID2000), then records official1PASS/0FAIL.
-It does not reproduce EBADF. The test's own ddmlib reboot still warns that the
-device did not become offline (#1255); that path is not qualified by the setup
-SDK reboot. Final cleanup has no live captured births, mounts, either IORegistry
-attachment or named listener, and pins are unchanged. This is a diagnostic,
-not full66 acceptance. Native FULL66, apps, fresh-template parity and rollback
-remain unrun on this cohort.
+c3ad24a3 and init isdeff6975; display and binderd hashes remain unchanged. These
+diagnostics identify the transient parent-side `Stdio::null()` file action
+in native `aim-lock-holder` creation as the EBADF race (#1337). The holder now
+inherits fd0 across `posix_spawn` and opens/duplicates `/dev/null` itself after
+exec, where guest close/dup activity cannot invalidate the host spawn action.
+The focused holder and broker regressions pass, and release host/guest runtime
+builds complete. A fresh native official PackageVisibility selector using that
+runtime completes1PASS/0FAIL, `done=true`, with XML SHA256
+a1d1544e30c11820c7bdcfbed7caa032fb5adf9388caad80a75da6d4bc116835.
+Both test-driven reboots return to `boot_completed=1` and a working SDK shell;
+the run contains no `holder-command-spawn`, broker-reply EBADF or POSIX admission
+failure marker. Its owner receipt reports complete cleanup, no remaining owned
+processes and no uncertainties. This proves the exact #1337 regression and does
+not replace the required unfiltered FULL66 acceptance. Native FULL66, apps,
+fresh-template parity and rollback remain unrun on this cohort.
 
 Native installer source now retains app-data commit exceptions per reservation
 and publication generation, returns them after ordinary completion, and preserves
