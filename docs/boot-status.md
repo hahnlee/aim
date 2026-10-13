@@ -1977,8 +1977,11 @@ requires the same boot lineage and exact equality among the live scan-user IDs,
 live UM model IDs and the canonical permission-user inventory; unrelated package
 metadata lag no longer invalidates the user owner, while an actual inventory
 change still rejects. The focused deferred-publication and install-user tests
-pass with the aim-services library check; matched-image replay remains pending.
-The
+pass with the aim-services library check. A fresh disposable `0c696ec6` replay
+then completes the official selector 8/8 with zero failures and a complete
+module: all four priority/restriction cases, both disable cases and both
+updated-system-app reboot/removal cases pass. Its owned supervisor reports
+complete cleanup with no remaining process or uncertainty. The
 old failed C109/C110 cohorts remain NOT RUN evidence. A separate rollback on
 a clone of native-written data constructs original PMS (package owner PID equals
 SystemServer 50573), preserving five selected packages' UID/codepath/version,
