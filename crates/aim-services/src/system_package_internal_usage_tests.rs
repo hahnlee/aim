@@ -128,21 +128,20 @@ fn prepared_transition_rebases_over_deferred_canonical_usage() {
     let mut fixture = Fixture::new();
     let bridge = fixture.attach();
     let query = publish(&fixture, &bridge);
-    let prepared = query.prepare_package_update(query.scan().owner().clone()).unwrap();
+    let mut prepared_owner = query.scan().owner().clone();
+    prepared_owner.set_legacy_user_inventory(&[0, 10]).unwrap();
+    let prepared = query.prepare_package_update(prepared_owner).unwrap();
     let install = fixture.system.package_install_guard();
     fixture.system.internal_notify_package_use(Some("p".into()), 2, 1000, 0).unwrap();
     let canonical = fixture.system.package_bootstrap.lock().unwrap().current.as_ref().unwrap()
         .snapshots.as_ref().unwrap().capture();
-    let mut owner = prepared.capture.scan().owner().clone();
-    assert!(crate::package::scan_snapshot::install_context::rebase_user_transition(
-        query.scan(), &canonical, &mut owner,
-    ).unwrap().is_none(), "usage-only publication must rebase");
-    let rebased = prepared.rebase_user_transition(&canonical, owner).unwrap();
+    let rebased = prepared.rebase_user_transition(query.scan(), &canonical).unwrap();
     assert_eq!(rebased.capture.scan().version(), canonical.version() + 1);
     assert_eq!(rebased.capture.scan().usage(), canonical.usage());
     assert_eq!(rebased.capture.context().scan_version, rebased.capture.scan().version());
     assert_eq!(rebased.capture.scan().owner().replica_runtime("p", false).unwrap().unwrap().usage,
         *canonical.usage().times("p").unwrap());
+    assert_eq!(rebased.capture.scan().owner().legacy_permission_users().unwrap(), &[0, 10]);
     drop(install);
 }
 #[test]

@@ -2595,13 +2595,7 @@ impl System {
                 let canonical = current.snapshots.as_ref().ok_or_else(|| Exception::new(
                     aim_binder_host::parcel::EX_ILLEGAL_STATE, "user transition canonical owner unavailable"))?.capture();
                 if !Arc::ptr_eq(&canonical, preparation_base.scan()) {
-                    if let Some(reason) = rebase_created_user_scan(preparation_base.scan(), &canonical, &mut candidate)
-                        .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                            format!("user transition canonical rebase: {error}")))? {
-                        return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                            format!("user transition canonical base changed: {reason}")));
-                    }
-                    update = update.rebase_user_transition(&canonical, candidate.clone())
+                    update = update.rebase_user_transition(preparation_base.scan(), &canonical)
                         .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
                 }
                 current.publish_snapshot(update.store);

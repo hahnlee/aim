@@ -275,9 +275,21 @@ impl PackageUpdate {
     /// expensive live permission/GID projection in `capture` remains valid.
     pub(crate) fn rebase_user_transition(
         self,
+        base: &Snapshot,
         latest: &Arc<Snapshot>,
-        owner: crate::package::scan::SigningScan,
     ) -> Result<Self, String> {
+        // The prepared owner already contains the permission inventory change
+        // made by prepare_user_transition. Rebase that owner rather than the
+        // caller's pre-preparation candidate, which would silently discard the
+        // newly-created user while retaining it in the query context.
+        let mut owner = self.capture.scan().owner().clone();
+        if let Some(reason) = super::install_context::rebase_user_transition(
+            base,
+            latest,
+            &mut owner,
+        )? {
+            return Err(format!("user transition canonical base changed: {reason}"));
+        }
         let version = latest.version().checked_add(1).ok_or("user package generation exhausted")?;
         let store = super::Store::new_replica_after(latest, owner, latest.usage().clone(), version)
             .map_err(|error| format!("user transition canonical rebase: {error:?}"))?;
