@@ -112,9 +112,12 @@ Its owner receipt reports complete cleanup, no remaining owned processes and no
 uncertainties. The fork owner now publishes the parent result only after the
 spawned child restores its copied task state and acknowledges readiness, closing
 the pre-resume exec-success/PTY-close race behind #1358; the focused readiness
-regression and a real guest fork/wait regression pass. A rebuilt disposable boot
-and ddmlib property replay remain required;
-the remaining Native/Original FULL66 modules are not yet complete.
+regression and a real guest fork/wait regression pass. A rebuilt disposable
+native boot reaches `running`; the CTS16_r1 AppSecurity preparer creates and
+removes users10 and11 without the former domain-publication CAS failure, and
+`ApplicationVisibilityTest#testApplicationListCrossUserNoGrant` passes1/0.
+The complete `CtsPackageManagerHostTestCases` module and the remaining
+Native/Original FULL66 modules are not yet complete.
 The current-pair original reboot exposed stale namespace admission while native
 Binder/POSIX/PTY/verity owners were retiring (#1318). Init now withdraws the
 captured registration before stopping services, preserves replacement records,
