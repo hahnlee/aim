@@ -1956,13 +1956,17 @@ reboot case passes, but cleanup fails in original permission preparation before
 factory publication. Its temporary package-removal view closed the Rust-owned
 candidate scan endpoint, so the following candidate transaction and rollback
 reported `package scan snapshot is closed`; the failed rollback also retained a
-prepared reservation and blocked later attempts. Permission rollback views now
-borrow that endpoint without transferring or closing it, and failed rollback
-still retires the reservation while returning its error. Successful factory
-activation also clears `FLAG_UPDATED_SYSTEM_APP` from both transient and saved
-setting owners. Eight focused factory-state tests, the aim-services library
-check, and the full device-services Java/AIDL/D8/original linkage build pass;
-replay of the corrected cohort remains pending. The
+prepared reservation and blocked later attempts. A fresh `5b63cb3c` replay
+preserves the scan endpoint but exposes the same ownership error in its cached
+query child: the removal view closes `IPackageComputer`, and the following
+candidate transaction reports `package computer is closed`. Scan captures now
+return an independent computer lease on every request, all Java permission views
+borrow their Rust-owned scan endpoints, and failed rollback still retires the
+reservation while returning its error. Successful factory activation also
+clears `FLAG_UPDATED_SYSTEM_APP` from both transient and saved setting owners.
+Eight focused factory-state tests, the aim-services library check, and the full
+device-services Java/AIDL/D8/original linkage build pass; replay of the corrected
+cohort remains pending. The
 old failed C109/C110 cohorts remain NOT RUN evidence. A separate rollback on
 a clone of native-written data constructs original PMS (package owner PID equals
 SystemServer 50573), preserving five selected packages' UID/codepath/version,

@@ -36,6 +36,8 @@ public final class NativeInstallPermissionScope implements InstallerPermissionBr
                 var before = new PackageScanLease(Objects.requireNonNull(previous))) {
             // The native owner hands off two retained snapshots. Unrelated
             // usage publications may advance the live store during this read.
+            lease.borrowEndpoint();
+            before.borrowEndpoint();
             if (lease.getVersion() != Math.addExact(before.getVersion(), 1))
                 throw new IllegalStateException("permission candidate generation differs");
             data = lease.captureData(owner, crossUserSuspensions);

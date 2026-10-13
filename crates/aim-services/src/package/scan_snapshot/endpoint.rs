@@ -473,7 +473,6 @@ impl Lease {
 struct ComputerLease {
     capture: Arc<super::query_state::Capture>,
     process: std::sync::Weak<aim_binder_host::local::LocalProcess>,
-    binder: Option<aim_binder_host::parcel::Binder>,
 }
 
 fn comparisons() -> &'static Mutex<BTreeMap<u64,std::sync::Weak<Snapshot>>> {
@@ -516,7 +515,6 @@ impl Endpoint {
         *endpoint.computer.lock().unwrap() = Some(ComputerLease {
             capture,
             process: Arc::downgrade(process),
-            binder: None,
         });
         endpoint
     }
@@ -1016,23 +1014,20 @@ impl Service for Endpoint {
                 if call.data.remaining() != 0 {
                     return Err(aim_binder_host::parcel::BAD_VALUE);
                 }
-                let mut owner = self.computer.lock().unwrap();
-                if let Some(owner) = owner.as_mut() {
-                    if owner.binder.is_none() {
-                        let Some(process) = owner.process.upgrade() else {
-                            reply.write_exception(&Exception::new(
-                                EX_ILLEGAL_STATE,
-                                "package query process stopped",
-                            ));
-                            return Ok(reply);
-                        };
-                        owner.binder =
-                            Some(process.add_service(Arc::new(super::computer::Computer::new(
-                                owner.capture.clone(),
-                                owner.process.clone(),
-                            ))));
-                    }
-                    api::write_get_computer_reply(&mut reply, owner.binder);
+                let owner = self.computer.lock().unwrap();
+                if let Some(owner) = owner.as_ref() {
+                    let Some(process) = owner.process.upgrade() else {
+                        reply.write_exception(&Exception::new(
+                            EX_ILLEGAL_STATE,
+                            "package query process stopped",
+                        ));
+                        return Ok(reply);
+                    };
+                    let binder = process.add_service(Arc::new(super::computer::Computer::new(
+                        owner.capture.clone(),
+                        owner.process.clone(),
+                    )));
+                    api::write_get_computer_reply(&mut reply, Some(binder));
                 } else {
                     reply.write_exception(&Exception::new(
                         EX_ILLEGAL_STATE,

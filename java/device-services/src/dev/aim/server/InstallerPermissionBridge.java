@@ -43,6 +43,8 @@ public final class InstallerPermissionBridge extends IInstallerPermissionBridge.
             if (!names.add(Objects.requireNonNull(name))) throw new IllegalArgumentException("duplicate rollback package");
         }
         try (var attempted = new PackageScanLease(candidate); var retained = new PackageScanLease(current)) {
+            attempted.borrowEndpoint();
+            retained.borrowEndpoint();
             var codes = new ArrayList<AndroidPackage>();
             for (String name : names) {
                 var state = Objects.requireNonNull(attempted.getPackageStateReplica(name, crossUserSuspensions));
@@ -88,6 +90,8 @@ public final class InstallerPermissionBridge extends IInstallerPermissionBridge.
         Parcel in = Parcel.obtain(), out = Parcel.obtain();
         try (var added = new PackageScanLease(candidate);
                 var before = new PackageScanLease(previous)) {
+            added.borrowEndpoint();
+            before.borrowEndpoint();
             in.unmarshall(installation, 0, installation.length); in.setDataPosition(0);
             boolean replacingFactory = in.readBoolean();
             int count = in.readInt();
