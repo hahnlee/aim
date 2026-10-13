@@ -287,6 +287,8 @@ pub trait Launcher {
     fn kill_group(&mut self, pid: u32, signal: i32);
     /// Processes that exited since the last call.
     fn reap(&mut self) -> Vec<(u32, Exit)>;
+    /// Waits for every owned process to exit and reaps it.
+    fn reap_all(&mut self) -> Result<Vec<(u32, Exit)>,String> { Ok(self.reap()) }
 }
 
 /// Records launches; pids are synthetic and nothing exits on its own.
@@ -422,6 +424,21 @@ impl HostLauncher {
 
     pub fn children(&self) -> impl Iterator<Item = u32> + '_ {
         self.children.iter().copied()
+    }
+
+    fn retired(&mut self, pid: u32, status: i32) -> (u32, Exit) {
+        self.forget(pid);
+        (pid,Exit::from_wait_status(status))
+    }
+
+    fn forget(&mut self,pid:u32) {
+        self.children.remove(&pid);
+        if let Some(owner)=self.posix_children.remove(&pid){
+            if let Some((controller,_))=&self.posix {if let Err(error)=controller.guest_exited(owner){eprintln!("native POSIX service retirement: {error}");}}
+        }
+        let by_pid=self.layout.identity_dir().join("by-pid");
+        let _=fs::remove_file(by_pid.join(pid.to_string()));
+        let _=fs::remove_file(by_pid.join(format!("{pid}.proc")));
     }
 }
 
@@ -648,23 +665,37 @@ impl Launcher for HostLauncher {
         let mut out = Vec::new();
         for pid in self.children.clone() {
             let mut status = 0;
-            // SAFETY: waitpid on our own child.
-            let r = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
-            if r == pid as i32 {
-                self.children.remove(&pid);
-                if let Some(owner)=self.posix_children.remove(&pid){
-                    if let Some((controller,_))=&self.posix {if let Err(error)=controller.guest_exited(owner){eprintln!("native POSIX service retirement: {error}");}}
-                }
-                // Its entry and its record (`docs/guest-init-contract.md`).
-                let by_pid = self.layout.identity_dir().join("by-pid");
-                let _ = fs::remove_file(by_pid.join(pid.to_string()));
-                let _ = fs::remove_file(by_pid.join(format!("{pid}.proc")));
-                out.push((pid, Exit::from_wait_status(status)));
-            } else if r < 0 {
-                self.children.remove(&pid);
+            loop {
+                // SAFETY: waitpid on our own child.
+                let result=unsafe{libc::waitpid(pid as i32,&mut status,libc::WNOHANG)};
+                if result==pid as i32 {out.push(self.retired(pid,status));break;}
+                if result==0 {break;}
+                let error=io::Error::last_os_error();
+                if error.raw_os_error()==Some(libc::EINTR) {continue;}
+                if error.raw_os_error()==Some(libc::ECHILD) {self.forget(pid);}
+                else {eprintln!("waitpid({pid}, WNOHANG): {error}");}
+                break;
             }
         }
         out
+    }
+
+    fn reap_all(&mut self) -> Result<Vec<(u32, Exit)>,String> {
+        let mut out=Vec::new();
+        for pid in self.children.clone() {
+            let mut status=0;
+            loop {
+                // SAFETY: blocking waitpid on our own child after shutdown
+                // has signalled every process group.
+                let result=unsafe{libc::waitpid(pid as i32,&mut status,0)};
+                if result==pid as i32 {out.push(self.retired(pid,status));break;}
+                let error=io::Error::last_os_error();
+                if result<0&&error.raw_os_error()==Some(libc::EINTR){continue;}
+                if result<0&&error.raw_os_error()==Some(libc::ECHILD){self.forget(pid);break;}
+                return Err(format!("waitpid({pid}): {error}"));
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -762,6 +793,61 @@ fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_reap_all_waits_for_every_owned_child() {
+        let directory=std::env::temp_dir().join(format!("aim-host-reap-all-{}",std::process::id()));
+        fs::create_dir_all(directory.join("image")).unwrap();
+        let layout=Layout::new(directory.join("image"),directory.join("data"),Some(directory.join("run")));
+        let linux_run=LinuxRun{binary:"/unused/linux-run".into(),image:layout.image.clone(),path_map_file:layout.path_map_file(),
+            binder:None,gpu:None,vulkan:None,display:None,trace:false,options:LinuxRunOptions::default()};
+        let mut launcher=HostLauncher::new(linux_run,layout);
+        // SAFETY: the child touches no shared Rust state and waits for the
+        // launcher's shutdown signal.
+        let pid=unsafe{libc::fork()};assert!(pid>0);
+        if pid==0 {unsafe{libc::setpgid(0,0);loop{libc::pause();}}}
+        launcher.children.insert(pid as u32);
+        launcher.kill_group(pid as u32,libc::SIGKILL);
+        let exits=launcher.reap_all().unwrap();
+        assert_eq!(exits.len(),1);assert_eq!(exits[0].0,pid as u32);
+        assert!(matches!(exits[0].1,Exit::Signal(libc::SIGKILL)));
+        assert_eq!(unsafe{libc::waitpid(pid,std::ptr::null_mut(),libc::WNOHANG)},-1,"owned child must already be reaped");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn host_nonblocking_reap_retires_an_already_reaped_owner() {
+        let directory=std::env::temp_dir().join(format!("aim-host-reap-echild-{}",std::process::id()));
+        fs::create_dir_all(directory.join("image")).unwrap();
+        let layout=Layout::new(directory.join("image"),directory.join("data"),Some(directory.join("run")));
+        let linux_run=LinuxRun{binary:"/unused/linux-run".into(),image:layout.image.clone(),path_map_file:layout.path_map_file(),
+            binder:None,gpu:None,vulkan:None,display:None,trace:false,options:LinuxRunOptions::default()};
+        let mut launcher=HostLauncher::new(linux_run,layout);
+        // SAFETY: the child exits immediately without touching shared state.
+        let pid=unsafe{libc::fork()};assert!(pid>=0);if pid==0{unsafe{libc::_exit(0)}}
+        assert_eq!(unsafe{libc::waitpid(pid,std::ptr::null_mut(),0)},pid);
+        launcher.children.insert(pid as u32);
+        assert!(launcher.reap().is_empty());
+        assert!(launcher.children.is_empty(),"ECHILD must retire the launcher's stale ownership record");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn host_reap_all_retires_an_already_reaped_owner() {
+        let directory=std::env::temp_dir().join(format!("aim-host-reap-all-echild-{}",std::process::id()));
+        fs::create_dir_all(directory.join("image")).unwrap();
+        let layout=Layout::new(directory.join("image"),directory.join("data"),Some(directory.join("run")));
+        let linux_run=LinuxRun{binary:"/unused/linux-run".into(),image:layout.image.clone(),path_map_file:layout.path_map_file(),
+            binder:None,gpu:None,vulkan:None,display:None,trace:false,options:LinuxRunOptions::default()};
+        let mut launcher=HostLauncher::new(linux_run,layout);
+        // SAFETY: the child exits immediately without touching shared state.
+        let pid=unsafe{libc::fork()};assert!(pid>=0);if pid==0{unsafe{libc::_exit(0)}}
+        assert_eq!(unsafe{libc::waitpid(pid,std::ptr::null_mut(),0)},pid);
+        launcher.children.insert(pid as u32);
+        assert!(launcher.reap_all().unwrap().is_empty());
+        assert!(launcher.children.is_empty(),"ECHILD must retire stale ownership before launcher Drop can signal it");
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn posix_child_stays_stopped_until_native_identity_is_published() {

@@ -100,6 +100,8 @@ fn trace_image(name: &str, i: &loader::Image) {
     );
 }
 
+const SIGSEGV: i32 = 11;
+
 /// `linux-run --fork-child`: become the child of a guest fork in the
 /// process that spawned this one (`sys::fork`). Only the runtime options
 /// of `opts` are used; the process state comes from the parent. Returns
@@ -180,8 +182,6 @@ pub fn run(mut opts: RunOptions) -> String {
     if let Err(error)=vfs::publish_process_namespace(){return format!("process mount namespace: errno {error}");}
     let posix_admission=if opts.mount_namespace_from_init{sys::posix_locks::start_external(opts.posix_control.as_deref())}else{sys::posix_locks::start(opts.posix_control.as_deref())};
     if let Err(error)=posix_admission{return format!("POSIX lock process admission: errno {error}");}
-    if let Err(error)=opts.state.apply_posix_closes(){return error;}
-
     let resolved = match vfs::resolve(vfs::LINUX_AT_FDCWD, opts.program.as_bytes(), true) {
         Ok(r) => r,
         Err(e) => return format!("{}: cannot resolve (errno {e})", opts.program),
@@ -203,8 +203,15 @@ pub fn run(mut opts: RunOptions) -> String {
     let argv: Vec<Vec<u8>> = argv.into_iter().map(|a| a.into_bytes()).collect();
     let execfn = opts.execfn.as_deref().unwrap_or(opts.program.as_bytes());
     match load_program(&resolved, &argv, &opts.envp, execfn) {
-        Ok((entry, sp)) => context::enter_guest(entry, sp),
-        Err(e) => e,
+        Ok((entry, sp)) => {
+            let guest=context::prepare_guest(entry,sp);
+            if let Err(error)=opts.state.commit_cloexec(){
+                crate::diag!("[linux-abi] exec descriptor receipt: {error}");
+                sys::die_process(SIGSEGV)
+            }
+            context::enter_prepared_guest(guest)
+        },
+        Err(e) => {opts.state.discard_cloexec();e},
     }
 }
 

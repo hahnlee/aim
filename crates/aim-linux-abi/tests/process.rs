@@ -209,6 +209,10 @@ fn stdio_null_keeps_the_layer_log() {
     assert!(!err.contains("visible"), "{err}");
     assert!(err.contains("[linux] exit_group"), "{err}");
     assert!(err.matches("/system/bin/sh loaded").count() >= 2, "{err}");
+    let load=err.rfind("stage=in-place.load").expect("in-place exec load stage");
+    let close=err.rfind("stage=in-place.close-on-exec").expect("in-place exec close commit");
+    assert!(load<close,"CLOEXEC must commit only after the new image is loaded: {err}");
+    assert!(!err.lines().any(|line|line.contains("[linux] execve(")&&line.contains(" = 0 ")),"successful in-place exec must enter the new image without returning through the dispatcher: {err}");
 }
 
 #[test]

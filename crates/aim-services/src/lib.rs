@@ -65,6 +65,20 @@ pub struct NativeServices {
     services: Vec<(String, Binder)>,
     package_runtime: std::sync::Mutex<Option<Arc<system::package_runtime::Runtime>>>,
     package_constructing: std::sync::atomic::AtomicBool,
+    shutdown: std::sync::Mutex<Shutdown>,
+}
+
+struct Shutdown {
+    phase: ShutdownPhase,
+    package: bool,
+    runtime: bool,
+    errors: Vec<String>,
+}
+
+enum ShutdownPhase { Open, Closing, Closed(Result<(),String>) }
+
+impl Shutdown {
+    fn open()->Self{Self{phase:ShutdownPhase::Open,package:false,runtime:false,errors:Vec::new()}}
 }
 
 impl NativeServices {
@@ -174,7 +188,8 @@ impl NativeServices {
         }
         process.start();
         Ok(Self { system, services, package_runtime: std::sync::Mutex::new(None),
-            package_constructing: std::sync::atomic::AtomicBool::new(false) })
+            package_constructing: std::sync::atomic::AtomicBool::new(false),
+            shutdown: std::sync::Mutex::new(Shutdown::open()) })
     }
 
     /// Compares the original services `names` with their native models
@@ -235,21 +250,42 @@ impl NativeServices {
         };
         Ok(endpoints)
     }
+
+    /// Retire boot-scoped service resources before the data volume detaches,
+    /// even when another holder still retains this facade.
+    pub fn shutdown(&self) -> Result<(), String> {
+        let mut shutdown = self.shutdown.lock().unwrap();
+        if let ShutdownPhase::Closed(result)=&shutdown.phase{return result.clone();}
+        shutdown.phase=ShutdownPhase::Closing;
+        if !shutdown.package {
+            if let Ok(bridge) = self.system.package_bootstrap() {
+                if let Err(error) = self.system.close_package_boot_session(&bridge) {
+                    shutdown.errors.push(format!("native package session shutdown cleanup: {}", error.message));
+                }
+                if let Err(error) = self.system.detach_package_bootstrap(&bridge) {
+                    shutdown.errors.push(format!("native package shutdown cleanup: {}", error.message));
+                }
+            }
+            shutdown.package=true;
+        }
+        if !shutdown.runtime {self.package_runtime.lock().unwrap().take();shutdown.runtime=true;}
+        if let Err(error) = self.system.process().shutdown() {
+            if error.raw_os_error()==Some(libc::EDEADLK) {
+                shutdown.phase=ShutdownPhase::Open;
+                let current=format!("native Binder shutdown: {error}");
+                return Err(shutdown.errors.iter().cloned().chain(std::iter::once(current)).collect::<Vec<_>>().join("; "));
+            }
+            shutdown.errors.push(format!("native Binder shutdown: {error}"));
+        }
+        let result=if shutdown.errors.is_empty(){Ok(())}else{Err(shutdown.errors.join("; "))};
+        shutdown.phase=ShutdownPhase::Closed(result.clone());
+        result
+    }
 }
 
 impl Drop for NativeServices {
     fn drop(&mut self) {
-        // BootSession retains its Runtime itself; that constructor does not
-        // populate package_runtime. Retire the attached epoch in either path.
-        if let Ok(bridge) = self.system.package_bootstrap() {
-            if let Err(error) = self.system.detach_package_bootstrap(&bridge) {
-                eprintln!("native package shutdown cleanup: {}", error.message);
-            }
-        }
-        self.package_runtime.get_mut().unwrap().take();
-        if let Err(error) = self.system.process().shutdown() {
-            eprintln!("native Binder shutdown: {error}");
-        }
+        if let Err(error) = self.shutdown() { eprintln!("{error}"); }
     }
 }
 
@@ -268,18 +304,25 @@ mod shutdown_tests {
     }
 
     #[test]
-    fn native_services_drop_releases_its_registered_data_file() {
+    fn native_services_shutdown_releases_registered_data_file_while_retained() {
         let path = std::env::temp_dir().join(format!("aim-native-services-stop-{}", std::process::id()));
         fs::write(&path, b"owned service data").unwrap();
         let file = Arc::new(fs::File::open(&path).unwrap());
         let fd = file.as_raw_fd();
         let weak = Arc::downgrade(&file);
-        let services = NativeServices::new(&Driver::new(), &[]).unwrap();
+        let services = Arc::new(NativeServices::new(&Driver::new(), &[]).unwrap());
+        let retained = services.clone();
         services.system.process().add_service(Arc::new(DataKeeper(file)));
         assert!(unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0);
-        drop(services);
+        services.shutdown().unwrap();
+        assert_eq!(Arc::strong_count(&retained), 2);
+        let shutdown=retained.shutdown.lock().unwrap();
+        assert!(shutdown.package&&shutdown.runtime);
+        assert!(matches!(&shutdown.phase,ShutdownPhase::Closed(Ok(()))));
+        drop(shutdown);
         assert!(weak.upgrade().is_none());
         assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+        retained.shutdown().unwrap();
         fs::remove_file(path).unwrap();
     }
 }

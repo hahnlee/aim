@@ -66,6 +66,7 @@ mod sharedfile;
 mod sigframe;
 mod signal;
 pub(crate) use signal::initialize_verity_fault_slot;
+pub(crate) use signal::die as die_process;
 pub(crate) mod space;
 mod sync_file;
 mod thread;

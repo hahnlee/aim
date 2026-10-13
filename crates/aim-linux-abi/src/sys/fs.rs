@@ -1530,12 +1530,16 @@ pub fn ioctl(a:[u64;6])->i64{
     }
 }
 
-/// execve in place: every guest fd marked close-on-exec is closed, as
-/// `close` would.
+/// execve in place: prepare every close-on-exec owner release before any
+/// native descriptor close makes the new image observable to a waiter.
 pub fn close_on_exec()->Result<(),errno::Errno>{
+    let mut targets=Vec::new();
     for fd in super::fd_visibility::visible(){
-        match fdtab::close_guest_cloexec(fd){Ok(())|Err(EBADF)=>{},Err(error)=>return Err(error)}
-    }Ok(())
+        let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};
+        if flags<0{let error=errno::last();if error==EBADF{continue;}return Err(error);}
+        if flags&libc::FD_CLOEXEC!=0{targets.push(fd);}
+    }
+    fdtab::close_exec_batch(targets)
 }
 
 pub fn close_range(a: [u64; 6]) -> i64 {

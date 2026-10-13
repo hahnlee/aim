@@ -345,11 +345,14 @@ pub fn set_guest_tp(tp: u64) {
     unsafe { slot_ptr(slot::TP).write(tp) }
 }
 
-/// Switch the current thread into guest code at `pc` with stack `sp`.
+/// A fully initialized initial guest context, ready for the assembly entry.
+pub struct PreparedGuest(*mut GuestContext);
+
+/// Prepare the current thread to enter guest code at `pc` with stack `sp`.
 /// Registers other than sp are zero, as the Linux kernel leaves them at exec.
-pub fn enter_guest(pc: u64, sp: u64) -> ! {
+pub fn prepare_guest(pc: u64, sp: u64) -> PreparedGuest {
     let ctx = init_thread();
-    // SAFETY: ctx is this thread's context; the guest image is mapped.
+    // SAFETY: ctx is this thread's context.
     unsafe {
         let c = &mut *ctx;
         c.x = [0; 31];
@@ -358,8 +361,15 @@ pub fn enter_guest(pc: u64, sp: u64) -> ! {
         c.pc = pc;
         c.nzcv = 0;
         c.fpcr = 0;
-        linux_abi_enter_guest(ctx as *const _)
     }
+    PreparedGuest(ctx)
+}
+
+/// Enter a prepared guest context without further host-side setup.
+pub fn enter_prepared_guest(prepared: PreparedGuest) -> ! {
+    // SAFETY: prepare_guest bound and initialized this thread's context; the
+    // caller has completed every fallible operation before this final branch.
+    unsafe { linux_abi_enter_guest(prepared.0 as *const _) }
 }
 
 /// Start a bound thread from its context: the trampoline's exit path

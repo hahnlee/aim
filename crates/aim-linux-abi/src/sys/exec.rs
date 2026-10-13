@@ -12,7 +12,7 @@
 //! to their defaults and the alternate stack goes, the thread loses its
 //! clear_child_tid, robust list, `comm` and thread pointer, credentials
 //! take the exec transform, and the new program and its interpreter are
-//! loaded; the syscall returns into the interpreter's entry. What fails
+//! loaded; control enters the interpreter's entry. What fails
 //! before that (the program or interpreter cannot be read) is returned to
 //! the caller; a load failure after it kills the process with SIGSEGV, as
 //! on Linux. Everything else stays: fds, the signal mask and pending
@@ -103,9 +103,10 @@ const SIG_SETMASK: u64 = 2;
 const SIG_IGN: u64 = 1;
 
 impl ExecState {
-    pub fn apply_posix_closes(&self)->Result<(),String>{
+    pub fn commit_cloexec(&self)->Result<(),String>{
         if let Some(fd)=self.close_receipt{super::exec_fd_receipt::consume(fd).map_err(|error|format!("exec descriptor receipt: errno {error}"))?;}Ok(())
     }
+    pub fn discard_cloexec(&self){if let Some(fd)=self.close_receipt{let _=super::exec_fd_receipt::discard(fd);}}
     /// Install this state in the new process, before the guest runs.
     pub fn apply(&self) -> Result<(),String> {
         if let Some(cwd) = &self.cwd {
@@ -352,8 +353,6 @@ fn in_place(
     let envp: Vec<Vec<u8>> = envp.iter().map(|e| e.as_bytes().to_vec()).collect();
     trace_stage("in-place.handovers.enter");
     super::fork::spawn::wait_handovers();
-    trace_stage("in-place.close-on-exec");
-    if let Err(error)=super::fs::close_on_exec(){crate::diag!("[linux-abi] exec descriptor close: errno {error}");super::signal::die(SIGSEGV)}
     trace_stage("in-place.reset");
     super::fdtab::adopt_plain();
     super::binder::exec_reset();
@@ -375,7 +374,16 @@ fn in_place(
             ctx.nzcv = 0;
             ctx.fpcr = 0;
             ctx.fpsr = 0;
-            Some(0)
+            // The descriptor close is the successful exec commit. A waiter
+            // woken by CLOEXEC must not observe the old image still resetting
+            // or loading after the close.
+            trace_stage("in-place.close-on-exec");
+            if let Err(error)=super::fs::close_on_exec(){crate::diag!("[linux-abi] exec descriptor close: errno {error}");super::signal::die(SIGSEGV)}
+            // is_live above proves this is the calling thread's bound context.
+            // Its host_sp was installed when the thread first entered guest
+            // code and none of the exec resets replace it. Resume directly so
+            // no Rust dispatcher work follows the observable CLOEXEC commit.
+            unsafe { context::resume(ctx as *mut GuestContext) }
         }
         Err(e) => {
             crate::diag!("[linux-abi] execve {}: {e}", target.guest);
@@ -493,7 +501,7 @@ fn relaunch(program: &str, argv: &[CString], envp: &[CString], execfn: &[u8]) ->
     if let Some(receipt)=&mut receipt{if let Err(error)=receipt.capture(){drop(guard);return -(error as i64);}}
     trace_stage("relaunch.descriptors");
     let mut descriptors=Vec::new();
-    for fd in super::fd_visibility::visible(){let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};if flags<0{let error=errno::last();drop(guard);return -(error as i64);}if flags&libc::FD_CLOEXEC==0{descriptors.push(fd.to_string());}}
+    for fd in super::fd_visibility::visible(){let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};if flags<0{let error=errno::last();drop(guard);return -(error as i64);}descriptors.push(fd.to_string());}
     let mut options=vec![arg("--guest-fds"),arg(descriptors.join(",")),arg("--socket-receipts"),arg(super::fdtab::socket_exec_text())];
     trace_stage("relaunch.regular-fds");
     let regular=match super::fdtab::regular_exec_text(){Ok(text)=>text,Err(error)=>{drop(guard);return -(error as i64);}};if !regular.is_empty(){options.extend([arg("--regular-fds"),arg(regular)]);}
@@ -506,9 +514,10 @@ fn relaunch(program: &str, argv: &[CString], envp: &[CString], execfn: &[u8]) ->
     // SAFETY: NULL-terminated arrays of C strings that outlive the call.
     trace_stage("relaunch.writer-flags");
     let writer_flags=match super::fdtab::prepare_regular_exec(){Ok(flags)=>flags,Err(error)=>{drop(guard);return -(error as i64)}};
+    let cloexec_flags=match &receipt{Some(receipt)=>match receipt.retain_for_host_exec(){Ok(flags)=>Some(flags),Err(error)=>{drop(guard);drop(writer_flags);return -(error as i64)}},None=>None};
     trace_stage("relaunch.host-exec");
     unsafe { libc::execve(hargv[0], hargv.as_ptr(), henv.as_ptr()) };
-    let error=errno::last();drop(guard);drop(writer_flags);drop(receipt);-(error as i64)
+    let error=errno::last();drop(guard);drop(cloexec_flags);drop(writer_flags);drop(receipt);-(error as i64)
 }
 
 #[cfg(test)]

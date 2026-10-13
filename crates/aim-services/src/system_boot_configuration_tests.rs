@@ -241,7 +241,7 @@ mod boot_configuration_epoch {
     }
 
     #[test]
-    fn native_services_drop_detaches_boot_session_store_without_direct_runtime_slot() {
+    fn native_services_shutdown_detaches_boot_session_store_while_facade_is_retained() {
         use std::{fs, os::unix::fs::MetadataExt};
         use crate::package::{owner::Store, permissions::RuntimePermissions};
         let mut fixture = Fixture::new();
@@ -275,19 +275,56 @@ mod boot_configuration_epoch {
         let weak_disk = Arc::downgrade(&disk);
         fixture.system.package_bootstrap.lock().unwrap().current.as_mut().unwrap().persistence = Some(disk);
         let retained_system = fixture.system.clone();
-        let services = crate::NativeServices {
+        let services = Arc::new(crate::NativeServices {
             system: fixture.system.clone(), services: Vec::new(),
             package_runtime: Mutex::new(None),
             package_constructing: std::sync::atomic::AtomicBool::new(false),
-        };
+            shutdown: Mutex::new(crate::Shutdown::open()),
+        });
+        let retained_services = services.clone();
         assert!(services.package_runtime.lock().unwrap().is_none(), "BootSession owns the actual runtime instead of this direct slot");
         assert!(retained_system.check_package_bootstrap(&bridge).is_ok());
-        drop(services);
+        services.shutdown().unwrap();
+        assert_eq!(Arc::strong_count(&retained_services), 2, "shutdown must not depend on the facade's last Arc dropping");
         assert!(retained_system.package_bootstrap().is_err(), "external System Arc must not keep a detached epoch alive");
         assert!(weak_disk.upgrade().is_none(), "bootstrap must release its actual Store");
         for identity in identities { assert_eq!(held(identity), 0, "actual claimed inode FD must close after shutdown"); }
         assert_eq!(fs::read(permissions.join("runtime-permissions.xml")).unwrap(), actual.serialize().unwrap());
         assert_eq!(fs::read(permissions.join("runtime-permissions.xml.reservecopy")).unwrap(), actual.serialize().unwrap());
+        retained_services.shutdown().unwrap();
+    }
+
+    #[test]
+    fn native_services_shutdown_closes_retained_boot_session_before_registry_release() {
+        use crate::package::{boot_session::Session,early_user_operations,scan_snapshot::endpoint};
+        let mut fixture=Fixture::new();let bridge=fixture.attach();
+        let (owner,usage,context)=empty_query_publication(1);
+        let capture=fixture.system.publish_package_scan_with_queries(&bridge,None,owner,usage,context).unwrap();
+        let early=early_user_operations::Endpoint::new(&crate::package::system_config::SystemConfig::default());
+        let users=fixture.native.add_service(early.clone());let internal=fixture.system.package_internal_host().unwrap();
+        let session=Session::new(&fixture.system,bridge.clone(),early,users,internal,false);
+        let metadata=Arc::new(endpoint::Endpoint::raw_metadata(capture.scan().clone()));
+        let prepared=crate::system_package_persistence_init::epoch_fixture_prepared(&fixture.root.join("data")).unwrap();
+        let disk=Arc::downgrade(&prepared.disk);
+        assert!(crate::system_package_persistence_init::epoch_fixture_prepared(&fixture.root.join("data")).is_err(),"actual Session writer lease must exclude another constructor");
+        let lifecycle=crate::package::lifecycle::Owner::from_settings(
+            &crate::package::settings::Settings{versions:vec![crate::package::settings::Version{fingerprint:Some("shutdown-fixture".into()),..Default::default()}],..Default::default()},
+            true,"shutdown-fixture",Box::new(|_|None),Box::new(|_|panic!("shutdown must not query CE storage"))).unwrap();
+        std::fs::create_dir(fixture.root.join("data/app")).unwrap();
+        let decompression=Arc::new(crate::package::scan::boot_compressed::BootDecompression::new(fixture.root.join("data/app")).unwrap());
+        let decompression_weak=Arc::downgrade(&decompression);
+        session.epoch_fixture_set_scanned(crate::system::package_boot_scan::Scanned{prepared,capture,runtime_metadata:Default::default(),
+            apex_results:vec![],registrations:vec![],lifecycle,boot_apex_changed:false,decompression},&metadata);
+        fixture.system.package_bootstrap.lock().unwrap().current.as_mut().unwrap().boot_session=Some(Arc::downgrade(&session));
+        fixture.native.add_service(session.clone());
+        let services=crate::NativeServices {system:fixture.system.clone(),services:Vec::new(),package_runtime:Mutex::new(None),
+            package_constructing:std::sync::atomic::AtomicBool::new(false),shutdown:Mutex::new(crate::Shutdown::open())};
+        services.shutdown().unwrap();
+        assert!(session.epoch_fixture_is_closed_and_empty(),"shutdown must empty a Session retained outside the Binder registry");
+        assert!(disk.upgrade().is_none(),"Session close must release the actual Store");
+        assert!(decompression_weak.upgrade().is_none(),"Session close must release boot workers");
+        let next=crate::system_package_persistence_init::epoch_fixture_prepared(&fixture.root.join("data")).expect("shutdown must release the actual DataLease");
+        drop(next);
     }
 
 }

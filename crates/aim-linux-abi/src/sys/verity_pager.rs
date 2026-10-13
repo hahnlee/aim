@@ -202,7 +202,9 @@ pub fn reconcile_memberships()->io::Result<()> {
     let Some(client)=crate::verity_client()else{return Ok(());};
     let mut memberships=MEMBERSHIPS.lock().unwrap();let tracked=tracked_identities()?;
     let removed:Vec<_>=memberships.difference(&tracked).copied().collect();
-    for identity in removed{client.unmap(identity)?;memberships.remove(&identity);}
+    if removed.is_empty(){return Ok(());}
+    client.unmap_many(removed.iter().copied())?;
+    for identity in removed{memberships.remove(&identity);}
     Ok(())
 }
 

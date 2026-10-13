@@ -2767,6 +2767,13 @@ impl System {
         closed.and(observers).and(web)
     }
 
+    pub(crate) fn close_package_boot_session(&self, bridge: &Arc<crate::package::bootstrap::Bridge>) -> Result<()> {
+        let session = self.package_bootstrap.lock().unwrap().current.as_ref()
+            .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
+            .and_then(|current| current.boot_session.as_ref()).and_then(Weak::upgrade);
+        match session { Some(session) => session.close(), None => Ok(()) }
+    }
+
     pub(crate) fn package_internal_host(self: &Arc<Self>) -> Result<Binder> {
         let mut state = self.package_bootstrap.lock().unwrap();
         let current = state.current.as_mut().ok_or_else(|| Exception::new(

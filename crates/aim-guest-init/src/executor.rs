@@ -847,6 +847,13 @@ impl GuestExecutor {
         next
     }
 
+    /// Waits until every process owned by init has exited and records each
+    /// exit before boot-scoped host services release their resources.
+    pub fn reap_all_processes(&mut self) -> Result<(),String> {
+        for (pid,exit) in self.launcher.reap_all()? { self.handle_exit(pid,exit); }
+        Ok(())
+    }
+
     /// `HandleControlMessage`.
     pub fn handle_control(&mut self, message: &ControlMessage) -> Result<Effect, String> {
         let name = message.target.as_str();

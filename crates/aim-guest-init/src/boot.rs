@@ -605,6 +605,9 @@ impl Boot {
             // Publish only after the actual init, mount owner and signal
             // dispositions are registered, before any native or guest service.
             registration.activate_pid_mapping(&layout.identity_dir().join("by-pid")).map_err(|error|error.to_string())?;
+            aim_storage::boot_id::BootId::generate(process)
+                .and_then(|boot_id|boot_id.publish(&layout.runtime))
+                .map_err(|error|format!("boot generation identity: {error}"))?;
             init_registration = Some(registration);
         }
         mark("runtime layout prepared");
@@ -1306,9 +1309,16 @@ impl Boot {
             self.executor
                 .supervisor
                 .kill_all(self.executor.launcher.as_mut());
-            std::thread::sleep(Duration::from_millis(100));
-            let _ = self.executor.poll_processes();
-            self.sweep_memfds();
+            match self.executor.reap_all_processes() {
+                Ok(()) => {
+                    self.sweep_memfds();
+                    if let Some(services) = self.native_services.take()
+                        && let Err(error) = services.shutdown() {
+                        self.executor.fatal.get_or_insert(error);
+                    }
+                }
+                Err(error) => {self.executor.fatal.get_or_insert(format!("child reap during shutdown: {error}"));}
+            }
         }
         self.report.fatal = self.executor.fatal.clone();
         self.report.timeline.extend(self.data.borrow().timeline());

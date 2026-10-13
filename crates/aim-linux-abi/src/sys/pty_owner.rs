@@ -350,6 +350,35 @@ mod tests {
         super::super::fdtab::publish_guest(fd).unwrap();GuestFd(fd)
     }
     #[test]
+    fn exec_close_keeps_description_until_native_close_commit() {
+        if super::super::fdtab::isolated_kernel_test("sys::pty_owner::tests::exec_close_keeps_description_until_native_close_commit"){return;}
+        let (_guard,root)=crate::vfs::test_view();
+        let runtime=root.join("pty-owner-exec-close");
+        std::fs::DirBuilder::new().mode(0o700).create(&runtime).unwrap();
+        let runtime=std::fs::canonicalize(runtime).unwrap();
+        let name=format!("dev.aim.pty-abi-exec-close.{}",std::process::id());
+        let owner=aim_storage::pty_owner::transport::RunningServer::start(&name,&runtime).unwrap();
+        let client=Arc::new(Client::lookup(&name,owner.config.process).unwrap());
+        let endpoint=client.allocate(2).unwrap();
+        let master=Arc::new(Description{client,endpoint});
+        let slave=publish(master.open_slave(2).unwrap());
+        let observed=master.clone();
+        super::super::fdtab::BEFORE_EXEC_NATIVE_CLOSE.with(|hook|*hook.borrow_mut()=Some(Box::new(move||{
+            let notification=observed.endpoint.capability.notification().unwrap();
+            let mut event=libc::pollfd{fd:notification.as_raw_fd(),events:libc::POLLIN,revents:0};
+            assert_eq!(unsafe{libc::poll(&mut event,1,100)},0,"PTY retirement became observable before native close commit");
+            assert!(!observed.endpoint.capability.status().hangup());
+        })));
+        super::super::fdtab::close_exec_batch(vec![slave.0]).unwrap();
+        assert!(!super::super::fdtab::visible(slave.0));
+        std::mem::forget(slave);
+        let notification=master.endpoint.capability.notification().unwrap();
+        let mut event=libc::pollfd{fd:notification.as_raw_fd(),events:libc::POLLIN,revents:0};
+        assert_eq!(unsafe{libc::poll(&mut event,1,2000)},1);
+        assert!(master.endpoint.capability.status().hangup());
+        drop(master);owner.shutdown().unwrap();std::fs::remove_dir(runtime).unwrap();
+    }
+    #[test]
     fn actual_typed_dispatch_preserves_output_flags_and_final_close() {
         if super::super::fdtab::isolated_kernel_test("sys::pty_owner::tests::actual_typed_dispatch_preserves_output_flags_and_final_close"){return;}
         let (_guard,root)=crate::vfs::test_view();

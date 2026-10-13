@@ -1236,7 +1236,22 @@ fn sys_node(tail: &str) -> Option<Node> {
         ])),
         "kernel/random" => Node::Dir(entries(&[("boot_id", dir::DT_REG), ("uuid", dir::DT_REG)])),
         "kernel/random/boot_id" => {
-            let s = sysctl_string("kern.bootsessionuuid").to_lowercase();
+            let s = match vfs::runtime_dir().map(aim_storage::boot_id::BootId::read) {
+                Some(Ok(boot_id)) => boot_id.uuid,
+                Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let runtime = vfs::runtime_dir().unwrap();
+                    match aim_storage::process_namespace::InitRegistration::read(
+                        &runtime.join("identity/by-pid"),
+                    ) {
+                        Ok(_) => return None,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(_) => return None,
+                    }
+                    sysctl_string("kern.bootsessionuuid").to_lowercase()
+                }
+                Some(Err(_)) => return None,
+                _ => sysctl_string("kern.bootsessionuuid").to_lowercase(),
+            };
             Node::File(format!("{s}\n").into_bytes())
         }
         "kernel/random/uuid" => Node::File(random_uuid().into_bytes()),
@@ -1858,6 +1873,31 @@ pub fn is_self_exe(path: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn boot_id_uses_the_authenticated_generation_record() {
+        if super::super::fdtab::isolated_kernel_test(
+            "sys::procfs::tests::boot_id_uses_the_authenticated_generation_record",
+        ) { return; }
+        let (_view, _root) = crate::vfs::test_view();
+        let runtime = crate::vfs::runtime_dir().unwrap();
+        let table = runtime.join("identity/by-pid");
+        std::fs::create_dir_all(&table).unwrap();
+        let owner = aim_storage::process_namespace::ProcessIdentity::running_strict(
+            std::process::id() as i32,
+        ).unwrap();
+        let registration = aim_storage::process_namespace::InitRegistration::register(
+            &table, owner, "boot-id-test",
+        ).unwrap();
+        let boot_id = aim_storage::boot_id::BootId::generate(owner).unwrap();
+        boot_id.publish(runtime).unwrap();
+        let expected = format!("{}\n", boot_id.uuid).into_bytes();
+        assert!(matches!(super::sys_node("kernel/random/boot_id"), Some(super::Node::File(bytes)) if bytes == expected));
+        assert!(matches!(super::sys_node("kernel/random/boot_id"), Some(super::Node::File(bytes)) if bytes == expected));
+        std::fs::remove_file(runtime.join("boot-id")).unwrap();
+        assert!(super::sys_node("kernel/random/boot_id").is_none());
+        registration.remove(&table).unwrap();
+        assert!(matches!(super::sys_node("kernel/random/boot_id"), Some(super::Node::File(_))));
+    }
     #[test]
     fn real_registered_process_mountinfo_uses_current_namespace_and_stable_clone_ids(){
         if super::super::fdtab::isolated_kernel_test("sys::procfs::tests::real_registered_process_mountinfo_uses_current_namespace_and_stable_clone_ids"){return;}

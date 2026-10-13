@@ -16,6 +16,7 @@ pub mod disk;
 pub mod guest_inode;
 pub mod system;
 
+pub mod boot_id;
 pub mod process_namespace;
 pub mod mount_namespace;
 

@@ -141,12 +141,41 @@ pub fn install_fileport(fd:i32,port:aim_binder_host::mach::Port)->Result<(),crat
 /// Receipt-owned reserved descriptors may still be unpublished. Hidden storage
 /// descriptors never belong to a Binder receipt or a guest close operation.
 pub fn close_owned_guest(fd:i32,allow_reserved:bool)->Result<(),crate::errno::Errno>{
-    close_owned(fd,allow_reserved,false)
+    close_owned(fd,allow_reserved)
 }
-pub(super) fn close_guest_cloexec(fd:i32)->Result<(),crate::errno::Errno>{close_owned(fd,false,true)}
-fn close_owned(fd:i32,allow_reserved:bool,cloexec_only:bool)->Result<(),crate::errno::Errno>{
+/// Commit a validated exec close set. All slow owner acknowledgements finish
+/// before the first native descriptor is closed, and typed owners stay pinned
+/// through the native close loop so their retirement cannot publish early.
+pub(super) fn close_exec_batch(mut targets:Vec<i32>)->Result<(),crate::errno::Errno>{
+    targets.sort_unstable();
+    if targets.windows(2).any(|pair|pair[0]==pair[1]){return Err(crate::errno::EINVAL);}
+    let mut closed=Vec::with_capacity(targets.len());
+    for fd in targets{
+        let guard=close_admission(fd)?;
+        if is_hidden(fd)||!visible(fd){return Err(crate::errno::EBADF);}
+        let retained=get(fd);let file=super::fuse_client::get(fd);let posix=guest_close_owner(fd)?;
+        let socket=matches!(retained,Some(Kind::Sock(_)));
+        withdraw_guest(fd)?;on_close(fd);
+        let binder_flush=guard.finish(true);
+        let flush=file.as_ref().map(|file|super::fuse_cache::flush_file(file).and_then(|_|super::fuse_client::flush(file)));
+        finish_guest_close(posix)?;binder_flush?;flush.unwrap_or(Ok(()))?;
+        closed.push((fd,socket,retained,file));
+    }
+    #[cfg(test)]
+    BEFORE_EXEC_NATIVE_CLOSE.with(|hook|if let Some(hook)=hook.borrow_mut().take(){hook();});
+    // Socket retirement is only observed by later guest socket operations.
+    // Admit it before native close so the close loop itself contains no lock,
+    // IPC, file-system operation, or owner drop between observable closes.
+    for(_,socket,_,_)in &closed{if *socket{super::close_effects::note_socket_close();}}
+    let mut error=None;
+    for(fd,_,_,_)in &closed{if unsafe{libc::close(*fd)}<0&&error.is_none(){error=Some(crate::errno::last());}}
+    drop(closed);
+    error.map_or(Ok(()),Err)
+}
+#[cfg(test)]
+thread_local!{pub(super) static BEFORE_EXEC_NATIVE_CLOSE:std::cell::RefCell<Option<Box<dyn FnOnce()>>>=const{std::cell::RefCell::new(None)};}
+fn close_owned(fd:i32,allow_reserved:bool)->Result<(),crate::errno::Errno>{
     let guard=close_admission(fd)?;if is_hidden(fd)||(!allow_reserved&&!visible(fd)){return Err(crate::errno::EBADF);}
-    if cloexec_only{let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};if flags<0{return Err(crate::errno::last());}if flags&libc::FD_CLOEXEC==0{return Ok(());}}
     let retained=get(fd);let file=super::fuse_client::get(fd);let posix=guest_close_owner(fd)?;
     let socket=matches!(retained,Some(Kind::Sock(_)));
     if visible(fd){withdraw_guest(fd)?;}
@@ -625,7 +654,6 @@ pub(crate) fn regular_exec_text()->Result<String,crate::errno::Errno>{
         if !visible(*fd){continue;}
         let flags=unsafe{libc::fcntl(*fd,libc::F_GETFD)};
         if flags<0{return Err(crate::errno::last());}
-        if flags&libc::FD_CLOEXEC!=0{continue;}
         use std::os::fd::AsRawFd;
         match kind{
             Kind::Regular(description)=>records.push(format!("{}\t{}\t{}",fd,description.flags,description.writer.as_ref().map(|writer|writer.descriptor().as_raw_fd()).unwrap_or(-1))),
@@ -646,7 +674,6 @@ pub(crate) fn prepare_regular_exec()->Result<ExecWriterFlags,crate::errno::Errno
         if !visible(guest){continue;}
         let guest_flags=unsafe{libc::fcntl(guest,libc::F_GETFD)};
         if guest_flags<0{return Err(crate::errno::last());}
-        if guest_flags&libc::FD_CLOEXEC!=0{continue;}
         let descriptor=match &kind{Kind::Regular(description)=>description.writer.as_ref().map(|writer|writer.descriptor()),Kind::Pty(description)=>Some(description.carrier()?),_=>None};
         if let Some(descriptor)=descriptor{let fd=descriptor.as_raw_fd();if !writers.insert(fd){continue;}let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};if flags<0{return Err(crate::errno::last());}
             if unsafe{libc::fcntl(fd,libc::F_SETFD,flags&!libc::FD_CLOEXEC)}<0{return Err(crate::errno::last());}
@@ -692,7 +719,7 @@ pub fn parse_socket_receipts(text:&str)->Result<Vec<(i32,aim_storage::socket_ino
 pub(crate) fn socket_exec_text()->String{
     fds_where(|kind|matches!(kind,Kind::Sock(_))).into_iter().filter_map(|(fd,kind)|{
         let Kind::Sock(socket)=kind else{return None};let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};
-        if !visible(fd)||flags<0||flags&libc::FD_CLOEXEC!=0{return None;}
+        if !visible(fd)||flags<0{return None;}
         let receipt=(*socket.inode_allocation.lock().unwrap())?;
         Some(format!("{fd}:{}",receipt.to_bytes().iter().map(|byte|format!("{byte:02x}")).collect::<String>()))
     }).collect::<Vec<_>>().join(",")
@@ -1092,11 +1119,15 @@ mod publication_tests{
   let writer=owner.writer.as_ref().unwrap().descriptor().as_raw_fd();
   let original=unsafe{libc::fcntl(writer,libc::F_GETFD)};assert_ne!(original&libc::FD_CLOEXEC,0);
   assert_eq!(super::super::fs::fcntl([fd as u64,2,libc::FD_CLOEXEC as u64,0,0,0]),0);
-  let guard=prepare_regular_exec().unwrap();assert_ne!(unsafe{libc::fcntl(writer,libc::F_GETFD)}&libc::FD_CLOEXEC,0);drop(guard);
+  assert!(regular_exec_text().unwrap().lines().any(|line|line.starts_with(&format!("{fd}\t"))),"CLOEXEC regular owner missing from relaunch metadata");
+  let guard=prepare_regular_exec().unwrap();assert_eq!(unsafe{libc::fcntl(writer,libc::F_GETFD)}&libc::FD_CLOEXEC,0);drop(guard);
   assert_eq!(super::super::fs::fcntl([fd as u64,2,0,0,0,0]),0);
   let duplicate=super::super::fs::dup([fd as u64,0,0,0,0,0]);assert!(duplicate>=0);
   let guard=prepare_regular_exec().unwrap();assert_eq!(unsafe{libc::fcntl(writer,libc::F_GETFD)}&libc::FD_CLOEXEC,0);drop(guard);
   assert_eq!(unsafe{libc::fcntl(writer,libc::F_GETFD)},original);
+  let socket=super::super::net::socket([1,1|0o2000000,0,0,0,0]);assert!(socket>=0);let socket=socket as i32;
+  assert!(socket_exec_text().split(',').any(|record|record.starts_with(&format!("{socket}:"))),"CLOEXEC socket receipt missing from relaunch metadata");
+  assert_eq!(super::super::fs::close([socket as u64,0,0,0,0,0]),0);
   assert_eq!(super::super::fs::close([duplicate as u64,0,0,0,0,0]),0);assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]),0);
  }
  #[test]
