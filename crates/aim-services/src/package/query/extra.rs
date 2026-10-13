@@ -2669,14 +2669,34 @@ impl Query<'_> {
     }
 
     fn package_gids(&self, name: &str, flags: i64, user: i32) -> Thrown<Option<Vec<i32>>> {
+        self.package_gids_with_grants(name, flags, user, None)
+    }
+
+    pub(crate) fn package_gids_with_grants(
+        &self,
+        name: &str,
+        flags: i64,
+        user: i32,
+        live_cross_user_grants: Option<(bool, bool)>,
+    ) -> Thrown<Option<Vec<i32>>> {
         if self.user(user).is_none() {
             return Ok(Ok(None));
         }
-        let flags = match self.update_flags_for_package(flags, user)? {
+        let flags = match self.update_flags_for_package_with_grants(
+            flags,
+            user,
+            live_cross_user_grants,
+        )? {
             Ok(f) => f,
             Err(e) => return Ok(Err(e)),
         };
-        if let Err(e) = self.enforce_cross_user(user, false, false, "getPackageGids")? {
+        if let Err(e) = self.enforce_cross_user_with_grants(
+            user,
+            false,
+            false,
+            "getPackageGids",
+            live_cross_user_grants,
+        )? {
             return Ok(Err(e));
         }
         let Some(ps) = self.state.packages.get(name) else {

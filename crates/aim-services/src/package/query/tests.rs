@@ -592,8 +592,8 @@ fn installed_lists_use_live_cross_user_grants() {
         0, 10, 10100, false, Some((false, true))).unwrap().is_ok());
     assert_eq!(
         query.installed_packages_with_grants(MATCH_ANY_USER, 0, Some((false, false)))
-            .unwrap_err(),
-        NotModelled("a cross-user call recents may make")
+            .unwrap().unwrap_err().code,
+        EX_SECURITY
     );
     assert!(query.installed_packages_with_grants(0, 0, Some((false, false)))
         .unwrap().is_ok());
@@ -601,6 +601,49 @@ fn installed_lists_use_live_cross_user_grants() {
     let system = Query { state: &captured_denial, filter: &filter, calling_uid: 1000 };
     assert!(system.installed_packages_with_grants(0, 10, Some((false, false)))
         .unwrap().is_ok());
+}
+
+#[test]
+fn package_uid_and_gids_use_live_cross_user_grants() {
+    let mut captured_grant = state();
+    captured_grant.packages.get_mut(APP).unwrap().users.get_mut(&0).unwrap()
+        .granted_permissions.push(INTERACT_ACROSS_USERS.into());
+    let filter = AppsFilter::new(&captured_grant, &Default::default()).unwrap();
+    let query = Query { state: &captured_grant, filter: &filter, calling_uid: 10100 };
+    assert_eq!(
+        query.package_uid_with_grants(APP, 0, 10, Some((false, false)))
+            .unwrap().unwrap_err().code,
+        EX_SECURITY
+    );
+    assert_eq!(
+        query.package_gids_with_grants(APP, 0, 10, Some((false, false)))
+            .unwrap().unwrap_err().code,
+        EX_SECURITY
+    );
+    assert_eq!(
+        query.package_uid_with_grants(APP, MATCH_ANY_USER, 0, Some((false, false)))
+            .unwrap().unwrap_err().code,
+        EX_SECURITY
+    );
+    assert_eq!(
+        query.package_gids_with_grants(APP, MATCH_ANY_USER, 0, Some((false, false)))
+            .unwrap().unwrap_err().code,
+        EX_SECURITY
+    );
+
+    let captured_denial = state();
+    let filter = AppsFilter::new(&captured_denial, &Default::default()).unwrap();
+    let query = Query { state: &captured_denial, filter: &filter, calling_uid: 10100 };
+    assert_eq!(
+        query.package_uid_with_grants(APP, 0, 10, Some((false, true)))
+            .unwrap().unwrap(),
+        1010100
+    );
+    assert_eq!(
+        query.package_gids_with_grants(APP, 0, 10, Some((false, true)))
+            .unwrap().unwrap(),
+        Some(Vec::new())
+    );
 }
 
 #[test]

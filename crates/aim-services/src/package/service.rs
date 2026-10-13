@@ -116,7 +116,7 @@ impl PackageQueries {
 }
 
 impl PackageQueries {
-    fn live_list_cross_user_grants(
+    fn live_cross_user_grants(
         &self,
         query: &Query<'_>,
         flags: i64,
@@ -395,6 +395,51 @@ impl Service for PackageQueries {
                 Ok(reply)
             })())
         } else { None };
+        let live_package_identity = if !self.native && capture.is_some()
+            && matches!(call.code, pm::GET_PACKAGE_UID | pm::GET_PACKAGE_GIDS) {
+            Some((|| -> Result<Parcel, QueryError> {
+                let resolution = match capture.as_ref().unwrap().resolution() {
+                    Ok(resolution) => resolution,
+                    Err(error) => return error.reply().map_err(QueryError::Transport),
+                };
+                let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: uid };
+                let mut reply = Parcel::new();
+                if call.code == pm::GET_PACKAGE_UID {
+                    let args = pm::GetPackageUid::read(&mut call.data).map_err(QueryError::Transport)?;
+                    if call.data.remaining() != 0 {
+                        return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                    }
+                    let grants = self.live_cross_user_grants(
+                        &query, args.flags, args.user_id, call.sender_pid, uid)?;
+                    match query.package_uid_with_grants(
+                        args.package_name.as_deref().unwrap_or_default(),
+                        args.flags,
+                        args.user_id,
+                        grants,
+                    ).map_err(QueryError::NotModelled)? {
+                        Ok(value) => pm::write_get_package_uid_reply(&mut reply, value),
+                        Err(error) => reply.write_exception(&error),
+                    }
+                } else {
+                    let args = pm::GetPackageGids::read(&mut call.data).map_err(QueryError::Transport)?;
+                    if call.data.remaining() != 0 {
+                        return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                    }
+                    let grants = self.live_cross_user_grants(
+                        &query, args.flags, args.user_id, call.sender_pid, uid)?;
+                    match query.package_gids_with_grants(
+                        args.package_name.as_deref().unwrap_or_default(),
+                        args.flags,
+                        args.user_id,
+                        grants,
+                    ).map_err(QueryError::NotModelled)? {
+                        Ok(value) => pm::write_get_package_gids_reply(&mut reply, &value),
+                        Err(error) => reply.write_exception(&error),
+                    }
+                }
+                Ok(reply)
+            })())
+        } else { None };
         let paged = if !self.native && capture.is_some()
             && matches!(call.code, pm::GET_INSTALLED_APPLICATIONS | pm::GET_INSTALLED_PACKAGES) {
             Some((|| -> Result<Parcel, QueryError> {
@@ -410,7 +455,7 @@ impl Service for PackageQueries {
                 if call.code==pm::GET_INSTALLED_APPLICATIONS {
                     let args=pm::GetInstalledApplications::read(&mut call.data).map_err(QueryError::Transport)?;
                     if call.data.remaining()!=0{return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));}
-                    let grants=self.live_list_cross_user_grants(
+                    let grants=self.live_cross_user_grants(
                         &query,args.flags,args.user_id,call.sender_pid,uid)?;
                     match query.internal_installed_applications_with_grants(
                         args.flags,args.user_id,uid,false,grants)? {
@@ -420,7 +465,7 @@ impl Service for PackageQueries {
                 } else {
                     let args=pm::GetInstalledPackages::read(&mut call.data).map_err(QueryError::Transport)?;
                     if call.data.remaining()!=0{return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));}
-                    let grants=self.live_list_cross_user_grants(
+                    let grants=self.live_cross_user_grants(
                         &query,args.flags,args.user_id,call.sender_pid,uid)?;
                     match query.installed_packages_with_grants(args.flags,args.user_id,grants)? {
                         Ok(items)=>{let slice=super::list_slice::Slice::new(process,"android.content.pm.PackageInfo",items);pm::write_get_installed_packages_reply(&mut reply,Some(&slice));},
@@ -430,7 +475,7 @@ impl Service for PackageQueries {
                 Ok(reply)
             })())
         } else {None};
-        let resolved = live_uid_packages.or(paged).or_else(|| (!self.native)
+        let resolved = live_uid_packages.or(live_package_identity).or(paged).or_else(|| (!self.native)
             .then(|| capture.as_ref().map_or(&*self.resolver,|capture|capture.resolver()).query(&state, call.code, uid, &mut call.data))
             .flatten());
         let answer = resolved.unwrap_or_else(|| {

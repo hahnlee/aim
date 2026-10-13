@@ -724,10 +724,11 @@ impl Query<'_> {
     fn update_flags_for_package_with_grants(&self, mut flags: i64, user: i32,
         live_cross_user_grants: Option<(bool, bool)>) -> Thrown<i64> {
         if flags & MATCH_ANY_USER != 0 {
+            let recents_may_skip = user != user_id(self.calling_uid);
             if let Err(e) = self.enforce_cross_user_with_grants(
                 user,
                 true,
-                true,
+                recents_may_skip,
                 "MATCH_ANY_USER flag requires INTERACT_ACROSS_USERS permission",
                 live_cross_user_grants,
             )? {
@@ -1643,14 +1644,34 @@ impl Query<'_> {
 
     /// `getPackageUid`.
     pub(crate) fn package_uid(&self, name: &str, flags: i64, user: i32) -> Thrown<i32> {
+        self.package_uid_with_grants(name, flags, user, None)
+    }
+
+    pub(crate) fn package_uid_with_grants(
+        &self,
+        name: &str,
+        flags: i64,
+        user: i32,
+        live_cross_user_grants: Option<(bool, bool)>,
+    ) -> Thrown<i32> {
         if self.user(user).is_none() {
             return Ok(Ok(-1));
         }
-        let flags = match self.update_flags_for_package(flags, user)? {
+        let flags = match self.update_flags_for_package_with_grants(
+            flags,
+            user,
+            live_cross_user_grants,
+        )? {
             Ok(f) => f,
             Err(e) => return Ok(Err(e)),
         };
-        if let Err(e) = self.enforce_cross_user(user, false, false, "getPackageUid")? {
+        if let Err(e) = self.enforce_cross_user_with_grants(
+            user,
+            false,
+            false,
+            "getPackageUid",
+            live_cross_user_grants,
+        )? {
             return Ok(Err(e));
         }
         Ok(Ok(self.package_uid_internal(
