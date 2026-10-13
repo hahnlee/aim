@@ -193,6 +193,25 @@ fn real_image_dry_run_boot() {
         boot.property("ro.crypto.state").as_deref(),
         Some("unencrypted")
     );
+    let keystore_store = report
+        .commands
+        .iter()
+        .position(|record| {
+            record.executed.action == "fs"
+                && record.executed.command == "mkdir /data/misc/keystore 0700 keystore keystore"
+                && record.executed.result.is_ok()
+        })
+        .expect("the device fs action must prepare keystore's store");
+    let keystore_start = report
+        .commands
+        .iter()
+        .position(|record| {
+            record.effects.iter().any(
+                |effect| matches!(effect, Effect::Launch { service, .. } if service == "keystore2"),
+            )
+        })
+        .expect("keystore2 not launched");
+    assert!(keystore_store < keystore_start);
     assert_eq!(
         boot.property("ro.persistent_properties.ready").as_deref(),
         Some("true")

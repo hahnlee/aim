@@ -1983,6 +1983,21 @@ module: all four priority/restriction cases, both disable cases and both
 updated-system-app reboot/removal cases pass. Its owned supervisor reports
 complete cleanup with no remaining process or uncertainty. The
 old failed C109/C110 cohorts remain NOT RUN evidence. A separate rollback on
+a fresh empty-DATA template exposed a device-init race before this selector:
+`keystore2` is an `early_hal`, while the original `post-fs-data` action records
+`/data/misc/keystore` as `0700 keystore:keystore` only after it starts. The
+first database attach could therefore observe the new host inode before its
+guest owner metadata and fail `open(persistent.sqlite)` with EACCES. The AIM
+device now prepares `/data/misc` and `/data/misc/keystore` immediately after
+its early DATA mount; the original idempotent `post-fs-data` commands still
+reassert the same ownership. The derived-image dry-run proves this command
+precedes the `keystore2` launch. A fresh empty template for image identity
+`b5e085834cf101c7` then reaches Settings at 200.2 s, `sys.boot_completed=1` at
+313.8 s and runtime-permission publication at 313.9 s, publishes the required
+70-file template (ASIF SHA-256 `40e134935ee9641c99d069966dc40bb503bfa6ddf9f3fa5fa9f1fe0e092f01df`),
+and leaves neither owned boot process nor DATA attachment. Its complete
+first-boot log contains no keystore database failure or abort (#1253).
+A separate rollback on
 a clone of native-written data constructs original PMS (package owner PID equals
 SystemServer 50573), preserving five selected packages' UID/codepath/version,
 persisted signatures and runtime permissions; Calculator, WebView and Chrome
