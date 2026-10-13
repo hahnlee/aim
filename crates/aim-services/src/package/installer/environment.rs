@@ -154,12 +154,34 @@ pub(super) fn current_install_users(
     config: &Config,
     base: &Arc<Snapshot>,
 ) -> Result<Vec<scan::User>, Failure> {
-    let users = (config.install_users)(base).map_err(|error| failure(-110, error.message))?;
+    captured_install_users(&config.install_users, base)
+}
+fn captured_install_users(
+    install_users: &InstallUsers,
+    base: &Arc<Snapshot>,
+) -> Result<Vec<scan::User>, Failure> {
+    let users = install_users(base).map_err(|error| failure(-110, error.message))?;
     let expected = base
         .owner()
         .legacy_permission_users()
         .map_err(|error| failure(-110, format!("Installation permission users: {error}")))?;
     validate_install_users(users, expected)
+}
+fn reservation_install_users(
+    install_users: &InstallUsers,
+    base: &Arc<Snapshot>,
+    current: &Arc<Snapshot>,
+    targets: &std::collections::BTreeSet<String>,
+) -> Result<Vec<scan::User>, Failure> {
+    if !base.same_lineage(current){return Err(failure(-110,"Installation base lineage changed"));}
+    if !Arc::ptr_eq(base,current) {
+        let mut checked=base.owner().clone();
+        if let Some(conflict)=crate::package::scan_snapshot::install_context::install_user_rebase_conflict(
+            base,current,&mut checked,targets).map_err(|error|failure(-110,error))? {
+            return Err(failure(-110,format!("Installation base owner changed: {conflict}")));
+        }
+    }
+    captured_install_users(install_users,current)
 }
 fn validate_install_users(
     users: Vec<scan::User>,
@@ -184,13 +206,17 @@ fn validate_install_users(
 #[cfg(test)]
 mod install_user_tests {
     use super::*;
+    use crate::package::{owner::usage::Usage,scan::{CapturedUsers,SigningScan},
+        settings::{Package,Settings}};
+    use std::{collections::{BTreeMap,BTreeSet},sync::atomic::{AtomicUsize,Ordering as AtomicOrdering}};
+    fn snapshot_fixture()->Arc<Store>{
+        let packages=vec![Package{name:"target.fixture".into(),app_id:10101,code_path:"/data/app/target".into(),version_code:1,..Default::default()},Package{name:"background.fixture".into(),app_id:10102,code_path:"/data/app/background".into(),version_code:1,..Default::default()}];
+        let settings=Settings{packages,..Default::default()};let mut owner=SigningScan::new(&Default::default(),&settings,29).unwrap();
+        owner.capture_user_states(settings.packages.iter().map(|package|((package.name.clone(),false),CapturedUsers{states:BTreeMap::from([(0,Default::default())]),active_aliases:Default::default()})).collect()).unwrap();let legacy=owner.settings.packages.iter().map(|package|((package.name.clone(),false),crate::package::owner::legacy_permissions::Migration::default())).collect();let shared=owner.identities.shared_users.keys().map(|name|(name.clone(),Default::default())).collect();owner.capture_legacy_permissions(&[0],legacy,shared).unwrap();Arc::new(Store::new(owner,Usage::new(["target.fixture","background.fixture"])).unwrap())
+    }
+    fn user(id:i32)->scan::User{scan::User{id,pre_created:false,adb_install_disallowed:false}}
     #[test]
     fn install_reservation_requires_current_permission_user_inventory() {
-        let user = |id| scan::User {
-            id,
-            pre_created: false,
-            adb_install_disallowed: false,
-        };
         assert_eq!(
             validate_install_users(vec![user(0), user(10)], &[0, 10]).unwrap(),
             vec![user(0), user(10)]
@@ -200,6 +226,25 @@ mod install_user_tests {
             error.message,
             "Installation user inventory differs from permission owner"
         );
+    }
+    #[test]
+    fn reservation_resolves_users_from_rebased_current_snapshot(){
+        let store=snapshot_fixture();let base=store.capture();let mut owner=base.owner().clone();let mut state=owner.scanned_user_states("background.fixture").unwrap()[&0].clone();state.hidden=true;owner.set_user_state("background.fixture",0,state).unwrap();store.publish(&base,owner,base.usage().clone()).unwrap();let current=store.capture();assert_ne!(base.metadata_revision(),current.metadata_revision());
+        let called=Arc::new(std::sync::Mutex::new(None));let seen=called.clone();let expected=current.clone();let users:InstallUsers=Arc::new(move|snapshot|{*seen.lock().unwrap()=Some(snapshot.clone());assert!(Arc::ptr_eq(snapshot,&expected));Ok(vec![user(0)])});
+        let values=reservation_install_users(&users,&base,&current,&BTreeSet::from(["target.fixture".into()])).unwrap();assert_eq!(values,vec![user(0)]);assert!(Arc::ptr_eq(called.lock().unwrap().as_ref().unwrap(),&current));
+    }
+    #[test]
+    fn reservation_rejects_protected_conflict_before_resolving_users(){
+        let store=snapshot_fixture();let base=store.capture();let mut owner=base.owner().clone();let mut state=owner.scanned_user_states("target.fixture").unwrap()[&0].clone();state.hidden=true;owner.set_user_state("target.fixture",0,state).unwrap();store.publish(&base,owner,base.usage().clone()).unwrap();let calls=Arc::new(AtomicUsize::new(0));let counted=calls.clone();let users:InstallUsers=Arc::new(move|_|{counted.fetch_add(1,AtomicOrdering::SeqCst);Ok(vec![user(0)])});
+        let error=reservation_install_users(&users,&base,&store.capture(),&BTreeSet::from(["target.fixture".into()])).unwrap_err();assert!(error.message.contains("Installation base owner changed"));assert_eq!(calls.load(AtomicOrdering::SeqCst),0);
+    }
+    #[test]
+    fn reservation_rejects_foreign_lineage_before_resolving_users(){
+        let base=snapshot_fixture().capture();let foreign=snapshot_fixture().capture();let calls=Arc::new(AtomicUsize::new(0));let counted=calls.clone();let users:InstallUsers=Arc::new(move|_|{counted.fetch_add(1,AtomicOrdering::SeqCst);Ok(vec![user(0)])});let error=reservation_install_users(&users,&base,&foreign,&BTreeSet::new()).unwrap_err();assert_eq!(error.message,"Installation base lineage changed");assert_eq!(calls.load(AtomicOrdering::SeqCst),0);
+    }
+    #[test]
+    fn reservation_rejects_current_permission_user_inventory_mismatch(){
+        let store=snapshot_fixture();let current=store.capture();let users:InstallUsers=Arc::new(|_|Ok(vec![user(10)]));let error=reservation_install_users(&users,&current,&current,&BTreeSet::new()).unwrap_err();assert_eq!(error.message,"Installation user inventory differs from permission owner");
     }
 }
 fn token() -> String {
@@ -321,18 +366,10 @@ impl pipeline::Environment for Owner {
         base: &Arc<Snapshot>,
     ) -> Result<Box<dyn pipeline::Reservation>, Failure> {
         let current=self.config.snapshots.capture();
-        if !base.same_lineage(&current){return Err(failure(-110,"Installation base lineage changed"));}
-        if !Arc::ptr_eq(base,&current) {
-            let targets=code.iter().map(|member|if member.package.static_shared_library_name.is_some(){
-                format!("{}_{}",member.package.package_name,member.package.static_shared_lib_version)
-            }else{member.package.package_name.clone()}).collect();
-            let mut checked=base.owner().clone();
-            if let Some(conflict)=crate::package::scan_snapshot::install_context::install_user_rebase_conflict(
-                base,&current,&mut checked,&targets).map_err(|error|failure(-110,error))? {
-                return Err(failure(-110,format!("Installation base owner changed: {conflict}")));
-            }
-        }
-        let users = current_install_users(&self.config, base)?;
+        let targets=code.iter().map(|member|if member.package.static_shared_library_name.is_some(){
+            format!("{}_{}",member.package.package_name,member.package.static_shared_lib_version)
+        }else{member.package.package_name.clone()}).collect();
+        let users = reservation_install_users(&self.config.install_users,base,&current,&targets)?;
         let mut reserved = Reserved {
             config: self.config.clone(),
             members: Vec::new(),
