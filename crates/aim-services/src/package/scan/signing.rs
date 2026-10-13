@@ -403,12 +403,15 @@ impl SigningScan {
     /// factory copies retain their user object, losing the active alias marker.
     pub fn remove_package_user_state(&mut self, user: i32) -> Result<(), String> {
         if user < 0 { return Err("removed package user id is negative".into()); }
-        let names: Vec<_> = self.scanned_users.keys().cloned().collect();
+        let mut candidate = self.clone();
+        let names: Vec<_> = candidate.scanned_users.keys().cloned().collect();
         for name in names {
-            let mut users = self.scanned_users[&name].clone();
+            let mut users = candidate.scanned_users[&name].clone();
             users.remove(&user);
-            self.update_disabled_user_aliases(&name, &users);
+            candidate.update_disabled_user_aliases(&name, &users);
         }
+        candidate.complete_retained_library_dependencies()?;
+        *self = candidate;
         Ok(())
     }
 

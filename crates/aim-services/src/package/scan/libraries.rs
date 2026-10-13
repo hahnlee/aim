@@ -221,6 +221,25 @@ mod install_regression {
         assert_eq!(error.cause,ResolveError::MissingLibrary("absent.sdk".into()));
     }
     #[test]
+    fn user_inventory_transition_refreshes_resolved_library_inputs() {
+        use crate::package::{restrictions::UserState, users::Creation};
+        let setting=Package{name:"android".into(),app_id:10100,code_path:"/system/framework/framework-res.apk".into(),version_code:1,..Default::default()};
+        let settings=Settings{packages:vec![setting.clone()],..Default::default()};
+        let mut owner=SigningScan::new(&SystemConfig::default(),&settings,36).unwrap();
+        owner.loaded.insert(setting.name.clone(),loaded(&setting,vec![]));
+        owner.scanned_users.insert(setting.name.clone(),[(0,UserState::default())].into());
+        owner.complete_library_dependencies(&|_,_|Ok(Policy::pinned(true))).unwrap();
+
+        Creation{user:10,states:BTreeMap::from([("android".into(),UserState::default())]),app_data:vec![],kernel_exclusions:vec![]}
+            .apply_scan(&mut owner).unwrap();
+        assert!(owner.library_dependencies("android").unwrap().is_some());
+        assert!(owner.scanned_user_states("android").unwrap().contains_key(&10));
+
+        owner.remove_package_user_state(10).unwrap();
+        assert!(owner.library_dependencies("android").unwrap().is_some());
+        assert!(!owner.scanned_user_states("android").unwrap().contains_key(&10));
+    }
+    #[test]
     fn new_loaded_install_rebuilds_graph_and_runtime_before_permission_projection(){
         let mut config=SystemConfig::default();config.libraries.insert("fixture.library".into(),Library{name:"fixture.library".into(),filename:"/system/framework/fixture.jar".into(),dependencies:vec![],on_bootclasspath_since:None,on_bootclasspath_before:None,can_be_safely_ignored:false,native:false});
         let old=Package{name:"old.fixture".into(),app_id:10100,code_path:"/data/app/old.fixture-1".into(),version_code:1,domain_set_id:Some("00000000-0000-0000-0000-000000000001".into()),..Default::default()};

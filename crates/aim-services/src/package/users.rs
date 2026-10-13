@@ -149,6 +149,7 @@ impl Creation {
         for (name, state) in &self.states {
             candidate.set_user_state(name, self.user, state.clone())?;
         }
+        candidate.complete_retained_library_dependencies()?;
         *scan = candidate;
         Ok(())
     }
