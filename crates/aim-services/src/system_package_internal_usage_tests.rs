@@ -116,6 +116,13 @@ fn held_install_gate_defers_usage_query_projection_without_losing_canonical_usag
     assert!(Arc::ptr_eq(current.queries.as_ref().unwrap(), &query));
     let canonical = current.snapshots.as_ref().unwrap().capture();
     assert!(!Arc::ptr_eq(&canonical, query.scan()));
+    assert_eq!(canonical.metadata_revision(),query.scan().metadata_revision());
+    assert_eq!(super::package_environment_init::install_users_for_snapshot(&query,&canonical).unwrap(),
+        vec![crate::package::scan::User{id:0,pre_created:false,adb_install_disallowed:false}]);
+    let mut changed_owner=query.scan().owner().clone();
+    changed_owner.settings.versions.push(crate::package::settings::Version{sdk_version:36,..Default::default()});
+    let changed=query.prepare_package_update(changed_owner).unwrap();
+    assert!(super::package_environment_init::install_users_for_snapshot(&changed.capture,&canonical).is_err());
     assert!(canonical.usage().times("p").unwrap()[2] > 0);
     assert_eq!(canonical.owner().replica_runtime("p", false).unwrap().unwrap().usage,
         *canonical.usage().times("p").unwrap());

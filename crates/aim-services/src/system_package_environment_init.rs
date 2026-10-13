@@ -10,6 +10,20 @@ use crate::package::{
     write::Apks,
 };
 use std::path::Path;
+pub(super) fn install_users_for_snapshot(
+    capture: &crate::package::scan_snapshot::query_state::Capture,
+    base: &crate::package::scan_snapshot::Snapshot,
+) -> Result<Vec<crate::package::scan::User>> {
+    if !capture.scan().same_metadata_generation(base) {
+        return Err(environment_error("install user snapshot changed"));
+    }
+    capture
+        .state()
+        .scan_users
+        .as_ref()
+        .and_then(|owner| owner.users.clone())
+        .ok_or_else(|| environment_error("environment actual scan users unavailable"))
+}
 pub struct EnvironmentBootInputs {
     pub factory_test: bool,
     pub parser_cache: Option<std::path::PathBuf>,
@@ -62,15 +76,7 @@ impl System {
                 .ok_or_else(|| environment_error("install user System stopped"))?;
             system.check_package_bootstrap(&user_bridge)?;
             let capture = system.capture_package_queries()?;
-            if !Arc::ptr_eq(capture.scan(), base) {
-                return Err(environment_error("install user snapshot changed"));
-            }
-            capture
-                .state()
-                .scan_users
-                .as_ref()
-                .and_then(|owner| owner.users.clone())
-                .ok_or_else(|| environment_error("environment actual scan users unavailable"))
+            install_users_for_snapshot(&capture, base)
         });
         let cross_user_suspensions = capture.context().cross_user_suspensions;
         let weak = Arc::downgrade(self);

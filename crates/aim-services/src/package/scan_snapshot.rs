@@ -53,6 +53,9 @@ pub fn uid_owner_registry(snapshot: &Snapshot) -> Result<Vec<u8>, String> {
 
 impl Snapshot {
     pub(in crate::package) fn same_lineage(&self, other: &Self) -> bool { Arc::ptr_eq(&self.lineage, &other.lineage) }
+    pub(crate) fn same_metadata_generation(&self, other: &Self) -> bool {
+        self.same_lineage(other) && self.metadata_revision == other.metadata_revision
+    }
     pub(in crate::package) fn replica_runtime(&self,name:&str,factory:bool)->Result<Option<&crate::package::scan::ReplicaRuntime>,String>{
         // Store::create/publish validate the complete runtime/seinfo/library
         // graph once before this owner becomes immutable. Check this record's
@@ -559,11 +562,16 @@ mod tests {
         assert!(!base.owner().has_replica_runtime());
         let same=Store::prepare_unchanged_metadata_store(&base).unwrap().capture();
         assert_eq!(same.owner(),base.owner());assert_eq!(same.metadata_revision(),base.metadata_revision());
+        assert!(same.same_metadata_generation(&base));
         let mut changed=base.owner().clone();
         changed.settings.versions.push(crate::package::settings::Version{sdk_version:36,..Default::default()});
         let changed=Store::new_replica_after(&base,changed,base.usage().clone(),base.version()+1).unwrap().capture();
         assert_eq!(changed.metadata_revision(),changed.version());
         assert_eq!(changed.usage(),base.usage());
+        assert!(!changed.same_metadata_generation(&base));
+        let foreign=Store::new_replica(base.owner().clone(),base.usage().clone()).unwrap().capture();
+        assert_eq!(foreign.metadata_revision(),base.metadata_revision());
+        assert!(!foreign.same_metadata_generation(&base));
     }
 
     #[test]
