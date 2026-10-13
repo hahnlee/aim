@@ -116,6 +116,34 @@ impl PackageQueries {
 }
 
 impl PackageQueries {
+    fn live_list_cross_user_grants(
+        &self,
+        query: &Query<'_>,
+        flags: i64,
+        user: i32,
+        pid: i32,
+        uid: i32,
+    ) -> Result<Option<(bool, bool)>, QueryError> {
+        if super::apps_filter::instant_app_package_name(query.state, uid)?.is_some()
+            || !query.state.users.contains_key(&user)
+            || matches!(super::apps_filter::app_id(uid), 0 | 1000)
+            || user == super::apps_filter::user_id(uid)
+                && flags & super::info::flags::MATCH_ANY_USER == 0
+        {
+            return Ok(None);
+        }
+        let system = self.system.as_ref().and_then(|owner| owner.upgrade())
+            .ok_or(QueryError::NotModelled(NotModelled(
+                "live permission owner unavailable")))?;
+        let full = system.check_permission_uncached(
+            "android.permission.INTERACT_ACROSS_USERS_FULL", pid, uid)
+            .map_err(QueryError::Original)?;
+        let partial = system.check_permission_uncached(
+            "android.permission.INTERACT_ACROSS_USERS", pid, uid)
+            .map_err(QueryError::Original)?;
+        Ok(Some((full, partial)))
+    }
+
     fn mutation(
         &self,
         call: &mut Call<'_>,
@@ -382,14 +410,19 @@ impl Service for PackageQueries {
                 if call.code==pm::GET_INSTALLED_APPLICATIONS {
                     let args=pm::GetInstalledApplications::read(&mut call.data).map_err(QueryError::Transport)?;
                     if call.data.remaining()!=0{return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));}
-                    match query.internal_installed_applications(args.flags,args.user_id,uid,false)? {
+                    let grants=self.live_list_cross_user_grants(
+                        &query,args.flags,args.user_id,call.sender_pid,uid)?;
+                    match query.internal_installed_applications_with_grants(
+                        args.flags,args.user_id,uid,false,grants)? {
                         Ok(items)=>{let slice=super::list_slice::Slice::new(process,"android.content.pm.ApplicationInfo",items);pm::write_get_installed_applications_reply(&mut reply,Some(&slice));},
                         Err(error)=>reply.write_exception(&error),
                     }
                 } else {
                     let args=pm::GetInstalledPackages::read(&mut call.data).map_err(QueryError::Transport)?;
                     if call.data.remaining()!=0{return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));}
-                    match query.installed_packages(args.flags,args.user_id)? {
+                    let grants=self.live_list_cross_user_grants(
+                        &query,args.flags,args.user_id,call.sender_pid,uid)?;
+                    match query.installed_packages_with_grants(args.flags,args.user_id,grants)? {
                         Ok(items)=>{let slice=super::list_slice::Slice::new(process,"android.content.pm.PackageInfo",items);pm::write_get_installed_packages_reply(&mut reply,Some(&slice));},
                         Err(error)=>reply.write_exception(&error),
                     }

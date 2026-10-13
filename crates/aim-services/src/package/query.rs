@@ -717,13 +717,19 @@ impl Query<'_> {
     }
 
     /// `updateFlagsForPackage` (and `updateFlagsForApplication`).
-    fn update_flags_for_package(&self, mut flags: i64, user: i32) -> Thrown<i64> {
+    fn update_flags_for_package(&self, flags: i64, user: i32) -> Thrown<i64> {
+        self.update_flags_for_package_with_grants(flags, user, None)
+    }
+
+    fn update_flags_for_package_with_grants(&self, mut flags: i64, user: i32,
+        live_cross_user_grants: Option<(bool, bool)>) -> Thrown<i64> {
         if flags & MATCH_ANY_USER != 0 {
-            if let Err(e) = self.enforce_cross_user(
+            if let Err(e) = self.enforce_cross_user_with_grants(
                 user,
                 true,
                 true,
                 "MATCH_ANY_USER flag requires INTERACT_ACROSS_USERS permission",
+                live_cross_user_grants,
             )? {
                 return Ok(Err(e));
             }
@@ -791,6 +797,17 @@ impl Query<'_> {
         recents: bool,
         message: &str,
     ) -> Thrown<()> {
+        self.enforce_cross_user_with_grants(user, same_user, recents, message, None)
+    }
+
+    fn enforce_cross_user_with_grants(
+        &self,
+        user: i32,
+        same_user: bool,
+        recents: bool,
+        message: &str,
+        live_cross_user_grants: Option<(bool, bool)>,
+    ) -> Thrown<()> {
         if user < 0 {
             return Ok(Err(Exception::illegal_argument(format!(
                 "Invalid userId {user}"
@@ -800,9 +817,14 @@ impl Query<'_> {
         if (!same_user && user == user_id(uid)) || matches!(app_id(uid), ROOT_UID | SYSTEM_UID) {
             return Ok(Ok(()));
         }
-        if self.uid_has_permission(uid, INTERACT_ACROSS_USERS_FULL)?
-            || self.uid_has_permission(uid, INTERACT_ACROSS_USERS)?
-        {
+        let (has_full, has_partial) = match live_cross_user_grants {
+            Some(grants) => grants,
+            None => (
+                self.uid_has_permission(uid, INTERACT_ACROSS_USERS_FULL)?,
+                self.uid_has_permission(uid, INTERACT_ACROSS_USERS)?,
+            ),
+        };
+        if has_full || has_partial {
             return Ok(Ok(()));
         }
         if apps_filter::is_isolated(uid) {
@@ -1839,16 +1861,23 @@ impl Query<'_> {
 
     /// `getInstalledPackages`.
     pub(crate) fn installed_packages(&self, flags: i64, user: i32) -> Thrown<Vec<PackageInfo>> {
+        self.installed_packages_with_grants(flags, user, None)
+    }
+
+    pub(crate) fn installed_packages_with_grants(&self, flags: i64, user: i32,
+        live_cross_user_grants: Option<(bool, bool)>) -> Thrown<Vec<PackageInfo>> {
         if apps_filter::instant_app_package_name(self.state, self.calling_uid)?.is_some()
             || self.user(user).is_none()
         {
             return Ok(Ok(Vec::new()));
         }
-        let flags = match self.update_flags_for_package(flags, user)? {
+        let flags = match self.update_flags_for_package_with_grants(
+            flags, user, live_cross_user_grants)? {
             Ok(f) => f,
             Err(e) => return Ok(Err(e)),
         };
-        if let Err(e) = self.enforce_cross_user(user, false, false, "get installed packages")? {
+        if let Err(e) = self.enforce_cross_user_with_grants(
+            user, false, false, "get installed packages", live_cross_user_grants)? {
             return Ok(Err(e));
         }
         let uninstalled = flags & MATCH_KNOWN_PACKAGES != 0;
@@ -1904,12 +1933,20 @@ impl Query<'_> {
     }
     pub(crate) fn internal_installed_applications(&self, flags: i64, user: i32, filter_uid: i32,
         force_allow_cross_user: bool) -> Thrown<Vec<ApplicationInfo>> {
+        self.internal_installed_applications_with_grants(
+            flags, user, filter_uid, force_allow_cross_user, None)
+    }
+
+    pub(crate) fn internal_installed_applications_with_grants(&self, flags: i64, user: i32,
+        filter_uid: i32, force_allow_cross_user: bool,
+        live_cross_user_grants: Option<(bool, bool)>) -> Thrown<Vec<ApplicationInfo>> {
         if apps_filter::instant_app_package_name(self.state, filter_uid)?.is_some()
             || self.user(user).is_none()
         {
             return Ok(Ok(Vec::new()));
         }
-        let flags = match self.update_flags_for_package(flags, user)? {
+        let flags = match self.update_flags_for_package_with_grants(
+            flags, user, live_cross_user_grants)? {
             Ok(f) => f,
             Err(e) => return Ok(Err(e)),
         };
@@ -1917,7 +1954,8 @@ impl Query<'_> {
         let apex = flags & MATCH_APEX != 0;
         let archived_only = !uninstalled && flags & MATCH_ARCHIVED_PACKAGES != 0;
         if !force_allow_cross_user {
-            if let Err(e) = self.enforce_cross_user(user, false, false, "get installed application info")? {
+            if let Err(e) = self.enforce_cross_user_with_grants(user, false, false,
+                "get installed application info", live_cross_user_grants)? {
                 return Ok(Err(e));
             }
         }

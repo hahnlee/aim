@@ -565,6 +565,45 @@ fn installed_packages_in_the_original_order() {
 }
 
 #[test]
+fn installed_lists_use_live_cross_user_grants() {
+    let mut captured_grant = state();
+    captured_grant.packages.get_mut(APP).unwrap().users.get_mut(&0).unwrap()
+        .granted_permissions.push(INTERACT_ACROSS_USERS.into());
+    let filter = AppsFilter::new(&captured_grant, &Default::default()).unwrap();
+    let query = Query { state: &captured_grant, filter: &filter, calling_uid: 10100 };
+    assert_eq!(
+        query.installed_packages_with_grants(0, 10, Some((false, false)))
+            .unwrap().unwrap_err().code,
+        EX_SECURITY
+    );
+    assert_eq!(
+        query.internal_installed_applications_with_grants(
+            0, 10, 10100, false, Some((false, false)))
+            .unwrap().unwrap_err().code,
+        EX_SECURITY
+    );
+
+    let captured_denial = state();
+    let filter = AppsFilter::new(&captured_denial, &Default::default()).unwrap();
+    let query = Query { state: &captured_denial, filter: &filter, calling_uid: 10100 };
+    assert!(query.installed_packages_with_grants(0, 10, Some((false, true)))
+        .unwrap().is_ok());
+    assert!(query.internal_installed_applications_with_grants(
+        0, 10, 10100, false, Some((false, true))).unwrap().is_ok());
+    assert_eq!(
+        query.installed_packages_with_grants(MATCH_ANY_USER, 0, Some((false, false)))
+            .unwrap_err(),
+        NotModelled("a cross-user call recents may make")
+    );
+    assert!(query.installed_packages_with_grants(0, 0, Some((false, false)))
+        .unwrap().is_ok());
+
+    let system = Query { state: &captured_denial, filter: &filter, calling_uid: 1000 };
+    assert!(system.installed_packages_with_grants(0, 10, Some((false, false)))
+        .unwrap().is_ok());
+}
+
+#[test]
 fn installed_applications_expose_force_queryable_package_across_users() {
     let mut state = state();
     state.packages.get_mut(APP).unwrap().users.get_mut(&0).unwrap()
