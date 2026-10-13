@@ -347,7 +347,7 @@ public final class NativePackageEffectsBridge extends IPackageMutationBridge.Stu
         encoded.add((int)(captureVersion >>> 32));
         encoded.add((int)captureVersion);
         for(int user:userIds) {
-            int[] values=lists.get(user); encoded.add(user);encoded.add(values==null?-1:values.length);
+            int[] values=lists==null?null:lists.get(user); encoded.add(user);encoded.add(values==null?-1:values.length);
             if(values!=null) for(int value:values) encoded.add(value);
         }
         return encoded.stream().mapToInt(Integer::intValue).toArray();
