@@ -43,6 +43,9 @@ mod package_runtime_creation;
 #[cfg(test)]
 #[path = "system_package_internal_usage_tests.rs"]
 mod internal_usage_tests;
+#[cfg(test)]
+#[path = "system_package_user_transition_tests.rs"]
+mod package_user_transition_tests;
 #[path = "system_verification.rs"]
 mod verification;
 #[path = "system_installer_confirmation.rs"]
@@ -382,6 +385,16 @@ impl PackageBootstrap {
             None => self.snapshots = Some(candidate),
         }
     }
+}
+
+fn rebase_created_user_scan(
+    base: &crate::package::scan_snapshot::Snapshot,
+    latest: &crate::package::scan_snapshot::Snapshot,
+    candidate: &mut crate::package::scan::SigningScan,
+) -> std::result::Result<Option<String>, String> {
+    if base.usage() != latest.usage() { return Ok(Some("usage owner changed".into())); }
+    crate::package::scan_snapshot::install_context::install_user_rebase_conflict(
+        base, latest, candidate, &std::collections::BTreeSet::new())
 }
 
 /// Told of a bridge attached, with its handle.
@@ -2567,17 +2580,45 @@ impl System {
         user: i32, created: bool, record: Option<crate::package::user_operations::UserRecord>,
     ) -> Result<Arc<crate::package::scan_snapshot::query_state::Capture>> {
         self.check_package_bootstrap(bridge)?;
-        let update = base.prepare_user_transition(scan, user, created, record, bridge).map_err(|error|
-            Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
-        let mut state = self.package_bootstrap.lock().unwrap();
-        let current = state.current.as_mut().filter(|current| Arc::ptr_eq(&current.bridge, bridge)
-            && current.queries.as_ref().is_some_and(|capture| Arc::ptr_eq(capture, base)))
-            .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "user transition base changed"))?;
-        current.publish_snapshot(update.store);
-        current.queries = Some(update.capture.clone());
-        if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
-        state.version = update.capture.scan().version();
-        Ok(update.capture)
+        let mut preparation_base = base.clone();
+        let mut candidate = scan;
+        // Query and component owners may publish while the original user owner
+        // is returning live permission state. Rebuild outside the publication
+        // lock, then retain an exact CAS at the point the generation changes.
+        for attempt in 0..3 {
+            let update = preparation_base.prepare_user_transition(candidate.clone(), user, created, record.clone(), bridge)
+                .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
+            let mut state = self.package_bootstrap.lock().unwrap();
+            let current = state.current.as_mut().filter(|current| Arc::ptr_eq(&current.bridge, bridge))
+                .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "user transition bootstrap changed"))?;
+            let published = current.queries.as_ref().ok_or_else(|| Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE, "user transition query owner unavailable"))?;
+            if Arc::ptr_eq(published, &preparation_base) {
+                current.publish_snapshot(update.store);
+                current.queries = Some(update.capture.clone());
+                if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
+                state.version = update.capture.scan().version();
+                return Ok(update.capture);
+            }
+            if attempt == 2 { return Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE, "user transition base kept changing")); }
+            let latest = published.clone();
+            drop(state);
+            if created {
+                if let Some(reason) = rebase_created_user_scan(preparation_base.scan(), latest.scan(), &mut candidate)
+                    .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        format!("user transition rebase: {error}")))? {
+                    return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        format!("user transition base changed: {reason}")));
+                }
+            } else if preparation_base.scan().owner() != latest.scan().owner()
+                || preparation_base.scan().usage() != latest.scan().usage() {
+                return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "removed user transition scan base changed"));
+            }
+            preparation_base = latest;
+        }
+        unreachable!()
     }
 
     pub(crate) fn native_package_has_launcher(&self, package: &str, user: i32, flags: i64) -> Result<bool> {
