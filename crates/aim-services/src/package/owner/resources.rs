@@ -50,6 +50,15 @@ impl CodeResources {
 
     pub fn clean(&self, code_path: &str, incremental: bool) -> Result<(), String> {
         let _install = self.system.package_install_guard();
+        self.clean_with_install_gate_held(code_path, incremental)
+    }
+
+    /// Cleanup for package mutations that already hold the shared install gate.
+    pub(crate) fn clean_with_install_gate_held(
+        &self,
+        code_path: &str,
+        incremental: bool,
+    ) -> Result<(), String> {
         let mut pending = self.pending_cleanup.lock().unwrap();
         clean(
             &self.data,
@@ -323,6 +332,45 @@ mod tests {
         }
         cleanup.join().unwrap();
         sdk.join().unwrap();
+        assert!(!apk.exists());
+        driver.release(process.proc_handle());
+    }
+
+    #[test]
+    fn cleanup_with_held_install_gate_does_not_reacquire_it() {
+        use aim_binder_driver::{Credentials, Device, Driver};
+        use std::{sync::mpsc, time::Duration};
+        let driver = Driver::new();
+        let process = LocalProcess::open(
+            &driver,
+            Device::Binder,
+            Credentials {
+                pid: 98002,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let system = System::new(process.clone(), &[]);
+        let data = Data::new();
+        fs::create_dir(data.0.join("app")).unwrap();
+        let apk = data.0.join("app/factory-update.apk");
+        fs::write(&apk, b"disposable code").unwrap();
+        let resources = Arc::new(CodeResources::with_system(
+            system.clone(),
+            data.0.clone(),
+            None,
+        ));
+        let (finished, done) = mpsc::channel();
+        let cleanup = std::thread::spawn(move || {
+            let _install = system.package_install_guard();
+            let result =
+                resources.clean_with_install_gate_held("/data/app/factory-update.apk", false);
+            finished.send(result).unwrap();
+        });
+        done.recv_timeout(Duration::from_secs(5))
+            .expect("cleanup reacquired the non-reentrant install gate")
+            .unwrap();
+        cleanup.join().unwrap();
         assert!(!apk.exists());
         driver.release(process.proc_handle());
     }

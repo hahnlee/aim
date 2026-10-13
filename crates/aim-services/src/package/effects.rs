@@ -82,9 +82,7 @@ impl Owner {
         let values=self.call(api::CAPTURE_POST_INSTALL_VISIBILITY,|p|api::CapturePostInstallVisibility{
             name:Some(setting.name.clone()),app_id:setting.uid_owner_id(),code_path:Some(setting.code_path.clone()),version:setting.version_code,users:Some(users.to_vec()),
         }.write(p),aim_service_aidl::read_int_array)?.ok_or_else(||Exception::new(EX_ILLEGAL_STATE,"original prior visibility reply null"))?;
-        if values.len()<3||values[0]!=0x56495331{return Err(Exception::new(EX_ILLEGAL_STATE,"original prior visibility capture header invalid"));}
-        let version=((values[1] as u32 as u64)<<32)|(values[2] as u32 as u64);
-        Ok((version,values[3..].to_vec()))
+        decode_visibility_capture(values)
     }
     pub fn post_install(&self, plan:&super::installer::post_install::Plan)->Result<(),Exception>{
         self.call(api::POST_INSTALL_PACKAGE,|p|api::PostInstallPackage{
@@ -139,6 +137,21 @@ impl Owner {
             _ => {}
         }
         Ok(())
+    }
+}
+fn decode_visibility_capture(values:Vec<i32>)->Result<(u64,Vec<i32>),Exception>{
+    if values.len()<3||values[0]!=0x56495332{return Err(Exception::new(EX_ILLEGAL_STATE,"original prior visibility capture header invalid"));}
+    let metadata=((values[1] as u32 as u64)<<32)|(values[2] as u32 as u64);
+    Ok((metadata,values[3..].to_vec()))
+}
+#[cfg(test)]
+mod visibility_capture_tests {
+    use super::*;
+    #[test]
+    fn header_carries_metadata_generation_and_rejects_the_snapshot_version_protocol(){
+        let(metadata,values)=decode_visibility_capture(vec![0x56495332,0x12345678,0x90abcdefu32 as i32,0,1,10000]).unwrap();
+        assert_eq!(metadata,0x1234567890abcdef);assert_eq!(values,[0,1,10000]);
+        assert!(decode_visibility_capture(vec![0x56495331,0,7]).is_err());
     }
 }
 fn transport(status: i32) -> Exception { Exception::new(EX_ILLEGAL_STATE, format!("package effects transport: {status}")) }

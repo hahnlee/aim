@@ -4,6 +4,8 @@ use super::{apps_filter, effects, info, model, query::Query, scan::SigningScan, 
 use aim_binder_host::parcel::{Exception, Reader, BAD_VALUE, EX_ILLEGAL_STATE};
 use aim_service_aidl::android_content_pm_ipackagemanager as pm;
 
+const INSTALL_PACKAGES: &str = "android.permission.INSTALL_PACKAGES";
+
 #[derive(Debug)]
 pub struct Request { pub target: Option<String>, pub installer: Option<String> }
 #[derive(Clone, Debug)]
@@ -17,7 +19,13 @@ impl Request {
     /// Invoke again against the current native capture after any intervening
     /// package/state change. The original records installer UID before its
     /// retry and retains that UID, so the caller keeps the first Plan's UID.
-    pub fn prepare(&self, query: &Query<'_>, effects: &effects::Owner) -> Result<Option<Plan>, Exception> {
+    pub fn prepare(
+        &self,
+        query: &Query<'_>,
+        effects: &effects::Owner,
+        pid: i32,
+        check_permission: impl FnOnce(&'static str, i32, i32) -> Result<bool, Exception>,
+    ) -> Result<Option<Plan>, Exception> {
         let uid = query.calling_uid;
         let user = apps_filter::user_id(uid);
         if apps_filter::instant_app_package_name(query.state, uid).map_err(missing)?.is_some() { return Ok(None); }
@@ -55,13 +63,8 @@ impl Request {
             if !same_current_signers(caller, old.signatures.as_ref()) {
                 return Err(Exception::security(format!("Caller does not have same cert as old installer package {}", old.name)));
             }
-        } else if !matches!(apps_filter::app_id(uid), 0 | 1000)
-            && !query.uid_has_permission(uid, "android.permission.INSTALL_PACKAGES").map_err(missing)? {
-            // This invokes original EventLog and the real PlatformCompat UID
-            // decision; a disabled compatibility change really returns silently.
-            if effects.require_installer_permission(uid)? {
-                return Err(Exception::security(format!("Neither user {uid} nor current process has android.permission.INSTALL_PACKAGES")));
-            }
+        } else if !authorize_missing_installer(pid, uid, check_permission,
+            |uid| effects.require_installer_permission(uid))? {
             return Ok(None);
         }
         let installer_uid = match self.installer.as_deref() {
@@ -72,8 +75,15 @@ impl Request {
     }
 }
 impl Plan {
-    pub fn reauthorize(&self, query: &Query<'_>, effects: &effects::Owner) -> Result<Option<Self>, Exception> {
-        Request { target: Some(self.target.clone()), installer: self.installer.clone() }.prepare(query, effects)
+    pub fn reauthorize(
+        &self,
+        query: &Query<'_>,
+        effects: &effects::Owner,
+        pid: i32,
+        check_permission: impl FnOnce(&'static str, i32, i32) -> Result<bool, Exception>,
+    ) -> Result<Option<Self>, Exception> {
+        Request { target: Some(self.target.clone()), installer: self.installer.clone() }
+            .prepare(query, effects, pid, check_permission)
             .map(|plan| plan.map(|mut plan| { plan.installer_uid = self.installer_uid; plan }))
     }
     pub fn apply_scan(&self, scan: &mut SigningScan) -> Result<(), String> {
@@ -113,4 +123,70 @@ fn same_current_signers(first: Option<&Signatures>, second: Option<&Signatures>)
         _ => false,
     }
 }
+fn authorize_missing_installer(
+    pid: i32,
+    uid: i32,
+    check_permission: impl FnOnce(&'static str, i32, i32) -> Result<bool, Exception>,
+    require_permission: impl FnOnce(i32) -> Result<bool, Exception>,
+) -> Result<bool, Exception> {
+    if matches!(apps_filter::app_id(uid), 0 | 1000) || check_permission(INSTALL_PACKAGES, pid, uid)? {
+        return Ok(true);
+    }
+    // This invokes original EventLog and the real PlatformCompat UID
+    // decision; a disabled compatibility change really returns silently.
+    if require_permission(uid)? {
+        Err(Exception::security(format!("Neither user {uid} nor current process has {INSTALL_PACKAGES}")))
+    } else {
+        Ok(false)
+    }
+}
 fn missing(error: apps_filter::NotModelled) -> Exception { Exception::new(EX_ILLEGAL_STATE, error.0) }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicUsize, Ordering}};
+
+    #[test]
+    fn live_grant_revoke_and_readopt_use_exact_binder_identity() {
+        let granted = AtomicBool::new(true);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let authorize = || authorize_missing_installer(731, 10_321, |permission, pid, uid| {
+            calls.lock().unwrap().push((permission.to_owned(), pid, uid));
+            Ok(granted.load(Ordering::SeqCst))
+        }, |_| Ok(true));
+
+        assert!(authorize().unwrap());
+        granted.store(false, Ordering::SeqCst);
+        assert_eq!(authorize().unwrap_err().code, aim_binder_host::parcel::EX_SECURITY);
+        granted.store(true, Ordering::SeqCst);
+        assert!(authorize().unwrap());
+        assert_eq!(&*calls.lock().unwrap(), &[
+            (INSTALL_PACKAGES.into(), 731, 10_321),
+            (INSTALL_PACKAGES.into(), 731, 10_321),
+            (INSTALL_PACKAGES.into(), 731, 10_321),
+        ]);
+    }
+
+    #[test]
+    fn cas_reauthorization_rechecks_live_permission() {
+        let granted = AtomicBool::new(true);
+        let checks = AtomicUsize::new(0);
+        let authorize = || authorize_missing_installer(44, 10_456, |permission, pid, uid| {
+            assert_eq!((permission, pid, uid), (INSTALL_PACKAGES, 44, 10_456));
+            checks.fetch_add(1, Ordering::SeqCst);
+            Ok(granted.load(Ordering::SeqCst))
+        }, |_| Ok(true));
+
+        assert!(authorize().unwrap(), "initial preparation accepts the live grant");
+        granted.store(false, Ordering::SeqCst);
+        assert_eq!(authorize().unwrap_err().code, aim_binder_host::parcel::EX_SECURITY,
+            "the retry must not retain the initial permission answer");
+        assert_eq!(checks.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn compatibility_disabled_denial_remains_a_silent_noop() {
+        assert!(!authorize_missing_installer(9, 10_789, |_, _, _| Ok(false), |_| Ok(false)).unwrap());
+    }
+}

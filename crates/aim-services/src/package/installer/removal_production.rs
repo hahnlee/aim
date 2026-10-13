@@ -208,7 +208,7 @@ impl Factory {
         }
         self.external.destroy_profiles(&active.name)?;
         self.resources
-            .clean(&active.code_path, false)
+            .clean_with_install_gate_held(&active.code_path, false)
             .map_err(fail)?;
         let domain = self
             .bridge

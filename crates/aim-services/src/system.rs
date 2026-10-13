@@ -2123,7 +2123,7 @@ impl System {
     }
 
     pub(crate) fn set_native_installer_attribution(
-        &self, request: crate::package::installer_attribution::Request, uid: i32,
+        self: &Arc<Self>, request: crate::package::installer_attribution::Request, pid: i32, uid: i32,
     ) -> Result<()> {
         let bridge = self.package_bootstrap()?;
         let effects = self.package_effects_owner(&bridge)?;
@@ -2135,9 +2135,10 @@ impl System {
             let resolution = resolver.resolution(capture.state()).map_err(|error| Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE, format!("installer attribution visibility: {error:?}")))?;
             let query = crate::package::query::Query { state: capture.state(), filter: &resolution.apps_filter, calling_uid: uid };
+            let check_permission = |permission, pid, uid| self.check_permission_uncached(permission, pid, uid);
             let plan = match &retained {
-                Some(plan) => plan.reauthorize(&query, &effects)?,
-                None => request.prepare(&query, &effects)?,
+                Some(plan) => plan.reauthorize(&query, &effects, pid, check_permission)?,
+                None => request.prepare(&query, &effects, pid, check_permission)?,
             };
             let Some(plan) = plan else { return Ok(()); };
             retained = Some(plan.clone());

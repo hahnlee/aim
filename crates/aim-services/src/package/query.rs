@@ -724,7 +724,8 @@ impl Query<'_> {
     fn update_flags_for_package_with_grants(&self, mut flags: i64, user: i32,
         live_cross_user_grants: Option<(bool, bool)>) -> Thrown<i64> {
         if flags & MATCH_ANY_USER != 0 {
-            let recents_may_skip = user != user_id(self.calling_uid);
+            let recents_may_skip = live_cross_user_grants.is_none()
+                && user != user_id(self.calling_uid);
             if let Err(e) = self.enforce_cross_user_with_grants(
                 user,
                 true,

@@ -590,11 +590,24 @@ fn installed_lists_use_live_cross_user_grants() {
         .unwrap().is_ok());
     assert!(query.internal_installed_applications_with_grants(
         0, 10, 10100, false, Some((false, true))).unwrap().is_ok());
-    assert_eq!(
-        query.installed_packages_with_grants(MATCH_ANY_USER, 0, Some((false, false)))
-            .unwrap().unwrap_err().code,
-        EX_SECURITY
-    );
+    for flags in [MATCH_ANY_USER, MATCH_KNOWN_PACKAGES] {
+        assert_eq!(
+            query.installed_packages_with_grants(flags, 10, Some((false, false)))
+                .unwrap().unwrap_err().code,
+            EX_SECURITY
+        );
+        assert_eq!(
+            query.internal_installed_applications_with_grants(
+                flags, 10, 10100, false, Some((false, false)))
+                .unwrap().unwrap_err().code,
+            EX_SECURITY
+        );
+        assert_eq!(
+            query.installed_packages_with_grants(flags, 0, Some((false, false)))
+                .unwrap().unwrap_err().code,
+            EX_SECURITY
+        );
+    }
     assert!(query.installed_packages_with_grants(0, 0, Some((false, false)))
         .unwrap().is_ok());
 
@@ -620,16 +633,28 @@ fn package_uid_and_gids_use_live_cross_user_grants() {
             .unwrap().unwrap_err().code,
         EX_SECURITY
     );
-    assert_eq!(
-        query.package_uid_with_grants(APP, MATCH_ANY_USER, 0, Some((false, false)))
-            .unwrap().unwrap_err().code,
-        EX_SECURITY
-    );
-    assert_eq!(
-        query.package_gids_with_grants(APP, MATCH_ANY_USER, 0, Some((false, false)))
-            .unwrap().unwrap_err().code,
-        EX_SECURITY
-    );
+    for flags in [MATCH_ANY_USER, MATCH_KNOWN_PACKAGES] {
+        assert_eq!(
+            query.package_uid_with_grants(APP, flags, 10, Some((false, false)))
+                .unwrap().unwrap_err().code,
+            EX_SECURITY
+        );
+        assert_eq!(
+            query.package_gids_with_grants(APP, flags, 10, Some((false, false)))
+                .unwrap().unwrap_err().code,
+            EX_SECURITY
+        );
+        assert_eq!(
+            query.package_uid_with_grants(APP, flags, 0, Some((false, false)))
+                .unwrap().unwrap_err().code,
+            EX_SECURITY
+        );
+        assert_eq!(
+            query.package_gids_with_grants(APP, flags, 0, Some((false, false)))
+                .unwrap().unwrap_err().code,
+            EX_SECURITY
+        );
+    }
 
     let captured_denial = state();
     let filter = AppsFilter::new(&captured_denial, &Default::default()).unwrap();
@@ -644,6 +669,18 @@ fn package_uid_and_gids_use_live_cross_user_grants() {
             .unwrap().unwrap(),
         Some(Vec::new())
     );
+    for flags in [MATCH_ANY_USER, MATCH_KNOWN_PACKAGES] {
+        assert_eq!(
+            query.package_uid_with_grants(APP, flags, 10, Some((false, true)))
+                .unwrap().unwrap(),
+            1010100
+        );
+        assert_eq!(
+            query.package_gids_with_grants(APP, flags, 10, Some((false, true)))
+                .unwrap().unwrap(),
+            Some(Vec::new())
+        );
+    }
 }
 
 #[test]

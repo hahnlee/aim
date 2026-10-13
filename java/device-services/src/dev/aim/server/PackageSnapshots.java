@@ -516,6 +516,7 @@ public final class PackageSnapshots {
         }
 
         public long getVersion() { checkClosed(); return data.version; }
+        public long getMetadataVersion() { checkClosed(); return data.metadataVersion; }
 
         public android.content.pm.ActivityInfo getNativeResolverActivity() {
             try {return endpoint().getNativeResolverActivity();}catch(RemoteException failure){throw failure.rethrowFromSystemServer();}

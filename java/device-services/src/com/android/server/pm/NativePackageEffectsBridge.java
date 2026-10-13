@@ -341,11 +341,11 @@ public final class NativePackageEffectsBridge extends IPackageMutationBridge.Stu
         if(previous.getAppId()!=appId||previous.getVersionCode()!=version||!Objects.equals(previous.getPathString(),codePath)) throw new IllegalStateException("prior visibility code/UID changed");
         SparseArray<int[]> lists=current.getVisibilityAllowLists(name,userIds);
         if (!(current instanceof NativeComputer)) throw new IllegalStateException("prior visibility requires native captured Computer");
-        long captureVersion=((NativeComputer)current).captureVersion();
+        long metadataVersion=((NativeComputer)current).captureMetadataVersion();
         ArrayList<Integer> encoded=new ArrayList<>();
-        encoded.add(0x56495331);
-        encoded.add((int)(captureVersion >>> 32));
-        encoded.add((int)captureVersion);
+        encoded.add(0x56495332);
+        encoded.add((int)(metadataVersion >>> 32));
+        encoded.add((int)metadataVersion);
         for(int user:userIds) {
             int[] values=lists==null?null:lists.get(user); encoded.add(user);encoded.add(values==null?-1:values.length);
             if(values!=null) for(int value:values) encoded.add(value);

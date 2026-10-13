@@ -511,7 +511,7 @@ impl Service for PackageQueries {
                 let system = self.system.as_ref().and_then(|owner| owner.upgrade())
                     .ok_or(QueryError::NotModelled(NotModelled("installer attribution system unavailable")))?;
                 let mut reply = Parcel::new();
-                match system.set_native_installer_attribution(request, uid) {
+                match system.set_native_installer_attribution(request, call.sender_pid, uid) {
                     Ok(()) => reply.write_no_exception(), Err(error) => reply.write_exception(&error),
                 }
                 return Ok(reply);
