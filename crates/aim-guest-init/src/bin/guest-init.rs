@@ -164,8 +164,13 @@ fn main() {
         }
     };
     let report = boot.run().clone();
-    // Detaches the data image; `exit` below would skip it.
-    drop(boot);
+    // A process generation can retain kernel mappings after its Rust owners
+    // have shut down. Its parent detaches after exit; on reboot, the next
+    // exec generation normally detaches the exact stale attachment first.
+    if let Err(error) = boot.handoff_data_detach() {
+        eprintln!("guest-init: DATA detach handoff: {error}");
+        std::process::exit(1);
+    }
     if !quiet {
         for diagnostic in &report.diagnostics {
             println!("diag: {diagnostic}");

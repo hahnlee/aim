@@ -230,6 +230,15 @@ impl DataImage {
         &self.image
     }
 
+    /// Transfers detach responsibility to the process owner. The caller
+    /// keeps this value alive until the rest of its boot state is dropped,
+    /// so the image lock is not released early. A reboot's next exec
+    /// generation finds and normally detaches this exact image in `attach`;
+    /// on exit, the parent owner does that after this process is gone.
+    pub fn handoff_detach(&mut self) -> Result<(), String> {
+        self.device.take().map(|_| ()).ok_or_else(|| format!("{}: no attached DATA image to hand off",self.image.display()))
+    }
+
     /// Detaches the image, compacting it first when it holds more than
     /// [`RECLAIM_THRESHOLD`] of freed space.
     pub fn detach(mut self) -> Result<(), String> {
@@ -458,6 +467,22 @@ mod tests {
     }
 
     #[test]
+    fn detach_handoff_keeps_the_image_lock_until_the_boot_owner_drops() {
+        let root=std::env::temp_dir().join(format!("aim-data-handoff-lock-{}",std::process::id()));
+        fs::create_dir(&root).unwrap();let lock_path=root.join("data.lock");
+        let lock=File::create(&lock_path).unwrap();
+        assert_eq!(unsafe{libc::flock(lock.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},0);
+        let mut data=DataImage{dir:root.join("data"),image:root.join("data.asif"),device:Some("/dev/not-a-device".into()),_lock:lock};
+        data.handoff_detach().unwrap();assert!(data.device.is_none());
+        assert!(data.handoff_detach().unwrap_err().contains("no attached DATA image"));
+        let contender=File::open(&lock_path).unwrap();
+        assert_eq!(unsafe{libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},-1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(),Some(libc::EWOULDBLOCK));
+        drop(data);assert_eq!(unsafe{libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     #[ignore = "creates and attaches one owned disposable APFS data image"]
     fn readonly_template_clone_is_private_writable_and_preserves_source() {
         use std::os::unix::fs::{MetadataExt,PermissionsExt};
@@ -483,6 +508,21 @@ mod tests {
         assert_eq!(Sha256::digest(fs::read(&template).unwrap()),source_hash);
         let after=fs::metadata(&template).unwrap();
         assert_eq!((after.dev(),after.ino(),after.permissions().mode()),(source_metadata.dev(),source_metadata.ino(),source_metadata.permissions().mode()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "creates and attaches one owned disposable APFS data image"]
+    fn detach_handoff_keeps_the_exact_attachment_until_owner_references_close() {
+        let root=std::env::temp_dir().join(format!("aim-data-handoff-{}",std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let dir=root.join("data");let mut data=DataImage::attach(&dir,None).unwrap();
+        let image=data.image().to_path_buf();let device=data.device.clone().unwrap();
+        let file_path=data.dir().join("owned-reference");fs::write(&file_path,b"actual owner reference").unwrap();
+        let reference=File::open(&file_path).unwrap();data.handoff_detach().unwrap();drop(data);
+        assert!(disk::attachments_of(&image).unwrap().iter().any(|attachment|attachment.device==device));
+        drop(reference);disk::detach(&device,PATIENCE).unwrap();
+        assert!(disk::attachments_of(&image).unwrap().iter().all(|attachment|attachment.device!=device));
         fs::remove_dir_all(root).unwrap();
     }
 

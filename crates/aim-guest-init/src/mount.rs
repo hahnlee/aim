@@ -112,6 +112,17 @@ impl DataMount {
         }
         out
     }
+
+    /// Leaves the attachment to the process owner after this boot has
+    /// stopped all guest and native owners. Detaching inside guest-init can
+    /// still be rejected by process-generation mappings which only retire at
+    /// exec or exit. The next exec generation, or aimctl after exit, performs
+    /// the normal exact-image detach.
+    pub fn handoff_detach(&mut self) -> Result<(), String> {
+        if self.pending.is_some() { return Err("DATA detach handoff before mount".into()); }
+        if let Some(image) = self.image.as_mut() { image.handoff_detach()?; }
+        Ok(())
+    }
 }
 
 impl Drop for DataMount {

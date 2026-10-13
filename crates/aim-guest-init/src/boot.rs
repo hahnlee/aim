@@ -895,6 +895,13 @@ impl Boot {
         self.props.clone()
     }
 
+    /// Hands the DATA attachment to the process owner after `run` has
+    /// completed its child and native-owner shutdown. The owner detaches it
+    /// after this process generation has retired its remaining mappings.
+    pub fn handoff_data_detach(&mut self) -> Result<(), String> {
+        self.data.borrow_mut().handoff_detach()
+    }
+
     /// Hands the executor's queued changes to the action manager.
     fn pump_outbox(&mut self) {
         while let Some(outgoing) = self.executor.outbox.pop_front() {
