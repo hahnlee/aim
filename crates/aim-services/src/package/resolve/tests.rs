@@ -425,6 +425,62 @@ fn reports_what_is_not_modelled() {
     );
 }
 
+#[test]
+fn independent_secondary_user_queries_stay_local() {
+    let mut state = (*state()).clone();
+    state.users.get_mut(&0).unwrap().profile_group_id = -10_000;
+    state.users.insert(
+        10,
+        User {
+            id: 10,
+            profile_group_id: -10_000,
+            unlocking_or_unlocked: true,
+            ..User::default()
+        },
+    );
+    for package in state.packages.values_mut() {
+        package.users.insert(10, package.users[&0].clone());
+    }
+    let resolution = Resolution::new(Arc::new(state), &Default::default()).unwrap();
+    let found = resolution
+        .query_intent_activities(&view(None, None), Some("image/png"), 0, 10, SYSTEM_UID)
+        .unwrap();
+    assert_eq!(
+        names(&found),
+        ["c.high.Open", "a.viewer.Image", "b.gallery.Open"]
+    );
+}
+
+#[test]
+fn matching_cross_profile_route_stays_explicitly_unmodelled() {
+    let mut state = (*state()).clone();
+    state.users.get_mut(&0).unwrap().restrictions = Some(br#"<package-restrictions><crossProfile-intent-filters>
+        <item targetUserId="10"><filter><action name="android.intent.action.VIEW" />
+        <cat name="android.intent.category.DEFAULT" /><type name="image/*" /></filter></item>
+        </crossProfile-intent-filters></package-restrictions>"#.to_vec());
+    state.users.insert(
+        10,
+        User {
+            id: 10,
+            profile_group_id: 0,
+            ..User::default()
+        },
+    );
+    let resolution = Resolution::new(Arc::new(state), &Default::default()).unwrap();
+    assert_eq!(
+        resolution.query_intent_activities(
+            &view(None, None),
+            Some("image/png"),
+            MATCH_DEFAULT_ONLY,
+            0,
+            SYSTEM_UID
+        ),
+        Err(ResolutionError::NotModelled(NotModelled(
+            "cross-profile resolution"
+        )))
+    );
+}
+
 /// A reply decodes field by field, every byte read.
 #[test]
 fn decodes_its_replies() {

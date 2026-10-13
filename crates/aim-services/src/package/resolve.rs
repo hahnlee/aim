@@ -249,12 +249,35 @@ impl Resolution {
         self.preferred.get(&user)
     }
 
-    /// The model's limits: other profiles' results.
-    fn single_profile(&self, user: i32) -> Result<()> {
-        if self.state.users.len() > 1 {
+    /// Another independent Android user does not participate in this user's
+    /// resolution. Only an applicable cross-profile route needs the profile
+    /// result combiner that is not modelled yet.
+    fn require_local_resolution(
+        &self,
+        intent: &Intent,
+        resolved_type: Option<&str>,
+        user: i32,
+    ) -> Result<()> {
+        debug_assert!(self.user_exists(user));
+        if let Some(owner) = self.preferred(user) {
+            let matches = preferred::query(&owner.cross_profile, intent, resolved_type, false)
+                .map_err(ResolutionError::UriMatching)?;
+            if !matches.is_empty() {
+                return Err(NotModelled("cross-profile resolution").into());
+            }
+        }
+        // A profile may forward approved web links to its parent without an
+        // explicit filter. Full secondary users have no such path.
+        const USER_FLAG_PROFILE: i32 = 0x1000;
+        if intent.has_web_uri()
+            && self
+                .state
+                .users
+                .get(&user)
+                .is_some_and(|source| source.flags & USER_FLAG_PROFILE != 0)
+        {
             return Err(NotModelled("cross-profile resolution").into());
         }
-        debug_assert!(self.user_exists(user));
         Ok(())
     }
 
@@ -387,7 +410,7 @@ impl Resolution {
         user: i32,
         package: Option<&str>,
     ) -> Result<Vec<ResolveInfo>> {
-        self.single_profile(user)?;
+        self.require_local_resolution(intent, resolved_type, user)?;
         let mut result = Vec::new();
         match package {
             None => {
