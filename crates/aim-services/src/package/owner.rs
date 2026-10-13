@@ -404,9 +404,6 @@ impl Store {
         package: &str,
         user: u32,
     ) -> Result<bool, WriteError> {
-        if self.unread_restrictions.contains(&user) {
-            return Err(WriteError::before("package restrictions were not restored by the settings continuation"));
-        }
         if self
             .state
             .settings
@@ -415,6 +412,16 @@ impl Store {
             .any(|p| p.name == package)
         {
             return Err(WriteError::before("package setting still exists"));
+        }
+        if !self.state.users.iter().any(|(id, _)| *id == user) {
+            return Err(WriteError::before(format!("unknown user {user}")));
+        }
+        // A newly registered user has no parsed restriction document until
+        // its complete initial writer runs. That writer uses the current scan,
+        // where the globally removed setting is already absent, so there is no
+        // incremental per-user entry to persist during this cleanup.
+        if self.unread_restrictions.contains(&user) {
+            return Ok(false);
         }
         let original = self
             .restrictions

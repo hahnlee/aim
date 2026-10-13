@@ -567,6 +567,56 @@ fn removed_setting_persistence_preserves_signer_references_sources_and_other_use
 }
 
 #[test]
+fn removed_setting_cleanup_defers_an_unread_new_user_to_its_complete_initial_write() {
+    let data = Data::new();
+    let restriction = data.settings();
+    fs::write(
+        data.0.join("system/packages.xml"),
+        b"<packages><package name='store' codePath='/data/app/store' userId='10100'/><package name='app' codePath='/data/app/app' userId='10101'/></packages>",
+    )
+    .unwrap();
+    fs::write(
+        restriction,
+        b"<package-restrictions><pkg name='store'/><pkg name='app'/></package-restrictions>",
+    )
+    .unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    store.register_package_user(10).unwrap();
+
+    let mut desired = store.state().settings.clone();
+    desired.packages.retain(|package| package.name != "store");
+    store
+        .commit_removed_package_setting(&desired, "store")
+        .unwrap();
+
+    assert!(!store
+        .commit_removed_package_restrictions("store", 10)
+        .unwrap());
+    let path = data
+        .0
+        .join("system/users/10/package-restrictions.xml");
+    assert!(!path.exists());
+
+    let initial = aim_android_xml::read(
+        b"<package-restrictions><pkg name='app'/></package-restrictions>",
+    )
+    .unwrap();
+    store.commit_initial_restrictions(10, initial).unwrap();
+    let restored = Restrictions::parse(
+        &aim_android_xml::read(&fs::read(path).unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        restored
+            .packages
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["app"]
+    );
+}
+
+#[test]
 fn removed_setting_writer_accepts_live_installer_registry_history_and_preserves_unknown_groups() {
     let root = aim_android_xml::read(b"<packages><package name='store' codePath='/data/app/store' userId='10100'/><package name='app' codePath='/data/app/app' userId='10101' updateOwner='store' installerAttributionTag='tag'/><shared-user userId='10199'><future-group/></shared-user></packages>").unwrap();
     let original = super::super::settings::Settings::parse(&root).unwrap();
