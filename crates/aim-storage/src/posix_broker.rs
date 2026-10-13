@@ -1,7 +1,7 @@
 //! Native controller for process-owned POSIX locks (#1189).
 //! Only native process admission registers owners; Mach request payloads cannot.
 use crate::{posix_control::{Client,Endpoint,Frame,Operation,Owner,Request},process_namespace::ProcessIdentity};
-use std::{collections::BTreeMap,io,path::PathBuf,process::{Child,Command,Stdio},sync::{Arc,Mutex,atomic::{AtomicBool,AtomicU64,Ordering}},thread,time::{Duration,Instant}};
+use std::{collections::BTreeMap,io,path::PathBuf,process::{Child,Command},sync::{Arc,Mutex,atomic::{AtomicBool,AtomicU64,Ordering}},thread,time::{Duration,Instant}};
 fn error(code:i32)->io::Error{io::Error::from_raw_os_error(code)}
 type Key=(i32,u64,u64);
 #[derive(Clone,Copy,Debug)]
@@ -38,13 +38,13 @@ fn admission_failure(stage:&str,actor:ProcessIdentity,failure:io::Error)->io::Er
 }
 fn spawn_failure(config:&Config,owner:Owner,controller:ProcessIdentity,failure:io::Error)->io::Error {
  // Snapshot only: closed stdio is legal and these numbers are not ownership proofs.
- // The command supplies null stdin and inherits stdout/stderr. Never reopen or retry here.
+ // The holder installs null stdin after exec and inherits stdout/stderr. Never reopen or retry here.
  for fd in 0..3 {
   let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};
   let flags_errno=if flags<0{io::Error::last_os_error().raw_os_error()}else{None};
   let access=unsafe{libc::fcntl(fd,libc::F_GETFL)};
   let access_errno=if access<0{io::Error::last_os_error().raw_os_error()}else{None};
-  admission_diagnostic(format_args!("[posix-owner] stage=holder-command-spawn-stdio controller={controller:?} actor={:?} fd={fd} getfd={flags} getfd_errno={flags_errno:?} getfl={access} getfl_errno={access_errno:?} stdin=null stdout=inherit stderr=inherit",owner.process));
+  admission_diagnostic(format_args!("[posix-owner] stage=holder-command-spawn-stdio controller={controller:?} actor={:?} fd={fd} getfd={flags} getfd_errno={flags_errno:?} getfl={access} getfl_errno={access_errno:?} stdin=inherit stdout=inherit stderr=inherit",owner.process));
  }
  admission_diagnostic(format_args!("[posix-owner] stage=holder-command-spawn-context controller={controller:?} actor={:?} executable={}",owner.process,config.holder.display()));
  admission_failure("holder-command-spawn",owner.process,failure)
@@ -81,7 +81,7 @@ struct Holder {owner:Owner,process:ProcessIdentity,client:Client,child:Mutex<Opt
 impl Holder {
  fn spawn(config:&Config,owner:Owner,controller:ProcessIdentity)->io::Result<Arc<Self>>{
   let name=format!("com.aim.posix-holder.{}.{}.{}",controller.host_pid,controller.start_microseconds,NEXT.fetch_add(1,Ordering::Relaxed));
-  let mut child=Command::new(&config.holder).args(["--service-name",&name,"--controller-pid",&controller.host_pid.to_string(),"--controller-seconds",&controller.start_seconds.to_string(),"--controller-microseconds",&controller.start_microseconds.to_string()]).stdin(Stdio::null()).spawn().map_err(|failure|spawn_failure(config,owner,controller,failure))?;
+  let mut child=Command::new(&config.holder).args(["--service-name",&name,"--controller-pid",&controller.host_pid.to_string(),"--controller-seconds",&controller.start_seconds.to_string(),"--controller-microseconds",&controller.start_microseconds.to_string()]).spawn().map_err(|failure|spawn_failure(config,owner,controller,failure))?;
   let result=(||{
    let process=ProcessIdentity::running(child.id()as i32).map_err(|failure|admission_failure("holder-running-pid",owner.process,failure))?;let deadline=Instant::now()+config.startup_timeout;
    let client=loop{match Client::lookup(&name){Ok(client)=>break client,Err(failure)if failure.raw_os_error()==Some(libc::ENOENT)=>{if child.try_wait().map_err(|failure|admission_failure("holder-try-wait",owner.process,failure))?.is_some(){return Err(admission_failure("holder-exited-before-lookup",owner.process,error(libc::ECHILD)));}if Instant::now()>=deadline{return Err(admission_failure("holder-lookup-timeout",owner.process,error(libc::ETIMEDOUT)));}thread::sleep(Duration::from_millis(5));},Err(failure)=>return Err(admission_failure("holder-client-lookup",owner.process,failure))}};
@@ -356,7 +356,7 @@ mod diagnostics_tests {
   assert_eq!(text.lines().filter(|line|line.starts_with(&prefix)).count(),1,"{text}");
   assert!(text.contains("host_errno=Some(9)"),"{text}");assert!(text.contains(&format!("actor={actual:?}")),"{text}");
   for fd in 0..3{assert_eq!(text.lines().filter(|line|line.contains("stage=holder-command-spawn-stdio ")&&line.contains(&format!(" fd={fd} "))).count(),1,"{text}");}
-  assert!(text.contains("stdin=null stdout=inherit stderr=inherit"),"{text}");
+  assert!(text.contains("stdin=inherit stdout=inherit stderr=inherit"),"{text}");
   // fd2 is our capture alias here, not an unowned inherited descriptor.
   assert_eq!(unsafe{libc::close(2)},0);
   let closed=std::panic::catch_unwind(||spawn_failure(&config,owner,actual,error(returned))).unwrap();
