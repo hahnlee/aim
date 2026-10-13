@@ -29,6 +29,7 @@ public final class PackageMigrationPolicyOracle {
                 verifyDeniedQueryOwners();
                 System.out.println("MIGRATION_POLICY_DENIED");
             } else {
+                com.android.server.pm.InstallerPermissionCompatOracle.main(args);
                 System.err.println("MIGRATION_POLICY_MARSHALL");
                 byte[] bytes = reply.marshall();
                 System.err.println("MIGRATION_POLICY_EXCEPTION");

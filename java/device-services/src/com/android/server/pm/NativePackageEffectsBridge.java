@@ -106,6 +106,20 @@ public final class NativePackageEffectsBridge extends IPackageMutationBridge.Stu
         long identity = Binder.clearCallingIdentity();
         try { action.run(); } finally { Binder.restoreCallingIdentity(identity); }
     }
+    static boolean isInstallerPermissionRequired(Computer computer,
+            com.android.internal.compat.IPlatformCompat compat, int callingUid, int user)
+            throws RemoteException {
+        // Keep UID resolution on the same native capture instead of making
+        // PlatformCompat re-enter the displaced public package manager.
+        String[] packages = computer.getPackagesForUid(callingUid);
+        if (packages == null || packages.length == 0) return true;
+        boolean required = true;
+        for (String name : packages) {
+            required &= compat.isChangeEnabled(150857253L,
+                    computer.getApplicationInfo(name, 0, user));
+        }
+        return required;
+    }
     @Override public boolean requireInstallerPermission(int callingUid) {
         enforceNative();
         android.util.EventLog.writeEvent(0x534e4554, "150857253", callingUid, "");
@@ -113,7 +127,8 @@ public final class NativePackageEffectsBridge extends IPackageMutationBridge.Stu
         try {
             var compat = com.android.internal.compat.IPlatformCompat.Stub.asInterface(ServiceManager.getService("platform_compat"));
             if (compat == null) throw new IllegalStateException("missing PlatformCompat");
-            return compat.isChangeEnabledByUid(150857253L, callingUid);
+            return isInstallerPermissionRequired(snapshot(), compat, callingUid,
+                    UserHandle.getUserId(callingUid));
         } catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
         finally { Binder.restoreCallingIdentity(identity); }
     }

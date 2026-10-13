@@ -129,6 +129,10 @@ fn compile_original_parcel_oracle(dir: &std::path::Path, jdk: &std::path::Path, 
         )
         .arg(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/InstallerPermissionCompatOracle.java"),
+        )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/CapturedSharedUserOracle.java"),
         )
         .arg("-classpath")
