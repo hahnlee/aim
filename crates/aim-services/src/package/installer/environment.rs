@@ -31,6 +31,7 @@ pub type AppDataCreate =
 pub type AppDataFlags = Arc<dyn Fn(i32) -> Result<i32, Exception> + Send + Sync>;
 pub type AppDataRollback = Arc<dyn Fn(&str, i32, i64) -> Result<(), Exception> + Send + Sync>;
 pub type PostInstallUsers = Arc<dyn Fn() -> Result<Vec<i32>, Exception> + Send + Sync>;
+pub type InstallUsers = Arc<dyn Fn(&Arc<Snapshot>) -> Result<Vec<scan::User>, Exception> + Send + Sync>;
 pub type CodeCacheClear = Arc<dyn Fn(&str, &[i32]) -> Result<(), Exception> + Send + Sync>;
 pub type AppDataCommit = Arc<dyn Fn(&str, i32, i64) -> Result<(), Exception> + Send + Sync>;
 pub type RuntimePrepare =
@@ -55,6 +56,7 @@ pub struct Config {
     pub apks: Arc<Apks>,
     pub snapshots: Arc<Store>,
     pub users: Vec<scan::User>,
+    pub install_users: InstallUsers,
     pub build_debuggable: bool,
     pub cross_user_suspensions: bool,
     pub factory_test: bool,
@@ -100,9 +102,7 @@ impl Owner {
         self.config.clone()
     }
     pub fn new(config: Config) -> Result<Arc<Self>, String> {
-        if config.users.is_empty() || config.users.iter().any(|user| user.id < 0) {
-            return Err("Installation users are unresolved".into());
-        }
+        current_install_users(&config, &config.snapshots.capture()).map_err(|error| error.message)?;
         let data = fs::canonicalize(&config.data).map_err(|error| error.to_string())?;
         if !data.is_dir()
             || config.directory_inode.uid.is_none()
@@ -136,6 +136,7 @@ struct Reserved {
     config: Arc<Config>,
     members: Vec<Member>,
     base: Arc<Snapshot>,
+    users: Vec<scan::User>,
     created: Mutex<Vec<(String, i32, i64)>>,
     committed: AtomicBool,
     commit_errors: Mutex<Vec<Exception>>,
@@ -147,6 +148,58 @@ fn failure(status: i32, message: impl ToString) -> Failure {
         legacy_status: status,
         committed: false,
         message: message.to_string(),
+    }
+}
+pub(super) fn current_install_users(
+    config: &Config,
+    base: &Arc<Snapshot>,
+) -> Result<Vec<scan::User>, Failure> {
+    let users = (config.install_users)(base).map_err(|error| failure(-110, error.message))?;
+    let expected = base
+        .owner()
+        .legacy_permission_users()
+        .map_err(|error| failure(-110, format!("Installation permission users: {error}")))?;
+    validate_install_users(users, expected)
+}
+fn validate_install_users(
+    users: Vec<scan::User>,
+    expected: &[i32],
+) -> Result<Vec<scan::User>, Failure> {
+    let ids = users.iter().map(|user| user.id).collect::<Vec<_>>();
+    if users.is_empty()
+        || ids.iter().any(|id| *id < 0)
+        || ids.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(failure(-110, "Installation users are unresolved"));
+    }
+    if ids != expected {
+        return Err(failure(
+            -110,
+            "Installation user inventory differs from permission owner",
+        ));
+    }
+    Ok(users)
+}
+
+#[cfg(test)]
+mod install_user_tests {
+    use super::*;
+    #[test]
+    fn install_reservation_requires_current_permission_user_inventory() {
+        let user = |id| scan::User {
+            id,
+            pre_created: false,
+            adb_install_disallowed: false,
+        };
+        assert_eq!(
+            validate_install_users(vec![user(0), user(10)], &[0, 10]).unwrap(),
+            vec![user(0), user(10)]
+        );
+        let error = validate_install_users(vec![user(0)], &[0, 10]).unwrap_err();
+        assert_eq!(
+            error.message,
+            "Installation user inventory differs from permission owner"
+        );
     }
 }
 fn token() -> String {
@@ -283,10 +336,12 @@ impl pipeline::Environment for Owner {
                 return Err(failure(-110,format!("Installation base owner changed: {conflict}")));
             }
         }
+        let users = current_install_users(&self.config, base)?;
         let mut reserved = Reserved {
             config: self.config.clone(),
             members: Vec::new(),
             base: base.clone(),
+            users,
             created: Mutex::new(Vec::new()),
             committed: AtomicBool::new(false),
             commit_errors: Mutex::new(Vec::new()),
@@ -532,7 +587,7 @@ impl pipeline::Reservation for Reserved {
             .collect()
     }
     fn users(&self) -> &[scan::User] {
-        &self.config.users
+        &self.users
     }
     fn build_debuggable(&self) -> bool {
         self.config.build_debuggable
@@ -902,6 +957,21 @@ pub(super) fn committed_fault_reservation(config:Config,base:Arc<Snapshot>,creat
 }
 
 #[cfg(test)]
-pub(super) fn committed_fault_reservation_from_owner(owner:&Arc<Owner>,base:Arc<Snapshot>,created:Vec<(String,i32,i64)>)->Box<dyn pipeline::Reservation>{
-    Box::new(Reserved{config:owner.config.clone(),members:vec![],base,created:Mutex::new(created),committed:AtomicBool::new(false),commit_errors:Mutex::new(vec![]),errors:owner.errors.clone(),pending:owner.pending.clone()})
+pub(super) fn committed_fault_reservation_from_owner(
+    owner: &Arc<Owner>,
+    base: Arc<Snapshot>,
+    created: Vec<(String, i32, i64)>,
+) -> Box<dyn pipeline::Reservation> {
+    let users = current_install_users(&owner.config, &base).unwrap();
+    Box::new(Reserved {
+        config: owner.config.clone(),
+        members: vec![],
+        base,
+        users,
+        created: Mutex::new(created),
+        committed: AtomicBool::new(false),
+        commit_errors: Mutex::new(vec![]),
+        errors: owner.errors.clone(),
+        pending: owner.pending.clone(),
+    })
 }

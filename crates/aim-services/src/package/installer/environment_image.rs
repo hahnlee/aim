@@ -135,6 +135,7 @@ impl ImageInputs {
             apks: self.apks,
             snapshots: services.snapshots,
             users: services.users,
+            install_users: services.install_users,
             build_debuggable: services.build_debuggable,
             cross_user_suspensions: services.cross_user_suspensions,
             factory_test: services.factory_test,
@@ -173,6 +174,7 @@ impl ImageInputs {
 pub struct Services {
     pub snapshots: Arc<crate::package::scan_snapshot::Store>,
     pub users: Vec<scan::User>,
+    pub install_users: environment::InstallUsers,
     pub build_debuggable: bool,
     pub cross_user_suspensions: bool,
     pub factory_test: bool,

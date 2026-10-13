@@ -214,6 +214,11 @@ impl Factory {
             .bridge
             .new_domain_id()
             .map_err(|error| fail(format!("Factory domain identity: {error:?}")))?;
+        let install_users = crate::package::installer::environment::current_install_users(
+            &self.image,
+            &base,
+        )
+        .map_err(|error| fail(error.message))?;
         let mut next = base.owner().clone();
         next.withdraw_for_live_factory(&active.name).map_err(fail)?;
         let restored = next
@@ -255,7 +260,7 @@ impl Factory {
                 &code,
                 update,
                 &saved,
-                Some(&self.image.users),
+                Some(&install_users),
                 None,
                 &self.image.apks,
                 scan::ScanMetadataCompletion {
@@ -362,9 +367,7 @@ impl Factory {
                     .map_err(fail)?;
             }
         }
-        let users = self
-            .image
-            .users
+        let users = install_users
             .iter()
             .map(|user| user.id as u32)
             .collect::<Vec<_>>();
@@ -408,7 +411,7 @@ impl Factory {
         data.commit()?;
         self.external.apply_permissions(permission, true, false)?;
         let mut effects = vec![preferred];
-        for user in &self.image.users {
+        for user in &install_users {
             if snapshot
                 .owner()
                 .scanned_user_states(&active.name)

@@ -48,12 +48,30 @@ impl System {
                     .ok_or_else(|| environment_error("environment native capture unavailable"))?,
             )
         };
-        let users = capture
+        let initial_users = capture
             .state()
             .scan_users
             .as_ref()
             .and_then(|owner| owner.users.clone())
             .ok_or_else(|| environment_error("environment actual scan users unavailable"))?;
+        let user_system = Arc::downgrade(self);
+        let user_bridge = bridge.clone();
+        let users: environment::InstallUsers = Arc::new(move |base| {
+            let system = user_system
+                .upgrade()
+                .ok_or_else(|| environment_error("install user System stopped"))?;
+            system.check_package_bootstrap(&user_bridge)?;
+            let capture = system.capture_package_queries()?;
+            if !Arc::ptr_eq(capture.scan(), base) {
+                return Err(environment_error("install user snapshot changed"));
+            }
+            capture
+                .state()
+                .scan_users
+                .as_ref()
+                .and_then(|owner| owner.users.clone())
+                .ok_or_else(|| environment_error("environment actual scan users unavailable"))
+        });
         let cross_user_suspensions = capture.context().cross_user_suspensions;
         let weak = Arc::downgrade(self);
         let retained = bridge.clone();
@@ -170,7 +188,8 @@ impl System {
         .map_err(environment_error)?;
         let mut config = image_inputs.configuration(environment_image::Services {
             snapshots,
-            users,
+            users: initial_users,
+            install_users: users,
             build_debuggable,
             cross_user_suspensions,
             factory_test: boot.factory_test,

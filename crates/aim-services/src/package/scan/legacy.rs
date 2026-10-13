@@ -16,6 +16,14 @@ pub(super) struct Assignments {
 }
 
 impl SigningScan {
+    pub(crate) fn legacy_permission_users(&self) -> Result<&[i32], String> {
+        self.validate_legacy_permissions()?;
+        Ok(&self
+            .legacy_permissions
+            .as_ref()
+            .ok_or("legacy permission owner unavailable")?
+            .users)
+    }
     pub fn installed_permission_receipt_uids(&self)->Result<&std::collections::BTreeSet<i32>,String>{
         self.validate_legacy_permissions()?;
         Ok(&self.legacy_permissions.as_ref().ok_or("legacy permission owner unavailable")?.installed_receipt)
