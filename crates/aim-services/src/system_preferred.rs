@@ -49,16 +49,21 @@ impl System {
             .and_then(|current| current.persistence.clone())
             .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
                 "preferred domain disk owner unavailable"))?;
-        let mut disk = persistence.lock().unwrap();
-        let capture = self.capture_package_queries()?;
-        let mut domains = capture.domains().ok_or_else(|| Exception::new(
-            aim_binder_host::parcel::EX_ILLEGAL_STATE, "preferred domain owner unavailable"))?
-            .owner().clone();
-        domains.clear_user(user);
-        let update = capture.prepare_domain_update(domains).map_err(|error|
-            Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
-        self.commit_package_domains(bridge, update, &mut disk).map(|_| ())
-            .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string()))
+        loop {
+            let capture = self.capture_package_queries()?;
+            let mut domains = capture.domains().ok_or_else(|| Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE, "preferred domain owner unavailable"))?
+                .owner().clone();
+            domains.clear_user(user);
+            let update = capture.prepare_domain_update(domains).map_err(|error|
+                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
+            match self.commit_package_domains_if_current(bridge, update, &mut persistence.lock().unwrap()) {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) => continue,
+                Err(error) => return Err(Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string())),
+            }
+        }
     }
 
     pub fn install_package_preferred(

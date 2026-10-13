@@ -76,11 +76,17 @@ pub fn create(system: &Arc<System>, bridge: &Arc<Bridge>, disk: Arc<Mutex<Store>
         clear_domain_user: Box::new(move |user| {
             let system = domain_system.upgrade().ok_or_else(|| error("native domain user system stopped"))?;
             system.check_package_bootstrap(&domain_bridge)?;
-            let capture = system.capture_package_queries()?;
-            let mut owner = capture.domains().ok_or_else(|| error("native domain owner absent"))?.owner().clone();
-            owner.clear_user(user);
-            let update = capture.prepare_domain_update(owner).map_err(error)?;
-            system.commit_package_domains(&domain_bridge, update, &mut domain_disk.lock().unwrap()).map(|_| ()).map_err(|cause|error(format!("Native domain user commit committed={}: {}",cause.committed,cause.message)))
+            loop {
+                let capture = system.capture_package_queries()?;
+                let mut owner = capture.domains().ok_or_else(|| error("native domain owner absent"))?.owner().clone();
+                owner.clear_user(user);
+                let update = capture.prepare_domain_update(owner).map_err(error)?;
+                match system.commit_package_domains_if_current(&domain_bridge, update, &mut domain_disk.lock().unwrap()) {
+                    Ok(Some(_)) => return Ok(()),
+                    Ok(None) => continue,
+                    Err(cause) => return Err(error(format!("Native domain user commit committed={}: {}",cause.committed,cause.message))),
+                }
+            }
         }),
         remove_unused_packages: Box::new(move |capture, user| {
             let system = remove_system.upgrade().ok_or_else(|| error("native unused package removal system stopped"))?;
