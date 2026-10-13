@@ -17,10 +17,10 @@
 //!   The copies are taken before the parent returns, so what it writes
 //!   afterwards stays its own.
 //! - **Handover.** The parent gives the child a send right to a port of its
-//!   own (the child's registered ports) and serves it on a host thread, so
-//!   `fork` returns without waiting for the child to start: the child sends
-//!   its reply port, and gets the memory entries and the state blob
-//!   (`state`) in one message. When the child dies first, the no-senders
+//!   own (the child's registered ports) and serves it on a host thread. The
+//!   child sends its reply port, gets the memory entries and state blob
+//!   (`state`) in one message, and acknowledges that it restored them before
+//!   the parent's `fork` returns. When the child dies first, the no-senders
 //!   notification ends the wait. A parent that exits or execs first waits
 //!   for its handovers ([`wait_handovers`]), since the child cannot start
 //!   without it.
@@ -655,17 +655,29 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
     }
     let blob = w.into_bytes();
     *lock(&HANDOVERS.0) += 1;
+    let ready=std::sync::Arc::new(HandoverReady::default());
     let started = std::thread::Builder::new()
         .name("fork-handover".into())
-        .spawn(move || serve(port,snap,blob,fork_lease));
+        .spawn({let ready=ready.clone();move || serve(port,snap,blob,fork_lease,ready)});
     if let Err(e) = started {
         // The child finds no parent port and ends.
         crate::diag!("[linux-abi] fork: no handover thread: {e}");
         // SAFETY: dropping our receive right.
         unsafe { mach_port_mod_refs(task(), port, MACH_PORT_RIGHT_RECEIVE, -1) };
         handover_done();
+        ready.complete();
     }
+    // The spawned host process is not a Linux child until its copied task
+    // state is restored. Do not publish the fork result before that boundary.
+    ready.wait();
     Ok(pid)
+}
+
+#[derive(Default)]
+struct HandoverReady{complete:Mutex<bool>,changed:Condvar}
+impl HandoverReady{
+    fn complete(&self){*lock(&self.complete)=true;self.changed.notify_all();}
+    fn wait(&self){let mut done=lock(&self.complete);while !*done{done=self.changed.wait(done).unwrap_or_else(|error|error.into_inner());}}
 }
 
 /// Handovers in progress, and a wakeup when one ends.
@@ -791,7 +803,7 @@ mod namespace_receipt_tests{
 }
 
 /// Hand the child its state when it asks, on a host thread of the parent.
-fn serve(port:Port,mut snap:Snapshot,blob:Vec<u8>,mut fork_lease:Option<aim_storage::verity_control::ForkLease>){
+fn serve(port:Port,mut snap:Snapshot,blob:Vec<u8>,mut fork_lease:Option<aim_storage::verity_control::ForkLease>,ready:std::sync::Arc<HandoverReady>){
     let mut hello: Received<Header> = Received {
         msg: Header::default(),
         trailer: [0; 128],
@@ -871,6 +883,7 @@ fn serve(port:Port,mut snap:Snapshot,blob:Vec<u8>,mut fork_lease:Option<aim_stor
     // SAFETY: dropping our receive right; the child's send right dies.
     unsafe { mach_port_mod_refs(task(), port, MACH_PORT_RIGHT_RECEIVE, -1) };
     handover_done();
+    ready.complete();
 }
 
 // ---- the child ----------------------------------------------------------------------
@@ -1120,6 +1133,14 @@ fn confirm_ready(parent:Port,member:u64)->Result<(),String>{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fork_result_waits_for_child_readiness(){
+        let ready=std::sync::Arc::new(HandoverReady::default());let waiter=ready.clone();
+        let(entered,entered_rx)=std::sync::mpsc::channel();let(returned,returned_rx)=std::sync::mpsc::channel();
+        let thread=std::thread::spawn(move||{entered.send(()).unwrap();waiter.wait();returned.send(()).unwrap();});entered_rx.recv().unwrap();
+        assert!(returned_rx.recv_timeout(Duration::from_millis(30)).is_err(),"fork result escaped before child readiness");ready.complete();returned_rx.recv_timeout(Duration::from_secs(1)).unwrap();thread.join().unwrap();
+    }
 
     #[test]
     fn rejected_native_ready_ack_cannot_reach_resume(){

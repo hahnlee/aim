@@ -109,7 +109,11 @@ failures, `done=true` and XML SHA256
 22813f446834ab2a35bdff68ae3d19a1f533d7c2c64adc77df5ef6236d19792b.
 Module cleanup is11s instead of the prior14-minute PM responsiveness recovery.
 Its owner receipt reports complete cleanup, no remaining owned processes and no
-uncertainties. Intermittent ddmlib legacy property fetch timeouts remain #1358;
+uncertainties. The fork owner now publishes the parent result only after the
+spawned child restores its copied task state and acknowledges readiness, closing
+the pre-resume exec-success/PTY-close race behind #1358; the focused readiness
+regression and a real guest fork/wait regression pass. A rebuilt disposable boot
+and ddmlib property replay remain required;
 the remaining Native/Original FULL66 modules are not yet complete.
 The current-pair original reboot exposed stale namespace admission while native
 Binder/POSIX/PTY/verity owners were retiring (#1318). Init now withdraws the
