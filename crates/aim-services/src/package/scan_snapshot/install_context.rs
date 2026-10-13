@@ -134,6 +134,19 @@ pub(crate) fn install_user_rebase_conflict(base:&Snapshot,current:&Snapshot,cand
     candidate.refresh_library_user_inputs()?;
     Ok(None)
 }
+
+/// Rebase a newly-created user's candidate over unrelated live package state.
+/// Usage may advance independently while the user owner obtains live permission
+/// inputs; mirror that projection into the candidate after the strict conflict
+/// checks have accepted the newer snapshot.
+pub(crate) fn rebase_user_transition(base:&Snapshot,current:&Snapshot,candidate:&mut crate::package::scan::SigningScan)->Result<Option<String>,String>{
+    let conflict=install_user_rebase_conflict(base,current,candidate,&BTreeSet::new())?;
+    if conflict.is_some(){return Ok(conflict);}
+    if base.usage()!=current.usage()&&candidate.has_replica_runtime(){
+        candidate.update_replica_usage(base.usage(),current.usage())?;
+    }
+    Ok(None)
+}
 fn entries_delta<T:PartialEq,K:Ord+std::fmt::Debug>(field:&str,before:&[T],after:&[T],key:impl Fn(&T)->K)->String{
     let before_keys=before.iter().map(&key).collect::<Vec<_>>();
     let after_keys=after.iter().map(&key).collect::<Vec<_>>();

@@ -37,6 +37,12 @@ fn created_user_rebase_preserves_context_only_and_component_publications() {
     assert!(rebase_created_user_scan(&base, &same_scan, &mut candidate).unwrap().is_none());
     assert!(candidate.scanned_user_states("fixture").unwrap().contains_key(&10));
 
+    let mut usage = base.usage().clone();
+    usage.notify("fixture", 0, 42);
+    let usage_only = Store::new(base.owner().clone(), usage).unwrap().capture();
+    assert!(rebase_created_user_scan(&base, &usage_only, &mut candidate).unwrap().is_none());
+    assert!(candidate.scanned_user_states("fixture").unwrap().contains_key(&10));
+
     let mut changed = base.owner().clone();
     let mut user = changed.scanned_user_states("fixture").unwrap()[&0].clone();
     user.hidden = true;

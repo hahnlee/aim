@@ -392,9 +392,7 @@ fn rebase_created_user_scan(
     latest: &crate::package::scan_snapshot::Snapshot,
     candidate: &mut crate::package::scan::SigningScan,
 ) -> std::result::Result<Option<String>, String> {
-    if base.usage() != latest.usage() { return Ok(Some("usage owner changed".into())); }
-    crate::package::scan_snapshot::install_context::install_user_rebase_conflict(
-        base, latest, candidate, &std::collections::BTreeSet::new())
+    crate::package::scan_snapshot::install_context::rebase_user_transition(base, latest, candidate)
 }
 
 /// Told of a bridge attached, with its handle.
