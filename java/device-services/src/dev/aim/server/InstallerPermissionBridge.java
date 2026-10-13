@@ -89,6 +89,7 @@ public final class InstallerPermissionBridge extends IInstallerPermissionBridge.
         try (var added = new PackageScanLease(candidate);
                 var before = new PackageScanLease(previous)) {
             in.unmarshall(installation, 0, installation.length); in.setDataPosition(0);
+            boolean replacingFactory = in.readBoolean();
             int count = in.readInt();
             if (count <= 0 || count > in.dataAvail() / 28)
                 throw new IllegalArgumentException("invalid permission install inventory");
@@ -149,6 +150,16 @@ public final class InstallerPermissionBridge extends IInstallerPermissionBridge.
                 }
             }
             if (in.dataAvail() != 0) throw new IllegalArgumentException("permission install trailing data");
+            if (replacingFactory) {
+                try (var removed = scope.restore(candidate, names)) {
+                    Objects.requireNonNull(removed, "factory permission removal scope unavailable");
+                    for (var install : installs) {
+                        if (install.oldCode() == null)
+                            throw new IllegalStateException("factory permission previous code unavailable");
+                        permissions.onPackageRemoved(install.oldCode());
+                    }
+                }
+            }
             try (var transaction = scope.enter(candidate, previous)) {
                 Objects.requireNonNull(transaction, "native candidate scope unavailable");
                 for (var install : installs) permissions.onPackageAdded(install.state(),

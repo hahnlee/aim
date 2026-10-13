@@ -222,6 +222,7 @@ impl System {
             clear_code_cache,
             post_install_users,
             permissions: permission.runtime_prepare(),
+            factory_permissions: permission.factory_prepare(),
             release_permissions: permission.release(),
             effects: self.package_effects_owner(bridge)?,
             code_resources,

@@ -86,6 +86,7 @@ pub struct Config {
     pub clear_code_cache: CodeCacheClear,
     pub post_install_users: PostInstallUsers,
     pub permissions: RuntimePrepare,
+    pub factory_permissions: RuntimePrepare,
     pub release_permissions: ReservationRelease,
     pub effects: Arc<crate::package::effects::Owner>,
     pub code_resources: Arc<crate::package::owner::resources::CodeResources>,

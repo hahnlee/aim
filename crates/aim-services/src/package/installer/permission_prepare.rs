@@ -49,6 +49,17 @@ pub type LibraryDependencyPolicy = Arc<
 fn illegal(message: impl Into<String>) -> Exception {
     Exception::new(EX_ILLEGAL_STATE, message)
 }
+fn factory_install(manifest_name: &str) -> Install {
+    Install {
+        params: SessionParams {
+            // PackageInstalledParams.DEFAULT uses AppOpsManager.MODE_DEFAULT.
+            auto_revoke_permissions_mode: 3,
+            ..Default::default()
+        },
+        user: -1,
+        name: manifest_name.into(),
+    }
+}
 struct Scope(Arc<Endpoint>);
 impl Drop for Scope {
     fn drop(&mut self) {
@@ -230,9 +241,13 @@ impl Owner {
     }
     pub fn runtime_prepare(self: &Arc<Self>) -> RuntimePrepare {
         let owner = self.clone();
-        Arc::new(move |admission, base| owner.prepare(admission, base))
+        Arc::new(move |admission, base| owner.prepare(admission, base, false))
     }
-    fn prepare(&self, admission: &mut CompletedAdmission, base: &Arc<crate::package::scan_snapshot::Snapshot>) -> Result<(), Exception> {
+    pub fn factory_prepare(self: &Arc<Self>) -> RuntimePrepare {
+        let owner = self.clone();
+        Arc::new(move |admission, base| owner.prepare(admission, base, true))
+    }
+    fn prepare(&self, admission: &mut CompletedAdmission, base: &Arc<crate::package::scan_snapshot::Snapshot>, factory: bool) -> Result<(), Exception> {
         let source =
             self.library_policy.lock().unwrap().clone().ok_or_else(|| {
                 illegal("installer original library dependency policy unavailable")
@@ -275,7 +290,15 @@ impl Owner {
                 .ok_or_else(|| illegal("completed install library user scope unavailable"))?;
         }
         let mut records = Vec::new();
-        {
+        if factory {
+            for metadata in &admission.completed {
+                let candidate = &metadata.candidate.record;
+                records.push((
+                    candidate.settings.name.clone(),
+                    factory_install(&candidate.parsed.package_name),
+                ));
+            }
+        } else {
             let mut pending = self.pending.lock().unwrap();
             for metadata in &admission.completed {
                 let setting = &metadata.candidate.record.settings;
@@ -289,6 +312,7 @@ impl Owner {
             }
         }
         let mut installation = Parcel::new();
+        installation.write_bool(factory);
         installation.write_i32(records.len() as i32);
         let mut expected = BTreeSet::new();
         for (name, install) in &records {
@@ -508,6 +532,19 @@ mod tests {
         crate::package::scan_snapshot::Store::new(owner, Usage::new(["fixture"]))
             .unwrap()
             .capture()
+    }
+    #[test]
+    fn factory_restore_uses_default_all_users_permission_installation() {
+        let install = factory_install("factory.manifest");
+        assert_eq!(install.name, "factory.manifest");
+        assert_eq!(install.user, -1);
+        assert_eq!(
+            install.params,
+            SessionParams {
+                auto_revoke_permissions_mode: 3,
+                ..Default::default()
+            }
+        );
     }
     #[test]
     fn retained_permission_handoff_allows_real_usage_publication_but_rejects_code_changes() {

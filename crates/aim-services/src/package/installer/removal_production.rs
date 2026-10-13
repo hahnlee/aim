@@ -183,9 +183,6 @@ impl Factory {
         let wipe = factory.version_code < active.version_code || factory.app_id != active.app_id;
         let preferred = (self.preferred_removal)(&active.name, -1, !wipe)?;
         base = self.store.snapshots.capture();
-        let permission = self
-            .external
-            .prepare_permissions(&active.name, active.app_id, -1)?;
         for (user, state) in &old_users {
             if !state.installed {
                 continue;
@@ -305,7 +302,6 @@ impl Factory {
             owner: next,
             completed: vec![metadata],
         };
-        (self.image.permissions)(&mut admission, &base)?;
         let mut data = PreparedData {
             image: self.image.clone(),
             created: Vec::new(),
@@ -367,6 +363,13 @@ impl Factory {
                     .map_err(fail)?;
             }
         }
+        if let Err(error) = (self.image.factory_permissions)(&mut admission, &base) {
+            return with_cleanup(
+                Err(error),
+                (self.image.release_permissions)(&factory.code_path, false),
+                "Factory permission rollback",
+            );
+        }
         let users = install_users
             .iter()
             .map(|user| user.id as u32)
@@ -392,24 +395,41 @@ impl Factory {
                 ..
             }) => {
                 data.committed = true;
-                (self.store.publish)(&base, &next)?;
-                data.commit()?;
+                let committed = (|| {
+                    (self.store.publish)(&base, &next)?;
+                    data.commit()
+                })();
+                with_cleanup(
+                    committed,
+                    (self.image.release_permissions)(&factory.code_path, true),
+                    "Factory permission commit",
+                )?;
                 return Err(fail(format!(
                     "Factory restoration committed: {}",
                     error.message
                 )));
             }
             Err(failure) => {
-                return Err(fail(format!(
-                    "Factory persistence: {}",
-                    publication_error(failure)
-                )));
+                return with_cleanup(
+                    Err(fail(format!(
+                        "Factory persistence: {}",
+                        publication_error(failure)
+                    ))),
+                    (self.image.release_permissions)(&factory.code_path, false),
+                    "Factory permission rollback",
+                );
             }
         };
         data.committed = true;
-        (self.store.publish)(&base, &snapshot)?;
-        data.commit()?;
-        self.external.apply_permissions(permission, true, false)?;
+        let committed = (|| {
+            (self.store.publish)(&base, &snapshot)?;
+            data.commit()
+        })();
+        with_cleanup(
+            committed,
+            (self.image.release_permissions)(&factory.code_path, true),
+            "Factory permission commit",
+        )?;
         let mut effects = vec![preferred];
         for user in &install_users {
             if snapshot
@@ -428,6 +448,21 @@ impl Factory {
         }
         self.external.remove_code(&active.name, &active.code_path)?;
         Ok(super::FactoryEffects { effects })
+    }
+}
+fn with_cleanup<T>(
+    result: Result<T, Exception>,
+    cleanup: Result<(), Exception>,
+    context: &str,
+) -> Result<T, Exception> {
+    match (result, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Ok(())) => Err(error),
+        (Err(mut error), Err(cleanup)) => {
+            error.message.push_str(&format!("; {context}: {}", cleanup.message));
+            Err(error)
+        }
     }
 }
 fn publication_error(error: crate::package::scan::live_install::PublicationFailure) -> String {
@@ -542,5 +577,25 @@ mod tests {
         let ordinary = system_location("/system_ext/priv-app/F/base.apk", &[]).unwrap();
         assert_eq!(ordinary.partition, Partition::SystemExt); assert_eq!(ordinary.apex, None);
         assert_eq!(ordinary.parse_flags(), parse::PARSE_IS_SYSTEM_DIR);
+    }
+    #[test]
+    fn factory_permission_cleanup_preserves_the_primary_failure() {
+        let error = with_cleanup::<()>(
+            Err(fail("publication failed")),
+            Err(fail("rollback failed")),
+            "Factory permission rollback",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.message,
+            "publication failed; Factory permission rollback: rollback failed"
+        );
+        assert!(with_cleanup(Ok(7), Ok(()), "unused").is_ok());
+        assert_eq!(
+            with_cleanup(Ok(7), Err(fail("commit failed")), "unused")
+                .unwrap_err()
+                .message,
+            "commit failed"
+        );
     }
 }
