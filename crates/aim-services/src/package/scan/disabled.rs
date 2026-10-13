@@ -427,6 +427,7 @@ impl SigningScan {
         p.restrict_update_hash = factory.restrict_update_hash;
         p.scanned_as_stopped_system_app = factory.scanned_as_stopped_system_app;
         p.transient.updated_system_app = false;
+        p.flags &= !crate::package::info::FLAG_UPDATED_SYSTEM_APP;
         p.install_source = factory.install_source;
         let enabled = p.clone();
         self.validate_legacy_permissions().ok()?;
@@ -1052,6 +1053,8 @@ mod tests {
         let ids = owner.identities.clone();
         let mut restored = owner.enable_system_setting(&factory.name, [7; 16]).unwrap();
         assert!(!restored.transient.updated_system_app);
+        assert_eq!(restored.flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP, 0);
+        assert_eq!(owner.settings.packages[0].flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP, 0);
         super::super::enrich::application(&mut restored, &mut parsed.clone(), false, false);
         assert_eq!(restored.flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP, 0);
         assert_ne!(restored.flags & crate::package::info::FLAG_SYSTEM, 0);
@@ -1267,6 +1270,7 @@ mod tests {
         let ids = owner.identities.clone();
         let enabled = owner.enable_system_setting("p", [3; 16]).unwrap();
         let mut expected = active;
+        expected.flags &= !crate::package::info::FLAG_UPDATED_SYSTEM_APP;
         expected.version_code = 10;
         expected.target_sdk_version = 35;
         expected.primary_cpu_abi = factory.primary_cpu_abi;

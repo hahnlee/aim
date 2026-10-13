@@ -38,6 +38,7 @@ public final class PackageScanLease implements AutoCloseable {
     private java.util.List<String> sharedNames;
     private boolean closed;
     private boolean endpointTransferred;
+    private boolean endpointBorrowed;
 
     public PackageScanLease(IPackageScanSnapshot endpoint) throws RemoteException {
         this.endpoint = NativePackageCapabilities.attach(endpoint);
@@ -134,7 +135,7 @@ public final class PackageScanLease implements AutoCloseable {
     @Override
     public synchronized void close() throws RemoteException {
         if (closed) return;
-        if (!endpointTransferred) endpoint.close();
+        if (!endpointTransferred && !endpointBorrowed) endpoint.close();
         closed = true;
         active.clear();
         disabled.clear();
@@ -481,9 +482,17 @@ public final class PackageScanLease implements AutoCloseable {
     }
 
     private void transferComparisonEndpoint(PackageSnapshots.Data data) throws RemoteException {
+        if (endpointBorrowed) return;
         long id = endpoint.getMetadataComparisonId();
         data.ownMetadataEndpoint(endpoint, id);
         endpointTransferred = true;
+    }
+
+    /** Keep this externally owned snapshot usable after the temporary replica closes. */
+    synchronized void borrowEndpoint() {
+        if (closed || endpointTransferred || endpointBorrowed)
+            throw new IllegalStateException("package scan endpoint ownership changed");
+        endpointBorrowed = true;
     }
 
     private void logFullReason(String reason, long metadata, PackageSnapshots.Data previous) {

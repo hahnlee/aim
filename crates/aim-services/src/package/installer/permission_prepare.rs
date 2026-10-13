@@ -217,7 +217,8 @@ impl Owner {
         let Some(prepared)=prepared else{return Ok(());};
         let mut retired=prepared.retired.lock().unwrap();
         if *retired{return Ok(());}
-        if !committed{
+        let result=(||{
+            if committed{return Ok(());}
             let current=self.snapshots.capture();let context=(self.context)(&current).map_err(illegal)?;
             let scope=Scope(super::permission_capture::endpoint(current,context,&self.process).map_err(illegal)?);
             let binder=self.process.add_service(scope.0.clone());let mut request=Parcel::new();
@@ -225,10 +226,12 @@ impl Owner {
             let reply=self.bridge.transact(api::ROLLBACK,&request,false).map_err(|error|illegal(format!("original permission rollback transport: {error}")))?;
             let mut reader=reply.reader();api::read_rollback_reply(&mut reader).map_err(|error|illegal(format!("original permission rollback reply: {error}")))??;
             if reader.remaining()!=0{return Err(illegal("original permission rollback trailing data"));}
-        }
+            Ok(())
+        })();
         *retired=true;
+        drop(retired);
         self.prepared.lock().unwrap().retain(|_,value|!Arc::ptr_eq(value,&prepared));
-        Ok(())
+        result
     }
     pub fn attach(
         self: &Arc<Self>,

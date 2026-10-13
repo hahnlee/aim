@@ -52,6 +52,9 @@ public final class NativeInstallPermissionScope implements InstallerPermissionBr
         if (current.containsKey(store)) throw new IllegalStateException("nested permission rollback scope");
         PackageSnapshots.Data data;
         try (var lease = new PackageScanLease(Objects.requireNonNull(snapshot))) {
+            // Rust owns this endpoint across removal preparation and the
+            // following candidate transaction. This temporary view borrows it.
+            lease.borrowEndpoint();
             data = lease.captureData(owner, crossUserSuspensions);
         }
         if (!excluded.isEmpty()) {

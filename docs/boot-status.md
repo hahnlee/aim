@@ -1946,25 +1946,23 @@ first/second null process maps, real-DER shared signer admission and foreign-cer
 atomic rejection, and candidate validation/failure atomicity. Actual CTS replay
 remains pending.
 C111 also exposes retained updated-system-app state after factory restore rejects
-an APK inside APEX (#1171). Native restore now resolves the actual original APEX
-inventory before parsing, retaining its partition, application privilege and
-PARSE_APK_IN_APEX policy. A fresh matched-cohort replay of
-`testPrivilegedAppUpgradePrioritiesPreservedOnReboot` passes 1/0, then its
-cleanup leaves the updated APK active because factory permission preparation
-incorrectly requires an ordinary install reservation. The same cleanup through
-`pm uninstall` reports `permission install reservation unavailable`. Factory
-restoration now supplies the pinned all-users/default permission installation
-parameters and performs updated-code removal before factory-code addition in one
-original permission-owner preparation transaction, with explicit rollback or
-commit of its reservation. A rebuilt matched cohort completes the official eight
-PrivilegedUpdate cases with four passes and four failures: the reboot case passes,
-but its cleanup now reports `permission candidate scan: Invalid("legacy package
-owner inventory differs")`, so the same four later factory-state assertions still
-observe the update flag. Enabling the factory setting now moves its captured
-legacy permission migration from the disabled owner to the active owner before
-candidate validation. Six focused factory permission/location/state/owner
-regressions and the library check pass; replay of the corrected cohort remains
-pending. The
+an APK inside APEX (#1171). Native restore resolves the actual original APEX
+inventory before parsing, retains its partition, application privilege and
+PARSE_APK_IN_APEX policy, supplies the pinned all-users/default permission
+installation parameters, and transfers captured legacy permission ownership to
+the active factory setting before candidate validation. The fresh matched
+`1377773e` cohort completes the official eight PrivilegedUpdate cases 4/4: the
+reboot case passes, but cleanup fails in original permission preparation before
+factory publication. Its temporary package-removal view closed the Rust-owned
+candidate scan endpoint, so the following candidate transaction and rollback
+reported `package scan snapshot is closed`; the failed rollback also retained a
+prepared reservation and blocked later attempts. Permission rollback views now
+borrow that endpoint without transferring or closing it, and failed rollback
+still retires the reservation while returning its error. Successful factory
+activation also clears `FLAG_UPDATED_SYSTEM_APP` from both transient and saved
+setting owners. Eight focused factory-state tests, the aim-services library
+check, and the full device-services Java/AIDL/D8/original linkage build pass;
+replay of the corrected cohort remains pending. The
 old failed C109/C110 cohorts remain NOT RUN evidence. A separate rollback on
 a clone of native-written data constructs original PMS (package owner PID equals
 SystemServer 50573), preserving five selected packages' UID/codepath/version,
