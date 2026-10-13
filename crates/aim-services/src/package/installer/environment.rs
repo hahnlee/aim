@@ -569,6 +569,7 @@ impl pipeline::Reservation for Reserved {
                     signing: code.signing.clone(),
                     metadata: member.metadata.clone(),
                     install_flags: record.params.install_flags,
+                    force_queryable_override: record.params.force_queryable_override,
                     required_installed_version: record.params.required_installed_version_code,
                     rollback: record.params.install_reason == 5,
                     source: (self.config.install_source)(code, &self.base)

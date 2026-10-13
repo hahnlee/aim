@@ -1487,11 +1487,14 @@ impl Query<'_> {
         }
         let caller = self.calling_uid;
         if user != user_id(caller)
-            && !matches!(app_id(caller), ROOT_UID | SYSTEM_UID)
+            && !matches!(caller, ROOT_UID | SYSTEM_UID)
             && !self.uid_has_permission(caller, INTERACT_ACROSS_USERS_FULL)?
             && !self.uid_has_permission(caller, INTERACT_ACROSS_USERS)?
         {
-            return Err(NotModelled("a cross-profile packages-for-uid call"));
+            return Ok(Err(Exception::security(format!(
+                "getPackagesForUid: UID {caller} requires {INTERACT_ACROSS_USERS_FULL} or \
+                 {INTERACT_ACROSS_USERS} to access user {user}."
+            ))));
         }
         let caller_is_instant=apps_filter::instant_app_package_name(self.state,self.calling_uid)?.is_some();
         let target=match self.uid_query_target(uid,true)?{Ok(target)=>target,Err(error)=>return Ok(Err(error))};

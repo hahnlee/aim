@@ -482,6 +482,30 @@ fn features_and_cross_user_calls() {
         "get package info: UID 10100 requires android.permission.INTERACT_ACROSS_USERS_FULL \
          or android.permission.INTERACT_ACROSS_USERS to access user 10."
     );
+    let reply = call(&state, 10100, false, pm::GET_PACKAGES_FOR_UID, |p| {
+        pm::GetPackagesForUid { uid: 1010100 }.write(p)
+    });
+    let e = Reader::new(reply.data(), reply.objects())
+        .read_exception()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(e.code, EX_SECURITY);
+    assert_eq!(
+        e.message,
+        "getPackagesForUid: UID 10100 requires android.permission.INTERACT_ACROSS_USERS_FULL \
+         or android.permission.INTERACT_ACROSS_USERS to access user 10."
+    );
+    let reply = call(&state, 101000, false, pm::GET_PACKAGES_FOR_UID, |p| {
+        pm::GetPackagesForUid { uid: 1010100 }.write(p)
+    });
+    assert_eq!(
+        Reader::new(reply.data(), reply.objects())
+            .read_exception()
+            .unwrap()
+            .unwrap_err()
+            .code,
+        EX_SECURITY
+    );
     // The system crosses users; a user without a state of the package
     // has the default one, installed.
     let reply = call(&state, 1000, false, pm::GET_PACKAGE_INFO, |p| {
@@ -519,6 +543,27 @@ fn installed_packages_in_the_original_order() {
     expected.sort_by_key(|n| info::java_hash(n));
     let expected: Vec<Value> = expected.iter().map(|n| Value::Str(n.to_string())).collect();
     assert_eq!(names, expected.iter().collect::<Vec<_>>());
+}
+
+#[test]
+fn installed_applications_expose_force_queryable_package_across_users() {
+    let mut state = state();
+    state.packages.get_mut(APP).unwrap().users.get_mut(&0).unwrap()
+        .granted_permissions.push(INTERACT_ACROSS_USERS.into());
+    state.packages.get_mut(OTHER).unwrap().users.insert(
+        10,
+        PackageUserState::default(),
+    );
+    state.packages.get_mut(OTHER).unwrap().is.force_queryable_override = true;
+
+    let reply = call(&state, 10100, false, pm::GET_INSTALLED_APPLICATIONS, |p| {
+        pm::GetInstalledApplications { flags: 0, user_id: 10 }.write(p)
+    });
+    let list = decoded(pm::GET_INSTALLED_APPLICATIONS, &reply);
+    let Value::List(items) = field(&list, "items") else {
+        panic!()
+    };
+    assert!(items.iter().any(|item| field(item, "packageName") == &Value::Str(OTHER.into())));
 }
 
 #[test]

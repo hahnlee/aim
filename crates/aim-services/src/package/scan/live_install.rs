@@ -18,6 +18,7 @@ pub struct Request {
     pub signing: SigningDetails,
     pub metadata: SettingMetadata,
     pub install_flags: i32,
+    pub force_queryable_override: bool,
     pub required_installed_version: i64,
     pub rollback: bool,
     pub source: settings::InstallSource,
@@ -414,6 +415,9 @@ impl SigningScan {
         if let Some(old) = &old {
             setting.package.restrict_update_hash = old.restrict_update_hash.clone();
         }
+        if request.force_queryable_override {
+            setting.package.force_queryable = true;
+        }
         setting.package.version_code = version;
         setting.package.base_revision_code = request.code.base_revision_code;
         setting.package.last_update_time = request.now;
@@ -732,6 +736,7 @@ mod tests {
                 restrict_update_hash: None,
             },
             install_flags: 2,
+            force_queryable_override: false,
             required_installed_version: -1,
             rollback: false,
             source: Default::default(),
@@ -758,6 +763,34 @@ mod tests {
         let admission=owner.prepare_live_installs(vec![shared],&users,false,&files).unwrap();
         let group=admission.owner.shared_legacy_permissions("org.example.group").unwrap().unwrap();assert!(group.users()[0].permissions.is_empty());
 
+    }
+    #[test]
+    fn force_queryable_install_is_retained_in_package_settings() {
+        let owner = SigningScan::new(&SystemConfig::default(), &Settings::default(), 36).unwrap();
+        let users = [super::super::User {
+            id: 0,
+            pre_created: false,
+            adb_install_disallowed: false,
+        }];
+        let files: crate::package::write::Files =
+            Box::new(|_| panic!("force-queryable admission does not read APK bytes"));
+
+        let ordinary = owner
+            .prepare_live_installs(
+                vec![request("org.example.ordinary", 1)],
+                &users,
+                false,
+                &files,
+            )
+            .unwrap();
+        assert!(!ordinary.owner.settings.packages[0].force_queryable);
+
+        let mut forced = request("org.example.forced", 1);
+        forced.force_queryable_override = true;
+        let installed = owner
+            .prepare_live_installs(vec![forced], &users, false, &files)
+            .unwrap();
+        assert!(installed.owner.settings.packages[0].force_queryable);
     }
     #[test]
     fn undefined_component_process_rejects_atomic_batch_before_uid_changes() {
