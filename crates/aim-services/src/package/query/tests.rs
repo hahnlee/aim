@@ -495,6 +495,25 @@ fn features_and_cross_user_calls() {
         "getPackagesForUid: UID 10100 requires android.permission.INTERACT_ACROSS_USERS_FULL \
          or android.permission.INTERACT_ACROSS_USERS to access user 10."
     );
+    // Runtime permission mutation is owned outside the immutable package
+    // snapshot. A live denial must override an older captured grant, and a
+    // live grant must override an older captured denial.
+    let mut granted = state.clone();
+    granted.packages.get_mut(APP).unwrap().users.get_mut(&0).unwrap()
+        .granted_permissions.push(INTERACT_ACROSS_USERS.into());
+    let filter = AppsFilter::new(&granted, &Default::default()).unwrap();
+    let query = Query { state: &granted, filter: &filter, calling_uid: 10100 };
+    assert_eq!(
+        query.packages_for_uid_checked_with_grants(1010100, Some((false, false)))
+            .unwrap().unwrap_err().code,
+        EX_SECURITY
+    );
+    assert!(query.packages_for_uid_checked_with_grants(1010100, Some((false, true)))
+        .unwrap().is_ok());
+    let filter = AppsFilter::new(&state, &Default::default()).unwrap();
+    let query = Query { state: &state, filter: &filter, calling_uid: 10100 };
+    assert!(query.packages_for_uid_checked_with_grants(1010100, Some((false, true)))
+        .unwrap().is_ok());
     let reply = call(&state, 101000, false, pm::GET_PACKAGES_FOR_UID, |p| {
         pm::GetPackagesForUid { uid: 1010100 }.write(p)
     });

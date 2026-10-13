@@ -339,6 +339,34 @@ impl Service for PackageQueries {
             (Source::Fixture(state), _) => state.read().unwrap().clone(),
             _ => unreachable!(),
         };
+        let live_uid_packages = if !self.native && capture.is_some() && call.code == pm::GET_PACKAGES_FOR_UID {
+            Some((|| -> Result<Parcel, QueryError> {
+                let args = pm::GetPackagesForUid::read(&mut call.data).map_err(QueryError::Transport)?;
+                if call.data.remaining() != 0 {
+                    return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                }
+                let system = self.system.as_ref().and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled("live permission owner unavailable")))?;
+                let full = system.check_permission_uncached(
+                    "android.permission.INTERACT_ACROSS_USERS_FULL", call.sender_pid,
+                    call.sender_euid as i32).map_err(QueryError::Original)?;
+                let partial = system.check_permission_uncached(
+                    "android.permission.INTERACT_ACROSS_USERS", call.sender_pid,
+                    call.sender_euid as i32).map_err(QueryError::Original)?;
+                let resolution = match capture.as_ref().unwrap().resolution() {
+                    Ok(resolution) => resolution,
+                    Err(error) => return error.reply().map_err(QueryError::Transport),
+                };
+                let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: uid };
+                let mut reply = Parcel::new();
+                match query.packages_for_uid_checked_with_grants(args.uid, Some((full, partial)))
+                    .map_err(QueryError::NotModelled)? {
+                    Ok(value) => pm::write_get_packages_for_uid_reply(&mut reply, &value),
+                    Err(error) => reply.write_exception(&error),
+                }
+                Ok(reply)
+            })())
+        } else { None };
         let paged = if !self.native && capture.is_some()
             && matches!(call.code, pm::GET_INSTALLED_APPLICATIONS | pm::GET_INSTALLED_PACKAGES) {
             Some((|| -> Result<Parcel, QueryError> {
@@ -369,7 +397,7 @@ impl Service for PackageQueries {
                 Ok(reply)
             })())
         } else {None};
-        let resolved = paged.or_else(|| (!self.native)
+        let resolved = live_uid_packages.or(paged).or_else(|| (!self.native)
             .then(|| capture.as_ref().map_or(&*self.resolver,|capture|capture.resolver()).query(&state, call.code, uid, &mut call.data))
             .flatten());
         let answer = resolved.unwrap_or_else(|| {

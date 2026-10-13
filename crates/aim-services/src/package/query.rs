@@ -1479,6 +1479,16 @@ impl Query<'_> {
 
     /// `IPackageManagerBase.getPackagesForUid`, with its cross-user check.
     fn packages_for_uid_checked(&self, uid: i32) -> Thrown<Option<Vec<Option<String>>>> {
+        self.packages_for_uid_checked_with_grants(uid, None)
+    }
+
+    /// The public Binder endpoint supplies live permission results because
+    /// runtime grants can change without publishing a new package snapshot.
+    pub(crate) fn packages_for_uid_checked_with_grants(
+        &self,
+        uid: i32,
+        live_cross_user_grants: Option<(bool, bool)>,
+    ) -> Thrown<Option<Vec<Option<String>>>> {
         let user = user_id(uid);
         if user < 0 {
             return Ok(Err(Exception::illegal_argument(format!(
@@ -1486,10 +1496,17 @@ impl Query<'_> {
             ))));
         }
         let caller = self.calling_uid;
+        let (has_full, has_partial) = match live_cross_user_grants {
+            Some(grants) => grants,
+            None => (
+                self.uid_has_permission(caller, INTERACT_ACROSS_USERS_FULL)?,
+                self.uid_has_permission(caller, INTERACT_ACROSS_USERS)?,
+            ),
+        };
         if user != user_id(caller)
             && !matches!(caller, ROOT_UID | SYSTEM_UID)
-            && !self.uid_has_permission(caller, INTERACT_ACROSS_USERS_FULL)?
-            && !self.uid_has_permission(caller, INTERACT_ACROSS_USERS)?
+            && !has_full
+            && !has_partial
         {
             return Ok(Err(Exception::security(format!(
                 "getPackagesForUid: UID {caller} requires {INTERACT_ACROSS_USERS_FULL} or \
