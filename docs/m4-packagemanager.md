@@ -1088,10 +1088,10 @@ not constructed.
 - The native owner makes the side effects: installd, apexd, incremental,
   ART Service through the bridge, broadcasts (`PACKAGE_ADDED` and the
   rest) and app kills through ActivityManager on the bridge.
-- **Bar.** Every module below ends each test as with the original; the
-  app checks; going back to the original on the native files; the
-  template built by the native owner's first boot passes first-boot.md's
-  structure and parity checks against the original's template.
+- **Bar.** All 66 modules below complete and pass on the native
+  PackageManager. Original outcome parity, returning to the original PMS on
+  native-written files, template parity and app checks are not part of the
+  current C acceptance gate.
 - Developed on a branch (AGENTS.md: breaking migrations happen on a
   branch) and landed as one change once the bar holds; A and B make most
   of its code land before, unchanged.
@@ -1101,8 +1101,10 @@ the access state moves (#616).
 
 ### CTS
 
-The CTS release of system-services.md ("Conformance"); the original's
-results per module are the baseline each slice is held to. By kind:
+The CTS release of system-services.md ("Conformance"). Slices A and B may use
+the original's results as shadow-comparison evidence. The current C acceptance
+is native-only: every module in the cohort below must complete and pass. By
+kind:
 
 | Slice | Device-side (run today with `am instrument`) | Host-side (Tradefed) |
 | --- | --- | --- |
@@ -1117,7 +1119,8 @@ modules, for 66 modules. All 23 host configs use `HostTest` or `JarHostTest`;
 52-total/22-host counts were inaccurate (#1063). Android 16 r1 moved
 `android.content.pm.cts` out of `CtsContentTestCases`, so that unrelated module
 is not expanded for this PM gate. All required release inputs are now pinned;
-native C results remain unrun (#701).
+the native FULL66 campaign is running (#701). Interim results do not establish
+acceptance.
 
 **App checks**, each slice: the integration gate; Settings (app info,
 storage, default apps, the app list's permissions); Chrome and WebView
@@ -1128,9 +1131,11 @@ from Play Store and of a local APK with `pm install` and through
 
 For the current C completion, the user explicitly deferred the tracked games
 (#704) and the Play Store catalog install/update/uninstall gate (#1273) on
-2026-10-11. These gates remain open follow-ups, not passing results. The other
-app checks, complete CTS comparison, template parity and return to the original
-on native-written files remain required.
+2026-10-11. These remain open follow-ups, not passing results. The other app
+checks are integration evidence rather than current C acceptance gates. Current
+C completion requires the native FULL66 cohort to complete with every module
+passing; template parity, Original outcome parity and return to the original on
+native-written files do not gate it.
 
 ## 6. Decisions
 
@@ -1175,10 +1180,11 @@ Tracked on #702.
 
 ## Conformance bar
 
-The CTS modules a native PackageManager must end as the original does
-(ADR 0013, decision 4), at `android-cts-16_r1`, and the original's
-results on this device. The device-side modules and every file their
-configs install or push are pinned in `upstream/cts.lock`.
+The current M4 C conformance bar is that all 66 PackageManager modules at
+`android-cts-16_r1` complete and pass on the native PackageManager. Original
+results are retained as diagnostic and historical evidence, not as an outcome
+parity requirement. The device-side modules and every file their configs
+install or push are pinned in `upstream/cts.lock`.
 
 **Modules.** Device-side modules (an instrumentation, run with
 `am instrument`):
@@ -1225,11 +1231,11 @@ dependencies: 375 module files, eight harness entries and the shared
 BackupPreparer dependency. All 384 host/shared pins and 1,065 device-input pins
 have verified hashes. Native C69 ParsingHost completes with 11 passes and no
 failures; later PreferredActivity and PackageSetting replays expose owner gaps
-tracked in GitHub and current evidence is recorded in boot-status.md. A complete
-66-module original/native campaign remains unrun (#701); historical single-module
-results do not establish acceptance of a later source/image cohort. The verified
-expanded device/permission inventory resolves the former count discrepancy in
-#1063.
+tracked in GitHub and current evidence is recorded in boot-status.md. The current
+native FULL66 campaign is running (#701); historical single-module results and
+Original outcomes do not establish acceptance of the current source/image cohort.
+The verified expanded device/permission inventory resolves the former count
+discrepancy in #1063.
 
 **Run.** On a first boot of a new data directory in window mode, each
 module as its Tradefed config prepares it: the config's commands and

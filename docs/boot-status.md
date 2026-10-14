@@ -3558,7 +3558,14 @@ that exact scan's loaded code and captured collector policy, then prepares a new
 runtime-only version. It carries section diagnostics and clones the prior owner;
 preparation does not publish or write disk. Existing System runtime publication
 compares bridge/base/version before swapping scan/query owners. The explicit
-retained-owner framework-res scan test now publishes a changed-ID read result:
+domain attachment and compatibility inventory is the intersection of active
+PackageSettings and loaded parsed code. A non-system setting whose captured
+users are all uninstalled may therefore retain its persisted domain UUID,
+verification results and user selections after DELETE_KEEP_DATA without an
+attached/queryable code owner; boot and unrelated installs skip its policy and
+query projection, and reinstallation consumes the retained state. Missing code
+for a system package, an installed user or a missing user owner remains fatal.
+The retained-owner framework-res scan test now publishes a changed-ID read result:
 user query state changes in the new capture, the old capture remains unchanged,
 live UUID is retained, settings bytes/persistence owner/nonce invalidations stay
 unchanged, and a stale prepared read is rejected. A later actual domain commit

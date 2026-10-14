@@ -149,23 +149,25 @@ impl Owner {
         policies: &BTreeMap<String, bool>,
     ) -> Result<Boot, String> {
         use std::collections::BTreeSet;
-        let names: BTreeSet<_> = scan
+        let setting_names: BTreeSet<_> = scan
             .settings
             .packages
             .iter()
             .map(|s| s.name.clone())
             .collect();
-        if names.len() != scan.settings.packages.len()
-            || policies.keys().cloned().collect::<BTreeSet<_>>() != names
-        {
+        if setting_names.len() != scan.settings.packages.len() {
+            return Err("boot domain policy inventory differs".into());
+        }
+        let mut names = BTreeSet::new();
+        for setting in &scan.settings.packages {
+            if scan.domain_code_owner(setting)?.is_some() { names.insert(setting.name.clone()); }
+        }
+        if policies.keys().cloned().collect::<BTreeSet<_>>() != names {
             return Err("boot domain policy inventory differs".into());
         }
         let mut inputs = Vec::new();
         for setting in &scan.settings.packages {
-            let code = scan
-                .loaded_packages()
-                .get(&setting.name)
-                .ok_or("missing boot domain code")?;
+            let Some(code) = scan.domain_code_owner(setting)? else { continue; };
             let signing = setting
                 .signatures
                 .as_ref()

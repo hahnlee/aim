@@ -323,9 +323,15 @@ impl Builder {
         for name in current.state().packages.keys() {
             if !scan.settings.packages.iter().any(|setting|&setting.name==name) {domains.clear_package(name);}
         }
+        let mut domain_active=BTreeSet::new();
+        for setting in &scan.settings.packages {
+            if scan.domain_code_owner(setting)?.is_some() {domain_active.insert(setting.name.as_str());}
+        }
+        let persisted=domains.persisted();
+        domains.rebase_persisted_projection(&persisted,persisted.clone(),&domain_active)?;
         let mut policies=BTreeMap::new();let mut changes=Vec::new();
         for setting in &scan.settings.packages {
-            let code=scan.loaded_packages().get(&setting.name).ok_or("install domain parsed-code owner unavailable")?;
+            let Some(code)=scan.domain_code_owner(setting)? else {continue;};
             let code=&code.package;
             let policy=self.bridge.domain_verification_restricted(&code.package_name,code.target_sdk_version)
                 .map_err(|error|format!("install domain compatibility: {error:?}"))?;

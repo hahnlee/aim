@@ -93,6 +93,26 @@ pub struct NewPackageOutcome {
 }
 
 impl SigningScan {
+    /// Domain attachment follows executable code, while DELETE_KEEP_DATA keeps
+    /// its setting and persisted state for a later reinstall.
+    pub(crate) fn domain_code_owner(
+        &self,
+        setting: &crate::package::settings::Package,
+    ) -> Result<Option<&Arc<super::LoadedPackage>>, String> {
+        if let Some(code) = self.loaded.get(&setting.name) {
+            return Ok(Some(code));
+        }
+        if setting.flags & crate::package::settings::FLAG_SYSTEM != 0 {
+            return Err(format!("system domain code owner unavailable: {}", setting.name));
+        }
+        let users = self.scanned_users.get(&setting.name)
+            .ok_or_else(|| format!("retired domain user owner unavailable: {}", setting.name))?;
+        if users.values().any(|state| state.installed) {
+            return Err(format!("installed package domain code owner unavailable: {}", setting.name));
+        }
+        Ok(None)
+    }
+
     /// Only scoped user metadata may differ. Every other owner field must match.
     pub(crate) fn scoped_user_metadata_changes(&self, other: &Self) -> Option<Vec<(String, bool)>> {
         let mut normalized=self.clone();

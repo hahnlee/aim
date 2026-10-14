@@ -175,10 +175,7 @@ impl Bridge {
     ) -> Result<BTreeMap<String, bool>, QueryContextError> {
         let mut inputs = Vec::new();
         for setting in &owner.settings.packages {
-            let code = owner
-                .loaded_packages()
-                .get(&setting.name)
-                .ok_or_else(|| QueryContextError::Input("missing domain policy code".into()))?;
+            let Some(code) = owner.domain_code_owner(setting).map_err(QueryContextError::Input)? else { continue; };
             if code.package.package_name != setting.name || code.package.target_sdk_version < 0 {
                 return Err(QueryContextError::Input(
                     "invalid domain policy code identity".into(),

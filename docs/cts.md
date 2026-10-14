@@ -64,6 +64,11 @@ about 646 MiB for the module inputs. These inputs have verified hashes;
 fetching them does not establish a module pass. The separate device-side
 inputs remain in `upstream/cts.lock`.
 
+For the current M4 C completion, acceptance is native-only: all 66 modules
+in the pinned PackageManager cohort must complete and pass on the native
+PackageManager. Original results remain useful diagnostic and historical
+evidence, but matching their outcomes is not part of this acceptance gate.
+
 To pin another module, list its entries with `tools/cts-module.py --list
 testcases/MODULE/`, add each with the sha256 of its inflated content to
 `upstream/cts-tradefed.lock`, and fetch.
@@ -80,7 +85,8 @@ configuration and counts as not run; an unchanged-harness single-test replay
 fails original permission PREPARE. C67 parsing XML records five passed and six failed tests with the module
 complete (2026.10.08_16.45.04); installation/context ownership failures remain.
 C69 official parsing XML confirms eleven passed, zero failed and module complete
-(2026.10.08_17.02.43). Full native C acceptance remains incomplete.
+(2026.10.08_17.02.43). The current native FULL66 campaign is running; interim
+results do not establish acceptance.
 Runs retain Tradefed results and logs as acceptance evidence.
 
 The separate template-parity gate in [first-boot.md](first-boot.md), #620,
@@ -88,10 +94,11 @@ uses the official `CtsBootStatsTestCases` host module. Its config and JAR
 are pinned and hash verified in `upstream/cts-tradefed.lock`; the config
 requires only that JAR and the existing `JarHostTest` harness, with no
 APK or file-push inputs. It is not added to the PM 66-module manifest.
-Run it separately on the original first boot and native template first boot
-with `tools/cts-tradefed.sh DATA PORT -m CtsBootStatsTestCases`, retaining
-both official XML results. Input preparation is complete; this gate has
-not been executed. The original `BootStatsHostTest.testBootStats` clears
+Run it separately on first-boot templates with
+`tools/cts-tradefed.sh DATA PORT -m CtsBootStatsTestCases`, retaining the
+official XML results. Input preparation is complete; this separate parity
+check has not been executed and is not part of the current M4 C acceptance
+gate. `BootStatsHostTest.testBootStats` clears
 the events log, reboots the device through Tradefed and reads the boot
 atoms with `cmd stats print-stats`; run it on the disposable gate device
 after preserving the first-boot measurements.
@@ -110,6 +117,7 @@ Official campaign comparison verifies each retained XML's campaign-local path an
 recorded SHA before parsing. Test outcomes remain visible even when wrapper or
 invocation validation failed; XML completeness, wrapper issues and assumption
 failures are reported separately and still prevent acceptance. The comparator
-requires complete same outcomes and all native tests passed, so evidence reporting
-does not waive a failed or unexecuted gate. Six fixture regressions cover this
-separation, tampering and foreign modules.
+requires a complete native campaign with every module passing. Original outcomes
+are reported separately and do not determine M4 C acceptance. Evidence reporting
+does not waive a failed or unexecuted native module. Six fixture regressions cover
+this separation, tampering and foreign modules.

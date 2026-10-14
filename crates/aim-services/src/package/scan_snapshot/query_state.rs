@@ -120,11 +120,10 @@ impl NativeDomains {
             {
                 return Ok(None);
             }
-            let code = &scan
-                .loaded_packages()
-                .get(name)
-                .ok_or("missing current domain approval code")?
-                .package;
+            let setting=scan.settings.packages.iter().find(|setting|setting.name==name)
+                .ok_or("missing current domain approval setting")?;
+            let Some(code)=scan.domain_code_owner(setting)? else{return Ok(None);};
+            let code=&code.package;
             let user = scan
                 .scanned_user_states(name)
                 .and_then(|users| users.get(&user));
@@ -201,20 +200,21 @@ impl Context {
             .collect();
         initial.sort_by_key(|name| crate::package::info::java_hash(name));
         self.system.initial_non_stopped_system_packages = Some(initial);
-        let expected: BTreeSet<_> = owner
-            .settings
-            .packages
-            .iter()
-            .map(|s| s.name.clone())
-            .collect();
+        let mut expected=BTreeSet::new();
+        for setting in &owner.settings.packages {
+            if owner.domain_code_owner(setting)?.is_some(){expected.insert(setting.name.clone());}
+        }
         if policies.keys().cloned().collect::<BTreeSet<_>>() != expected {
             return Err("domain compatibility inventory differs".into());
         }
+        for ((_,factory),inputs) in &mut self.packages {
+            if *factory {continue;}
+            inputs.domain_verification=None;
+            inputs.uri_relative_filter_groups.clear();
+            for user in inputs.users.values_mut(){user.domain_selection=None;}
+        }
         for setting in &owner.settings.packages {
-            let code = owner
-                .loaded_packages()
-                .get(&setting.name)
-                .ok_or("missing domain query code")?;
+            let Some(code)=owner.domain_code_owner(setting)? else{continue;};
             let attached = domains
                 .package(&setting.name)
                 .ok_or_else(|| format!("missing attached query domain owner for {}", setting.name))?;
@@ -519,6 +519,10 @@ impl Capture {
         if next.version()<self.scan.version(){return Err("committed snapshot generation regressed".into());}
         let mut context=(*self.context).clone();context.scan_version=next.version();
         let active=next.owner().settings.packages.iter().map(|package|package.name.as_str()).collect::<BTreeSet<_>>();
+        let mut domain_active=BTreeSet::new();
+        for setting in &next.owner().settings.packages {
+            if next.owner().domain_code_owner(setting)?.is_some(){domain_active.insert(setting.name.as_str());}
+        }
         let factory=next.owner().settings.disabled_system_packages.iter().map(|package|package.name.as_str()).collect::<BTreeSet<_>>();
         // Re-enabling a retained factory must bind its own scoped code inputs,
         // rather than retaining the removed data package's path/version.
@@ -538,9 +542,9 @@ impl Capture {
             domains.boot.owner.rebase_persisted_projection(
                 &self.scan.owner().settings.domain_verification,
                 next.owner().settings.domain_verification.clone(),
-                &active,
+                &domain_active,
             )?;
-            domains.policies.retain(|name,_|active.contains(name.as_str()));
+            domains.policies.retain(|name,_|domain_active.contains(name.as_str()));
             context=context.resolve_domains(next.owner(),domains.owner(),&domains.config,&domains.policies)?;
             context.native_domains=Some(Arc::new(domains));
         }

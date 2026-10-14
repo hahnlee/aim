@@ -219,11 +219,84 @@ impl SigningScan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::package::{
+        domain_verification::{self, owner::Owner as DomainOwner},
+        bootstrap::{ApexInventory,ScanUsers},
+        intent_filter::{ACTION_VIEW, CATEGORY_BROWSABLE, IntentFilter, ParsedIntentInfo},
+        pkg::{Activity, AndroidPackage},
+        restrictions::UserState,
+        scan_snapshot::query_state::{Context,PackageInputs,UserInputs},
+        settings::{Signatures, FLAG_SYSTEM},
+        sign::SigningDetails,
+        system_config::SystemConfig,
+    };
+    use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
 
     fn owner(xml: &[u8]) -> SigningScan {
         let root = aim_android_xml::read(xml).unwrap();
         let settings = crate::package::settings::Settings::parse(&root).unwrap();
         SigningScan::new(&Default::default(), &settings, 36).unwrap()
+    }
+
+    fn domain_fixture() -> (SigningScan, Arc<super::super::LoadedPackage>) {
+        let id="00000000-0000-0000-0000-000000000001";
+        let signing=SigningDetails{unknown:false,scheme_version:3,signatures:vec![vec![7]],current_flags:vec![],public_keys:Some(vec![]),past_signing_certificates:None};
+        let mut filter=IntentFilter{auto_verify:true,..Default::default()};
+        filter.add_action(ACTION_VIEW);filter.add_category(CATEGORY_BROWSABLE);filter.add_category("android.intent.category.DEFAULT");
+        filter.add_data_scheme("https");filter.add_data_authority("fixture.example",None);
+        let mut activity=Activity::default();activity.main.component.intents.push(ParsedIntentInfo{filter,..Default::default()});
+        let setting=Package{name:"fixture".into(),code_path:"/data/app/fixture".into(),app_id:10123,domain_set_id:Some(id.into()),
+            signatures:Some(Signatures{scheme_version:3,signatures:signing.signatures.clone(),current_flags:vec![],public_keys:Some(vec![]),past_signatures:None}),..Default::default()};
+        let parsed=AndroidPackage{package_name:setting.name.clone(),path:Some(setting.code_path.clone()),base_apk_path:Some(format!("{}/base.apk",setting.code_path)),
+            uid:setting.app_id,target_sdk_version:36,activities:vec![activity],signing_details:Some(signing.parcel_details().unwrap()),..Default::default()};
+        let code=Arc::new(super::super::LoadedPackage::new(parsed,signing).unwrap());
+        let mut scan=SigningScan::new(&Default::default(),&crate::package::settings::Settings{packages:vec![setting],domain_verification:domain_verification::State{active:vec![domain_verification::Package{
+            name:"fixture".into(),id:id.into(),has_auto_verify_domains:true,signature:None,domains:vec![(Some("fixture.example".into()),1)],
+            users:vec![domain_verification::User{id:0,allow_link_handling:false,enabled_hosts:vec!["fixture.example".into()]}],uri_relative_filter_groups:vec![],}],..Default::default()},..Default::default()},36).unwrap();
+        scan.loaded.insert("fixture".into(),code.clone());
+        scan.scanned_users.insert("fixture".into(),BTreeMap::from([(0,UserState::default())]));
+        (scan,code)
+    }
+
+    #[test]
+    fn retained_domain_setting_requires_uninstalled_non_system_owner() {
+        let (mut scan,_)=domain_fixture();let setting=scan.settings.packages[0].clone();
+        assert!(scan.domain_code_owner(&setting).unwrap().is_some());
+        scan.loaded.remove(&setting.name);
+        assert!(scan.domain_code_owner(&setting).unwrap_err().contains("installed package"));
+        scan.scanned_users.get_mut(&setting.name).unwrap().get_mut(&0).unwrap().installed=false;
+        assert!(scan.domain_code_owner(&setting).unwrap().is_none());
+        let mut system=setting.clone();system.flags|=FLAG_SYSTEM;
+        assert!(scan.domain_code_owner(&system).unwrap_err().contains("system domain"));
+        scan.scanned_users.remove(&setting.name);
+        assert!(scan.domain_code_owner(&setting).unwrap_err().contains("user owner"));
+    }
+
+    #[test]
+    fn retired_domain_state_stays_persisted_and_reattaches_on_reinstall() {
+        let (mut scan,code)=domain_fixture();let config=SystemConfig::default();
+        let policies=BTreeMap::from([("fixture".into(),true)]);
+        let mut domains=DomainOwner::from_boot(&scan,&config,&policies).unwrap().owner;
+        let expected=domains.persisted();assert!(domains.package("fixture").is_some());
+        scan.scanned_users.get_mut("fixture").unwrap().get_mut(&0).unwrap().installed=false;
+        scan.loaded.remove("fixture");assert!(scan.domain_code_owner(&scan.settings.packages[0]).unwrap().is_none());
+        domains.rebase_persisted_projection(&expected,expected.clone(),&BTreeSet::new()).unwrap();
+        assert!(domains.package("fixture").is_none());assert_eq!(domains.persisted(),expected);
+        let retired=DomainOwner::from_boot(&scan,&config,&BTreeMap::new()).unwrap().owner;
+        assert!(retired.package("fixture").is_none());assert_eq!(retired.persisted(),expected);
+        let stale=PackageInputs{app_id:10123,path:"/data/app/fixture".into(),version:0,installed_permissions:vec![],
+            domain_verification:Some((expected.active[0].id.clone(),vec![("fixture.example".into(),1)])),uri_relative_filter_groups:vec![],
+            filter_application_query:false,syncable_authorities:vec![],users:BTreeMap::from([(0,UserInputs{gids:vec![],granted_permissions:vec![],domain_selection:Some((false,vec![("fixture.example".into(),1)]))})])};
+        let context=Context{scan_version:1,native_domains:None,boot_classes:None,nonce:None,system:Default::default(),platform:Default::default(),users:Default::default(),
+            apex_inventory:ApexInventory{packages:Some(vec![]),active:vec![]},scan_users:ScanUsers{users:Some(vec![])},cross_user_suspensions:false,
+            packages:BTreeMap::from([(("fixture".into(),false),stale)]),retained_packages:Default::default()};
+        let resolved=context.resolve_domains(&scan,&retired,&config,&BTreeMap::new()).unwrap();let inputs=&resolved.packages[&("fixture".into(),false)];
+        assert!(inputs.domain_verification.is_none()&&inputs.uri_relative_filter_groups.is_empty()&&inputs.users[&0].domain_selection.is_none());
+        assert!(resolved.clone().resolve_domains(&scan,&retired,&config,&policies).unwrap_err().contains("inventory differs"));
+        scan.loaded.insert("fixture".into(),code);scan.scanned_users.get_mut("fixture").unwrap().get_mut(&0).unwrap().installed=true;
+        let reattached=DomainOwner::from_boot(&scan,&config,&policies).unwrap().owner;
+        assert_eq!(reattached.package("fixture"),expected.active.first());
+        assert_eq!(reattached.persisted(),expected);
     }
 
     #[test]
