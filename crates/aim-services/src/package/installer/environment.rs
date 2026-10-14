@@ -319,6 +319,7 @@ pub(crate) fn capture_visibility_checked(
     mut capture:impl FnMut(&crate::package::settings::Package,&[i32])->Result<(u64,Vec<i32>),Failure>,
 )->Result<Vec<Vec<i32>>,Failure>{
     let targets=names.iter().cloned().collect();
+    let mut last=String::new();
     for _ in 0..8 {
         let current=snapshots.capture();
         if !base.same_lineage(&current){return Err(failure(-110,"pre-install visibility capture lineage changed"));}
@@ -349,14 +350,17 @@ pub(crate) fn capture_visibility_checked(
         let metadata_coherent=capture_metadata.map_or_else(
             ||current.same_metadata_generation(&latest),
             |metadata|metadata==latest.metadata_revision());
-        if values.len()==names.len()&&users()?==all_users&&metadata_coherent {
+        let latest_users=users()?;
+        if values.len()==names.len()&&latest_users==all_users&&metadata_coherent {
             return Ok(values);
         }
+        last=format!("capture_metadata={capture_metadata:?} latest_metadata={} users={all_users:?}->{latest_users:?} values={}/{}",
+            latest.metadata_revision(),values.len(),names.len());
         // Only the read-only policy capture repeats; code/app-data/permission
         // preparation and the original admission base retain their ownership.
     }
     let current=snapshots.capture();
-    Err(failure(-110,format!("pre-install visibility capture did not stabilize: base={} current={} metadata={}->{}",
+    Err(failure(-110,format!("pre-install visibility capture did not stabilize: base={} current={} metadata={}->{} {last}",
         base.version(),current.version(),base.metadata_revision(),current.metadata_revision())))
 }
 

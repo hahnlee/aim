@@ -78,8 +78,11 @@ and later uninstall cleanup retains the factory setting. Direct permission and
 mutation captures also retain the native metadata generation separately from
 their logical publication version; this keeps post-reboot visibility capture on
 the same immutable policy epoch.
-Three focused restoration/cleanup tests pass without skips; a rebuilt CTS run
-and unfiltered Native FULL66 remain required.
+Four focused restoration/cleanup tests pass without skips. All eight
+`PrivilegedUpdateTests` methods now have official native CTS PASS results; the
+final disable, uninstall-after-disable and reboot-preservation selectors ran on
+fresh disposable data with the rebuilt runtime (2026-10-15). Unfiltered Native
+FULL66 remains unrun.
 
 Native FULL66 now runs the unresolved tail first: modules 4–66 must all pass
 before a fresh DATA image runs modules 1–3, and acceptance requires the exact

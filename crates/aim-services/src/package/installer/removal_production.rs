@@ -183,10 +183,29 @@ impl Factory {
             Vec::new()
         };
         let location = system_location(&factory.code_path, &apexes)?;
-        let parsed = self.image.apks
+        let mut parsed = self.image.apks
             .parsed_path(&factory.code_path, location.parse_flags())
             .map_err(fail)?;
         let signing = self.image.apks.signing_details(&parsed).map_err(fail)?;
+        let platform = base.owner().loaded_packages().get("android")
+            .ok_or_else(|| fail("Platform signing owner unavailable"))?;
+        let mut policy = scan::ScanPolicy::for_location(&location);
+        policy.adjust_shared_uid_privilege(
+            &parsed,
+            &signing,
+            &platform.collected_signing,
+            &base.owner().identities,
+            self.image.vendor_sdk,
+        );
+        policy.apply(
+            &mut parsed,
+            &signing,
+            Some(&platform.collected_signing),
+            false,
+            &self.image.apks,
+            &self.image.library_compatibility,
+            None,
+        ).map_err(fail)?;
         let code = scan::Code {
             location,
             parsed,
@@ -233,6 +252,11 @@ impl Factory {
         let restored = next
             .enable_system_setting(&active.name, domain)
             .ok_or_else(|| fail("Factory UID reservation failed"))?;
+        let restored_domain = restored.domain_set_id.as_deref()
+            .ok_or_else(|| fail("Factory domain identity absent"))
+            .and_then(|id| domain_bytes(id).map_err(fail))?;
+        validate_factory_identity(&next, &active.name, None, "enabled")
+            .map_err(fail)?;
         let host = (self.image.apks.files)(&factory.code_path)
             .ok_or_else(|| fail("Factory VFS mapping unavailable"))?;
         let native = scan::NativeLibraryEnvironment {
@@ -256,7 +280,7 @@ impl Factory {
                 .iter()
                 .filter_map(|(name, _)| name.clone())
                 .collect(),
-            domain_set_id: domain,
+            domain_set_id: restored_domain,
             target_sdk_version: factory.target_sdk_version,
             restrict_update_hash: factory.restrict_update_hash.clone(),
         };
@@ -310,6 +334,8 @@ impl Factory {
                 },
             )
             .map_err(|error| fail(format!("Factory native re-admission: {error:?}")))?;
+        validate_factory_identity(&next, &active.name, Some(&factory.code_path), "scanned")
+            .map_err(fail)?;
         let mut admission = scan::live_install::CompletedAdmission {
             owner: next,
             completed: vec![metadata],
@@ -382,6 +408,38 @@ impl Factory {
                 "Factory permission rollback",
             );
         }
+        let latest = self.store.snapshots.capture();
+        let targets = std::collections::BTreeSet::from([active.name.clone()]);
+        let conflict = match crate::package::scan_snapshot::install_context::install_user_rebase_conflict(
+            &base,
+            &latest,
+            &mut admission.owner,
+            &targets,
+        ) {
+            Ok(conflict) => conflict,
+            Err(error) => return with_cleanup(
+                Err(fail(error)),
+                (self.image.release_permissions)(&factory.code_path, false),
+                "Factory permission rollback",
+            ),
+        };
+        if let Some(reason) = conflict {
+            return with_cleanup(
+                Err(fail(format!("Factory permission base changed: {reason}"))),
+                (self.image.release_permissions)(&factory.code_path, false),
+                "Factory permission rollback",
+            );
+        }
+        if base.usage() != latest.usage() && admission.owner.has_replica_runtime()
+            && let Err(error) = admission.owner.update_replica_usage(base.usage(), latest.usage())
+        {
+            return with_cleanup(
+                Err(fail(error)),
+                (self.image.release_permissions)(&factory.code_path, false),
+                "Factory permission rollback",
+            );
+        }
+        base = latest;
         let users = install_users
             .iter()
             .map(|user| user.id as u32)
@@ -461,6 +519,43 @@ impl Factory {
         self.external.remove_code(&active.name, &active.code_path)?;
         Ok(super::FactoryEffects { effects })
     }
+}
+
+fn validate_factory_identity(
+    owner: &crate::package::scan::SigningScan,
+    name: &str,
+    path: Option<&str>,
+    phase: &str,
+) -> Result<(), String> {
+    let setting = owner.settings.packages.iter().find(|setting| setting.name == name)
+        .ok_or_else(|| format!("factory restoration {phase} setting missing"))?;
+    if path.is_some_and(|path| setting.code_path != path)
+        || setting.flags & crate::package::settings::FLAG_SYSTEM == 0
+        || setting.flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP != 0
+        || setting.transient.updated_system_app
+        || owner.settings.disabled_system_packages.iter().any(|setting| setting.name == name)
+    {
+        return Err(format!(
+            "factory restoration {phase} identity differs: path={} expected={path:?} flags={} transient_updated={} disabled={}",
+            setting.code_path,
+            setting.flags,
+            setting.transient.updated_system_app,
+            owner.settings.disabled_system_packages.iter().any(|setting| setting.name == name),
+        ));
+    }
+    Ok(())
+}
+
+fn domain_bytes(id: &str) -> Result<[u8; 16], String> {
+    let normalized = crate::package::domain_verification::uuid::parse(id, true)?;
+    let hex = normalized.bytes().filter(|byte| *byte != b'-').collect::<Vec<_>>();
+    if hex.len() != 32 { return Err("factory domain identity length differs".into()); }
+    let mut bytes = [0u8; 16];
+    for (at, pair) in hex.chunks_exact(2).enumerate() {
+        bytes[at] = u8::from_str_radix(std::str::from_utf8(pair).map_err(|error| error.to_string())?, 16)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(bytes)
 }
 fn with_cleanup<T>(
     result: Result<T, Exception>,
@@ -589,6 +684,25 @@ mod tests {
         let ordinary = system_location("/system_ext/priv-app/F/base.apk", &[]).unwrap();
         assert_eq!(ordinary.partition, Partition::SystemExt); assert_eq!(ordinary.apex, None);
         assert_eq!(ordinary.parse_flags(), parse::PARSE_IS_SYSTEM_DIR);
+    }
+    #[test]
+    fn factory_restore_identity_rejects_updated_or_retained_factory_state() {
+        use crate::package::{scan::SigningScan, settings::{Package, Settings, FLAG_SYSTEM}};
+        let package = Package { name: "factory".into(), code_path: "/system/app/Factory".into(),
+            app_id: 10001, flags: FLAG_SYSTEM, ..Default::default() };
+        let mut owner = SigningScan::new(&Default::default(), &Settings { packages: vec![package.clone()], ..Default::default() }, 36).unwrap();
+        validate_factory_identity(&owner, "factory", Some(&package.code_path), "test").unwrap();
+        owner.settings.packages[0].transient.updated_system_app = true;
+        assert!(validate_factory_identity(&owner, "factory", Some(&package.code_path), "test").is_err());
+        owner.settings.packages[0].transient.updated_system_app = false;
+        owner.settings.packages[0].flags |= crate::package::info::FLAG_UPDATED_SYSTEM_APP;
+        assert!(validate_factory_identity(&owner, "factory", Some(&package.code_path), "test").is_err());
+    }
+    #[test]
+    fn factory_restore_reuses_the_active_domain_identity() {
+        let id = "f8cf4bdb-015d-4960-804f-8c9d74376cab";
+        assert_eq!(domain_bytes(id).unwrap(), [0xf8,0xcf,0x4b,0xdb,0x01,0x5d,0x49,0x60,
+            0x80,0x4f,0x8c,0x9d,0x74,0x37,0x6c,0xab]);
     }
     #[test]
     fn factory_permission_cleanup_preserves_the_primary_failure() {

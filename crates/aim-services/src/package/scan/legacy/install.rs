@@ -8,15 +8,9 @@ impl SigningScan {
     /// the projection inventory alone is changed before the new scan is captured.
     pub(crate) fn transition_permission_user_inventory(&mut self, user: i32, created: bool,
         bridge: &crate::package::bootstrap::Bridge) -> Result<(), String> {
-        if user < 0 { return Err("negative permission inventory user".into()); }
-        let mut users = self.legacy_permissions.as_ref().ok_or("legacy permission owner unavailable")?.users.clone();
-        if created {
-            if users.contains(&user) { return Err("created permission inventory user already exists".into()); }
-            users.push(user); users.sort();
-        } else {
-            if !users.contains(&user) { return Err("removed permission inventory user is unknown".into()); }
-            users.retain(|id| *id != user);
-        }
+        let Some(users) = transitioned_permission_users(self.legacy_permission_users()?, user, created)? else {
+            return Ok(());
+        };
         let mut candidate = self.clone();
         candidate.set_legacy_user_inventory(&users)?;
         candidate.identities.ids.capture_retained_permission_inventory(bridge, &users)?;
@@ -92,5 +86,32 @@ impl SigningScan {
         owners.installed_receipt = states.keys().copied().collect();
         owners.modern_receipts.extend(states);
         self.validate_legacy_permissions()
+    }
+}
+
+fn transitioned_permission_users(users: &[i32], user: i32, created: bool) -> Result<Option<Vec<i32>>, String> {
+    if user < 0 { return Err("negative permission inventory user".into()); }
+    let mut next = users.to_vec();
+    if created {
+        if next.contains(&user) { return Err("created permission inventory user already exists".into()); }
+        next.push(user);
+        next.sort();
+    } else {
+        if !next.contains(&user) { return Ok(None); }
+        next.retain(|id| *id != user);
+    }
+    Ok(Some(next))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::transitioned_permission_users;
+
+    #[test]
+    fn partial_user_cleanup_is_idempotent() {
+        assert_eq!(transitioned_permission_users(&[0], 10, false).unwrap(), None);
+        assert_eq!(transitioned_permission_users(&[0, 10], 10, false).unwrap(), Some(vec![0]));
+        assert!(transitioned_permission_users(&[0], 0, true).is_err());
+        assert!(transitioned_permission_users(&[0], -1, false).is_err());
     }
 }
