@@ -130,6 +130,24 @@ fn identities(owner: &SigningScan) -> BTreeMap<(String, bool), Identity> {
 }
 
 impl SigningScan {
+    /// Recreate PackageStateUnserialized for settings retained by KEEP_DATA.
+    /// Their executable declarations are gone, but PackageUsage still owns one
+    /// row for every active PackageSetting.
+    pub(crate) fn retain_unloaded_runtime_at_boot(&self,usage:&Usage,retained:&mut BTreeMap<(String,bool),OriginalRuntime>)->Result<(),String>{
+        let mut additions=BTreeMap::new();
+        for setting in &self.settings.packages{
+            if self.loaded.contains_key(&setting.name){continue;}
+            if self.domain_code_owner(setting)?.is_some(){return Err(format!("unloaded boot runtime still has code: {}",setting.name));}
+            let key=(setting.name.clone(),false);
+            if retained.contains_key(&key){return Err(format!("duplicate retained boot runtime: {}",setting.name));}
+            let state=ReplicaRuntime{usage:*usage.times(&setting.name).ok_or("retained boot runtime usage owner absent")?,
+                seinfo:None,override_seinfo:None,library_files:Vec::new(),libraries:Vec::new()};
+            additions.insert(key,OriginalRuntime{name:setting.name.clone(),app_id:setting.app_id,path:setting.code_path.clone(),
+                version:setting.version_code,has_code:false,state,transient:setting.transient.clone()});
+        }
+        retained.extend(additions);Ok(())
+    }
+
     pub(super) fn rebind_retired_code_runtime(&mut self, name: &str) -> Result<(), String> {
         let current = identities(self);
         if let Some(assigned) = &mut self.replica_runtime {
@@ -943,5 +961,23 @@ mod tests {
             );
             assert!(owner == prior);
         }
+    }
+    #[test]
+    fn code_retired_setting_recreates_boot_runtime_from_setting_and_usage(){
+        let setting=Package{name:"retired".into(),app_id:10124,code_path:"/data/app/retired".into(),version_code:7,
+            domain_set_id:Some("00000000-0000-0000-0000-000000000002".into()),..Default::default()};
+        let mut owner=SigningScan::new(&SystemConfig::default(),&Settings{packages:vec![setting],..Default::default()},29).unwrap();
+        let mut uninstalled=UserState::default();uninstalled.installed=false;
+        owner.capture_user_states(BTreeMap::from([(("retired".into(),false),CapturedUsers{
+            states:BTreeMap::from([(0,uninstalled.clone()),(10,uninstalled)]),active_aliases:Default::default()})])).unwrap();
+        let mut usage=Usage::new(["retired"]);assert_eq!(usage.times("retired"),Some(&[0;8]));usage.notify("retired",2,1234);
+        let mut retained=BTreeMap::new();owner.retain_unloaded_runtime_at_boot(&usage,&mut retained).unwrap();
+        let input=&retained[&("retired".into(),false)];
+        assert!(!input.has_code);assert_eq!(input.state.usage,[0,0,1234,0,0,0,0,0]);
+        assert_eq!(input.state.seinfo,None);assert!(input.state.library_files.is_empty()&&input.state.libraries.is_empty());
+        owner.complete_runtime_at_boot(&usage,retained).unwrap();
+        let snapshot=Store::new(owner,usage).unwrap().capture();
+        assert!(!snapshot.owner().loaded_packages().contains_key("retired"));
+        assert_eq!(snapshot.replica_runtime("retired",false).unwrap().unwrap().usage[2],1234);
     }
 }

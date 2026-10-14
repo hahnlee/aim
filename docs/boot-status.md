@@ -52,6 +52,17 @@ redirect native construction, UserManager/ART adapters and lifecycle calls;
 `package` and `package_native` identify the native guest-init owner. All 298
 planned methods are implemented; this is not conformance acceptance.
 
+The current native CTS runtime restores active PackageSettings whose code was
+retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full
+active setting inventory, matching the original PackageUsage owner, and a
+non-system setting with no installed users reconstructs its identity-bearing
+code-less runtime state without reintroducing parsed code, seInfo or library
+declarations. System settings and settings with an installed user still fail
+closed when their code owner is missing. The focused runtime suite passes 8/0
+(2026-10-14). The preceding PackageVisibility run reached its requested reboot
+but exposed this gap through `android.appsecurity.cts.tinyapp`; a rebuilt
+targeted CTS rerun and unfiltered Native FULL66 remain required.
+
 The current f89fddbf matched original/native images are build-qualified: both
 use the same vendor artifacts and the primary workflow restores the default
 image configuration with zero stale nodes. Native identity 9fdad5ca has two
