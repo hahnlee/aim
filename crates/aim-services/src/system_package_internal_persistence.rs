@@ -104,8 +104,7 @@ impl System {
             .filter(|current| Arc::ptr_eq(&current.bridge, &owner.bridge))
             .and_then(|current| current.persistence.clone()).ok_or_else(|| illegal("Settings disk owner unavailable"))?;
         loop {
-            self.check_package_bootstrap(&owner.bridge)?;
-            let base = self.capture_package_queries()?;
+            let base = self.capture_package_queries_for(&owner.bridge)?;
             let mut scan = base.scan().owner().clone();
             apply_permission_definitions(&mut scan, definitions);
             let domains = base.domains().ok_or_else(|| illegal("Settings domain owner unavailable"))?;
@@ -122,7 +121,7 @@ impl System {
             let result = disk.commit_scan_settings(update.capture.scan());
             if result.is_ok() || result.as_ref().is_err_and(|error| error.committed) {
                 current.publish_snapshot(update.store);
-                current.queries = Some(update.capture.clone());
+                current.set_queries(Some(update.capture.clone()));
                 if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
                 state.version = update.capture.scan().version();
             }
@@ -181,7 +180,7 @@ impl System {
     pub(crate) fn internal_write_permission_settings(&self, users: Option<Vec<i32>>, asynchronous: bool,
         uid: i32, _pid: i32) -> Result<()> {
         enforce(uid)?; let users = users.ok_or_else(|| Exception::illegal_argument("null permission users"))?;
-        let runtime = self.internal_persistence_owner()?; let capture = self.capture_package_queries()?;
+        let runtime = self.internal_persistence_owner()?; let capture = self.capture_package_queries_for(&runtime.bridge)?;
         for user in &users {
             if !capture.state().users.contains_key(user) { return Err(Exception::illegal_argument("unknown permission user")); }
         }
@@ -222,7 +221,7 @@ impl System {
         self.check_package_bootstrap(bridge)?; let runtime = self.internal_persistence_owner()?;
         if !Arc::ptr_eq(&runtime.bridge, bridge) { return Err(illegal("permission read leaf belongs to another bootstrap")); }
         let id = u32::try_from(user).map_err(|_| Exception::illegal_argument("negative permission read user"))?;
-        let base = self.capture_package_queries()?;
+        let base = self.capture_package_queries_for(bridge)?;
         let config = self.package_bootstrap.lock().unwrap().current.as_ref().and_then(|current| current.installer.as_ref().map(|(owner, _)| owner.system_config().clone()))
             .ok_or_else(|| illegal("permission read SystemConfig unavailable"))?;
         // Original modern writeLegacyPermissionStateTEMP is a no-op. The
@@ -242,7 +241,7 @@ impl System {
         let mut scan = latest.scan().owner().clone();
         let metadata = disk.read_permission_user(&mut scan, &config, id).map_err(|error| illegal(error.to_string()))?;
         let update = latest.prepare_package_update(scan).map_err(illegal)?;
-        current.publish_snapshot(update.store); current.queries = Some(update.capture.clone());
+        current.publish_snapshot(update.store); current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version(); drop(state); drop(disk); drop(install);
         self.with_runtime_permission_metadata(&update.capture, |owner| owner.import_permission_user(&metadata, user))?;

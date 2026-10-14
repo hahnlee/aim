@@ -30,7 +30,7 @@ pub fn create(system: &Arc<System>, bridge: &Arc<Bridge>, disk: Arc<Mutex<Store>
     let dependencies = user_operations::Dependencies {
         capture: Box::new(move || {
             let system = capture_system.upgrade().ok_or_else(|| error("native user system stopped"))?;
-            system.check_package_bootstrap(&capture_bridge)?; system.capture_package_queries()
+            system.capture_package_queries_for(&capture_bridge)
         }),
         publish_user: Box::new(move |base, scan, user, created, record| {
             let system = publish_system.upgrade().ok_or_else(|| error("native user publication system stopped"))?;
@@ -39,13 +39,11 @@ pub fn create(system: &Arc<System>, bridge: &Arc<Bridge>, disk: Arc<Mutex<Store>
         }),
         launcher: Box::new(move |name, user, flags| {
             let system = launcher_system.upgrade().ok_or("native launcher system stopped")?;
-            system.check_package_bootstrap(&launcher_bridge).map_err(|error| format!("{error:?}"))?;
-            system.native_package_has_launcher(name, user, flags).map_err(|error| format!("{error:?}"))
+            system.native_package_has_launcher(&launcher_bridge, name, user, flags).map_err(|error| format!("{error:?}"))
         }),
         kernel_exclusion: Box::new(move |name, _user| {
             let system = exclusion_system.upgrade().ok_or_else(|| error("native kernel mapping system stopped"))?;
-            system.check_package_bootstrap(&exclusion_bridge)?;
-            let capture = system.capture_package_queries()?;
+            let capture = system.capture_package_queries_for(&exclusion_bridge)?;
             let package = capture.scan().owner().settings.packages.iter().find(|package| package.name == name).ok_or_else(|| error("kernel mapping package absent"))?;
             let users = capture.scan().owner().scanned_user_states(name).ok_or_else(|| error("kernel mapping user owner absent"))?;
             let excluded: Vec<_> = users.iter().filter_map(|(user, state)| (!state.installed).then_some(*user)).collect();
@@ -75,9 +73,8 @@ pub fn create(system: &Arc<System>, bridge: &Arc<Bridge>, disk: Arc<Mutex<Store>
         }),
         clear_domain_user: Box::new(move |user| {
             let system = domain_system.upgrade().ok_or_else(|| error("native domain user system stopped"))?;
-            system.check_package_bootstrap(&domain_bridge)?;
             loop {
-                let capture = system.capture_package_queries()?;
+                let capture = system.capture_package_queries_for(&domain_bridge)?;
                 let mut owner = capture.domains().ok_or_else(|| error("native domain owner absent"))?.owner().clone();
                 owner.clear_user(user);
                 let update = capture.prepare_domain_update(owner).map_err(error)?;

@@ -319,7 +319,7 @@ impl System {
         self.publish_package_scan_with_configured_roles(bridge,None,owner,usage,context,&platform,resource_config,&props,&begin.system_config)?;
         self.install_package_freezer_publication(bridge)?;
         self.initialize_web_instant_policy(bridge)?;
-        let capture=self.capture_package_queries()?;
+        let capture=self.capture_package_queries_for(bridge)?;
         Ok(Scanned{prepared:begin.prepared,capture,runtime_metadata,apex_results,registrations,lifecycle:begin.lifecycle.owner,boot_apex_changed,decompression})
     }
 }

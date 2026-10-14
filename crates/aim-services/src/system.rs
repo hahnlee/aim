@@ -213,6 +213,8 @@ pub struct System {
     /// the call).
     bridge_listeners: Mutex<Vec<BridgeListener>>,
     package_bootstrap: Mutex<PackageBootstrapState>,
+    /// Last committed immutable query generation, independent of mutation publication.
+    package_queries: Arc<Mutex<PackageQueryPublication>>,
     package_constructor_capture: Mutex<Option<Arc<aim_storage::constructor_capture::Sink>>>,
     package_public_services: Mutex<Option<package_public_services::Pair>>,
     package_install_lock: Arc<Mutex<()>>,
@@ -227,6 +229,12 @@ pub struct System {
 struct PackageBootstrapState {
     current: Option<PackageBootstrap>,
     version: u64,
+}
+
+#[derive(Default)]
+struct PackageQueryPublication {
+    bridge: Option<Weak<crate::package::bootstrap::Bridge>>,
+    capture: Option<Arc<crate::package::scan_snapshot::query_state::Capture>>,
 }
 
 /// IO completes before callback shutdown; retain outside publication locks.
@@ -261,6 +269,7 @@ struct PackageBootstrap {
     bridge: Arc<crate::package::bootstrap::Bridge>,
     snapshots: Option<Arc<crate::package::scan_snapshot::Store>>,
     queries: Option<Arc<crate::package::scan_snapshot::query_state::Capture>>,
+    published_queries: Arc<Mutex<PackageQueryPublication>>,
     key_set_tokens: Option<Arc<crate::package::keysets::Tokens>>,
     installer_files: Option<Arc<crate::package::installer::hardlink::Files>>,
     installer_external: Option<Arc<crate::package::installer::preapproval::BridgeOwner>>,
@@ -313,6 +322,7 @@ struct PackageBootstrap {
 
 impl Drop for PackageBootstrap {
     fn drop(&mut self) {
+        self.retire_queries();
         if let Some(owner) = &self.boot_lifecycle { owner.stop(); }
         if let Some(owner) = &self.package_observers { owner.stop(); }
         for reservation in self.mutation_reservations.drain(..).filter_map(|reservation| reservation.upgrade()) {
@@ -368,6 +378,27 @@ impl Drop for PackageBootstrap {
 }
 
 impl PackageBootstrap {
+    fn retire_queries(&self) {
+        let mut published = self.published_queries.lock().unwrap();
+        if published
+            .bridge
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some_and(|bridge| Arc::ptr_eq(&bridge, &self.bridge))
+        {
+            published.bridge = None;
+            published.capture = None;
+        }
+    }
+
+    fn set_queries(
+        &mut self,
+        capture: Option<Arc<crate::package::scan_snapshot::query_state::Capture>>,
+    ) {
+        self.published_queries.lock().unwrap().capture = capture.clone();
+        self.queries = capture;
+    }
+
     #[track_caller]
     fn publish_snapshot(&mut self, candidate: impl Into<Arc<crate::package::scan_snapshot::Store>>) {
         let candidate = candidate.into();
@@ -475,6 +506,7 @@ impl System {
                 permissions: Mutex::new(Permissions::default()),
                 bridge_listeners: Mutex::new(Vec::new()),
                 package_bootstrap: Mutex::new(PackageBootstrapState::default()),
+                package_queries: Arc::new(Mutex::new(PackageQueryPublication::default())),
                 package_constructor_capture: Mutex::new(None),
                 package_public_services: Mutex::new(None),
                 package_install_lock: Arc::new(Mutex::new(())),
@@ -816,9 +848,10 @@ impl System {
         let mut current = self.package_bootstrap.lock().unwrap();
         let previous = current.current.replace(PackageBootstrap {
             bridge: bridge.clone(),
-            boot_configuration:Arc::new(BootConfiguration::default()),
+            boot_configuration: Arc::new(BootConfiguration::default()),
             snapshots: None,
             queries: None,
+            published_queries: self.package_queries.clone(),
             key_set_tokens: None,
             installer_files: None,
             installer_external: None,
@@ -865,6 +898,11 @@ impl System {
             version_page: None,
             installer: None,
         });
+        {
+            let mut published = self.package_queries.lock().unwrap();
+            published.bridge = Some(Arc::downgrade(&bridge));
+            published.capture = None;
+        }
         drop(current);
         if let Some(previous) = previous {
             if let Some((installer, _)) = &previous.installer {
@@ -1005,7 +1043,7 @@ impl System {
         };
         let snapshot =
             result.map_err(|error| fail(&format!("package scan publication failed: {error:?}")))?;
-        current.queries = None;
+        current.set_queries(None);
         if let Some(page) = &current.version_page {
             page.publish(snapshot.version());
         }
@@ -1139,7 +1177,7 @@ impl System {
         };
         current.key_set_tokens = capture.state().system.key_set_tokens.clone();
         current.publish_snapshot(store);
-        current.queries = Some(capture.clone());
+        current.set_queries(Some(capture.clone()));
         if let Some(page) = &current.version_page {
             page.publish(version);
         }
@@ -1192,7 +1230,7 @@ impl System {
         if current.queries.is_some() {
             return Err(fail("package query owner already published".into()));
         }
-        current.queries = Some(capture.clone());
+        current.set_queries(Some(capture.clone()));
         Ok(capture)
     }
 
@@ -1237,18 +1275,41 @@ impl System {
     pub fn capture_package_queries(
         &self,
     ) -> Result<Arc<crate::package::scan_snapshot::query_state::Capture>> {
-        self.package_bootstrap
+        self.package_queries
             .lock()
             .unwrap()
-            .current
-            .as_ref()
-            .and_then(|current| current.queries.clone())
+            .capture
+            .clone()
             .ok_or_else(|| {
                 Exception::new(
                     aim_binder_host::parcel::EX_ILLEGAL_STATE,
                     "native package query owners are unavailable",
                 )
             })
+    }
+
+    pub(crate) fn capture_package_queries_for(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+    ) -> Result<Arc<crate::package::scan_snapshot::query_state::Capture>> {
+        let published = self.package_queries.lock().unwrap();
+        if !published
+            .bridge
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some_and(|current| Arc::ptr_eq(&current, bridge))
+        {
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "native package query epoch changed",
+            ));
+        }
+        published.capture.clone().ok_or_else(|| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "native package query owners are unavailable",
+            )
+        })
     }
 
     /// Finish native boot dependencies/runtime before publication.
@@ -1333,7 +1394,7 @@ impl System {
         capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
     ) -> Result<()> {
         self.check_package_bootstrap(bridge)?;
-        if Arc::ptr_eq(capture, &self.capture_package_queries()?) {
+        if Arc::ptr_eq(capture, &self.capture_package_queries_for(bridge)?) {
             Ok(())
         } else {
             Err(Exception::new(
@@ -1448,7 +1509,7 @@ impl System {
             ));
         }
         current.publish_snapshot(update.store);
-        current.queries = Some(update.capture.clone());
+        current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page {
             page.publish(update.capture.scan().version());
         }
@@ -1541,7 +1602,7 @@ impl System {
         );
         if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
             current.publish_snapshot(update.store);
-            current.queries = Some(update.capture.clone());
+            current.set_queries(Some(update.capture.clone()));
             if let Some(page) = &current.version_page {
                 page.publish(update.capture.scan().version());
             }
@@ -2103,7 +2164,7 @@ impl System {
         // The original commits Settings first and schedules disk writes afterward.
         // Serialization or unknown-user failures cannot undo the live mutation.
         current.publish_snapshot(update.store);
-        current.queries = Some(update.capture.clone());
+        current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
         drop(state);
@@ -2130,8 +2191,7 @@ impl System {
         let resolver = crate::package::resolve::Resolver::default();
         let mut retained: Option<crate::package::installer_attribution::Plan> = None;
         loop {
-            self.check_package_bootstrap(&bridge)?;
-            let capture = self.capture_package_queries()?;
+            let capture = self.capture_package_queries_for(&bridge)?;
             let resolution = resolver.resolution(capture.state()).map_err(|error| Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE, format!("installer attribution visibility: {error:?}")))?;
             let query = crate::package::query::Query { state: capture.state(), filter: &resolution.apps_filter, calling_uid: uid };
@@ -2161,7 +2221,7 @@ impl System {
             let written = plan.persist(&mut disk, &owner);
             if written.is_ok() || written.as_ref().is_err_and(|error| error.committed) {
                 current.publish_snapshot(update.store);
-                current.queries = Some(update.capture.clone());
+                current.set_queries(Some(update.capture.clone()));
                 if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
                 state.version = update.capture.scan().version();
             }
@@ -2194,7 +2254,7 @@ impl System {
         let update = base.prepare_package_update(owner.clone()).map_err(|error|
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
         current.publish_snapshot(update.store);
-        current.queries = Some(update.capture.clone());
+        current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
         drop(state);
@@ -2241,7 +2301,7 @@ impl System {
         let update = capture.prepare_app_metadata_files(owner).map_err(|error|
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
         current.publish_snapshot(update.store);
-        current.queries = Some(update.capture.clone());
+        current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
         Ok(())
@@ -2317,7 +2377,7 @@ impl System {
         let update = base.prepare_package_update(owner).map_err(|error|
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
         current.publish_snapshot(update.store);
-        current.queries = Some(update.capture.clone());
+        current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
         drop(state);
@@ -2388,8 +2448,7 @@ impl System {
         let current = Arc::new(move || {
             let system = system.upgrade().ok_or_else(|| Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE, "application data system stopped"))?;
-            system.check_package_bootstrap(&retained)?;
-            system.capture_package_queries()
+            system.capture_package_queries_for(&retained)
         });
         let (owner, worker) = crate::package::application_data::Owner::start(transport,
             self.process.clone(), current, commit, self.package_install_lock.clone());
@@ -2418,7 +2477,7 @@ impl System {
         installer: Arc<dyn crate::package::move_package::InstallOwner>,
     ) -> Result<crate::package::move_package::Workers> {
         self.check_package_bootstrap(bridge)?;
-        let capture = self.capture_package_queries()?;
+        let capture = self.capture_package_queries_for(bridge)?;
         let lifecycle = capture.state().system.lifecycle.clone().ok_or_else(|| Exception::new(
             aim_binder_host::parcel::EX_ILLEGAL_STATE, "relocation lifecycle unavailable"))?;
         let effects = self.package_effects_owner(bridge)?;
@@ -2432,8 +2491,7 @@ impl System {
         let source = Arc::new(move || {
             let system = system.upgrade().ok_or_else(|| Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE, "relocation system stopped"))?;
-            system.check_package_bootstrap(&retained)?;
-            Ok(system.capture_package_queries()?.state().clone())
+            Ok(system.capture_package_queries_for(&retained)?.state().clone())
         });
         let (owner, workers) = crate::package::move_package::Owner::new(source, files,
             crate::package::move_package::StorageOwner::new(transport), installer, effects,
@@ -2467,7 +2525,7 @@ impl System {
         let existing = self.existing_package_owner()?;
         let effects = self.package_effects_owner(bridge)?;
         let preferred = self.package_preferred_registry(bridge)?;
-        let lifecycle = self.capture_package_queries()?.state().system.lifecycle.clone().ok_or_else(||
+        let lifecycle = self.capture_package_queries_for(bridge)?.state().system.lifecycle.clone().ok_or_else(||
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "mutation lifecycle unavailable"))?;
         let changes = self.package_bootstrap.lock().unwrap().current.as_ref()
             .filter(|current| Arc::ptr_eq(&current.bridge, bridge)).map(|current| current.changes.clone())
@@ -2487,8 +2545,7 @@ impl System {
         let system = Arc::downgrade(self); let retained = bridge.clone();
         let source = Arc::new(move || {
             let system = system.upgrade().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "mutation system stopped"))?;
-            system.check_package_bootstrap(&retained)?;
-            Ok(system.capture_package_queries()?.state().clone())
+            Ok(system.capture_package_queries_for(&retained)?.state().clone())
         });
         let producer = crate::package::mutation_producers::Owner::new(pipeline,
             deletion.controller.store.clone(), source, existing, deletion, effects.clone(),
@@ -2600,7 +2657,7 @@ impl System {
                         .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
                 }
                 current.publish_snapshot(update.store);
-                current.queries = Some(update.capture.clone());
+                current.set_queries(Some(update.capture.clone()));
                 if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
                 state.version = update.capture.scan().version();
                 return Ok(update.capture);
@@ -2623,8 +2680,8 @@ impl System {
         }
     }
 
-    pub(crate) fn native_package_has_launcher(&self, package: &str, user: i32, flags: i64) -> Result<bool> {
-        let capture = self.capture_package_queries()?;
+    pub(crate) fn native_package_has_launcher(&self, bridge: &Arc<crate::package::bootstrap::Bridge>, package: &str, user: i32, flags: i64) -> Result<bool> {
+        let capture = self.capture_package_queries_for(bridge)?;
         let resolution = capture.resolution().map_err(|error| Exception::new(
             aim_binder_host::parcel::EX_ILLEGAL_STATE, format!("new-user launcher resolution: {error:?}")))?;
         let intent = crate::package::intent::Intent {
@@ -2656,7 +2713,7 @@ impl System {
     ) -> Result<()> {
         use crate::package::query::preferred::Owner;
         self.check_package_bootstrap(bridge)?;
-        let capture = self.capture_package_queries()?;
+        let capture = self.capture_package_queries_for(bridge)?;
         let handle = capture.state().system.preferred_owner.as_ref().ok_or_else(|| Exception::new(
             aim_binder_host::parcel::EX_ILLEGAL_STATE, "cross-profile preferred owner unavailable"))?;
         let level = handle.actions.cross_access(1000, source, target, true)
@@ -2714,8 +2771,7 @@ impl System {
             aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT, format!("internal mutation record: {status}")))?;
         let gate=self.package_install_guard();
         loop {
-        let latest=self.capture_package_queries()?;
-        self.check_package_bootstrap(bridge)?;
+        let latest=self.capture_package_queries_for(bridge)?;
         let mut applied = crate::package::internal_mutation_apply::apply_rebased(base.scan(),latest.scan(), &record).map_err(|error|
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
         let disk = self.package_bootstrap.lock().unwrap().current.as_ref()
@@ -2771,7 +2827,7 @@ impl System {
         }
         if committed {
             current.publish_snapshot(update.store);
-            current.queries = Some(update.capture.clone());
+            current.set_queries(Some(update.capture.clone()));
             if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
             state.version = update.capture.scan().version();
         }
@@ -2800,7 +2856,9 @@ impl System {
         let detached = {
             let mut state = self.package_bootstrap.lock().unwrap();
             if state.current.as_ref().is_some_and(|current| Arc::ptr_eq(&current.bridge, bridge)) {
-                state.current.take()
+                let detached=state.current.take();
+                if let Some(current)=&detached {current.retire_queries();}
+                detached
             } else { None }
         };
         let Some(detached) = detached else { return Ok(()); };
@@ -2850,7 +2908,7 @@ impl System {
         let update = base.prepare_archive_owner(owner).map_err(|error|
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
         current.publish_snapshot(update.store);
-        current.queries = Some(update.capture.clone());
+        current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
         Ok(())
@@ -2868,7 +2926,7 @@ impl System {
         let update = base.prepare_launch_owner(owner).map_err(|error|
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
         current.publish_snapshot(update.store);
-        current.queries = Some(update.capture.clone());
+        current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
         Ok(())
@@ -2905,7 +2963,7 @@ impl System {
                 .map(|dependencies| (current.bridge.clone(), dependencies.clone())))
         };
         let (bridge, dependencies) = retained?;
-        let capture = match self.capture_package_queries() { Ok(capture)=>capture, Err(error)=>return Some(Err(error)) };
+        let capture = match self.capture_package_queries_for(&bridge) { Ok(capture)=>capture, Err(error)=>return Some(Err(error)) };
         let resolution = match capture.resolution() { Ok(value)=>value, Err(error)=>return Some(Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,format!("mutation current resolution: {error:?}")))) };
         let current_query = crate::package::query::Query{state:capture.state(),filter:&resolution.apps_filter,calling_uid:query.calling_uid};
         // Original policy leaves may reenter native PM while AMS is locked.
@@ -2987,7 +3045,7 @@ impl System {
                     written.unwrap_err().to_string()));
             }
             current.publish_snapshot(update.store);
-            current.queries = Some(update.capture.clone());
+            current.set_queries(Some(update.capture.clone()));
             if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
             state.version = update.capture.scan().version();
             update.capture.state().clone()
@@ -3036,7 +3094,7 @@ impl System {
         &self, bridge: &Arc<crate::package::bootstrap::Bridge>, data: &std::path::Path,
     ) -> Result<crate::package::instant::Worker> {
         self.check_package_bootstrap(bridge)?;
-        let capture = self.capture_package_queries()?;
+        let capture = self.capture_package_queries_for(bridge)?;
         let density = bridge.instant_icon_density().map_err(|error| match error {
             crate::package::bootstrap::OwnerError::Owner(exception) => exception,
             error => Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, format!("instant configuration owner: {error:?}")),
@@ -3055,7 +3113,7 @@ impl System {
             (Some(current), Ok(update)) => {
                 current.instant_registry = Some(owner.clone());
                 current.publish_snapshot(update.store);
-                current.queries = Some(update.capture.clone());
+                current.set_queries(Some(update.capture.clone()));
                 if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
                 state.version = update.capture.scan().version();
                 Ok(())
@@ -3082,7 +3140,7 @@ impl System {
         let update = capture.prepare_instant_registry_update(owner).map_err(|error|
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
         current.publish_snapshot(update.store);
-        current.queries = Some(update.capture.clone());
+        current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
         Ok(())
@@ -3109,8 +3167,7 @@ impl System {
         let current = Arc::new(move || {
             let system = system.upgrade().ok_or_else(|| Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE, "maintenance system stopped"))?;
-            system.check_package_bootstrap(&retained)?;
-            system.capture_package_queries()
+            system.capture_package_queries_for(&retained)
         });
         let (runtime, worker) = crate::package::diagnostics::Runtime::attach(crate::package::diagnostics::Inputs {
             process: self.process.clone(), maintenance: Arc::new(maintenance), effects,
@@ -3265,7 +3322,7 @@ impl System {
     ) -> Result<()> {
         use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as aidl;
         self.check_package_bootstrap(bridge)?;
-        let capture = self.capture_package_queries()?;
+        let capture = self.capture_package_queries_for(bridge)?;
         let resolver = Arc::new(crate::package::resolve::Resolver::default());
         let resolution = resolver.resolution(capture.state()).map_err(|error| Exception::new(
             aim_binder_host::parcel::EX_ILLEGAL_STATE, format!("confirmation installer selection: {error:?}")))?;
@@ -3291,8 +3348,7 @@ impl System {
         let source = Arc::new(move || {
             let system = system.upgrade().ok_or_else(|| Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE, "confirmation system stopped"))?;
-            system.check_package_bootstrap(&retained)?;
-            Ok(system.capture_package_queries()?.state().clone())
+            Ok(system.capture_package_queries_for(&retained)?.state().clone())
         });
         let sessions = Arc::downgrade(installer);
         let stages = Box::new(move |session: &crate::package::installer::Session, record: &crate::package::installer::Record| {
@@ -3319,8 +3375,7 @@ impl System {
         let source = Arc::new(move || {
             let system = system.upgrade().ok_or_else(|| Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE, "move install system stopped"))?;
-            system.check_package_bootstrap(&retained)?;
-            Ok(system.capture_package_queries()?.state().clone())
+            Ok(system.capture_package_queries_for(&retained)?.state().clone())
         });
         let adapter = crate::package::installer::move_pipeline::Adapter::new(pipeline.clone(), source, claims);
         let apks = pipeline.apks.clone();
@@ -3405,8 +3460,7 @@ impl System {
         Ok(Arc::new(move |scan| {
             let system = system.upgrade().ok_or("install publication system stopped")?;
             loop {
-                system.check_package_bootstrap(&bridge).map_err(|error| format!("{error:?}"))?;
-                let base = system.capture_package_queries().map_err(|error| format!("{error:?}"))?;
+                let base = system.capture_package_queries_for(&bridge).map_err(|error| format!("{error:?}"))?;
                 let latest = snapshots.capture();
                 let mut retained = scan.owner().clone();
                 if !crate::package::scan_snapshot::install_context::rebase_install_users(
@@ -3427,7 +3481,7 @@ impl System {
                     drop(state);
                     continue;
                 }
-                current.queries = Some(capture);
+                current.set_queries(Some(capture));
                 if let Some(page) = &current.version_page { page.publish(latest.version()); }
                 state.version = latest.version();
                 break;
@@ -3441,7 +3495,7 @@ impl System {
         self: &Arc<Self>, bridge: &Arc<crate::package::bootstrap::Bridge>,
     ) -> Result<()> {
         self.check_package_bootstrap(bridge)?;
-        let lifecycle = self.capture_package_queries()?.state().system.lifecycle.clone()
+        let lifecycle = self.capture_package_queries_for(bridge)?.state().system.lifecycle.clone()
             .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
                 "freezer lifecycle owner unavailable"))?;
         let owner = lifecycle.clone();
@@ -3462,7 +3516,7 @@ impl System {
                 // An installation has persisted its scan and is completing its
                 // query projection. Publish only the retained freezer view;
                 // the install owner will project the real latest lifecycle map.
-                current.queries = Some(base.with_frozen_view(frozen.clone())?);
+                current.set_queries(Some(base.with_frozen_view(frozen.clone())?));
                 return Ok(());
             }
             let update = base.prepare_package_update(base.scan().owner().clone())?;
@@ -3473,7 +3527,7 @@ impl System {
                 Err(error) => return Err(format!("freezer canonical publication: {error:?}")),
                 Ok(_) => {}
             }
-            current.queries = Some(capture.clone());
+            current.set_queries(Some(capture.clone()));
             if let Some(page) = &current.version_page { page.publish(capture.scan().version()); }
             state.version = capture.scan().version();
             return Ok(());
@@ -3497,7 +3551,7 @@ impl System {
             let require_mutable_receiver = external.commit_mutable_receiver_enforced(uid)?;
             let secure_frp = external.secure_frp_active()?;
             let secure_frp_install_allowed = if secure_frp {
-                let capture = system.capture_package_queries()?;
+                let capture = system.capture_package_queries_for(&bridge)?;
                 let resolution = capture.resolution().map_err(|error|
                     Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, format!("FRP package resolution: {error:?}")))?;
                 let query = crate::package::query::Query {
@@ -3514,7 +3568,7 @@ impl System {
                 let system_installer = calling_package.as_ref().is_some_and(|name|
                     installers.iter().any(|installer| installer.as_ref() == Some(name)));
                 let allowed = !system_installer && system.check_permission("android.permission.INSTALL_PACKAGES", -1, uid)?;
-                if !Arc::ptr_eq(&capture, &system.capture_package_queries()?) {
+                if !Arc::ptr_eq(&capture, &system.capture_package_queries_for(&bridge)?) {
                     return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
                         "FRP package selection changed"));
                 }
@@ -3537,7 +3591,7 @@ impl System {
             let system = system.upgrade().ok_or_else(|| Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE, "installer system owner stopped"))?;
             system.check_package_bootstrap(&bridge)?;
-            let capture = system.capture_package_queries()?;
+            let capture = system.capture_package_queries_for(&bridge)?;
             let owner = capture.state().system.instant_components.as_ref().ok_or_else(||
                 Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
                     "instant app installer selection owner unavailable"))?;
@@ -3548,7 +3602,7 @@ impl System {
                     format!("installer domain limits owner: {error:?}")),
             })?;
             system.check_package_bootstrap(&bridge)?;
-            if !Arc::ptr_eq(&capture, &system.capture_package_queries()?) {
+            if !Arc::ptr_eq(&capture, &system.capture_package_queries_for(&bridge)?) {
                 return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
                     "installer domain selection changed"));
             }
@@ -3753,7 +3807,7 @@ impl System {
         let committed = result.is_ok() || result.as_ref().is_err_and(|error| error.committed);
         if committed {
             current.publish_snapshot(update.store);
-            current.queries = Some(update.capture.clone());
+            current.set_queries(Some(update.capture.clone()));
             if let Some(page) = &current.version_page {
                 page.publish(update.capture.scan().version());
             }
@@ -3970,7 +4024,7 @@ impl System {
         inodes: std::collections::BTreeMap<u32, aim_storage::guest_inode::GuestInode>,
     ) -> Result<crate::package::owner::runtime_metadata::worker::Worker> {
         self.check_package_bootstrap(bridge)?;
-        let capture = self.capture_package_queries()?;
+        let capture = self.capture_package_queries_for(bridge)?;
         let metadata = self.runtime_permission_metadata_owner(&capture)?;
         metadata.lock().unwrap().bind_creation_metadata(&inodes).map_err(|error|
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
@@ -3994,7 +4048,7 @@ impl System {
                     .check_package_bootstrap(&bridge)
                     .map_err(|error| fail(format!("runtime worker bootstrap: {error:?}")))?;
                 let capture = system
-                    .capture_package_queries()
+                    .capture_package_queries_for(&bridge)
                     .map_err(|error| fail(format!("runtime worker capture: {error:?}")))?;
                 system.process_due_runtime_permission_requests(
                     &bridge,
@@ -5316,7 +5370,7 @@ impl System {
         self.check_package_bootstrap(bridge)?;
         let early = self.boot_configuration_for(bridge)?.values.lock().unwrap().early.clone().ok_or_else(|| Exception::new(
             aim_binder_host::parcel::EX_ILLEGAL_STATE, "actual early native package configuration unavailable"))?;
-        let capture = self.capture_package_queries()?;
+        let capture = self.capture_package_queries_for(bridge)?;
         let late = early.after_scan(capture.state().clone(), effects).map_err(|message|
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, message))?;
         self.complete_native_package_boot_facts(bridge, late)
@@ -5325,7 +5379,7 @@ impl System {
         bridge: &Arc<crate::package::bootstrap::Bridge>, late: crate::package::boot_configuration::Late,
     ) -> Result<()> {
         self.check_package_bootstrap(bridge)?;
-        let capture = self.capture_package_queries()?;
+        let capture = self.capture_package_queries_for(bridge)?;
         let controller = capture.state().system.permission_controller_package.as_ref()
             .and_then(|name| name.as_ref()).and_then(|name| capture.state().packages.get(name))
             .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "accepted permission controller unavailable"))?;
@@ -5539,7 +5593,7 @@ impl System {
             Err(error) => return Ok(Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))),
         };
         current.publish_snapshot(update.store);
-        current.queries = Some(update.capture.clone());
+        current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
         drop(state);
@@ -5564,7 +5618,7 @@ impl System {
             return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"permission refresh generation changed"));
         }
         current.publish_snapshot(update.store);
-        current.queries = Some(update.capture.clone());
+        current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
         Ok(())

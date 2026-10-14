@@ -36,8 +36,7 @@ impl Runtime {
             .ok_or_else(|| failure("original domain system stopped"))?;
         let _operation = self.lifecycle.lock().unwrap();
         loop {
-            system.check_package_bootstrap(&self.bridge)?;
-            let capture = system.capture_package_queries()?;
+            let capture = system.capture_package_queries_for(&self.bridge)?;
             let native = capture
                 .domains()
                 .ok_or_else(|| failure("native domain lifecycle owner absent"))?;
@@ -184,7 +183,7 @@ impl Runtime {
                     .system
                     .upgrade()
                     .ok_or_else(|| failure("original domain system stopped"))?
-                    .capture_package_queries()?;
+                    .capture_package_queries_for(&self.bridge)?;
                 state
                     .receipts
                     .acknowledge(
@@ -266,7 +265,7 @@ impl System {
         bridge: &Arc<crate::package::bootstrap::Bridge>,
     ) -> Result<Arc<Runtime>> {
         self.check_package_bootstrap(bridge)?;
-        let capture = self.capture_package_queries()?;
+        let capture = self.capture_package_queries_for(bridge)?;
         let before = capture
             .domains()
             .ok_or_else(|| failure("native domain initializer owner absent"))?

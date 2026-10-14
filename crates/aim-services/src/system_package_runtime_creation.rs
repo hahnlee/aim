@@ -32,7 +32,7 @@ impl System {
             Err(error)=>return Err(creation_error(error.to_string())),
         };
         self.check_package_bootstrap(bridge)?;
-        let capture=self.capture_package_queries()?;
+        let capture=self.capture_package_queries_for(bridge)?;
         if !capture.state().users.contains_key(&user){return Err(creation_error("Runtime creation user is not in the current native UM inventory"));}
         self.with_runtime_permission_metadata(&capture,|state|state.publish_user_creation_inode(user as u32,inode))?
             .map_err(creation_error)

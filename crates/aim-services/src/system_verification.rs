@@ -69,8 +69,7 @@ impl System {
         if result.state.active.is_empty()&&result.state.restored.is_empty(){for diagnostic in result.diagnostics {runtime.note(diagnostic.message);}return Ok(());}
         let input=result.state;let diagnostics=result.diagnostics;
         loop {
-            self.check_package_bootstrap(&bridge)?;
-            let capture=self.capture_package_queries()?;
+            let capture=self.capture_package_queries_for(&bridge)?;
             let domains=capture.domains().ok_or_else(||error("native domain restore registry unavailable"))?;
             let mut owner=domains.owner().clone();
             let result=domain::ReadResult{state:input.clone(),diagnostics:vec![]};

@@ -23,12 +23,12 @@ impl System {
     }
     pub(crate) fn native_boot_dexopt_start_time(&self,bridge:&Arc<crate::package::bootstrap::Bridge>)->Result<i64>{
         self.check_package_bootstrap(bridge)?;
-        self.capture_package_queries()?.state().system.lifecycle.as_ref().ok_or_else(||dexopt_error("Dexopt lifecycle unavailable"))?
+        self.capture_package_queries_for(bridge)?.state().system.lifecycle.as_ref().ok_or_else(||dexopt_error("Dexopt lifecycle unavailable"))?
             .boot_dexopt_start_nanos().map_err(dexopt_error)
     }
     pub(crate) fn note_native_boot_dexopt_start_time(&self,bridge:&Arc<crate::package::bootstrap::Bridge>,started:i64)->Result<()>{
         self.check_package_bootstrap(bridge)?;
-        self.capture_package_queries()?.state().system.lifecycle.as_ref().ok_or_else(||dexopt_error("Dexopt lifecycle unavailable"))?
+        self.capture_package_queries_for(bridge)?.state().system.lifecycle.as_ref().ok_or_else(||dexopt_error("Dexopt lifecycle unavailable"))?
             .note_boot_dexopt_start_nanos(started).map_err(dexopt_error)
     }
     pub(crate) fn persist_native_dexopt_package_usage(&self,bridge:&Arc<crate::package::bootstrap::Bridge>)->Result<()>{

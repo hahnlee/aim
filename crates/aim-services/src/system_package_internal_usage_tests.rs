@@ -170,12 +170,24 @@ fn prepared_transition_rebases_over_deferred_canonical_usage() {
 #[test]
 fn prepared_usage_cannot_publish_into_retired_bootstrap_epoch(){
     let mut fixture=Fixture::new();let old_bridge=fixture.attach();let old=publish(&fixture,&old_bridge);
+    let captures=crate::package::boot_captures::Captures::new(&fixture.system,old_bridge.clone());
     let mut usage=old.scan().usage().clone();usage.notify("p",0,111);let prepared=old.prepare_usage_update(usage).unwrap();
     let new_bridge=fixture.attach();let replacement=publish(&fixture,&new_bridge);
     assert!(fixture.system.check_package_bootstrap(&old_bridge).is_err());
+    assert!(captures.capture(replacement.scan().version() as i64).is_err(),"retired boot captures must not read the replacement epoch");
     assert!(fixture.system.publish_package_scan_with_queries(&old_bridge,Some(old.scan()),prepared.capture.scan().owner().clone(),prepared.capture.scan().usage().clone(),(**prepared.capture.context()).clone()).is_err());
     assert!(Arc::ptr_eq(&replacement,&fixture.system.capture_package_queries().unwrap()));
     assert_eq!(replacement.scan().usage().times("p").unwrap(),&[0;8]);
+}
+
+#[test]
+fn retired_bootstrap_cannot_enter_launcher_or_existing_preference_helpers(){
+    let mut fixture=Fixture::new();let old_bridge=fixture.attach();publish(&fixture,&old_bridge);
+    let new_bridge=fixture.attach();publish(&fixture,&new_bridge);
+    let launcher=fixture.system.native_package_has_launcher(&old_bridge,"p",0,0).unwrap_err();
+    assert!(launcher.message.contains("epoch changed"));
+    let preferences=fixture.system.restore_existing_install_preferences(&old_bridge,"p",0).unwrap_err();
+    assert!(preferences.message.contains("epoch changed"),"retired preference helper reached an owner: {}",preferences.message);
 }
 
 #[test]
@@ -206,6 +218,21 @@ fn public_read_dispatch_skips_held_mutation_and_bootstrap_gates(){
         assert!(crate::package::mutation_dispatch::handles(code),"actual mutation must retain native ownership: {code}");
     }
     assert!(Arc::ptr_eq(&capture,&fixture.system.capture_package_queries().unwrap()));
+}
+
+#[test]
+fn boot_snapshot_capture_skips_held_bootstrap_publication_lock(){
+    let mut fixture=Fixture::new();let bridge=fixture.attach();let capture=publish(&fixture,&bridge);
+    let captures=Arc::new(crate::package::boot_captures::Captures::new(&fixture.system,bridge.clone()));
+    let publication=fixture.system.package_bootstrap.lock().unwrap();
+    let system=fixture.system.clone();let worker_captures=captures.clone();let expected=capture.clone();
+    let (send,receive)=std::sync::mpsc::channel();
+    let worker=std::thread::spawn(move||send.send((system.capture_package_queries(),worker_captures.snapshot())).unwrap());
+    let result=receive.recv_timeout(std::time::Duration::from_secs(2));
+    drop(publication);worker.join().unwrap();
+    let (current,snapshot)=result.expect("boot snapshot capture waited for the mutation/bootstrap publication lock");
+    assert!(Arc::ptr_eq(&expected,&current.unwrap()));assert!(snapshot.is_ok());
+    fixture.system.detach_package_bootstrap(&bridge).unwrap();assert!(captures.snapshot().is_err());
 }
 
 #[test]
@@ -654,14 +681,14 @@ fn service_host_lease_pairs_query_scan_across_durable_canonical_publication() {
     };
     let retained=capture();assert_eq!(versions(&retained),(old.scan().version() as i64,old.scan().version() as i64));
     let next=old.prepare_committed_package_snapshot(new.clone()).unwrap();
-    fixture.system.package_bootstrap.lock().unwrap().current.as_mut().unwrap().queries=Some(next.clone());
+    fixture.system.package_bootstrap.lock().unwrap().current.as_mut().unwrap().set_queries(Some(next.clone()));
     let (paired,query)=fixture.system.capture_package_scan_and_queries().unwrap();
     assert!(Arc::ptr_eq(&paired,&new));assert!(Arc::ptr_eq(&query.unwrap(),&next));
     let current=capture();assert_eq!(versions(&current),(new.version() as i64,new.version() as i64));
     assert_eq!(versions(&retained),(old.scan().version() as i64,old.scan().version() as i64),"old lease must keep its exact immutable query owner");
     // Initial/raw boot metadata still exposes the real canonical Store when no
     // finalized query owner has been published; it invents no Computer lease.
-    fixture.system.package_bootstrap.lock().unwrap().current.as_mut().unwrap().queries=None;
+    fixture.system.package_bootstrap.lock().unwrap().current.as_mut().unwrap().set_queries(None);
     let (paired,query)=fixture.system.capture_package_scan_and_queries().unwrap();
     assert!(Arc::ptr_eq(&paired,&new));assert!(query.is_none());
 }

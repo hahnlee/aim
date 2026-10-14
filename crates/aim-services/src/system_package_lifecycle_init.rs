@@ -73,7 +73,7 @@ impl<M:AreaMemory+Send+'static> BeforeScan<M>{
             return Err(Exception::new(EX_ILLEGAL_STATE,"initial capture replaced production lifecycle"));
         }
         self.system.install_package_freezer_publication(&self.bridge)?;
-        let capture=self.system.capture_package_queries()?;
+        let capture=self.system.capture_package_queries_for(&self.bridge)?;
         self.system.check_package_bootstrap(&self.bridge)?;
         Ok(Published{lifecycle:self.production.owner,capture,persistence:self.persistence,recovery:self.recovery})
     }

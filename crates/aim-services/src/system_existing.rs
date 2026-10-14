@@ -75,7 +75,7 @@ impl System {
         request: Request,
     ) -> Result<i32, Exception> {
         self.check_package_bootstrap(&owner.bridge)?;
-        let before = self.capture_package_queries()?;
+        let before = self.capture_package_queries_for(&owner.bridge)?;
         let resolver = Resolver::default();
         let resolution = resolver
             .resolution(before.state())
@@ -255,7 +255,7 @@ impl System {
         let committed = write.is_ok() || write.as_ref().is_err_and(|e| e.committed);
         if committed {
             current.publish_snapshot(update.store);
-            current.queries = Some(update.capture.clone());
+            current.set_queries(Some(update.capture.clone()));
             if let Some(page) = &current.version_page {
                 page.publish(update.capture.scan().version());
             }
@@ -271,7 +271,7 @@ impl System {
         if !changed {
             return owner.complete_immediate(request, 1);
         }
-        let installed = self.capture_package_queries()?;
+        let installed = self.capture_package_queries_for(&owner.bridge)?;
         let mut record = Parcel::new();
         record.write_i32(1);
         record.write_i64(installed.scan().version() as i64);
@@ -357,10 +357,11 @@ impl System {
     }
     pub(crate) fn restore_existing_install_preferences(
         &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
         name: &str,
         user: i32,
     ) -> Result<(), Exception> {
-        let capture = self.capture_package_queries()?;
+        let capture = self.capture_package_queries_for(bridge)?;
         let preferred = capture
             .state()
             .system
@@ -372,8 +373,10 @@ impl System {
             bootstrap
                 .current
                 .as_ref()
+                .filter(|current| Arc::ptr_eq(&current.bridge, bridge)
+                    && current.queries.as_ref().is_some_and(|current| Arc::ptr_eq(current, &capture)))
                 .and_then(|current| current.persistence.clone())
-                .ok_or_else(|| error("existing install preference persistence absent"))?
+                .ok_or_else(|| error("existing install preference generation changed"))?
         };
         let pending = persistence
             .lock()
@@ -381,16 +384,21 @@ impl System {
             .pending_default_browser(user as u32)
             .map_err(error)?;
         if pending.as_deref() == Some(name) {
+            self.check_package_bootstrap(bridge)?;
             preferred
                 .actions
                 .restore_browser(user, name, true)
                 .map_err(|e| error(format!("existing install browser restore: {e:?}")))?;
-            persistence
-                .lock()
-                .unwrap()
-                .take_matching_pending_browser(user as u32, name)
-                .map_err(error)?;
+            let mut disk = persistence.lock().unwrap();
+            let published = self.package_queries.lock().unwrap();
+            if !published.bridge.as_ref().and_then(std::sync::Weak::upgrade)
+                .is_some_and(|current| Arc::ptr_eq(&current, bridge))
+                || !published.capture.as_ref().is_some_and(|current| Arc::ptr_eq(current, &capture)) {
+                return Err(error("existing install preference generation changed"));
+            }
+            disk.take_matching_pending_browser(user as u32, name).map_err(error)?;
         }
+        self.check_package_bootstrap(bridge)?;
         preferred
             .actions
             .reconcile_home(user, 1000)
@@ -456,7 +464,7 @@ impl System {
         );
         if write.is_ok() || write.as_ref().is_err_and(|e| e.committed) {
             current.publish_snapshot(update.store);
-            current.queries = Some(update.capture.clone());
+            current.set_queries(Some(update.capture.clone()));
             if let Some(page) = &current.version_page {
                 page.publish(update.capture.scan().version());
             }

@@ -13,7 +13,7 @@ impl System {
     pub fn initialize_native_package_verification(self:&Arc<Self>,bridge:&Arc<Bridge>,
         persistence:Arc<Mutex<crate::package::owner::Store>>)->Result<VerificationWorkers,Exception> {
         self.check_package_bootstrap(bridge)?;
-        let capture=self.capture_package_queries()?;
+        let capture=self.capture_package_queries_for(bridge)?;
         if capture.domains().is_none(){return Err(failure("Native domain registry must be captured before verification initialization"));}
         persistence.lock().unwrap().validate_committed_scan(capture.scan().owner()).map_err(|error|failure(error.to_string()))?;
         let selected=Runtime::select(capture.state())?;
@@ -67,7 +67,7 @@ impl System {
             }
         }
         if verification_id<0||required.is_empty(){return Err(failure("Install verification requires an allocated token and required verifiers"));}
-        let capture=self.capture_package_queries()?;
+        let capture=self.capture_package_queries_for(bridge)?;
         let resolver=crate::package::resolve::Resolver::default();
         let resolution=resolver.resolution(capture.state()).map_err(|error|failure(format!("Verifier visibility: {error:?}")))?;
         let query=crate::package::query::Query{state:capture.state(),filter:&resolution.apps_filter,calling_uid:1000};

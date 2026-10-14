@@ -57,8 +57,7 @@ impl PackageQueries {
                 source: Source::Native(Arc::new(move || {
                     let system = parent.upgrade().ok_or_else(|| Exception::new(
                         aim_binder_host::parcel::EX_ILLEGAL_STATE, "package endpoint system stopped"))?;
-                    system.check_package_bootstrap(&bridge)?;
-                    system.capture_package_queries()
+                    system.capture_package_queries_for(&bridge)
                 })),
                 resolver: owner.resolver.clone(), native: owner.native, system: owner.system.clone(),
             })

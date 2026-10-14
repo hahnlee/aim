@@ -84,7 +84,7 @@ pub fn transact(system: &Arc<crate::system::System>, call: &mut Call<'_>) -> Opt
                 // The mutation already belongs to PermissionManager. Publish
                 // its live grants/GIDs before reporting success to native clients.
                 let refresh = system.package_bootstrap().and_then(|bridge| {
-                    system.capture_package_queries().and_then(|capture| {
+                    system.capture_package_queries_for(&bridge).and_then(|capture| {
                         system.refresh_package_permission_queries(&bridge, &capture)
                     })
                 });

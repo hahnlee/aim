@@ -23,7 +23,7 @@ pub(crate) fn validate_identity(before:&State,after:&State,names:&[String])->Res
 impl System {
     pub(crate) fn capture_package_dump_permissions(&self,state:&State,names:&[String])->Result<BTreeMap<i32,legacy_permissions::State>> {
         let bridge=self.package_bootstrap()?;self.check_package_bootstrap(&bridge)?;
-        validate_identity(state,self.capture_package_queries()?.state(),names)?;
+        validate_identity(state,self.capture_package_queries_for(&bridge)?.state(),names)?;
         let users=state.users.keys().copied().collect::<Vec<_>>();
         let mut ids=std::collections::BTreeSet::new();
         for name in names {
@@ -44,7 +44,7 @@ impl System {
             live.insert(app_id,value);
         }
         self.check_package_bootstrap(&bridge)?;
-        validate_identity(state,self.capture_package_queries()?.state(),names)?;
+        validate_identity(state,self.capture_package_queries_for(&bridge)?.state(),names)?;
         Ok(live)
     }
 }

@@ -327,147 +327,19 @@ impl WriteParcelable for PackageSeInfo {
 
 struct Lease {
     snapshot: Option<Arc<Snapshot>>,
-    usage_records: Option<Vec<u8>>,
     comparison_id: Option<u64>,
-    code: BTreeMap<(String, bool), Arc<Vec<u8>>>,
-    settings: BTreeMap<(String, bool), Arc<Vec<u8>>>,
-    runtimes: BTreeMap<(String, bool), Arc<Vec<u8>>>,
-    libraries: BTreeMap<String, Arc<Vec<u8>>>,
-    shared_users: BTreeMap<String, Arc<Vec<u8>>>,
-    users: BTreeMap<(String, bool, i32), Arc<Vec<u8>>>,
+    records: BTreeMap<RecordKey, Arc<Vec<u8>>>,
 }
 
-impl Lease {
-    fn shared_user(
-        &mut self,
-        snapshot: &Snapshot,
-        name: Option<&str>,
-    ) -> Result<Option<Arc<Vec<u8>>>, Exception> {
-        let name = name.ok_or_else(|| Exception::illegal_argument("shared user name is null"))?;
-        let key = name.to_owned();
-        if let Some(bytes) = self.shared_users.get(&key) {
-            return Ok(Some(bytes.clone()));
-        }
-        let bytes = super::shared_record::captured(snapshot, name)
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
-        let Some(bytes) = bytes else {
-            return Ok(None);
-        };
-        let bytes = Arc::new(bytes);
-        self.shared_users.insert(key, bytes.clone());
-        Ok(Some(bytes))
-    }
-    fn libraries(
-        &mut self,
-        snapshot: &Snapshot,
-        name: Option<&str>,
-    ) -> Result<Option<Arc<Vec<u8>>>, Exception> {
-        let name = name.ok_or_else(|| Exception::illegal_argument("package name is null"))?;
-        let key = name.to_owned();
-        if let Some(bytes) = self.libraries.get(&key) {
-            return Ok(Some(bytes.clone()));
-        }
-        let bytes = super::library_record::captured(snapshot, name)
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
-        let Some(bytes) = bytes else {
-            return Ok(None);
-        };
-        let bytes = Arc::new(bytes);
-        self.libraries.insert(key, bytes.clone());
-        Ok(Some(bytes))
-    }
-    fn runtime(
-        &mut self,
-        snapshot: &Snapshot,
-        name: Option<&str>,
-        factory: bool,
-    ) -> Result<Option<Arc<Vec<u8>>>, Exception> {
-        let name = name.ok_or_else(|| Exception::illegal_argument("package name is null"))?;
-        let key = (name.to_owned(), factory);
-        if let Some(bytes) = self.runtimes.get(&key) {
-            return Ok(Some(bytes.clone()));
-        }
-        let bytes = super::runtime_record::captured(snapshot, name, factory)
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
-        let Some(bytes) = bytes else {
-            return Ok(None);
-        };
-        let bytes = Arc::new(bytes);
-        self.runtimes.insert(key, bytes.clone());
-        Ok(Some(bytes))
-    }
-    fn setting(
-        &mut self,
-        snapshot: &Snapshot,
-        name: Option<&str>,
-        factory: bool,
-    ) -> Result<Option<Arc<Vec<u8>>>, Exception> {
-        let name = name.ok_or_else(|| Exception::illegal_argument("package name is null"))?;
-        let key = (name.to_owned(), factory);
-        if let Some(bytes) = self.settings.get(&key) {
-            return Ok(Some(bytes.clone()));
-        }
-        let bytes = super::setting_record::captured(snapshot, name, factory)
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
-        let Some(bytes) = bytes else {
-            return Ok(None);
-        };
-        let bytes = Arc::new(bytes);
-        self.settings.insert(key, bytes.clone());
-        Ok(Some(bytes))
-    }
-    fn user(
-        &mut self,
-        snapshot: &Snapshot,
-        name: Option<&str>,
-        disabled: bool,
-        user: i32,
-    ) -> Result<Option<Arc<Vec<u8>>>, Exception> {
-        let name = name.ok_or_else(|| Exception::illegal_argument("package name is null"))?;
-        if user < 0 {
-            return Err(Exception::illegal_argument("invalid user id"));
-        }
-        let key = (name.to_owned(), disabled, user);
-        if let Some(bytes) = self.users.get(&key) {
-            return Ok(Some(bytes.clone()));
-        }
-        let bytes = super::user_record::captured(snapshot, name, disabled, user)
-            .map_err(|error| Exception::new(EX_ILLEGAL_STATE, error))?;
-        let Some(bytes) = bytes else {
-            return Ok(None);
-        };
-        let bytes = Arc::new(bytes);
-        self.users.insert(key, bytes.clone());
-        Ok(Some(bytes))
-    }
-    fn code(
-        &mut self,
-        snapshot: &Snapshot,
-        name: Option<&str>,
-        disabled: bool,
-    ) -> Result<Option<Arc<Vec<u8>>>, Exception> {
-        let name = name.ok_or_else(|| Exception::illegal_argument("package name is null"))?;
-        let key = (name.to_owned(), disabled);
-        if let Some(code) = self.code.get(&key) {
-            return Ok(Some(code.clone()));
-        }
-        let code = PackageCode::captured(snapshot, name, disabled)
-            .map_err(|error| Exception::new(EX_ILLEGAL_STATE, error))?;
-        let Some(code) = code else {
-            return Ok(None);
-        };
-        let mut parcel = Parcel::new();
-        code.write_to(&mut parcel);
-        let bytes = Arc::new(parcel.data().to_vec());
-        if bytes.len() > i32::MAX as usize {
-            return Err(Exception::new(
-                EX_ILLEGAL_STATE,
-                "package code exceeds transport size",
-            ));
-        }
-        self.code.insert(key, bytes.clone());
-        Ok(Some(bytes))
-    }
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+enum RecordKey {
+    Usage,
+    SharedUser(String),
+    Libraries(String),
+    Runtime(String, bool),
+    Setting(String, bool),
+    User(String, bool, i32),
+    Code(String, bool),
 }
 
 struct ComputerLease {
@@ -506,6 +378,10 @@ impl Drop for Endpoint {
 }
 
 impl Endpoint {
+    fn admit_snapshot(&self) -> Option<Arc<Snapshot>> {
+        self.lease.lock().unwrap().snapshot.clone()
+    }
+
     pub(crate) fn with_computer(
         snapshot: Arc<Snapshot>,
         capture: Arc<super::query_state::Capture>,
@@ -524,10 +400,12 @@ impl Endpoint {
         let mut endpoint=Self::new(snapshot);endpoint.raw_metadata=true;endpoint
     }
     pub fn close_lease(&self){
-        let mut lease=self.lease.lock().unwrap();if let Some(id)=lease.comparison_id.take(){comparisons().lock().unwrap().remove(&id);}
-        lease.snapshot.take();lease.usage_records.take();
+        let comparison_id={
+            let mut lease=self.lease.lock().unwrap();
+            lease.snapshot.take();lease.records.clear();lease.comparison_id.take()
+        };
+        if let Some(id)=comparison_id{comparisons().lock().unwrap().remove(&id);}
         self.computer.lock().unwrap().take();
-        lease.code.clear();lease.users.clear();lease.settings.clear();lease.runtimes.clear();lease.libraries.clear();lease.shared_users.clear();
     }
     pub fn new(snapshot: Arc<Snapshot>) -> Self {
         Self {
@@ -535,16 +413,159 @@ impl Endpoint {
             raw_metadata: false,
             lease: Mutex::new(Lease {
                 snapshot: Some(snapshot),
-                usage_records: None,
                 comparison_id: None,
-                code: BTreeMap::new(),
-                users: BTreeMap::new(),
-                settings: BTreeMap::new(),
-                runtimes: BTreeMap::new(),
-                libraries: BTreeMap::new(),
-                shared_users: BTreeMap::new(),
+                records: BTreeMap::new(),
             }),
         }
+    }
+
+    fn cached_record<F>(
+        &self,
+        snapshot: &Arc<Snapshot>,
+        key: RecordKey,
+        capture: F,
+    ) -> Result<Option<Arc<Vec<u8>>>, Exception>
+    where
+        F: FnOnce(&Snapshot) -> Result<Option<Vec<u8>>, Exception>,
+    {
+        if let Some(bytes) = self.lease.lock().unwrap().records.get(&key).cloned() {
+            return Ok(Some(bytes));
+        }
+        let Some(bytes) = capture(snapshot)? else {
+            return Ok(None);
+        };
+        let bytes = Arc::new(bytes);
+        let mut lease = self.lease.lock().unwrap();
+        if lease
+            .snapshot
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, snapshot))
+        {
+            return Ok(Some(
+                lease
+                    .records
+                    .entry(key)
+                    .or_insert_with(|| bytes.clone())
+                    .clone(),
+            ));
+        }
+        Ok(Some(bytes))
+    }
+
+    fn shared_user(
+        &self,
+        snapshot: &Arc<Snapshot>,
+        name: Option<&str>,
+    ) -> Result<Option<Arc<Vec<u8>>>, Exception> {
+        let name = name.ok_or_else(|| Exception::illegal_argument("shared user name is null"))?;
+        self.cached_record(
+            snapshot,
+            RecordKey::SharedUser(name.to_owned()),
+            |snapshot| {
+                super::shared_record::captured(snapshot, name)
+                    .map_err(|error| Exception::new(EX_ILLEGAL_STATE, error))
+            },
+        )
+    }
+
+    fn libraries(
+        &self,
+        snapshot: &Arc<Snapshot>,
+        name: Option<&str>,
+    ) -> Result<Option<Arc<Vec<u8>>>, Exception> {
+        let name = name.ok_or_else(|| Exception::illegal_argument("package name is null"))?;
+        self.cached_record(
+            snapshot,
+            RecordKey::Libraries(name.to_owned()),
+            |snapshot| {
+                super::library_record::captured(snapshot, name)
+                    .map_err(|error| Exception::new(EX_ILLEGAL_STATE, error))
+            },
+        )
+    }
+
+    fn runtime(
+        &self,
+        snapshot: &Arc<Snapshot>,
+        name: Option<&str>,
+        factory: bool,
+    ) -> Result<Option<Arc<Vec<u8>>>, Exception> {
+        let name = name.ok_or_else(|| Exception::illegal_argument("package name is null"))?;
+        self.cached_record(
+            snapshot,
+            RecordKey::Runtime(name.to_owned(), factory),
+            |snapshot| {
+                super::runtime_record::captured(snapshot, name, factory)
+                    .map_err(|error| Exception::new(EX_ILLEGAL_STATE, error))
+            },
+        )
+    }
+
+    fn setting(
+        &self,
+        snapshot: &Arc<Snapshot>,
+        name: Option<&str>,
+        factory: bool,
+    ) -> Result<Option<Arc<Vec<u8>>>, Exception> {
+        let name = name.ok_or_else(|| Exception::illegal_argument("package name is null"))?;
+        self.cached_record(
+            snapshot,
+            RecordKey::Setting(name.to_owned(), factory),
+            |snapshot| {
+                super::setting_record::captured(snapshot, name, factory)
+                    .map_err(|error| Exception::new(EX_ILLEGAL_STATE, error))
+            },
+        )
+    }
+
+    fn user(
+        &self,
+        snapshot: &Arc<Snapshot>,
+        name: Option<&str>,
+        disabled: bool,
+        user: i32,
+    ) -> Result<Option<Arc<Vec<u8>>>, Exception> {
+        let name = name.ok_or_else(|| Exception::illegal_argument("package name is null"))?;
+        if user < 0 {
+            return Err(Exception::illegal_argument("invalid user id"));
+        }
+        self.cached_record(
+            snapshot,
+            RecordKey::User(name.to_owned(), disabled, user),
+            |snapshot| {
+                super::user_record::captured(snapshot, name, disabled, user)
+                    .map_err(|error| Exception::new(EX_ILLEGAL_STATE, error))
+            },
+        )
+    }
+
+    fn code(
+        &self,
+        snapshot: &Arc<Snapshot>,
+        name: Option<&str>,
+        disabled: bool,
+    ) -> Result<Option<Arc<Vec<u8>>>, Exception> {
+        let name = name.ok_or_else(|| Exception::illegal_argument("package name is null"))?;
+        self.cached_record(
+            snapshot,
+            RecordKey::Code(name.to_owned(), disabled),
+            |snapshot| {
+                let Some(code) = PackageCode::captured(snapshot, name, disabled)
+                    .map_err(|error| Exception::new(EX_ILLEGAL_STATE, error))?
+                else {
+                    return Ok(None);
+                };
+                let mut parcel = Parcel::new();
+                code.write_to(&mut parcel);
+                if parcel.data().len() > i32::MAX as usize {
+                    return Err(Exception::new(
+                        EX_ILLEGAL_STATE,
+                        "package code exceeds transport size",
+                    ));
+                }
+                Ok(Some(parcel.data().to_vec()))
+            },
+        )
     }
 }
 
@@ -567,25 +588,16 @@ impl Service for Endpoint {
         let start = call.data.position();
         call.data.enforce_interface(api::DESCRIPTOR)?;
         call.data.set_position(start);
-        let mut lease = self.lease.lock().unwrap();
         if call.code == api::CLOSE {
             api::Close::read(&mut call.data)?;
             if call.data.remaining() != 0 {
                 return Err(aim_binder_host::parcel::BAD_VALUE);
             }
-            if let Some(id)=lease.comparison_id.take(){comparisons().lock().unwrap().remove(&id);}
-        lease.snapshot.take();lease.usage_records.take();
-            self.computer.lock().unwrap().take();
-            lease.code.clear();
-            lease.users.clear();
-            lease.settings.clear();
-            lease.runtimes.clear();
-            lease.libraries.clear();
-            lease.shared_users.clear();
+            self.close_lease();
             reply.write_no_exception();
             return Ok(reply);
         }
-        let Some(snapshot) = lease.snapshot.clone() else {
+        let Some(snapshot) = self.admit_snapshot() else {
             reply.write_exception(&Exception::new(
                 EX_ILLEGAL_STATE,
                 "package scan snapshot is closed",
@@ -602,6 +614,10 @@ impl Service for Endpoint {
             api::GET_METADATA_COMPARISON_ID => {
                 api::GetMetadataComparisonId::read(&mut call.data)?;
                 if call.data.remaining()!=0{return Err(aim_binder_host::parcel::BAD_VALUE);}
+                let mut lease=self.lease.lock().unwrap();
+                if !lease.snapshot.as_ref().is_some_and(|current|Arc::ptr_eq(current,&snapshot)){
+                    reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,"package scan snapshot is closed"));return Ok(reply);
+                }
                 if lease.comparison_id.is_none(){
                     static NEXT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(1);
                     let id=match NEXT.fetch_update(std::sync::atomic::Ordering::Relaxed,std::sync::atomic::Ordering::Relaxed,|id|id.checked_add(1).filter(|next|*next<=i64::MAX as u64)){
@@ -635,35 +651,74 @@ impl Service for Endpoint {
                 api::write_get_metadata_version_reply(&mut reply,snapshot.metadata_revision() as i64);
             }
             api::GET_USAGE_RECORDS_LENGTH | api::GET_USAGE_RECORDS_CHUNK => {
-                let chunk = if call.code==api::GET_USAGE_RECORDS_CHUNK {
-                    let args=api::GetUsageRecordsChunk::read(&mut call.data)?;
-                    Some((args.offset,args.length))
-                } else { api::GetUsageRecordsLength::read(&mut call.data)?;None };
-                if call.data.remaining()!=0{return Err(aim_binder_host::parcel::BAD_VALUE);}
-                if lease.usage_records.is_none() {
-                    let count=match i32::try_from(snapshot.usage().names().count()) {
-                        Ok(count)=>count,Err(_)=>{reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,"usage records count overflow"));return Ok(reply);}
+                let chunk = if call.code == api::GET_USAGE_RECORDS_CHUNK {
+                    let args = api::GetUsageRecordsChunk::read(&mut call.data)?;
+                    Some((args.offset, args.length))
+                } else {
+                    api::GetUsageRecordsLength::read(&mut call.data)?;
+                    None
+                };
+                if call.data.remaining() != 0 {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
+                let bytes = match self.cached_record(&snapshot, RecordKey::Usage, |snapshot| {
+                    let count = match i32::try_from(snapshot.usage().names().count()) {
+                        Ok(count) => count,
+                        Err(_) => {
+                            return Err(Exception::new(
+                                EX_ILLEGAL_STATE,
+                                "usage records count overflow",
+                            ));
+                        }
                     };
-                    let mut record=Parcel::new();record.write_i64(snapshot.version() as i64);
-                    record.write_i64(snapshot.metadata_revision() as i64);record.write_i32(count);
-                    for name in snapshot.usage().names(){
-                        let Some(usage)=PackageUsage::captured(&snapshot,name) else {
-                            reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,"usage records member unavailable"));return Ok(reply);
+                    let mut record = Parcel::new();
+                    record.write_i64(snapshot.version() as i64);
+                    record.write_i64(snapshot.metadata_revision() as i64);
+                    record.write_i32(count);
+                    for name in snapshot.usage().names() {
+                        let Some(usage) = PackageUsage::captured(&snapshot, name) else {
+                            return Err(Exception::new(
+                                EX_ILLEGAL_STATE,
+                                "usage records member unavailable",
+                            ));
                         };
                         usage.write_to(&mut record);
                     }
-                    if i32::try_from(record.data().len()).is_err(){reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,"usage records length overflow"));return Ok(reply);}
-                    lease.usage_records=Some(record.data().to_vec());
-                }
-                let Some(bytes)=lease.usage_records.as_ref() else {return Err(aim_binder_host::parcel::BAD_VALUE);};
-                if let Some((offset,length))=chunk{
-                    if offset<0||length<=0||length as usize>MAX_CHUNK||offset as usize>bytes.len(){
-                        reply.write_exception(&Exception::illegal_argument("invalid usage records chunk"));
-                    }else{
-                        let start=offset as usize;let end=start.saturating_add(length as usize).min(bytes.len());
-                        api::write_get_usage_records_chunk_reply(&mut reply,&Some(bytes[start..end].to_vec()));
+                    if i32::try_from(record.data().len()).is_err() {
+                        return Err(Exception::new(
+                            EX_ILLEGAL_STATE,
+                            "usage records length overflow",
+                        ));
                     }
-                }else{api::write_get_usage_records_length_reply(&mut reply,bytes.len() as i32);}
+                    Ok(Some(record.data().to_vec()))
+                }) {
+                    Ok(Some(bytes)) => bytes,
+                    Ok(None) => return Err(aim_binder_host::parcel::BAD_VALUE),
+                    Err(error) => {
+                        reply.write_exception(&error);
+                        return Ok(reply);
+                    }
+                };
+                if let Some((offset, length)) = chunk {
+                    if offset < 0
+                        || length <= 0
+                        || length as usize > MAX_CHUNK
+                        || offset as usize > bytes.len()
+                    {
+                        reply.write_exception(&Exception::illegal_argument(
+                            "invalid usage records chunk",
+                        ));
+                    } else {
+                        let start = offset as usize;
+                        let end = start.saturating_add(length as usize).min(bytes.len());
+                        api::write_get_usage_records_chunk_reply(
+                            &mut reply,
+                            &Some(bytes[start..end].to_vec()),
+                        );
+                    }
+                } else {
+                    api::write_get_usage_records_length_reply(&mut reply, bytes.len() as i32);
+                }
             }
             api::GET_HIDDEN_API_ENFORCEMENT_POLICY => {
                 let args = api::GetHiddenApiEnforcementPolicy::read(&mut call.data)?;
@@ -732,7 +787,7 @@ impl Service for Endpoint {
                 if call.data.remaining() != 0 {
                     return Err(aim_binder_host::parcel::BAD_VALUE);
                 }
-                match lease.shared_user(&snapshot, args.shared_user_name.as_deref()) {
+                match self.shared_user(&snapshot, args.shared_user_name.as_deref()) {
                     Ok(bytes) => api::write_get_shared_user_state_length_reply(
                         &mut reply,
                         bytes.map_or(-1, |p| p.len() as i32),
@@ -750,7 +805,7 @@ impl Service for Endpoint {
                         "invalid shared UID chunk range",
                     ));
                 } else {
-                    match lease.shared_user(&snapshot, args.shared_user_name.as_deref()) {
+                    match self.shared_user(&snapshot, args.shared_user_name.as_deref()) {
                         Ok(None) => api::write_get_shared_user_state_chunk_reply(&mut reply, &None),
                         Ok(Some(bytes)) if args.offset as usize > bytes.len() => reply
                             .write_exception(&Exception::illegal_argument(
@@ -773,7 +828,7 @@ impl Service for Endpoint {
                 if call.data.remaining() != 0 {
                     return Err(aim_binder_host::parcel::BAD_VALUE);
                 }
-                match lease.libraries(&snapshot, args.package_name.as_deref()) {
+                match self.libraries(&snapshot, args.package_name.as_deref()) {
                     Ok(bytes) => api::write_get_library_state_length_reply(
                         &mut reply,
                         bytes.map_or(-1, |p| p.len() as i32),
@@ -791,7 +846,7 @@ impl Service for Endpoint {
                         "invalid package library chunk range",
                     ));
                 } else {
-                    match lease.libraries(&snapshot, args.package_name.as_deref()) {
+                    match self.libraries(&snapshot, args.package_name.as_deref()) {
                         Ok(None) => api::write_get_library_state_chunk_reply(&mut reply, &None),
                         Ok(Some(bytes)) if args.offset as usize > bytes.len() => reply
                             .write_exception(&Exception::illegal_argument(
@@ -814,7 +869,7 @@ impl Service for Endpoint {
                 if call.data.remaining() != 0 {
                     return Err(aim_binder_host::parcel::BAD_VALUE);
                 }
-                match lease.runtime(&snapshot, args.package_name.as_deref(), args.disabled) {
+                match self.runtime(&snapshot, args.package_name.as_deref(), args.disabled) {
                     Ok(bytes) => api::write_get_runtime_state_length_reply(
                         &mut reply,
                         bytes.map_or(-1, |p| p.len() as i32),
@@ -832,7 +887,7 @@ impl Service for Endpoint {
                         "invalid package runtime chunk range",
                     ));
                 } else {
-                    match lease.runtime(&snapshot, args.package_name.as_deref(), args.disabled) {
+                    match self.runtime(&snapshot, args.package_name.as_deref(), args.disabled) {
                         Ok(None) => api::write_get_runtime_state_chunk_reply(&mut reply, &None),
                         Ok(Some(bytes)) if args.offset as usize > bytes.len() => reply
                             .write_exception(&Exception::illegal_argument(
@@ -855,7 +910,7 @@ impl Service for Endpoint {
                 if call.data.remaining() != 0 {
                     return Err(aim_binder_host::parcel::BAD_VALUE);
                 }
-                match lease.setting(&snapshot, args.package_name.as_deref(), args.disabled) {
+                match self.setting(&snapshot, args.package_name.as_deref(), args.disabled) {
                     Ok(bytes) => api::write_get_setting_length_reply(
                         &mut reply,
                         bytes.map_or(-1, |p| p.len() as i32),
@@ -873,7 +928,7 @@ impl Service for Endpoint {
                         "invalid package setting chunk range",
                     ));
                 } else {
-                    match lease.setting(&snapshot, args.package_name.as_deref(), args.disabled) {
+                    match self.setting(&snapshot, args.package_name.as_deref(), args.disabled) {
                         Ok(None) => api::write_get_setting_chunk_reply(&mut reply, &None),
                         Ok(Some(bytes)) if args.offset as usize > bytes.len() => reply
                             .write_exception(&Exception::illegal_argument(
@@ -913,7 +968,7 @@ impl Service for Endpoint {
                 if call.data.remaining() != 0 {
                     return Err(aim_binder_host::parcel::BAD_VALUE);
                 }
-                match lease.user(
+                match self.user(
                     &snapshot,
                     args.package_name.as_deref(),
                     args.disabled,
@@ -936,7 +991,7 @@ impl Service for Endpoint {
                         "invalid user state chunk range",
                     ));
                 } else {
-                    match lease.user(
+                    match self.user(
                         &snapshot,
                         args.package_name.as_deref(),
                         args.disabled,
@@ -1079,7 +1134,7 @@ impl Service for Endpoint {
                 if call.data.remaining() != 0 {
                     return Err(aim_binder_host::parcel::BAD_VALUE);
                 }
-                match lease.code(&snapshot, args.package_name.as_deref(), args.disabled) {
+                match self.code(&snapshot, args.package_name.as_deref(), args.disabled) {
                     Ok(code) => api::write_get_code_length_reply(
                         &mut reply,
                         code.map_or(-1, |code| code.len() as i32),
@@ -1097,7 +1152,7 @@ impl Service for Endpoint {
                         "invalid package code chunk range",
                     ));
                 } else {
-                    match lease.code(&snapshot, args.package_name.as_deref(), args.disabled) {
+                    match self.code(&snapshot, args.package_name.as_deref(), args.disabled) {
                         Ok(None) => api::write_get_code_chunk_reply(&mut reply, &None),
                         Ok(Some(code)) if args.offset as usize > code.len() => reply
                             .write_exception(&Exception::illegal_argument(
@@ -1121,3 +1176,86 @@ impl Service for Endpoint {
     }
 }
 mod install;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::{
+        owner::usage::Usage,
+        scan::SigningScan,
+        settings::{Package, Settings},
+    };
+    use std::{
+        sync::mpsc::{self, RecvTimeoutError},
+        thread,
+        time::Duration,
+    };
+
+    fn snapshot() -> Arc<Snapshot> {
+        let owner = SigningScan::new(
+            &Default::default(),
+            &Settings {
+                packages: vec![Package {
+                    name: "fixture".into(),
+                    app_id: 10100,
+                    code_path: "/data/app/fixture".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            36,
+        )
+        .unwrap();
+        Arc::new(Snapshot {
+            version: 7,
+            owner,
+            usage: Usage::new(["fixture"]),
+            replica_validated: false,
+            metadata_revision: 1,
+            lineage: Arc::new(()),
+        })
+    }
+
+    #[test]
+    fn slow_cache_miss_does_not_hold_lifecycle_lock_or_repopulate_after_close() {
+        let snapshot = snapshot();
+        let endpoint = Arc::new(Endpoint::new(snapshot.clone()));
+        let (entered_tx, entered_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let slow_endpoint = endpoint.clone();
+        let slow_snapshot = snapshot.clone();
+        let slow = thread::spawn(move || {
+            slow_endpoint.cached_record(
+                &slow_snapshot,
+                RecordKey::Code("slow".into(), false),
+                |_| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(Some(vec![1, 2, 3]))
+                },
+            )
+        });
+        entered_rx.recv().unwrap();
+
+        let (fast_tx, fast_rx) = mpsc::sync_channel(0);
+        let fast_endpoint = endpoint.clone();
+        let fast_snapshot = snapshot.clone();
+        thread::spawn(move || {
+            fast_tx
+                .send(fast_endpoint.setting(&fast_snapshot, Some("fixture"), false))
+                .unwrap();
+        });
+        let fast = match fast_rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(result) => result.unwrap().unwrap(),
+            Err(RecvTimeoutError::Timeout) => panic!("independent setting request blocked"),
+            Err(RecvTimeoutError::Disconnected) => panic!("setting request disconnected"),
+        };
+        assert!(!fast.is_empty());
+
+        endpoint.close_lease();
+        assert!(endpoint.admit_snapshot().is_none());
+        release_tx.send(()).unwrap();
+        assert_eq!(slow.join().unwrap().unwrap().unwrap().as_slice(), [1, 2, 3]);
+        assert!(endpoint.lease.lock().unwrap().records.is_empty());
+    }
+}

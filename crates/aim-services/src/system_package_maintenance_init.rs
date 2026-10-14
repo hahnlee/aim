@@ -27,7 +27,7 @@ impl System {
             || !Arc::ptr_eq(&removal.effects,&effects) {
             return Err(illegal("Maintenance removal is detached from shared installation owners"));
         }
-        let capture=self.capture_package_queries()?;
+        let capture=self.capture_package_queries_for(bridge)?;
         if !Arc::ptr_eq(capture.scan(),&snapshots.capture()) {return Err(illegal("Maintenance scan/query generations differ"));}
         if capture.state().system.lifecycle.is_none() || capture.state().system.instant_registry.is_none() {
             return Err(illegal("Maintenance lifecycle/instant native owners unavailable"));
@@ -41,7 +41,7 @@ impl System {
         let weak=Arc::downgrade(self);let retained=bridge.clone();
         let current=Arc::new(move|| {
             let system=weak.upgrade().ok_or_else(||illegal("Maintenance native system stopped"))?;
-            system.check_package_bootstrap(&retained)?;system.capture_package_queries()
+            system.capture_package_queries_for(&retained)
         });
         let weak=Arc::downgrade(self);let retained=bridge.clone();
         let usage:diagnostics::UsagePublication=Arc::new(move|caller,package,reason,now| {
@@ -87,7 +87,7 @@ impl System {
         let update=capture.prepare_usage_update(usage).map_err(illegal)?;
         let published=update.capture.scan().clone();
         current.publish_snapshot(update.store);
-        current.queries=Some(update.capture);
+        current.set_queries(Some(update.capture));
         if let Some(page)=&current.version_page {page.publish(published.version());}
         state.version=published.version();
         // Source notifyPackageUse modifies usage only; no Settings write, package

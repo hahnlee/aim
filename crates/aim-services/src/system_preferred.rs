@@ -50,7 +50,7 @@ impl System {
             .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
                 "preferred domain disk owner unavailable"))?;
         loop {
-            let capture = self.capture_package_queries()?;
+            let capture = self.capture_package_queries_for(bridge)?;
             let mut domains = capture.domains().ok_or_else(|| Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE, "preferred domain owner unavailable"))?
                 .owner().clone();
@@ -114,7 +114,7 @@ impl System {
         current.preferred_commit = Some(commit);
         current.preferred_actions = Some(actions);
         current.publish_snapshot(update.store);
-        current.queries = Some(update.capture.clone());
+        current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
         drop(state);
@@ -166,7 +166,7 @@ impl System {
         }
         registry.publish(stage).map_err(&fail)?;
         current.publish_snapshot(update.store);
-        current.queries = Some(update.capture.clone());
+        current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
         drop(state);

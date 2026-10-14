@@ -10,8 +10,7 @@ impl System {
         let weak = Arc::downgrade(self); let lookup_bridge = bridge.clone();
         let lookup = Arc::new(move |name: &str| {
             let system = weak.upgrade().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE,"legacy verifier system detached"))?;
-            system.check_package_bootstrap(&lookup_bridge)?;
-            let capture = system.capture_package_queries()?;
+            let capture = system.capture_package_queries_for(&lookup_bridge)?;
             let domains = capture.domains().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE,"domain owner unavailable"))?;
             let package = domains.owner().persisted().active.into_iter().find(|package| package.name == name);
             let Some(package) = package else { return Ok(None); };
@@ -24,8 +23,7 @@ impl System {
         let set = Arc::new(move |uid: i32, id: &str, names: &[String], status: i32| {
             let system = weak.upgrade().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE,"legacy verifier system detached"))?;
             loop {
-                system.check_package_bootstrap(&set_bridge)?;
-                let capture = system.capture_package_queries()?;
+                let capture = system.capture_package_queries_for(&set_bridge)?;
                 let domains = capture.domains().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE,"domain owner unavailable"))?;
                 system.authorize_package_domain(&set_bridge,&capture,0,uid,Operation::Verifier)?;
                 let Some(package) = domains.owner().package_by_id(id) else {return Ok(1);};
@@ -72,7 +70,7 @@ impl System {
         let bridge = self.package_bootstrap()?;
         let Some(name)=package else{return Ok(false);};
         loop {
-            let capture = self.capture_package_queries()?;
+            let capture = self.capture_package_queries_for(&bridge)?;
             let allowed = self.authorize_package_domain(&bridge,&capture,pid,uid,Operation::LegacySelect(name,user))?;
             if !allowed {return Ok(false);}
             let domains = capture.domains().ok_or_else(||Exception::new(EX_ILLEGAL_STATE,"native domain owner unavailable"))?;

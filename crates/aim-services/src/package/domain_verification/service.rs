@@ -51,12 +51,12 @@ impl DomainQueries {
         let system = self.system.upgrade().ok_or_else(|| {
             Exception::new(EX_ILLEGAL_STATE, "native system owner is unavailable")
         })?;
+        let bridge = system.package_bootstrap()?;
         loop {
-            let capture = system.capture_package_queries()?;
+            let capture = system.capture_package_queries_for(&bridge)?;
             let domains = capture.domains().ok_or_else(|| {
                 Exception::new(EX_ILLEGAL_STATE, "native domain owner is unavailable")
             })?;
-            let bridge = system.package_bootstrap()?;
             let visible = match system.authorize_package_domain(
                 &bridge,
                 &capture,
@@ -67,7 +67,7 @@ impl DomainQueries {
                 Ok(visible) => visible,
                 Err(error) => {
                     system.check_package_bootstrap(&bridge)?;
-                    if !Arc::ptr_eq(&capture, &system.capture_package_queries()?) {
+                    if !Arc::ptr_eq(&capture, &system.capture_package_queries_for(&bridge)?) {
                         continue;
                     }
                     return Err(error);
@@ -122,11 +122,11 @@ impl DomainQueries {
         let system = self.system.upgrade().ok_or_else(|| {
             Exception::new(EX_ILLEGAL_STATE, "native system owner is unavailable")
         })?;
-        let capture = system.capture_package_queries()?;
+        let bridge = system.package_bootstrap()?;
+        let capture = system.capture_package_queries_for(&bridge)?;
         let domains = capture.domains().ok_or_else(|| {
             Exception::new(EX_ILLEGAL_STATE, "native domain owner is unavailable")
         })?;
-        let bridge = system.package_bootstrap()?;
         system.authorize_package_domain(&bridge, &capture, pid, uid, Operation::Verifier)?;
         Ok(domains.owner().valid_verification_package_names())
     }
@@ -162,7 +162,7 @@ impl DomainQueries {
             ));
         }
         loop {
-            let capture = system.capture_package_queries()?;
+            let capture = system.capture_package_queries_for(&bridge)?;
             let domains = capture.domains().ok_or_else(|| {
                 Exception::new(EX_ILLEGAL_STATE, "native domain owner is unavailable")
             })?;
@@ -171,7 +171,7 @@ impl DomainQueries {
                 Ok(_) => (),
                 Err(error) => {
                     system.check_package_bootstrap(&bridge)?;
-                    if !Arc::ptr_eq(&capture, &system.capture_package_queries()?) {
+                    if !Arc::ptr_eq(&capture, &system.capture_package_queries_for(&bridge)?) {
                         continue;
                     }
                     return Err(error);
@@ -318,14 +318,14 @@ impl DomainQueries {
         let system = self.system.upgrade().ok_or_else(|| {
             Exception::new(EX_ILLEGAL_STATE, "native system owner is unavailable")
         })?;
-        let capture = system.capture_package_queries()?;
+        let bridge = system.package_bootstrap()?;
+        let capture = system.capture_package_queries_for(&bridge)?;
         if capture.domains().is_none() {
             return Err(Exception::new(
                 EX_ILLEGAL_STATE,
                 "native domain owner is unavailable",
             ));
         }
-        let bridge = system.package_bootstrap()?;
         let allowed = system.authorize_package_domain(&bridge, &capture, pid, uid, operation)?;
         let missing = || Exception {
             code: aim_binder_host::parcel::EX_SERVICE_SPECIFIC,
@@ -387,11 +387,11 @@ impl DomainQueries {
         let system = self.system.upgrade().ok_or_else(|| {
             Exception::new(EX_ILLEGAL_STATE, "native system owner is unavailable")
         })?;
-        let capture = system.capture_package_queries()?;
+        let bridge = system.package_bootstrap()?;
+        let capture = system.capture_package_queries_for(&bridge)?;
         let domains = capture.domains().ok_or_else(|| {
             Exception::new(EX_ILLEGAL_STATE, "native domain owner is unavailable")
         })?;
-        let bridge = system.package_bootstrap()?;
         system.authorize_package_domain(&bridge, &capture, pid, uid, Operation::Owners(user))?;
         let result = domains.owners(capture.scan().owner(), host, user, |name, sdk| {
             bridge
@@ -460,7 +460,7 @@ impl DomainQueries {
         let hosts = set.ok_or_else(|| Exception::new(EX_NULL_POINTER, "Attempt to invoke virtual method 'java.util.Set android.content.pm.verify.domain.DomainSet.getDomains()' on a null object reference"))?
             .resolve(&system.process()).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("DomainSet blob: {e}")))?;
         loop {
-            let capture = system.capture_package_queries()?;
+            let capture = system.capture_package_queries_for(&bridge)?;
             let domains = capture.domains().ok_or_else(|| {
                 Exception::new(EX_ILLEGAL_STATE, "native domain owner is unavailable")
             })?;
@@ -482,7 +482,7 @@ impl DomainQueries {
                 Ok(true) => (),
                 Err(error) => {
                     system.check_package_bootstrap(&bridge)?;
-                    if !Arc::ptr_eq(&capture, &system.capture_package_queries()?) {
+                    if !Arc::ptr_eq(&capture, &system.capture_package_queries_for(&bridge)?) {
                         continue;
                     }
                     return Err(error);
@@ -551,7 +551,7 @@ impl DomainQueries {
                     }))
                 });
             system.check_package_bootstrap(&bridge)?;
-            if !Arc::ptr_eq(&capture, &system.capture_package_queries()?) {
+            if !Arc::ptr_eq(&capture, &system.capture_package_queries_for(&bridge)?) {
                 continue;
             }
             let status = result.map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
@@ -610,7 +610,7 @@ impl DomainQueries {
         })?;
         let bridge = system.package_bootstrap()?;
         loop {
-            let capture = system.capture_package_queries()?;
+            let capture = system.capture_package_queries_for(&bridge)?;
             let domains = capture.domains().ok_or_else(|| {
                 Exception::new(EX_ILLEGAL_STATE, "native domain owner is unavailable")
             })?;
@@ -618,7 +618,7 @@ impl DomainQueries {
                 system.authorize_package_domain(&bridge, &capture, pid, uid, Operation::UriAgent)
             {
                 system.check_package_bootstrap(&bridge)?;
-                if !Arc::ptr_eq(&capture, &system.capture_package_queries()?) {
+                if !Arc::ptr_eq(&capture, &system.capture_package_queries_for(&bridge)?) {
                     continue;
                 }
                 return Err(error.into());

@@ -11,7 +11,7 @@ impl Endpoint {
         system.check_package_bootstrap(&self.bridge)?;Ok(system)
     }
     fn count(&self)->Result<i32,Exception>{
-        let system=self.system()?;let capture=system.capture_package_queries()?;
+        let system=self.system()?;let capture=system.capture_package_queries_for(&self.bridge)?;
         let policy=system.native_dexopt_hibernation_leaf(&self.bridge)?;
         let mut count=0i32;
         for loaded in capture.scan().owner().loaded_packages().values(){

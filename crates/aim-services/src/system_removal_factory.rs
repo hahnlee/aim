@@ -8,7 +8,7 @@ impl System {
     pub fn native_removal_store(self:&Arc<Self>,bridge:&Arc<crate::package::bootstrap::Bridge>,
         disk:Arc<Mutex<crate::package::owner::Store>>)->Result<Arc<removal::NativeStore>,Exception> {
         self.check_package_bootstrap(bridge)?;
-        let capture=self.capture_package_queries()?;
+        let capture=self.capture_package_queries_for(bridge)?;
         disk.lock().unwrap().validate_committed_scan(capture.scan().owner()).map_err(|cause|error(cause.to_string()))?;
         let snapshots={let state=self.package_bootstrap.lock().unwrap();
             let current=state.current.as_ref().filter(|current|Arc::ptr_eq(&current.bridge,bridge)).ok_or_else(||error("Removal bootstrap replaced"))?;
@@ -33,7 +33,7 @@ impl System {
         ->Result<Arc<Snapshot>,Exception> {
         loop {
             self.check_package_bootstrap(bridge)?;
-            let capture = self.capture_package_queries()?;
+            let capture = self.capture_package_queries_for(bridge)?;
             let shared = self.package_bootstrap.lock().unwrap().current.as_ref()
                 .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
                 .and_then(|current| current.snapshots.clone())
@@ -61,7 +61,7 @@ impl System {
                 continue;
             }
             let published = updated.scan().clone();
-            current.queries = Some(updated);
+            current.set_queries(Some(updated));
             if let Some(page) = &current.version_page { page.publish(published.version()); }
             state.version = published.version();
             return Ok(published);
@@ -93,8 +93,7 @@ impl System {
         let weak=Arc::downgrade(self);
         Arc::new(move ||{
             let system=weak.upgrade().ok_or_else(||error("Removal native system stopped"))?;
-            system.check_package_bootstrap(&bridge)?;
-            Ok(system.capture_package_queries()?.state().clone())
+            Ok(system.capture_package_queries_for(&bridge)?.state().clone())
         })
     }
 }

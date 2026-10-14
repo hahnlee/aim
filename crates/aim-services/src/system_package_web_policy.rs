@@ -24,7 +24,7 @@ impl System {
             .ok_or_else(|| error("web policy bootstrap changed"))?;
         let base = current.queries.as_ref().ok_or_else(|| error("web policy capture unavailable"))?;
         let update = base.prepare_web_instant_policy(snapshot).map_err(error)?;
-        current.publish_snapshot(update.store); current.queries = Some(update.capture.clone());
+        current.publish_snapshot(update.store); current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
         Ok(())

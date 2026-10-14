@@ -72,6 +72,20 @@ focused query suite passes 47/0. The rebuilt targeted selector
 the reboot path on `ad77108c` (2026-10-14). Unfiltered Native FULL66 remains
 required.
 
+Native FULL66 now runs the unresolved tail first: modules 4–66 must all pass
+before a fresh DATA image runs modules 1–3, and acceptance requires the exact
+66-module union. The first tail attempt ended during module 4 before any CTS
+assertion when SystemServer's watchdog fired after a 71-second package snapshot
+Binder wait (#1376). The service host now publishes the last committed immutable
+query capture through a short bridge-scoped lock, so `GET_SNAPSHOT` does not wait
+behind the long package bootstrap mutation lock and a retained bridge cannot read
+a replacement epoch. Package scan lease record construction also runs outside
+the lease lifecycle lock; close prevents an in-flight cache miss from republishing
+its record while allowing an already admitted call to finish. The focused scan
+snapshot suite passes 27/0, and a fresh diagnostic boot held one SystemServer PID
+healthy for 153 seconds with repeated package probes. A rebuilt tail CTS run is
+still required; these diagnostics are not conformance acceptance.
+
 The current f89fddbf matched original/native images are build-qualified: both
 use the same vendor artifacts and the primary workflow restores the default
 image configuration with zero stale nodes. Native identity 9fdad5ca has two

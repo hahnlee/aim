@@ -278,7 +278,7 @@ impl Service for Endpoint {
                         .map_err(|status| Exception::new(EX_ILLEGAL_STATE,format!("legacy runtime state request: {status}")))?;
                     if call.data.remaining() != 0 { return Err(Exception::illegal_argument("internal package host trailing data")); }
                     if a.calling_uid < 0 || a.calling_pid < 0 { return Err(Exception::illegal_argument("invalid original caller identity")); }
-                    let value = legacy_runtime_record(&system,a.user_id)?;
+                    let value = legacy_runtime_record(&system,&self.bridge,a.user_id)?;
                     api::write_get_legacy_runtime_permissions_state_record_reply(&mut reply,&Some(value));
                 }
                 api::ARCHIVE_PACKAGE => {
@@ -332,8 +332,8 @@ impl Service for Endpoint {
     }
 }
 
-fn legacy_runtime_record(system:&System,user:i32)->Result<Vec<u8>,Exception> {
-    let capture=system.capture_package_queries()?;
+fn legacy_runtime_record(system:&System,bridge:&Arc<super::bootstrap::Bridge>,user:i32)->Result<Vec<u8>,Exception> {
+    let capture=system.capture_package_queries_for(bridge)?;
     system.with_runtime_permission_metadata(&capture, |metadata| {
         let users=capture.state().users.keys().copied().collect::<std::collections::BTreeSet<_>>();
         legacy_runtime_record_from_owners(capture.scan().owner(),metadata,&users,user)

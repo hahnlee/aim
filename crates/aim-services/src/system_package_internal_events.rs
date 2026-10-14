@@ -43,14 +43,14 @@ impl System {
             if let Some(update)=prepared{
                 match snapshots.publish_validated_store_after(&canonical,&update.store){Err(Error::Stale)=>continue,
                     Err(error)=>return Err(event_error(format!("isolated canonical publication: {error:?}"))),Ok(_)=>{}}
-                let version=update.capture.scan().version();current.queries=Some(update.capture);
+                let version=update.capture.scan().version();current.set_queries(Some(update.capture));
                 if let Some(page)=&current.version_page{page.publish(version);}state.version=version;
             }else{
                 // Context-only delta: preserve the actual durable/new-code scan.
                 // The install Context builder sees this changed query base and
                 // must retry its projection before publishing the full capture.
                 if !Arc::ptr_eq(&snapshots.capture(),&canonical){continue;}
-                current.queries=delta;
+                current.set_queries(delta);
             }
             return Ok(());
         }
@@ -119,7 +119,7 @@ impl System {
             }
             if let Some(update) = projected {
                 let version = update.capture.scan().version();
-                current.queries = Some(update.capture);
+                current.set_queries(Some(update.capture));
                 if let Some(page) = &current.version_page { page.publish(version); }
                 state.version = version;
             }
@@ -230,8 +230,7 @@ impl System {
             let system = weak
                 .upgrade()
                 .ok_or_else(|| event_error("instant prune system stopped"))?;
-            system.check_package_bootstrap(&retained)?;
-            system.capture_package_queries()
+            system.capture_package_queries_for(&retained)
         });
         let installer = {
             let state = self.package_bootstrap.lock().unwrap();
@@ -286,8 +285,8 @@ impl System {
         self.check_package_bootstrap(&bridge)?;
         Ok((bridge, Arc::new(node)))
     }
-    fn internal_event_allowlist(&self, name: &str, user: i32) -> Result<Option<Vec<i32>>> {
-        let capture = self.capture_package_queries()?;
+    fn internal_event_allowlist(&self, bridge: &Arc<crate::package::bootstrap::Bridge>, name: &str, user: i32) -> Result<Option<Vec<i32>>> {
+        let capture = self.capture_package_queries_for(bridge)?;
         let resolver = crate::package::resolve::Resolver::default();
         let resolution = resolver
             .resolution(capture.state())
@@ -431,7 +430,7 @@ impl System {
         if reader.remaining() != 0 {
             return Err(event_error("event record tail"));
         }
-        let allow = self.internal_event_allowlist(&name, user)?;
+        let allow = self.internal_event_allowlist(&bridge, &name, user)?;
         let events = self.package_events()?;
         let weak = Arc::downgrade(self);
         let retained = bridge.clone();

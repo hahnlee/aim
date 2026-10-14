@@ -84,8 +84,7 @@ impl System {
             let system = user_system
                 .upgrade()
                 .ok_or_else(|| environment_error("install user System stopped"))?;
-            system.check_package_bootstrap(&user_bridge)?;
-            let capture = system.capture_package_queries()?;
+            let capture = system.capture_package_queries_for(&user_bridge)?;
             install_users_for_snapshot(&capture, base)
         });
         let cross_user_suspensions = capture.context().cross_user_suspensions;
@@ -166,10 +165,7 @@ impl System {
         let current = Arc::new(move || {
             let system = weak.upgrade().ok_or("install context system stopped")?;
             system
-                .check_package_bootstrap(&retained)
-                .map_err(|error| error.message)?;
-            system
-                .capture_package_queries()
+                .capture_package_queries_for(&retained)
                 .map_err(|error| error.message)
         });
         let contexts = crate::package::scan_snapshot::install_context::Builder::new(
@@ -366,8 +362,7 @@ impl System {
             let system = weak
                 .upgrade()
                 .ok_or_else(|| environment_error("install completion system stopped"))?;
-            system.check_package_bootstrap(&retained)?;
-            let capture = system.capture_package_queries()?;
+            let capture = system.capture_package_queries_for(&retained)?;
             if capture.scan().version() < receipt.generation {
                 return Err(environment_error(
                     "install completion generation unpublished",
@@ -468,7 +463,7 @@ impl System {
                                 .map_err(|error| {
                                     environment_error(format!("post-restore permissions {error:?}"))
                                 })?;
-                            system.restore_existing_install_preferences(&complete_name, user)?;
+                            system.restore_existing_install_preferences(&complete_bridge, &complete_name, user)?;
                             Ok(())
                         })();
                         let _ = sender.send(result);

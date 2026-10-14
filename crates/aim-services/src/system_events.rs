@@ -205,14 +205,14 @@ impl System {
         caller: i32,
         args: aim_service_aidl::android_content_pm_ipackagemanager::LogAppProcessStartIfNeeded,
     ) -> Result<()> {
-        let capture = self.capture_package_queries()?;
+        let bridge = self.package_bootstrap()?;
+        let capture = self.capture_package_queries_for(&bridge)?;
         if crate::package::apps_filter::instant_app_package_name(capture.state(), caller)
             .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.0))?
             .is_some()
         {
             return Ok(());
         }
-        let bridge = self.package_bootstrap()?;
         bridge
             .log_package_process_start(
                 args.package_name,
@@ -241,7 +241,7 @@ impl System {
         receipt: &crate::package::installer::pipeline::PublishedInstall,
     ) -> Result<()> {
         self.check_package_bootstrap(bridge)?;
-        let capture = self.capture_package_queries()?;
+        let capture = self.capture_package_queries_for(bridge)?;
         crate::package::installer::install_events::validate_monitor_publication(after,capture.scan(),receipt)
             .map_err(|error|Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error))?;
         let resolver = crate::package::resolve::Resolver::default();

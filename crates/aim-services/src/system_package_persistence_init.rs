@@ -167,9 +167,7 @@ pub fn install(system: &Arc<System>, bridge: &Arc<Bridge>, prepared: Prepared, i
     let weak_system = Arc::downgrade(system); let query_bridge = bridge.clone();
     let source: installer::native::QuerySource = Arc::new(move || {
         let system = weak_system.upgrade().ok_or_else(|| illegal("Native installer system stopped"))?;
-        let current = system.package_bootstrap()?;
-        if !Arc::ptr_eq(&current, &query_bridge) { return Err(illegal("Native installer bootstrap changed")) }
-        Ok(system.capture_package_queries()?.state().clone())
+        Ok(system.capture_package_queries_for(&query_bridge)?.state().clone())
     });
     let policy = system.package_installer_policy_source(bridge, policy)?;
     let installer = installer::native::NativeOwners::open(sessions, source, policy, config, session_disk, publisher, callback, process)?;

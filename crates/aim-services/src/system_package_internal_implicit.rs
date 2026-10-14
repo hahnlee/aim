@@ -100,7 +100,7 @@ impl System {
             match snapshots.publish_validated_store_after(base, &update.store) {
                 Ok(_) => {
                     let version = update.capture.scan().version();
-                    current.queries = Some(update.capture);
+                    current.set_queries(Some(update.capture));
                     if let Some(page) = &current.version_page { page.publish(version); }
                     state.version = version;
                     return Ok(());
@@ -109,7 +109,7 @@ impl System {
                 Err(error) => return Err(fail(format!("implicit-access canonical publication: {error:?}"))),
             }
         }
-        current.queries = Some(view);
+        current.set_queries(Some(view));
         Ok(())
     }
 }

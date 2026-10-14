@@ -167,7 +167,7 @@ impl Owner {
                         format!("existing permission restore: {error:?}"),
                     )
                 })?;
-            system.restore_existing_install_preferences(&completion_name, user)?;
+            system.restore_existing_install_preferences(&bridge, &completion_name, user)?;
             if let Some(diagnostic) = bridge
                 .complete_existing_install(
                     Some(&completion_name),

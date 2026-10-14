@@ -18,7 +18,7 @@ impl Runtime { pub(crate) fn leaf(&self) -> &Strong { &self.leaf }
 impl System {
     fn enter_native_package_settings_ready(&self, bridge: &Arc<crate::package::bootstrap::Bridge>) -> Result<()> {
         self.check_package_bootstrap(bridge)?;
-        let owner = self.capture_package_queries()?.state().platform.settings_owner.clone()
+        let owner = self.capture_package_queries_for(bridge)?.state().platform.settings_owner.clone()
             .ok_or_else(|| fail("native boot settings owner unavailable"))?;
         let compatibility = owner.system_ready()?;
         let gate = self.package_install_lock.lock().unwrap();
@@ -29,7 +29,7 @@ impl System {
         if capture.state().system.compatibility_mode == compatibility { return Ok(()); }
         let update = capture.prepare_compatibility_mode(compatibility).map_err(fail)?;
         current.publish_snapshot(update.store);
-        current.queries = Some(update.capture.clone());
+        current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
         drop(state);
@@ -42,7 +42,7 @@ impl System {
     pub fn initialize_package_boot_lifecycle(self:&Arc<Self>,bridge:&Arc<crate::package::bootstrap::Bridge>,
         leaf:Strong,decompression:Arc<crate::package::scan::boot_compressed::BootDecompression>,boot_apex_changed:bool)->Result<Worker> {
         self.check_package_bootstrap(bridge)?;
-        let capture=self.capture_package_queries()?;
+        let capture=self.capture_package_queries_for(bridge)?;
         if capture.state().system.lifecycle.is_none(){return Err(fail("Boot package lifecycle owner unavailable"));}
         let prepared=self.prepare_native_boot_core_app_data()?;
         let (queue,receiver)=mpsc::channel();let startup=Arc::new((Mutex::new(None),Condvar::new()));
@@ -114,9 +114,9 @@ impl Runtime {
                 self.decompression.acknowledge_released(&paths).map_err(fail)?;
                 // Original PMS publishes mSystemReady before synchronous web,
                 // AppsFilter, carrier and parser callbacks can query the owner.
-                system.capture_package_queries()?.state().system.lifecycle.as_ref().ok_or_else(||fail("Boot lifecycle missing"))?.system_ready(1000).map_err(fail)?;
+                system.capture_package_queries_for(&self.bridge)?.state().system.lifecycle.as_ref().ok_or_else(||fail("Boot lifecycle missing"))?.system_ready(1000).map_err(fail)?;
                 system.start_web_instant_policy(&self.bridge)?;
-                system.capture_package_queries()?.state().platform.settings_owner.as_ref().ok_or_else(||fail("Boot settings owner missing"))?.begin_system_ready()?;
+                system.capture_package_queries_for(&self.bridge)?.state().platform.settings_owner.as_ref().ok_or_else(||fail("Boot settings owner missing"))?.begin_system_ready()?;
                 self.call(leaf::PREPARE_READY,|_|{})?;
                 system.enter_native_package_settings_ready(&self.bridge)?;
                 system.sweep_dangling_package_preferred(&self.bridge)?;
@@ -127,7 +127,7 @@ impl Runtime {
             5=>{self.queue.send(Job::Prepare).map_err(|_|fail("App-data queue stopped"))?;self.wait()?;},
             6=>{let events=*self.events.lock().unwrap();self.call(leaf::REGISTER_PACKAGE_OBSERVERS,|p|p.write_binder(events))?;},
             7=>{
-                let capture=system.capture_package_queries()?;
+                let capture=system.capture_package_queries_for(&self.bridge)?;
                 let owner=capture.state().system.module_metadata.as_ref().ok_or_else(||fail("Native module metadata not initialized"))?;
                 // The native constructor loaded the original provider XML using
                 // accepted APK/APEX code; retaining that owner completes readiness.
@@ -136,7 +136,7 @@ impl Runtime {
             8=>installer()?.restore_native_staged_on_boot(&self.leaf)?,
             9=>{system.package_maintenance_owner()?.schedule_unused_library_prune()?;self.call(leaf::SCHEDULE_MAINTENANCE,|_|{})?;},
             10=>{
-                let capture=system.capture_package_queries()?;let owner=capture.state().system.lifecycle.as_ref().ok_or_else(||fail("Boot dexopt lifecycle missing"))?;
+                let capture=system.capture_package_queries_for(&self.bridge)?;let owner=capture.state().system.lifecycle.as_ref().ok_or_else(||fail("Boot dexopt lifecycle missing"))?;
                 let reason=if owner.first_boot(){Some("first-boot")}else if owner.device_upgrading(){Some("boot-after-ota")}else if self.boot_apex_changed{Some("boot-after-mainline-update")}else{None};
                 if let Some(reason)=reason{let completion=system.package_dexopt_completion(&self.bridge)?;self.call(leaf::UPGRADE_DEXOPT,|p|{p.write_string16(Some(reason));p.write_binder(Some(completion));})?;}
             },
@@ -159,7 +159,7 @@ impl Service for Events {
             events::OVERLAY_CHANGED=>{
                 let args=events::OverlayChanged::read(&mut call.data)?;if call.data.remaining()!=0{return Err(BAD_VALUE);}
                 (||->Result<()>{let system=self.0.system()?;let Some(name)=args.package_name else{return Ok(());};
-                    let capture=system.capture_package_queries()?;let Some(package)=capture.state().packages.get(&name)else{return Ok(());};
+                    let capture=system.capture_package_queries_for(&self.0.bridge)?;let Some(package)=capture.state().packages.get(&name)else{return Ok(());};
                     let uid=crate::package::apps_filter::uid(args.user_id,package.app_id);
                     system.package_effects_owner(&self.0.bridge)?.package_changed(&name,uid,true,&[name.clone()],Some("android.intent.action.OVERLAY_CHANGED"),1000,false)
                 })()

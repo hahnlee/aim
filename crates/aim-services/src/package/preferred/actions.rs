@@ -66,7 +66,7 @@ impl SystemActions {
     fn update_home(&self, user: i32, uid: i32) -> Result<bool, ActionError> {
         let system = self.system()?;
         let capture = system
-            .capture_package_queries()
+            .capture_package_queries_for(&self.bridge)
             .map_err(ActionError::Exception)?;
         let lifecycle =
             capture
@@ -378,7 +378,7 @@ impl Actions for SystemActions {
     fn default_preferences(&self, user: i32) -> Result<Vec<PreferredActivity>, ActionError> {
         let system = self.system()?;
         let capture = system
-            .capture_package_queries()
+            .capture_package_queries_for(&self.bridge)
             .map_err(ActionError::Exception)?;
         let resolution = crate::package::resolve::Resolver::default()
             .resolution(capture.state())

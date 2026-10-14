@@ -290,7 +290,7 @@ impl Session {
     }
     fn current_bootstrap_state(&self) -> Result<Vec<u8>, Exception> {
         let system = self.require_scan()?;
-        let capture = system.capture_package_queries()?;
+        let capture = system.capture_package_queries_for(&self.bridge)?;
         let version = i64::try_from(capture.scan().version())
             .map_err(|_| illegal("boot version exceeds Java long"))?;
         self.captures.bootstrap_state(version)

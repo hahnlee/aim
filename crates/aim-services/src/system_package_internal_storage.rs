@@ -33,7 +33,7 @@ impl System {
         let deletion=installer.removal_owner()?;
         let maintenance=Arc::new(bridge.package_maintenance().map_err(|error|storage_error(format!("Native maintenance storage: {error:?}")))?);
         let system=Arc::downgrade(self);let retained=bridge.clone();
-        let current=Arc::new(move||{let system=system.upgrade().ok_or_else(||storage_error("Native storage system stopped"))?;system.check_package_bootstrap(&retained)?;system.capture_package_queries()});
+        let current=Arc::new(move||{let system=system.upgrade().ok_or_else(||storage_error("Native storage system stopped"))?;system.capture_package_queries_for(&retained)});
         let owner=crate::package::diagnostics_storage::Owner::new(maintenance,current,deletion,installer);
         match owner.free(volume_uuid.as_deref(),bytes,flags){Ok(())=>Ok(()),Err(crate::package::diagnostics_storage::Error::Owner(error))=>Err(error),Err(crate::package::diagnostics_storage::Error::Io(message))=>Err(storage_io(message))}
     }

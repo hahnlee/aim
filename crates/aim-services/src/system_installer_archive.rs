@@ -62,8 +62,7 @@ impl System {
                     "archive system stopped",
                 )
             })?;
-            system.check_package_bootstrap(&retained)?;
-            Ok(system.capture_package_queries()?.state().clone())
+            Ok(system.capture_package_queries_for(&retained)?.state().clone())
         });
         let keep = self.package_customization()?;
         let policy_external = external.clone();

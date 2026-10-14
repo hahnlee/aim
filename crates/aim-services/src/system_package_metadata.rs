@@ -35,7 +35,7 @@ impl System {
             ));
         }
         let install = self.package_install_guard();
-        let capture = self.capture_package_queries()?;
+        let capture = self.capture_package_queries_for(bridge)?;
         if capture.state().system.module_metadata.is_some()
             || capture.state().system.app_metadata_files.is_some()
             || capture.state().system.instant_registry.is_some()
@@ -101,7 +101,7 @@ impl System {
             let mut update=latest.prepare_package_update(latest.scan().owner().clone()).map_err(fail)?;
             update.capture=update.capture.load_module_metadata(&apks.platform,config,&files,&apex).map_err(fail)?;
             current.publish_snapshot(update.store);
-            current.queries = Some(update.capture.clone());
+            current.set_queries(Some(update.capture.clone()));
             if let Some(page) = &current.version_page {
                 page.publish(update.capture.scan().version());
             }

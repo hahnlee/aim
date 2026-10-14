@@ -82,7 +82,7 @@ impl System {
         let reply=self.package_permission_call(code,&request)?;
         let success=reply.reader().read_exception().map_err(|status|failure(status.to_string()))?.is_ok();
         if success&&matches!(code,pm::GRANT_RUNTIME_PERMISSION|pm::REVOKE_RUNTIME_PERMISSION|pm::UPDATE_PERMISSION_FLAGS) {
-            let bridge=self.package_bootstrap()?;let capture=self.capture_package_queries()?;
+            let bridge=self.package_bootstrap()?;let capture=self.capture_package_queries_for(&bridge)?;
             self.refresh_package_permission_queries(&bridge,&capture)?;
         }
         Ok(reply.into_parcel())
@@ -98,7 +98,7 @@ impl System {
         let reply=self.shell_policy_call(policy_api::RESET_RUNTIME_PERMISSIONS,|request|{request.write_i32(pid);request.write_i32(caller);})?;
         let mut reader=reply.reader();reader.read_exception().map_err(|status|failure(status.to_string()))??;
         if reader.remaining()!=0{return Err(failure("Permission reset reply trailing data"));}
-        let bridge=self.package_bootstrap()?;let capture=self.capture_package_queries()?;
+        let bridge=self.package_bootstrap()?;let capture=self.capture_package_queries_for(&bridge)?;
         self.refresh_package_permission_queries(&bridge,&capture)
     }
     pub fn shell_clear_data(self:&Arc<Self>,uid:u32,pid:i32,package:&str,user:i32,cache_only:bool)->Result<bool> {
@@ -142,7 +142,7 @@ impl System {
     pub fn shell_requested_runtime_permissions(self:&Arc<Self>,uid:u32,pid:i32,package:Option<&str>,user:i32)->Result<Vec<(String,Vec<String>)>> {
         let caller=self.authenticate_package_shell(uid,pid)?;
         let bridge=self.package_bootstrap()?;self.check_package_bootstrap(&bridge)?;
-        let capture=self.capture_package_queries()?;
+        let capture=self.capture_package_queries_for(&bridge)?;
         let resolution=capture.resolution().map_err(|error|failure(format!("Shell permission query resolution: {error:?}")))?;
         let query=crate::package::query::Query {state:capture.state(),filter:&resolution.apps_filter,calling_uid:caller};
         let flags=crate::package::info::flags::GET_PERMISSIONS;

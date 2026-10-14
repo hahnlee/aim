@@ -13,14 +13,9 @@ impl Captures {
     pub fn new(system: &Arc<System>, bridge: Arc<Bridge>) -> Self {
         Self { system: Arc::downgrade(system), bridge, versions: Mutex::new(BTreeMap::new()), resolver: Resolver::default() }
     }
-    fn system(&self) -> Result<Arc<System>, Exception> {
-        let system = self.system.upgrade().ok_or_else(|| error("boot capture system stopped"))?;
-        system.check_package_bootstrap(&self.bridge)?;
-        Ok(system)
-    }
     pub fn snapshot(&self) -> Result<Binder, Exception> {
-        let system = self.system()?;
-        let capture = system.capture_package_queries()?;
+        let system = self.system.upgrade().ok_or_else(|| error("boot capture system stopped"))?;
+        let capture = system.capture_package_queries_for(&self.bridge)?;
         let mut versions = self.versions.lock().unwrap();
         versions.retain(|_, capture| capture.strong_count() != 0);
         versions.insert(capture.scan().version(), Arc::downgrade(&capture));
@@ -29,9 +24,9 @@ impl Captures {
             capture.scan().clone(), capture, &system.binder_process()))))
     }
     pub fn capture(&self, version: i64) -> Result<Arc<Capture>, Exception> {
-        let system = self.system()?;
+        let system = self.system.upgrade().ok_or_else(|| error("boot capture system stopped"))?;
         let version = u64::try_from(version).map_err(|_| Exception::illegal_argument("negative boot capture version"))?;
-        let current = system.capture_package_queries()?;
+        let current = system.capture_package_queries_for(&self.bridge)?;
         if current.scan().version() == version { return Ok(current); }
         self.versions.lock().unwrap().get(&version).and_then(Weak::upgrade)
             .ok_or_else(|| error("requested boot capture is no longer retained"))

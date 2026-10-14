@@ -29,7 +29,7 @@ impl System {
         self.check_package_bootstrap(bridge)?;
         // SystemConfig has already been consumed by the native scan and role
         // constructors. Check the same source generation before binding owners.
-        let capture = self.capture_package_queries()?;
+        let capture = self.capture_package_queries_for(bridge)?;
         let lifecycle = capture.state().system.lifecycle.as_ref().ok_or_else(|| {
             Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE,
@@ -52,7 +52,7 @@ impl System {
         self.install_native_package_preferred(bridge, image)?;
         if first_boot {
             let users: Vec<_> = self
-                .capture_package_queries()?
+                .capture_package_queries_for(bridge)?
                 .state()
                 .users
                 .keys()
@@ -71,7 +71,7 @@ impl System {
         user: i32,
     ) -> Result<()> {
         self.check_package_bootstrap(bridge)?;
-        let capture = self.capture_package_queries()?;
+        let capture = self.capture_package_queries_for(bridge)?;
         let handle = capture
             .state()
             .system
@@ -122,7 +122,7 @@ impl System {
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error)
         })?;
         for user in users {
-            let capture = self.capture_package_queries()?;
+            let capture = self.capture_package_queries_for(bridge)?;
             let components = capture.state().package_registry.as_ref().ok_or_else(|| {
                 Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
                     "systemReady component registration owner unavailable")
@@ -189,7 +189,7 @@ impl System {
         // Original helper visits changed users in descending SparseBooleanArray
         // order, then sends one notification for the requested removal scope.
         for user in effects.changed_users.into_iter().rev() {
-            let capture = self.capture_package_queries()?;
+            let capture = self.capture_package_queries_for(bridge)?;
             let handle = capture.state().system.preferred_owner.as_ref().ok_or_else(|| {
                 Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
                     "removed preferred home owner unavailable")
@@ -241,8 +241,7 @@ impl System {
                     "cross-profile system stopped",
                 )
             })?;
-            system.check_package_bootstrap(&retained)?;
-            let capture = system.capture_package_queries()?;
+            let capture = system.capture_package_queries_for(&retained)?;
             let handle = capture
                 .state()
                 .system
@@ -302,7 +301,7 @@ impl System {
     ) -> Result<aim_android_xml::Element> {
         self.check_package_bootstrap(bridge)?;
         let registry = self.package_preferred_registry(bridge)?;
-        let capture = self.capture_package_queries()?;
+        let capture = self.capture_package_queries_for(bridge)?;
         let handle = capture
             .state()
             .system
@@ -416,7 +415,7 @@ impl System {
             .publish_new_user(stage)
             .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
         current.publish_snapshot(update.store);
-        current.queries = Some(update.capture.clone());
+        current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page {
             page.publish(update.capture.scan().version());
         }

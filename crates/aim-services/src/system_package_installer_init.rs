@@ -23,9 +23,8 @@ impl DeviceOwner {
     }
     fn capture(&self, uid: u32, pid: i32, requested_user: i32) -> Result<DevicePolicy, Exception> {
         let system = self.system.upgrade().ok_or_else(|| illegal("installer policy system stopped"))?;
-        system.check_package_bootstrap(&self.bridge)?;
         let uid_i32 = i32::try_from(uid).map_err(|_| Exception::illegal_argument("installer UID exceeds Android range"))?;
-        let capture = system.capture_package_queries()?;
+        let capture = system.capture_package_queries_for(&self.bridge)?;
         let mut request = Parcel::new(); request.write_interface_token(api::DESCRIPTOR);
         let reply = self.leaf.transact(api::GET_POLICY_FLAGS, &request, false)
             .map_err(|status| illegal(format!("installer flag owner transport: {status}")))?;

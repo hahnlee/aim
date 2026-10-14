@@ -134,7 +134,7 @@ fn isolated_callback_preserves_durable_install_during_query_lag() {
         .current
         .as_mut()
         .unwrap()
-        .queries = Some(full);
+        .set_queries(Some(full));
     fixture
         .system
         .internal_add_isolated_uid(1099002, 1010100, 1000, 42)

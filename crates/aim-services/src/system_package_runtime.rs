@@ -115,7 +115,7 @@ impl System {
             }
         });
         let persistence = crate::system_package_persistence_init::install(self, bridge,
-            inputs.prepared, &inputs.persistence_inputs, self.capture_package_queries()?, inputs.runtime_metadata,
+            inputs.prepared, &inputs.persistence_inputs, self.capture_package_queries_for(bridge)?, inputs.runtime_metadata,
             inputs.system_config.clone(), policy, publisher, callback, self.process.clone(), icons,
             inputs.apks.clone(), inputs.properties.clone(), inputs.dependency_installer_enabled)?;
         let original_domains = self.initialize_original_domain_settings(bridge)?;
@@ -171,7 +171,7 @@ impl System {
         let internal_installs = self.initialize_package_internal_owners(bridge, inputs.kernel.clone())?;
         let maintenance = self.initialize_package_maintenance(bridge)?;
         let relocation = self.install_native_package_relocation(bridge, pipeline.clone(), inputs.claims)?;
-        let capture = self.capture_package_queries()?;
+        let capture = self.capture_package_queries_for(bridge)?;
         let lifecycle = capture.state().system.lifecycle.clone().ok_or_else(|| Exception::new(
             aim_binder_host::parcel::EX_ILLEGAL_STATE, "runtime lifecycle unavailable"))?;
         let instant = capture.state().system.instant_registry.clone().ok_or_else(|| Exception::new(
@@ -191,7 +191,7 @@ impl System {
         let constructor_capture = if let Some(sink)=self.package_constructor_capture.lock().unwrap().clone() {
             let _publication=self.package_install_guard();
             let _disk=persistence.disk.lock().unwrap();
-            let retained=self.capture_package_queries()?;
+            let retained=self.capture_package_queries_for(bridge)?;
             Some((sink.freeze(&inputs.data,retained.scan().version(),inputs.persistence_inputs.controller_version)
                 .map_err(|cause|Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,cause))?,retained))
         } else { None };

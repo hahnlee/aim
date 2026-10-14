@@ -44,7 +44,7 @@ impl System {
     pub(crate) fn internal_get_historical_sessions(&self,user:i32,uid:i32,_pid:i32)->Result<Vec<crate::package::installer::codec::SessionInfo>> {
         let bridge=self.package_bootstrap()?;
         let removal=self.public_package_removal()?;
-        let capture=self.capture_package_queries()?;let resolver=crate::package::resolve::Resolver::default();
+        let capture=self.capture_package_queries_for(&bridge)?;let resolver=crate::package::resolve::Resolver::default();
         let resolution=resolver.resolution(capture.state()).map_err(|error|Exception::new(EX_ILLEGAL_STATE,format!("Historical session visibility: {error:?}")))?;
         let query=crate::package::query::Query{state:capture.state(),filter:&resolution.apps_filter,calling_uid:uid};
         removal.controller.cross_user(&query,uid as u32,user,"getAllSessions")?;
