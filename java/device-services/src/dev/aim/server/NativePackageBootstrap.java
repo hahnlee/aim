@@ -154,6 +154,11 @@ public final class NativePackageBootstrap implements NativePackageManagerService
             if (snapshots == null || computers == null) throw new IllegalStateException("native Computer requested before scan completion");
             return computers.apply(snapshots.computer());
         }
+        private NativeComputer refreshedComputer() {
+            if (aborted) throw new IllegalStateException("native package constructor epoch closed");
+            if (snapshots == null || computers == null) throw new IllegalStateException("native Computer requested before scan completion");
+            return computers.apply(snapshots.refreshedComputer());
+        }
         @Override public PackageManagerTracedLock installLock() { return installLock; }
         @Override public Object packageLock() { return packagesLock; }
         @Override public com.android.server.pm.NativeUserManagerBridge.Owner userPackages() { return earlyUser; }
@@ -228,7 +233,7 @@ public final class NativePackageBootstrap implements NativePackageManagerService
                     reads.getDynamicCodeLogger(), context);
             shutdownOwnerInstalled=true;
             bridge.installPackageMutationOwner(context, BackgroundThread.getHandler(),
-                    this::computer, originals.effectsPolicy());
+                    this::computer, this::refreshedComputer, originals.effectsPolicy());
             String fingerprint = android.os.SystemProperties.get("ro.build.fingerprint");
             if (fingerprint == null || fingerprint.isEmpty()) throw new IllegalStateException("actual image fingerprint unavailable");
             user = new NativePackageUserOwner(context, installer, installLock, packagesLock,

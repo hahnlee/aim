@@ -51,6 +51,7 @@ public final class NativePackageEffectsBridge extends IPackageMutationBridge.Stu
     private final Context context;
     private final Handler handler;
     private final Supplier<Computer> snapshots;
+    private final Supplier<Computer> visibilitySnapshots;
     private final Policy policy;
     private final ActivityManagerInternal activity;
     private final UserManagerInternal users;
@@ -63,10 +64,12 @@ public final class NativePackageEffectsBridge extends IPackageMutationBridge.Stu
     private int pendingCallingUid;
 
     public NativePackageEffectsBridge(Context context, Handler handler,
-            Supplier<Computer> snapshots, Policy policy, ProtectedPackages protectedPackages) {
+            Supplier<Computer> snapshots, Supplier<Computer> visibilitySnapshots,
+            Policy policy, ProtectedPackages protectedPackages) {
         this.context = Objects.requireNonNull(context);
         this.handler = Objects.requireNonNull(handler);
         this.snapshots = Objects.requireNonNull(snapshots);
+        this.visibilitySnapshots = Objects.requireNonNull(visibilitySnapshots);
         this.policy = Objects.requireNonNull(policy);
         activity = Objects.requireNonNull(LocalServices.getService(ActivityManagerInternal.class), "missing ActivityManagerInternal");
         users = Objects.requireNonNull(LocalServices.getService(UserManagerInternal.class), "missing UserManagerInternal");
@@ -102,6 +105,8 @@ public final class NativePackageEffectsBridge extends IPackageMutationBridge.Stu
         if (Binder.getCallingUid() != Process.SYSTEM_UID) throw new SecurityException("native package effects require system UID");
     }
     private Computer snapshot() { return Objects.requireNonNull(snapshots.get(), "native Computer unavailable"); }
+    private Computer visibilitySnapshot() { return Objects.requireNonNull(
+            visibilitySnapshots.get(), "native visibility Computer unavailable"); }
     private void clean(Runnable action) {
         long identity = Binder.clearCallingIdentity();
         try { action.run(); } finally { Binder.restoreCallingIdentity(identity); }
@@ -351,7 +356,7 @@ public final class NativePackageEffectsBridge extends IPackageMutationBridge.Stu
     }
     @Override public int[] capturePostInstallVisibility(String name,int appId,String codePath,long version,int[] userIds) {
         enforceNative();
-        Computer current=snapshot();
+        Computer current=visibilitySnapshot();
         PackageStateInternal previous=Objects.requireNonNull(current.getPackageStateInternal(name),"prior visibility package absent");
         if(previous.getAppId()!=appId||previous.getVersionCode()!=version||!Objects.equals(previous.getPathString(),codePath)) throw new IllegalStateException("prior visibility code/UID changed");
         SparseArray<int[]> lists=current.getVisibilityAllowLists(name,userIds);

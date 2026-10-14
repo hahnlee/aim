@@ -93,7 +93,7 @@ public final class NativePackageQueryOracle {
             try (var versions = new PackageVersionPage(java.util.Objects.requireNonNull(host.getPackageStateVersionPage()));
                     var store = new PackageSnapshots.Store(owners, owners, true, versions)) {
                 store.refresh();
-                PackageSnapshotUsageOracle.verify(store, () -> {
+                PackageSnapshotUsageOracle.verify(store, owners, owners, () -> {
                     try { internal.notifyPackageUse("android", 0,
                             android.os.Binder.getCallingUid(), android.os.Binder.getCallingPid()); }
                     catch (android.os.RemoteException error) { throw error.rethrowFromSystemServer(); }

@@ -859,6 +859,10 @@ fn should_remove_setting(package: &crate::package::model::PackageState, plan: &P
         && !package.users.iter().any(|(user, state)| state.installed && !plan.users.contains(user))
 }
 
+fn should_restore_factory(package: &crate::package::model::PackageState, plan: &Plan) -> bool {
+    package.is.updated_system_app && plan.request.flags & SYSTEM_APP == 0
+}
+
 impl Controller {
     fn with_query<T>(
         &self,
@@ -1116,7 +1120,7 @@ impl Controller {
                 }
             }
         }
-        if package.is.system && plan.request.flags & SYSTEM_APP == 0 {
+        if should_restore_factory(&package, plan) {
             if !current.disabled_system_packages.contains_key(&package.name) {
                 return Ok(INTERNAL_ERROR);
             }
@@ -1679,7 +1683,7 @@ mod admission_policy_tests {
     }
 
     #[test]
-    fn restored_factory_identity_survives_disabled_user_cleanup() {
+    fn updated_system_uninstall_restores_factory_before_disabled_user_cleanup() {
         use crate::package::{
             scan::{CapturedUsers, SigningScan},
             settings::{Package, Settings, FLAG_SYSTEM, PRIVATE_FLAG_PRIVILEGED},
@@ -1728,6 +1732,35 @@ mod admission_policy_tests {
                 ),
             ]))
             .unwrap();
+        let mut package = PackageState {
+            name: factory.name.clone(),
+            app_id: factory.app_id,
+            is: crate::package::model::StateFlags {
+                updated_system_app: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let plan = Plan {
+            request: Request {
+                package: factory.name.clone(),
+                version: -1,
+                caller_package: None,
+                uid: 1000,
+                pid: 7,
+                user: 0,
+                flags: 0,
+                existing_only: false,
+            },
+            internal_package: factory.name.clone(),
+            users: vec![0],
+            blocked_users: Vec::new(),
+            keep_uninstalled: false,
+        };
+        assert!(!package.is.system);
+        assert!(should_restore_factory(&package, &plan));
+        assert!(should_remove_setting(&package, &plan, true));
+
         let restored = owner
             .enable_system_setting(&factory.name, [7; 16])
             .unwrap();
@@ -1735,7 +1768,7 @@ mod admission_policy_tests {
         owner
             .set_user_state(&restored.name, 0, disabled.clone())
             .unwrap();
-        let mut package = PackageState {
+        package = PackageState {
             name: restored.name.clone(),
             app_id: restored.app_id,
             setting_flags: Some((restored.flags, restored.private_flags)),
@@ -1753,24 +1786,10 @@ mod admission_policy_tests {
                 ..Default::default()
             },
         );
-        let plan = Plan {
-            request: Request {
-                package: restored.name.clone(),
-                version: -1,
-                caller_package: None,
-                uid: 1000,
-                pid: 7,
-                user: 0,
-                flags: 0,
-                existing_only: false,
-            },
-            internal_package: restored.name.clone(),
-            users: vec![0],
-            blocked_users: Vec::new(),
-            keep_uninstalled: false,
-        };
         assert!(package.is.system);
         assert!(package.is.privileged);
+        assert!(!package.is.updated_system_app);
+        assert!(!should_restore_factory(&package, &plan));
         assert!(!should_remove_setting(&package, &plan, true));
         assert_eq!(owner.settings.packages, vec![restored]);
         assert_eq!(owner.scanned_user_states(&factory.name).unwrap()[&0], disabled);

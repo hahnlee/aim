@@ -199,6 +199,16 @@ public final class PackageSnapshots {
         public ComputerSnapshot computer() {
             var data = capture(); try { return new ComputerSnapshot(data); } finally { data.release(); }
         }
+        /** Installation policy needs the latest query owner even if its version-page notice races. */
+        public ComputerSnapshot refreshedComputer() {
+            try { refresh(); }
+            catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+            catch (IOException failure) { throw new IllegalStateException("native package replica refresh failed", failure); }
+            synchronized (this) {
+                if (closed || current == null) throw new IllegalStateException("package replica store is closed");
+                return new ComputerSnapshot(current);
+            }
+        }
         @Override public void close() {
             Data previous;
             synchronized (this) { if (closed) return; closed = true; previous = current; current = null; }

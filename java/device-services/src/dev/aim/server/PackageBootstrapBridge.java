@@ -541,11 +541,12 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
 
     public synchronized void installPackageMutationOwner(Context context, android.os.Handler handler,
             java.util.function.Supplier<com.android.server.pm.Computer> snapshots,
+            java.util.function.Supplier<com.android.server.pm.Computer> visibilitySnapshots,
             com.android.server.pm.NativePackageEffectsBridge.Policy policy) {
         if (packageEffects != null) throw new IllegalStateException("package effects already attached");
         getPackagePolicyBridge();
         packageEffects = new com.android.server.pm.NativePackageEffectsBridge(context, handler,
-                snapshots, policy, packagePolicy.protectedPackages());
+                snapshots, visibilitySnapshots, policy, packagePolicy.protectedPackages());
     }
 
     @Override
