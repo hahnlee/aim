@@ -226,7 +226,8 @@ impl System {
         let decompression=Arc::new(crate::package::scan::boot_compressed::BootDecompression::new(begin.data.join("app")).map_err(failure)?);
         let mut usage=Usage::new(owner.settings.packages.iter().map(|setting|setting.name.as_str()));usage.read(&begin.data.join("system/package-usage.list")).map_err(failure)?;
         self.expand_native_boot_stubs(bridge,&begin,&mut owner,apks,policy,&system,&decompression,zip_time,&usage,&mut retained_runtime)?;
-        owner.retain_unloaded_runtime_at_boot(&usage,&mut retained_runtime)
+        let boot_users=boot.users().users.as_deref().ok_or_else(||failure("retained unloaded boot user inventory absent"))?;
+        owner.retain_unloaded_runtime_at_boot(&usage,&saved_users,boot_users,&mut retained_runtime)
             .map_err(|error|failure(format!("retained unloaded boot runtime failed: {error}")))?;
         owner.assign_seinfo_at_boot(policy.seinfo,&mut |package|
             bridge.seinfo_target_sdk(package).map_err(|error|format!("original seInfo compatibility: {error:?}")))

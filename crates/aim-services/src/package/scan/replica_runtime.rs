@@ -133,11 +133,18 @@ impl SigningScan {
     /// Recreate PackageStateUnserialized for settings retained by KEEP_DATA.
     /// Their executable declarations are gone, but PackageUsage still owns one
     /// row for every active PackageSetting.
-    pub(crate) fn retain_unloaded_runtime_at_boot(&self,usage:&Usage,retained:&mut BTreeMap<(String,bool),OriginalRuntime>)->Result<(),String>{
+    pub(crate) fn retain_unloaded_runtime_at_boot(&self,usage:&Usage,
+        saved_users:&BTreeMap<String,BTreeMap<i32,crate::package::restrictions::UserState>>,users:&[super::User],
+        retained:&mut BTreeMap<(String,bool),OriginalRuntime>)->Result<(),String>{
         let mut additions=BTreeMap::new();
         for setting in &self.settings.packages{
             if self.loaded.contains_key(&setting.name){continue;}
-            if self.domain_code_owner(setting)?.is_some(){return Err(format!("unloaded boot runtime still has code: {}",setting.name));}
+            if setting.flags&crate::package::settings::FLAG_SYSTEM!=0{return Err(format!("system boot runtime code owner unavailable: {}",setting.name));}
+            let states=saved_users.get(&setting.name).ok_or_else(||format!("retired boot user owner unavailable: {}",setting.name))?;
+            let expected=users.iter().map(|user|user.id).collect::<std::collections::BTreeSet<_>>();
+            if states.keys().copied().collect::<std::collections::BTreeSet<_>>()!=expected||states.values().any(|state|state.installed){
+                return Err(format!("retired boot user scope differs: {}",setting.name));
+            }
             let key=(setting.name.clone(),false);
             if retained.contains_key(&key){return Err(format!("duplicate retained boot runtime: {}",setting.name));}
             let state=ReplicaRuntime{usage:*usage.times(&setting.name).ok_or("retained boot runtime usage owner absent")?,
@@ -968,10 +975,13 @@ mod tests {
             domain_set_id:Some("00000000-0000-0000-0000-000000000002".into()),..Default::default()};
         let mut owner=SigningScan::new(&SystemConfig::default(),&Settings{packages:vec![setting],..Default::default()},29).unwrap();
         let mut uninstalled=UserState::default();uninstalled.installed=false;
-        owner.capture_user_states(BTreeMap::from([(("retired".into(),false),CapturedUsers{
-            states:BTreeMap::from([(0,uninstalled.clone()),(10,uninstalled)]),active_aliases:Default::default()})])).unwrap();
+        let saved_users=BTreeMap::from([("retired".into(),BTreeMap::from([(0,uninstalled.clone()),(10,uninstalled)]))]);
+        let users=[crate::package::scan::User{id:0,pre_created:false,adb_install_disallowed:false},crate::package::scan::User{id:10,pre_created:false,adb_install_disallowed:false}];
         let mut usage=Usage::new(["retired"]);assert_eq!(usage.times("retired"),Some(&[0;8]));usage.notify("retired",2,1234);
-        let mut retained=BTreeMap::new();owner.retain_unloaded_runtime_at_boot(&usage,&mut retained).unwrap();
+        let mut installed=saved_users.clone();installed.get_mut("retired").unwrap().get_mut(&10).unwrap().installed=true;
+        assert!(owner.retain_unloaded_runtime_at_boot(&usage,&installed,&users,&mut BTreeMap::new()).is_err());
+        assert!(owner.retain_unloaded_runtime_at_boot(&usage,&saved_users,&users[..1],&mut BTreeMap::new()).is_err());
+        let mut retained=BTreeMap::new();owner.retain_unloaded_runtime_at_boot(&usage,&saved_users,&users,&mut retained).unwrap();
         let input=&retained[&("retired".into(),false)];
         assert!(!input.has_code);assert_eq!(input.state.usage,[0,0,1234,0,0,0,0,0]);
         assert_eq!(input.state.seinfo,None);assert!(input.state.library_files.is_empty()&&input.state.libraries.is_empty());
