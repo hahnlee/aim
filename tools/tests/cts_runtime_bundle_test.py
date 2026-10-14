@@ -68,6 +68,10 @@ class Lifetime(unittest.TestCase):
             receipt = bundle.snapshot(ROOT, harness, root / 'generations')
             private = Path(receipt['directory']) / 'harness/android-cts'
             self.assertFalse((private / 'testcases').is_symlink())
+            for name in ('results', 'logs'):
+                self.assertTrue((private / name).is_dir())
+                self.assertFalse((private / name).is_symlink())
+                self.assertTrue((private / name).resolve().is_relative_to(Path(receipt['directory'])))
             # These are the unchanged pinned launcher's actual discovery rules.
             launcher = (private / 'tools/cts-tradefed').read_text()
             self.assertIn("find ${CTS_ROOT}/android-cts/testcases -name '*.jar'", launcher)
@@ -134,6 +138,12 @@ public class PreparerProbe {
                 (harness / 'tools' / name).write_text('#!/bin/bash\nexit 0\n')
             (harness / 'tools/tradefed.jar').write_bytes(b'actual fixture artifact')
             receipt = bundle.snapshot(root, harness, root / 'snapshots')
+            peer = bundle.snapshot(root, harness, root / 'peer-snapshots')
+            self.assertEqual(receipt['identity'], peer['identity'])
+            first_results = Path(receipt['directory']) / 'harness/android-cts/results'
+            peer_results = Path(peer['directory']) / 'harness/android-cts/results'
+            (first_results / 'campaign-one').mkdir()
+            self.assertFalse((peer_results / 'campaign-one').exists())
             script = Path(receipt['directory']) / 'tools/cts-tradefed.sh'
             self.assertNotEqual(script.stat().st_ino, (root / 'tools/cts-tradefed.sh').stat().st_ino)
             process = subprocess.Popen(['bash', str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)

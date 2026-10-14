@@ -116,12 +116,13 @@ def summarize(path, data=None):
                                               if 'command_line_args' in build.attrib]}}
 
 
-def result_for(module, before, scope):
+def result_for(module, before, scope, results_root=None):
     """Bind official results to this wrapper's command, device and lifetime."""
+    results_root = Path(results_root) if results_root is not None else HARNESS / 'results'
     if scope['finished_ms'] < scope['started_ms']:
         raise ValueError('wrapper invocation clock moved backwards')
     candidates = []
-    for path in (HARNESS / 'results').glob('*/test_result.xml'):
+    for path in results_root.glob('*/test_result.xml'):
         if path.parent.is_symlink() or str(path.parent) in before:
             continue
         try:
@@ -416,7 +417,6 @@ def run(args):
         while (args.output / f'{stem}-attempt{attempt}.log').exists():
             attempt += 1
         stem += f'-attempt{attempt}'
-        before = {str(p) for p in (HARNESS / 'results').glob('*') if p.is_dir()}
         log = args.output / (stem + '.log')
         shell_args = ['--linux-run', provenance['linux_run']] if args.linux_run is not None else []
         if args.host_tool_selection and module == cts_host_tools.MODULE:
@@ -424,6 +424,8 @@ def run(args):
         revalidate_execution(provenance)
         bundle = cts_runtime_bundle.validate(provenance['wrapper_bundle']['directory'])
         base = Path(bundle['directory'])
+        results_root = base / 'harness/android-cts/results'
+        before = {str(p) for p in results_root.glob('*') if p.is_dir()}
         selected_tools = [value for name, record in provenance['execution_tools'].items() if name != 'owner'
                           for value in ['--cts-' + name, record['path']]]
         wrapper = [str(base / 'tools/cts-tradefed.sh'), *selected_tools, '--repository-root', str(ROOT), '--image', provenance['image'],
@@ -469,7 +471,7 @@ def run(args):
             owner_receipt = args.output / (stem + '.owner.json')
             validate_owner_receipt(owner_receipt, command, child.pid, provenance['execution_tools']['owner']['sha256'])
             row['owner_receipt_sha256'] = digest(owner_receipt)
-            xml = result_for(module, before, scope)
+            xml = result_for(module, before, scope, results_root)
             result = summarize(xml)
             copied = args.output / (stem + '.xml')
             with copied.open('xb') as output:

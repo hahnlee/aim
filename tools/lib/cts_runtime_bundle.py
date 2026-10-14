@@ -71,10 +71,20 @@ def validate(bundle):
                 raise ValueError('CTS bundle testcase artifact link differs: ' + name)
             if sha(path.read_bytes()) != record['sha256']:
                 raise ValueError('CTS testcase artifact differs: ' + name)
-    for name, target in manifest['directories'].items():
-        link = bundle / 'harness/android-cts' / name
-        if not link.is_symlink() or link.resolve(strict=True) != Path(target):
-            raise ValueError('CTS bundle harness directory link differs: ' + name)
+    writable = manifest.get('writable_directories')
+    if writable is not None:
+        if set(writable) != {'results', 'logs'}:
+            raise ValueError('CTS bundle writable directory inventory differs')
+        for name in writable:
+            directory = bundle / 'harness/android-cts' / name
+            if directory.is_symlink() or not directory.is_dir() or not directory.resolve().is_relative_to(bundle):
+                raise ValueError('CTS bundle writable directory must be private: ' + name)
+    else:
+        # Validate bundles captured before campaign-local result isolation.
+        for name, target in manifest['directories'].items():
+            link = bundle / 'harness/android-cts' / name
+            if not link.is_symlink() or link.resolve(strict=True) != Path(target):
+                raise ValueError('CTS bundle harness directory link differs: ' + name)
     return {'directory': str(bundle), 'identity': identity, 'manifest': manifest}
 
 
@@ -92,8 +102,7 @@ def snapshot(root, harness, destination):
                       {'path': str(path.resolve()), 'sha256': sha(path.read_bytes())}
                       for path in sorted((harness / 'testcases').rglob('*')) if path.is_file()}
     manifest = {'root': str(root), 'harness': str(harness),
-                'directories': {name: str((harness / name).resolve())
-                                for name in ['results', 'logs'] if (harness / name).exists()},
+                'writable_directories': ['logs', 'results'],
                 'testcase_files': testcase_files,
                 'files': {name: {'sha256': sha(data), 'executable': name.endswith('.sh')
                            or name.rsplit('/', 1)[-1] in HARNESS_SCRIPTS}
@@ -110,12 +119,11 @@ def snapshot(root, harness, destination):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
             path.chmod(0o555 if manifest['files'][name]['executable'] else 0o444)
-        # Preserve the original launcher's relative CTS layout without copying
-        # or changing official test artifacts. Their immutable pins remain owners.
+        # Results and logs are campaign-local mutable state. Sharing the source
+        # harness directories lets concurrent campaigns observe partial foreign
+        # XML and invalidates lifetime binding.
         for name in ['results', 'logs']:
-            target = harness / name
-            if target.exists():
-                (temporary / 'harness/android-cts' / name).symlink_to(target, target_is_directory=True)
+            (temporary / 'harness/android-cts' / name).mkdir(parents=True)
         for path in sorted((harness / 'tools').glob('*.jar')):
             (temporary / 'harness/android-cts/tools' / path.name).symlink_to(path.resolve())
         # The official launcher uses find without following directory links.
