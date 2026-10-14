@@ -386,9 +386,11 @@ plan, preserves concurrent changes to other components and still rejects two
 writers of the same component. Four focused rebase regressions pass in release
 mode. Runtime1aa1fd39 exposed continuous unrelated metadata publication during the
 bounded original visibility capture (#1110). Each original reply is bound to one
-immutable Computer generation; the installer now retains only the newest
-generation-coherent reply after revalidating lineage, target/shared-UID
-ownership and user inventory. Six focused regressions cover continuous
+immutable Computer metadata generation. The callback may capture a newer
+generation than the Rust pre-call snapshot; the installer accepts it only when
+that metadata generation still matches the post-callback canonical snapshot,
+after revalidating lineage, target/shared-UID ownership and user inventory.
+Ten focused regressions cover coherent callback advancement, continuous
 publication, stale/future replies, mixed generations and owner changes. Runtime
 aedaf873 includes that correction and recursive `MNT_DETACH` cleanup (#1351).
 It passes signed v1 installation, same-signer v2 replacement, uninstall, native

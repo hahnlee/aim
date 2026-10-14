@@ -333,7 +333,7 @@ pub(crate) fn capture_visibility_checked(
             if let Some(setting)=current.owner().settings.packages.iter().find(|setting|&setting.name==name){
                 let(metadata,allowlist)=capture(setting,&all_users)?;
                 super::post_install::validate_visibility(&all_users,&allowlist).map_err(|error|failure(-110,error.message))?;
-                if metadata!=current.metadata_revision()||capture_metadata.is_some_and(|expected|expected!=metadata){capture_metadata=None;values.clear();break;}
+                if capture_metadata.is_some_and(|expected|expected!=metadata){capture_metadata=None;values.clear();break;}
                 capture_metadata=Some(metadata);
                 values.push(allowlist);
             }else{values.push(Vec::new());}
