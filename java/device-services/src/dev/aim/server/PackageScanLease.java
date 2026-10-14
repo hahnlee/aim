@@ -514,7 +514,9 @@ public final class PackageScanLease implements AutoCloseable {
             boolean crossUserSuspensions) throws RemoteException, IOException {
         if (closed) throw new IllegalStateException("package scan lease is closed");
         Objects.requireNonNull(owner);
-        if (!fullReasonLogged) logFullReason("direct_scope", -1, null);
+        long metadata = endpoint.getMetadataVersion();
+        if (metadata <= 0 || metadata > version) throw new IOException("invalid metadata version");
+        if (!fullReasonLogged) logFullReason("direct_scope", metadata, null);
         var packages = capturePackageMap(false, crossUserSuspensions);
         var disabled = capturePackageMap(true, crossUserSuspensions);
         var shared = new java.util.LinkedHashMap<String, com.android.server.pm.pkg.SharedUserApi>();
@@ -539,6 +541,7 @@ public final class PackageScanLease implements AutoCloseable {
             if (computer.getVersion() != version) throw new IOException("native query capture version differs");
             var uidOwners = PackageUidOwners.capture(computer, version, packages, shared, crossUserSuspensions);
             var data = new PackageSnapshots.Data(version, packages, disabled, shared, owner, computer, uidOwners);
+            data.metadataVersion(metadata);
             transferComparisonEndpoint(data);
             return data;
         } catch (RemoteException | IOException | RuntimeException failure) {

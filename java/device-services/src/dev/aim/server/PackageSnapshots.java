@@ -246,6 +246,7 @@ public final class PackageSnapshots {
             names.forEach(active::remove);
             retain();
             var result = new Data(version, active, disabled, sharedUsers, owner, computer, uidOwners);
+            result.metadataVersion = metadataVersion;
             result.parent = this;
             result.ownsComputer = false;
             result.metadataRoot = null;

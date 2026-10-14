@@ -853,6 +853,12 @@ pub struct Controller {
     pub gate: Arc<Mutex<()>>,
     pub keystore: Arc<owner::keystore::KeystoreCleanup>,
 }
+
+fn should_remove_setting(package: &crate::package::model::PackageState, plan: &Plan, data_removed: bool) -> bool {
+    !package.is.system && !plan.keep_uninstalled && data_removed
+        && !package.users.iter().any(|(user, state)| state.installed && !plan.users.contains(user))
+}
+
 impl Controller {
     fn with_query<T>(
         &self,
@@ -1121,8 +1127,7 @@ impl Controller {
             return Ok(INTERNAL_ERROR);
         }
         let data_removed = plan.request.flags & KEEP_DATA == 0;
-        let remove_setting = !package.is.system && !plan.keep_uninstalled && data_removed
-            && !package.users.iter().any(|(user, state)| state.installed && !plan.users.contains(user));
+        let remove_setting = should_remove_setting(&package, plan, data_removed);
         self.external.destroy_profiles(&package.name)?;
         for &user in &plan.users {
             self.effects
@@ -1671,6 +1676,104 @@ mod admission_policy_tests {
             Ok(_) => panic!("user action bypassed known-target policy capture"),
         };
         assert_eq!(error.message, "known target policy failure");
+    }
+
+    #[test]
+    fn restored_factory_identity_survives_disabled_user_cleanup() {
+        use crate::package::{
+            scan::{CapturedUsers, SigningScan},
+            settings::{Package, Settings, FLAG_SYSTEM, PRIVATE_FLAG_PRIVILEGED},
+        };
+        let active = Package {
+            name: "factory.package".into(),
+            code_path: "/data/app/factory.package".into(),
+            app_id: 10123,
+            flags: crate::package::info::FLAG_UPDATED_SYSTEM_APP,
+            version_code: 2,
+            ..Default::default()
+        };
+        let factory = Package {
+            code_path: "/system/priv-app/FactoryPackage".into(),
+            flags: FLAG_SYSTEM | (1 << 6),
+            private_flags: PRIVATE_FLAG_PRIVILEGED,
+            version_code: 1,
+            ..active.clone()
+        };
+        let mut owner = SigningScan::new(
+            &Default::default(),
+            &Settings {
+                packages: vec![active],
+                disabled_system_packages: vec![factory.clone()],
+                ..Default::default()
+            },
+            36,
+        )
+        .unwrap();
+        let initial_users = BTreeMap::from([(0, UserState::default())]);
+        owner
+            .capture_user_states(BTreeMap::from([
+                (
+                    (factory.name.clone(), false),
+                    CapturedUsers {
+                        states: initial_users.clone(),
+                        active_aliases: BTreeSet::new(),
+                    },
+                ),
+                (
+                    (factory.name.clone(), true),
+                    CapturedUsers {
+                        states: initial_users,
+                        active_aliases: BTreeSet::from([0]),
+                    },
+                ),
+            ]))
+            .unwrap();
+        let restored = owner
+            .enable_system_setting(&factory.name, [7; 16])
+            .unwrap();
+        let disabled = uninstalled(&UserState::default(), 0);
+        owner
+            .set_user_state(&restored.name, 0, disabled.clone())
+            .unwrap();
+        let mut package = PackageState {
+            name: restored.name.clone(),
+            app_id: restored.app_id,
+            setting_flags: Some((restored.flags, restored.private_flags)),
+            is: crate::package::model::StateFlags {
+                system: restored.flags & FLAG_SYSTEM != 0,
+                privileged: restored.private_flags & PRIVATE_FLAG_PRIVILEGED != 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        package.users.insert(
+            0,
+            PackageUserState {
+                installed: disabled.installed,
+                ..Default::default()
+            },
+        );
+        let plan = Plan {
+            request: Request {
+                package: restored.name.clone(),
+                version: -1,
+                caller_package: None,
+                uid: 1000,
+                pid: 7,
+                user: 0,
+                flags: 0,
+                existing_only: false,
+            },
+            internal_package: restored.name.clone(),
+            users: vec![0],
+            blocked_users: Vec::new(),
+            keep_uninstalled: false,
+        };
+        assert!(package.is.system);
+        assert!(package.is.privileged);
+        assert!(!should_remove_setting(&package, &plan, true));
+        assert_eq!(owner.settings.packages, vec![restored]);
+        assert_eq!(owner.scanned_user_states(&factory.name).unwrap()[&0], disabled);
     }
 }
 

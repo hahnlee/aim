@@ -426,6 +426,8 @@ impl SigningScan {
         p.target_sdk_version = factory.target_sdk_version;
         p.restrict_update_hash = factory.restrict_update_hash;
         p.scanned_as_stopped_system_app = factory.scanned_as_stopped_system_app;
+        p.flags = factory.flags;
+        p.private_flags = factory.private_flags;
         p.transient.updated_system_app = false;
         p.flags &= !crate::package::info::FLAG_UPDATED_SYSTEM_APP;
         p.install_source = factory.install_source;
@@ -1026,9 +1028,11 @@ mod tests {
         }
     }
     #[test]
-    fn update_then_factory_enable_preserves_user_state_and_clears_only_update_flag() {
+    fn update_then_factory_enable_restores_system_identity_and_preserves_user_state() {
         use crate::package::{pkg::{AndroidPackage, booleans}, settings::{Package, Settings}, sign::SigningDetails};
-        let factory = Package { name: "factory".into(), code_path: "/apex/vendor.module/priv-app/Factory".into(), app_id: 10001, flags: 1, version_code: 1, ..Default::default() };
+        let factory = Package { name: "factory".into(), code_path: "/apex/vendor.module/priv-app/Factory".into(), app_id: 10001,
+            flags: crate::package::info::FLAG_SYSTEM | (1 << 6), private_flags: crate::package::settings::PRIVATE_FLAG_PRIVILEGED,
+            version_code: 1, ..Default::default() };
         let mut owner = SigningScan::new(&Default::default(), &Settings { packages: vec![factory.clone()], ..Default::default() }, 36).unwrap();
         let signing = SigningDetails { unknown: false, current_flags: Vec::new(), signatures: vec![vec![3]], scheme_version: 3, public_keys: Some(Vec::new()), past_signing_certificates: None };
         let parsed = AndroidPackage { package_name: factory.name.clone(), uid: factory.app_id, booleans: booleans::SYSTEM | booleans::ENABLED, feature_flag_state: Some(Vec::new()), signing_details: Some(signing.parcel_details().unwrap()), ..Default::default() };
@@ -1046,8 +1050,9 @@ mod tests {
         assert!(owner.disable_system_package(&factory.name).unwrap());
         let active = &mut owner.settings.packages[0];
         active.code_path = "/data/app/factory-update".into(); active.version_code = 2;
-        let mut update_parsed = parsed.clone();
-        super::super::enrich::application(active, &mut update_parsed, false, true);
+        active.flags = crate::package::info::FLAG_UPDATED_SYSTEM_APP;
+        active.private_flags = 0;
+        active.transient.updated_system_app = true;
         assert_ne!(active.flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP, 0);
         assert!(!owner.settings.disabled_system_packages[0].transient.updated_system_app);
         let ids = owner.identities.clone();
@@ -1055,6 +1060,10 @@ mod tests {
         assert!(!restored.transient.updated_system_app);
         assert_eq!(restored.flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP, 0);
         assert_eq!(owner.settings.packages[0].flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP, 0);
+        assert_eq!(restored.flags, factory.flags);
+        assert_eq!(restored.private_flags, factory.private_flags);
+        assert_eq!(owner.settings.packages[0].flags, factory.flags);
+        assert_eq!(owner.settings.packages[0].private_flags, factory.private_flags);
         super::super::enrich::application(&mut restored, &mut parsed.clone(), false, false);
         assert_eq!(restored.flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP, 0);
         assert_ne!(restored.flags & crate::package::info::FLAG_SYSTEM, 0);
@@ -1230,7 +1239,8 @@ mod tests {
             name: "p".into(),
             code_path: "/data/app/p".into(),
             app_id: 10001,
-            flags: 129,
+            flags: crate::package::info::FLAG_UPDATED_SYSTEM_APP,
+            private_flags: 1 << 18,
             domain_set_id: Some("active-domain".into()),
             version_code: 9,
             last_update_time: 123,
@@ -1241,7 +1251,8 @@ mod tests {
             name: "p".into(),
             code_path: "/system/app/p".into(),
             app_id: 10001,
-            flags: 1,
+            flags: crate::package::info::FLAG_SYSTEM | (1 << 6),
+            private_flags: crate::package::settings::PRIVATE_FLAG_PRIVILEGED,
             version_code: 10,
             target_sdk_version: 35,
             primary_cpu_abi: Some("arm64-v8a".into()),
@@ -1270,7 +1281,8 @@ mod tests {
         let ids = owner.identities.clone();
         let enabled = owner.enable_system_setting("p", [3; 16]).unwrap();
         let mut expected = active;
-        expected.flags &= !crate::package::info::FLAG_UPDATED_SYSTEM_APP;
+        expected.flags = factory.flags;
+        expected.private_flags = factory.private_flags;
         expected.version_code = 10;
         expected.target_sdk_version = 35;
         expected.primary_cpu_abi = factory.primary_cpu_abi;

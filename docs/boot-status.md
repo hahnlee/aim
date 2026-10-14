@@ -69,8 +69,15 @@ returning Android's minimum setting-backed package/application information.
 The owner now supplies that information without recreating parsed code; its
 focused query suite passes 47/0. The rebuilt targeted selector
 `PackageVisibilityTest#testUninstalledPackageVisibility_full` passes 1/1 through
-the reboot path on `ad77108c` (2026-10-14). Unfiltered Native FULL66 remains
-required.
+the reboot path on `ad77108c` (2026-10-14). Factory restoration now replaces an
+updated package slot's public and private flags with the retained factory
+setting's flags before publication. Its query snapshot therefore remains a
+system package after a user is disabled, and later uninstall cleanup retains
+the factory setting. Direct permission and mutation captures also retain the
+native metadata generation separately from their logical publication version;
+this keeps post-reboot visibility capture on the same immutable policy epoch.
+Three focused restoration/cleanup tests pass without skips; a rebuilt CTS run
+and unfiltered Native FULL66 remain required.
 
 Native FULL66 now runs the unresolved tail first: modules 4–66 must all pass
 before a fresh DATA image runs modules 1–3, and acceptance requires the exact
