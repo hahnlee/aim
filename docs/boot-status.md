@@ -56,13 +56,19 @@ The current native CTS runtime restores active PackageSettings whose code was
 retired by `DELETE_KEEP_DATA` across reboot. Package usage is read for the full
 active setting inventory, matching the original PackageUsage owner, and a
 non-system setting whose persisted restrictions cover every boot user as
-uninstalled reconstructs its identity-bearing code-less runtime state without
-reintroducing parsed code, seInfo or library declarations. System settings,
+uninstalled reconstructs its identity-bearing code-less runtime state and the
+same saved user scope in the scan owner, without reintroducing parsed code,
+seInfo or library declarations. This lets domain and query construction retain
+the setting while excluding it from executable-code inventories. System settings,
 incomplete user scopes and settings with an installed user still fail closed
 when their code owner is missing. The focused runtime suite passes 8/0
-(2026-10-14). The preceding PackageVisibility run reached its requested reboot
-but exposed this gap through `android.appsecurity.cts.tinyapp`; a rebuilt
-targeted CTS rerun and unfiltered Native FULL66 remain required.
+(2026-10-14). A rebuilt PackageVisibility run completed native boot construction
+and then exposed #1373 when PlatformCompat queried the code-retired
+`android.appsecurity.cts.tinyapp`: the native query owner threw instead of
+returning Android's minimum setting-backed package/application information.
+The owner now supplies that information without recreating parsed code; its
+focused query suite passes 47/0. A rebuilt targeted CTS rerun and unfiltered
+Native FULL66 remain required.
 
 The current f89fddbf matched original/native images are build-qualified: both
 use the same vendor artifacts and the primary workflow restores the default

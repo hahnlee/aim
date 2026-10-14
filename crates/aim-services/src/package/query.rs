@@ -26,6 +26,7 @@ use super::apps_filter::{
 use super::feed::Feed;
 use super::info::{
     self, ApplicationInfo, COMPONENT_ENABLED_STATE_DEFAULT, COMPONENT_ENABLED_STATE_DISABLED,
+    COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED, COMPONENT_ENABLED_STATE_DISABLED_USER,
     COMPONENT_ENABLED_STATE_ENABLED, Extras, FLAG_SYSTEM, PackageInfo, Target, array_order,
     flags::*, generate_application_info, generate_package_info, user_state,
 };
@@ -1212,7 +1213,118 @@ impl Query<'_> {
             if flags & (MATCH_UNINSTALLED_PACKAGES | MATCH_ARCHIVED_PACKAGES) != 0
                 && info::is_available(&state, flags)
             {
-                return Err(NotModelled("the info of a package without code"));
+                let (setting_flags, private_flags) = ps.setting_flags
+                    .ok_or(NotModelled("package setting application flags unavailable"))?;
+                let mut ai = ApplicationInfo {
+                    item: info::PackageItemInfo {
+                        package_name: Some(ps.name.clone()),
+                        is_archived: !state.installed && state.archive_state.is_some(),
+                        ..info::PackageItemInfo::default()
+                    },
+                    flags: setting_flags,
+                    private_flags,
+                    volume_uuid: ps.volume_uuid.clone(),
+                    primary_cpu_abi: ps.primary_cpu_abi.clone(),
+                    secondary_cpu_abi: ps.secondary_cpu_abi.clone(),
+                    uid: info::uid(user, ps.app_id),
+                    target_sdk_version: ps.target_sdk_version,
+                    long_version_code: ps.version_code,
+                    enabled_setting: state.enabled,
+                    enabled: !matches!(state.enabled,
+                        COMPONENT_ENABLED_STATE_DISABLED | COMPONENT_ENABLED_STATE_DISABLED_USER)
+                        && (state.enabled != COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED
+                            || flags & MATCH_DISABLED_UNTIL_USED_COMPONENTS != 0),
+                    ..ApplicationInfo::default()
+                };
+                const FLAG_STOPPED: i32 = 1 << 21;
+                const FLAG_INSTALLED: i32 = 1 << 23;
+                const FLAG_SUSPENDED: i32 = 1 << 30;
+                const COMPATIBILITY_FLAGS: i32 = (1 << 9) | (1 << 10) | (1 << 11)
+                    | (1 << 12) | (1 << 13) | (1 << 19);
+                const PRIVATE_FLAG_HIDDEN: i32 = 1;
+                const PRIVATE_FLAG_DEFAULT_TO_DEVICE_PROTECTED_STORAGE: i32 = 1 << 5;
+                const PRIVATE_FLAG_INSTANT: i32 = 1 << 7;
+                const PRIVATE_FLAG_VIRTUAL_PRELOAD: i32 = 1 << 16;
+                const PRIVATE_FLAG_EXT_NOT_LAUNCHED: i32 = 1 << 6;
+                if !self.state.system.compatibility_mode {
+                    ai.flags |= COMPATIBILITY_FLAGS;
+                }
+                ai.flags |= if state.stopped { FLAG_STOPPED } else { 0 }
+                    | if state.installed { FLAG_INSTALLED } else { 0 }
+                    | if !state.suspended_by.is_empty() { FLAG_SUSPENDED } else { 0 };
+                ai.private_flags |= if state.hidden { PRIVATE_FLAG_HIDDEN } else { 0 }
+                    | if state.instant_app { PRIVATE_FLAG_INSTANT } else { 0 }
+                    | if state.virtual_preload { PRIVATE_FLAG_VIRTUAL_PRELOAD } else { 0 };
+                ai.private_flags_ext |=
+                    if state.not_launched { PRIVATE_FLAG_EXT_NOT_LAUNCHED } else { 0 };
+                if let Some((_, category)) = self.state.system.fallback_categories.iter()
+                    .find(|(package, _)| package == &ps.name)
+                {
+                    ai.category = *category;
+                }
+                ai.se_info_user = Some(if state.instant_app {
+                    ":ephemeralapp:complete".into()
+                } else {
+                    ":complete".into()
+                });
+                if let Some(overlay) = &state.overlay_paths {
+                    ai.resource_dirs = Some(overlay.resource_dirs.clone());
+                    ai.overlay_paths = Some(overlay.overlay_paths.clone());
+                }
+                if ai.item.is_archived
+                    && let Some(activity) = state.archive_state.as_ref()
+                        .and_then(|archive| archive.activities.first())
+                {
+                    ai.item.non_localized_label = Some(activity.title.clone());
+                }
+                let data = ps.volume_uuid.as_deref()
+                    .map_or_else(|| "/data".to_string(), |uuid| format!("/mnt/expand/{uuid}"));
+                let ce = format!("{data}/user/{user}/{}", ps.name);
+                let de = format!("{data}/user_de/{user}/{}", ps.name);
+                if ps.name == "android" {
+                    ai.data_dir = Some("/data/system".into());
+                } else {
+                    ai.data_dir = Some(if private_flags
+                        & PRIVATE_FLAG_DEFAULT_TO_DEVICE_PROTECTED_STORAGE != 0
+                        { de.clone() } else { ce.clone() });
+                    ai.device_protected_data_dir = Some(de);
+                    ai.credential_protected_data_dir = Some(ce);
+                }
+                if !state.installed && !state.data_exists && self.aconfig(info::NULLABLE_DATA_DIR) {
+                    ai.data_dir = None;
+                }
+                let s = ps.signatures.as_ref()
+                    .ok_or(NotModelled("package setting signing details unavailable"))?;
+                let signing = info::SigningInfo {
+                    scheme_version: s.scheme_version,
+                    signatures: s.signatures.clone(),
+                    public_keys: s.public_keys.clone(),
+                    past_signing_certificates: s.past_signatures.as_ref()
+                        .map(|p| p.iter().map(|(certificate, _)| certificate.clone()).collect()),
+                };
+                let signatures = if flags & GET_SIGNATURES == 0 {
+                    None
+                } else {
+                    match &signing.past_signing_certificates {
+                        Some(past) if !past.is_empty() => Some(vec![past[0].clone()]),
+                        _ if !signing.signatures.is_empty() => Some(signing.signatures.clone()),
+                        _ => None,
+                    }
+                };
+                return Ok(Some(PackageInfo {
+                    package_name: Some(ps.name.clone()),
+                    version_code: ps.version_code as i32,
+                    version_code_major: (ps.version_code >> 32) as i32,
+                    shared_user_id: ps.shared_user.clone(),
+                    application_info: Some(Arc::new(ai)),
+                    first_install_time: state.first_install_time,
+                    last_update_time: ps.last_update_time,
+                    signatures,
+                    signing_info: Some(signing),
+                    archive_time_millis: state.archive_state.as_ref()
+                        .map_or(0, |archive| archive.archive_time),
+                    ..PackageInfo::default()
+                }));
             }
             return Ok(None);
         };
@@ -1304,9 +1416,15 @@ impl Query<'_> {
                 .ok_or(NotModelled("accepted platform application owner unavailable"));
         }
         if flags & (MATCH_KNOWN_PACKAGES | MATCH_ARCHIVED_PACKAGES) != 0
-            && self.state.packages.contains_key(&name)
+            && let Some(ps) = self.state.packages.get(&name)
         {
-            return Err(NotModelled("the info of a package without code"));
+            if visibility.filter_shared_lib(ps, user, flags)?
+                || self.filtered(Some(ps), filter_uid, user)?
+            {
+                return Ok(Ok(None));
+            }
+            return Ok(Ok(self.generate_package_info(ps, flags, user)?
+                .and_then(|pi| pi.application_info.map(|ai| (*ai).clone()))));
         }
         Ok(Ok(None))
     }
@@ -1988,16 +2106,12 @@ impl Query<'_> {
                 if ps.is.system {
                     effective |= MATCH_ANY_USER;
                 }
-                let Some(_) = ps.pkg else {
-                    return Err(NotModelled("the info of a package without code"));
-                };
                 let state = user_state(ps, user);
                 if archived_only && !state.installed && state.archive_state.is_none() {
                     continue;
                 }
             }
-            let Some(p) = ps.pkg.as_deref() else { continue };
-            if !apex && p.is2(APEX) {
+            if !apex && ps.pkg.as_deref().is_some_and(|p| p.is2(APEX)) {
                 continue;
             }
             let shared_library_filter_uid = if uninstalled || archived_only { filter_uid } else { self.calling_uid };
@@ -2007,6 +2121,14 @@ impl Query<'_> {
             {
                 continue;
             }
+            let Some(p) = ps.pkg.as_deref() else {
+                if let Some(ai) = self.generate_package_info(ps, effective, user)?
+                    .and_then(|pi| pi.application_info.map(|ai| (*ai).clone()))
+                {
+                    list.push(ai);
+                }
+                continue;
+            };
             let state = user_state(ps, user);
             if let Some(mut ai) =
                 generate_application_info(&self.target(ps, p, &state, user), effective)

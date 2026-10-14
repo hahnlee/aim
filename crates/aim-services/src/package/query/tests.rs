@@ -328,6 +328,62 @@ fn package_info_squashes_its_application_info() {
 }
 
 #[test]
+fn code_retired_setting_supplies_minimal_package_and_application_info() {
+    let mut state = state();
+    let ps = state.packages.get_mut(APP).unwrap();
+    ps.pkg = None;
+    ps.parcel = None;
+    ps.setting_flags = Some((0x1240, 0x4540));
+    ps.version_code = (3_i64 << 32) | 7;
+    ps.target_sdk_version = 35;
+    ps.primary_cpu_abi = Some("arm64-v8a".into());
+    ps.secondary_cpu_abi = Some("armeabi-v7a".into());
+    ps.signatures = Some(crate::package::settings::Signatures {
+        scheme_version: 3,
+        signatures: vec![vec![7, 7]],
+        ..Default::default()
+    });
+    for user in [0, 10] {
+        ps.users.insert(user, PackageUserState {
+            installed: false,
+            data_exists: true,
+            first_install_time: 0x1234 + i64::from(user),
+            ..PackageUserState::default()
+        });
+    }
+    let filter = AppsFilter::new(&state, &Default::default()).unwrap();
+    let query = Query { state: &state, filter: &filter, calling_uid: 1000 };
+
+    assert!(query.package_info(APP, -1, 0, 10).unwrap().unwrap().is_none());
+    assert!(query.application_info(APP, MATCH_ANY_USER, 10).unwrap().unwrap().is_none());
+    let pi = query.package_info(
+        APP, -1, MATCH_UNINSTALLED_PACKAGES | GET_SIGNATURES | GET_SIGNING_CERTIFICATES, 10)
+        .unwrap().unwrap().unwrap();
+    assert_eq!(pi.package_name.as_deref(), Some(APP));
+    assert_eq!((pi.version_code_major, pi.version_code), (3, 7));
+    assert_eq!(pi.first_install_time, 0x123e);
+    assert_eq!(pi.last_update_time, 0x18f0);
+    assert_eq!(pi.signatures, Some(vec![vec![7, 7]]));
+    assert!(pi.signing_info.is_some());
+    let ai = pi.application_info.as_deref().unwrap();
+    assert_eq!(ai.item.package_name.as_deref(), Some(APP));
+    assert_eq!(ai.uid, 1_010_100);
+    assert_eq!(ai.long_version_code, (3_i64 << 32) | 7);
+    assert_eq!(ai.target_sdk_version, 35);
+    assert_eq!(ai.primary_cpu_abi.as_deref(), Some("arm64-v8a"));
+    assert_eq!(ai.data_dir.as_deref(), Some("/data/user/10/org.example.app"));
+    assert_eq!(ai.device_protected_data_dir.as_deref(),
+        Some("/data/user_de/10/org.example.app"));
+
+    let direct = query.application_info(APP, MATCH_UNINSTALLED_PACKAGES, 10)
+        .unwrap().unwrap().unwrap();
+    assert_eq!(direct, *ai);
+    let listed = query.internal_installed_applications(
+        MATCH_UNINSTALLED_PACKAGES, 10, 1000, false).unwrap().unwrap();
+    assert_eq!(listed.iter().find(|ai| ai.item.package_name.as_deref() == Some(APP)), Some(ai));
+}
+
+#[test]
 fn packages_are_filtered_by_visibility() {
     let state = state();
     let as_other = get_application_info(&state, 10101, APP, 0);
