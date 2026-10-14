@@ -67,8 +67,10 @@ and then exposed #1373 when PlatformCompat queried the code-retired
 `android.appsecurity.cts.tinyapp`: the native query owner threw instead of
 returning Android's minimum setting-backed package/application information.
 The owner now supplies that information without recreating parsed code; its
-focused query suite passes 47/0. A rebuilt targeted CTS rerun and unfiltered
-Native FULL66 remain required.
+focused query suite passes 47/0. The rebuilt targeted selector
+`PackageVisibilityTest#testUninstalledPackageVisibility_full` passes 1/1 through
+the reboot path on `ad77108c` (2026-10-14). Unfiltered Native FULL66 remains
+required.
 
 The current f89fddbf matched original/native images are build-qualified: both
 use the same vendor artifacts and the primary workflow restores the default
