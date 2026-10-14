@@ -1,5 +1,8 @@
 //! Production binding for the existing native deletion/archive coordinator.
-use super::{Controller, External, NativeStore, Plan, Policy, PolicySource, RestoreFactory};
+use super::{
+    AdmissionPolicy, Controller, External, NativeStore, Plan, PolicySource, RemovalPolicy,
+    RestoreFactory,
+};
 use crate::package::apps_filter;
 use aim_binder_host::{
     local::LocalProcess,
@@ -46,11 +49,33 @@ pub fn build(inputs: Inputs) -> Result<Arc<Controller>, Exception> {
         return Err(fail("Removal constructor query/scan generation differs"));
     }
     let external = inputs.external.clone();
-    let effects = inputs.effects.clone();
     let roles = inputs.roles.clone();
+    let removal_roles = roles.clone();
     let user_policy = inputs.user_policy;
-    let policy: PolicySource = Arc::new(move |query, request| {
+    let admission = Arc::new(move |query: &crate::package::query::Query<'_>, request: &super::Request| {
         let device = user_policy(request.uid, request.pid, request.user)?;
+        let same = |name: Option<&str>| {
+            apps_filter::is_caller_same_app(query.state, name, query.calling_uid)
+                .map_err(|error| fail(error.0))
+        };
+        let caller = request.caller_package.as_deref();
+        let privileged_identity = matches!(request.uid, 0 | 2000)
+            || apps_filter::app_id(request.uid as i32) == 1000;
+        Ok(AdmissionPolicy {
+            device,
+            can_silently_install: !privileged_identity && external.silent(request.uid, caller)?,
+            emergency_installer: same(roles.emergency_installer.as_deref())?,
+            system_protection_role: same(roles.system_protection.as_deref())?,
+            pinned: !request.package.is_empty() && external.pinned(&request.package)?,
+            verifier_packages: roles.verifier_packages.clone(),
+            uninstaller_package: roles.uninstaller.clone(),
+            storage_manager_package: roles.storage_manager.clone(),
+            keep_uninstalled: roles.keep_uninstalled.contains(&request.package),
+        })
+    });
+    let external = inputs.external.clone();
+    let effects = inputs.effects.clone();
+    let removal = Arc::new(move |_: &crate::package::query::Query<'_>, request: &super::Request| {
         let users = external.users()?;
         if users.iter().any(|user| *user < 0)
             || users.iter().collect::<BTreeSet<_>>().len() != users.len()
@@ -86,29 +111,16 @@ pub fn build(inputs: Inputs) -> Result<Arc<Controller>, Exception> {
                 restricted.insert(user);
             }
         }
-        let same = |name: Option<&str>| {
-            apps_filter::is_caller_same_app(query.state, name, query.calling_uid)
-                .map_err(|error| fail(error.0))
-        };
-        let caller = request.caller_package.as_deref();
-        Ok(Policy {
-            device,
-            can_silently_install: external.silent(request.uid, caller)?,
-            emergency_installer: same(roles.emergency_installer.as_deref())?,
-            system_protection_role: same(roles.system_protection.as_deref())?,
-            pinned: !request.package.is_empty() && external.pinned(&request.package)?,
+        Ok(RemovalPolicy {
             admins,
             protected,
             uninstall_restricted: restricted,
             users,
             child_users,
-            verifier_packages: roles.verifier_packages.clone(),
-            uninstaller_package: roles.uninstaller.clone(),
-            storage_manager_package: roles.storage_manager.clone(),
-            keep_uninstalled: roles.keep_uninstalled.contains(&request.package),
-            sdk_library_independence: roles.sdk_library_independence,
+            sdk_library_independence: removal_roles.sdk_library_independence,
         })
     });
+    let policy = PolicySource { admission, removal };
     let factory = inputs.factory;
     let restore: RestoreFactory = Arc::new(move |plan| factory.restore(plan));
     let process = inputs.process.clone();

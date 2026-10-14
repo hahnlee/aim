@@ -69,31 +69,8 @@ impl System {
         let policy_external = external.clone();
         let policy_installer = Arc::downgrade(&installer);
         let retained_keep = keep.clone();
-        let policy: removal::PolicySource = Arc::new(move |query, request| {
+        let admission = Arc::new(move |query: &crate::package::query::Query<'_>, request: &removal::Request| {
             let device = policy_installer.upgrade().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "native archive installer owner closed"))?.archiver_device_policy(request.uid, request.user)?;
-            let users = policy_external.users()?;
-            let mut admins = BTreeSet::new();
-            let mut protected = BTreeSet::new();
-            let mut restricted = BTreeSet::new();
-            let mut children = BTreeMap::new();
-            let security = query.state.system.security_policy.as_ref().ok_or_else(|| {
-                Exception::new(
-                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                    "native removal protection owner unavailable",
-                )
-            })?;
-            for &user in &users {
-                if policy_external.active_admin(&request.package, user)? {
-                    admins.insert(user);
-                }
-                if security.protected(user, Some(&request.package)) {
-                    protected.insert(user);
-                }
-                if policy_external.restricted(user)? {
-                    restricted.insert(user);
-                }
-                children.insert(user, policy_external.children(user)?);
-            }
             let roles = query.state.system.roles.as_ref().ok_or_else(|| {
                 Exception::new(
                     aim_binder_host::parcel::EX_ILLEGAL_STATE,
@@ -126,26 +103,43 @@ impl System {
                 let holders = um.role_holders(role, request.user)?;
                 Ok(caller.iter().flatten().any(|name| holders.contains(name)))
             };
-            let independence = policy_external.sdk_library_independence()?;
-            Ok(removal::Policy {
+            let privileged_identity = matches!(request.uid, 0 | 2000)
+                || crate::package::apps_filter::app_id(request.uid as i32) == 1000;
+            Ok(removal::AdmissionPolicy {
                 device,
-                can_silently_install: policy_external
+                can_silently_install: !privileged_identity && policy_external
                     .silent(request.uid, request.caller_package.as_deref())?,
                 emergency_installer: has_role("android.app.role.EMERGENCY")?,
                 system_protection_role: has_role("android.app.role.SYSTEM_PROTECTION")?,
-                pinned: policy_external.pinned(&request.package)?,
-                admins,
-                protected,
-                uninstall_restricted: restricted,
-                users,
-                child_users: children,
+                pinned: !request.package.is_empty() && policy_external.pinned(&request.package)?,
                 verifier_packages: verifiers,
                 uninstaller_package: uninstaller,
                 storage_manager_package: storage_manager_package.clone(),
                 keep_uninstalled: retained_keep.should_keep(Some(&request.package)),
-                sdk_library_independence: independence,
             })
         });
+        let policy_external = external.clone();
+        let removal_policy = Arc::new(move |query: &crate::package::query::Query<'_>, request: &removal::Request| {
+            let users = policy_external.users()?;
+            let mut admins = BTreeSet::new();
+            let mut protected = BTreeSet::new();
+            let mut restricted = BTreeSet::new();
+            let mut children = BTreeMap::new();
+            let security = query.state.system.security_policy.as_ref().ok_or_else(|| {
+                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "native removal protection owner unavailable")
+            })?;
+            for &user in &users {
+                if policy_external.active_admin(&request.package, user)? { admins.insert(user); }
+                if security.protected(user, Some(&request.package)) { protected.insert(user); }
+                if policy_external.restricted(user)? { restricted.insert(user); }
+                children.insert(user, policy_external.children(user)?);
+            }
+            Ok(removal::RemovalPolicy { admins, protected, uninstall_restricted: restricted,
+                users, child_users: children,
+                sdk_library_independence: policy_external.sdk_library_independence()? })
+        });
+        let policy = removal::PolicySource { admission, removal: removal_policy };
         let system = Arc::downgrade(self);
         let retained = bridge.clone();
         let factory_restore = Arc::new(move |plan: &removal::Plan| {

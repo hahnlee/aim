@@ -2165,10 +2165,11 @@ mod tests {
         let _client_shutdown=Shutdown(client.clone());
         let external=removal::External::new(client.strong(0),process.clone());
         let policy_owner=Arc::downgrade(&owner);
-        let policy:removal::PolicySource=Arc::new(move|_,request|{
+        let admission=Arc::new(move|_:&crate::package::query::Query<'_>,request:&removal::Request|{
             let device=policy_owner.upgrade().ok_or_else(||illegal("native archive installer owner closed"))?.archiver_device_policy(request.uid,request.user)?;
-            Ok(removal::Policy{device,can_silently_install:false,emergency_installer:false,system_protection_role:false,pinned:false,admins:Default::default(),protected:Default::default(),uninstall_restricted:Default::default(),users:vec![0],child_users:Default::default(),verifier_packages:vec![],uninstaller_package:None,storage_manager_package:None,keep_uninstalled:false,sdk_library_independence:false})
+            Ok(removal::AdmissionPolicy{device,can_silently_install:false,emergency_installer:false,system_protection_role:false,pinned:false,verifier_packages:vec![],uninstaller_package:None,storage_manager_package:None,keep_uninstalled:false})
         });
+        let policy=removal::PolicySource{admission,removal:Arc::new(|_,_|Ok(removal::RemovalPolicy{admins:Default::default(),protected:Default::default(),uninstall_restricted:Default::default(),users:vec![0],child_users:Default::default(),sdk_library_independence:false}))};
         let controller=Arc::new(removal::Controller{store:native_store.clone(),source:owner.source.clone(),resolver:Default::default(),effects:crate::package::effects::Owner::new(client.strong(0)).unwrap(),external:external.clone(),policy,publisher:owner.publisher.clone(),factory_restore:Arc::new(|_|Err(illegal("fixture has no factory"))),preferred_removal:Arc::new(|_,_,_|Err(illegal("fixture has no preferred owner"))),gate:Arc::new(Mutex::new(())),keystore:Arc::new(crate::package::owner::keystore::KeystoreCleanup::new(process.clone()))});
         let save_owner=Arc::downgrade(&owner);
         let drafts=archiver::Drafts::new(owner.sessions.clone(),Arc::new(|_,_,_,_|Err(illegal("fixture has no draft params"))),Arc::new(move||save_owner.upgrade().ok_or_else(||illegal("native archive installer owner closed"))?.archiver_save_sessions()),Arc::downgrade(&(owner.clone() as Arc<dyn super::super::SessionOperations>)));
@@ -2188,11 +2189,11 @@ mod tests {
         let state=state();let resolver=crate::package::resolve::Resolver::default();let resolution=resolver.resolution(&state).unwrap();
         let query=crate::package::query::Query{state:&state,filter:&resolution.apps_filter,calling_uid:1000};
         let request=removal::Request{package:"fixture".into(),version:-1,caller_package:None,user:0,flags:0,uid:1000,pid:77,existing_only:false};
-        assert!((controller.policy)(&query,&request).is_ok(),"live weak policy must reach actual NativeOwners");
+        assert!((controller.policy.admission)(&query,&request).is_ok(),"live weak policy must reach actual NativeOwners");
         let retained_system=crate::system::System::new(process.clone(),&[]);
         drop(native_store);drop(controller);drop(owner);
         assert!(weak_owner.upgrade().is_none(),"real NativeOwners/Archiver/Drafts graph must be acyclic");
-        assert_eq!((retired_policy)(&query,&request).err().unwrap().code,EX_ILLEGAL_STATE);
+        assert_eq!((retired_policy.admission)(&query,&request).err().unwrap().code,EX_ILLEGAL_STATE);
         assert_eq!(retained_drafts.expire(draft_id).unwrap_err().code,EX_ILLEGAL_STATE);
         drop(retained_drafts);
         assert!(weak_disk.upgrade().is_none(),"native archive graph must release the actual Settings Store");

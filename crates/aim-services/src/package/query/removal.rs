@@ -77,32 +77,35 @@ impl Owner {
         Arc::new(Self { controller, process, events, resolver: Resolver::default(), errors: Mutex::new(vec![]) })
     }
     fn decide(&self, query: &Query<'_>, request: Request) -> Result<Decision, Exception> {
-        let captured = (self.controller.policy)(query, &request)?;
+        let admission = (self.controller.policy.admission)(query, &request)?;
         let internal = query.resolve_internal_package_name(&request.package, request.version);
         let package = query.state.packages.get(&internal);
+        let mut captured = None;
         if request.existing_only {
-            let installed = package.map_or(0, |package| captured.users.iter().filter(|user| package.users.get(user).is_none_or(|state| state.installed)).count());
+            let installed=if let Some(package)=package {let policy=(self.controller.policy.removal)(query,&request)?;let count=policy.users.iter().filter(|user|package.users.get(user).is_none_or(|state|state.installed)).count();captured=Some(policy);count}else{0};
             if installed <= 1 { return Ok(Decision::Status(removal::INTERNAL_ERROR)) }
         }
         if request.version < -1 { return Err(Exception::new(EX_ILLEGAL_ARGUMENT, "versionCode must be >= -1")) }
-        if captured.pinned { return Ok(Decision::Status(removal::APP_PINNED)) }
-        let mut users = if request.flags & removal::ALL_USERS != 0 { captured.users.clone() } else { vec![request.user] };
+        if admission.pinned { return Ok(Decision::Status(removal::APP_PINNED)) }
+        let Some(package)=package else{return Ok(Decision::Status(removal::INTERNAL_ERROR))};
+        let captured=captured.map_or_else(||(self.controller.policy.removal)(query,&request),Ok)?;
         let caller_user = apps_filter::user_id(query.calling_uid);
         let package_uid_matches = |name: Option<&str>| -> Result<bool, Exception> {
             let Some(name) = name else { return Ok(false) };
             Ok(query.package_uid_internal(name, 0, caller_user, 1000).map_err(policy::unknown)? == query.calling_uid)
         };
         let mut silent = request.existing_only || matches!(request.uid, 0 | 2000) || apps_filter::app_id(query.calling_uid) == 1000
-            || package.is_some_and(|package| package.install_source.is_orphaned);
+            || package.install_source.is_orphaned;
         if !silent {
-            silent = package_uid_matches(package.and_then(|package| package.install_source.installer.as_deref()))?;
-            for name in &captured.verifier_packages { if package_uid_matches(Some(name))? { silent = true; break; } }
-            silent |= package_uid_matches(captured.uninstaller_package.as_deref())? || package_uid_matches(captured.storage_manager_package.as_deref())?
+            silent = package_uid_matches(package.install_source.installer.as_deref())?;
+            for name in &admission.verifier_packages { if package_uid_matches(Some(name))? { silent = true; break; } }
+            silent |= package_uid_matches(admission.uninstaller_package.as_deref())? || package_uid_matches(admission.storage_manager_package.as_deref())?
                 || policy::permission(query, "android.permission.MANAGE_PROFILE_AND_DEVICE_OWNERS")?;
         }
         if !silent { return Ok(Decision::Action) }
+        let mut users = if request.flags & removal::ALL_USERS != 0 { captured.users.clone() } else { vec![request.user] };
         for &user in &users {
-            policy::cross_user(query, &captured.device, user, false, "deletePackage")?;
+            policy::cross_user(query, &admission.device, user, false, "deletePackage")?;
             if captured.admins.contains(&user) { return Ok(Decision::Status(removal::DEVICE_POLICY)) }
             if captured.protected.contains(&user) { return Ok(Decision::Status(removal::INTERNAL_ERROR)) }
         }
@@ -113,14 +116,14 @@ impl Owner {
         users.retain(|user| !blocked.contains(user));
         if request.flags & removal::ALL_USERS == 0 {
             for &child in captured.child_users.get(&request.user).into_iter().flatten() {
-                if package.is_some_and(|package| package.users.get(&child).is_some_and(|state| state.installed)) && !users.contains(&child) { users.push(child); }
+                if package.users.get(&child).is_some_and(|state| state.installed) && !users.contains(&child) { users.push(child); }
             }
         }
-        if package.is_some_and(|package| package.users.get(&caller_user).is_some_and(|state| state.instant_app))
+        if package.users.get(&caller_user).is_some_and(|state| state.instant_app)
             && !query.internal_can_view_instant(query.calling_uid, request.user).map_err(policy::unknown)? {
             return Ok(Decision::Status(removal::INTERNAL_ERROR));
         }
-        Ok(Decision::Delete(Plan { request, internal_package: internal, users, blocked_users: blocked, keep_uninstalled: captured.keep_uninstalled }))
+        Ok(Decision::Delete(Plan { request, internal_package: internal, users, blocked_users: blocked, keep_uninstalled: admission.keep_uninstalled }))
     }
     fn invoke(self: &Arc<Self>, versioned: Option<VersionedPackage>, observer: Option<Binder>, uid: u32, pid: i32, user: i32, flags: i32, existing: bool) -> Result<(), Exception> {
         // Public DELETE_PACKAGES is mandatory even for device/profile owners.

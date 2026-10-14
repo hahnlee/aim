@@ -551,23 +551,26 @@ pub struct Request {
     pub flags: i32,
     pub existing_only: bool,
 }
-/// Captured from the original UM/DPM/ATM owners and the native protection owner.
-/// Empty sets mean the owners explicitly answered no, not unavailable owners.
-pub struct Policy {
+/// Admission policy whose failures take precedence over target lookup.
+pub struct AdmissionPolicy {
     pub device: super::policy::DevicePolicy,
     pub can_silently_install: bool,
     pub emergency_installer: bool,
     pub system_protection_role: bool,
     pub pinned: bool,
+    pub verifier_packages: Vec<String>,
+    pub uninstaller_package: Option<String>,
+    pub storage_manager_package: Option<String>,
+    pub keep_uninstalled: bool,
+}
+/// Per-user policy captured from the original UM/DPM owners and native
+/// protection only after admission establishes that the target exists.
+pub struct RemovalPolicy {
     pub admins: BTreeSet<i32>,
     pub protected: BTreeSet<i32>,
     pub uninstall_restricted: BTreeSet<i32>,
     pub users: Vec<i32>,
     pub child_users: BTreeMap<i32, Vec<i32>>,
-    pub verifier_packages: Vec<String>,
-    pub uninstaller_package: Option<String>,
-    pub storage_manager_package: Option<String>,
-    pub keep_uninstalled: bool,
     pub sdk_library_independence: bool,
 }
 #[derive(Clone, Debug)]
@@ -595,9 +598,10 @@ fn installer_matches(q: &Query<'_>, name: Option<&str>) -> Result<bool, Exceptio
 pub fn admit(
     q: &Query<'_>,
     request: Request,
-    policy_state: &Policy,
+    admission: &AdmissionPolicy,
+    removal: impl FnOnce() -> Result<RemovalPolicy, Exception>,
 ) -> Result<Admission, Exception> {
-    policy::cross_user(q, &policy_state.device, request.user, true, "uninstall")?;
+    policy::cross_user(q, &admission.device, request.user, true, "uninstall")?;
     if !matches!(request.uid, 0 | 2000) {
         policy::check_package(q, request.caller_package.as_deref())?;
     }
@@ -608,9 +612,9 @@ pub fn admit(
         ));
     }
     let privileged = has_delete
-        || policy_state.can_silently_install
-        || policy_state.emergency_installer
-        || policy_state.system_protection_role;
+        || admission.can_silently_install
+        || admission.emergency_installer
+        || admission.system_protection_role;
     if !privileged {
         let caller = request
             .caller_package
@@ -631,13 +635,37 @@ pub fn admit(
             "versionCode must be >= -1",
         ));
     }
-    if policy_state.pinned {
+    if admission.pinned {
         return Ok(Admission::Rejected(APP_PINNED));
     }
     let internal = q.resolve_internal_package_name(&request.package, request.version);
     let Some(package) = q.state.packages.get(&internal) else {
         return Ok(Admission::Rejected(INTERNAL_ERROR));
     };
+    // A known target preserves the original owner/error ordering: capture all
+    // per-user policy before deciding whether the caller needs user action.
+    let policy_state = removal()?;
+    let silently_allowed = matches!(request.uid, 0 | 2000)
+        || apps_filter::app_id(request.uid as i32) == 1000
+        || package.install_source.is_orphaned
+        || admission.can_silently_install
+        || admission.emergency_installer
+        || admission.system_protection_role
+        || request.existing_only
+        || installer_matches(q, package.install_source.installer.as_deref())?
+        || admission
+            .verifier_packages
+            .iter()
+            .map(|name| installer_matches(q, Some(name)))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .any(|matches| matches)
+        || installer_matches(q, admission.uninstaller_package.as_deref())?
+        || installer_matches(q, admission.storage_manager_package.as_deref())?
+        || policy::permission(q, "android.permission.MANAGE_PROFILE_AND_DEVICE_OWNERS")?;
+    if !silently_allowed {
+        return Ok(Admission::UserAction);
+    }
     let mut users = if request.flags & ALL_USERS != 0 {
         policy_state.users.clone()
     } else {
@@ -653,29 +681,8 @@ pub fn admit(
             return Ok(Admission::Rejected(INTERNAL_ERROR));
         }
     }
-    let silently_allowed = matches!(request.uid, 0 | 2000)
-        || apps_filter::app_id(request.uid as i32) == 1000
-        || package.install_source.is_orphaned
-        || policy_state.can_silently_install
-        || policy_state.emergency_installer
-        || policy_state.system_protection_role
-        || request.existing_only
-        || installer_matches(q, package.install_source.installer.as_deref())?
-        || policy_state
-            .verifier_packages
-            .iter()
-            .map(|name| installer_matches(q, Some(name)))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .any(|matches| matches)
-        || installer_matches(q, policy_state.uninstaller_package.as_deref())?
-        || installer_matches(q, policy_state.storage_manager_package.as_deref())?
-        || policy::permission(q, "android.permission.MANAGE_PROFILE_AND_DEVICE_OWNERS")?;
-    if !silently_allowed {
-        return Ok(Admission::UserAction);
-    }
     for &user in &users {
-        policy::cross_user(q, &policy_state.device, user, true, "deletePackage")?;
+        policy::cross_user(q, &admission.device, user, true, "deletePackage")?;
         if policy_state.admins.contains(&user) {
             return Ok(Admission::Rejected(DEVICE_POLICY));
         }
@@ -726,7 +733,7 @@ pub fn admit(
         internal_package: internal,
         users,
         blocked_users: blocked,
-        keep_uninstalled: policy_state.keep_uninstalled,
+        keep_uninstalled: admission.keep_uninstalled,
     }))
 }
 
@@ -771,8 +778,15 @@ pub struct NativeStore {
     pub publish: Publication,
     pub invalidate: CacheInvalidation,
 }
-pub type PolicySource =
-    Arc<dyn Fn(&Query<'_>, &Request) -> Result<Policy, Exception> + Send + Sync>;
+pub type AdmissionPolicySource =
+    Arc<dyn Fn(&Query<'_>, &Request) -> Result<AdmissionPolicy, Exception> + Send + Sync>;
+pub type RemovalPolicySource =
+    Arc<dyn Fn(&Query<'_>, &Request) -> Result<RemovalPolicy, Exception> + Send + Sync>;
+#[derive(Clone)]
+pub struct PolicySource {
+    pub admission: AdmissionPolicySource,
+    pub removal: RemovalPolicySource,
+}
 pub type PreferredRemoval = Arc<dyn Fn(&str, i32, bool) -> Result<PostCommitEffect, Exception> + Send + Sync>;
 pub enum PostCommitEffect {
     Deferred(Arc<dyn Fn() -> Result<(), Exception> + Send + Sync>),
@@ -873,7 +887,7 @@ impl Controller {
             flags: 0,
             existing_only: false,
         };
-        let capture = (self.policy)(query, &request)?;
+        let capture = (self.policy.admission)(query, &request)?;
         policy::cross_user(query, &capture.device, user, true, operation)
     }
     pub fn verify_unarchive_receiver(
@@ -916,13 +930,13 @@ impl Controller {
         receiver: Option<IntentSender>,
     ) -> Result<(), Exception> {
         let admission = self.with_query(request.uid, |query| {
-            let captured = (self.policy)(query, &request)?;
+            let captured = (self.policy.admission)(query, &request)?;
             policy::cross_user(query, &captured.device, request.user, true, "uninstall")?;
             if !matches!(request.uid, 0 | 2000) {
                 self.external
                     .check_package(request.uid, request.caller_package.as_deref())?;
             }
-            admit(query, request.clone(), &captured)
+            admit(query, request.clone(), &captured, || (self.policy.removal)(query, &request))
         })?;
         match admission {
             Admission::Rejected(status) => self.complete(&request, receiver, status, None),
@@ -1005,7 +1019,8 @@ impl Controller {
             filter: &resolved.apps_filter,
             calling_uid: 1000,
         };
-        let policy = (self.policy)(&query, &request)?;
+        let admission = (self.policy.admission)(&query, &request)?;
+        let policy = (self.policy.removal)(&query, &request)?;
         let users = if flags & ALL_USERS != 0 {
             policy.users
         } else {
@@ -1016,7 +1031,7 @@ impl Controller {
             request,
             users,
             blocked_users: vec![],
-            keep_uninstalled: policy.keep_uninstalled,
+            keep_uninstalled: admission.keep_uninstalled,
         };
         let _ = removed_by_system;
         self.execute(&plan)
@@ -1053,7 +1068,7 @@ impl Controller {
             });
         }
         let sdk_independence = self.with_query(plan.request.uid, |query| {
-            Ok((self.policy)(query, &plan.request)?.sdk_library_independence)
+            Ok((self.policy.removal)(query, &plan.request)?.sdk_library_independence)
         })?;
         let current = (self.source)()?;
         let Some(package) = current.packages.get(&plan.internal_package).cloned() else {
@@ -1567,6 +1582,95 @@ impl NativeStore {
                 })?;
         }
         Ok(next)
+    }
+}
+
+#[cfg(test)]
+mod admission_policy_tests {
+    use super::*;
+    use crate::package::{
+        apps_filter::AppsFilter,
+        installer::policy::{CallingPermissions, DevicePolicy, UserPolicy},
+        model::{PackageState, PackageUserState},
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn admission(pinned: bool) -> AdmissionPolicy {
+        AdmissionPolicy {
+            device: DevicePolicy {
+                permissions: CallingPermissions::new(Arc::new(|_, _, _| Ok(false))),
+                debuggable: false,
+                apex_supported: false,
+                rollback_lifetime: false,
+                users: BTreeMap::from([(0, UserPolicy {
+                    disallow_install_apps: false,
+                    disallow_debugging_features: false,
+                    organization_managed: false,
+                })]),
+                adopted_shell_uids: BTreeSet::new(),
+                verifier_uid: None,
+            },
+            can_silently_install: false,
+            emergency_installer: false,
+            system_protection_role: false,
+            pinned,
+            verifier_packages: vec![],
+            uninstaller_package: None,
+            storage_manager_package: None,
+            keep_uninstalled: false,
+        }
+    }
+    fn request(version: i64) -> Request {
+        Request { package: "absent.package".into(), version, caller_package: None,
+            uid: 0, pid: 7, user: 0, flags: 0, existing_only: false }
+    }
+
+    #[test]
+    fn absent_target_skips_per_user_policy_after_admission_priorities() {
+        let state = State::default();
+        let filter = AppsFilter::default();
+        let query = Query { state: &state, filter: &filter, calling_uid: 0 };
+        let calls = AtomicUsize::new(0);
+        let details = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(illegal("unreachable per-user policy"))
+        };
+        assert!(matches!(admit(&query, request(-1), &admission(false), details).unwrap(),
+            Admission::Rejected(INTERNAL_ERROR)));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let invalid = match admit(&query, request(-2), &admission(false), details) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid version accepted"),
+        };
+        assert_eq!(invalid.code, EX_ILLEGAL_ARGUMENT);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(admit(&query, request(-1), &admission(true), details).unwrap(),
+            Admission::Rejected(APP_PINNED)));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn known_target_captures_per_user_policy_before_user_action() {
+        let mut caller = PackageState { name: "caller.package".into(), app_id: 10100,
+            target_sdk_version: 35, ..Default::default() };
+        caller.users.insert(0, PackageUserState { granted_permissions:
+            vec!["android.permission.DELETE_PACKAGES".into()], ..Default::default() });
+        let target = PackageState { name: "known.package".into(), app_id: 10101,
+            target_sdk_version: 35, ..Default::default() };
+        let state = State { packages: [(caller.name.clone(), caller),
+            (target.name.clone(), target)].into(), ..Default::default() };
+        let filter = AppsFilter::default();
+        let query = Query { state: &state, filter: &filter, calling_uid: 10100 };
+        let request = Request { package: "known.package".into(), version: -1,
+            caller_package: Some("caller.package".into()), uid: 10100, pid: 7,
+            user: 0, flags: 0, existing_only: false };
+        let error = match admit(&query, request, &admission(false), || {
+            Err(illegal("known target policy failure"))
+        }) {
+            Err(error) => error,
+            Ok(_) => panic!("user action bypassed known-target policy capture"),
+        };
+        assert_eq!(error.message, "known target policy failure");
     }
 }
 
