@@ -48,7 +48,7 @@ impl<'a> Context<'a> {
         Ok(binder)
     }
     pub fn retire_receiver(&self,binder:Binder){if let Binder::Local(ptr)=binder{if let Some(receiver)=self.receivers.lock().unwrap().remove(&ptr){receiver.inner.lock().unwrap().take();}}}
-    pub fn install_input(&mut self,path:Option<&str>)->Result<aim_binder_host::server::RetainedFd,Exception>{self.command.open_input(&self.process,path)}
+    pub fn install_input(&mut self,path:Option<&str>)->Result<Option<aim_binder_host::server::RetainedFd>,Exception>{self.command.open_input(&self.process,path)}
     pub fn translate_user(&self,user:i32,all_default:i32,operation:&str)->Result<i32,Exception>{self.system()?.shell_handle_incoming_user(self.pid,self.uid,user,all_default,operation)}
     pub fn user_exists(&self,user:i32)->Result<bool,Exception>{Ok(self.capture()?.state().users.contains_key(&user))}
     pub fn boot_completed(&self)->Result<bool,Exception>{self.system()?.shell_boot_completed()}
@@ -63,7 +63,12 @@ impl<'a> Context<'a> {
         Ok(Some((package.is.system,package.pkg.as_ref().is_some_and(|code|code.is2(super::pkg::booleans2::APEX)))))
     }
     pub fn uninstall_apex(&self,name:&str,version:i64,user:i32,receiver:super::installer::preapproval::IntentSender,flags:i32)->Result<(),Exception>{self.system()?.shell_uninstall_apex(self.uid,self.pid,name,version,user,receiver,flags)}
-    pub fn install_size(&mut self,path:&str,abi:Option<&str>)->Result<i64,Exception>{let file=self.install_input(Some(path))?;self.system()?.shell_install_size(self.uid,self.pid,file,path,abi)}
+    pub fn install_size(&mut self,path:&str,abi:Option<&str>)->Result<i64,Exception>{
+        // setParamsSize: an unopened file ends the command.
+        let Some(file)=self.install_input(Some(path))? else{
+            self.command.eprintln(&format!("Error: Can't open file: {path}"));
+            return Err(Exception::illegal_argument(format!("Error: Can't open file: {path}")));
+        };self.system()?.shell_install_size(self.uid,self.pid,file,path,abi)}
     pub fn validate_install_abi(&self,abi:&str)->Result<(),Exception>{self.system()?.shell_validate_install_abi(self.uid,self.pid,abi)}
     pub fn validate_install_compiler_filter(&self,filter:&str)->Result<(),Exception>{self.system()?.shell_validate_install_compiler_filter(self.uid,self.pid,filter)}
     pub fn sdk_dependency_installer_enabled(&self)->Result<bool,Exception>{self.system()?.shell_dependency_installer_enabled(self.uid,self.pid)}

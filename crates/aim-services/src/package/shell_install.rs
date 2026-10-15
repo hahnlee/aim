@@ -291,7 +291,8 @@ fn write(
     log: bool,
 ) -> Result<i32, Exception> {
     with_session(ctx, owner, id, |ctx, target| {
-        let file = ctx.install_input(path)?;
+        // openInFile: an unopened file fails the write with -1.
+        let Some(file) = ctx.install_input(path)? else { return Ok(-1) };
         if path.is_some_and(|p| p != "-") {
             let metadata = file
                 .metadata()
