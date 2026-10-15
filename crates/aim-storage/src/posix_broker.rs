@@ -155,7 +155,6 @@ impl State {
  fn retire_dead(&self)->io::Result<()> {
   let dead={let mut owners=self.owners.lock().unwrap();let keys=owners.iter().filter(|(_,holder)|!holder.owner.process.is_live()).map(|(key,_)|*key).collect::<Vec<_>>();keys.into_iter().filter_map(|key|owners.remove(&key)).collect::<Vec<_>>()};
   for holder in dead{if let Err(failure)=holder.stop(){eprintln!("[posix-owner] stage=retire-dead controller={:?} actor={:?} error={failure}",self.controller,holder.owner.process);return Err(failure);}}
-  if let Some(namespace)=self.namespace.lock().unwrap().clone(){crate::process_namespace::InitNamespaceEntry::retire_dead(&namespace.table,self.controller)?;}
   Ok(())
  }
  fn retire_all(&self)->io::Result<()> {
@@ -199,6 +198,9 @@ impl State {
   if !actor.is_live(){return Err(error(libc::ESRCH));}Ok(current)
  }
  fn admit_external(&self,actor:ProcessIdentity)->io::Result<Arc<Holder>> {
+  // Entries exist only for external actors, so they are retired as one
+  // joins or exits, not on every request.
+  if let Some(namespace)=self.namespace.lock().unwrap().clone(){crate::process_namespace::InitNamespaceEntry::retire_dead(&namespace.table,self.controller)?;}
   let namespace=self.external_namespace(actor)?;
   let init=self.namespace.lock().unwrap().clone().ok_or_else(||error(libc::EPERM))?.init;
   let guest_pid=if actor==init.process{1}else{actor.host_pid};

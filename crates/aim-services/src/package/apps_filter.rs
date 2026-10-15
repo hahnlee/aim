@@ -13,6 +13,7 @@
 //! connecting ActivityManager/WindowManager producers is tracked in #724.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use super::model::{PackageState, SharedUser, State};
 use super::pkg::{AndroidPackage, booleans};
@@ -312,6 +313,49 @@ impl AppsFilter {
     pub fn is_force_queryable(&self, app_id: i32) -> bool {
         self.force_queryable.contains(&app_id)
     }
+    /// The relations of `state`, shared with the last state that had the
+    /// same packages: the original keeps one filter and updates it when a
+    /// package is added or removed, not when a user state changes.
+    pub fn latest(
+        state: &Arc<State>,
+        config: &Config,
+    ) -> std::result::Result<Arc<AppsFilter>, super::domain_verification::uri_parcel::MatchError> {
+        static LATEST: Mutex<Option<(Arc<State>, Arc<AppsFilter>)>> = Mutex::new(None);
+        let mut latest = LATEST.lock().unwrap();
+        if let Some((before, filter)) = &*latest {
+            if Self::same_inputs(before, state) {
+                return Ok(filter.clone());
+            }
+        }
+        let filter = Arc::new(AppsFilter::new(state, config)?);
+        *latest = Some((state.clone(), filter.clone()));
+        Ok(filter)
+    }
+
+    /// Whether `a` and `b` give `new` the same inputs, so the relations of
+    /// one hold for the other.
+    fn same_inputs(a: &State, b: &State) -> bool {
+        a.system.force_system_packages_queryable == b.system.force_system_packages_queryable
+            && a.system.force_queryable_packages == b.system.force_queryable_packages
+            && a.system.named_actors == b.system.named_actors
+            && a.packages.len() == b.packages.len()
+            && a.packages.iter().zip(&b.packages).all(|((an, a), (bn, b))| {
+                an == bn
+                    && a.app_id == b.app_id
+                    && a.is.system == b.is.system
+                    && a.is.force_queryable_override == b.is.force_queryable_override
+                    && a.filter_application_query == b.filter_application_query
+                    && a.target_sdk_version == b.target_sdk_version
+                    && a.signatures == b.signatures
+                    && a.install_source == b.install_source
+                    && match (&a.pkg, &b.pkg) {
+                        (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
+                        (None, None) => true,
+                        _ => false,
+                    }
+            })
+    }
+
     /// The relations of every package in `state`, as `addPackage` of each
     /// and the recomputation at boot completion leave them.
     pub fn new(state: &State, config: &Config) -> std::result::Result<AppsFilter, super::domain_verification::uri_parcel::MatchError> {
@@ -712,6 +756,25 @@ mod tests {
 
     fn filtered(f: &AppsFilter, s: &State, caller: i32, target: &str) -> bool {
         f.should_filter(s, caller, &s.packages[target], 0)
+    }
+
+    #[test]
+    fn relations_depend_on_packages_not_user_states() {
+        let before = state();
+        let mut after = before.clone();
+        after.packages.get_mut("a").unwrap().users.insert(0, PackageUserState::default());
+        assert!(AppsFilter::same_inputs(&before, &after));
+
+        let mut installer = before.clone();
+        installer.packages.get_mut("a").unwrap().install_source.installer = Some("b".into());
+        assert!(!AppsFilter::same_inputs(&before, &installer));
+        let mut updated = before.clone();
+        updated.packages.get_mut("a").unwrap().pkg =
+            Some(Arc::new(AndroidPackage { queries_packages: vec!["z".into()], ..AndroidPackage::clone(before.packages["a"].pkg.as_ref().unwrap()) }));
+        assert!(!AppsFilter::same_inputs(&before, &updated));
+        let mut removed = before.clone();
+        removed.packages.remove("k");
+        assert!(!AppsFilter::same_inputs(&before, &removed));
     }
 
     #[test]

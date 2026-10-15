@@ -95,7 +95,7 @@ const USER_SYSTEM: i32 = 0;
 pub struct Resolution {
     pub state: Arc<State>,
     pub components: ComponentResolver,
-    pub apps_filter: AppsFilter,
+    pub apps_filter: Arc<AppsFilter>,
     /// Each user's preferred activities.
     preferred: BTreeMap<i32, Preferred>,
     /// `getSetupWizardPackageNameImpl`, found once.
@@ -125,7 +125,7 @@ impl Resolution {
             .collect();
         Ok(Resolution {
             components: ComponentResolver::new(&state)?,
-            apps_filter: AppsFilter::new(&state, config).map_err(MimeGroupError::UriMatching)?,
+            apps_filter: AppsFilter::latest(&state, config).map_err(MimeGroupError::UriMatching)?,
             state,
             preferred,
             setup_wizard: OnceLock::new(),

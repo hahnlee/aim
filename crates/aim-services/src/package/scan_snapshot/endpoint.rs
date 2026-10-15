@@ -356,8 +356,10 @@ fn changed_user_metadata(before:&Snapshot,current:&Snapshot)->Result<Option<Vec<
     if !before.replica_validated||!current.replica_validated||!Arc::ptr_eq(&before.lineage,&current.lineage)
         ||before.version()>current.version()||before.usage().names().ne(current.usage().names())
         ||before.usage().historical_available()!=current.usage().historical_available(){return Ok(None);}
-    let mut owner=before.owner().clone();
-    if before.usage()!=current.usage(){owner.update_validated_replica_usage(before.usage(),current.usage())?;}
+    let updated;
+    let owner=if before.usage()!=current.usage(){
+        let mut owner=before.owner().clone();owner.update_validated_replica_usage(before.usage(),current.usage())?;updated=owner;&updated
+    }else{before.owner()};
     let changed=owner.scoped_user_metadata_changes(current.owner());
     // Retained shared-UID factory members require their complete original owner.
     // Conservatively capture the full graph until that scoped mapping is available.

@@ -227,7 +227,7 @@ impl Resolution {
             .collect();
         Ok(Self {
             components: ComponentResolver::new(&state)?,
-            apps_filter: query.filter.clone(),
+            apps_filter: Arc::new(query.filter.clone()),
             state,
             preferred,
             setup_wizard: OnceLock::new(),
