@@ -208,8 +208,8 @@ pub fn mmap(mut a: [u64; 6]) -> i64 {
         Ok(held) => held, Err(error) => return -(error as i64),
     };
     if matches!(held.kind(), Some(super::fdtab::Kind::Path(_))) { return -(crate::errno::EBADF as i64); }
-    let client=crate::verity_client();
     let identity=match held.kind(){Some(super::fdtab::Kind::Regular(description))=>Some(description.identity),_=>None};
+    let client=identity.and_then(|_|crate::verity_client());
     // Begin before the VM epoch: an enable transaction may need its exclusive
     // epoch while admission waits. Proof lookup below happens after this ACK.
     let admission=match (&client,identity){
