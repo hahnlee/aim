@@ -3901,7 +3901,7 @@ impl System {
                 owner
                     .queries
                     .as_ref()
-                    .is_some_and(|query| Arc::ptr_eq(query, capture))
+                    .is_some_and(|query| query.scan().same_lineage(capture.scan()))
             })
             .ok_or_else(|| {
                 Exception::new(
@@ -3931,10 +3931,12 @@ impl System {
             .current
             .as_ref()
             .filter(|current| {
+                // The owner belongs to the bootstrap, so any capture of its
+                // lineage reaches it; usage publishes new captures constantly.
                 current
                     .queries
                     .as_ref()
-                    .is_some_and(|query| Arc::ptr_eq(query, capture))
+                    .is_some_and(|query| query.scan().same_lineage(capture.scan()))
                     && current
                         .runtime_metadata
                         .as_ref()
