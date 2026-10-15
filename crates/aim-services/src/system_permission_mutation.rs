@@ -73,7 +73,7 @@ impl System {
         let update = capture.prepare_visibility_update(grants).map_err(|_| {
             QueryError::NotModelled(NotModelled("provider visibility preparation failed"))
         })?;
-        current.publish_snapshot(update.store);
+        let update = current.publish_update(update).map_err(QueryError::Original)?;
         current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page {
             page.publish(update.capture.scan().version());
@@ -251,7 +251,7 @@ impl System {
         };
         // As Settings does, publish the installation-local nonce first. I/O
         // failure logs loss-at-reboot but retains the live verifier identity.
-        current.publish_snapshot(update.store);
+        let update = current.publish_update(update).map_err(QueryError::Original)?;
         current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page {
             page.publish(update.capture.scan().version());

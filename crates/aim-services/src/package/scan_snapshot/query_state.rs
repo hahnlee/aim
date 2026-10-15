@@ -1537,6 +1537,43 @@ impl Capture {
     }
 }
 impl Capture {
+    /// This update's candidate moved onto `canonical`, which a usage
+    /// notification advanced past `base`, the scan the candidate was prepared
+    /// from, while the install gate was held (internal_notify_package_use).
+    /// A usage slot the candidate changed keeps the later time; every other
+    /// slot keeps the canonical one. Any other canonical change is refused.
+    pub(crate) fn rebase_over_usage(self:&Arc<Self>,base:&Arc<super::Snapshot>,canonical:&Arc<super::Snapshot>)
+        -> Result<PackageUpdate,String> {
+        let candidate=&self.scan;
+        if candidate.version!=base.version+1||!base.same_lineage(canonical)||!base.same_lineage(candidate)
+            ||base.usage().names().ne(canonical.usage().names())||base.usage().names().ne(candidate.usage().names()) {
+            return Err(format!("publication base {} is behind canonical scan {}",base.version,canonical.version));
+        }
+        let mut advanced=base.owner().clone();
+        advanced.update_validated_replica_usage(base.usage(),canonical.usage())?;
+        if &advanced!=canonical.owner() {
+            return Err(format!("canonical scan {} changed more than usage since publication base {}",canonical.version,base.version));
+        }
+        let mut usage=canonical.usage().clone();
+        for name in base.usage().names() {
+            let (before,after,latest)=(base.usage().times(name).unwrap(),candidate.usage().times(name).unwrap(),canonical.usage().times(name).unwrap());
+            for reason in 0..before.len() {
+                if after[reason]!=before[reason] {usage.notify(name,reason as i32,after[reason].max(latest[reason]));}
+            }
+        }
+        let mut owner=candidate.owner().clone();
+        owner.update_validated_replica_usage(candidate.usage(),&usage)?;
+        let store=super::Store::new_replica_after(canonical,owner,usage,canonical.version+1)
+            .map_err(|error|format!("usage rebase replica: {error:?}"))?;
+        let version=store.capture().version();
+        let mut context=(*self.context).clone();context.scan_version=version;
+        // As prepare_usage_update: PackageState holds no usage, so the
+        // candidate's projections stay valid for the rebased scan.
+        let mut state=(*self.state).clone();state.generation=version;
+        let capture=Arc::new(Self{scan:store.capture(),state:Arc::new(state),domains:self.domains.clone(),
+            context:Arc::new(context),frozen:self.frozen.clone(),resolver:Default::default()});
+        Ok(PackageUpdate{store,capture})
+    }
     pub fn with_launch_sender(self:&Arc<Self>,owner:Arc<crate::package::launch::Owner>)->Result<Arc<Self>,String>{
         let mut context=(*self.context).clone();context.system.launch_sender=Some(owner);
         Self::new(self.scan.clone(),context)

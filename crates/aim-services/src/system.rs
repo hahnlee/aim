@@ -399,6 +399,23 @@ impl PackageBootstrap {
         self.queries = capture;
     }
 
+    /// Publishes `update` over the canonical scan, never behind it (#1393):
+    /// a candidate prepared from a query capture that usage has since
+    /// outrun is moved onto the canonical scan; any other gap is refused.
+    #[track_caller]
+    fn publish_update(&mut self, mut update: crate::package::scan_snapshot::query_state::PackageUpdate) -> Result<Published> {
+        if let (Some(snapshots), Some(base)) = (&self.snapshots, &self.queries) {
+            let canonical = snapshots.capture();
+            if update.store.capture().version() <= canonical.version() {
+                update = update.capture.rebase_over_usage(base.scan(), &canonical)
+                    .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
+            }
+        }
+        let capture = update.capture.clone();
+        self.publish_snapshot(update.store);
+        Ok(Published { capture })
+    }
+
     #[track_caller]
     fn publish_snapshot(&mut self, candidate: impl Into<Arc<crate::package::scan_snapshot::Store>>) {
         let candidate = candidate.into();
@@ -424,6 +441,11 @@ fn rebase_created_user_scan(
     candidate: &mut crate::package::scan::SigningScan,
 ) -> std::result::Result<Option<String>, String> {
     crate::package::scan_snapshot::install_context::rebase_user_transition(base, latest, candidate)
+}
+
+/// What `publish_update` published.
+struct Published {
+    capture: Arc<crate::package::scan_snapshot::query_state::Capture>,
 }
 
 /// Told of a bridge attached, with its handle.
@@ -1511,7 +1533,7 @@ impl System {
                 "runtime domain generation differs",
             ));
         }
-        current.publish_snapshot(update.store);
+        let update = current.publish_update(crate::package::scan_snapshot::query_state::PackageUpdate{store:update.store,capture:update.capture})?;
         current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page {
             page.publish(update.capture.scan().version());
@@ -1603,13 +1625,15 @@ impl System {
                 .owner()
                 .persisted(),
         );
+        let mut capture = update.capture.clone();
         if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
-            current.publish_snapshot(update.store);
+            let update = current.publish_update(crate::package::scan_snapshot::query_state::PackageUpdate{store:update.store,capture:update.capture}).map_err(|error|crate::package::owner::WriteError{committed:true,message:error.message})?;
             current.set_queries(Some(update.capture.clone()));
             if let Some(page) = &current.version_page {
                 page.publish(update.capture.scan().version());
             }
             state.version = update.capture.scan().version();
+            capture = update.capture;
         }
         let committed = result.is_ok() || result.as_ref().is_err_and(|e| e.committed);
         drop(state);
@@ -1632,7 +1656,7 @@ impl System {
                 });
             }
         }
-        result.map(|_| Some(update.capture))
+        result.map(|_| Some(capture))
     }
     // Original policy calls run without holding the publication lock.
     fn complete_package_owner(
@@ -2166,7 +2190,7 @@ impl System {
         };
         // The original commits Settings first and schedules disk writes afterward.
         // Serialization or unknown-user failures cannot undo the live mutation.
-        current.publish_snapshot(update.store);
+        let update = current.publish_update(update).map_err(crate::package::resolve::QueryError::Original)?;
         current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
@@ -2223,7 +2247,7 @@ impl System {
                 Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
             let written = plan.persist(&mut disk, &owner);
             if written.is_ok() || written.as_ref().is_err_and(|error| error.committed) {
-                current.publish_snapshot(update.store);
+                let update = current.publish_update(update)?;
                 current.set_queries(Some(update.capture.clone()));
                 if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
                 state.version = update.capture.scan().version();
@@ -2256,7 +2280,7 @@ impl System {
         package.set_page_size_compat(if enabled { 32 } else { 64 }).map_err(Exception::illegal_argument)?;
         let update = base.prepare_package_update(owner.clone()).map_err(|error|
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
-        current.publish_snapshot(update.store);
+        let update = current.publish_update(update)?;
         current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
@@ -2303,7 +2327,7 @@ impl System {
         }
         let update = capture.prepare_app_metadata_files(owner).map_err(|error|
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
-        current.publish_snapshot(update.store);
+        let update = current.publish_update(update)?;
         current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
@@ -2379,7 +2403,7 @@ impl System {
         plan.apply_scan(&mut owner).map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
         let update = base.prepare_package_update(owner).map_err(|error|
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
-        current.publish_snapshot(update.store);
+        let update = current.publish_update(update)?;
         current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
@@ -2659,7 +2683,7 @@ impl System {
                     update = update.rebase_user_transition(preparation_base.scan(), &canonical)
                         .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
                 }
-                current.publish_snapshot(update.store);
+                let update = current.publish_update(update)?;
                 current.set_queries(Some(update.capture.clone()));
                 if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
                 state.version = update.capture.scan().version();
@@ -2829,7 +2853,7 @@ impl System {
             }
         }
         if committed {
-            current.publish_snapshot(update.store);
+            let update = current.publish_update(update)?;
             current.set_queries(Some(update.capture.clone()));
             if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
             state.version = update.capture.scan().version();
@@ -2910,7 +2934,7 @@ impl System {
             aim_binder_host::parcel::EX_ILLEGAL_STATE, "archive query owner already installed")); }
         let update = base.prepare_archive_owner(owner).map_err(|error|
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
-        current.publish_snapshot(update.store);
+        let update = current.publish_update(update)?;
         current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
@@ -2928,7 +2952,7 @@ impl System {
             aim_binder_host::parcel::EX_ILLEGAL_STATE, "launch owner already installed")); }
         let update = base.prepare_launch_owner(owner).map_err(|error|
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
-        current.publish_snapshot(update.store);
+        let update = current.publish_update(update)?;
         current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
@@ -3047,7 +3071,7 @@ impl System {
                 return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
                     written.unwrap_err().to_string()));
             }
-            current.publish_snapshot(update.store);
+            let update = current.publish_update(update)?;
             current.set_queries(Some(update.capture.clone()));
             if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
             state.version = update.capture.scan().version();
@@ -3115,7 +3139,7 @@ impl System {
         let result = match (current, prepared) {
             (Some(current), Ok(update)) => {
                 current.instant_registry = Some(owner.clone());
-                current.publish_snapshot(update.store);
+                let update = current.publish_update(update)?;
                 current.set_queries(Some(update.capture.clone()));
                 if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
                 state.version = update.capture.scan().version();
@@ -3142,7 +3166,7 @@ impl System {
             aim_binder_host::parcel::EX_ILLEGAL_STATE, "instant capture unavailable"))?;
         let update = capture.prepare_instant_registry_update(owner).map_err(|error|
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
-        current.publish_snapshot(update.store);
+        let update = current.publish_update(update)?;
         current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
@@ -3809,7 +3833,7 @@ impl System {
         let result = disk.commit_mutation(&plan);
         let committed = result.is_ok() || result.as_ref().is_err_and(|error| error.committed);
         if committed {
-            current.publish_snapshot(update.store);
+            let update = current.publish_update(update).map_err(crate::package::resolve::QueryError::Original)?;
             current.set_queries(Some(update.capture.clone()));
             if let Some(page) = &current.version_page {
                 page.publish(update.capture.scan().version());
@@ -5595,7 +5619,7 @@ impl System {
             Ok(value) => value,
             Err(error) => return Ok(Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))),
         };
-        current.publish_snapshot(update.store);
+        let update = current.publish_update(update).map_err(crate::package::resolve::QueryError::Original)?;
         current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
@@ -5620,7 +5644,7 @@ impl System {
         if !current.queries.as_ref().is_some_and(|current| Arc::ptr_eq(current, base)) {
             return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"permission refresh generation changed"));
         }
-        current.publish_snapshot(update.store);
+        let update = current.publish_update(update)?;
         current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();

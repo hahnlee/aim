@@ -113,7 +113,7 @@ impl System {
         current.preferred_registry = Some(registry);
         current.preferred_commit = Some(commit);
         current.preferred_actions = Some(actions);
-        current.publish_snapshot(update.store);
+        let update = current.publish_update(update)?;
         current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();
@@ -165,7 +165,7 @@ impl System {
             return Err(fail(written.unwrap_err().to_string()));
         }
         registry.publish(stage).map_err(&fail)?;
-        current.publish_snapshot(update.store);
+        let update = current.publish_update(update)?;
         current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();

@@ -28,7 +28,7 @@ impl System {
         let capture = current.queries.as_ref().ok_or_else(|| fail("settings-ready capture absent"))?;
         if capture.state().system.compatibility_mode == compatibility { return Ok(()); }
         let update = capture.prepare_compatibility_mode(compatibility).map_err(fail)?;
-        current.publish_snapshot(update.store);
+        let update = current.publish_update(update)?;
         current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version();

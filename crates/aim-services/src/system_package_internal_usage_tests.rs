@@ -818,3 +818,31 @@ fn unchanged_component_use_does_not_wait_for_install_publication() {
     result.expect("unchanged component use waited for install publication").unwrap();
     assert!(Arc::ptr_eq(&before,&fixture.system.capture_package_queries().unwrap()));
 }
+
+#[test]
+fn a_candidate_behind_canonical_usage_moves_onto_it_and_any_other_gap_is_refused() {
+    let mut fixture = Fixture::new();
+    let bridge = fixture.attach();
+    let query = publish(&fixture, &bridge);
+    let install = fixture.system.package_install_guard();
+    fixture.system.internal_notify_package_use(Some("p".into()), 2, 1000, 0).unwrap();
+    let canonical = fixture.system.package_bootstrap.lock().unwrap().current.as_ref().unwrap().snapshots.as_ref().unwrap().capture();
+    let used = canonical.usage().times("p").unwrap()[2];
+    assert!(used > 0 && canonical.version() > query.scan().version());
+    // A mutation prepared from the lagging query capture.
+    let mut owner = query.scan().owner().clone();
+    owner.settings.versions.push(crate::package::settings::Version{sdk_version:36,..Default::default()});
+    let update = query.prepare_package_update(owner.clone()).unwrap();
+    assert!(update.capture.scan().version() <= canonical.version());
+    let rebased = update.capture.rebase_over_usage(query.scan(), &canonical).unwrap();
+    assert_eq!(rebased.capture.scan().version(), canonical.version() + 1);
+    assert_eq!(rebased.capture.scan().usage().times("p").unwrap()[2], used);
+    assert_eq!(rebased.capture.scan().owner().settings.versions, owner.settings.versions);
+    // A canonical scan that changed more than usage is not overwritten.
+    let other = crate::package::scan_snapshot::Store::new_replica_after(query.scan(), owner, query.scan().usage().clone(), query.scan().version() + 1).unwrap();
+    let mut second = query.scan().owner().clone();
+    second.settings.versions.clear();
+    let behind = query.prepare_package_update(second).unwrap();
+    assert!(behind.capture.rebase_over_usage(query.scan(), &other.capture()).err().unwrap().contains("more than usage"));
+    drop(install);
+}
