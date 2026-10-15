@@ -21,7 +21,7 @@
 //!   directory does (zygote's tmpfs over `/data/user` hides the path map's
 //!   `/data/user/0`).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
@@ -1070,11 +1070,11 @@ impl HostPathView {
         if let Some(guest) = crate::sys::tty::pts_guest(s) { return Some(guest); }
         let mut best: Option<(usize, usize, String)> = None;
         let canonical = self.canonical_mounts.get_or_init(|| self.mounts.iter()
-            .filter_map(|(guest, path)| path.canonicalize().ok().map(|path| (guest.clone(), path)))
+            .filter_map(|(guest, path)| canonical_host(path).map(|path| (guest.clone(), path)))
             .collect());
         // The implicit root competes with bind aliases of the same host tree;
         // a later alias cannot rename ordinary paths already rooted at `/`.
-        let root = self.canonical_root.get_or_init(|| self.root.canonicalize().unwrap_or_else(|_| self.root.clone()));
+        let root = self.canonical_root.get_or_init(|| canonical_host(&self.root).unwrap_or_else(|| self.root.clone()));
         let roots = [("/".to_owned(), self.root.clone()), ("/".to_owned(), root.clone())];
         for (guest, prefix) in self.mounts.iter().chain(canonical.iter()).chain(roots.iter()) {
             let Ok(rest) = host.strip_prefix(prefix) else { continue; };
@@ -1087,6 +1087,17 @@ impl HostPathView {
         }
         best.map(|(_, _, guest)| guest)
     }
+}
+
+/// The canonical form of a mount's host path. A path that was already
+/// canonical stays so and is resolved once per process; one through a
+/// symlink is resolved again each time, so a retargeted alias is seen.
+fn canonical_host(path: &Path) -> Option<PathBuf> {
+    static CANONICAL: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+    if CANONICAL.lock().unwrap().contains(path) { return Some(path.to_path_buf()); }
+    let canonical = path.canonicalize().ok()?;
+    if canonical == path { CANONICAL.lock().unwrap().insert(canonical.clone()); }
+    Some(canonical)
 }
 
 /// Guest path of a host path, if it lies inside the root or a mapped area.
