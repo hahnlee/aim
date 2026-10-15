@@ -110,6 +110,10 @@ impl Owner {
         if user < 0 { return Err(Exception::illegal_argument("negative removed user")); }
         let base = (self.dependencies.capture)()?;
         (self.dependencies.remove_unused_packages)(&base, user)?;
+        // As creation: hold the publication gate from capture through
+        // publication, so no mutation persists this user's restrictions
+        // between their removal on disk and the scan without the user.
+        let current = serialized(&self.publication_gate, || -> Result<_, Exception> {
         let capture = (self.dependencies.capture)()?;
         let mut scan = capture.scan().owner().clone(); scan.remove_package_user_state(user).map_err(failure)?;
         self.disk.lock().unwrap().remove_package_user(user as u32).map_err(|error| failure(error.to_string()))?;
@@ -125,7 +129,8 @@ impl Owner {
         self.preferred.remove_user(user).map_err(failure)?;
         self.runtime.lock().unwrap().remove_user(user);
         (self.dependencies.clear_domain_user)(user)?;
-        let current = (self.dependencies.publish_user)(&capture, scan, user, false, None)?;
+        (self.dependencies.publish_user)(&capture, scan, user, false, None)
+        })?;
         (self.dependencies.write_package_list)(&current, None)?;
         (self.dependencies.kernel_remove_user)(user)?;
         self.pending.lock().unwrap().remove(&user);

@@ -38,7 +38,14 @@ public final class CapturedPackageSetting {
             var suspensions = source.getSuspendParams();
             if (suspensions != null) target.setSuspendParams(suspensions.untrackedStorage());
             if (user.overlayPaths != null) {
-                target.setOverlayPaths(source.getOverlayPaths());
+                var paths = source.getOverlayPaths();
+                // setOverlayPaths keeps an unset owner unset for empty paths;
+                // the original holds empty paths only after earlier ones, so
+                // this reaches them the same way.
+                if (paths != null && paths.isEmpty()) {
+                    target.setOverlayPaths(new android.content.pm.overlay.OverlayPaths.Builder().addNonApkPath("/").build());
+                }
+                target.setOverlayPaths(paths);
                 if (target.getOverlayPaths() == null) throw new IllegalArgumentException("captured overlay cannot be reproduced");
             }
             if (user.getLibraryOverlays() != null) {

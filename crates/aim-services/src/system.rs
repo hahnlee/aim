@@ -2700,8 +2700,19 @@ impl System {
                 }
             } else if preparation_base.scan().owner() != latest.scan().owner()
                 || preparation_base.scan().usage() != latest.scan().usage() {
-                return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                    "removed user transition scan base changed"));
+                // A removal is the base without the user's states, as
+                // cleanUpUser takes it from the settings it then holds:
+                // remove them again from the latest scan.
+                let removal = |owner: &crate::package::scan::SigningScan| {
+                    let mut removed = owner.clone();
+                    removed.remove_package_user_state(user).map(|_| removed)
+                        .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))
+                };
+                if removal(preparation_base.scan().owner())? != candidate {
+                    return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        "removed user transition scan base changed"));
+                }
+                candidate = removal(latest.scan().owner())?;
             }
             preparation_base = latest;
         }

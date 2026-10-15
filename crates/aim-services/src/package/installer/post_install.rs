@@ -57,7 +57,9 @@ impl Plan {
         }
         let states=current.owner().scanned_user_states(&self.name).ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"post-install user owner retired"))?;
         for (users,instant) in [(&self.first_users,false),(&self.first_instant,true),(&self.update_users,false),(&self.update_instant,true)] {
-            if users.iter().any(|user|states.get(user).is_none_or(|state|!state.installed||state.instant_app!=instant)) {
+            // A user removed since the install has no state; the original
+            // still names it, and ActivityManager skips users that are gone.
+            if users.iter().any(|user|states.get(user).is_some_and(|state|!state.installed||state.instant_app!=instant)) {
                 return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"post-install target user changed"));
             }
         }
