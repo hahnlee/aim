@@ -80,7 +80,7 @@ impl OwnerConfig {
 /// A guest process's lock owner. Its holder process starts with the first
 /// request that needs it: most processes never take a POSIX lock, and on
 /// Linux a process that holds none costs the kernel nothing.
-struct Holder {owner:Owner,config:Config,controller:ProcessIdentity,native:Mutex<Option<Arc<Native>>>,requests:Mutex<BTreeMap<u64,(Operation,u64)>>,next_request:AtomicU64,dispatch:Mutex<()>,rebinding:AtomicBool}
+struct Holder {owner:Owner,config:Config,controller:ProcessIdentity,native:Mutex<Option<Arc<Native>>>,registered:AtomicBool,requests:Mutex<BTreeMap<u64,(Operation,u64)>>,next_request:AtomicU64,dispatch:Mutex<()>,rebinding:AtomicBool}
 struct Native {process:ProcessIdentity,client:Client,child:Mutex<Option<Child>>}
 impl Native {
  fn spawn(config:&Config,owner:Owner,controller:ProcessIdentity)->io::Result<Self>{
@@ -96,7 +96,7 @@ impl Native {
 }
 impl Holder {
  fn new(config:&Config,owner:Owner,controller:ProcessIdentity)->Arc<Self>{
-  Arc::new(Self{owner,config:config.clone(),controller,native:Mutex::new(None),requests:Mutex::new(BTreeMap::new()),next_request:AtomicU64::new(1),dispatch:Mutex::new(()),rebinding:AtomicBool::new(false)})
+  Arc::new(Self{owner,config:config.clone(),controller,native:Mutex::new(None),registered:AtomicBool::new(false),requests:Mutex::new(BTreeMap::new()),next_request:AtomicU64::new(1),dispatch:Mutex::new(()),rebinding:AtomicBool::new(false)})
  }
  fn spawn(config:&Config,owner:Owner,controller:ProcessIdentity)->io::Result<Arc<Self>>{let holder=Self::new(config,owner,controller);holder.native()?;Ok(holder)}
  /// The holder process, started now if it has not been.
@@ -215,13 +215,10 @@ impl State {
   self.retire_dead()?;
   let Request{frame,proof,actor,reply}=request;
   let holder=self.owners.lock().unwrap().get(&key(actor)).cloned();
-  // An attach to an existing holder (an exec of the same process) may find
-  // locks registered before it; the reply's ticket says so.
-  let existed=holder.is_some();
   let holder=if holder.is_none()&&matches!(frame.operation,Operation::Attach|Operation::ExternalAttach){match if frame.operation==Operation::ExternalAttach{self.admit_external(actor)}else{self.admit_fork(actor)}{Ok(holder)=>Some(holder),Err(failure)=>{let mut response=frame;response.host_pid=0;response.guest_pid=0;response.errno=failure.raw_os_error().unwrap_or(libc::EPERM);reply.send(response)?;return Ok(None)}}}else{holder};
   if matches!(frame.operation,Operation::Attach|Operation::ExternalAttach) {
    let mut response=frame;response.host_pid=0;response.guest_pid=0;
-   response.errno=match holder.as_ref(){Some(holder)if holder.owner.process==actor&&actor.is_live()&&holder.alive()=>{match holder.rebind(){Ok(())=>{response.guest_pid=holder.owner.guest_pid;response.ticket=u64::from(existed);0},Err(failure)=>failure.raw_os_error().unwrap_or(libc::EIO)}},_=>libc::EPERM};
+   response.errno=match holder.as_ref(){Some(holder)if holder.owner.process==actor&&actor.is_live()&&holder.alive()=>{match holder.rebind(){Ok(())=>{response.guest_pid=holder.owner.guest_pid;response.ticket=u64::from(holder.registered.load(Ordering::Acquire));0},Err(failure)=>failure.raw_os_error().unwrap_or(libc::EIO)}},_=>libc::EPERM};
    reply.send(response)?;return Ok(None);
   }
   // Without a holder process nothing is registered, so a close releases
@@ -233,6 +230,9 @@ impl State {
    if frame.operation==Operation::Exit{return Err(error(libc::EPERM));}
    if holder.started().is_none()&&frame.operation==Operation::Cancel{return Err(error(libc::ENOENT));}
    let client=holder.native()?.client.try_clone()?;
+   // An attach to this holder (an exec of the same process) may find files
+   // registered before it; the attach reply says so.
+   if frame.operation==Operation::Register{holder.registered.store(true,Ordering::Release);}
    // Forward in endpoint receive order, before starting a reply waiter.
    // Cancel must not overtake the corresponding Wait reservation.
    let dispatch=holder.dispatch.lock().unwrap();
