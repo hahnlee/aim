@@ -1225,7 +1225,23 @@ impl NativeOwners {
                 return Err(super::pipeline::Error::Pending);
             }
         }
-        super::pipeline::install(config.owners.as_ref(), code, &self.source)
+        // The original commits against the settings it holds at commit, so a
+        // concurrent change before then (a user removed while this one was
+        // prepared) never fails the install. An uncommitted failure while the
+        // base moved is prepared again on the new base; one on an unchanged
+        // base is final, as is the last of a few attempts: usage alone moves
+        // the base often, and a real failure must not repeat for long.
+        let mut attempts = 3;
+        loop {
+            attempts -= 1;
+            let base = (self.source)().map(|state| state.generation).ok();
+            let result = super::pipeline::install(config.owners.as_ref(), code.clone(), &self.source);
+            match result {
+                Err(super::pipeline::Error::Install(ref failure)) if attempts > 0 && !failure.committed
+                    && base.is_some() && (self.source)().map(|state| state.generation).ok() != base => continue,
+                result => return result,
+            }
+        }
     }
     pub fn configure_lite_policy(&self, source: LitePolicySource) -> Result<(), Exception> {
         let mut policy = self.lite_policy.lock().unwrap();

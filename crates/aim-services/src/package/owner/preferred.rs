@@ -136,13 +136,13 @@ impl Store {
         if self.unread_restrictions.contains(&user) {
             return Err("package restrictions not restored".into());
         }
-        let state = self
+        // mPendingDefaultBrowser.get(userId): a user removed meanwhile has none.
+        Ok(self
             .state
             .users
             .iter()
             .find(|(id, _)| *id == user)
-            .ok_or("pending browser user unavailable")?;
-        Ok(state.1.restrictions.default_browser.clone())
+            .and_then(|state| state.1.restrictions.default_browser.clone()))
     }
 
     /// Original setPendingDefaultBrowserLPw mutates Settings memory; the next
