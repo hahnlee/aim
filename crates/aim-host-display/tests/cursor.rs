@@ -75,6 +75,11 @@ fn a_cursor_buffer_is_the_window_hosts_cursor() {
         .unwrap();
     let _server = Kill(server);
     set_server(&socket);
+    // The layer's role: the connection becomes the guest's fd.
+    aim_host_display::set_hooks(aim_host_display::Hooks {
+        allocated: |fd| aim_storage::socket_inode::Receipt::mint(std::os::fd::AsRawFd::as_raw_fd(&fd)).map_err(|e| e.raw_os_error().unwrap_or(libc::EIO)),
+        publish: |fd, _| match unsafe { libc::dup(std::os::fd::AsRawFd::as_raw_fd(&fd)) } { -1 => Err(libc::EBADF), fd => Ok(fd) },
+    });
     let mut info = Connect::default();
     let fd = call(FN_CONNECT, &mut info);
     assert!(fd >= 0, "connect: {fd}");
