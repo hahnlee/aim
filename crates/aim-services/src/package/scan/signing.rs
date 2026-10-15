@@ -115,10 +115,21 @@ impl SigningScan {
 
     /// Only scoped user metadata may differ. Every other owner field must match.
     pub(crate) fn scoped_user_metadata_changes(&self, other: &Self) -> Option<Vec<(String, bool)>> {
-        let mut normalized=self.clone();
-        normalized.scanned_users=other.scanned_users.clone();
-        normalized.disabled_users=other.disabled_users.clone();
-        if &normalized!=other{return None;}
+        let Self{settings,identities,libraries,package_registry,update_ownership,system_app_update_owners,installers,
+            disabled_users:_,scanned_users:_,loaded,disabled_loaded,pending_metadata,transferred_packages,
+            displaced_shared_settings,apex_origins,seinfo,legacy_permissions,library_dependencies,shared_processes,
+            replica_runtime,hidden_api_allowlist,strict_signature_packages,first_api_level,parsed,permission_admissions}=self;
+        let same=*settings==other.settings&&*identities==other.identities&&*libraries==other.libraries
+            &&*package_registry==other.package_registry&&*update_ownership==other.update_ownership
+            &&*system_app_update_owners==other.system_app_update_owners&&*installers==other.installers
+            &&*loaded==other.loaded&&*disabled_loaded==other.disabled_loaded&&*pending_metadata==other.pending_metadata
+            &&*transferred_packages==other.transferred_packages&&*displaced_shared_settings==other.displaced_shared_settings
+            &&*apex_origins==other.apex_origins&&*seinfo==other.seinfo&&*legacy_permissions==other.legacy_permissions
+            &&*library_dependencies==other.library_dependencies&&*shared_processes==other.shared_processes
+            &&*replica_runtime==other.replica_runtime&&*hidden_api_allowlist==other.hidden_api_allowlist
+            &&*strict_signature_packages==other.strict_signature_packages&&*first_api_level==other.first_api_level
+            &&*parsed==other.parsed&&*permission_admissions==other.permission_admissions;
+        if !same{return None;}
         let mut changed=Vec::new();
         for setting in &self.settings.packages {
             if self.scanned_users.get(&setting.name)!=other.scanned_users.get(&setting.name){changed.push((setting.name.clone(),false));}

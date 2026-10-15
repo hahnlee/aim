@@ -92,13 +92,27 @@ pub struct Record {
 }
 
 /// Final code and its signing owner retained together for facade reconstruction.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct LoadedPackage {
     pub package: AndroidPackage,
     pub collected_signing: sign::SigningDetails,
     disabled_binding: Option<DisabledCodeBinding>,
     runtime_view: Option<std::sync::Arc<AndroidPackage>>,
     projection: code_projection::Cache,
+}
+
+/// Owners share one `Arc` across versions, so the same package compares
+/// by address before its fields.
+impl PartialEq for LoadedPackage {
+    fn eq(&self, other: &Self) -> bool {
+        let Self { package, collected_signing, disabled_binding, runtime_view, projection } = self;
+        std::ptr::eq(self, other)
+            || (*package == other.package
+                && *collected_signing == other.collected_signing
+                && *disabled_binding == other.disabled_binding
+                && *runtime_view == other.runtime_view
+                && *projection == other.projection)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
