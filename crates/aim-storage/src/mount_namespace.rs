@@ -46,13 +46,15 @@ impl Namespace {
   let mut mounts=Vec::new();for _ in 0..count{let id=u64::from_le_bytes(take(&mut at,8)?.try_into().unwrap());let origin=u64::from_le_bytes(take(&mut at,8)?.try_into().unwrap());let parent=u64::from_le_bytes(take(&mut at,8)?.try_into().unwrap());let shared=u64::from_le_bytes(take(&mut at,8)?.try_into().unwrap());let master=u64::from_le_bytes(take(&mut at,8)?.try_into().unwrap());mounts.push(MountRecord{id,origin,parent,shared,master,kind:text(&mut at)?,guest:text(&mut at)?,host:text(&mut at)?,source:text(&mut at)?,fstype:text(&mut at)?,root:text(&mut at)?,own:take(&mut at,1)?[0]!=0});}
   if at!=bytes.len()||generation==0{return Err(protocol());}records::validate(&mounts)?;Ok(State{generation,base,events,mounts})
  }
+ /// The rename publishes the new state whole; the runtime directory does
+ /// not outlive the boot, so nothing is flushed to the disk.
  fn write_unlocked(&self,state:&State)->io::Result<()>{
   let mut bytes=b"AIMMNT3\0".to_vec();bytes.extend(state.generation.to_le_bytes());
   fn text(bytes:&mut Vec<u8>,value:&str){bytes.extend((value.len() as u64).to_le_bytes());bytes.extend(value.as_bytes());}
   text(&mut bytes,&state.base);bytes.extend((state.events.len() as u64).to_le_bytes());for event in &state.events{text(&mut bytes,event);}
   bytes.extend((state.mounts.len()as u64).to_le_bytes());for mount in &state.mounts{bytes.extend(mount.id.to_le_bytes());bytes.extend(mount.origin.to_le_bytes());bytes.extend(mount.parent.to_le_bytes());bytes.extend(mount.shared.to_le_bytes());bytes.extend(mount.master.to_le_bytes());for value in [&mount.kind,&mount.guest,&mount.host,&mount.source,&mount.fstype,&mount.root]{text(&mut bytes,value);}bytes.push(u8::from(mount.own));}
   let temporary=self.path().with_extension(format!("{}.tmp",std::process::id()));
-  let result=(||{let mut file=fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&temporary)?;file.write_all(&bytes)?;file.sync_all()?;fs::rename(&temporary,self.path())?;fs::File::open(self.directory())?.sync_all()?;self.publish_generation(state.generation)})();
+  let result=(||{let mut file=fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&temporary)?;file.write_all(&bytes)?;fs::rename(&temporary,self.path())?;self.publish_generation(state.generation)})();
   if result.is_err(){let _=fs::remove_file(temporary);}result
  }
  pub fn initialize(&self,base:&str)->io::Result<State>{self.locked(||match self.read_unlocked(){Ok(state)=>{self.publish_generation(state.generation)?;Ok(state)},Err(error)if error.kind()==io::ErrorKind::NotFound=>{let mounts=records::initialize(self,base)?;let state=State{generation:1,base:base.into(),events:Vec::new(),mounts};self.write_unlocked(&state)?;Ok(state)},Err(error)=>Err(error)})}
