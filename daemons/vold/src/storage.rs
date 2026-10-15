@@ -64,9 +64,9 @@ fn volume_root(uuid: Option<&str>) -> PathBuf {
     }
 }
 
-/// `fscrypt_prepare_user_storage` without keys. Returns the prepared
-/// directories.
-pub fn prepare_user_storage(uuid: Option<&str>, user: u32, flags: i32) -> io::Result<Vec<PathBuf>> {
+/// The per-user directories vold owns on a volume (FsCrypt.cpp's
+/// prepare and destroy lists), with their mode and owner.
+fn user_storage_dirs(uuid: Option<&str>, user: u32, flags: i32) -> Vec<(PathBuf, u32, u32, u32)> {
     let internal = uuid.is_none_or(str::is_empty);
     let root = volume_root(uuid);
     let mut dirs: Vec<(PathBuf, u32, u32, u32)> = Vec::new();
@@ -145,6 +145,13 @@ pub fn prepare_user_storage(uuid: Option<&str>, user: u32, flags: i32) -> io::Re
         };
         dirs.push((user_ce, 0o771, AID_SYSTEM, AID_SYSTEM));
     }
+    dirs
+}
+
+/// `fscrypt_prepare_user_storage` without keys. Returns the prepared
+/// directories.
+pub fn prepare_user_storage(uuid: Option<&str>, user: u32, flags: i32) -> io::Result<Vec<PathBuf>> {
+    let dirs = user_storage_dirs(uuid, user, flags);
     for (path, mode, uid, gid) in &dirs {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -164,6 +171,33 @@ pub fn prepare_user_storage(uuid: Option<&str>, user: u32, flags: i32) -> io::Re
         return Err(io::Error::other(format!("vold_prepare_subdirs: {status}")));
     }
     Ok(dirs.into_iter().map(|d| d.0).collect())
+}
+
+/// `fscrypt_destroy_user_storage` without keys: the original helper clears
+/// its per-user subdirectories, then each of the user's directories is
+/// removed. installd and system_server have emptied them already; one that
+/// is gone is not an error, one that cannot go is.
+pub fn destroy_user_storage(uuid: Option<&str>, user: u32, flags: i32) -> io::Result<Vec<PathBuf>> {
+    let status = std::process::Command::new("/system/bin/vold_prepare_subdirs")
+        .args(["destroy", uuid.unwrap_or(""), &user.to_string(), &flags.to_string()])
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!("vold_prepare_subdirs: {status}")));
+    }
+    let mut removed = Vec::new();
+    let mut failure = None;
+    // User 0's CE storage is /data/data itself, never removed.
+    for (path, ..) in user_storage_dirs(uuid, user, flags).into_iter().rev().filter(|d| d.0 != Path::new("/data/data")) {
+        match std::fs::remove_dir(&path) {
+            Ok(()) => removed.push(path),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                log::error!("failed to destroy {}: {e}", path.display());
+                failure.get_or_insert(e);
+            }
+        }
+    }
+    failure.map_or(Ok(removed), Err)
 }
 
 /// `fscrypt_init_user0` without keys: `prepare_special_dirs` and user 0's
