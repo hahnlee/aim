@@ -302,7 +302,7 @@ fn retire(kind:Option<Kind>){
 }
 /// Keep the retired Binder open description through its close flush, without
 /// nesting private allocation or performing IPC under the lifecycle lock.
-pub(crate) struct CloseAdmission { guard:Option<Lifecycle>, pin:Option<Pinned> }
+pub(crate) struct CloseAdmission { guard:Option<Lifecycle>, pin:Option<Pinned>, _draining:Draining }
 impl Drop for CloseAdmission { fn drop(&mut self) { drop(self.guard.take()); drop(self.pin.take()); } }
 impl CloseAdmission {
     pub(crate) fn finish(mut self, closed:bool)->Result<(),crate::errno::Errno> {
@@ -312,6 +312,8 @@ impl CloseAdmission {
     }
 }
 pub(crate) fn close_admission(fd:i32)->Result<CloseAdmission,crate::errno::Errno> {
+    // Before the lifecycle lock, which a borrower's I/O may take.
+    let draining=drain_borrows(fd);
     loop {
         let pin=if visible(fd) && matches!(get(fd),Some(Kind::Binder(_))) { Some(pin_guest(fd)?) } else { None };
         let guard=lifecycle();
@@ -321,7 +323,7 @@ pub(crate) fn close_admission(fd:i32)->Result<CloseAdmission,crate::errno::Errno
             (Some(Kind::Binder(_)),_)|(_,Some(Kind::Binder(_)))=>false,
             _=>true,
         };
-        if same { return Ok(CloseAdmission { guard:Some(guard),pin }); }
+        if same { return Ok(CloseAdmission { guard:Some(guard),pin,_draining:draining }); }
         drop(guard); drop(pin);
     }
 }
@@ -345,14 +347,18 @@ pub(crate) fn install_storage_registrar()->Result<(),String>{
 }
 /// A stable host open description and retained Linux owner, captured together
 /// under lifecycle admission. Blocking I/O never holds the lifecycle lock.
-pub struct Pinned{descriptor:Option<aim_storage::private_fd::PrivateFd>,kind:Option<Kind>,socket_allowed:bool,fuse:Option<Arc<super::fuse_client::Open>>}
+pub struct Pinned{descriptor:Option<aim_storage::private_fd::PrivateFd>,kind:Option<Kind>,socket_allowed:bool,fuse:Option<Arc<super::fuse_client::Open>>,borrowed:Option<Borrow>}
 impl Pinned{
-    pub fn descriptor(&self)->std::os::fd::BorrowedFd<'_>{use std::os::fd::AsFd;self.descriptor.as_ref().unwrap().as_fd()}
+    pub fn descriptor(&self)->std::os::fd::BorrowedFd<'_>{
+        use std::os::fd::AsFd;
+        match &self.borrowed{Some(borrow)=>unsafe{std::os::fd::BorrowedFd::borrow_raw(borrow.0)},None=>self.descriptor.as_ref().unwrap().as_fd()}
+    }
     pub fn kind(&self)->Option<&Kind>{self.kind.as_ref()}
     pub fn socket_allowed(&self)->bool{self.socket_allowed}
 }
 impl Drop for Pinned{fn drop(&mut self){
     use std::os::fd::AsRawFd;
+    if self.borrowed.is_some(){return;}
     let fd=self.descriptor().as_raw_fd();
     if let Some(file)=&self.fuse{super::fuse_client::remove_private_alias(fd,file);}
     let (previous,last_socket)={let mut table=TABLE.write().unwrap();let previous=table.remove(&fd);let last=match &self.kind{Some(Kind::Sock(socket))=>!table.values().any(|kind|matches!(kind,Kind::Sock(other) if Arc::ptr_eq(socket,other))),_=>false};(previous,last)};
@@ -379,7 +385,49 @@ pub fn pin_guest(fd:i32)->Result<Pinned,crate::errno::Errno>{
         Ok(unsafe{std::os::fd::OwnedFd::from_raw_fd(held)})
     }).map_err(|error|crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
     {use std::os::fd::AsRawFd;if let Some(file)=&fuse{super::fuse_client::install_private_alias(descriptor.as_raw_fd(),file.clone())?;}if let Some(kind)=&kind{insert(descriptor.as_raw_fd(),kind.clone());}}
-    Ok(Pinned{descriptor:Some(descriptor),kind,socket_allowed,fuse})
+    Ok(Pinned{descriptor:Some(descriptor),kind,socket_allowed,fuse,borrowed:None})
+}
+
+/// Per guest fd: the borrows in flight (low 16 bits) and the closers waiting
+/// for them (high bits). As Linux's fdget keeps the file for one syscall, a
+/// borrow keeps the fd number from being closed or replaced under it.
+static BORROWS:LazyLock<Box<[std::sync::atomic::AtomicU32]>>=LazyLock::new(||(0..hidden_base()).map(|_|std::sync::atomic::AtomicU32::new(0)).collect());
+const CLOSER:u32=1<<16;
+thread_local!{static OWN_BORROWS:std::cell::RefCell<Vec<i32>>=const{std::cell::RefCell::new(Vec::new())};}
+struct Borrow(i32);
+impl Drop for Borrow{fn drop(&mut self){
+    OWN_BORROWS.with(|own|{let mut own=own.borrow_mut();if let Some(at)=own.iter().rposition(|fd|*fd==self.0){own.swap_remove(at);}});
+    BORROWS[self.0 as usize].fetch_sub(1,std::sync::atomic::Ordering::Release);
+}}
+/// Pin `fd` for one non-blocking I/O call (read, write, seek, stat). A regular
+/// file's fd is borrowed in place, without the duplicate and close a pin costs;
+/// a closer waits for the borrow (regular file I/O always finishes). Other fds,
+/// which can block indefinitely, get a duplicate.
+pub fn pin_guest_io(fd:i32)->Result<Pinned,crate::errno::Errno>{
+    use std::sync::atomic::Ordering;
+    let Some(slot)=usize::try_from(fd).ok().and_then(|at|BORROWS.get(at))else{return pin_guest(fd)};
+    if slot.fetch_add(1,Ordering::Acquire)>=CLOSER{slot.fetch_sub(1,Ordering::Release);return pin_guest(fd);}
+    OWN_BORROWS.with(|own|own.borrow_mut().push(fd));
+    let borrow=Borrow(fd);
+    require_guest_visible(fd)?;
+    let kind=get(fd);
+    if !matches!(kind,None|Some(Kind::Regular(_)))||super::fuse_client::get(fd).is_some()||super::fuse_device::is_device(fd){drop(borrow);return pin_guest(fd);}
+    let mut stat:libc::stat=unsafe{std::mem::zeroed()};
+    if unsafe{libc::fstat(fd,&mut stat)}<0{return Err(crate::errno::last());}
+    if stat.st_mode&libc::S_IFMT!=libc::S_IFREG{drop(borrow);return pin_guest(fd);}
+    Ok(Pinned{descriptor:None,kind,socket_allowed:false,fuse:None,borrowed:Some(borrow)})
+}
+/// Held by a closer of `fd` until the fd is gone: new borrows take the
+/// duplicating path, and other threads' borrows have ended.
+struct Draining(Option<usize>);
+impl Drop for Draining{fn drop(&mut self){if let Some(at)=self.0{BORROWS[at].fetch_sub(CLOSER,std::sync::atomic::Ordering::Release);}}}
+fn drain_borrows(fd:i32)->Draining{
+    use std::sync::atomic::Ordering;
+    let Some(at)=usize::try_from(fd).ok().filter(|at|*at<BORROWS.len())else{return Draining(None)};
+    BORROWS[at].fetch_add(CLOSER,Ordering::Acquire);
+    let own=OWN_BORROWS.with(|own|own.borrow().iter().filter(|other|**other==fd).count()as u32);
+    while BORROWS[at].load(Ordering::Acquire)%CLOSER>own{std::thread::yield_now();}
+    Draining(Some(at))
 }
 
 static TABLE: LazyLock<RwLock<HashMap<i32, Kind>>> = LazyLock::new(Default::default);
