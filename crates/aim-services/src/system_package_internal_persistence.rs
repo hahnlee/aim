@@ -119,14 +119,16 @@ impl System {
             let latest = current.queries.as_ref().ok_or_else(|| illegal("settings writer capture unavailable"))?;
             if !Arc::ptr_eq(latest, &base) { continue; }
             let result = disk.commit_scan_settings(update.capture.scan());
+            let mut capture = update.capture.clone();
             if result.is_ok() || result.as_ref().is_err_and(|error| error.committed) {
-                current.publish_snapshot(update.store);
+                let update = current.publish_update(update)?;
                 current.set_queries(Some(update.capture.clone()));
                 if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
                 state.version = update.capture.scan().version();
+                capture = update.capture;
             }
             result.map_err(|error| illegal(error.to_string()))?;
-            return Ok(update.capture);
+            return Ok(capture);
         }
     }
     pub(crate) fn install_internal_persistence(&self, owner: Arc<Runtime>) -> Result<()> {
@@ -241,7 +243,7 @@ impl System {
         let mut scan = latest.scan().owner().clone();
         let metadata = disk.read_permission_user(&mut scan, &config, id).map_err(|error| illegal(error.to_string()))?;
         let update = latest.prepare_package_update(scan).map_err(illegal)?;
-        current.publish_snapshot(update.store); current.set_queries(Some(update.capture.clone()));
+        let update = current.publish_update(update)?; current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
         state.version = update.capture.scan().version(); drop(state); drop(disk); drop(install);
         self.with_runtime_permission_metadata(&update.capture, |owner| owner.import_permission_user(&metadata, user))?;

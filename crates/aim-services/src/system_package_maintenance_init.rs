@@ -86,7 +86,7 @@ impl System {
         if usage==*capture.scan().usage() {return Ok(());}
         let update=capture.prepare_usage_update(usage).map_err(illegal)?;
         let published=update.capture.scan().clone();
-        current.publish_snapshot(update.store);
+        let update = current.publish_update(update)?;
         current.set_queries(Some(update.capture));
         if let Some(page)=&current.version_page {page.publish(published.version());}
         state.version=published.version();

@@ -254,7 +254,7 @@ impl System {
         };
         let committed = write.is_ok() || write.as_ref().is_err_and(|e| e.committed);
         if committed {
-            current.publish_snapshot(update.store);
+            let update = current.publish_update(update)?;
             current.set_queries(Some(update.capture.clone()));
             if let Some(page) = &current.version_page {
                 page.publish(update.capture.scan().version());
@@ -463,7 +463,7 @@ impl System {
             true,
         );
         if write.is_ok() || write.as_ref().is_err_and(|e| e.committed) {
-            current.publish_snapshot(update.store);
+            let update = current.publish_update(update)?;
             current.set_queries(Some(update.capture.clone()));
             if let Some(page) = &current.version_page {
                 page.publish(update.capture.scan().version());

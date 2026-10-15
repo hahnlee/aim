@@ -414,7 +414,7 @@ impl System {
         registry
             .publish_new_user(stage)
             .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
-        current.publish_snapshot(update.store);
+        let update = current.publish_update(update)?;
         current.set_queries(Some(update.capture.clone()));
         if let Some(page) = &current.version_page {
             page.publish(update.capture.scan().version());
