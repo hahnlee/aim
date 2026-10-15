@@ -599,7 +599,7 @@ pub fn init(root: &Path, map: Option<&Path>) -> Result<(), String> {
     let read_only_dev = read_only_dev(&root);
     let _ = VFS.set(Vfs {
         root,
-        mapped: !mounts.is_empty(),
+        mapped: map.is_some(),
         read_only_dev,
         mounts: RwLock::new(mounts),
         runtime,
@@ -648,10 +648,10 @@ pub fn on_read_only_root(dev: i32) -> bool {
     VFS.get().and_then(|v| v.read_only_dev) == Some(dev)
 }
 
-/// Whether the root is a read-only volume (the image), rather than a
-/// writable directory given as `--root`.
+/// Whether the root is the read-only image: a path map's root, or a
+/// read-only volume, rather than a writable directory given as `--root`.
 pub fn read_only_root() -> bool {
-    VFS.get().is_some_and(|v| v.read_only_dev.is_some())
+    VFS.get().is_some_and(|v| v.mapped || v.read_only_dev.is_some())
 }
 
 fn vfs() -> &'static Vfs {
