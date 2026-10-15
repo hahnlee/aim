@@ -33,6 +33,17 @@ pub fn captured(
     disabled: bool,
     user: i32,
 ) -> Result<Option<Vec<u8>>, String> {
+    captured_at(snapshot, snapshot.version(), name, disabled, user)
+}
+
+/// This record as written at `version`.
+pub(super) fn captured_at(
+    snapshot: &Snapshot,
+    version: u64,
+    name: &str,
+    disabled: bool,
+    user: i32,
+) -> Result<Option<Vec<u8>>, String> {
     if user < 0 {
         return Err("user state requires a nonnegative user id".into());
     }
@@ -55,7 +66,7 @@ pub fn captured(
     // existing setting has no explicit entry for this user.
     let default = UserState::default();
     let state = users.get(&user).unwrap_or(&default);
-    write_capture(snapshot.version(), setting, disabled, user, state).map(Some)
+    write_capture(version, setting, disabled, user, state).map(Some)
 }
 
 pub(super) fn write_capture(

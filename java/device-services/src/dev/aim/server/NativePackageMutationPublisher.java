@@ -10,12 +10,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class NativePackageMutationPublisher implements NativePackageStateMutation.Publisher {
     private final IPackageInternalHost host;
     private final PackageSnapshots.Owner owner;
+    private final PackageSnapshots.Store snapshots;
     private final boolean crossUserSuspensions;
 
     public NativePackageMutationPublisher(IPackageInternalHost host, PackageSnapshots.Owner owner,
-            boolean crossUserSuspensions) {
+            PackageSnapshots.Store snapshots, boolean crossUserSuspensions) {
         this.host = Objects.requireNonNull(host);
         this.owner = Objects.requireNonNull(owner);
+        this.snapshots = Objects.requireNonNull(snapshots);
         this.crossUserSuspensions = crossUserSuspensions;
     }
     @Override public NativePackageStateMutation.Reservation reserve() {
@@ -32,7 +34,10 @@ public final class NativePackageMutationPublisher implements NativePackageStateM
             IPackageScanSnapshot snapshot = Objects.requireNonNull(endpoint.getSnapshot(), "reserved native graph unavailable");
             lease = new PackageScanLease(snapshot);
             long version = lease.getVersion();
-            data = lease.captureData(owner, crossUserSuspensions);
+            // The reserved graph shares the current capture's unchanged replicas.
+            var base = snapshots.retainCurrent();
+            try { data = lease.captureData(owner, crossUserSuspensions, base); }
+            finally { if (base != null) base.release(); }
             scope = new PackageSnapshots.ComputerSnapshot(data);
             if (scope.getVersion() != version) throw new IllegalStateException("mutation capture version differs");
             int sequence = endpoint.getChangedPackagesSequence();

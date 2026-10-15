@@ -409,27 +409,31 @@ public final class PackageScanLease implements AutoCloseable {
         if (closed) throw new IllegalStateException("package scan lease is closed");
         long metadata = endpoint.getMetadataVersion();
         if (metadata <= 0 || metadata > version) throw new IOException("invalid metadata version");
-        var activeChanges = new java.util.LinkedHashMap<String, PackageStateReplica>();
-        var factoryChanges = new java.util.LinkedHashMap<String, PackageStateReplica>();
+        var activeChanges = new java.util.HashSet<String>();
+        var factoryChanges = new java.util.HashSet<String>();
+        var sharedChanges = new java.util.HashSet<String>();
         boolean full = previous == null || previous.metadataComparisonId() <= 0;
         if (!full && previous.metadataVersion() != metadata) {
-            byte[] changes = endpoint.getChangedUsersForMetadataBase(previous.metadataComparisonId());
+            byte[] changes = endpoint.getChangedOwnersForMetadataBase(previous.metadataComparisonId());
             if (changes == null) full = true;
             else {
                 var record = Parcel.obtain();
                 try {
                     record.unmarshall(changes, 0, changes.length); record.setDataPosition(0);
-                    if (record.readLong() != version || record.readLong() != metadata) throw new IOException("user metadata delta version differs");
+                    if (record.readLong() != version || record.readLong() != metadata) throw new IOException("metadata delta version differs");
                     int count = record.readInt();
-                    if (count < 0 || count > record.dataAvail() / 12) throw new IOException("invalid user metadata delta count");
+                    if (count < 0 || count > record.dataAvail() / 12) throw new IOException("invalid metadata delta count");
                     for (int i = 0; i < count; i++) {
                         String name = Objects.requireNonNull(record.readString()); boolean factory = record.readBoolean();
-                        var target = factory ? factoryChanges : activeChanges;
-                        var replica = getPackageStateReplica(name, factory, crossUserSuspensions);
-                        if (replica == null || target.put(name, replica) != null) throw new IOException("invalid user metadata delta owner");
+                        if (!(factory ? factoryChanges : activeChanges).add(name)) throw new IOException("duplicate metadata delta owner");
                     }
-                    if (record.dataAvail() != 0) throw new IOException("user metadata delta trailing data");
-                } catch (IllegalArgumentException | NullPointerException failure) { throw new IOException("invalid user metadata delta", failure); }
+                    count = record.readInt();
+                    if (count < 0 || count > record.dataAvail() / 8) throw new IOException("invalid shared metadata delta count");
+                    for (int i = 0; i < count; i++) {
+                        if (!sharedChanges.add(Objects.requireNonNull(record.readString()))) throw new IOException("duplicate shared metadata delta owner");
+                    }
+                    if (record.dataAvail() != 0) throw new IOException("metadata delta trailing data");
+                } catch (IllegalArgumentException | NullPointerException failure) { throw new IOException("invalid metadata delta", failure); }
                 finally { record.recycle(); }
             }
         }
@@ -467,10 +471,44 @@ public final class PackageScanLease implements AutoCloseable {
         } catch (IllegalArgumentException | NullPointerException failure) {
             throw new IOException("invalid usage records", failure);
         } finally { parcel.recycle(); }
+        // Unchanged owners keep the previous capture's replicas.
+        var packages = new java.util.LinkedHashMap<String, com.android.server.pm.pkg.PackageState>();
+        for (String name : packageNames(false)) {
+            var state = activeChanges.contains(name) ? getPackageStateReplica(name, false, crossUserSuspensions)
+                    : previous.packageReplica(name, false);
+            var times = records.get(name);
+            if (!(state instanceof PackageStateReplica replica) || times == null)
+                throw new IOException("incremental package owner is not a native replica");
+            packages.put(name, replica.withUsage(times, version));
+        }
+        if (!records.keySet().equals(packages.keySet())) throw new IOException("incremental usage inventory differs");
+        var disabled = new java.util.LinkedHashMap<String, com.android.server.pm.pkg.PackageState>();
+        for (String name : packageNames(true)) {
+            var state = factoryChanges.contains(name) ? getPackageStateReplica(name, true, crossUserSuspensions)
+                    : previous.packageReplica(name, true);
+            if (!(state instanceof PackageStateReplica)) throw new IOException("incremental factory owner is not a native replica");
+            disabled.put(name, state);
+        }
+        var shared = new java.util.LinkedHashMap<String, com.android.server.pm.pkg.SharedUserApi>();
+        var sharedIds = new java.util.HashSet<Integer>();
+        for (String name : getSharedUserNames()) {
+            SharedUserReplica replica;
+            if (sharedChanges.contains(name)) replica = sharedUserReplica(name, crossUserSuspensions, packages);
+            else if (previous.sharedReplica(name) instanceof SharedUserReplica retained) replica = retained.withPackages(packages);
+            else throw new IOException("incremental shared owner is not a native replica");
+            for (var member : replica.getCurrentPackageStates()) {
+                if (packages.get(member.getPackageName()) != member) throw new IOException("shared UID member outside package inventory");
+            }
+            if (!sharedIds.add(replica.getAppId())) throw new IOException("duplicate shared UID identity");
+            shared.put(name, replica);
+        }
+        // A changed group may change any member's validity; otherwise only changed members can.
+        validateSharedGroups(packages, shared, false, sharedChanges.isEmpty() ? activeChanges : packages.keySet());
+        validateSharedGroups(disabled, shared, true, sharedChanges.isEmpty() ? factoryChanges : disabled.keySet());
         var computer = captureComputer();
         PackageSnapshots.Data result = null;
         try {
-            result = previous.withChangedUsers(version, metadata, records, activeChanges, factoryChanges, computer, crossUserSuspensions);
+            result = previous.withChangedOwners(version, metadata, packages, disabled, shared, computer, crossUserSuspensions);
             if (previous.metadataVersion() != metadata) transferComparisonEndpoint(result);
             return result;
         }
@@ -532,8 +570,8 @@ public final class PackageScanLease implements AutoCloseable {
         for (var group : shared.values()) {
             if (!sharedIds.add(group.getAppId())) throw new IOException("duplicate shared UID identity");
         }
-        validateSharedGroups(packages, shared, false);
-        validateSharedGroups(disabled, shared, true);
+        validateSharedGroups(packages, shared, false, packages.keySet());
+        validateSharedGroups(disabled, shared, true, disabled.keySet());
         IPackageComputer computer = endpoint.getComputer();
         if (computer == null) throw new IOException("missing native package query capture");
         NativePackageCapabilities.attach(computer);
@@ -551,9 +589,11 @@ public final class PackageScanLease implements AutoCloseable {
     }
 
     private void validateSharedGroups(java.util.Map<String, com.android.server.pm.pkg.PackageState> packages,
-            java.util.Map<String, com.android.server.pm.pkg.SharedUserApi> shared, boolean factory)
-            throws RemoteException, IOException {
-        for (var state : packages.values()) {
+            java.util.Map<String, com.android.server.pm.pkg.SharedUserApi> shared, boolean factory,
+            java.util.Set<String> names) throws RemoteException, IOException {
+        for (String name : names) {
+            var state = packages.get(name);
+            if (state == null) throw new IOException("validated package outside inventory");
             if (!state.hasSharedUser()) continue;
             var signing = getSigningState(state.getPackageName(), factory);
             var group = shared.get(signing.getSharedGroupName());
@@ -577,13 +617,20 @@ public final class PackageScanLease implements AutoCloseable {
         }
     }
 
-    private java.util.Map<String, com.android.server.pm.pkg.PackageState> capturePackageMap(
-            boolean factory, boolean crossUserSuspensions) throws RemoteException, IOException {
+    private java.util.List<String> packageNames(boolean factory) throws RemoteException, IOException {
         String[] names = endpoint.getPackageNames(factory);
         if (names == null) throw new IOException("missing package setting inventory");
-        var result = new java.util.LinkedHashMap<String, com.android.server.pm.pkg.PackageState>();
+        var unique = new java.util.HashSet<String>();
         for (String name : names) {
-            if (name == null || result.containsKey(name)) throw new IOException("invalid package setting inventory");
+            if (name == null || !unique.add(name)) throw new IOException("invalid package setting inventory");
+        }
+        return java.util.List.of(names);
+    }
+
+    private java.util.Map<String, com.android.server.pm.pkg.PackageState> capturePackageMap(
+            boolean factory, boolean crossUserSuspensions) throws RemoteException, IOException {
+        var result = new java.util.LinkedHashMap<String, com.android.server.pm.pkg.PackageState>();
+        for (String name : packageNames(factory)) {
             var replica = getPackageStateReplica(name, factory, crossUserSuspensions);
             if (replica == null) throw new IOException("missing package setting inventory owner");
             result.put(name, replica);
@@ -649,6 +696,20 @@ public final class PackageScanLease implements AutoCloseable {
         var replica = new SharedUserReplica(state, members);
         sharedReplicas.put(key, replica);
         return replica;
+    }
+
+    /** A changed group of this capture over the given active members. */
+    private SharedUserReplica sharedUserReplica(String name, boolean crossUserSuspensions,
+            java.util.Map<String, com.android.server.pm.pkg.PackageState> packages) throws RemoteException, IOException {
+        SharedUserData state = getSharedUserData(name);
+        if (state == null) throw new IOException("missing shared UID inventory owner");
+        var members = new java.util.ArrayList<PackageStateReplica>();
+        for (var member : state.getMembers()) {
+            var replica = member.retained() == null ? packages.get(member.name()) : member.retained().newReplica(crossUserSuspensions);
+            if (!(replica instanceof PackageStateReplica owner)) throw new IOException("missing shared UID package owner");
+            members.add(owner);
+        }
+        return new SharedUserReplica(state, members);
     }
 
     public synchronized int getHiddenApiEnforcementPolicy(String name, boolean factory)

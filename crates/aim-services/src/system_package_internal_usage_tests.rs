@@ -536,13 +536,11 @@ fn query_epochs_retain_metadata_only_for_equal_complete_native_owners() {
     let runtime=base.scan().owner().replica_runtime("p",false).unwrap().unwrap().clone();
     owner.capture_replica_runtime(BTreeMap::from([(("p".into(),false),runtime.clone()),(("p".into(),true),runtime.clone())])).unwrap();
     let factory_store=Store::new_replica(owner,base.scan().usage().clone()).unwrap();let factory_base=factory_store.capture();
-    // A factory-only user delta conservatively recaptures the complete shared
-    // graph; it must never keep a stale retained SharedUser member.
+    // A factory-only user delta names exactly that factory owner.
     let mut user_owner=factory_base.owner().clone();
     let active=crate::package::scan::CapturedUsers{states:user_owner.scanned_user_states("p").unwrap().clone(),active_aliases:Default::default()};
     let mut factory_users=user_owner.disabled_user_states("p").unwrap().clone();factory_users.get_mut(&0).unwrap().stopped=true;
     user_owner.capture_user_states(BTreeMap::from([(("p".into(),false),active),(("p".into(),true),crate::package::scan::CapturedUsers{states:factory_users,active_aliases:Default::default()})])).unwrap();
-    assert_eq!(factory_base.owner().scoped_user_metadata_changes(&user_owner),Some(vec![("p".into(),true)]));
     let changed_users=Store::new_replica_after(&factory_base,user_owner,factory_base.usage().clone(),factory_base.version()+1).unwrap();
     use aim_binder_host::local::Service;
     use aim_service_aidl::dev_aim_server_ipackagescansnapshot as meta;
@@ -551,10 +549,13 @@ fn query_epochs_retain_metadata_only_for_equal_complete_native_owners() {
     let mut request=Parcel::new();meta::GetMetadataComparisonId{}.write(&mut request);
     let reply=call(&old,meta::GET_METADATA_COMPARISON_ID,&request);
     let id=meta::read_get_metadata_comparison_id_reply(&mut reply.reader()).unwrap().unwrap();
-    let mut request=Parcel::new();meta::GetChangedUsersForMetadataBase{comparison_id:id}.write(&mut request);
+    let mut request=Parcel::new();meta::GetChangedOwnersForMetadataBase{comparison_id:id}.write(&mut request);
     let current=crate::package::scan_snapshot::endpoint::Endpoint::new(changed_users.capture());
-    let reply=call(&current,meta::GET_CHANGED_USERS_FOR_METADATA_BASE,&request);
-    assert!(meta::read_get_changed_users_for_metadata_base_reply(&mut reply.reader()).unwrap().unwrap().is_none());
+    let reply=call(&current,meta::GET_CHANGED_OWNERS_FOR_METADATA_BASE,&request);
+    let bytes=meta::read_get_changed_owners_for_metadata_base_reply(&mut reply.reader()).unwrap().unwrap().unwrap();
+    let mut record=aim_binder_host::parcel::Reader::new(&bytes,&[]);record.read_i64().unwrap();record.read_i64().unwrap();
+    assert_eq!(record.read_i32().unwrap(),1);assert_eq!(record.read_string16().unwrap().as_deref(),Some("p"));
+    assert!(record.read_bool().unwrap());assert_eq!(record.read_i32().unwrap(),0);assert_eq!(record.remaining(),0);
     let mut owner=factory_base.owner().clone();let mut changed=runtime.clone();changed.usage[0]=123;
     owner.capture_replica_runtime(BTreeMap::from([(("p".into(),false),runtime),(("p".into(),true),changed)])).unwrap();
     let changed=Store::new_replica_after(&factory_base,owner,factory_base.usage().clone(),factory_base.version()+1).unwrap().capture();
@@ -603,7 +604,7 @@ fn duplicate_app_data_receipt_keeps_metadata_but_persists_and_publishes_each_com
 }
 
 #[test]
-fn metadata_comparison_capabilities_are_lease_bound_and_strictly_user_scoped() {
+fn metadata_comparison_capabilities_are_lease_bound_and_name_exactly_the_changed_owners() {
     use crate::package::scan_snapshot::{Store,endpoint::Endpoint};
     use aim_binder_host::{local::Service,parcel::Reader};
     use aim_service_aidl::dev_aim_server_ipackagescansnapshot as api;
@@ -618,17 +619,22 @@ fn metadata_comparison_capabilities_are_lease_bound_and_strictly_user_scoped() {
     let store=Store::new_replica_after(base.scan(),owner,base.scan().usage().clone(),base.scan().version()+1).unwrap();
     let current=Endpoint::new(store.capture());
     let get=|endpoint:&Endpoint,from| {
-        let mut request=Parcel::new();api::GetChangedUsersForMetadataBase{comparison_id:from}.write(&mut request);
-        let reply=call(endpoint,api::GET_CHANGED_USERS_FOR_METADATA_BASE,&request);
-        api::read_get_changed_users_for_metadata_base_reply(&mut reply.reader()).unwrap().unwrap()
+        let mut request=Parcel::new();api::GetChangedOwnersForMetadataBase{comparison_id:from}.write(&mut request);
+        let reply=call(endpoint,api::GET_CHANGED_OWNERS_FOR_METADATA_BASE,&request);
+        api::read_get_changed_owners_for_metadata_base_reply(&mut reply.reader()).unwrap().unwrap()
     };
-    let bytes=get(&current,id).expect("actual single-package user change supports incremental capture");
-    let mut record=Reader::new(&bytes,&[]);
-    assert_eq!(record.read_i64().unwrap(),store.capture().version() as i64);
-    assert_eq!(record.read_i64().unwrap(),store.capture().metadata_revision() as i64);
-    assert_eq!(record.read_i32().unwrap(),1);assert_eq!(record.read_string16().unwrap().as_deref(),Some("p"));
-    assert!(!record.read_bool().unwrap());assert_eq!(record.remaining(),0);
-    // A real changed metadata owner alongside user state requires the full graph.
+    let only_p=|bytes:Vec<u8>,capture:&crate::package::scan_snapshot::Snapshot|{
+        let mut record=Reader::new(&bytes,&[]);
+        assert_eq!(record.read_i64().unwrap(),capture.version() as i64);
+        assert_eq!(record.read_i64().unwrap(),capture.metadata_revision() as i64);
+        assert_eq!(record.read_i32().unwrap(),1);assert_eq!(record.read_string16().unwrap().as_deref(),Some("p"));
+        assert!(!record.read_bool().unwrap());assert_eq!(record.read_i32().unwrap(),0);assert_eq!(record.remaining(),0);
+    };
+    only_p(get(&current,id).expect("a single-package user change is incremental"),&store.capture());
+    let same=Store::new_replica_after(&store.capture(),store.capture().owner().clone(),store.capture().usage().clone(),store.capture().version()+1).unwrap();
+    let bytes=get(&Endpoint::new(same.capture()),id).unwrap();let mut record=Reader::new(&bytes,&[]);record.read_i64().unwrap();record.read_i64().unwrap();
+    assert_eq!(record.read_i32().unwrap(),1,"only the user-changed owner differs from the comparison base");
+    // Any other changed record of that package names the same owner.
     for kind in 0..3 {
         let mut owner=store.capture().owner().clone();
         if kind==0 {owner.settings.packages[0].category_hint=7;}
@@ -638,10 +644,12 @@ fn metadata_comparison_capabilities_are_lease_bound_and_strictly_user_scoped() {
             owner.capture_replica_runtime(BTreeMap::from([(("p".into(),false),runtime)])).unwrap();
         }
         let changed=Store::new_replica_after(&store.capture(),owner,store.capture().usage().clone(),store.capture().version()+1).unwrap();
-        assert!(get(&Endpoint::new(changed.capture()),id).is_none());
+        only_p(get(&Endpoint::new(changed.capture()),id).expect("a package record change is incremental"),&changed.capture());
     }
+    // Records compare by content: another Store's equal capture changes nothing.
     let foreign=Store::new_replica(base.scan().owner().clone(),base.scan().usage().clone()).unwrap();
-    assert!(get(&Endpoint::new(foreign.capture()),id).is_none(),"equal fields cannot authorize foreign Store lineage");
+    let bytes=get(&Endpoint::new(foreign.capture()),id).unwrap();let mut record=Reader::new(&bytes,&[]);record.read_i64().unwrap();record.read_i64().unwrap();
+    assert_eq!((record.read_i32().unwrap(),record.read_i32().unwrap()),(0,0));
     assert!(get(&current,i64::MAX).is_none());
     baseline.close_lease();
     assert!(get(&current,id).is_none(),"closed endpoint capability expires even while its snapshot remains strongly held");

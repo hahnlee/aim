@@ -166,19 +166,18 @@ fn boolean(r: &mut Reader<'_>) -> Result<bool, String> {
     }
 }
 
+/// The call that reads one UID's live permission state.
+pub fn call(app_id: i32, users: &[i32]) -> (u32, Parcel) {
+    let mut request = Parcel::new();
+    bridge::GetLegacyPermissionState { app_id, user_ids: Some(users.to_vec()) }.write(&mut request);
+    (bridge::GET_LEGACY_PERMISSION_STATE, request)
+}
+
 impl crate::package::bootstrap::Bridge {
     pub fn legacy_permissions(&self, app_id: i32, users: &[i32]) -> Result<State, Error> {
         validate(app_id, users)?;
-        let mut request = Parcel::new();
-        bridge::GetLegacyPermissionState {
-            app_id,
-            user_ids: Some(users.to_vec()),
-        }
-        .write(&mut request);
-        let reply = self
-            .owner
-            .transact(bridge::GET_LEGACY_PERMISSION_STATE, &request, false)
-            .map_err(Error::Transport)?;
+        let (code, request) = call(app_id, users);
+        let reply = self.read(code, &request).map_err(Error::Transport)?;
         let mut reader = reply.reader();
         let bytes = bridge::read_get_legacy_permission_state_reply(&mut reader)
             .map_err(Error::Transport)?

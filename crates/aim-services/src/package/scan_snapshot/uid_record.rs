@@ -79,6 +79,7 @@ mod tests {
             metadata_revision: 1,
             lineage: std::sync::Arc::new(()),
             libraries: Default::default(),
+            records: Default::default(),
         }
     }
 

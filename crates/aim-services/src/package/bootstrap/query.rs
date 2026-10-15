@@ -64,16 +64,8 @@ impl Bridge {
                 "invalid query compatibility identity".into(),
             ));
         }
-        let mut data = Parcel::new();
-        bridge::IsApplicationQueryFilteringEnabled {
-            package_name: Some(name.into()),
-            target_sdk,
-        }
-        .write(&mut data);
-        let reply = self
-            .owner
-            .transact(bridge::IS_APPLICATION_QUERY_FILTERING_ENABLED, &data, false)
-            .map_err(OwnerError::Transport)?;
+        let (code, data) = application_query_filtering_call(name, target_sdk);
+        let reply = self.read(code, &data).map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let enabled = bridge::read_is_application_query_filtering_enabled_reply(&mut reader)
             .map_err(OwnerError::Transport)?
@@ -94,16 +86,8 @@ impl Bridge {
                 "invalid domain compatibility identity".into(),
             ));
         }
-        let mut request = Parcel::new();
-        bridge::IsDomainVerificationRestricted {
-            package_name: Some(name.into()),
-            target_sdk,
-        }
-        .write(&mut request);
-        let reply = self
-            .owner
-            .transact(bridge::IS_DOMAIN_VERIFICATION_RESTRICTED, &request, false)
-            .map_err(OwnerError::Transport)?;
+        let (code, request) = domain_verification_restricted_call(name, target_sdk);
+        let reply = self.read(code, &request).map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let enabled = bridge::read_is_domain_verification_restricted_reply(&mut reader)
             .map_err(OwnerError::Transport)?
@@ -173,6 +157,17 @@ impl Bridge {
         &self,
         owner: &SigningScan,
     ) -> Result<BTreeMap<String, bool>, QueryContextError> {
+        let calls = owner.settings.packages.iter()
+            .filter_map(|setting| owner.domain_code_owner(setting).ok().flatten())
+            .map(|code| domain_verification_restricted_call(&code.package.package_name, code.package.target_sdk_version))
+            .collect();
+        self.read_ahead(calls, || self.read_domain_policies(owner))
+    }
+
+    fn read_domain_policies(
+        &self,
+        owner: &SigningScan,
+    ) -> Result<BTreeMap<String, bool>, QueryContextError> {
         let mut inputs = Vec::new();
         for setting in &owner.settings.packages {
             let Some(code) = owner.domain_code_owner(setting).map_err(QueryContextError::Input)? else { continue; };
@@ -235,15 +230,8 @@ impl Bridge {
         if name.is_empty() {
             return Err(OwnerError::Code("missing permission package".into()));
         }
-        let mut request = Parcel::new();
-        bridge::GetPackageInstalledPermissions {
-            package_name: Some(name.into()),
-        }
-        .write(&mut request);
-        let reply = self
-            .owner
-            .transact(bridge::GET_PACKAGE_INSTALLED_PERMISSIONS, &request, false)
-            .map_err(OwnerError::Transport)?;
+        let (code, request) = installed_permissions_call(name);
+        let reply = self.read(code, &request).map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let names = bridge::read_get_package_installed_permissions_reply(&mut reader)
             .map_err(OwnerError::Transport)?
@@ -260,17 +248,8 @@ impl Bridge {
         if name.is_empty() || !(0..100_000).contains(&app_id) || user_id < 0 {
             return Err(OwnerError::Code("invalid permission identity".into()));
         }
-        let mut request = Parcel::new();
-        bridge::GetPackageGrantedPermissions {
-            package_name: Some(name.into()),
-            app_id,
-            user_id,
-        }
-        .write(&mut request);
-        let reply = self
-            .owner
-            .transact(bridge::GET_PACKAGE_GRANTED_PERMISSIONS, &request, false)
-            .map_err(OwnerError::Transport)?;
+        let (code, request) = granted_permissions_call(name, app_id, user_id);
+        let reply = self.read(code, &request).map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let names = bridge::read_get_package_granted_permissions_reply(&mut reader)
             .map_err(OwnerError::Transport)?
@@ -313,12 +292,28 @@ impl Bridge {
         }
         validate(&packages, &context.packages, &context.users)?;
         validate(&retained, &context.retained_packages, &context.users)?;
-        for (key, extra) in &mut context.packages {
-            self.resolve_package(packages[key].0, packages[key].1, extra)?;
+        let mut calls = Vec::new();
+        for (setting, stored, extra) in context.packages.iter().map(|(key, extra)| (packages[key].0, packages[key].1, extra))
+            .chain(context.retained_packages.iter().map(|(key, extra)| (retained[key].0, retained[key].1, extra)))
+        {
+            calls.push(installed_permissions_call(&setting.name));
+            calls.push(application_query_filtering_call(&setting.name, setting.target_sdk_version));
+            for id in extra.users.keys() {
+                if stored.get(id).is_none_or(|state| state.installed) {
+                    calls.push(granted_permissions_call(&setting.name, setting.app_id, *id));
+                }
+                calls.extend(super::permission_gids_calls(setting.app_id, &[*id]));
+            }
         }
-        for (key, extra) in &mut context.retained_packages {
-            self.resolve_package(retained[key].0, retained[key].1, extra)?;
-        }
+        self.read_ahead(calls, || {
+            for (key, extra) in &mut context.packages {
+                self.resolve_package(packages[key].0, packages[key].1, extra)?;
+            }
+            for (key, extra) in &mut context.retained_packages {
+                self.resolve_package(retained[key].0, retained[key].1, extra)?;
+            }
+            Ok(())
+        })?;
         Ok(context)
     }
 
@@ -350,6 +345,30 @@ impl Bridge {
         }
         Ok(())
     }
+}
+
+pub fn application_query_filtering_call(name: &str, target_sdk: i32) -> (u32, Parcel) {
+    let mut data = Parcel::new();
+    bridge::IsApplicationQueryFilteringEnabled { package_name: Some(name.into()), target_sdk }.write(&mut data);
+    (bridge::IS_APPLICATION_QUERY_FILTERING_ENABLED, data)
+}
+
+pub fn domain_verification_restricted_call(name: &str, target_sdk: i32) -> (u32, Parcel) {
+    let mut data = Parcel::new();
+    bridge::IsDomainVerificationRestricted { package_name: Some(name.into()), target_sdk }.write(&mut data);
+    (bridge::IS_DOMAIN_VERIFICATION_RESTRICTED, data)
+}
+
+pub fn installed_permissions_call(name: &str) -> (u32, Parcel) {
+    let mut data = Parcel::new();
+    bridge::GetPackageInstalledPermissions { package_name: Some(name.into()) }.write(&mut data);
+    (bridge::GET_PACKAGE_INSTALLED_PERMISSIONS, data)
+}
+
+pub fn granted_permissions_call(name: &str, app_id: i32, user_id: i32) -> (u32, Parcel) {
+    let mut data = Parcel::new();
+    bridge::GetPackageGrantedPermissions { package_name: Some(name.into()), app_id, user_id }.write(&mut data);
+    (bridge::GET_PACKAGE_GRANTED_PERMISSIONS, data)
 }
 
 fn validate<K: Ord>(

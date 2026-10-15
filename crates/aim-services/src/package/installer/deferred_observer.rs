@@ -13,36 +13,47 @@ pub const PENDING_KILL: Duration = Duration::from_millis(1000);
 /// `DEFERRED_NO_KILL_INSTALL_OBSERVER_DELAY_MS`.
 pub const NO_KILL: Duration = Duration::from_millis(500);
 
+/// Each package's latest kill, ordered, so a kill reported before its
+/// install starts waiting still ends that wait.
 #[derive(Default)]
 pub struct Deferred {
-    pending: Mutex<BTreeMap<i32, BTreeSet<String>>>,
+    kills: Mutex<Kills>,
     changed: Condvar,
 }
+#[derive(Default)]
+struct Kills {
+    sequence: u64,
+    latest: BTreeMap<String, u64>,
+}
 impl Deferred {
-    /// Blocks until every package in `killed` had its processes killed, or
-    /// `delay` passes; with nothing to kill it waits out `delay`.
-    pub fn wait(&self, session: i32, killed: BTreeSet<String>, delay: Duration) {
+    /// The point after which a kill counts for an install starting now.
+    pub fn mark(&self) -> u64 {
+        self.kills.lock().unwrap().sequence
+    }
+    /// Blocks until every package in `killed` had its processes killed after
+    /// `since`, or `delay` passes; with nothing to kill it waits out `delay`.
+    pub fn wait(&self, since: u64, killed: &BTreeSet<String>, delay: Duration) {
         let deadline = Instant::now() + delay;
-        let waits_for_kill = !killed.is_empty();
-        let mut pending = self.pending.lock().unwrap();
-        pending.insert(session, killed);
+        let mut kills = self.kills.lock().unwrap();
         loop {
-            if waits_for_kill && pending[&session].is_empty() {
+            if !killed.is_empty()
+                && killed.iter().all(|name| kills.latest.get(name).is_some_and(|at| *at > since))
+            {
                 break;
             }
             let now = Instant::now();
             if now >= deadline {
                 break;
             }
-            pending = self.changed.wait_timeout(pending, deadline - now).unwrap().0;
+            kills = self.changed.wait_timeout(kills, deadline - now).unwrap().0;
         }
-        pending.remove(&session);
     }
     /// `onPackageProcessKilledForUninstall`.
     pub fn killed(&self, package: &str) {
-        for packages in self.pending.lock().unwrap().values_mut() {
-            packages.remove(package);
-        }
+        let mut kills = self.kills.lock().unwrap();
+        kills.sequence += 1;
+        let sequence = kills.sequence;
+        kills.latest.insert(package.to_owned(), sequence);
         self.changed.notify_all();
     }
 }
@@ -55,23 +66,31 @@ mod tests {
     #[test]
     fn a_kill_ends_the_wait_and_otherwise_the_delay_does() {
         let deferred = Arc::new(Deferred::default());
+        let since = deferred.mark();
         let waiter = deferred.clone();
         let started = Instant::now();
-        let thread = std::thread::spawn(move || waiter.wait(1, BTreeSet::from(["p".to_owned()]), Duration::from_secs(10)));
-        while deferred.pending.lock().unwrap().is_empty() {
-            std::thread::yield_now();
-        }
+        let thread = std::thread::spawn(move || {
+            waiter.wait(since, &BTreeSet::from(["p".to_owned()]), Duration::from_secs(10))
+        });
         deferred.killed("other");
         deferred.killed("p");
         thread.join().unwrap();
         assert!(started.elapsed() < Duration::from_secs(5));
 
+        // A kill reported before the wait begins still ends it.
+        let since = deferred.mark();
+        deferred.killed("q");
         let started = Instant::now();
-        deferred.wait(2, BTreeSet::from(["q".to_owned()]), Duration::from_millis(50));
+        deferred.wait(since, &BTreeSet::from(["q".to_owned()]), Duration::from_secs(10));
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        // An earlier install's kill does not.
+        let since = deferred.mark();
+        let started = Instant::now();
+        deferred.wait(since, &BTreeSet::from(["q".to_owned()]), Duration::from_millis(50));
         assert!(started.elapsed() >= Duration::from_millis(50));
         let started = Instant::now();
-        deferred.wait(3, BTreeSet::new(), Duration::from_millis(50));
+        deferred.wait(since, &BTreeSet::new(), Duration::from_millis(50));
         assert!(started.elapsed() >= Duration::from_millis(50));
-        assert!(deferred.pending.lock().unwrap().is_empty());
     }
 }

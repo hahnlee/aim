@@ -1931,7 +1931,7 @@ public final class PackageRoundTripOracle {
             return comparisonIds.computeIfAbsent(getVersion(), ignored -> COMPARISON_IDS.incrementAndGet());
         }
         // Controlled owner has no native comparison registry: full capture is the contract fallback.
-        public byte[] getChangedUsersForMetadataBase(long comparisonId) { return null; }
+        public byte[] getChangedOwnersForMetadataBase(long comparisonId) { return null; }
         private final String name;
         private final byte[] bytes;
         private final byte[] usage;

@@ -1771,10 +1771,13 @@ aggregate native tests pass 792/0, ten ignored. C90 still reaches ANR.
 C92 bounded creator diagnostics prove both duplicate app-data state publications
 and actual per-package component user-state changes trigger whole metadata graph
 reconstruction. Duplicate unchanged receipts now retain metadata revision while
-persisting/publishing normally (13 regressions pass). Generic active scoped-user
-metadata delta compares complete native owners, normalizing only usage/user maps,
-and uses unique lease-owned comparison capabilities with strict lineage/lifetime
-checks; foreign, expired, factory or nonuser changes use full capture. Current
+persisting/publishing normally (13 regressions pass). Replica deltas compare each
+package's and shared UID's records by content, ignoring only the capture version
+and active usage, through unique lease-owned comparison capabilities (#1400): a
+capture, including an install's permission candidate and a mutation reservation,
+refetches only the owners whose records changed; an expired base uses full
+capture. Store queries run on the current capture's Computer, and native passes
+read system_server's per-package owners in one `transactBatch`. Current
 whole native suite passes 794/0, eleven ignored and full Java builds pass. C93
 completed Binder calls fall to about 282,898 over 173.9s versus roughly four
 million before; Chrome still ANRs. Its actual main thread waits 3.5335s in

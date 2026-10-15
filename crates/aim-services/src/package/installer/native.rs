@@ -708,6 +708,7 @@ impl NativeOwners {
         let ordered=std::iter::once(id).chain(root.children.iter().copied()).collect();
         let warning_attempt=self.install_warnings.begin(id,ordered)?;
         let before=(self.source)()?;
+        let since=self.deferred.mark();
         let result = self.install_staged_batch(id);
         match result {
             Err(super::pipeline::Error::Pending) => Ok(()),
@@ -728,7 +729,7 @@ impl NativeOwners {
                 let this=self.this.clone();
                 std::thread::spawn(move||{
                     let Some(owner)=this.upgrade() else {return};
-                    owner.deferred.wait(id,killed,delay);
+                    owner.deferred.wait(since,&killed,delay);
                     if let Err(error)=owner.complete_install(id,&warnings) {owner.errors.lock().unwrap().push(error.message);}
                 });
                 Ok(())

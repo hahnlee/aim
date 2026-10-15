@@ -49,7 +49,7 @@ public final class PackageSnapshotUserDeltaOracle {
                     }
                     var latest = source.capture();
                     try {
-                        byte[] changes = latest.getChangedUsersForMetadataBase(comparison);
+                        byte[] changes = latest.getChangedOwnersForMetadataBase(comparison);
                         if (changes == null) throw new AssertionError("retained actual user-change comparison requires full fallback");
                         var record = android.os.Parcel.obtain();
                         try {
@@ -58,11 +58,11 @@ public final class PackageSnapshotUserDeltaOracle {
                                     || record.readLong() != latest.getMetadataVersion()
                                     || record.readInt() != 1
                                     || !original.getPackageName().equals(record.readString())
-                                    || record.readBoolean() || record.dataAvail() != 0)
+                                    || record.readBoolean() || record.readInt() != 0 || record.dataAvail() != 0)
                                 throw new AssertionError("user comparison returned wrong current record keys");
                         } finally { record.recycle(); }
                         baseline.close(); baseline = null;
-                        if (latest.getChangedUsersForMetadataBase(comparison) != null)
+                        if (latest.getChangedOwnersForMetadataBase(comparison) != null)
                             throw new AssertionError("expired comparison capability remained usable");
                     } finally { latest.close(); }
                 } catch (Exception | Error failure) {

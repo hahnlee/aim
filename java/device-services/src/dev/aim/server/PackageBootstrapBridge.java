@@ -241,6 +241,38 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
     }
 
     @Override
+    public byte[] transactBatch(byte[] calls) throws RemoteException {
+        enforceSystemUid();
+        var in = android.os.Parcel.obtain();
+        var out = android.os.Parcel.obtain();
+        try {
+            in.unmarshall(calls, 0, calls.length); in.setDataPosition(0);
+            int count = in.readInt();
+            if (count < 0 || count > in.dataAvail() / 8) throw new IllegalArgumentException("invalid batch count");
+            out.writeInt(count);
+            for (int i = 0; i < count; i++) {
+                int code = in.readInt();
+                byte[] request = in.createByteArray();
+                if (code == TRANSACTION_transactBatch || request == null) throw new IllegalArgumentException("invalid batched call");
+                var data = android.os.Parcel.obtain();
+                var reply = android.os.Parcel.obtain();
+                try {
+                    data.unmarshall(request, 0, request.length); data.setDataPosition(0);
+                    // Binder.execTransact reports a call's failure in its reply.
+                    try {
+                        if (!onTransact(code, data, reply, 0)) throw new IllegalArgumentException("unknown batched call");
+                    } catch (RuntimeException failure) {
+                        reply.recycle(); reply = android.os.Parcel.obtain(); reply.writeException(failure);
+                    }
+                    out.writeByteArray(reply.marshall());
+                } finally { data.recycle(); reply.recycle(); }
+            }
+            if (in.dataAvail() != 0) throw new IllegalArgumentException("batch trailing data");
+            return out.marshall();
+        } finally { in.recycle(); out.recycle(); }
+    }
+
+    @Override
     public boolean isInstallerArtServiceV3Enabled() {
         enforceSystemUid();
         return com.android.art.flags.Flags.artServiceV3();
