@@ -68,7 +68,7 @@ impl Store {
             )?;
             file.write_all(&bytes)?;
             file.flush()?;
-            file.sync_all()?;
+            crate::fsync(&file)?;
             fs::rename(&new, &main)
         })();
         drop(file);

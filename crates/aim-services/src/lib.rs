@@ -58,6 +58,15 @@ const SERVICE_HOST: &str = "aim.service_host";
 /// system_server's SELinux context, which servicemanager checks the
 /// registration of these names against.
 const SYSTEM_SERVER_CONTEXT: &str = "u:r:system_server:s0";
+/// fsync(2) as the guest's own fsync runs it (aim-linux-abi `fsops::fsync`).
+/// `File::sync_all` is F_FULLFSYNC on Darwin, a device cache flush the
+/// original's AtomicFile writes never pay.
+pub(crate) fn fsync(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: plain fsync of an open descriptor.
+    if unsafe { libc::fsync(file.as_raw_fd()) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
 /// `SystemServer.sMaxBinderThreads`.
 const SYSTEM_SERVER_BINDER_THREADS: u32 = 31;
 

@@ -16,4 +16,8 @@ public class UserManager {
     public static final String USER_TYPE_FULL_RESTRICTED="android.os.usertype.full.RESTRICTED";
     public static final String USER_TYPE_PROFILE_MANAGED="android.os.usertype.profile.MANAGED";
     public static boolean isUserTypeRestricted(String type){throw new RuntimeException("stub");}
+    public static final int REMOVE_RESULT_REMOVED = 0;
+    public static final int REMOVE_RESULT_DEFERRED = 1;
+    public static final int REMOVE_RESULT_ALREADY_BEING_REMOVED = 2;
+    public static final int REMOVE_RESULT_ERROR_MAIN_USER_PERMANENT_ADMIN = -5;
 }

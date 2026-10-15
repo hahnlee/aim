@@ -22,6 +22,9 @@ impl Store {
 
     /// Require the exact persisted projection of this completed scan.
     pub(crate) fn validate_committed_scan(&self, scan: &SigningScan) -> Result<(), WriteError> {
+        if self.validated.lock().unwrap().as_ref().is_some_and(|validated| validated.same_except_users(scan)) {
+            return Ok(());
+        }
         let expected = self.persistent_scan_settings(scan)?;
         if super::canonical_persistent_settings(self.state.settings.clone()) != expected
         {
@@ -29,6 +32,7 @@ impl Store {
                 "committed scan/settings ownership differs",
             ));
         }
+        *self.validated.lock().unwrap() = Some(scan.clone());
         Ok(())
     }
 

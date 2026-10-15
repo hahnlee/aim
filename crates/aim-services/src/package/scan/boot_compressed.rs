@@ -52,7 +52,7 @@ impl BootDecompression {
                 output.flush().map_err(|e| e.to_string())?;
                 fs::set_permissions(&temporary, fs::Permissions::from_mode(0o644)).map_err(|e| e.to_string())?;
                 record(&temporary, GuestInode { uid: Some(1000), gid: Some(1000), mode: Some(0o644) }).map_err(|e| e.to_string())?;
-                output.sync_all().map_err(|e| e.to_string())?;
+                crate::fsync(&output).map_err(|e| e.to_string())?;
                 fs::rename(&temporary, host.join(output_name)).map_err(|e| e.to_string())?;
             }
             let package = apks.parsed_path(&guest, 0)?;
@@ -64,7 +64,7 @@ impl BootDecompression {
             let libraries = apks.copy_native_libraries_with_override(&package, abis, None, policy, &NativeLibraryDestination {
                 guest_root: &library_guest, root: &library_host, owner: GuestInode { uid: Some(1000), gid: Some(1000), mode: None }, zip_time, restorecon,
             }).map_err(|e| e.to_string())?;
-            File::open(&host).and_then(|file| file.sync_all()).map_err(|e| e.to_string())?;
+            File::open(&host).and_then(|file| crate::fsync(&file)).map_err(|e| e.to_string())?;
             let metadata = fs::symlink_metadata(&host).map_err(|e| e.to_string())?;
             let receipt = Receipt { guest_path: guest, host_path: host.clone(), device: metadata.dev(), inode: metadata.ino() };
             // Original records this before initPackageTracedLI. A later scan

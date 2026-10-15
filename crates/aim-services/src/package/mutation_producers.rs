@@ -114,7 +114,7 @@ impl Owner {
             let path = stage.path.join(destination); let temporary = stage.path.join(format!("{destination}.new"));
             let mut output = OpenOptions::new().create_new(true).write(true).open(&temporary).map_err(io_error)?;
             let mut gzip = flate2::read::MultiGzDecoder::new(source); io::copy(&mut gzip, &mut output).map_err(io_error)?;
-            output.flush().map_err(io_error)?; output.sync_all().map_err(io_error)?;
+            output.flush().map_err(io_error)?; crate::fsync(&output).map_err(io_error)?;
             fs::set_permissions(&temporary, fs::Permissions::from_mode(0o644)).map_err(io_error)?;
             fs::rename(&temporary, path).map_err(io_error)?; count += 1;
         }

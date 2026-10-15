@@ -40,7 +40,23 @@ pub(crate) fn install_user_rebase_conflict(base:&Snapshot,current:&Snapshot,cand
     let mut latest=current.owner().clone();
     let mut changes=Vec::new();
     for setting in &base.owner().settings.packages{
-        if targets.contains(&setting.name)||protected.contains(&setting.uid_owner_id()){continue;}
+        if targets.contains(&setting.name){
+            // An update keeps the package's overlay paths: OverlayManager's
+            // update after the previous PACKAGE_ADDED carries into the
+            // candidate. Any other concurrent target change stays a conflict.
+            let (Some(before),Some(after))=(base.owner().scanned_user_states(&setting.name),current.owner().scanned_user_states(&setting.name))else{continue;};
+            for (user,state) in before{
+                let Some(now)=after.get(user).filter(|now|*now!=state)else{continue;};
+                let mut overlays=state.clone();overlays.runtime.set_overlay_paths(now.runtime.overlays().cloned());
+                if overlays!=*now{continue;}
+                let Some(mut merged)=candidate.scanned_user_states(&setting.name).and_then(|users|users.get(user)).cloned()else{continue;};
+                merged.runtime.set_overlay_paths(now.runtime.overlays().cloned());
+                candidate.set_user_state(&setting.name,*user,merged)?;
+                normalized.set_user_state(&setting.name,*user,now.clone())?;
+            }
+            continue;
+        }
+        if protected.contains(&setting.uid_owner_id()){continue;}
         let Some(before)=base.owner().scanned_user_states(&setting.name)else{continue;};
         let Some(after)=current.owner().scanned_user_states(&setting.name)else{return Ok(Some(format!("package {} missing current user owner",setting.name)));};
         if before.keys().ne(after.keys()){return Ok(Some(format!("package {} user inventory {:?} -> {:?}",setting.name,before.keys().collect::<Vec<_>>(),after.keys().collect::<Vec<_>>())));}
@@ -122,7 +138,7 @@ pub(crate) fn install_user_rebase_conflict(base:&Snapshot,current:&Snapshot,cand
     normalized.refresh_library_user_inputs()?;
     latest.refresh_library_user_inputs()?;
     if normalized!=latest{
-        let before=Snapshot{version:base.version(),owner:normalized,usage:current.usage().clone(),replica_validated:false,metadata_revision:base.metadata_revision(),lineage:base.lineage.clone()};
+        let before=Snapshot{version:base.version(),owner:normalized,usage:current.usage().clone(),replica_validated:false,metadata_revision:base.metadata_revision(),lineage:base.lineage.clone(),libraries:Default::default()};
         return Ok(Some(format!("unmerged normalized owner: {}; targets={targets:?}, protected appIds={protected:?}",install_identity_delta(&before,current))));
     }
     for (name,user,state) in changes{candidate.set_user_state(&name,user,state)?;}
@@ -236,7 +252,7 @@ impl super::Store {
         let version=current.version().checked_add(1).filter(|version|*version<=i64::MAX as u64)
             .ok_or(super::CommitError::Snapshot(super::Error::VersionExhausted))?;
         super::validate(&owner,&usage).map_err(super::CommitError::Snapshot)?;
-        let mut next=Snapshot{version,owner,usage,replica_validated:self.replica,metadata_revision:version,lineage:current.lineage.clone()};
+        let mut next=Snapshot{version,owner,usage,replica_validated:self.replica,metadata_revision:version,lineage:current.lineage.clone(),libraries:Default::default()};
         if self.replica{super::validate_replica(&next).map_err(super::CommitError::Snapshot)?;}
         next.metadata_revision=super::derive_metadata_revision(&current,&next).map_err(|error|super::CommitError::Snapshot(error))?;
         let next=Arc::new(next);
@@ -589,6 +605,13 @@ mod permission_owner_tests {
             let reason=install_user_rebase_conflict(&base,&current,&mut candidate,&targets).unwrap().unwrap();
             assert!(reason.contains(&format!("package {name} user 0 state ownership")),"{reason}");
         }
+        // OverlayManager's paths for the target carry into the candidate.
+        let mut changed=owner.clone();let mut overlaid=UserState::default();
+        let paths=crate::package::model::OverlayPaths{resource_dirs:vec!["/product/overlay/fixture.apk".into()],overlay_paths:vec![]};
+        overlaid.runtime.set_overlay_paths(Some(paths.clone()));changed.set_user_state("target",0,overlaid).unwrap();
+        let current=snapshot(changed);let mut candidate=owner.clone();
+        assert!(install_user_rebase_conflict(&base,&current,&mut candidate,&targets).unwrap().is_none());
+        assert_eq!(candidate.scanned_user_states("target").unwrap()[&0].runtime.overlays(),Some(&paths));
     }
     #[test]
     fn modern_context_preserves_grants_and_actual_gid_inputs_independent_of_legacy(){

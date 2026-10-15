@@ -7,7 +7,13 @@ public abstract class UserManagerInternal {
         void onUserVisibilityChanged(int userId, boolean visible);
     }
 
+    public interface UserLifecycleListener {
+        default void onUserRemoved(android.content.pm.UserInfo user) {}
+    }
+
     public UserManagerInternal() { throw new RuntimeException("stub"); }
+    public abstract void addUserLifecycleListener(UserLifecycleListener listener);
+    public abstract void removeUserLifecycleListener(UserLifecycleListener listener);
     public abstract void addUserVisibilityListener(UserVisibilityListener listener);
     public abstract int[] getUserIds();
     public abstract java.util.List<android.content.pm.UserInfo> getUsers(boolean excludePartial, boolean excludeDying, boolean excludePreCreated);

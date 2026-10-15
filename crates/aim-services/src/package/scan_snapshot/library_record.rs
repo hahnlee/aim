@@ -13,7 +13,6 @@ pub fn captured(snapshot: &Snapshot, name: &str) -> Result<Option<Vec<u8>>, Stri
         return Ok(None);
     };
     let (files, infos) = snapshot
-        .owner()
         .library_dependencies(name)?
         .ok_or("missing active library dependency owner")?;
     let mut libraries = Parcel::new();

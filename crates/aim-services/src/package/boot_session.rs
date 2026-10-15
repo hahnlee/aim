@@ -310,7 +310,6 @@ impl Session {
             return Ok(());
         }
         self.early.close();
-        self.captures.close();
         for endpoint in self.raw_metadata_leases.lock().unwrap().drain(..).filter_map(|lease|lease.upgrade()){endpoint.close_lease();}
         let (raw, scanned, runtime) = {
             let mut state = self.state.lock().unwrap();

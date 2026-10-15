@@ -115,6 +115,19 @@ impl SigningScan {
 
     /// Only scoped user metadata may differ. Every other owner field must match.
     pub(crate) fn scoped_user_metadata_changes(&self, other: &Self) -> Option<Vec<(String, bool)>> {
+        if !self.same_except_users(other){return None;}
+        let mut changed=Vec::new();
+        for setting in &self.settings.packages {
+            if self.scanned_users.get(&setting.name)!=other.scanned_users.get(&setting.name){changed.push((setting.name.clone(),false));}
+        }
+        for setting in &self.settings.disabled_system_packages {
+            if self.disabled_users.get(&setting.name)!=other.disabled_users.get(&setting.name){changed.push((setting.name.clone(),true));}
+        }
+        Some(changed)
+    }
+
+    /// Equal in every owner field except scanned and disabled user states.
+    pub(crate) fn same_except_users(&self, other: &Self) -> bool {
         let Self{settings,identities,libraries,package_registry,update_ownership,system_app_update_owners,installers,
             disabled_users:_,scanned_users:_,loaded,disabled_loaded,pending_metadata,transferred_packages,
             displaced_shared_settings,apex_origins,seinfo,legacy_permissions,library_dependencies,shared_processes,
@@ -129,15 +142,7 @@ impl SigningScan {
             &&*replica_runtime==other.replica_runtime&&*hidden_api_allowlist==other.hidden_api_allowlist
             &&*strict_signature_packages==other.strict_signature_packages&&*first_api_level==other.first_api_level
             &&*parsed==other.parsed&&*permission_admissions==other.permission_admissions;
-        if !same{return None;}
-        let mut changed=Vec::new();
-        for setting in &self.settings.packages {
-            if self.scanned_users.get(&setting.name)!=other.scanned_users.get(&setting.name){changed.push((setting.name.clone(),false));}
-        }
-        for setting in &self.settings.disabled_system_packages {
-            if self.disabled_users.get(&setting.name)!=other.disabled_users.get(&setting.name){changed.push((setting.name.clone(),true));}
-        }
-        Some(changed)
+        same
     }
 
     /// Bounded ownership diagnostics; never print signer, key or owner values.

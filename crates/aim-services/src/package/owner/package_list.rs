@@ -39,7 +39,7 @@ fn write_with(
         metadata(&file, &temp)?;
         write(&mut file)?;
         file.flush()?;
-        file.sync_all()?;
+        crate::fsync(&file)?;
         drop(file);
         fs::rename(&temp, &path)
     })();

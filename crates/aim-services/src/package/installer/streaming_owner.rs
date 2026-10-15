@@ -104,7 +104,7 @@ impl Owner{
         let mut output=self.disk.lock().unwrap().write_target(&state.session,&state.record,name,offset).map_err(|error|Exception::new(EX_ILLEGAL_STATE,error.message))?;
         let mut left=length;let mut buffer=vec![0;131072];
         while left>0{if self.stopped.load(std::sync::atomic::Ordering::Acquire){return Err(Exception::new(EX_ILLEGAL_STATE,"stream owner stopped during write"));}let count=input.read(&mut buffer[..(left as usize).min(131072)]).map_err(|error|Exception::new(EX_ILLEGAL_STATE,error.to_string()))?;if count==0{break;}output.write_all(&buffer[..count]).map_err(|error|Exception::new(EX_ILLEGAL_STATE,error.to_string()))?;left-=count as i64;}
-        output.sync_all().map_err(|error|Exception::new(EX_ILLEGAL_STATE,error.to_string()))
+        crate::fsync(&output).map_err(|error|Exception::new(EX_ILLEGAL_STATE,error.to_string()))
     }
     pub fn stop(&self){self.stopped.store(true,std::sync::atomic::Ordering::Release);}
     pub fn close(&self)->Result<(),Exception>{

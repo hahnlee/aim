@@ -102,7 +102,7 @@ impl NativeLibraryInstallPolicy {
                 archive
                     .copy_to(entry, &mut &file)
                     .map_err(|e| fail(-18, e.to_string()))?;
-                file.sync_all().map_err(|e| fail(-110, e.to_string()))?;
+                crate::fsync(&file).map_err(|e| fail(-110, e.to_string()))?;
                 let accessed = existing
                     .as_ref()
                     .map(|m| {

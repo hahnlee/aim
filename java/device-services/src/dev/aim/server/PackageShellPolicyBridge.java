@@ -51,6 +51,18 @@ public final class PackageShellPolicyBridge extends IPackageShellPolicyBridge.St
                     output.getFileDescriptor(), error.getFileDescriptor(), arguments, null, null);
         } catch (java.io.IOException failure) { throw new IllegalStateException(failure); }
     }
+    @Override public int handleRemoveUserCommand(android.os.ParcelFileDescriptor input,
+            android.os.ParcelFileDescriptor output, android.os.ParcelFileDescriptor error,
+            String[] arguments) {
+        try (input; output; error) {
+            Objects.requireNonNull(input); Objects.requireNonNull(output); Objects.requireNonNull(error);
+            Objects.requireNonNull(arguments);
+            if (arguments.length == 0 || !"remove-user".equals(arguments[0]))
+                throw new IllegalArgumentException("Unknown user shell command");
+            return new PackageShellRemoveUserCommand().exec(this, input.getFileDescriptor(),
+                    output.getFileDescriptor(), error.getFileDescriptor(), arguments, null, null);
+        } catch (java.io.IOException failure) { throw new IllegalStateException(failure); }
+    }
     @Override public int handleListUsersCommand(android.os.ParcelFileDescriptor input,
             android.os.ParcelFileDescriptor output, android.os.ParcelFileDescriptor error) {
         try (input; output; error) {

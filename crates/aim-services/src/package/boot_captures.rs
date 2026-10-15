@@ -5,21 +5,29 @@ use aim_binder_host::parcel::{Binder, Exception, EX_ILLEGAL_STATE};
 use std::{collections::BTreeMap, sync::{Arc, Mutex, Weak}};
 
 pub struct Captures {
-    system: Weak<System>, bridge: Arc<Bridge>,
-    versions: Mutex<BTreeMap<u64, Weak<Capture>>>, resolver: Resolver,
+    system: Weak<System>, bridge: Arc<Bridge>, resolver: Resolver,
 }
 fn error(message: impl Into<String>) -> Exception { Exception::new(EX_ILLEGAL_STATE, message) }
+
+/// Every capture leased to the original with a Computer, by version. The
+/// original holds that Computer, and so the capture, for as long as it
+/// holds the snapshot, and asks about that version until it drops it.
+fn leased() -> &'static Mutex<BTreeMap<u64, Vec<Weak<Capture>>>> {
+    static LEASED: std::sync::OnceLock<Mutex<BTreeMap<u64, Vec<Weak<Capture>>>>> = std::sync::OnceLock::new();
+    LEASED.get_or_init(Default::default)
+}
+pub(crate) fn lease(capture: &Arc<Capture>) {
+    let mut leased = leased().lock().unwrap();
+    leased.retain(|_, captures| { captures.retain(|capture| capture.strong_count() != 0); !captures.is_empty() });
+    leased.entry(capture.scan().version()).or_default().push(Arc::downgrade(capture));
+}
 impl Captures {
     pub fn new(system: &Arc<System>, bridge: Arc<Bridge>) -> Self {
-        Self { system: Arc::downgrade(system), bridge, versions: Mutex::new(BTreeMap::new()), resolver: Resolver::default() }
+        Self { system: Arc::downgrade(system), bridge, resolver: Resolver::default() }
     }
     pub fn snapshot(&self) -> Result<Binder, Exception> {
         let system = self.system.upgrade().ok_or_else(|| error("boot capture system stopped"))?;
         let capture = system.capture_package_queries_for(&self.bridge)?;
-        let mut versions = self.versions.lock().unwrap();
-        versions.retain(|_, capture| capture.strong_count() != 0);
-        versions.insert(capture.scan().version(), Arc::downgrade(&capture));
-        drop(versions);
         Ok(system.binder_process().add_service(Arc::new(Endpoint::with_computer(
             capture.scan().clone(), capture, &system.binder_process()))))
     }
@@ -28,7 +36,8 @@ impl Captures {
         let version = u64::try_from(version).map_err(|_| Exception::illegal_argument("negative boot capture version"))?;
         let current = system.capture_package_queries_for(&self.bridge)?;
         if current.scan().version() == version { return Ok(current); }
-        self.versions.lock().unwrap().get(&version).and_then(Weak::upgrade)
+        leased().lock().unwrap().get(&version).into_iter().flatten().filter_map(Weak::upgrade)
+            .find(|capture| capture.scan().same_lineage(current.scan()))
             .ok_or_else(|| error("requested boot capture is no longer retained"))
     }
     pub fn filter_package_name(&self, version: i64, name: &str, uid: i32, user: i32) -> Result<Option<String>, Exception> {
@@ -60,5 +69,4 @@ impl Captures {
         for (user, disabled) in &web.disabled { record.write_i32(*user); record.write_bool(*disabled); }
         Ok(record.data().to_vec())
     }
-    pub fn close(&self) { self.versions.lock().unwrap().clear(); }
 }

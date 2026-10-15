@@ -354,7 +354,7 @@ impl Owner {
             content: vec![Node::Element(Element { name: "permissions".into(), attrs: Vec::new(), content: permissions })] };
         let bytes = if binary_xml { aim_android_xml::abx::write(&root)? } else { metadata_text(app)? };
         let file = directory.join("metadata.xml"); let staging = directory.join("metadata.xml.new");
-        let result = (|| -> io::Result<()> { let mut output = fs::File::create(&staging)?; output.write_all(&bytes)?; output.sync_all()?; drop(output); fs::rename(&staging, &file) })();
+        let result = (|| -> io::Result<()> { let mut output = fs::File::create(&staging)?; output.write_all(&bytes)?; crate::fsync(&output)?; drop(output); fs::rename(&staging, &file) })();
         if let Err(error) = result { self.delete_file(&staging); return Err(error.to_string()); }
         Ok(())
     }

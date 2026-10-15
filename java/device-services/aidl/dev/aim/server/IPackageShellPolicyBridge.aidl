@@ -9,4 +9,6 @@ interface IPackageShellPolicyBridge {
         in ParcelFileDescriptor error, in String[] arguments);
     int handleListUsersCommand(in ParcelFileDescriptor input, in ParcelFileDescriptor output,
         in ParcelFileDescriptor error);
+    int handleRemoveUserCommand(in ParcelFileDescriptor input, in ParcelFileDescriptor output,
+        in ParcelFileDescriptor error, in String[] arguments);
 }
