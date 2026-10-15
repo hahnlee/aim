@@ -94,7 +94,7 @@ const USER_SYSTEM: i32 = 0;
 #[derive(Clone)]
 pub struct Resolution {
     pub state: Arc<State>,
-    pub components: ComponentResolver,
+    pub components: Arc<ComponentResolver>,
     pub apps_filter: Arc<AppsFilter>,
     /// Each user's preferred activities.
     preferred: BTreeMap<i32, Preferred>,
@@ -124,7 +124,7 @@ impl Resolution {
             .map(|(&id, u)| (id, domains::legacy_domain_states(u)))
             .collect();
         Ok(Resolution {
-            components: ComponentResolver::new(&state)?,
+            components: ComponentResolver::latest(&state)?,
             apps_filter: AppsFilter::latest(&state, config).map_err(MimeGroupError::UriMatching)?,
             state,
             preferred,

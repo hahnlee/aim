@@ -232,13 +232,20 @@ public final class PackageSnapshots {
         private android.content.pm.ResolveInfo instantInstallerInfo;
         private boolean instantInstallerInfoRead;
         private android.content.pm.SigningDetails platformSigning;
-        private final Map<NameKey, String> resolvedNames = new java.util.HashMap<>();
         // Visibility and UID lookups are pure functions of this immutable
-        // version: the original answers them in process, from its snapshot.
+        // version's metadata: the original answers them in process, from its
+        // snapshot. A version that changes only usage shares them.
         private record FilterKey(int kind, String owner, String name, int appId, int uid, int user, boolean uninstalled) {}
         private record LookupKey(int uid, boolean knownCompute) {}
-        private final Map<FilterKey, Boolean> filtered = new java.util.HashMap<>();
-        private final Map<LookupKey, Integer> lookupUids = new java.util.HashMap<>();
+        private record LocalKey(String name, int uid, int user) {}
+        private static final class Answers {
+            final Map<NameKey, String> resolvedNames = new java.util.HashMap<>();
+            final Map<LocalKey, String> localNames = new java.util.HashMap<>();
+            final Map<LocalKey, Boolean> localFiltered = new java.util.HashMap<>();
+            final Map<FilterKey, Boolean> filtered = new java.util.HashMap<>();
+            final Map<LookupKey, Integer> lookupUids = new java.util.HashMap<>();
+        }
+        private Answers answers = new Answers();
         private int references = 1;
         private boolean ownerClosed;
         private Data parent;
@@ -297,45 +304,61 @@ public final class PackageSnapshots {
                 boolean uninstalled, int callingUid, int callingPid) throws RemoteException {
             if (computer == null) throw new IllegalStateException("native package query capture unavailable");
             var key = new FilterKey(kind, owner, name, appId, uid, user, uninstalled);
-            synchronized (this) {
-                Boolean known = filtered.get(key);
+            synchronized (answers) {
+                Boolean known = answers.filtered.get(key);
                 if (known != null) return known;
-                retain();
             }
+            retain();
             try {
                 boolean value = computer.shouldFilterApplication(kind, owner, name, appId, uid, user, uninstalled,
                         callingUid, callingPid);
-                synchronized (this) { filtered.putIfAbsent(key, value); return filtered.get(key); }
+                synchronized (answers) { answers.filtered.putIfAbsent(key, value); return answers.filtered.get(key); }
             } finally { release(); }
         }
 
         int lookupUid(int uid, boolean knownCompute, int callingUid, int callingPid) throws RemoteException {
             if (computer == null) throw new IllegalStateException("native package query capture unavailable");
             var key = new LookupKey(uid, knownCompute);
-            synchronized (this) {
-                Integer known = lookupUids.get(key);
+            synchronized (answers) {
+                Integer known = answers.lookupUids.get(key);
                 if (known != null) return known;
-                retain();
             }
+            retain();
             try {
                 int value = computer.getPackageLookupUid(uid, knownCompute, callingUid, callingPid);
-                synchronized (this) { lookupUids.putIfAbsent(key, value); return lookupUids.get(key); }
+                synchronized (answers) { answers.lookupUids.putIfAbsent(key, value); return answers.lookupUids.get(key); }
             } finally { release(); }
+        }
+
+        /** `PackageManagerLocal`'s filtered name of a package in this capture. */
+        String localName(String name, int uid, int user) {
+            var key = new LocalKey(name, uid, user);
+            synchronized (answers) { if (answers.localNames.containsKey(key)) return answers.localNames.get(key); }
+            String resolved = owner.getFilteredPackageName(version, name, uid, user);
+            synchronized (answers) { answers.localNames.putIfAbsent(key, resolved); return answers.localNames.get(key); }
+        }
+
+        /** Whether `PackageManagerLocal` filters this capture's own state of a package. */
+        boolean localFiltered(PackageState state, int uid, int user) {
+            var key = new LocalKey(state.getPackageName(), uid, user);
+            synchronized (answers) { Boolean known = answers.localFiltered.get(key); if (known != null) return known; }
+            boolean value = owner.shouldFilter(version, state, uid, user);
+            synchronized (answers) { answers.localFiltered.putIfAbsent(key, value); return answers.localFiltered.get(key); }
         }
 
         String resolveName(String name, int callingUid) throws RemoteException {
             if (computer == null) throw new IllegalStateException("native package query capture unavailable");
             var key = new NameKey(name, callingUid);
-            synchronized (this) {
-                if (resolvedNames.containsKey(key)) return resolvedNames.get(key);
-                retain();
+            synchronized (answers) {
+                if (answers.resolvedNames.containsKey(key)) return answers.resolvedNames.get(key);
             }
+            retain();
             try {
                 String resolved = computer.resolveInternalPackageName(name,
                         android.content.pm.PackageManager.VERSION_CODE_HIGHEST, callingUid);
-                synchronized (this) {
-                    if (!resolvedNames.containsKey(key)) resolvedNames.put(key, resolved);
-                    return resolvedNames.get(key);
+                synchronized (answers) {
+                    if (!answers.resolvedNames.containsKey(key)) answers.resolvedNames.put(key, resolved);
+                    return answers.resolvedNames.get(key);
                 }
             } finally { release(); }
         }
@@ -400,6 +423,7 @@ public final class PackageSnapshots {
             if (metadata == metadataVersion) {
                 retained = metadataRoot == null ? this : metadataRoot;
                 result.metadataRoot = retained;
+                result.answers = answers;
             } else {
                 retained = this;
                 while (retained.parent != null) retained = retained.parent;
@@ -1553,7 +1577,7 @@ public final class PackageSnapshots {
             if (uncommitted != null && name.equals(uncommitted.getPackageName())) {
                 return uncommitted;
             }
-            String resolved = data.owner.getFilteredPackageName(data.version, name, callingUid, userId);
+            String resolved = data.localName(name, callingUid, userId);
             if (resolved == null) return null;
             PackageState state = data.packages.get(resolved);
             if (state == null) throw new IllegalStateException("owner returned a package outside the snapshot");
@@ -1569,7 +1593,9 @@ public final class PackageSnapshots {
                     PackageState state = uncommitted != null
                             && original.getPackageName().equals(uncommitted.getPackageName())
                             ? (PackageStateInternal) uncommitted : original;
-                    if (!data.owner.shouldFilter(data.version, state, callingUid, userId)) {
+                    boolean hidden = state == original ? data.localFiltered(state, callingUid, userId)
+                            : data.owner.shouldFilter(data.version, state, callingUid, userId);
+                    if (!hidden) {
                         result.put(name, state);
                     }
                 });

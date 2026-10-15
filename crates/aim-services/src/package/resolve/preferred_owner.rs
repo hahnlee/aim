@@ -226,7 +226,7 @@ impl Resolution {
             .map(|(&user, state)| (user, domains::legacy_domain_states(state)))
             .collect();
         Ok(Self {
-            components: ComponentResolver::new(&state)?,
+            components: Arc::new(ComponentResolver::new(&state)?),
             apps_filter: Arc::new(query.filter.clone()),
             state,
             preferred,
