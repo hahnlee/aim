@@ -202,11 +202,10 @@ pub fn tracked_identities()->io::Result<std::collections::BTreeSet<[u8;36]>> {
 pub fn restore_memberships()->io::Result<()> {
     let tracked=tracked_identities()?;
     if tracked.is_empty(){return Ok(());}
-    let Some(client)=crate::verity_client()else{return Ok(());};
-    for identity in tracked {
-        let admission=client.admission(identity)?;
-        publish_membership(Identity::from_bytes(&identity).map_err(|_|io::Error::from_raw_os_error(libc::EINVAL))?,admission)?;
-    }
+    // The parent's fork lease makes the coordinator add this process to the
+    // inodes at handoff; it only has to be registered.
+    if crate::verity_client().is_none(){return Ok(());}
+    MEMBERSHIPS.lock().unwrap().extend(tracked);
     Ok(())
 }
 pub fn reconcile_memberships()->io::Result<()> {
