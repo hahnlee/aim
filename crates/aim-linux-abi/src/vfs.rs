@@ -787,6 +787,15 @@ pub fn lookup(guest: &str) -> (PathBuf, Area) {
 /// host prefix (the area itself rather than a bind into it), or through
 /// the image root; in a tmpfs of this process, the host path (private to
 /// the process and its children).
+/// `path` below `prefix`, as `Path::strip_prefix`; a byte comparison first
+/// rules out most of the mounts a lookup goes through.
+fn strip_host_prefix<'p>(path: &'p Path, prefix: &Path) -> Option<&'p Path> {
+    let bytes = prefix.as_os_str().as_bytes();
+    let trimmed = if bytes.len() > 1 { bytes.strip_suffix(b"/").unwrap_or(bytes) } else { bytes };
+    if !path.as_os_str().as_bytes().starts_with(trimmed) { return None; }
+    path.strip_prefix(prefix).ok()
+}
+
 pub fn attr_key(guest: &str) -> String {
     if !guest.starts_with('/') {
         return guest.to_string();
@@ -797,7 +806,7 @@ pub fn attr_key(guest: &str) -> String {
     let area = mounts
         .iter()
         .filter(|m| !m.own)
-        .filter_map(|m| Some((m, host.strip_prefix(&m.host).ok()?)))
+        .filter_map(|m| Some((m, strip_host_prefix(&host, &m.host)?)))
         .min_by_key(|(m, _)| (m.host.as_os_str().len(), m.guest.len()));
     if let Some((m, rest)) = area {
         return if rest.as_os_str().is_empty() {
@@ -1096,7 +1105,7 @@ impl HostPathView {
         let root = self.canonical_root.get_or_init(|| canonical_host(&self.root).unwrap_or_else(|| self.root.clone()));
         let roots = [("/".to_owned(), self.root.clone()), ("/".to_owned(), root.clone())];
         for (guest, prefix) in self.mounts.iter().chain(canonical.iter()).chain(roots.iter()) {
-            let Ok(rest) = host.strip_prefix(prefix) else { continue; };
+            let Some(rest) = strip_host_prefix(host, prefix) else { continue; };
             let len = prefix.as_os_str().len();
             if best.as_ref().is_none_or(|b| len > b.0 || (len == b.0 && guest.len() < b.1)) {
                 let path = if rest.as_os_str().is_empty() { guest.clone() }
