@@ -134,6 +134,8 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
             Ok(r) => {if let Some(route)=vfs::fuse_route(&r.guest){return super::fuse_client::tmpfile(route,r.guest,flags as u32,mode as u32).map(|fd|fd as i64).unwrap_or_else(|error|-(error as i64));}
                 if attrs::recording() {
                     let stat = match attrs::path_stat(&r.guest) { Ok(stat) => stat, Err(error) => return -(error as i64) };
+                    // O_DIRECTORY's lookup fails before any permission check.
+                    if stat.st_mode & libc::S_IFMT != libc::S_IFDIR { return -(errno::ENOTDIR as i64); }
                     if !attrs::permits(&stat, 3, id, attrs::FS) { return -(errno::EACCES as i64); }
                 }
                 super::tmpfile::open(&r,flags&O_EXCL!=0,open_flags_to_host(flags&!(O_DIRECTORY|O_EXCL)),mode)},

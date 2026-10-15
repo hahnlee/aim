@@ -30,7 +30,7 @@ pub(crate) fn pending()->bool{let owner=OWNER.lock().unwrap();owner.generation!=
 /// Called before socket I/O/readiness, never after consuming guest data.
 pub(crate) fn observe_socket()->Result<(),Errno>{barrier(true)}
 pub(crate) fn observes(pin:&super::fdtab::Pinned)->bool{
-    match pin.kind(){Some(super::fdtab::Kind::Sock(_))=>true,Some(super::fdtab::Kind::Epoll(ep))=>super::epoll::observes_sockets(ep,{use std::os::fd::AsRawFd;pin.descriptor().as_raw_fd()},&mut std::collections::HashSet::new()),_=>false}
+    match pin.kind(){Some(super::fdtab::Kind::Sock(_))=>true,Some(super::fdtab::Kind::Epoll(ep))=>super::epoll::observes_sockets(ep,&mut std::collections::HashSet::new()),_=>false}
 }
 pub(crate) fn run(operation:impl FnOnce()->i64)->i64{
     let result=operation();
