@@ -60,7 +60,10 @@ impl Guest {
     /// A guest program without an identity: binder peers see it as root,
     /// as `adb root` would run it.
     fn run(&self, argv: &[&str], timeout: Duration) -> Output {
+        // Not launched by guest-init: it enters init's mount namespace, as
+        // adb's shell does.
         let mut child = Command::new(env!("CARGO_BIN_EXE_linux-run"))
+            .arg("--mount-namespace-from-init")
             .arg("--path-map")
             .arg(&self.path_map)
             .arg("--binder")
