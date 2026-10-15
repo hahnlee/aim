@@ -930,13 +930,12 @@ mod completion_tests {
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
+            // Tests run at once, and the clock has microseconds here.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
                 "aim-capture-{}-{}",
                 std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             fs::create_dir(&root).unwrap();
             Self(root)
