@@ -335,6 +335,17 @@ struct InstallResult {
     warnings: Vec<String>,
 }
 impl ResultState {
+    /// Ends the wait with `DEAD_OBJECT` when the session owner dies, which
+    /// then can no longer send the result.
+    fn follow_owner(self: &Arc<Self>, ctx: &Context<'_>) -> Result<super::shell::OwnerDeath, Exception> {
+        let state = Arc::downgrade(self);
+        ctx.link_package_owner_death(Box::new(move || {
+            if let Some(state) = state.upgrade() {
+                state.result.lock().unwrap().push_back(Err(aim_binder_host::parcel::DEAD_OBJECT));
+                state.changed.notify_all();
+            }
+        }))
+    }
     fn wait(&self) -> Result<InstallResult, Exception> {
         let mut state = self.result.lock().unwrap();
         while state.is_empty() {
@@ -471,6 +482,7 @@ fn report(ctx: &mut Context<'_>, result: InstallResult) -> i32 {
 }
 fn commit(ctx: &mut Context<'_>, owner: Binder, id: i32, timeout: i64) -> Result<i32, Exception> {
     let state = Arc::new(ResultState::default());
+    let _owner = state.follow_owner(ctx)?;
     let binder = ctx.publish_receiver(Arc::new(Receiver(state.clone())))?;
     let result = with_session(ctx, owner, id, |ctx, target| {
         let mut p = Parcel::new();
@@ -774,6 +786,7 @@ fn uninstall(ctx: &mut Context<'_>, owner: Binder, args: &[String]) -> Result<i3
         flags |= 4;
     }
     let state = Arc::new(ResultState::default());
+    let _owner = state.follow_owner(ctx)?;
     let binder = ctx.publish_receiver(Arc::new(Receiver(state.clone())))?;
     let receiver = IntentSender { target: binder };
     let result = (|| {

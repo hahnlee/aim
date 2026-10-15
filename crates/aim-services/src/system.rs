@@ -919,6 +919,9 @@ impl System {
         self.process.link_to_death(
             &bridge.owner,
             Box::new(move || {
+                if let Some(attached) = attached.upgrade() {
+                    attached.died();
+                }
                 if let (Some(system), Some(attached)) = (this.upgrade(), attached.upgrade()) {
                     let session=system.package_bootstrap.lock().unwrap().current.as_ref()
                         .filter(|owner|Arc::ptr_eq(&owner.bridge,&attached))

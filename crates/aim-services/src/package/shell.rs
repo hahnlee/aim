@@ -13,6 +13,8 @@ pub struct Context<'a> {
     receivers:std::sync::Mutex<std::collections::BTreeMap<u64,Arc<Receiver>>>,
     _synchronous:PhantomData<Rc<()>>,
 }
+pub struct OwnerDeath{bridge:Arc<super::bootstrap::Bridge>,id:u64}
+impl Drop for OwnerDeath{fn drop(&mut self){self.bridge.clear_death(self.id);}}
 impl<'a> Context<'a> {
     pub fn new(system:&Arc<crate::system::System>,public:&'a dyn Service,call:&mut Call<'_>)->Result<Self,i32>{
         let process=system.binder_process();
@@ -25,6 +27,14 @@ impl<'a> Context<'a> {
     }
     pub fn capture(&self)->Result<Arc<super::scan_snapshot::query_state::Capture>,Exception>{self.system()?.capture_package_queries()}
     pub fn process(&self)->&Arc<LocalProcess>{&self.process}
+    /// Calls `on_death` when the system server that owns package sessions
+    /// dies, as a command running inside it would end with it. Dropping the
+    /// link clears it.
+    pub fn link_package_owner_death(&self,on_death:Box<dyn FnOnce()+Send>)->Result<OwnerDeath,Exception>{
+        let bridge=self.system()?.package_bootstrap()?;
+        let id=bridge.on_death(on_death);
+        Ok(OwnerDeath{bridge,id})
+    }
     pub fn input_clone(&mut self)->Result<aim_binder_host::server::RetainedFd,Exception>{
         self.command.input().ok_or_else(||Exception::illegal_argument("shell input descriptor missing"))?
             .try_clone().map_err(|error|failure(format!("shell input descriptor: {error}")))

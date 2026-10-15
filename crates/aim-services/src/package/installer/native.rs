@@ -71,6 +71,7 @@ pub struct NativeOwners {
     publisher: Publisher,
     callback: Callback,
     errors: Mutex<Vec<String>>,
+    deferred: super::deferred_observer::Deferred,
     this: std::sync::Weak<Self>,
     process: std::sync::Weak<LocalProcess>,
     writer_config: Mutex<Option<WriterConfig>>,
@@ -175,6 +176,7 @@ impl NativeOwners {
         let weak_process = Arc::downgrade(&process);
         let callbacks = super::callbacks::Registry::new(process, visibility)?;
         let owner = Arc::new_cyclic(|this| Self {
+            deferred: Default::default(),
             this: this.clone(),
             process: weak_process,
             writer_config: Mutex::new(None),
@@ -671,6 +673,29 @@ impl NativeOwners {
         }
         Ok(())
     }
+    fn complete_install(&self, id: i32, warnings: &[String]) -> Result<(), Exception> {
+        let root = self.sessions.snapshot(id)?;
+        for member in std::iter::once(id).chain(root.children.iter().copied()) {
+            let session = self.sessions.snapshot(member)?;
+            self.record_finished_install_history(member)?;
+            self.notify(Event::Finished {
+                id: member,
+                user: session.user,
+                success: true,
+            });
+        }
+        self.deliver_install_with_warnings(id, 1, None, warnings)?;
+        self.receivers.lock().unwrap().remove(&id);
+        let retired = self.sessions.finish_nonstaged(id)?;
+        if !retired.is_empty() {
+            self.persist()?;
+        }
+        Ok(())
+    }
+    /// `onPackageProcessKilledForUninstall`.
+    pub fn package_processes_killed(&self, package: &str) {
+        self.deferred.killed(package);
+    }
     fn reject_install(&self, id: i32, message: &str) -> Result<(), Exception> {
         self.deliver_install(id, -115, Some(message.into()))?;
         let ids = self.sessions.abandon(id, 1000)?;
@@ -682,30 +707,30 @@ impl NativeOwners {
         let root=self.sessions.snapshot(id)?;
         let ordered=std::iter::once(id).chain(root.children.iter().copied()).collect();
         let warning_attempt=self.install_warnings.begin(id,ordered)?;
+        let before=(self.source)()?;
         let result = self.install_staged_batch(id);
         match result {
             Err(super::pipeline::Error::Pending) => Ok(()),
             Ok(()) => {
                 let warnings=warning_attempt.take()?;
-                let root = self.sessions.snapshot(id)?;
-                let ids: Vec<_> = std::iter::once(id)
-                    .chain(root.children.iter().copied())
-                    .collect();
-                for member in ids {
-                    let session = self.sessions.snapshot(member)?;
-                    self.record_finished_install_history(member)?;
-                    self.notify(Event::Finished {
-                        id: member,
-                        user: session.user,
-                        success: true,
-                    });
+                // handlePackagePostInstall defers an update's observer until
+                // its old processes are killed, or a delay passes.
+                let mut updated=false;let mut killed=std::collections::BTreeSet::new();
+                for member in std::iter::once(id).chain(root.children.iter().copied()) {
+                    let (name,flags)=self.sessions.with_record(member,|session,record|
+                        Ok((session.resolved_package.clone(),record.params.install_flags)))?;
+                    let Some(name)=name.filter(|name|before.packages.contains_key(name)) else {continue};
+                    updated=true;
+                    if flags&0x1000==0 {killed.insert(name);}
                 }
-                self.deliver_install_with_warnings(id, 1, None,&warnings)?;
-                self.receivers.lock().unwrap().remove(&id);
-                let retired = self.sessions.finish_nonstaged(id)?;
-                if !retired.is_empty() {
-                    self.persist()?;
-                }
+                if !updated {return self.complete_install(id,&warnings);}
+                let delay=if killed.is_empty(){super::deferred_observer::NO_KILL}else{super::deferred_observer::PENDING_KILL};
+                let this=self.this.clone();
+                std::thread::spawn(move||{
+                    let Some(owner)=this.upgrade() else {return};
+                    owner.deferred.wait(id,killed,delay);
+                    if let Err(error)=owner.complete_install(id,&warnings) {owner.errors.lock().unwrap().push(error.message);}
+                });
                 Ok(())
             }
             Err(super::pipeline::Error::Install(failure)) => {

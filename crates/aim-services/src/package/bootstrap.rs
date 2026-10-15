@@ -27,6 +27,41 @@ pub struct Bridge {
     pub(crate) owner: Strong,
     test_base_on_bcp: bool,
     pub(crate) signing_debuggable: bool,
+    deaths: Deaths,
+}
+
+/// What waits for system_server's death. A process holds one death
+/// notification per reference, so these share the one `System` links.
+#[derive(Default)]
+struct Deaths {
+    listeners: std::sync::Mutex<(bool, std::collections::BTreeMap<u64, Box<dyn FnOnce() + Send>>)>,
+    next: std::sync::atomic::AtomicU64,
+}
+impl Deaths {
+    fn add(&self, on_death: Box<dyn FnOnce() + Send>) -> u64 {
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut listeners = self.listeners.lock().unwrap();
+        if listeners.0 {
+            drop(listeners);
+            on_death();
+        } else {
+            listeners.1.insert(id, on_death);
+        }
+        id
+    }
+    fn clear(&self, id: u64) {
+        self.listeners.lock().unwrap().1.remove(&id);
+    }
+    fn died(&self) {
+        let listeners = {
+            let mut listeners = self.listeners.lock().unwrap();
+            listeners.0 = true;
+            std::mem::take(&mut listeners.1)
+        };
+        for listener in listeners.into_values() {
+            listener();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -157,6 +192,18 @@ fn read_installer_user_policy(
 }
 
 impl Bridge {
+    /// Calls `on_death` when system_server dies, at once if it has; the id
+    /// clears it.
+    pub(crate) fn on_death(&self, on_death: Box<dyn FnOnce() + Send>) -> u64 {
+        self.deaths.add(on_death)
+    }
+    pub(crate) fn clear_death(&self, id: u64) {
+        self.deaths.clear(id)
+    }
+    /// System's death notification for this bridge.
+    pub(crate) fn died(&self) {
+        self.deaths.died()
+    }
     pub fn format_package_timestamp(&self, millis: i64) -> Result<String, OwnerError> {
         let mut data = Parcel::new();
         bridge::FormatPackageTimestamp { millis }.write(&mut data);
@@ -826,6 +873,7 @@ impl Bridge {
             owner,
             test_base_on_bcp: on_bcp,
             signing_debuggable,
+            deaths: Deaths::default(),
         })
     }
 
@@ -911,6 +959,22 @@ impl Bridge {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn death_listeners_run_once_and_late_ones_at_once() {
+        use super::Deaths;
+        use std::sync::{Arc, atomic::{AtomicI32, Ordering}};
+        let deaths = Deaths::default();
+        let calls = Arc::new(AtomicI32::new(0));
+        let call = |calls: &Arc<AtomicI32>| { let calls = calls.clone(); Box::new(move || { calls.fetch_add(1, Ordering::SeqCst); }) as Box<dyn FnOnce() + Send> };
+        deaths.add(call(&calls));
+        let cleared = deaths.add(call(&calls));
+        deaths.clear(cleared);
+        deaths.died();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        deaths.add(call(&calls));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn cloud_verification_reads_live_binder_flag_and_preserves_owner_failures() {
         use aim_binder_driver::{Credentials, Device, Driver, Errno, File, GuestProcess, errno, uapi::*};
         use aim_binder_host::local::{Call, LocalProcess, Reply, Service};
@@ -954,7 +1018,7 @@ mod tests {
         let mut object = FlatBinderObject { kind:BINDER_TYPE_BINDER, flags:0, binder:ptr, cookie:ptr }.encode();
         driver.ioctl(server.proc_handle(), 99603, BINDER_SET_CONTEXT_MGR_EXT, &mut object, &mut NoMemory).unwrap();
         server.start(); client.start();
-        let owner = Bridge { owner:client.strong(0), test_base_on_bcp:false, signing_debuggable:false };
+        let owner = Bridge { owner:client.strong(0), test_base_on_bcp:false, signing_debuggable:false, deaths:Deaths::default() };
         for enabled in [false, true, false] {
             phase.store(i32::from(enabled), Ordering::Release);
             assert_eq!(owner.installer_cloud_compilation_verification_enabled().unwrap(), enabled);
@@ -1027,7 +1091,7 @@ mod tests {
         driver.ioctl(server.proc_handle(), 99503, BINDER_SET_CONTEXT_MGR_EXT, &mut object, &mut NoMemory).unwrap();
         server.start();
         client.start();
-        let owner = Bridge { owner: client.strong(0), test_base_on_bcp: false, signing_debuggable: false };
+        let owner = Bridge { owner: client.strong(0), test_base_on_bcp: false, signing_debuggable: false, deaths: Deaths::default() };
         let registry = crate::package::libraries::Registry::new(&SystemConfig::default());
         let available = std::collections::BTreeMap::new();
         let mut pkg = crate::package::pkg::AndroidPackage::default();
