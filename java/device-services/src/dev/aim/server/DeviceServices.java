@@ -153,6 +153,7 @@ public final class DeviceServices extends SystemService {
     }
 
     private static final class Bridge extends IBridge.Stub {
+        private final PackageBootstrapBridge packageBootstrap = new PackageBootstrapBridge();
         private final Context context;
         private final IServiceHost host;
         private final LocationBridge location;
@@ -181,6 +182,12 @@ public final class DeviceServices extends SystemService {
             } catch (IOException e) {
                 throw new IllegalStateException(e);
             }
+        }
+
+        @Override
+        public IPackageDiagnosticInputs getPackageDiagnosticInputs() {
+            enforceSystemUid();
+            return new PackageDiagnosticInputs(context);
         }
 
         @Override
@@ -217,6 +224,21 @@ public final class DeviceServices extends SystemService {
         public void watchPackageWrites(IPackageWritesHost host) {
             enforceSystemUid();
             packageWrites.attach(host);
+        }
+
+        @Override
+        public boolean areNativeLibraryDependenciesEnforced(String packageName, int targetSdk) {
+            return packageBootstrap.areNativeLibraryDependenciesEnforced(packageName, targetSdk);
+        }
+
+        @Override
+        public boolean isTestBaseOnBootclasspath() {
+            return packageBootstrap.isTestBaseOnBootclasspath();
+        }
+
+        @Override
+        public int[] getPermissionGidsForUid(int uid) {
+            return packageBootstrap.getPermissionGidsForUid(uid);
         }
 
         private static void enforceSystemUid() {

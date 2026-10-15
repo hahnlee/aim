@@ -4,4 +4,6 @@ package android.os;
 
 public class RemoteException extends android.util.AndroidException {
     public RuntimeException rethrowFromSystemServer() { throw new RuntimeException("stub"); }
+    public RemoteException() { throw new RuntimeException("stub"); }
+    public RemoteException(String message) { super(message); throw new RuntimeException("stub"); }
 }

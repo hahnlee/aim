@@ -1,0 +1,620 @@
+//! Initial APEX registration from android-16.0.0_r1 InstallPackageHelper and
+//! ScanPackageUtils. Copyright (C) The Android Open Source Project, Apache 2.0.
+use super::{
+    AbiScanContext, AbiScanMode, Error, FirstBootSystemInputs, Identity, NativeLibraryEnvironment,
+    NewPackageOutcome, NewSetting, Partition, Record, ScanMetadataCompletion, ScanPolicy,
+    SettingMetadata, SettingUpdate, SigningError, SigningScan, Uid, application_flags,
+};
+use crate::package::{
+    bootstrap::ApexPackage, owner::shared_users::ScanOrigin, parse, pkg::AndroidPackage,
+    system_config::SystemConfig, write::Apks,
+};
+
+#[derive(Clone, Debug)]
+pub struct ApexScanResult {
+    pub info: ApexPackage,
+    pub package: AndroidPackage,
+    pub signing: crate::package::sign::SigningDetails,
+}
+
+impl ApexScanResult {
+    pub fn notification_payload(results: &[Self]) -> Result<Vec<u8>, String> {
+        let mut out = aim_binder_host::parcel::Parcel::new();
+        out.write_i32(i32::try_from(results.len()).map_err(|_| "APEX result count overflow")?);
+        for result in results {
+            let pkg = &result.package;
+            if !pkg.is2(crate::package::pkg::booleans2::APEX)
+                || pkg.uid != -1
+                || pkg.path.as_deref() != Some(&result.info.module_path)
+                || ((i64::from(pkg.version_code_major) << 32) | i64::from(pkg.version_code as u32))
+                    != result.info.version_code
+                || pkg.signing_details.as_ref() != Some(&result.signing.parcel_details()?)
+            {
+                return Err(
+                    "APEX notification differs from completed code/signing ownership".into(),
+                );
+            }
+            let info = &result.info;
+            out.write_string16(info.module_name.as_deref());
+            out.write_string16(Some(&info.module_path));
+            out.write_string16(Some(&info.preinstalled_path));
+            out.write_i64(info.version_code);
+            out.write_bool(info.factory);
+            out.write_bool(info.active);
+            out.write_bool(info.active_changed);
+            aim_service_aidl::write_byte_array(&mut out, Some(&pkg.to_cache_entry()?.bytes));
+            match &result.signing.past_signing_certificates {
+                None => out.write_i32(-1),
+                Some(past) => {
+                    out.write_i32(
+                        i32::try_from(past.len()).map_err(|_| "APEX signer count overflow")?,
+                    );
+                    for (certificate, flags) in past {
+                        aim_service_aidl::write_byte_array(&mut out, Some(certificate));
+                        out.write_i32(*flags);
+                    }
+                }
+            }
+        }
+        Ok(out.data().to_vec())
+    }
+}
+
+impl SigningScan {
+    /// Register containers before APK directories. This returns the original
+    /// ApexManager notification inputs; notification/publication belong to the
+    /// surrounding boot owner. Earlier accepted scans survive a later error.
+    pub fn scan_initial_apex(
+        &mut self,
+        apks: &Apks,
+        config: &SystemConfig,
+        inputs: &FirstBootSystemInputs<'_>,
+    ) -> Result<Vec<ApexScanResult>, SigningError> {
+        let mut results = Vec::new();
+        for source in &inputs.apex_image.packages {
+            let fail = |phase, message: String| {
+                SigningError::Rejected(Error {
+                    package: source.parsed.package_name.clone(),
+                    path: source.info.module_path.clone(),
+                    phase,
+                    message,
+                })
+            };
+            let mut parsed = source.parsed.clone();
+            // addForInitLI refreshes the disabled raw identity before any
+            // later selection or admission can reject this source.
+            if let Some(disabled) = self
+                .settings
+                .disabled_system_packages
+                .iter_mut()
+                .find(|p| p.name == parsed.package_name)
+            {
+                disabled
+                    .transient
+                    .apex_module_name
+                    .clone_from(&source.info.module_name);
+            }
+            let mut identity = Identity::select_for_apex(&parsed, &self.settings);
+            let mut previous = self
+                .settings
+                .packages
+                .iter()
+                .find(|p| p.name == identity.internal_name)
+                .cloned();
+            let original = if previous.is_none() {
+                Identity::original_setting(&parsed, &self.settings, &|name| {
+                    self.has_scanned_package(name)
+                })
+                .cloned()
+            } else {
+                None
+            };
+            if let Some(original) = &original {
+                if !original.shared_user
+                    && super::signing::selected_shared_user(
+                        false,
+                        parsed.shared_user_id.as_deref(),
+                        parsed.is(crate::package::pkg::booleans::LEAVING_SHARED_UID),
+                    )
+                    .is_some()
+                {
+                    return Err(fail(
+                        "apex-identity",
+                        "original adoption changing non-shared ownership is not represented (#890)"
+                            .into(),
+                    ));
+                }
+                identity.internal_name = original.name.clone();
+                identity.real_name = Some(identity.manifest_name.clone());
+                previous = Some(original.clone());
+            }
+            let disabled = self
+                .settings
+                .disabled_system_packages
+                .iter()
+                .find(|p| p.name == identity.internal_name)
+                .cloned();
+            if previous
+                .as_ref()
+                .is_some_and(|p| original.is_none() && p.app_id != p.shared_app_id().unwrap_or(-1))
+            {
+                return Err(fail(
+                    "apex-identity",
+                    "container replaces an application UID owner".into(),
+                ));
+            }
+            let shared_name = super::signing::selected_shared_user(
+                previous.as_ref().is_some_and(|p| p.shared_user),
+                parsed.shared_user_id.as_deref(),
+                parsed.is(crate::package::pkg::booleans::LEAVING_SHARED_UID),
+            )
+            .map(str::to_owned);
+            self.validate_legacy_permissions()
+                .map_err(|message| fail("apex-legacy", message))?;
+            let shared_id = match &shared_name {
+                Some(name) => {
+                    let new_group = !self.identities.shared_users.contains_key(name);
+                    let group = self
+                        .identities
+                        .get_shared_user(name, 0, 0, true)
+                        .map_err(|e| {
+                            fail("apex-identity", format!("cannot resolve shared UID: {e:?}"))
+                        })?
+                        .unwrap()
+                        .clone();
+                    if !self.settings.shared_users.iter().any(|g| g.name == *name) {
+                        self.settings
+                            .shared_users
+                            .push(crate::package::settings::SharedUser {
+                                name: name.clone(),
+                                app_id: group.app_id,
+                                flags: group.flags,
+                                signatures: group.signatures.clone(),
+                            });
+                    }
+                    if new_group {
+                        self.legacy_shared_constructor(name, group.app_id)
+                            .map_err(|message| fail("apex-legacy", message))?;
+                    }
+                    Some(group.app_id)
+                }
+                None => None,
+            };
+            let replaces_shared = previous
+                .as_ref()
+                .is_some_and(|p| p.shared_app_id() != shared_id);
+            let disabled_legacy = if replaces_shared && shared_id.is_none() && disabled.is_some() {
+                Some(
+                    self.disabled_legacy_for_replacement(&identity.internal_name)
+                        .map_err(|message| fail("apex-legacy", message))?,
+                )
+            } else {
+                None
+            };
+            let updated = !source.info.factory || disabled.is_some();
+            let mut policy = container_policy(&source.info.module_path);
+            if policy.needs_shared_uid_privilege_check(&parsed, &self.identities, inputs.vendor_sdk)
+            {
+                let platform = self
+                    .settings
+                    .packages
+                    .iter()
+                    .find(|p| p.name == "android")
+                    .and_then(|p| p.signatures.as_ref())
+                    .ok_or_else(|| {
+                        fail(
+                            "apex-policy",
+                            "platform setting signing owner is unavailable".into(),
+                        )
+                    })?;
+                let platform = crate::package::sign::SigningDetails::from_saved(platform)
+                    .map_err(|e| fail("apex-signatures", e))?;
+                policy.adjust_shared_uid_privilege(
+                    &parsed,
+                    &source.signing,
+                    &platform,
+                    &self.identities,
+                    inputs.vendor_sdk,
+                );
+            }
+            policy
+                .apply(
+                    &mut parsed,
+                    &source.signing,
+                    None,
+                    updated,
+                    apks,
+                    inputs.compatibility,
+                    None,
+                )
+                .map_err(|e| fail("apex-policy", e))?;
+            super::validate::static_library(&parsed, false)
+                .map_err(|e| fail("apex-validation", e))?;
+            parsed.signing_details = Some(
+                source
+                    .signing
+                    .parcel_details()
+                    .map_err(|e| fail("apex-signatures", e))?,
+            );
+            identity.apply(&mut parsed);
+            let (flags, private_flags) = application_flags(&parsed, updated);
+            let metadata = SettingMetadata {
+                code_path: source.info.module_path.clone(),
+                legacy_native_library_path: None,
+                primary_cpu_abi: None,
+                secondary_cpu_abi: None,
+                version_code: (i64::from(parsed.version_code_major) << 32)
+                    | i64::from(parsed.version_code as u32),
+                flags,
+                private_flags,
+                last_modified_time: 0,
+                uses_sdk_libraries: super::boot::sdk_libraries(&parsed)
+                    .map_err(|e| fail("apex-metadata", e))?,
+                uses_static_libraries: super::boot::static_libraries(&parsed)
+                    .map_err(|e| fail("apex-metadata", e))?,
+                mime_groups: parsed.mime_groups.clone(),
+                domain_set_id: (inputs.new_domain_id)().map_err(|e| fail("apex-domain", e))?,
+                target_sdk_version: parsed.target_sdk_version,
+                restrict_update_hash: parsed.restrict_update_hash.clone(),
+            };
+            let mut setting = if let Some(original) = &original {
+                let users = self.scanned_users.get(&original.name).ok_or_else(|| {
+                    fail(
+                        "apex-users",
+                        "original setting user owner is not captured".into(),
+                    )
+                })?;
+                NewSetting::adopt(original, users, &identity.manifest_name, metadata)
+            } else if let Some(previous) = previous.as_ref().filter(|_| !replaces_shared) {
+                let users = self.scanned_users.get(&previous.name).ok_or_else(|| {
+                    fail(
+                        "apex-users",
+                        "retained container has no scan user owner".into(),
+                    )
+                })?;
+                NewSetting::update(
+                    previous,
+                    users,
+                    SettingUpdate {
+                        code_path: metadata.code_path.clone(),
+                        legacy_native_library_path: None,
+                        primary_cpu_abi: None,
+                        secondary_cpu_abi: None,
+                        flags,
+                        private_flags,
+                        uses_sdk_libraries: metadata.uses_sdk_libraries,
+                        uses_static_libraries: metadata.uses_static_libraries,
+                        mime_groups: metadata.mime_groups,
+                        domain_set_id: metadata.domain_set_id,
+                        target_sdk_version: metadata.target_sdk_version,
+                        restrict_update_hash: metadata.restrict_update_hash,
+                    },
+                    inputs.users.users,
+                    disabled.is_some(),
+                )
+            } else {
+                let mut users = inputs.users;
+                users.install_user = None;
+                users.stopped_system_app = super::boot::initial_stopped(
+                    &parsed,
+                    config,
+                    apks.platform
+                        .framework_boolean("config_stopSystemPackagesByDefault")
+                        .map_err(|e| fail("apex-policy", e))?,
+                );
+                NewSetting::new(
+                    &identity,
+                    &Uid {
+                        app_id: -1,
+                        shared_user: shared_name,
+                    },
+                    metadata,
+                    users,
+                )
+            };
+            if disabled_legacy.is_some() {
+                let factory = disabled.as_ref().unwrap();
+                setting.package.signatures = factory.signatures.clone();
+                if let Some(users) = inputs.users.users {
+                    let states = self.disabled_user_states(&factory.name).ok_or_else(|| {
+                        fail(
+                            "apex-users",
+                            "disabled component owner is not captured".into(),
+                        )
+                    })?;
+                    for user in users {
+                        let original = states.get(&user.id).cloned().unwrap_or_default();
+                        let state = setting.users.entry(user.id).or_default();
+                        state.enabled_components =
+                            Some(original.enabled_components.unwrap_or_default());
+                        state.disabled_components =
+                            Some(original.disabled_components.unwrap_or_default());
+                    }
+                }
+            }
+            if replaces_shared {
+                setting.package.pending_restore = previous.as_ref().unwrap().pending_restore;
+            }
+            let mut staged = self.clone();
+            if let Some(original) = original.as_ref().filter(|p| p.app_id > 0) {
+                staged
+                    .retain_original_setting(original, &setting.users)
+                    .map_err(|e| fail("apex-identity", e))?;
+            }
+            if replaces_shared {
+                let old = previous.as_ref().unwrap();
+                staged.detach_disabled_user_aliases(&old.name);
+                staged
+                    .withdraw_loaded_apex(old)
+                    .map_err(|message| fail("apex-origin", message))?;
+            }
+            let mut package = setting.package;
+            package.app_id = -1;
+            package.shared_user_app_id = shared_id;
+            package.transient.updated_system_app |= updated;
+            package
+                .transient
+                .apex_module_name
+                .clone_from(&source.info.module_name);
+            if let Some(at) = staged
+                .settings
+                .packages
+                .iter()
+                .position(|p| p.name == package.name)
+            {
+                staged.settings.packages[at] = package.clone();
+            } else {
+                staged.settings.packages.push(package.clone());
+            }
+            if previous.is_none() || replaces_shared {
+                staged
+                    .legacy_setting_constructor(&package.name, previous.is_some(), disabled_legacy)
+                    .map_err(|message| fail("apex-legacy", message))?;
+            } else {
+                staged
+                    .rebind_legacy_setting(&package.name)
+                    .map_err(|message| fail("apex-legacy", message))?;
+            }
+            let identity_manifest = identity.manifest_name.clone();
+            let mut record = Record {
+                settings: package,
+                parsed,
+                signing: source.signing.clone(),
+                identity,
+                origin: if source.scan_parse_flags & parse::PARSE_IS_SYSTEM_DIR != 0 {
+                    ScanOrigin::SystemDirectory
+                } else {
+                    ScanOrigin::Data
+                },
+            };
+            let signing = staged.apply_apex_candidate(&record, source)?;
+            record.settings = staged
+                .settings
+                .packages
+                .iter()
+                .find(|p| p.name == record.settings.name)
+                .unwrap()
+                .clone();
+            let env = NativeLibraryEnvironment {
+                preferred_abi: inputs.preferred_abi,
+                app_lib32_install_dir: inputs.app_lib32_install_dir,
+                code_is_directory: false,
+                canonical_source: None,
+            };
+            let scan_as_instant_app=setting.users.get(&0).is_some_and(|user|user.instant_app);
+            let completed = staged.finish_scan_metadata(
+                NewPackageOutcome {
+                    record,
+                    users: setting.users,
+                    signing,
+                },
+                apks,
+                ScanMetadataCompletion {
+                    scan_as_instant_app,
+                    seinfo: inputs.seinfo,
+                    abi_policy: inputs.abi_policy,
+                    native_environment: &env,
+                    context: AbiScanContext {
+                        mode: AbiScanMode::Apex,
+                        system: true,
+                        updated,
+                        override_abi: None,
+                        platform_runtime_64bit: None,
+                    },
+                    install: inputs.install,
+                    destination: None,
+                    clock: inputs.clock,
+                    factory_test: inputs.factory_test,
+                },
+            )?;
+            let name = &completed.candidate.record.settings.name;
+            if replaces_shared {
+                let old = previous.as_ref().unwrap();
+                if staged.detach_shared_member(old)? {
+                    staged
+                        .validate_legacy_permissions()
+                        .map_err(|message| fail("apex-legacy", message))?;
+                }
+            }
+            // The final code retains the scan UID; Settings registration assigns
+            // shared application ownership only after code finalization.
+            let converted = staged
+                .convert_apex_shared_user(name, inputs.shared_uid_migration)
+                .map_err(|message| fail("apex-shared-migration", message))?;
+            if let Some(id) = shared_id.filter(|_| !converted) {
+                staged
+                    .settings
+                    .packages
+                    .iter_mut()
+                    .find(|p| p.name == *name)
+                    .unwrap()
+                    .app_id = id;
+            }
+            staged
+                .rebind_legacy_setting(name)
+                .map_err(|message| fail("apex-legacy", message))?;
+            if source.info.factory && !source.info.active {
+                staged.disable_system_package(name)?;
+            }
+            if original.is_some() {
+                staged
+                    .settings
+                    .renamed_packages
+                    .retain(|(new, _)| new != &identity_manifest);
+                staged
+                    .settings
+                    .renamed_packages
+                    .push((identity_manifest, name.clone()));
+            }
+            results.push(ApexScanResult {
+                info: source.info.clone(),
+                package: completed.candidate.record.parsed,
+                signing: completed.candidate.record.signing,
+            });
+            *self = staged;
+        }
+        Ok(results)
+    }
+
+    /// commitReconciledScanResultLocked's conversion after completed scan
+    /// metadata and before Settings registration. The APEX code UID stays -1.
+    fn convert_apex_shared_user(
+        &mut self,
+        name: &str,
+        strategy: super::SharedUidMigration,
+    ) -> Result<bool, String> {
+        if strategy != super::SharedUidMigration::BestEffort {
+            return Ok(false);
+        }
+        let setting = self
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == name)
+            .ok_or("APEX migration setting is missing")?;
+        let Some(id) = setting.shared_app_id() else {
+            return Ok(false);
+        };
+        let code = self
+            .loaded
+            .get(name)
+            .ok_or("APEX migration code is missing")?;
+        if !code
+            .package
+            .is(crate::package::pkg::booleans::LEAVING_SHARED_UID)
+        {
+            return Ok(false);
+        }
+        let group = self
+            .identities
+            .shared_users
+            .iter()
+            .find(|(_, g)| g.app_id == id)
+            .ok_or("APEX migration shared owner is missing")?;
+        if group.1.package_names().collect::<Vec<_>>() != vec![name] {
+            return Ok(false);
+        }
+        let disabled: Vec<_> = self
+            .settings
+            .disabled_system_packages
+            .iter()
+            .filter(|p| p.shared_app_id() == Some(id))
+            .collect();
+        if disabled.len() > 1
+            || disabled.first().is_some_and(|p| {
+                !self.disabled_loaded.get(&p.name).is_some_and(|code| {
+                    code.package
+                        .is(crate::package::pkg::booleans::LEAVING_SHARED_UID)
+                })
+            })
+        {
+            return Ok(false);
+        }
+        let group_name = group.0.clone();
+        self.validate_seinfo()?;
+        self.identities
+            .ids
+            .replace(
+                id,
+                crate::package::owner::app_ids::Owner::Package(name.into()),
+            )
+            .map_err(|e| format!("APEX migration slot replacement: {e:?}"))?;
+        let setting = self
+            .settings
+            .packages
+            .iter_mut()
+            .find(|p| p.name == name)
+            .unwrap();
+        setting.shared_user = false;
+        setting.shared_user_app_id = None;
+        for setting in &mut self.settings.disabled_system_packages {
+            if setting.shared_app_id() == Some(id) {
+                setting.shared_user = false;
+                setting.shared_user_app_id = None;
+            }
+        }
+        self.settings.shared_users.retain(|g| g.name != group_name);
+        self.identities.remove_shared_user(&group_name);
+        self.commit_converted_legacy(name, &group_name, id)?;
+        self.rebind_apex_seinfo_after_conversion(name, id)?;
+        self.unlink_apex_parsed_uid(name, id)?;
+        Ok(true)
+    }
+}
+
+fn container_policy(path: &str) -> ScanPolicy {
+    // getSystemPackageScanFlags always includes SYSTEM, even for /data APEX.
+    // Partition masks use the actual code path, not the preinstalled origin.
+    let partition = [
+        Partition::SystemExt,
+        Partition::Product,
+        Partition::Oem,
+        Partition::Odm,
+        Partition::Vendor,
+        Partition::System,
+    ]
+    .into_iter()
+    .find(|part| {
+        let root = format!("/{}", part.name());
+        path == root || path.starts_with(&(root + "/"))
+    });
+    ScanPolicy {
+        system: true,
+        apex: true,
+        privileged: partition
+            .is_some_and(|part| path.starts_with(&format!("/{}/priv-app/", part.name()))),
+        oem: partition == Some(Partition::Oem),
+        vendor: partition == Some(Partition::Vendor),
+        odm: partition == Some(Partition::Odm),
+        product: partition == Some(Partition::Product),
+        system_ext: partition == Some(Partition::SystemExt),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn container_flags_follow_code_partition_and_always_include_system_and_apex() {
+        for (path, vendor, product, system_ext, privileged) in [
+            ("/vendor/apex/a.apex", true, false, false, false),
+            ("/product/apex/a.apex", false, true, false, false),
+            ("/system_ext/apex/a.apex", false, false, true, false),
+            ("/system/priv-app/a.apex", false, false, false, true),
+            ("/vendorish/a.apex", false, false, false, false),
+            ("/data/apex/active/a.apex", false, false, false, false),
+        ] {
+            let policy = container_policy(path);
+            assert!(policy.system && policy.apex);
+            assert_eq!(
+                (
+                    policy.vendor,
+                    policy.product,
+                    policy.system_ext,
+                    policy.privileged
+                ),
+                (vendor, product, system_ext, privileged)
+            );
+        }
+    }
+}

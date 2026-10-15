@@ -20,4 +20,4 @@ runtime="$1"
 shift
 [[ -f "$runtime/path-map" ]] || { echo "$runtime/path-map: not a guest-init runtime" >&2; exit 1; }
 [[ $# -gt 0 ]] || set -- -d -b all -v threadtime
-exec "$linux_run" --path-map "$runtime/path-map" /system/bin/logcat "$@"
+exec "$linux_run" --mount-namespace-from-init --path-map "$runtime/path-map" /system/bin/logcat "$@"

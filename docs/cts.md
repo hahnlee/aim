@@ -5,8 +5,9 @@ APK; it runs here with `pm install` and `am instrument` in the guest's shell
 (system-services.md, "Conformance"). A host-side module (`JarHostTest`,
 `HostTest`) is a jar that runs on the Mac inside Tradefed, the release's
 harness, and drives the device over adb: installs with flags, `adb shell`
-commands, pushes and pulls, reboots. For M4, 22 of PackageManager's 52
-modules are host-side (m4-packagemanager.md, "CTS").
+commands, pushes and pulls, reboots. The M4 table explicitly lists 23 host-side modules (m4-packagemanager.md,
+"CTS"). All 23 canonical configs in Android 16 r1 use `HostTest` or
+`JarHostTest`; the former 52-total/22-host count was inaccurate (#1063).
 
 They run against the guest as against a device: the release's own Tradefed
 talks to the image's own adbd. Nothing on either side is replaced or faked.
@@ -38,6 +39,8 @@ jars require JDK 21, supplied by Android Studio's JBR or Homebrew
 ```sh
 cargo aim build
 cargo aim boot --data DATA -- --androidboot aim.adb.port=5611
+# With the resident controller:
+aimctl --data DATA start --adb-port 5611
 # once sys.boot_completed is 1:
 tools/cts-tradefed.sh DATA 5611 -m CtsPackageSettingHostTestCases
 ```
@@ -53,11 +56,54 @@ remaining options (`-m MODULE`, `-t CLASS#test`, ...): the classic console
 precondition steps are skipped because their APKs are not fetched; neither
 changes what a module tests.
 
+The lock now includes all 23 host modules listed in the M4 table: their
+complete official module directories, including test APKs, signing sidecars
+and the staged-install tools, plus every explicit config file dependency.
+There are 375 module files, one shared BackupPreparer helper and eight harness entries (384 pins), occupying
+about 646 MiB for the module inputs. These inputs have verified hashes;
+fetching them does not establish a module pass. The separate device-side
+inputs remain in `upstream/cts.lock`.
+
+For the current M4 C completion, acceptance is native-only: all 66 modules
+in the pinned PackageManager cohort must complete and pass on the native
+PackageManager. Original results remain useful diagnostic and historical
+evidence, but matching their outcomes is not part of this acceptance gate.
+
 To pin another module, list its entries with `tools/cts-module.py --list
 testcases/MODULE/`, add each with the sha256 of its inflated content to
 `upstream/cts-tradefed.lock`, and fetch.
 
-## Status (2026-10-02)
+## Input status (2026-10-08)
+
+All 386 host/harness pins and all 1,065 device-input pins are present and
+hash verified. The relevant C device/permission cohort has 43 modules (42
+instrumentation modules and one native GTest), with 934 archive paths. The
+Secure FRP test APK already embeds its install helper (#1087). The official C parsing host module has completed twice with zero passed and
+eleven failed tests, retained in the 2026.10.08_14.49.54 and
+2026.10.08_15.09.01 result directories. A C57 diagnostic-option trial failed
+configuration and counts as not run; an unchanged-harness single-test replay
+fails original permission PREPARE. C67 parsing XML records five passed and six failed tests with the module
+complete (2026.10.08_16.45.04); installation/context ownership failures remain.
+C69 official parsing XML confirms eleven passed, zero failed and module complete
+(2026.10.08_17.02.43). The current native FULL66 campaign is running; interim
+results do not establish acceptance.
+Runs retain Tradefed results and logs as acceptance evidence.
+
+The separate template-parity gate in [first-boot.md](first-boot.md), #620,
+uses the official `CtsBootStatsTestCases` host module. Its config and JAR
+are pinned and hash verified in `upstream/cts-tradefed.lock`; the config
+requires only that JAR and the existing `JarHostTest` harness, with no
+APK or file-push inputs. It is not added to the PM 66-module manifest.
+Run it separately on first-boot templates with
+`tools/cts-tradefed.sh DATA PORT -m CtsBootStatsTestCases`, retaining the
+official XML results. Input preparation is complete; this separate parity
+check has not been executed and is not part of the current M4 C acceptance
+gate. `BootStatsHostTest.testBootStats` clears
+the events log, reboots the device through Tradefed and reads the boot
+atoms with `cmd stats print-stats`; run it on the disposable gate device
+after preserving the first-boot measurements.
+
+## Original device transport checks (2026-10-02)
 
 Measured in device-mode boots with a disposable data directory (ops
 checks m4tf-1 to m4tf-5): adb connects and is authorized; `adb shell`,
@@ -66,3 +112,12 @@ the same guest-init pid and adbd back in 6 s. No module has produced
 results yet: an install crashed system_server once (#784), and after a
 reboot a module waited on `/sdcard`, which the emulated volume does not
 provide without MediaProvider's FUSE (#221).
+
+Official campaign comparison verifies each retained XML's campaign-local path and
+recorded SHA before parsing. Test outcomes remain visible even when wrapper or
+invocation validation failed; XML completeness, wrapper issues and assumption
+failures are reported separately and still prevent acceptance. The comparator
+requires a complete native campaign with every module passing. Original outcomes
+are reported separately and do not determine M4 C acceptance. Evidence reporting
+does not waive a failed or unexecuted native module. Six fixture regressions cover
+this separation, tampering and foreign modules.

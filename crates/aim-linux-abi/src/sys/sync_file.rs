@@ -8,7 +8,7 @@
 //! and `/proc/self/fd` shows it as `anon_inode:sync_file`.
 
 use aim_sync_file::State;
-use std::os::fd::BorrowedFd;
+use std::os::fd::{BorrowedFd,AsRawFd};
 
 use super::fdtab::{self, Kind};
 use super::fork_state::{Reader, Writer};
@@ -74,13 +74,19 @@ pub fn init() {
     aim_sync_file::set_hooks(aim_sync_file::Hooks {
         hide: fdtab::hide,
         unhide: fdtab::unhide,
-        adopt,
+        adopt:publish_fence,
     });
 }
 
 /// `fd` (new to the guest, or arrived from elsewhere) is a sync_file.
 pub fn adopt(fd: i32) {
     fdtab::insert(fd, Kind::SyncFile);
+}
+
+fn publish_fence(fd:i32)->Result<(),crate::errno::Errno>{
+    let _guard=fdtab::lifecycle();
+    adopt(fd);
+    match fdtab::publish_typed_guest(fd){Ok(())=>Ok(()),Err(error)=>{fdtab::on_close(fd);Err(error)}}
 }
 
 /// Whether `fd` is a sync_file; one that arrived unrecognized is adopted.
@@ -114,8 +120,8 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
         SYNC_IOC_MERGE => merge(fd, arg),
         SYNC_IOC_FILE_INFO => file_info(fd, arg),
         SYNC_IOC_SET_DEADLINE => {
-            // SAFETY: the guest's struct sync_set_deadline.
-            let d = unsafe { (arg as *const [u64; 2]).read_unaligned() };
+            let bytes=match super::user_memory::read_exact(arg,16){Ok(bytes)=>bytes,Err(error)=>return Some(-(error as i64))};
+            let d=unsafe{(bytes.as_ptr()as *const [u64;2]).read_unaligned()};
             // The deadline is a hint; the host GPU has no clock to boost.
             if d[1] != 0 { -(EINVAL as i64) } else { 0 }
         }
@@ -124,31 +130,24 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
 }
 
 fn merge(fd: i32, arg: u64) -> i64 {
-    // SAFETY: the guest's struct sync_merge_data.
-    let mut d = unsafe { (arg as *const MergeData).read_unaligned() };
-    if d.flags != 0 || d.pad != 0 {
-        return -(EINVAL as i64);
-    }
-    if !is_sync_file(d.fd2) {
-        return -(ENOENT as i64);
-    }
-    // SAFETY: both are open guest sync_files, borrowed for the call.
-    let merged =
-        unsafe { aim_sync_file::merge(BorrowedFd::borrow_raw(fd), BorrowedFd::borrow_raw(d.fd2)) };
-    match merged {
-        Ok(file) => {
-            d.fence = aim_sync_file::give_to_guest(file);
-            // SAFETY: the guest's struct, written back with the new fd.
-            unsafe { (arg as *mut MergeData).write_unaligned(d) };
-            0
-        }
-        Err(e) => -(e.raw_os_error().unwrap_or(libc::ENOMEM) as i64),
-    }
+    let bytes=match super::user_memory::read_exact(arg,size_of::<MergeData>()){Ok(bytes)=>bytes,Err(error)=>return -(error as i64)};
+    let mut d=unsafe{(bytes.as_ptr()as *const MergeData).read_unaligned()};
+    if d.flags != 0 || d.pad != 0 {return -(EINVAL as i64);}
+    let second=match fdtab::pin_guest(d.fd2){Ok(pin)=>pin,Err(crate::errno::EBADF)=>return -(ENOENT as i64),Err(error)=>return -(error as i64)};
+    if !is_sync_file(second.descriptor().as_raw_fd()){return -(ENOENT as i64);}
+    let file=match unsafe{aim_sync_file::merge(BorrowedFd::borrow_raw(fd),second.descriptor())}{Ok(file)=>file,Err(error)=>return -(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::ENOMEM))as i64)};
+    // The new descriptor remains owned and unpublished until copy_to_user
+    // succeeds, as sync_file_ioctl_merge's fd_install ordering requires.
+    d.name[31]=0;
+    d.fence=file.as_raw_fd();
+    let output=unsafe{std::slice::from_raw_parts((&d as *const MergeData).cast::<u8>(),size_of::<MergeData>())};
+    if let Err(error)=super::user_memory::write_exact(arg,output){return -(error as i64);}
+    match aim_sync_file::give_to_guest(file){Ok(_)=>0,Err(error)=>-(error as i64)}
 }
 
 fn file_info(fd: i32, arg: u64) -> i64 {
-    // SAFETY: the guest's struct sync_file_info.
-    let mut info = unsafe { (arg as *const FileInfo).read_unaligned() };
+    let bytes=match super::user_memory::read_exact(arg,size_of::<FileInfo>()){Ok(bytes)=>bytes,Err(error)=>return -(error as i64)};
+    let mut info=unsafe{(bytes.as_ptr()as *const FileInfo).read_unaligned()};
     if info.flags != 0 || info.pad != 0 {
         return -(EINVAL as i64);
     }
@@ -172,46 +171,43 @@ fn file_info(fd: i32, arg: u64) -> i64 {
             flags: 0,
             timestamp_ns,
         };
-        // SAFETY: the guest's array of at least one struct sync_fence_info.
-        unsafe { (info.sync_fence_info as *mut FenceInfo).write_unaligned(fence) };
+        let output=unsafe{std::slice::from_raw_parts((&fence as *const FenceInfo).cast::<u8>(),size_of::<FenceInfo>())};
+        if let Err(error)=super::user_memory::write_exact(info.sync_fence_info,output){return -(error as i64);}
     }
     info.status = status;
     info.name = name32(NAME);
     info.num_fences = 1;
-    // SAFETY: the guest's struct, written back.
-    unsafe { (arg as *mut FileInfo).write_unaligned(info) };
-    0
+    let output=unsafe{std::slice::from_raw_parts((&info as *const FileInfo).cast::<u8>(),size_of::<FileInfo>())};
+    super::user_memory::write_exact(arg,output).map(|_|0).unwrap_or_else(|error|-(error as i64))
 }
 
 /// The fds this process keeps for its pending fences, which a fork child
 /// inherits.
 pub(super) fn fork_save(w: &mut Writer) {
-    w.seq(aim_sync_file::inherited().into_iter(), |w, fd| w.i32(fd));
+    w.seq(aim_sync_file::inherited().into_iter(), |w, fd| {w.retain_private(fd);w.i32(fd)});
 }
 
 /// A fork child closes the parent's pending-fence fds: the parent signals
 /// those fences.
 pub(super) fn fork_restore(r: &mut Reader) {
     init();
-    aim_sync_file::close_inherited(&r.seq(|r| r.i32()));
+    for fd in r.seq(|r|r.i32()){if let Err(error)=fdtab::close_fork_private(fd){crate::diag!("fork sync private close: errno {error}");r.invalidate();return;}}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::fd::{FromRawFd, OwnedFd};
 
     /// A new guest sync_file and its writer.
     fn guest_fence() -> (i32, aim_sync_file::Writer) {
         let (file, writer) = aim_sync_file::pair().unwrap();
-        (aim_sync_file::give_to_guest(file), writer)
+        let fd=aim_sync_file::give_to_guest(file).unwrap();
+        (fd,writer)
     }
 
     /// Close a guest fd the way the guest does.
     fn close(fd: i32) {
-        fdtab::on_close(fd);
-        // SAFETY: a test fd, closed once.
-        drop(unsafe { OwnedFd::from_raw_fd(fd) });
+        assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]),0);
     }
 
     fn info(fd: i32, with_fence: bool) -> (i64, FileInfo, FenceInfo) {
@@ -275,6 +271,7 @@ mod tests {
         // fd2 that is not a sync_file, and nonzero flags.
         let (s, t) = std::os::unix::net::UnixDatagram::pair().unwrap();
         let other = std::os::fd::AsRawFd::as_raw_fd(&s);
+        fdtab::publish_guest(other).unwrap();
         d.fd2 = other;
         let r = ioctl(a, SYNC_IOC_MERGE, &mut d as *mut MergeData as u64);
         assert_eq!(r, Some(-(ENOENT as i64)));
@@ -285,18 +282,59 @@ mod tests {
         // Other sockets are not sync_files, and their ioctls go elsewhere.
         let r = ioctl(other, SYNC_IOC_FILE_INFO, &mut d as *mut MergeData as u64);
         assert_eq!(r, None);
-        drop((s, t));
+        fdtab::withdraw_guest(other).unwrap();drop((s, t));
         for fd in [a, b, m] {
             close(fd);
         }
     }
 
     #[test]
+    fn real_guest_merge_publishes_fd_and_fault_copy_rolls_back(){
+        const MARKER:&str="sync-merge-native-namespace";
+        if !std::env::args().any(|arg|arg==MARKER){
+            let mut child=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","sys::sync_file::tests::real_guest_merge_publishes_fd_and_fault_copy_rolls_back","--skip",MARKER,"--nocapture"]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+            let deadline=std::time::Instant::now()+std::time::Duration::from_secs(10);loop{if child.try_wait().unwrap().is_some(){break;}if std::time::Instant::now()>=deadline{child.kill().unwrap();child.wait().unwrap();panic!("merge namespace timed out");}std::thread::sleep(std::time::Duration::from_millis(5));}
+            let output=child.wait_with_output().unwrap();assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));assert!(String::from_utf8_lossy(&output.stdout).contains("SYNC_MERGE_NATIVE_NAMESPACE_EXECUTED"));return;
+        }
+        init();let(a,wa)=guest_fence();let(b,wb)=guest_fence();wa.signal(1);wb.signal(1);
+        let mut data:MergeData=unsafe{std::mem::zeroed()};data.fd2=b;
+        let invoke=|at:u64|super::super::fs::ioctl([a as u64,SYNC_IOC_MERGE,at,0,0,0]);
+        assert_eq!(invoke(&mut data as *mut MergeData as u64),0);let merged=data.fence;
+        assert_eq!(super::super::fs::fcntl([merged as u64,1,0,0,0,0]),1);
+        let mut stat=[0u8;128];assert_eq!(super::super::fs::fstat([merged as u64,stat.as_mut_ptr()as u64,0,0,0,0]),0);
+        let mut poll=libc::pollfd{fd:merged,events:libc::POLLIN,revents:0};let timeout=[0i64;2];assert_eq!(super::super::poll::ppoll([&mut poll as *mut libc::pollfd as u64,1,timeout.as_ptr()as u64,0,0,0]),1);assert_ne!(poll.revents&libc::POLLIN,0);
+        assert_eq!(super::super::fs::ioctl([merged as u64,SYNC_IOC_FILE_INFO,&mut (unsafe{std::mem::zeroed::<FileInfo>()})as *mut FileInfo as u64,0,0,0]),0);
+        assert_eq!(super::super::fs::ioctl([merged as u64,SYNC_IOC_FILE_INFO,1,0,0,0]),-(EFAULT as i64));
+        assert_eq!(super::super::fs::ioctl([merged as u64,SYNC_IOC_SET_DEADLINE,1,0,0,0]),-(EFAULT as i64));
+        close(merged);
+        data.fd2=-1;assert_eq!(invoke(&mut data as *mut MergeData as u64),-(ENOENT as i64));
+        use std::os::fd::AsRawFd;
+        let private=aim_storage::private_fd::PrivateFd::allocate(||std::fs::File::open("/dev/null").map(Into::into)).unwrap();data.fd2=private.as_raw_fd();assert_eq!(invoke(&mut data as *mut MergeData as u64),-(ENOENT as i64));drop(private);
+        fn native_fds()->Vec<i32>{let mut bytes=[0u8;8192];let size=unsafe{libc::proc_pidinfo(libc::getpid(),1,0,bytes.as_mut_ptr().cast(),bytes.len()as i32)};assert!(size>=0);let mut fds=bytes[..size as usize].chunks_exact(8).map(|bytes|i32::from_ne_bytes(bytes[..4].try_into().unwrap())).collect::<Vec<_>>();fds.sort_unstable();fds}
+        let page=super::super::mem::PAGE as usize;let memory=unsafe{libc::mmap(std::ptr::null_mut(),page,libc::PROT_READ|libc::PROT_WRITE,libc::MAP_ANON|libc::MAP_PRIVATE,-1,0)};assert_ne!(memory,libc::MAP_FAILED);data.fd2=b;unsafe{(memory as *mut MergeData).write(data);}assert_eq!(unsafe{libc::mprotect(memory,page,libc::PROT_READ)},0);
+        let before=native_fds();assert_eq!(invoke(memory as u64),-(crate::errno::EFAULT as i64));assert_eq!(native_fds(),before,"unpublished merged FD must close on copy_to_user failure");assert_eq!(unsafe{libc::munmap(memory,page)},0);
+        let rejected=aim_sync_file::signaled(1,1).unwrap();let fd=rejected.as_raw_fd();fdtab::keep_hidden(fd);
+        assert_eq!(aim_sync_file::give_to_guest(rejected),Err(crate::errno::EBADF));
+        assert_eq!(unsafe{libc::fcntl(fd,libc::F_GETFD)},-1);assert_eq!(crate::errno::last(),crate::errno::EBADF);assert!(fdtab::get(fd).is_none());fdtab::unhide(fd);
+        close(a);close(b);println!("SYNC_MERGE_NATIVE_NAMESPACE_EXECUTED");
+    }
+
+    #[test]
     fn a_fence_from_elsewhere_is_recognized() {
+        const MARKER:&str="foreign-fence-native-namespace";
+        if !std::env::args().any(|arg|arg==MARKER){
+            let output=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","sys::sync_file::tests::a_fence_from_elsewhere_is_recognized","--skip",MARKER,"--nocapture"]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+            let mut child=output;let deadline=std::time::Instant::now()+std::time::Duration::from_secs(10);
+            loop{if child.try_wait().unwrap().is_some(){break;}if std::time::Instant::now()>=deadline{child.kill().unwrap();child.wait().unwrap();panic!("native fixture namespace timed out");}std::thread::sleep(std::time::Duration::from_millis(5));}
+            let output=child.wait_with_output().unwrap();
+            assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));assert!(String::from_utf8_lossy(&output.stdout).contains("FOREIGN_FENCE_NATIVE_NAMESPACE_EXECUTED"));return;
+        }
+
         init();
         let (file, writer) = aim_sync_file::pair().unwrap();
         // Arrived by SCM_RIGHTS or binder: not in the table yet.
         let fd = std::os::fd::IntoRawFd::into_raw_fd(file);
+        fdtab::publish_guest(fd).unwrap();
         assert!(fdtab::get(fd).is_none());
         writer.signal(1);
         assert_eq!(info(fd, false).1.status, 1);
@@ -306,5 +344,6 @@ mod tests {
         let r = ioctl(fd, 0xc0083e7f, [0u64; 2].as_ptr() as u64);
         assert_eq!(r, Some(-(ENOTTY as i64)));
         close(fd);
+        println!("FOREIGN_FENCE_NATIVE_NAMESPACE_EXECUTED");
     }
 }

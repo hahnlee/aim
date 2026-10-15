@@ -8,11 +8,89 @@ use std::path::PathBuf;
 use aim_storage::data::{self, DataImage};
 use aim_storage::disk;
 
-fn dir(name: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("storage-{name}-{}", std::process::id()));
-    let _ = data::remove(&dir);
-    dir
+struct Fixture {
+    root: PathBuf,
+    dir: PathBuf,
+    identity: (u64, u64),
+}
+
+impl std::ops::Deref for Fixture {
+    type Target = std::path::Path;
+    fn deref(&self) -> &Self::Target { &self.dir }
+}
+impl AsRef<std::path::Path> for Fixture {
+    fn as_ref(&self) -> &std::path::Path { &self.dir }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        use std::os::unix::fs::MetadataExt;
+        let result = (|| {
+            let metadata = fs::symlink_metadata(&self.root).map_err(|error| error.to_string())?;
+            if !metadata.is_dir() || (metadata.dev(), metadata.ino()) != self.identity {
+                return Err(format!("{}: fixture ownership changed", self.root.display()));
+            }
+            if disk::is_mount_point(&self.dir) {
+                let mount = fs::canonicalize(&self.dir).map_err(|error| error.to_string())?;
+                let attached = disk::attachments_of(&data::image_of(&self.dir))?;
+                if !attached.iter().any(|image| image.mounts.contains(&mount)) {
+                    return Err(format!("{}: mount is not the fixture image", self.dir.display()));
+                }
+            }
+            // File and DataImage locals declared after this guard drop first.
+            // This owner API normally ejects exact image attachments before deletion.
+            data::remove(&self.dir)?;
+            fs::remove_dir(&self.root).map_err(|error| format!("{}: {error}", self.root.display()))
+        })();
+        if let Err(error) = result {
+            if std::thread::panicking() {
+                eprintln!("storage fixture cleanup failed; retained {}: {error}", self.root.display());
+            } else {
+                panic!("storage fixture cleanup failed; retained {}: {error}", self.root.display());
+            }
+        }
+    }
+}
+
+fn dir(name: &str) -> Fixture {
+    use std::os::unix::fs::MetadataExt;
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let parent = fs::canonicalize(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    loop {
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = parent.join(format!("storage-{name}-{}-{serial}", std::process::id()));
+        match fs::create_dir(&root) {
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("{}: {error}", root.display()),
+            Ok(()) => {
+                let metadata = fs::symlink_metadata(&root).unwrap();
+                return Fixture { dir: root.join("data"), root, identity: (metadata.dev(), metadata.ino()) };
+            }
+        }
+    }
+}
+
+#[test]
+fn a_failed_test_detaches_and_removes_only_its_fixture() {
+    let mut owned = None;
+    let mut injected = false;
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let dir = dir("unwind");
+        owned = Some((dir.root.clone(), dir.dir.clone(), data::image_of(&dir)));
+        let image = DataImage::attach(&dir, None).unwrap();
+        assert!(disk::is_mount_point(&dir));
+        fs::write(dir.join("retained-on-failure"), vec![0x5a; 8 << 20]).unwrap();
+        assert!(image.image().exists());
+        injected = true;
+        panic!("injected assertion before fixture removal");
+    }));
+    assert!(injected, "fixture must reach the intended failure after actual attach/write");
+    assert!(failed.is_err());
+    let (root, mount, image) = owned.unwrap();
+    assert!(!disk::is_mount_point(&mount));
+    assert!(!disk::attached().unwrap().iter().any(|attachment| attachment.image == image));
+    assert!(!image.exists());
+    assert!(!mount.exists());
+    assert!(!root.exists());
 }
 
 #[test]

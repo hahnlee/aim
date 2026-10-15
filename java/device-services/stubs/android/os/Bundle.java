@@ -2,7 +2,17 @@
 // the members used, checked against the image by the device-services node.
 package android.os;
 
-public final class Bundle extends BaseBundle {
+public final class Bundle extends BaseBundle implements Parcelable {
+    public void putFloat(String name,float value) { throw new RuntimeException("stub"); }
+    public void putParcelable(String key, Parcelable value) { throw new RuntimeException("stub"); }
+    public static final Parcelable.Creator<Bundle> CREATOR = null;
+    @Override public void writeToParcel(Parcel out, int flags) { throw new RuntimeException("stub"); }
+    @Override public int describeContents() { throw new RuntimeException("stub"); }
     public Bundle() { throw new RuntimeException("stub"); }
+    public <T> java.util.ArrayList<T> getParcelableArrayList(String key, Class<T> type) { throw new RuntimeException("stub"); }
+    public <T extends Parcelable> void putParcelableArrayList(String key, java.util.ArrayList<T> values) { throw new RuntimeException("stub"); }
     public void putBinder(String key, IBinder value) { throw new RuntimeException("stub"); }
+    public Bundle(int capacity) { throw new RuntimeException("stub"); }
+    public Bundle(Bundle original) { throw new RuntimeException("stub"); }
+    public void putBundle(String key, Bundle value) { throw new RuntimeException("stub"); }
 }

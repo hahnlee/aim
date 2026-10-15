@@ -2,7 +2,8 @@
 //! edit here:
 //!
 //! - `host/<bin>`: every binary of the host crates (the workspace's
-//!   default members), built with `--release`;
+//!   default members), built with `--release` in a private Cargo directory
+//!   and published as detached executable vnodes;
 //! - `hal/<package>` and `daemon/<package>`: every guest package with a
 //!   `[package.metadata.vendor-hal]` or `[package.metadata.daemon]` table,
 //!   built for aarch64-linux-android with the `android` profile and
@@ -30,6 +31,7 @@ pub const ANDROID_PROFILE: &str = "android";
 /// The API level of the NDK linker wrapper `.cargo/config.toml` names.
 const ANDROID_API: u32 = 35;
 const RECIPE: u32 = 1;
+const HOST_RECIPE: u32 = 2;
 
 pub struct Package {
     pub name: String,
@@ -212,24 +214,31 @@ impl Workspace {
                     .filter(|t| t.kind.iter().any(|k| k == "bin"))
                 {
                     let artifact = self.host_bin(&target.name);
-                    let deps = if self.needs_generated_sources(id) {
+                    let mut deps = if self.needs_generated_sources(id) {
                         vec![Dep::order_only("aidl-gen")]
                     } else {
                         Vec::new()
                     };
+                    if target.name == "guest-init" {
+                        deps.push(Dep::order_only("host/aim-lock-holder"));
+                    }
+                    if target.name == "linux-run" { deps.push(Dep::order_only("host/aim-pty-holder")); }
                     nodes.push(Node {
                         name: format!("host/{}", target.name),
                         deps,
                         inputs: self.declared_inputs(id),
                         outputs: vec![artifact.clone()],
                         tools: vec![Tool::Rustc],
-                        recipe: RECIPE,
+                        recipe: HOST_RECIPE,
                         action: Action::Cargo(Unit {
                             batch: "host".into(),
                             package: package.name.clone(),
                             bin: Some(target.name.clone()),
-                            artifact,
-                            install: None,
+                            artifact: self
+                                .target_dir
+                                .join("aim-host-build/release")
+                                .join(&target.name),
+                            install: Some(artifact),
                         }),
                         boot: true,
                     });
@@ -299,18 +308,21 @@ fn guest_install(prefix: &str, table: &Value) -> Option<(PathBuf, bool)> {
     }
 }
 
-/// Builds one batch of cargo units and installs guest artifacts. Returns
+/// Builds one batch of cargo units and publishes its artifacts. Returns
 /// each unit's found inputs.
 pub fn build(units: &[&Unit], ctx: &Ctx, log: &mut Log) -> Result<Vec<Vec<PathBuf>>, String> {
     let mut cmd = cargo();
     cmd.current_dir(aim_paths::root())
         .args(["build", "--locked"]);
-    let guest = units[0].install.is_some();
+    let guest = units[0].batch != "host";
     if guest {
         prepare_guest_links()?;
         cmd.args(["--target", ANDROID_TARGET, "--profile", ANDROID_PROFILE]);
     } else {
-        cmd.arg("--release");
+        // Cargo may replace or relink its own artifacts. They must never be
+        // the executable vnodes currently running a guest (#1146).
+        let staging = units[0].artifact.parent().unwrap().parent().unwrap();
+        cmd.arg("--release").arg("--target-dir").arg(staging);
     }
     let mut packages = BTreeSet::new();
     for unit in units {
@@ -331,7 +343,11 @@ pub fn build(units: &[&Unit], ctx: &Ctx, log: &mut Log) -> Result<Vec<Vec<PathBu
     let mut found = Vec::new();
     for unit in units {
         if let Some(install) = &unit.install {
-            install_file(&unit.artifact, install)?;
+            if guest {
+                install_file(&unit.artifact, install)?;
+            } else {
+                publish_executable(&unit.artifact, install)?;
+            }
             log.line(&format!("installed {}", install.display()));
         }
         found.push(dep_info(&unit.artifact.with_extension("d"))?);
@@ -387,6 +403,57 @@ pub fn write_if_changed(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Stri
 pub fn install_file(from: &Path, to: &Path) -> Result<(), String> {
     let bytes = fs::read(from).map_err(|e| format!("{}: {e}", from.display()))?;
     write_if_changed(to, &bytes, 0o755)
+}
+
+/// Publish a detached executable vnode, keeping every running old generation
+/// immutable. Never hardlink a Cargo artifact or rewrite a public executable.
+fn publish_executable(from: &Path, to: &Path) -> Result<(), String> {
+    use std::io;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let parent = to
+        .parent()
+        .ok_or_else(|| format!("{}: no executable directory", to.display()))?;
+    fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+    let (partial, mut output) = loop {
+        let mut name = to.as_os_str().to_owned();
+        name.push(format!(
+            ".publish-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path = PathBuf::from(name);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o755)
+            .open(&path)
+        {
+            Ok(file) => break (path, file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("{}: {error}", path.display())),
+        }
+    };
+    let result = (|| {
+        let mut source =
+            fs::File::open(from).map_err(|error| format!("{}: {error}", from.display()))?;
+        io::copy(&mut source, &mut output)
+            .map_err(|error| format!("{}: {error}", partial.display()))?;
+        output
+            .set_permissions(fs::Permissions::from_mode(0o755))
+            .map_err(|error| error.to_string())?;
+        output.sync_all().map_err(|error| error.to_string())?;
+        drop(output);
+        fs::rename(&partial, to).map_err(|error| format!("{}: {error}", to.display()))
+    })();
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => match fs::remove_file(&partial) {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(format!("{error}; remove {}: {cleanup}", partial.display())),
+        },
+    }
 }
 
 /// The repository sources a dep-info file lists: those outside `target/`
@@ -455,13 +522,138 @@ mod tests {
     use super::*;
 
     #[test]
+    fn host_nodes_separate_cargo_artifacts_from_public_commands() {
+        let id = "fixture".to_owned();
+        let workspace = Workspace {
+            target_dir: PathBuf::from("fixture-target"),
+            packages: HashMap::from([(
+                id.clone(),
+                Package {
+                    name: "fixture-host".into(),
+                    manifest: "Cargo.toml".into(),
+                    local: true,
+                    targets: vec![Target {
+                        name: "fixture-bin".into(),
+                        kind: vec!["bin".into()],
+                        src_path: "src/main.rs".into(),
+                    }],
+                    metadata: Value::Null,
+                    build_script: None,
+                    deps: Vec::new(),
+                },
+            )]),
+            members: vec![id.clone()],
+            default_members: BTreeSet::from([id]),
+        };
+        let nodes = workspace.nodes().unwrap();
+        assert_eq!(nodes.len(), 1);
+        let public = workspace.host_bin("fixture-bin");
+        assert_eq!(nodes[0].outputs, vec![public.clone()]);
+        assert_eq!(nodes[0].recipe, HOST_RECIPE);
+        let Action::Cargo(unit) = &nodes[0].action else {
+            panic!("host Cargo node expected");
+        };
+        assert_eq!(unit.batch, "host");
+        assert_eq!(unit.install.as_ref(), Some(&public));
+        assert_eq!(
+            unit.artifact,
+            workspace
+                .target_dir
+                .join("aim-host-build/release/fixture-bin")
+        );
+        assert_ne!(unit.artifact, public);
+    }
+
+    #[test]
+    fn executable_publication_detaches_compiler_and_running_generations() {
+        use std::io::{Read, Seek};
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let directory =
+            std::env::temp_dir().join(format!("aim-executable-publication-{}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        let compiler = directory.join("compiler");
+        let public = directory.join("public");
+        fs::write(&compiler, b"original signed bytes").unwrap();
+        publish_executable(&compiler, &public).unwrap();
+        let mut running = fs::File::open(&public).unwrap();
+        let original = running.metadata().unwrap();
+        assert_ne!(original.ino(), fs::metadata(&compiler).unwrap().ino());
+        // Even identical-byte publication creates a new vnode during migration.
+        publish_executable(&compiler, &public).unwrap();
+        assert_ne!(original.ino(), fs::metadata(&public).unwrap().ino());
+        assert_eq!(fs::read(&public).unwrap(), b"original signed bytes");
+        fs::write(&compiler, b"next signed bytes").unwrap();
+        assert_eq!(fs::read(&public).unwrap(), b"original signed bytes");
+        publish_executable(&compiler, &public).unwrap();
+        running.rewind().unwrap();
+        let mut retained = Vec::new();
+        running.read_to_end(&mut retained).unwrap();
+        assert_eq!(retained, b"original signed bytes");
+        assert_eq!(fs::read(&public).unwrap(), b"next signed bytes");
+        assert_eq!(
+            fs::metadata(&public).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(publish_executable(&directory.join("missing"), &public).is_err());
+        assert_eq!(fs::read(&public).unwrap(), b"next signed bytes");
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+        drop(running);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn published_macho_preserves_signature_and_executes() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::MetadataExt;
+        let source = std::env::current_exe().unwrap();
+        let directory =
+            std::env::temp_dir().join(format!("aim-signed-publication-{}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        let public = directory.join("published-test");
+        publish_executable(&source, &public).unwrap();
+        assert_ne!(
+            fs::metadata(&source).unwrap().ino(),
+            fs::metadata(&public).unwrap().ino()
+        );
+        assert_eq!(
+            Sha256::digest(fs::read(&source).unwrap()),
+            Sha256::digest(fs::read(&public).unwrap())
+        );
+        let signature = Command::new("/usr/bin/codesign")
+            .args(["--verify", "--strict", "--verbose=2"])
+            .arg(&public)
+            .output()
+            .unwrap();
+        assert!(
+            signature.status.success(),
+            "signed publication: {}",
+            String::from_utf8_lossy(&signature.stderr)
+        );
+        let executed = Command::new(&public).arg("--list").output().unwrap();
+        assert!(
+            executed.status.success(),
+            "published Mach-O exec: {:?} {}",
+            executed.status,
+            String::from_utf8_lossy(&executed.stderr)
+        );
+        assert!(
+            String::from_utf8(executed.stdout)
+                .unwrap()
+                .contains("published_macho_preserves_signature_and_executes")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn dep_info_keeps_generated_sources() {
         let root = aim_paths::root();
-        let [source, generated, fetched, built] = [
+        let [source, generated, fetched, built, staged] = [
             root.join("crates/x/src/lib.rs"),
             aim_paths::generated().join("hal-aidl/x/lib.rs"),
             aim_paths::aosp().join("binder/src/lib.rs"),
             root.join("target/release/build/x/out/y.rs"),
+            root.join("target/aim-host-build/release/build/x/out/y.rs"),
         ];
         let file = std::env::temp_dir().join(format!("aim-dep-info-{}.d", std::process::id()));
         let listed = [
@@ -469,6 +661,7 @@ mod tests {
             &generated,
             &fetched,
             &built,
+            &staged,
             &PathBuf::from("/usr/x.h"),
         ]
         .map(|p| p.display().to_string().replace(' ', "\\ "));

@@ -64,7 +64,7 @@ non-cargo stages are declared in code:
 
 | Node | Upstream | Inputs (declared) | Outputs |
 | --- | --- | --- | --- |
-| `host/<bin>` | `aidl-gen` when it compiles generated sources (aim-services) | manifests, build scripts, `Cargo.lock`, cargo config; found: dep-info | cargo's `target/release/<bin>` |
+| `host/<bin>` | `aidl-gen` when it compiles generated sources (aim-services) | manifests, build scripts, `Cargo.lock`, cargo config; found: dep-info | atomically published `target/release/<bin>` |
 | `image` | `host/android-image-extract`, `host/linux-translate` (order only) | `image/original.lock` | `_build/android16-image.dmg`, attached |
 | `aidl-gen` | `image` (order only) | `hal/sources.lock`, `daemons/sources.lock`, `crates/aim-services/sources.lock`, `image/original.lock`, `tools/lib/*.py`, AIDL crate manifests | `target/aim/gen/{hal,daemon,service}-aidl` |
 | `hal/<package>`, `daemon/<package>` | `image`; `aidl-gen` when a dependency's sources are generated or fetched | as `host/*` | `target/aim/{hal,daemons}/...` |
@@ -145,6 +145,25 @@ cargo nodes of one kind share one cargo invocation (`host`, `hal`, `daemon`:
 the daemons build AOSP's binder crate with its `system` feature, the HALs
 without it, so they cannot share an invocation).
 
+Host batches compile in `target/aim-host-build/release`, separate from the public
+`target/release` commands. After Cargo succeeds, each executable is copied to a
+new sibling inode and atomically renamed into its public path. Running processes
+retain their old executable vnode; later Cargo compilation never writes that
+vnode or shares a hardlink with it (#1146). The public command paths and embedded
+signatures are preserved. This is executable publication, not an atomic boot
+cohort upgrade; ordinary direct `cargo build --release` is outside this publisher.
+
+The `generate-service-aidl` command calls the pinned service generator directly
+under the workspace build lock and original-image read lease. It rebuilds no
+image or graph dependency. Use a separate worktree and private Cargo target
+when frozen campaigns still depend on the current workspace's generated files;
+the command updates that worktree's `target/aim/gen/service-aidl`, records input
+and output hashes, and verifies the original transaction codes as usual.
+The read-only `check-service-java DEX STUB_DEX` command validates an already
+compiled private service DEX against the pinned original boot/systemserver
+classpaths and checks its own generated AIDL transaction codes. It holds an
+original-image read lease and builds or replaces no artifact.
+
 ### Rebuild times
 
 A branch that changes one host crate costs its cargo build and nothing
@@ -162,7 +181,7 @@ The host crates build incrementally (`[profile.release]` in
 `Cargo.toml`), with release's usual 16 codegen units: in a worktree,
 all host binaries after a one-line change to `aim-linux-abi` took 4.1 s
 instead of 6.8 s, and after one to `aim-services` 0.9-4.1 s instead of
-5.2-9.2 s. The incremental state costs about 600 MB in `target/release`.
+5.2-9.2 s. The incremental state costs about 600 MB in the host Cargo output directory.
 
 ## One Cargo workspace
 
@@ -219,9 +238,12 @@ tools; nothing of them is linked into the output or put in the image.
   only the members used. The stubs are dexed and checked against the
   image's jars on the boot and system server class paths
   (`aim_android_image::linkage`): every class, superclass, member and
-  constant a stub declares must be the image's. Then every class, field
-  and method the dexed code refers to outside itself must resolve in those
-  jars as ART resolves it. A changed internal API fails the build instead
+  constant a stub declares must be the image's. Java emits a constructor for
+  every class; a private compile-only constructor is ignored only when the
+  image class has no constructors (#900). Every constructor referenced by
+  executable code must still exist on its declaring class: constructors
+  are never inherited. Every other class, field and method the dexed code
+  refers to outside itself must resolve in those jars as ART resolves it. A changed internal API fails the build instead
   of the boot. The Java stubs' transaction codes are checked against the
   ones generated for the Rust side.
 - The jar holds one stored, aligned `classes.dex`, as the platform's do.

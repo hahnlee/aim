@@ -8,5 +8,8 @@ import java.io.IOException;
 public class ApplicationSharedMemory {
     private ApplicationSharedMemory(FileDescriptor fd, boolean mutable, long ptr) { throw new RuntimeException("stub"); }
     public static ApplicationSharedMemory getInstance() { throw new RuntimeException("stub"); }
+    public static ApplicationSharedMemory create() { throw new RuntimeException("stub"); }
+    public static void setInstance(ApplicationSharedMemory memory) { throw new RuntimeException("stub"); }
+    public void close() { throw new RuntimeException("stub"); }
     public FileDescriptor getReadOnlyFileDescriptor() throws IOException { throw new RuntimeException("stub"); }
 }

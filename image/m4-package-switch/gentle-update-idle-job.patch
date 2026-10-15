@@ -1,0 +1,17 @@
+--- a/services/core/java/com/android/server/pm/GentleUpdateHelper.java
++++ b/services/core/java/com/android/server/pm/GentleUpdateHelper.java
+@@ -65,13 +65,6 @@
+     public static class Service extends JobService {
+         @Override
+         public boolean onStartJob(JobParameters params) {
+-            try {
+-                var pis = (PackageInstallerService) ActivityThread.getPackageManager()
+-                        .getPackageInstaller();
+-                var helper = pis.getGentleUpdateHelper();
+-                helper.mHandler.post(helper::runIdleJob);
+-            } catch (Exception e) {
+-                Slog.e(TAG, "Failed to get PackageInstallerService", e);
+-            }
++            dev.aim.server.InstallerExternalBridge.onIdleJob();
+             return false;
+         }

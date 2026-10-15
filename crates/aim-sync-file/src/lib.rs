@@ -65,8 +65,8 @@ pub struct Hooks {
     pub hide: fn(RawFd) -> RawFd,
     /// Forget a hidden descriptor that is about to be closed.
     pub unhide: fn(RawFd),
-    /// A sync_file descriptor was handed to the guest.
-    pub adopt: fn(RawFd),
+    /// Publish this owned native fence; failure is a Linux errno.
+    pub adopt: fn(RawFd) -> Result<(), i32>,
 }
 
 static HOOKS: OnceLock<Hooks> = OnceLock::new();
@@ -198,12 +198,10 @@ pub fn signaled(timestamp_ns: i64, status: i32) -> io::Result<OwnedFd> {
 }
 
 /// Hand a sync_file to the guest: its fd number from now on.
-pub fn give_to_guest(file: OwnedFd) -> RawFd {
-    let fd = file.into_raw_fd();
-    if let Some(h) = HOOKS.get() {
-        (h.adopt)(fd);
-    }
-    fd
+pub fn give_to_guest(file: OwnedFd) -> Result<RawFd, i32> {
+    let fd = file.as_raw_fd();
+    if let Some(h) = HOOKS.get() { (h.adopt)(fd)?; }
+    Ok(file.into_raw_fd())
 }
 
 /// Whether `fd` is a sync_file's socket.

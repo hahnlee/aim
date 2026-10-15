@@ -75,6 +75,64 @@ impl Driver {
         pending.deliver();
     }
 
+    /// Lookup a receipt owned by this exact receiving process/thread/buffer.
+    pub fn delivery_id(&self, handle: ProcHandle, tid: Tid, buffer: u64) -> Result<u64, Errno> {
+        let st = self.lock();
+        let alloc = st
+            .procs
+            .get(&handle.0)
+            .and_then(|p| p.alloc.as_ref())
+            .ok_or(errno::EBADF)?;
+        let offset = alloc.offset_of(buffer).ok_or(errno::EINVAL)?;
+        alloc.buffers[&offset]
+            .delivery
+            .filter(|(owner, _)| *owner == tid)
+            .map(|(_, id)| id)
+            .ok_or(errno::EPERM)
+    }
+    /// Reject a hosted delivery before exposing its command/FDs to userspace.
+    /// The host closes installed descriptors; this owner unwinds Binder state.
+    pub fn reject_delivery(
+        &self,
+        handle: ProcHandle,
+        tid: Tid,
+        buffer: u64,
+        id: u64,
+    ) -> Result<(), Errno> {
+        let mut st = self.lock();
+        let proc = handle.0;
+        let alloc = st
+            .procs
+            .get(&proc)
+            .and_then(|p| p.alloc.as_ref())
+            .ok_or(errno::EBADF)?;
+        let offset = alloc.offset_of(buffer).ok_or(errno::EINVAL)?;
+        let b = &alloc.buffers[&offset];
+        if b.delivery != Some((tid, id)) || !b.allow_user_free {
+            return Err(errno::EPERM);
+        }
+        if let Some(t) = st.txns.get(&id) {
+            if t.to_proc != Some(proc)
+                || t.to_thread != Some(tid)
+                || t.buffer != Some(offset)
+                || st.procs[&proc]
+                    .threads
+                    .get(&tid)
+                    .and_then(|t| t.transaction_stack)
+                    != Some(id)
+            {
+                return Err(errno::EPERM);
+            }
+            let parent = t.to_parent;
+            st.thread(proc, tid).unwrap().transaction_stack = parent;
+        }
+        st.buffer_mut(proc, offset).unwrap().txn = None;
+        st.cleanup_transaction(id, BR_FAILED_REPLY);
+        st.free_buffer(proc, offset, true, None);
+        self.unlock(st);
+        Ok(())
+    }
+
     /// Start recording every transaction ([`Driver::take_trace`]).
     pub fn start_trace(&self) {
         let mut st = self.lock();
@@ -88,6 +146,54 @@ impl Driver {
         let records = st.trace.as_mut().map(|t| t.take()).unwrap_or_default();
         self.unlock(st);
         records
+    }
+
+    /// Non-destructive, atomic view of traced calls still waiting on a reply.
+    /// Empty when tracing is disabled; no parcel contents are copied.
+    pub fn pending_trace(&self) -> crate::PendingTraceSnapshot {
+        let st = self.lock();
+        let mut snapshot = st
+            .trace
+            .as_ref()
+            .map(|trace| trace.snapshot())
+            .unwrap_or_default();
+        for pending in &mut snapshot.records {
+            if !pending.returning
+                && let Some(txn) = st.txns.get(&pending.id)
+            {
+                pending.record.from_parent = txn.from_parent;
+                pending.record.to_parent = txn.to_parent;
+            }
+            for proc in st.procs.values() {
+                if st.contexts[proc.context].name != pending.record.device {
+                    continue;
+                }
+                if proc.creds.pid == pending.record.from_pid {
+                    pending.from_stack = proc
+                        .threads
+                        .get(&pending.record.from_tid)
+                        .and_then(|thread| thread.transaction_stack);
+                    pending.from_queued = proc.todo.len()
+                        + proc
+                            .threads
+                            .get(&pending.record.from_tid)
+                            .map_or(0, |thread| thread.todo.len());
+                }
+                if proc.creds.pid == pending.record.to_pid {
+                    pending.to_stack = proc
+                        .threads
+                        .get(&pending.record.to_tid)
+                        .and_then(|thread| thread.transaction_stack);
+                    pending.to_queued = proc.todo.len()
+                        + proc
+                            .threads
+                            .get(&pending.record.to_tid)
+                            .map_or(0, |thread| thread.todo.len());
+                }
+            }
+        }
+        self.unlock(st);
+        snapshot
     }
 
     /// Copy every transaction to the node `proc`'s `handle` refers to, and
@@ -173,6 +279,20 @@ impl Driver {
         let ready = st.has_work(proc.0, tid, proc_work);
         self.unlock(st);
         Ok(ready)
+    }
+
+    /// Linux binder_flush: each public descriptor close asks current loopers
+    /// to return, even while duplicates or in-flight ioctl references remain.
+    pub fn flush(&self, proc: ProcHandle) -> Result<(), Errno> {
+        let mut st = self.lock();
+        let tids: Vec<Tid> = st.procs.get(&proc.0).ok_or(errno::EBADF)?
+            .threads.keys().copied().collect();
+        for tid in tids {
+            st.thread(proc.0, tid).unwrap().looper_need_return = true;
+            st.wake_waiter(proc.0, tid);
+        }
+        self.unlock(st);
+        Ok(())
     }
 
     /// Interrupt a thread blocked in a read (a signal arrived): the ioctl
@@ -558,5 +678,57 @@ impl State {
             put_u32(arg, 16, n.has_strong_ref as u32);
             put_u32(arg, 20, n.has_weak_ref as u32);
         }
+    }
+}
+
+impl Driver {
+    /// Native system-service nested forwarding. No identity is supplied by
+    /// the caller: credentials come from the live incoming driver transaction.
+    /// `inbound_buffer` is captured by LocalProcess's authenticated dispatch.
+    pub fn forward_inbound_transaction(
+        &self,
+        proc: ProcHandle,
+        tid: Tid,
+        inbound_buffer: u64,
+        tr: &TransactionData,
+        guest: &mut dyn GuestProcess,
+    ) -> Result<(), Errno> {
+        if tr.flags & TF_ONE_WAY != 0 {
+            return Err(errno::EINVAL);
+        }
+        let mut st = self.lock();
+        let validate = (|| {
+            let native = st.procs.get(&proc.0).ok_or(errno::ESRCH)?;
+            if native.creds.euid != 1000 {
+                return Err(errno::EPERM);
+            }
+            let thread = native.threads.get(&tid).ok_or(errno::EPERM)?;
+            let id = thread.transaction_stack.ok_or(errno::EPERM)?;
+            let inbound = st.txns.get(&id).ok_or(errno::EPERM)?;
+            if inbound.to_proc != Some(proc.0)
+                || inbound.to_thread != Some(tid)
+                || inbound.is_oneway()
+            {
+                return Err(errno::EPERM);
+            }
+            let offset = inbound.buffer.ok_or(errno::EPERM)?;
+            let alloc = native.alloc.as_ref().ok_or(errno::EPERM)?;
+            if alloc.vm_start.checked_add(offset as u64) != Some(inbound_buffer) {
+                return Err(errno::EPERM);
+            }
+            Ok(inbound.sender_credentials.clone())
+        })();
+        let sender = match validate {
+            Ok(sender) => sender,
+            Err(error) => {
+                self.unlock(st);
+                return Err(error);
+            }
+        };
+        st.thread(proc.0, tid).unwrap().forwarded_sender = Some(sender);
+        st.transaction(proc.0, tid, tr, false, 0, guest);
+        st.thread(proc.0, tid).unwrap().forwarded_sender = None;
+        self.unlock(st);
+        Ok(())
     }
 }

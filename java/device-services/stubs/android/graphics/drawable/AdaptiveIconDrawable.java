@@ -5,6 +5,8 @@ package android.graphics.drawable;
 public class AdaptiveIconDrawable extends Drawable {
     public static final float MASK_SIZE = 100.0f;
 
+    public AdaptiveIconDrawable(Drawable background,Drawable foreground) { throw new RuntimeException("stub"); }
+    public static float getExtraInsetFraction(){throw new RuntimeException("stub");}
     AdaptiveIconDrawable() { throw new RuntimeException("stub"); }
     @Override
     public void draw(android.graphics.Canvas canvas) { throw new RuntimeException("stub"); }
@@ -14,4 +16,5 @@ public class AdaptiveIconDrawable extends Drawable {
     public int getOpacity() { throw new RuntimeException("stub"); }
     @Override
     public void setColorFilter(android.graphics.ColorFilter colorFilter) { throw new RuntimeException("stub"); }
+ public android.graphics.drawable.Drawable getMonochrome(){throw new RuntimeException("stub");}
 }

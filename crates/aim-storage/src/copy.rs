@@ -97,9 +97,20 @@ fn c_path(path: &Path) -> Result<CString, String> {
     CString::new(path.as_os_str().as_bytes()).map_err(|e| e.to_string())
 }
 
-/// Gives `dest` the extended attributes of `source`, then `mode`. Setting
+/// Gives `dest` the ownership and extended attributes of `source`, then `mode`. Setting
 /// an attribute needs write access, which the final mode may deny.
 fn attributes(source: &Path, dest: &Path, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let source_meta = fs::symlink_metadata(source).map_err(|e| format!("{}: {e}", source.display()))?;
+    let dest_meta = fs::symlink_metadata(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+    if (source_meta.uid(), source_meta.gid()) != (dest_meta.uid(), dest_meta.gid()) {
+        let to = c_path(dest)?;
+        // Real filesystem ownership is independent of the guest-inode xattr.
+        // chown may clear set-ID bits, so restore the final mode afterwards.
+        if unsafe { libc::fchownat(libc::AT_FDCWD, to.as_ptr(), source_meta.uid(), source_meta.gid(), libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+            return Err(format!("{}: chown: {}", dest.display(), std::io::Error::last_os_error()));
+        }
+    }
     let set_mode = |mode: u32| {
         fs::set_permissions(dest, fs::Permissions::from_mode(mode & 0o7777))
             .map_err(|e| format!("{}: {e}", dest.display()))

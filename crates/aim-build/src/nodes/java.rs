@@ -140,7 +140,7 @@ impl Toolchain {
             );
         }
         let mut cmd = Command::new(self.jdk.join("bin/javac"));
-        cmd.args(["--release", "17", "-encoding", "UTF-8"])
+        cmd.args(["--release", "17", "-encoding", "UTF-8", "-Xmaxerrs", "1000"])
             .arg("-d")
             .arg(out);
         if lint {

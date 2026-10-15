@@ -1,0 +1,9 @@
+<package-restrictions>
+  <preferred-activities>
+    <item name="removed/.Always" always="true" set="0"><filter><action name="first"/></filter></item>
+    <item name="removed/.Default" set="0"><filter><action name="second"/></filter></item>
+    <item name="removed/.Last" always="false" set="0"><filter><action name="third"/></filter></item>
+    <item name="kept/.Main" always="true" set="1"><set name="removed/.Candidate"/><filter><action name="fourth"/></filter></item>
+  </preferred-activities>
+  <persistent-preferred-activities><item name="removed/.Policy" set-by-dpm="true"><filter/></item></persistent-preferred-activities>
+</package-restrictions>

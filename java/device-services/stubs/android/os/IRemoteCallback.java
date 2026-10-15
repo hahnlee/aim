@@ -6,6 +6,7 @@ public interface IRemoteCallback extends IInterface {
     void sendResult(Bundle data) throws RemoteException;
 
     abstract class Stub extends Binder implements IRemoteCallback {
+        public static IRemoteCallback asInterface(IBinder binder) { throw new RuntimeException("stub"); }
         public Stub() { throw new RuntimeException("stub"); }
         public IBinder asBinder() { throw new RuntimeException("stub"); }
     }

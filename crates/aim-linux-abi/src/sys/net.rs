@@ -39,6 +39,19 @@ use super::fdtab::{self, Kind};
 use crate::errno::{self, EAGAIN, EBADF, EINVAL};
 use crate::vfs;
 
+mod proc_table;
+mod socket_inode;
+mod regular_scm;
+mod socket_scm;
+pub(crate) use socket_scm::{classify as classify_socket_scm, reset as reset_socket_scm, init as init_socket_carriers, drain as drain_socket_carriers};
+pub(crate) use socket_scm::{Export as BinderSocketExport, export as export_binder_socket};
+pub(crate) use socket_inode::stat as socket_inode_stat;
+pub(crate) use socket_inode::install as install_socket_receipt;
+pub(crate) use socket_inode::{Export as SocketExport, export_pinned as export_socket_pinned};
+pub(crate) use socket_inode::is_socket as is_socket_inode;
+pub(crate) use socket_inode::with as with_socket_inode;
+pub(super) use proc_table::{metadata as proc_metadata, table as proc_table, socket_identity as proc_socket_identity, SocketMetadata};
+
 const L_AF_UNIX: u16 = 1;
 const L_AF_INET: u16 = 2;
 const L_AF_INET6: u16 = 10;
@@ -79,6 +92,7 @@ pub enum SockType {
     Stream,
     Dgram,
     SeqPacket,
+    Raw,
 }
 
 /// What kind of socket a [`Sock`] is.
@@ -110,6 +124,8 @@ pub struct InetOpts {
 pub struct Sock {
     pub ty: SockType,
     pub family: Family,
+    pub(super) inode_allocation: Mutex<Option<aim_storage::socket_inode::Receipt>>,
+    inet_owner: Mutex<Option<SocketMetadata>>,
     /// SO_PASSCRED: attach SCM_CREDENTIALS to received messages.
     passcred: AtomicBool,
     /// Serializes framed receives, so one message is read whole.
@@ -128,6 +144,8 @@ impl Sock {
         Arc::new(Sock {
             ty,
             family,
+            inode_allocation: Mutex::new(None),
+            inet_owner: Mutex::new(None),
             passcred: AtomicBool::new(false),
             recv: Mutex::new(()),
             local: Mutex::new(None),
@@ -142,7 +160,10 @@ pub(super) fn save_sock(s: &Sock, w: &mut super::fork_state::Writer) {
         SockType::Stream => 0,
         SockType::Dgram => 1,
         SockType::SeqPacket => 2,
+        SockType::Raw => 3,
     });
+    w.opt(*s.inode_allocation.lock().unwrap(), |w, receipt| w.bytes(&receipt.to_bytes()));
+    w.opt(*s.inet_owner.lock().unwrap(), |w, owner| { w.u32(owner.uid); w.u64(owner.inode); w.u64(owner.cookie); w.bool(owner.probes_known); });
     w.bool(s.passcred.load(std::sync::atomic::Ordering::Relaxed));
     w.opt(s.local.lock().unwrap().as_deref(), |w, a| w.bytes(a));
     w.opt(s.peer.lock().unwrap().as_deref(), |w, a| w.bytes(a));
@@ -173,8 +194,11 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
     let ty = match r.u32() {
         0 => SockType::Stream,
         1 => SockType::Dgram,
+        3 => SockType::Raw,
         _ => SockType::SeqPacket,
     };
+    let inode_allocation = r.opt(|r| aim_storage::socket_inode::Receipt::from_bytes(&r.bytes()).expect("trusted fork socket receipt encoding"));
+    let inet_owner = r.opt(|r| SocketMetadata { fd: -1, uid: r.u32(), inode: r.u64(), cookie: r.u64(), local: None, peer: None, port_zero: false, probes_known: r.bool() });
     let passcred = r.bool();
     let local = r.opt(|r| r.bytes());
     let peer = r.opt(|r| r.bytes());
@@ -195,26 +219,55 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
         _ => Family::Unix,
     };
     let s = Sock::of(ty, family);
+    *s.inode_allocation.lock().unwrap() = inode_allocation;
+    *s.inet_owner.lock().unwrap() = inet_owner;
     s.passcred.store(passcred, Ordering::Relaxed);
     *s.local.lock().unwrap() = local;
     *s.peer.lock().unwrap() = peer;
     s
 }
 
-/// The socket's Linux state, of any family.
-fn any_sock(fd: i32) -> Option<Arc<Sock>> {
-    match fdtab::get(fd) {
-        Some(Kind::Sock(s)) => Some(s),
-        _ => None,
+enum SocketPin<'a> {
+    Owned(fdtab::Pinned),
+    // read/write already captured guest authority; its alias is private (#1204).
+    Borrowed(&'a fdtab::Pinned),
+}
+impl std::ops::Deref for SocketPin<'_> {
+    type Target = fdtab::Pinned;
+    fn deref(&self) -> &Self::Target {
+        match self { Self::Owned(pin) => pin, Self::Borrowed(pin) => pin }
     }
 }
-
-/// An AF_UNIX socket's Linux state.
-fn sock(fd: i32) -> Option<Arc<Sock>> {
-    match fdtab::get(fd) {
-        Some(Kind::Sock(s)) if matches!(s.family, Family::Unix) => Some(s),
-        _ => None,
+struct SocketInput<'a> {
+    pin: SocketPin<'a>,
+}
+impl SocketInput<'static> {
+    fn capture(fd: i32) -> Result<Self, i64> {
+        let pin = fdtab::pin_guest(fd).map_err(|error| -(error as i64))?;
+        Self::checked(SocketPin::Owned(pin))
     }
+}
+impl<'a> SocketInput<'a> {
+    fn checked(pin: SocketPin<'a>) -> Result<Self, i64> {
+        let input = Self { pin };
+        if !input.pin.socket_allowed() {
+            return Err(-ENOTSOCK);
+        }
+        is_socket(input.fd())?;
+        super::close_effects::observe_socket().map_err(|error|-(error as i64))?;
+        Ok(input)
+    }
+    fn fd(&self) -> i32 {
+        use std::os::fd::AsRawFd;
+        self.pin.descriptor().as_raw_fd()
+    }
+}
+/// State and raw descriptor come from the same retained open description.
+fn any_sock(input: &SocketInput) -> Option<Arc<Sock>> {
+    match input.pin.kind() { Some(Kind::Sock(socket)) => Some(socket.clone()), _ => None }
+}
+fn sock(input: &SocketInput) -> Option<Arc<Sock>> {
+    any_sock(input).filter(|socket| matches!(socket.family, Family::Unix))
 }
 
 // ---- recognition --------------------------------------------------------
@@ -241,7 +294,7 @@ fn mark(fd: i32, ty: SockType) {
         l_linger: match ty {
             SockType::SeqPacket => MARK_SEQPACKET,
             SockType::Dgram => MARK_DGRAM,
-            SockType::Stream => return,
+            SockType::Stream | SockType::Raw => return,
         },
     };
     // SAFETY: setting SO_LINGER (off) on our socket.
@@ -289,9 +342,10 @@ fn unix_addr(guest: &str) -> Vec<u8> {
     v
 }
 
-/// Recognize an AF_UNIX socket that arrived from elsewhere (exec,
-/// SCM_RIGHTS, binder) and give it its Linux state.
+/// Recognize an inherited or transferred socket and retain its Linux state.
+/// Creation ownership comes from its actual sockfs inode owner.
 pub fn adopt(fd: i32) {
+    if fdtab::get(fd).is_some() || super::fuse_device::is_typed(fd) || super::fuse_client::get(fd).is_some() { return; }
     let Some(host_ty) = get_int(fd, libc::SOL_SOCKET, libc::SO_TYPE) else {
         return;
     };
@@ -304,11 +358,18 @@ pub fn adopt(fd: i32) {
             (&mut sa as *mut libc::sockaddr_storage).cast(),
             &mut len,
         )
-    } < 0
-        || sa.ss_family as i32 != libc::AF_UNIX
-    {
+    } < 0 {
         return;
     }
+    if matches!(sa.ss_family as i32, libc::AF_INET | libc::AF_INET6) {
+        // Recognition retains transport state, never fabricates an inherited
+        // socket's creation UID or its missing sockfs inode record (#1144).
+        let ty = match host_ty { libc::SOCK_DGRAM => SockType::Dgram, libc::SOCK_RAW => SockType::Raw, _ => SockType::Stream };
+        let socket = Sock::of(ty, Family::Inet(InetOpts::default()));
+        fdtab::insert(fd, Kind::Sock(socket));
+        return;
+    }
+    if sa.ss_family as i32 != libc::AF_UNIX { return; }
     if let Some(n) = netlink_of_host(&sa) {
         fdtab::insert(
             fd,
@@ -391,7 +452,7 @@ struct Cred {
 fn cred_of(pid: i32) -> Cred {
     let c = super::cred::peer(pid);
     Cred {
-        pid: c.pid,
+        pid: super::pidns::guest_pid(c.pid).unwrap_or(0),
         uid: c.uid,
         gid: c.gid,
     }
@@ -789,11 +850,17 @@ pub fn socket(a: [u64; 6]) -> i64 {
                 return -(errno::last() as i64);
             }
             set_int(fd, libc::SOL_SOCKET, libc::SO_NOSIGPIPE, 1);
-            if d == libc::AF_INET && base == L_SOCK_DGRAM && proto == IPPROTO_ICMP {
-                let o = InetOpts::default();
-                o.icmp4.store(true, Ordering::Relaxed);
-                fdtab::insert(fd, Kind::Sock(Sock::of(SockType::Dgram, Family::Inet(o))));
+            let o = InetOpts::default();
+            o.icmp4.store(host_ty == libc::SOCK_DGRAM && d == libc::AF_INET && proto == IPPROTO_ICMP, Ordering::Relaxed);
+            let ty = match host_ty { libc::SOCK_STREAM => SockType::Stream, libc::SOCK_DGRAM => SockType::Dgram, _ => SockType::Raw };
+            let socket = Sock::of(ty, Family::Inet(o));
+            if ty != SockType::Raw {
+                match proc_table::created(fd) {
+                    Ok(owner) => *socket.inet_owner.lock().unwrap() = Some(owner),
+                    Err(error) => { unsafe { libc::close(fd); } return -(error as i64); }
+                }
             }
+            fdtab::insert(fd, Kind::Sock(socket));
             fd
         }
         // PF_KEY: libbpf_android's synchronizeKernelRCU opens and closes
@@ -834,6 +901,8 @@ pub fn socket(a: [u64; 6]) -> i64 {
         _ => return -EAFNOSUPPORT,
     };
     fdtab::set_flags(fd, nonblock, cloexec);
+    if let Err(error)=socket_inode::allocated(fd){fdtab::on_close(fd);unsafe{libc::close(fd);}return -(error as i64);}
+    if let Err(error) = fdtab::publish_guest(fd) { fdtab::on_close(fd); unsafe { libc::close(fd); } return -(error as i64); }
     fd as i64
 }
 
@@ -856,10 +925,31 @@ pub fn socketpair(a: [u64; 6]) -> i64 {
         setup_unix(fd, st);
         fdtab::set_flags(fd, ty & L_SOCK_NONBLOCK != 0, ty & L_SOCK_CLOEXEC != 0);
         fdtab::insert(fd, Kind::Sock(Sock::new(st)));
+        if let Err(error)=socket_inode::allocated(fd){for fd in fds{fdtab::on_close(fd);unsafe{libc::close(fd);}}return -(error as i64);}
     }
-    // SAFETY: guest int[2].
-    unsafe { (sv as *mut [i32; 2]).write_unaligned(fds) };
-    0
+    let publication = {
+        let _admission = fdtab::lifecycle();
+        let mut result = Ok(());
+        for (index, &fd) in fds.iter().enumerate() {
+            if let Err(error) = fdtab::publish_guest(fd) {
+                for &published in &fds[..index] { fdtab::withdraw_guest(published).expect("socketpair publication owns visibility"); }
+                result = Err(error);
+                break;
+            }
+        }
+        if result.is_ok() {
+            // SAFETY: guest int[2], before another thread can close its slots.
+            unsafe { (sv as *mut [i32; 2]).write_unaligned(fds) };
+        }
+        result
+    };
+    match publication {
+        Ok(()) => 0,
+        Err(error) => {
+            for fd in fds { fdtab::on_close(fd); unsafe { libc::close(fd); } }
+            -(error as i64)
+        }
+    }
 }
 
 /// Whether `fd` is a file the layer keeps as a host socket that is no
@@ -868,11 +958,19 @@ pub fn socketpair(a: [u64; 6]) -> i64 {
 pub fn hidden_socket(fd: i32) -> bool {
     matches!(
         fdtab::get(fd),
-        Some(Kind::Event(_) | Kind::Timer(_) | Kind::Evdev(_) | Kind::SyncFile | Kind::Binder(_))
+        Some(
+            Kind::Event(_)
+                | Kind::Timer(_)
+                | Kind::Evdev(_)
+                | Kind::SyncFile
+                | Kind::Binder(_)
+                | Kind::ProxyFile
+        )
     )
 }
 
 fn is_socket(fd: i32) -> Result<(), i64> {
+    if super::fuse_device::is_typed(fd){return Err(-ENOTSOCK);}
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: fstat into a local buffer.
     if unsafe { libc::fstat(fd, &mut st) } < 0 {
@@ -885,11 +983,12 @@ fn is_socket(fd: i32) -> Result<(), i64> {
 }
 
 pub fn bind(a: [u64; 6]) -> i64 {
-    let fd = a[0] as i32;
+    let input = match SocketInput::capture(a[0] as i32) { Ok(input) => input, Err(error) => return error };
+    let fd = input.fd();
     if let Err(e) = is_socket(fd) {
         return e;
     }
-    if let Some(s) = any_sock(fd) {
+    if let Some(s) = any_sock(&input) {
         match &s.family {
             Family::Netlink(n) => {
                 return match super::netlink::parse_sockaddr(a[1], a[2] as u32) {
@@ -917,7 +1016,7 @@ pub fn bind(a: [u64; 6]) -> i64 {
         // Linux autobind: nothing to do for a Darwin AF_UNIX socket.
         return 0;
     }
-    if let Some(r) = bind_on_link(fd, &name) {
+    if let Some(r) = bind_on_link(&input, &name) {
         return r;
     }
     let bind_once = || {
@@ -946,7 +1045,7 @@ pub fn bind(a: [u64; 6]) -> i64 {
         }
     }
     if r == 0
-        && let Some(s) = sock(fd)
+        && let Some(s) = sock(&input)
     {
         *s.local.lock().unwrap() = Some(name);
     }
@@ -954,11 +1053,12 @@ pub fn bind(a: [u64; 6]) -> i64 {
 }
 
 pub fn connect(a: [u64; 6]) -> i64 {
-    let fd = a[0] as i32;
+    let input = match SocketInput::capture(a[0] as i32) { Ok(input) => input, Err(error) => return error };
+    let fd = input.fd();
     if let Err(e) = is_socket(fd) {
         return e;
     }
-    if let Some(s) = any_sock(fd) {
+    if let Some(s) = any_sock(&input) {
         match &s.family {
             Family::Netlink(_) => {
                 return match super::netlink::parse_sockaddr(a[1], a[2] as u32) {
@@ -977,7 +1077,7 @@ pub fn connect(a: [u64; 6]) -> i64 {
     if family_mismatch(fd, &name) {
         return -EAFNOSUPPORT;
     }
-    if let Some(r) = connect_to_router(fd, &name) {
+    if let Some(r) = connect_to_router(&input, &name) {
         return r;
     }
     let zero_port = datagram_to_port_zero(fd, &mut t);
@@ -989,23 +1089,18 @@ pub fn connect(a: [u64; 6]) -> i64 {
         r = -111;
     }
     if (r == 0 || r == -115)
-        && let Some(s) = sock(fd)
+        && let Some(s) = sock(&input)
     {
         *s.peer.lock().unwrap() = Some(name);
     }
     if r == 0 {
-        match (any_sock(fd), zero_port) {
+        match (any_sock(&input), zero_port) {
             (Some(s), _) => {
                 if let Family::Inet(o) = &s.family {
                     o.port_zero.store(zero_port, Ordering::Relaxed);
                 }
             }
-            (None, true) => {
-                let o = InetOpts::default();
-                o.port_zero.store(true, Ordering::Relaxed);
-                fdtab::insert(fd, Kind::Sock(Sock::of(SockType::Dgram, Family::Inet(o))));
-            }
-            (None, false) => {}
+            (None, _) => {}
         }
     }
     r
@@ -1017,8 +1112,9 @@ pub fn connect(a: [u64; 6]) -> i64 {
 /// (`dhcp_to_router`), not to the Mac's network. The host socket stays
 /// unconnected: the Mac's own DHCP client holds that address pair, so a
 /// host connect fails with EADDRINUSE. None: an ordinary connect.
-fn connect_to_router(fd: i32, name: &[u8]) -> Option<i64> {
-    let s = any_sock(fd)?;
+fn connect_to_router(input: &SocketInput, name: &[u8]) -> Option<i64> {
+    let fd = input.fd();
+    let s = any_sock(&input)?;
     let Family::Inet(o) = &s.family else {
         return None;
     };
@@ -1041,8 +1137,9 @@ fn connect_to_router(fd: i32, name: &[u8]) -> Option<i64> {
 /// nothing from the Mac's network reaches it. A host bind would take the
 /// Mac's UDP port 68 from the Mac and from other guests. None: an ordinary
 /// bind.
-fn bind_on_link(fd: i32, name: &[u8]) -> Option<i64> {
-    let s = any_sock(fd)?;
+fn bind_on_link(input: &SocketInput, name: &[u8]) -> Option<i64> {
+    let fd = input.fd();
+    let s = any_sock(&input)?;
     let Family::Inet(o) = &s.family else {
         return None;
     };
@@ -1094,12 +1191,14 @@ fn datagram_to_port_zero(fd: i32, t: &mut Target) -> bool {
 }
 
 pub fn listen(a: [u64; 6]) -> i64 {
+    let input = match SocketInput::capture(a[0] as i32) { Ok(input) => input, Err(error) => return error };
     // SAFETY: plain listen.
-    errno::check(unsafe { libc::listen(a[0] as i32, a[1] as i32) } as i64)
+    errno::check(unsafe { libc::listen(input.fd(), a[1] as i32) } as i64)
 }
 
 pub fn accept4(a: [u64; 6]) -> i64 {
-    let (fd, addr, addrlen, flags) = (a[0] as i32, a[1], a[2], a[3]);
+    let input = match SocketInput::capture(a[0] as i32) { Ok(input) => input, Err(error) => return error };
+    let (fd, addr, addrlen, flags) = (input.fd(), a[1], a[2], a[3]);
     if flags & !(L_SOCK_NONBLOCK | L_SOCK_CLOEXEC) != 0 {
         return -(EINVAL as i64);
     }
@@ -1129,7 +1228,7 @@ pub fn accept4(a: [u64; 6]) -> i64 {
     );
     set_int(nfd, libc::SOL_SOCKET, libc::SO_NOSIGPIPE, 1);
     let peer = linux_addr_of_host(&sa, len);
-    if let Some(l) = sock(fd) {
+    if let Some(l) = sock(&input) {
         let s = Sock::new(l.ty);
         setup_unix(nfd, l.ty);
         *s.local.lock().unwrap() = l.local.lock().unwrap().clone();
@@ -1137,14 +1236,26 @@ pub fn accept4(a: [u64; 6]) -> i64 {
             .store(l.passcred.load(Ordering::Relaxed), Ordering::Relaxed);
         fdtab::insert(nfd, Kind::Sock(s));
     }
+    if sa.ss_family as i32 == libc::AF_INET || sa.ss_family as i32 == libc::AF_INET6 {
+        let owner = match proc_table::created(nfd) {
+            Ok(owner) => owner,
+            Err(error) => { fdtab::on_close(nfd); unsafe { libc::close(nfd); } return -(error as i64); }
+        };
+        let socket = Sock::of(SockType::Stream, Family::Inet(InetOpts::default()));
+        *socket.inet_owner.lock().unwrap() = Some(owner);
+        fdtab::insert(nfd, Kind::Sock(socket));
+    }
+    if let Err(error)=socket_inode::allocated(nfd){fdtab::on_close(nfd);unsafe{libc::close(nfd);}return -(error as i64);}
+    if let Err(error) = fdtab::publish_guest(nfd) { fdtab::on_close(nfd); unsafe { libc::close(nfd); } return -(error as i64); }
     if let Some(p) = peer {
         put_addr(&p, addr, addrlen);
     }
     nfd as i64
 }
 
-fn name_of(fd: i32, peer: bool, out: u64, outlen: u64) -> i64 {
-    if let Some(s) = any_sock(fd) {
+fn name_of(input: &SocketInput, peer: bool, out: u64, outlen: u64) -> i64 {
+    let fd = input.fd();
+    if let Some(s) = any_sock(&input) {
         let name = match &s.family {
             Family::Netlink(_) if peer => Some(super::netlink::sockaddr_nl(0, 0)),
             Family::Netlink(n) => Some(n.local_name()),
@@ -1183,7 +1294,7 @@ fn name_of(fd: i32, peer: bool, out: u64, outlen: u64) -> i64 {
             return 0;
         }
     }
-    if let Some(s) = sock(fd) {
+    if let Some(s) = sock(&input) {
         let known = if peer { &s.peer } else { &s.local };
         if let Some(n) = known.lock().unwrap().clone() {
             // A peer name is only valid while connected.
@@ -1217,27 +1328,42 @@ fn name_of(fd: i32, peer: bool, out: u64, outlen: u64) -> i64 {
 }
 
 pub fn getsockname(a: [u64; 6]) -> i64 {
-    name_of(a[0] as i32, false, a[1], a[2])
+    let input = match SocketInput::capture(a[0] as i32) { Ok(input) => input, Err(error) => return error };
+    name_of(&input, false, a[1], a[2])
 }
 
 pub fn getpeername(a: [u64; 6]) -> i64 {
-    name_of(a[0] as i32, true, a[1], a[2])
+    let input = match SocketInput::capture(a[0] as i32) { Ok(input) => input, Err(error) => return error };
+    name_of(&input, true, a[1], a[2])
 }
 
 pub fn shutdown(a: [u64; 6]) -> i64 {
+    let input = match SocketInput::capture(a[0] as i32) { Ok(input) => input, Err(error) => return error };
     if a[1] > 2 {
         return -(EINVAL as i64);
     }
     // SAFETY: SHUT_RD/WR/RDWR agree.
-    errno::check(unsafe { libc::shutdown(a[0] as i32, a[1] as i32) } as i64)
+    errno::check(unsafe { libc::shutdown(input.fd(), a[1] as i32) } as i64)
 }
 
 // ---- control messages -------------------------------------------------------
 
 /// Linux cmsgs -> Darwin cmsgs. SCM_CREDENTIALS is dropped: receivers get
 /// the sender's identity from the frame header or the peer.
-fn control_to_host(ptr: u64, len: usize) -> Result<Vec<u8>, i64> {
+#[derive(Default)]
+struct HostControl {
+    bytes: Vec<u8>,
+    // Path proof descriptors must remain alive through sendmsg, even if the
+    // guest concurrently closes its public O_PATH descriptor.
+    _exports: Vec<fdtab::ExportedFd>,
+    _regular: Vec<regular_scm::Export>,
+    _sockets: Vec<socket_scm::Export>,
+}
+fn control_to_host(ptr: u64, len: usize) -> Result<HostControl, i64> {
     let mut out = Vec::new();
+    let mut exports = Vec::new();
+    let mut regular = Vec::new();
+    let mut sockets = Vec::new();
     let mut off = 0usize;
     while off + 16 <= len {
         // SAFETY: inside the guest control buffer.
@@ -1260,28 +1386,130 @@ fn control_to_host(ptr: u64, len: usize) -> Result<Vec<u8>, i64> {
             out.extend_from_slice(&(hlen as u32).to_le_bytes());
             out.extend_from_slice(&libc::SOL_SOCKET.to_le_bytes());
             out.extend_from_slice(&libc::SCM_RIGHTS.to_le_bytes());
-            // SAFETY: the fds follow the Linux header.
-            out.extend_from_slice(unsafe {
-                std::slice::from_raw_parts((ptr as *const u8).add(off + 16), n)
-            });
+            // Every entry retains its actual open description. Typed carriers
+            // keep one SCM descriptor and leave the guest payload intact.
+            for index in 0..n / 4 {
+                let fd = unsafe { ((ptr as *const u8).add(off + 16 + index * 4) as *const i32).read_unaligned() };
+                match fdtab::export_scm(fd).map_err(|error| -(error as i64))? {
+                    fdtab::ScmExport::Regular(source) => {
+                        let exported = regular_scm::export(source).map_err(|error| -(error as i64))?;
+                        out.extend_from_slice(&exported.fd().to_ne_bytes());
+                        regular.push(exported);
+                    }
+                    fdtab::ScmExport::Socket(source) => {
+                        let exported = socket_scm::export(source).map_err(|error| -(error as i64))?;
+                        out.extend_from_slice(&exported.fd().to_ne_bytes());
+                        sockets.push(exported);
+                    }
+                    fdtab::ScmExport::Other(exported) => {
+                        out.extend_from_slice(&exported.fd.to_ne_bytes());
+                        exports.push(exported);
+                    }
+                }
+            }
+            // Preserve any original ancillary tail bytes for host validation.
+            let tail = n % 4;
+            if tail != 0 {
+                out.extend_from_slice(unsafe { std::slice::from_raw_parts((ptr as *const u8).add(off + 16 + n - tail), tail) });
+            }
             out.resize((out.len() + 3) & !3, 0);
         } else if !(level == L_SOL_SOCKET && matches!(ty, L_SCM_CREDENTIALS | L_SCM_RIGHTS)) {
             return Err(-(EINVAL as i64));
         }
         off += (clen + 7) & !7;
     }
-    Ok(out)
+    Ok(HostControl { bytes: out, _exports: exports, _regular: regular, _sockets: sockets })
+}
+
+#[derive(Default)]
+struct IncomingControl {
+    bytes: Vec<u8>,
+    owned: Vec<(i32, bool)>,
+}
+impl IncomingControl {
+    fn buffer(cap: usize) -> Self { Self { bytes: vec![0; cap], owned: Vec::new() } }
+    fn truncate(&mut self, len: usize) {
+        self.bytes.truncate(len);
+        let mut off = 0;
+        while off + 12 <= self.bytes.len() {
+            let word = |i| u32::from_ne_bytes(self.bytes[off+i..off+i+4].try_into().unwrap());
+            let (len, level, ty) = (word(0) as usize, word(4) as i32, word(8) as i32);
+            if len < 12 || len > self.bytes.len() - off { break; }
+            if level == libc::SOL_SOCKET && ty == libc::SCM_RIGHTS {
+                for raw in self.bytes[off+12..off+len].chunks_exact(4) {
+                    self.owned.push((i32::from_ne_bytes(raw.try_into().unwrap()), false));
+                }
+            }
+            off += (len + 3) & !3;
+        }
+    }
+    fn publish(&mut self, fd: i32) -> Result<(), i64> {
+        fdtab::publish_guest(fd).map_err(|e| -(e as i64))?;
+        self.owned.iter_mut().find(|entry| entry.0 == fd).unwrap().1 = true;
+        Ok(())
+    }
+    fn withdraw_publication(&mut self) {
+        for (fd, published) in &mut self.owned {
+            if *published {
+                fdtab::withdraw_guest(*fd).expect("SCM receiver owns published visibility under lifecycle admission");
+                *published = false;
+            }
+        }
+    }
+    fn deliver(&mut self, fd: i32) { self.owned.retain(|entry| entry.0 != fd); }
+}
+impl std::ops::Deref for IncomingControl {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] { &self.bytes }
+}
+impl std::ops::DerefMut for IncomingControl {
+    fn deref_mut(&mut self) -> &mut [u8] { &mut self.bytes }
+}
+impl Drop for IncomingControl {
+    fn drop(&mut self) {
+        if self.owned.is_empty() { return; }
+        {
+            let _admission = fdtab::lifecycle();
+            self.withdraw_publication();
+        }
+        for &(fd, _) in &self.owned {
+            // Keep typed lifetime owners through actual close, outside admission
+            // because their final private descriptor drop reenters the owner.
+            let kind = fdtab::get(fd);
+            fdtab::on_close(fd);
+            unsafe { libc::close(fd); }
+            super::close_effects::note_socket_close();
+            drop(kind);
+        }
+    }
+}
+
+fn adopt_received_descriptor(fd: i32) -> Result<(), errno::Errno> {
+    if super::fuse_device::adopt(fd) { return Ok(()); }
+    if super::fuse_client::adopt(fd)? { return Ok(()); }
+    // Class5 carriers are regular lease files; classification must consult
+    // the authoritative registry for every descriptor, not infer from type.
+    let class = socket_scm::classify(fd)?;
+    match class {
+        0 => { fdtab::adopt_untyped(fd); Ok(()) },
+        aim_binder_host::proxy_file::CLASS => { fdtab::insert(fd, Kind::ProxyFile); Ok(()) },
+        aim_binder_host::path_file::CLASS => fdtab::install_path(fd),
+        aim_binder_host::regular_scm::CLASS => regular_scm::adopt(fd),
+        aim_binder_host::socket_scm::CLASS => socket_scm::adopt(fd),
+        aim_binder_host::pty_file::CLASS => fdtab::install_pty(fd),
+        _ => Err(71),
+    }
 }
 
 /// Darwin cmsgs (plus credentials) -> Linux cmsgs in the guest buffer.
 /// Returns (bytes written, MSG_CTRUNC if something did not fit).
 fn control_to_guest(
-    host: &[u8],
+    host: &mut IncomingControl,
     cred: Option<Cred>,
     cloexec: bool,
     out: u64,
     cap: usize,
-) -> (usize, i32) {
+) -> Result<(usize, i32), i64> {
     let mut msgs: Vec<(i32, Vec<u8>)> = Vec::new();
     let mut off = 0usize;
     while off + 12 <= host.len() {
@@ -1292,13 +1520,6 @@ fn control_to_guest(
         }
         if level == libc::SOL_SOCKET && ty == libc::SCM_RIGHTS {
             let data = host[off + 12..off + clen].to_vec();
-            for fd in data
-                .chunks_exact(4)
-                .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
-            {
-                fdtab::set_flags(fd, false, cloexec);
-                fdtab::adopt(fd);
-            }
             // Darwin can hand back a bare SCM_RIGHTS header (a sender's
             // empty one); Linux never delivers one, and libbase aborts on it.
             if !data.is_empty() {
@@ -1307,11 +1528,42 @@ fn control_to_guest(
         }
         off += (clen + 3) & !3;
     }
+    let received: Vec<i32> = msgs
+        .iter()
+        .filter(|(ty, _)| *ty == L_SCM_RIGHTS)
+        .flat_map(|(_, data)| {
+            data.chunks_exact(4)
+                .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+        })
+        .collect();
+    for &fd in &received {
+        if let Err(error) = adopt_received_descriptor(fd) { return Err(-(error as i64)); }
+        let previous = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if previous < 0 { return Err(-(errno::last() as i64)); }
+        let flags = (previous & !libc::FD_CLOEXEC) | if cloexec { libc::FD_CLOEXEC } else { 0 };
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, flags) } < 0 { return Err(-(errno::last() as i64)); }
+    }
     if let Some(c) = cred {
         let mut d = c.pid.to_le_bytes().to_vec();
         d.extend_from_slice(&c.uid.to_le_bytes());
         d.extend_from_slice(&c.gid.to_le_bytes());
         msgs.push((L_SCM_CREDENTIALS, d));
+    }
+    let _admission = (!received.is_empty()).then(fdtab::lifecycle);
+    let mut planned = 0;
+    for (ty, data) in &msgs {
+        let clen = 16 + data.len();
+        if out != 0 && planned + clen <= cap {
+            if *ty == L_SCM_RIGHTS {
+                for raw in data.chunks_exact(4) {
+                    if let Err(error) = host.publish(i32::from_ne_bytes(raw.try_into().unwrap())) {
+                        host.withdraw_publication();
+                        return Err(error);
+                    }
+                }
+            }
+            planned += ((clen + 7) & !7).min(cap - planned);
+        }
     }
     let (mut w, mut flags) = (0usize, 0);
     for (ty, data) in msgs {
@@ -1319,16 +1571,6 @@ fn control_to_guest(
         let space = (clen + 7) & !7;
         if out == 0 || w + clen > cap {
             flags |= L_MSG_CTRUNC;
-            if ty == L_SCM_RIGHTS {
-                for fd in data
-                    .chunks_exact(4)
-                    .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
-                {
-                    fdtab::on_close(fd);
-                    // SAFETY: an fd we received and cannot deliver.
-                    unsafe { libc::close(fd) };
-                }
-            }
             continue;
         }
         let mut rec = vec![0u8; space.min(cap - w)];
@@ -1338,9 +1580,12 @@ fn control_to_guest(
         rec[16..clen].copy_from_slice(&data);
         // SAFETY: inside the guest control buffer.
         unsafe { std::ptr::copy_nonoverlapping(rec.as_ptr(), (out as *mut u8).add(w), rec.len()) };
+        if ty == L_SCM_RIGHTS {
+            for raw in data.chunks_exact(4) { host.deliver(i32::from_ne_bytes(raw.try_into().unwrap())); }
+        }
         w += rec.len();
     }
-    (w, flags)
+    Ok((w, flags))
 }
 
 // ---- send / receive --------------------------------------------------------
@@ -1473,16 +1718,17 @@ fn prefix(iov: &[libc::iovec], mut n: usize) -> Vec<libc::iovec> {
 
 /// One Linux sendmsg on `fd`.
 fn send(
-    fd: i32,
+    input: &SocketInput,
     iov: &[libc::iovec],
     name: Option<(u64, u32)>,
     ctrl: Option<(u64, usize)>,
     flags: u64,
 ) -> i64 {
-    if let Some(r) = send_other(fd, iov, name) {
+    let fd = input.fd();
+    if let Some(r) = send_other(&input, iov, name) {
         return r;
     }
-    let s = sock(fd);
+    let s = sock(&input);
     let (target, abstract_target) = match name {
         Some((p, l)) if p != 0 => match target_of(p, l, false) {
             Ok((_, n)) if family_mismatch(fd, &n) => return -EAFNOSUPPORT,
@@ -1491,12 +1737,12 @@ fn send(
         },
         _ => (None, false),
     };
-    let mut hctrl = match ctrl {
+    let mut control = match ctrl {
         Some((p, l)) if p != 0 && l > 0 => match control_to_host(p, l) {
             Ok(c) => c,
             Err(e) => return e,
         },
-        _ => Vec::new(),
+        _ => HostControl::default(),
     };
     let hflags = host_send_flags(flags);
     let total = iov_len(iov);
@@ -1517,9 +1763,9 @@ fn send(
     full.extend_from_slice(iov);
     let r = match &target {
         Some(t) => with_target(t, |sa, len| {
-            sendmsg_host(fd, &mut full, Some((sa, len)), &mut hctrl, hflags)
+            sendmsg_host(fd, &mut full, Some((sa, len)), &mut control.bytes, hflags)
         }),
-        None => sendmsg_host(fd, &mut full, None, &mut hctrl, hflags),
+        None => sendmsg_host(fd, &mut full, None, &mut control.bytes, hflags),
     };
     if r == -(libc::ENOENT as i64) && abstract_target {
         return -111;
@@ -1557,8 +1803,9 @@ fn send(
 
 /// A send on a netlink or packet socket, which the layer handles. None:
 /// another family.
-fn send_other(fd: i32, iov: &[libc::iovec], name: Option<(u64, u32)>) -> Option<i64> {
-    let s = any_sock(fd)?;
+fn send_other(input: &SocketInput, iov: &[libc::iovec], name: Option<(u64, u32)>) -> Option<i64> {
+    let fd = input.fd();
+    let s = any_sock(&input)?;
     let name = name.filter(|n| n.0 != 0);
     let gather = || -> Vec<u8> {
         iov.iter()
@@ -1651,8 +1898,9 @@ fn host_inet_name(fd: i32, peer: bool) -> Option<(u16, [u8; 4])> {
 }
 
 /// A receive on a netlink or packet socket. None: another family.
-fn recv_other(fd: i32, iov: &[libc::iovec], flags: u64) -> Option<Result<Received, i64>> {
-    let s = any_sock(fd)?;
+fn recv_other(input: &SocketInput, iov: &[libc::iovec], flags: u64) -> Option<Result<Received, i64>> {
+    let fd = input.fd();
+    let s = any_sock(&input)?;
     let hflags = host_recv_flags(flags);
     Some(match &s.family {
         Family::Netlink(_) => {
@@ -1667,7 +1915,7 @@ fn recv_other(fd: i32, iov: &[libc::iovec], flags: u64) -> Option<Result<Receive
                 Received {
                     n: n.saturating_sub(meta.len()) as i64,
                     flags: f,
-                    ctrl: Vec::new(),
+                    ctrl: IncomingControl::default(),
                     cred: s.passcred.load(Ordering::Relaxed).then_some(Cred {
                         pid: pid as i32,
                         uid,
@@ -1698,7 +1946,7 @@ fn recv_other(fd: i32, iov: &[libc::iovec], flags: u64) -> Option<Result<Receive
                     Received {
                         n: n as i64,
                         flags: if truncated { libc::MSG_TRUNC } else { 0 },
-                        ctrl: Vec::new(),
+                        ctrl: IncomingControl::default(),
                         cred: None,
                         name: Some(name),
                     }
@@ -1735,7 +1983,7 @@ fn recv_ping(fd: i32, iov: &[libc::iovec], hflags: i32, flags: u64) -> Result<Re
             at
         } as i64,
         flags: if at < msg.len() { libc::MSG_TRUNC } else { 0 },
-        ctrl: Vec::new(),
+        ctrl: IncomingControl::default(),
         cred: None,
         name,
     })
@@ -1750,7 +1998,7 @@ struct Received {
     /// MSG_TRUNC requested).
     n: i64,
     flags: i32,
-    ctrl: Vec<u8>,
+    ctrl: IncomingControl,
     cred: Option<Cred>,
     name: Option<Vec<u8>>,
 }
@@ -1778,6 +2026,10 @@ fn recvmsg_host(
     let r = unsafe { libc::recvmsg(fd, &mut m, flags) };
     if r < 0 {
         return Err(-(errno::last() as i64));
+    }
+    if m.msg_flags & libc::MSG_CTRUNC != 0 || ctrl.is_empty() {
+        // Kernel receive may have discarded queued carrier descriptors.
+        super::close_effects::note_socket_close();
     }
     let addr = (name && m.msg_namelen > 0)
         .then(|| linux_addr_of_host(&sa, m.msg_namelen))
@@ -1810,17 +2062,18 @@ fn recv_exact(fd: i32, mut iov: Vec<libc::iovec>, flags: i32) -> Result<usize, i
 }
 
 fn recv(
-    fd: i32,
+    input: &SocketInput,
     iov: &[libc::iovec],
     want_name: bool,
     ctrl_cap: usize,
     flags: u64,
 ) -> Result<Received, i64> {
-    if let Some(r) = recv_other(fd, iov, flags) {
+    let fd = input.fd();
+    if let Some(r) = recv_other(&input, iov, flags) {
         return r;
     }
-    let s = sock(fd);
-    let mut hctrl = vec![0u8; if ctrl_cap > 0 { ctrl_cap + 64 } else { 0 }];
+    let s = sock(&input);
+    let mut hctrl = IncomingControl::buffer(if ctrl_cap > 0 { ctrl_cap + 64 } else { 0 });
     let hflags = host_recv_flags(flags);
     let cap = iov_len(iov);
     let Some(s) = s else {
@@ -1837,7 +2090,7 @@ fn recv(
     };
     let passcred = s.passcred.load(Ordering::Relaxed);
     match s.ty {
-        SockType::Stream => {
+        SockType::Stream | SockType::Raw => {
             let mut v = iov.to_vec();
             let (n, f, cl, name) = recvmsg_host(fd, &mut v, &mut hctrl, want_name, hflags)?;
             hctrl.truncate(cl);
@@ -1908,7 +2161,7 @@ fn recv(
             }];
             // A blocking receive here honors O_NONBLOCK, SO_RCVTIMEO and
             // signals as Linux's does; the rest of the frame follows.
-            let (n, _, cl, _) = recvmsg_host(fd, &mut v, &mut hctrl, false, first)?;
+            let (n, first_flags, cl, _) = recvmsg_host(fd, &mut v, &mut hctrl, false, first)?;
             hctrl.truncate(cl);
             let mut got = n;
             if got == 0 {
@@ -1932,10 +2185,11 @@ fn recv(
                     got += recv_exact(fd, vec![rest], 0)?;
                 }
                 if got < FRAME {
+                    drop(hctrl);
                     return Ok(Received {
                         n: 0,
-                        flags: 0,
-                        ctrl: hctrl,
+                        flags: first_flags,
+                        ctrl: IncomingControl::default(),
                         cred: None,
                         name: None,
                     });
@@ -1992,7 +2246,7 @@ fn recv(
                 } else {
                     copy as i64
                 },
-                flags: if len > cap { libc::MSG_TRUNC } else { 0 },
+                flags: first_flags | if len > cap { libc::MSG_TRUNC } else { 0 },
                 ctrl: hctrl,
                 cred: passcred.then_some(c),
                 name: s.peer.lock().unwrap().clone(),
@@ -2004,31 +2258,37 @@ fn recv(
 // ---- syscalls ---------------------------------------------------------------
 
 pub fn sendto(a: [u64; 6]) -> i64 {
-    let iov = [libc::iovec {
-        iov_base: a[1] as *mut _,
-        iov_len: a[2] as usize,
-    }];
-    send(a[0] as i32, &iov, Some((a[4], a[5] as u32)), None, a[3])
+    super::close_effects::run(|| {
+        let input = match SocketInput::capture(a[0] as i32) { Ok(input) => input, Err(error) => return error };
+        let iov = [libc::iovec {
+            iov_base: a[1] as *mut _,
+            iov_len: a[2] as usize,
+        }];
+        send(&input, &iov, Some((a[4], a[5] as u32)), None, a[3])
+    })
 }
 
 pub fn recvfrom(a: [u64; 6]) -> i64 {
-    let (fd, buf, len, flags, addr, addrlen) = (a[0] as i32, a[1], a[2] as usize, a[3], a[4], a[5]);
-    let iov = [libc::iovec {
-        iov_base: buf as *mut _,
-        iov_len: len,
-    }];
-    match recv(fd, &iov, addr != 0, 0, flags) {
-        Ok(r) => {
-            if let Some(n) = &r.name {
-                put_addr(n, addr, addrlen);
-            } else if addr != 0 && addrlen != 0 {
-                // SAFETY: guest socklen_t.
-                unsafe { (addrlen as *mut u32).write_unaligned(0) };
+    super::close_effects::run(|| {
+        let input = match SocketInput::capture(a[0] as i32) { Ok(input) => input, Err(error) => return error };
+        let (buf, len, flags, addr, addrlen) = (a[1], a[2] as usize, a[3], a[4], a[5]);
+        let iov = [libc::iovec {
+            iov_base: buf as *mut _,
+            iov_len: len,
+        }];
+        match recv(&input, &iov, addr != 0, 0, flags) {
+            Ok(r) => {
+                if let Some(n) = &r.name {
+                    put_addr(n, addr, addrlen);
+                } else if addr != 0 && addrlen != 0 {
+                    // SAFETY: guest socklen_t.
+                    unsafe { (addrlen as *mut u32).write_unaligned(0) };
+                }
+                r.n
             }
-            r.n
+            Err(e) => e,
         }
-        Err(e) => e,
-    }
+    })
 }
 
 /// Linux arm64 `struct msghdr`.
@@ -2047,13 +2307,13 @@ struct LinuxMsghdr {
 }
 const _: () = assert!(std::mem::size_of::<LinuxMsghdr>() == 56);
 
-fn sendmsg_one(fd: i32, m: &LinuxMsghdr, flags: u64) -> i64 {
+fn sendmsg_one(input: &SocketInput, m: &LinuxMsghdr, flags: u64) -> i64 {
     let iov = match guest_iov(m.iov, m.iovlen) {
         Ok(v) => v,
         Err(e) => return e,
     };
     send(
-        fd,
+        &input,
         &iov,
         (m.name != 0).then_some((m.name, m.namelen)),
         Some((m.control, m.controllen as usize)),
@@ -2061,24 +2321,27 @@ fn sendmsg_one(fd: i32, m: &LinuxMsghdr, flags: u64) -> i64 {
     )
 }
 
-fn recvmsg_one(fd: i32, mp: u64, flags: u64) -> i64 {
+fn recvmsg_one(input: &SocketInput, mp: u64, flags: u64) -> i64 {
     // SAFETY: guest struct msghdr.
     let mut m = unsafe { (mp as *const LinuxMsghdr).read_unaligned() };
     let iov = match guest_iov(m.iov, m.iovlen) {
         Ok(v) => v,
         Err(e) => return e,
     };
-    let r = match recv(fd, &iov, m.name != 0, m.controllen as usize, flags) {
+    let mut r = match recv(&input, &iov, m.name != 0, m.controllen as usize, flags) {
         Ok(r) => r,
         Err(e) => return e,
     };
-    let (cl, ctrunc) = control_to_guest(
-        &r.ctrl,
+    let (cl, ctrunc) = match control_to_guest(
+        &mut r.ctrl,
         r.cred,
         flags & L_MSG_CMSG_CLOEXEC != 0,
         m.control,
         m.controllen as usize,
-    );
+    ) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
     m.controllen = cl as u64;
     m.flags = linux_msg_flags(r.flags) | ctrunc;
     if m.name != 0 {
@@ -2098,61 +2361,74 @@ fn recvmsg_one(fd: i32, mp: u64, flags: u64) -> i64 {
 }
 
 pub fn sendmsg(a: [u64; 6]) -> i64 {
-    // SAFETY: guest struct msghdr.
-    let m = unsafe { (a[1] as *const LinuxMsghdr).read_unaligned() };
-    sendmsg_one(a[0] as i32, &m, a[2])
+    super::close_effects::run(|| {
+        let input = match SocketInput::capture(a[0] as i32) { Ok(input) => input, Err(error) => return error };
+        // SAFETY: guest struct msghdr.
+        let m = unsafe { (a[1] as *const LinuxMsghdr).read_unaligned() };
+        sendmsg_one(&input, &m, a[2])
+    })
 }
 
 pub fn recvmsg(a: [u64; 6]) -> i64 {
-    recvmsg_one(a[0] as i32, a[1], a[2])
+    super::close_effects::run(|| {
+        let input = match SocketInput::capture(a[0] as i32) { Ok(input) => input, Err(error) => return error };
+        recvmsg_one(&input, a[1], a[2])
+    })
 }
 
 /// Linux `struct mmsghdr`: a msghdr and the byte count, 64 bytes.
 const MMSG: u64 = 64;
 
 pub fn sendmmsg(a: [u64; 6]) -> i64 {
-    let (fd, vec, n, flags) = (a[0] as i32, a[1], a[2].min(1024), a[3]);
-    for i in 0..n {
-        let p = vec + i * MMSG;
-        // SAFETY: guest mmsghdr array.
-        let m = unsafe { (p as *const LinuxMsghdr).read_unaligned() };
-        let r = sendmsg_one(fd, &m, flags);
-        if r < 0 {
-            return if i > 0 { i as i64 } else { r };
+    super::close_effects::run(|| {
+        let input = match SocketInput::capture(a[0] as i32) { Ok(input) => input, Err(error) => return error };
+        let (vec, n, flags) = (a[1], a[2].min(1024), a[3]);
+        for i in 0..n {
+            let p = vec + i * MMSG;
+            // SAFETY: guest mmsghdr array.
+            let m = unsafe { (p as *const LinuxMsghdr).read_unaligned() };
+            let r = sendmsg_one(&input, &m, flags);
+            if r < 0 {
+                return if i > 0 { i as i64 } else { r };
+            }
+            // SAFETY: msg_len follows the msghdr.
+            unsafe { ((p + 56) as *mut u32).write_unaligned(r as u32) };
         }
-        // SAFETY: msg_len follows the msghdr.
-        unsafe { ((p + 56) as *mut u32).write_unaligned(r as u32) };
-    }
-    n as i64
+        n as i64
+    })
 }
 
 pub fn recvmmsg(a: [u64; 6]) -> i64 {
-    const L_MSG_WAITFORONE: u64 = 0x10000;
-    let (fd, vec, n, mut flags) = (a[0] as i32, a[1], a[2].min(1024), a[3]);
-    for i in 0..n {
-        let p = vec + i * MMSG;
-        let r = recvmsg_one(fd, p, flags & !L_MSG_WAITFORONE);
-        if r < 0 {
-            return if i > 0 { i as i64 } else { r };
+    super::close_effects::run(|| {
+        let input = match SocketInput::capture(a[0] as i32) { Ok(input) => input, Err(error) => return error };
+        const L_MSG_WAITFORONE: u64 = 0x10000;
+        let (vec, n, mut flags) = (a[1], a[2].min(1024), a[3]);
+        for i in 0..n {
+            let p = vec + i * MMSG;
+            let r = recvmsg_one(&input, p, flags & !L_MSG_WAITFORONE);
+            if r < 0 {
+                return if i > 0 { i as i64 } else { r };
+            }
+            // SAFETY: msg_len follows the msghdr.
+            unsafe { ((p + 56) as *mut u32).write_unaligned(r as u32) };
+            if flags & L_MSG_WAITFORONE != 0 {
+                flags |= L_MSG_DONTWAIT;
+            }
         }
-        // SAFETY: msg_len follows the msghdr.
-        unsafe { ((p + 56) as *mut u32).write_unaligned(r as u32) };
-        if flags & L_MSG_WAITFORONE != 0 {
-            flags |= L_MSG_DONTWAIT;
-        }
-    }
-    n as i64
+        n as i64
+    })
 }
 
 /// read/readv on a socket with Linux state (a plain host read for
 /// AF_INET options).
-pub fn read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
-    if let Family::Inet(o) = &any_sock(fd)?.family
+pub(super) fn read_pinned(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> {
+    let input = match SocketInput::checked(SocketPin::Borrowed(pin)) { Ok(input) => input, Err(error) => return Some(error) };
+    if let Family::Inet(o) = &any_sock(&input)?.family
         && !o.icmp4.load(Ordering::Relaxed)
     {
         return None;
     }
-    Some(match recv(fd, iov, false, 0, 0) {
+    Some(match recv(&input, iov, false, 0, 0) {
         Ok(r) => r.n,
         Err(e) => e,
     })
@@ -2160,12 +2436,14 @@ pub fn read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
 
 /// write/writev on a socket with Linux state (a plain host write for
 /// AF_INET options, but for DHCP to the virtual router).
-pub fn write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
-    let s = any_sock(fd)?;
+pub(super) fn write_pinned(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> {
+    let input = match SocketInput::checked(SocketPin::Borrowed(pin)) { Ok(input) => input, Err(error) => return Some(error) };
+    let fd = input.fd();
+    let s = any_sock(&input)?;
     if let Family::Inet(_) = &s.family {
         return dhcp_to_router(fd, &s, iov, None);
     }
-    Some(send(fd, iov, None, None, 0))
+    Some(send(&input, iov, None, None, 0))
 }
 
 // ---- options -----------------------------------------------------------------
@@ -2251,7 +2529,8 @@ fn put_opt(v: &[u8], out: u64, outlen: u64) -> i64 {
 }
 
 pub fn setsockopt(a: [u64; 6]) -> i64 {
-    let (fd, level, opt, val, len) = (a[0] as i32, a[1], a[2], a[3], a[4] as u32);
+    let input = match SocketInput::capture(a[0] as i32) { Ok(input) => input, Err(error) => return error };
+    let (fd, level, opt, val, len) = (input.fd(), a[1], a[2], a[3], a[4] as u32);
     let int = || {
         if len < 4 {
             None
@@ -2284,11 +2563,17 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
             }
         }
         // SAFETY: an int option.
-        return errno::check(
+        let result = errno::check(
             unsafe { libc::setsockopt(fd, l, o, (&v as *const i32).cast(), 4) } as i64,
         );
+        if result == 0 && l == libc::SOL_SOCKET && o == libc::SO_KEEPALIVE && v != 0 {
+            if let Some(socket) = any_sock(&input) {
+                if let Some(owner) = socket.inet_owner.lock().unwrap().as_mut() { owner.probes_known = false; }
+            }
+        }
+        return result;
     }
-    if let Some(r) = setsockopt_other(fd, level, opt, val, len) {
+    if let Some(r) = setsockopt_other(&input, level, opt, val, len) {
         return r;
     }
     match (level, opt) {
@@ -2296,7 +2581,7 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
             let Some(v) = int() else {
                 return -(EINVAL as i64);
             };
-            match any_sock(fd) {
+            match any_sock(&input) {
                 Some(s) => s.passcred.store(v != 0, Ordering::Relaxed),
                 None => {
                     if let Err(e) = is_socket(fd) {
@@ -2336,7 +2621,7 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
             if len < 8 {
                 return -(EINVAL as i64);
             }
-            if sock(fd).is_some_and(|s| s.ty != SockType::Stream) {
+            if sock(&input).is_some_and(|s| s.ty != SockType::Stream) {
                 // The linger time is the socket's marker; AF_UNIX sockets
                 // have nothing to linger for.
                 return 0;
@@ -2354,8 +2639,9 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
 
 /// The AF_INET options, netlink options and packet filters. None: not
 /// one of them.
-fn setsockopt_other(fd: i32, level: u64, opt: u64, val: u64, len: u32) -> Option<i64> {
-    let s = any_sock(fd);
+fn setsockopt_other(input: &SocketInput, level: u64, opt: u64, val: u64, len: u32) -> Option<i64> {
+    let fd = input.fd();
+    let s = any_sock(&input);
     let int = || {
         // SAFETY: a guest int option value.
         (len >= 4).then(|| unsafe { (val as *const u32).read_unaligned() })
@@ -2377,11 +2663,7 @@ fn setsockopt_other(fd: i32, level: u64, opt: u64, val: u64, len: u32) -> Option
             }
             let s = match s {
                 Some(s) => s,
-                None => {
-                    let s = Sock::of(SockType::Stream, Family::Inet(InetOpts::default()));
-                    fdtab::insert(fd, Kind::Sock(s.clone()));
-                    s
-                }
+                None => return None,
             };
             let Family::Inet(o) = &s.family else {
                 unreachable!()
@@ -2515,11 +2797,12 @@ fn host_protocol(fd: i32) -> i32 {
 }
 
 pub fn getsockopt(a: [u64; 6]) -> i64 {
-    let (fd, level, opt, val, len) = (a[0] as i32, a[1], a[2], a[3], a[4]);
+    let input = match SocketInput::capture(a[0] as i32) { Ok(input) => input, Err(error) => return error };
+    let (fd, level, opt, val, len) = (input.fd(), a[1], a[2], a[3], a[4]);
     if let Err(e) = is_socket(fd) {
         return e;
     }
-    if let Some(s) = any_sock(fd) {
+    if let Some(s) = any_sock(&input) {
         let int = |v: i32| put_opt(&v.to_le_bytes(), val, len);
         match (level, opt, &s.family) {
             (1, L_SO_MARK, Family::Inet(o)) => return int(o.mark.load(Ordering::Relaxed) as i32),
@@ -2564,13 +2847,14 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
         };
         return put_opt(&v.to_le_bytes(), val, len);
     }
-    let s = sock(fd);
+    let s = sock(&input);
     match (level, opt) {
         (1, L_SO_TYPE) => {
             let t = match s.map(|s| s.ty) {
                 Some(SockType::SeqPacket) => L_SOCK_SEQPACKET,
                 Some(SockType::Dgram) => L_SOCK_DGRAM,
                 Some(SockType::Stream) => L_SOCK_STREAM,
+                Some(SockType::Raw) => L_SOCK_RAW,
                 None => match get_int(fd, libc::SOL_SOCKET, libc::SO_TYPE) {
                     Some(libc::SOCK_DGRAM) => L_SOCK_DGRAM,
                     Some(libc::SOCK_RAW) => L_SOCK_RAW,
@@ -2600,7 +2884,7 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
         }
         (1, L_SO_PROTOCOL) => put_opt(&host_protocol(fd).to_le_bytes(), val, len),
         (1, L_SO_PASSCRED) => {
-            let v = any_sock(fd).is_some_and(|s| s.passcred.load(Ordering::Relaxed)) as i32;
+            let v = any_sock(&input).is_some_and(|s| s.passcred.load(Ordering::Relaxed)) as i32;
             put_opt(&v.to_le_bytes(), val, len)
         }
         (1, L_SO_PEERCRED) => {
@@ -2665,6 +2949,89 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn proxy_scm_receipt_reexport_dup_and_revocation_keep_owner_class() {
+        use aim_binder_host::{proxy_file, server::Server};
+        use std::os::fd::{AsRawFd, IntoRawFd};
+        use std::os::unix::net::UnixStream;
+        let name = format!("dev.aim.test.proxy-registry.{}", std::process::id());
+        let _server = Server::start(&name).unwrap();
+        super::super::binder::init(&name).unwrap();
+        let path = std::env::temp_dir().join(format!("aim-linux-proxy-scm-{}", std::process::id()));
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let (owner, capability, worker) = proxy_file::open(file).unwrap();
+        let fd = capability.into_raw_fd();
+        super::fdtab::insert(fd, super::Kind::ProxyFile);
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        super::fdtab::publish_guest(fd).unwrap();
+        super::fdtab::publish_guest(sender.as_raw_fd()).unwrap();
+        super::fdtab::publish_guest(receiver.as_raw_fd()).unwrap();
+        let transfer = |fd: i32| {
+            super::fdtab::publish_guest(fd).unwrap();
+            let mut control = [0u8; 24];
+            control[..8].copy_from_slice(&20u64.to_ne_bytes());
+            control[8..12].copy_from_slice(&1i32.to_ne_bytes());
+            control[12..16].copy_from_slice(&1i32.to_ne_bytes());
+            control[16..20].copy_from_slice(&fd.to_ne_bytes());
+            let mut payload = [b'x'];
+            let iov = libc::iovec {
+                iov_base: payload.as_mut_ptr().cast(),
+                iov_len: 1,
+            };
+            let mut msg = super::LinuxMsghdr {
+                name: 0,
+                namelen: 0,
+                _pad: 0,
+                iov: &iov as *const _ as u64,
+                iovlen: 1,
+                control: control.as_mut_ptr() as u64,
+                controllen: 24,
+                flags: 0,
+                _pad2: 0,
+            };
+            assert_eq!(super::sendmsg_one(&super::SocketInput::capture(sender.as_raw_fd()).unwrap(), &msg, 0), 1);
+            control.fill(0);
+            assert_eq!(
+                super::recvmsg_one(
+                    &super::SocketInput::capture(receiver.as_raw_fd()).unwrap(),
+                    &mut msg as *mut _ as u64,
+                    super::L_MSG_CMSG_CLOEXEC
+                ),
+                1
+            );
+            assert_eq!(msg.flags & super::L_MSG_CTRUNC, 0);
+            let received = i32::from_ne_bytes(control[16..20].try_into().unwrap());
+            assert!(super::super::proxy_file::is_proxy(received));
+            assert!(unsafe { libc::fcntl(received, libc::F_GETFD) } & libc::FD_CLOEXEC != 0);
+            received
+        };
+        let received = transfer(fd);
+        super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]);
+        let exported = transfer(received);
+        let duplicate = super::super::fs::dup([exported as u64, 0, 0, 0, 0, 0]) as i32;
+        assert!(super::super::proxy_file::is_proxy(duplicate));
+        let bytes = b"typed";
+        assert_eq!(
+            super::super::fs::write([received as u64, bytes.as_ptr() as u64, 5, 0, 0, 0]),
+            5
+        );
+        assert_eq!(super::super::proxy_file::seek(duplicate, 0, 1), 5);
+        owner.revoke();
+        assert_eq!(super::super::proxy_file::sync(exported), -1);
+        for fd in [received, exported, duplicate] {
+            super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]);
+        }
+        for endpoint in [sender.as_raw_fd(), receiver.as_raw_fd()] {
+            super::fdtab::withdraw_guest(endpoint).unwrap(); super::fdtab::on_close(endpoint);
+        }
+        drop(worker);
+        std::fs::remove_file(path).unwrap();
+    }
     use super::*;
 
     #[test]
@@ -2676,9 +3043,10 @@ mod tests {
 
     #[test]
     fn multicast_all_is_recorded_per_socket() {
-        // SAFETY: a host socket this test owns.
-        let fd = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM, 0) };
-        assert!(fd >= 0);
+        if fdtab::isolated_kernel_test("sys::net::tests::multicast_all_is_recorded_per_socket"){return;}
+        let (_view,_directory)=crate::vfs::test_view();
+        let fd=socket([L_AF_INET6 as u64,L_SOCK_DGRAM,0,0,0,0])as i32;
+        assert!(fd>=0);
         let get = || {
             let (mut v, mut l) = (-1i32, 4u32);
             let r = getsockopt([
@@ -2708,6 +3076,7 @@ mod tests {
         assert_eq!(set(1, 1), 0);
         assert_eq!(get(), (0, 1));
         assert_eq!(set(0, 0), -(EINVAL as i64));
+        fdtab::withdraw_guest(fd).unwrap();
         fdtab::on_close(fd);
         // SAFETY: our socket.
         unsafe { libc::close(fd) };
@@ -2715,9 +3084,14 @@ mod tests {
 
     #[test]
     fn tcp_user_timeout_round_trips() {
+        if fdtab::isolated_kernel_test("sys::net::tests::tcp_user_timeout_round_trips") { return; }
         // SAFETY: a host socket this test owns.
         let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
         assert!(fd >= 0);
+        let prior=match fdtab::get(fd){Some(Kind::Sock(socket))=>match socket.family{Family::Inet(_)=>"Inet",Family::Unix=>"Unix",Family::Netlink(_)=>"Netlink",Family::Packet(_)=>"Packet"},Some(_)=>"nonSocket",None=>"none"};
+        assert_eq!(prior,"none","fresh native TCP fd inherited unrelated metadata: fd={fd} visible={} hidden={}",fdtab::visible(fd),fdtab::is_hidden(fd));
+        adopt(fd); fdtab::publish_guest(fd).unwrap();
+        assert!(matches!(fdtab::get(fd),Some(Kind::Sock(socket)) if matches!(socket.family,Family::Inet(_))),"actual TCP socket did not receive Inet state");
         let get = || {
             let (mut v, mut l) = (-1i32, 4u32);
             let r = getsockopt([
@@ -2748,6 +3122,7 @@ mod tests {
             Some(2)
         );
         assert_eq!(set(-1), -(EINVAL as i64));
+        fdtab::withdraw_guest(fd).unwrap();
         fdtab::on_close(fd);
         // SAFETY: our socket.
         unsafe { libc::close(fd) };
@@ -2762,5 +3137,270 @@ mod tests {
         };
         let (len, d) = parse_header(&header(99, c));
         assert_eq!((len, d.pid, d.uid, d.gid), (99, 42, 1036, 1037));
+    }
+}
+
+#[cfg(test)]
+mod hidden_net_boundary_tests {
+    use super::*;
+    #[test]
+    fn hidden_proof_descriptors_cannot_be_used_or_sent_as_guest_sockets() {
+        if fdtab::isolated_kernel_test("sys::net::hidden_net_boundary_tests::hidden_proof_descriptors_cannot_be_used_or_sent_as_guest_sockets") { return; }
+        use std::os::fd::AsRawFd;
+        let (proof, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let fd = proof.as_raw_fd();
+        fdtab::keep_hidden(fd);
+        struct Hidden(i32);
+        impl Drop for Hidden { fn drop(&mut self) { fdtab::unhide(self.0); } }
+        let _hidden = Hidden(fd);
+        let args = [fd as u64,0,0,0,0,0];
+        for (name,call) in [("bind",bind as fn([u64;6])->i64),("connect",connect),("listen",listen),("accept4",accept4),("getsockname",getsockname),("getpeername",getpeername),("shutdown",shutdown),("sendto",sendto),("recvfrom",recvfrom),("sendmsg",sendmsg),("recvmsg",recvmsg),("sendmmsg",sendmmsg),("recvmmsg",recvmmsg),("setsockopt",setsockopt),("getsockopt",getsockopt)] {
+            assert_eq!(call(args), -(EBADF as i64),"hidden descriptor accepted by {name}: roleVisible={} hidden={}",fdtab::visible(fd),fdtab::is_hidden(fd));
+        }
+        assert_eq!(super::super::fs::read([fd as u64,0,0,0,0,0]),-(EBADF as i64));
+        assert_eq!(super::super::fs::write([fd as u64,0,0,0,0,0]),-(EBADF as i64));
+        let mut rights=[0u8;24];rights[..8].copy_from_slice(&20u64.to_ne_bytes());
+        rights[8..12].copy_from_slice(&(L_SOL_SOCKET as i32).to_ne_bytes());
+        rights[12..16].copy_from_slice(&L_SCM_RIGHTS.to_ne_bytes());
+        rights[16..20].copy_from_slice(&fd.to_ne_bytes());
+        assert!(matches!(control_to_host(rights.as_ptr() as u64,rights.len()), Err(error) if error == -(EBADF as i64)));
+        assert!(super::super::procfs::fd_link(fd).is_none());
+        // Kernel libc still owns a usable proof socket; guest checks did not
+        // shut it down or alter its data while rejecting the guessed number.
+        assert_eq!(unsafe { libc::write(fd,b"k".as_ptr().cast(),1) },1);
+        let mut byte=0u8;assert_eq!(unsafe{libc::read(peer.as_raw_fd(),(&mut byte as *mut u8).cast(),1)},1);assert_eq!(byte,b'k');
+    }
+}
+
+#[cfg(test)]
+mod path_scm_boundary_tests {
+    use super::*;
+    #[test]
+    fn path_scm_keeps_single_fd_payload_flags_and_proof_alive_after_sender_close() {
+        use std::os::fd::AsRawFd;
+        let (_view, directory) = vfs::test_view();
+        let name = format!("dev.aim.test.path-scm.{}",std::process::id());
+        let _server = aim_binder_host::server::Server::start(&name).unwrap();
+        super::super::binder::init(&name).unwrap();
+        let file = directory.join("data/path-scm-input");
+        std::fs::write(&file,b"original").unwrap();
+        let path = c"/data/path-scm-input";
+        let fd = super::super::fs::openat([vfs::LINUX_AT_FDCWD as u64,path.as_ptr() as u64,0o10000000u64|super::super::fs::O_CLOEXEC,0,0,0]) as i32;
+        assert!(fd>=0);
+        let rights = |fd:i32| { let mut value=[0u8;24];value[..8].copy_from_slice(&20u64.to_ne_bytes());value[8..12].copy_from_slice(&1i32.to_ne_bytes());value[12..16].copy_from_slice(&1i32.to_ne_bytes());value[16..20].copy_from_slice(&fd.to_ne_bytes());value };
+        let mut original = rights(fd);
+        let mut exported = control_to_host(original.as_ptr() as u64,original.len()).unwrap();
+        assert_eq!(exported.bytes.len(),16);
+        let proof = i32::from_ne_bytes(exported.bytes[12..16].try_into().unwrap());
+        assert_ne!(proof,fd);assert!(fdtab::is_hidden(proof));
+        assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]),0);
+        assert!(unsafe{libc::fcntl(proof,libc::F_GETFD)}>=0);
+        let (sender,receiver)=std::os::unix::net::UnixStream::pair().unwrap();
+        fdtab::publish_guest(sender.as_raw_fd()).unwrap(); fdtab::publish_guest(receiver.as_raw_fd()).unwrap();
+        let mut payload=[b'p'];let mut iov=[libc::iovec{iov_base:payload.as_mut_ptr().cast(),iov_len:1}];
+        assert_eq!(sendmsg_host(sender.as_raw_fd(),&mut iov,None,&mut exported.bytes,0),1);
+        drop(exported);
+        original.fill(0);
+        let mut message=LinuxMsghdr{name:0,namelen:0,_pad:0,iov:iov.as_ptr() as u64,iovlen:1,control:original.as_mut_ptr() as u64,controllen:24,flags:0,_pad2:0};
+        assert_eq!(recvmsg_one(&SocketInput::capture(receiver.as_raw_fd()).unwrap(),&mut message as *mut _ as u64,L_MSG_CMSG_CLOEXEC),1);
+        assert_eq!(payload,[b'p']);assert_eq!(message.controllen,24);assert_eq!(message.flags & L_MSG_CTRUNC,0);
+        let received=i32::from_ne_bytes(original[16..20].try_into().unwrap());
+        assert!(matches!(fdtab::get(received),Some(Kind::Path(_))));
+        assert_eq!(super::super::fs::fcntl([received as u64,3,0,0,0,0]) as u64,0o10000000u64);
+        let mut byte=0u8;assert_eq!(super::super::fs::read([received as u64,(&mut byte as *mut u8) as u64,1,0,0,0]),-(EBADF as i64));
+        super::super::fs::close([received as u64,0,0,0,0,0]);
+        let ordinary=std::fs::File::open(&file).unwrap();fdtab::publish_guest(ordinary.as_raw_fd()).unwrap();let normal=rights(ordinary.as_raw_fd());
+        let control=control_to_host(normal.as_ptr() as u64,normal.len()).unwrap();
+        let held = i32::from_ne_bytes(control.bytes[12..16].try_into().unwrap());
+        let mut original_stat: libc::stat = unsafe { std::mem::zeroed() };
+        let mut held_stat: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstat(ordinary.as_raw_fd(), &mut original_stat) }, 0);
+        assert_eq!(unsafe { libc::fstat(held, &mut held_stat) }, 0);
+        assert_eq!((held_stat.st_dev,held_stat.st_ino), (original_stat.st_dev,original_stat.st_ino));
+        assert_eq!(unsafe { libc::lseek(held, 2, libc::SEEK_SET) }, 2);
+        assert_eq!(unsafe { libc::lseek(ordinary.as_raw_fd(), 0, libc::SEEK_CUR) }, 2);
+        for endpoint in [sender.as_raw_fd(),receiver.as_raw_fd(),ordinary.as_raw_fd()] {
+            fdtab::withdraw_guest(endpoint).unwrap(); fdtab::on_close(endpoint);
+        }
+        std::fs::remove_file(file).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod incoming_control_tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    fn rights(fd: i32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&16u32.to_ne_bytes());
+        bytes.extend_from_slice(&libc::SOL_SOCKET.to_ne_bytes());
+        bytes.extend_from_slice(&libc::SCM_RIGHTS.to_ne_bytes());
+        bytes.extend_from_slice(&fd.to_ne_bytes());
+        bytes
+    }
+    fn receive_control(sender: i32, receiver: i32, fd: i32) -> IncomingControl {
+        let mut byte = [1u8];
+        let mut iov = [libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 }];
+        let mut control = rights(fd);
+        assert_eq!(sendmsg_host(sender, &mut iov, None, &mut control, 0), 1);
+        let mut incoming = IncomingControl::buffer(128);
+        let (n, _, len, _) = recvmsg_host(receiver, &mut iov, &mut incoming, false, 0).unwrap();
+        assert_eq!(n, 1);
+        incoming.truncate(len);
+        assert_eq!(incoming.owned.len(), 1);
+        incoming
+    }
+    #[test]
+    fn incoming_control_closes_rights_after_rest_read_error_and_truncation() {
+        if fdtab::isolated_kernel_test("sys::net::incoming_control_tests::incoming_control_closes_rights_after_rest_read_error_and_truncation") { return; }
+        let name = format!("dev.aim.test.incoming-scm.{}",std::process::id());
+        let _server = aim_binder_host::server::Server::start(&name).unwrap();
+        super::super::binder::init(&name).unwrap();
+        let (sender, receiver) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (proof, observer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let incoming = receive_control(sender.as_raw_fd(), receiver.as_raw_fd(), proof.as_raw_fd());
+        let received = incoming.owned[0].0;
+        assert!(!fdtab::visible(received));
+        assert_eq!(unsafe { libc::fcntl(received, libc::F_GETFD) } & libc::FD_CLOEXEC, 0,"ordinary raw SCM receipt remains inheritable in this kernel instance");
+        drop(proof);
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let mut byte = 0u8;
+        let result = (|| -> Result<(), i64> {
+            let _control = incoming;
+            recv_exact(file.as_raw_fd(), vec![libc::iovec { iov_base: (&mut byte as *mut u8).cast(), iov_len: 1 }], 0)?;
+            Ok(())
+        })();
+        assert!(result.is_err());
+        assert_eq!(unsafe { libc::fcntl(received, libc::F_GETFD) }, -1);
+        assert_eq!(unsafe { libc::recv(observer.as_raw_fd(), (&mut byte as *mut u8).cast(), 1, libc::MSG_DONTWAIT) }, 0);
+
+        let (proof, observer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut incoming = receive_control(sender.as_raw_fd(), receiver.as_raw_fd(), proof.as_raw_fd());
+        let received = incoming.owned[0].0;
+        drop(proof);
+        assert_eq!(control_to_guest(&mut incoming, None, false, 0, 0).unwrap(), (0, L_MSG_CTRUNC));
+        drop(incoming);
+        assert_eq!(unsafe { libc::fcntl(received, libc::F_GETFD) }, -1);
+        assert_eq!(unsafe { libc::recv(observer.as_raw_fd(), (&mut byte as *mut u8).cast(), 1, libc::MSG_DONTWAIT) }, 0);
+    }
+    #[test]
+    fn incoming_control_inherited_inet_retains_transport_without_guessing_creation_owner() {
+        for bind_address in ["127.0.0.1:0", "[::1]:0"] {
+            let socket = std::net::UdpSocket::bind(bind_address).unwrap();
+            let fd = socket.as_raw_fd();
+            adopt(fd);
+            fdtab::publish_guest(fd).unwrap();
+            let input = SocketInput::capture(fd).unwrap();
+            let state = any_sock(&input).unwrap();
+            assert!(matches!(state.family, Family::Inet(_)));
+            assert!(state.inet_owner.lock().unwrap().is_none());
+            let mut destination = vec![0u8; if socket.local_addr().unwrap().is_ipv4() { 16 } else { 28 }];
+            let family = if destination.len() == 16 { L_AF_INET } else { L_AF_INET6 };
+            destination[..2].copy_from_slice(&family.to_ne_bytes());
+            if family == L_AF_INET { destination[4..8].copy_from_slice(&[127,0,0,1]); }
+            else { destination[23] = 1; }
+            assert_eq!(connect([fd as u64, destination.as_ptr() as u64, destination.len() as u64, 0,0,0]), 0);
+            let mut peer = [0u8; 28]; let mut len = peer.len() as u32;
+            assert_eq!(getpeername([fd as u64, peer.as_mut_ptr() as u64, &mut len as *mut _ as u64, 0,0,0]), 0);
+            assert_eq!(&peer[2..4], &[0,0]);
+            assert!(state.inet_owner.lock().unwrap().is_none());
+            drop(input);
+            fdtab::withdraw_guest(fd).unwrap(); fdtab::on_close(fd);
+        }
+    }
+
+    #[test]
+    fn incoming_control_socket_input_retains_original_description_after_close_reuse() {
+        use std::os::fd::IntoRawFd;
+        let (original, original_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (replacement, replacement_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let fd = original.into_raw_fd();
+        let state = Sock::new(SockType::Stream);
+        fdtab::insert(fd, Kind::Sock(state.clone()));
+        fdtab::publish_guest(fd).unwrap();
+        let input = SocketInput::capture(fd).unwrap();
+        {
+            let _guard = fdtab::lifecycle();
+            fdtab::withdraw_guest(fd).unwrap();
+            fdtab::on_close(fd);
+            assert_eq!(unsafe { libc::close(fd) }, 0);
+            assert_eq!(unsafe { libc::dup2(replacement.as_raw_fd(), fd) }, fd);
+            fdtab::insert(fd, Kind::Sock(Sock::new(SockType::Dgram)));
+            fdtab::publish_guest(fd).unwrap();
+        }
+        assert!(Arc::ptr_eq(&any_sock(&input).unwrap(), &state));
+        assert!(matches!(sock(&input).unwrap().ty, SockType::Stream));
+        assert_eq!(unsafe { libc::write(original_peer.as_raw_fd(), b"o".as_ptr().cast(), 1) }, 1);
+        assert_eq!(unsafe { libc::write(replacement_peer.as_raw_fd(), b"r".as_ptr().cast(), 1) }, 1);
+        let mut byte = 0u8;
+        let iov = [libc::iovec { iov_base: (&mut byte as *mut u8).cast(), iov_len: 1 }];
+        assert_eq!(recv(&input, &iov, false, 0, 0).unwrap().n, 1);
+        assert_eq!(byte, b'o');
+        assert_eq!(unsafe { libc::read(fd, (&mut byte as *mut u8).cast(), 1) }, 1);
+        assert_eq!(byte, b'r');
+        drop(input);
+        assert_eq!(unsafe { libc::recv(original_peer.as_raw_fd(), (&mut byte as *mut u8).cast(), 1, libc::MSG_DONTWAIT) }, 0);
+        fdtab::withdraw_guest(fd).unwrap();
+        fdtab::on_close(fd);
+        unsafe { libc::close(fd); }
+    }
+
+    #[test]
+    fn incoming_control_fragmented_seqpacket_eof_closes_undeliverable_rights() {
+        let (sender, receiver) = std::os::unix::net::UnixStream::pair().unwrap();
+        let fd = receiver.as_raw_fd();
+        fdtab::insert(fd, Kind::Sock(Sock::new(SockType::SeqPacket)));
+        let (proof, observer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut byte = [1u8];
+        let mut iov = [libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 }];
+        let mut control = rights(proof.as_raw_fd());
+        assert_eq!(sendmsg_host(sender.as_raw_fd(), &mut iov, None, &mut control, 0), 1);
+        drop(proof);
+        sender.shutdown(std::net::Shutdown::Write).unwrap();
+        fdtab::publish_guest(fd).unwrap();
+        let input = SocketInput::capture(fd).unwrap();
+        let received = recv(&input, &iov, false, 128, 0).unwrap();
+        assert_eq!(received.n, 0);
+        assert!(received.ctrl.owned.is_empty());
+        assert_eq!(unsafe { libc::recv(observer.as_raw_fd(), byte.as_mut_ptr().cast(), 1, libc::MSG_DONTWAIT) }, 0);
+        fdtab::withdraw_guest(fd).unwrap();
+        fdtab::on_close(fd);
+    }
+
+    #[test]
+    fn incoming_control_publication_and_partial_rollback_preserve_ownership() {
+        let name = format!("dev.aim.test.incoming-publish.{}",std::process::id());
+        let _server = aim_binder_host::server::Server::start(&name).unwrap();
+        super::super::binder::init(&name).unwrap();
+        let (sender, receiver) = std::os::unix::net::UnixStream::pair().unwrap();
+        let proof = std::fs::File::open("/dev/null").unwrap();
+        let mut incoming = receive_control(sender.as_raw_fd(), receiver.as_raw_fd(), proof.as_raw_fd());
+        let fd = incoming.owned[0].0;
+        let mut output = [0u8; 24];
+        assert_eq!(control_to_guest(&mut incoming, None, true, output.as_mut_ptr() as u64, 24).unwrap(), (24, 0));
+        assert!(fdtab::visible(fd));
+        assert!(incoming.owned.is_empty());
+        drop(incoming);
+        assert!(unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0);
+        fdtab::withdraw_guest(fd).unwrap();
+        fdtab::on_close(fd);
+        unsafe { libc::close(fd); }
+
+        let mut first = receive_control(sender.as_raw_fd(), receiver.as_raw_fd(), proof.as_raw_fd());
+        let mut second = receive_control(sender.as_raw_fd(), receiver.as_raw_fd(), proof.as_raw_fd());
+        let a = first.owned[0].0;
+        let b = second.owned[0].0;
+        first.bytes.extend_from_slice(&second.bytes);
+        first.owned.append(&mut second.owned);
+        fdtab::keep_hidden(b);
+        let mut failed_output = [0xabu8; 48];
+        assert_eq!(control_to_guest(&mut first, None, false, failed_output.as_mut_ptr() as u64, 48), Err(-(EBADF as i64)));
+        drop(first);
+        fdtab::unhide(b);
+        assert!(!fdtab::visible(a));
+        assert_eq!(unsafe { libc::fcntl(a, libc::F_GETFD) }, -1);
+        assert_eq!(unsafe { libc::fcntl(b, libc::F_GETFD) }, -1);
+        assert_eq!(failed_output, [0xab; 48]);
     }
 }

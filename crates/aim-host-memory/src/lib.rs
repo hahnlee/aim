@@ -14,9 +14,10 @@
 //! (measured under `memory_pressure -l warn`: the level read 2 for a
 //! minute, and neither lmkd nor a plain host process got an event).
 
+use aim_storage::private_fd::{PrivateFd, receive_allocations};
 use std::ffi::CStr;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::sync::{Mutex, Once};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use aim_hostcall::memory::{FN_READ, FN_WATCH, Memory, VERSION, level};
@@ -28,6 +29,16 @@ pub static MODULE: HostModule = HostModule {
     version: VERSION,
     call,
 };
+
+/// The kernel duplicates and publishes the actual private pipe reader under
+/// its descriptor lifecycle lock. The writer never becomes guest-visible.
+pub struct Hooks {
+    pub publish: fn(BorrowedFd<'_>) -> Result<i32, i32>,
+}
+static HOOKS: OnceLock<Hooks> = OnceLock::new();
+pub fn set_hooks(hooks: Hooks) -> Result<(), Hooks> {
+    HOOKS.set(hooks)
+}
 
 unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
     match func {
@@ -109,39 +120,88 @@ pub fn read() -> Memory {
 }
 
 /// The write ends of the watchers' pipes.
-static WATCHERS: Mutex<Vec<OwnedFd>> = Mutex::new(Vec::new());
+static WATCHERS: Mutex<Vec<PrivateFd>> = Mutex::new(Vec::new());
 
 /// Darwin's `F_SETNOSIGPIPE`: a write to a pipe whose reader has gone
 /// fails with EPIPE instead of raising SIGPIPE.
 const F_SETNOSIGPIPE: i32 = 73;
 
 fn watch() -> i64 {
-    let mut fds = [0i32; 2];
-    // SAFETY: a pipe into a local array.
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+    let Some(hooks) = HOOKS.get() else {
         return -(errno::ENODEV as i64);
+    };
+    watch_with(hooks.publish)
+}
+fn linux_error(error: std::io::Error) -> i32 {
+    match error.raw_os_error().unwrap_or(libc::EIO) {
+        libc::EPERM => 1,
+        libc::ENOENT => 2,
+        libc::EINTR => 4,
+        libc::EIO => 5,
+        libc::EBADF => errno::EBADF,
+        libc::EAGAIN => errno::EAGAIN,
+        libc::ENOMEM => errno::ENOMEM,
+        libc::EACCES => 13,
+        libc::EBUSY => errno::EBUSY,
+        libc::EINVAL => errno::EINVAL,
+        libc::ENFILE => 23,
+        libc::EMFILE => 24,
+        libc::ENOSPC => 28,
+        libc::EPIPE => 32,
+        libc::ENOSYS => errno::ENOSYS,
+        _ => 5,
     }
-    // SAFETY: the fds were just made and are ours.
-    let (read_end, write_end) =
-        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+}
+fn io(error: std::io::Error) -> i64 {
+    -(linux_error(error) as i64)
+}
+fn watch_with(publish: fn(BorrowedFd<'_>) -> Result<i32, i32>) -> i64 {
+    let (_, mut ends) = match receive_allocations(|| {
+        let mut fds = [0; 2];
+        // SAFETY: fresh pipe ends are immediately owned in the guarded batch.
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok((
+            (),
+            vec![unsafe { OwnedFd::from_raw_fd(fds[0]) }, unsafe {
+                OwnedFd::from_raw_fd(fds[1])
+            }],
+        ))
+    }) {
+        Ok(ends) => ends,
+        Err(error) => return io(error),
+    };
+    let write_end = ends.pop().unwrap();
+    let read_end = ends.pop().unwrap();
     for fd in [&read_end, &write_end] {
-        // SAFETY: flags on our new fds.
-        unsafe {
-            libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
-            libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
+        // SAFETY: both are actual private pipe owners, not guest numbers.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+            || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0
+        {
+            return io(std::io::Error::last_os_error());
         }
     }
-    // SAFETY: as above.
-    unsafe { libc::fcntl(write_end.as_raw_fd(), F_SETNOSIGPIPE, 1) };
-    WATCHERS.lock().unwrap().push(write_end);
-    static WATCHER: Once = Once::new();
-    WATCHER.call_once(|| {
-        let _ = std::thread::Builder::new()
+    if unsafe { libc::fcntl(write_end.as_raw_fd(), F_SETNOSIGPIPE, 1) } < 0 {
+        return io(std::io::Error::last_os_error());
+    }
+    // A failed thread allocation cannot leave an already published guest FD.
+    static WATCHER: OnceLock<Result<(), i32>> = OnceLock::new();
+    if let Err(error) = WATCHER.get_or_init(|| {
+        std::thread::Builder::new()
             .name("aim-memory-pressure".into())
-            .spawn(watch_level);
-    });
-    // The guest owns the read end from here on.
-    std::os::fd::IntoRawFd::into_raw_fd(read_end) as i64
+            .spawn(watch_level)
+            .map(|_| ())
+            .map_err(|error| linux_error(error))
+    }) {
+        return -(*error as i64);
+    }
+    let guest = match publish(read_end.as_fd()) {
+        Ok(fd) => fd,
+        Err(error) => return -(error as i64),
+    };
+    WATCHERS.lock().unwrap().push(write_end);
+    guest as i64
 }
 
 /// Wake every watcher; forget those whose reader has gone.
@@ -177,6 +237,13 @@ fn watch_level() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    fn native_publish(fd: BorrowedFd<'_>) -> Result<i32, i32> {
+        // Standalone host-module test has no kernel visibility registrar.
+        fd.try_clone_to_owned()
+            .map(std::os::fd::IntoRawFd::into_raw_fd)
+            .map_err(|error| error.raw_os_error().unwrap_or(libc::EIO))
+    }
 
     fn call_read(m: &mut Memory, len: u64) -> i64 {
         // SAFETY: `m` is a Memory block; `len` is what the guest claims.
@@ -203,8 +270,9 @@ mod tests {
     #[test]
     fn watchers_wake_on_a_level_change() {
         // SAFETY: FN_WATCH takes no argument block.
-        let a = unsafe { call(FN_WATCH, 0, 0) };
-        let b = unsafe { call(FN_WATCH, 0, 0) };
+        let _lock = TEST_LOCK.lock().unwrap();
+        let a = watch_with(native_publish);
+        let b = watch_with(native_publish);
         assert!(a >= 0 && b >= 0 && a != b);
         // SAFETY: the read ends are ours now.
         let (a, b) = unsafe {
@@ -228,5 +296,33 @@ mod tests {
         notify();
         assert_eq!(pending(&a), 1);
         assert_eq!(WATCHERS.lock().unwrap().len(), 1);
+        drop(a);
+        notify();
+        assert_eq!(WATCHERS.lock().unwrap().len(), 0);
+    }
+    #[test]
+    fn failed_publication_drops_private_pipe_and_retains_no_watcher() {
+        use std::sync::atomic::{AtomicI32, Ordering};
+        static READER: AtomicI32 = AtomicI32::new(-1);
+        fn reject(fd: BorrowedFd<'_>) -> Result<i32, i32> {
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) }, 0);
+            assert_eq!(stat.st_mode & libc::S_IFMT, libc::S_IFIFO);
+            READER.store(fd.as_raw_fd(), Ordering::SeqCst);
+            Err(errno::ENODEV)
+        }
+        let _lock = TEST_LOCK.lock().unwrap();
+        notify();
+        let before = WATCHERS.lock().unwrap().len();
+        assert_eq!(watch_with(reject), -(errno::ENODEV as i64));
+        assert_eq!(WATCHERS.lock().unwrap().len(), before);
+        assert_eq!(
+            unsafe { libc::fcntl(READER.load(Ordering::SeqCst), libc::F_GETFD) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EBADF)
+        );
     }
 }

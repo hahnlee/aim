@@ -3,5 +3,9 @@
 package android.content.pm;
 
 public class PermissionGroupInfo extends PackageItemInfo {
+    public int descriptionRes;
+    public CharSequence nonLocalizedDescription;
+
     public PermissionGroupInfo() { throw new RuntimeException("stub"); }
+    public void writeToParcel(android.os.Parcel out,int flags){throw new RuntimeException("stub");}
 }

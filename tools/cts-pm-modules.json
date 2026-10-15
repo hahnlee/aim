@@ -1,0 +1,269 @@
+{
+  "release": "16_r1",
+  "modules": [
+    {
+      "name": "CtsPackageManagerParsingHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsPackageManagerPreferredActivityHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsPackageSettingHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsPackageManagerHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsAppSecurityHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsInstallHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsUsesLibraryHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsClassloaderSplitsHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsDexMetadataHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsAppMetadataHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsInstantAppsHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsApexTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsStagedInstallHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsRollbackManagerHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsOverlayHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsShortcutHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsCompilationTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsDomainVerificationHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsIncrementalInstallHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsInstalledLoadingProgressHostTests",
+      "kind": "host"
+    },
+    {
+      "name": "CtsPackageManagerStatsHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsPackageManagerIncrementalStatsHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsPackageManagerMultiUserHostTestCases",
+      "kind": "host"
+    },
+    {
+      "name": "CtsAdminPackageInstallerTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsAppEnumerationTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsAppOps2TestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsAppOpsTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsAtomicInstallTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsAttributionSourceTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsDomainVerificationDeviceMultiUserTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsDomainVerificationDeviceStandaloneTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsHibernationTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsInstantAppTests",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsNoPermissionTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsNoPermissionTestCases25",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsOsTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPackageInstallAppOpDefaultTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPackageInstallAppOpDeniedTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPackageInstallSessionTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPackageInstallTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPackageInstallerCUJDeviceAdminTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPackageInstallerCUJInstallationTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPackageInstallerCUJInstallationViaIntentForResultTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPackageInstallerCUJInstallationViaSessionTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPackageInstallerCUJMultiUsersTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPackageInstallerCUJUninstallationTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPackageInstallerCUJUpdateOwnerShipTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPackageInstallerCUJUpdateSelfTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPackageInstallerTapjackingTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPackageManagerTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPackageUninstallTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPackageWatchdogTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPermissionManagerNativeTestCases",
+      "kind": "gtest"
+    },
+    {
+      "name": "CtsPermissionMultiDeviceTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPermissionMultiUserTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPermissionPolicyTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPermissionTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPermissionTestCasesSdk28",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsPermissionUiTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsRoleMultiUserTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsRoleTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsRollbackManagerTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsSecureFrpInstallTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsShortcutManagerTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsSuspendAppsPermissionTestCases",
+      "kind": "instrumentation"
+    },
+    {
+      "name": "CtsSuspendAppsTestCases",
+      "kind": "instrumentation"
+    }
+  ]
+}

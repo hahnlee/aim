@@ -18,7 +18,7 @@
 mod record;
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, Weak};
@@ -44,6 +44,24 @@ const DISABLED_SYSTEM_PARSED: i32 = 3;
 const SHARED_USER: i32 = 4;
 const USER: i32 = 5;
 const SYSTEM: i32 = 6;
+const RUNTIME: i32 = 7;
+const DISABLED_SYSTEM_RUNTIME: i32 = 8;
+const SHARED_PROCESSES: i32 = 9;
+const USER_SCOPE: i32 = 10;
+const DISABLED_SYSTEM_USER_SCOPE: i32 = 11;
+const SCAN_USERS: i32 = 12;
+const APEX_INVENTORY: i32 = 13;
+const SDK_SANDBOX_PACKAGE: i32 = 14;
+
+/// The nullable SDK package selected by original PMS, without inventory inference.
+pub fn read_sdk_sandbox_package(bytes: &[u8]) -> aim_binder_host::parcel::Result<Option<String>> {
+    let mut reader = aim_binder_host::parcel::Reader::new(bytes, &[]);
+    let name = reader.read_string16()?;
+    if reader.remaining() != 0 {
+        return Err(BAD_VALUE);
+    }
+    Ok(name)
+}
 
 /// A record's kind and key, ordered as `PackageFeed.Key` orders them: by
 /// kind, then as Java compares strings (by UTF-16 unit).
@@ -90,8 +108,13 @@ struct Inner {
     /// A record coming in chunks: its key, length and bytes so far.
     partial: Option<(Key, usize, Vec<u8>)>,
     state: Option<Arc<State>>,
-    /// The tokens asked for and the nonce read before each.
-    asked: Vec<(i64, Option<i64>)>,
+    /// Complete publications, including those a shadow worker has not read.
+    history: VecDeque<(Instant, Arc<State>)>,
+    /// The tokens asked for, the nonce read before each, and when.
+    asked: Vec<(i64, Option<i64>, Instant)>,
+    /// When the published state's batch was asked for: its snapshot is
+    /// newer.
+    asked_at: Option<Instant>,
     last_token: i64,
     /// The latest batch's token, and whether its digest matched.
     ended: Option<(i64, bool)>,
@@ -120,6 +143,12 @@ impl Feed {
     /// The last state published.
     pub fn state(&self) -> Option<Arc<State>> {
         self.inner.lock().unwrap().state.clone()
+    }
+
+    /// The latest complete publication before `at`. A queued shadow call
+    /// can predate the state the comparison worker first observes.
+    pub fn state_before(&self, at: Instant) -> Option<Arc<State>> {
+        self.inner.lock().unwrap().state_before(at)
     }
 
     /// A state at least as new as the original's now: the last one if the
@@ -157,13 +186,29 @@ impl Feed {
         }
     }
 
+    /// A state at least as new as the original's at `since`: the last one
+    /// if its batch was asked for after `since`, else as [`Feed::fresh`].
+    /// While a comparison lags behind the calls it compares, one batch
+    /// serves every call taken before it was asked for.
+    pub fn fresh_since(&self, since: Instant, timeout: Duration) -> Option<Arc<State>> {
+        {
+            let inner = self.inner.lock().unwrap();
+            if let (Some(state), Some(asked)) = (&inner.state, inner.asked_at)
+                && asked >= since
+            {
+                return Some(state.clone());
+            }
+        }
+        self.fresh(timeout)
+    }
+
     /// Asks system_server for a batch with a new token (one-way); `nonce`
     /// was read before.
     fn ask(&self, inner: &mut Inner, reset: bool, nonce: Option<i64>) -> Option<i64> {
         let feed = inner.feed.clone()?;
         inner.last_token += 1;
         let token = inner.last_token;
-        inner.asked.push((token, nonce));
+        inner.asked.push((token, nonce, Instant::now()));
         let mut data = Parcel::new();
         feed::Sync { reset, token }.write(&mut data);
         if let Err(s) = feed.transact(feed::SYNC, &data, true) {
@@ -267,19 +312,44 @@ impl Inner {
     /// state's nonce is the one read before `token` was asked for: the
     /// batch's snapshot was taken after that.
     fn end(&mut self, digest: &[u8], token: i64) -> Result<Arc<State>, Failed> {
+        self.end_with_clock(digest, token, Instant::now)
+    }
+
+    fn state_before(&self, at: Instant) -> Option<Arc<State>> {
+        self.history
+            .iter()
+            .rev()
+            .find(|(published, _)| *published < at)
+            .map(|(_, state)| state.clone())
+    }
+
+    fn end_with_clock(
+        &mut self,
+        digest: &[u8],
+        token: i64,
+        clock: impl FnOnce() -> Instant,
+    ) -> Result<Arc<State>, Failed> {
         self.ended = Some((token, false));
-        self.asked.retain(|(t, _)| *t >= token);
+        self.asked.retain(|(t, ..)| *t >= token);
         if digest != records_digest(&self.records) {
             return Err(Failed::Drifted);
         }
-        let nonce = self
-            .asked
-            .iter()
-            .find(|(t, _)| *t == token)
-            .and_then(|(_, n)| *n);
+        let asked = self.asked.iter().find(|(t, ..)| *t == token);
+        let nonce = asked.and_then(|(_, n, _)| *n);
+        let asked_at = asked.map(|(.., at)| *at);
         let generation = self.state.as_ref().map_or(1, |s| s.generation + 1);
         let state = Arc::new(build(&self.records, generation, nonce).map_err(Failed::Unreadable)?);
         self.state = Some(state.clone());
+        let now = clock();
+        self.history.push_back((now, state.clone()));
+        // Keep ten seconds and the newest publication older than that,
+        // matching the write model's observation window.
+        while self.history.len() > 1
+            && now.duration_since(self.history[1].0) > Duration::from_secs(10)
+        {
+            self.history.pop_front();
+        }
+        self.asked_at = asked_at;
         self.ended = Some((token, true));
         Ok(state)
     }
@@ -348,8 +418,112 @@ fn build(
                 state.system.force_queryable_packages = packages;
                 state.platform = platform;
             }
+            SDK_SANDBOX_PACKAGE => {
+                if !key.name.is_empty() {
+                    return Err("SDK sandbox package requires the singleton key".into());
+                }
+                state.system.sdk_sandbox_package =
+                    Some(read_sdk_sandbox_package(bytes).map_err(failed)?);
+            }
+            APEX_INVENTORY => {
+                if !key.name.is_empty() {
+                    return Err("APEX inventory requires the singleton key".into());
+                }
+                state.apex_inventory = Some(
+                    crate::package::bootstrap::ApexInventory::read_original_record(bytes)
+                        .map_err(failed)?,
+                );
+            }
+            SCAN_USERS => {
+                if !key.name.is_empty() {
+                    return Err("scan users require the singleton key".into());
+                }
+                state.scan_users = Some(
+                    crate::package::bootstrap::ScanUsers::read_original_record(bytes)
+                        .map_err(failed)?,
+                );
+            }
+            USER_SCOPE | DISABLED_SYSTEM_USER_SCOPE => {
+                let input = crate::package::scan::OriginalUserScope::read_original_record(bytes)
+                    .map_err(failed)?;
+                let factory = key.kind == DISABLED_SYSTEM_USER_SCOPE;
+                let package = packages(&mut state, !factory)
+                    .get(&key.name)
+                    .ok_or_else(|| format!("{key:?}: missing user-scope package"))?;
+                if input.name != key.name
+                    || package.name != key.name
+                    || input.factory != factory
+                    || input.app_id != package.app_id
+                    || input.path != package.path
+                    || input.version != package.version_code
+                    || input.users != package.users.keys().copied().collect()
+                {
+                    return Err(format!("{key:?}: user scope identity differs"));
+                }
+                state.user_scopes.insert((key.name.clone(), factory), input);
+            }
+            SHARED_PROCESSES => {
+                let input =
+                    crate::package::scan::OriginalSharedProcesses::read_original_record(bytes)
+                        .map_err(failed)?;
+                let group = state
+                    .shared_users
+                    .get(&key.name)
+                    .ok_or_else(|| format!("{key:?}: missing shared process group"))?;
+                if input.name != key.name
+                    || group.name != key.name
+                    || input.app_id != group.app_id
+                    || input.members != group.packages
+                {
+                    return Err(format!("{key:?}: shared process identity differs"));
+                }
+                state.shared_process_inputs.insert(key.name.clone(), input);
+            }
+            RUNTIME | DISABLED_SYSTEM_RUNTIME => {
+                let runtime = record::runtime(bytes).map_err(failed)?;
+                let factory = key.kind == DISABLED_SYSTEM_RUNTIME;
+                let package = packages(&mut state, !factory)
+                    .get(&key.name)
+                    .ok_or_else(|| format!("{key:?}: runtime package is missing"))?;
+                if runtime.name != key.name
+                    || package.name != key.name
+                    || runtime.app_id != package.app_id
+                    || package.path != runtime.path
+                    || runtime.version != package.version_code
+                    || runtime.has_code != package.parcel.is_some()
+                {
+                    return Err(format!("{key:?}: runtime package/code identity differs"));
+                }
+                let effective = runtime
+                    .state
+                    .override_seinfo
+                    .as_deref()
+                    .filter(|v| !v.is_empty())
+                    .or(runtime.state.seinfo.as_deref());
+                if effective != package.seinfo.as_deref()
+                    || runtime.state.libraries != package.uses_library_infos
+                    || runtime.state.library_files != package.uses_library_files
+                    || runtime.transient.hidden_until_installed != package.is.hidden_until_installed
+                    || runtime.transient.updated_system_app != package.is.updated_system_app
+                    || runtime.transient.apk_in_updated_apex != package.is.apk_in_updated_apex
+                    || runtime.transient.apex_module_name != package.apex_module_name
+                {
+                    return Err(format!("{key:?}: runtime package getters differ"));
+                }
+                state
+                    .runtime_inputs
+                    .insert((key.name.clone(), factory), runtime);
+            }
             _ => return Err(format!("{key:?}: no such kind")),
         }
+    }
+    if !state.shared_process_inputs.is_empty()
+        && state
+            .shared_process_inputs
+            .keys()
+            .ne(state.shared_users.keys())
+    {
+        return Err("shared process aggregate inventory differs".into());
     }
     for (kind, name, app_id) in shared_user_ids {
         let shared_user = app_id.and_then(|id| {
@@ -358,6 +532,61 @@ fn build(
         });
         if let Some(p) = packages(&mut state, kind == PACKAGE).get_mut(&name) {
             p.shared_user = shared_user;
+        }
+    }
+    if !state.user_scopes.is_empty() {
+        let expected: std::collections::BTreeSet<_> = state
+            .packages
+            .keys()
+            .map(|n| (n.clone(), false))
+            .chain(
+                state
+                    .disabled_system_packages
+                    .keys()
+                    .map(|n| (n.clone(), true)),
+            )
+            .collect();
+        if state
+            .user_scopes
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            != expected
+        {
+            return Err("original user scope inventory is incomplete".into());
+        }
+        for ((name, _), input) in &state.user_scopes {
+            for id in &input.active_aliases {
+                if !state
+                    .user_scopes
+                    .get(&(name.clone(), false))
+                    .is_some_and(|active| active.users.contains(id))
+                {
+                    return Err("original user alias has no active owner".into());
+                }
+            }
+        }
+    }
+    if !state.runtime_inputs.is_empty() {
+        let expected: std::collections::BTreeSet<_> = state
+            .packages
+            .keys()
+            .map(|name| (name.clone(), false))
+            .chain(
+                state
+                    .disabled_system_packages
+                    .keys()
+                    .map(|name| (name.clone(), true)),
+            )
+            .collect();
+        if state
+            .runtime_inputs
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            != expected
+        {
+            return Err("original runtime inventory is incomplete".into());
         }
     }
     Ok(state)
@@ -377,6 +606,58 @@ fn packages(state: &mut State, installed: bool) -> &mut BTreeMap<String, Package
 pub fn dump(state: &State) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "generation={} nonce={:?}", state.generation, state.nonce);
+    let _ = writeln!(
+        s,
+        "shared_process_inputs={}",
+        state.shared_process_inputs.len()
+    );
+    let _ = writeln!(
+        s,
+        "user_scopes={} factory_aliases={}",
+        state.user_scopes.len(),
+        state
+            .user_scopes
+            .values()
+            .map(|s| s.active_aliases.len())
+            .sum::<usize>()
+    );
+    let _ = writeln!(
+        s,
+        "scan_users={}",
+        match &state.scan_users {
+            None => "missing".into(),
+            Some(users) => users
+                .users
+                .as_ref()
+                .map_or_else(|| "uninitialized".into(), |u| u.len().to_string()),
+        }
+    );
+    let _ = writeln!(
+        s,
+        "apex_inventory={} active={}",
+        state.apex_inventory.as_ref().map_or_else(
+            || "missing".into(),
+            |a| a
+                .packages
+                .as_ref()
+                .map_or_else(|| "null".into(), |p| p.len().to_string())
+        ),
+        state.apex_inventory.as_ref().map_or(0, |a| a.active.len())
+    );
+    let active_runtime = state
+        .runtime_inputs
+        .keys()
+        .filter(|(_, factory)| !factory)
+        .count();
+    let factory_runtime = state.runtime_inputs.len() - active_runtime;
+    let _ = writeln!(
+        s,
+        "runtime_inputs={} active={} factory={}",
+        state.runtime_inputs.len(),
+        active_runtime,
+        factory_runtime
+    );
+
     for (title, packages) in [
         ("Packages:", &state.packages),
         ("Hidden system packages:", &state.disabled_system_packages),
@@ -448,7 +729,12 @@ fn dump_package(s: &mut String, p: &PackageState) {
     for (key, value) in fields {
         let _ = writeln!(s, "    {key}={value}");
     }
-    list(s, "    usesLibraryFiles:", &p.uses_library_files);
+    if !p.uses_library_files.is_empty() {
+        let _ = writeln!(s, "    usesLibraryFiles:");
+        for file in &p.uses_library_files {
+            let _ = writeln!(s, "      {}", file.as_deref().unwrap_or("null"));
+        }
+    }
     for (id, u) in &p.users {
         let _ = writeln!(
             s,

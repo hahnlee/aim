@@ -174,6 +174,9 @@ struct Dispatcher(Weak<Controller>);
 /// is not touched before, so a boot without system_server makes no
 /// CoreAudio client.
 pub fn start(driver: &Arc<Driver>) {
+    start_for_namespace(driver,std::process::id() as i32)
+}
+pub fn start_for_namespace(driver:&Arc<Driver>,guest_pid:i32){
     let driver = driver.clone();
     let _ = std::thread::Builder::new()
         .name("volume".into())
@@ -182,7 +185,7 @@ pub fn start(driver: &Arc<Driver>) {
                 &driver,
                 Device::Binder,
                 Credentials {
-                    pid: std::process::id() as i32,
+                    pid: guest_pid,
                     euid: SYSTEM_UID,
                     security_context: Some(SYSTEM_SERVER_CONTEXT.into()),
                 },

@@ -1,0 +1,1 @@
+package android.content.pm.parsing;public class ApkLiteParseUtils{public static android.content.pm.parsing.result.ParseResult<ApkLite> parseApkLite(android.content.pm.parsing.result.ParseInput input,java.io.FileDescriptor fd,String path,int flags){throw new RuntimeException("stub");}}

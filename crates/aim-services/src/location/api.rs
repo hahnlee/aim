@@ -1488,7 +1488,7 @@ impl LocationManagerService {
         let Some(file) = self.env.process.file(fd) else {
             return;
         };
-        let Some(fd) = aim_binder_host::server::file_fd(&file) else {
+        let Some(mut fd) = aim_binder_host::server::file_fd(&file) else {
             return;
         };
         let text = self.with(|inner, env, effects| {
@@ -1529,6 +1529,6 @@ impl LocationManagerService {
             }
             s
         });
-        let _ = std::fs::File::from(fd).write_all(text.as_bytes());
+        let _ = fd.write_all(text.as_bytes());
     }
 }

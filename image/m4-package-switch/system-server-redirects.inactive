@@ -1,0 +1,15 @@
+# Inactive D1 source; never included by the image assembler before C acceptance.
+# D1 main publishes native local interfaces and returns null into the concrete PMS slot.
+# Two remaining SystemServer PMS-bearing calls stay original as documented:
+# OtaDexoptService.main is unreachable under config.disable_otadexopt;
+# HsumBootUserInitializer.createInstance returns null in the non-headless image.
+com.android.server.SystemServer.startBootstrapServices com.android.server.pm.PackageManagerService.main dev.aim.server.NativePackageManagerService.main 1 Native PackageManager construction, original UM and native local interfaces; activate only after C CTS/app acceptance.
+com.android.server.SystemServer.startBootstrapServices com.android.server.pm.PackageManagerService.isFirstBoot dev.aim.server.NativePackageManagerService.isFirstBoot 1 Native persisted first-boot owner.
+com.android.server.SystemServer.isFirstBootOrUpgrade com.android.server.pm.PackageManagerService.isFirstBoot dev.aim.server.NativePackageManagerService.isFirstBoot 1 Native persisted first-boot owner.
+com.android.server.SystemServer.isFirstBootOrUpgrade com.android.server.pm.PackageManagerService.isDeviceUpgrading dev.aim.server.NativePackageManagerService.isDeviceUpgrading 1 Native fingerprint and migration owner.
+com.android.server.SystemServer.lambda$startOtherServices$6 com.android.server.pm.PackageManagerService.waitForAppDataPrepared dev.aim.server.NativePackageManagerService.waitForAppDataPrepared 1 Actual native app-data preparation completion barrier.
+com.android.server.SystemServer.startOtherServices com.android.server.pm.DexOptHelper.initializeArtManagerLocal dev.aim.server.NativePackageManagerService.initializeArtManagerLocal 1 Original ART Service over native PackageManagerLocal and native dexopt completion owner.
+com.android.server.SystemServer.startOtherServices com.android.server.pm.PackageManagerService.updatePackagesIfNeeded dev.aim.server.NativePackageManagerService.updatePackagesIfNeeded 1 Actual native upgrade dexopt owner.
+com.android.server.SystemServer.startOtherServices com.android.server.pm.PackageManagerService.updateMetricsIfNeeded dev.aim.server.NativePackageManagerService.updateMetricsIfNeeded 1 Actual original display metrics supplied to native package owner.
+com.android.server.SystemServer.startOtherServices com.android.server.pm.PackageManagerService.performFstrimIfNeeded dev.aim.server.NativePackageManagerService.performFstrimIfNeeded 1 Actual storage maintenance owner.
+com.android.server.SystemServer.startOtherServices com.android.server.pm.PackageManagerService.systemReady dev.aim.server.NativePackageManagerService.systemReady 1 Actual native/original lifecycle stages with owner ordering.

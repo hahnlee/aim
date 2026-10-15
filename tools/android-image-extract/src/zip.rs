@@ -21,6 +21,8 @@ pub struct Entry {
     pub method: u16,
     pub flags: u16,
     pub crc32: u32,
+    /// Packed DOS date (high word) and time (low word), in the archive's timezone.
+    pub dos_time: u32,
     pub compressed_size: u64,
     pub size: u64,
     local_offset: u64,
@@ -121,6 +123,7 @@ impl<'a> Archive<'a> {
                 method: le16(header, 10)?,
                 flags: le16(header, 8)?,
                 crc32: le32(header, 16)?,
+                dos_time: le32(header, 12)?,
                 compressed_size,
                 size,
                 local_offset,

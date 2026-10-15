@@ -288,6 +288,7 @@ fn run() -> Result<bool, String> {
             Err(e) => {
                 let c = match &e {
                     Error::Parse(_) => "(parse failed)".to_owned(),
+                    Error::OlderSdk(_) => "(older SDK)".to_owned(),
                     Error::Unsupported(s) => format!("(unsupported) {s}"),
                 };
                 println!("{guest}: {e}");

@@ -113,7 +113,7 @@ impl<E: Entry> IntentResolver<E> {
         resolved_type: Option<&str>,
         default_only: bool,
         build: &mut impl Build<E, R>,
-    ) -> Vec<R> {
+    ) -> std::result::Result<Vec<R>, super::domain_verification::uri_parcel::MatchError> {
         let scheme = intent.scheme();
         let action = intent.action.as_deref();
         fn get<'a>(map: &'a HashMap<String, Vec<usize>>, key: &str) -> &'a [usize] {
@@ -155,9 +155,9 @@ impl<E: Entry> IntentResolver<E> {
                 default_only,
                 &mut dest,
                 build,
-            );
+            )?;
         }
-        dest
+        Ok(dest)
     }
 }
 
@@ -169,7 +169,7 @@ pub fn query_from_list<'a, E: Entry + 'a, R>(
     resolved_type: Option<&str>,
     default_only: bool,
     build: &mut impl Build<E, R>,
-) -> Vec<R> {
+) -> std::result::Result<Vec<R>, super::domain_verification::uri_parcel::MatchError> {
     let mut dest = Vec::new();
     for list in lists {
         build_resolve_list(
@@ -179,9 +179,9 @@ pub fn query_from_list<'a, E: Entry + 'a, R>(
             default_only,
             &mut dest,
             build,
-        );
+        )?;
     }
-    dest
+    Ok(dest)
 }
 
 /// `buildResolveList`.
@@ -192,7 +192,7 @@ fn build_resolve_list<'a, E: Entry + 'a, R>(
     default_only: bool,
     dest: &mut Vec<R>,
     build: &mut impl Build<E, R>,
-) {
+) -> std::result::Result<(), super::domain_verification::uri_parcel::MatchError> {
     let excluding_stopped = intent.is_excluding_stopped();
     let categories = intent.categories.as_deref();
     for entry in entries {
@@ -218,7 +218,7 @@ fn build_resolve_list<'a, E: Entry + 'a, R>(
             categories,
             false,
             None,
-        );
+        )?;
         if matched >= 0
             && (!default_only || filter.has_category(CATEGORY_DEFAULT))
             && let Some(result) = build.result(entry, matched)
@@ -226,6 +226,7 @@ fn build_resolve_list<'a, E: Entry + 'a, R>(
             dest.push(result);
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -307,7 +308,20 @@ mod tests {
             once: false,
             stopped: &[],
         };
-        r.query(i, ty, default_only, &mut b)
+        r.query(i, ty, default_only, &mut b).unwrap()
+    }
+
+    #[test]
+    fn nullable_uri_error_is_not_an_empty_resolver_result() {
+        let mut filter = filter(&["VIEW"], &[], &["https"], true);
+        filter.add_data_authority("x", None);
+        let mut group = super::super::intent_filter::UriRelativeFilterGroup::new(0);
+        group.add_nullable(0, 0, None);
+        filter.add_uri_relative_filter_group(group);
+        let mut resolver = IntentResolver::default(); resolver.add(F("nullable", filter));
+        let mut build = Names {once: false, stopped: &[]};
+        assert_eq!(resolver.query(&intent("VIEW", Some("https://x/path")), None, false, &mut build),
+            Err(super::super::domain_verification::uri_parcel::MatchError::NullPattern(0)));
     }
 
     #[test]
@@ -364,7 +378,7 @@ mod tests {
             once: false,
             stopped: &["a"],
         };
-        assert_eq!(r.query(&i, Some("image/png"), false, &mut b), ["b", "c"]);
+        assert_eq!(r.query(&i, Some("image/png"), false, &mut b).unwrap(), ["b", "c"]);
         // A filter in two cuts is kept once.
         let mut r = IntentResolver::default();
         let mut f = filter(&["VIEW"], &["image/png"], &["content"], false);
@@ -375,12 +389,12 @@ mod tests {
             once: true,
             stopped: &[],
         };
-        assert_eq!(r.query(&i, Some("image/png"), false, &mut b), ["x"]);
+        assert_eq!(r.query(&i, Some("image/png"), false, &mut b).unwrap(), ["x"]);
         let mut b = Names {
             once: false,
             stopped: &[],
         };
-        assert_eq!(r.query(&i, Some("image/png"), false, &mut b), ["x", "x"]);
+        assert_eq!(r.query(&i, Some("image/png"), false, &mut b).unwrap(), ["x", "x"]);
     }
 
     #[test]
@@ -394,7 +408,7 @@ mod tests {
             once: false,
             stopped: &[],
         };
-        let got = query_from_list(lists, &intent("VIEW", None), None, false, &mut b);
+        let got = query_from_list(lists, &intent("VIEW", None), None, false, &mut b).unwrap();
         assert_eq!(got, ["e"]);
     }
 }

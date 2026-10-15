@@ -1,0 +1,11 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.aim.webviewprobe" android:versionCode="1" android:versionName="1.0">
+  <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="36" />
+  <application android:label="AIM Original WebView Probe" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:hardwareAccelerated="true" android:usesCleartextTraffic="false">
+    <activity android:name=".WebViewProbeActivity" android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
+  </application>
+</manifest>

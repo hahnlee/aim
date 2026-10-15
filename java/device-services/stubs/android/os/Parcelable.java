@@ -5,6 +5,14 @@ package android.os;
 public interface Parcelable {
     int PARCELABLE_WRITE_RETURN_VALUE = 0x0001;
     void writeToParcel(Parcel dest, int flags);
+    int describeContents();
 
-    interface Creator<T> {}
+    interface ClassLoaderCreator<T> extends Creator<T> {
+        T createFromParcel(Parcel in, ClassLoader loader);
+    }
+
+    interface Creator<T> {
+        T createFromParcel(Parcel in);
+        T[] newArray(int size);
+    }
 }

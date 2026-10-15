@@ -101,6 +101,10 @@ impl Object {
                 "IOServiceGetMatchingServices {class:?}: {status:#x}"
             ));
         }
+        // IOKit returns a null iterator on a successful match with no services.
+        if iterator == 0 {
+            return Ok(Vec::new());
+        }
         Ok(Object(iterator).all())
     }
 
@@ -129,7 +133,7 @@ impl Object {
         let status = unsafe {
             IORegistryEntryGetChildIterator(self.0, c"IOService".as_ptr(), &mut iterator)
         };
-        if status != 0 {
+        if status != 0 || iterator == 0 {
             return Vec::new();
         }
         Object(iterator).all()
@@ -175,5 +179,19 @@ impl Object {
         for child in self.children() {
             child.media(out);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matching_no_services_returns_an_empty_collection() {
+        assert!(
+            Object::matching(c"AimStorageNonexistentClass809")
+                .unwrap()
+                .is_empty()
+        );
     }
 }

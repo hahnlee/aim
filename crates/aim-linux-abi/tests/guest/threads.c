@@ -660,6 +660,85 @@ static void test_sigwait(void) {
   printf("ok %s\n", t);
 }
 
+// Thread-directed blocked signals stay with their target, including before wait.
+struct directed_wait {
+  _Atomic int ready, release;
+  pid_t tid;
+  int signal, error;
+  siginfo_t info;
+};
+static void *directed_quit_waiter(void *argument) {
+  struct directed_wait *wait = argument;
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, SIGQUIT);
+  sigaddset(&set, SIGUSR1);
+  wait->tid = (pid_t)syscall(SYS_gettid);
+  atomic_store(&wait->ready, 1);
+  while (!atomic_load(&wait->release)) sched_yield();
+  struct timespec timeout = {2, 0};
+  wait->signal = sigtimedwait(&set, &wait->info, &timeout);
+  wait->error = errno;
+  return argument;
+}
+static void test_directed_sigquit_join(void) {
+  const char *t = "directed_sigquit_join";
+  sigset_t set, old;
+  sigemptyset(&set);
+  sigaddset(&set, SIGQUIT);
+  sigaddset(&set, SIGUSR1);
+  CHECK(t, pthread_sigmask(SIG_BLOCK, &set, &old) == 0, "block");
+  for (int queued = 0; queued < 2; queued++) {
+    struct directed_wait target = {0}, competitor = {0};
+    pthread_t a, b;
+    int create_a = pthread_create(&a, NULL, directed_quit_waiter, &target);
+    int create_b = pthread_create(&b, NULL, directed_quit_waiter, &competitor);
+    if (create_a || create_b) {
+      atomic_store(&target.release, 1);
+      atomic_store(&competitor.release, 1);
+      if (!create_a) pthread_join(a, NULL);
+      if (!create_b) pthread_join(b, NULL);
+      pthread_sigmask(SIG_SETMASK, &old, NULL);
+      CHECK(t, 0, "create %d/%d", create_a, create_b);
+    }
+    while (!atomic_load(&target.ready) || !atomic_load(&competitor.ready)) sched_yield();
+    atomic_store(&competitor.release, 1);
+    if (!queued) {
+      atomic_store(&target.release, 1);
+      usleep(20000);
+    }
+    uint64_t start = now_ns();
+    int send = pthread_kill(a, SIGQUIT);
+    // A signal pending on the target must not become pending on the caller.
+    struct timespec poll = {0, 0};
+    int caller = sigtimedwait(&set, NULL, &poll), caller_error = errno;
+    atomic_store(&target.release, 1);
+    void *result = NULL;
+    int joined = pthread_join(a, &result);
+    uint64_t elapsed = now_ns() - start;
+    int stop_competitor = pthread_kill(b, SIGUSR1);
+    int joined_competitor = pthread_join(b, NULL);
+    int valid = send == 0 && joined == 0 && result == &target &&
+        target.signal == SIGQUIT && target.info.si_code == SI_TKILL &&
+        target.info.si_pid == getpid() && target.info.si_uid == getuid() &&
+        target.tid != competitor.tid && caller == -1 && caller_error == EAGAIN &&
+        stop_competitor == 0 && joined_competitor == 0 && competitor.signal == SIGUSR1 &&
+        competitor.info.si_code == SI_TKILL && competitor.info.si_pid == getpid() &&
+        elapsed < 1000000000ULL;
+    if (!valid) {
+      pthread_sigmask(SIG_SETMASK, &old, NULL);
+      CHECK(t, 0, "phase %d send %d join %d target %d/%d code %d pid %d caller %d/%d competitor %d/%d elapsed %llu",
+          queued, send, joined, target.signal, target.error, target.info.si_code,
+          target.info.si_pid, caller, caller_error, competitor.signal, competitor.error,
+          (unsigned long long)elapsed);
+    }
+    printf("ok %s %s tid=%d sender=%d join_ns=%llu\n", t,
+        queued ? "queued-before-wait" : "after-wait-ready", target.tid,
+        target.info.si_pid, (unsigned long long)elapsed);
+  }
+  pthread_sigmask(SIG_SETMASK, &old, NULL);
+}
+
 static _Atomic int sus_hits;
 static void sus_handler(int sig) {
   (void)sig;
@@ -926,6 +1005,7 @@ static const struct test tests[] = {
     {"async_signal", test_async_latency},
     {"signal_storm", test_signal_storm},
     {"sigwait_sigqueue", test_sigwait},
+    {"directed_sigquit_join", test_directed_sigquit_join},
     {"sigsuspend", test_sigsuspend},
     {"sa_restart", test_sa_restart},
     {"nanosleep", test_nanosleep},

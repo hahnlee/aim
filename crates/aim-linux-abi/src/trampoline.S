@@ -67,15 +67,15 @@ _linux_abi_syscall_entry:
     cmp     x8, #178
     b.eq    Lgettid
     cmp     x8, #63
-    b.eq    Lread
+    b.eq    Lfull
     cmp     x8, #64
-    b.eq    Lwrite
+    b.eq    Lfull
     cmp     x8, #67
-    b.eq    Lpread
+    b.eq    Lfull
     cmp     x8, #68
-    b.eq    Lpwrite
+    b.eq    Lfull
     cmp     x8, #57
-    b.eq    Lclose
+    b.eq    Lfull
     cmp     x8, #124
     b.eq    Lyield
     sub     x16, x8, #174               // getuid, geteuid, getgid, getegid
@@ -95,30 +95,6 @@ Lgettid:
     ldr     x16, [x16, #{ctx}]
     ldr     x0, [x16, #304]
     b       Llean_ret
-Lread:
-    mov     x16, #3
-    b       Lfd_darwin
-Lpread:
-    mov     x16, #153
-    b       Lfd_darwin
-// Writes are charged to the process's budget of unchecked bytes
-// (sys/space.rs); past it, they take the full path, which looks at the
-// volume's free space.
-Lwrite:
-Lpwrite:
-    adrp    x16, {budget}@PAGE
-    ldr     x17, [x16, {budget}@PAGEOFF]
-    subs    x17, x17, x2
-    b.lo    Lfull
-    str     x17, [x16, {budget}@PAGEOFF]
-    mov     x16, #4                     // write
-    cmp     x8, #64
-    b.eq    Lfd_darwin
-    mov     x16, #154                   // pwrite
-    b       Lfd_darwin
-Lclose:
-    mov     x16, #6
-    b       Lfd_darwin
 Lids:                                   // the guest's ids (sys/cred.rs)
     adrp    x17, {ids}@PAGE
     add     x17, x17, {ids}@PAGEOFF
@@ -133,36 +109,7 @@ Lyield:
     mov     x0, #0
     b       Llean_ret
 
-// An fd call: fds with Linux state beyond the host object (eventfd,
-// SEQPACKET sockets, epoll, ...; see sys/fdtab.rs) and fds past the table
-// take the full path.
-Lfd_darwin:
-    lsr     x17, x0, #16
-    cbnz    x17, Lfull
-    adrp    x17, {slow}@PAGE
-    add     x17, x17, {slow}@PAGEOFF
-    ldrb    w17, [x17, x0]
-    cbnz    w17, Lfull
-    // fall through
-
-// One Darwin BSD syscall on the guest's live x0..x3; carry set means errno.
-// x0 is kept for a restart after a signal.
-Ldarwin:
-    mrs     x17, tpidrro_el0
-    ldr     x17, [x17, #{ctx}]
-    str     x0, [x17, #{orig}]
-    mov     x17, x1
-    svc     #0x80
-    mov     x1, x17
-    b.cc    Llean_ret
-    cmp     x0, #128
-    b.hs    1f
-    adrp    x16, {errtab}@PAGE
-    add     x16, x16, {errtab}@PAGEOFF
-    ldrb    w0, [x16, x0]
-    neg     x0, x0
-    b       Llean_ret
-1:  mov     x0, #-5                     // EIO beyond the table
+// FD syscalls dispatch through Rust to pin their open description before I/O.
 // Lean exit check; restartable from its first instruction.
     .globl _linux_abi_lean_check
     .alt_entry _linux_abi_lean_check

@@ -5,4 +5,5 @@ package com.android.server;
 public final class LocalServices {
     public static <T> T getService(Class<T> type) { throw new RuntimeException("stub"); }
     public static <T> void addService(Class<T> type, T service) { throw new RuntimeException("stub"); }
+    public static <T> void removeServiceForTest(Class<T> type) { throw new RuntimeException("stub"); }
 }

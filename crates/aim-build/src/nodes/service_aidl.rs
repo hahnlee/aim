@@ -120,6 +120,88 @@ fn char_offset(chars: &[char], i: usize) -> usize {
     chars[..i].iter().map(|c| c.len_utf8()).sum()
 }
 
+/// Resolve enum arguments from their pinned declarations, rather than treating
+/// every named value as a nullable Java Parcelable (#829).
+fn enum_backing(text: &str) -> Result<Option<(String, String)>, String> {
+    let t = tokens(text)?;
+    let Some(at) = t.iter().position(|token| token == "enum") else {
+        return Ok(None);
+    };
+    let package = t
+        .windows(3)
+        .find(|w| w[0] == "package" && w[2] == ";")
+        .ok_or("enum has no package")?[1]
+        .clone();
+    let name = t.get(at + 1).ok_or("enum has no name")?;
+    if t.get(at + 2).map(String::as_str) != Some("{") {
+        return Err("enum has no body".into());
+    }
+    let mut backing = "int".to_owned();
+    if let Some(annotation) = t[..at]
+        .windows(2)
+        .position(|w| w[0] == "@" && w[1] == "Backing")
+    {
+        let value = t
+            .get(annotation..annotation + 7)
+            .ok_or("incomplete enum backing")?;
+        if value[2] != "(" || value[3] != "type" || value[4] != "=" || value[6] != ")" {
+            return Err("invalid enum backing annotation".into());
+        }
+        backing = value[5].trim_matches('"').to_owned();
+    }
+    if !matches!(backing.as_str(), "int" | "long") {
+        return Err(format!(
+            "unsupported enum backing `{backing}` for {package}.{name}"
+        ));
+    }
+    Ok(Some((format!("{package}.{name}"), backing)))
+}
+
+fn resolve_enums(
+    iface: &mut Interface,
+    text: &str,
+    enums: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let mut imports = BTreeMap::new();
+    for declaration in tokens(text)?.windows(3) {
+        if declaration[0] == "import" && declaration[2] == ";" {
+            let full = &declaration[1];
+            let name = full.rsplit('.').next().unwrap().to_owned();
+            if imports.insert(name.clone(), full.clone()).is_some() {
+                return Err(format!("duplicate imported type `{name}`"));
+            }
+        }
+    }
+    fn resolve(
+        ty: &mut Type,
+        package: &str,
+        imports: &BTreeMap<String, String>,
+        enums: &BTreeMap<String, String>,
+    ) {
+        let full = if ty.name.contains('.') {
+            ty.name.clone()
+        } else {
+            imports
+                .get(&ty.name)
+                .cloned()
+                .unwrap_or_else(|| format!("{package}.{}", ty.name))
+        };
+        if let Some(backing) = enums.get(&full) {
+            ty.name.clone_from(backing);
+        }
+        for arg in &mut ty.args {
+            resolve(arg, package, imports, enums);
+        }
+    }
+    for method in &mut iface.methods {
+        resolve(&mut method.ret, &iface.package, &imports, enums);
+        for param in &mut method.params {
+            resolve(&mut param.ty, &iface.package, &imports, enums);
+        }
+    }
+    Ok(())
+}
+
 struct Parser {
     t: Vec<String>,
     i: usize,
@@ -299,8 +381,9 @@ fn snake(name: &str) -> String {
         }
         out.extend(c.to_lowercase());
     }
-    const KEYWORDS: [&str; 12] = [
+    const KEYWORDS: &[&str] = &[
         "type", "in", "ref", "match", "mod", "fn", "use", "loop", "box", "where", "move", "self",
+        "async", "await", "dyn", "try", "yield", "gen",
     ];
     if KEYWORDS.contains(&out.as_str()) {
         format!("r#{out}")
@@ -330,7 +413,7 @@ enum Kind {
     Plain(&'static str, &'static str, &'static str),
     /// A Java-only parcelable, as the named type parameter.
     Parcelable(String),
-    /// A `List` of one, as `writeTypedList` writes it.
+    /// A typed `List` or array; both write a count and typed elements.
     ParcelableList(String),
 }
 
@@ -345,6 +428,11 @@ fn kind(ty: &Type) -> Result<Kind, String> {
             "read_string_list(r)?",
             "write_string_list(p, {v}.as_deref());",
         ),
+        ("List", false) if ty.args.is_empty() => Kind::Plain(
+            "Option<Vec<ParcelValue>>",
+            "read_array_list(r)?",
+            "write_array_list(p, {v}.as_deref());",
+        ),
         ("byte", true) => Kind::Plain(
             "Option<Vec<u8>>",
             "read_byte_array(r)?",
@@ -354,6 +442,16 @@ fn kind(ty: &Type) -> Result<Kind, String> {
             "Option<Vec<i32>>",
             "read_int_array(r)?",
             "write_int_array(p, {v}.as_deref());",
+        ),
+        ("long", true) => Kind::Plain(
+            "Option<Vec<i64>>",
+            "read_long_array(r)?",
+            "write_long_array(p, {v}.as_deref());",
+        ),
+        ("boolean", true) => Kind::Plain(
+            "Option<Vec<bool>>",
+            "read_bool_array(r)?",
+            "write_bool_array(p, {v}.as_deref());",
         ),
         ("int", false) => Kind::Plain("i32", "r.read_i32()?", "p.write_i32({v});"),
         ("long", false) => Kind::Plain("i64", "r.read_i64()?", "p.write_i64({v});"),
@@ -373,6 +471,15 @@ fn kind(ty: &Type) -> Result<Kind, String> {
         ("IBinder", false) => {
             Kind::Plain("Option<Binder>", "r.read_binder()?", "p.write_binder({v});")
         }
+        ("Map", false)
+            if ty.args.len() == 2 && ty.args.iter().all(|a| a.name == "String" && !a.array) =>
+        {
+            Kind::Plain(
+                "Option<Vec<(Option<String>, Option<String>)>>",
+                "read_string_map(r)?",
+                "write_string_map(p, {v}.as_deref());",
+            )
+        }
         (b, false)
             if b.len() > 1
                 && b.starts_with('I')
@@ -381,8 +488,15 @@ fn kind(ty: &Type) -> Result<Kind, String> {
         {
             Kind::Plain("Option<Binder>", "r.read_binder()?", "p.write_binder({v});")
         }
-        (b, false) if ty.args.is_empty() && b.chars().next().is_some_and(char::is_uppercase) => {
+        (b, false) if b != "List" && b != "Map"
+            && b.chars().next().is_some_and(char::is_uppercase) => {
+            // Generic Java parcelables retain their own Parcelable wire format.
+            // Their type arguments do not turn them into inline typed arrays.
+            for argument in &ty.args { kind(argument)?; }
             Kind::Parcelable(b.to_string())
+        }
+        (b, true) if ty.args.is_empty() && b.chars().next().is_some_and(char::is_uppercase) => {
+            Kind::ParcelableList(b.to_string())
         }
         ("List", false)
             if ty.args.len() == 1
@@ -430,7 +544,10 @@ fn method_code(m: &Method) -> Result<String, String> {
     let mut generics = Vec::new();
     let mut fields = Vec::new();
     for p in &m.params {
-        if !matches!(p.direction.as_str(), "" | "in") {
+        if p.direction == "out" {
+            continue;
+        }
+        if !matches!(p.direction.as_str(), "" | "in" | "inout") {
             return Err(format!(
                 "{}: `{}` parameters are not supported",
                 m.name, p.direction
@@ -520,6 +637,13 @@ fn method_code(m: &Method) -> Result<String, String> {
     }
     writeln!(s, "        }}\n    }}\n").unwrap();
     if !m.oneway {
+        if m.params
+            .iter()
+            .any(|p| matches!(p.direction.as_str(), "out" | "inout"))
+        {
+            s += &output_reply_code(m)?;
+            return Ok(s);
+        }
         let fname = snake(&m.name);
         match kind(&m.ret)? {
             Kind::Void => {
@@ -564,10 +688,114 @@ fn method_code(m: &Method) -> Result<String, String> {
                 writeln!(s, "            Err(e) => Err(e),\n        }})\n    }}\n").unwrap();
             }
             Kind::ParcelableList(t) => {
-                return Err(format!("{}: returning List<{t}> is not supported", m.name));
+                writeln!(s, "    pub fn write_{fname}_reply<{t}: WriteParcelable>(p: &mut Parcel, result: Option<&[Option<{t}>]>) {{").unwrap();
+                writeln!(s, "        p.write_no_exception();").unwrap();
+                writeln!(s, "        write_typed_list(p, result);\n    }}\n").unwrap();
+                writeln!(s, "    pub fn read_{fname}_reply<{t}: ReadParcelable>(r: &mut Reader<'_>) -> Result<Returned<Option<Vec<Option<{t}>>>>> {{").unwrap();
+                writeln!(s, "        Ok(match r.read_exception()? {{").unwrap();
+                writeln!(s, "            Ok(()) => Ok(read_typed_list(r)?),").unwrap();
+                writeln!(s, "            Err(e) => Err(e),\n        }})\n    }}\n").unwrap();
             }
         }
     }
+    Ok(s)
+}
+
+/// A reply with AIDL `out` or `inout` parameters: the return value first,
+/// then each output in declaration order, as the Java Stub writes it.
+fn output_reply_code(m: &Method) -> Result<String, String> {
+    let mut generics = Vec::new();
+    let mut fields = Vec::new();
+    let mut add = |name: String, ty: &Type| -> Result<(), String> {
+        let (rust, read, write) = match kind(ty)? {
+            Kind::Void => return Err(format!("{}: void output", m.name)),
+            Kind::Plain(rust, read, write) => {
+                (rust.to_string(), read.to_string(), write.to_string())
+            }
+            Kind::Parcelable(t) => {
+                if !generics.contains(&t) {
+                    generics.push(t.clone());
+                }
+                (
+                    format!("Option<{t}>"),
+                    "read_typed(r)?".into(),
+                    "write_typed(p, {v}.as_ref());".into(),
+                )
+            }
+            Kind::ParcelableList(t) => {
+                if !generics.contains(&t) {
+                    generics.push(t.clone());
+                }
+                (
+                    format!("Option<Vec<Option<{t}>>>"),
+                    "read_typed_list(r)?".into(),
+                    "write_typed_list(p, {v}.as_deref());".into(),
+                )
+            }
+        };
+        fields.push((name, rust, read, write));
+        Ok(())
+    };
+    if !matches!(kind(&m.ret)?, Kind::Void) {
+        add("result".into(), &m.ret)?;
+    }
+    for p in &m.params {
+        if matches!(p.direction.as_str(), "out" | "inout") {
+            add(snake(&p.name), &p.ty)?;
+        }
+    }
+    let name = format!("{}Reply", camel(&m.name));
+    let fname = snake(&m.name);
+    let params = if generics.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", generics.join(", "))
+    };
+    let bounds = |trait_name: &str| {
+        if generics.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<{}>",
+                generics
+                    .iter()
+                    .map(|g| format!("{g}: {trait_name}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    };
+    let mut s = String::new();
+    writeln!(s, "    #[derive(Debug)]\n    pub struct {name}{params} {{").unwrap();
+    for (field, ty, _, _) in &fields {
+        writeln!(s, "        pub {field}: {ty},").unwrap();
+    }
+    writeln!(s, "    }}\n").unwrap();
+    writeln!(
+        s,
+        "    pub fn write_{fname}_reply{}(p: &mut Parcel, value: &{name}{params}) {{",
+        bounds("WriteParcelable")
+    )
+    .unwrap();
+    writeln!(s, "        p.write_no_exception();").unwrap();
+    for (field, _, _, write) in &fields {
+        writeln!(
+            s,
+            "        {}",
+            write.replace("{v}", &format!("value.{field}"))
+        )
+        .unwrap();
+    }
+    writeln!(s, "    }}\n").unwrap();
+    writeln!(s, "    pub fn read_{fname}_reply{}(r: &mut Reader<'_>) -> Result<Returned<{name}{params}>> {{",
+        bounds("ReadParcelable")).unwrap();
+    writeln!(s, "        Ok(match r.read_exception()? {{").unwrap();
+    writeln!(s, "            Ok(()) => Ok({name} {{").unwrap();
+    for (field, _, read, _) in &fields {
+        writeln!(s, "                {field}: {read},").unwrap();
+    }
+    writeln!(s, "            }}),").unwrap();
+    writeln!(s, "            Err(e) => Err(e),\n        }})\n    }}\n").unwrap();
     Ok(s)
 }
 
@@ -671,6 +899,44 @@ pub fn write_int_array(p: &mut Parcel, value: Option<&[i32]>) {
     }
 }
 
+/// `createLongArray` / `writeLongArray`.
+pub fn read_long_array(r: &mut Reader<'_>) -> Result<Option<Vec<i64>>> {
+    let n = r.read_i32()?;
+    if n < 0 {
+        return Ok(None);
+    }
+    (0..n).map(|_| r.read_i64()).collect::<Result<Vec<_>>>().map(Some)
+}
+
+pub fn write_long_array(p: &mut Parcel, value: Option<&[i64]>) {
+    match value {
+        None => p.write_i32(-1),
+        Some(v) => {
+            p.write_i32(v.len() as i32);
+            v.iter().for_each(|x| p.write_i64(*x));
+        }
+    }
+}
+
+/// `createBooleanArray` / `writeBooleanArray`.
+pub fn read_bool_array(r: &mut Reader<'_>) -> Result<Option<Vec<bool>>> {
+    let n = r.read_i32()?;
+    if n < 0 {
+        return Ok(None);
+    }
+    (0..n).map(|_| r.read_bool()).collect::<Result<Vec<_>>>().map(Some)
+}
+
+pub fn write_bool_array(p: &mut Parcel, value: Option<&[bool]>) {
+    match value {
+        None => p.write_i32(-1),
+        Some(v) => {
+            p.write_i32(v.len() as i32);
+            v.iter().for_each(|b| p.write_bool(*b));
+        }
+    }
+}
+
 /// `createByteArray`: its length (-1 for null), then the bytes, padded.
 pub fn read_byte_array(r: &mut Reader<'_>) -> Result<Option<Vec<u8>>> {
     let n = r.read_i32()?;
@@ -711,8 +977,33 @@ pub fn write_string_list(p: &mut Parcel, value: Option<&[Option<String>]>) {
     }
 }
 
-/// `createTypedArrayList`: a count (-1 for null), then each element as
-/// `readTypedObject`.
+/// The typed `Map<String, String>` of the Java AIDL backend.
+pub fn read_string_map(r: &mut Reader<'_>) -> Result<Option<Vec<(Option<String>, Option<String>)>>> {
+    let n = r.read_i32()?;
+    if n < 0 {
+        return Ok(None);
+    }
+    (0..n)
+        .map(|_| Ok((r.read_string16()?, r.read_string16()?)))
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
+pub fn write_string_map(p: &mut Parcel, value: Option<&[(Option<String>, Option<String>)]>) {
+    match value {
+        None => p.write_i32(-1),
+        Some(v) => {
+            p.write_i32(v.len() as i32);
+            for (key, value) in v {
+                p.write_string16(key.as_deref());
+                p.write_string16(value.as_deref());
+            }
+        }
+    }
+}
+
+/// `createTypedArrayList` / `createTypedArray`: a count (-1 for null),
+/// then each element as `readTypedObject`.
 pub fn read_typed_list<T: ReadParcelable>(r: &mut Reader<'_>) -> Result<Option<Vec<Option<T>>>> {
     let n = r.read_i32()?;
     if n < 0 {
@@ -730,6 +1021,117 @@ pub fn write_typed_list<T: WriteParcelable>(p: &mut Parcel, value: Option<&[Opti
             v.iter().for_each(|x| write_typed(p, x.as_ref()));
         }
     }
+}
+
+/// Java Parcel.writeValue/readValue, distinct from a typed Parcelable's presence word.
+/// Custom values retain their length-prefixed wire form until their owning schema decodes them.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ParcelValue {
+    Null,
+    String(Option<String>),
+    Integer(i32),
+    Short(i16),
+    Long(i64),
+    Float(f32),
+    Double(f64),
+    Boolean(bool),
+    Binder(Option<Binder>),
+    Bytes(Option<Vec<u8>>),
+    Strings(Option<Vec<Option<String>>>),
+    Ints(Option<Vec<i32>>),
+    Longs(Option<Vec<i64>>),
+    Booleans(Option<Vec<bool>>),
+    Byte(i8),
+    Doubles(Option<Vec<f64>>),
+    Character(u16),
+    Shorts(Option<Vec<i16>>),
+    Characters(Option<Vec<u16>>),
+    Floats(Option<Vec<f32>>),
+    /// Parcel's custom/container length record, with no Binder/FD capabilities.
+    /// Types: Map, Parcelable, List, SparseArray, Parcelable[], Object[], Serializable.
+    Custom { kind: i32, bytes: Vec<u8> },
+}
+fn read_value_array<T>(r: &mut Reader<'_>, size: usize, mut read: impl FnMut(&mut Reader<'_>) -> Result<T>) -> Result<Option<Vec<T>>> {
+    let count = r.read_i32()?;
+    if count < 0 { return Ok(None); }
+    if count as usize > r.remaining() / size { return Err(aim_binder_host::parcel::BAD_VALUE); }
+    (0..count).map(|_| read(r)).collect::<Result<Vec<_>>>().map(Some)
+}
+fn write_value_array<T>(p: &mut Parcel, values: Option<&[T]>, mut write: impl FnMut(&mut Parcel, &T)) {
+    match values {
+        None => p.write_i32(-1),
+        Some(values) => { p.write_i32(values.len() as i32); for value in values { write(p, value); } }
+    }
+}
+impl ParcelValue {
+    pub fn read(r: &mut Reader<'_>) -> Result<Self> {
+        use aim_binder_host::parcel::BAD_VALUE;
+        let kind = r.read_i32()?;
+        Ok(match kind {
+            -1 => Self::Null,
+            0 => Self::String(r.read_string16()?),
+            1 => Self::Integer(r.read_i32()?),
+            5 => Self::Short(r.read_i32()? as i16),
+            6 => Self::Long(r.read_i64()?),
+            7 => Self::Float(r.read_f32()?),
+            8 => Self::Double(f64::from_bits(r.read_i64()? as u64)),
+            9 => Self::Boolean(r.read_bool()?),
+            13 => Self::Bytes(read_byte_array(r)?),
+            14 => Self::Strings(read_string_list(r)?),
+            15 => Self::Binder(r.read_binder()?),
+            18 => Self::Ints(read_int_array(r)?),
+            19 => Self::Longs(read_long_array(r)?),
+            20 => Self::Byte(r.read_i32()? as i8),
+            23 => Self::Booleans(read_bool_array(r)?),
+            28 => Self::Doubles(read_value_array(r, 8, |r| Ok(f64::from_bits(r.read_i64()? as u64)))?),
+            29 => Self::Character(r.read_i32()? as u16),
+            30 => Self::Shorts(read_value_array(r, 4, |r| Ok(r.read_i32()? as i16))?),
+            31 => Self::Characters(read_value_array(r, 4, |r| Ok(r.read_i32()? as u16))?),
+            32 => Self::Floats(read_value_array(r, 4, |r| r.read_f32())?),
+            2 | 4 | 11 | 12 | 16 | 17 | 21 => {
+                let length: usize = r.read_i32()?.try_into().map_err(|_| BAD_VALUE)?;
+                if length > r.remaining() || length % 4 != 0 { return Err(BAD_VALUE); }
+                let start = r.position();
+                let end = start.checked_add(length).ok_or(BAD_VALUE)?;
+                if r.next_object().is_some_and(|position| position < end) { return Err(BAD_VALUE); }
+                r.set_position(end);
+                Self::Custom { kind, bytes: r.since(start).0.to_vec() }
+            }
+            _ => return Err(BAD_VALUE),
+        })
+    }
+    pub fn write(&self, p: &mut Parcel) {
+        match self {
+            Self::Null => p.write_i32(-1),
+            Self::String(value) => { p.write_i32(0); p.write_string16(value.as_deref()); }
+            Self::Integer(value) => { p.write_i32(1); p.write_i32(*value); }
+            Self::Short(value) => { p.write_i32(5); p.write_i32(i32::from(*value)); }
+            Self::Long(value) => { p.write_i32(6); p.write_i64(*value); }
+            Self::Float(value) => { p.write_i32(7); p.write_f32(*value); }
+            Self::Double(value) => { p.write_i32(8); p.write_i64(value.to_bits() as i64); }
+            Self::Boolean(value) => { p.write_i32(9); p.write_bool(*value); }
+            Self::Bytes(value) => { p.write_i32(13); write_byte_array(p, value.as_deref()); }
+            Self::Strings(value) => { p.write_i32(14); write_string_list(p, value.as_deref()); }
+            Self::Binder(value) => { p.write_i32(15); p.write_binder(*value); }
+            Self::Ints(value) => { p.write_i32(18); write_int_array(p, value.as_deref()); }
+            Self::Longs(value) => { p.write_i32(19); write_long_array(p, value.as_deref()); }
+            Self::Byte(value) => { p.write_i32(20); p.write_i32(i32::from(*value)); }
+            Self::Booleans(value) => { p.write_i32(23); write_bool_array(p, value.as_deref()); }
+            Self::Doubles(value) => { p.write_i32(28); write_value_array(p, value.as_deref(), |p, value| p.write_i64(value.to_bits() as i64)); }
+            Self::Character(value) => { p.write_i32(29); p.write_i32(i32::from(*value)); }
+            Self::Shorts(value) => { p.write_i32(30); write_value_array(p, value.as_deref(), |p, value| p.write_i32(i32::from(*value))); }
+            Self::Characters(value) => { p.write_i32(31); write_value_array(p, value.as_deref(), |p, value| p.write_i32(i32::from(*value))); }
+            Self::Floats(value) => { p.write_i32(32); write_value_array(p, value.as_deref(), |p, value| p.write_f32(*value)); }
+            Self::Custom { kind, bytes } => { p.write_i32(*kind); p.write_i32(bytes.len() as i32); p.write_raw(bytes, &[]); }
+        }
+    }
+}
+/// Raw AIDL `List`: count (-1 for null), then individually tagged Java values.
+pub fn read_array_list(r: &mut Reader<'_>) -> Result<Option<Vec<ParcelValue>>> {
+    read_value_array(r, 4, ParcelValue::read)
+}
+pub fn write_array_list(p: &mut Parcel, values: Option<&[ParcelValue]>) {
+    write_value_array(p, values, |p, value| value.write(p));
 }
 
 "#;
@@ -782,11 +1184,15 @@ fn dex_stub_codes(
 /// methods to marshal.
 fn own_interfaces(lock: &Lock) -> Result<Vec<(Interface, Vec<String>, String)>, String> {
     let mut out = Vec::new();
+    let mut descriptors = std::collections::BTreeSet::new();
     for entry in lock.array("OWN_INTERFACES") {
         let fields: Vec<&str> = entry.split('|').collect();
         let [descriptor, file, methods] = fields[..] else {
             return Err(format!("{LOCK}: bad OWN_INTERFACES entry `{entry}`"));
         };
+        if !descriptors.insert(descriptor) {
+            return Err(format!("{LOCK}: duplicate OWN_INTERFACES descriptor `{descriptor}`"));
+        }
         let path = aim_paths::root().join(file);
         let text = fs::read_to_string(&path).map_err(|e| format!("{file}: {e}"))?;
         let iface = parse(&text).map_err(|e| format!("{file}: {e}"))?;
@@ -837,14 +1243,21 @@ fn constants_code(
     let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let class = format!("L{};", descriptor.replace('.', "/"));
     let mut values = BTreeMap::new();
+    let mut found = false;
     for dex in aim_android_image::system_server::dex_files(&bytes)? {
         let dex = Dex::parse(dex)?;
         if let Some(def) = dex.class(&class) {
+            found = true;
             values.extend(dex.static_values(def)?);
         }
     }
+    if !found {
+        return Err(format!("{jar}: no class {descriptor}"));
+    }
     match values.get("descriptor") {
         Some(Value::String(d)) if d == descriptor => {}
+        // Enum and ordinary constant holders have no Binder descriptor field.
+        None => {}
         _ => return Err(format!("{jar}: {descriptor} does not declare itself")),
     }
     let mut s = String::new();
@@ -875,6 +1288,15 @@ pub fn run(log: &mut Log) -> Result<(), String> {
         ));
     }
     let image = fs::canonicalize(aim_paths::original_image()).map_err(|e| e.to_string())?;
+    let mut enums = BTreeMap::new();
+    for (path, _) in &files {
+        let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if let Some((descriptor, backing)) = enum_backing(&text)? {
+            if enums.insert(descriptor.clone(), backing).is_some() {
+                return Err(format!("duplicate enum declaration `{descriptor}`"));
+            }
+        }
+    }
     let mut code = PRELUDE.to_string();
     for entry in lock.array("INTERFACES") {
         let fields: Vec<&str> = entry.split('|').collect();
@@ -887,7 +1309,8 @@ pub fn run(log: &mut Log) -> Result<(), String> {
             .find(|(p, _)| p.to_string_lossy().ends_with(&file))
             .ok_or_else(|| format!("{LOCK}: no SOURCE_FILES entry for {descriptor}"))?;
         let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let iface = parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut iface = parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        resolve_enums(&mut iface, &text, &enums)?;
         if iface.descriptor() != descriptor {
             return Err(format!(
                 "{}: declares {}",
@@ -909,7 +1332,10 @@ pub fn run(log: &mut Log) -> Result<(), String> {
         let selected: Vec<String> = methods.split(',').map(str::to_string).collect();
         code += &interface_code(&iface, &selected, origin)?;
     }
-    for (iface, selected, file) in own_interfaces(&lock)? {
+    for (mut iface, selected, file) in own_interfaces(&lock)? {
+        let text = fs::read_to_string(aim_paths::root().join(&file))
+            .map_err(|e| format!("{file}: {e}"))?;
+        resolve_enums(&mut iface, &text, &enums)?;
         code += &interface_code(&iface, &selected, &file)?;
     }
     for entry in lock.array("CONSTANTS") {
@@ -926,6 +1352,40 @@ pub fn run(log: &mut Log) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enum_backing_follows_import_and_package_scope_without_parcelable_framing() {
+        let mut enums = BTreeMap::new();
+        for text in [
+            "package first; @Backing(type=\"int\") enum Mode { A=0, }",
+            "package second; @Backing(type=\"long\") enum Mode { A=0, }",
+            "package own; enum Local { A=0, }",
+        ] {
+            let (name, backing) = enum_backing(text).unwrap().unwrap();
+            enums.insert(name, backing);
+        }
+        let text = "package own; import first.Mode; interface ITest { Mode read(in Mode mode, in Mode[] modes, in second.Mode other, in Local local); }";
+        let mut iface = parse(text).unwrap();
+        resolve_enums(&mut iface, text, &enums).unwrap();
+        let method = &iface.methods[0];
+        assert_eq!(method.ret.name, "int");
+        assert_eq!(
+            method
+                .params
+                .iter()
+                .map(|p| p.ty.name.as_str())
+                .collect::<Vec<_>>(),
+            ["int", "int", "long", "int"]
+        );
+        assert!(method.params[1].ty.array);
+        let code = interface_code(&iface, &["read".into()], "fixture").unwrap();
+        assert!(code.contains("pub mode: i32"));
+        assert!(code.contains("pub other: i64"));
+        assert!(!code.contains("write_typed(p"));
+        assert!(enum_backing("package bad; @Backing(type=\"byte\") enum Value { A=0, }").is_err());
+        let conflict = "package own; import first.Mode; import second.Mode; interface ITest { void read(Mode value); }";
+        assert!(resolve_enums(&mut parse(conflict).unwrap(), conflict, &enums).is_err());
+    }
 
     const SAMPLE: &str = r#"
 package android.content;
@@ -978,7 +1438,20 @@ interface IClipboard {
         assert_eq!(snake("setPrimaryClip"), "set_primary_clip");
         assert_eq!(snake("getUIDState"), "get_uid_state");
         assert_eq!(snake("type"), "r#type");
+        assert_eq!(snake("async"), "r#async");
+        assert_eq!(snake("await"), "r#await");
+        assert_eq!(snake("dyn"), "r#dyn");
         assert_eq!(camel("setPrimaryClip"), "SetPrimaryClip");
+    }
+
+    #[test]
+    fn generic_parcelables_keep_the_whole_parcelable_wire_contract() {
+        let iface = parse("package own; interface IQuery { ParceledListSlice<ApplicationInfo> applications(); void put(in Box<PackageInfo> value); }").unwrap();
+        let code = interface_code(&iface, &["*".into()], "test").unwrap();
+        assert!(code.contains("read_applications_reply<ParceledListSlice: ReadParcelable>"));
+        assert!(code.contains("write_typed(p, result);"));
+        assert!(!code.contains("write_typed_list"));
+        assert!(kind(&Type { name: "Map".into(), args: vec![], array: false }).is_err());
     }
 
     #[test]

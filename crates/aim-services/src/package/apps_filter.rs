@@ -8,14 +8,19 @@
 //! queries with every protected broadcast known); this model computes
 //! the settled relations from a whole state. Implicit grants (an app
 //! that started, bound or was sent to another, `grantImplicitAccess`)
-//! are the original's runtime state and not in the feed: the model knows
-//! none (#724).
+//! are runtime state and are not in the original feed. Native interaction
+//! grants live in the snapshot's ImplicitAccess;
+//! connecting ActivityManager/WindowManager producers is tracked in #724.
 
 use std::collections::{HashMap, HashSet};
 
 use super::model::{PackageState, SharedUser, State};
-use super::pkg::{AndroidPackage, MainComponent, booleans};
+use super::pkg::{AndroidPackage, booleans};
 use super::uri::Uri;
+
+pub mod logging;
+mod implicit;
+pub use implicit::ImplicitAccess;
 
 /// A path of the original that depends on state the model does not
 /// have; the query is reported as not modelled.
@@ -86,6 +91,14 @@ pub enum Setting<'a> {
 
 /// The setting of an app id.
 pub fn setting(state: &State, app_id: i32) -> Option<Setting<'_>> {
+    if let Some(owners) = &state.uid_owners {
+        return match owners.get(&app_id)? {
+            super::model::UidOwner::Package(package) => Some(Setting::Package(package)),
+            super::model::UidOwner::SharedUser(name) => {
+                state.shared_users.get(name).map(Setting::Shared)
+            }
+        };
+    }
     if let Some(su) = state.shared_users.values().find(|s| s.app_id == app_id) {
         return Some(Setting::Shared(su));
     }
@@ -97,13 +110,19 @@ pub fn setting(state: &State, app_id: i32) -> Option<Setting<'_>> {
 }
 
 /// A shared user's packages.
-fn shared_packages<'a>(
+pub(crate) fn shared_packages<'a>(
     state: &'a State,
     su: &'a SharedUser,
 ) -> impl Iterator<Item = &'a PackageState> {
-    su.packages
+    su.native_packages
         .iter()
-        .filter_map(|name| state.packages.get(name))
+        .flat_map(|packages| packages.iter())
+        .chain(su.packages.iter().filter_map(|name| {
+            su.native_packages
+                .is_none()
+                .then(|| state.packages.get(name))
+                .flatten()
+        }))
 }
 
 /// `AppsFilterImpl`'s settled relations, by app id.
@@ -138,13 +157,24 @@ fn can_query_via_components(
     querying: &AndroidPackage,
     target: &AndroidPackage,
     protected: &HashSet<&str>,
-) -> bool {
-    querying.queries_intents.iter().any(|intent| {
-        let matches = |c: &MainComponent, protected: Option<&HashSet<&str>>| {
-            let ignored: Option<Vec<&str>> = protected.map(|p| p.iter().copied().collect());
-            c.exported
-                && c.component.intents.iter().rev().any(|info| {
-                    info.filter.matches(
+) -> std::result::Result<bool, super::domain_verification::uri_parcel::MatchError> {
+    for intent in &querying.queries_intents {
+        for (components, protected) in [
+            (
+                target.services.iter().map(|c| &c.main).collect::<Vec<_>>(),
+                None,
+            ),
+            (target.activities.iter().map(|c| &c.main).collect(), None),
+            (
+                target.receivers.iter().map(|c| &c.main).collect(),
+                Some(protected),
+            ),
+            (target.providers.iter().map(|c| &c.main).collect(), None),
+        ] {
+            let ignored = protected.map(|values| values.iter().copied().collect::<Vec<_>>());
+            for component in components.into_iter().rev().filter(|c| c.exported) {
+                for info in component.component.intents.iter().rev() {
+                    if info.filter.matches(
                         intent.action.as_deref(),
                         intent.ty.as_deref(),
                         intent.scheme(),
@@ -152,36 +182,30 @@ fn can_query_via_components(
                         intent.categories.as_deref(),
                         true,
                         ignored.as_deref(),
-                    ) > 0
-                })
-        };
-        target.services.iter().rev().any(|s| matches(&s.main, None))
-            || target
-                .activities
-                .iter()
-                .rev()
-                .any(|a| matches(&a.main, None))
-            || target
-                .receivers
-                .iter()
-                .rev()
-                .any(|r| matches(&r.main, Some(protected)))
-            || target
-                .providers
-                .iter()
-                .rev()
-                .any(|p| matches(&p.main, None))
-    }) || (!querying.queries_providers.is_empty()
+                    )? > 0
+                    {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+    }
+    Ok(!querying.queries_providers.is_empty()
         && target.providers.iter().any(|p| {
             p.main.exported
-                && p.authority.as_deref().is_some_and(|a| {
-                    a.split(';')
+                && p.authority.as_deref().is_some_and(|authorities| {
+                    authorities
+                        .split(';')
                         .filter(|s| !s.is_empty())
-                        .any(|a| querying.queries_providers.iter().any(|q| q == a))
+                        .any(|authority| {
+                            querying
+                                .queries_providers
+                                .iter()
+                                .any(|query| query == authority)
+                        })
                 })
         }))
 }
-
 /// `canQueryViaPackage`, `canQueryAsInstaller`, `canQueryAsUpdateOwner`.
 fn can_query_via_package(
     querying: &PackageState,
@@ -285,9 +309,12 @@ fn signatures_match_exactly(a: &PackageState, b: &PackageState) -> bool {
 }
 
 impl AppsFilter {
+    pub fn is_force_queryable(&self, app_id: i32) -> bool {
+        self.force_queryable.contains(&app_id)
+    }
     /// The relations of every package in `state`, as `addPackage` of each
     /// and the recomputation at boot completion leave them.
-    pub fn new(state: &State, config: &Config) -> AppsFilter {
+    pub fn new(state: &State, config: &Config) -> std::result::Result<AppsFilter, super::domain_verification::uri_parcel::MatchError> {
         let mut f = AppsFilter::default();
         let packages: Vec<(&PackageState, &AndroidPackage)> = state
             .packages
@@ -332,7 +359,7 @@ impl AppsFilter {
                 }
                 let pair = (qs.app_id, ts.app_id);
                 if !f.force_queryable.contains(&ts.app_id) {
-                    if !requests_query_all_packages(q) && can_query_via_components(q, t, &protected)
+                    if !requests_query_all_packages(q) && can_query_via_components(q, t, &protected)?
                     {
                         f.queries_via_component.insert(pair);
                     }
@@ -355,7 +382,7 @@ impl AppsFilter {
                 }
             }
         }
-        f
+        Ok(f)
     }
 
     /// `AppsFilterBase.shouldFilterApplication`: whether the target is
@@ -379,9 +406,13 @@ impl AppsFilter {
             // (allow_sdk_sandbox_query_intent_activities is on).
             let target_uid = uid(user, target.app_id);
             return !self.force_queryable.contains(&target.app_id)
+                && !state
+                    .system
+                    .implicit_access
+                    .transient(calling_uid, target_uid)
                 && target_uid != calling_uid - (FIRST_SDK_SANDBOX_UID - FIRST_APPLICATION_UID);
         }
-        self.should_filter_internal(state, calling_app_id, target)
+        self.should_filter_internal(state, calling_uid, target, user)
     }
 
     /// `shouldFilterApplicationInternal`, which the original's cache holds
@@ -389,13 +420,15 @@ impl AppsFilter {
     fn should_filter_internal(
         &self,
         state: &State,
-        calling_app_id: i32,
+        calling_uid: i32,
         target: &PackageState,
+        user: i32,
     ) -> bool {
+        let calling_app_id = app_id(calling_uid);
         // FeatureConfig's DeviceConfig flag. The original's cache keeps
         // what it computed before the flag changed until something
         // recomputes it; the model follows the flag at once.
-        if state.platform.query_filtering_disabled {
+        if state.platform.settings_owner.as_ref().map_or(state.platform.query_filtering_disabled,|owner|owner.cached_filtering_disabled()) {
             return false;
         }
         let Some(calling) = setting(state, calling_app_id) else {
@@ -434,6 +467,10 @@ impl AppsFilter {
             || self.queries_via_component.contains(&pair)
             || self.queryable_via_uses_library.contains(&pair)
             || self.queryable_via_uses_permission.contains(&pair)
+            || state
+                .system
+                .implicit_access
+                .visible(calling_uid, uid(user, target.app_id))
             || acts_on_target(t))
     }
 }
@@ -469,7 +506,12 @@ pub fn instant_app_package_name(state: &State, mut calling_uid: i32) -> Result<O
 /// `ComputerEngine.isCallerSameApp`.
 pub fn is_caller_same_app(state: &State, package: Option<&str>, uid: i32) -> Result<bool> {
     if is_sdk_sandbox(uid) {
-        return Err(NotModelled("the SDK sandbox's package"));
+        let selected = state
+            .system
+            .sdk_sandbox_package
+            .as_ref()
+            .ok_or(NotModelled("the SDK sandbox's package"))?;
+        return Ok(package.is_some() && package == selected.as_deref());
     }
     Ok(package
         .and_then(|p| state.packages.get(p))
@@ -480,16 +522,27 @@ pub fn is_caller_same_app(state: &State, package: Option<&str>, uid: i32) -> Res
 /// the caller. With `filter_uninstall`, a package not installed for the
 /// user is hidden too, an archived one unless `filter_archived` is off.
 pub fn should_filter_application(
-    state: &State,
-    filter: &AppsFilter,
-    ps: Option<&PackageState>,
-    mut calling_uid: i32,
-    user: i32,
-    filter_uninstall: bool,
-    filter_archived: bool,
+    state: &State, filter: &AppsFilter, ps: Option<&PackageState>, calling_uid: i32,
+    user: i32, filter_uninstall: bool, filter_archived: bool,
+) -> Result<bool> {
+    should_filter_application_with_permission(state, filter, ps, calling_uid, calling_uid,
+        user, filter_uninstall, filter_archived)
+}
+
+pub fn should_filter_application_with_permission(
+    state: &State, filter: &AppsFilter, ps: Option<&PackageState>, mut calling_uid: i32,
+    permission_uid: i32, user: i32, filter_uninstall: bool, filter_archived: bool,
 ) -> Result<bool> {
     if is_sdk_sandbox(calling_uid) {
-        return Err(NotModelled("the SDK sandbox's visibility"));
+        if ps.is_some_and(|target| {
+            uid(user, target.app_id)
+                == calling_uid - (FIRST_SDK_SANDBOX_UID - FIRST_APPLICATION_UID)
+        }) {
+            return Ok(false);
+        }
+        if ps.is_none() {
+            return Ok(true);
+        }
     }
     if is_isolated(calling_uid) {
         calling_uid = isolated_owner(state, calling_uid)?;
@@ -513,8 +566,16 @@ pub fn should_filter_application(
     if is_caller_same_app(state, Some(&ps.name), calling_uid)? {
         return Ok(false);
     }
-    if caller_is_instant || us.instant_app {
-        return Err(NotModelled("instant apps' visibility"));
+    if caller_is_instant {
+        if us.instant_app { return Ok(true); }
+        return ps.pkg.as_deref().map(|package| package.booleans & booleans::VISIBLE_TO_INSTANT_APPS == 0)
+            .ok_or(NotModelled("instant visibility parsed target package unavailable"));
+    }
+    if us.instant_app {
+        let query = super::query::Query { state, filter, calling_uid: permission_uid };
+        if query.internal_can_view_instant(calling_uid, user)? { return Ok(false); }
+        let access = state.system.instant_access.as_ref().ok_or(NotModelled("native instant access snapshot unavailable"))?;
+        return Ok(!access.granted(user, app_id(calling_uid), ps.app_id));
     }
     Ok(filter.should_filter(state, calling_uid, ps, user))
 }
@@ -525,7 +586,7 @@ mod tests {
 
     use super::super::intent::Intent;
     use super::super::intent_filter::{IntentFilter, ParsedIntentInfo};
-    use super::super::model::User;
+    use super::super::model::{PackageUserState, User};
     use super::super::pkg::{Activity, Component, Permission, UsesPermission};
     use super::super::settings::Signatures;
     use super::super::uri::Uri;
@@ -555,8 +616,10 @@ mod tests {
 
     fn signed(ps: &mut PackageState, key: u8) {
         ps.signatures = Some(Signatures {
+            current_flags: Vec::new(),
             scheme_version: 3,
             signatures: vec![vec![key]],
+            public_keys: None,
             past_signatures: None,
         });
     }
@@ -658,7 +721,7 @@ mod tests {
             force_system_packages_queryable: false,
             force_queryable_packages: vec!["settings".into()],
         };
-        let f = AppsFilter::new(&s, &config);
+        let f = AppsFilter::new(&s, &config).unwrap();
         // <queries><package>, and not the other way.
         assert!(!filtered(&f, &s, 10001, "b"));
         assert!(filtered(&f, &s, 10002, "a"));
@@ -687,8 +750,350 @@ mod tests {
             force_system_packages_queryable: true,
             force_queryable_packages: Vec::new(),
         };
-        let f = AppsFilter::new(&s, &all);
+        let f = AppsFilter::new(&s, &all).unwrap();
         assert!(!filtered(&f, &s, 10002, "settings"));
+    }
+
+    #[test]
+    fn interaction_grants_are_directional_user_scoped_and_snapshot_owned() {
+        let mut s = state();
+        let f = AppsFilter::new(&s, &Config::default()).unwrap();
+        assert!(filtered(&f, &s, 10002, "a"));
+        assert!(!s.system.implicit_access.grant(10002, 10002, false));
+        assert!(s.system.implicit_access.grant(10002, 10001, false));
+        assert!(!s.system.implicit_access.grant(10002, 10001, false));
+        assert!(!filtered(&f, &s, 10002, "a"));
+        assert!(f.should_filter(&s, uid(10, 10002), &s.packages["a"], 10));
+        assert!(f.should_filter(&s, 10002, &s.packages["a"], 10));
+        assert!(s.system.implicit_access.grant(10002, 10001, true));
+        let old = s.clone();
+        s.system
+            .implicit_access
+            .replace_package(10001, &[0, 10], false);
+        assert!(!filtered(&f, &s, 10002, "a"));
+        s.system.implicit_access.remove_package(10001, &[0, 10]);
+        assert!(filtered(&f, &s, 10002, "a"));
+        assert!(!filtered(&f, &old, 10002, "a"));
+        // SDK sandboxes use only ordinary grants, even when retained access
+        // makes the same target visible to an ordinary application UID.
+        assert!(s.system.implicit_access.grant(20002, 10001, true));
+        assert!(filtered(&f, &s, 20002, "a"));
+        assert!(s.system.implicit_access.grant(20002, 10001, false));
+        assert!(!filtered(&f, &s, 20002, "a"));
+    }
+
+    #[test]
+    fn interaction_cleanup_removes_both_directions_for_resolved_users() {
+        let mut grants = ImplicitAccess::default();
+        for user in [0, 10, 11] {
+            for retain in [false, true] {
+                assert!(grants.grant(uid(user, 10001), uid(user, 10002), retain));
+                assert!(grants.grant(uid(user, 10003), uid(user, 10001), retain));
+                assert!(grants.grant(uid(user, 10002), uid(user, 10003), retain));
+            }
+        }
+        let original = grants.clone();
+        grants.replace_package(10001, &[0, 10], true);
+        assert_eq!(grants, original);
+        grants.replace_package(10001, &[0, 10], false);
+        assert!(!grants.transient(10001, 10002));
+        assert!(grants.visible(10001, 10002));
+        assert!(!grants.transient(uid(10, 10003), uid(10, 10001)));
+        grants.remove_package(10001, &[0, 10]);
+        for user in [0, 10] {
+            assert!(!grants.visible(uid(user, 10001), uid(user, 10002)));
+            assert!(!grants.visible(uid(user, 10003), uid(user, 10001)));
+            assert!(grants.visible(uid(user, 10002), uid(user, 10003)));
+        }
+        assert!(grants.transient(uid(11, 10001), uid(11, 10002)));
+        assert!(grants.visible(uid(11, 10003), uid(11, 10001)));
+    }
+
+    #[test]
+    fn sandbox_same_app_uses_the_selected_owner_without_package_inventory() {
+        let mut state = State::default();
+        for user in [0, 10] {
+            for id in [FIRST_SDK_SANDBOX_UID, LAST_SDK_SANDBOX_UID] {
+                let caller = uid(user, id);
+                assert_eq!(
+                    is_caller_same_app(&state, Some("selected.sdk"), caller),
+                    Err(NotModelled("the SDK sandbox's package"))
+                );
+                state.system.sdk_sandbox_package = Some(None);
+                assert_eq!(is_caller_same_app(&state, None, caller), Ok(false));
+                assert_eq!(
+                    is_caller_same_app(&state, Some("selected.sdk"), caller),
+                    Ok(false)
+                );
+                state.system.sdk_sandbox_package = Some(Some("selected.sdk".into()));
+                assert_eq!(
+                    is_caller_same_app(&state, Some("selected.sdk"), caller),
+                    Ok(true)
+                );
+                assert_eq!(
+                    is_caller_same_app(&state, Some("other.sdk"), caller),
+                    Ok(false)
+                );
+                assert_eq!(is_caller_same_app(&state, None, caller), Ok(false));
+                // Ordinary callers still require parsed package ownership.
+                assert_eq!(
+                    is_caller_same_app(&state, Some("selected.sdk"), uid(user, 10001)),
+                    Ok(false)
+                );
+                state.system.sdk_sandbox_package = None;
+            }
+        }
+    }
+
+    #[test]
+    fn sandbox_non_client_visibility_follows_uninstall_same_app_and_owned_grants() {
+        for user in [0, 10] {
+            let sandbox = uid(user, FIRST_SDK_SANDBOX_UID);
+            let mut state = State::default();
+            let mut target = PackageState {
+                name: "selected.sdk".into(),
+                app_id: 10005,
+                users: [(
+                    user,
+                    PackageUserState {
+                        installed: true,
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            };
+            let filter = AppsFilter::new(&state, &Config::default()).unwrap();
+            assert_eq!(
+                should_filter_application(
+                    &state,
+                    &filter,
+                    Some(&target),
+                    sandbox,
+                    user,
+                    false,
+                    true
+                ),
+                Err(NotModelled("the SDK sandbox's package"))
+            );
+            state.system.sdk_sandbox_package = Some(Some(target.name.clone()));
+            assert_eq!(
+                should_filter_application(
+                    &state,
+                    &filter,
+                    Some(&target),
+                    sandbox,
+                    user,
+                    true,
+                    true
+                ),
+                Ok(false)
+            );
+            // Uninstall/archived filtering precedes even the selected owner's same-app check.
+            target.users.get_mut(&user).unwrap().installed = false;
+            for uninstall in [false, true] {
+                for archived_filter in [false, true] {
+                    assert_eq!(
+                        should_filter_application(
+                            &state,
+                            &filter,
+                            Some(&target),
+                            sandbox,
+                            user,
+                            uninstall,
+                            archived_filter
+                        ),
+                        Ok(uninstall)
+                    );
+                    target.users.get_mut(&user).unwrap().archive_state =
+                        Some(super::super::restrictions::ArchiveState {
+                            installer_title: String::new(),
+                            archive_time: 0,
+                            activities: vec![],
+                        });
+                    assert_eq!(
+                        should_filter_application(
+                            &state,
+                            &filter,
+                            Some(&target),
+                            sandbox,
+                            user,
+                            uninstall,
+                            archived_filter
+                        ),
+                        Ok(uninstall && archived_filter)
+                    );
+                    target.users.get_mut(&user).unwrap().archive_state = None;
+                }
+            }
+            target.users.get_mut(&user).unwrap().installed = true;
+            // A captured null selection still permits AppsFilter-owned relations.
+            state.system.sdk_sandbox_package = Some(None);
+            assert_eq!(
+                should_filter_application(
+                    &state,
+                    &filter,
+                    Some(&target),
+                    sandbox,
+                    user,
+                    true,
+                    true
+                ),
+                Ok(true)
+            );
+            state
+                .system
+                .implicit_access
+                .grant(sandbox, uid(user, target.app_id), true);
+            assert_eq!(
+                should_filter_application(
+                    &state,
+                    &filter,
+                    Some(&target),
+                    sandbox,
+                    user,
+                    true,
+                    true
+                ),
+                Ok(true)
+            );
+            state
+                .system
+                .implicit_access
+                .grant(sandbox, uid(user, target.app_id), false);
+            assert_eq!(
+                should_filter_application(
+                    &state,
+                    &filter,
+                    Some(&target),
+                    sandbox,
+                    user,
+                    true,
+                    true
+                ),
+                Ok(false)
+            );
+            assert_eq!(
+                should_filter_application(
+                    &state,
+                    &filter,
+                    Some(&target),
+                    uid(user + 1, FIRST_SDK_SANDBOX_UID),
+                    user,
+                    false,
+                    true
+                ),
+                Ok(true)
+            );
+            state
+                .system
+                .implicit_access
+                .remove_package(target.app_id, &[user]);
+            target.is.force_queryable_override = true;
+            state.packages.insert(target.name.clone(), target.clone());
+            let forced = AppsFilter::new(&state, &Config::default()).unwrap();
+            assert_eq!(
+                should_filter_application(
+                    &state,
+                    &forced,
+                    Some(&target),
+                    sandbox,
+                    user,
+                    true,
+                    true
+                ),
+                Ok(false)
+            );
+            target.users.get_mut(&user).unwrap().instant_app = true;
+            assert_eq!(
+                should_filter_application(
+                    &state,
+                    &forced,
+                    Some(&target),
+                    sandbox,
+                    user,
+                    true,
+                    true
+                ),
+                Err(NotModelled("native instant access snapshot unavailable"))
+            );
+        }
+    }
+
+    #[test]
+    fn sandbox_clients_are_visible_before_code_user_and_instant_checks() {
+        let state = State::default();
+        let filter = AppsFilter::new(&state, &Config::default()).unwrap();
+        for user in [0, 10] {
+            for client_id in [FIRST_APPLICATION_UID, FIRST_SDK_SANDBOX_UID - 1] {
+                let sandbox = uid(
+                    user,
+                    client_id + FIRST_SDK_SANDBOX_UID - FIRST_APPLICATION_UID,
+                );
+                let client = PackageState {
+                    name: "sandbox.client".into(),
+                    app_id: client_id,
+                    users: [(
+                        user,
+                        PackageUserState {
+                            installed: false,
+                            instant_app: true,
+                            ..Default::default()
+                        },
+                    )]
+                    .into(),
+                    ..Default::default()
+                };
+                for uninstall in [false, true] {
+                    for archived in [false, true] {
+                        assert_eq!(
+                            should_filter_application(
+                                &state,
+                                &filter,
+                                Some(&client),
+                                sandbox,
+                                user,
+                                uninstall,
+                                archived
+                            ),
+                            Ok(false)
+                        );
+                        assert_eq!(
+                            should_filter_application(
+                                &state, &filter, None, sandbox, user, uninstall, archived
+                            ),
+                            Ok(true)
+                        );
+                    }
+                }
+                assert_eq!(
+                    should_filter_application(
+                        &state,
+                        &filter,
+                        Some(&client),
+                        sandbox,
+                        user + 1,
+                        false,
+                        true
+                    ),
+                    Err(NotModelled("the SDK sandbox's package"))
+                );
+                let mut other = client.clone();
+                other.app_id += 1;
+                assert_eq!(
+                    should_filter_application(
+                        &state,
+                        &filter,
+                        Some(&other),
+                        sandbox,
+                        user,
+                        false,
+                        true
+                    ),
+                    Err(NotModelled("the SDK sandbox's package"))
+                );
+            }
+        }
     }
 
     #[test]

@@ -163,15 +163,12 @@ pub(super) fn legacy_domain_states(user: &User) -> HashMap<String, i32> {
     else {
         return HashMap::new();
     };
-    r.packages
-        .into_iter()
-        .map(|(name, s)| (name, s.domain_verification_status))
-        .collect()
+    r.legacy_domain_states.into_iter().collect()
 }
 
 impl Resolution {
     /// `approvalLevelForDomainInternal`, not including negative levels.
-    fn approval_level(&self, ps: &PackageState, host: &str, user: i32) -> Result<i32> {
+    pub(super) fn approval_level(&self, ps: &PackageState, host: &str, user: i32) -> Result<i32> {
         let Some(us) = ps.users.get(&user) else {
             return Ok(APPROVAL_LEVEL_NONE);
         };
@@ -199,7 +196,7 @@ impl Resolution {
             return Ok(APPROVAL_LEVEL_NONE);
         }
         if us.instant_app {
-            return Err(NotModelled("an instant app's domain approval"));
+            return Err(NotModelled("an instant app's domain approval").into());
         }
         Ok(if host_in(hosts, host, DOMAIN_STATE_VERIFIED) {
             APPROVAL_LEVEL_VERIFIED
@@ -241,7 +238,7 @@ impl Resolution {
                 .map_or(&[][..], |(_, g)| g.as_slice());
             let level = match ps {
                 Some(ps)
-                    if groups.is_empty() || UriRelativeFilterGroup::match_groups(groups, data) =>
+                    if groups.is_empty() || UriRelativeFilterGroup::match_groups(groups, data).map_err(ResolutionError::UriMatching)? =>
                 {
                     self.approval_level(ps, &host, user)?
                 }
@@ -282,7 +279,7 @@ impl Resolution {
             if packages.len() > 1 {
                 return Err(NotModelled(
                     "approved web handlers installed at the same time",
-                ));
+                ).into());
             }
             approved.retain(|ri| Some(ri.component().0) == packages.first().copied());
             // filterToLastDeclared: of one package, its last declared
@@ -324,7 +321,7 @@ impl Resolution {
         user: i32,
     ) -> Result<Vec<ResolveInfo>> {
         if candidates.iter().any(|ri| ri.is_instant_app_available) {
-            return Err(NotModelled("web instant apps' setting"));
+            return Err(NotModelled("web instant apps' setting").into());
         }
         let (all, undefined): (Vec<ResolveInfo>, Vec<ResolveInfo>) = candidates
             .iter()

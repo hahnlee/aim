@@ -35,6 +35,7 @@ const CLONE_VFORK: u64 = 0x4000;
 const CLONE_PARENT: u64 = 0x8000;
 const CLONE_THREAD: u64 = 0x10000;
 const CLONE_NEWNS: u64 = 0x20000;
+const CAP_SYS_ADMIN:u32=21;
 const CLONE_SETTLS: u64 = 0x80000;
 const CLONE_PARENT_SETTID: u64 = 0x10_0000;
 const CLONE_CHILD_CLEARTID: u64 = 0x20_0000;
@@ -53,7 +54,6 @@ const UNSUPPORTED: u64 = CLONE_FS
     | CLONE_SIGHAND
     | CLONE_THREAD
     | CLONE_PARENT
-    | CLONE_NEWNS
     | CLONE_NEWCGROUP
     | CLONE_NEWUTS
     | CLONE_NEWIPC
@@ -186,6 +186,10 @@ pub fn clone3(ctx: &mut GuestContext, a: [u64; 6]) -> i64 {
 }
 
 fn fork(ctx: &mut GuestContext, mut r: Request) -> i64 {
+    if r.flags&CLONE_NEWNS!=0{
+        if r.flags&CLONE_FS!=0{return -(EINVAL as i64);}
+        if !super::cred::capable(CAP_SYS_ADMIN){return -(crate::errno::EPERM as i64);}
+    }
     let own_files_thread = is_own_files_thread(r.flags);
     if own_files_thread {
         r.flags &= !(CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | CLONE_FS | CLONE_SYSVSEM);
@@ -210,6 +214,7 @@ fn fork(ctx: &mut GuestContext, mut r: Request) -> i64 {
     let traced = super::ptrace::clone_event(r.flags);
     let setup = spawn::ChildSetup {
         stack: r.stack,
+        new_mount_namespace:r.flags&CLONE_NEWNS!=0,
         tls: (r.flags & CLONE_SETTLS != 0).then_some(r.tls),
         set_tid: if r.flags & CLONE_CHILD_SETTID != 0 {
             r.child_tid

@@ -3,7 +3,10 @@
 package android.util;
 
 public class SparseArray<E> {
+    public void remove(int key) { throw new RuntimeException("stub"); }
     public SparseArray() { throw new RuntimeException("stub"); }
+    public E get(int key) { throw new RuntimeException("stub"); }
+    public void put(int key, E value) { throw new RuntimeException("stub"); }
     public int size() { throw new RuntimeException("stub"); }
     public int keyAt(int index) { throw new RuntimeException("stub"); }
     public E valueAt(int index) { throw new RuntimeException("stub"); }

@@ -294,7 +294,7 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
         },
         FN_FENCE => match (unsafe { args_mut::<Timeline>(args, len) }, PRIVATE.get()) {
             (Ok(a), Some(p)) => {
-                metal::fence(p, a).map_or_else(|e| e, |f| aim_sync_file::give_to_guest(f) as i64)
+                metal::fence(p, a).map_or_else(|e| e, |f| aim_sync_file::give_to_guest(f).map(|fd|fd as i64).unwrap_or_else(|error|-(error as i64)))
             }
             (Err(e), _) => e,
             (_, None) => ENODEV,

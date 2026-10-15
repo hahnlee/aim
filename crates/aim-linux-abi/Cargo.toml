@@ -18,6 +18,7 @@ name = "linux-translate"
 path = "src/bin/linux-translate.rs"
 
 [dependencies]
+aim-ashmem = { path = "../aim-ashmem" }
 aim-binder-driver = { path = "../aim-binder-driver" }
 aim-binder-host = { path = "../aim-binder-host" }
 aim-host-audio = { path = "../aim-host-audio" }
@@ -32,11 +33,12 @@ aim-host-sensors = { path = "../aim-host-sensors" }
 aim-host-vulkan = { path = "../aim-host-vulkan" }
 aim-hostcall.workspace = true
 aim-sync-file.workspace = true
+aim-storage.workspace = true
 libc.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+aim-android-image = { path = "../aim-android-image" }
 aim-android-init = { path = "../aim-android-init" }
 aim-guest-init = { path = "../aim-guest-init" }
 aim-paths.workspace = true
-aim-storage.workspace = true

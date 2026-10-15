@@ -173,6 +173,7 @@ pub struct Package {
     pub uses_permissions: Vec<UsesPermission>,
     pub implicit_permissions: ArraySet,
     pub upgrade_key_sets: ArraySet,
+    pub key_set_mapping: ArrayMap<Vec<crate::package::pkg::Serialized>>,
     pub protected_broadcasts: Vec<String>,
     pub activities: Vec<Activity>,
     pub apex_system_services: Vec<ApexSystemService>,
@@ -225,6 +226,7 @@ pub struct Package {
     pub zygote_preload_name: Option<String>,
     pub split_class_loader_names: Option<Vec<Option<String>>>,
     pub split_code_paths: Option<Vec<String>>,
+    pub split_dependencies: Option<std::collections::BTreeMap<i32, Vec<i32>>>,
     pub split_flags: Option<Vec<i32>>,
     pub split_names: Option<Vec<String>>,
     pub split_revision_codes: Option<Vec<i32>>,
@@ -312,6 +314,7 @@ impl Package {
             uses_permissions: Vec::new(),
             implicit_permissions: ArraySet::default(),
             upgrade_key_sets: ArraySet::default(),
+            key_set_mapping: ArrayMap::default(),
             protected_broadcasts: Vec::new(),
             activities: Vec::new(),
             apex_system_services: Vec::new(),
@@ -366,6 +369,7 @@ impl Package {
             split_code_paths: None,
             split_flags: None,
             split_names: None,
+            split_dependencies: None,
             split_revision_codes: None,
             resizeable_activity: None,
             auto_revoke_permissions: 0,
@@ -558,10 +562,16 @@ impl Package {
         w.set(&self.implicit_permissions);
         w.field("upgradeKeySets");
         w.set(&self.upgrade_key_sets);
-        // The parser refuses a package that defines key sets (their keys
-        // are written Java-serialized), so the mapping is empty.
         w.field("keySetMapping");
-        w.int(0);
+        w.int(self.key_set_mapping.len() as i32);
+        for (alias, keys) in self.key_set_mapping.iter() {
+            w.string(Some(alias));
+            w.int(keys.len() as i32);
+            for key in keys {
+                w.string(Some(&key.class));
+                w.bytes(Some(&key.bytes));
+            }
+        }
         w.field("protectedBroadcasts");
         w.strings(Some(&self.protected_broadcasts));
         w.field("activities");
@@ -690,10 +700,18 @@ impl Package {
         }
         w.field("splitCodePaths");
         w.strings(self.split_code_paths.as_deref());
-        // `writeSparseArray`: the parser builds split dependencies only for
-        // isolated splits, which no package parsed here has.
         w.field("splitDependencies");
-        w.int(-1);
+        match &self.split_dependencies {
+            None => w.int(-1),
+            Some(deps) => {
+                w.int(deps.len() as i32);
+                for (index, values) in deps {
+                    w.int(*index);
+                    w.int(18); // Parcel.VAL_INTARRAY
+                    w.ints(Some(values));
+                }
+            }
+        }
         w.field("splitFlags");
         w.ints(self.split_flags.as_deref());
         w.field("splitNames");

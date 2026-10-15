@@ -27,21 +27,29 @@ impl Apk {
             source,
             table: None,
         };
-        apk.table = match apk.file("resources.arsc") {
-            Ok(b) => Some(Table::parse(&b)?),
-            Err(_) => None,
-        };
+        apk.table = apk
+            .file_if_present("resources.arsc")?
+            .map(|bytes| Table::parse(&bytes))
+            .transpose()?;
         Ok(apk)
     }
 
     /// The file `name` of the archive.
     pub fn file(&self, name: &str) -> Result<Vec<u8>> {
+        self.file_if_present(name)?
+            .ok_or_else(|| bad(format!("no {name}")))
+    }
+
+    /// Absence is distinct from a present entry failing decompression, size
+    /// bounds or CRC validation. Code-only APKs may omit resources.arsc.
+    pub fn file_if_present(&self, name: &str) -> Result<Option<Vec<u8>>> {
         let archive = Archive::open(self.source.as_ref()).map_err(|e| bad(e.to_string()))?;
-        let entry = archive
-            .find(name.as_bytes())
-            .ok_or_else(|| bad(format!("no {name}")))?;
+        let Some(entry) = archive.find(name.as_bytes()) else {
+            return Ok(None);
+        };
         archive
             .read(entry, MAX_ENTRY)
+            .map(Some)
             .map_err(|e| bad(e.to_string()))
     }
 

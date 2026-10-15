@@ -21,6 +21,33 @@ pub trait UserMemory {
     fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Errno>;
     /// A received file now sits at `fd` (for the caller's fd bookkeeping).
     fn installed(&mut self, _fd: i32) {}
+    /// Borrow the incoming send right while installing the actual backing.
+    /// Guest adapters allocate temporary descriptors under their private-FD guard.
+    fn install_fileport(&mut self, fd: i32, port: Port) -> Result<(), Errno> { install(fd, port) }
+    fn installed_typed(&mut self, fd: i32, _class: u32) {
+        self.installed(fd);
+    }
+    fn install_typed(&mut self, fd: i32, class: u32) -> Result<(), Errno> {
+        self.installed_typed(fd, class);
+        Ok(())
+    }
+    fn export_fd(&mut self, fd: i32) -> Result<i32, Errno> {
+        Ok(fd)
+    }
+    fn regular_export(&mut self, _fd: i32) -> Result<Option<crate::regular_file::Export>, Errno> { Ok(None) }
+    /// The receiving ABI must validate/adopt the actual writer open description.
+    fn install_regular(&mut self, _fd: i32, _metadata: &wire::RegularMetadata, _writer: Option<crate::regular_file::WriterPort>) -> Result<(), Errno> { Err(95) }
+    fn socket_export(&mut self,_fd:i32)->Result<Option<aim_storage::socket_inode::Receipt>,Errno>{Ok(None)}
+    fn install_socket(&mut self,_fd:i32,_receipt:aim_storage::socket_inode::Receipt)->Result<(),Errno>{Err(95)}
+    fn file_class(&mut self, _fd: i32) -> u32 {
+        0
+    }
+    /// Close this authenticated installed/reserved receipt. Guest adapters
+    /// withdraw visibility and retain its owner through the actual close.
+    fn close_file(&mut self, fd:i32) -> Result<(),Errno> {
+        self.closed(fd);
+        if unsafe { libc::close(fd) } < 0 { Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(EIO)) } else { Ok(()) }
+    }
     /// The driver closed `fd`.
     fn closed(&mut self, _fd: i32) {}
 }
@@ -99,6 +126,113 @@ pub struct Client {
 }
 
 impl Client {
+    #[cfg(test)]
+    pub(crate) fn from_service_port(service:Port)->Self{Self{service}}
+    pub fn socket_scm_endpoint(&self)->Result<crate::socket_scm::Endpoint,Errno>{
+        let request=Msg{id:wire::SOCKET_SCM_CHANNEL,ports:vec![],data:vec![]};let reply=with_thread(|thread|call(thread,self.service,&request))??;
+        let result=(||{let mut reader=status(&reply)?;let endpoint=crate::socket_scm::Endpoint::decode(&mut reader)?;if reader.remaining()!=0||!reply.ports.is_empty(){return Err(wire::EPROTO);}Ok(endpoint)})();
+        for port in reply.ports{mach::release_send(port);}result
+    }
+    /// Return an opaque carrier fileport. The ABI materializes it privately.
+    pub fn create_regular_scm(&self,backing:i32,writer:Option<i32>,metadata:&wire::RegularMetadata)->Result<crate::regular_scm::FilePort,Errno>{
+        if metadata.writer!=writer.is_some(){return Err(wire::EPROTO);}
+        let backing=crate::regular_scm::FilePort::new(mach::fd_to_port(backing).ok_or(errno::EBADF)?);
+        let writer=writer.map(|fd|mach::fd_to_port(fd).map(crate::regular_scm::FilePort::new).ok_or(errno::EBADF)).transpose()?;
+        let mut data=Writer::default();metadata.encode(&mut data);
+        let mut ports=vec![(backing.as_port(),mach::COPY_SEND)];if let Some(writer)=&writer{ports.push((writer.as_port(),mach::COPY_SEND));}
+        let request=Msg{id:wire::CREATE_REGULAR_SCM,ports,data:data.0};
+        let reply=with_thread(|thread|call(thread,self.service,&request))??;
+        let result=(||{let mut reader=status(&reply)?;if reader.u32()?!=crate::regular_scm::CLASS||reader.remaining()!=0||reply.ports.len()!=1{return Err(wire::EPROTO);}Ok(())})();
+        if let Err(error)=result{for port in reply.ports{mach::release_send(port);}return Err(error);}
+        Ok(crate::regular_scm::FilePort::new(reply.ports[0]))
+    }
+    pub fn resolve_regular_scm(&self,carrier:i32)->Result<crate::regular_scm::Resolved,Errno>{
+        let carrier=crate::regular_scm::FilePort::new(mach::fd_to_port(carrier).ok_or(errno::EBADF)?);
+        let request=Msg{id:wire::RESOLVE_REGULAR_SCM,ports:vec![(carrier.as_port(),mach::COPY_SEND)],data:vec![]};
+        let reply=with_thread(|thread|call(thread,self.service,&request))??;
+        let result=(||{let mut reader=status(&reply)?;let metadata=wire::RegularMetadata::decode(&mut reader)?;if reader.remaining()!=0||reply.ports.len()!=1+metadata.writer as usize{return Err(wire::EPROTO);}Ok(metadata)})();
+        let metadata=match result{Ok(metadata)=>metadata,Err(error)=>{for port in reply.ports{mach::release_send(port);}return Err(error);}};
+        Ok(crate::regular_scm::Resolved{backing:crate::regular_scm::FilePort::new(reply.ports[0]),writer:if metadata.writer{Some(crate::regular_file::WriterPort::new(reply.ports[1]))}else{None},metadata})
+    }
+    pub fn drain_regular_scm(&self,identity:&[u8;36])->Result<(),Errno>{
+        let request=Msg{id:wire::DRAIN_REGULAR_SCM,ports:vec![],data:identity.to_vec()};
+        let reply=with_thread(|thread|call(thread,self.service,&request))??;
+        let result=(||{if !reply.ports.is_empty()||status(&reply)?.remaining()!=0{return Err(wire::EPROTO);}Ok(())})();
+        for port in reply.ports{mach::release_send(port);}result
+    }
+
+    /// Register an owned Linux path carrier with the native daemon. Errors are Linux wire errno.
+    pub fn create_path(&self, fd: i32, flags: u32) -> Result<std::os::fd::OwnedFd, Errno> {
+        use std::os::fd::FromRawFd;
+        let port = mach::fd_to_port(fd).ok_or(errno::EBADF)?;
+        let request = Msg {
+            id: wire::CREATE_PATH,
+            ports: vec![(port, mach::COPY_SEND)],
+            data: flags.to_le_bytes().to_vec(),
+        };
+        let result = with_thread(|t| call(t, self.service, &request));
+        mach::release_send(port);
+        let reply = result??;
+        let result = (|| {
+            let class = status(&reply)?.u32()?;
+            if class != crate::path_file::CLASS || reply.ports.len() != 1 {
+                return Err(wire::EPROTO);
+            }
+            let fd = mach::port_to_fd(reply.ports[0]).ok_or(errno::EBADF)?;
+            Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+        })();
+        for port in &reply.ports {
+            mach::release_send(*port);
+        }
+        result
+    }
+
+    /// Ask the native owner's registry about an actual descriptor capability.
+    pub fn file_class(&self, fd: i32) -> Result<u32, Errno> {
+        let mut ty = 0i32;
+        let mut len = std::mem::size_of::<i32>() as u32;
+        // Opaque PTY carriers use real pipe identities; endpoint owners
+        // classify them without treating other native files as capabilities.
+        if unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_TYPE,
+                (&mut ty as *mut i32).cast(),
+                &mut len,
+            )
+        } < 0
+        {
+            return if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOTSOCK) {
+                match aim_storage::pipe_identity::key(fd) {
+                    Ok(Some(_)) => self.pipe_file_class(fd),
+                    Ok(None) => Ok(0),
+                    Err(_) => Err(errno::EBADF),
+                }
+            } else {
+                Err(errno::EBADF)
+            };
+        }
+        let port = mach::fd_to_port(fd).ok_or(errno::EBADF)?;
+        let msg = Msg {
+            id: wire::FILE_CLASS,
+            ports: vec![(port, mach::COPY_SEND)],
+            data: Vec::new(),
+        };
+        let result = with_thread(|t| call(t, self.service, &msg));
+        mach::release_send(port);
+        let reply = result??;
+        status(&reply)?.u32()
+    }
+
+    fn pipe_file_class(&self, fd: i32) -> Result<u32, Errno> {
+        let port = mach::fd_to_port(fd).ok_or(errno::EBADF)?;
+        let msg = Msg { id: wire::FILE_CLASS, ports: vec![(port, mach::COPY_SEND)], data: Vec::new() };
+        let result = with_thread(|t| call(t, self.service, &msg));
+        mach::release_send(port);
+        status(&result??)?.u32()
+    }
+
     pub fn connect(name: &str) -> Option<Self> {
         mach::look_up(name).ok().map(|service| Self { service })
     }
@@ -233,6 +367,13 @@ impl BinderFile {
         Ok(p)
     }
 
+    /// Flush this actual open description after a public Linux fd close.
+    /// The caller retains a private close pin until this acknowledgement.
+    pub fn flush(&self) -> Result<(), Errno> {
+        with_thread(|t| self.control(t, wire::FLUSH, Vec::new()))??;
+        Ok(())
+    }
+
     /// Install the receive buffer at `[vm_start, vm_start+len)`, which the
     /// caller reserved; it becomes a read-only view of the daemon's buffer.
     pub fn mmap(&self, vm_start: u64, len: u64) -> Result<(), Errno> {
@@ -314,19 +455,50 @@ impl BinderFile {
             reads = bwr.read_size > bwr.read_consumed;
         }
         let fds = std::mem::take(&mut io.fds);
+        io.file_classes.clear();
+        io.regular.clear();
+        io.sockets.clear();
+        let exports = fds
+            .iter()
+            .map(|fd| mem.export_fd(*fd as i32))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut ports = Vec::new();
-        for fd in fds {
-            if ports.len() == mach::MAX_PORTS {
-                break;
-            }
-            // An fd that is not open has no port; the driver fails the
-            // transaction with EBADF.
-            if let Some(p) = mach::fd_to_port(fd as i32) {
+        for (fd, exported) in fds.into_iter().zip(exports) {
+            let regular = match mem.regular_export(fd as i32) {
+                Ok(regular) => regular,
+                Err(error) => { for (port, _) in ports { mach::release_send(port); } return Err(error); }
+            };
+            let socket=match mem.socket_export(fd as i32){Ok(socket)=>socket,Err(error)=>{for(port,_)in ports{mach::release_send(port);}return Err(error);}};
+            let class = mem.file_class(fd as i32);
+            if (class==crate::socket_scm::CLASS)!=socket.is_some(){for(port,_)in ports{mach::release_send(port);}return Err(wire::EPROTO);}
+            if (class == crate::regular_file::CLASS) != regular.is_some() { for (port, _) in ports { mach::release_send(port); } return Err(wire::EPROTO); }
+            let needed = 1 + regular.as_ref().is_some_and(|regular| regular.metadata.writer) as usize;
+            if ports.len() + needed > mach::MAX_PORTS { break; }
+            if let Some(p) = mach::fd_to_port(exported) {
+                let writer = if let Some(regular) = &regular {
+                    if regular.metadata.writer != regular.writer_fd.is_some() {
+                        mach::release_send(p);
+                        for (port, _) in ports { mach::release_send(port); }
+                        return Err(wire::EPROTO);
+                    }
+                    match regular.writer_fd {
+                        Some(fd) => match mach::fd_to_port(fd) {
+                            Some(port) => Some(port),
+                            None => { mach::release_send(p); for (port, _) in ports { mach::release_send(port); } return Err(errno::EBADF); }
+                        },
+                        None => None,
+                    }
+                } else { None };
                 io.fds.push(fd);
+                io.file_classes.push(class);
+                io.regular.push(regular.map(|regular| regular.metadata));
+                io.sockets.push(socket);
                 ports.push((p, mach::MOVE_SEND));
+                if let Some(writer) = writer { ports.push((writer, mach::MOVE_SEND)); }
             }
         }
-        let reply = with_thread(|t| -> Result<IoctlReply, Errno> {
+        if let Err(error) = io.validate() { for (port, _) in ports { mach::release_send(port); } return Err(error); }
+        let (reply, writers) = with_thread(|t| -> Result<(IoctlReply, Vec<Option<crate::regular_file::WriterPort>>), Errno> {
             if reads {
                 refill_reserved(&mut t.reserved, reserve);
                 io.grow = t.reserved.len() >= reserve;
@@ -339,13 +511,35 @@ impl BinderFile {
                 data: io.encode(),
             };
             let r = call(t, port, &msg)?;
-            let reply = IoctlReply::decode(&r.data)?;
-            for (fd, p) in reply.installs.iter().zip(&r.ports) {
-                install(*fd as i32, *p);
-                t.reserved.retain(|r| *r != *fd as i32);
+            let reply = match IoctlReply::decode(&r.data) {
+                Ok(reply) => reply,
+                Err(error) => { for port in r.ports { mach::release_send(port); } return Err(error); }
+            };
+            let count = reply.installs.len() + reply.regular.iter().flatten().filter(|metadata| metadata.writer).count();
+            if count != r.ports.len() {
+                for port in r.ports { mach::release_send(port); }
+                reject_deliveries(t, port, &reply)?;
+                return Err(wire::EPROTO);
             }
-            for p in r.ports.iter().skip(reply.installs.len()) {
-                mach::release_send(*p);
+            let mut ports = r.ports.into_iter();
+            let mut writers = Vec::with_capacity(reply.installs.len());
+            for (index, fd) in reply.installs.iter().enumerate() {
+                let p = ports.next().unwrap();
+                let result = mem.install_fileport(*fd as i32, p);
+                mach::release_send(p);
+                if let Err(error) = result {
+                    for port in ports { mach::release_send(port); }
+                    for fd in reply.installs.iter().chain(&reply.closes) {
+                        if let Err(secondary) = mem.close_file(*fd as i32) { eprintln!("Binder import rollback close fd={fd}: errno {secondary}"); }
+                        t.reserved.retain(|reserved| *reserved != *fd as i32);
+                    }
+                    reject_deliveries(t, port, &reply)?;
+                    return Err(error);
+                }
+                writers.push(if reply.regular[index].as_ref().is_some_and(|metadata| metadata.writer) {
+                    Some(crate::regular_file::WriterPort::new(ports.next().unwrap()))
+                } else { None });
+                t.reserved.retain(|reserved| *reserved != *fd as i32);
             }
             if cmd == BINDER_THREAD_EXIT
                 && reply.status == 0
@@ -353,20 +547,36 @@ impl BinderFile {
             {
                 mach::release_send(p);
             }
-            Ok(reply)
+            Ok((reply, writers))
         })??;
-        for fd in &reply.installs {
-            mem.installed(*fd as i32);
+        for (index, (fd, writer)) in reply.installs.iter().zip(writers).enumerate() {
+            let result = match (&reply.regular[index],reply.sockets[index]) {
+                (None,Some(receipt))=>mem.install_socket(*fd as i32,receipt),
+                (Some(metadata),None) => mem.install_regular(*fd as i32, metadata, writer),
+                (None,None) => mem.install_typed(*fd as i32, reply.file_classes[index]),
+                _=>Err(wire::EPROTO),
+            };
+            if let Err(error) = result {
+                for fd in reply.installs.iter().chain(&reply.closes) {
+                    if let Err(secondary) = mem.close_file(*fd as i32) { eprintln!("Binder typed import rollback close fd={fd}: errno {secondary}"); }
+                }
+                with_thread(|t| -> Result<(), Errno> {
+                    let port = self.thread_port(t, tid)?;
+                    reject_deliveries(t, port, &reply)
+                })??;
+                self.drain(reply.drain);
+                return Err(error);
+            }
         }
         for (addr, bytes) in &reply.writes {
             mem.write(*addr, bytes)?;
         }
+        let mut close_error = None;
         for fd in &reply.closes {
-            mem.closed(*fd as i32);
-            // SAFETY: closing an fd the driver installed and now frees.
-            unsafe { libc::close(*fd as i32) };
+            if let Err(error) = mem.close_file(*fd as i32) { close_error.get_or_insert(error); }
         }
         self.drain(reply.drain);
+        if let Some(error) = close_error { return Err(error); }
         if writes_arg && size > 0 && (reply.status == 0 || cmd == BINDER_WRITE_READ) {
             mem.write(arg, &reply.arg)?;
         }
@@ -380,6 +590,31 @@ impl BinderFile {
             e => Err(e),
         }
     }
+}
+
+fn reject_deliveries(
+    thread: &mut ThreadState,
+    port: Port,
+    reply: &IoctlReply,
+) -> Result<(), Errno> {
+    for (buffer, id) in reply.deliveries.iter().rev() {
+        let mut data = Writer::default();
+        data.u64(*buffer).u64(*id);
+        let result = call(
+            thread,
+            port,
+            &Msg {
+                id: wire::REJECT_DELIVERY,
+                ports: Vec::new(),
+                data: data.0,
+            },
+        )?;
+        let result = IoctlReply::decode(&result.data)?;
+        if result.status != 0 {
+            return Err(result.status);
+        }
+    }
+    Ok(())
 }
 
 /// Top the pool up to `count` placeholders. A placeholder only holds its
@@ -419,16 +654,20 @@ fn refill_reserved(pool: &mut Vec<i32>, count: usize) {
 
 /// Put a received file at the reserved number `fd` (close-on-exec, as the
 /// driver installs it).
-fn install(fd: i32, port: Port) {
-    if let Some(new) = mach::port_to_fd(port) {
-        // SAFETY: replacing our placeholder with the received file.
-        unsafe {
-            libc::dup2(new, fd);
-            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-            libc::close(new);
-        }
-    }
-    mach::release_send(port);
+fn install(fd: i32, port: Port) -> Result<(), Errno> {
+    let result = (|| {
+        let new = mach::port_to_fd(port).ok_or(errno::EBADF)?;
+        let result = if unsafe { libc::dup2(new, fd) } < 0 {
+            Err(errno::EBADF)
+        } else if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            Err(errno::EBADF)
+        } else {
+            Ok(())
+        };
+        unsafe { libc::close(new) };
+        result
+    })();
+    result
 }
 
 /// Gather the guest memory the write stream makes the driver read.
@@ -554,5 +793,15 @@ mod tests {
             // SAFETY: our placeholders.
             unsafe { libc::close(fd) };
         }
+    }
+    #[test]
+    fn failed_host_descriptor_install_cannot_succeed_with_a_placeholder() {
+        use std::os::fd::AsRawFd;
+        let source = std::fs::File::open("/dev/null").unwrap();
+        assert_eq!(install(source.as_raw_fd(), mach::NULL), Err(errno::EBADF));
+        assert!(unsafe { libc::fcntl(source.as_raw_fd(), libc::F_GETFD) } >= 0);
+        let port = mach::fd_to_port(source.as_raw_fd()).unwrap();
+        assert_eq!(install(-1, port), Err(errno::EBADF));
+        assert!(unsafe { libc::fcntl(source.as_raw_fd(), libc::F_GETFD) } >= 0);
     }
 }

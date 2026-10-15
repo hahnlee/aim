@@ -65,10 +65,14 @@ pub fn run(
 /// Starts aim-display with its socket and capture file in `dir` (in window
 /// mode when `windows`) and waits for its socket.
 pub fn start_display(ctx: &Ctx, dir: &Path, windows: bool) -> Result<Child, String> {
+    start_display_binary(&ctx.workspace.host_bin("aim-display"), dir, windows)
+}
+
+pub fn start_display_binary(binary: &Path, dir: &Path, windows: bool) -> Result<Child, String> {
     let socket = dir.join("display");
     fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let _ = fs::remove_file(&socket);
-    let mut display = Command::new(ctx.workspace.host_bin("aim-display"))
+    let mut display = Command::new(binary)
         .args(display_args(dir, windows))
         .spawn()
         .map_err(|e| format!("aim-display: {e}"))?;

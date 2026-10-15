@@ -66,44 +66,11 @@ fn lowest(set: u64) -> i32 {
 }
 
 /// Linux -> Darwin signal numbers (0 when Darwin has no equivalent).
-pub fn to_host(sig: i32) -> i32 {
-    match sig {
-        1 => libc::SIGHUP,
-        2 => libc::SIGINT,
-        3 => libc::SIGQUIT,
-        4 => libc::SIGILL,
-        5 => libc::SIGTRAP,
-        6 => libc::SIGABRT,
-        7 => libc::SIGBUS,
-        8 => libc::SIGFPE,
-        9 => libc::SIGKILL,
-        10 => libc::SIGUSR1,
-        11 => libc::SIGSEGV,
-        12 => libc::SIGUSR2,
-        13 => libc::SIGPIPE,
-        14 => libc::SIGALRM,
-        15 => libc::SIGTERM,
-        17 => libc::SIGCHLD,
-        18 => libc::SIGCONT,
-        19 => libc::SIGSTOP,
-        20 => libc::SIGTSTP,
-        21 => libc::SIGTTIN,
-        22 => libc::SIGTTOU,
-        23 => libc::SIGURG,
-        24 => libc::SIGXCPU,
-        25 => libc::SIGXFSZ,
-        26 => libc::SIGVTALRM,
-        27 => libc::SIGPROF,
-        28 => libc::SIGWINCH,
-        29 => libc::SIGIO,
-        31 => libc::SIGSYS,
-        _ => 0,
-    }
-}
+pub fn to_host(sig:i32)->i32{aim_storage::process_namespace::signal_to_host(sig)}
 
 /// Darwin -> Linux signal numbers (0 for SIGEMT and SIGINFO).
 pub fn from_host(h: i32) -> i32 {
-    (1..32).find(|&s| to_host(s) == h).unwrap_or(0)
+    aim_storage::process_namespace::signal_from_host(h)
 }
 
 enum Default {
@@ -467,7 +434,7 @@ fn drain_external() {
             let mut info = Siginfo::from_sender(
                 sig,
                 code as u32 as i32,
-                super::pidns::vnr(pid),
+                super::pidns::guest_pid(super::pidns::vnr(pid)).unwrap_or(0),
                 sender_uid(pid),
             );
             info.fields[1] = code >> 32; // _sigchld.status
@@ -536,6 +503,29 @@ fn take(th: &Thread) -> Option<Taken> {
 /// For the layer's own blocking calls: whether a guest handler is to run,
 /// so the call must return EINTR. Signals without a handler are consumed
 /// here and do not interrupt, as on Linux.
+/// Linux fatal_signal_pending tests SIGKILL without consuming other signals.
+/// Native SIGKILL terminates immediately; queued kernel state uses this mask.
+pub fn fatal_pending(th:&Thread)->bool {
+    let mask=bit(SIGKILL);
+    th.sig.own.load(SeqCst)&mask!=0 || lock(&th.sig.pending).set&mask!=0 || process().set&mask!=0
+}
+
+pub(super) fn tty_signal_ignored(sig:i32)->Result<bool,crate::errno::Errno>{
+    let th=thread::current().ok_or(crate::errno::ESRCH)?;
+    Ok(th.sig.mask()&bit(sig)!=0||ignored(sig,&action(sig)))
+}
+pub(super) fn tty_signal_group(members:&[aim_storage::process_namespace::ProcessIdentity],pgrp:i32,sid:i32,sig:i32)->Result<(),crate::errno::Errno>{
+    let info=Siginfo::new(sig,128); // Linux SI_KERNEL.
+    let mut sent=false;
+    for member in members{
+        if !member.is_live()||unsafe{libc::getpgid(member.host_pid)}!=pgrp||unsafe{libc::getsid(member.host_pid)}!=sid{continue;}
+        let result=if member.host_pid==libc_getpid(){send_process(info)}else{super::ptrace::remote_signal(member.host_pid,0,&info)};
+        if result<0{return Err((-result)as crate::errno::Errno);}
+        sent=true;
+    }
+    if sent{Ok(())}else{Err(crate::errno::ESRCH)}
+}
+
 pub fn interrupted(th: &Thread) -> bool {
     // A stashed signal keeps the flag set until it is delivered.
     if th.sig.attn.load(SeqCst) == 0 {
@@ -766,12 +756,86 @@ unsafe fn act_now(ctx: *mut GuestContext, m: &mut DarwinMcontext) {
     }
 }
 
+struct VerityFaultSlot {
+    busy: AtomicBool,
+    intent: std::cell::UnsafeCell<Option<super::verity_pager::FaultIntent>>,
+    esr: std::cell::Cell<u64>,
+}
+thread_local! {
+    static VERITY_FAULT: VerityFaultSlot = const { VerityFaultSlot {
+        busy: AtomicBool::new(false), intent: std::cell::UnsafeCell::new(None),
+        esr: std::cell::Cell::new(0),
+    } };
+}
+/// Every main, clone, and spawned fork thread binds before running guest code.
+pub(crate) fn initialize_verity_fault_slot() { VERITY_FAULT.with(|_| {}); }
+
+fn defer_verity_fault(ctx: *mut GuestContext, si_addr: u64, m: &mut DarwinMcontext) -> bool {
+    let Some(ctx) = (unsafe { ctx.as_mut() }) else { return false; };
+    if ctx.in_host != 0 || context::region(m.pc) != context::Region::Other { return false; }
+    let ec = m.esr >> 26;
+    let address = if matches!(ec, 0x20 | 0x21 | 0x24 | 0x25) { m.far } else { si_addr };
+    let access = if matches!(ec, 0x20 | 0x21) || address == m.pc { super::verity_pager::Access::Execute }
+        else if matches!(ec, 0x24 | 0x25) && m.esr & (1 << 6) != 0 { super::verity_pager::Access::Write }
+        else { super::verity_pager::Access::Read };
+    let Some(intent) = super::verity_pager::fault_intent(address, access) else { return false; };
+    let accepted = VERITY_FAULT.with(|slot| {
+        if slot.busy.swap(true, SeqCst) { return false; }
+        unsafe { *slot.intent.get() = Some(intent); }
+        slot.esr.set(m.esr as u64);
+        true
+    });
+    if !accepted { return false; }
+    Cpu::from_mc(m).to_ctx(ctx);
+    ctx.in_host = 1;
+    m.pc = finish_verity_fault as usize as u64;
+    m.sp = ctx.host_sp;
+    m.fp = 0; m.lr = 0;
+    true
+}
+
+extern "C" fn finish_verity_fault() -> ! {
+    let (intent, esr) = VERITY_FAULT.with(|slot| {
+        (unsafe { (*slot.intent.get()).take().expect("retained verity fault") }, slot.esr.get())
+    });
+    let address = intent.address();
+    let result=match intent.jit_request(){
+        Ok(Some(request))=>{drop(intent);super::verity_pager::resolve_jit(request)},
+        Ok(None)=>{let result=super::verity_pager::resolve(&intent);drop(intent);result},
+        Err(_)=>{drop(intent);super::verity_pager::FaultResult::Bus{address}},
+    };
+    VERITY_FAULT.with(|slot| slot.busy.store(false, SeqCst));
+    let ctx = unsafe { &mut *context::current_ctx() };
+    let info = match result {
+        super::verity_pager::FaultResult::Verified | super::verity_pager::FaultResult::Retry => context::resume_trap(),
+        super::verity_pager::FaultResult::Bus { address } => Siginfo::fault(sigframe::SIGBUS, 2, address),
+        super::verity_pager::FaultResult::Permission => Siginfo::fault(sigframe::SIGSEGV, 2, address),
+        super::verity_pager::FaultResult::Unowned => Siginfo::fault(sigframe::SIGSEGV, 1, address),
+    };
+    let Some(th) = thread_of(ctx) else { die(info.signo); };
+    let act = action(info.signo); let mask = th.sig.mask();
+    if act.handler == SIG_DFL || act.handler == SIG_IGN || mask & bit(info.signo) != 0 { die(info.signo); }
+    let cpu = Cpu::from_ctx(ctx);
+    frame(th, &cpu, &Taken { info, act }, mask, esr, address).to_ctx(ctx);
+    context::resume_trap()
+}
+
 // ---- host signal handler --------------------------------------------------------
+
+struct HostErrno(i32);
+impl HostErrno {
+    fn save() -> Self { Self(unsafe { *libc::__error() }) }
+}
+impl Drop for HostErrno {
+    fn drop(&mut self) { unsafe { *libc::__error() = self.0; } }
+}
 
 /// The host handler for every signal the layer takes. `patch` handles its
 /// `brk` sites first. A fault nothing takes is reported by `diag`, then
 /// kills the process with the signal, as Linux's default action.
 extern "C" fn host_handler(sig: i32, info: *mut libc::siginfo_t, uc: *mut libc::c_void) {
+    // A signal can arrive between a host syscall and its errno read.
+    let _errno = HostErrno::save();
     // SAFETY: SA_SIGINFO handler arguments from the kernel.
     unsafe {
         if sig == libc::SIGTRAP && crate::patch::handle_brk(uc as *mut libc::ucontext_t) {
@@ -805,7 +869,12 @@ unsafe fn host_signal(hsig: i32, si: &libc::siginfo_t, uc: *mut libc::c_void) ->
     ) && si.si_code > 0
         && si.si_code < 0x10000;
     if fault {
+        // A resident MAP_JIT page may fault only to switch its per-thread
+        // write/execute view; PROT_NONE demand reservations are not JIT pages.
         if matches!(hsig, libc::SIGSEGV | libc::SIGBUS) && super::jit::fault(ctx, m) {
+            return None;
+        }
+        if matches!(hsig, libc::SIGSEGV | libc::SIGBUS) && defer_verity_fault(ctx, si.si_addr as u64, m) {
             return None;
         }
         let host_fault = Some(from_host(hsig));
@@ -934,7 +1003,9 @@ fn forward(hsig: i32, extra: i32) {
 /// every signal whose Linux default is not "ignore" (a forwarded signal the
 /// guest blocks must stay pending instead of taking the host default).
 /// Handlers run on each thread's host alternate stack and never restart
-/// host syscalls, so a blocked thread notices the guest signal.
+/// host syscalls, so a blocked thread notices the guest signal. Default-ignored
+/// signals still need forwarding: a guest blocked SIGCHLD is synchronously
+/// consumed by sigtimedwait/signalfd before its default disposition applies.
 pub fn install_host_handlers() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -944,7 +1015,6 @@ pub fn install_host_handlers() {
             if h != 0
                 && sig != SIGKILL
                 && sig != SIGSTOP
-                && !matches!(default_action(sig), Default::Ignore)
             {
                 forward(h, 0);
             }
@@ -962,8 +1032,6 @@ fn mirror_on_host(sig: i32, act: &KSigaction) {
     }
     if act.handler == SIG_IGN {
         host_action(h, libc::SIG_IGN, 0);
-    } else if act.handler == SIG_DFL && matches!(default_action(sig), Default::Ignore) {
-        host_action(h, libc::SIG_DFL, 0);
     } else {
         let mut extra = 0;
         if sig == 17 {
@@ -1142,7 +1210,7 @@ pub fn rt_sigtimedwait(a: [u64; 6]) -> i64 {
 fn sender(sig: i32, code: i32) -> Siginfo {
     // SAFETY: trivial.
     let pid = unsafe { libc::getpid() };
-    Siginfo::from_sender(sig, code, pid, super::cred::getuid(174) as u32)
+    Siginfo::from_sender(sig, code, super::pidns::guest_pid(pid).unwrap_or(0), super::cred::getuid(174) as u32)
 }
 
 fn my_pid() -> i64 {
@@ -1170,6 +1238,7 @@ pub(super) fn signal_process(p: i32, sig: i32, h: i32) -> i64 {
     if !(super::cred::may_signal(p) || sig == SIGCONT && same_session()) {
         return -(EPERM as i64);
     }
+    match super::pidns::init_signal_allowed(p,sig){Ok(true)=>{},Ok(false)=>return -(EPERM as i64),Err(error)=>return error}
     if sig != 0 && (h == 0 || SYNCHRONOUS & bit(sig) != 0) {
         return super::ptrace::remote_signal(p, 0, &sender(sig, sigframe::SI_USER));
     }
@@ -1200,6 +1269,9 @@ pub fn from_peer(tid: i32, info: Siginfo) -> i64 {
 /// kill(pid, sig). Other processes are signalled through Darwin, which has
 /// no real-time signals.
 pub fn kill(a: [u64; 6]) -> i64 {
+    if !(0..=NSIG).contains(&(a[1] as i32)) { return -(EINVAL as i64); }
+    let mut a=a;
+    a[0]=match super::pidns::syscall_pid(a[0] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};
     let (pid, sig) = (a[0] as i32 as i64, a[1] as i32);
     if !(0..=NSIG).contains(&sig) {
         return -(EINVAL as i64);
@@ -1241,7 +1313,15 @@ pub fn kill(a: [u64; 6]) -> i64 {
     // one member was signalled (`__kill_pgrp_info`); `kill(-1)` skips the
     // caller, ignores EPERM and fails only for want of a target.
     let me = my_pid() as i32;
-    let targets: Vec<i32> = targets.into_iter().filter(|&p| !all || p != me).collect();
+    let mut eligible=Vec::new();
+    for p in targets {
+        if all {
+            let init=match super::pidns::is_namespace_init(p){Ok(init)=>init,Err(error)=>return error};
+            if p==me||init{continue;}
+        }
+        eligible.push(p);
+    }
+    let targets=eligible;
     let mut sent = false;
     let mut err = if all && !targets.is_empty() {
         0
@@ -1270,6 +1350,11 @@ fn target(tgid: Option<i64>, tid: i64, sig: i32) -> Result<std::sync::Arc<Thread
 
 /// tkill(tid, sig) and tgkill(tgid, tid, sig).
 pub fn tgkill(nr: u64, a: [u64; 6]) -> i64 {
+    let sig = if nr == 131 { a[2] } else { a[1] } as i32;
+    if !(0..=NSIG).contains(&sig) || a[0] as i32 <= 0 || nr == 131 && a[1] as i32 <= 0 { return -(EINVAL as i64); }
+    let mut a=a;
+    a[0]=match super::pidns::syscall_pid(a[0] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};
+    if nr==131{a[1]=match super::pidns::syscall_pid(a[1] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};}
     let (tgid, tid, sig) = if nr == 131 {
         (Some(a[0] as i32 as i64), a[1] as i32 as i64, a[2] as i32)
     } else {
@@ -1310,8 +1395,15 @@ fn peer(pid: i32, tid: i32, info: Siginfo) -> i64 {
     if !super::cred::may_signal(pid) {
         return -(EPERM as i64);
     }
+    match super::pidns::init_signal_allowed(pid,info.signo){Ok(true)=>{},Ok(false)=>return -(EPERM as i64),Err(error)=>return error}
     if info.signo == 0 {
         return 0;
+    }
+    match super::pidns::is_namespace_init(pid){
+        // Darwin has no sigqueue transport. Native init does not run the
+        // guest ptrace signal agent; losing si_code/value is not delivery.
+        Ok(true)=>return -(crate::errno::EOPNOTSUPP as i64),
+        Ok(false)=>{},Err(error)=>return error,
     }
     super::ptrace::remote_signal(pid, tid, &info)
 }
@@ -1327,6 +1419,9 @@ fn queued_to_peer(pid: i32, tid: i32, info: Siginfo) -> i64 {
 
 /// rt_sigqueueinfo(tgid, sig, info).
 pub fn rt_sigqueueinfo(a: [u64; 6]) -> i64 {
+    if !valid(a[1] as i32 as u64) || a[0] as i32 <= 0 { return -(EINVAL as i64); }
+    let mut a=a;
+    a[0]=match super::pidns::syscall_pid(a[0] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};
     let (tgid, sig) = (a[0] as i32 as i64, a[1] as i32);
     if !valid(sig as u64) {
         return -(EINVAL as i64);
@@ -1342,6 +1437,9 @@ pub fn rt_sigqueueinfo(a: [u64; 6]) -> i64 {
 
 /// rt_tgsigqueueinfo(tgid, tid, sig, info).
 pub fn rt_tgsigqueueinfo(a: [u64; 6]) -> i64 {
+    if !valid(a[2] as i32 as u64) || a[0] as i32 <= 0 || a[1] as i32 <= 0 { return -(EINVAL as i64); }
+    let mut a=a;
+    for index in [0,1]{a[index]=match super::pidns::syscall_pid(a[index] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};}
     let sig = a[2] as i32;
     if !valid(sig as u64) {
         return -(EINVAL as i64);
@@ -1516,4 +1614,92 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
         flags: r.i32(),
     };
     *lock(&current().sig.alt) = alt;
+}
+
+#[cfg(test)]
+mod host_errno_tests {
+    use super::HostErrno;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static SIGNALS: AtomicU32 = AtomicU32::new(0);
+
+    #[test]
+    fn signal_handler_preserves_interrupted_host_errno() {
+        const CHILD: &str = "__isolated_host_errno_fork";
+        if !std::env::args().any(|argument| argument == CHILD) {
+            use std::os::unix::process::CommandExt;
+            struct ChildGroup(std::process::Child);
+            impl Drop for ChildGroup {
+                fn drop(&mut self) {
+                    if self.0.try_wait().ok().flatten().is_none() {
+                        unsafe { libc::killpg(self.0.id() as i32, libc::SIGKILL); }
+                        let _ = self.0.wait();
+                    }
+                }
+            }
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "sys::signal::host_errno_tests::signal_handler_preserves_interrupted_host_errno", "--skip", CHILD, "--nocapture"])
+                .process_group(0).spawn().unwrap();
+            let mut child = ChildGroup(child);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if let Some(status) = child.0.try_wait().unwrap() {
+                    assert!(status.success(), "isolated raw-fork fixture: {status}");
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    unsafe { libc::killpg(child.0.id() as i32, libc::SIGKILL); }
+                    child.0.wait().unwrap();
+                    panic!("isolated raw-fork fixture exceeded ten seconds");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            return;
+        }
+        extern "C" fn handler(_: i32) {
+            let _errno = HostErrno::save();
+            unsafe { libc::close(-1); }
+            SIGNALS.fetch_add(1, Ordering::Relaxed);
+        }
+        // Signal dispositions stay isolated from the parallel test harness.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = handler as *const () as usize;
+                libc::sigemptyset(&mut action.sa_mask);
+                if libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut()) != 0 { libc::_exit(2); }
+                let result = libc::open(c"/dev/null/not-a-directory".as_ptr(), libc::O_RDONLY);
+                let error = *libc::__error();
+                if result != -1 || error != libc::ENOTDIR { libc::_exit(3); }
+                if libc::kill(libc::getpid(), libc::SIGUSR1) != 0 || *libc::__error() != error { libc::_exit(4); }
+                let fd = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY);
+                if fd < 0 { libc::_exit(5); }
+                *libc::__error() = libc::EINTR;
+                if libc::kill(libc::getpid(), libc::SIGUSR1) != 0 || *libc::__error() != libc::EINTR { libc::_exit(6); }
+                libc::close(fd);
+                if SIGNALS.load(Ordering::Relaxed) != 2 { libc::_exit(7); }
+                libc::_exit(0);
+            }
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(libc::WEXITSTATUS(status), 0);
+    }
+}
+
+#[cfg(test)]
+mod namespace_argument_tests {
+    #[test]
+    fn invalid_signals_are_rejected_before_unregistered_init_resolution() {
+        let invalid = 65;
+        let expected = -(crate::errno::EINVAL as i64);
+        assert_eq!(super::kill([1, invalid, 0, 0, 0, 0]), expected);
+        assert_eq!(super::tgkill(131, [1, 1, invalid, 0, 0, 0]), expected);
+        assert_eq!(super::tgkill(130, [1, invalid, 0, 0, 0, 0]), expected);
+        assert_eq!(super::rt_sigqueueinfo([1, invalid, 0, 0, 0, 0]), expected);
+        assert_eq!(super::rt_tgsigqueueinfo([1, 1, invalid, 0, 0, 0]), expected);
+    }
 }

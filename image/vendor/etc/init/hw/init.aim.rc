@@ -54,6 +54,12 @@ on early-init
 # triggers init would.
 on fs
     mount_all /vendor/etc/fstab.aim --early
+    # early_hal starts before the original post-fs-data action. Prepare
+    # keystore's persistent store before that class can publish keystore2;
+    # the original action repeats these idempotent ownership checks later.
+    mkdir /data/misc 01771 system misc encryption=Require
+    mkdir /data/misc/keystore 0700 keystore keystore
+    restorecon /data/misc /data/misc/keystore
 
 on late-fs
     mount_all /vendor/etc/fstab.aim --late

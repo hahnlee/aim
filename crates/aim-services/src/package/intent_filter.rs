@@ -86,10 +86,39 @@ pub struct PatternMatcher {
     parsed: Option<Vec<i32>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PatternError {
+    IllegalArgument(String),
+    IndexOutOfBounds { length: usize, index: usize },
+}
+impl From<String> for PatternError {
+    fn from(value: String) -> Self {
+        Self::IllegalArgument(value)
+    }
+}
+impl From<&str> for PatternError {
+    fn from(value: &str) -> Self {
+        Self::IllegalArgument(value.into())
+    }
+}
+impl std::fmt::Display for PatternError {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IllegalArgument(value) => out.write_str(value),
+            Self::IndexOutOfBounds { length, index } => {
+                write!(out, "length={length}; index={index}")
+            }
+        }
+    }
+}
+
 impl PatternMatcher {
     /// `new PatternMatcher(pattern, type)`; an error for an advanced glob
     /// the original refuses.
     pub fn new(pattern: &str, kind: i32) -> std::result::Result<PatternMatcher, String> {
+        Self::new_checked(pattern, kind).map_err(|error| error.to_string())
+    }
+    pub fn new_checked(pattern: &str, kind: i32) -> std::result::Result<PatternMatcher, PatternError> {
         let parsed = if kind == PATTERN_ADVANCED_GLOB {
             Some(parse_advanced(&utf16(pattern))?)
         } else {
@@ -112,6 +141,12 @@ impl PatternMatcher {
             kind,
             parsed,
         })
+    }
+
+    pub(crate) fn write_cache(&self, writer: &mut super::parse::parcel::Writer) {
+        writer.string(Some(&self.pattern));
+        writer.int(self.kind);
+        writer.ints(self.parsed.as_deref());
     }
 
     /// `writeToParcel`.
@@ -243,7 +278,7 @@ fn match_glob(pattern: &[u16], m: &[u16]) -> bool {
 }
 
 /// `PatternMatcher.parseAndVerifyAdvancedPattern`.
-fn parse_advanced(pattern: &[u16]) -> std::result::Result<Vec<i32>, String> {
+fn parse_advanced(pattern: &[u16]) -> std::result::Result<Vec<i32>, PatternError> {
     let lp = pattern.len();
     let mut out: Vec<i32> = Vec::new();
     let (mut ip, mut in_set, mut in_range, mut in_char_class) = (0, false, false, false);
@@ -258,7 +293,7 @@ fn parse_advanced(pattern: &[u16]) -> std::result::Result<Vec<i32>, String> {
     };
     let after_token = |out: &[i32]| match out.last() {
         Some(&t) if !is_modifier(t) => Ok(()),
-        _ => Err("Modifier must follow a token.".to_owned()),
+        _ => Err(PatternError::from("Modifier must follow a token.")),
     };
     while ip < lp {
         if out.len() > MAX_PATTERN_STORAGE - 3 {
@@ -271,7 +306,8 @@ fn parse_advanced(pattern: &[u16]) -> std::result::Result<Vec<i32>, String> {
                 if in_set {
                     add = true;
                 } else {
-                    if pattern.get(ip + 1) == Some(&0x5e) {
+                    let next = pattern.get(ip + 1).ok_or(PatternError::IndexOutOfBounds {length: lp, index: ip + 1})?;
+                    if *next == 0x5e {
                         out.push(PARSED_TOKEN_CHAR_SET_INVERSE_START);
                         ip += 1;
                     } else {
@@ -577,44 +613,22 @@ pub const ACTION_ALLOW: i32 = 0;
 pub struct UriRelativeFilter {
     pub uri_part: i32,
     pub pattern_type: i32,
-    pub filter: String,
+    pub filter: Option<String>,
 }
 
 impl UriRelativeFilter {
-    fn matches(&self, data: &Uri) -> bool {
-        // The original builds its matcher here, and throws for a bad
-        // advanced glob.
-        let Ok(pe) = PatternMatcher::new(&self.filter, self.pattern_type) else {
-            return false;
-        };
-        match self.uri_part {
-            URI_PART_PATH => pe.matches(data.path().as_deref()),
-            URI_PART_QUERY => data.query().is_some_and(|query| {
-                let mut params = java_split(&query, '&');
-                if params.len() == 1 {
-                    params = java_split(&query, ';');
-                }
-                params.iter().any(|p| pe.matches(Some(p)))
-            }),
-            URI_PART_FRAGMENT => pe.matches(data.fragment().as_deref()),
-            _ => false,
+    fn matches(
+        &self,
+        data: &Uri,
+    ) -> std::result::Result<bool, super::domain_verification::uri_parcel::MatchError> {
+        super::domain_verification::uri_parcel::Filter {
+            uri_part: self.uri_part,
+            pattern_type: self.pattern_type,
+            filter: self.filter.clone(),
         }
+        .match_data(data)
     }
 }
-
-/// `String.split` by one character: trailing empty strings dropped, one
-/// empty string for an empty input.
-fn java_split(s: &str, by: char) -> Vec<&str> {
-    let mut parts: Vec<&str> = s.split(by).collect();
-    while parts.len() > 1 && parts.last() == Some(&"") {
-        parts.pop();
-    }
-    if parts.len() == 1 && parts[0].is_empty() && !s.is_empty() {
-        parts.clear();
-    }
-    parts
-}
-
 /// `UriRelativeFilterGroup`: matches when all its filters do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UriRelativeFilterGroup {
@@ -632,23 +646,37 @@ impl UriRelativeFilterGroup {
 
     /// `addUriRelativeFilter`: a set.
     pub fn add(&mut self, uri_part: i32, pattern_type: i32, filter: &str) {
+        self.add_nullable(uri_part, pattern_type, Some(filter));
+    }
+    pub fn add_nullable(&mut self, uri_part: i32, pattern_type: i32, filter: Option<&str>) {
         let f = UriRelativeFilter {
             uri_part,
             pattern_type,
-            filter: filter.to_owned(),
+            filter: filter.map(str::to_owned),
         };
         if !self.filters.contains(&f) {
             self.filters.push(f);
+            self.filters.sort_by_key(|f| {
+                31i32
+                    .wrapping_add(f.uri_part)
+                    .wrapping_mul(31)
+                    .wrapping_add(f.pattern_type)
+                    .wrapping_mul(31)
+                    .wrapping_add(
+                        f.filter
+                            .as_deref()
+                            .map_or(0, crate::package::info::java_hash),
+                    )
+            });
         }
     }
-
     fn read(r: &mut Reader<'_>, strings: &mut dyn Strings) -> Result<UriRelativeFilterGroup> {
         let mut group = UriRelativeFilterGroup::new(r.read_i32()?);
         for _ in 0..r.read_i32()?.max(0) {
             let uri_part = r.read_i32()?;
             let pattern_type = r.read_i32()?;
-            let filter = strings.string16(r)?.unwrap_or_default();
-            group.add(uri_part, pattern_type, &filter);
+            let filter = strings.string16(r)?;
+            group.add_nullable(uri_part, pattern_type, filter.as_deref());
         }
         Ok(group)
     }
@@ -659,7 +687,7 @@ impl UriRelativeFilterGroup {
         for f in &self.filters {
             p.write_i32(f.uri_part);
             p.write_i32(f.pattern_type);
-            p.write_string16(Some(&f.filter));
+            p.write_string16(f.filter.as_deref());
         }
     }
 
@@ -667,23 +695,35 @@ impl UriRelativeFilterGroup {
         let int = |e: &Element, name| e.string(name).and_then(|v| parse_int(&v)).unwrap_or(0);
         let mut group = UriRelativeFilterGroup::new(int(e, "allow"));
         for f in e.children().filter(|f| f.name == "uriRelativeFilter") {
-            let filter = f.string("filter").unwrap_or_default();
-            group.add(int(f, "part"), int(f, "pattern"), &filter);
+            let filter = f.string("filter");
+            group.add_nullable(int(f, "part"), int(f, "pattern"), filter.as_deref());
         }
         group
     }
 
     /// `matchGroupsToUri`: the first group that matches decides.
-    pub fn match_groups(groups: &[UriRelativeFilterGroup], data: &Uri) -> bool {
-        groups
-            .iter()
-            .find(|g| g.matches(data))
-            .is_some_and(|g| g.action == ACTION_ALLOW)
+    pub fn match_groups(
+        groups: &[UriRelativeFilterGroup],
+        data: &Uri,
+    ) -> std::result::Result<bool, super::domain_verification::uri_parcel::MatchError> {
+        for group in groups {
+            if group.filters.is_empty() {
+                continue;
+            }
+            let mut matched = true;
+            for filter in &group.filters {
+                if !filter.matches(data)? {
+                    matched = false;
+                    break;
+                }
+            }
+            if matched {
+                return Ok(group.action == ACTION_ALLOW);
+            }
+        }
+        Ok(false)
     }
 
-    fn matches(&self, data: &Uri) -> bool {
-        !self.filters.is_empty() && self.filters.iter().all(|f| f.matches(data))
-    }
 }
 
 /// `android.content.IntentFilter`. A list the original keeps null is
@@ -949,8 +989,11 @@ impl IntentFilter {
     }
 
     /// `matchRelRefGroups`: the first group that matches decides.
-    fn match_rel_ref_groups(&self, data: &Uri) -> bool {
-        let groups = self.uri_relative_filter_groups.as_deref().unwrap_or_default();
+    fn match_rel_ref_groups(&self, data: &Uri) -> std::result::Result<bool, super::domain_verification::uri_parcel::MatchError> {
+        let groups = self
+            .uri_relative_filter_groups
+            .as_deref()
+            .unwrap_or_default();
         UriRelativeFilterGroup::match_groups(groups, data)
     }
 
@@ -961,16 +1004,16 @@ impl IntentFilter {
         scheme: Option<&str>,
         data: Option<&Uri>,
         wildcards: bool,
-    ) -> i32 {
+    ) -> std::result::Result<i32, super::domain_verification::uri_parcel::MatchError> {
         let wildcard_with_mime_groups =
             wildcards && self.mime_groups.as_ref().is_some_and(|g| !g.is_empty());
         let mut m = MATCH_CATEGORY_EMPTY;
         if !wildcard_with_mime_groups && self.types.is_none() && self.schemes.is_none() {
-            return if ty.is_none() && data.is_none() {
+            return Ok(if ty.is_none() && data.is_none() {
                 MATCH_CATEGORY_EMPTY + MATCH_ADJUSTMENT_NORMAL
             } else {
                 NO_MATCH_DATA
-            };
+            });
         }
         if let Some(schemes) = &self.schemes {
             let scheme_or_empty = scheme.unwrap_or("");
@@ -978,7 +1021,7 @@ impl IntentFilter {
             {
                 m = MATCH_CATEGORY_SCHEME;
             } else {
-                return NO_MATCH_DATA;
+                return Ok(NO_MATCH_DATA);
             }
             if let (Some(_), Some(data)) = (&self.ssps, data) {
                 let ssp = data.scheme_specific_part();
@@ -992,44 +1035,44 @@ impl IntentFilter {
                 // Without a scheme-specific part, an authority must match.
                 let auth = self.match_data_authority(data, wildcards);
                 if auth < 0 {
-                    return NO_MATCH_DATA;
+                    return Ok(NO_MATCH_DATA);
                 }
                 if self.paths.is_none() && self.uri_relative_filter_groups.is_none() {
                     m = auth;
                 } else {
                     let data = data.expect("an authority matched");
                     if self.has_data_path(data.path().as_deref(), wildcards)
-                        || self.match_rel_ref_groups(data)
+                        || self.match_rel_ref_groups(data)?
                     {
                         m = MATCH_CATEGORY_PATH;
                     } else {
-                        return NO_MATCH_DATA;
+                        return Ok(NO_MATCH_DATA);
                     }
                 }
             }
             if m == NO_MATCH_DATA {
-                return NO_MATCH_DATA;
+                return Ok(NO_MATCH_DATA);
             }
         } else if scheme.is_some_and(|s| {
             !s.is_empty() && s != "content" && s != "file" && !(wildcards && s == WILDCARD)
         }) {
             // A type-only filter matches no data, or content: and file:
             // data.
-            return NO_MATCH_DATA;
+            return Ok(NO_MATCH_DATA);
         }
         if wildcard_with_mime_groups {
-            return MATCH_CATEGORY_TYPE;
+            return Ok(MATCH_CATEGORY_TYPE);
         } else if self.types.is_some() {
             if self.find_mime_type(ty) {
                 m = MATCH_CATEGORY_TYPE;
             } else {
-                return NO_MATCH_TYPE;
+                return Ok(NO_MATCH_TYPE);
             }
         } else if ty.is_some() {
             // Without types, only an intent without one matches.
-            return NO_MATCH_TYPE;
+            return Ok(NO_MATCH_TYPE);
         }
-        m + MATCH_ADJUSTMENT_NORMAL
+        Ok(m + MATCH_ADJUSTMENT_NORMAL)
     }
 
     /// `matchCategories`: whether every category of the intent is the
@@ -1056,23 +1099,23 @@ impl IntentFilter {
         categories: Option<&[String]>,
         wildcards: bool,
         ignore_actions: Option<&[&str]>,
-    ) -> i32 {
+    ) -> std::result::Result<i32, super::domain_verification::uri_parcel::MatchError> {
         if let Some(action) = action
             && !self.match_action(action, wildcards, ignore_actions)
         {
-            return NO_MATCH_ACTION;
+            return Ok(NO_MATCH_ACTION);
         }
-        let data_match = self.match_data(ty, scheme, data, wildcards);
+        let data_match = self.match_data(ty, scheme, data, wildcards)?;
         if data_match < 0 {
-            return data_match;
+            return Ok(data_match);
         }
         if !self.match_categories(categories) {
-            return NO_MATCH_CATEGORY;
+            return Ok(NO_MATCH_CATEGORY);
         }
         if self.extras.is_some() {
-            return NO_MATCH_EXTRAS;
+            return Ok(NO_MATCH_EXTRAS);
         }
-        data_match
+        Ok(data_match)
     }
 
     /// `IntentFilter(Parcel)`.

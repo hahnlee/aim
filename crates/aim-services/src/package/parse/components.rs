@@ -859,11 +859,11 @@ impl Parser<'_> {
     fn parse_window_layout(&self, e: &Element) -> Result<WindowLayout> {
         let sa = self.obtain(e);
         let unsupported = |what: &str| Error::Unsupported(format!("<layout android:{what}>"));
-        let density = || {
-            self.platform
-                .density_dpi
-                .map(|d| d as f32 * (1.0 / 160.0))
-                .ok_or_else(|| unsupported("a size without the display's density"))
+        let density = |attribute: &str| {
+            if !sa.dimension_requires_density(attribute) { return Ok(1.0); }
+            self.platform.density_dpi.filter(|density| *density > 0)
+                .map(|density| density as f32 * (1.0 / 160.0))
+                .ok_or_else(|| unsupported(&format!("{attribute}: DIP/SP dimension requires actual DisplayMetrics.densityDpi")))
         };
         let mut l = WindowLayout {
             width: -1,
@@ -883,7 +883,7 @@ impl Parser<'_> {
                 TYPE_FRACTION => *fraction = sa.fraction(attr, -1.0),
                 TYPE_DIMENSION => {
                     *size = sa
-                        .dimension_pixel_size(attr, -1, density()?)
+                        .dimension_pixel_size(attr, -1, density(attr)?)
                         .ok_or_else(|| unsupported(attr))?
                 }
                 _ => {}
@@ -896,7 +896,7 @@ impl Parser<'_> {
         ] {
             if sa.has_value(attr) {
                 *size = sa
-                    .dimension_pixel_size(attr, -1, density()?)
+                    .dimension_pixel_size(attr, -1, density(attr)?)
                     .ok_or_else(|| unsupported(attr))?;
             }
         }

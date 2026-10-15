@@ -45,4 +45,4 @@ pub use shadow::{
     FileId, ShadowCopy, ShadowKind, ShadowObject, ShadowParcel, ShadowReply, ShadowSink,
 };
 pub use state::{Notifier, Resume, Tid};
-pub use trace::TraceRecord;
+pub use trace::{PendingTraceRecord, PendingTraceSnapshot, TraceRecord};

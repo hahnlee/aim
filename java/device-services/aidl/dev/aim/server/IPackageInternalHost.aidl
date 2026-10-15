@@ -1,0 +1,47 @@
+package dev.aim.server;
+import android.content.IntentSender;
+import android.content.Intent;
+import android.content.pm.PackageInstaller;
+import dev.aim.server.IPackageMutationReservation;
+/** Native System owns internal mutation/lifecycle transactions; trusted origin remains explicit. */
+interface IPackageInternalHost {
+    void setKeepUninstalledPackages(in List<String> packages, int callingUid, int callingPid);
+    void removeAllNonSystemPackageSuspensions(int userId, int callingUid, int callingPid);
+    void removeNonSystemPackageSuspensions(String packageName, int userId, int callingUid, int callingPid);
+    void removeDistractingPackageRestrictions(String packageName, int userId, int callingUid, int callingPid);
+    void removeAllDistractingPackageRestrictions(int userId, int callingUid, int callingPid);
+    void flushPackageRestrictions(int userId, int callingUid, int callingPid);
+    String[] setPackagesSuspendedByAdmin(int userId, in String[] packages, boolean suspended, int callingUid, int callingPid);
+    void addIsolatedUid(int isolatedUid, int ownerUid, int callingUid, int callingPid);
+    void removeIsolatedUid(int isolatedUid, int callingUid, int callingPid);
+    void notifyPackageUse(String packageName, int reason, int callingUid, int callingPid);
+    void onPackageProcessKilledForUninstall(String packageName, int callingUid, int callingPid);
+    void freeStorage(String volumeUuid, long bytes, int flags, int callingUid, int callingPid);
+    void freeAllAppCacheAboveQuota(String volumeUuid, int callingUid, int callingPid);
+    void setEnableRollbackCode(int token, int code, int callingUid, int callingPid);
+    void finishPackageInstall(int token, boolean didLaunch, int callingUid, int callingPid);
+    String removeLegacyDefaultBrowserPackageName(int userId, int callingUid, int callingPid);
+    void uninstallApex(String packageName, long version, int userId, in IntentSender sender, int flags, int callingUid, int callingPid);
+    void updateRuntimePermissionsFingerprint(int userId, int callingUid, int callingPid);
+    void migrateLegacyObbData(int callingUid, int callingPid);
+    void writeSettings(boolean async, int callingUid, int callingPid);
+    void writePermissionSettings(in int[] users, boolean async, int callingUid, int callingPid);
+    void setVisibilityLogging(String packageName, boolean enabled, int callingUid, int callingPid);
+    void unsuspendAdminSuspendedPackages(int userId, int callingUid, int callingPid);
+    long deleteOatArtifactsOfPackage(String packageName, int callingUid, int callingPid);
+    void reconcileAppsData(int userId, int flags, boolean migrateAppsData, int callingUid, int callingPid);
+    void setPackageStoppedState(String packageName, boolean stopped, int userId, int callingUid, int callingPid);
+    void notifyComponentUsed(String packageName, int userId, String caller, String debugInfo, int callingUid, int callingPid);
+    void sendPackageRestartedBroadcast(String packageName, int uid, int flags, int callingUid, int callingPid);
+    void sendPackageDataClearedBroadcast(String packageName, int uid, int userId, boolean restore, boolean instant, int callingUid, int callingPid);
+    void pruneInstantApps(int callingUid, int callingPid);
+    void shutdown(int callingUid, int callingPid);
+    PackageInstaller.SessionInfo[] getHistoricalSessions(int userId, int callingUid, int callingPid);
+    void grantImplicitAccess(int userId, in Intent intent, int recipientAppId, int visibleUid, boolean direct, boolean retainOnUpdate, int callingUid, int callingPid);
+    IPackageMutationReservation reserveMutation();
+    byte[] getLegacyRuntimePermissionsStateRecord(int userId, int callingUid, int callingPid);
+    void archivePackage(String packageName, String callerPackage, int flags, in IntentSender receiver, int userId, int callingUid, int callingPid);
+    void unarchivePackage(String packageName, String callerPackage, in IntentSender receiver, int userId, boolean showConfirmation, int callingUid, int callingPid);
+    void clearArchiveState(String packageName, int userId, int callingUid, int callingPid);
+    PackageInstaller.SessionInfo getActiveUnarchiveSession(String packageName, int userId, int callingUid, int callingPid);
+}

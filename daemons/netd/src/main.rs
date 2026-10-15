@@ -17,6 +17,7 @@
 mod fwmark;
 mod interfaces;
 mod networks;
+mod readiness;
 mod resolv;
 
 use std::sync::Mutex;
@@ -622,6 +623,7 @@ fn control_socket(name: &str) -> Option<i32> {
 
 fn main() {
     daemon_log::init("netd");
+    readiness::wait();
     if let Err(e) = resolv::start() {
         log::error!("DnsResolver: {e}");
         std::process::exit(1);

@@ -19,10 +19,9 @@ use std::sync::{LazyLock, Mutex, OnceLock};
 use crate::errno::{self, EINVAL, EPERM};
 
 /// `st_flags` of an ashmem file (both set; guest files never have them).
-const MARK: u32 = libc::UF_NODUMP | libc::UF_OPAQUE;
+use aim_ashmem::{MARK, State, XATTR};
 /// The device number fstat reports (misc major 10).
 const RDEV: i32 = (10 << 24) | 58;
-const XATTR: &core::ffi::CStr = c"dev.aim.ashmem";
 const PAGE: u64 = 16384;
 const NAME_LEN: usize = 256;
 const PROT_MASK: u32 = 7; // PROT_READ | PROT_WRITE | PROT_EXEC
@@ -75,6 +74,7 @@ pub fn open(guest: &str, flags: u64) -> Option<i64> {
             return Some(-(e as i64));
         }
         super::fdtab::set_flags(fd, false, flags & O_CLOEXEC != 0);
+        if let Err(error)=super::fdtab::publish_typed_guest(fd){libc::close(fd);return Some(-(error as i64));}
         fd as i64
     })
 }
@@ -138,62 +138,6 @@ pub fn stat(guest: &str) -> Option<libc::stat> {
 /// Link text for `/proc/self/fd/N`.
 pub fn link_name(st: &libc::stat) -> Option<String> {
     marked(st).then(|| "/dev/ashmem".to_string())
-}
-
-/// A region's state besides its size.
-#[derive(Clone, Debug, PartialEq)]
-struct State {
-    prot: u32,
-    mapped: bool,
-    /// Unpinned page ranges, inclusive, sorted and disjoint.
-    unpinned: Vec<(u64, u64)>,
-    name: Vec<u8>,
-}
-
-impl State {
-    /// "prot mapped [start-end ...]\nname".
-    fn encode(&self) -> Vec<u8> {
-        let ranges: Vec<String> = self
-            .unpinned
-            .iter()
-            .map(|(a, b)| format!(" {a}-{b}"))
-            .collect();
-        let mut v =
-            format!("{} {}{}\n", self.prot, self.mapped as u8, ranges.concat()).into_bytes();
-        v.extend_from_slice(&self.name);
-        v
-    }
-
-    fn decode(b: &[u8]) -> Option<State> {
-        let nl = b.iter().position(|&c| c == b'\n')?;
-        let head = std::str::from_utf8(&b[..nl]).ok()?;
-        let mut w = head.split(' ');
-        let prot = w.next()?.parse().ok()?;
-        let mapped = w.next()? == "1";
-        let unpinned = w
-            .map(|r| {
-                let (a, b) = r.split_once('-')?;
-                Some((a.parse().ok()?, b.parse().ok()?))
-            })
-            .collect::<Option<_>>()?;
-        Some(State {
-            prot,
-            mapped,
-            unpinned,
-            name: b[nl + 1..].to_vec(),
-        })
-    }
-}
-
-impl Default for State {
-    fn default() -> State {
-        State {
-            prot: PROT_MASK,
-            mapped: false,
-            unpinned: Vec::new(),
-            name: Vec::new(),
-        }
-    }
 }
 
 /// This process's last copy of each region's state, by (device, inode),
@@ -412,6 +356,31 @@ mod tests {
 
     fn region() -> i32 {
         open("/dev/ashmem", O_CLOEXEC).unwrap() as i32
+    }
+
+    #[test]
+    fn native_immutable_region_obeys_guest_ashmem_contract() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::FileExt;
+        let bytes = vec![0x73; 65536];
+        let file = aim_ashmem::immutable_blob(&bytes).unwrap();
+        let fd = file.as_raw_fd();
+        let mut st = stat_of(fd).unwrap();
+        assert!(as_device(&mut st));
+        assert_eq!(st.st_mode & libc::S_IFMT, libc::S_IFCHR);
+        assert_eq!(st.st_rdev, RDEV);
+        assert_eq!(ioctl(fd, GET_SIZE, 0), Some(bytes.len() as i64));
+        assert_eq!(ioctl(fd, GET_PROT_MASK, 0), Some(1));
+        assert_eq!(ioctl(fd, SET_PROT_MASK, 3), Some(-(EINVAL as i64)));
+        assert_eq!(
+            before_mmap(fd, bytes.len() as u64, 3),
+            Some(-(EPERM as i64))
+        );
+        assert_eq!(before_mmap(fd, bytes.len() as u64, 1), None);
+        assert_eq!(ioctl(fd, SET_SIZE, 1), Some(-(EINVAL as i64)));
+        let mut read = vec![0; bytes.len()];
+        file.read_exact_at(&mut read, 0).unwrap();
+        assert_eq!(read, bytes);
     }
 
     #[test]

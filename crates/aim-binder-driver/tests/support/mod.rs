@@ -248,6 +248,8 @@ impl Process {
         guest.install_file(file).unwrap()
     }
 
+    pub fn close_file(&self,fd:u32){self.files.lock().unwrap().files.remove(&fd);}
+
     pub fn file(&self, fd: u32) -> Option<File> {
         self.files.lock().unwrap().files.get(&fd).cloned()
     }

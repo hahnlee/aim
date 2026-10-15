@@ -15,8 +15,11 @@ fn signing(p: &mut Parcel, scheme: i32, signers: &[&[u8]], past: Option<&[(&[u8]
     p.write_i32(signers.len() as i32);
     for s in signers {
         write_byte_array(p, Some(s));
-        p.write_i32(0);
+        p.write_i32(5);
     }
+    p.write_i32(1);
+    p.write_string16(Some("sun.security.rsa.RSAPublicKeyImpl"));
+    write_byte_array(p, Some(b"serialized-key"));
     match past {
         None => p.write_i32(-1),
         Some(past) => {
@@ -29,32 +32,71 @@ fn signing(p: &mut Parcel, scheme: i32, signers: &[&[u8]], past: Option<&[(&[u8]
     }
 }
 
-/// A shared library without dependencies, as `PackageFeed.sharedLibrary`
-/// writes it; `dependency` adds one.
+/// Original SharedLibraryInfo bytes inside the feed's byte-array envelope.
 fn library(p: &mut Parcel, name: &str, dependency: Option<&str>) {
-    p.write_string16(Some(name));
-    p.write_string16(Some("/system/framework/lib.jar"));
-    p.write_string16(None);
-    p.write_i32(-1);
-    p.write_i64(-1);
-    p.write_i32(0);
-    p.write_bool(false);
-    p.write_string16(Some("android"));
-    p.write_i64(0);
-    p.write_i32(1);
-    p.write_string16(Some("com.example.app"));
-    p.write_i64(7);
-    match dependency {
-        None => p.write_i32(-1),
-        Some(d) => {
-            p.write_i32(1);
-            library(p, d, None);
-        }
+    use crate::package::model::SharedLibrary;
+    let new = |name: &str| SharedLibrary {
+        name: Some(name.into()),
+        path: Some("/system/framework/lib.jar".into()),
+        version: -1,
+        declaring: ("android".into(), 0),
+        dependents: vec![Some(("com.example.app".into(), 7))],
+        optional_dependents: Some(vec![None, Some(("optional.consumer".into(), 19))]),
+        cert_digests: Some(vec![None, Some("certificate.digest".into())]),
+        ..Default::default()
+    };
+    let mut library = new(name);
+    if let Some(name) = dependency {
+        library.dependencies.push(Some(new(name)));
     }
+    let mut parcel = Parcel::new();
+    crate::package::info::write_libraries(&mut parcel, Some(&[library]));
+    // Strip writeTypedList's count and present marker.
+    write_byte_array(p, Some(&parcel.data()[8..]));
 }
 
 /// A package record in `PackageFeed.packageState`'s layout.
 fn package_record(name: &str, shared_user_app_id: Option<i32>) -> Vec<u8> {
+    package_record_with_mime(
+        name,
+        shared_user_app_id,
+        &[(Some("images".into()), vec![Some("image/png".into())])],
+    )
+}
+
+fn package_record_with_mime(
+    name: &str,
+    shared_user_app_id: Option<i32>,
+    groups: &[(Option<String>, Vec<Option<String>>)],
+) -> Vec<u8> {
+    package_record_metadata(name, shared_user_app_id, groups, 42, -1)
+}
+
+fn package_record_metadata(
+    name: &str,
+    shared_user_app_id: Option<i32>,
+    groups: &[(Option<String>, Vec<Option<String>>)],
+    version: i64,
+    category: i32,
+) -> Vec<u8> {
+    package_record_with_files(
+        name,
+        shared_user_app_id,
+        groups,
+        version,
+        category,
+        &[Some("/system/framework/lib.jar")],
+    )
+}
+
+fn package_record_with_files(
+    name: &str,
+    shared_user_app_id: Option<i32>,
+    groups: &[(Option<String>, Vec<Option<String>>)],
+    version: i64,
+    category: i32,
+    files: &[Option<&str>],
+) -> Vec<u8> {
     let mut p = Parcel::new();
     p.write_string16(Some(name));
     p.write_i32(10_100);
@@ -66,9 +108,9 @@ fn package_record(name: &str, shared_user_app_id: Option<i32>) -> Vec<u8> {
     p.write_string16(None);
     p.write_string16(Some("default:targetSdkVersion=36"));
     p.write_string16(None);
-    p.write_i64(42);
+    p.write_i64(version);
     p.write_i32(36);
-    p.write_i32(-1);
+    p.write_i32(category);
     p.write_i32(2);
     p.write_i64(1_000);
     p.write_i64(2_000);
@@ -76,14 +118,22 @@ fn package_record(name: &str, shared_user_app_id: Option<i32>) -> Vec<u8> {
     // hasSharedUser, isDebuggable, isPrivileged, isSystem.
     let shared = u32::from(shared_user_app_id.is_some());
     p.write_i32((shared | 1 << 3 | 1 << 15 | 1 << 19) as i32);
-    p.write_i32(1);
-    p.write_string16(Some("images"));
-    strings(&mut p, &["image/png"]);
+    p.write_i32(groups.len() as i32);
+    for (name, types) in groups {
+        p.write_string16(name.as_deref());
+        p.write_i32(types.len() as i32);
+        for value in types {
+            p.write_string16(value.as_deref());
+        }
+    }
     p.write_i32(1);
     p.write_string16(Some("com.google.android.trichromelibrary"));
     p.write_i64(7);
     p.write_i32(0);
-    strings(&mut p, &["/system/framework/lib.jar"]);
+    p.write_i32(files.len() as i32);
+    for file in files {
+        p.write_string16(*file);
+    }
     p.write_i32(1);
     library(&mut p, "lib", Some("dep"));
     strings(&mut p, &["com.example.app.PERMISSION"]);
@@ -94,7 +144,7 @@ fn package_record(name: &str, shared_user_app_id: Option<i32>) -> Vec<u8> {
     p.write_string16(None);
     p.write_string16(Some("com.android.vending"));
     p.write_i32(3);
-    p.write_i32(-1);
+    signing(&mut p, 3, &[b"\x04"], None);
     p.write_bool(true);
     p.write_string16(Some("4a1e7c2d-0000-0000-0000-000000000000"));
     p.write_i32(1);
@@ -210,6 +260,19 @@ fn keys_are_in_javas_order() {
 #[test]
 fn reads_a_package_record() {
     let (p, shared) = record::package(&package_record("com.example.app", Some(1000))).unwrap();
+    for library in [
+        &p.uses_library_infos[0],
+        p.uses_library_infos[0].dependencies[0].as_ref().unwrap(),
+    ] {
+        assert_eq!(
+            library.optional_dependents,
+            Some(vec![None, Some(("optional.consumer".into(), 19))])
+        );
+        assert_eq!(
+            library.cert_digests,
+            Some(vec![None, Some("certificate.digest".into())])
+        );
+    }
     assert_eq!(shared, Some(1000));
     assert_eq!(p.name, "com.example.app");
     assert_eq!(p.app_id, 10_100);
@@ -218,7 +281,10 @@ fn reads_a_package_record() {
     assert_eq!(p.version_code, 42);
     assert_eq!(p.hidden_api_enforcement_policy, 2);
     assert!(p.is.system && p.is.privileged && p.is.debuggable && !p.is.vendor);
-    assert_eq!(p.mime_groups, [("images".into(), vec!["image/png".into()])]);
+    assert_eq!(
+        p.mime_groups,
+        [(Some("images".into()), vec![Some("image/png".into())])]
+    );
     assert_eq!(
         p.uses_static_libraries,
         [("com.google.android.trichromelibrary".into(), 7)]
@@ -226,19 +292,42 @@ fn reads_a_package_record() {
     let lib = &p.uses_library_infos[0];
     assert_eq!(lib.name.as_deref(), Some("lib"));
     assert_eq!(lib.code_paths, None);
-    assert_eq!(lib.dependents, [("com.example.app".into(), 7)]);
-    assert_eq!(lib.dependencies[0].name.as_deref(), Some("dep"));
+    assert_eq!(lib.dependents, [Some(("com.example.app".into(), 7))]);
+    assert_eq!(
+        lib.dependencies[0].as_ref().unwrap().name.as_deref(),
+        Some("dep")
+    );
     assert_eq!(p.installed_permissions, ["com.example.app.PERMISSION"]);
     let signatures = p.signatures.as_ref().unwrap();
+    assert_eq!(signatures.current_flags, vec![5]);
     assert_eq!(signatures.scheme_version, 3);
     assert_eq!(signatures.signatures, [vec![1, 2]]);
+    assert_eq!(
+        signatures.public_keys.as_ref().unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .bytes,
+        b"serialized-key"
+    );
     assert_eq!(signatures.past_signatures, Some(vec![(vec![3], 8)]));
     assert_eq!(
         p.install_source.installer.as_deref(),
         Some("com.android.vending")
     );
     assert_eq!(p.install_source.package_source, 3);
-    assert_eq!(p.install_source.initiating_package_signatures, None);
+    assert_eq!(
+        p.install_source
+            .initiating_package_signatures
+            .as_ref()
+            .unwrap()
+            .public_keys
+            .as_ref()
+            .unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .bytes,
+        b"serialized-key"
+    );
     assert_eq!(
         p.domain_verification,
         Some((
@@ -251,7 +340,7 @@ fn reads_a_package_record() {
         (
             domain.as_str(),
             groups[0].action,
-            groups[0].filters[0].filter.as_str()
+            groups[0].filters[0].filter.as_deref().unwrap()
         ),
         ("example.com", 1, "/private")
     );
@@ -310,7 +399,7 @@ fn publishes_a_batch_whose_digest_matches() {
     let user = user_record(0);
     let system = system_record();
     let mut inner = Inner::default();
-    inner.asked.push((1, Some(77)));
+    inner.asked.push((1, Some(77), Instant::now()));
     inner.begin(true);
     put(&mut inner, PACKAGE, "com.example.app", &package);
     put(&mut inner, PARSED, "com.example.app", b"parcel");
@@ -415,4 +504,430 @@ fn dumps_as_dumpsys_package() {
     assert!(text.contains("      disabledComponents:\n        com.example.app.Main\n"));
     // Arrays.hashCode([1, 2]) = 31 * (31 + 1) + 2.
     assert!(text.contains("signatures=version:3, signatures:[3e2], past signatures:[22 flags: 8]"));
+}
+
+#[test]
+fn package_records_retain_null_and_empty_mime_names_and_types() {
+    let groups = vec![
+        (None, vec![None, Some(String::new())]),
+        (Some(String::new()), vec![None]),
+        (Some("images".into()), vec![Some("image/png".into()), None]),
+    ];
+    let (package, _) = record::package(&package_record_with_mime("app", None, &groups)).unwrap();
+    assert_eq!(package.mime_groups, groups);
+}
+
+#[test]
+fn mime_feed_rejects_absent_collection_owners_and_duplicate_names() {
+    let mut missing_map = Parcel::new();
+    missing_map.write_i32(-1);
+    assert!(
+        record::mime_groups(&mut aim_binder_host::parcel::Reader::new(
+            missing_map.data(),
+            &[]
+        ))
+        .is_err()
+    );
+    let mut missing_types = Parcel::new();
+    missing_types.write_i32(1);
+    missing_types.write_string16(None);
+    missing_types.write_i32(-1);
+    assert!(
+        record::mime_groups(&mut aim_binder_host::parcel::Reader::new(
+            missing_types.data(),
+            &[]
+        ))
+        .is_err()
+    );
+    let groups = vec![(None, Vec::new()), (None, Vec::new())];
+    assert!(record::package(&package_record_with_mime("app", None, &groups)).is_err());
+}
+
+#[test]
+fn publication_history_keeps_intermediate_updates_before_worker_observation() {
+    let start = Instant::now();
+    let mut inner = Inner::default();
+    let mut publish = |seconds, version, category| {
+        inner.begin(false);
+        let bytes = package_record_metadata("example", None, &[], version, category);
+        inner
+            .put(key(PACKAGE, "example"), bytes.len(), &bytes)
+            .unwrap();
+        let digest = records_digest(&inner.records);
+        inner
+            .end_with_clock(&digest, seconds, || {
+                start + Duration::from_secs(seconds as u64)
+            })
+            .unwrap()
+    };
+    let first = publish(0, 1, -1);
+    let intermediate = publish(2, 2, -1);
+    let latest = publish(4, 2, 7);
+    drop(publish);
+    let before = inner.state_before(start + Duration::from_secs(3)).unwrap();
+    assert!(Arc::ptr_eq(&before, &intermediate));
+    assert_eq!(before.packages["example"].version_code, 2);
+    assert_eq!(before.packages["example"].category_override, -1);
+    assert_eq!(first.packages["example"].version_code, 1);
+    assert_eq!(latest.packages["example"].category_override, 7);
+    assert!(inner.state_before(start).is_none());
+    assert!(Arc::ptr_eq(
+        &inner.state_before(start + Duration::from_secs(2)).unwrap(),
+        &first
+    ));
+    assert_eq!(
+        inner
+            .end_with_clock(&[0; 32], 5, || start + Duration::from_secs(5))
+            .err(),
+        Some(Failed::Drifted)
+    );
+    assert_eq!(inner.history.len(), 3);
+    let digest = records_digest(&inner.records);
+    inner
+        .end_with_clock(&digest, 16, || start + Duration::from_secs(16))
+        .unwrap();
+    assert_eq!(inner.history.len(), 2);
+    assert!(inner.state_before(start + Duration::from_secs(3)).is_none());
+    assert!(Arc::ptr_eq(
+        &inner.state_before(start + Duration::from_secs(6)).unwrap(),
+        &latest
+    ));
+}
+
+fn runtime_record(name: &str, has_code: bool, usage: i64) -> Vec<u8> {
+    let mut p = Parcel::new();
+    p.write_string16(Some(name));
+    p.write_i32(10100);
+    p.write_string16(Some("/data/app/~~a/com.example.app-b"));
+    p.write_i64(42);
+    p.write_bool(has_code);
+    p.write_string16(Some("default:targetSdkVersion=36"));
+    p.write_string16(None);
+    aim_service_aidl::write_long_array(&mut p, Some(&[usage; 8]));
+    strings(&mut p, &["/system/framework/lib.jar"]);
+    p.write_i32(1);
+    library(&mut p, "lib", Some("dep"));
+    p.write_bool(false);
+    p.write_bool(false);
+    p.write_bool(false);
+    p.write_string16(None);
+    p.data().to_vec()
+}
+
+#[test]
+fn runtime_records_require_complete_matching_package_and_code_scopes() {
+    let mut inner = Inner::default();
+    put(&mut inner, PACKAGE, "p", &package_record("p", None));
+    put(
+        &mut inner,
+        DISABLED_SYSTEM_PACKAGE,
+        "p",
+        &package_record("p", None),
+    );
+    put(&mut inner, RUNTIME, "p", &runtime_record("p", false, 17));
+    assert!(build(&inner.records, 1, None).is_err());
+    put(
+        &mut inner,
+        DISABLED_SYSTEM_RUNTIME,
+        "p",
+        &runtime_record("p", false, 29),
+    );
+    let state = build(&inner.records, 1, None).unwrap();
+    assert_eq!(
+        state.runtime_inputs[&("p".into(), false)].state.usage,
+        [17; 8]
+    );
+    assert_eq!(
+        state.runtime_inputs[&("p".into(), true)].state.usage,
+        [29; 8]
+    );
+    put(&mut inner, RUNTIME, "p", &runtime_record("p", true, 17));
+    assert!(build(&inner.records, 2, None).is_err());
+    put(&mut inner, PARSED, "p", b"retained code");
+    assert!(build(&inner.records, 2, None).is_ok());
+    put(
+        &mut inner,
+        RUNTIME,
+        "p",
+        &runtime_record("wrong-name", true, 17),
+    );
+    assert!(build(&inner.records, 2, None).is_err());
+    assert_eq!(
+        state.runtime_inputs[&("p".into(), false)].state.usage,
+        [17; 8]
+    );
+    let mut tail = runtime_record("p", false, 0);
+    tail.extend([0; 4]);
+    assert!(record::runtime(&tail).is_err());
+    let mut invalid_bool = runtime_record("p", false, 0);
+    let mut r = aim_binder_host::parcel::Reader::new(&invalid_bool, &[]);
+    r.read_string16().unwrap();
+    r.read_i32().unwrap();
+    r.read_string16().unwrap();
+    r.read_i64().unwrap();
+    let offset = invalid_bool.len() - r.remaining();
+    invalid_bool[offset..offset + 4].copy_from_slice(&2i32.to_le_bytes());
+    assert!(record::runtime(&invalid_bool).is_err());
+    assert!(record::runtime(&runtime_record("p", false, 0)[..17]).is_err());
+}
+
+#[test]
+fn library_file_slots_survive_feed_and_application_queries() {
+    use crate::package::info::{self, Target};
+    let files = [None, Some(""), Some("/system/framework/lib.jar"), None];
+    let (package, _) =
+        record::package(&package_record_with_files("app", None, &[], 42, -1, &files)).unwrap();
+    let expected: Vec<_> = files.iter().map(|p| p.map(str::to_owned)).collect();
+    assert_eq!(package.uses_library_files, expected);
+    let system = crate::package::model::System::default();
+    let parsed = crate::package::pkg::AndroidPackage::default();
+    let user = crate::package::model::PackageUserState {
+        installed: true,
+        ..Default::default()
+    };
+    let target = Target {
+        sys: &system,
+        pkg: &parsed,
+        ps: &package,
+        state: &user,
+        user: 0,
+    };
+    let result =
+        info::generate_application_info(&target, info::flags::GET_SHARED_LIBRARY_FILES).unwrap();
+    assert_eq!(result.shared_library_files, Some(expected));
+}
+
+#[test]
+fn shared_aggregate_batches_require_matching_complete_group_records() {
+    fn aggregate(name: &str, app_id: i32, members: &[&str]) -> Vec<u8> {
+        let mut p = Parcel::new();
+        p.write_string16(Some(name));
+        p.write_i32(app_id);
+        p.write_i32(members.len() as i32);
+        for member in members {
+            p.write_string16(Some(member));
+            p.write_bool(false);
+            p.write_string16(Some("/data/app/member"));
+            p.write_i64(1);
+            p.write_i32(app_id);
+            p.write_bool(false);
+        }
+        p.write_i32(0);
+        p.data().to_vec()
+    }
+    let mut inner = Inner::default();
+    put(
+        &mut inner,
+        SHARED_USER,
+        "group",
+        &shared_user_record("group", 10100, &["b", "a"]),
+    );
+    put(
+        &mut inner,
+        SHARED_PROCESSES,
+        "group",
+        &aggregate("group", 10100, &["b", "a"]),
+    );
+    let state = build(&inner.records, 1, None).unwrap();
+    assert_eq!(state.shared_process_inputs["group"].members, ["b", "a"]);
+    put(
+        &mut inner,
+        SHARED_PROCESSES,
+        "group",
+        &aggregate("group", 10100, &["a", "b"]),
+    );
+    assert!(build(&inner.records, 2, None).is_err());
+    put(
+        &mut inner,
+        SHARED_PROCESSES,
+        "group",
+        &aggregate("group", 10100, &["b", "a"]),
+    );
+    put(
+        &mut inner,
+        SHARED_USER,
+        "empty",
+        &shared_user_record("empty", 10101, &[]),
+    );
+    assert!(build(&inner.records, 2, None).is_err());
+    put(
+        &mut inner,
+        SHARED_PROCESSES,
+        "empty",
+        &aggregate("empty", 10101, &[]),
+    );
+    assert_eq!(
+        build(&inner.records, 2, None)
+            .unwrap()
+            .shared_process_inputs
+            .len(),
+        2
+    );
+    put(
+        &mut inner,
+        SHARED_PROCESSES,
+        "empty",
+        &aggregate("foreign", 10101, &[]),
+    );
+    assert!(build(&inner.records, 3, None).is_err());
+    assert_eq!(state.shared_process_inputs["group"].members, ["b", "a"]);
+}
+
+#[test]
+fn original_user_scopes_require_complete_package_inventory_and_sparse_ids() {
+    fn scope(factory: bool, version: i64, users: &[(i32, bool)]) -> Vec<u8> {
+        let mut p = Parcel::new();
+        p.write_string16(Some("p"));
+        p.write_i32(10100);
+        p.write_string16(Some("/data/app/~~a/com.example.app-b"));
+        p.write_i64(version);
+        p.write_bool(factory);
+        p.write_i32(users.len() as i32);
+        for (id, alias) in users {
+            p.write_i32(*id);
+            p.write_bool(*alias);
+        }
+        p.data().to_vec()
+    }
+    let mut inner = Inner::default();
+    put(&mut inner, PACKAGE, "p", &package_record("p", None));
+    put(
+        &mut inner,
+        DISABLED_SYSTEM_PACKAGE,
+        "p",
+        &package_record("p", None),
+    );
+    put(
+        &mut inner,
+        USER_SCOPE,
+        "p",
+        &scope(false, 42, &[(0, false)]),
+    );
+    assert!(build(&inner.records, 1, None).is_err());
+    put(
+        &mut inner,
+        DISABLED_SYSTEM_USER_SCOPE,
+        "p",
+        &scope(true, 42, &[(0, true)]),
+    );
+    let state = build(&inner.records, 1, None).unwrap();
+    assert_eq!(
+        state.user_scopes[&("p".into(), true)].active_aliases,
+        std::collections::BTreeSet::from([0])
+    );
+    for bad in [
+        scope(true, 41, &[(0, true)]),
+        scope(true, 42, &[]),
+        scope(false, 42, &[(0, false)]),
+    ] {
+        put(&mut inner, DISABLED_SYSTEM_USER_SCOPE, "p", &bad);
+        assert!(build(&inner.records, 2, None).is_err());
+    }
+    assert_eq!(
+        state.user_scopes[&("p".into(), true)].users,
+        std::collections::BTreeSet::from([0])
+    );
+}
+
+#[test]
+fn scan_user_publication_retains_owner_presence_and_rejects_foreign_keys() {
+    let mut inner = Inner::default();
+    let bytes = [1i32, 1, 0, 0, 1]
+        .into_iter()
+        .flat_map(i32::to_le_bytes)
+        .collect::<Vec<_>>();
+    put(&mut inner, SCAN_USERS, "", &bytes);
+    let old = build(&inner.records, 1, None).unwrap();
+    assert!(old.scan_users.as_ref().unwrap().users.as_ref().unwrap()[0].adb_install_disallowed);
+    put(&mut inner, SCAN_USERS, "", &0i32.to_le_bytes());
+    assert_eq!(
+        build(&inner.records, 2, None)
+            .unwrap()
+            .scan_users
+            .unwrap()
+            .users,
+        None
+    );
+    assert_eq!(old.scan_users.unwrap().users.unwrap().len(), 1);
+    put(&mut inner, SCAN_USERS, "foreign", &bytes);
+    assert!(build(&inner.records, 3, None).is_err());
+}
+
+#[test]
+fn apex_inventory_publication_preserves_null_all_and_rejects_foreign_keys() {
+    let mut inner = Inner::default();
+    let frame = |all: i32| {
+        [all, 0]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect::<Vec<_>>()
+    };
+    put(&mut inner, APEX_INVENTORY, "", &frame(-1));
+    let old = build(&inner.records, 1, None).unwrap();
+    assert_eq!(old.apex_inventory.as_ref().unwrap().packages, None);
+    put(&mut inner, APEX_INVENTORY, "", &frame(0));
+    assert_eq!(
+        build(&inner.records, 2, None)
+            .unwrap()
+            .apex_inventory
+            .unwrap()
+            .packages,
+        Some(Vec::new())
+    );
+    assert_eq!(old.apex_inventory.unwrap().packages, None);
+    put(&mut inner, APEX_INVENTORY, "foreign", &frame(0));
+    assert!(build(&inner.records, 3, None).is_err());
+}
+
+#[test]
+fn sandbox_package_publication_distinguishes_missing_null_and_selected_owner() {
+    let mut inner = Inner::default();
+    assert_eq!(
+        build(&inner.records, 1, None)
+            .unwrap()
+            .system
+            .sdk_sandbox_package,
+        None
+    );
+    let frame = |name: Option<&str>| {
+        let mut parcel = Parcel::new();
+        parcel.write_string16(name);
+        parcel.data().to_vec()
+    };
+    put(
+        &mut inner,
+        SDK_SANDBOX_PACKAGE,
+        "",
+        &frame(Some("selected.sdk")),
+    );
+    let old = build(&inner.records, 2, None).unwrap();
+    put(&mut inner, SDK_SANDBOX_PACKAGE, "", &frame(None));
+    assert_eq!(
+        build(&inner.records, 3, None)
+            .unwrap()
+            .system
+            .sdk_sandbox_package,
+        Some(None)
+    );
+    assert_eq!(
+        old.system.sdk_sandbox_package,
+        Some(Some("selected.sdk".into()))
+    );
+    inner.records.clear();
+    assert_eq!(
+        build(&inner.records, 4, None)
+            .unwrap()
+            .system
+            .sdk_sandbox_package,
+        None
+    );
+    put(&mut inner, SDK_SANDBOX_PACKAGE, "foreign", &frame(None));
+    assert!(build(&inner.records, 5, None).is_err());
+    inner.records.clear();
+    let mut trailing = frame(None);
+    trailing.extend(0i32.to_le_bytes());
+    for malformed in [Vec::new(), vec![0], trailing, vec![1, 0, 0, 0]] {
+        put(&mut inner, SDK_SANDBOX_PACKAGE, "", &malformed);
+        assert!(build(&inner.records, 6, None).is_err());
+    }
 }

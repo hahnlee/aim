@@ -328,6 +328,45 @@ impl Writer {
         self.p.set_i32_at(at, (end - start) as i32);
     }
 
+    /// Nullable pooled strings, including null entries of a decoded array.
+    pub fn optional_strings(&mut self, values: Option<&[Option<String>]>) {
+        let Some(values) = values else {
+            return self.int(-1);
+        };
+        self.int(values.len() as i32);
+        for value in values {
+            self.string(value.as_deref());
+        }
+    }
+
+    pub fn double(&mut self, value: f64) {
+        self.p.write_i64(value.to_bits() as i64);
+    }
+
+    /// Bundle framing shared by parsed and decoded package values.
+    pub fn bundle_entries<T>(
+        &mut self,
+        values: Option<&[T]>,
+        mut write: impl FnMut(&mut Self, &T),
+    ) {
+        let Some(values) = values else {
+            return self.int(-1);
+        };
+        if values.is_empty() {
+            return self.int(0);
+        }
+        let at = self.p.position();
+        self.int(-1);
+        self.int(BUNDLE_MAGIC);
+        let start = self.p.position();
+        self.int(values.len() as i32);
+        for value in values {
+            write(self, value);
+        }
+        self.p.set_i32_at(at, (self.p.position() - start) as i32);
+        self.bool(false);
+    }
+
     /// `writeBundle`.
     pub fn bundle(&mut self, b: Option<&Bundle>) {
         let Some(b) = b else { return self.int(-1) };

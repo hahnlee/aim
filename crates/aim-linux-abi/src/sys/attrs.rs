@@ -148,58 +148,39 @@ fn decode_original(b: &[u8]) -> Option<Attr> {
 }
 
 /// Stores `a`'s recorded fields over the guest attribute of `host`.
-fn set_guest(host: Host, a: Attr) -> bool {
+fn set_guest(host: Host, a: Attr) -> Result<bool, crate::errno::Errno> {
+    if matches!(host, Host::Image(_)) { return Ok(false); }
     let b = encode(a.over(guest_attr(host).unwrap_or_default()));
-    // SAFETY: host path or fd, local buffer.
-    let set = || unsafe {
-        match host {
-            Host::Image(_) => false,
-            Host::Path(p) => {
-                libc::setxattr(
-                    p.as_ptr(),
-                    GUEST.as_ptr(),
-                    b.as_ptr().cast(),
-                    b.len(),
-                    0,
-                    libc::XATTR_NOFOLLOW,
-                ) == 0
-            }
-            Host::Fd(fd) => {
-                libc::fsetxattr(fd, GUEST.as_ptr(), b.as_ptr().cast(), b.len(), 0, 0) == 0
-            }
-        }
+    let set = || {
+        let result = unsafe { match host {
+            Host::Path(p) => libc::setxattr(p.as_ptr(), GUEST.as_ptr(), b.as_ptr().cast(), b.len(), 0, libc::XATTR_NOFOLLOW),
+            Host::Fd(fd) => libc::fsetxattr(fd, GUEST.as_ptr(), b.as_ptr().cast(), b.len(), 0, 0),
+            Host::Image(_) => unreachable!(),
+        } };
+        if result == 0 { Ok(()) } else { Err(crate::errno::last()) }
     };
-    if set() {
-        return true;
-    }
-    // Changing an attribute needs write access: a file the guest created
-    // read-only (`open(O_CREAT, 0444)`) gets it for the change.
-    if std::io::Error::last_os_error().raw_os_error() != Some(libc::EACCES) {
-        return false;
-    }
+    let error = match set() { Ok(()) => return Ok(true), Err(error) => error };
+    if matches!(error, crate::errno::EROFS | 95) { return Ok(false); }
+    if !matches!(error, crate::errno::EACCES | crate::errno::EPERM) { return Err(error); }
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: host path or fd, local buffer; then plain chmods of it.
-    let chmod = |m: u16| unsafe {
-        match host {
-            Host::Path(p) => libc::chmod(p.as_ptr(), m),
-            Host::Fd(fd) => libc::fchmod(fd, m),
-            Host::Image(_) => -1,
-        }
-    };
-    let got = unsafe {
-        match host {
-            Host::Path(p) => libc::lstat(p.as_ptr(), &mut st),
-            Host::Fd(fd) => libc::fstat(fd, &mut st),
-            Host::Image(_) => -1,
-        }
-    };
+    let chmod = |mode| unsafe { match host {
+        Host::Path(p) => libc::chmod(p.as_ptr(), mode),
+        Host::Fd(fd) => libc::fchmod(fd, mode),
+        Host::Image(_) => unreachable!(),
+    } };
+    let got = unsafe { match host {
+        Host::Path(p) => libc::lstat(p.as_ptr(), &mut st),
+        Host::Fd(fd) => libc::fstat(fd, &mut st),
+        Host::Image(_) => unreachable!(),
+    } };
+    if got < 0 { return Err(crate::errno::last()); }
+    if st.st_mode & libc::S_IFMT == libc::S_IFLNK { return Ok(false); }
+    if error == crate::errno::EPERM { return Err(error); }
     let mode = st.st_mode & 0o7777;
-    if got < 0 || st.st_mode & libc::S_IFMT == libc::S_IFLNK || chmod(mode | 0o200) < 0 {
-        return false;
-    }
-    let ok = set();
-    chmod(mode);
-    ok
+    if chmod(mode | 0o200) < 0 { return Err(crate::errno::last()); }
+    let result = set();
+    if chmod(mode) < 0 { return Err(crate::errno::last()); }
+    result.map(|()| true)
 }
 
 struct Table {
@@ -244,6 +225,10 @@ fn parse(text: &str) -> HashMap<String, Attr> {
 
 /// The table's attributes of a guest path.
 fn table_lookup(guest: &str) -> Attr {
+    if !guest.starts_with('/') { return Attr::default(); }
+    table_lookup_key(&vfs::attr_key(if guest.len() > 1 { guest.trim_end_matches('/') } else { guest }))
+}
+fn table_lookup_key(key: &str) -> Attr {
     let Some(path) = file() else {
         return Attr::default();
     };
@@ -263,39 +248,48 @@ fn table_lookup(guest: &str) -> Attr {
             map: parse(&text),
         });
     }
-    let map = &t.as_ref().unwrap().map;
-    if map.is_empty() || !guest.starts_with('/') {
-        return Attr::default();
-    }
-    let key = vfs::attr_key(if guest.len() > 1 {
-        guest.trim_end_matches('/')
-    } else {
-        guest
-    });
-    map.get(&key).copied().unwrap_or_default()
+    t.as_ref().unwrap().map.get(key).copied().unwrap_or_default()
 }
 
-fn table_record(guest: &str, a: Attr) {
-    let Some(path) = file() else {
-        return;
-    };
+// Darwin devfs does not carry writable guest xattrs. Its allocated character
+// inode has a real generation identity; a reused slave number is a new inode.
+fn device_key(st: &libc::stat) -> String {
+    format!("/@devfs/{}/{}/{}/{}/{}", st.st_dev, st.st_ino, st.st_gen, st.st_birthtime, st.st_birthtime_nsec)
+}
+/// Only actual PTY allocation creates a devfs owner binding. Other character
+/// devices retain their existing inode/xattr/table metadata path.
+pub(super) fn allocated_character(host: Host, attributes: Attr) -> Result<(), crate::errno::Errno> {
+    if !recording() { return Ok(()); }
+    let stat = host_stat(host)?;
+    if stat.st_mode & libc::S_IFMT != libc::S_IFCHR { return Err(crate::errno::EINVAL); }
+    with_inode_lock(host, &stat, || table_record_key(&device_key(&stat), attributes))
+}
+pub(super) fn character_attributes(host: Host) -> Result<Option<Attr>, crate::errno::Errno> {
+    let stat = host_stat(host)?;
+    if stat.st_mode & libc::S_IFMT != libc::S_IFCHR { return Ok(None); }
+    let attributes = table_lookup_key(&device_key(&stat));
+    Ok((attributes != Attr::default()).then_some(attributes))
+}
+
+fn table_record(guest: &str, a: Attr) -> Result<(), crate::errno::Errno> {
+    table_record_key(&vfs::attr_key(guest), a)
+}
+fn table_record_key(key: &str, a: Attr) -> Result<(), crate::errno::Errno> {
+    let path = file().ok_or(crate::errno::EIO)?;
     let field = |v: Option<u32>| v.map_or("-".to_string(), |v| v.to_string());
     let line = format!(
         "{}\t{}\t{}\t{}\n",
-        vfs::attr_key(guest),
+        key,
         field(a.uid),
         field(a.gid),
         a.mode.map_or("-".to_string(), |m| format!("{m:o}"))
     );
     // One append-mode write per line, so concurrent writers do not
     // interleave.
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = f.write_all(line.as_bytes());
-    }
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)
+        .map_err(|error| crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
+    file.write_all(line.as_bytes())
+        .map_err(|error| crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))
 }
 
 /// An inode's attributes as last read, valid while its ctime is (every
@@ -400,6 +394,10 @@ fn lookup_stat(host: Host, guest: impl FnOnce() -> String, st: &libc::stat) -> A
     if !recording() {
         return Attr::default();
     }
+    if st.st_mode & libc::S_IFMT == libc::S_IFCHR {
+        let device = table_lookup_key(&device_key(st));
+        if device != Attr::default() { return device; }
+    }
     let (inode, original) = inode_attrs(host, st);
     if let Some(a) = inode {
         return a;
@@ -444,11 +442,75 @@ pub fn recording() -> bool {
     vfs::runtime_dir().is_some()
 }
 
+thread_local! {
+    static HELD_INODE_LOCKS: std::cell::RefCell<Vec<(i32,u64)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn host_stat(host: Host) -> Result<libc::stat, crate::errno::Errno> {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    let result = unsafe { match host {
+        Host::Fd(fd) => libc::fstat(fd, &mut stat),
+        Host::Path(path) | Host::Image(path) => libc::lstat(path.as_ptr(), &mut stat),
+    } };
+    if result < 0 { Err(crate::errno::last()) } else { Ok(stat) }
+}
+
+/// Serialize metadata on the actual inode across guest processes and bind aliases.
+/// Same-thread nested recording shares the already-held lock.
+pub fn with_inode_lock<T>(host: Host, stat: &libc::stat,
+        action: impl FnOnce() -> Result<T, crate::errno::Errno>) -> Result<T, crate::errno::Errno> {
+    if !recording() { return action(); }
+    let key = (stat.st_dev, stat.st_ino);
+    let actual = host_stat(host)?;
+    if (actual.st_dev, actual.st_ino) != key { return Err(crate::errno::from_darwin(libc::ESTALE)); }
+    if HELD_INODE_LOCKS.with(|held| held.borrow().contains(&key)) { return action(); }
+    let _own = super::fork::spawn::own_fds();
+    let directory = vfs::runtime_dir().ok_or(crate::errno::EIO)?.join("inode-locks");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
+    let path = directory.join(format!("{:x}-{:x}",key.0 as u32,key.1));
+    let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)
+        .map_err(|error| crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
+    use std::os::fd::AsRawFd;
+    use std::os::fd::{FromRawFd,IntoRawFd};
+    struct PrivateLock(std::fs::File);
+    impl Drop for PrivateLock { fn drop(&mut self) { super::fdtab::unhide(self.0.as_raw_fd()); } }
+    let file = PrivateLock(unsafe { std::fs::File::from_raw_fd(super::fdtab::hide(file.into_raw_fd())) });
+    loop {
+        if unsafe { libc::flock(file.0.as_raw_fd(),libc::LOCK_EX) } == 0 { break; }
+        let error = crate::errno::last(); if error != crate::errno::EINTR { return Err(error); }
+    }
+    struct Held((i32,u64));
+    impl Drop for Held { fn drop(&mut self) {
+        HELD_INODE_LOCKS.with(|held| held.borrow_mut().retain(|key|*key!=self.0));
+    } }
+    let actual = host_stat(host)?;
+    if (actual.st_dev, actual.st_ino) != key { return Err(crate::errno::from_darwin(libc::ESTALE)); }
+    HELD_INODE_LOCKS.with(|held| held.borrow_mut().push(key));
+    let _held = Held(key);
+    action()
+}
+
 /// Record a guest chown/chmod of `host` (only under a path map): on the
 /// inode, or in the table when it cannot carry the attribute.
+pub fn record_checked(host: Host, guest: impl FnOnce() -> String, a: Attr) -> Result<(), crate::errno::Errno> {
+    if !recording() { return Ok(()); }
+    let stat = host_stat(host)?;
+    with_inode_lock(host, &stat, || {
+        if stat.st_mode & libc::S_IFMT == libc::S_IFCHR {
+            let previous = table_lookup_key(&device_key(&stat));
+            if previous != Attr::default() {
+                return table_record_key(&device_key(&stat), a.over(previous));
+            }
+        }
+        if set_guest(host, a)? { return Ok(()); }
+        table_record(&guest(), a)
+    })
+}
+
 pub fn record(host: Host, guest: impl FnOnce() -> String, a: Attr) {
-    if recording() && !set_guest(host, a) {
-        table_record(&guest(), a);
+    if let Err(error) = record_checked(host, guest, a) {
+        eprintln!("guest inode metadata recording failed: errno={error}");
     }
 }
 
@@ -474,41 +536,89 @@ pub fn absent(host: &CStr) -> bool {
 
 /// The guest created `host`: it belongs to the guest's identity, as on
 /// Linux (only under a path map).
-pub fn created(host: Host, guest: impl FnOnce() -> String) {
+pub fn created(host: Host, guest: impl FnOnce() -> String) -> Result<(), crate::errno::Errno> {
     if !recording() {
-        return;
+        return Ok(());
     }
-    let (uid, gid) = ids(FS);
-    record(
+    let guest = guest();
+    let (uid, mut gid) = ids(FS);
+    let parent_name = guest.rsplit_once('/').map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+        .ok_or(crate::errno::EINVAL)?;
+    let parent = vfs::resolve(vfs::LINUX_AT_FDCWD, parent_name.as_bytes(), true)?;
+    let mut parent_stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::stat(parent.host.as_ptr(), &mut parent_stat) } < 0 {
+        return Err(crate::errno::last());
+    }
+    apply(Host::Path(&parent.host), || parent.guest.clone(), &mut parent_stat);
+    let mut mode = None;
+    if parent_stat.st_mode & libc::S_ISGID != 0 {
+        gid = parent_stat.st_gid;
+        let mut child: libc::stat = unsafe { std::mem::zeroed() };
+        let result = unsafe { match host {
+            Host::Fd(fd) => libc::fstat(fd, &mut child),
+            Host::Path(path) | Host::Image(path) => libc::lstat(path.as_ptr(), &mut child),
+        } };
+        if result < 0 { return Err(crate::errno::last()); }
+        if child.st_mode & libc::S_IFMT == libc::S_IFDIR {
+            mode = Some((child.st_mode as u32 & 0o7777) | libc::S_ISGID as u32);
+        }
+    }
+    record_checked(
         host,
-        guest,
+        || guest,
         Attr {
             uid: Some(uid),
             gid: Some(gid),
-            mode: None,
+            mode,
         },
-    );
+    )
 }
 
 /// Linux permission check of `mode` bits (R 4, W 2, X 1) for the guest
 /// identity against the guest view of a stat.
-pub fn permits(st: &libc::stat, want: u32, uid: u32, gid: u32) -> bool {
-    if want == 0 {
+/// Linux inode_permission using filesystem identity, or access(2)'s chosen identity.
+pub fn permits(st: &libc::stat, want: u32, id: &super::cred::Identity, kind: usize) -> bool {
+    let mode = st.st_mode as u32;
+    let uid = id.uid[kind];
+    let bits = if st.st_uid == uid {
+        (mode >> 6) & 7
+    } else if st.st_gid == id.gid[kind] || id.groups.contains(&st.st_gid) {
+        (mode >> 3) & 7
+    } else { mode & 7 };
+    if bits & want == want { return true; }
+    let capabilities = if kind == REAL {
+        if uid == 0 { id.cap_perm } else { 0 }
+    } else { id.cap_eff };
+    let directory = mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32;
+    if capabilities & (1 << 1) != 0 && (want & 1 == 0 || directory || mode & 0o111 != 0) {
         return true;
     }
-    let m = st.st_mode as u32;
-    if uid == 0 {
-        // root: everything but execute needs no bit; execute needs one.
-        return want & 1 == 0 || m & 0o111 != 0 || m & libc::S_IFMT as u32 == libc::S_IFDIR as u32;
+    capabilities & (1 << 2) != 0 && want & 2 == 0 && (want & 1 == 0 || directory)
+}
+
+/// A resolved prefix has no remaining symlinks. Do not recurse through stat_at.
+pub(super) fn path_stat(guest: &str) -> Result<libc::stat, crate::errno::Errno> {
+    if let Some(route) = vfs::fuse_route(guest) {
+        return super::fuse_client::stat(&route, None, None);
     }
-    let bits = if st.st_uid == uid {
-        (m >> 6) & 7
-    } else if st.st_gid == gid {
-        (m >> 3) & 7
-    } else {
-        m & 7
-    };
-    bits & want == want
+    if let Some(stat) = super::procfs::stat(guest, true) { return stat; }
+    let (host, area) = vfs::lookup(guest);
+    use std::os::unix::ffi::OsStrExt;
+    let host = std::ffi::CString::new(host.as_os_str().as_bytes()).map_err(|_| crate::errno::EINVAL)?;
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::stat(host.as_ptr(), &mut stat) } < 0 { return Err(crate::errno::last()); }
+    let host = if area == vfs::Area::Image { Host::Image(&host) } else { Host::Path(&host) };
+    apply(host, || guest.to_owned(), &mut stat);
+    Ok(stat)
+}
+
+pub(super) fn search(guest: &str, id: &super::cred::Identity, kind: usize) -> Result<(), crate::errno::Errno> {
+    if !recording() { return Ok(()); }
+    // Without default_permissions the original FUSE daemon owns access checks.
+    if vfs::fuse_route(guest).is_some_and(|route| !route.default_permissions) { return Ok(()); }
+    let stat = path_stat(guest)?;
+    if stat.st_mode & libc::S_IFMT != libc::S_IFDIR { return Err(crate::errno::ENOTDIR); }
+    if permits(&stat, 1, id, kind) { Ok(()) } else { Err(crate::errno::EACCES) }
 }
 
 #[cfg(test)]
@@ -565,12 +675,105 @@ mod tests {
         st.st_mode = libc::S_IFREG | 0o640;
         st.st_uid = 1000;
         st.st_gid = 1001;
+        let permits = |stat: &libc::stat, mask, uid, gid| {
+            let mut id = super::super::cred::Identity::default();
+            id.uid = [uid; 4]; id.gid = [gid; 4];
+            if uid != 0 { id.cap_eff = 0; id.cap_perm = 0; }
+            super::permits(stat, mask, &id, FS)
+        };
         assert!(permits(&st, 6, 1000, 5));
         assert!(permits(&st, 4, 7, 1001));
         assert!(!permits(&st, 2, 7, 1001));
         assert!(!permits(&st, 4, 7, 7));
         assert!(permits(&st, 6, 0, 0));
         assert!(!permits(&st, 1, 0, 0));
+    }
+
+    #[test]
+    fn dac_identity_groups_and_capability_execute_rules() {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        stat.st_mode = libc::S_IFREG | 0o040; stat.st_uid=10100; stat.st_gid=10200;
+        let mut id = super::super::cred::Identity { uid:[10300;4],gid:[10300;4],cap_eff:0,cap_perm:0,..Default::default() };
+        assert!(!permits(&stat,4,&id,FS)); id.groups.push(10200); assert!(permits(&stat,4,&id,FS));
+        id.uid[FS]=10100; assert!(!permits(&stat,4,&id,FS));
+        id.cap_eff=1<<1; assert!(permits(&stat,6,&id,FS)); assert!(!permits(&stat,1,&id,FS));
+        stat.st_mode |= 1; assert!(permits(&stat,1,&id,FS));
+        id.cap_eff=1<<2; stat.st_mode=libc::S_IFREG;
+        assert!(permits(&stat,4,&id,FS)); assert!(!permits(&stat,2,&id,FS)); assert!(!permits(&stat,1,&id,FS));
+        stat.st_mode=libc::S_IFDIR; assert!(permits(&stat,1,&id,FS));
+        id.cap_perm=1<<1; id.uid[REAL]=10300; assert!(!permits(&stat,2,&id,REAL));
+        id.uid[REAL]=0; assert!(permits(&stat,2,&id,REAL));
+    }
+
+    #[test]
+    #[ignore = "subprocess helper exercised by inode_lock_serializes_aliases_across_processes"]
+    fn inode_lock_child_probe() {
+        use std::io::BufRead;
+        let mut input = std::io::BufReader::new(std::io::stdin());
+        let mut root = String::new(); let mut map = String::new(); let mut path = String::new();
+        input.read_line(&mut root).unwrap(); input.read_line(&mut map).unwrap(); input.read_line(&mut path).unwrap();
+        crate::vfs::init(std::path::Path::new(root.trim()),Some(std::path::Path::new(map.trim()))).unwrap();
+        let file = std::fs::File::open(path.trim()).unwrap();
+        use std::os::fd::AsRawFd;
+        let host = Host::Fd(file.as_raw_fd()); let stat = host_stat(host).unwrap();
+        println!("inode-child-ready"); std::io::stdout().flush().unwrap();
+        with_inode_lock(host,&stat,|| {
+            record_checked(host, || "/data/inode-child-alias".into(),
+                Attr { gid:Some(10777), ..Default::default() })
+        }).unwrap();
+        println!("inode-child-acquired");
+    }
+
+    #[test]
+    fn inode_lock_serializes_aliases_across_processes() {
+        use std::io::{BufRead,Write};
+        use std::os::fd::AsRawFd;
+        let (_guard, root) = crate::vfs::test_view();
+        let first = root.join("inode-parent-anchor"); let alias = root.join("inode-child-alias");
+        std::fs::write(&first,b"owned").unwrap(); std::fs::hard_link(&first,&alias).unwrap();
+        let file = std::fs::File::open(&first).unwrap();
+        let host=Host::Fd(file.as_raw_fd()); let stat=host_stat(host).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","sys::attrs::tests::inode_lock_child_probe","--ignored","--nocapture"])
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        with_inode_lock(host,&stat,|| {
+            let mut input=child.stdin.take().unwrap();
+            writeln!(input,"{}",crate::vfs::root().display()).unwrap();
+            writeln!(input,"{}",crate::vfs::runtime_dir().unwrap().join("path-map").display()).unwrap();
+            writeln!(input,"{}",alias.display()).unwrap(); drop(input);
+            let mut output=std::io::BufReader::new(child.stdout.take().unwrap());
+            let mut line=String::new();
+            loop { line.clear(); assert!(output.read_line(&mut line).unwrap()>0); if line.contains("inode-child-ready") { break; } }
+            child.stdout=Some(output.into_inner());
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            assert!(child.try_wait().unwrap().is_none(),"child bypassed inode lock");
+            record_checked(host,|| "/data/inode-parent-anchor".into(),Attr {uid:Some(10666),..Default::default()})
+        }).unwrap();
+        let output=child.wait_with_output().unwrap(); assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stdout));
+        let recorded=guest_attr(host).unwrap(); assert_eq!(recorded.uid,Some(10666)); assert_eq!(recorded.gid,Some(10777));
+        std::fs::remove_file(alias).unwrap(); std::fs::remove_file(first).unwrap();
+    }
+
+    #[test]
+    fn checked_record_rejects_invalid_fd_and_table_write_failure() {
+        let (_guard, _root) = crate::vfs::test_view();
+        assert_eq!(record_checked(Host::Fd(-1), || "/data/invalid-descriptor".into(),
+            Attr { mode:Some(0o600), ..Default::default() }), Err(crate::errno::EBADF));
+        let path = file().unwrap();
+        let backup = path.with_extension("checked-record-backup");
+        let previous = path.exists();
+        if previous { std::fs::rename(&path, &backup).unwrap(); }
+        std::fs::create_dir(&path).unwrap();
+        let fixture = path.with_extension("readonly-fixture");
+        std::fs::write(&fixture,b"readonly").unwrap();
+        use std::os::unix::ffi::OsStrExt;
+        let image = std::ffi::CString::new(fixture.as_os_str().as_bytes()).unwrap();
+        let result = record_checked(Host::Image(&image), || "/readonly-fixture".into(),
+            Attr { mode:Some(0o600), ..Default::default() });
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::remove_file(fixture).unwrap();
+        if previous { std::fs::rename(&backup, &path).unwrap(); }
+        assert_eq!(result, Err(crate::errno::EISDIR));
     }
 
     #[test]

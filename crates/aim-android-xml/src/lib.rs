@@ -9,6 +9,8 @@
 
 pub mod abx;
 mod base64;
+mod double;
+pub mod pull;
 pub mod text;
 
 use std::borrow::Cow;
@@ -16,7 +18,7 @@ use std::borrow::Cow;
 /// An attribute's value, typed as the writer typed it: binary XML keeps the
 /// type of each `TypedXmlSerializer.attribute*` call, text XML has strings
 /// only.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Value {
     Null,
     String(String),
@@ -33,6 +35,26 @@ pub enum Value {
     Bool(bool),
 }
 
+// Document identity retains the writer's type and floating-point bits. This
+// also lets persistence owners compare unchanged NaNs and detect signed-zero
+// changes made by another writer.
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Null, Self::Null) => true,
+            (Self::String(a), Self::String(b)) | (Self::Interned(a), Self::Interned(b)) => a == b,
+            (Self::BytesHex(a), Self::BytesHex(b))
+            | (Self::BytesBase64(a), Self::BytesBase64(b)) => a == b,
+            (Self::Int(a), Self::Int(b)) | (Self::IntHex(a), Self::IntHex(b)) => a == b,
+            (Self::Long(a), Self::Long(b)) | (Self::LongHex(a), Self::LongHex(b)) => a == b,
+            (Self::Float(a), Self::Float(b)) => a.to_bits() == b.to_bits(),
+            (Self::Double(a), Self::Double(b)) => a.to_bits() == b.to_bits(),
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 /// A node of an element's content: an element, or another token (text,
 /// a comment, ...) by its `XmlPullParser` event type, with its text.
 #[derive(Clone, Debug, PartialEq)]
@@ -47,6 +69,14 @@ pub const TEXT: u8 = 4;
 pub const CDSECT: u8 = 5;
 /// `XmlPullParser.COMMENT`.
 pub const COMMENT: u8 = 9;
+/// `XmlPullParser.ENTITY_REF`.
+pub const ENTITY_REF: u8 = 6;
+/// `XmlPullParser.IGNORABLE_WHITESPACE`.
+pub const IGNORABLE_WHITESPACE: u8 = 7;
+/// `XmlPullParser.PROCESSING_INSTRUCTION`.
+pub const PROCESSING_INSTRUCTION: u8 = 8;
+/// `XmlPullParser.DOCDECL`.
+pub const DOCDECL: u8 = 10;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Element {
@@ -62,6 +92,86 @@ pub fn read(bytes: &[u8]) -> Result<Element, String> {
     } else {
         text::read(bytes)
     }
+}
+
+/// Read a document for owners using `XmlPullParser.next()`. Preserve comments
+/// and other unrelated nodes, but normalize text/CDATA/entity events so a
+/// subsequent ABX write retains their meaning. BinaryXmlPullParser skips a
+/// standalone CDATA/entity token; text XML reports CDATA as text.
+pub fn read_next(bytes: &[u8]) -> Result<Element, String> {
+    read_next_optional(bytes)?.ok_or_else(|| {
+        if bytes.starts_with(abx::MAGIC) {
+            "ABX: no root element".into()
+        } else {
+            format!(
+                "XML: no root element at line {}",
+                bytes.iter().filter(|b| **b == b'\n').count() + 1
+            )
+        }
+    })
+}
+
+/// Pull-parser END_DOCUMENT without START_TAG is distinct from malformed XML.
+/// Required-root readers continue to reject this through read/read_next.
+pub fn read_next_optional(bytes: &[u8]) -> Result<Option<Element>, String> {
+    let mut root = if bytes.starts_with(abx::MAGIC) {
+        abx::read_optional(bytes)?
+    } else {
+        text::read_optional(bytes)?
+    };
+    if let Some(root) = &mut root {
+        normalize_next(root, bytes.starts_with(abx::MAGIC))?;
+    }
+    Ok(root)
+}
+
+pub(crate) fn normalize_next(e: &mut Element, binary: bool) -> Result<(), String> {
+    let mut pending_text = false;
+    let mut content = Vec::new();
+    for mut node in e.content.drain(..) {
+        match &mut node {
+            Node::Element(child) => {
+                normalize_next(child, binary)?;
+                pending_text = false;
+            }
+            Node::Token(TEXT, _) => pending_text = true,
+            Node::Token(CDSECT, _) if !binary || pending_text => {
+                let Node::Token(kind, _) = &mut node else {
+                    unreachable!()
+                };
+                *kind = TEXT;
+                pending_text = true;
+            }
+            Node::Token(CDSECT, _) => continue,
+            Node::Token(6, Some(name)) if binary => {
+                let value = match name.as_str() {
+                    "lt" => "<".into(),
+                    "gt" => ">".into(),
+                    "amp" => "&".into(),
+                    "apos" => "'".into(),
+                    "quot" => "\"".into(),
+                    name if name.starts_with('#') => {
+                        let value: i32 = name[1..]
+                            .parse()
+                            .map_err(|_| format!("invalid entity {name}"))?;
+                        char::from_u32(value as u16 as u32)
+                            .ok_or_else(|| format!("invalid UTF-16 entity {name}"))?
+                            .to_string()
+                    }
+                    _ => return Err(format!("unknown entity {name}")),
+                };
+                if !pending_text {
+                    continue;
+                }
+                node = Node::Token(TEXT, Some(value));
+            }
+            Node::Token(COMMENT | 8, _) => {}
+            _ => pending_text = false,
+        }
+        content.push(node);
+    }
+    e.content = content;
+    Ok(())
 }
 
 impl Value {
@@ -176,7 +286,19 @@ impl Element {
             Value::Float(f) => Some(*f),
             _ => None,
         };
-        self.typed(name, float, |s| s.trim().parse().ok())
+        self.typed(name, float, double::parse_float)
+    }
+
+    /// `getAttributeDouble`, including Java's hexadecimal float syntax.
+    pub fn double(&self, name: &str) -> Result<Option<f64>, String> {
+        self.typed(
+            name,
+            |v| match v {
+                Value::Double(value) => Some(*value),
+                _ => None,
+            },
+            double::parse,
+        )
     }
 
     /// `getAttributeBoolean`.
@@ -301,5 +423,26 @@ mod tests {
         assert!(e.bool("i").is_err());
         // `Integer.parseInt(s, 16)` takes no two's complement.
         assert!(element(&[("h", s("ffffffff"))]).int_hex("h").is_err());
+    }
+}
+
+#[cfg(test)]
+mod optional_document_tests {
+    #[test]
+    fn no_start_tag_is_distinct_from_malformed_or_truncated_input() {
+        for bytes in [b"".as_slice(), b" \n", b"ABX\0\x10\x11"] {
+            assert_eq!(super::read_next_optional(bytes).unwrap(), None);
+            assert!(super::read_next(bytes).is_err());
+            assert!(super::read(bytes).is_err());
+        }
+        assert!(super::read_next_optional(b"ABX\0").is_err());
+        assert!(super::read_next_optional(b"<packages><").is_err());
+        assert_eq!(
+            super::read_next_optional(b"<packages/>")
+                .unwrap()
+                .unwrap()
+                .name,
+            "packages"
+        );
     }
 }

@@ -10,4 +10,5 @@ public abstract class ActivityTaskManagerInternal {
         PackageConfigurationUpdater setNightMode(int nightMode);
         boolean commit();
     }
+ public abstract boolean isBaseOfLockedTask(String name);
 }

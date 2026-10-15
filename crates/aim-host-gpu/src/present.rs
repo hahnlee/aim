@@ -222,7 +222,7 @@ pub fn present(p: &mut Present) -> i64 {
         (g.bind_framebuffer)(GL_DRAW_FRAMEBUFFER, draw as u32);
         (g.bind_framebuffer)(GL_READ_FRAMEBUFFER, read as u32);
         match fence::fence(display) {
-            Ok(f) => p.fence = aim_sync_file::give_to_guest(f),
+            Ok(f) => match aim_sync_file::give_to_guest(f){Ok(fd)=>p.fence=fd,Err(error)=>return -(error as i64)},
             Err(e) => return e,
         }
     }

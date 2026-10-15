@@ -6,4 +6,5 @@ public class Canvas extends BaseCanvas {
     public Canvas() { throw new RuntimeException("stub"); }
     public boolean clipPath(Path path) { throw new RuntimeException("stub"); }
     public void drawBitmap(Bitmap bitmap, Rect src, Rect dst, Paint paint) { throw new RuntimeException("stub"); }
+ public Canvas(Bitmap bitmap){throw new RuntimeException("stub");}
 }

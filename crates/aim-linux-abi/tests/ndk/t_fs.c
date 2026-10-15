@@ -125,6 +125,10 @@ static void at_calls(void) {
   int dfd = open(base, O_RDONLY | O_DIRECTORY);
   CHECK(dfd >= 0);
   CHECK(mkdirat(dfd, "at", 0700) == 0 || errno == EEXIST);
+  CHECK(unlinkat(dfd, "at", 0) == -1 && errno == EISDIR);
+  CHECK(symlinkat("at", dfd, "at.lnk") == 0);
+  CHECK(unlinkat(dfd, "at.lnk", AT_REMOVEDIR) == -1 && errno == ENOTDIR);
+  CHECK(unlinkat(dfd, "at.lnk", 0) == 0);
   int fd = openat(dfd, "at/f", O_CREAT | O_WRONLY | O_TRUNC, 0600);
   CHECK(fd >= 0);
   CHECK(faccessat(dfd, "at/f", R_OK | W_OK, 0) == 0);
@@ -141,9 +145,14 @@ static void at_calls(void) {
   struct timespec omit[2] = {{0, UTIME_NOW}, {0, UTIME_OMIT}};
   CHECK(utimensat(dfd, "at/f", omit, 0) == 0);
   CHECK(fstatat(dfd, "at/f", &st, 0) == 0 && st.st_mtim.tv_sec == 1000000000 && st.st_atim.tv_sec > 1000000000);
+  CHECK(unlinkat(dfd, "at", 0) == -1 && errno == EISDIR);
+  CHECK(unlinkat(dfd, "at/f", 1) == -1 && errno == EINVAL);
   CHECK(unlinkat(dfd, "at/g", 0) == 0);
   CHECK(unlinkat(dfd, "at", AT_REMOVEDIR) == -1 && errno == ENOTEMPTY);
   CHECK(unlinkat(dfd, "at/f", 0) == 0 && unlinkat(dfd, "at", AT_REMOVEDIR) == 0);
+  CHECK(unlinkat(dfd, "at", 0) == -1 && errno == ENOENT);
+  CHECK(mkdirat(dfd, "at", 0700) == 0);
+  CHECK(remove(p("at")) == 0);
   // The image is read-only under a path map.
   CHECK(open("/system/build.prop", O_RDWR) == -1 && errno == EROFS);
   CHECK(mkdir("/system/new-dir", 0755) == -1 && errno == EROFS);

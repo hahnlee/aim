@@ -126,6 +126,7 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     let derived = identity::compute(&original_identity, &plan);
     let (image, shadow) = (aim_paths::system_image(), aim_paths::derived_image_shadow());
     let mount = aim_paths::derived_image_mount();
+    let _lease = system::ImageLease::write(&image)?;
     let modified = |p: &std::path::Path| fs::metadata(p).and_then(|m| m.modified()).ok();
     if shadow.exists() && modified(&shadow) < modified(&image) {
         // Written over a system image that has been built again since.
@@ -139,10 +140,8 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     if shadow.exists() {
         // A shadow of another system image does not attach, or shows
         // another identity.
-        let found = system::attach(&image, Some(&shadow), &mount, false)
-            .ok()
-            .and_then(|()| identity::read_tree_identity(&aim_paths::derived_image()).ok())
-            .flatten();
+        system::attach(&image, Some(&shadow), &mount, false)?;
+        let found = identity::read_tree_identity(&aim_paths::derived_image())?;
         if found.as_deref() == Some(derived.hex.as_str()) {
             log.line(&format!("reused {} ({})", mount.display(), derived.hex));
             return Ok(());

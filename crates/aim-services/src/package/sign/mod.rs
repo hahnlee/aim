@@ -26,7 +26,32 @@
 mod asn1;
 mod block;
 mod crypto;
+mod history;
+mod merge;
+mod overrides;
+pub use history::{History, INSTALLED_DATA, JoinType, ROLLBACK, SHARED_USER_ID};
+pub use merge::MergeRule;
+pub use overrides::{OverrideSnapshot, Overrides, read_details as read_override_details};
 mod jar;
+mod serialize;
+pub(crate) use serialize::canonical_public_keys;
+pub use serialize::decode_public_key as deserialize_public_key;
+pub use serialize::public_keys as serialize_public_keys;
+
+pub(crate) fn saved_certificate_keys(
+    certificates: &[Vec<u8>],
+) -> Result<Option<Vec<super::pkg::Serialized>>, String> {
+    let mut keys = Vec::new();
+    for bytes in certificates {
+        let Ok(certificate) = asn1::Certificate::parse(bytes) else {
+            return Ok(None);
+        };
+        keys.push(certificate.public_key.to_vec());
+    }
+    // A missing native serialization implementation is not an invalid guest
+    // certificate: report it rather than publishing SigningDetails.UNKNOWN.
+    serialize_public_keys(&keys).map(Some)
+}
 #[cfg(test)]
 mod tests;
 mod v2;
@@ -87,15 +112,74 @@ pub type Lineage = Vec<(Vec<u8>, i32)>;
 /// `SigningDetails`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SigningDetails {
+    /// The original UNKNOWN singleton, distinct from an empty signer array.
+    pub unknown: bool,
     /// The signers' certificates, as encoded.
     pub signatures: Vec<Vec<u8>>,
+    /// Current Signature capability flags; empty represents all zero.
+    pub current_flags: Vec<i32>,
     pub scheme_version: i32,
-    /// The signers' public keys (`SubjectPublicKeyInfo`), each once.
-    pub public_keys: Vec<Vec<u8>>,
+    /// Original nullable public-key set (`SubjectPublicKeyInfo`), each once.
+    pub public_keys: Option<Vec<Option<Vec<u8>>>>,
     pub past_signing_certificates: Option<Lineage>,
 }
 
 impl SigningDetails {
+    pub fn unknown() -> Self {
+        Self {
+            unknown: true,
+            signatures: Vec::new(),
+            current_flags: Vec::new(),
+            scheme_version: UNKNOWN,
+            public_keys: None,
+            past_signing_certificates: None,
+        }
+    }
+
+    pub fn package_details(&self) -> Result<Option<super::pkg::SigningDetails>, String> {
+        if self.unknown {
+            if !self.signatures.is_empty()
+                || !self.current_flags.is_empty()
+                || self.scheme_version != UNKNOWN
+                || self.public_keys.is_some()
+                || self.past_signing_certificates.is_some()
+            {
+                return Err("UNKNOWN signing has populated fields".into());
+            }
+            Ok(None)
+        } else {
+            self.parcel_details().map(Some)
+        }
+    }
+
+    /// Original PackageImpl's SigningDetails parcel representation. Keep the
+    /// collected package lineage separate from reconciled settings signatures.
+    pub fn parcel_details(&self) -> Result<super::pkg::SigningDetails, String> {
+        if self.unknown {
+            return Err("UNKNOWN signing has no populated parcel body".into());
+        }
+        Ok(super::pkg::SigningDetails {
+            signatures: Some(self.signatures.clone()),
+            scheme_version: self.scheme_version,
+            public_keys: self.serialized_public_keys()?,
+            past_signing_certificates: self.past_signing_certificates.as_ref().map(|past| {
+                past.iter()
+                    .map(|(certificate, _)| certificate.clone())
+                    .collect()
+            }),
+        })
+    }
+
+    /// Preserve null versus empty when handing keys to Parcel/settings owners.
+    pub fn serialized_public_keys(
+        &self,
+    ) -> Result<Option<Vec<Option<super::pkg::Serialized>>>, String> {
+        self.public_keys
+            .as_deref()
+            .map(serialize::nullable_public_keys)
+            .transpose()
+    }
+
     fn new(
         signatures: Vec<Vec<u8>>,
         scheme_version: i32,
@@ -109,9 +193,11 @@ impl SigningDetails {
             }
         }
         Ok(SigningDetails {
+            unknown: false,
             signatures,
+            current_flags: Vec::new(),
             scheme_version,
-            public_keys,
+            public_keys: Some(public_keys.into_iter().map(Some).collect()),
             past_signing_certificates,
         })
     }
@@ -183,15 +269,63 @@ pub fn package_signing_details(
     skip_verify: bool,
     build: &Build,
 ) -> Result<SigningDetails, Error> {
+    package_signing_details_using(
+        base,
+        splits,
+        static_shared_library,
+        target_sdk,
+        skip_verify,
+        build,
+        None,
+    )
+}
+
+/// Apply the explicit test owner after each APK verifies, before split comparison.
+pub fn package_signing_details_with_overrides(
+    base: &Apk,
+    splits: &[Apk],
+    static_shared_library: bool,
+    target_sdk: i32,
+    skip_verify: bool,
+    build: &Build,
+    overrides: &Overrides,
+) -> Result<SigningDetails, Error> {
+    package_signing_details_using(
+        base,
+        splits,
+        static_shared_library,
+        target_sdk,
+        skip_verify,
+        build,
+        Some(overrides),
+    )
+}
+
+fn package_signing_details_using(
+    base: &Apk,
+    splits: &[Apk],
+    static_shared_library: bool,
+    target_sdk: i32,
+    skip_verify: bool,
+    build: &Build,
+    overrides: Option<&Overrides>,
+) -> Result<SigningDetails, Error> {
     let min_scheme = if static_shared_library {
         SIGNING_BLOCK_V2
     } else {
         minimum_signature_scheme(target_sdk)
     };
-    let details = verify(base, min_scheme, !skip_verify, build)?;
+    let collect = |apk: &Apk| {
+        let details = verify(apk, min_scheme, !skip_verify, build)?;
+        Ok::<_, Error>(match overrides {
+            Some(owner) => owner.apply(&details),
+            None => details,
+        })
+    };
+    let details = collect(base)?;
     if base.path != FRAMEWORK_RES {
         for split in splits {
-            if !verify(split, min_scheme, !skip_verify, build)?.signatures_match(&details) {
+            if !collect(split)?.signatures_match(&details) {
                 return Err(Error::new(
                     INSTALL_PARSE_FAILED_INCONSISTENT_CERTIFICATES,
                     format!("{} has mismatched certificates", split.path),

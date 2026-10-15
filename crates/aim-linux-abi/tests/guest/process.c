@@ -257,6 +257,44 @@ static void random_writes(void) {
   printf("ok random_writes\n");
 }
 
+static long namespace_root_mount_id(void) {
+  FILE* f = fopen("/proc/self/mountinfo", "r");
+  CHECK(f != NULL, "open actual mountinfo");
+  char line[8192], target[4096]; long id, parent;
+  while (fgets(line, sizeof(line), f)) {
+    if (sscanf(line, "%ld %ld %*s %*s %4095s", &id, &parent, target) == 3 && !strcmp(target, "/")) {
+      fclose(f); return id;
+    }
+  }
+  fclose(f); CHECK(0, "actual root mount missing"); return -1;
+}
+struct namespace_clone_case { long parent; char source[256], target[256]; };
+static int namespace_clone_child(void* arg) {
+  struct namespace_clone_case* c = arg;
+  if (namespace_root_mount_id() == c->parent) return 2;
+  if (mount(c->source, c->target, "none", MS_BIND, NULL) != 0) return 3;
+  char path[300]; snprintf(path, sizeof(path), "%s/marker", c->target);
+  int fd = open(path, O_RDONLY); if (fd < 0) return 4;
+  char value[16] = {0}; int n = read(fd, value, sizeof(value)); close(fd);
+  return n == 7 && !memcmp(value, "private", 7) ? 0 : 5;
+}
+static void clone_new_mount_namespace(void) {
+  struct namespace_clone_case c = {.parent = namespace_root_mount_id()};
+  snprintf(c.source, sizeof(c.source), "/data/local/tmp/ns-source-%d", getpid());
+  snprintf(c.target, sizeof(c.target), "/data/local/tmp/ns-target-%d", getpid());
+  CHECK(mkdir(c.source, 0700) == 0 && mkdir(c.target, 0700) == 0, "namespace fixture dirs");
+  char marker[300]; snprintf(marker, sizeof(marker), "%s/marker", c.source);
+  int fd = open(marker, O_CREAT | O_WRONLY, 0600); CHECK(fd >= 0, "source marker"); CHECK(write(fd, "private", 7) == 7, "marker write"); close(fd);
+  void* stack = mmap(NULL, 65536, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); CHECK(stack != MAP_FAILED, "clone stack");
+  errno = 0; CHECK(clone(namespace_clone_child, (char*)stack + 65536, CLONE_NEWNS | CLONE_FS | SIGCHLD, &c) == -1 && errno == EINVAL, "NEWNS/FS conflict");
+  pid_t child = clone(namespace_clone_child, (char*)stack + 65536, CLONE_NEWNS | SIGCHLD, &c); CHECK(child > 0, "actual NEWNS clone %s", strerror(errno));
+  int st; CHECK(waitpid(child, &st, 0) == child && WIFEXITED(st) && WEXITSTATUS(st) == 0, "NEWNS child status %#x", st);
+  CHECK(namespace_root_mount_id() == c.parent, "parent namespace unchanged");
+  snprintf(marker, sizeof(marker), "%s/marker", c.target); errno = 0; CHECK(open(marker, O_RDONLY) == -1 && errno == ENOENT, "child bind polluted parent");
+  snprintf(marker, sizeof(marker), "%s/marker", c.source); unlink(marker); rmdir(c.source); rmdir(c.target); munmap(stack, 65536);
+  printf("ok clone_new_mount_namespace\n");
+}
+
 static void fork_wait(void) {
   pid_t parent = getpid();
   int p[2];
@@ -1413,6 +1451,87 @@ static void seccomp_filter(void) {
   printf("ok seccomp_filter\n");
 }
 
+// Default-disposition SIGCHLD stays pending while blocked, including when
+// an exec'ed child exits before the parent enters its timed signal wait.
+static void default_sigchld_sigtimedwait(void) {
+  struct sigaction original, reset = {.sa_handler = SIG_DFL};
+  CHECK(sigaction(SIGCHLD, NULL, &original) == 0 && original.sa_handler == SIG_DFL,
+        "initial SIGCHLD disposition");
+  sigset_t set, old;
+  sigemptyset(&set);
+  sigaddset(&set, SIGCHLD);
+  CHECK(sigprocmask(SIG_BLOCK, &set, &old) == 0, "block SIGCHLD");
+  for (int explicit_default = 0; explicit_default < 2; explicit_default++) {
+    if (explicit_default) CHECK(sigaction(SIGCHLD, &reset, NULL) == 0, "reset SIGCHLD");
+    pid_t child = fork();
+    CHECK(child >= 0, "fork SIGCHLD child");
+    if (child == 0) {
+      char* args[] = {"exit", NULL};
+      execv(self_path, args);
+      _exit(99);
+    }
+    // Let exit precede sigtimedwait: retaining a blocked signal matters even
+    // when no thread has entered the wait yet.
+    usleep(100000);
+    siginfo_t info = {0};
+    struct timespec timeout = {.tv_sec = 2};
+    int signal = sigtimedwait(&set, &info, &timeout);
+    int error = errno, status = 0;
+    CHECK(waitpid(child, &status, 0) == child, "reap owned SIGCHLD child");
+    CHECK(signal == SIGCHLD, "default blocked SIGCHLD wait returned %d errno %d", signal, error);
+    CHECK(info.si_signo == SIGCHLD && info.si_pid == child && info.si_code == CLD_EXITED &&
+              info.si_status == 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "SIGCHLD identity/status: pid %d code %d status %d", info.si_pid, info.si_code, info.si_status);
+  }
+  CHECK(sigprocmask(SIG_SETMASK, &old, NULL) == 0, "restore signal mask");
+  puts("ok default_sigchld_sigtimedwait");
+}
+
+// sockfs inode ownership is shared through actual inherited and SCM sockets.
+static void socket_inode_owner_fork(void) {
+  int socket_fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  CHECK(socket_fd >= 0, "allocate socket inode");
+  CHECK(fchown(socket_fd, 1073, (gid_t)-1) == 0, "resolver socket chown");
+  struct stat before;
+  CHECK(fstat(socket_fd, &before) == 0 && before.st_uid == 1073, "socket fstat owner");
+  pid_t child = fork();
+  CHECK(child >= 0, "socket owner fork");
+  if (child == 0) {
+    struct stat shared;
+    if (fstat(socket_fd, &shared) != 0 || shared.st_ino != before.st_ino || shared.st_uid != 1073) _exit(31);
+    if (fchown(socket_fd, 4099, (gid_t)-1) != 0) _exit(32);
+    _exit(0);
+  }
+  int status;
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+        "fork socket owner status %#x", status);
+  struct stat after;
+  CHECK(fstat(socket_fd, &after) == 0 && after.st_ino == before.st_ino && after.st_uid == 4099,
+        "parent did not observe child socket owner");
+  int channel[2]; CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, channel) == 0, "SCM owner channel");
+  child = fork(); CHECK(child >= 0, "SCM owner fork");
+  if (child == 0) {
+    close(channel[0]); close(socket_fd);
+    if (setgid(40001) != 0 || setuid(40001) != 0) _exit(41);
+    char byte, control[CMSG_SPACE(sizeof(int))]; struct iovec iov = {&byte, 1};
+    struct msghdr message = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = control, .msg_controllen = sizeof(control)};
+    if (recvmsg(channel[1], &message, 0) != 1) _exit(42);
+    struct cmsghdr* header = CMSG_FIRSTHDR(&message); int received;
+    if (header == NULL || header->cmsg_type != SCM_RIGHTS) _exit(43);
+    memcpy(&received, CMSG_DATA(header), sizeof(received)); struct stat transferred;
+    if (fstat(received, &transferred) != 0 || transferred.st_ino != before.st_ino || transferred.st_uid != 4099) _exit(44);
+    errno = 0; if (fchown(received, 40001, (gid_t)-1) != -1 || errno != EPERM) _exit(45);
+    close(received); close(channel[1]); _exit(0);
+  }
+  close(channel[1]); char byte = 1, control[CMSG_SPACE(sizeof(int))] = {0}; struct iovec iov = {&byte, 1};
+  struct msghdr message = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = control, .msg_controllen = sizeof(control)};
+  struct cmsghdr* header = CMSG_FIRSTHDR(&message); header->cmsg_level = SOL_SOCKET; header->cmsg_type = SCM_RIGHTS; header->cmsg_len = CMSG_LEN(sizeof(int));
+  memcpy(CMSG_DATA(header), &socket_fd, sizeof(socket_fd)); CHECK(sendmsg(channel[0], &message, 0) == 1, "send real socket owner FD");
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0, "foreign SCM owner status %#x", status);
+  close(channel[0]); close(socket_fd);
+  puts("ok socket_inode_owner_fork");
+}
+
 int main(int argc, char** argv) {
   self_path = "/data/local/tmp/process";
   arg_area = argv[0];
@@ -1450,6 +1569,9 @@ int main(int argc, char** argv) {
     const char* name;
     void (*fn)(void);
   } checks[] = {
+      {"socket_inode_owner_fork", socket_inode_owner_fork},
+      {"default_sigchld_sigtimedwait", default_sigchld_sigtimedwait},
+      {"clone_new_mount_namespace", clone_new_mount_namespace},
       {"fork_wait", fork_wait},     {"fork_new_code", fork_new_code},
       {"pipe_echo", pipe_echo},     {"mount_ns", mount_ns},
       {"exec_image", exec_image},   {"exec_argv", exec_argv},

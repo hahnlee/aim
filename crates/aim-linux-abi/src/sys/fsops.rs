@@ -10,16 +10,25 @@ use super::tmpfile;
 use crate::errno::{self, EINVAL, ENOENT, ENOSPC};
 use crate::sys::{guest_cstr, procfs};
 use crate::vfs::{self, Resolved};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 const AT_REMOVEDIR: u64 = 0x200;
 const AT_SYMLINK_FOLLOW: u64 = 0x400;
 const EPERM: i64 = 1;
 const EXDEV: i64 = 18;
+const EISDIR: i64 = 21;
+const ENOTEMPTY: i64 = 39;
 const EOPNOTSUPP: i64 = 95;
+const ENODATA: i64 = 61;
+const EFBIG: i64 = 27;
 
 fn resolve_w(dirfd: u64, path: u64, follow: bool) -> Result<Resolved, i64> {
     // SAFETY: guest path pointer.
-    let p = unsafe { guest_cstr(path) };
+    let owned = guest_cstr(path).map_err(|error|-(error as i64))?;
+    resolve_w_bytes(dirfd,&owned,follow)
+}
+fn resolve_w_bytes(dirfd:u64,p:&[u8],follow:bool)->Result<Resolved,i64>{
+    if !p.starts_with(b"/")&&super::fdtab::is_hidden(dirfd as i32){return Err(-(crate::errno::EBADF as i64));}
     let r = vfs::resolve(dirfd as i32, p, follow).map_err(|e| -(e as i64))?;
     check_writable(&r)?;
     Ok(r)
@@ -28,6 +37,7 @@ fn resolve_w(dirfd: u64, path: u64, follow: bool) -> Result<Resolved, i64> {
 pub fn mkdirat(a: [u64; 6]) -> i64 {
     match resolve_w(a[0], a[1], false) {
         Ok(r) => {
+            if let Some(route)=vfs::fuse_route(&r.guest){return super::fuse_client::mkdir(&route,a[2] as u32).map(|_|0).unwrap_or_else(|error|-(error as i64));}
             // The owner keeps access on the host (see host_mode), and
             // macOS drops S_ISVTX; the guest's mode is recorded when the
             // host's differs.
@@ -37,13 +47,14 @@ pub fn mkdirat(a: [u64; 6]) -> i64 {
             let res = errno::check(unsafe { libc::mkdir(r.host.as_ptr(), mode) } as i64);
             if res == 0 {
                 let host = Host::Path(&r.host);
-                attrs::created(host, || r.guest.clone());
+                if let Err(error) = attrs::created(host, || r.guest.clone()) { return -(error as i64); }
                 if attrs::recording() {
                     let mut st: libc::stat = unsafe { std::mem::zeroed() };
                     // SAFETY: host path, local buffer.
                     unsafe { libc::stat(r.host.as_ptr(), &mut st) };
+                    attrs::apply(host, || r.guest.clone(), &mut st);
                     let made = st.st_mode as u32 & 0o7777;
-                    let guest = (made & 0o077) | (want & 0o700) | (want & libc::S_ISVTX as u32);
+                    let guest = (made & (0o077 | libc::S_ISGID as u32)) | (want & 0o700) | (want & libc::S_ISVTX as u32);
                     if guest != made {
                         attrs::record(
                             host,
@@ -68,9 +79,10 @@ pub fn mknodat(a: [u64; 6]) -> i64 {
         Ok(r) => r,
         Err(e) => return e,
     };
+    if let Some(route)=vfs::fuse_route(&r.guest){return super::fuse_client::mknod(&route,mode,a[3] as u32).map(|_|0).unwrap_or_else(|error|-(error as i64));}
     let res = mknod_host(&r, mode);
     if res == 0 {
-        attrs::created(Host::Path(&r.host), || r.guest.clone());
+        if let Err(error) = attrs::created(Host::Path(&r.host), || r.guest.clone()) { return -(error as i64); }
     }
     res
 }
@@ -101,35 +113,197 @@ fn mknod_host(r: &Resolved, mode: u32) -> i64 {
     }
 }
 
+fn directory_permits(st: &libc::stat, want: u32, id: &super::cred::Identity) -> bool {
+    let bits = if st.st_uid == id.uid[3] {
+        (st.st_mode as u32 >> 6) & 7
+    } else if st.st_gid == id.gid[3] || id.groups.contains(&st.st_gid) {
+        (st.st_mode as u32 >> 3) & 7
+    } else {
+        st.st_mode as u32 & 7
+    };
+    bits & want == want
+        || id.cap_eff & (1 << 1) != 0
+        || (want & 2 == 0 && id.cap_eff & (1 << 2) != 0)
+}
+fn sticky_permits(parent: &libc::stat, target: &libc::stat, id: &super::cred::Identity) -> bool {
+    parent.st_mode as u32 & libc::S_ISVTX as u32 == 0
+        || id.uid[3] == parent.st_uid
+        || id.uid[3] == target.st_uid
+        || id.cap_eff & (1 << 3) != 0
+}
+fn unlink_permissions(r: &Resolved, id: &super::cred::Identity) -> Result<(), i64> {
+    if !attrs::recording() {
+        return Ok(());
+    }
+    let parent = std::path::Path::new(&r.guest)
+        .parent()
+        .ok_or(-crate::errno::EBUSY as i64)?;
+    let directory = super::fs::stat_at(
+        crate::vfs::LINUX_AT_FDCWD,
+        parent.as_os_str().as_encoded_bytes(),
+        0,
+    )?;
+    let target = super::fs::stat_at(
+        crate::vfs::LINUX_AT_FDCWD,
+        r.guest.as_bytes(),
+        AT_SYMLINK_NOFOLLOW,
+    )?;
+    if !directory_permits(&directory, 3, id) {
+        return Err(-crate::errno::EACCES as i64);
+    }
+    if directory.st_mode as u32 & libc::S_ISVTX as u32 != 0 {
+        if !sticky_permits(&directory, &target, id) {
+            return Err(-EPERM);
+        }
+    }
+    Ok(())
+}
+
 pub fn unlinkat(a: [u64; 6]) -> i64 {
+    unlinkat_as(a, &super::cred::current())
+}
+fn unlinkat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     if a[2] & !AT_REMOVEDIR != 0 {
         return -(EINVAL as i64);
     }
-    match resolve_w(a[0], a[1], false) {
-        // SAFETY: host path.
-        Ok(r) => errno::check(unsafe {
-            if a[2] & AT_REMOVEDIR != 0 {
-                libc::rmdir(r.host.as_ptr())
-            } else {
-                libc::unlink(r.host.as_ptr())
+    // SAFETY: guest path pointer.
+    let owned_path = match guest_cstr(a[1]) { Ok(bytes)=>bytes, Err(error)=>return -(error as i64) };
+    let path = owned_path.as_slice();
+    if !path.starts_with(b"/")&&super::fdtab::is_hidden(a[0] as i32){return -(crate::errno::EBADF as i64);}
+
+    if let Ok(resolved)=vfs::resolve(a[0] as i32,path,false){if let Some(route)=vfs::fuse_route(&resolved.guest){return super::fuse_client::unlink(&route,a[2]&AT_REMOVEDIR!=0).map(|_|0).unwrap_or_else(|error|-(error as i64));}}
+    let resolved = vfs::resolve_checked(a[0] as i32, path, false, |directory| {
+        if !attrs::recording() {
+            return Ok(());
+        }
+        let st = super::fs::stat_at(crate::vfs::LINUX_AT_FDCWD, directory.as_bytes(), 0)
+            .map_err(|error| -error as i32)?;
+        if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return Err(crate::errno::ENOTDIR);
+        }
+        if directory_permits(&st, 1, id) {
+            Ok(())
+        } else {
+            Err(crate::errno::EACCES)
+        }
+    })
+    .map_err(|error| -i64::from(error));
+    match resolved {
+        Ok(r) => {
+            let last = path
+                .split(|&byte| byte == b'/')
+                .rfind(|component| !component.is_empty());
+            match last {
+                None => {
+                    return if a[2] & AT_REMOVEDIR != 0 {
+                        -crate::errno::EBUSY as i64
+                    } else {
+                        -EISDIR
+                    };
+                }
+                Some(b".") => {
+                    return if a[2] & AT_REMOVEDIR != 0 {
+                        -EINVAL as i64
+                    } else {
+                        -EISDIR
+                    };
+                }
+                Some(b"..") => {
+                    return if a[2] & AT_REMOVEDIR != 0 {
+                        -ENOTEMPTY
+                    } else {
+                        -EISDIR
+                    };
+                }
+                _ => (),
             }
-        } as i64),
+            let parent = std::path::Path::new(&r.guest).parent().unwrap();
+            let parent = match vfs::resolve(
+                crate::vfs::LINUX_AT_FDCWD,
+                parent.as_os_str().as_encoded_bytes(),
+                true,
+            ) {
+                Ok(parent) => parent,
+                Err(error) => return -i64::from(error),
+            };
+            if let Err(error) = check_writable(&parent) {
+                return error;
+            }
+            if a[2] & AT_REMOVEDIR == 0 && path.last() == Some(&b'/') {
+                return match super::fs::stat_at(
+                    crate::vfs::LINUX_AT_FDCWD,
+                    r.guest.as_bytes(),
+                    AT_SYMLINK_NOFOLLOW,
+                ) {
+                    Ok(st) if st.st_mode & libc::S_IFMT == libc::S_IFDIR => -EISDIR,
+                    Ok(_) => -crate::errno::ENOTDIR as i64,
+                    Err(error) => error,
+                };
+            }
+            if let Err(error) = unlink_permissions(&r, id) {
+                return error;
+            }
+            let target = match super::fs::stat_at(
+                crate::vfs::LINUX_AT_FDCWD,
+                r.guest.as_bytes(),
+                AT_SYMLINK_NOFOLLOW,
+            ) {
+                Ok(target) => target,
+                Err(error) => return error,
+            };
+            let directory = target.st_mode & libc::S_IFMT == libc::S_IFDIR;
+            if a[2] & AT_REMOVEDIR != 0 && !directory {
+                return -crate::errno::ENOTDIR as i64;
+            }
+            if a[2] & AT_REMOVEDIR == 0 && directory {
+                return -EISDIR;
+            }
+            if vfs::is_mountpoint(&r.guest) {
+                return -crate::errno::EBUSY as i64;
+            }
+            // SAFETY: resolved host path.
+            let result = unsafe {
+                if a[2] & AT_REMOVEDIR != 0 {
+                    libc::rmdir(r.host.as_ptr())
+                } else {
+                    libc::unlink(r.host.as_ptr())
+                }
+            };
+            if result == 0 {
+                return 0;
+            }
+            let error = errno::last() as i64;
+            if a[2] == 0 && error == EPERM {
+                // Darwin returns EPERM for directory unlink; Linux uses
+                // EISDIR. Do not follow a symlink to a directory.
+                let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
+                // SAFETY: resolved host path and local stat buffer.
+                if unsafe { libc::lstat(r.host.as_ptr(), &mut metadata) } == 0
+                    && metadata.st_mode & libc::S_IFMT == libc::S_IFDIR
+                {
+                    return -EISDIR;
+                }
+            }
+            -error
+        }
         Err(e) => e,
     }
 }
 
 pub fn symlinkat(a: [u64; 6]) -> i64 {
     // SAFETY: guest string; the target is stored verbatim (guest-relative).
-    let target = unsafe { guest_cstr(a[0]) };
+    let owned_target = match guest_cstr(a[0]) { Ok(bytes)=>bytes, Err(error)=>return -(error as i64) };
+    let target = owned_target.as_slice();
     let Ok(t) = std::ffi::CString::new(target) else {
         return -(EINVAL as i64);
     };
     match resolve_w(a[1], a[2], false) {
         Ok(r) => {
+            if let Some(route)=vfs::fuse_route(&r.guest){return super::fuse_client::symlink(&route,target).map(|_|0).unwrap_or_else(|error|-(error as i64));}
             // SAFETY: host path.
             let res = errno::check(unsafe { libc::symlink(t.as_ptr(), r.host.as_ptr()) } as i64);
             if res == 0 {
-                attrs::created(Host::Path(&r.host), || r.guest.clone());
+                if let Err(error) = attrs::created(Host::Path(&r.host), || r.guest.clone()) { return -(error as i64); }
             }
             res
         }
@@ -139,15 +313,15 @@ pub fn symlinkat(a: [u64; 6]) -> i64 {
 
 pub fn linkat(a: [u64; 6]) -> i64 {
     let flags = a[4];
-    if flags & !(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
-        return -(EINVAL as i64);
-    }
+    if flags & !(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {return -(EINVAL as i64);}
+    let old_path=match guest_cstr(a[1]){Ok(bytes)=>bytes,Err(error)=>return -(error as i64)};
+    if flags&AT_EMPTY_PATH!=0&&old_path.is_empty()&&super::fdtab::is_hidden(a[0] as i32){return -(crate::errno::EBADF as i64);}
     // SAFETY: guest path pointer.
-    let empty = flags & AT_EMPTY_PATH != 0 && unsafe { guest_cstr(a[1]) }.is_empty();
+    let empty = flags & AT_EMPTY_PATH != 0 && old_path.is_empty();
     let old = if empty {
         None
     } else {
-        match resolve_w(a[0], a[1], flags & AT_SYMLINK_FOLLOW != 0) {
+        match resolve_w_bytes(a[0], &old_path, flags & AT_SYMLINK_FOLLOW != 0) {
             Ok(r) => Some(r),
             Err(e) => return e,
         }
@@ -156,6 +330,8 @@ pub fn linkat(a: [u64; 6]) -> i64 {
         Ok(r) => r,
         Err(e) => return e,
     };
+    let old_route=old.as_ref().and_then(|old|vfs::fuse_route(&old.guest));let new_route=vfs::fuse_route(&new.guest);
+    match(old_route,new_route){(Some(old),Some(new))=>return super::fuse_client::link(&old,&new).map(|_|0).unwrap_or_else(|error|-(error as i64)),(Some(_),None)|(None,Some(_))=>return -EXDEV,_=>{}}
     // An open file, by AT_EMPTY_PATH or its /proc/self/fd link (how an
     // O_TMPFILE file gets its name).
     let fd = match &old {
@@ -195,6 +371,10 @@ pub fn renameat2(a: [u64; 6]) -> i64 {
         Ok(r) => r,
         Err(e) => return e,
     };
+    match(vfs::fuse_route(&old.guest),vfs::fuse_route(&new.guest)){
+        (Some(old),Some(new))=>return super::fuse_client::rename(&old,&new,flags as u32).map(|_|0).unwrap_or_else(|error|-(error as i64)),
+        (Some(_),None)|(None,Some(_))=>return -EXDEV,_=>{}
+    }
     let hflags = if flags & RENAME_NOREPLACE != 0 {
         libc::RENAME_EXCL
     } else if flags & RENAME_EXCHANGE != 0 {
@@ -235,157 +415,715 @@ fn host_mode(mode: u32, st_mode: u16) -> u16 {
     (mode | owner) as u16
 }
 
-pub fn fchmodat(a: [u64; 6]) -> i64 {
-    let mode = a[2] as u32 & 0o7777;
-    let r = match resolve_w(a[0], a[1], true) {
-        Ok(r) => r,
-        Err(e) => return e,
-    };
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: host path, local buffer.
-    unsafe { libc::stat(r.host.as_ptr(), &mut st) };
-    // SAFETY: host path.
-    if unsafe { libc::chmod(r.host.as_ptr(), host_mode(mode, st.st_mode)) } < 0 {
-        return -(errno::last() as i64);
+fn resolve_metadata(
+    dirfd: i32,
+    path: &[u8],
+    follow: bool,
+    id: &super::cred::Identity,
+) -> Result<Resolved, i64> {
+    if !path.starts_with(b"/") && super::fdtab::is_hidden(dirfd) {
+        return Err(-(crate::errno::EBADF as i64));
     }
-    attrs::record(
-        Host::Path(&r.host),
-        || r.guest,
-        Attr {
-            mode: Some(mode),
-            ..Default::default()
-        },
-    );
-    0
+    let resolved = vfs::resolve_checked(dirfd, path, follow, |directory| {
+        attrs::search(directory, id, attrs::FS)
+    })
+    .map_err(|error| -(error as i64))?;
+    check_writable(&resolved)?;
+    Ok(resolved)
 }
-
+struct MetadataFd(Option<OwnedFd>);
+impl AsRawFd for MetadataFd {
+    fn as_raw_fd(&self) -> i32 {
+        self.0.as_ref().unwrap().as_raw_fd()
+    }
+}
+impl Drop for MetadataFd {
+    fn drop(&mut self) {
+        if let Some(fd) = self.0.take() {
+            let raw = fd.as_raw_fd();
+            drop(fd);
+            super::fdtab::unhide(raw);
+        }
+    }
+}
+fn private_metadata_fd(fd: i32) -> MetadataFd {
+    MetadataFd(Some(unsafe {
+        OwnedFd::from_raw_fd(super::fdtab::hide(fd))
+    }))
+}
+fn metadata_fd_copy(fd: i32) -> Result<MetadataFd, i64> {
+    let _creating = super::fork::spawn::own_fds();
+    let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if copy < 0 {
+        return Err(-(errno::last() as i64));
+    }
+    Ok(private_metadata_fd(copy))
+}
+fn inode_mutation(
+    host: Host,
+    guest: &str,
+    follow: bool,
+    change: impl FnOnce(&libc::stat) -> i64,
+) -> i64 {
+    let initial = match metadata_stat(host, guest, follow) {
+        Ok(stat) => stat,
+        Err(error) => return error,
+    };
+    attrs::with_inode_lock(host, &initial, || {
+        let stat = metadata_stat(host, guest, follow).map_err(|error| (-error) as i32)?;
+        let result = change(&stat);
+        if result < 0 {
+            Err((-result) as i32)
+        } else {
+            Ok(result)
+        }
+    })
+    .unwrap_or_else(|error| -(error as i64))
+}
+fn metadata_anchor(resolved: &Resolved, follow: bool, write: bool) -> Result<MetadataFd, i64> {
+    let _creating = super::fork::spawn::own_fds();
+    // O_EVTONLY does not require content-read access. O_NOFOLLOW prevents a
+    // swapped final symlink from redirecting the authenticated inode change.
+    let flags = libc::O_EVTONLY
+        | libc::O_NONBLOCK
+        | libc::O_CLOEXEC
+        | if follow {
+            libc::O_NOFOLLOW
+        } else {
+            libc::O_SYMLINK
+        };
+    let fd = unsafe { libc::open(resolved.host.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(-(errno::last() as i64));
+    }
+    let anchor = private_metadata_fd(fd);
+    if !write {
+        return Ok(anchor);
+    }
+    let mut first: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(anchor.as_raw_fd(), &mut first) } < 0 {
+        return Err(-(errno::last() as i64));
+    }
+    if first.st_mode & libc::S_IFMT == libc::S_IFDIR {
+        return Err(-EISDIR);
+    }
+    if first.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(-(EINVAL as i64));
+    }
+    let writable = unsafe {
+        libc::open(
+            resolved.host.as_ptr(),
+            libc::O_WRONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+    };
+    if writable < 0 {
+        return Err(-(errno::last() as i64));
+    }
+    let writable = private_metadata_fd(writable);
+    let mut second: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(writable.as_raw_fd(), &mut second) } < 0 {
+        return Err(-(errno::last() as i64));
+    }
+    if first.st_dev != second.st_dev || first.st_ino != second.st_ino {
+        return Err(-(crate::errno::EAGAIN as i64));
+    }
+    Ok(writable)
+}
+fn metadata_stat(host: Host, guest: &str, follow: bool) -> Result<libc::stat, i64> {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        match host {
+            Host::Path(path) | Host::Image(path) => {
+                if follow {
+                    libc::stat(path.as_ptr(), &mut stat)
+                } else {
+                    libc::lstat(path.as_ptr(), &mut stat)
+                }
+            }
+            Host::Fd(fd) => libc::fstat(fd, &mut stat),
+        }
+    };
+    if result < 0 {
+        return Err(-(errno::last() as i64));
+    }
+    attrs::apply(host, || guest.to_owned(), &mut stat);
+    Ok(stat)
+}
 fn fd_guest(fd: i32) -> Option<String> {
     procfs::fd_guest_path(fd).ok()
 }
-
-pub fn fchmod(a: [u64; 6]) -> i64 {
-    let (fd, mode) = (a[0] as i32, a[1] as u32 & 0o7777);
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: fstat into a local buffer, then a plain fchmod.
-    unsafe { libc::fstat(fd, &mut st) };
-    if unsafe { libc::fchmod(fd, host_mode(mode, st.st_mode)) } < 0 {
-        return -(errno::last() as i64);
+fn writable_fd_metadata(fd: i32, stat: &libc::stat) -> Result<(), i64> {
+    if vfs::on_read_only_root(stat.st_dev) {
+        return Err(-(crate::errno::EROFS as i64));
     }
-    attrs::record(
-        Host::Fd(fd),
-        || fd_guest(fd).unwrap_or_default(),
-        Attr {
-            mode: Some(mode),
-            ..Default::default()
-        },
-    );
-    0
+    // Anonymous memory has an actual writable inode/seal owner. F_GETPATH's
+    // diagnostic host pathname is not a guest mount identity.
+    if memfd::key(fd).is_some() { return Ok(()); }
+    let guest = crate::xrt::original_guest_path(fd).or_else(|| {
+        let mut path=[0u8;libc::PATH_MAX as usize];
+        if unsafe{libc::fcntl(fd,libc::F_GETPATH,path.as_mut_ptr())}<0 {return None;}
+        let length=path.iter().position(|byte|*byte==0)?;
+        use std::os::unix::ffi::OsStrExt;
+        vfs::guest_path_of_host(std::path::Path::new(std::ffi::OsStr::from_bytes(&path[..length])))
+    });
+    if attrs::recording() && guest.is_some_and(|path|vfs::lookup(&path).1==vfs::Area::Image) {
+        return Err(-(crate::errno::EROFS as i64));
+    }
+    Ok(())
 }
-
+fn chmod_mode(stat: &libc::stat, mode: u32, id: &super::cred::Identity) -> Result<u32, i64> {
+    if stat.st_uid != id.uid[attrs::FS] && id.cap_eff & (1 << 3) == 0 {
+        return Err(-EPERM);
+    }
+    let group = stat.st_gid == id.gid[attrs::FS] || id.groups.contains(&stat.st_gid);
+    Ok(if !group && id.cap_eff & (1 << 4) == 0 {
+        mode & !(libc::S_ISGID as u32)
+    } else {
+        mode
+    })
+}
+fn chown_change(
+    stat: &libc::stat,
+    uid: u64,
+    gid: u64,
+    id: &super::cred::Identity,
+) -> Result<Attr, i64> {
+    let mut change = owner(uid, gid);
+    let capable = id.cap_eff & 1 != 0;
+    let own = stat.st_uid == id.uid[attrs::FS];
+    if change
+        .uid
+        .is_some_and(|uid| (!own || uid != stat.st_uid) && !capable)
+    {
+        return Err(-EPERM);
+    }
+    if change.gid.is_some_and(|gid| {
+        (!own || (gid != stat.st_gid && gid != id.gid[attrs::FS] && !id.groups.contains(&gid)))
+            && !capable
+    }) {
+        return Err(-EPERM);
+    }
+    if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        // chown clears execution privilege even for root; mandatory-locking
+        // setgid (without group execute) remains, as in Linux chown_common.
+        let old = stat.st_mode as u32 & 0o7777;
+        let group = stat.st_gid == id.gid[attrs::FS] || id.groups.contains(&stat.st_gid);
+        let mode = old
+            & !(libc::S_ISUID as u32)
+            & if old & 0o010 != 0 || !group && id.cap_eff & (1 << 4) == 0 {
+                !(libc::S_ISGID as u32)
+            } else {
+                u32::MAX
+            };
+        if mode != old {
+            change.mode = Some(mode);
+        }
+    }
+    Ok(change)
+}
+fn kill_file_capabilities(host: Host, stat: &libc::stat) -> Result<(), i64> {
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Ok(());
+    }
+    let name = c"dev.aim.xattr.security.capability";
+    let size = unsafe { match host {
+        Host::Path(path) => libc::getxattr(path.as_ptr(),name.as_ptr(),std::ptr::null_mut(),0,0,libc::XATTR_NOFOLLOW),
+        Host::Fd(fd) => libc::fgetxattr(fd,name.as_ptr(),std::ptr::null_mut(),0,0,0),
+        Host::Image(_) => return Err(-(crate::errno::EROFS as i64)),
+    }};
+    if size<=0 {
+        if size==0{return Ok(());}
+        let error=errno::last();
+        return if error as i64==ENODATA||error==crate::errno::EOPNOTSUPP{Ok(())}else{Err(-(error as i64))};
+    }
+    let result = unsafe {
+        match host {
+            Host::Path(path) => {
+                libc::removexattr(path.as_ptr(), name.as_ptr(), libc::XATTR_NOFOLLOW)
+            }
+            Host::Fd(fd) => libc::fremovexattr(fd, name.as_ptr(), 0),
+            Host::Image(_) => return Err(-(crate::errno::EROFS as i64)),
+        }
+    };
+    if result < 0 {
+        let error = errno::last();
+        if error as i64 != ENODATA && error != crate::errno::EOPNOTSUPP {
+            return Err(-(error as i64));
+        }
+    }
+    Ok(())
+}
 fn owner(uid: u64, gid: u64) -> Attr {
-    let id = |v: u64| (v as u32 != u32::MAX).then_some(v as u32);
+    let id = |value: u64| (value as u32 != u32::MAX).then_some(value as u32);
     Attr {
         uid: id(uid),
         gid: id(gid),
         mode: None,
     }
 }
-
-/// chown: the host cannot take Android ids. Under a path map the owner is
-/// recorded; otherwise the host call decides.
-fn chown_host(path: &std::ffi::CStr, guest: &str, uid: u64, gid: u64, follow: bool) -> i64 {
-    if vfs::runtime_dir().is_some() {
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: host path, local buffer.
-        let r = unsafe {
-            if follow {
-                libc::stat(path.as_ptr(), &mut st)
-            } else {
-                libc::lstat(path.as_ptr(), &mut st)
-            }
-        };
-        if r < 0 {
-            return -(errno::last() as i64);
-        }
-        attrs::record(Host::Path(path), || guest.to_string(), owner(uid, gid));
-        return 0;
-    }
-    // SAFETY: host path.
-    errno::check(unsafe {
-        if follow {
-            libc::chown(path.as_ptr(), uid as u32, gid as u32)
-        } else {
-            libc::lchown(path.as_ptr(), uid as u32, gid as u32)
-        }
-    } as i64)
+pub fn fchmodat(a: [u64; 6]) -> i64 {
+    fchmodat_as(a, &super::cred::current())
 }
-
-pub fn fchownat(a: [u64; 6]) -> i64 {
-    let (uid, gid, flags) = (a[2], a[3], a[4]);
-    // SAFETY: guest path pointer.
-    if unsafe { guest_cstr(a[1]) }.is_empty() && flags & AT_EMPTY_PATH != 0 {
-        return fchown([a[0], uid, gid, 0, 0, 0]);
-    }
-    let r = match resolve_w(a[0], a[1], flags & AT_SYMLINK_NOFOLLOW == 0) {
-        Ok(r) => r,
-        Err(e) => return e,
+fn fchmodat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
+    let owned_path = match guest_cstr(a[1]) { Ok(bytes)=>bytes, Err(error)=>return -(error as i64) };
+    let path = owned_path.as_slice();
+    let resolved = match resolve_metadata(a[0] as i32, path, true, id) {
+        Ok(value) => value,
+        Err(error) => return error,
     };
-    chown_host(
-        &r.host,
-        &r.guest,
-        uid,
-        gid,
-        flags & AT_SYMLINK_NOFOLLOW == 0,
-    )
-}
-
-pub fn fchown(a: [u64; 6]) -> i64 {
-    let fd = a[0] as i32;
-    if vfs::runtime_dir().is_some() {
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: plain fstat.
-        if unsafe { libc::fstat(fd, &mut st) } < 0 {
+    if let Some(fd) = procfs::current_fd_link(&resolved.guest) {
+        return match fd {
+            Ok(fd) => chmod_fd(fd, a[2] as u32, id, true),
+            Err(error) => -(error as i64),
+        };
+    }
+    if let Some(route) = vfs::fuse_route(&resolved.guest) {
+        let mut mode = a[2] as u32 & 0o7777;
+        if route.default_permissions {
+            let stat = match super::fuse_client::stat(&route, None, None) {
+                Ok(stat) => stat,
+                Err(error) => return -(error as i64),
+            };
+            mode = match chmod_mode(&stat, mode, id) {
+                Ok(mode) => mode,
+                Err(error) => return error,
+            };
+        }
+        return super::fuse_client::setattr(&route, None, None, Some(mode), None, None, None)
+            .map(|_| 0)
+            .unwrap_or_else(|error| -(error as i64));
+    }
+    let anchor = match metadata_anchor(&resolved, true, false) {
+        Ok(fd) => fd,
+        Err(error) => return error,
+    };
+    let host = Host::Fd(anchor.as_raw_fd());
+    inode_mutation(host, &resolved.guest, true, |stat| {
+        let mode = match chmod_mode(&stat, a[2] as u32 & 0o7777, id) {
+            Ok(mode) => mode,
+            Err(error) => return error,
+        };
+        if unsafe { libc::fchmod(anchor.as_raw_fd(), host_mode(mode, stat.st_mode)) } < 0 {
             return -(errno::last() as i64);
         }
-        attrs::record(
+        attrs::record_checked(
+            host,
+            || resolved.guest.clone(),
+            Attr {
+                mode: Some(mode),
+                ..Default::default()
+            },
+        )
+        .map(|_| 0)
+        .unwrap_or_else(|error| -(error as i64))
+    })
+}
+pub fn fchmod(a: [u64; 6]) -> i64 {
+    fchmod_as(a, &super::cred::current())
+}
+fn fchmod_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
+    let pinned = match super::fdtab::pin_guest(a[0] as i32) { Ok(fd) => fd, Err(error) => return -(error as i64) };
+    chmod_fd_private(pinned.descriptor().as_raw_fd(), a[1] as u32, id, false, true)
+}
+fn chmod_fd(fd: i32, mode: u32, id: &super::cred::Identity, magic_link: bool) -> i64 {
+    chmod_fd_private(fd, mode, id, magic_link, false)
+}
+fn chmod_fd_private(fd: i32, mode: u32, id: &super::cred::Identity, magic_link: bool, pinned: bool) -> i64 {
+    if !pinned && super::fdtab::is_hidden(fd) {
+        return -(crate::errno::EBADF as i64);
+    }
+    if !magic_link && super::fs::is_path_fd(fd) {
+        return -(crate::errno::EBADF as i64);
+    }
+    if let Some(file) = super::fuse_client::get(fd) {
+        let mut mode = mode & 0o7777;
+        if file.route.default_permissions {
+            let stat = match super::fuse_client::stat(&file.route, Some(file.node), Some(file.fh)) {
+                Ok(stat) => stat,
+                Err(error) => return -(error as i64),
+            };
+            mode = match chmod_mode(&stat, mode, id) {
+                Ok(mode) => mode,
+                Err(error) => return error,
+            };
+        }
+        return super::fuse_client::setattr(
+            &file.route,
+            Some(file.node),
+            Some(file.fh),
+            Some(mode),
+            None,
+            None,
+            None,
+        )
+        .map(|_| 0)
+        .unwrap_or_else(|error| -(error as i64));
+    }
+    let anchor = match metadata_fd_copy(fd) {
+        Ok(fd) => fd,
+        Err(error) => return error,
+    };
+    let fd = anchor.as_raw_fd();
+    let guest = fd_guest(fd).unwrap_or_default();
+    inode_mutation(Host::Fd(fd), &guest, true, |stat| {
+        // Following a procfs magic link to an O_PATH symlink must not change
+        // its target. Bionic maps this Linux ELOOP to ENOTSUP.
+        if magic_link && stat.st_mode & libc::S_IFMT == libc::S_IFLNK {
+            return -(crate::errno::ELOOP as i64);
+        }
+        if let Err(error) = writable_fd_metadata(fd, &stat) {
+            return error;
+        }
+        let mode = match chmod_mode(&stat, mode & 0o7777, id) {
+            Ok(mode) => mode,
+            Err(error) => return error,
+        };
+        if unsafe { libc::fchmod(fd, host_mode(mode, stat.st_mode)) } < 0 {
+            return -(errno::last() as i64);
+        }
+        attrs::record_checked(
             Host::Fd(fd),
-            || fd_guest(fd).unwrap_or_default(),
-            owner(a[1], a[2]),
-        );
-        return 0;
-    }
-    // SAFETY: plain fchown.
-    errno::check(unsafe { libc::fchown(fd, a[1] as u32, a[2] as u32) } as i64)
+            || guest.clone(),
+            Attr {
+                mode: Some(mode),
+                ..Default::default()
+            },
+        )
+        .map(|_| 0)
+        .unwrap_or_else(|error| -(error as i64))
+    })
 }
-
+pub fn fchownat(a: [u64; 6]) -> i64 {
+    fchownat_as(a, &super::cred::current())
+}
+fn fchownat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
+    let (uid, gid, flags) = (a[2], a[3], a[4]);
+    if flags & !(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW) != 0 {
+        return -(EINVAL as i64);
+    }
+    let owned_path = match guest_cstr(a[1]) { Ok(bytes)=>bytes, Err(error)=>return -(error as i64) };
+    let path = owned_path.as_slice();
+    if path.is_empty() && flags & AT_EMPTY_PATH != 0 {
+        if a[0] as i32 == vfs::LINUX_AT_FDCWD {
+            return fchownat_as(
+                [
+                    a[0],
+                    c".".as_ptr() as u64,
+                    uid,
+                    gid,
+                    flags & AT_SYMLINK_NOFOLLOW,
+                    0,
+                ],
+                id,
+            );
+        }
+        return fchown_fd_as([a[0], uid, gid, 0, 0, 0], id, true);
+    }
+    let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
+    let resolved = match resolve_metadata(a[0] as i32, path, follow, id) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    if let Some(route) = vfs::fuse_route(&resolved.guest) {
+        let mut change = owner(uid, gid);
+        if route.default_permissions {
+            let stat = match super::fuse_client::stat(&route, None, None) {
+                Ok(stat) => stat,
+                Err(error) => return -(error as i64),
+            };
+            change = match chown_change(&stat, uid, gid, id) {
+                Ok(change) => change,
+                Err(error) => return error,
+            };
+        }
+        return super::fuse_client::setattr(
+            &route,
+            None,
+            None,
+            change.mode,
+            change.uid,
+            change.gid,
+            None,
+        )
+        .map(|_| 0)
+        .unwrap_or_else(|error| -(error as i64));
+    }
+    let anchor = match metadata_anchor(&resolved, follow, false) {
+        Ok(fd) => fd,
+        Err(error) => return error,
+    };
+    let host = Host::Fd(anchor.as_raw_fd());
+    inode_mutation(host, &resolved.guest, follow, |stat| {
+        let change = match chown_change(&stat, uid, gid, id) {
+            Ok(change) => change,
+            Err(error) => return error,
+        };
+        if !attrs::recording() {
+            return errno::check(
+                unsafe { libc::fchown(anchor.as_raw_fd(), uid as u32, gid as u32) } as i64,
+            );
+        }
+        if let Err(error) = kill_file_capabilities(host, &stat) {
+            return error;
+        }
+        attrs::record_checked(host, || resolved.guest.clone(), change)
+            .map(|_| 0)
+            .unwrap_or_else(|error| -(error as i64))
+    })
+}
+pub fn fchown(a: [u64; 6]) -> i64 {
+    fchown_as(a, &super::cred::current())
+}
+pub(super) fn fchown_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
+    let pinned = match super::fdtab::pin_guest(a[0] as i32) { Ok(fd) => fd, Err(error) => return -(error as i64) };
+    let mut args = a; args[0] = pinned.descriptor().as_raw_fd() as u64;
+    fchown_fd_private(args, id, false, true)
+}
+fn fchown_fd_as(a: [u64; 6], id: &super::cred::Identity, allow_path: bool) -> i64 {
+    fchown_fd_private(a, id, allow_path, false)
+}
+fn fchown_fd_private(a: [u64; 6], id: &super::cred::Identity, allow_path: bool, pinned: bool) -> i64 {
+    let fd = a[0] as i32;
+    if !pinned && super::fdtab::is_hidden(fd) {
+        return -(crate::errno::EBADF as i64);
+    }
+    if !allow_path && super::fs::is_path_fd(fd) {
+        return -(crate::errno::EBADF as i64);
+    }
+    if let Some(file) = super::fuse_client::get(fd) {
+        let mut change = owner(a[1], a[2]);
+        if file.route.default_permissions {
+            let stat = match super::fuse_client::stat(&file.route, Some(file.node), Some(file.fh)) {
+                Ok(stat) => stat,
+                Err(error) => return -(error as i64),
+            };
+            change = match chown_change(&stat, a[1], a[2], id) {
+                Ok(change) => change,
+                Err(error) => return error,
+            };
+        }
+        return super::fuse_client::setattr(
+            &file.route,
+            Some(file.node),
+            Some(file.fh),
+            change.mode,
+            change.uid,
+            change.gid,
+            None,
+        )
+        .map(|_| 0)
+        .unwrap_or_else(|error| -(error as i64));
+    }
+    match super::net::is_socket_inode(fd) {
+        Err(error)=>return -(error as i64),
+        Ok(true)=>return super::net::with_socket_inode(fd,|stat,attributes| {
+            let change=chown_change(stat,a[1],a[2],id).map_err(|error|(-error) as crate::errno::Errno)?;
+            attributes.uid=change.uid.or(attributes.uid);attributes.gid=change.gid.or(attributes.gid);attributes.mode=change.mode.or(attributes.mode);Ok(())
+        }).map(|_|0).unwrap_or_else(|error|-(error as i64)),
+        Ok(false)=>{},
+    }
+    let guest = fd_guest(fd).unwrap_or_default();
+    let original = fd;
+    let anchor = match metadata_fd_copy(fd) {
+        Ok(fd) => fd,
+        Err(error) => return error,
+    };
+    let fd = anchor.as_raw_fd();
+    inode_mutation(Host::Fd(fd), &guest, true, |stat| {
+        if let Err(error) = writable_fd_metadata(original, &stat) {
+            return error;
+        }
+        let change = match chown_change(&stat, a[1], a[2], id) {
+            Ok(change) => change,
+            Err(error) => return error,
+        };
+        if !attrs::recording() {
+            return errno::check(unsafe { libc::fchown(fd, a[1] as u32, a[2] as u32) } as i64);
+        }
+        if let Err(error) = kill_file_capabilities(Host::Fd(fd), &stat) {
+            return error;
+        }
+        attrs::record_checked(Host::Fd(fd), || guest.clone(), change)
+            .map(|_| 0)
+            .unwrap_or_else(|error| -(error as i64))
+    })
+}
 pub fn truncate(a: [u64; 6]) -> i64 {
-    match resolve_w(vfs::LINUX_AT_FDCWD as u64, a[0], true) {
-        // SAFETY: host path.
-        Ok(r) => errno::check(unsafe { libc::truncate(r.host.as_ptr(), a[1] as i64) } as i64),
-        Err(e) => e,
-    }
+    truncate_as(a, &super::cred::current())
 }
-
+fn truncate_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
+    if (a[1] as i64) < 0 {
+        return -(EINVAL as i64);
+    }
+    let owned_path = match guest_cstr(a[0]) { Ok(bytes)=>bytes, Err(error)=>return -(error as i64) };
+    let path = owned_path.as_slice();
+    let resolved = match resolve_metadata(vfs::LINUX_AT_FDCWD, path, true, id) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    if let Some(route) = vfs::fuse_route(&resolved.guest) {
+        if route.default_permissions {
+            let stat = match super::fuse_client::stat(&route, None, None) {
+                Ok(stat) => stat,
+                Err(error) => return -(error as i64),
+            };
+            if !attrs::permits(&stat, 2, id, attrs::FS) {
+                return -(crate::errno::EACCES as i64);
+            }
+        }
+        return super::fuse_client::setattr(&route, None, None, None, None, None, Some(a[1]))
+            .map(|_| 0)
+            .unwrap_or_else(|error| -(error as i64));
+    }
+    let anchor = match metadata_anchor(&resolved, true, true) {
+        Ok(fd) => fd,
+        Err(error) => return error,
+    };
+    let host = Host::Fd(anchor.as_raw_fd());
+    inode_mutation(host, &resolved.guest, true, |stat| {
+        if stat.st_mode & libc::S_IFMT == libc::S_IFDIR {
+            return -EISDIR;
+        }
+        if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return -(EINVAL as i64);
+        }
+        if !attrs::permits(&stat, 2, id, attrs::FS) {
+            return -(crate::errno::EACCES as i64);
+        }
+        let result =
+            errno::check(unsafe { libc::ftruncate(anchor.as_raw_fd(), a[1] as i64) } as i64);
+        if result == 0 {
+            if let Err(error) = kill_file_capabilities(host, &stat) {
+                return error;
+            }
+        }
+        if result == 0 && id.cap_eff & (1 << 4) == 0 {
+            let mut mode = stat.st_mode as u32 & 0o7777;
+            mode &= !(libc::S_ISUID as u32);
+            if mode & 0o010 != 0
+                || stat.st_gid != id.gid[attrs::FS] && !id.groups.contains(&stat.st_gid)
+            {
+                mode &= !(libc::S_ISGID as u32);
+            }
+            if let Err(error) = attrs::record_checked(
+                host,
+                || resolved.guest.clone(),
+                Attr {
+                    mode: Some(mode),
+                    ..Default::default()
+                },
+            ) {
+                return -(error as i64);
+            }
+        }
+        result
+    })
+}
 pub fn ftruncate(a: [u64; 6]) -> i64 {
-    let (fd, len) = (a[0] as i32, a[1] as i64);
+    ftruncate_as(a, &super::cred::current())
+}
+fn ftruncate_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
+    let pinned = match super::fdtab::pin_guest(a[0] as i32) { Ok(fd) => fd, Err(error) => return -(error as i64) };
+    ftruncate_private(&pinned, a[1] as i64, id)
+}
+fn ftruncate_private(pinned: &super::fdtab::Pinned, len: i64, id: &super::cred::Identity) -> i64 {
+    let fd = pinned.descriptor().as_raw_fd();
+    if super::fs::is_path_fd(fd) {
+        return -(crate::errno::EBADF as i64);
+    }
     if len < 0 {
         return -(EINVAL as i64);
     }
-    if memfd::resize_sealed(fd, len as u64) {
-        return -EPERM;
+    if let Some(file) = super::fuse_client::get(fd) {
+        if !matches!(file.flags & 3,1|2) {
+            return -(EINVAL as i64);
+        }
+        return super::fuse_client::set_size(&file, len as u64)
+            .map(|_| 0)
+            .unwrap_or_else(|error| -(error as i64));
     }
-    // SAFETY: plain ftruncate.
-    errno::check(unsafe { libc::ftruncate(fd, len) } as i64)
+    let guest = fd_guest(fd).unwrap_or_default();
+    let original = fd;
+    let anchor = match metadata_fd_copy(fd) {
+        Ok(fd) => fd,
+        Err(error) => return error,
+    };
+    let fd = anchor.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return -(errno::last() as i64);
+    }
+    if flags & libc::O_ACCMODE == libc::O_RDONLY || matches!(pinned.kind(),Some(super::fdtab::Kind::Regular(description))if !matches!(description.flags&3,1|2)) {
+        return -(EINVAL as i64);
+    }
+    inode_mutation(Host::Fd(fd), &guest, true, |stat| {
+        if let Err(error) = writable_fd_metadata(original, &stat) {
+            return error;
+        }
+        let _admission = match mutation_admission(pinned) { Ok(value) => value, Err(error) => return -(error as i64) };
+        if memfd::resize_sealed(fd, len as u64) {
+            return -EPERM;
+        }
+        let result = errno::check(unsafe { libc::ftruncate(fd, len) } as i64);
+        if result == 0 {
+            if let Err(error) = kill_file_capabilities(Host::Fd(fd), &stat) {
+                return error;
+            }
+        }
+        if result == 0 && id.cap_eff & (1 << 4) == 0 {
+            let mut mode = stat.st_mode as u32 & 0o7777;
+            mode &= !(libc::S_ISUID as u32);
+            if mode & 0o010 != 0
+                || stat.st_gid != id.gid[attrs::FS] && !id.groups.contains(&stat.st_gid)
+            {
+                mode &= !(libc::S_ISGID as u32);
+            }
+            if let Err(error) = attrs::record_checked(
+                Host::Fd(fd),
+                || guest.clone(),
+                Attr {
+                    mode: Some(mode),
+                    ..Default::default()
+                },
+            ) {
+                return -(error as i64);
+            }
+        }
+        result
+    })
+}
+
+fn mutation_admission(pinned: &super::fdtab::Pinned) -> Result<Option<(aim_storage::fsverity::Admission, aim_storage::inode_lease::WriterLease)>, crate::errno::Errno> {
+    let Some(super::fdtab::Kind::Regular(description)) = pinned.kind() else { return Ok(None) };
+    description.check_write()?;
+    let admission = description.store.lock_inode(&pinned.descriptor()).map_err(verity_error)?;
+    if admission.identity() != description.identity { return Err(crate::errno::EBADF); }
+    if admission.enabled().map_err(verity_error)?.is_some() { return Err(crate::errno::EPERM); }
+    let writer = admission.writer_lease().map_err(verity_error)?;
+    Ok(Some((admission, writer)))
+}
+fn verity_error(error: aim_storage::fsverity::Error) -> crate::errno::Errno {
+    match error { aim_storage::fsverity::Error::Linux(error) => error, aim_storage::fsverity::Error::Io(error) => errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) }
 }
 
 const FALLOC_FL_KEEP_SIZE: u64 = 1;
 const FALLOC_FL_PUNCH_HOLE: u64 = 2;
 
 pub fn fallocate(a: [u64; 6]) -> i64 {
-    let (fd, mode, off, len) = (a[0] as i32, a[1], a[2] as i64, a[3] as i64);
+    let pinned = match super::fdtab::pin_guest(a[0] as i32) { Ok(fd) => fd, Err(error) => return -(error as i64) };
+    let (fd, mode, off, len) = (pinned.descriptor().as_raw_fd(), a[1], a[2] as i64, a[3] as i64);
+    if super::fs::is_path_fd(fd) { return -(crate::errno::EBADF as i64); }
+    if let Some(file)=super::fuse_client::get(fd){if off<0||len<=0{return -(EINVAL as i64);}return super::fuse_client::fallocate(&file,off as u64,len as u64,mode as u32).map(|_|0).unwrap_or_else(|error|-(error as i64));}
     if off < 0 || len <= 0 {
         return -(EINVAL as i64);
     }
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 { return -(errno::last() as i64); }
+    if flags & libc::O_ACCMODE == libc::O_RDONLY || matches!(pinned.kind(),Some(super::fdtab::Kind::Regular(description))if !matches!(description.flags&3,1|2)) { return -(crate::errno::EBADF as i64); }
+    let stat = match metadata_stat(Host::Fd(fd), &fd_guest(fd).unwrap_or_default(), true) { Ok(stat) => stat, Err(error) => return error };
+    if let Err(error) = writable_fd_metadata(fd, &stat) { return error; }
+    let _admission = match mutation_admission(&pinned) { Ok(value) => value, Err(error) => return -(error as i64) };
+    if off.checked_add(len).is_none() { return -EFBIG; }
     if mode == FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE {
         if memfd::write_sealed(fd) {
             return -EPERM;
@@ -436,8 +1174,19 @@ pub fn fallocate(a: [u64; 6]) -> i64 {
 
 /// fsync (82), fdatasync (83), syncfs (267).
 pub fn fsync(a: [u64; 6]) -> i64 {
+    let pinned = match super::fdtab::pin_guest(a[0] as i32) { Ok(fd) => fd, Err(error) => return -(error as i64) };
+    fsync_private(&pinned)
+}
+fn fsync_private(pinned: &super::fdtab::Pinned) -> i64 {
+    let fd = pinned.descriptor().as_raw_fd();
+    if super::fs::is_path_fd(fd) { return -(crate::errno::EBADF as i64); }
+    if super::fuse_device::is_device(fd){return -(EINVAL as i64);}
+    if let Some(file)=super::fuse_client::get(fd){if let Err(error)=super::fuse_cache::flush_file(&file){return -(error as i64);}return file.fsync(false).map(|_|0).unwrap_or_else(|error|-(error as i64));}
+    if super::proxy_file::is_proxy(fd) {
+        return super::proxy_file::sync(fd);
+    }
     // SAFETY: plain fsync.
-    errno::check(unsafe { libc::fsync(a[0] as i32) } as i64)
+    errno::check(unsafe { libc::fsync(fd) } as i64)
 }
 
 pub fn sync() -> i64 {
@@ -448,16 +1197,16 @@ pub fn sync() -> i64 {
 
 /// sync_file_range: write-out of a range; a full fsync covers it.
 pub fn sync_file_range(a: [u64; 6]) -> i64 {
-    if a[3] & !7 != 0 || (a[1] as i64) < 0 || (a[2] as i64) < 0 {
-        return -(EINVAL as i64);
-    }
-    fsync(a)
+    let pinned = match super::fdtab::pin_guest(a[0] as i32) { Ok(fd) => fd, Err(error) => return -(error as i64) };
+    if matches!(pinned.kind(), Some(super::fdtab::Kind::Path(_))) { return -(crate::errno::EBADF as i64); }
+    if a[3] & !7 != 0 || (a[1] as i64) < 0 || (a[2] as i64) < 0 { return -(EINVAL as i64); }
+    fsync_private(&pinned)
 }
 
 pub fn flock(a: [u64; 6]) -> i64 {
-    // LOCK_SH/EX/NB/UN agree.
-    // SAFETY: plain flock.
-    errno::check(unsafe { libc::flock(a[0] as i32, a[1] as i32) } as i64)
+    let pinned = match super::fdtab::pin_guest(a[0] as i32) { Ok(fd) => fd, Err(error) => return -(error as i64) };
+    if matches!(pinned.kind(), Some(super::fdtab::Kind::Path(_))) { return -(crate::errno::EBADF as i64); }
+    errno::check(unsafe { libc::flock(pinned.descriptor().as_raw_fd(), a[1] as i32) } as i64)
 }
 
 const UTIME_NOW: i64 = (1 << 30) - 1;
@@ -483,15 +1232,20 @@ pub fn utimensat(a: [u64; 6]) -> i64 {
             };
         }
     }
+    let copied_path=if path==0{None}else{match guest_cstr(path){Ok(bytes)=>Some(bytes),Err(error)=>return -(error as i64)}};
+    if copied_path.as_ref().is_none_or(|bytes|bytes.is_empty()||!bytes.starts_with(b"/"))&&super::fdtab::is_hidden(dirfd){return -(crate::errno::EBADF as i64);}
     // SAFETY: guest path pointer (NULL: the fd itself).
-    if path == 0 || (unsafe { guest_cstr(path) }.is_empty() && flags & AT_EMPTY_PATH != 0) {
+    if path == 0 || (copied_path.as_ref().is_some_and(|bytes|bytes.is_empty()) && flags & AT_EMPTY_PATH != 0) {
+        if path==0&&super::fs::is_path_fd(dirfd){return -(crate::errno::EBADF as i64);}
+        if let Some(file)=super::fuse_client::get(dirfd){return super::fuse_client::times(&file.route,Some(file.node),Some(file.fh),&ts).map(|_|0).unwrap_or_else(|error|-(error as i64));}
         // SAFETY: futimens with local timespecs.
         return errno::check(unsafe { libc::futimens(dirfd, ts.as_ptr()) } as i64);
     }
-    let r = match resolve_w(dirfd as u64, path, flags & AT_SYMLINK_NOFOLLOW == 0) {
+    let r = match resolve_w_bytes(dirfd as u64, copied_path.as_ref().unwrap(), flags & AT_SYMLINK_NOFOLLOW == 0) {
         Ok(r) => r,
         Err(e) => return e,
     };
+    if let Some(route)=vfs::fuse_route(&r.guest){return super::fuse_client::times(&route,None,None,&ts).map(|_|0).unwrap_or_else(|error|-(error as i64));}
     let hflags = if flags & AT_SYMLINK_NOFOLLOW != 0 {
         libc::AT_SYMLINK_NOFOLLOW
     } else {
@@ -544,7 +1298,297 @@ mod tests {
         let fd = openat([AT, p.as_ptr() as u64, flags, 0o600, 0, 0]);
         assert!(fd >= 0, "create {path}: {fd}");
         // SAFETY: the fd just opened.
-        unsafe { libc::close(fd as i32) };
+        assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]),0);
+    }
+
+    #[test]
+    fn fd_metadata_pin_rejects_private_and_preserves_closed_inode() {
+        let (_guard, view) = crate::vfs::test_view();
+        let first = view.join("data/pinned-original"); let replacement = view.join("data/pinned-replacement");
+        std::fs::write(&first, b"original").unwrap(); std::fs::write(&replacement, b"replacement").unwrap();
+        let source = std::fs::OpenOptions::new().read(true).write(true).open(&first).unwrap();
+        let raw = source.as_raw_fd();
+        assert_eq!(ftruncate([raw as u64, 3, 0, 0, 0, 0]), -(crate::errno::EBADF as i64));
+        super::super::fdtab::publish_guest(raw).unwrap();
+        let pinned = super::super::fdtab::pin_guest(raw).unwrap();
+        assert_eq!(fchmod([pinned.descriptor().as_raw_fd() as u64, 0o777, 0, 0, 0, 0]), -(crate::errno::EBADF as i64));
+        super::super::fdtab::withdraw_guest(raw).unwrap(); drop(source);
+        let foreign = std::fs::OpenOptions::new().read(true).write(true).open(&replacement).unwrap();
+        if foreign.as_raw_fd() != raw { assert_eq!(unsafe { libc::dup2(foreign.as_raw_fd(), raw) }, raw); }
+        assert_eq!(ftruncate_private(&pinned, 3, &super::super::cred::Identity::default()), 0);
+        assert_eq!(chmod_fd_private(pinned.descriptor().as_raw_fd(), 0o640, &super::super::cred::Identity::default(), false, true), 0);
+        assert_eq!(std::fs::read(&first).unwrap(), b"ori"); assert_eq!(std::fs::read(&replacement).unwrap(), b"replacement");
+        assert_eq!(owner("/data/pinned-original").2, 0o640);
+        if foreign.as_raw_fd() != raw { assert_eq!(unsafe { libc::close(raw) }, 0); }
+        drop(foreign); drop(pinned);
+    }
+
+    #[test]
+    fn fd_metadata_enabled_verity_rejects_truncate_and_allocation() {
+        use std::os::fd::AsFd;
+        let (_guard, view) = crate::vfs::test_view();
+        let path = view.join("data/verity-metadata"); let bytes = vec![0x5a; 8192]; std::fs::write(&path, &bytes).unwrap();
+        let readonly = std::fs::File::open(&path).unwrap();
+        let store = std::sync::Arc::new(aim_storage::fsverity::Store::new(&view.join("verity-records"), &view.join("verity-leases")).unwrap());
+        let admission = store.lock_inode(&readonly).unwrap(); let guard = admission.begin_enable().unwrap(); drop(admission);
+        let prepared = guard.build(aim_storage::fsverity::BuildOptions::new(1, 4096, vec![], 4096, 4096).unwrap(), &[], || false).unwrap(); guard.commit(prepared).unwrap();
+        let writable = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        assert_eq!(super::super::regular_file::Description::new(writable.as_fd(), 2, store.clone()).err().unwrap(), crate::errno::EPERM);
+        drop(writable);
+        let raw = readonly.as_raw_fd();
+        let description = super::super::regular_file::Description::new(readonly.as_fd(), 0, store).unwrap();
+        super::super::fdtab::insert(raw, super::super::fdtab::Kind::Regular(description));
+        super::super::fdtab::publish_guest(raw).unwrap();
+        assert_eq!(ftruncate([raw as u64, 1, 0, 0, 0, 0]), -(EINVAL as i64));
+        assert_eq!(fallocate([raw as u64, 0, 0, 16384, 0, 0]), -(crate::errno::EBADF as i64));
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        super::super::fdtab::withdraw_guest(raw).unwrap(); super::super::fdtab::on_close(raw); drop(readonly);
+    }
+
+    #[test]
+    fn mapped_metadata_memfd_and_unmapped_fd_resize_real_shared_memory() {
+        let(_guard,_view)=crate::vfs::test_view();assert!(attrs::recording());
+        let fd=memfd::memfd_create([c"metadata-anonymous".as_ptr() as u64,3,0,0,0,0]);assert!(fd>=0);assert!(memfd::key(fd as i32).is_some());
+        assert_eq!(ftruncate([fd as u64,16384,0,0,0,0]),0);
+        let address=super::super::mem::mmap([0,16384,3,1,fd as u64,0]);assert!(address>0,"actual shared mmap: {address}");
+        unsafe{(address as *mut u8).write(0x5a)};
+        let mut byte=0u8;assert_eq!(unsafe{libc::pread(fd as i32,(&mut byte as *mut u8).cast(),1,0)},1);assert_eq!(byte,0x5a);
+        let context:crate::context::GuestContext=unsafe{std::mem::zeroed()};
+        assert_eq!(super::super::mem::munmap(&context,[address as u64,16384,0,0,0,0]),0);
+        assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]),0);
+        let path=std::env::temp_dir().join(format!("aim-unmapped-metadata-{}",std::process::id()));
+        let ordinary=std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
+        use std::os::fd::AsRawFd;assert!(vfs::guest_path_of_host(&path).is_none());
+        super::super::fdtab::publish_guest(ordinary.as_raw_fd()).unwrap();
+        assert_eq!(ftruncate([ordinary.as_raw_fd() as u64,37,0,0,0,0]),0);assert_eq!(ordinary.metadata().unwrap().len(),37);
+        super::super::fdtab::withdraw_guest(ordinary.as_raw_fd()).unwrap();drop(ordinary);std::fs::remove_file(path).unwrap();
+        let image_path=_view.join("root/system/metadata-readonly-fixture");std::fs::create_dir_all(image_path.parent().unwrap()).unwrap();
+        let image=std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&image_path).unwrap();
+        assert_eq!(vfs::lookup(&vfs::guest_path_of_host(&image_path.canonicalize().unwrap()).unwrap()).1,vfs::Area::Image);
+        super::super::fdtab::publish_guest(image.as_raw_fd()).unwrap();
+        assert_eq!(ftruncate([image.as_raw_fd() as u64,37,0,0,0,0]),-(crate::errno::EROFS as i64));
+        assert_eq!(image.metadata().unwrap().len(),0);super::super::fdtab::withdraw_guest(image.as_raw_fd()).unwrap();drop(image);std::fs::remove_file(image_path).unwrap();
+    }
+
+    #[test]
+    fn directory_nofollow_chown_preserves_current_owner_without_capabilities() {
+        let (_guard, view) = crate::vfs::test_view();
+        let host=view.join("data/nofollow-chown");std::fs::create_dir_all(&host).unwrap();
+        let path=c("/data/nofollow-chown/.");let inode=CString::new(host.as_os_str().as_encoded_bytes()).unwrap();
+        attrs::record_checked(Host::Path(&inode),||"/data/nofollow-chown".into(),Attr{uid:Some(1000),gid:Some(1000),mode:Some(0o775)}).unwrap();
+        let mut system=super::super::cred::Identity::default();system.uid=[1000;4];system.gid=[1000;4];system.cap_eff=0;
+        assert_eq!(fchownat_as([AT,path.as_ptr() as u64,1000,1000,AT_SYMLINK_NOFOLLOW,0],&system),0);
+        assert_eq!(owner("/data/nofollow-chown"),(1000,1000,0o775));
+        std::fs::remove_dir_all(host).unwrap();
+    }
+
+    #[test]
+    fn mapped_cgroup_directory_dot_metadata_preserves_real_inode() {
+        let (_guard, view) = crate::vfs::test_view();
+        let host = view.join("run/cgroup-dot");
+        std::fs::create_dir_all(host.join("system/uid_1000")).unwrap();
+        let host = host.canonicalize().unwrap();
+        vfs::add_mount("/sys/fs/cgroup", host.clone(), vfs::Area::Writable, "none", "cgroup2").unwrap();
+        let proc_host = view.join("run/proc-dot"); std::fs::create_dir_all(&proc_host).unwrap();
+        vfs::add_mount("/proc", proc_host.canonicalize().unwrap(), vfs::Area::Kernfs, "proc", "proc").unwrap();
+        let path = c("/sys/fs/cgroup/system/uid_1000/.");
+        let id = super::super::cred::Identity::default();
+        let resolved = resolve_metadata(vfs::LINUX_AT_FDCWD, path.as_bytes(), true, &id).unwrap();
+        let anchor = metadata_anchor(&resolved, true, false).unwrap();
+        assert_eq!(fchmodat_as([AT, path.as_ptr() as u64, 0o750, 0, 0, 0], &id), 0);
+        let directory = CString::new(host.join("system/uid_1000").as_os_str().as_encoded_bytes()).unwrap();
+        let fd = unsafe { libc::open(directory.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
+        assert!(fd >= 0);
+        super::super::fdtab::publish_guest(fd).unwrap();
+        assert_eq!(fchmodat_as([fd as u64, c".".as_ptr() as u64, 0o755, 0, 0, 0], &id), 0);
+        assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]), 0);
+        let path_fd = super::super::fs::openat([AT, path.as_ptr() as u64, 0o10000000 | 0o100000, 0, 0, 0]);
+        assert!(path_fd >= 0);
+        assert_eq!(fchmod_as([path_fd as u64, 0o750, 0, 0, 0, 0], &id), -(crate::errno::EBADF as i64));
+        let magic = c(&format!("/proc/self/fd/{path_fd}"));
+        let proc_resolved = resolve_metadata(vfs::LINUX_AT_FDCWD, magic.as_bytes(), true, &id).unwrap();
+        assert!(matches!(metadata_anchor(&proc_resolved, true, false), Err(error) if error == -(ENOENT as i64)));
+        assert_eq!(fchmodat_as([AT, magic.as_ptr() as u64, 0o750, 0, 0, 0], &id), 0);
+        attrs::record_checked(Host::Fd(path_fd as i32), || path.to_str().unwrap().into(), Attr{uid:Some(1000),gid:Some(1000),mode:Some(0o750)}).unwrap();
+        let mut system = id.clone(); system.uid=[1000;4]; system.gid=[1000;4]; system.cap_eff=0;
+        let mut foreign = system.clone(); foreign.uid=[2000;4];
+        assert_eq!(fchmodat_as([AT, magic.as_ptr() as u64, 0o777, 0, 0, 0], &foreign), -EPERM);
+        std::fs::rename(host.join("system/uid_1000"),host.join("system/retained")).unwrap();
+        std::fs::create_dir(host.join("system/uid_1000")).unwrap();
+        assert_eq!(fchmodat_as([AT, magic.as_ptr() as u64, 0o711, 0, 0, 0], &system), 0);
+        let mut stat:libc::stat=unsafe{std::mem::zeroed()};
+        assert_eq!(unsafe{libc::fstat(path_fd as i32,&mut stat)},0);
+        attrs::apply(Host::Fd(path_fd as i32),||path.to_str().unwrap().into(),&mut stat);
+        assert_eq!(stat.st_mode & 0o7777,0o711);
+        let hidden=c(&format!("/proc/self/fd/{}",anchor.as_raw_fd()));
+        assert_eq!(fchmodat_as([AT,hidden.as_ptr() as u64,0o777,0,0,0],&id),-(ENOENT as i64));
+        assert_eq!(super::super::fs::close([path_fd as u64, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(fchmodat_as([AT,magic.as_ptr() as u64,0o777,0,0,0],&id),-(ENOENT as i64));
+        std::os::unix::fs::symlink("retained",host.join("system/link")).unwrap();
+        let link=c("/sys/fs/cgroup/system/link");
+        let link_fd=super::super::fs::openat([AT,link.as_ptr() as u64,0o10000000|0o100000,0,0,0]);assert!(link_fd>=0);
+        let magic=c(&format!("/proc/self/fd/{link_fd}"));
+        assert_eq!(fchmodat_as([AT,magic.as_ptr() as u64,0o777,0,0,0],&id),-(crate::errno::ELOOP as i64));
+        assert_eq!(super::super::fs::close([link_fd as u64,0,0,0,0,0]),0);
+        drop(anchor);
+        assert!(vfs::remove_mount("/sys/fs/cgroup").unwrap());
+        assert!(vfs::remove_mount("/proc").unwrap());
+        std::fs::remove_dir_all(proc_host).unwrap();
+        std::fs::remove_dir_all(host).unwrap();
+    }
+
+    #[test]
+    fn metadata_anchor_preserves_inode_after_path_swap_and_hides_internal_fds() {
+        let(_guard,view)=crate::vfs::test_view();let base=format!("/data/metadata-anchor-{}",std::process::id());
+        let directory=view.join("data").join(base.trim_start_matches("/data/"));std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("owned"),b"owned").unwrap();std::fs::write(directory.join("foreign"),b"foreign").unwrap();
+        let record=|name:&str,uid|{let path=c(directory.join(name).to_str().unwrap());attrs::record_checked(Host::Path(&path),||format!("{base}/{name}"),Attr{uid:Some(uid),gid:Some(uid),mode:Some(0o600)}).unwrap();};
+        record("",0);let path=c(directory.to_str().unwrap());attrs::record_checked(Host::Path(&path),||base.clone(),Attr{mode:Some(0o777),..Default::default()}).unwrap();record("owned",2000);record("foreign",5000);
+        let mut id=super::super::cred::Identity::default();id.uid=[2000;4];id.gid=[2000;4];id.cap_eff=0;
+        let resolved=resolve_metadata(LINUX_AT_FDCWD,format!("{base}/owned").as_bytes(),true,&id).unwrap();
+        let anchor=metadata_anchor(&resolved,true,false).unwrap();let raw=anchor.as_raw_fd();assert!(super::super::fdtab::is_hidden(raw));
+        std::fs::rename(directory.join("owned"),directory.join("old-inode")).unwrap();std::fs::rename(directory.join("foreign"),directory.join("owned")).unwrap();
+        let root=super::super::cred::Identity::default();
+        assert_eq!(fchmod_as([raw as u64,0o777,0,0,0,0],&root),-(crate::errno::EBADF as i64));
+        assert_eq!(fchown_as([raw as u64,0,0,0,0,0],&root),-(crate::errno::EBADF as i64));
+        assert_eq!(ftruncate_as([raw as u64,0,0,0,0,0],&root),-(crate::errno::EBADF as i64));
+        assert_eq!(fsync([raw as u64,0,0,0,0,0]),-(crate::errno::EBADF as i64));
+        assert_eq!(fallocate([raw as u64,0,0,1,0,0]),-(crate::errno::EBADF as i64));
+        assert_eq!(fchownat_as([raw as u64,c"".as_ptr() as u64,0,0,AT_EMPTY_PATH,0],&root),-(crate::errno::EBADF as i64));
+        assert_eq!(fchmodat_as([raw as u64,c"entry".as_ptr() as u64,0o777,0,0,0],&root),-(crate::errno::EBADF as i64));
+        let host=Host::Fd(raw);assert_eq!(inode_mutation(host,&resolved.guest,true,|stat|{
+            let mode=match chmod_mode(stat,0o640,&id){Ok(mode)=>mode,Err(error)=>return error};
+            if unsafe{libc::fchmod(raw,host_mode(mode,stat.st_mode))}<0{return -(errno::last() as i64);}
+            attrs::record_checked(host,||resolved.guest.clone(),Attr{mode:Some(mode),..Default::default()}).map(|_|0).unwrap_or_else(|error|-(error as i64))
+        }),0);
+        assert_eq!(owner(&format!("{base}/old-inode")),(2000,2000,0o640));assert_eq!(owner(&format!("{base}/owned")),(5000,5000,0o600));
+        drop(anchor);assert!(!super::super::fdtab::is_hidden(raw));std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn metadata_dac_checks_real_inode_owner_groups_caps_search_and_open_fd_rights() {
+        use std::os::fd::AsRawFd;
+        let(_guard,view)=crate::vfs::test_view();
+        let base=format!("/data/metadata-dac-{}",std::process::id());let host=view.join("data").join(base.trim_start_matches("/data/"));
+        std::fs::create_dir_all(host.join("private")).unwrap();std::fs::write(host.join("file"),b"0123456789").unwrap();std::fs::write(host.join("private/file"),b"private").unwrap();
+        let record=|suffix:&str,uid,gid,mode|{
+            let path=CString::new(host.join(suffix).as_os_str().as_encoded_bytes()).unwrap();
+            attrs::record_checked(Host::Path(&path),||format!("{base}/{suffix}"),Attr{uid:Some(uid),gid:Some(gid),mode:Some(mode)}).unwrap();
+        };
+        record("",0,0,0o777);record("private",3000,3000,0o700);record("private/file",2000,2100,0o666);record("file",2000,2100,0o660);
+        let mut owner_id=super::super::cred::Identity::default();owner_id.uid=[2000;4];owner_id.gid=[2000;4];owner_id.cap_eff=0;
+        let mut foreign=owner_id.clone();foreign.uid=[4000;4];foreign.gid=[4000;4];
+        let file=c(&format!("{base}/file"));let private=c(&format!("{base}/private/file"));
+        let chmod=|path:&CString,mode,id:&super::super::cred::Identity|fchmodat_as([AT,path.as_ptr() as u64,mode,0,0,0],id);
+        assert_eq!(chmod(&file,0o777,&foreign),-EPERM);assert_eq!(owner(&format!("{base}/file")),(2000,2100,0o660));
+        let mut fs_owner=foreign.clone();fs_owner.uid[attrs::FS]=2000;
+        assert_eq!(chmod(&file,0o660,&fs_owner),0);
+        let mut root_without_caps=foreign.clone();root_without_caps.uid=[0;4];assert_eq!(chmod(&file,0o777,&root_without_caps),-EPERM);
+        assert_eq!(chmod(&private,0o777,&owner_id),-(crate::errno::EACCES as i64));
+        assert_eq!(chmod(&file,0o6760,&owner_id),0);assert_eq!(owner(&format!("{base}/file")).2,0o4760);
+        owner_id.groups=vec![2100];assert_eq!(chmod(&file,0o2760,&owner_id),0);assert_eq!(owner(&format!("{base}/file")).2,0o2760);
+        let mut privileged=foreign.clone();privileged.cap_eff=1<<3;assert_eq!(chmod(&file,0o660,&privileged),0);
+        let chown=|uid,gid,id:&super::super::cred::Identity|fchownat_as([AT,file.as_ptr() as u64,uid,gid,0,0],id);
+        assert_eq!(chown(4000,u32::MAX as u64,&owner_id),-EPERM);
+        assert_eq!(chown(u32::MAX as u64,2300,&owner_id),-EPERM);
+        owner_id.groups.push(2300);assert_eq!(chown(u32::MAX as u64,2300,&owner_id),0);assert_eq!(owner(&format!("{base}/file")).1,2300);
+        assert_eq!(chown(2000,2300,&foreign),-EPERM);
+        privileged.cap_eff=1;assert_eq!(chown(5000,5100,&privileged),0);assert_eq!(owner(&format!("{base}/file")).0,5000);
+        assert_eq!(truncate_as([file.as_ptr() as u64,3,0,0,0,0],&foreign),-(crate::errno::EACCES as i64));assert_eq!(std::fs::metadata(host.join("file")).unwrap().len(),10);
+        foreign.groups=vec![5100];assert_eq!(truncate_as([file.as_ptr() as u64,3,0,0,0,0],&foreign),0);
+        let rw=std::fs::OpenOptions::new().read(true).write(true).open(host.join("file")).unwrap();let ro=std::fs::File::open(host.join("file")).unwrap();
+        super::super::fdtab::publish_guest(rw.as_raw_fd()).unwrap();super::super::fdtab::publish_guest(ro.as_raw_fd()).unwrap();
+        record("file",5000,5100,0o000);foreign.groups.clear();
+        assert_eq!(fchmod_as([rw.as_raw_fd() as u64,0o777,0,0,0,0],&foreign),-EPERM);
+        assert_eq!(fchown_as([rw.as_raw_fd() as u64,4000,u32::MAX as u64,0,0,0],&foreign),-EPERM);
+        assert_eq!(truncate_as([file.as_ptr() as u64,2,0,0,0,0],&foreign),-(crate::errno::EACCES as i64));
+        assert_eq!(ftruncate_as([rw.as_raw_fd() as u64,2,0,0,0,0],&foreign),0);assert_eq!(std::fs::metadata(host.join("file")).unwrap().len(),2);
+        assert_eq!(ftruncate_as([ro.as_raw_fd() as u64,0,0,0,0,0],&foreign),-(EINVAL as i64));
+        privileged.cap_eff=1<<3;assert_eq!(fchmod_as([ro.as_raw_fd() as u64,0o640,0,0,0,0],&privileged),0);
+        let path_fd=openat([AT,file.as_ptr() as u64,0o10000000,0,0,0]);assert!(path_fd>=0);
+        assert_eq!(fchown_as([path_fd as u64,5000,u32::MAX as u64,0,0,0],&privileged),-(crate::errno::EBADF as i64));
+        let mut current_owner=owner_id.clone();current_owner.uid=[5000;4];
+        assert_eq!(fchownat_as([path_fd as u64,c"".as_ptr() as u64,5000,u32::MAX as u64,AT_EMPTY_PATH,0],&current_owner),0);
+        assert_eq!(super::super::fs::close([path_fd as u64,0,0,0,0,0]),0);
+        let cap_name=c"dev.aim.xattr.security.capability";let caps=[0x01u8,0,0,0x02,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+        assert_eq!(unsafe{libc::fsetxattr(rw.as_raw_fd(),cap_name.as_ptr(),caps.as_ptr().cast(),caps.len(),0,0)},0);
+        assert_eq!(fchown_as([rw.as_raw_fd() as u64,5000,u32::MAX as u64,0,0,0],&current_owner),0);
+        assert_eq!(unsafe{libc::fgetxattr(rw.as_raw_fd(),cap_name.as_ptr(),std::ptr::null_mut(),0,0,0)},-1);
+        assert_eq!(errno::last() as i64,ENODATA);
+        record("file",5000,5100,0o6750);
+        assert_eq!(unsafe{libc::fsetxattr(rw.as_raw_fd(),cap_name.as_ptr(),caps.as_ptr().cast(),caps.len(),0,0)},0);
+        let mut keep_setid=foreign.clone();keep_setid.cap_eff=1<<4;
+        assert_eq!(ftruncate_as([rw.as_raw_fd() as u64,1,0,0,0,0],&keep_setid),0);
+        assert_eq!(owner(&format!("{base}/file")).2,0o6750);
+        assert_eq!(unsafe{libc::fgetxattr(rw.as_raw_fd(),cap_name.as_ptr(),std::ptr::null_mut(),0,0,0)},-1);
+        assert_eq!(errno::last() as i64,ENODATA);
+        assert_eq!(fchmod_as([u64::MAX,0,0,0,0,0],&foreign),-(crate::errno::EBADF as i64));
+        assert_eq!(fchownat_as([AT,file.as_ptr() as u64,0,0,0x8000,0],&foreign),-(EINVAL as i64));
+        let mut root=super::super::cred::Identity::default();root.uid=[0;4];assert_eq!(chmod(&file,0o640,&root),0);
+        super::super::fdtab::withdraw_guest(rw.as_raw_fd()).unwrap();super::super::fdtab::on_close(rw.as_raw_fd());
+        super::super::fdtab::withdraw_guest(ro.as_raw_fd()).unwrap();super::super::fdtab::on_close(ro.as_raw_fd());
+        drop(rw);drop(ro);std::fs::remove_dir_all(host).unwrap();
+    }
+
+    #[test]
+    fn recorded_setgid_parent_survives_atomic_replacement_and_nested_creation() {
+        let (_view, _) = vfs::test_view();
+        let base = format!("/data/setgid-creation-{}", std::process::id());
+        let parent = c(&base);
+        assert_eq!(mkdirat([AT, parent.as_ptr() as u64, 0o750, 0, 0, 0]), 0);
+        let (uid, gid) = attrs::ids(attrs::FS);
+        let inherited = if gid == 2000 { 2001 } else { 2000 };
+        chown(&base, uid, inherited);
+        chmod(&base, 0o2750);
+        let target = format!("{base}/atomic.state");
+        let temporary = format!("{target}.new");
+        for _ in 0..3 {
+            create(&temporary);
+            chmod(&temporary, 0o640);
+            let source = c(&temporary);
+            let destination = c(&target);
+            assert_eq!(renameat2([AT, source.as_ptr() as u64, AT, destination.as_ptr() as u64, 0, 0]), 0);
+            assert_eq!(owner(&target), (uid, inherited, 0o640));
+        }
+        // Reopening an existing inode must not reassign the creator's fs gid.
+        chown(&target, uid, 2010);
+        let destination = c(&target);
+        let fd = openat([AT, destination.as_ptr() as u64, 0o1 | 0o100, 0o600, 0, 0]);
+        assert!(fd >= 0); assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]),0);
+        assert_eq!(owner(&target).1, 2010);
+        let nested = format!("{base}/nested");
+        let child = c(&nested);
+        assert_eq!(mkdirat([AT, child.as_ptr() as u64, 0o700, 0, 0, 0]), 0);
+        assert_eq!(owner(&nested), (uid, inherited, 0o2700));
+        create(&format!("{nested}/file"));
+        assert_eq!(owner(&format!("{nested}/file")).1, inherited);
+        // A directory fd and a followed symlink select the same real parent.
+        let directory = openat([AT, parent.as_ptr() as u64, 0o200000, 0, 0, 0]);
+        assert!(directory >= 0);
+        let name = c("relative");
+        let fd = openat([directory as u64, name.as_ptr() as u64, 0o1 | 0o100 | 0o200, 0o600, 0, 0]);
+        assert!(fd >= 0); unsafe { libc::close(fd as i32); libc::close(directory as i32); }
+        assert_eq!(owner(&format!("{base}/relative")).1, inherited);
+        let alias = format!("{base}-symlink");
+        let alias_name = c(&alias);
+        assert_eq!(symlinkat([parent.as_ptr() as u64, AT, alias_name.as_ptr() as u64, 0, 0, 0]), 0);
+        create(&format!("{alias}/through-link"));
+        assert_eq!(owner(&format!("{base}/through-link")).1, inherited);
+        // Non-setgid parent creation continues to use the creator's fs gid.
+        chmod(&base, 0o750);
+        create(&format!("{base}/ordinary"));
+        assert_eq!(owner(&format!("{base}/ordinary")).1, gid);
+        let resolved = vfs::resolve(LINUX_AT_FDCWD, base.as_bytes(), true).unwrap();
+        let bind_alias = format!("{base}-bind");
+        vfs::add_mount(&bind_alias, std::path::PathBuf::from(std::ffi::OsStr::from_bytes(resolved.host.as_bytes())),
+            resolved.area, &base, "bind").unwrap();
+        chmod(&base, 0o2750);
+        create(&format!("{bind_alias}/through-bind"));
+        assert_eq!(owner(&format!("{base}/through-bind")).1, inherited);
+        assert!(vfs::remove_mount(&bind_alias).unwrap());
+        let resolved_alias = vfs::resolve(LINUX_AT_FDCWD, alias.as_bytes(), false).unwrap();
+        std::fs::remove_file(std::path::Path::new(std::ffi::OsStr::from_bytes(resolved_alias.host.as_bytes()))).unwrap();
+        std::fs::remove_dir_all(std::path::Path::new(std::ffi::OsStr::from_bytes(resolved.host.as_bytes()))).unwrap();
     }
 
     #[test]
@@ -592,7 +1636,7 @@ mod tests {
         let fd = crate::sys::fs::openat([AT, ro.as_ptr() as u64, 0o100 | 0o200, 0o444, 0, 0]);
         assert!(fd >= 0);
         // SAFETY: the fd just opened.
-        unsafe { libc::close(fd as i32) };
+        assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]),0);
         chown(&format!("{base}/ro"), 1013, 1013);
         assert_eq!(owner(&format!("{base}/ro")), (1013, 1013, 0o444));
 
@@ -698,5 +1742,364 @@ mod tests {
             table.len(),
             start.elapsed().as_micros()
         );
+    }
+}
+
+#[cfg(test)]
+mod unlink_permission_tests {
+    use super::*;
+    #[test]
+    fn unlink_and_rmdir_preserve_active_mount_backing_nodes() {
+        use std::ffi::CString;
+        let (_guard, view) = crate::vfs::test_view();
+        let base = format!("/data/remove-mount-{}", std::process::id());
+        let host = view.join("data").join(base.trim_start_matches("/data/"));
+        std::fs::create_dir_all(&host).unwrap();
+        let backing = view.join("remove-mount-backing");
+        std::fs::create_dir_all(&backing).unwrap();
+        std::fs::write(backing.join("keep"), b"owned").unwrap();
+        let file = view.join("remove-mount-file");
+        std::fs::write(&file, b"owned").unwrap();
+        let directory_guest = format!("{base}/directory");
+        let file_guest = format!("{base}/file");
+        crate::vfs::add_mount(
+            &directory_guest,
+            backing.clone(),
+            crate::vfs::Area::Writable,
+            "bind",
+            "bind",
+        ).unwrap();
+        crate::vfs::add_mount(
+            &file_guest,
+            file.clone(),
+            crate::vfs::Area::Writable,
+            "bind",
+            "bind",
+        ).unwrap();
+        let id = super::super::cred::Identity::default();
+        let invoke = |path: &str, flags| {
+            let path = CString::new(path).unwrap();
+            unlinkat_as(
+                [
+                    crate::vfs::LINUX_AT_FDCWD as u64,
+                    path.as_ptr() as u64,
+                    flags,
+                    0,
+                    0,
+                    0,
+                ],
+                &id,
+            )
+        };
+        assert_eq!(
+            invoke(&directory_guest, AT_REMOVEDIR),
+            -crate::errno::EBUSY as i64
+        );
+        assert_eq!(invoke(&directory_guest, 0), -EISDIR);
+        assert_eq!(invoke(&file_guest, 0), -crate::errno::EBUSY as i64);
+        assert_eq!(
+            invoke(&file_guest, AT_REMOVEDIR),
+            -crate::errno::ENOTDIR as i64
+        );
+        assert_eq!(
+            invoke("/data", AT_REMOVEDIR),
+            -30,
+            "readonly parent mount precedes busy target"
+        );
+        std::os::unix::fs::symlink(&directory_guest, host.join("link")).unwrap();
+        assert_eq!(invoke(&format!("{base}/link"), 0), 0);
+        assert!(backing.join("keep").is_file() && file.is_file());
+        crate::vfs::add_mount(
+            &file_guest,
+            file.clone(),
+            crate::vfs::Area::Image,
+            "bind",
+            "bind",
+        ).unwrap();
+        assert_eq!(invoke(&file_guest, 0), -crate::errno::EBUSY as i64);
+        assert!(crate::vfs::remove_mount(&file_guest).unwrap());
+        crate::vfs::add_mount(
+            &directory_guest,
+            file.clone(),
+            crate::vfs::Area::Writable,
+            "bind",
+            "bind",
+        ).unwrap();
+        assert_eq!(invoke(&directory_guest, 0), -crate::errno::EBUSY as i64);
+        assert!(crate::vfs::remove_mount(&directory_guest).unwrap());
+        assert!(crate::vfs::is_mountpoint(&directory_guest));
+        assert!(crate::vfs::remove_mount(&directory_guest).unwrap());
+        assert!(!crate::vfs::is_mountpoint(&directory_guest));
+        assert!(crate::vfs::remove_mount(&file_guest).unwrap());
+        std::fs::remove_dir_all(backing).unwrap();
+        std::fs::remove_file(file).unwrap();
+        std::fs::remove_dir_all(host).unwrap();
+    }
+    #[test]
+    fn removal_last_components_and_trailing_slashes_keep_linux_errors() {
+        use std::ffi::CString;
+        let (_guard, view) = crate::vfs::test_view();
+        let base = format!("/data/unlink-last-{}", std::process::id());
+        let host = view.join("data").join(base.trim_start_matches("/data/"));
+        std::fs::create_dir_all(host.join("dir")).unwrap();
+        std::fs::write(host.join("file"), b"owned").unwrap();
+        std::os::unix::fs::symlink("dir", host.join("dirlink")).unwrap();
+        std::os::unix::fs::symlink("file", host.join("filelink")).unwrap();
+        let id = super::super::cred::Identity::default();
+        let invoke = |path: &str, flags| {
+            let path = CString::new(path).unwrap();
+            unlinkat_as(
+                [
+                    crate::vfs::LINUX_AT_FDCWD as u64,
+                    path.as_ptr() as u64,
+                    flags,
+                    0,
+                    0,
+                    0,
+                ],
+                &id,
+            )
+        };
+        for root in ["/", "///"] {
+            assert_eq!(invoke(root, 0), -EISDIR);
+            assert_eq!(invoke(root, AT_REMOVEDIR), -crate::errno::EBUSY as i64);
+        }
+        for suffix in [".", "../"] {
+            assert_eq!(invoke(&format!("{base}/{suffix}"), 0), -EISDIR);
+            assert_eq!(
+                invoke(&format!("{base}/{suffix}"), AT_REMOVEDIR),
+                if suffix == "." {
+                    -EINVAL as i64
+                } else {
+                    -ENOTEMPTY
+                }
+            );
+        }
+        assert_eq!(
+            invoke(&format!("{base}/file/"), 0),
+            -crate::errno::ENOTDIR as i64
+        );
+        assert_eq!(invoke(&format!("{base}/dir/"), 0), -EISDIR);
+        for link in ["dirlink", "filelink"] {
+            assert_eq!(
+                invoke(&format!("{base}/{link}/"), 0),
+                -crate::errno::ENOTDIR as i64
+            );
+            assert_eq!(
+                invoke(&format!("{base}/{link}/"), AT_REMOVEDIR),
+                -crate::errno::ENOTDIR as i64
+            );
+        }
+        assert_eq!(
+            invoke(&format!("{base}/missing/"), 0),
+            -crate::errno::ENOENT as i64
+        );
+        assert!(
+            host.join("file").is_file()
+                && host.join("dir").is_dir()
+                && host.join("dirlink").symlink_metadata().is_ok()
+        );
+        assert_eq!(invoke(&format!("{base}/dir/"), AT_REMOVEDIR), 0);
+        std::fs::remove_dir_all(host).unwrap();
+    }
+    #[test]
+    fn unlink_walk_checks_symlink_prefixes_dotdot_and_relative_fd_base() {
+        const MARKER:&str="unlink-dirfd-native-namespace";
+        if !std::env::args().any(|arg|arg==MARKER){
+            let output=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","sys::fsops::unlink_permission_tests::unlink_walk_checks_symlink_prefixes_dotdot_and_relative_fd_base","--skip",MARKER,"--nocapture"]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+            let mut child=output;let deadline=std::time::Instant::now()+std::time::Duration::from_secs(10);
+            loop{if child.try_wait().unwrap().is_some(){break;}if std::time::Instant::now()>=deadline{child.kill().unwrap();child.wait().unwrap();panic!("native fixture namespace timed out");}std::thread::sleep(std::time::Duration::from_millis(5));}
+            let output=child.wait_with_output().unwrap();
+            assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));assert!(String::from_utf8_lossy(&output.stdout).contains("UNLINK_DIRFD_NATIVE_NAMESPACE_EXECUTED"));return;
+        }
+
+        use std::{ffi::CString, os::fd::AsRawFd};
+        let (_guard, view) = crate::vfs::test_view();
+        let base = format!("/data/unlink-walk-{}", std::process::id());
+        let host = view.join("data").join(base.trim_start_matches("/data/"));
+        std::fs::create_dir_all(host.join("denied")).unwrap();
+        std::fs::create_dir_all(host.join("allowed")).unwrap();
+        let record = |suffix: &str, uid, mode| {
+            let path = CString::new(host.join(suffix).as_os_str().as_encoded_bytes()).unwrap();
+            super::super::attrs::record(
+                super::super::attrs::Host::Path(&path),
+                || format!("{base}/{suffix}"),
+                super::super::attrs::Attr {
+                    uid: Some(uid),
+                    gid: Some(2000),
+                    mode: Some(mode),
+                },
+            );
+        };
+        record("denied", 1000, 0o700);
+        record("allowed", 3000, 0o777);
+        std::os::unix::fs::symlink(format!("{base}/allowed"), host.join("denied/link")).unwrap();
+        std::fs::write(host.join("allowed/victim"), b"owned").unwrap();
+        let mut id = super::super::cred::Identity::default();
+        id.uid = [3000; 4];
+        id.gid = [3000; 4];
+        id.cap_eff = 0;
+        let invoke = |fd, path: &str, flags| {
+            let path = CString::new(path).unwrap();
+            unlinkat_as([fd as u64, path.as_ptr() as u64, flags, 0, 0, 0], &id)
+        };
+        assert_eq!(
+            invoke(
+                crate::vfs::LINUX_AT_FDCWD,
+                &format!("{base}/denied/link/victim"),
+                0
+            ),
+            -crate::errno::EACCES as i64
+        );
+        assert_eq!(
+            invoke(
+                crate::vfs::LINUX_AT_FDCWD,
+                &format!("{base}/denied/../allowed/victim"),
+                0
+            ),
+            -crate::errno::EACCES as i64
+        );
+        assert!(host.join("allowed/victim").is_file());
+        std::fs::create_dir(host.join("denied/nested")).unwrap();
+        record("denied/nested", 3000, 0o777);
+        std::fs::write(host.join("denied/nested/victim"), b"owned").unwrap();
+        let fd = std::fs::File::open(host.join("denied/nested")).unwrap();
+        super::super::fdtab::publish_guest(fd.as_raw_fd()).unwrap();
+        assert_eq!(
+            invoke(fd.as_raw_fd(), "victim", 0),
+            0,
+            "dirfd access does not search ancestors above its base"
+        );
+        use std::os::fd::IntoRawFd;
+        assert_eq!(super::super::fs::close([fd.into_raw_fd() as u64,0,0,0,0,0]),0);
+        record("allowed", 3000, 0o555);
+        assert_eq!(
+            invoke(
+                crate::vfs::LINUX_AT_FDCWD,
+                &format!("{base}/allowed/victim"),
+                0
+            ),
+            -crate::errno::EACCES as i64
+        );
+        assert_eq!(
+            invoke(
+                crate::vfs::LINUX_AT_FDCWD,
+                &format!("{base}/allowed/missing"),
+                0
+            ),
+            -crate::errno::ENOENT as i64
+        );
+        std::fs::remove_dir_all(&host).unwrap();
+        println!("UNLINK_DIRFD_NATIVE_NAMESPACE_EXECUTED");
+    }
+    #[test]
+    fn unlink_sticky_checks_symlink_owner_and_rmdir() {
+        use std::ffi::CString;
+        let (_guard, view) = crate::vfs::test_view();
+        let base = format!("/data/unlink-sticky-{}", std::process::id());
+        let host = view.join("data").join(base.trim_start_matches("/data/"));
+        std::fs::create_dir_all(&host).unwrap();
+        let record = |suffix: &str, uid, mode| {
+            let path = CString::new(host.join(suffix).as_os_str().as_encoded_bytes()).unwrap();
+            super::super::attrs::record(
+                super::super::attrs::Host::Path(&path),
+                || {
+                    if suffix.is_empty() {
+                        base.clone()
+                    } else {
+                        format!("{base}/{suffix}")
+                    }
+                },
+                super::super::attrs::Attr {
+                    uid: Some(uid),
+                    gid: Some(2000),
+                    mode: Some(mode),
+                },
+            );
+        };
+        record("", 1000, 0o1777);
+        std::fs::write(host.join("target"), b"owned").unwrap();
+        record("target", 3000, 0o600);
+        std::os::unix::fs::symlink("target", host.join("link")).unwrap();
+        record("link", 2000, 0o777);
+        let mut id = super::super::cred::Identity::default();
+        id.uid = [3000; 4];
+        id.gid = [3000; 4];
+        id.cap_eff = 0;
+        let link = CString::new(format!("{base}/link")).unwrap();
+        let args = [
+            crate::vfs::LINUX_AT_FDCWD as u64,
+            link.as_ptr() as u64,
+            0,
+            0,
+            0,
+            0,
+        ];
+        assert_eq!(unlinkat_as(args, &id), -EPERM);
+        assert!(host.join("link").symlink_metadata().is_ok());
+        id.uid[3] = 2000;
+        assert_eq!(unlinkat_as(args, &id), 0);
+        assert!(host.join("target").is_file());
+        std::fs::create_dir(host.join("dir")).unwrap();
+        record("dir", 4000, 0o700);
+        let dir = CString::new(format!("{base}/dir")).unwrap();
+        let args = [
+            crate::vfs::LINUX_AT_FDCWD as u64,
+            dir.as_ptr() as u64,
+            AT_REMOVEDIR,
+            0,
+            0,
+            0,
+        ];
+        assert_eq!(unlinkat_as(args, &id), -EPERM);
+        id.cap_eff = 1 << 3;
+        assert_eq!(unlinkat_as(args, &id), 0);
+        std::fs::remove_dir_all(&host).unwrap();
+    }
+    #[test]
+    fn sticky_directory_requires_owner_or_fowner_capability() {
+        let mut parent: libc::stat = unsafe { std::mem::zeroed() };
+        parent.st_mode = libc::S_IFDIR | 0o1777;
+        parent.st_uid = 1000;
+        let mut target: libc::stat = unsafe { std::mem::zeroed() };
+        target.st_uid = 2000;
+        let mut id = super::super::cred::Identity::default();
+        id.cap_eff = 0;
+        id.uid = [3000; 4];
+        assert!(!sticky_permits(&parent, &target, &id));
+        id.uid[3] = 1000;
+        assert!(sticky_permits(&parent, &target, &id));
+        id.uid[3] = 2000;
+        assert!(sticky_permits(&parent, &target, &id));
+        id.uid[3] = 3000;
+        id.cap_eff = 1 << 1;
+        assert!(!sticky_permits(&parent, &target, &id));
+        id.cap_eff = 1 << 3;
+        assert!(sticky_permits(&parent, &target, &id));
+    }
+    #[test]
+    fn directory_dac_uses_fs_ids_groups_and_capabilities() {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        st.st_mode = libc::S_IFDIR | 0o750;
+        st.st_uid = 1000;
+        st.st_gid = 2000;
+        let mut id = super::super::cred::Identity::default();
+        id.uid = [1001; 4];
+        id.gid = [2001; 4];
+        id.cap_eff = 0;
+        assert!(!directory_permits(&st, 3, &id));
+        id.groups.push(2000);
+        assert!(directory_permits(&st, 1, &id));
+        assert!(!directory_permits(&st, 3, &id));
+        id.uid[3] = 1000;
+        assert!(directory_permits(&st, 3, &id));
+        id.uid[3] = 0;
+        st.st_mode = libc::S_IFDIR;
+        assert!(!directory_permits(&st, 3, &id));
+        id.cap_eff = 1 << 2;
+        assert!(directory_permits(&st, 1, &id));
+        assert!(!directory_permits(&st, 3, &id));
+        id.cap_eff = 1 << 1;
+        assert!(directory_permits(&st, 3, &id));
     }
 }

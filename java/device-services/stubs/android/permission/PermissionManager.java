@@ -5,6 +5,9 @@ package android.permission;
 import java.util.Map;
 
 public final class PermissionManager {
+    public java.util.List<android.content.pm.PermissionGroupInfo> getAllPermissionGroups(int flags){throw new RuntimeException("stub");}
+    public java.util.List<android.content.pm.PermissionInfo> queryPermissionsByGroup(String group,int flags){throw new RuntimeException("stub");}
+
     public PermissionManager(android.content.Context context) { throw new RuntimeException("stub"); }
     public Map<String, PermissionState> getAllPermissionStates(String packageName, String persistentDeviceId) { throw new RuntimeException("stub"); }
 

@@ -476,3 +476,151 @@ fn more_waiting_threads_than_workers() {
             .expect("a call never completed");
     }
 }
+
+#[test]
+fn typed_fd_import_failure_rolls_back_delivery_before_copyout_and_unblocks_sender() {
+    struct Reject {
+        installed: Vec<i32>,
+        closed: Vec<i32>,
+        writes: usize,
+    }
+    impl UserMemory for Reject {
+        fn read(&mut self, a: u64, n: usize) -> Result<Vec<u8>, Errno> {
+            Own.read(a, n)
+        }
+        fn write(&mut self, a: u64, b: &[u8]) -> Result<(), Errno> {
+            self.writes += 1;
+            Own.write(a, b)
+        }
+        fn install_typed(&mut self, fd: i32, _: u32) -> Result<(), Errno> {
+            self.installed.push(fd);
+            Err(22)
+        }
+        fn closed(&mut self, fd: i32) {
+            self.closed.push(fd);
+        }
+    }
+    let name = format!(
+        "dev.aim.test.binder-reject.{}.{}",
+        std::process::id(),
+        NAME.fetch_add(1, Ordering::Relaxed)
+    );
+    let _server = Server::start(&name).unwrap();
+    let client = Client::connect(&name).unwrap();
+    let mgr = open(&client, 1000, "u:r:servicemanager:s0");
+    let caller = open(&client, 10001, "u:r:shell:s0");
+    let mut node = FlatBinderObject {
+        kind: BINDER_TYPE_BINDER,
+        flags: FLAT_BINDER_FLAG_ACCEPTS_FDS,
+        binder: 0x1234,
+        cookie: 0x5678,
+    }
+    .encode();
+    mgr.ioctl(
+        100,
+        BINDER_SET_CONTEXT_MGR_EXT,
+        node.as_mut_ptr() as u64,
+        &mut Own,
+    )
+    .unwrap();
+    let mut enter = Vec::new();
+    cmd(&mut enter, BC_ENTER_LOOPER, &[]);
+    write_read(&mgr, 100, &enter, false).unwrap();
+    let mut pipe = [0i32; 2];
+    assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+    let mut expected: libc::stat = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::fstat(pipe[0], &mut expected) }, 0);
+    let calling = std::thread::spawn(move || {
+        use std::os::fd::AsRawFd;
+        use std::os::fd::FromRawFd;
+        let file = unsafe { std::fs::File::from_raw_fd(pipe[0]) };
+        let _writer = unsafe { std::fs::File::from_raw_fd(pipe[1]) };
+        let object = FlatBinderObject {
+            kind: BINDER_TYPE_FD,
+            flags: 0,
+            binder: file.as_raw_fd() as u64,
+            cookie: 0,
+        }
+        .encode();
+        let offsets = 0u64.to_le_bytes();
+        let tr = TransactionData {
+            code: 7,
+            flags: TF_ACCEPT_FDS,
+            data_size: object.len() as u64,
+            offsets_size: 8,
+            buffer: object.as_ptr() as u64,
+            offsets: offsets.as_ptr() as u64,
+            ..Default::default()
+        };
+        let mut write = Vec::new();
+        cmd(&mut write, BC_TRANSACTION, &tr.encode());
+        let mut read = write_read(&caller, 200, &write, true).unwrap();
+        while !returns(&read)
+            .iter()
+            .any(|(code, _)| *code == BR_FAILED_REPLY)
+        {
+            read = write_read(&caller, 200, &[], true).unwrap();
+        }
+        let mut write = Vec::new();
+        cmd(
+            &mut write,
+            BC_TRANSACTION,
+            &TransactionData {
+                code: 8,
+                ..Default::default()
+            }
+            .encode(),
+        );
+        let mut read = write_read(&caller, 200, &write, true).unwrap();
+        loop {
+            if let Some((_, Some(reply))) = returns(&read).into_iter().find(|(c, _)| *c == BR_REPLY)
+            {
+                let mut free = Vec::new();
+                cmd(&mut free, BC_FREE_BUFFER, &reply.buffer.to_le_bytes());
+                write_read(&caller, 200, &free, false).unwrap();
+                break;
+            }
+            read = write_read(&caller, 200, &[], true).unwrap();
+        }
+        unsafe { libc::close(caller.fd) };
+    });
+    let mut read = [0u8; 512];
+    let mut arg = WriteRead {
+        read_size: 512,
+        read_buffer: read.as_mut_ptr() as u64,
+        ..Default::default()
+    }
+    .encode();
+    let mut reject = Reject {
+        installed: Vec::new(),
+        closed: Vec::new(),
+        writes: 0,
+    };
+    assert_eq!(
+        mgr.ioctl(100, BINDER_WRITE_READ, arg.as_mut_ptr() as u64, &mut reject),
+        Err(22)
+    );
+    assert_eq!(reject.writes, 0);
+    assert_eq!(reject.installed.len(), 1);
+    assert_eq!(reject.closed, reject.installed);
+    // Parallel tests may reuse a just-closed numeric FD. The received unique
+    // pipe must be gone from this slot, even if another file has since taken it.
+    let mut remaining: libc::stat = unsafe { std::mem::zeroed() };
+    let exists = unsafe { libc::fstat(reject.installed[0], &mut remaining) } == 0;
+    assert!(!exists || (remaining.st_dev, remaining.st_ino) != (expected.st_dev, expected.st_ino));
+    let read = write_read(&mgr, 100, &[], true).unwrap();
+    let (_, Some(next)) = returns(&read)
+        .into_iter()
+        .find(|(c, _)| *c == BR_TRANSACTION)
+        .unwrap()
+    else {
+        panic!("transaction required")
+    };
+    assert_eq!(next.code, 8);
+    let mut reply = Vec::new();
+    cmd(&mut reply, BC_FREE_BUFFER, &next.buffer.to_le_bytes());
+    cmd(&mut reply, BC_REPLY, &TransactionData::default().encode());
+    write_read(&mgr, 100, &reply, false).unwrap();
+    calling.join().unwrap();
+    unsafe { libc::close(mgr.fd) };
+}

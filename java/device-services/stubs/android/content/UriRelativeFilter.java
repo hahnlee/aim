@@ -3,6 +3,8 @@
 package android.content;
 
 public final class UriRelativeFilter {
+    public UriRelativeFilter(UriRelativeFilterParcel parcel) { throw new RuntimeException("stub"); }
+    public boolean matchData(android.net.Uri uri) { throw new RuntimeException("stub"); }
     public UriRelativeFilter(int uriPart, int patternType, String filter) { throw new RuntimeException("stub"); }
     public int getUriPart() { throw new RuntimeException("stub"); }
     public int getPatternType() { throw new RuntimeException("stub"); }

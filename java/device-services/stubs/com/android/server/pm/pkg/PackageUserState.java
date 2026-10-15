@@ -6,6 +6,7 @@ import android.content.pm.overlay.OverlayPaths;
 import android.util.ArraySet;
 
 public interface PackageUserState {
+    PackageUserState DEFAULT = null;
     ArchiveState getArchiveState();
     long getCeDataInode();
     long getDeDataInode();
@@ -19,6 +20,10 @@ public interface PackageUserState {
     String getLastDisableAppCaller();
     int getMinAspectRatio();
     OverlayPaths getAllOverlayPaths();
+    OverlayPaths getOverlayPaths();
+    java.util.Map<String, OverlayPaths> getSharedLibraryOverlayPaths();
+    boolean isComponentEnabled(String componentName);
+    boolean isComponentDisabled(String componentName);
     boolean dataExists();
     String getSplashScreenTheme();
     int getUninstallReason();

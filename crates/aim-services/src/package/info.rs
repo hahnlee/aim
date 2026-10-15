@@ -301,7 +301,7 @@ pub struct ApplicationInfo {
     pub overlay_paths: Option<Vec<String>>,
     pub se_info: Option<String>,
     pub se_info_user: Option<String>,
-    pub shared_library_files: Option<Vec<String>>,
+    pub shared_library_files: Option<Vec<Option<String>>>,
     pub shared_library_infos: Option<Vec<SharedLibrary>>,
     pub optional_shared_library_infos: Option<Vec<SharedLibrary>>,
     pub data_dir: Option<String>,
@@ -481,7 +481,7 @@ impl ApplicationInfo {
         write_strings8(p, self.overlay_paths.as_deref());
         p.write_string8(self.se_info.as_deref());
         p.write_string8(self.se_info_user.as_deref());
-        write_strings8(p, self.shared_library_files.as_deref());
+        write_string8_array(p, self.shared_library_files.as_deref());
         write_libraries(p, self.shared_library_infos.as_deref());
         write_libraries(p, self.optional_shared_library_infos.as_deref());
         p.write_string8(self.data_dir.as_deref());
@@ -836,8 +836,8 @@ impl PermissionInfo {
 pub struct SigningInfo {
     pub scheme_version: i32,
     pub signatures: Vec<Vec<u8>>,
-    /// The signers' public keys as the original serialized them; `None`
-    /// where the model has none (#738).
+    /// The signers' public keys in the original runtime's serialization
+    /// format; absent only where no signing-key state has been supplied.
     pub public_keys: Option<Vec<Option<pkg::Serialized>>>,
     pub past_signing_certificates: Option<Vec<Vec<u8>>>,
 }
@@ -1239,38 +1239,46 @@ fn write_typed_array<T>(p: &mut Parcel, v: Option<&[T]>, mut item: impl FnMut(&m
 }
 
 /// `writeTypedList` of `SharedLibraryInfo`s.
-fn write_libraries(p: &mut Parcel, v: Option<&[SharedLibrary]>) {
+pub(in crate::package) fn write_libraries(p: &mut Parcel, v: Option<&[SharedLibrary]>) {
     write_typed_array(p, v, write_library);
 }
 
 /// `SharedLibraryInfo.writeToParcel`. The library's own code paths are
-/// there only for a library without a path (a static or dynamic one's
-/// package; `getAllCodePaths` is the path otherwise); its dependents and
-/// dependencies are null until one is added. Optional dependents and
-/// certificate digests are not in the model (#740).
-fn write_library(p: &mut Parcel, l: &SharedLibrary) {
+/// retained exactly from the owner (`getAllCodePaths` alone cannot distinguish
+/// an absent code-path array); its dependents and
+/// dependencies are null until one is added. Optional dependent and certificate
+/// list owners retain their null/empty distinction.
+pub(in crate::package) fn write_library(p: &mut Parcel, l: &SharedLibrary) {
     const VERSIONED_PACKAGE: &str = "android.content.pm.VersionedPackage";
     p.write_string8(l.path.as_deref());
     p.write_string8(l.package_name.as_deref());
     match &l.code_paths {
-        Some(paths) if l.path.is_none() => {
+        Some(paths) => {
             p.write_i32(1);
-            write_strings8(p, Some(paths));
+            write_string8_array(p, Some(paths));
         }
         _ => p.write_i32(0),
     }
     p.write_string8(l.name.as_deref());
     p.write_i64(l.version);
     p.write_i32(l.kind);
-    p.write_string16(Some(VERSIONED_PACKAGE));
-    p.write_string8(Some(&l.declaring.0));
-    p.write_i64(l.declaring.1);
+    if l.declaring_absent {
+        p.write_string16(None);
+    } else {
+        p.write_string16(Some(VERSIONED_PACKAGE));
+        p.write_string8(Some(&l.declaring.0));
+        p.write_i64(l.declaring.1);
+    }
     // writeList of VersionedPackages: each a length-prefixed parcelable.
-    if l.dependents.is_empty() {
+    if l.dependents.is_empty() && !l.dependents_initialized {
         p.write_i32(-1);
     } else {
         p.write_i32(l.dependents.len() as i32);
-        for (name, version) in &l.dependents {
+        for dependent in &l.dependents {
+            let Some((name, version)) = dependent else {
+                p.write_i32(-1);
+                continue;
+            };
             p.write_i32(4);
             let length = p.position();
             p.write_i32(-1);
@@ -1282,13 +1290,43 @@ fn write_library(p: &mut Parcel, l: &SharedLibrary) {
             p.set_i32_at(length, (end - start) as i32);
         }
     }
-    write_libraries(
-        p,
-        (!l.dependencies.is_empty()).then_some(&l.dependencies[..]),
-    );
+    if l.dependencies_initialized || !l.dependencies.is_empty() {
+        p.write_i32(l.dependencies.len() as i32);
+        for dependency in &l.dependencies {
+            p.write_i32(i32::from(dependency.is_some()));
+            if let Some(dependency) = dependency {
+                write_library(p, dependency);
+            }
+        }
+    } else {
+        p.write_i32(-1);
+    }
     p.write_bool(l.native);
-    p.write_i32(-1);
-    p.write_i32(-1);
+    match &l.optional_dependents {
+        None => p.write_i32(-1),
+        Some(dependents) => {
+            p.write_i32(dependents.len() as i32);
+            for dependent in dependents {
+                match dependent {
+                    None => p.write_string16(None),
+                    Some((name, version)) => {
+                        p.write_string16(Some(VERSIONED_PACKAGE));
+                        p.write_string8(Some(name));
+                        p.write_i64(*version);
+                    }
+                }
+            }
+        }
+    }
+    match &l.cert_digests {
+        None => p.write_i32(-1),
+        Some(digests) => {
+            p.write_i32(digests.len() as i32);
+            for digest in digests {
+                p.write_string16(digest.as_deref());
+            }
+        }
+    }
 }
 
 /// `PackageUserStateUtils.isAvailable`.
@@ -1397,7 +1435,7 @@ fn aconfig(sys: &System, name: &str) -> bool {
 
 /// `AppInfoUtils.appInfoFlags` of the package (`PackageImpl`'s base
 /// flags).
-fn base_flags(pkg: &AndroidPackage) -> i32 {
+pub(super) fn base_flags(pkg: &AndroidPackage) -> i32 {
     use booleans::*;
     let b = |f: i64| pkg.is(f);
     flag(b(EXTERNAL_STORAGE), FLAG_EXTERNAL_STORAGE)
@@ -1455,7 +1493,7 @@ fn screens_since(v: Option<bool>, pkg: &AndroidPackage, sdk: i32) -> bool {
 }
 
 /// `AppInfoUtils.appInfoPrivateFlags`.
-fn base_private_flags(pkg: &AndroidPackage) -> i32 {
+pub(super) fn base_private_flags(pkg: &AndroidPackage) -> i32 {
     use booleans::*;
     let b = |f: i64| pkg.is(f);
     let mut flags = flag(b(STATIC_SHARED_LIBRARY), PRIVATE_FLAG_STATIC_SHARED_LIBRARY)
@@ -1578,7 +1616,7 @@ fn data_directory(volume: Option<&str>) -> String {
 }
 
 /// `PackageImpl.toAppInfoWithoutState`.
-fn app_info_without_state(pkg: &AndroidPackage, sys: &System) -> ApplicationInfo {
+pub fn app_info_without_state(pkg: &AndroidPackage, sys: &System) -> ApplicationInfo {
     let split_paths = pkg.split_code_paths.clone().filter(|p| !p.is_empty());
     let use_round = sys.use_round_icon && pkg.round_icon_res != 0;
     ApplicationInfo {
@@ -1979,7 +2017,7 @@ pub fn generate_provider_info(
 }
 
 /// `PackageInfoUtils.generateInstrumentationInfo`.
-fn generate_instrumentation_info(
+pub(in crate::package) fn generate_instrumentation_info(
     t: &Target<'_>,
     i: &pkg::Instrumentation,
     flags: i64,

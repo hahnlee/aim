@@ -220,10 +220,17 @@ impl State {
         tr.code = t.code;
         tr.flags = t.flags;
         tr.sender_euid = t.sender_euid;
-        tr.sender_pid = t
-            .from
-            .and_then(|(p, _)| self.procs.get(&p))
-            .map_or(0, |p| p.creds.pid);
+        tr.sender_pid = if t.delegated_sender {
+            if t.from.is_some() {
+                t.sender_credentials.pid
+            } else {
+                0
+            }
+        } else {
+            t.from
+                .and_then(|(p, _)| self.procs.get(&p))
+                .map_or(0, |p| p.creds.pid)
+        };
         let oneway = t.is_oneway();
         let secctx = t.security_ctx;
 
@@ -298,6 +305,8 @@ impl State {
         } else {
             self.free_transaction(id);
         }
+        self.buffer_mut(proc, offset).unwrap().delivery = Some((tid, id));
+        guest.delivered(tr.buffer, id);
         true
     }
 

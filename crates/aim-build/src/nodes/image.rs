@@ -61,6 +61,7 @@ pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
     let lock = Lock::read(&repo(LOCK))?;
     let want = lock.get("SHA256")?;
     let image = aim_paths::system_image();
+    let _lease = system::ImageLease::write(&image)?;
     if image.exists() && aim_storage::disk::format_of(&image)? != system::FORMAT {
         log.line(&format!(
             "{} is not {}; building it again",

@@ -1,0 +1,5 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.aim.test.permission">
+    <uses-sdk android:minSdkVersion="36" android:targetSdkVersion="36" />
+    <application android:label="Original permission owner fixture" android:hasCode="true" />
+    <instrumentation android:name="dev.aim.test.permission.OriginalPermissionInstrumentation" android:targetPackage="dev.aim.test.permission" />
+</manifest>

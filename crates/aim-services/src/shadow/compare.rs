@@ -245,6 +245,10 @@ struct Exchange {
     service: String,
     descriptor: String,
     model: Arc<dyn ShadowModel>,
+    /// The call as the model read it.
+    call: Normal,
+    /// The copies dropped when it was answered.
+    dropped: u64,
     answer: Answer,
     ids: Identities,
     /// The slice binder's offset, while its chunks come.
@@ -284,6 +288,30 @@ impl Exchange {
         decoded.unwrap_or_else(|| raw(&mut reply.reader()))
     }
 
+    /// The model's answer from the state it held before the call, decoded.
+    fn before(&mut self) -> Option<ParcelResult<Value>> {
+        let answer = self.model.answer_before(&mut ShadowCall {
+            service: &self.service,
+            descriptor: &self.descriptor,
+            code: self.copy.code,
+            flags: self.copy.flags,
+            sender_pid: self.copy.from_pid,
+            sender_euid: self.copy.from_euid,
+            seq: self.copy.seq,
+            sent: self.copy.sent,
+            dropped: self.dropped,
+            data: self.call.reader(),
+        })?;
+        Some(match answer {
+            Answer::Reply(reply) => {
+                let normal = normalize_model(&reply, &mut self.ids);
+                self.decode(&normal)
+            }
+            Answer::Status(s) => Ok(Value::Status(s)),
+            Answer::NotModelled => return None,
+        })
+    }
+
     /// Compares the replies: the call's log line.
     fn compare(mut self) -> String {
         let ShadowReply::Reply { flags, parcel } = &self.copy.reply else {
@@ -316,7 +344,10 @@ impl Exchange {
         };
         let (outcome, original, model) = match (original, model) {
             (Ok(a), Ok(b)) if a == b => return self.finish("matched"),
-            (Ok(a), Ok(b)) => ("differed", a, b),
+            (Ok(a), Ok(b)) => match self.before() {
+                Some(Ok(before)) if before == a => ("raced", a, b),
+                _ => ("differed", a, b),
+            },
             (a, b) => {
                 let shown = |r: Result<Value, (i32, Normal)>| match r {
                     Ok(v) => v,
@@ -448,6 +479,7 @@ impl Comparator {
         let descriptor = descriptor(&copy.data.data);
         let mut ids = Identities::default();
         let call = normalize_copy(&copy.data, None, &mut ids);
+        let dropped = self.dropped.load(Ordering::Relaxed);
         let answer = model.answer(&mut ShadowCall {
             service: &service,
             descriptor: &descriptor,
@@ -457,7 +489,7 @@ impl Comparator {
             sender_euid: copy.from_euid,
             seq: copy.seq,
             sent: copy.sent,
-            dropped: self.dropped.load(Ordering::Relaxed),
+            dropped,
             data: call.reader(),
         });
         let slice = match &copy.reply {
@@ -471,6 +503,8 @@ impl Comparator {
             service,
             descriptor,
             model,
+            call,
+            dropped,
             answer,
             ids,
             slice,
@@ -546,13 +580,18 @@ mod tests {
         }
     }
 
-    /// Answers with a fixed reply; decodes method 1 as a typed slice.
-    struct Fixed(Mutex<Option<Answer>>);
+    /// Answers with a fixed reply, and from before the call with another;
+    /// decodes method 1 as a typed slice.
+    struct Fixed(Mutex<Option<Answer>>, Mutex<Option<Answer>>);
 
     impl ShadowModel for Fixed {
         fn answer(&self, call: &mut ShadowCall<'_>) -> Answer {
             assert_eq!(call.descriptor, "test.IList");
             self.0.lock().unwrap().take().unwrap_or(Answer::NotModelled)
+        }
+        fn answer_before(&self, call: &mut ShadowCall<'_>) -> Option<Answer> {
+            assert_eq!(call.data.enforce_interface("test.IList"), Ok(()));
+            self.1.lock().unwrap().take()
         }
         fn decode_reply(
             &self,
@@ -570,8 +609,13 @@ mod tests {
     }
 
     fn comparator(answer: Answer) -> Comparator {
+        comparator_before(answer, None)
+    }
+
+    fn comparator_before(answer: Answer, before: Option<Answer>) -> Comparator {
         let roots = Arc::new(Mutex::new(HashMap::from([(7, "list".to_string())])));
-        let model: Arc<dyn ShadowModel> = Arc::new(Fixed(Mutex::new(Some(answer))));
+        let model: Arc<dyn ShadowModel> =
+            Arc::new(Fixed(Mutex::new(Some(answer)), Mutex::new(before)));
         Comparator::new(
             HashMap::from([("list".to_string(), model)]),
             roots,
@@ -657,6 +701,30 @@ mod tests {
         assert!(line.contains("\"original\":{\"slice\":1,"), "{line}");
         assert!(line.contains("\"items\":\"0100000006000000\""), "{line}");
         assert!(line.contains("\"items\":\"0100000005000000\""), "{line}");
+    }
+
+    #[test]
+    fn a_difference_the_state_before_the_call_explains_raced() {
+        let now = Instant::now();
+        let before = || Some(Answer::Reply(model_slice(&[6])));
+        let mut c = comparator_before(Answer::Reply(model_slice(&[5])), before());
+        let lines = c.step(
+            Some(call(1, 1, token(), reply(&model_slice(&[6]), &[]))),
+            now,
+        );
+        assert!(lines[0].contains("\"outcome\":\"raced\""), "{lines:?}");
+        assert!(
+            lines[0].contains("\"items\":\"0100000005000000\""),
+            "{lines:?}"
+        );
+
+        // Before the call the model answered neither.
+        let mut c = comparator_before(Answer::Reply(model_slice(&[5])), before());
+        let lines = c.step(
+            Some(call(2, 1, token(), reply(&model_slice(&[7]), &[]))),
+            now,
+        );
+        assert!(lines[0].contains("\"outcome\":\"differed\""), "{lines:?}");
     }
 
     #[test]

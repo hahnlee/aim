@@ -85,9 +85,10 @@ The design is the one Cygwin uses on Windows. The parent spawns a fresh
 5. **Handover.** A host thread of the parent serves the port. The child
    sends its reply port and receives the memory entries and the blob in one
    message. If the child dies first, a no-senders notification ends the
-   wait. `fork` returns once the child is spawned. A parent that exits,
-   execs or dies of a signal before the handover is done waits for it
-   (`wait_handovers`), since the child cannot start without it.
+   wait. `fork` returns once the child has restored the copied task state
+   and acknowledged that it is ready to resume. A parent that exits, execs
+   or dies of a signal waits for its other handovers (`wait_handovers`),
+   since those children cannot start without it.
 6. **The child** maps every entry at its address. Only the heap window is
    mapped over; any other collision is an error. Code is mapped without
    execute permission and made executable after, as `mmap` and `mprotect`

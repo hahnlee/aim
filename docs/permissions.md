@@ -244,6 +244,17 @@ native owner reads and writes the same ones in the same formats:
   `/data/system/appops/discrete` (discrete ops; the sqlite registries'
   flags are off in this image).
 
+For the M4 C single-member shared UID conversion, the app ID stays the
+same: the existing per-app-ID grants, flags and UID AppOps modes remain
+owned by AccessCheckingService. Native package persistence leaves its
+`access.abx` untouched. A disposable original-PMS reboot after a native
+conversion (2026-10-02) preserves a READ_CONTACTS grant with USER_SET, a
+READ_CALENDAR denial with USER_SET/USER_FIXED and RUN_IN_BACKGROUND ignore;
+the original permissionmgr/AppOps queries and the decoded target app ID
+state agree. This checks user 0's default-device state. The live package
+feed and permission-owner notifications at the native switch remain under
+#702; conversion must not report the retained app ID as removed.
+
 ## PermissionController
 
 PermissionController is an app, and two originals require it to be one:

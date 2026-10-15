@@ -1,0 +1,5 @@
+# The original Android PM shell delegates exactly this source-defined set to ART.
+AOSP_TAG=android-16.0.0_r1
+SOURCE_PATH=services/core/java/com/android/server/pm/PackageManagerShellCommand.java
+SOURCE_URL=https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-16.0.0_r1/services/core/java/com/android/server/pm/PackageManagerShellCommand.java
+SOURCE_SHA256=96c8109b2c84abdc0cf145e5bbf88751375cf3c25a6b4bd5fb719055370a1387

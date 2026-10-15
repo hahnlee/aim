@@ -3,5 +3,8 @@
 package android.util;
 
 public class DisplayMetrics {
+    public DisplayMetrics() { throw new RuntimeException("stub"); }
     public float density;
+    public int widthPixels; public int heightPixels; public int densityDpi;
+    public float scaledDensity; public float xdpi; public float ydpi;
 }

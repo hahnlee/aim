@@ -36,6 +36,16 @@ const UMOUNT_NOFOLLOW: u64 = 8;
 
 const CAP_SYS_ADMIN: u32 = 21;
 
+fn remove_mount(guest: &str, flags: u64) -> Result<bool, crate::errno::Errno> {
+    if flags & MNT_DETACH != 0 {
+        vfs::detach_mount(guest)
+    } else if vfs::mount_has_children(guest)? {
+        Err(EBUSY)
+    } else {
+        vfs::remove_mount(guest)
+    }
+}
+
 pub fn unshare(a: [u64; 6]) -> i64 {
     // A process's files, cwd, SysV semaphore undo list and mount table are
     // already its own.
@@ -45,16 +55,19 @@ pub fn unshare(a: [u64; 6]) -> i64 {
     if a[0] & CLONE_NEWNS != 0 && !super::cred::capable(CAP_SYS_ADMIN) {
         return -(EPERM as i64);
     }
+    if a[0]&CLONE_NEWNS!=0 {if let Err(error)=vfs::private_mount_namespace(){return -(error as i64);}}
     0
 }
 
 fn resolve(path: u64, follow: bool) -> Result<vfs::Resolved, i64> {
     // SAFETY: guest string.
-    let path = unsafe { super::guest_cstr(path) };
+    let owned_path = super::guest_cstr(path).map_err(|error|-(error as i64))?;
+    let path=owned_path.as_slice();
     vfs::resolve(LINUX_AT_FDCWD, path, follow).map_err(|e| -(e as i64))
 }
 
 fn is_dir(r: &vfs::Resolved) -> Result<bool, i64> {
+    if let Some(route)=vfs::fuse_route(&r.guest){let stat=super::fuse_client::stat(&route,None,None).map_err(|error|-(error as i64))?;return Ok(stat.st_mode&libc::S_IFMT==libc::S_IFDIR);}
     // SAFETY: host path, local buffer.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::stat(r.host.as_ptr(), &mut st) } != 0 {
@@ -101,12 +114,12 @@ fn do_mount(a: [u64; 6]) -> Result<(), i64> {
         return Err(-(ENOTDIR as i64));
     }
     if flags & MS_REMOUNT != 0 {
+        if vfs::remount_fuse(&target.guest,flags&MS_RDONLY!=0).map_err(|error|-(error as i64))?{return Ok(());}
         // Mount options (read-only, nosuid, ...) are not enforced.
         return Ok(());
     }
     if flags & PROPAGATION != 0 {
-        // Nothing propagates between processes here.
-        return Ok(());
+        return vfs::set_mount_propagation(&target.guest,flags).map_err(|error|-(error as i64));
     }
     if flags & MS_BIND != 0 {
         let source = resolve(a[0], true)?;
@@ -118,33 +131,41 @@ fn do_mount(a: [u64; 6]) -> Result<(), i64> {
         } else {
             source.area
         };
-        // MS_REC or not, the mounts below the source that live in its host
-        // tree come along.
+        // Linux recursive bind clones visible submounts, including virtual
+        // FUSE routes whose nodes do not exist in the host anchor tree.
         let host = PathBuf::from(OsStr::from_bytes(source.host.as_bytes()));
-        vfs::add_mount(&target.guest, host, area, &source.guest, "bind");
+        vfs::bind_mount_recursive(&source.guest,&target.guest,host,area,flags&0x4000!=0).map_err(|error|-(error as i64))?;
         return Ok(());
     }
     if flags & MS_MOVE != 0 {
         let source = resolve(a[0], true)?;
-        return if vfs::move_mount(&source.guest, &target.guest) {
+        return if vfs::move_mount(&source.guest, &target.guest).map_err(|error|-(error as i64))? {
             Ok(())
         } else {
             Err(-(EINVAL as i64))
         };
     }
     // SAFETY: guest strings.
-    let fstype = unsafe { super::guest_cstr(a[2]) };
-    match fstype {
+    let fstype = super::guest_cstr(a[2]).map_err(|error|-(error as i64))?;
+    match fstype.as_slice() {
+        b"fuse"|b"fuse.media"=>{
+            let data=if a[4]==0{Vec::new()}else{super::user_memory::read_cstr(a[4],16384).map_err(|error|-(error as i64))?};let options=super::fuse_mount::parse(&data).map_err(|error|-(error as i64))?;
+            let session=super::fuse::session_for_fd(options.fd).map_err(|error|-(error as i64))?;
+            super::fuse::Client::from_key(&session).and_then(|client|client.mount()).map_err(|error|-(error as i64))?;
+            let source=super::guest_cstr(a[0]).map_err(|error|-(error as i64))?;let source=std::str::from_utf8(&source).map_err(|_|-(EINVAL as i64))?;
+            vfs::add_fuse_mount(&target.guest,session.transport().to_path_buf(),PathBuf::from(OsStr::from_bytes(target.host.as_bytes())),source,&options,flags&MS_RDONLY!=0).map_err(|error|-(error as i64))?;
+            match super::fuse_sysfs::mounted(&session){Ok(_)=>Ok(()),Err(error)=>{vfs::remove_mount(&target.guest).map_err(|error|-(error as i64))?;Err(-(error as i64))}}
+        }
         b"tmpfs" => {
             // SAFETY: guest string (options), may be null.
-            let data = unsafe { super::guest_cstr(a[4]) };
-            let dir = tmpfs_dir(data)?;
+            let data = if a[4]==0{Vec::new()}else{super::user_memory::read_cstr(a[4],16384).map_err(|error|-(error as i64))?};
+            let dir = tmpfs_dir(&data)?;
             let area = if flags & MS_RDONLY != 0 {
                 Area::Image
             } else {
                 Area::Writable
             };
-            vfs::add_mount(&target.guest, dir, area, "tmpfs", "tmpfs");
+            vfs::add_mount(&target.guest, dir, area, "tmpfs", "tmpfs").map_err(|error|-(error as i64))?;
             Ok(())
         }
         _ => Err(-(ENODEV as i64)),
@@ -158,11 +179,35 @@ pub fn umount2(a: [u64; 6]) -> i64 {
     if !super::cred::capable(CAP_SYS_ADMIN) {
         return -(EPERM as i64);
     }
+    // A disconnected FUSE mount can no longer resolve children, but Linux
+    // still unmounts an exact mountpoint from the namespace's mount table.
+    // Try the canonical absolute spelling directly before walking the
+    // filesystem; relative paths and paths needing dot normalization keep the
+    // ordinary resolver semantics below.
+    let owned_path = match super::guest_cstr(a[0]) {
+        Ok(path) => path,
+        Err(error) => return -(error as i64),
+    };
+    if let Ok(path) = std::str::from_utf8(&owned_path)
+        && path.starts_with('/')
+        && (path == "/"
+            || path
+                .split('/')
+                .skip(1)
+                .all(|component| !component.is_empty() && component != "." && component != ".."))
+    {
+        match remove_mount(path, a[1]) {
+            Ok(true) => return 0,
+            Ok(false) => {}
+            Err(error) => return -(error as i64),
+        }
+    }
     let target = match resolve(a[0], a[1] & UMOUNT_NOFOLLOW == 0) {
         Ok(t) => t,
         Err(e) => return e,
     };
-    if vfs::remove_mount(&target.guest) {
+    let removed=match remove_mount(&target.guest,a[1]){Ok(removed)=>removed,Err(error)=>return -(error as i64)};
+    if removed {
         0
     } else if target.guest == "/" {
         -(EBUSY as i64)

@@ -75,6 +75,8 @@ pub struct ServiceRecord {
     pub time_crashed: Option<Instant>,
     pub crash_count: u32,
     pub starts: u64,
+    mount_namespace: std::cell::Cell<Option<crate::service_namespace::Selection>>,
+    origin: crate::service_namespace::LaunchOrigin,
     pub was_last_exit_ok: bool,
     /// For `exec` services: the credentials from the command line.
     pub exec_identity: Option<(u32, u32, Vec<u32>, Option<String>)>,
@@ -109,6 +111,8 @@ impl ServiceRecord {
             time_crashed: None,
             crash_count: 0,
             starts: 0,
+            mount_namespace: std::cell::Cell::new(None),
+            origin: crate::service_namespace::LaunchOrigin::Service,
             was_last_exit_ok: true,
             exec_identity: None,
         }
@@ -119,6 +123,7 @@ impl ServiceRecord {
     pub fn for_helper(def: Service) -> Self {
         let mut record = Self::new(def);
         record.flags |= flags::TEMPORARY;
+        record.origin=crate::service_namespace::LaunchOrigin::Helper;
         record.exec_identity = Some((0, 0, Vec::new(), None));
         record
     }
@@ -286,8 +291,13 @@ impl Planner {
             oom_score_adjust: def.oom_score_adjust,
             rlimits,
         };
+        let origin=record.origin;
+        let(namespace,remembered)=crate::service_namespace::plan(&self.layout,&def.name,&argv[0],origin,if origin==crate::service_namespace::LaunchOrigin::Service{record.mount_namespace.get()}else{None})?;
+        if remembered.is_some(){record.mount_namespace.set(remembered);}
         Ok(LaunchSpec {
             service: def.name.clone(),
+            origin,
+            mount_namespace: namespace,
             generation,
             argv,
             env,
@@ -334,6 +344,7 @@ pub struct Supervisor {
     /// Interface name (`aidl/foo`) → service.
     interfaces: HashMap<String, String>,
     exec_count: u64,
+    delayed: Vec<String>,
     events: Vec<SupervisorEvent>,
     synced: (usize, usize),
 }
@@ -448,6 +459,10 @@ impl Supervisor {
             .records
             .get_mut(name)
             .ok_or_else(|| format!("Could not find service '{name}'"))?;
+        if record.def.updatable&&!crate::service_namespace::ready(&planner.layout.runtime)?{
+            if record.flags&flags::EXEC==0{self.delayed.push(name.into());}
+            return Err(format!("Cannot start updatable service '{name}' before default linker configuration is ready"));
+        }
         let disabled = record.flags & (flags::DISABLED | flags::RESET) != 0;
         record.flags &= !(flags::DISABLED
             | flags::RESTARTING
@@ -485,6 +500,8 @@ impl Supervisor {
             spec: Box::new(spec),
         })
     }
+
+    pub fn take_delayed(&mut self)->Vec<String>{std::mem::take(&mut self.delayed).into_iter().collect()}
 
     /// `Service::StartIfNotDisabled` (`class_start`).
     pub fn start_if_not_disabled(
@@ -658,6 +675,7 @@ impl Supervisor {
         def.oneshot = true;
         let mut record = ServiceRecord::new(def);
         record.flags |= flags::TEMPORARY;
+        record.origin=crate::service_namespace::LaunchOrigin::Transient;
         record.exec_identity = Some((uid, gid, groups, spec.seclabel.clone()));
         self.records.insert(name.clone(), record);
         Ok(name)
@@ -677,6 +695,7 @@ impl Supervisor {
             .records
             .get_mut(name)
             .ok_or_else(|| format!("Could not find service '{name}'"))?;
+        if record.def.updatable&&!crate::service_namespace::ready(&planner.layout.runtime)?{return Err(format!("Cannot exec updatable service '{name}' before default linker configuration is ready"));}
         record.flags |= flags::ONESHOT | flags::EXEC;
         match self.start(name, launcher, planner, properties, now) {
             Ok(outcome) => Ok(outcome),

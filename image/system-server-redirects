@@ -10,3 +10,4 @@
 # signature.
 #
 # caller (class.method)   call (class.method)   to (class.method)   calls   reason
+com.android.server.SystemServer.startBootstrapServices com.android.server.pm.PackageManagerService.main dev.aim.server.PackageBootstrapBridge.startPackageManager 1 Attach the synchronous M4 package-policy bridge after PlatformCompat and before original PMS scanning; original PMS remains until C acceptance gates (#834, #798).

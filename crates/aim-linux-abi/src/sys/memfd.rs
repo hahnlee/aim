@@ -46,7 +46,6 @@ use std::sync::{Mutex, OnceLock};
 use super::fdtab::{self, Kind};
 use super::vmmap;
 use crate::errno::{self, EINVAL, EPERM};
-use crate::sys::guest_cstr;
 
 const MFD_CLOEXEC: u64 = 1;
 const MFD_ALLOW_SEALING: u64 = 2;
@@ -74,8 +73,8 @@ const SEAL_ATTR: &str = "dev.aim.memfd.seal.";
 /// kernel time with a few dozen memfds alive), and every app would pay it
 /// on start (#446). The processes that make many memfds sweep for all.
 const SWEEP_EVERY: u32 = 64;
-/// Files younger than this are left to their creator, which may not hold
-/// its lock yet.
+/// Periodic sweeps leave recent files alone; lifecycle sweeps additionally
+/// require our mark, which the creator installs only after taking its lock.
 const SWEEP_MIN_AGE: i64 = 5;
 
 /// (device, inode) of the backing file.
@@ -222,9 +221,10 @@ fn read_seals(fd: i32) -> u32 {
 
 /// Remove the names of memfd files in `dir` no open file description
 /// refers to, unless younger than `min_age` seconds.
-fn sweep(dir: &std::path::Path, min_age: i64) {
+fn sweep(dir: &std::path::Path, min_age: i64) -> u64 {
+    let mut removed = 0;
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+        return 0;
     };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -238,17 +238,37 @@ fn sweep(dir: &std::path::Path, min_age: i64) {
         unsafe {
             let fd = libc::open(
                 p.as_ptr(),
-                libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_EXLOCK,
+                libc::O_RDONLY
+                    | libc::O_NONBLOCK
+                    | libc::O_CLOEXEC
+                    | libc::O_EXLOCK
+                    | libc::O_NOFOLLOW,
             );
             if fd < 0 {
                 continue;
             }
-            if stat_fd(fd).is_some_and(|st| now - st.st_birthtime >= min_age) {
-                libc::unlink(p.as_ptr());
+            if let Some(st) = stat_fd(fd)
+                && marked(&st)
+                && now - st.st_birthtime >= min_age
+            {
+                let mut named: libc::stat = std::mem::zeroed();
+                if libc::lstat(p.as_ptr(), &mut named) == 0
+                    && key_of(&named) == key_of(&st)
+                    && libc::unlink(p.as_ptr()) == 0
+                {
+                    removed += 1;
+                }
             }
             libc::close(fd);
         }
     }
+    removed
+}
+
+/// Reclaim unreferenced backing names after a boot, including processes
+/// that created fewer than the periodic sweep threshold.
+pub fn sweep_unused() -> u64 {
+    sweep(dir(), 0)
 }
 
 /// Whether the `n`th memfd_create of this process (from 0) sweeps.
@@ -266,7 +286,8 @@ pub fn memfd_create(a: [u64; 6]) -> i64 {
         return -(EINVAL as i64);
     }
     // SAFETY: guest string.
-    let name = unsafe { guest_cstr(a[0]) };
+    let owned_name=match super::user_memory::read_cstr(a[0],250){Ok(bytes)=>bytes,Err(36)=>return -(EINVAL as i64),Err(error)=>return -(error as i64)};
+    let name=owned_name.as_slice();
     if name.len() > 249 {
         return -(EINVAL as i64);
     }
@@ -324,6 +345,10 @@ pub fn memfd_create(a: [u64; 6]) -> i64 {
     let k = key_of(&st);
     with(|m| m.insert(k, Memfd::new(String::from_utf8_lossy(name).into_owned())));
     fdtab::insert(fd, Kind::Memfd(k));
+    if let Err(error) = fdtab::publish_guest(fd) {
+        fdtab::on_close(fd); unsafe { libc::close(fd); }
+        return -(error as i64);
+    }
     fd as i64
 }
 
@@ -358,6 +383,10 @@ pub fn reopen(fd: i32, host_flags: i32) -> Option<i64> {
     hold(new);
     know(key_of(&st), fd);
     fdtab::insert(new, Kind::Memfd(key_of(&st)));
+    if let Err(error) = fdtab::publish_guest(new) {
+        fdtab::on_close(new); unsafe { libc::close(new); }
+        return Some(-(error as i64));
+    }
     Some(new as i64)
 }
 
@@ -921,18 +950,66 @@ mod tests {
         assert_eq!(due, [63, 127, 191]);
     }
 
+    #[test]
+    fn lifecycle_sweep_collects_crashed_short_process() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        let directory =
+            std::env::temp_dir().join(format!("aim-memfd-crash-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = ChildGuard(Command::new("python3")
+            .args(["-c", "import os,sys,fcntl,stat,time; p=sys.argv[1]; f=os.open(p,os.O_CREAT|os.O_EXCL|os.O_RDWR,0o600); fcntl.flock(f,fcntl.LOCK_SH); os.chflags(p,stat.UF_NODUMP|stat.UF_HIDDEN); os.write(f,b'fixture'); print('ready',flush=True); time.sleep(60)"])
+            .arg(directory.join("short-process"))
+            .stdout(Stdio::piped())
+            .spawn().unwrap());
+        let mut ready = String::new();
+        BufReader::new(child.0.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready.trim(), "ready");
+        assert_eq!(sweep(&directory, 0), 0);
+        assert_eq!(
+            std::fs::read(directory.join("short-process")).unwrap(),
+            b"fixture"
+        );
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        assert_eq!(sweep(&directory, 0), 1);
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        std::fs::remove_dir(directory).unwrap();
+    }
+
     /// A sweep removes the names only of files no description holds.
     #[test]
     fn sweep_keeps_held_files() {
         let d = std::env::temp_dir().join(format!("aim-memfd-test-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let held = std::fs::File::create(d.join("held")).unwrap();
-        drop(std::fs::File::create(d.join("free")).unwrap());
+        let free = std::fs::File::create(d.join("free")).unwrap();
+        drop(std::fs::File::create(d.join("unrelated")).unwrap());
+        unsafe {
+            libc::fchflags(held.as_raw_fd(), MARK);
+            libc::fchflags(free.as_raw_fd(), MARK);
+        }
+        drop(free);
         use std::os::fd::AsRawFd;
         hold(held.as_raw_fd());
-        sweep(&d, 0);
+        assert_eq!(sweep(&d, 5), 0);
+        assert!(d.join("free").exists());
+        assert_eq!(sweep(&d, 0), 1);
         assert!(d.join("held").exists());
         assert!(!d.join("free").exists());
+        assert!(d.join("unrelated").exists());
+        let reopened = reopen(held.as_raw_fd(), libc::O_RDONLY).unwrap();
+        assert!(reopened >= 0);
+        unsafe { libc::close(reopened as i32) };
         // Unlocking the description rather than closing it: a child another
         // test forks meanwhile may hold a copy of it.
         // SAFETY: our fd.
@@ -940,6 +1017,7 @@ mod tests {
         sweep(&d, 0);
         assert!(!d.join("held").exists());
         drop(held);
+        std::fs::remove_file(d.join("unrelated")).unwrap();
         std::fs::remove_dir(&d).unwrap();
     }
 }

@@ -41,7 +41,7 @@ impl Ucred {
 ///
 /// ADR 0012 runs SELinux permissive, so [`Permissive`] allows everything;
 /// a policy engine can replace it without touching the set rules.
-pub trait PropertyPolicy {
+pub trait PropertyPolicy: Send {
     /// May `source_context` set a property labeled `target_context`?
     /// `name` is the property, or `ctl.<service>` / `ctl.<action>$<service>`
     /// for control messages. init denies when either context is missing.

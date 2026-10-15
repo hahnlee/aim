@@ -3,8 +3,9 @@
 //! type in the high nibble) and the token's data, big-endian. Element and
 //! attribute names, and values written with `attributeInterned`, are
 //! interned: a string's first use carries it and gets the next index,
-//! later uses carry the index. Strings are Java's modified UTF-8 with a
-//! 16-bit length.
+//! later uses carry the index. Strings have a 16-bit byte length and use
+//! ArtFastDataOutput's modified UTF-8, including four-byte supplementary
+//! characters; the reader also accepts legacy six-byte surrogate pairs.
 
 use std::collections::HashMap;
 
@@ -111,6 +112,10 @@ impl Reader<'_> {
 /// The root element of the binary XML document `bytes`. Tokens outside
 /// the root element are left out.
 pub fn read(bytes: &[u8]) -> Result<Element, String> {
+    read_optional(bytes)?.ok_or_else(|| "ABX: no root element".into())
+}
+
+pub fn read_optional(bytes: &[u8]) -> Result<Option<Element>, String> {
     if !bytes.starts_with(MAGIC) {
         return Err("not ABX".into());
     }
@@ -167,19 +172,24 @@ pub fn read(bytes: &[u8]) -> Result<Element, String> {
     if !open.is_empty() {
         return Err(format!("ABX: <{}> does not end", open[0].name));
     }
-    root.ok_or_else(|| "ABX: no root element".into())
+    Ok(root)
 }
 
 /// `root` as one binary XML document, written as `BinaryXmlSerializer`
 /// writes it: a document whose values keep their types is written back
-/// byte for byte.
+/// in the pinned ArtFastDataOutput string encoding.
 pub fn write(root: &Element) -> Result<Vec<u8>, String> {
+    write_sequence(std::slice::from_ref(root))
+}
+
+/// Android TypedXmlSerializer also emits independent sibling root sections.
+pub fn write_sequence(roots:&[Element])->Result<Vec<u8>,String> {
     let mut w = Writer {
         out: MAGIC.to_vec(),
         interned: HashMap::new(),
     };
     w.out.push(START_DOCUMENT | TYPE_NULL);
-    w.element(root)?;
+    for root in roots {w.element(root)?;}
     w.out.push(END_DOCUMENT | TYPE_NULL);
     Ok(w.out)
 }
@@ -274,7 +284,8 @@ impl Writer {
 
 /// Java's modified UTF-8 (`ModifiedUtf8`): UTF-16 units, NUL in two
 /// bytes, a supplementary character as its two surrogates in three bytes
-/// each.
+/// each. ArtFastDataInput/Output also accept/emit ART's non-standard four-byte
+/// supplementary form (CharsetUtils, android-16.0.0_r1).
 fn decode_utf(b: &[u8]) -> Option<String> {
     let mut units = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -284,6 +295,17 @@ fn decode_utf(b: &[u8]) -> Option<String> {
                 .filter(|c| *c & 0xc0 == 0x80)
                 .map(|c| (c & 0x3f) as u16)
         };
+        if matches!(b[i], 0xf0..=0xf4) {
+            let scalar = ((b[i] & 7) as u32) << 18
+                | (cont(i + 1)? as u32) << 12
+                | (cont(i + 2)? as u32) << 6
+                | cont(i + 3)? as u32;
+            let c = char::from_u32(scalar).filter(|c| *c as u32 >= 0x10000)?;
+            let mut pair = [0; 2];
+            units.extend_from_slice(c.encode_utf16(&mut pair));
+            i += 4;
+            continue;
+        }
         let (unit, n) = match b[i] {
             c @ 0x01..=0x7f => (c as u16, 1),
             c @ 0xc0..=0xdf => (((c & 0x1f) as u16) << 6 | cont(i + 1)?, 2),
@@ -301,15 +323,14 @@ fn decode_utf(b: &[u8]) -> Option<String> {
 
 fn encode_utf(s: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.len());
-    for u in s.encode_utf16() {
-        match u {
-            0x01..=0x7f => out.push(u as u8),
-            0x00..=0x7ff => out.extend([0xc0 | (u >> 6) as u8, 0x80 | (u & 0x3f) as u8]),
-            _ => out.extend([
-                0xe0 | (u >> 12) as u8,
-                0x80 | (u >> 6 & 0x3f) as u8,
-                0x80 | (u & 0x3f) as u8,
-            ]),
+    // ArtFastDataOutput/CharsetUtils use ART's four-byte supplementary form.
+    // NUL remains modified UTF-8; the reader also accepts surrogate pairs.
+    for c in s.chars() {
+        if c == '\0' {
+            out.extend([0xc0, 0x80]);
+        } else {
+            let mut bytes = [0; 4];
+            out.extend_from_slice(c.encode_utf8(&mut bytes).as_bytes());
         }
     }
     out
@@ -415,8 +436,99 @@ mod tests {
             assert_eq!(decode_utf(&b).as_deref(), Some(s));
         }
         assert_eq!(encode_utf("\u{0}"), [0xc0, 0x80]);
-        assert_eq!(encode_utf("😀"), [0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80]);
+        assert_eq!(encode_utf("😀"), [0xf0, 0x9f, 0x98, 0x80]);
+        assert_eq!(
+            decode_utf(&[0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80]).as_deref(),
+            Some("😀")
+        );
         assert_eq!(decode_utf(&[0x00]), None);
-        assert_eq!(decode_utf(&[0xf0, 0x9f, 0x98, 0x80]), None);
+        assert_eq!(decode_utf(&[0xf0, 0x9f, 0x98, 0x80]).as_deref(), Some("😀"));
+        for bad in [
+            &[0xf0, 0x80, 0x80, 0x80][..],
+            &[0xf4, 0x90, 0x80, 0x80],
+            &[0xf0, 0x9f, 0x98],
+        ] {
+            assert_eq!(decode_utf(bad), None);
+        }
+    }
+}
+
+pub(crate) struct Pull<'a> {
+    reader: Reader<'a>,
+}
+
+impl<'a> Pull<'a> {
+    pub(crate) fn new(bytes: &'a [u8]) -> Result<Self, String> {
+        let mut reader = Reader {
+            bytes,
+            at: MAGIC.len(),
+            interned: Vec::new(),
+        };
+        // setInput peeks the first token, so magic alone is an input error.
+        let token = *bytes.get(reader.at).ok_or("ABX: truncated header")?;
+        if token & 0x0f == START_DOCUMENT {
+            reader.at += 1;
+        }
+        Ok(Self { reader })
+    }
+
+    pub(crate) fn peek(&self) -> Result<u8, String> {
+        self.reader
+            .bytes
+            .get(self.reader.at)
+            .map(|b| b & 0x0f)
+            .ok_or_else(|| format!("ABX: truncated at {}", self.reader.at))
+    }
+
+    pub(crate) fn token(&mut self) -> Result<crate::pull::Token, String> {
+        use crate::pull::Token;
+        let r = &mut self.reader;
+        // nextToken treats EOF during external token decoding as END_DOCUMENT.
+        let result = (|| {
+            let [token] = r.take()?;
+            let event = token & 0x0f;
+            Ok::<_, String>(match event {
+                START_TAG => Token::Start(Element {
+                    name: r.interned()?,
+                    attrs: Vec::new(),
+                    content: Vec::new(),
+                }),
+                END_TAG => Token::End(r.interned()?),
+                END_DOCUMENT => Token::EndDocument,
+                START_DOCUMENT => Token::Content(START_DOCUMENT, None),
+                crate::ENTITY_REF => {
+                    Token::Content(crate::CDSECT, Some(crate::pull::entity(&r.utf()?)?))
+                }
+                crate::TEXT
+                | crate::CDSECT
+                | crate::COMMENT
+                | crate::PROCESSING_INSTRUCTION
+                | crate::DOCDECL
+                | crate::IGNORABLE_WHITESPACE => Token::Content(event, Some(r.utf()?)),
+                _ => return Err(format!("ABX: unexpected token {event}")),
+            })
+        })();
+        let mut token = match result {
+            Err(message) if message.starts_with("ABX: truncated at ") => {
+                return Ok(Token::EndDocument);
+            }
+            other => other?,
+        };
+        if let Token::Start(element) = &mut token {
+            loop {
+                let byte = *r
+                    .bytes
+                    .get(r.at)
+                    .ok_or_else(|| format!("ABX: truncated at {}", r.at))?;
+                if byte & 0x0f != ATTRIBUTE {
+                    break;
+                }
+                r.at += 1;
+                let name = r.interned()?;
+                let value = r.value(byte & 0xf0)?;
+                element.attrs.push((name, value));
+            }
+        }
+        Ok(token)
     }
 }
