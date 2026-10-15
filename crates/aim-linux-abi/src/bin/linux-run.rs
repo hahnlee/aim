@@ -33,6 +33,8 @@ const USAGE: &str = "usage: linux-run [OPTIONS] PROGRAM [ARGS...]
 
   --root DIR             guest root directory (default /)
   --path-map FILE        guest filesystem view over the root
+  --runtime DIR          the kernel state directory of a run without a path
+                         map, shared by its processes (made when absent)
   --mount-namespace-from-init  explicitly enter the running init current namespace
   --cache DIR            translation cache directory
   --no-cache             rewrite every file at load time
@@ -107,6 +109,9 @@ fn host_environment() -> Vec<Vec<u8>> {
 }
 
 fn main() {
+    // What the process was exec'd with: as Linux's execve, the program
+    // inherits every descriptor not closed on exec.
+    let inherited_fds = aim_linux_abi::sys::open_fds();
     let internal_args = std::env::args_os().skip(1).collect::<Vec<_>>();
     if internal_args.first().is_some_and(|arg| arg == "--fuse-broker") {
         if internal_args.len() != 2 { usage(); }
@@ -143,7 +148,7 @@ fn main() {
     let mut runtime_args = Vec::new();
     let mut diag_fd = None;
     let mut posix_control=None;
-    let mut socket_receipts=Vec::new();let mut guest_fds=vec![0,1,2];let mut explicit_guest_fds=false;
+    let mut socket_receipts=Vec::new();let mut guest_fds=inherited_fds;let mut explicit_guest_fds=false;
     let program = loop {
         let Some(a) = args.next() else { usage() };
         if a == "--fork-child" {
@@ -165,6 +170,7 @@ fn main() {
             "--exec-close-receipt"=>{let fd=value().to_string_lossy().parse::<i32>().unwrap_or_else(|_|usage());if fd<0{usage();}state.close_receipt=Some(fd);},
             "--guest-fds"=>{explicit_guest_fds=true;guest_fds=aim_linux_abi::sys::parse_guest_fds(&value().to_string_lossy()).unwrap_or_else(|error|{eprintln!("linux-run: invalid guest descriptor inventory: errno {error}");std::process::exit(2)});},
             "--path-map" => path_map = Some(PathBuf::from(value())),
+            "--runtime" => aim_linux_abi::vfs::use_runtime(PathBuf::from(value())),
             "--mount-namespace-from-init"=>mount_namespace_from_init=true,
             "--posix-control"=>posix_control=Some(PathBuf::from(value())),
             "--binder" => binder = Some(value().to_string_lossy().into_owned()),
@@ -256,7 +262,7 @@ fn main() {
     if let Some(fd) = diag_fd {
         runtime_args.extend([cstring("--diag-fd"), cstring(fd.to_string())]);
     }
-    if !explicit_guest_fds{guest_fds.retain(|fd|unsafe{libc::fcntl(*fd,libc::F_GETFD)}>=0);}
+    if !explicit_guest_fds{guest_fds.retain(|fd|Some(*fd)!=diag_fd&&unsafe{libc::fcntl(*fd,libc::F_GETFD)}>=0);}
     if let Some(label) = seclabel {
         identity.seclabel = label;
     }

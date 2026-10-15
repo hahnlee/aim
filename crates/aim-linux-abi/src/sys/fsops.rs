@@ -566,7 +566,9 @@ fn writable_fd_metadata(fd: i32, stat: &libc::stat) -> Result<(), i64> {
         use std::os::unix::ffi::OsStrExt;
         vfs::guest_path_of_host(std::path::Path::new(std::ffi::OsStr::from_bytes(&path[..length])))
     });
-    if attrs::recording() && guest.is_some_and(|path|vfs::lookup(&path).1==vfs::Area::Image) {
+    // A translated copy of an image file is writable on the host; its guest
+    // path is the image's.
+    if vfs::read_only_root() && guest.is_some_and(|path|vfs::lookup(&path).1==vfs::Area::Image) {
         return Err(-(crate::errno::EROFS as i64));
     }
     Ok(())

@@ -255,6 +255,8 @@ fn lean_syscalls_follow_linux_semantics() {
     let mut fds = [0i32; 2];
     // SAFETY: plain pipe.
     assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    // The guest's, as if inherited at exec.
+    aim_linux_abi::sys::inherit_fds(&fds).unwrap();
     let (r, w) = (fds[0] as u64, fds[1] as u64);
     let msg = b"lean";
     assert_eq!(sys(64, [w, msg.as_ptr() as u64, 4, 0]), 4, "write");
@@ -271,6 +273,7 @@ fn lean_syscalls_follow_linux_semantics() {
     let (a, b) = {
         let mut p = [0i32; 2];
         unsafe { libc::pipe(p.as_mut_ptr()) };
+        aim_linux_abi::sys::inherit_fds(&p).unwrap();
         unsafe { libc::fcntl(p[0], libc::F_SETFL, libc::O_NONBLOCK) };
         (p[0] as u64, p[1])
     };
@@ -299,6 +302,7 @@ fn lean_syscalls_follow_linux_semantics() {
     std::fs::write(&path, b"0123456789").unwrap();
     let f = std::fs::File::open(&path).unwrap();
     use std::os::fd::AsRawFd;
+    aim_linux_abi::sys::inherit_fds(&[f.as_raw_fd()]).unwrap();
     let fd = f.as_raw_fd() as u64;
     assert_eq!(sys(67, [fd, buf.as_mut_ptr() as u64, 3, 5]), 3, "pread64");
     assert_eq!(&buf[..3], b"567");
@@ -315,6 +319,8 @@ fn ioctl_resolves_the_fd_before_the_request() {
     let mut fds = [0i32; 2];
     // SAFETY: plain pipe.
     assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    // The guest's, as if inherited at exec.
+    aim_linux_abi::sys::inherit_fds(&fds).unwrap();
     let r = fds[0] as u64;
     let mut out = [0u8; 64];
     let out = out.as_mut_ptr() as u64;

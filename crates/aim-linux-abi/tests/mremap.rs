@@ -150,11 +150,14 @@ fn paged_file(name: &str, pages: usize) -> std::fs::File {
     let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     let data: Vec<u8> = (0..pages * PAGE).map(|i| (i / PAGE + 1) as u8).collect();
     std::fs::write(&path, data).unwrap();
-    std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&path)
-        .unwrap()
+        .unwrap();
+    // The guest's, as if inherited at exec.
+    aim_linux_abi::sys::inherit_fds(&[std::os::fd::AsRawFd::as_raw_fd(&file)]).unwrap();
+    file
 }
 
 /// The guest's mmap of `f` from its second page, followed by `room` free

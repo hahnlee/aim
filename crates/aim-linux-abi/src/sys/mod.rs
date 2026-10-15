@@ -93,7 +93,7 @@ pub use dir::synthesized_path as synthesized_dir_path;
 pub use exec::{ExecState, init as init_exec, interpret as interpret_script};
 pub use fdtab::adopt as adopt_fd;
 pub use fdtab::init as init_fds;
-pub use fdtab::{parse_guest_fds,parse_socket_receipts};
+pub use fdtab::{inherit as inherit_fds,open_fds,parse_guest_fds,parse_socket_receipts};
 pub use fork::spawn::{child_main as become_fork_child, reserve_fds as reserve_fork_fds};
 pub(crate) use fork::state as fork_state;
 pub use mem::init_brk;

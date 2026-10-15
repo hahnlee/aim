@@ -503,6 +503,44 @@ pub(crate) fn inherit_fork_namespace(map:Option<&Path>)->Result<(),String>{
     aim_storage::process_namespace::register_mount_namespace(&table,child,&namespace).map_err(|error|error.to_string())
 }
 
+/// Without a path map, the processes of one run share a runtime directory
+/// in the temporary directory, as the processes of one boot share
+/// guest-init's: the first makes it and passes it on with `--runtime`.
+static STANDALONE_RUNTIME:OnceLock<PathBuf>=OnceLock::new();
+const STANDALONE_PREFIX:&str="aim-mount-";
+/// Use `dir` as this run's runtime directory (`--runtime`).
+pub fn use_runtime(dir:PathBuf){let _=STANDALONE_RUNTIME.set(dir);}
+/// The run's runtime directory to pass on, when there is no path map.
+pub fn standalone_runtime()->Option<&'static Path>{STANDALONE_RUNTIME.get().map(PathBuf::as_path)}
+/// Every process of a run holds a shared lock on its directory's `holders`
+/// for its lifetime; the kernel drops it however the process ends.
+fn hold_standalone_runtime(directory:&Path)->Result<(),String>{
+    let file=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).custom_flags(libc::O_CLOEXEC|libc::O_NOFOLLOW).open(directory.join("holders")).map_err(|error|format!("{}: {error}",directory.display()))?;
+    if unsafe{libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file),libc::LOCK_SH)}<0{return Err(format!("{}: {}",directory.display(),std::io::Error::last_os_error()));}
+    crate::sys::fdtab::hide(std::os::fd::IntoRawFd::into_raw_fd(file));Ok(())
+}
+/// Remove the runtime directories of runs that have ended: nothing holds
+/// their `holders` lock any more.
+fn sweep_standalone_runtimes(){
+    let Ok(entries)=std::fs::read_dir(std::env::temp_dir())else{return};
+    for entry in entries.flatten(){
+        if !entry.file_name().to_string_lossy().starts_with(STANDALONE_PREFIX){continue;}
+        let directory=entry.path();
+        let Ok(file)=std::fs::OpenOptions::new().read(true).custom_flags(libc::O_CLOEXEC|libc::O_NOFOLLOW).open(directory.join("holders"))else{
+            // Made before runs held their directory: stale once its maker,
+            // named pid-seconds-microseconds, is gone.
+            let name=entry.file_name().to_string_lossy().into_owned();
+            let fields=name[STANDALONE_PREFIX.len()..].split('-').map(str::parse::<u64>).collect::<Result<Vec<_>,_>>().unwrap_or_default();
+            if let [pid,start_seconds,start_microseconds]=fields[..]
+                &&!(aim_storage::process_namespace::ProcessIdentity{host_pid:pid as i32,start_seconds,start_microseconds}).is_live(){
+                let _=std::fs::remove_dir_all(&directory);
+            }
+            continue;
+        };
+        if unsafe{libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file),libc::LOCK_EX|libc::LOCK_NB)}==0{let _=std::fs::remove_dir_all(&directory);}
+    }
+}
+
 /// Initialize from `--root` and, when given, a `--path-map` file (whose
 /// `root` line overrides `root`).
 pub fn init(root: &Path, map: Option<&Path>) -> Result<(), String> {
@@ -538,9 +576,18 @@ pub fn init(root: &Path, map: Option<&Path>) -> Result<(), String> {
         .canonicalize()
         .map_err(|e| format!("--root {}: {e}", root.display()))?;
     if runtime.is_none(){
-        let process=aim_storage::process_namespace::ProcessIdentity::running(unsafe{libc::getpid()}).map_err(|error|error.to_string())?;
-        let directory=std::env::temp_dir().join(format!("aim-mount-{}-{}-{}",process.host_pid,process.start_seconds,process.start_microseconds));
-        std::fs::create_dir_all(&directory).map_err(|error|error.to_string())?;
+        let directory=match STANDALONE_RUNTIME.get(){
+            Some(directory)=>directory.clone(),
+            None=>{
+                sweep_standalone_runtimes();
+                let process=aim_storage::process_namespace::ProcessIdentity::running(unsafe{libc::getpid()}).map_err(|error|error.to_string())?;
+                let directory=std::env::temp_dir().join(format!("{STANDALONE_PREFIX}{}-{}-{}",process.host_pid,process.start_seconds,process.start_microseconds));
+                std::fs::create_dir_all(&directory).map_err(|error|error.to_string())?;
+                let _=STANDALONE_RUNTIME.set(directory.clone());
+                directory
+            }
+        };
+        hold_standalone_runtime(&directory)?;
         runtime=Some(directory);
     }
     let read_only_dev = read_only_dev(&root);
@@ -567,7 +614,9 @@ pub fn init(root: &Path, map: Option<&Path>) -> Result<(), String> {
             let owner=aim_storage::mount_namespace::Namespace::open(runtime,&id).map_err(|error|error.to_string())?;
             let mut base=match map{Some(path)=>std::fs::read_to_string(path).map_err(|error|error.to_string())?,None=>String::new()};
             if !base.lines().any(|line|line.starts_with("root\t")){base=format!("root\t/\t{}\n{base}",vfs().root.display());}
-            if !base.lines().any(|line|line.starts_with("propagation\t/\t")){base.push_str("propagation\t/\tshared\n");}
+            // The kernel's mounts start private; a path map is Android's
+            // view, whose init makes the root shared.
+            if !base.lines().any(|line|line.starts_with("propagation\t/\t")){base.push_str(if map.is_some(){"propagation\t/\tshared\n"}else{"propagation\t/\tprivate\n"});}
             owner.initialize(&base).map_err(|error|error.to_string())?;
             *NAMESPACE_VIEW.lock().unwrap()=Some(NamespaceView{page:owner.generation().map_err(|error|error.to_string())?,owner,generation:0,records:Default::default()});
             refresh_namespace().map_err(|error|format!("standalone mount namespace: errno {error}"))?;
@@ -591,6 +640,12 @@ fn read_only_dev(root: &Path) -> Option<i32> {
 /// on it can have been changed by a guest.
 pub fn on_read_only_root(dev: i32) -> bool {
     VFS.get().and_then(|v| v.read_only_dev) == Some(dev)
+}
+
+/// Whether the root is a read-only volume (the image), rather than a
+/// writable directory given as `--root`.
+pub fn read_only_root() -> bool {
+    VFS.get().is_some_and(|v| v.read_only_dev.is_some())
 }
 
 fn vfs() -> &'static Vfs {

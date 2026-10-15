@@ -782,6 +782,9 @@ pub fn parse_guest_fds(text:&str)->Result<Vec<i32>,crate::errno::Errno>{
     }
     Ok(fds)
 }
+/// Take the fds a process was exec'd with as the guest's, as linux-run does
+/// at start.
+pub fn inherit(fds:&[i32])->Result<(),crate::errno::Errno>{bootstrap(fds.to_vec(),&[])}
 pub(crate) fn bootstrap(inherited:Vec<i32>,receipts:&[(i32,aim_storage::socket_inode::Receipt)])->Result<(),crate::errno::Errno>{
     if receipts.iter().any(|(fd,_)|!inherited.contains(fd)){return Err(crate::errno::EINVAL);}
     for fd in inherited{
