@@ -244,6 +244,12 @@ public final class PackageSnapshots {
         private boolean instantInstallerInfoRead;
         private android.content.pm.SigningDetails platformSigning;
         private final Map<NameKey, String> resolvedNames = new java.util.HashMap<>();
+        // Visibility and UID lookups are pure functions of this immutable
+        // version: the original answers them in process, from its snapshot.
+        private record FilterKey(int kind, String owner, String name, int appId, int uid, int user, boolean uninstalled) {}
+        private record LookupKey(int uid, boolean knownCompute) {}
+        private final Map<FilterKey, Boolean> filtered = new java.util.HashMap<>();
+        private final Map<LookupKey, Integer> lookupUids = new java.util.HashMap<>();
         private int references = 1;
         private boolean ownerClosed;
         private Data parent;
@@ -295,6 +301,36 @@ public final class PackageSnapshots {
                 if (binder == null) throw new IllegalStateException("missing retained read-only query binder");
                 var query = android.content.pm.IPackageManager.Stub.asInterface(android.os.Binder.allowBlocking(binder));
                 synchronized (this) { return readQueries.computeIfAbsent(key, ignored -> query); }
+            } finally { release(); }
+        }
+
+        boolean filterApplication(int kind, String owner, String name, int appId, int uid, int user,
+                boolean uninstalled, int callingUid, int callingPid) throws RemoteException {
+            if (computer == null) throw new IllegalStateException("native package query capture unavailable");
+            var key = new FilterKey(kind, owner, name, appId, uid, user, uninstalled);
+            synchronized (this) {
+                Boolean known = filtered.get(key);
+                if (known != null) return known;
+                retain();
+            }
+            try {
+                boolean value = computer.shouldFilterApplication(kind, owner, name, appId, uid, user, uninstalled,
+                        callingUid, callingPid);
+                synchronized (this) { filtered.putIfAbsent(key, value); return filtered.get(key); }
+            } finally { release(); }
+        }
+
+        int lookupUid(int uid, boolean knownCompute, int callingUid, int callingPid) throws RemoteException {
+            if (computer == null) throw new IllegalStateException("native package query capture unavailable");
+            var key = new LookupKey(uid, knownCompute);
+            synchronized (this) {
+                Integer known = lookupUids.get(key);
+                if (known != null) return known;
+                retain();
+            }
+            try {
+                int value = computer.getPackageLookupUid(uid, knownCompute, callingUid, callingPid);
+                synchronized (this) { lookupUids.putIfAbsent(key, value); return lookupUids.get(key); }
             } finally { release(); }
         }
 
@@ -1119,7 +1155,8 @@ public final class PackageSnapshots {
             int user = android.os.UserHandle.getUserId(uid);
             boolean knownCompute = com.android.server.pm.NativeUserManagerBridge.isKnownIsolatedComputeApp(uid);
             int lookupUid;
-            try { lookupUid = endpoint().getPackageLookupUid(uid, knownCompute,
+            checkClosed();
+            try { lookupUid = data.lookupUid(uid, knownCompute,
                     android.os.Binder.getCallingUid(), android.os.Binder.getCallingPid()); }
             catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
             Object owner = uidOwner(android.os.UserHandle.getAppId(lookupUid));
@@ -1168,7 +1205,7 @@ public final class PackageSnapshots {
                 }
                 if (kind == -1) throw new IllegalArgumentException("package visibility candidate is outside retained capture");
             }
-            try { return endpoint().shouldFilterApplication(kind, ownerName, name, appId, uid, user, uninstalled,
+            try { return data.filterApplication(kind, ownerName, name, appId, uid, user, uninstalled,
                     android.os.Binder.getCallingUid(), android.os.Binder.getCallingPid()); }
             catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
         }
