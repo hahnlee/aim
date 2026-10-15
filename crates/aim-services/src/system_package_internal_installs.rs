@@ -39,7 +39,11 @@ impl System {
     }
     pub(crate) fn internal_on_package_process_killed_for_uninstall(&self,package:Option<String>,_uid:i32,_pid:i32)->Result<()> {
         // HashMap.remove(null) in the original simply finds no keyed request.
-        match package {Some(package)=>self.internal_install_owner()?.killed(package),None=>Ok(())}
+        let Some(package)=package else {return Ok(())};
+        let installer={let state=self.package_bootstrap.lock().unwrap();state.current.as_ref()
+            .and_then(|current|current.installer.as_ref().map(|(owner,_)|owner.clone()))};
+        if let Some(installer)=installer {installer.package_processes_killed(&package);}
+        self.internal_install_owner()?.killed(package)
     }
     pub(crate) fn internal_get_historical_sessions(&self,user:i32,uid:i32,_pid:i32)->Result<Vec<crate::package::installer::codec::SessionInfo>> {
         let bridge=self.package_bootstrap()?;

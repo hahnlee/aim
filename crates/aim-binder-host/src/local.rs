@@ -421,6 +421,12 @@ impl LocalProcess {
         process
     }
 
+    /// `ProcessState::setThreadPoolMaxThreadCount`.
+    pub fn set_max_threads(&self, threads: u32) {
+        self.ioctl(self.tid(), BINDER_SET_MAX_THREADS, &mut threads.to_le_bytes())
+            .expect("BINDER_SET_MAX_THREADS");
+    }
+
     fn arc(&self) -> Arc<Self> {
         self.this.upgrade().expect("a live process")
     }

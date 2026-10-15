@@ -13,6 +13,7 @@ pub mod archive_queries;
 mod archive_timer;
 pub mod checksums;
 pub mod commit;
+mod deferred_observer;
 pub mod codec;
 pub mod internal_installs;
 pub mod endpoint;

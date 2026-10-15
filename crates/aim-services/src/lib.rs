@@ -58,6 +58,8 @@ const SERVICE_HOST: &str = "aim.service_host";
 /// system_server's SELinux context, which servicemanager checks the
 /// registration of these names against.
 const SYSTEM_SERVER_CONTEXT: &str = "u:r:system_server:s0";
+/// `SystemServer.sMaxBinderThreads`.
+const SYSTEM_SERVER_BINDER_THREADS: u32 = 31;
 
 /// The native services of a boot.
 pub struct NativeServices {
@@ -119,6 +121,10 @@ impl NativeServices {
                 security_context: Some(SYSTEM_SERVER_CONTEXT.into()),
             },
         );
+        // These services answer what system_server answered, with its pool
+        // (SystemServer.sMaxBinderThreads): callers it serves may wait on
+        // system_server while it waits on them.
+        process.set_max_threads(SYSTEM_SERVER_BINDER_THREADS);
         let system = system::System::new(
             process.clone(),
             &[&clipboard::APP_OPS[..], &location::APP_OPS[..]].concat(),
