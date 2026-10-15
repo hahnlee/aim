@@ -402,6 +402,11 @@ fn lookup_stat(host: Host, guest: impl FnOnce() -> String, st: &libc::stat) -> A
     if let Some(a) = inode {
         return a;
     }
+    // chown and chmod answer EROFS on the image before recording anything,
+    // so its files have their original attributes and no table entry.
+    if vfs::on_read_only_root(st.st_dev) {
+        return original.unwrap_or_default();
+    }
     let a = table_lookup(&guest());
     if a.complete() {
         return a;
