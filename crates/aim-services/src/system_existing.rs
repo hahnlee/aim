@@ -373,8 +373,7 @@ impl System {
             bootstrap
                 .current
                 .as_ref()
-                .filter(|current| Arc::ptr_eq(&current.bridge, bridge)
-                    && current.queries.as_ref().is_some_and(|current| Arc::ptr_eq(current, &capture)))
+                .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
                 .and_then(|current| current.persistence.clone())
                 .ok_or_else(|| error("existing install preference generation changed"))?
         };
@@ -393,7 +392,8 @@ impl System {
             let published = self.package_queries.lock().unwrap();
             if !published.bridge.as_ref().and_then(std::sync::Weak::upgrade)
                 .is_some_and(|current| Arc::ptr_eq(&current, bridge))
-                || !published.capture.as_ref().is_some_and(|current| Arc::ptr_eq(current, &capture)) {
+                || !published.capture.as_ref().is_some_and(|current| current.state().system.preferred_owner.as_ref()
+                    .is_some_and(|owner| Arc::ptr_eq(owner, &preferred))) {
                 return Err(error("existing install preference generation changed"));
             }
             disk.take_matching_pending_browser(user as u32, name).map_err(error)?;
