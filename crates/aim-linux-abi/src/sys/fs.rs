@@ -1304,7 +1304,7 @@ struct LinuxFlock {
 }
 
 fn lock(fd: i32, cmd: u64, arg: u64) -> i64 {
-    if matches!(cmd,F_GETLK|F_SETLK|F_SETLKW){
+    if matches!(cmd,F_GETLK|F_SETLK|F_SETLKW)&&super::posix_locks::configured(){
         let mut bytes=match super::fsverity_ioctl::read::<32>(arg){Ok(bytes)=>bytes,Err(error)=>return -(error as i64)};
         if cmd!=F_GETLK&&i16::from_le_bytes(bytes[..2].try_into().unwrap())!=2&&matches!(fdtab::get(fd),Some(Kind::Regular(description))if description.flags&3==3){return -(EBADF as i64);}
         let result=super::posix_locks::dispatch(unsafe{std::os::fd::BorrowedFd::borrow_raw(fd)},cmd,bytes.as_mut_ptr()as u64);

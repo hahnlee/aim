@@ -234,6 +234,11 @@ pub fn install(client: Arc<Client>) -> Result<(), Errno> {
     *CURRENT.lock().unwrap() = Some(client);
     Ok(())
 }
+/// Whether this process's POSIX locks live in a lock holder: a run without
+/// a lock controller (no guest-init) keeps them in the host's fcntl locks.
+pub fn configured() -> bool {
+    CURRENT.lock().unwrap().is_some()
+}
 pub fn current() -> Result<Arc<Client>, Errno> {
     let client = CURRENT.lock().unwrap().clone().ok_or(37)?;
     if ProcessIdentity::running(unsafe { libc::getpid() }).map_err(io)? != client.owner.process {

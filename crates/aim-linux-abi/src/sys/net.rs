@@ -1489,7 +1489,8 @@ fn adopt_received_descriptor(fd: i32) -> Result<(), errno::Errno> {
     if super::fuse_client::adopt(fd)? { return Ok(()); }
     // Class5 carriers are regular lease files; classification must consult
     // the authoritative registry for every descriptor, not infer from type.
-    let class = socket_scm::classify(fd)?;
+    // Carriers come from a binder host; without one there are none.
+    let class = if super::binder::connected() { socket_scm::classify(fd)? } else { 0 };
     match class {
         0 => { fdtab::adopt_untyped(fd); Ok(()) },
         aim_binder_host::proxy_file::CLASS => { fdtab::insert(fd, Kind::ProxyFile); Ok(()) },
