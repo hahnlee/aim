@@ -2007,7 +2007,8 @@ mod external_namespace_entry_tests {
         std::fs::remove_file(&receipt).unwrap();assert_eq!(crate::sys::posix_locks::start_external(Some(&locator)),Err(crate::errno::ENOENT));std::fs::write(&receipt,&original).unwrap();
         let identity=table.join(current.host_pid.to_string());std::fs::write(&identity,b"cap_effective\t0x200000\n").unwrap();
         assert_eq!(crate::sys::posix_locks::start_external(Some(&locator)),Err(71));
-        let mut privileged=crate::sys::cred::Identity::default();privileged.uid=[2000;4];privileged.cap_eff=1<<21;crate::sys::cred::init(privileged,Some(table.clone()));
+        // setns(CLONE_NEWNS) takes CAP_SYS_ADMIN and CAP_SYS_CHROOT.
+        let mut privileged=crate::sys::cred::Identity::default();privileged.uid=[2000;4];privileged.cap_eff=(1<<21)|(1<<18);crate::sys::cred::init(privileged,Some(table.clone()));
         aim_storage::process_namespace::register_mount_namespace(&table,current,"foreign-owner").unwrap();
         assert_eq!(crate::sys::posix_locks::start_external(Some(&locator)),Err(crate::errno::EPERM));
         aim_storage::process_namespace::register_mount_namespace(&table,current,owner.id()).unwrap();
