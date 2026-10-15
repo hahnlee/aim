@@ -289,6 +289,14 @@ fn overlay_rebase_after_lost_publication_cas_keeps_usage_and_rejects_true_confli
     state.runtime.set_overlay_paths(Some(OverlayPaths{resource_dirs:vec!["conflicting".into()],overlay_paths:vec![]}));owner.set_user_state("p",0,state).unwrap();
     let conflict=current.prepare_internal_mutation(owner,current.scan().usage().clone()).unwrap();
     assert!(apply_rebased(base.scan(),conflict.capture.scan(),&record).err().expect("overlapping overlay must reject").contains("overlays"));
+    // A user added after the reservation keeps its own state.
+    let mut owner=current.scan().owner().clone();owner.set_legacy_user_inventory(&[0,10]).unwrap();
+    let mut added=owner.scanned_user_states("p").unwrap()[&0].clone();added.runtime.set_overlay_paths(None);
+    owner.set_user_state("p",10,added.clone()).unwrap();
+    let grown=crate::package::scan_snapshot::Store::new_replica_after(current.scan(),owner,current.scan().usage().clone(),current.scan().version()+1).unwrap();
+    let rebased=apply_rebased(base.scan(),&grown.capture(),&record).unwrap();
+    let users=rebased.scan.scanned_user_states("p").unwrap();
+    assert_eq!(users[&10],added);assert_eq!(users[&0].runtime.overlays(),Some(&overlay));
 }
 
 

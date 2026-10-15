@@ -378,9 +378,9 @@ impl Builder {
         if current.state().users!=latest.state().users {
             return Err("install context UM user owner changed during owner reads".into());
         }
-        if current.state().system.isolated_owners!=latest.state().system.isolated_owners {
-            return Err(format!("install context isolated UID owner changed during owner reads: {:?} -> {:?}",current.state().system.isolated_owners,latest.state().system.isolated_owners));
-        }
+        // Isolated processes start and end with no relation to the install;
+        // the context carries their latest owners (isolated_delta).
+        context.system.isolated_owners=latest.context().system.isolated_owners.clone();
         Ok(context)
     }
     fn package(&self,setting:&settings::Package,permission_id:Option<i32>,stored:&BTreeMap<i32,restrictions::UserState>,code:Option<&crate::package::pkg::AndroidPackage>,users:&[i32],permissions:&mut BTreeMap<i32,legacy_permissions::State>)->Result<PackageInputs,String> {

@@ -225,11 +225,13 @@ pub fn apply_rebased(base: &Snapshot, latest: &Snapshot, record: &Record) -> Res
     for (inputs, factory) in [(&mut merged.active, false), (&mut merged.disabled, true)] {
         let before_settings = if factory { &base.owner().settings.disabled_system_packages } else { &base.owner().settings.packages };
         let current_settings = if factory { &latest.owner().settings.disabled_system_packages } else { &latest.owner().settings.packages };
-        let expected = before_settings.iter().map(|setting|setting.name.as_str()).collect::<BTreeSet<_>>();
-        if expected != current_settings.iter().map(|setting|setting.name.as_str()).collect() {
-            return Err("internal mutator concurrent package inventory change".into());
-        }
-        for input in inputs {
+        // A package installed or removed since the reservation is not one
+        // the mutation changed: a removed package's row goes, and an added
+        // package keeps its latest state.
+        inputs.retain(|input|current_settings.iter().any(|setting|setting.name==input.name));
+        let added=current_settings.iter().filter(|setting|!before_settings.iter().any(|before|before.name==setting.name))
+            .map(|setting|unchanged_setting(latest,setting,factory)).collect::<Result<Vec<_>,String>>()?;
+        for input in inputs.iter_mut() {
             validate_setting(base.owner(), input, factory)?;
             let before = before_settings.iter().find(|setting|setting.name==input.name).ok_or("mutation base setting missing")?;
             let current = current_settings.iter().find(|setting|setting.name==input.name).ok_or("mutation current setting missing")?;
@@ -264,13 +266,19 @@ pub fn apply_rebased(base: &Snapshot, latest: &Snapshot, record: &Record) -> Res
             patch!(mime_groups,old_groups,new_groups);
             let before_users=if factory{base.owner().disabled_user_states(&input.name)}else{base.owner().scanned_user_states(&input.name)}.ok_or("mutation base users missing")?;
             let current_users=if factory{latest.owner().disabled_user_states(&input.name)}else{latest.owner().scanned_user_states(&input.name)}.ok_or("mutation current users missing")?;
-            if before_users.keys().ne(current_users.keys()) { return Err("internal mutator concurrent user inventory change".into()); }
+            // A user added or removed since the reservation is not one the
+            // mutation changed: a removed user's row goes, and an added user
+            // keeps its latest state.
+            input.users.retain(|user|current_users.contains_key(&user.id));
             for user in &mut input.users {
                 let before=before_users.get(&user.id).ok_or("mutation user absent from reservation")?;
-                let current=current_users.get(&user.id).ok_or("mutation user removed")?;
-                merge_user(user,before,current)?;
+                merge_user(user,before,&current_users[&user.id])?;
+            }
+            for (&id,current) in current_users.iter().filter(|(id,_)|!before_users.contains_key(id)) {
+                input.users.push(unchanged_user(id,current));
             }
         }
+        inputs.extend(added);
     }
     merged.version=i64::try_from(latest.version()).map_err(|_|"mutation current version overflow")?;
     apply(latest,&merged)
@@ -279,6 +287,29 @@ fn merge_field<T: PartialEq+Clone>(incoming:&T,before:&T,current:&T,field:&str)-
     if incoming==before { return Ok(current.clone()); }
     if current!=before && current!=incoming { return Err(format!("internal mutator concurrent field conflict: {field}")); }
     Ok(incoming.clone())
+}
+/// The record of `setting` as `latest` holds it, which `apply` keeps.
+fn unchanged_setting(latest:&Snapshot,setting:&super::settings::Package,factory:bool)->Result<Setting,String>{
+    let runtime=latest.replica_runtime(&setting.name,factory)?.ok_or("mutation added runtime missing")?;
+    let users=if factory{latest.owner().disabled_user_states(&setting.name)}else{latest.owner().scanned_user_states(&setting.name)}
+        .ok_or("mutation added users missing")?;
+    let mime_groups=setting.mime_groups.iter().map(|(name,types)|Ok((name.clone().ok_or("mutation nullable declared MIME group")?,
+        types.iter().map(|value|value.clone().ok_or_else(||"mutation nullable MIME type".to_owned())).collect::<Result<Vec<_>,String>>()?)))
+        .collect::<Result<Vec<_>,String>>()?;
+    Ok(Setting{name:setting.name.clone(),factory,app_id:setting.app_id,private_flags:setting.private_flags,category:setting.category_hint,
+        page_flags:setting.page_size_compat,update_available:setting.update_available,loading_progress:setting.loading_progress,
+        loading_completed:setting.loading_completed_time,hidden_until_installed:setting.transient.hidden_until_installed,
+        override_seinfo:runtime.override_seinfo.clone(),usage:runtime.usage.to_vec(),installer:setting.install_source.installer.clone(),
+        installer_uid:setting.install_source.installer_uid,update_owner:setting.install_source.update_owner.clone(),
+        mime_groups:(!mime_groups.is_empty()).then_some(mime_groups),users:users.iter().map(|(&id,state)|unchanged_user(id,state)).collect()})
+}
+/// The record of `state` as it stands, which `apply_user` keeps.
+fn unchanged_user(id:i32,state:&UserState)->User{
+    User{id,installed:state.installed,uninstall_reason:state.uninstall_reason,distraction_flags:state.distraction_flags,
+        hidden:state.hidden,stopped:state.stopped,not_launched:state.not_launched,warning:state.harmful_app_warning.clone(),
+        splash:state.splash_screen_theme.clone(),min_aspect_ratio:state.min_aspect_ratio,overlays:state.runtime.overlays().cloned(),
+        libraries:state.runtime.libraries().map(|values|values.iter().map(|(name,paths)|(name.clone(),Some(paths.clone()))).collect()),
+        suspensions:state.suspensions.clone(),overrides:state.runtime.overrides().map(|values|values.to_vec())}
 }
 fn merge_user(input:&mut User,before:&UserState,current:&UserState)->Result<(),String>{
     macro_rules! patch { ($field:ident,$old:expr,$new:expr) => {
