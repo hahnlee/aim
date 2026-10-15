@@ -650,6 +650,9 @@ fn service_host_lease_pairs_query_scan_across_durable_canonical_publication() {
     let mut fixture=Fixture::new();let bridge=fixture.attach();let old=publish(&fixture,&bridge);
     let snapshots=fixture.system.package_bootstrap.lock().unwrap().current.as_ref().unwrap().snapshots.clone().unwrap();
     let mut owner=old.scan().owner().clone();owner.settings.packages[0].category_hint=7;
+    // The fixture loads no code for p: as published, p is uninstalled with
+    // its data kept, which a committed snapshot can hold without code.
+    owner.capture_user_states(BTreeMap::from([(("p".into(),false),crate::package::scan::CapturedUsers{states:BTreeMap::from([(0,crate::package::restrictions::UserState{installed:false,..Default::default()})]),active_aliases:Default::default()})])).unwrap();
     let durable=fixture.root.join("data/committed-category");
     let new=snapshots.publish_after(old.scan(),owner,old.scan().usage().clone(),|snapshot|{
         std::fs::write(&durable,snapshot.owner().settings.packages[0].category_hint.to_string()).map_err(|error|crate::package::owner::WriteError{committed:false,message:error.to_string()})
