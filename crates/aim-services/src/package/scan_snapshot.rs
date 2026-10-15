@@ -44,6 +44,9 @@ pub struct Snapshot {
     replica_validated: bool,
     metadata_revision: u64,
     lineage: Arc<()>,
+    /// The owner's library dependency graph, validated once: the owner
+    /// never changes, and every query of one package would validate all.
+    libraries: std::sync::OnceLock<Result<(), String>>,
 }
 
 /// Exact registered UID-slot projection for the facade's retained capture.
@@ -52,6 +55,12 @@ pub fn uid_owner_registry(snapshot: &Snapshot) -> Result<Vec<u8>, String> {
 }
 
 impl Snapshot {
+    /// `SigningScan::library_dependencies`, validating the graph once.
+    pub(crate) fn library_dependencies(&self, name: &str)
+        -> Result<Option<(&[Option<String>], &[crate::package::model::SharedLibrary])>, String> {
+        self.libraries.get_or_init(|| self.owner.validate_library_dependencies()).clone()?;
+        self.owner.validated_library_dependencies(name)
+    }
     pub(crate) fn same_lineage(&self, other: &Self) -> bool { Arc::ptr_eq(&self.lineage, &other.lineage) }
     pub(crate) fn same_metadata_generation(&self, other: &Self) -> bool {
         self.same_lineage(other) && self.metadata_revision == other.metadata_revision
@@ -166,7 +175,7 @@ impl Store {
         let version = base.version.checked_add(1).filter(|version| *version <= i64::MAX as u64).ok_or(Error::VersionExhausted)?;
         // Exact immutable validated owner plus a checked usage-only delta. Code,
         // settings, permissions and user inventories cannot have changed here.
-        Ok(Self { current: Mutex::new(Arc::new(Snapshot {version,owner,usage,replica_validated:true,metadata_revision:base.metadata_revision,lineage:base.lineage.clone()})), replica:true })
+        Ok(Self { current: Mutex::new(Arc::new(Snapshot {version,owner,usage,replica_validated:true,metadata_revision:base.metadata_revision,lineage:base.lineage.clone(),libraries:Default::default()})), replica:true })
     }
 
     /// A typed query-context delta may advance its Computer lease while the
@@ -243,6 +252,7 @@ impl Store {
             replica_validated: replica,
             metadata_revision,
             lineage,
+            libraries: Default::default(),
         });
         if replica {
             validate_replica(&snapshot)?;
@@ -269,7 +279,7 @@ impl Store {
         if !Arc::ptr_eq(&current,base) {return Err(CommitError::Snapshot(Error::Stale));}
         let version=current.version.checked_add(1).filter(|version|*version<=i64::MAX as u64).ok_or(CommitError::Snapshot(Error::VersionExhausted))?;
         validate(&owner,&usage).map_err(CommitError::Snapshot)?;
-        let mut next=Snapshot {version,owner,usage,replica_validated:self.replica,metadata_revision:version,lineage:current.lineage.clone()};
+        let mut next=Snapshot {version,owner,usage,replica_validated:self.replica,metadata_revision:version,lineage:current.lineage.clone(),libraries:Default::default()};
         if self.replica {validate_replica(&next).map_err(CommitError::Snapshot)?;}
         next.metadata_revision=derive_metadata_revision(&current,&next).map_err(CommitError::Snapshot)?;
         let next=Arc::new(next);
@@ -308,6 +318,7 @@ impl Store {
             replica_validated: self.replica,
             metadata_revision: version,
             lineage: current.lineage.clone(),
+            libraries: Default::default(),
         };
         if self.replica {
             validate_replica(&next)?;
@@ -909,6 +920,7 @@ mod tests {
             replica_validated: false,
             metadata_revision: i64::MAX as u64,
             lineage: Arc::new(()),
+            libraries: Default::default(),
         });
         *store.current.lock().unwrap() = exhausted.clone();
         assert_eq!(

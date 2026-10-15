@@ -809,6 +809,79 @@ fn uninstall(ctx: &mut Context<'_>, owner: Binder, args: &[String]) -> Result<i3
     ctx.retire_receiver(binder);
     result
 }
+/// `runInstallExisting` (AOSP android-16.0.0_r1 PackageManagerShellCommand).
+fn install_existing(ctx: &mut Context<'_>, owner: Binder, args: &[String]) -> Result<i32, Exception> {
+    // INSTALL_ALL_WHITELIST_RESTRICTED_PERMISSIONS, INSTALL_INSTANT_APP, INSTALL_FULL_APP.
+    const ALL_RESTRICTED: i32 = 0x0040_0000;
+    const INSTANT: i32 = 0x800;
+    const FULL: i32 = 0x4000;
+    let (mut at, mut requested, mut flags, mut wait) = (0, -2, ALL_RESTRICTED, false);
+    while args.get(at).is_some_and(|a| a.starts_with('-')) {
+        let opt = arg(args, &mut at)?;
+        match opt.as_str() {
+            "--user" => requested = user(&arg(args, &mut at)?)?,
+            "--ephemeral" | "--instant" => flags = (flags | INSTANT) & !FULL,
+            "--full" => flags = (flags & !INSTANT) | FULL,
+            "--wait" => wait = true,
+            "--restrict-permissions" => flags &= !ALL_RESTRICTED,
+            _ => {
+                ctx.command.println(&format!("Error: Unknown option: {opt}"));
+                return Ok(1);
+            }
+        }
+    }
+    let Some(package) = args.get(at).cloned() else {
+        ctx.command.println("Error: package name not specified");
+        return Ok(1);
+    };
+    // UserHandle.USER_NULL.
+    let translated = ctx.translate_user(requested, -10000, "runInstallExisting")?;
+    if wait {
+        let state = Arc::new(ResultState::default());
+        let _owner = state.follow_owner(ctx)?;
+        let binder = ctx.publish_receiver(Arc::new(Receiver(state.clone())))?;
+        ctx.command.println(&format!("Installing package {package} for user: {translated}"));
+        let result = (|| {
+            let mut p = Parcel::new();
+            installer::InstallExistingPackage {
+                package_name: Some(package),
+                install_flags: flags,
+                install_reason: 0,
+                status_receiver: Some(IntentSender { target: binder }),
+                user_id: translated,
+                white_listed_permissions: None,
+            }
+            .write(&mut p);
+            checked(ctx.invoke(owner, installer::INSTALL_EXISTING_PACKAGE, p)?)?;
+            let result = state.wait()?;
+            ctx.command.println("Received intent for package install");
+            Ok(if result.status == 0 { 0 } else { 1 })
+        })();
+        ctx.retire_receiver(binder);
+        return result;
+    }
+    let mut p = Parcel::new();
+    pm::InstallExistingPackageAsUser {
+        package_name: Some(package.clone()),
+        user_id: translated,
+        install_flags: flags,
+        install_reason: 0,
+        white_listed_permissions: None,
+    }
+    .write(&mut p);
+    let reply = ctx.invoke_public(pm::INSTALL_EXISTING_PACKAGE_AS_USER, p)?;
+    let status = pm::read_install_existing_package_as_user_reply(&mut reply.reader()).map_err(wire)??;
+    // INSTALL_FAILED_INVALID_URI throws NameNotFoundException, which the
+    // command prints.
+    if status == -3 {
+        ctx.command.println(&format!(
+            "android.content.pm.PackageManager$NameNotFoundException: Package {package} doesn't exist"
+        ));
+        return Ok(1);
+    }
+    ctx.command.println(&format!("Package {package} installed for user: {translated}"));
+    Ok(0)
+}
 /// `None` leaves unrelated commands to the remaining native shell cohorts.
 pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
     let command = ctx.command.command().unwrap_or_default().to_owned();
@@ -824,6 +897,7 @@ pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
             | "get-stagedsessions"
             | "remove-splits"
             | "uninstall"
+            | "install-existing"
     ) {
         return Ok(None);
     }
@@ -917,6 +991,7 @@ pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
         }
         "get-stagedsessions" => staged_list(ctx, owner, &args)?,
         "uninstall" => uninstall(ctx, owner, &args)?,
+        "install-existing" => install_existing(ctx, owner, &args)?,
         "remove-splits" => {
             let package = args.first().ok_or_else(|| bad("Missing package"))?;
             if args.len() < 2 {

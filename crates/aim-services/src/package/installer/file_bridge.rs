@@ -83,11 +83,11 @@ impl Transfer {
                                 }
                             }
                             2 => {
-                                target.sync_all()?;
+                                crate::fsync(&target)?;
                                 server.write_all(&header)?;
                             }
                             3 => {
-                                target.sync_all()?;
+                                crate::fsync(&target)?;
                                 drop(target);
                                 owner.closed.store(true, Ordering::SeqCst);
                                 server.write_all(&header)?;

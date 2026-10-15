@@ -252,7 +252,7 @@ impl Pending {
         target
             .set_len(0)
             .and_then(|_| target.write_all(&checksums.digests()))
-            .and_then(|_| target.sync_all())
+            .and_then(|_| crate::fsync(&target))
             .map_err(|error| {
                 StageError::Storage(super::storage::Error {
                     legacy_status: -110,
@@ -269,7 +269,7 @@ impl Pending {
             target
                 .set_len(0)
                 .and_then(|_| target.write_all(&signature))
-                .and_then(|_| target.sync_all())
+                .and_then(|_| crate::fsync(&target))
                 .map_err(|error| {
                     StageError::Storage(super::storage::Error {
                     legacy_status: -110,

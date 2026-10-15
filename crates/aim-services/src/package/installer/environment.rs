@@ -301,7 +301,7 @@ fn copy_tree(source: &Path, target: &Path, config: &Config) -> Result<(), Failur
             io::copy(&mut source, &mut file).map_err(|error| failure(-4, error))?;
             record_inode(&destination, &config.file_inode).map_err(|error| failure(-4, error))?;
             (config.labeler)(&destination).map_err(|error| failure(-4, error))?;
-            file.sync_all().map_err(|error| failure(-4, error))?;
+            crate::fsync(&file).map_err(|error| failure(-4, error))?;
         } else {
             return Err(failure(
                 -2,
@@ -310,7 +310,7 @@ fn copy_tree(source: &Path, target: &Path, config: &Config) -> Result<(), Failur
         }
     }
     fs::File::open(target)
-        .and_then(|file| file.sync_all())
+        .and_then(|file| crate::fsync(&file))
         .map_err(|error| failure(-4, error))
 }
 pub(crate) fn capture_visibility_checked(

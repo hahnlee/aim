@@ -241,6 +241,7 @@ impl SigningScan {
             return Err("boot runtime usage inventory differs".into());
         }
         let expected = identities(self);
+        self.validate_library_dependencies()?;
         let mut inputs = BTreeMap::new();
         for (key, identity) in &expected {
             let input = if !key.1 && identity.code.is_some() {
@@ -248,7 +249,7 @@ impl SigningScan {
                     .seinfo_state(&key.0)?
                     .ok_or("missing boot runtime seInfo owner")?;
                 let (files, libraries) = self
-                    .library_dependencies(&key.0)?
+                    .validated_library_dependencies(&key.0)?
                     .ok_or("missing boot runtime library owner")?;
                 let setting = self
                     .settings

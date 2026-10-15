@@ -92,7 +92,7 @@ impl Store {
             guest_inode::record(&new, self.file_inode).map_err(before)?;
             (self.labeler)(&new, "/data/system/install_sessions.xml.new")?;
             file.write_all(&bytes).map_err(before)?;
-            file.sync_all().map_err(before)?;
+            crate::fsync(&file).map_err(before)?;
             fs::rename(&new, &main).map_err(before)?;
             committed = true;
             Ok(())

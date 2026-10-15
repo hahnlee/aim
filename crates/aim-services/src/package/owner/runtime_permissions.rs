@@ -99,7 +99,7 @@ impl Store {
             guest_inode::record(&temp, inode)?;
             write(&mut file, &bytes)?;
             file.flush()?;
-            file.sync_all()?;
+            crate::fsync(&file)?;
             drop(file);
             fs::rename(&temp, &main)?;
             committed = true;
@@ -117,7 +117,7 @@ impl Store {
             copy.set_permissions(fs::Permissions::from_mode(mode))?;
             guest_inode::record(&reserve, inode)?;
             copy.write_all(&bytes)?;
-            copy.sync_all()?;
+            crate::fsync(&copy)?;
             Ok(())
         })();
         let result = if let Err(error) = result {

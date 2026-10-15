@@ -5,6 +5,8 @@ public interface IUserManager extends IInterface {
     android.content.pm.UserInfo preCreateUserWithThrow(String type) throws RemoteException;
     android.content.pm.UserInfo createProfileForUserWithThrow(String name,String type,int flags,int user,String[] disallowedPackages) throws RemoteException;
     android.content.pm.UserInfo createRestrictedProfileWithThrow(String name,int parent) throws RemoteException;
+    boolean removeUser(int userId) throws RemoteException;
+    int removeUserWhenPossible(int userId, boolean overrideDevicePolicy) throws RemoteException;
     abstract class Stub extends Binder implements IUserManager {
         public Stub() { throw new RuntimeException("stub"); }
         public IBinder asBinder() { throw new RuntimeException("stub"); }

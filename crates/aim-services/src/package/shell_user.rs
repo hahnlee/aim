@@ -3,10 +3,12 @@ use super::shell::Context;
 use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Owned { Create, List }
+enum Owned { Create, List, Remove }
 fn owned(arguments: &[String]) -> Option<Owned> {
     if arguments.first().is_some_and(|command| command == "create-user") {
         Some(Owned::Create)
+    } else if arguments.first().is_some_and(|command| command == "remove-user") {
+        Some(Owned::Remove)
     } else if arguments.first().is_some_and(|command| command == "list")
         && arguments.get(1).is_some_and(|noun| noun == "users") {
         Some(Owned::List)
@@ -43,6 +45,7 @@ pub fn run(context: &mut Context<'_>) -> Result<Option<i32>, Exception> {
     match owned {
         Owned::Create=>system.shell_create_user_command(context.uid,context.pid,input,output,error,context.command.args.clone()),
         Owned::List=>system.shell_list_users_command(context.uid,context.pid,input,output,error),
+        Owned::Remove=>system.shell_remove_user_command(context.uid,context.pid,input,output,error,context.command.args.clone()),
     }.map(Some)
 }
 
@@ -55,7 +58,8 @@ mod tests {
         assert_eq!(owned(&["create-user".into(),"fixture".into()]),Some(Owned::Create));
         assert_eq!(owned(&["list".into(),"users".into()]),Some(Owned::List));
         assert_eq!(owned(&["list".into(),"users".into(),"ignored".into()]),Some(Owned::List));
-        for arguments in [vec!["remove-user".into()],vec!["install".into()],
+        assert_eq!(owned(&["remove-user".into(),"10".into()]),Some(Owned::Remove));
+        for arguments in [vec!["install".into()],
             vec!["list".into()],vec!["list".into(),"packages".into()],
             vec!["create-user-extra".into()],vec![],vec!["CREATE-USER".into()]] {
             assert_eq!(owned(&arguments),None);

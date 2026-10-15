@@ -123,6 +123,45 @@ impl System {
         self.check_package_bootstrap(&bridge)?;
         Ok(result)
     }
+    pub fn shell_remove_user_command(
+        &self,
+        uid: u32,
+        pid: i32,
+        input: RetainedFd,
+        output: RetainedFd,
+        error: RetainedFd,
+        arguments: Vec<String>,
+    ) -> Result<i32> {
+        if self.process.authenticated_inbound_identity() != Some((pid, uid)) {
+            return Err(Exception::security(
+                "User removal shell caller lacks authenticated Binder provenance",
+            ));
+        }
+        let bridge = self.package_bootstrap()?;
+        self.check_package_bootstrap(&bridge)?;
+        let owner =
+            self.package_bootstrap_binder_leaf(&bridge, bootstrap::GET_PACKAGE_SHELL_POLICY_BRIDGE)?;
+        let mut request = Parcel::new();
+        user::HandleRemoveUserCommand {
+            input: Some(Descriptor(input.into_file_owner())),
+            output: Some(Descriptor(output.into_file_owner())),
+            error: Some(Descriptor(error.into_file_owner())),
+            arguments: Some(arguments.into_iter().map(Some).collect()),
+        }
+        .write(&mut request);
+        // As create-user: the original checks Binder.getCallingUid itself.
+        let reply = self.process
+            .transact_preserving_inbound(owner.handle, user::HANDLE_REMOVE_USER_COMMAND, &request)
+            .map_err(|status| failure(format!("User removal shell transport: {status}")))?;
+        let mut reader = reply.reader();
+        let result = user::read_handle_remove_user_command_reply(&mut reader)
+            .map_err(|status| failure(format!("User removal shell reply: {status}")))??;
+        if reader.remaining() != 0 {
+            return Err(failure("User removal shell reply tail"));
+        }
+        self.check_package_bootstrap(&bridge)?;
+        Ok(result)
+    }
 }
 
 

@@ -110,6 +110,9 @@ pub struct Store {
     first_write_files: Vec<OwnedFile>,
     preferred_users: BTreeSet<u32>,
     list_document: Option<String>,
+    /// The last scan `validate_committed_scan` accepted, apart from user
+    /// states, which packages.xml does not hold; reset as the document moves.
+    validated: std::sync::Mutex<Option<super::scan::SigningScan>>,
 }
 
 /// Settings stores these keyed owners in maps; serialized iteration order
@@ -201,6 +204,7 @@ impl Store {
             first_write_files: Vec::new(),
             preferred_users,
             list_document,
+            validated: Default::default(),
         })
     }
 
@@ -631,6 +635,7 @@ impl Store {
         );
         if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
             self.settings_document = root;
+            *self.validated.get_mut().unwrap() = None;
             self.settings_present = true;
             self.first_write_files.clear();
             self.state.settings = persisted;
@@ -915,7 +920,7 @@ fn finish(file: &mut File, path: &Path) -> io::Result<()> {
             mode: Some(0o660),
         },
     )?;
-    file.sync_all()
+    crate::fsync(&file)
 }
 
 fn write_resilient(path: &Path, backup: &Path, bytes: &[u8]) -> Result<(), WriteError> {

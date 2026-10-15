@@ -710,7 +710,7 @@ impl Store {
                 &format!("/data/system/install_sessions/app_icon.{id}.png"),
             )?;
             file.write_all(png).map_err(before)?;
-            file.sync_all().map_err(before)?;
+            crate::fsync(&file).map_err(before)?;
         } else {
             match fs::remove_file(&path) {
                 Ok(()) => {}
@@ -837,7 +837,7 @@ impl Store {
             let mut target = self.write_target(session, record, &name, 0)?;
             target.set_len(0).map_err(before)?;
             std::io::copy(&mut source, &mut target).map_err(before)?;
-            target.sync_all().map_err(before)?;
+            crate::fsync(&target).map_err(before)?;
         }
         Ok(())
     }
@@ -1005,7 +1005,7 @@ impl Store {
             guest_inode::record(&new, self.file_inode).map_err(before)?;
             (self.labeler)(&new, "/data/system/install_sessions.xml.new")?;
             file.write_all(&bytes).map_err(before)?;
-            file.sync_all().map_err(before)?;
+            crate::fsync(&file).map_err(before)?;
             fs::rename(&new, &main).map_err(before)?;
             committed = true;
             Ok(())

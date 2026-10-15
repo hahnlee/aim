@@ -390,6 +390,7 @@ impl Endpoint {
         process: &Arc<aim_binder_host::local::LocalProcess>,
     ) -> Self {
         let endpoint = Self::new(snapshot);
+        crate::package::boot_captures::lease(&capture);
         *endpoint.computer.lock().unwrap() = Some(ComputerLease {
             capture,
             process: Arc::downgrade(process),
@@ -1215,6 +1216,7 @@ mod tests {
             replica_validated: false,
             metadata_revision: 1,
             lineage: Arc::new(()),
+            libraries: Default::default(),
         })
     }
 
