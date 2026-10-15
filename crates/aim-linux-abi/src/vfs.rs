@@ -263,6 +263,7 @@ fn apply_namespace_state(state:aim_storage::mount_namespace::State)->Result<(),E
     PRIVATE_MOUNTS.store(false,Ordering::Release);
     let(_,base)=parse_map(&state.base).map_err(|_|errno::EIO)?;
     *PROPAGATION_RULES.lock().unwrap()=map_propagation(&state.base)?;
+    let mut base=base;base.extend(input_mount());base.sort_by(|a,b|b.guest.len().cmp(&a.guest.len()));
     *vfs().mounts.write().unwrap()=base;
     for event in state.events {
         if let Some(guest)=event.strip_prefix("remove\t") { remove_mount(guest)?; }
@@ -395,6 +396,26 @@ pub fn set_input_dir(dir: &Path) {
 /// The host directory behind `/dev/input`, if any.
 pub fn input_dir() -> Option<&'static Path> {
     INPUT.get().map(PathBuf::as_path)
+}
+
+/// The window's input devices at /dev/input (`--display`): this process's,
+/// whatever namespace state it applies.
+fn input_mount()->Option<Mount>{
+    let dir=input_dir()?;
+    Some(Mount {
+        guest: "/dev/input".into(),
+        host: dir.to_owned(),
+        area: Area::Input,
+        source: None,
+        fstype: None,
+        own: false,
+        seq: 0,
+        fuse: None,
+        shared_fuse: false,
+        bind_source: None,
+        projected_fuse: false,
+        origin:None,
+    })
 }
 
 /// Parse a path map file: `kind<TAB>guest<TAB>host` lines, kinds `root`,
@@ -554,23 +575,8 @@ pub fn init(root: &Path, map: Option<&Path>) -> Result<(), String> {
         }
         None => (None, Vec::new(), None),
     };
-    if let Some(dir) = input_dir() {
-        mounts.push(Mount {
-            guest: "/dev/input".into(),
-            host: dir.to_owned(),
-            area: Area::Input,
-            source: None,
-            fstype: None,
-            own: false,
-            seq: 0,
-            fuse: None,
-            shared_fuse: false,
-            bind_source: None,
-            projected_fuse: false,
-            origin:None,
-        });
-        mounts.sort_by(|a, b| b.guest.len().cmp(&a.guest.len()));
-    }
+    mounts.extend(input_mount());
+    mounts.sort_by(|a, b| b.guest.len().cmp(&a.guest.len()));
     let root = map_root.as_deref().unwrap_or(root);
     let root = root
         .canonicalize()
