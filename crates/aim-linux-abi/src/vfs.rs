@@ -21,7 +21,7 @@
 //!   directory does (zygote's tmpfs over `/data/user` hides the path map's
 //!   `/data/user/0`).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
@@ -1121,10 +1121,11 @@ impl HostPathView {
 /// canonical stays so and is resolved once per process; one through a
 /// symlink is resolved again each time, so a retargeted alias is seen.
 fn canonical_host(path: &Path) -> Option<PathBuf> {
-    static CANONICAL: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
-    if CANONICAL.lock().unwrap().contains(path) { return Some(path.to_path_buf()); }
+    // Hashed as bytes: Path's own ordering compares component by component.
+    static CANONICAL: std::sync::LazyLock<Mutex<HashSet<std::ffi::OsString>>> = std::sync::LazyLock::new(Default::default);
+    if CANONICAL.lock().unwrap().contains(path.as_os_str()) { return Some(path.to_path_buf()); }
     let canonical = path.canonicalize().ok()?;
-    if canonical == path { CANONICAL.lock().unwrap().insert(canonical.clone()); }
+    if canonical == path { CANONICAL.lock().unwrap().insert(canonical.clone().into_os_string()); }
     Some(canonical)
 }
 
