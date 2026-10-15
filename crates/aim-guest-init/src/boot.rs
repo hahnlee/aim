@@ -701,9 +701,13 @@ impl Boot {
         manager.queue_boot(&properties);
         mark("init scripts loaded");
 
+        // The owners' endpoints are one boot's: a reboot (or another boot)
+        // in this process names new ones.
+        static BOOTS:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
+        let boot_number=BOOTS.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
         let posix_control=if options.mode==RunMode::Run {
             let process=aim_storage::process_namespace::ProcessIdentity::running(std::process::id()as i32).map_err(|error|error.to_string())?;
-            let endpoint=format!("dev.aim.posix.{}.{}.{}",process.host_pid,process.start_seconds,process.start_microseconds);
+            let endpoint=format!("dev.aim.posix.{}.{}.{}.{boot_number}",process.host_pid,process.start_seconds,process.start_microseconds);
             let holder=std::fs::canonicalize(linux_run_binary.with_file_name("aim-lock-holder")).map_err(|error|format!("configured POSIX lock holder: {error}"))?;
             let controller=Arc::new(aim_storage::posix_broker::Controller::start(aim_storage::posix_broker::Config{endpoint,holder,startup_timeout:Duration::from_secs(5)}).map_err(|error|error.to_string())?);
             let table=std::fs::canonicalize(layout.identity_dir().join("by-pid")).map_err(|error|error.to_string())?;
@@ -724,7 +728,7 @@ impl Boot {
             std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))
                 .map_err(|error| error.to_string())?;
             let runtime = std::fs::canonicalize(runtime).map_err(|error| error.to_string())?;
-            let endpoint = format!("dev.aim.pty.{}", std::process::id());
+            let endpoint = format!("dev.aim.pty.{}.{boot_number}", std::process::id());
             let owner = aim_storage::pty_owner::transport::RunningServer::start_with_credentials(&endpoint, &runtime,&layout.identity_dir().join("by-pid"))
                 .map_err(|error| format!("PTY owner: {error}"))?;
             owner.config.write(&layout.runtime.join("pty-control-owner"))

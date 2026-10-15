@@ -1489,7 +1489,8 @@ fn adopt_received_descriptor(fd: i32) -> Result<(), errno::Errno> {
     if super::fuse_client::adopt(fd)? { return Ok(()); }
     // Class5 carriers are regular lease files; classification must consult
     // the authoritative registry for every descriptor, not infer from type.
-    let class = socket_scm::classify(fd)?;
+    // Carriers come from a binder host; without one there are none.
+    let class = if super::binder::connected() { socket_scm::classify(fd)? } else { 0 };
     match class {
         0 => { fdtab::adopt_untyped(fd); Ok(()) },
         aim_binder_host::proxy_file::CLASS => { fdtab::insert(fd, Kind::ProxyFile); Ok(()) },
@@ -2951,6 +2952,7 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
 mod tests {
     #[test]
     fn proxy_scm_receipt_reexport_dup_and_revocation_keep_owner_class() {
+        if super::super::fdtab::isolated_kernel_test("sys::net::tests::proxy_scm_receipt_reexport_dup_and_revocation_keep_owner_class") { return; }
         use aim_binder_host::{proxy_file, server::Server};
         use std::os::fd::{AsRawFd, IntoRawFd};
         use std::os::unix::net::UnixStream;
@@ -3177,6 +3179,7 @@ mod path_scm_boundary_tests {
     use super::*;
     #[test]
     fn path_scm_keeps_single_fd_payload_flags_and_proof_alive_after_sender_close() {
+        if super::super::fdtab::isolated_kernel_test("sys::net::path_scm_boundary_tests::path_scm_keeps_single_fd_payload_flags_and_proof_alive_after_sender_close") { return; }
         use std::os::fd::AsRawFd;
         let (_view, directory) = vfs::test_view();
         let name = format!("dev.aim.test.path-scm.{}",std::process::id());
@@ -3286,6 +3289,7 @@ mod incoming_control_tests {
     }
     #[test]
     fn incoming_control_inherited_inet_retains_transport_without_guessing_creation_owner() {
+        if super::super::fdtab::isolated_kernel_test("sys::net::incoming_control_tests::incoming_control_inherited_inet_retains_transport_without_guessing_creation_owner") { return; }
         for bind_address in ["127.0.0.1:0", "[::1]:0"] {
             let socket = std::net::UdpSocket::bind(bind_address).unwrap();
             let fd = socket.as_raw_fd();
@@ -3312,6 +3316,7 @@ mod incoming_control_tests {
 
     #[test]
     fn incoming_control_socket_input_retains_original_description_after_close_reuse() {
+        if super::super::fdtab::isolated_kernel_test("sys::net::incoming_control_tests::incoming_control_socket_input_retains_original_description_after_close_reuse") { return; }
         use std::os::fd::IntoRawFd;
         let (original, original_peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let (replacement, replacement_peer) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -3348,6 +3353,7 @@ mod incoming_control_tests {
 
     #[test]
     fn incoming_control_fragmented_seqpacket_eof_closes_undeliverable_rights() {
+        if super::super::fdtab::isolated_kernel_test("sys::net::incoming_control_tests::incoming_control_fragmented_seqpacket_eof_closes_undeliverable_rights") { return; }
         let (sender, receiver) = std::os::unix::net::UnixStream::pair().unwrap();
         let fd = receiver.as_raw_fd();
         fdtab::insert(fd, Kind::Sock(Sock::new(SockType::SeqPacket)));
@@ -3370,6 +3376,7 @@ mod incoming_control_tests {
 
     #[test]
     fn incoming_control_publication_and_partial_rollback_preserve_ownership() {
+        if super::super::fdtab::isolated_kernel_test("sys::net::incoming_control_tests::incoming_control_publication_and_partial_rollback_preserve_ownership") { return; }
         let name = format!("dev.aim.test.incoming-publish.{}",std::process::id());
         let _server = aim_binder_host::server::Server::start(&name).unwrap();
         super::super::binder::init(&name).unwrap();

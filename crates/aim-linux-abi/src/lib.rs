@@ -153,6 +153,9 @@ pub fn run(mut opts: RunOptions) -> String {
     if let Err(e) = vfs::init(opts.root, opts.path_map) {
         return e;
     }
+    if let Some(runtime)=vfs::standalone_runtime()&&!opts.runtime_args.iter().any(|arg|arg.as_bytes()==b"--runtime"){
+        opts.runtime_args.extend([CString::new("--runtime").unwrap(),CString::new(std::os::unix::ffi::OsStrExt::as_bytes(runtime.as_os_str())).unwrap()]);
+    }
     if let Err(error)=start_verity_runtime(){return error;}
     sys::initialize_umask();
     sys::init_heap_window();

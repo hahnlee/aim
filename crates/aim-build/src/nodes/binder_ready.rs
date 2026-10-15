@@ -65,12 +65,15 @@ pub(super) fn poll(runtime: &Path, init: ProcessIdentity, name: &str, timeout_ms
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, process::{Child, Command}, time::{Duration, SystemTime, UNIX_EPOCH}};
+    use std::{fs, process::{Child, Command}, time::Duration};
     struct Fixture { root: std::path::PathBuf, child: Child }
     impl Fixture {
         fn new() -> Self {
-            let root = std::env::temp_dir().join(format!("aim-binder-startup-{}-{}", std::process::id(),
-                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+            // This file is compiled into several test modules, and its tests
+            // run at once.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!("aim-binder-startup-{}-{}-{}", std::process::id(),
+                module_path!().replace("::", "-"), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
             fs::create_dir(&root).unwrap();
             let child = Command::new("/bin/sleep").arg("20").spawn().unwrap();
             Self { root, child }

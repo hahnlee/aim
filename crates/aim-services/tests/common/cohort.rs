@@ -208,8 +208,9 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let root = std::env::temp_dir().join(format!("aim-cohort-pins-{}-{}", std::process::id(),
-                NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed)));
+            // This file is compiled into several test modules, each with its own NEXT.
+            let root = std::env::temp_dir().join(format!("aim-cohort-pins-{}-{}-{}", std::process::id(),
+                module_path!().replace("::", "-"), NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed)));
             fs::create_dir(&root).unwrap(); let root = fs::canonicalize(root).unwrap();
             let make = |path: &Path, bytes: &[u8]| {
                 fs::create_dir_all(path.parent().unwrap()).unwrap(); fs::write(path, bytes).unwrap(); sha(path).unwrap()

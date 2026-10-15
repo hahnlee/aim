@@ -263,6 +263,7 @@ fn apply_namespace_state(state:aim_storage::mount_namespace::State)->Result<(),E
     PRIVATE_MOUNTS.store(false,Ordering::Release);
     let(_,base)=parse_map(&state.base).map_err(|_|errno::EIO)?;
     *PROPAGATION_RULES.lock().unwrap()=map_propagation(&state.base)?;
+    let mut base=base;base.extend(input_mount());base.sort_by(|a,b|b.guest.len().cmp(&a.guest.len()));
     *vfs().mounts.write().unwrap()=base;
     for event in state.events {
         if let Some(guest)=event.strip_prefix("remove\t") { remove_mount(guest)?; }
@@ -397,6 +398,26 @@ pub fn input_dir() -> Option<&'static Path> {
     INPUT.get().map(PathBuf::as_path)
 }
 
+/// The window's input devices at /dev/input (`--display`): this process's,
+/// whatever namespace state it applies.
+fn input_mount()->Option<Mount>{
+    let dir=input_dir()?;
+    Some(Mount {
+        guest: "/dev/input".into(),
+        host: dir.to_owned(),
+        area: Area::Input,
+        source: None,
+        fstype: None,
+        own: false,
+        seq: 0,
+        fuse: None,
+        shared_fuse: false,
+        bind_source: None,
+        projected_fuse: false,
+        origin:None,
+    })
+}
+
 /// Parse a path map file: `kind<TAB>guest<TAB>host` lines, kinds `root`,
 /// `ro`, `rw` and `kernfs`; `#` starts a comment line.
 fn map_propagation(text:&str)->Result<Vec<(String,Propagation)>,Errno>{
@@ -503,6 +524,44 @@ pub(crate) fn inherit_fork_namespace(map:Option<&Path>)->Result<(),String>{
     aim_storage::process_namespace::register_mount_namespace(&table,child,&namespace).map_err(|error|error.to_string())
 }
 
+/// Without a path map, the processes of one run share a runtime directory
+/// in the temporary directory, as the processes of one boot share
+/// guest-init's: the first makes it and passes it on with `--runtime`.
+static STANDALONE_RUNTIME:OnceLock<PathBuf>=OnceLock::new();
+const STANDALONE_PREFIX:&str="aim-mount-";
+/// Use `dir` as this run's runtime directory (`--runtime`).
+pub fn use_runtime(dir:PathBuf){let _=STANDALONE_RUNTIME.set(dir);}
+/// The run's runtime directory to pass on, when there is no path map.
+pub fn standalone_runtime()->Option<&'static Path>{STANDALONE_RUNTIME.get().map(PathBuf::as_path)}
+/// Every process of a run holds a shared lock on its directory's `holders`
+/// for its lifetime; the kernel drops it however the process ends.
+fn hold_standalone_runtime(directory:&Path)->Result<(),String>{
+    let file=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).custom_flags(libc::O_CLOEXEC|libc::O_NOFOLLOW).open(directory.join("holders")).map_err(|error|format!("{}: {error}",directory.display()))?;
+    if unsafe{libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file),libc::LOCK_SH)}<0{return Err(format!("{}: {}",directory.display(),std::io::Error::last_os_error()));}
+    crate::sys::fdtab::hide(std::os::fd::IntoRawFd::into_raw_fd(file));Ok(())
+}
+/// Remove the runtime directories of runs that have ended: nothing holds
+/// their `holders` lock any more.
+fn sweep_standalone_runtimes(){
+    let Ok(entries)=std::fs::read_dir(std::env::temp_dir())else{return};
+    for entry in entries.flatten(){
+        if !entry.file_name().to_string_lossy().starts_with(STANDALONE_PREFIX){continue;}
+        let directory=entry.path();
+        let Ok(file)=std::fs::OpenOptions::new().read(true).custom_flags(libc::O_CLOEXEC|libc::O_NOFOLLOW).open(directory.join("holders"))else{
+            // Made before runs held their directory: stale once its maker,
+            // named pid-seconds-microseconds, is gone.
+            let name=entry.file_name().to_string_lossy().into_owned();
+            let fields=name[STANDALONE_PREFIX.len()..].split('-').map(str::parse::<u64>).collect::<Result<Vec<_>,_>>().unwrap_or_default();
+            if let [pid,start_seconds,start_microseconds]=fields[..]
+                &&!(aim_storage::process_namespace::ProcessIdentity{host_pid:pid as i32,start_seconds,start_microseconds}).is_live(){
+                let _=std::fs::remove_dir_all(&directory);
+            }
+            continue;
+        };
+        if unsafe{libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file),libc::LOCK_EX|libc::LOCK_NB)}==0{let _=std::fs::remove_dir_all(&directory);}
+    }
+}
+
 /// Initialize from `--root` and, when given, a `--path-map` file (whose
 /// `root` line overrides `root`).
 pub fn init(root: &Path, map: Option<&Path>) -> Result<(), String> {
@@ -516,37 +575,31 @@ pub fn init(root: &Path, map: Option<&Path>) -> Result<(), String> {
         }
         None => (None, Vec::new(), None),
     };
-    if let Some(dir) = input_dir() {
-        mounts.push(Mount {
-            guest: "/dev/input".into(),
-            host: dir.to_owned(),
-            area: Area::Input,
-            source: None,
-            fstype: None,
-            own: false,
-            seq: 0,
-            fuse: None,
-            shared_fuse: false,
-            bind_source: None,
-            projected_fuse: false,
-            origin:None,
-        });
-        mounts.sort_by(|a, b| b.guest.len().cmp(&a.guest.len()));
-    }
+    mounts.extend(input_mount());
+    mounts.sort_by(|a, b| b.guest.len().cmp(&a.guest.len()));
     let root = map_root.as_deref().unwrap_or(root);
     let root = root
         .canonicalize()
         .map_err(|e| format!("--root {}: {e}", root.display()))?;
     if runtime.is_none(){
-        let process=aim_storage::process_namespace::ProcessIdentity::running(unsafe{libc::getpid()}).map_err(|error|error.to_string())?;
-        let directory=std::env::temp_dir().join(format!("aim-mount-{}-{}-{}",process.host_pid,process.start_seconds,process.start_microseconds));
-        std::fs::create_dir_all(&directory).map_err(|error|error.to_string())?;
+        let directory=match STANDALONE_RUNTIME.get(){
+            Some(directory)=>directory.clone(),
+            None=>{
+                sweep_standalone_runtimes();
+                let process=aim_storage::process_namespace::ProcessIdentity::running(unsafe{libc::getpid()}).map_err(|error|error.to_string())?;
+                let directory=std::env::temp_dir().join(format!("{STANDALONE_PREFIX}{}-{}-{}",process.host_pid,process.start_seconds,process.start_microseconds));
+                std::fs::create_dir_all(&directory).map_err(|error|error.to_string())?;
+                let _=STANDALONE_RUNTIME.set(directory.clone());
+                directory
+            }
+        };
+        hold_standalone_runtime(&directory)?;
         runtime=Some(directory);
     }
     let read_only_dev = read_only_dev(&root);
     let _ = VFS.set(Vfs {
         root,
-        mapped: !mounts.is_empty(),
+        mapped: map.is_some(),
         read_only_dev,
         mounts: RwLock::new(mounts),
         runtime,
@@ -567,7 +620,9 @@ pub fn init(root: &Path, map: Option<&Path>) -> Result<(), String> {
             let owner=aim_storage::mount_namespace::Namespace::open(runtime,&id).map_err(|error|error.to_string())?;
             let mut base=match map{Some(path)=>std::fs::read_to_string(path).map_err(|error|error.to_string())?,None=>String::new()};
             if !base.lines().any(|line|line.starts_with("root\t")){base=format!("root\t/\t{}\n{base}",vfs().root.display());}
-            if !base.lines().any(|line|line.starts_with("propagation\t/\t")){base.push_str("propagation\t/\tshared\n");}
+            // The kernel's mounts start private; a path map is Android's
+            // view, whose init makes the root shared.
+            if !base.lines().any(|line|line.starts_with("propagation\t/\t")){base.push_str(if map.is_some(){"propagation\t/\tshared\n"}else{"propagation\t/\tprivate\n"});}
             owner.initialize(&base).map_err(|error|error.to_string())?;
             *NAMESPACE_VIEW.lock().unwrap()=Some(NamespaceView{page:owner.generation().map_err(|error|error.to_string())?,owner,generation:0,records:Default::default()});
             refresh_namespace().map_err(|error|format!("standalone mount namespace: errno {error}"))?;
@@ -591,6 +646,12 @@ fn read_only_dev(root: &Path) -> Option<i32> {
 /// on it can have been changed by a guest.
 pub fn on_read_only_root(dev: i32) -> bool {
     VFS.get().and_then(|v| v.read_only_dev) == Some(dev)
+}
+
+/// Whether the root is the read-only image: a path map's root, or a
+/// read-only volume, rather than a writable directory given as `--root`.
+pub fn read_only_root() -> bool {
+    VFS.get().is_some_and(|v| v.mapped || v.read_only_dev.is_some())
 }
 
 fn vfs() -> &'static Vfs {
@@ -1946,7 +2007,8 @@ mod external_namespace_entry_tests {
         std::fs::remove_file(&receipt).unwrap();assert_eq!(crate::sys::posix_locks::start_external(Some(&locator)),Err(crate::errno::ENOENT));std::fs::write(&receipt,&original).unwrap();
         let identity=table.join(current.host_pid.to_string());std::fs::write(&identity,b"cap_effective\t0x200000\n").unwrap();
         assert_eq!(crate::sys::posix_locks::start_external(Some(&locator)),Err(71));
-        let mut privileged=crate::sys::cred::Identity::default();privileged.uid=[2000;4];privileged.cap_eff=1<<21;crate::sys::cred::init(privileged,Some(table.clone()));
+        // setns(CLONE_NEWNS) takes CAP_SYS_ADMIN and CAP_SYS_CHROOT.
+        let mut privileged=crate::sys::cred::Identity::default();privileged.uid=[2000;4];privileged.cap_eff=(1<<21)|(1<<18);crate::sys::cred::init(privileged,Some(table.clone()));
         aim_storage::process_namespace::register_mount_namespace(&table,current,"foreign-owner").unwrap();
         assert_eq!(crate::sys::posix_locks::start_external(Some(&locator)),Err(crate::errno::EPERM));
         aim_storage::process_namespace::register_mount_namespace(&table,current,owner.id()).unwrap();

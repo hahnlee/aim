@@ -24,7 +24,8 @@ static CLIENT: Mutex<Option<Client>> = Mutex::new(None);
 pub fn file_class(fd: i32) -> Result<u32, i32> {
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstat(fd, &mut stat) } < 0 { return Err(crate::errno::last()); }
-    if stat.st_mode & libc::S_IFMT == libc::S_IFSOCK {
+    // Socket carriers come from a binder host; without one there are none.
+    if stat.st_mode & libc::S_IFMT == libc::S_IFSOCK && connected() {
         return super::net::classify_socket_scm(fd);
     }
     let client = CLIENT.lock().unwrap();
@@ -70,6 +71,10 @@ pub fn init(name: &str) -> Result<(), String> {
 
 pub(super) fn socket_carriers_configured() -> bool { CLIENT.lock().unwrap().is_some() }
 
+/// Whether a binder host serves this process (`--binder`).
+pub(super) fn connected() -> bool {
+    CLIENT.lock().unwrap().is_some()
+}
 pub(super) fn socket_scm_endpoint() -> Result<aim_binder_host::socket_scm::Endpoint, i32> {
     CLIENT.lock().unwrap().as_ref().ok_or(crate::errno::ENODEV)?.socket_scm_endpoint()
 }

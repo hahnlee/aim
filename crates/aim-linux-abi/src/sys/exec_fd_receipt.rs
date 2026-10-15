@@ -180,6 +180,8 @@ mod tests{
  }
  #[test]
  fn large_nofile_limit_keeps_empty_receipt_header_sized(){
+  // It captures every open fd, which tests alongside open and close.
+  if super::super::fdtab::isolated_kernel_test("sys::exec_fd_receipt::tests::large_nofile_limit_keeps_empty_receipt_header_sized"){return;}
   let mut limit:libc::rlimit=unsafe{std::mem::zeroed()};assert_eq!(unsafe{libc::getrlimit(libc::RLIMIT_NOFILE,&mut limit)},0);
   let legacy=HEADER+36*limit.rlim_cur.min(1<<20)as usize;assert!(legacy>1<<20,"test requires a large RLIMIT_NOFILE");
   let(_view,_root)=vfs::test_view();let mut receipt=Receipt::prepare().unwrap().unwrap();

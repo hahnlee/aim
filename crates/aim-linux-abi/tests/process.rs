@@ -525,7 +525,17 @@ fn orphaned_linux_run(root: &Path, args: &[&str]) -> (Vec<u8>, Vec<u8>) {
 
 #[test]
 fn socket_inode_owner_is_shared_across_real_guest_fork() {
-    check("socket_inode_owner_fork");
+    let Some(root) = root() else { return };
+    // A socket's owner travels with it through the binder host, as in a boot.
+    let binder = format!("dev.aim.test.process-scm.{}", std::process::id());
+    let _server = aim_binder_host::server::Server::start(&binder).expect("binder host");
+    let out = linux_run(root, &["--binder", &binder, PROGRAM, "socket_inode_owner_fork"], |_| {});
+    assert!(
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("ok socket_inode_owner_fork\n"),
+        "{:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// Linux retains blocked default-disposition SIGCHLD for synchronous waits,

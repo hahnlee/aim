@@ -77,6 +77,19 @@ pub fn fixture_image(root: &Path) -> PathBuf {
         fs::write(&path, b"").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     }
+    // The APEXes apexd mounts in the bootstrap namespace, each with a
+    // manifest naming it (field 1).
+    for name in ["com.android.runtime", "com.android.i18n", "com.android.tzdata", "com.android.virt"] {
+        let dir = image.join("apex").join(name);
+        fs::create_dir_all(&dir).unwrap();
+        let mut manifest = vec![0x0a, name.len() as u8];
+        manifest.extend_from_slice(name.as_bytes());
+        fs::write(dir.join("apex_manifest.pb"), manifest).unwrap();
+    }
+    // The overlay's init namespace policy, which the derived image ships.
+    let policy = "vendor/etc/aim/init-mount-namespace-policy.conf";
+    fs::create_dir_all(image.join(policy).parent().unwrap()).unwrap();
+    fs::copy(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../image").join(policy), image.join(policy)).unwrap();
     image
 }
 
@@ -96,8 +109,8 @@ id=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --identity) id="$2"; shift 2 ;;
-    --root|--path-map) shift 2 ;;
-    --inherit-env|--trace) shift ;;
+    --root|--path-map|--binder|--display|--gpu|--vulkan|--guest-fds|--posix-control|--seclabel|--socket-receipts) shift 2 ;;
+    --inherit-env|--trace|--stdio-null) shift ;;
     *) break ;;
   esac
 done
@@ -114,6 +127,9 @@ exec /bin/sleep 20
     )
     .unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    // guest-init runs the POSIX lock holder beside linux-run.
+    let holder = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().join("aim-lock-holder");
+    std::os::unix::fs::symlink(holder, root.join("aim-lock-holder")).unwrap();
     path
 }
 

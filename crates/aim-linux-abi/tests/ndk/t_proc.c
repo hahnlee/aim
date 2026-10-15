@@ -244,8 +244,15 @@ static void mount_table(void) {
   CHECK(!strncmp(big, "/dev/root / erofs ro,", 21));
   CHECK(strstr(big, "\nproc /proc proc rw,") && strstr(big, " /data ext4 rw,") &&
         strstr(big, "\ntmpfs /dev tmpfs rw,"));
-  CHECK(slurp("/proc/self/mountinfo", big, sizeof big) > 0 && !strncmp(big, "1 0 0:1 / / ro,", 15));
-  CHECK(strstr(big, " / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n") != NULL);
+  // Mount ids are the kernel's to choose; a shared mount names its peer
+  // group (shared:N) before the separator.
+  CHECK(slurp("/proc/self/mountinfo", big, sizeof big) > 0);
+  char* root = strstr(big, " / / ro,");
+  CHECK(root && root < strchr(big, '\n'));
+  char* proc = strstr(big, " / /proc rw,nosuid,nodev,noexec,relatime ");
+  CHECK(proc);
+  char* separator = strstr(proc, " - proc proc rw\n");
+  CHECK(separator && separator < strchr(proc, '\n'));
 }
 
 // A second thread for the per-thread files: it names itself, reports its

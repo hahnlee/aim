@@ -611,7 +611,18 @@ pub(super) fn path_stat(guest: &str) -> Result<libc::stat, crate::errno::Errno> 
     use std::os::unix::ffi::OsStrExt;
     let host = std::ffi::CString::new(host.as_os_str().as_bytes()).map_err(|_| crate::errno::EINVAL)?;
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::stat(host.as_ptr(), &mut stat) } < 0 { return Err(crate::errno::last()); }
+    if unsafe { libc::stat(host.as_ptr(), &mut stat) } < 0 {
+        let error = crate::errno::last();
+        // The layer's own device nodes (vfs::HOST_DEVICES, the pty slaves)
+        // sit in /dev and /dev/pts, a devtmpfs root's, when no mount
+        // provides them.
+        if error == crate::errno::ENOENT && area == vfs::Area::Image && matches!(guest, "/dev" | "/dev/pts") {
+            stat.st_mode = libc::S_IFDIR | 0o755;
+            stat.st_nlink = 2;
+            return Ok(stat);
+        }
+        return Err(error);
+    }
     let host = if area == vfs::Area::Image { Host::Image(&host) } else { Host::Path(&host) };
     apply(host, || guest.to_owned(), &mut stat);
     Ok(stat)

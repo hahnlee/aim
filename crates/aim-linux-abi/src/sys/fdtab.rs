@@ -95,6 +95,9 @@ pub(super) fn export_pinned(pin:Pinned)->Result<ExportedFd,crate::errno::Errno>{
 pub enum ScmExport{Regular(RegularExport),Socket(super::net::SocketExport),Other(ExportedFd)}
 pub fn export_scm(fd:i32)->Result<ScmExport,crate::errno::Errno>{
     let pin=pin_guest(fd)?;
+    // Regular files' and sockets' receipts travel through the binder host;
+    // without one (a run without guest-init) the host passes the fd itself.
+    if !super::binder::connected(){return export_pinned(pin).map(ScmExport::Other);}
     match pin.kind().cloned(){Some(Kind::Regular(description))=>super::regular_file::export(pin,description).map(ScmExport::Regular),Some(Kind::Sock(_))=>super::net::export_socket_pinned(pin).map(ScmExport::Socket),_=>export_pinned(pin).map(ScmExport::Other)}
 }
 
@@ -782,6 +785,9 @@ pub fn parse_guest_fds(text:&str)->Result<Vec<i32>,crate::errno::Errno>{
     }
     Ok(fds)
 }
+/// Take the fds a process was exec'd with as the guest's, as linux-run does
+/// at start.
+pub fn inherit(fds:&[i32])->Result<(),crate::errno::Errno>{bootstrap(fds.to_vec(),&[])}
 pub(crate) fn bootstrap(inherited:Vec<i32>,receipts:&[(i32,aim_storage::socket_inode::Receipt)])->Result<(),crate::errno::Errno>{
     if receipts.iter().any(|(fd,_)|!inherited.contains(fd)){return Err(crate::errno::EINVAL);}
     for fd in inherited{

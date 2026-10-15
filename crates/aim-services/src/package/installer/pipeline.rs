@@ -735,6 +735,9 @@ mod committed_effect_tests {
         let mut scan=SigningScan::new(&Default::default(),&settings,36).unwrap();
         scan.capture_user_states(std::collections::BTreeMap::from([(("p".into(),false),scan::CapturedUsers{states:std::collections::BTreeMap::from([(0,crate::package::restrictions::UserState{installed:true,..Default::default()})]),active_aliases:Default::default()})])).unwrap();
         scan.capture_replica_runtime(std::collections::BTreeMap::from([(("p".into(),false),scan::ReplicaRuntime{usage:[0;8],seinfo:None,override_seinfo:None,library_files:vec![],libraries:vec![]})])).unwrap();
+        let shared=scan.identities.shared_users.keys().map(|name|(name.clone(),Default::default())).collect();
+        scan.capture_legacy_permissions(&[0],std::collections::BTreeMap::from([(("p".into(),false),Default::default())]),shared).unwrap();
+        scan.capture_install_permissions_fixed(std::collections::BTreeMap::from([(("p".into(),false),false)])).unwrap();
         let snapshots=Arc::new(crate::package::scan_snapshot::Store::new(scan,Usage::new(["p"])).unwrap());
         let mut durable=Store::create(&disk_path,&[0]).unwrap();durable.commit_scan_settings(&snapshots.capture()).unwrap();let disk=Arc::new(Mutex::new(durable));
         let query=Arc::new(Mutex::new(snapshots.capture()));let mode=Arc::new(AtomicUsize::new(0));let events=Arc::new(Mutex::new(vec![]));let rollbacks=Arc::new(AtomicUsize::new(0));
