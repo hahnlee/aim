@@ -48,6 +48,9 @@ impl Description{
 pub fn adopt(fd:i32,flags:u64)->Result<Option<Arc<Description>>,Errno>{
  let mut stat:libc::stat=unsafe{std::mem::zeroed()};if unsafe{libc::fstat(fd,&mut stat)}<0{return Err(errno::last());}
  if stat.st_mode&libc::S_IFMT!=libc::S_IFREG{return Ok(None);}
+ // Nothing on the read-only root has a writer or can enable verity (EROFS),
+ // so its descriptions need no admission, as on Linux.
+ if vfs::on_read_only_root(stat.st_dev){return Ok(None);}
  let Some(configuration)=configuration()?else{return Ok(None)};
  Description::new(unsafe{BorrowedFd::borrow_raw(fd)},flags,configuration.store.clone()).map(Some)
 }
@@ -55,6 +58,7 @@ pub(crate) fn adopt_kernel(fd:BorrowedFd<'_>,flags:u64)->Result<Option<Arc<Descr
 pub(crate) fn configured_store()->Result<Option<Arc<Store>>,Errno>{configuration().map(|configuration|configuration.map(|configuration|configuration.store.clone()))}
 pub(super) fn verity_stat(stat:&libc::stat)->Result<Option<bool>,Errno>{
  if stat.st_mode&libc::S_IFMT!=libc::S_IFREG{return Ok(None);}
+ if vfs::on_read_only_root(stat.st_dev){return Ok(Some(false));}
  let Some(configuration)=configuration()?else{return Ok(None)};
  let identity=Identity{dev:stat.st_dev as u32 as u64,ino:stat.st_ino,generation:stat.st_gen,birth_seconds:stat.st_birthtime,birth_nanoseconds:stat.st_birthtime_nsec};
  configuration.store.lookup(identity).map(|metadata|Some(metadata.is_some())).map_err(core)
