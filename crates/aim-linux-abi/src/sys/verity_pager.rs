@@ -200,15 +200,17 @@ pub fn tracked_identities()->io::Result<std::collections::BTreeSet<[u8;36]>> {
 /// Restored VM owners join with the child's real coordinator process epoch
 /// before the fork owner sends its ready acknowledgement.
 pub fn restore_memberships()->io::Result<()> {
+    let tracked=tracked_identities()?;
+    if tracked.is_empty(){return Ok(());}
     let Some(client)=crate::verity_client()else{return Ok(());};
-    for identity in tracked_identities()? {
+    for identity in tracked {
         let admission=client.admission(identity)?;
         publish_membership(Identity::from_bytes(&identity).map_err(|_|io::Error::from_raw_os_error(libc::EINVAL))?,admission)?;
     }
     Ok(())
 }
 pub fn reconcile_memberships()->io::Result<()> {
-    let Some(client)=crate::verity_client()else{return Ok(());};
+    let Some(client)=crate::started_verity_client()else{return Ok(());};
     let mut memberships=MEMBERSHIPS.lock().unwrap();let tracked=tracked_identities()?;
     let removed:Vec<_>=memberships.difference(&tracked).copied().collect();
     if removed.is_empty(){return Ok(());}

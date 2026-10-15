@@ -257,7 +257,25 @@ pub fn load_program(
 }
 
 static VERITY_RUNTIME:std::sync::Mutex<Option<sys::verity_control::Runtime>>=std::sync::Mutex::new(None);
+/// The coordinator and proof store, read at start; the process registers
+/// with the coordinator when it first needs to (`verity_client`).
+static VERITY_PENDING:std::sync::Mutex<Option<(aim_storage::verity_control::OwnerConfig,std::sync::Arc<aim_storage::fsverity::Store>)>>=std::sync::Mutex::new(None);
+/// This process's verity coordinator client, registering it now if it has
+/// not been: only a process that maps or enables a file that can have
+/// verity takes part, as on Linux only those touch verity state.
 pub(crate) fn verity_client()->Option<std::sync::Arc<aim_storage::verity_control::Client>>{
+    let mut current=VERITY_RUNTIME.lock().unwrap();
+    if current.is_none()&&let Some((config,store))=VERITY_PENDING.lock().unwrap().take(){
+        match sys::verity_control::Runtime::start_with_store(&config.endpoint,config.process,std::time::Duration::from_secs(5),store){
+            Ok(runtime)=>*current=Some(runtime),
+            // Without registration this process cannot honour verity.
+            Err(error)=>{diag!("verity process registration: {error}");unsafe{libc::_exit(127)}},
+        }
+    }
+    current.as_ref().map(|runtime|runtime.client.clone())
+}
+/// The client if this process has registered.
+pub(crate) fn started_verity_client()->Option<std::sync::Arc<aim_storage::verity_control::Client>>{
     VERITY_RUNTIME.lock().unwrap().as_ref().map(|runtime|runtime.client.clone())
 }
 pub(crate) fn start_verity_runtime()->Result<(),String>{
@@ -267,11 +285,11 @@ pub(crate) fn start_verity_runtime()->Result<(),String>{
         Err(error)if error.kind()==std::io::ErrorKind::NotFound=>return Ok(()),
         Err(error)=>return Err(format!("verity coordinator owner: {error}")),
     };
-    let mut current=VERITY_RUNTIME.lock().unwrap();
-    if current.is_some(){return Err("verity process registration already initialized".into());}
+    let mut pending=VERITY_PENDING.lock().unwrap();
+    if pending.is_some()||VERITY_RUNTIME.lock().unwrap().is_some(){return Err("verity process registration already initialized".into());}
     let store=sys::regular_file::configured_store()
         .map_err(|error|format!("verity proof store: errno {error}"))?
         .ok_or("verity coordinator has no configured proof store")?;
-    *current=Some(sys::verity_control::Runtime::start_with_store(&config.endpoint,config.process,std::time::Duration::from_secs(5),store).map_err(|error|format!("verity process registration: {error}"))?);
+    *pending=Some((config,store));
     Ok(())
 }

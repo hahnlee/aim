@@ -585,7 +585,8 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
     w.str(&mount_text);
     let tracked=super::super::verity_pager::tracked_identities().map_err(|error|-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64))?;
     let identity_count=tracked.len();
-    let fork_lease=crate::verity_client().map(|client|client.fork_lease(tracked)).transpose().map_err(|error|{crate::diag!("[linux-abi] fork mapping admission ({identity_count} identities): {error}");-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64)})?;
+    // Without verified mappings there is nothing to hand over.
+    let fork_lease=(!tracked.is_empty()).then(crate::verity_client).flatten().map(|client|client.fork_lease(tracked)).transpose().map_err(|error|{crate::diag!("[linux-abi] fork mapping admission ({identity_count} identities): {error}");-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64)})?;
     let pager=super::super::verity_pager::ForkSnapshot::capture().map_err(|error|-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64))?;
     let snap = snapshot()?;
     save_regions(&mut w, &snap.regions);
@@ -1097,7 +1098,7 @@ fn become_child(h: Handover) -> String {
         return format!("fork diagnostics descriptor: errno {error}");
     }
     if let Err(error)=super::super::verity_pager::restore_memberships(){return format!("fork restored mapping publication: {error}");}
-    if let Err(error)=confirm_ready(h.parent,crate::verity_client().map(|client|client.member).unwrap_or(0)){return error;}
+    if let Err(error)=confirm_ready(h.parent,crate::started_verity_client().map(|client|client.member).unwrap_or(0)){return error;}
     drop(h);
     if let Some((rd, _)) = vfork {
         // SAFETY: the parent's end of its wait pipe, inherited.
