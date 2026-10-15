@@ -346,6 +346,12 @@ mod tests {
         fs::remove_file(files.state()).unwrap();
         assert!(resident(&files).is_err());
         drop(holder);
+        // A test alongside that forks holds the lock's description until its
+        // exec closes it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while held(&files.lock()) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(!held(&files.lock()));
         fs::remove_dir_all(root).unwrap();
     }
