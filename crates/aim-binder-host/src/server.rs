@@ -1300,7 +1300,10 @@ mod close_flush_tests {
         file.flush().unwrap();received.recv_timeout(Duration::from_secs(2)).unwrap();
         driver.ioctl(open.handle,tid,BINDER_WRITE_READ,&mut arg,&mut Memory).unwrap();assert_eq!(WriteRead::decode(&arg).read_consumed,4);assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()),BR_NOOP);
         let mut version=[0;4];driver.ioctl(open.handle,tid,BINDER_VERSION,&mut version,&mut Memory).unwrap();assert_eq!(i32::from_le_bytes(version),CURRENT_PROTOCOL_VERSION);
-        drop(pin);assert_eq!(unsafe{libc::recv(peer,(&mut byte as*mut u8).cast(),1,libc::MSG_PEEK|libc::MSG_DONTWAIT)},0);
+        drop(pin);
+        // A test alongside that forks can hold the end for a moment before its exec.
+        let mut ready=libc::pollfd{fd:peer,events:libc::POLLIN,revents:0};assert_eq!(unsafe{libc::poll(&mut ready,1,2000)},1);
+        assert_eq!(unsafe{libc::recv(peer,(&mut byte as*mut u8).cast(),1,libc::MSG_PEEK|libc::MSG_DONTWAIT)},0);
         worker.join().unwrap();driver.release(open.handle);server.files.lock().unwrap().remove(&file.port);
         unsafe{libc::close(peer);libc::close(server.kq);}mach::destroy_receive(file.port);mach::destroy_receive(service);mach::destroy_receive(server.set);mach::destroy_receive(server.pool.set);
     }
