@@ -34,6 +34,9 @@ pub struct Client {
     controller: ProcessIdentity,
     tickets: Mutex<HashMap<([u8; 36], i32), u64>>,
     next: AtomicU64,
+    /// The holder may keep locks this client never registered (an attach
+    /// after exec), so every close must ask it.
+    inherited: bool,
 }
 impl Client {
     pub fn new(
@@ -50,6 +53,7 @@ impl Client {
             controller,
             tickets: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
+            inherited: false,
         }))
     }
     fn call(&self, frame: Frame, proof: Option<BorrowedFd<'_>>) -> Result<Frame, Errno> {
@@ -88,6 +92,12 @@ impl Client {
     }
     pub fn close_inode(&self, key: Identity) -> Result<(), Errno> {
         let mut tickets = self.tickets.lock().unwrap();
+        // As Linux's locks_remove_posix: a process that never locked the
+        // inode holds nothing to release.
+        let key_bytes = key.to_bytes();
+        if !self.inherited && !tickets.keys().any(|(identity, _)| *identity == key_bytes) {
+            return Ok(());
+        }
         let mut frame = Frame::new(Operation::Close, self.request()?);
         frame.key = key.to_bytes();
         let pending = self.control.begin(frame, None).map_err(io)?;
@@ -111,6 +121,11 @@ impl Client {
         }
         tickets.retain(|(identity, _), _| *identity != frame.key);
         Ok(())
+    }
+    #[cfg(test)]
+    fn inheriting(mut self: Arc<Self>) -> Arc<Self> {
+        Arc::get_mut(&mut self).unwrap().inherited = true;
+        self
     }
     pub fn capability(&self) -> Result<posix_control::SendRight, Errno> {
         self.control.capability().map_err(io)
@@ -300,7 +315,7 @@ fn attach(locator: Option<&std::path::Path>,operation:Operation) -> Result<(), E
     if reply.guest_pid <= 0 {
         return Err(failure("reply-guest-pid",errno::ESRCH));
     }
-    let client = Client::new(
+    let mut client = Client::new(
         control,
         Owner {
             process,
@@ -308,6 +323,7 @@ fn attach(locator: Option<&std::path::Path>,operation:Operation) -> Result<(), E
         },
         config.process,
     ).map_err(|error|failure("client-owner-live",error))?;
+    Arc::get_mut(&mut client).unwrap().inherited = reply.ticket != 0;
     // Attach consumed request1 in the same native owner incarnation.
     client.next.store(2, Ordering::Relaxed);
     install(client).map_err(|error|failure("install-owner",error))
@@ -611,6 +627,10 @@ mod interrupted_close_tests {
         .unwrap();
         let file = std::fs::File::open("/dev/null").unwrap();
         let identity = Identity::from_fd(file.as_fd()).unwrap();
+        // A client that never locked the inode asks nothing at close.
+        assert_eq!(client.close_inode(identity), Ok(()));
+        assert!(matches!(endpoint.receive(Duration::from_millis(25)),Err(error)if error.raw_os_error()==Some(libc::ETIMEDOUT)));
+        let client = client.inheriting();
         let server = std::thread::spawn(move || {
             let request = endpoint.receive(Duration::from_secs(2)).unwrap();
             assert_eq!(request.actor, actual);
@@ -693,7 +713,8 @@ mod interrupted_close_tests {
             owner,
             actual,
         )
-        .unwrap();
+        .unwrap()
+        .inheriting();
         install(close_client).unwrap();
         let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
         let mut action: libc::sigaction = unsafe { std::mem::zeroed() };

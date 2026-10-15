@@ -159,10 +159,13 @@ pub fn init_caught_signals(table:&Path,process:ProcessIdentity)->io::Result<u64>
     u64::from_str_radix(fields[4],16).map_err(|_|io::Error::from_raw_os_error(libc::EPROTO))
 }
 
+/// Readers see the old record or the new one (the rename). The table lives
+/// in the boot's runtime directory, which no boot outlives, so nothing is
+/// flushed to the disk.
 fn atomic_write(path:&Path,bytes:&[u8])->io::Result<()> {
     use std::io::Write;let nonce=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let temporary:PathBuf=path.with_extension(format!("{}-{nonce}.tmp",std::process::id()));
-    let result=(||{let mut file=fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;file.write_all(bytes)?;file.sync_all()?;fs::rename(&temporary,path)})();
+    let result=(||{let mut file=fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;file.write_all(bytes)?;fs::rename(&temporary,path)})();
     if result.is_err(){let _=fs::remove_file(temporary);}result
 }
 #[cfg(test)]

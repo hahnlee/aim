@@ -77,9 +77,13 @@ impl OwnerConfig {
   Ok(Self{endpoint:fields[4].into(),process})
  }
 }
-struct Holder {owner:Owner,process:ProcessIdentity,client:Client,child:Mutex<Option<Child>>,requests:Mutex<BTreeMap<u64,(Operation,u64)>>,next_request:AtomicU64,dispatch:Mutex<()>,rebinding:AtomicBool}
-impl Holder {
- fn spawn(config:&Config,owner:Owner,controller:ProcessIdentity)->io::Result<Arc<Self>>{
+/// A guest process's lock owner. Its holder process starts with the first
+/// request that needs it: most processes never take a POSIX lock, and on
+/// Linux a process that holds none costs the kernel nothing.
+struct Holder {owner:Owner,config:Config,controller:ProcessIdentity,native:Mutex<Option<Arc<Native>>>,requests:Mutex<BTreeMap<u64,(Operation,u64)>>,next_request:AtomicU64,dispatch:Mutex<()>,rebinding:AtomicBool}
+struct Native {process:ProcessIdentity,client:Client,child:Mutex<Option<Child>>}
+impl Native {
+ fn spawn(config:&Config,owner:Owner,controller:ProcessIdentity)->io::Result<Self>{
   let name=format!("com.aim.posix-holder.{}.{}.{}",controller.host_pid,controller.start_microseconds,NEXT.fetch_add(1,Ordering::Relaxed));
   let mut child=Command::new(&config.holder).args(["--service-name",&name,"--controller-pid",&controller.host_pid.to_string(),"--controller-seconds",&controller.start_seconds.to_string(),"--controller-microseconds",&controller.start_microseconds.to_string()]).spawn().map_err(|failure|spawn_failure(config,owner,controller,failure))?;
   let result=(||{
@@ -87,8 +91,23 @@ impl Holder {
    let client=loop{match Client::lookup(&name){Ok(client)=>break client,Err(failure)if failure.raw_os_error()==Some(libc::ENOENT)=>{if child.try_wait().map_err(|failure|admission_failure("holder-try-wait",owner.process,failure))?.is_some(){return Err(admission_failure("holder-exited-before-lookup",owner.process,error(libc::ECHILD)));}if Instant::now()>=deadline{return Err(admission_failure("holder-lookup-timeout",owner.process,error(libc::ETIMEDOUT)));}thread::sleep(Duration::from_millis(5));},Err(failure)=>return Err(admission_failure("holder-client-lookup",owner.process,failure))}};
    if !owner.process.is_live(){return Err(admission_failure("holder-actor-live",owner.process,error(libc::ESRCH)));}Ok((process,client))
   })();
-  match result{Ok((process,client))=>Ok(Arc::new(Self{owner,process,client,child:Mutex::new(Some(child)),requests:Mutex::new(BTreeMap::new()),next_request:AtomicU64::new(1),dispatch:Mutex::new(()),rebinding:AtomicBool::new(false)})),Err(failure)=>{if child.try_wait().map_err(|failure|admission_failure("holder-try-wait",owner.process,failure))?.is_none(){child.kill().map_err(|failure|admission_failure("holder-failed-start-cleanup-kill",owner.process,failure))?;}child.wait().map_err(|failure|admission_failure("holder-failed-start-cleanup-wait",owner.process,failure))?;Err(failure)}}
+  match result{Ok((process,client))=>Ok(Self{process,client,child:Mutex::new(Some(child))}),Err(failure)=>{if child.try_wait().map_err(|failure|admission_failure("holder-try-wait",owner.process,failure))?.is_none(){child.kill().map_err(|failure|admission_failure("holder-failed-start-cleanup-kill",owner.process,failure))?;}child.wait().map_err(|failure|admission_failure("holder-failed-start-cleanup-wait",owner.process,failure))?;Err(failure)}}
  }
+}
+impl Holder {
+ fn new(config:&Config,owner:Owner,controller:ProcessIdentity)->Arc<Self>{
+  Arc::new(Self{owner,config:config.clone(),controller,native:Mutex::new(None),requests:Mutex::new(BTreeMap::new()),next_request:AtomicU64::new(1),dispatch:Mutex::new(()),rebinding:AtomicBool::new(false)})
+ }
+ fn spawn(config:&Config,owner:Owner,controller:ProcessIdentity)->io::Result<Arc<Self>>{let holder=Self::new(config,owner,controller);holder.native()?;Ok(holder)}
+ /// The holder process, started now if it has not been.
+ fn native(&self)->io::Result<Arc<Native>>{
+  let mut native=self.native.lock().unwrap();
+  if let Some(native)=native.as_ref(){return Ok(native.clone());}
+  let started=Arc::new(Native::spawn(&self.config,self.owner,self.controller)?);*native=Some(started.clone());Ok(started)
+ }
+ fn started(&self)->Option<Arc<Native>>{self.native.lock().unwrap().clone()}
+ /// Live unless its holder process has died.
+ fn alive(&self)->bool{self.started().is_none_or(|native|native.process.is_live())}
  fn remap(&self,mut frame:Frame)->io::Result<Frame>{
   if self.rebinding.load(Ordering::Acquire){return Err(error(libc::EAGAIN));}
   let mut requests=self.requests.lock().unwrap();
@@ -106,16 +125,18 @@ impl Holder {
    if self.rebinding.swap(true,Ordering::AcqRel){return Err(admission_failure("rebind-busy",self.owner.process,error(libc::EBUSY)));}
    self.requests.lock().unwrap().values().filter(|(operation,_)|*operation==Operation::Wait).map(|(_,request)|*request).collect::<Vec<_>>()};
   let result=(||{
-   for waiting in waits {let native=self.next_request.fetch_update(Ordering::Relaxed,Ordering::Relaxed,|next|next.checked_add(1)).map_err(|_|admission_failure("rebind-request-overflow",self.owner.process,error(libc::EOVERFLOW)))?;let mut cancel=Frame::new(Operation::Cancel,native);cancel.ticket=waiting;let response=self.client.call_right(cancel,None).map_err(|failure|admission_failure("rebind-cancel-call",self.owner.process,failure))?;if response.errno!=0{return Err(admission_failure("rebind-cancel-reply",self.owner.process,error(response.errno)));}}
+   let holder=match self.started(){Some(holder)=>holder,None=>{self.requests.lock().unwrap().clear();return Ok(());}};
+   for waiting in waits {let native=self.next_request.fetch_update(Ordering::Relaxed,Ordering::Relaxed,|next|next.checked_add(1)).map_err(|_|admission_failure("rebind-request-overflow",self.owner.process,error(libc::EOVERFLOW)))?;let mut cancel=Frame::new(Operation::Cancel,native);cancel.ticket=waiting;let response=holder.client.call_right(cancel,None).map_err(|failure|admission_failure("rebind-cancel-call",self.owner.process,failure))?;if response.errno!=0{return Err(admission_failure("rebind-cancel-reply",self.owner.process,error(response.errno)));}}
    self.requests.lock().unwrap().clear();Ok(())
   })();
   self.rebinding.store(false,Ordering::Release);result
  }
  fn stop(&self)->io::Result<()> {
-  let mut child=self.child.lock().unwrap();let Some(mut owned)=child.take()else{return Ok(())};
+  let Some(native)=self.started()else{return Ok(())};
+  let mut child=native.child.lock().unwrap();let Some(mut owned)=child.take()else{return Ok(())};
   let result=(||{
    if let Some(status)=owned.try_wait()?{return if status.success(){Ok(())}else{Err(error(libc::ECHILD))};}
-   let reply=self.client.call_right(Frame::new(Operation::Exit,u64::MAX),None)?;
+   let reply=native.client.call_right(Frame::new(Operation::Exit,u64::MAX),None)?;
    if reply.errno!=0{return Err(error(reply.errno));}
    let deadline=Instant::now()+Duration::from_secs(2);
    loop{if let Some(status)=owned.try_wait()?{return if status.success(){Ok(())}else{Err(error(libc::ECHILD))};}if Instant::now()>=deadline{return Err(error(libc::ETIMEDOUT));}thread::sleep(Duration::from_millis(5));}
@@ -155,7 +176,7 @@ impl State {
    ||child_namespace!=parent_namespace{return Err(failed("fork-namespace-match",error(libc::EPERM)));}
   if !actor.is_live()||!parent.owner.process.is_live(){return Err(failed("fork-parent-child-live",error(libc::ESRCH)));}
   let owner=Owner{process:actor,guest_pid:if actor==namespace.init.process{1}else{actor.host_pid}};
-  let holder=Holder::spawn(&self.config,owner,self.controller).map_err(|failure|failed("fork-holder-spawn",failure))?;
+  let holder=Holder::new(&self.config,owner,self.controller);
   if !actor.is_live()||!parent.owner.process.is_live(){holder.stop().map_err(|failure|failed("fork-holder-stop",failure))?;return Err(failed("fork-post-spawn-live",error(libc::ESRCH)));}
   if crate::process_namespace::mount_namespace_of(&namespace.table,actor).map_err(|failure|failed("fork-post-child-namespace",failure))?!=child_namespace
    ||crate::process_namespace::mount_namespace_of(&namespace.table,parent.owner.process).map_err(|failure|failed("fork-post-parent-namespace",failure))?!=parent_namespace{holder.stop().map_err(|failure|failed("fork-holder-stop",failure))?;return Err(failed("fork-post-namespace-match",error(libc::EPERM)));}
@@ -181,7 +202,7 @@ impl State {
   let namespace=self.external_namespace(actor)?;
   let init=self.namespace.lock().unwrap().clone().ok_or_else(||error(libc::EPERM))?.init;
   let guest_pid=if actor==init.process{1}else{actor.host_pid};
-  let holder=Holder::spawn(&self.config,Owner{process:actor,guest_pid},self.controller)?;
+  let holder=Holder::new(&self.config,Owner{process:actor,guest_pid},self.controller);
   let validation=self.external_namespace(actor);
   if !matches!(validation,Ok(ref current)if *current==namespace){holder.stop()?;return Err(validation.err().unwrap_or_else(||error(libc::EPERM)));}
   let mut owners=self.owners.lock().unwrap();
@@ -194,17 +215,24 @@ impl State {
   self.retire_dead()?;
   let Request{frame,proof,actor,reply}=request;
   let holder=self.owners.lock().unwrap().get(&key(actor)).cloned();
+  // An attach to an existing holder (an exec of the same process) may find
+  // locks registered before it; the reply's ticket says so.
+  let existed=holder.is_some();
   let holder=if holder.is_none()&&matches!(frame.operation,Operation::Attach|Operation::ExternalAttach){match if frame.operation==Operation::ExternalAttach{self.admit_external(actor)}else{self.admit_fork(actor)}{Ok(holder)=>Some(holder),Err(failure)=>{let mut response=frame;response.host_pid=0;response.guest_pid=0;response.errno=failure.raw_os_error().unwrap_or(libc::EPERM);reply.send(response)?;return Ok(None)}}}else{holder};
   if matches!(frame.operation,Operation::Attach|Operation::ExternalAttach) {
    let mut response=frame;response.host_pid=0;response.guest_pid=0;
-   response.errno=match holder.as_ref(){Some(holder)if holder.owner.process==actor&&actor.is_live()&&holder.process.is_live()=>{match holder.rebind(){Ok(())=>{response.guest_pid=holder.owner.guest_pid;0},Err(failure)=>failure.raw_os_error().unwrap_or(libc::EIO)}},_=>libc::EPERM};
+   response.errno=match holder.as_ref(){Some(holder)if holder.owner.process==actor&&actor.is_live()&&holder.alive()=>{match holder.rebind(){Ok(())=>{response.guest_pid=holder.owner.guest_pid;response.ticket=u64::from(existed);0},Err(failure)=>failure.raw_os_error().unwrap_or(libc::EIO)}},_=>libc::EPERM};
    reply.send(response)?;return Ok(None);
   }
+  // Without a holder process nothing is registered, so a close releases
+  // nothing.
+  if frame.operation==Operation::Close&&holder.as_ref().is_some_and(|holder|holder.owner.process==actor&&holder.started().is_none()){reply.send(frame)?;return Ok(None);}
   let prepared=(||{
    let holder=holder.ok_or_else(||error(libc::EPERM))?;
-   if !actor.is_live()||holder.owner.process!=actor||!holder.process.is_live(){return Err(error(libc::ESRCH));}
+   if !actor.is_live()||holder.owner.process!=actor||!holder.alive(){return Err(error(libc::ESRCH));}
    if frame.operation==Operation::Exit{return Err(error(libc::EPERM));}
-   let client=holder.client.try_clone()?;
+   if holder.started().is_none()&&frame.operation==Operation::Cancel{return Err(error(libc::ENOENT));}
+   let client=holder.native()?.client.try_clone()?;
    // Forward in endpoint receive order, before starting a reply waiter.
    // Cancel must not overtake the corresponding Wait reservation.
    let dispatch=holder.dispatch.lock().unwrap();
@@ -221,12 +249,12 @@ impl State {
  fn handle(&self,forwarded:Forwarded)->io::Result<()> {
   let Forwarded{frame,native_request,actor,reply,holder,pending}=forwarded;let mut response=frame;
   let result=(||{
-   response=loop{match pending.wait(Duration::from_millis(100)){Ok(value)=>break value,Err(failure)if matches!(failure.raw_os_error(),Some(libc::ETIMEDOUT)|Some(libc::EINTR))=>{if !actor.is_live()||!holder.process.is_live(){return Err(error(libc::ESRCH));}},Err(failure)=>return Err(failure)}};
+   response=loop{match pending.wait(Duration::from_millis(100)){Ok(value)=>break value,Err(failure)if matches!(failure.raw_os_error(),Some(libc::ETIMEDOUT)|Some(libc::EINTR))=>{if !actor.is_live()||!holder.alive(){return Err(error(libc::ESRCH));}},Err(failure)=>return Err(failure)}};
    if frame.operation==Operation::Get&&response.errno==0&&response.range.kind!=2 {
     // The controller's exact live holder registry is authoritative. Host
     // processes outside this guest namespace have no guest PID.
     let owners=self.owners.lock().unwrap();
-    response.guest_pid=owners.values().find(|entry|entry.process.host_pid==response.host_pid&&entry.process.is_live()&&entry.owner.process.is_live()).map_or(0,|entry|entry.owner.guest_pid);
+    response.guest_pid=owners.values().find(|entry|entry.started().is_some_and(|native|native.process.host_pid==response.host_pid&&native.process.is_live())&&entry.owner.process.is_live()).map_or(0,|entry|entry.owner.guest_pid);
     response.host_pid=0;
    }
    Ok(())
@@ -277,9 +305,9 @@ impl Controller {
   if self.stop.load(Ordering::Acquire)||!self.process.is_live()||!owner.process.is_live()||owner.guest_pid<=0{return Err(error(libc::ESRCH));}
   self.state.retire_dead()?;
   let mut owners=self.state.owners.lock().unwrap();
-  if let Some(holder)=owners.get(&key(owner.process)){if holder.owner!=owner{return Err(error(libc::EINVAL));}if !holder.process.is_live(){return Err(error(libc::ECHILD));}return Ok(holder.process);}
+  if let Some(holder)=owners.get(&key(owner.process)){if holder.owner!=owner{return Err(error(libc::EINVAL));}let native=holder.native()?;if !native.process.is_live(){return Err(error(libc::ECHILD));}return Ok(native.process);}
   if owners.values().any(|entry|entry.owner.guest_pid==owner.guest_pid&&entry.owner.process.is_live()){return Err(error(libc::EEXIST));}
-  let holder=Holder::spawn(&self.config,owner,self.process)?;let process=holder.process;owners.insert(key(owner.process),holder);Ok(process)
+  let holder=Holder::spawn(&self.config,owner,self.process)?;let process=holder.native()?.process;owners.insert(key(owner.process),holder);Ok(process)
  }
  /// Native exec handoff retires old blocking requests, while keeping the
  /// same process's file-backed locks and cached holder descriptors.

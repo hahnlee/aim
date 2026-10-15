@@ -373,7 +373,8 @@ pub fn pin_guest(fd:i32)->Result<Pinned,crate::errno::Errno>{
         let mut stat:libc::stat=unsafe{std::mem::zeroed()};
         if unsafe{libc::fstat(fd,&mut stat)}<0{return Err(std::io::Error::last_os_error());}
         socket_allowed=stat.st_mode&libc::S_IFMT==libc::S_IFSOCK&&matches!(kind,None|Some(Kind::Sock(_)))&&!super::fuse_device::is_device(fd)&&super::fuse_client::get(fd).is_none();
-        let held=unsafe{libc::fcntl(fd,libc::F_DUPFD_CLOEXEC,0)};
+        // Straight into the hidden range, so that hiding moves nothing.
+        let held=unsafe{libc::fcntl(fd,libc::F_DUPFD_CLOEXEC,hidden_base())};
         if held<0{return Err(std::io::Error::last_os_error());}
         Ok(unsafe{std::os::fd::OwnedFd::from_raw_fd(held)})
     }).map_err(|error|crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
@@ -805,7 +806,7 @@ static HIDDEN: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 pub fn hide(fd: i32) -> i32 {
     let base = hidden_base();
     // SAFETY: duplicating our own fd, then closing the original.
-    let high = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, base) };
+    let high = if fd >= base { -1 } else { unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, base) } };
     let fd = if high >= 0 {
         unsafe { libc::close(fd) };
         high

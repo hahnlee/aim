@@ -38,6 +38,7 @@ fn enable(pin:&Pinned,arg:u64)->Result<i64,Errno>{
  if stat.st_mode&libc::S_IFMT==libc::S_IFDIR{return Err(errno::EISDIR);}
  if stat.st_mode&libc::S_IFMT!=libc::S_IFREG{return Err(errno::EINVAL);}
  if crate::vfs::on_read_only_root(stat.st_dev){return Err(errno::EROFS);}
+ if !super::regular_file::verity_capable(stat.st_dev)?{return Err(errno::EOPNOTSUPP);}
  let Some(Kind::Regular(description))=pin.kind()else{return Err(errno::ENOTTY)};
  super::binder::drain_regular_scm(&description.identity.to_bytes()).map_err(|error|if error==errno::EAGAIN{26}else{error})?;
  let admission=description.store.lock_inode(&pin.descriptor()).map_err(core)?;

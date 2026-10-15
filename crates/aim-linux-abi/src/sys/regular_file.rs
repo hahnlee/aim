@@ -4,7 +4,7 @@ use aim_storage::{fsverity::{Store,Error},inode_lease::{Identity,Inode,WriterLea
 use std::{fs::File,io::Read,os::{fd::{AsRawFd,BorrowedFd,FromRawFd},unix::{ffi::OsStrExt,fs::OpenOptionsExt}},path::{Path,PathBuf},sync::{Arc,OnceLock}};
 fn io(error:std::io::Error)->Errno{errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))}
 fn core(error:Error)->Errno{match error{Error::Linux(error)=>error,Error::Io(error)=>io(error)}}
-struct Configuration{store:Arc<Store>,leases:PathBuf}
+struct Configuration{store:Arc<Store>,leases:PathBuf,dev:i32}
 static CONFIGURATION:OnceLock<Result<Option<Configuration>,Errno>>=OnceLock::new();
 fn configuration()->Result<Option<&'static Configuration>,Errno>{
  match CONFIGURATION.get_or_init(||{
@@ -31,7 +31,10 @@ fn load_configuration(runtime:&Path)->Result<Option<Configuration>,Errno>{
   if path.is_empty()||path.contains(&0)||path.len()>4096{return Err(errno::EINVAL);}
   let path=PathBuf::from(std::ffi::OsStr::from_bytes(path));
   if !path.is_absolute()||!std::fs::symlink_metadata(&path).map_err(io)?.is_dir()||std::fs::canonicalize(&path).map_err(io)?!=path{return Err(errno::EINVAL);}
-  let leases=runtime.join("fs-verity-leases");let store=Arc::new(Store::new(&path,&leases).map_err(core)?);Ok(Some(Configuration{store,leases}))
+  // Verity lives on the filesystem of its proofs, the data volume; like
+  // Linux's tmpfs, the runtime directory's files cannot have it.
+  let dev={use std::os::unix::fs::MetadataExt;std::fs::metadata(&path).map_err(io)?.dev()as i32};
+  let leases=runtime.join("fs-verity-leases");let store=Arc::new(Store::new(&path,&leases).map_err(core)?);Ok(Some(Configuration{store,leases,dev}))
 }
 pub struct Description{pub flags:u64,pub identity:Identity,pub writer:Option<WriterLease>,pub store:Arc<Store>,inode:Inode,admission:aim_storage::fsverity::RetainedAdmission}
 impl Description{
@@ -49,13 +52,18 @@ pub fn adopt(fd:i32,flags:u64)->Result<Option<Arc<Description>>,Errno>{
  let mut stat:libc::stat=unsafe{std::mem::zeroed()};if unsafe{libc::fstat(fd,&mut stat)}<0{return Err(errno::last());}
  if stat.st_mode&libc::S_IFMT!=libc::S_IFREG{return Ok(None);}
  let Some(configuration)=configuration()?else{return Ok(None)};
+ // A file that cannot have verity needs no admission, as on Linux.
+ if stat.st_dev!=configuration.dev{return Ok(None);}
  Description::new(unsafe{BorrowedFd::borrow_raw(fd)},flags,configuration.store.clone()).map(Some)
 }
 pub(crate) fn adopt_kernel(fd:BorrowedFd<'_>,flags:u64)->Result<Option<Arc<Description>>,Errno>{adopt(fd.as_raw_fd(),flags)}
 pub(crate) fn configured_store()->Result<Option<Arc<Store>>,Errno>{configuration().map(|configuration|configuration.map(|configuration|configuration.store.clone()))}
+/// Whether files on host device `dev` can have verity.
+pub(super) fn verity_capable(dev:i32)->Result<bool,Errno>{Ok(configuration()?.is_some_and(|configuration|configuration.dev==dev))}
 pub(super) fn verity_stat(stat:&libc::stat)->Result<Option<bool>,Errno>{
  if stat.st_mode&libc::S_IFMT!=libc::S_IFREG{return Ok(None);}
  let Some(configuration)=configuration()?else{return Ok(None)};
+ if stat.st_dev!=configuration.dev{return Ok(Some(false));}
  let identity=Identity{dev:stat.st_dev as u32 as u64,ino:stat.st_ino,generation:stat.st_gen,birth_seconds:stat.st_birthtime,birth_nanoseconds:stat.st_birthtime_nsec};
  configuration.store.lookup(identity).map(|metadata|Some(metadata.is_some())).map_err(core)
 }

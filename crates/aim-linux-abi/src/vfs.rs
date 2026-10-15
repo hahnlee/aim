@@ -21,7 +21,7 @@
 //!   directory does (zygote's tmpfs over `/data/user` hides the path map's
 //!   `/data/user/0`).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
@@ -136,6 +136,8 @@ fn origin_visible(id:&str,receiving:&[aim_storage::mount_namespace::MountRecord]
     let target=receiving.iter().filter(|mount|mount.guest!=guest&&(mount.guest=="/"||below(&mount.guest,guest).is_some())).max_by_key(|mount|(mount.guest.len(),mount.id)).ok_or(errno::EIO)?;
     Ok(origin.parent_shared!=0&&(target.shared==origin.parent_shared||target.master==origin.parent_shared))
 }
+/// The mount table lives in the boot's runtime directory, which no boot
+/// outlives: the rename publishes it whole and nothing is flushed to disk.
 fn publish_fuse_route(guest:&str,host:&Path,source:&str,route:Option<&FuseRoute>)->Result<(),Errno>{
     if mount_propagation(guest)!=Propagation::Shared{return Ok(());}
     let _lock=fuse_table_lock()?;let mut lines=fuse_table_lines()?;
@@ -148,9 +150,8 @@ fn publish_fuse_route(guest:&str,host:&Path,source:&str,route:Option<&FuseRoute>
     let path=fuse_table().ok_or(errno::ENODEV)?;let temporary=path.with_extension(format!("{}.new",std::process::id()));
     use std::io::Write as _;
     let mut output=std::fs::OpenOptions::new().create(true).truncate(true).write(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).mode(0o600).open(&temporary).map_err(|_|errno::EIO)?;
-    output.write_all(lines.join("\n").as_bytes()).map_err(|_|errno::EIO)?;output.sync_all().map_err(|_|errno::EIO)?;
-    std::fs::rename(&temporary,&path).map_err(|_|errno::EIO)?;
-    std::fs::File::open(path.parent().ok_or(errno::EIO)?).and_then(|directory|directory.sync_all()).map_err(|_|errno::EIO)
+    output.write_all(lines.join("\n").as_bytes()).map_err(|_|errno::EIO)?;
+    std::fs::rename(&temporary,&path).map_err(|_|errno::EIO)
 }
 fn publish_plain_mount(guest:&str,host:&Path,area:Area,source:&str,fstype:&str,bind_source:Option<&str>)->Result<(),Errno>{
     if mount_propagation(guest)!=Propagation::Shared{return Ok(());}
@@ -160,8 +161,7 @@ fn publish_plain_mount(guest:&str,host:&Path,area:Area,source:&str,fstype:&str,b
     let _lock=fuse_table_lock()?;let mut lines=fuse_table_lines()?;lines.retain(|line|line.split('\t').next()!=Some(guest));lines.push(fields.join("\t"));
     let path=fuse_table().ok_or(errno::ENODEV)?;let temporary=path.with_extension(format!("{}.new",std::process::id()));use std::io::Write as _;
     let mut output=std::fs::OpenOptions::new().create(true).truncate(true).write(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).mode(0o600).open(&temporary).map_err(|_|errno::EIO)?;
-    output.write_all(lines.join("\n").as_bytes()).map_err(|_|errno::EIO)?;output.sync_all().map_err(|_|errno::EIO)?;std::fs::rename(&temporary,&path).map_err(|_|errno::EIO)?;
-    std::fs::File::open(path.parent().ok_or(errno::EIO)?).and_then(|directory|directory.sync_all()).map_err(|_|errno::EIO)
+    output.write_all(lines.join("\n").as_bytes()).map_err(|_|errno::EIO)?;std::fs::rename(&temporary,&path).map_err(|_|errno::EIO)
 }
 pub fn refresh_fuse_mounts()->Result<(),Errno>{
     refresh_namespace()?;
@@ -1070,11 +1070,11 @@ impl HostPathView {
         if let Some(guest) = crate::sys::tty::pts_guest(s) { return Some(guest); }
         let mut best: Option<(usize, usize, String)> = None;
         let canonical = self.canonical_mounts.get_or_init(|| self.mounts.iter()
-            .filter_map(|(guest, path)| path.canonicalize().ok().map(|path| (guest.clone(), path)))
+            .filter_map(|(guest, path)| canonical_host(path).map(|path| (guest.clone(), path)))
             .collect());
         // The implicit root competes with bind aliases of the same host tree;
         // a later alias cannot rename ordinary paths already rooted at `/`.
-        let root = self.canonical_root.get_or_init(|| self.root.canonicalize().unwrap_or_else(|_| self.root.clone()));
+        let root = self.canonical_root.get_or_init(|| canonical_host(&self.root).unwrap_or_else(|| self.root.clone()));
         let roots = [("/".to_owned(), self.root.clone()), ("/".to_owned(), root.clone())];
         for (guest, prefix) in self.mounts.iter().chain(canonical.iter()).chain(roots.iter()) {
             let Ok(rest) = host.strip_prefix(prefix) else { continue; };
@@ -1087,6 +1087,17 @@ impl HostPathView {
         }
         best.map(|(_, _, guest)| guest)
     }
+}
+
+/// The canonical form of a mount's host path. A path that was already
+/// canonical stays so and is resolved once per process; one through a
+/// symlink is resolved again each time, so a retargeted alias is seen.
+fn canonical_host(path: &Path) -> Option<PathBuf> {
+    static CANONICAL: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+    if CANONICAL.lock().unwrap().contains(path) { return Some(path.to_path_buf()); }
+    let canonical = path.canonicalize().ok()?;
+    if canonical == path { CANONICAL.lock().unwrap().insert(canonical.clone()); }
+    Some(canonical)
 }
 
 /// Guest path of a host path, if it lies inside the root or a mapped area.
