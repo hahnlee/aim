@@ -34,8 +34,8 @@ pub struct Client {
     controller: ProcessIdentity,
     tickets: Mutex<HashMap<([u8; 36], i32), u64>>,
     next: AtomicU64,
-    /// The holder may keep locks this client never registered (an attach
-    /// after exec), so every close must ask it.
+    /// The holder has files this client never registered (registered before
+    /// an exec), which may hold locks: every close must ask it.
     inherited: bool,
 }
 impl Client {

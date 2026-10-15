@@ -174,6 +174,15 @@ struct PageState { ready: bool, protection: i32 }
 struct Slot { readers: AtomicUsize, mapping: AtomicPtr<Mapping> }
 impl Slot { const fn new() -> Self { Self { readers: AtomicUsize::new(RETIRED), mapping: AtomicPtr::new(std::ptr::null_mut()) } } }
 static REGISTRY: [Slot; SLOTS] = [const { Slot::new() }; SLOTS];
+/// Slots at or above this index have never held a mapping (slots are taken
+/// lowest first), and the number that hold one now: a page fault or a kernel
+/// copy looks only at slots that can hold a mapping.
+static HIGH: AtomicUsize = AtomicUsize::new(0);
+static USED: AtomicUsize = AtomicUsize::new(0);
+fn used_slots() -> &'static [Slot] {
+    if USED.load(Ordering::Acquire) == 0 { return &[]; }
+    &REGISTRY[..HIGH.load(Ordering::Acquire)]
+}
 static WRITERS: Mutex<()> = Mutex::new(());
 static MAPPINGS: Mutex<Vec<Registration>> = Mutex::new(Vec::new());
 static LIFECYCLE: Mutex<()> = Mutex::new(());
@@ -217,7 +226,7 @@ pub fn exclusive_mutation()->VmExclusive{VmExclusive(VM_EPOCH.write().unwrap())}
 pub fn retain(registration: Registration) { MAPPINGS.lock().unwrap().push(registration); }
 pub fn wait_pending(start:u64,length:u64) {
     loop {
-        let intent=(0..SLOTS).find_map(|index| {
+        let intent=(0..HIGH.load(Ordering::Acquire)).find_map(|index| {
             let slot=&REGISTRY[index];let readers=slot.readers.load(Ordering::Acquire);
             if readers==RETIRED{return None;}
             if slot.readers.compare_exchange(readers,readers+1,Ordering::Acquire,Ordering::Relaxed).is_err(){return None;}
@@ -636,6 +645,7 @@ impl Registration {
             std::thread::yield_now();
         }
         slot.mapping.store(std::ptr::null_mut(), Ordering::Release);
+        USED.fetch_sub(1, Ordering::Release);
         unsafe { drop(Box::from_raw(self.mapping)); }
         self.mapping = std::ptr::null_mut();
     }
@@ -673,7 +683,7 @@ fn register_inner(base: u64, length: u64, offset: u64, protection: i32, shared: 
     }
     if source.proof.is_some() && shared && protection & libc::PROT_WRITE != 0 { return Err(io::Error::from_raw_os_error(libc::EACCES)); }
     let _writer = WRITERS.lock().unwrap();
-    for slot in &REGISTRY {
+    for slot in &REGISTRY[..HIGH.load(Ordering::Acquire)] {
         let ptr = slot.mapping.load(Ordering::Acquire);
         if !ptr.is_null() { let map = unsafe { &*ptr }; if base < map.base + map.length && map.base < base + length { return Err(io::Error::from_raw_os_error(libc::EEXIST)); } }
     }
@@ -681,12 +691,14 @@ fn register_inner(base: u64, length: u64, offset: u64, protection: i32, shared: 
     let mapping = Box::into_raw(Box::new(Mapping { generation:NEXT_GENERATION.fetch_add(1,Ordering::Relaxed),base, length, offset, logical_protection: protection, shared, source, retired: AtomicBool::new(false), failed:AtomicBool::new(false), pending:AtomicBool::new(false),pending_gate:Mutex::new(false),pending_wake:std::sync::Condvar::new(), operation: Mutex::new(vec![PageState { ready: false, protection }; (length / PAGE) as usize]) }));
     REGISTRY[slot].mapping.store(mapping, Ordering::Release);
     REGISTRY[slot].readers.store(0, Ordering::Release);
+    HIGH.fetch_max(slot + 1, Ordering::Release);
+    USED.fetch_add(1, Ordering::Release);
     Ok(Registration { slot, mapping })
 }
 
 /// No allocation, filesystem call, mutex, or Arc clone. Bounded registry scan.
 pub fn fault_intent(address: u64, access: Access) -> Option<FaultIntent> {
-    for (index, slot) in REGISTRY.iter().enumerate() {
+    for (index, slot) in used_slots().iter().enumerate() {
         let mut readers = slot.readers.load(Ordering::Acquire);
         loop {
             if readers == RETIRED || readers == RETIRED - 1 { break; }

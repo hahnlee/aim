@@ -343,13 +343,13 @@ pub(super) fn is_path_fd(fd: i32) -> bool {
 
 /// read/readv on an fd with Linux state. None: a plain host fd.
 fn special_read(fd:i32,iov:&[libc::iovec])->Option<i64>{
-    let pin=match fdtab::pin_guest(fd){Ok(pin)=>pin,Err(error)=>return Some(-(error as i64))};
+    let pin=match fdtab::pin_guest_io(fd){Ok(pin)=>pin,Err(error)=>return Some(-(error as i64))};
     if let Err(error)=prepare_iov(&pin,iov,false){return Some(-(error as i64));}
     use std::os::fd::AsRawFd;let actual=pin.descriptor().as_raw_fd();
     Some(special_read_kernel(&pin,iov).unwrap_or_else(||errno::check(unsafe{libc::readv(actual,iov.as_ptr(),iov.len() as i32)} as i64)))
 }
 fn special_write(fd:i32,iov:&[libc::iovec])->Option<i64>{
-    let pin=match fdtab::pin_guest(fd){Ok(pin)=>pin,Err(error)=>return Some(-(error as i64))};
+    let pin=match fdtab::pin_guest_io(fd){Ok(pin)=>pin,Err(error)=>return Some(-(error as i64))};
     if let Err(error)=prepare_iov(&pin,iov,true){return Some(-(error as i64));}
     use std::os::fd::AsRawFd;let actual=pin.descriptor().as_raw_fd();
     if let Some(Kind::Regular(description))=pin.kind(){
@@ -363,7 +363,7 @@ fn special_write(fd:i32,iov:&[libc::iovec])->Option<i64>{
     }))
 }
 fn special_pio(fd:i32,buf:u64,len:usize,pos:i64,write:bool)->Option<i64>{
-    let pin=match fdtab::pin_guest(fd){Ok(pin)=>pin,Err(error)=>return Some(-(error as i64))};
+    let pin=match fdtab::pin_guest_io(fd){Ok(pin)=>pin,Err(error)=>return Some(-(error as i64))};
     if let Err(error)=prepare_iov(&pin,&one(buf,len),write){return Some(-(error as i64));}
     use std::os::fd::AsRawFd;let actual=pin.descriptor().as_raw_fd();
     if let Some(Kind::Regular(description))=pin.kind(){
@@ -619,7 +619,7 @@ fn charge_iov(fd: i32, v: &[libc::iovec]) -> Result<Cow<'_, [libc::iovec]>, i64>
 /// preadv/pwritev (69/70) and preadv2/pwritev2 (286/287; flags ignored).
 pub fn preadv(write:bool,a:[u64;6])->i64{
     let fd=a[0]as i32;let pos=a[3]as i64;
-    let pin=match fdtab::pin_guest(fd){Ok(pin)=>pin,Err(error)=>return -(error as i64)};
+    let pin=match fdtab::pin_guest_io(fd){Ok(pin)=>pin,Err(error)=>return -(error as i64)};
     let vectors=match iovs(a[1],a[2]){Ok(vectors)=>vectors,Err(error)=>return error};
     let vectors=vectors.as_slice();
     if let Err(error)=prepare_iov(&pin,vectors,write){return -(error as i64);}
@@ -642,7 +642,7 @@ pub fn preadv(write:bool,a:[u64;6])->i64{
 }
 
 pub fn lseek(a: [u64; 6]) -> i64 {
-    let pin=match fdtab::pin_guest(a[0]as i32){Ok(pin)=>pin,Err(error)=>return -(error as i64)};
+    let pin=match fdtab::pin_guest_io(a[0]as i32){Ok(pin)=>pin,Err(error)=>return -(error as i64)};
     use std::os::fd::AsRawFd;
     if let Some(Kind::Regular(description))=pin.kind(){
         let whence=match a[2]as i32{3=>4,4=>3,whence=>whence};
@@ -746,7 +746,7 @@ fn attrs_host(r: &vfs::Resolved) -> attrs::Host<'_> {
 
 /// Host stat of an fd, with the guest's ownership view.
 fn stat_fd(fd:i32)->Result<libc::stat,i64>{
-    let pin=fdtab::pin_guest(fd).map_err(|error|-(error as i64))?;
+    let pin=fdtab::pin_guest_io(fd).map_err(|error|-(error as i64))?;
     use std::os::fd::AsRawFd;stat_fd_kernel(pin.descriptor().as_raw_fd())
 }
 pub(super) fn stat_fd_kernel(fd:i32)->Result<libc::stat,i64>{

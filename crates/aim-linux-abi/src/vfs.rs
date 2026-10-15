@@ -59,9 +59,9 @@ pub enum Area {
     Input,
 }
 
-#[derive(Clone)]
+#[derive(Clone,PartialEq)]
 pub struct MountOrigin{pub namespace:String,pub id:u64,pub parent_shared:u64,pub shared:u64,pub master:u64}
-#[derive(Clone)]
+#[derive(Clone,PartialEq)]
 struct Mount {
     /// Normalized absolute guest path, no trailing `/`.
     guest: String,
@@ -163,12 +163,30 @@ fn publish_plain_mount(guest:&str,host:&Path,area:Area,source:&str,fstype:&str,b
     let mut output=std::fs::OpenOptions::new().create(true).truncate(true).write(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).mode(0o600).open(&temporary).map_err(|_|errno::EIO)?;
     output.write_all(lines.join("\n").as_bytes()).map_err(|_|errno::EIO)?;std::fs::rename(&temporary,&path).map_err(|_|errno::EIO)
 }
+/// What the last refresh read and made: while the shared table (replaced
+/// whole by rename), the namespace records and this process's mounts and
+/// propagation are unchanged, a refresh would make the same mounts again.
+struct FuseRefresh{table:Option<(u64,i64,i64,i64,i64)>,records:std::sync::Arc<Vec<aim_storage::mount_namespace::MountRecord>>,rules:Vec<(String,Propagation)>,private:bool,mounts:Vec<Mount>}
+static LAST_FUSE_REFRESH:Mutex<Option<FuseRefresh>>=Mutex::new(None);
+fn fuse_table_identity()->Result<Option<(u64,i64,i64,i64,i64)>,Errno>{
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::metadata(fuse_table().ok_or(errno::ENODEV)?){
+        Ok(stat)=>Ok(Some((stat.ino(),stat.size()as i64,stat.mtime(),stat.mtime_nsec(),stat.ctime_nsec()))),
+        Err(error)if error.kind()==std::io::ErrorKind::NotFound=>Ok(None),
+        Err(_)=>Err(errno::EIO),
+    }
+}
 pub fn refresh_fuse_mounts()->Result<(),Errno>{
     refresh_namespace()?;
     if fuse_table().is_none(){return Ok(());}
     let namespace=NAMESPACE_VIEW.lock().unwrap().as_ref().map(|view|view.owner.clone()).ok_or(errno::ENODEV)?;
     let receiving=NAMESPACE_VIEW.lock().unwrap().as_ref().map(|view|view.records.clone()).ok_or(errno::ENODEV)?;
-    let _lock=fuse_table_lock()?;let lines=fuse_table_lines()?;let mut mounts=vfs().mounts.write().unwrap();
+    let mut last=LAST_FUSE_REFRESH.lock().unwrap();
+    let table=fuse_table_identity()?;
+    if last.as_ref().is_some_and(|last|last.table==table&&std::sync::Arc::ptr_eq(&last.records,&receiving)&&last.private==PRIVATE_MOUNTS.load(Ordering::Acquire)
+        &&*PROPAGATION_RULES.lock().unwrap()==last.rules&&*vfs().mounts.read().unwrap()==last.mounts){return Ok(());}
+    *last=None;
+    let _lock=fuse_table_lock()?;let table=fuse_table_identity()?;let lines=fuse_table_lines()?;let mut mounts=vfs().mounts.write().unwrap();
     let old=mounts.iter().filter(|mount|mount.shared_fuse).map(|mount|(mount.guest.clone(),mount.seq)).collect::<HashMap<_,_>>();
     mounts.retain(|mount|(!mount.shared_fuse&&!mount.projected_fuse)||mount_propagation(&mount.guest)==Propagation::Private);
     let mut seq=mounts.iter().map(|mount|mount.seq).max().unwrap_or(0);
@@ -185,7 +203,8 @@ pub fn refresh_fuse_mounts()->Result<(),Errno>{
         }
     }
     project_mounts(&mut mounts,mount_propagation);
-    mounts.sort_by(|a,b|b.guest.len().cmp(&a.guest.len()).then(b.seq.cmp(&a.seq)));Ok(())
+    mounts.sort_by(|a,b|b.guest.len().cmp(&a.guest.len()).then(b.seq.cmp(&a.seq)));
+    *last=Some(FuseRefresh{table,records:receiving,rules:PROPAGATION_RULES.lock().unwrap().clone(),private:PRIVATE_MOUNTS.load(Ordering::Acquire),mounts:mounts.clone()});Ok(())
 }
 fn project_mounts(mounts:&mut Vec<Mount>,propagation:impl Fn(&str)->Propagation){
     let mut seq=mounts.iter().map(|mount|mount.seq).max().unwrap_or(0);
@@ -768,6 +787,15 @@ pub fn lookup(guest: &str) -> (PathBuf, Area) {
 /// host prefix (the area itself rather than a bind into it), or through
 /// the image root; in a tmpfs of this process, the host path (private to
 /// the process and its children).
+/// `path` below `prefix`, as `Path::strip_prefix`; a byte comparison first
+/// rules out most of the mounts a lookup goes through.
+fn strip_host_prefix<'p>(path: &'p Path, prefix: &Path) -> Option<&'p Path> {
+    let bytes = prefix.as_os_str().as_bytes();
+    let trimmed = if bytes.len() > 1 { bytes.strip_suffix(b"/").unwrap_or(bytes) } else { bytes };
+    if !path.as_os_str().as_bytes().starts_with(trimmed) { return None; }
+    path.strip_prefix(prefix).ok()
+}
+
 pub fn attr_key(guest: &str) -> String {
     if !guest.starts_with('/') {
         return guest.to_string();
@@ -778,7 +806,7 @@ pub fn attr_key(guest: &str) -> String {
     let area = mounts
         .iter()
         .filter(|m| !m.own)
-        .filter_map(|m| Some((m, host.strip_prefix(&m.host).ok()?)))
+        .filter_map(|m| Some((m, strip_host_prefix(&host, &m.host)?)))
         .min_by_key(|(m, _)| (m.host.as_os_str().len(), m.guest.len()));
     if let Some((m, rest)) = area {
         return if rest.as_os_str().is_empty() {
@@ -1077,7 +1105,7 @@ impl HostPathView {
         let root = self.canonical_root.get_or_init(|| canonical_host(&self.root).unwrap_or_else(|| self.root.clone()));
         let roots = [("/".to_owned(), self.root.clone()), ("/".to_owned(), root.clone())];
         for (guest, prefix) in self.mounts.iter().chain(canonical.iter()).chain(roots.iter()) {
-            let Ok(rest) = host.strip_prefix(prefix) else { continue; };
+            let Some(rest) = strip_host_prefix(host, prefix) else { continue; };
             let len = prefix.as_os_str().len();
             if best.as_ref().is_none_or(|b| len > b.0 || (len == b.0 && guest.len() < b.1)) {
                 let path = if rest.as_os_str().is_empty() { guest.clone() }
