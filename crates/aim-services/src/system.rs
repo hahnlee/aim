@@ -1669,18 +1669,9 @@ impl System {
         let fail =
             |message: String| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, message);
         self.check_package_bootstrap(bridge)?;
-        let policies = owner
-            .loaded_packages()
-            .iter()
-            .map(|(name, code)| {
-                bridge
-                    .library_policy(name, code.package.target_sdk_version)
-                    .map(|policy| (name.clone(), policy))
-                    .map_err(|error| {
-                        fail(format!("boot library policy failed for {name}: {error:?}"))
-                    })
-            })
-            .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+        let policies = bridge
+            .library_policies(owner.loaded_packages().iter().map(|(name, code)| (name.as_str(), code.package.target_sdk_version)))
+            .map_err(|(name, error)| fail(format!("boot library policy failed for {name}: {error:?}")))?;
         owner
             .complete_library_dependencies(&|name, _| {
                 policies

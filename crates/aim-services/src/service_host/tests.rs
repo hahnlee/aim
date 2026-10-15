@@ -250,6 +250,7 @@ struct Owner {
     domain_reply: AtomicUsize,
     users_reply: AtomicUsize,
     apex_reply: AtomicUsize,
+    batches: AtomicUsize,
     gid: i32,
 }
 impl Service for Owner {
@@ -259,6 +260,31 @@ impl Service for Owner {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         assert_eq!(call.sender_euid, 1000);
         call.data.enforce_interface(bootstrap::DESCRIPTOR)?;
+        if call.code == bootstrap::TRANSACT_BATCH {
+            // PackageBootstrapBridge.transactBatch: each call dispatched on its own.
+            self.batches.fetch_add(1, Ordering::SeqCst);
+            let calls = aim_service_aidl::read_byte_array(&mut call.data)?.unwrap();
+            let mut calls = aim_binder_host::parcel::Reader::new(&calls, &[]);
+            let count = calls.read_i32()?;
+            let mut replies = Parcel::new();
+            replies.write_i32(count);
+            for _ in 0..count {
+                let code = calls.read_i32()? as u32;
+                let data = aim_service_aidl::read_byte_array(&mut calls)?.unwrap();
+                let reply = self.transact(&mut Call {
+                    code,
+                    flags: 0,
+                    sender_pid: call.sender_pid,
+                    sender_euid: call.sender_euid,
+                    data: aim_binder_host::parcel::Reader::new(&data, &[]),
+                })?;
+                aim_service_aidl::write_byte_array(&mut replies, Some(reply.data()));
+            }
+            let mut reply = Parcel::new();
+            reply.write_no_exception();
+            aim_service_aidl::write_byte_array(&mut reply, Some(replies.data()));
+            return Ok(reply);
+        }
         if call.code == bootstrap::IS_TEST_BASE_ON_BOOTCLASSPATH {
             self.bcp_reads.fetch_add(1, Ordering::SeqCst);
         }
@@ -1632,6 +1658,7 @@ fn exercise_bootstrap_on(
         domain_reply: AtomicUsize::new(0),
         users_reply: AtomicUsize::new(0),
         apex_reply: AtomicUsize::new(0),
+        batches: AtomicUsize::new(0),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 3003,
@@ -1664,6 +1691,7 @@ fn exercise_bootstrap_on(
         domain_reply: AtomicUsize::new(0),
         users_reply: AtomicUsize::new(0),
         apex_reply: AtomicUsize::new(0),
+        batches: AtomicUsize::new(0),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 999,
@@ -1799,9 +1827,11 @@ fn exercise_bootstrap_on(
     let reads = owner.query_calls.lock().unwrap().len();
     assert!(old.resolve_query_context(published.owner(), bad).is_err());
     assert_eq!(owner.query_calls.lock().unwrap().len(), reads);
+    let batches = owner.batches.load(Ordering::SeqCst);
     let resolved = old
         .resolve_query_context(published.owner(), context.clone())
         .unwrap();
+    assert_eq!(owner.batches.load(Ordering::SeqCst), batches + 1, "one transaction reads every live owner");
     let capture = crate::package::scan_snapshot::query_state::Capture::new(
         published.clone(),
         resolved.clone(),
@@ -2449,6 +2479,7 @@ fn exercise_bootstrap_on(
         domain_reply: AtomicUsize::new(0),
         users_reply: AtomicUsize::new(0),
         apex_reply: AtomicUsize::new(0),
+        batches: AtomicUsize::new(0),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 3004,

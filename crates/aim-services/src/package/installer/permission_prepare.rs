@@ -38,11 +38,11 @@ struct Prepared {
     names: Vec<String>,
     retired: Mutex<bool>,
 }
+/// The original library dependency policy of each named package.
 pub type LibraryDependencyPolicy = Arc<
     dyn Fn(
-            &str,
-            &crate::package::pkg::AndroidPackage,
-        ) -> Result<crate::package::libraries::Policy, String>
+            &mut dyn Iterator<Item = (&str, &crate::package::pkg::AndroidPackage)>,
+        ) -> Result<BTreeMap<String, crate::package::libraries::Policy>, String>
         + Send
         + Sync,
 >;
@@ -255,18 +255,10 @@ impl Owner {
             self.library_policy.lock().unwrap().clone().ok_or_else(|| {
                 illegal("installer original library dependency policy unavailable")
             })?;
-        let policies = admission
-            .owner
-            .loaded_packages()
-            .iter()
-            .map(|(name, code)| {
-                source(name, &code.package)
-                    .map(|policy| (name.clone(), policy))
-                    .map_err(|error| {
-                        illegal(format!("installer library policy for {name}: {error}"))
-                    })
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let policies = source(
+            &mut admission.owner.loaded_packages().iter().map(|(name, code)| (name.as_str(), &code.package)),
+        )
+        .map_err(|error| illegal(format!("installer library policy: {error}")))?;
         admission
             .owner
             .complete_library_dependencies(&|name, _| {

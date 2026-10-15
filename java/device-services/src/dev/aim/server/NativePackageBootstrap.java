@@ -195,9 +195,18 @@ public final class NativePackageBootstrap implements NativePackageManagerService
                         new PackageVersionPage(Objects.requireNonNull(boot.getVersionPage())));
                 snapshots.refresh();
             } catch (IOException failure) { throw new IllegalStateException("native full replica capture failed", failure); }
+            // A version's boot state never changes; queries cluster on recent versions.
+            var states = new java.util.LinkedHashMap<Long, State>(8, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(Map.Entry<Long, State> eldest) { return size() > 4; }
+            };
             computers = scope -> {
                 try {
-                    State captured = State.read(boot.getBootstrapStateForVersion(scope.getVersion()));
+                    State captured;
+                    synchronized (states) { captured = states.get(scope.getVersion()); }
+                    if (captured == null) {
+                        captured = State.read(boot.getBootstrapStateForVersion(scope.getVersion()));
+                        synchronized (states) { states.put(scope.getVersion(), captured); }
+                    }
                     return NativePMInterfaceProducerGroups.computer(scope, scope.getVersion(),
                             captured.webDisabled(), captured.safeMode(),captured.platformPackage(),context,
                             Objects.requireNonNull(com.android.server.LocalServices.getService(com.android.server.pm.UserManagerInternal.class)),policy);
@@ -206,7 +215,7 @@ public final class NativePackageBootstrap implements NativePackageManagerService
             bridge.installPackageShellReadOwner(context,snapshots);
             bridge.installInstallerPermissionOwner(snapshots, snapshotOwner, state.crossUser());
             IPackageInternalHost internalHost = NativePackageCapabilities.attach(boot.getInternalHost());
-            var mutation = new NativePackageStateMutation(new NativePackageMutationPublisher(internalHost, snapshotOwner, state.crossUser()));
+            var mutation = new NativePackageStateMutation(new NativePackageMutationPublisher(internalHost, snapshotOwner, snapshots, state.crossUser()));
             var checksums = new com.android.server.pm.NativePackageChecksums(context, snapshots);
             var loading = new NativePackageLoadingProgress(context, snapshots);
             android.content.ComponentName instantResolver;

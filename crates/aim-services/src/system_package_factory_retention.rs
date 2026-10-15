@@ -8,10 +8,8 @@ pub struct Factory {
     code:Arc<crate::package::scan::LoadedPackage>,
 }
 pub fn capture(owner:&SigningScan,name:&str,usage:&Usage,bridge:&Arc<Bridge>)->Result<Factory>{
-    let policies=owner.loaded_packages().iter().map(|(name,code)|{
-        bridge.library_policy(name,code.package.target_sdk_version).map(|policy|(name.clone(),policy))
-            .map_err(|error|failure(format!("factory retained library policy: {error:?}")))
-    }).collect::<Result<BTreeMap<_,_>>>()?;
+    let policies=bridge.library_policies(owner.loaded_packages().iter().map(|(name,code)|(name.as_str(),code.package.target_sdk_version)))
+        .map_err(|(_,error)|failure(format!("factory retained library policy: {error:?}")))?;
     // Resolve the pre-replacement graph without committing effects to active users.
     let graph=owner.resolve_library_dependencies(&|name,_|{
         let policy=policies.get(name).ok_or(crate::package::libraries::ResolveError::Incomplete("factory library policy owner"))?;

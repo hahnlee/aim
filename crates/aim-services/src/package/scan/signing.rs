@@ -113,19 +113,6 @@ impl SigningScan {
         Ok(None)
     }
 
-    /// Only scoped user metadata may differ. Every other owner field must match.
-    pub(crate) fn scoped_user_metadata_changes(&self, other: &Self) -> Option<Vec<(String, bool)>> {
-        if !self.same_except_users(other){return None;}
-        let mut changed=Vec::new();
-        for setting in &self.settings.packages {
-            if self.scanned_users.get(&setting.name)!=other.scanned_users.get(&setting.name){changed.push((setting.name.clone(),false));}
-        }
-        for setting in &self.settings.disabled_system_packages {
-            if self.disabled_users.get(&setting.name)!=other.disabled_users.get(&setting.name){changed.push((setting.name.clone(),true));}
-        }
-        Some(changed)
-    }
-
     /// Equal in every owner field except scanned and disabled user states.
     pub(crate) fn same_except_users(&self, other: &Self) -> bool {
         let Self{settings,identities,libraries,package_registry,update_ownership,system_app_update_owners,installers,

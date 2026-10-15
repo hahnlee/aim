@@ -181,9 +181,10 @@ impl System {
             contexts.permission_source(),
         );
         let library_bridge = bridge.clone();
-        permission.configure_library_policy(Arc::new(move |name, package| {
-            library_bridge.library_policy(name, package.target_sdk_version)
-                .map_err(|error| format!("installer shared-library policy owner: {error:?}"))
+        permission.configure_library_policy(Arc::new(move |packages| {
+            let packages = packages.map(|(name, package)| (name, package.target_sdk_version)).collect::<Vec<_>>();
+            library_bridge.library_policies(packages.into_iter())
+                .map_err(|(name, error)| format!("installer shared-library policy owner for {name}: {error:?}"))
         }))?;
         let metadata = environment_producers::metadata(apks.clone());
         let publish = self.package_install_query_publication(

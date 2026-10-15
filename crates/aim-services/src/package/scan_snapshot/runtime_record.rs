@@ -3,6 +3,18 @@ use super::Snapshot;
 use aim_binder_host::parcel::Parcel;
 
 pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option<Vec<u8>>, String> {
+    captured_at(snapshot, snapshot.version(), name, factory, false)
+}
+
+/// This record as written at `version`, optionally without the usage times
+/// a replica takes from the usage records instead.
+pub(super) fn captured_at(
+    snapshot: &Snapshot,
+    version: u64,
+    name: &str,
+    factory: bool,
+    without_usage: bool,
+) -> Result<Option<Vec<u8>>, String> {
     let owner = snapshot.owner();
     let packages = if factory {
         &owner.settings.disabled_system_packages
@@ -12,11 +24,16 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
     let Some(setting) = packages.iter().find(|p| p.name == name) else {
         return Ok(None);
     };
-    let state = snapshot
-        .replica_runtime(name, factory)?
-        .ok_or("missing replica runtime owner")?;
+    let mut state = std::borrow::Cow::Borrowed(
+        snapshot
+            .replica_runtime(name, factory)?
+            .ok_or("missing replica runtime owner")?,
+    );
+    if without_usage {
+        state.to_mut().usage = Default::default();
+    }
     write(
-        snapshot.version(),
+        version,
         setting,
         factory,
         if factory {
@@ -25,7 +42,7 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
             owner.loaded_packages()
         }
         .contains_key(name),
-        state,
+        &state,
     )
     .map(Some)
 }

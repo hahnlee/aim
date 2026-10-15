@@ -138,7 +138,7 @@ pub(crate) fn install_user_rebase_conflict(base:&Snapshot,current:&Snapshot,cand
     normalized.refresh_library_user_inputs()?;
     latest.refresh_library_user_inputs()?;
     if normalized!=latest{
-        let before=Snapshot{version:base.version(),owner:normalized,usage:current.usage().clone(),replica_validated:false,metadata_revision:base.metadata_revision(),lineage:base.lineage.clone(),libraries:Default::default()};
+        let before=Snapshot{version:base.version(),owner:normalized,usage:current.usage().clone(),replica_validated:false,metadata_revision:base.metadata_revision(),lineage:base.lineage.clone(),libraries:Default::default(),records:Default::default()};
         return Ok(Some(format!("unmerged normalized owner: {}; targets={targets:?}, protected appIds={protected:?}",install_identity_delta(&before,current))));
     }
     for (name,user,state) in changes{candidate.set_user_state(&name,user,state)?;}
@@ -252,7 +252,7 @@ impl super::Store {
         let version=current.version().checked_add(1).filter(|version|*version<=i64::MAX as u64)
             .ok_or(super::CommitError::Snapshot(super::Error::VersionExhausted))?;
         super::validate(&owner,&usage).map_err(super::CommitError::Snapshot)?;
-        let mut next=Snapshot{version,owner,usage,replica_validated:self.replica,metadata_revision:version,lineage:current.lineage.clone(),libraries:Default::default()};
+        let mut next=Snapshot{version,owner,usage,replica_validated:self.replica,metadata_revision:version,lineage:current.lineage.clone(),libraries:Default::default(),records:Default::default()};
         if self.replica{super::validate_replica(&next).map_err(super::CommitError::Snapshot)?;}
         next.metadata_revision=super::derive_metadata_revision(&current,&next).map_err(|error|super::CommitError::Snapshot(error))?;
         let next=Arc::new(next);
@@ -278,6 +278,10 @@ impl Builder {
         let builder=self.clone();Arc::new(move|snapshot|builder.build(snapshot,Phase::AfterPermissionLifecycle))
     }
     pub fn build(&self,snapshot:&Arc<Snapshot>,phase:Phase)->Result<Context,String> {
+        let users=(self.current)()?.context().users.keys().copied().collect::<Vec<_>>();
+        self.bridge.read_ahead(live_calls(snapshot.owner(),&users),||self.build_reading(snapshot,phase))
+    }
+    fn build_reading(&self,snapshot:&Arc<Snapshot>,phase:Phase)->Result<Context,String> {
         let current=(self.current)()?;
         let scan=snapshot.owner();
         // Registration is a completed native owner, never reconstructed in map order.
@@ -425,6 +429,42 @@ impl Builder {
             filter_application_query:self.bridge.application_query_filtering(&setting.name,setting.target_sdk_version).map_err(|error|format!("install query compatibility: {error:?}"))?,
             users:inputs,syncable_authorities,domain_verification:None,uri_relative_filter_groups:Vec::new()})
     }
+}
+
+/// The live owner reads `build` makes, sent ahead in one transaction.
+fn live_calls(scan:&crate::package::scan::SigningScan,users:&[i32])->Vec<(u32,aim_binder_host::parcel::Parcel)> {
+    use crate::package::bootstrap as bridge;
+    let mut calls=Vec::new();
+    let mut package=|setting:&settings::Package,permission_id:Option<i32>|{
+        if let Some(id)=permission_id {
+            calls.push(legacy_permissions::call(id,users));
+            calls.extend(bridge::permission_gids_calls(id,users));
+        }
+        calls.push(bridge::installed_permissions_call(&setting.name));
+        calls.push(bridge::application_query_filtering_call(&setting.name,setting.target_sdk_version));
+    };
+    for (settings,factory) in [(&scan.settings.packages,false),(&scan.settings.disabled_system_packages,true)] {
+        for setting in settings {
+            let code=if factory {scan.disabled_loaded_packages()} else {scan.loaded_packages()}.get(&setting.name);
+            let id=super::boot_context::permission_uid_owner(setting,code.map(|code|code.runtime_package())).ok().flatten();
+            package(setting,id);
+        }
+    }
+    for (id,_) in scan.identities.ids.owners() {
+        if let Some(old)=scan.identities.ids.detached_setting(id) {package(&old.package,Some(id));}
+    }
+    for group in scan.identities.shared_users.values() {
+        for (_,old) in group.retained_settings() {package(&old.package,Some(group.app_id));}
+    }
+    for setting in &scan.settings.packages {
+        if let Ok(Some(code))=scan.domain_code_owner(setting) {
+            calls.push(bridge::domain_verification_restricted_call(&code.package.package_name,code.package.target_sdk_version));
+        }
+    }
+    for code in scan.disabled_loaded_packages().values() {
+        calls.push(bridge::domain_verification_restricted_call(&code.package.package_name,code.package.target_sdk_version));
+    }
+    calls
 }
 
 fn live_user_inputs(live:&legacy_permissions::State,user:i32,installed:bool,gids:Vec<i32>)->Result<UserInputs,String>{

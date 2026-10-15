@@ -22,6 +22,7 @@ pub mod shared_record;
 mod uid_record;
 pub mod user_record;
 pub(crate) mod version_page;
+mod replica_records;
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},
@@ -47,6 +48,8 @@ pub struct Snapshot {
     /// The owner's library dependency graph, validated once: the owner
     /// never changes, and every query of one package would validate all.
     libraries: std::sync::OnceLock<Result<(), String>>,
+    /// Each owner's replica records, written once on the first comparison.
+    records: std::sync::OnceLock<Result<replica_records::Records, String>>,
 }
 
 /// Exact registered UID-slot projection for the facade's retained capture.
@@ -60,6 +63,9 @@ impl Snapshot {
         -> Result<Option<(&[Option<String>], &[crate::package::model::SharedLibrary])>, String> {
         self.libraries.get_or_init(|| self.owner.validate_library_dependencies()).clone()?;
         self.owner.validated_library_dependencies(name)
+    }
+    pub(crate) fn replica_records(&self) -> Result<&replica_records::Records, String> {
+        self.records.get_or_init(|| replica_records::Records::capture(self)).as_ref().map_err(Clone::clone)
     }
     pub(crate) fn same_lineage(&self, other: &Self) -> bool { Arc::ptr_eq(&self.lineage, &other.lineage) }
     pub(crate) fn same_metadata_generation(&self, other: &Self) -> bool {
@@ -175,7 +181,7 @@ impl Store {
         let version = base.version.checked_add(1).filter(|version| *version <= i64::MAX as u64).ok_or(Error::VersionExhausted)?;
         // Exact immutable validated owner plus a checked usage-only delta. Code,
         // settings, permissions and user inventories cannot have changed here.
-        Ok(Self { current: Mutex::new(Arc::new(Snapshot {version,owner,usage,replica_validated:true,metadata_revision:base.metadata_revision,lineage:base.lineage.clone(),libraries:Default::default()})), replica:true })
+        Ok(Self { current: Mutex::new(Arc::new(Snapshot {version,owner,usage,replica_validated:true,metadata_revision:base.metadata_revision,lineage:base.lineage.clone(),libraries:Default::default(),records:Default::default()})), replica:true })
     }
 
     /// A typed query-context delta may advance its Computer lease while the
@@ -253,6 +259,7 @@ impl Store {
             metadata_revision,
             lineage,
             libraries: Default::default(),
+            records: Default::default(),
         });
         if replica {
             validate_replica(&snapshot)?;
@@ -279,7 +286,7 @@ impl Store {
         if !Arc::ptr_eq(&current,base) {return Err(CommitError::Snapshot(Error::Stale));}
         let version=current.version.checked_add(1).filter(|version|*version<=i64::MAX as u64).ok_or(CommitError::Snapshot(Error::VersionExhausted))?;
         validate(&owner,&usage).map_err(CommitError::Snapshot)?;
-        let mut next=Snapshot {version,owner,usage,replica_validated:self.replica,metadata_revision:version,lineage:current.lineage.clone(),libraries:Default::default()};
+        let mut next=Snapshot {version,owner,usage,replica_validated:self.replica,metadata_revision:version,lineage:current.lineage.clone(),libraries:Default::default(),records:Default::default()};
         if self.replica {validate_replica(&next).map_err(CommitError::Snapshot)?;}
         next.metadata_revision=derive_metadata_revision(&current,&next).map_err(CommitError::Snapshot)?;
         let next=Arc::new(next);
@@ -319,6 +326,7 @@ impl Store {
             metadata_revision: version,
             lineage: current.lineage.clone(),
             libraries: Default::default(),
+            records: Default::default(),
         };
         if self.replica {
             validate_replica(&next)?;
@@ -921,6 +929,7 @@ mod tests {
             metadata_revision: i64::MAX as u64,
             lineage: Arc::new(()),
             libraries: Default::default(),
+            records: Default::default(),
         });
         *store.current.lock().unwrap() = exhausted.clone();
         assert_eq!(

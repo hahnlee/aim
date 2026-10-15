@@ -142,37 +142,17 @@ public final class PackageSnapshots {
             T run(IPackageComputer computer, int callingUid, int callingPid) throws RemoteException;
         }
 
-        /** Pure DTO queries retain one exact native endpoint without Java package reconstruction. */
+        /** Pure DTO queries run on the current capture's native endpoint. */
         public <T> T queryComputer(Query<T> query) {
             Objects.requireNonNull(query);
             int callingUid = android.os.Binder.getCallingUid();
             int callingPid = android.os.Binder.getCallingPid();
-            Data candidate;
-            synchronized (this) {
-                if (closed) throw new IllegalStateException("package replica store is closed");
-                candidate = NativeInstallPermissionScope.candidate(this);
-                if (candidate != null) candidate.retain();
-            }
+            var data = capture();
             try {
-                if (candidate != null) {
-                    try {
-                        if (candidate.computer == null) throw new IllegalStateException("native package query capture unavailable");
-                        return query.run(candidate.computer, callingUid, callingPid);
-                    } finally { candidate.release(); }
-                }
-                var endpoint = source.capture();
-                if (endpoint == null) throw new IOException("missing native snapshot endpoint");
-                try (var lease = new PackageScanLease(endpoint)) {
-                    var computer = lease.captureComputer();
-                    try {
-                        synchronized (this) {
-                            if (closed) throw new IllegalStateException("package replica store is closed");
-                        }
-                        return query.run(computer, callingUid, callingPid);
-                    } finally { computer.close(); }
-                }
+                if (data.computer == null) throw new IllegalStateException("native package query capture unavailable");
+                return query.run(data.computer, callingUid, callingPid);
             } catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
-            catch (IOException failure) { throw new IllegalStateException("native query capture failed", failure); }
+            finally { data.release(); }
         }
 
         public android.content.pm.ResolveInfo resolveServiceQuery(android.content.Intent intent, String type,
@@ -193,6 +173,15 @@ public final class PackageSnapshots {
                         android.content.pm.PackageManager.VERSION_CODE_HIGHEST, uid);
                 return computer.filterAppAccess(resolved, filterUid, user, uninstalled);
             });
+        }
+
+        /** The current capture, retained as the base of an independent one; null before the first. */
+        Data retainCurrent() {
+            synchronized (this) {
+                if (closed || current == null) return null;
+                current.retain();
+                return current;
+            }
         }
 
         public long getVersion() { var data = capture(); try { return data.version; } finally { data.release(); } }
@@ -396,30 +385,13 @@ public final class PackageSnapshots {
         long metadataVersion() { return metadataVersion; }
         void metadataVersion(long version) { metadataVersion = version; }
 
-        Data withUsage(long version, long metadata, Map<String, PackageUsageState> usage,
-                IPackageComputer computer, boolean crossUserSuspensions) throws IOException, RemoteException {
-            return withChangedUsers(version, metadata, usage, java.util.Map.of(), java.util.Map.of(), computer, crossUserSuspensions);
-        }
+        PackageState packageReplica(String name, boolean factory) { return (factory ? disabled : packages).get(name); }
+        SharedUserApi sharedReplica(String name) { return sharedUsers.get(name); }
 
-        Data withChangedUsers(long version, long metadata, Map<String, PackageUsageState> usage,
-                Map<String, PackageStateReplica> activeChanges, Map<String, PackageStateReplica> factoryChanges,
+        /** A later capture of this lineage, sharing this one's unchanged replicas. */
+        Data withChangedOwners(long version, long metadata, Map<String, PackageState> active,
+                Map<String, PackageState> factories, Map<String, SharedUserApi> shared,
                 IPackageComputer computer, boolean crossUserSuspensions) throws IOException, RemoteException {
-            if (!usage.keySet().equals(packages.keySet()) || !packages.keySet().containsAll(activeChanges.keySet())
-                    || !disabled.keySet().containsAll(factoryChanges.keySet()))
-                throw new IOException("incremental metadata inventory differs");
-            var active = new LinkedHashMap<String, PackageState>();
-            for (var entry : packages.entrySet()) {
-                var value = activeChanges.containsKey(entry.getKey()) ? activeChanges.get(entry.getKey()) : entry.getValue();
-                if (!(value instanceof PackageStateReplica replica)) throw new IOException("incremental package owner is not a native replica");
-                active.put(entry.getKey(), replica.withUsage(usage.get(entry.getKey()), version));
-            }
-            var shared = new LinkedHashMap<String, SharedUserApi>();
-            for (var entry : sharedUsers.entrySet()) {
-                if (!(entry.getValue() instanceof SharedUserReplica replica))
-                    throw new IOException("usage-only shared owner is not a native replica");
-                shared.put(entry.getKey(), replica.withPackages(active));
-            }
-            var factories = new LinkedHashMap<>(disabled); factories.putAll(factoryChanges);
             var registered = PackageUidOwners.capture(computer, version, active, shared, crossUserSuspensions);
             var result = new Data(version, active, factories, shared, owner, computer, registered);
             result.metadataVersion = metadata;

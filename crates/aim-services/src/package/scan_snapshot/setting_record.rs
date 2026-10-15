@@ -4,6 +4,16 @@ use aim_binder_host::parcel::Parcel;
 use aim_service_aidl::write_byte_array;
 
 pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option<Vec<u8>>, String> {
+    captured_at(snapshot, snapshot.version(), name, factory)
+}
+
+/// This record as written at `version`.
+pub(super) fn captured_at(
+    snapshot: &Snapshot,
+    version: u64,
+    name: &str,
+    factory: bool,
+) -> Result<Option<Vec<u8>>, String> {
     let settings = &snapshot.owner().settings;
     let packages = if factory {
         &settings.disabled_system_packages
@@ -23,7 +33,7 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
         None
     };
     write(
-        snapshot.version(),
+        version,
         s,
         factory,
         legacy.as_ref(),

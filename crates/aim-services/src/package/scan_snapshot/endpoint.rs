@@ -14,7 +14,7 @@ use std::{
 };
 
 pub struct PackageCode {
-    version: u64,
+    pub(super) version: u64,
     name: String,
     parsed_name: String,
     app_id: i32,
@@ -55,6 +55,20 @@ impl PackageCode {
             disabled,
             entry: code.facade_entry()?,
         }))
+    }
+}
+
+impl PackageCode {
+    /// The same record at any version; code shared across versions compares
+    /// by address before its bytes.
+    pub(super) fn same_record(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.parsed_name == other.parsed_name
+            && self.app_id == other.app_id
+            && self.disabled == other.disabled
+            && (Arc::ptr_eq(&self.entry, &other.entry)
+                || (self.entry.cache.bytes == other.entry.cache.bytes
+                    && self.entry.past_signing_certificates == other.entry.past_signing_certificates))
     }
 }
 
@@ -107,7 +121,7 @@ impl WriteParcelable for PackageUsage {
 }
 
 pub struct PackageSigningState {
-    version: u64,
+    pub(super) version: u64,
     name: String,
     app_id: i32,
     disabled: bool,
@@ -253,7 +267,7 @@ impl WriteParcelable for PackageSigningState {
 pub const MAX_CHUNK: usize = 64 * 1024;
 
 pub struct PackageTransientState {
-    version: u64,
+    pub(super) version: u64,
     name: String,
     app_id: i32,
     disabled: bool,
@@ -352,18 +366,20 @@ fn comparisons() -> &'static Mutex<BTreeMap<u64,std::sync::Weak<Snapshot>>> {
     REGISTRY.get_or_init(||Mutex::new(BTreeMap::new()))
 }
 
-fn changed_user_metadata(before:&Snapshot,current:&Snapshot)->Result<Option<Vec<(String,bool)>>,String>{
-    if !before.replica_validated||!current.replica_validated||!Arc::ptr_eq(&before.lineage,&current.lineage)
-        ||before.version()>current.version()||before.usage().names().ne(current.usage().names())
+/// The owners whose records in `current` differ from `before`'s, written for
+/// the replica; None requires a full capture. Records compare by content, so
+/// any two captures compare, such as an install's candidate and the canonical one.
+fn changed_owners(before:&Snapshot,current:&Snapshot)->Result<Option<Vec<u8>>,String>{
+    if !before.replica_validated||!current.replica_validated
         ||before.usage().historical_available()!=current.usage().historical_available(){return Ok(None);}
-    let updated;
-    let owner=if before.usage()!=current.usage(){
-        let mut owner=before.owner().clone();owner.update_validated_replica_usage(before.usage(),current.usage())?;updated=owner;&updated
-    }else{before.owner()};
-    let changed=owner.scoped_user_metadata_changes(current.owner());
-    // Retained shared-UID factory members require their complete original owner.
-    // Conservatively capture the full graph until that scoped mapping is available.
-    Ok(changed.filter(|rows|!rows.iter().any(|(_,factory)|*factory)))
+    let changes=current.replica_records()?.changed_since(before.replica_records()?);
+    let mut record=Parcel::new();
+    record.write_i64(current.version() as i64);record.write_i64(current.metadata_revision() as i64);
+    record.write_i32(changes.packages.len() as i32);
+    for (name,factory) in changes.packages{record.write_string16(Some(name));record.write_bool(factory);}
+    record.write_i32(changes.shared.len() as i32);
+    for name in changes.shared{record.write_string16(Some(name));}
+    Ok(Some(record.data().to_vec()).filter(|bytes|bytes.len()<=MAX_CHUNK))
 }
 
 pub struct Endpoint {
@@ -631,21 +647,16 @@ impl Service for Endpoint {
                 }
                 api::write_get_metadata_comparison_id_reply(&mut reply,lease.comparison_id.unwrap() as i64);
             }
-            api::GET_CHANGED_USERS_FOR_METADATA_BASE => {
-                let args=api::GetChangedUsersForMetadataBase::read(&mut call.data)?;
+            api::GET_CHANGED_OWNERS_FOR_METADATA_BASE => {
+                let args=api::GetChangedOwnersForMetadataBase::read(&mut call.data)?;
                 if call.data.remaining()!=0{return Err(aim_binder_host::parcel::BAD_VALUE);}
                 if args.comparison_id<=0{reply.write_exception(&Exception::illegal_argument("invalid metadata comparison capability"));}
                 else{
                     let before={let mut registry=comparisons().lock().unwrap();registry.retain(|_,value|value.strong_count()!=0);registry.get(&(args.comparison_id as u64)).and_then(std::sync::Weak::upgrade)};
-                    let changed=match before.as_ref().map(|before|changed_user_metadata(before,&snapshot)).transpose(){
-                        Ok(changed)=>changed.flatten(),Err(error)=>{reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,error));return Ok(reply);}
+                    let bytes=match before.as_ref().map(|before|changed_owners(before,&snapshot)).transpose(){
+                        Ok(bytes)=>bytes.flatten(),Err(error)=>{reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,error));return Ok(reply);}
                     };
-                    let bytes=changed.map(|changed|{
-                        let mut record=Parcel::new();record.write_i64(snapshot.version() as i64);record.write_i64(snapshot.metadata_revision() as i64);
-                        record.write_i32(changed.len() as i32);for (name,factory) in changed{record.write_string16(Some(&name));record.write_bool(factory);}record.data().to_vec()
-                    });
-                    let bytes=bytes.filter(|bytes|bytes.len()<=MAX_CHUNK);
-                    api::write_get_changed_users_for_metadata_base_reply(&mut reply,&bytes);
+                    api::write_get_changed_owners_for_metadata_base_reply(&mut reply,&bytes);
                 }
             }
             api::GET_METADATA_VERSION => {
@@ -1217,6 +1228,7 @@ mod tests {
             metadata_revision: 1,
             lineage: Arc::new(()),
             libraries: Default::default(),
+            records: Default::default(),
         })
     }
 

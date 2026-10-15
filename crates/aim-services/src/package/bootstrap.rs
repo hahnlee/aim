@@ -14,6 +14,11 @@ use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
 mod apex;
 mod existing;
 mod query;
+mod read_ahead;
+pub(crate) use query::{
+    application_query_filtering_call, domain_verification_restricted_call, granted_permissions_call,
+    installed_permissions_call,
+};
 mod runtime;
 mod preferred;
 mod scan;
@@ -892,20 +897,8 @@ impl Bridge {
         package_name: &str,
         target_sdk: i32,
     ) -> Result<Policy, NativePolicyError> {
-        let mut data = Parcel::new();
-        bridge::AreNativeLibraryDependenciesEnforced {
-            package_name: Some(package_name.into()),
-            target_sdk,
-        }
-        .write(&mut data);
-        let reply = self
-            .owner
-            .transact(
-                bridge::ARE_NATIVE_LIBRARY_DEPENDENCIES_ENFORCED,
-                &data,
-                false,
-            )
-            .map_err(NativePolicyError::Transport)?;
+        let (code, data) = native_dependencies_call(package_name, target_sdk);
+        let reply = self.read(code, &data).map_err(NativePolicyError::Transport)?;
         let mut reader = reply.reader();
         let enforce_native_dependencies =
             bridge::read_are_native_library_dependencies_enforced_reply(&mut reader)
@@ -914,11 +907,8 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(NativePolicyError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        let mut data = Parcel::new();
-        bridge::IsSdkLibraryIndependenceEnabled {}.write(&mut data);
-        let reply = self.owner
-            .transact(bridge::IS_SDK_LIBRARY_INDEPENDENCE_ENABLED, &data, false)
-            .map_err(NativePolicyError::Transport)?;
+        let (code, data) = sdk_library_independence_call();
+        let reply = self.read(code, &data).map_err(NativePolicyError::Transport)?;
         let mut reader = reply.reader();
         let sdk_library_independence =
             bridge::read_is_sdk_library_independence_enabled_reply(&mut reader)
@@ -930,18 +920,33 @@ impl Bridge {
         Ok(Policy { enforce_native_dependencies, sdk_library_independence })
     }
 
+    /// `library_policy` of each package, read in one transaction.
+    pub fn library_policies<'a>(
+        &self,
+        packages: impl Iterator<Item = (&'a str, i32)> + Clone,
+    ) -> Result<std::collections::BTreeMap<String, Policy>, (String, NativePolicyError)> {
+        let calls = std::iter::once(sdk_library_independence_call())
+            .chain(packages.clone().map(|(name, sdk)| native_dependencies_call(name, sdk)))
+            .collect();
+        self.read_ahead(calls, || {
+            packages
+                .map(|(name, sdk)| {
+                    self.library_policy(name, sdk)
+                        .map(|policy| (name.to_owned(), policy))
+                        .map_err(|error| (name.to_owned(), error))
+                })
+                .collect()
+        })
+    }
+
     pub fn permission_gids(
         &self,
         app_id: i32,
         users: &[i32],
     ) -> Result<Vec<u32>, PermissionGidError> {
         permission_gids::query_with(app_id, users, |uid| {
-            let mut data = Parcel::new();
-            bridge::GetPermissionGidsForUid { uid }.write(&mut data);
-            let reply = self
-                .owner
-                .transact(bridge::GET_PERMISSION_GIDS_FOR_UID, &data, false)
-                .map_err(PermissionGidError::Transport)?;
+            let (code, data) = permission_gids_call(uid);
+            let reply = self.read(code, &data).map_err(PermissionGidError::Transport)?;
             let mut reader = reply.reader();
             let result = bridge::read_get_permission_gids_for_uid_reply(&mut reader)
                 .map_err(PermissionGidError::Transport)?
@@ -954,6 +959,35 @@ impl Bridge {
             Ok(result)
         })
     }
+}
+
+fn native_dependencies_call(package_name: &str, target_sdk: i32) -> (u32, Parcel) {
+    let mut data = Parcel::new();
+    bridge::AreNativeLibraryDependenciesEnforced { package_name: Some(package_name.into()), target_sdk }
+        .write(&mut data);
+    (bridge::ARE_NATIVE_LIBRARY_DEPENDENCIES_ENFORCED, data)
+}
+
+fn sdk_library_independence_call() -> (u32, Parcel) {
+    let mut data = Parcel::new();
+    bridge::IsSdkLibraryIndependenceEnabled {}.write(&mut data);
+    (bridge::IS_SDK_LIBRARY_INDEPENDENCE_ENABLED, data)
+}
+
+/// The call that reads one UID's permission GIDs.
+pub fn permission_gids_call(uid: i32) -> (u32, Parcel) {
+    let mut data = Parcel::new();
+    bridge::GetPermissionGidsForUid { uid }.write(&mut data);
+    (bridge::GET_PERMISSION_GIDS_FOR_UID, data)
+}
+
+/// The calls `Bridge::permission_gids` makes for an app ID in each user.
+pub fn permission_gids_calls(app_id: i32, users: &[i32]) -> Vec<(u32, Parcel)> {
+    users
+        .iter()
+        .filter_map(|user| user.checked_mul(100_000)?.checked_add(app_id % 100_000))
+        .map(permission_gids_call)
+        .collect()
 }
 
 #[cfg(test)]

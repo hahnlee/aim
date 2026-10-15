@@ -40,7 +40,7 @@ public final class NativeInstallPermissionScope implements InstallerPermissionBr
             before.borrowEndpoint();
             if (lease.getVersion() != Math.addExact(before.getVersion(), 1))
                 throw new IllegalStateException("permission candidate generation differs");
-            data = lease.captureData(owner, crossUserSuspensions);
+            data = captureOverCurrent(lease);
         }
         var frame = new Frame(store, data, Thread.currentThread());
         current.put(store, frame);
@@ -57,7 +57,7 @@ public final class NativeInstallPermissionScope implements InstallerPermissionBr
             // Rust owns this endpoint across removal preparation and the
             // following candidate transaction. This temporary view borrows it.
             lease.borrowEndpoint();
-            data = lease.captureData(owner, crossUserSuspensions);
+            data = captureOverCurrent(lease);
         }
         if (!excluded.isEmpty()) {
             var original = data;
@@ -67,6 +67,13 @@ public final class NativeInstallPermissionScope implements InstallerPermissionBr
         var frame = new Frame(store, data, Thread.currentThread());
         current.put(store, frame);
         return frame;
+    }
+
+    /** The candidate shares the live store's unchanged replicas. */
+    private PackageSnapshots.Data captureOverCurrent(PackageScanLease lease) throws RemoteException, IOException {
+        var base = store.retainCurrent();
+        try { return lease.captureData(owner, crossUserSuspensions, base); }
+        finally { if (base != null) base.release(); }
     }
 
     private static final class Frame implements AutoCloseable {

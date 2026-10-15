@@ -150,4 +150,22 @@ fn storage_allowed(setting:&crate::package::model::PackageState)->bool{
     !setting.pkg.as_ref().unwrap().properties.as_ref().is_some_and(|properties|properties.iter().any(|(name,property)|name=="android.internal.PROPERTY_NO_APP_DATA_STORAGE"&&matches!(property.value,crate::package::pkg::PropertyValue::Bool(true))))
 }
 fn storage_error(message:impl Into<String>)->Exception{Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,message)}
-fn storage_io(message:String)->Exception{let mut parcel=Parcel::new();parcel.write_string16(Some("java.io.IOException"));parcel.write_string16(Some(&message));Exception::parcelable(Some(&message),&parcel).expect("IOException parcel has no capabilities")}
+/// `ParcelableException` carrying the original's IOException, as
+/// `Parcel.writeException` writes it.
+fn storage_io(message:String)->Exception{let mut parcel=Parcel::new();parcel.write_string16(Some("android.os.ParcelableException"));parcel.write_string16(Some("java.io.IOException"));parcel.write_string16(Some(&message));Exception::parcelable(Some(&message),&parcel).expect("IOException parcel has no capabilities")}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn storage_failures_reach_the_original_as_parcelable_io_exceptions() {
+        let error = super::storage_io("Failed to free 1 on storage device".into());
+        assert_eq!(error.code, aim_binder_host::parcel::EX_PARCELABLE);
+        // Parcel.readParcelable resolves the creator by this class name first.
+        let payload = error.parcelable.unwrap();
+        let mut reader = aim_binder_host::parcel::Reader::new(payload.bytes(), &[]);
+        assert_eq!(reader.read_string16().unwrap().as_deref(), Some("android.os.ParcelableException"));
+        assert_eq!(reader.read_string16().unwrap().as_deref(), Some("java.io.IOException"));
+        assert_eq!(reader.read_string16().unwrap().as_deref(), Some("Failed to free 1 on storage device"));
+        assert_eq!(reader.remaining(), 0);
+    }
+}
