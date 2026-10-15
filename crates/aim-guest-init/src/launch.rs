@@ -806,6 +806,8 @@ mod tests {
         // launcher's shutdown signal.
         let pid=unsafe{libc::fork()};assert!(pid>0);
         if pid==0 {unsafe{libc::setpgid(0,0);loop{libc::pause();}}}
+        // Both sides set the group, so the kill below never precedes it.
+        unsafe{libc::setpgid(pid,pid);}
         launcher.children.insert(pid as u32);
         launcher.kill_group(pid as u32,libc::SIGKILL);
         let exits=launcher.reap_all().unwrap();
