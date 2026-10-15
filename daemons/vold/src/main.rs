@@ -533,7 +533,13 @@ impl IVold::IVold for Vold {
         );
         Ok(())
     }
-    fn destroyUserStorage(&self, _: Option<&str>, _: i32, _: i32) -> binder::Result<()> {
+    fn destroyUserStorage(&self, uuid: Option<&str>, user: i32, flags: i32) -> binder::Result<()> {
+        let dirs = storage::destroy_user_storage(uuid, user as u32, flags)
+            .map_err(|e| io_error(&format!("destroyUserStorage {user}"), e))?;
+        log::info!(
+            "destroyed storage of user {user} (flags {flags}): {} directories",
+            dirs.len()
+        );
         Ok(())
     }
     fn prepareSandboxForApp(&self, _: &str, _: i32, _: &str, _: i32) -> binder::Result<()> {
