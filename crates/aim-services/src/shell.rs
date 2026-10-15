@@ -75,22 +75,33 @@ impl ShellCommand {
     pub fn input(&mut self)->Option<&mut aim_binder_host::server::RetainedFd>{self.input.as_mut()}
     pub fn output(&mut self)->Option<&mut aim_binder_host::server::RetainedFd>{self.out.as_mut()}
     pub fn error(&mut self)->Option<&mut aim_binder_host::server::RetainedFd>{self.err.as_mut()}
-    pub fn open_input(&mut self,process:&Arc<LocalProcess>,path:Option<&str>)->std::result::Result<aim_binder_host::server::RetainedFd,aim_binder_host::parcel::Exception>{
+    /// `ShellCommand.openFileForSystem`: `None` after printing why, as it
+    /// returns null.
+    pub fn open_input(&mut self,process:&Arc<LocalProcess>,path:Option<&str>)->std::result::Result<Option<aim_binder_host::server::RetainedFd>,aim_binder_host::parcel::Exception>{
         use aim_binder_host::parcel::{Exception,EX_ILLEGAL_STATE};
         let error=|message:String|Exception::new(EX_ILLEGAL_STATE,message);
         if path.is_none()||path==Some("-"){
-            return self.input.as_ref().ok_or_else(||error("shell input unavailable".into()))?.try_clone().map_err(|cause|error(cause.to_string()));
+            return self.input.as_ref().ok_or_else(||error("shell input unavailable".into()))?.try_clone().map(Some).map_err(|cause|error(cause.to_string()));
         }
         let callback=self.callback.as_ref().ok_or_else(||error("shell file callback unavailable".into()))?;
         let mut request=Parcel::new();
         aim_service_aidl::com_android_internal_os_ishellcallback::OpenFile{path:path.map(str::to_owned),se_linux_context:Some("u:r:system_server:s0".into()),mode:Some("r".into())}.write(&mut request);
         let reply=callback.transact(aim_service_aidl::com_android_internal_os_ishellcallback::OPEN_FILE,&request,false).map_err(|code|error(format!("shell openFile transport: {code}")))?;
-        let mut reader=reply.reader();reader.read_exception().map_err(|code|error(format!("shell openFile reply: {code}")))??;
-        if reader.read_i32().map_err(|code|error(format!("shell openFile presence: {code}")))?!=1{return Err(error("shell openFile returned no descriptor".into()));}
+        let mut reader=reply.reader();
+        let opened=match reader.read_exception().map_err(|code|error(format!("shell openFile reply: {code}")))? {
+            Err(failure)=>{self.eprintln(&format!("Failure opening file: {}",failure.message));false}
+            Ok(())=>reader.read_i32().map_err(|code|error(format!("shell openFile presence: {code}")))?==1,
+        };
+        if !opened{
+            let path=path.unwrap_or("null");
+            self.eprintln(&format!("Error: Unable to open file: {path}"));
+            if !path.starts_with("/data/local/tmp/"){self.eprintln("Consider using a file under /data/local/tmp/");}
+            return Ok(None);
+        }
         if reader.read_i32().map_err(|code|error(format!("shell openFile commfd: {code}")))?!=0{return Err(error("shell openFile unexpected communication descriptor".into()));}
         let fd=reader.read_fd().map_err(|code|error(format!("shell openFile fd: {code}")))?;
         if reader.remaining()!=0{return Err(error("shell openFile reply trailing bytes".into()));}
-        process.file(fd).and_then(|file|aim_binder_host::server::file_fd(&file)).ok_or_else(||error("shell openFile descriptor owner missing".into()))
+        process.file(fd).and_then(|file|aim_binder_host::server::file_fd(&file)).map(Some).ok_or_else(||error("shell openFile descriptor owner missing".into()))
     }
     /// Whether the command runs: `Binder.onTransact` runs it only with an
     /// output.
