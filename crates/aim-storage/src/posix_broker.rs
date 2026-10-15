@@ -194,10 +194,13 @@ impl State {
   self.retire_dead()?;
   let Request{frame,proof,actor,reply}=request;
   let holder=self.owners.lock().unwrap().get(&key(actor)).cloned();
+  // An attach to an existing holder (an exec of the same process) may find
+  // locks registered before it; the reply's ticket says so.
+  let existed=holder.is_some();
   let holder=if holder.is_none()&&matches!(frame.operation,Operation::Attach|Operation::ExternalAttach){match if frame.operation==Operation::ExternalAttach{self.admit_external(actor)}else{self.admit_fork(actor)}{Ok(holder)=>Some(holder),Err(failure)=>{let mut response=frame;response.host_pid=0;response.guest_pid=0;response.errno=failure.raw_os_error().unwrap_or(libc::EPERM);reply.send(response)?;return Ok(None)}}}else{holder};
   if matches!(frame.operation,Operation::Attach|Operation::ExternalAttach) {
    let mut response=frame;response.host_pid=0;response.guest_pid=0;
-   response.errno=match holder.as_ref(){Some(holder)if holder.owner.process==actor&&actor.is_live()&&holder.process.is_live()=>{match holder.rebind(){Ok(())=>{response.guest_pid=holder.owner.guest_pid;0},Err(failure)=>failure.raw_os_error().unwrap_or(libc::EIO)}},_=>libc::EPERM};
+   response.errno=match holder.as_ref(){Some(holder)if holder.owner.process==actor&&actor.is_live()&&holder.process.is_live()=>{match holder.rebind(){Ok(())=>{response.guest_pid=holder.owner.guest_pid;response.ticket=u64::from(existed);0},Err(failure)=>failure.raw_os_error().unwrap_or(libc::EIO)}},_=>libc::EPERM};
    reply.send(response)?;return Ok(None);
   }
   let prepared=(||{
