@@ -301,7 +301,7 @@ impl Image {
 
 /// Applies `parse` to every item on up to `available_parallelism` threads,
 /// returning the results in item order.
-fn parse_all<T: Sync, R: Send>(items: &[T], parse: impl Fn(&T) -> R + Sync) -> Vec<R> {
+pub(crate) fn parse_all<T: Sync, R: Send>(items: &[T], parse: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).min(items.len().max(1));
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut results: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
