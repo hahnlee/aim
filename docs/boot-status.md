@@ -98,6 +98,14 @@ snapshot suite passes 27/0, and a fresh diagnostic boot held one SystemServer PI
 healthy for 153 seconds with repeated package probes. A rebuilt tail CTS run is
 still required; these diagnostics are not conformance acceptance.
 
+The native package boot scan parses the image's packages on worker threads
+(results in path order, so the outcome is the sequential one) and keeps each
+parse in `/data/system/aim_package_cache`, keyed by the image identity, the
+runtime build, the platform features and extensions and the package files.
+A reboot of the native image now reaches `sys.boot_completed` in 16–17 s
+(was 24–27 s; the original image takes 15–16 s); SystemServer's run to AMS
+ready takes 7.5 s (was 13.1 s; original 3.8 s).
+
 The current f89fddbf matched original/native images are build-qualified: both
 use the same vendor artifacts and the primary workflow restores the default
 image configuration with zero stale nodes. Native identity 9fdad5ca has two
