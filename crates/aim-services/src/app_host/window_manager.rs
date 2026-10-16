@@ -131,8 +131,8 @@ impl Session {
             *next
         };
         let channel_name = format!("{id:07x} {name}");
-        let channel = self.host.open_input_channel(&channel_name)?;
         let display = self.host.display()?.0.clone();
+        let channel = self.host.open_input_channel(&channel_name, display.width, display.height)?;
         let mut p = Parcel::new();
         p.write_no_exception();
         p.write_i32(ADDED);

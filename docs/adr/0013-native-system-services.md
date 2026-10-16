@@ -450,7 +450,9 @@ The migration's state and conformance results are in
   process and bind its application ([app-host.md](../app-host.md)).
   Calculator's application is created 414 ms after the start request;
   native `window` adds its window as a SurfaceFlinger layer, and its
-  first frame is drawn about 0.5 s after the start and shown.
+  first frame is drawn about 0.5 s after the start and shown. The agent
+  reads the touchscreen and publishes motions on the window's input
+  channel, as InputReader and InputDispatcher would.
 - **The zygote relay.** Zygote takes commands only from the system uid,
   and the native services run on the host, so a system daemon
   (`aim-app-host-agent`) sends them; the commands are `ZygoteProcess`'s.

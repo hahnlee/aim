@@ -12,15 +12,18 @@
 //! - A window's input channel is a guest socket pair, as
 //!   `InputChannel::openInputChannelPair` makes it: the agent makes it,
 //!   hands the client's end to the host (`dev.aim.IAppHostAgent`, which it
-//!   attaches to `aim.app_host`) and keeps the server's.
+//!   attaches to `aim.app_host`) and publishes the window's input on the
+//!   server's (`input`).
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::Mutex;
+use std::sync::Arc;
 
 use binder::binder_impl::{AssociateClass, BorrowedParcel, IBinderInternal, Remotable, TransactionCode};
 use binder::{BinderFeatures, Interface, ParcelFileDescriptor, Status, StatusCode, declare_binder_interface};
+
+mod input;
 
 /// init's socket for this service (`socket aim_zygote_relay` in its rc).
 const SOCKET: &str = "ANDROID_SOCKET_aim_zygote_relay";
@@ -29,8 +32,8 @@ const ZYGOTE: &str = "/dev/socket/zygote";
 /// The app host's control service, and its `attachAgent(IBinder)`.
 const APP_HOST: &str = "aim.app_host";
 const ATTACH_AGENT: u32 = 2;
-/// `IAppHostAgent.openInputChannel(String name)`: the channel's index and
-/// the client's end.
+/// `IAppHostAgent.openInputChannel(String name, int displayWidth, int
+/// displayHeight)`: the channel's index and the client's end.
 const OPEN_INPUT_CHANNEL: u32 = 1;
 /// `InputTransport.cpp`'s `SOCKET_BUFFER_SIZE`.
 const SOCKET_BUFFER_SIZE: libc::c_int = 32 * 1024;
@@ -144,7 +147,7 @@ fn no_calls(_: &dyn IAppHost, _: TransactionCode, _: &BorrowedParcel<'_>, _: &mu
 }
 
 pub trait IAppHostAgent: Interface {
-    fn open_input_channel(&self, name: &str) -> std::io::Result<(i32, OwnedFd)>;
+    fn open_input_channel(&self, name: &str, width: i32, height: i32) -> std::io::Result<(i32, OwnedFd)>;
 }
 
 declare_binder_interface! {
@@ -155,14 +158,14 @@ declare_binder_interface! {
 }
 
 impl IAppHostAgent for BpAppHostAgent {
-    fn open_input_channel(&self, _: &str) -> std::io::Result<(i32, OwnedFd)> {
+    fn open_input_channel(&self, _: &str, _: i32, _: i32) -> std::io::Result<(i32, OwnedFd)> {
         Err(std::io::ErrorKind::Unsupported.into())
     }
 }
 
 impl IAppHostAgent for binder::binder_impl::Binder<BnAppHostAgent> {
-    fn open_input_channel(&self, name: &str) -> std::io::Result<(i32, OwnedFd)> {
-        self.0.open_input_channel(name)
+    fn open_input_channel(&self, name: &str, width: i32, height: i32) -> std::io::Result<(i32, OwnedFd)> {
+        self.0.open_input_channel(name, width, height)
     }
 }
 
@@ -175,7 +178,8 @@ fn on_transact(
     match code {
         OPEN_INPUT_CHANNEL => {
             let name: String = data.read()?;
-            match agent.open_input_channel(&name) {
+            let (width, height): (i32, i32) = (data.read()?, data.read()?);
+            match agent.open_input_channel(&name, width, height) {
                 Ok((index, client)) => {
                     reply.write(&Status::ok())?;
                     reply.write(&index)?;
@@ -195,17 +199,19 @@ fn on_transact(
     }
 }
 
-/// The input channels' server ends, by index.
+/// The agent: its windows' input.
 struct Agent {
-    channels: Mutex<Vec<OwnedFd>>,
+    input: Arc<input::Dispatcher>,
+    channels: std::sync::atomic::AtomicI32,
 }
 
 impl Interface for Agent {}
 
 impl IAppHostAgent for Agent {
     /// `InputChannel::openInputChannelPair`: a sequenced-packet socket
-    /// pair with 32 KiB buffers each way.
-    fn open_input_channel(&self, _name: &str) -> std::io::Result<(i32, OwnedFd)> {
+    /// pair with 32 KiB buffers each way; the window, the latest, takes
+    /// the focus and the input.
+    fn open_input_channel(&self, _name: &str, width: i32, height: i32) -> std::io::Result<(i32, OwnedFd)> {
         let mut pair = [0; 2];
         // SAFETY: a socket pair into a local array; both ends are owned below.
         if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, pair.as_mut_ptr()) } != 0 {
@@ -226,15 +232,14 @@ impl IAppHostAgent for Agent {
                 };
             }
         }
-        let mut channels = self.channels.lock().unwrap();
-        channels.push(server);
-        Ok(((channels.len() - 1) as i32, client))
+        self.input.add_window(server, width, height);
+        Ok((self.channels.fetch_add(1, std::sync::atomic::Ordering::Relaxed), client))
     }
 }
 
 /// Attaches the agent to the app host, which waits for it.
 fn attach() {
-    let agent = BnAppHostAgent::new_binder(Agent { channels: Mutex::new(Vec::new()) }, BinderFeatures::default());
+    let agent = BnAppHostAgent::new_binder(Agent { input: input::Dispatcher::new(), channels: Default::default() }, BinderFeatures::default());
     let Some(mut host) = binder::wait_for_service(APP_HOST) else {
         return log::error!("{APP_HOST}: not found");
     };

@@ -40,7 +40,8 @@ odsign cannot be left out: init waits for properties they set
 each when excluded. SurfaceFlinger waits for the power HAL at its first
 frame, so `vendor.power-default` stays too. Calculator, started through
 the app host, draws its first frame about 0.5 s after its process starts,
-and its window is on the display.
+its window is on the display, and taps on the display's touchscreen
+reach it (7 + 8 = shows 15).
 
 ## Native system services (2026-09-29, ADR 0013)
 

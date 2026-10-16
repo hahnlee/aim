@@ -10,11 +10,13 @@
 
 pub mod activity;
 pub mod appops_service;
+pub mod audio_service;
 pub mod bind;
 pub mod compat;
 pub mod config;
 pub mod display;
 pub mod display_service;
+pub mod input_manager;
 pub mod input_method;
 pub mod package_service;
 pub mod packages;
@@ -55,9 +57,10 @@ const CONTROL_DESCRIPTOR: &str = "dev.aim.IAppHost";
 const START_ACTIVITY: u32 = 1;
 /// `void attachAgent(IBinder agent)`: the app host agent (`aim-app-host-agent`).
 const ATTACH_AGENT: u32 = 2;
-/// The agent's `openInputChannel(String name)`, and where the client's
-/// socket (a `ParcelFileDescriptor`) starts in its reply: after the status
-/// and the channel's index.
+/// The agent's `openInputChannel(String name, int displayWidth, int
+/// displayHeight)`, and where the client's socket (a
+/// `ParcelFileDescriptor`) starts in its reply: after the status and the
+/// channel's index.
 const AGENT_DESCRIPTOR: &str = "dev.aim.IAppHostAgent";
 const OPEN_INPUT_CHANNEL: u32 = 1;
 const AGENT_CHANNEL_FD: usize = 8;
@@ -268,6 +271,8 @@ impl AppHost {
             ("trust", Arc::new(trust_service::TrustManager::new(self.clone()))),
             ("permission", Arc::new(permission_controller::PermissionController(self.clone()))),
             ("input_method", Arc::new(input_method::InputMethodManager::new(self.clone()))),
+            ("input", Arc::new(input_manager::InputManager(self.clone()))),
+            ("audio", Arc::new(audio_service::AudioService::new(self.clone()))),
             (
                 "activity_task",
                 Arc::new(activity::ActivityTaskManager(
@@ -684,15 +689,18 @@ impl AppHost {
         self.apps.lock().unwrap().values().find(|a| a.uid == uid && a.thread.is_some()).and_then(|a| a.config.clone())
     }
 
-    /// A window input channel from the agent: its reply, whose client
-    /// socket starts at [`AGENT_CHANNEL_FD`].
-    fn open_input_channel(&self, name: &str) -> Result<aim_binder_host::local::Received, Exception> {
+    /// A window input channel from the agent, for a window on a display of
+    /// `width` by `height` pixels: its reply, whose client socket starts at
+    /// [`AGENT_CHANNEL_FD`].
+    fn open_input_channel(&self, name: &str, width: i32, height: i32) -> Result<aim_binder_host::local::Received, Exception> {
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
         let agent = self.agent.lock().unwrap();
         let agent = agent.as_ref().ok_or_else(|| state("the app host agent has not attached".into()))?;
         let mut data = Parcel::new();
         data.write_interface_token(AGENT_DESCRIPTOR);
         data.write_string16(Some(name));
+        data.write_i32(width);
+        data.write_i32(height);
         let reply = agent.transact(OPEN_INPUT_CHANNEL, &data, false).map_err(|s| state(format!("openInputChannel: {s}")))?;
         let status = reply.reader().read_exception();
         match status {

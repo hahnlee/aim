@@ -12,6 +12,7 @@ description = "The app host's agent in the guest: zygote commands from the syste
 program = "aim-app-host-agent"
 
 [dependencies]
+aim-input-transport.workspace = true
 binder = { workspace = true, features = ["system"] }
 daemon-log.workspace = true
 libc.workspace = true

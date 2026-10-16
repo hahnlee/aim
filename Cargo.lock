@@ -44,6 +44,7 @@ version = "0.1.0"
 name = "aim-app-host-agent"
 version = "0.1.0"
 dependencies = [
+ "aim-input-transport",
  "binder",
  "daemon-log",
  "libc",
@@ -216,6 +217,10 @@ dependencies = [
 
 [[package]]
 name = "aim-hostcall"
+version = "0.1.0"
+
+[[package]]
+name = "aim-input-transport"
 version = "0.1.0"
 
 [[package]]
