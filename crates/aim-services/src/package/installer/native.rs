@@ -20,7 +20,7 @@ pub type StagedExecutor = Arc<
     dyn Fn(
             i32,
             Vec<(Session, Record, String)>,
-        ) -> Result<crate::package::staging::ReadySession, Exception>
+        ) -> Result<crate::package::staging::ReadySession, super::pipeline::Error>
         + Send
         + Sync,
 >;
@@ -1028,10 +1028,7 @@ impl NativeOwners {
                 .ok_or_else(|| {
                     failure("Actual staged verification/submission owner unavailable")
                 })?;
-            let ready = executor(id, members).map_err(|error| super::pipeline::Error::Owner {
-                committed: false,
-                error,
-            })?;
+            let ready = executor(id, members)?;
             if ready.id != id {
                 return Err(failure("Staged executor returned a foreign root"));
             }

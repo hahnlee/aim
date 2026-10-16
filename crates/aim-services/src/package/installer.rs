@@ -436,12 +436,16 @@ impl Sessions {
         if !parent.parameters.multi_package || target.parameters.multi_package {
             return Err(self::state("Invalid multi-package session graph"));
         }
-        if parent.parameters.staged != target.parameters.staged
-            || (parent.parameters.install_flags ^ target.parameters.install_flags)
-                & INSTALL_ENABLE_ROLLBACK
-                != 0
-        {
-            return Err(self::state("Inconsistent staged or rollback settings"));
+        // PackageInstallerSession.addChildSessionId's checks and messages.
+        for (differs, setting) in [
+            (parent.parameters.staged != target.parameters.staged, "staged"),
+            ((parent.parameters.install_flags ^ target.parameters.install_flags) & INSTALL_ENABLE_ROLLBACK != 0, "rollback"),
+        ] {
+            if differs {
+                return Err(self::state(&format!(
+                    "Multipackage Inconsistency: session {child} and session {id} have inconsistent {setting} settings"
+                )));
+            }
         }
         let apex = target.parameters.install_flags & INSTALL_APEX != 0;
         if !parent.parameters.staged
@@ -450,7 +454,7 @@ impl Sessions {
                 .iter()
                 .any(|id| (state.sessions[id].parameters.install_flags & INSTALL_APEX != 0) != apex)
         {
-            return Err(self::state("Non-staged APK and APEX cannot be mixed"));
+            return Err(self::state("Mix of APK and APEX is not supported for non-staged multi-package session"));
         }
         if target.destroyed || (target.parent != -1 && target.parent != id) {
             return Err(self::state("Child session is unavailable"));

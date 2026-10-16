@@ -595,6 +595,17 @@ impl Service for Endpoint {
                     aidl::write_get_staged_sessions_reply(&mut reply, Some(&list));
                 }
                 Action::Abandon(id) => {
+                    // PackageInstallerSession.abandon: a session in a terminal
+                    // state (an applied or failed staged one) stays as it is.
+                    let session = self.sessions.snapshot(id)?;
+                    if session.parent == -1
+                        && session.parameters.staged
+                        && (matches!(uid, 0 | 1000) || session.installer_uid == uid)
+                        && self.owners.staged_status(id)?.is_some_and(|status| status.applied || status.failed)
+                    {
+                        aidl::write_abandon_session_reply(&mut reply);
+                        return Ok(());
+                    }
                     let ids = self.sessions.abandon(id, uid)?;
                     self.owners.abandon_stage(&ids)?;
                     aidl::write_abandon_session_reply(&mut reply);
