@@ -33,6 +33,11 @@ public final class InstallerCompletionBridge extends IInstallerCompletionBridge.
             default:throw new IllegalArgumentException("Invalid installation scenario");
         }
     }
+    @Override public void packageAdded(String name,int appId){
+        enforceNativeOwner();
+        com.android.server.LocalServices.getService(android.app.AppOpsManagerInternal.class)
+            .onPackageAdded(java.util.Objects.requireNonNull(name),appId);
+    }
     @Override public int dexoptInstalled(String name,int scenario,int installReason,int flags,String filter,boolean debuggable,boolean instant,boolean apex,boolean rollback){
         var result=dexoptInstalledResult(name,scenario,installReason,flags,filter,debuggable,instant,apex,rollback);
         return result==null||!result.hasResult?-1:result.finalStatus;

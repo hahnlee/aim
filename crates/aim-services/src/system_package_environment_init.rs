@@ -436,6 +436,16 @@ impl System {
                     }
                     None=>return Err(environment_error("ART completion unexpectedly skipped an eligible package")),
                 }
+                // InstallPackageHelper.completeInstallProcess, after the dexopt
+                // of executePostCommitSteps and before the backup restore.
+                let app_id = capture.state().packages.get(&name).map(|package| package.app_id)
+                    .ok_or_else(|| environment_error("installed package has no published app ID"))?;
+                let mut request = Parcel::new();
+                api::PackageAdded { package_name: Some(name.clone()), app_id }.write(&mut request);
+                let reply = art.transact(api::PACKAGE_ADDED, &request, false)
+                    .map_err(|code| environment_error(format!("app-op package transport {code}")))?;
+                api::read_package_added_reply(&mut reply.reader())
+                    .map_err(|code| environment_error(format!("app-op package reply {code}")))??;
                 for installed in receipt
                     .packages
                     .iter()
