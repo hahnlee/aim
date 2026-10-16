@@ -323,6 +323,15 @@ name = "aim-windows-core"
 version = "0.1.0"
 
 [[package]]
+name = "aim-zygote-relay"
+version = "0.1.0"
+dependencies = [
+ "daemon-log",
+ "libc",
+ "log",
+]
+
+[[package]]
 name = "aimctl"
 version = "0.1.0"
 dependencies = [

@@ -355,6 +355,9 @@ const SERVICEMANAGER_READY: &str = "servicemanager.ready";
 /// image has no SystemUI, so the native status bar takes its place.
 const LIGHTWEIGHT_SHELL: &str = "ro.vendor.aim.lightweight_shell";
 
+/// The zygote relay's socket (`aim-zygote-relay`, docs/app-host.md).
+const APP_HOST_ZYGOTE_RELAY: &str = "aim_zygote_relay";
+
 /// The system services the image says are native (ADR 0013): SystemServer
 /// does not start them, so they are created here, to be registered with
 /// servicemanager once it is ready.
@@ -764,6 +767,16 @@ impl Boot {
                 trace_binder(server, file)?;
             }
             native_services = start_native_services(&image, &layout.data.join("data"), &layout.properties_dir(), server,native_pid,options.package_constructor_capture.as_deref())?;
+            if let Some(services) = &native_services {
+                let properties_dir = layout.properties_dir();
+                let property = |name| crate::props::read_property(&properties_dir, name).unwrap_or_default();
+                let sdk = property("ro.build.version.sdk").parse().map_err(|_| "ro.build.version.sdk is not a number")?;
+                let socket_dir = layout.socket_dir();
+                services.configure_app_host(image.root(), &layout.data.join("data"), sdk,
+                    &property("ro.build.version.codename"),
+                    Box::new(move || crate::unixsock::connect_at(&socket_dir, APP_HOST_ZYGOTE_RELAY)))
+                    .map_err(|e| format!("app host: {e}"))?;
+            }
             if let Some((names, log)) = &options.binder_shadow {
                 let properties_dir = layout.properties_dir();
                 let files = map.clone();

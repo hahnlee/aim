@@ -13,6 +13,7 @@
 //! ([`aim_binder_host::local`]). docs/system-services.md tracks which
 //! services are native and how they conform.
 
+pub mod app_host;
 mod bundle;
 pub mod clip;
 pub mod clipboard;
@@ -77,6 +78,7 @@ pub struct NativeServices {
     package_runtime: std::sync::Mutex<Option<Arc<system::package_runtime::Runtime>>>,
     package_constructing: std::sync::atomic::AtomicBool,
     shutdown: std::sync::Mutex<Shutdown>,
+    app_host: Option<Arc<app_host::AppHost>>,
 }
 
 struct Shutdown {
@@ -150,6 +152,7 @@ impl NativeServices {
                 &system,
             ))),
         )];
+        let mut app_host = None;
         for name in names {
             // A service and the names it is published under, as its
             // original publishes them.
@@ -195,6 +198,8 @@ impl NativeServices {
                 // Package endpoints are published only by the completed C boot
                 // session. The explicit image name enables its configuration.
                 "package" => { system.request_native_package_manager(); Vec::new() },
+                // The app host image's ActivityManager (docs/app-host.md).
+                "activity" => app_host.get_or_insert_with(|| app_host::AppHost::new(process.clone())).services(),
                 other => return Err(format!("no native implementation of `{other}`")),
             };
             for (name, service) in published {
@@ -204,7 +209,18 @@ impl NativeServices {
         process.start();
         Ok(Self { system, services, package_runtime: std::sync::Mutex::new(None),
             package_constructing: std::sync::atomic::AtomicBool::new(false),
-            shutdown: std::sync::Mutex::new(Shutdown::open()) })
+            shutdown: std::sync::Mutex::new(Shutdown::open()), app_host })
+    }
+
+    /// The app host's inputs (`app_host::AppHost::configure`), when
+    /// `activity` is native.
+    pub fn configure_app_host(&self, root: &std::path::Path, data: &std::path::Path, sdk: i32,
+        codename: &str, connect: app_host::Connect,
+    ) -> Result<(), String> {
+        match &self.app_host {
+            Some(host) => host.configure(root, data, sdk, codename, connect),
+            None => Ok(()),
+        }
     }
 
     /// Compares the original services `names` with their native models

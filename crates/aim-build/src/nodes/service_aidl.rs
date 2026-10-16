@@ -433,6 +433,11 @@ fn kind(ty: &Type) -> Result<Kind, String> {
             "read_array_list(r)?",
             "write_array_list(p, {v}.as_deref());",
         ),
+        ("Map", false) if ty.args.is_empty() => Kind::Plain(
+            "Option<Vec<(ParcelValue, ParcelValue)>>",
+            "read_value_map(r)?",
+            "write_value_map(p, {v}.as_deref());",
+        ),
         ("byte", true) => Kind::Plain(
             "Option<Vec<u8>>",
             "read_byte_array(r)?",
@@ -565,12 +570,15 @@ fn method_code(m: &Method) -> Result<String, String> {
                 if !generics.contains(&t) {
                     generics.push(t.clone());
                 }
-                fields.push((
-                    snake(&p.name),
-                    format!("Option<{t}>"),
-                    "read_typed(r)?".into(),
-                    "write_typed(p, {v}.as_ref());".into(),
-                ));
+                // `FileDescriptor` is written raw (`writeRawFileDescriptor`):
+                // the descriptor's object alone, never null, with no
+                // presence word.
+                let (ty, read, write) = if t == "FileDescriptor" {
+                    (t.clone(), format!("{t}::read_from(r)?"), "{v}.write_to(p);".into())
+                } else {
+                    (format!("Option<{t}>"), "read_typed(r)?".into(), "write_typed(p, {v}.as_ref());".into())
+                };
+                fields.push((snake(&p.name), ty, read, write));
             }
             Kind::ParcelableList(t) => {
                 if !generics.contains(&t) {
@@ -1133,6 +1141,14 @@ pub fn read_array_list(r: &mut Reader<'_>) -> Result<Option<Vec<ParcelValue>>> {
 pub fn write_array_list(p: &mut Parcel, values: Option<&[ParcelValue]>) {
     write_value_array(p, values, |p, value| value.write(p));
 }
+/// Raw AIDL `Map` (`writeMap`, `readHashMap`): count (-1 for null), then
+/// each key and value as a tagged Java value.
+pub fn read_value_map(r: &mut Reader<'_>) -> Result<Option<Vec<(ParcelValue, ParcelValue)>>> {
+    read_value_array(r, 8, |r| Ok((ParcelValue::read(r)?, ParcelValue::read(r)?)))
+}
+pub fn write_value_map(p: &mut Parcel, values: Option<&[(ParcelValue, ParcelValue)]>) {
+    write_value_array(p, values, |p, (key, value)| { key.write(p); value.write(p); });
+}
 
 "#;
 
@@ -1451,7 +1467,19 @@ interface IClipboard {
         assert!(code.contains("read_applications_reply<ParceledListSlice: ReadParcelable>"));
         assert!(code.contains("write_typed(p, result);"));
         assert!(!code.contains("write_typed_list"));
-        assert!(kind(&Type { name: "Map".into(), args: vec![], array: false }).is_err());
+        assert!(kind(&Type { name: "Map".into(), args: vec![Type { name: "Foo".into(), args: vec![], array: false }], array: false }).is_err());
+    }
+
+    #[test]
+    fn raw_maps_and_file_descriptors_keep_the_java_backend_wire_form() {
+        let iface = parse("package own; oneway interface IThread { void bind(in Map services, in FileDescriptor fd, in SharedMemory fonts); }").unwrap();
+        let code = interface_code(&iface, &["*".into()], "test").unwrap();
+        assert!(code.contains("pub services: Option<Vec<(ParcelValue, ParcelValue)>>,"));
+        assert!(code.contains("write_value_map(p, self.services.as_deref());"));
+        // `writeRawFileDescriptor`: no presence word, never null.
+        assert!(code.contains("pub fd: FileDescriptor,"));
+        assert!(code.contains("self.fd.write_to(p);"));
+        assert!(code.contains("write_typed(p, self.fonts.as_ref());"));
     }
 
     #[test]
