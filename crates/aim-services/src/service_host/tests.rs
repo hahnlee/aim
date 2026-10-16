@@ -251,6 +251,7 @@ struct Owner {
     users_reply: AtomicUsize,
     apex_reply: AtomicUsize,
     batches: AtomicUsize,
+    batch_answers: AtomicUsize,
     gid: i32,
 }
 impl Service for Owner {
@@ -261,11 +262,12 @@ impl Service for Owner {
         assert_eq!(call.sender_euid, 1000);
         call.data.enforce_interface(bootstrap::DESCRIPTOR)?;
         if call.code == bootstrap::TRANSACT_BATCH {
-            // PackageBootstrapBridge.transactBatch: each call dispatched on its own.
+            // PackageBootstrapBridge.transactBatch: each call dispatched on its own,
+            // as many per reply as its budget allows.
             self.batches.fetch_add(1, Ordering::SeqCst);
             let calls = aim_service_aidl::read_byte_array(&mut call.data)?.unwrap();
             let mut calls = aim_binder_host::parcel::Reader::new(&calls, &[]);
-            let count = calls.read_i32()?;
+            let count = calls.read_i32()?.min(self.batch_answers.load(Ordering::SeqCst) as i32);
             let mut replies = Parcel::new();
             replies.write_i32(count);
             for _ in 0..count {
@@ -1659,6 +1661,7 @@ fn exercise_bootstrap_on(
         users_reply: AtomicUsize::new(0),
         apex_reply: AtomicUsize::new(0),
         batches: AtomicUsize::new(0),
+        batch_answers: AtomicUsize::new(i32::MAX as usize),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 3003,
@@ -1692,6 +1695,7 @@ fn exercise_bootstrap_on(
         users_reply: AtomicUsize::new(0),
         apex_reply: AtomicUsize::new(0),
         batches: AtomicUsize::new(0),
+        batch_answers: AtomicUsize::new(i32::MAX as usize),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 999,
@@ -1855,6 +1859,13 @@ fn exercise_bootstrap_on(
         )
     );
     assert_eq!(*owner.calls.lock().unwrap(), [10100, 1010100]);
+    // A reply that fills its budget leaves the rest to further batches.
+    owner.batch_answers.store(2, Ordering::SeqCst);
+    let parts = owner.batches.load(Ordering::SeqCst);
+    let split = old.resolve_query_context(published.owner(), context.clone()).unwrap();
+    assert!(owner.batches.load(Ordering::SeqCst) > parts + 1);
+    assert_eq!(format!("{split:?}"), format!("{resolved:?}"));
+    owner.batch_answers.store(i32::MAX as usize, Ordering::SeqCst);
     owner.legacy_reply.store(5, Ordering::SeqCst);
     let empty_fixed = old.runtime_permissions(&capture, 0, 7, None).unwrap();
     assert_eq!(empty_fixed.packages, [(Some("fixture".into()), vec![])]);
@@ -2480,6 +2491,7 @@ fn exercise_bootstrap_on(
         users_reply: AtomicUsize::new(0),
         apex_reply: AtomicUsize::new(0),
         batches: AtomicUsize::new(0),
+        batch_answers: AtomicUsize::new(i32::MAX as usize),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 3004,

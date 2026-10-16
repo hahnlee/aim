@@ -64,7 +64,17 @@ impl Bridge {
         pass()
     }
 
+    /// The bridge answers a batch's calls in order until its reply fills a
+    /// bounded share of the binder buffer; the rest go in the next batch.
     fn transact_batch(&self, calls: &[(u32, Vec<u8>)]) -> Result<Vec<Vec<u8>>, StatusCode> {
+        let mut replies = Vec::with_capacity(calls.len());
+        while replies.len() < calls.len() {
+            replies.extend(self.transact_part(&calls[replies.len()..])?);
+        }
+        Ok(replies)
+    }
+
+    fn transact_part(&self, calls: &[(u32, Vec<u8>)]) -> Result<Vec<Vec<u8>>, StatusCode> {
         let mut batch = Parcel::new();
         batch.write_i32(i32::try_from(calls.len()).map_err(|_| aim_binder_host::parcel::BAD_VALUE)?);
         for (code, request) in calls {
@@ -79,11 +89,11 @@ impl Bridge {
             .map_err(|_| aim_binder_host::parcel::BAD_VALUE)?
             .ok_or(aim_binder_host::parcel::BAD_VALUE)?;
         let mut replies = Reader::new(&bytes, &[]);
-        if reader.remaining() != 0 || replies.read_i32()? != calls.len() as i32 {
+        let answered = usize::try_from(replies.read_i32()?).map_err(|_| aim_binder_host::parcel::BAD_VALUE)?;
+        if reader.remaining() != 0 || answered == 0 || answered > calls.len() {
             return Err(aim_binder_host::parcel::BAD_VALUE);
         }
-        let replies = calls
-            .iter()
+        let replies = (0..answered)
             .map(|_| aim_service_aidl::read_byte_array(&mut replies)?.ok_or(aim_binder_host::parcel::BAD_VALUE))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(replies)

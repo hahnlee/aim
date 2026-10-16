@@ -1,7 +1,7 @@
 //! Native controller for process-owned POSIX locks (#1189).
 //! Only native process admission registers owners; Mach request payloads cannot.
 use crate::{posix_control::{Client,Endpoint,Frame,Operation,Owner,Request},process_namespace::ProcessIdentity};
-use std::{collections::BTreeMap,io,path::PathBuf,process::{Child,Command},sync::{Arc,Mutex,atomic::{AtomicBool,AtomicU64,Ordering}},thread,time::{Duration,Instant}};
+use std::{collections::BTreeMap,io,os::fd::{AsRawFd,FromRawFd},path::PathBuf,process::{Child,Command},sync::{Arc,Mutex,atomic::{AtomicBool,AtomicU64,Ordering}},thread,time::{Duration,Instant}};
 fn error(code:i32)->io::Error{io::Error::from_raw_os_error(code)}
 type Key=(i32,u64,u64);
 #[derive(Clone,Copy,Debug)]
@@ -149,11 +149,32 @@ impl Drop for Holder {fn drop(&mut self){if let Err(failure)=self.stop(){eprintl
 struct Forwarded {frame:Frame,native_request:u64,actor:ProcessIdentity,reply:crate::posix_control::Reply,holder:Arc<Holder>,pending:crate::posix_control::Pending}
 #[derive(Clone)]
 struct Namespace {table:PathBuf,init:crate::process_namespace::InitRegistration}
-struct State {config:Config,controller:ProcessIdentity,namespace:Mutex<Option<Namespace>>,owners:Mutex<BTreeMap<Key,Arc<Holder>>>,failures:Mutex<Vec<String>>}
+/// Owner exits, as the kernel reports them, so a request retires the dead
+/// without probing every live owner.
+struct Exits {queue:crate::private_fd::PrivateFd,unwatched:AtomicBool}
+impl Exits {
+ fn new()->io::Result<Self>{
+  let queue=crate::private_fd::PrivateFd::allocate(||{let fd=unsafe{libc::kqueue()};if fd<0{Err(io::Error::last_os_error())}else{Ok(unsafe{std::os::fd::OwnedFd::from_raw_fd(fd)})}})?;
+  Ok(Self{queue,unwatched:AtomicBool::new(false)})
+ }
+ /// An owner that exited, or was replaced, before its watch began is left to
+ /// the next scan.
+ fn watch(&self,process:ProcessIdentity){
+  let event=libc::kevent{ident:process.host_pid as usize,filter:libc::EVFILT_PROC,flags:libc::EV_ADD|libc::EV_ONESHOT,fflags:libc::NOTE_EXIT,data:0,udata:std::ptr::null_mut()};
+  if unsafe{libc::kevent(self.queue.as_raw_fd(),&event,1,std::ptr::null_mut(),0,std::ptr::null())}<0||!process.is_live(){self.unwatched.store(true,Ordering::Release);}
+ }
+ /// Whether an owner may have exited since the last call.
+ fn any(&self)->bool{
+  let mut exited=self.unwatched.swap(false,Ordering::AcqRel);
+  let mut events:[libc::kevent;64]=unsafe{std::mem::zeroed()};let zero=libc::timespec{tv_sec:0,tv_nsec:0};
+  loop{let count=unsafe{libc::kevent(self.queue.as_raw_fd(),std::ptr::null(),0,events.as_mut_ptr(),events.len()as i32,&zero)};if count!=0{exited=true;}if count<events.len()as i32{break exited;}}
+ }
+}
+struct State {config:Config,controller:ProcessIdentity,namespace:Mutex<Option<Namespace>>,owners:Mutex<BTreeMap<Key,Arc<Holder>>>,exits:Exits,failures:Mutex<Vec<String>>}
 impl State {
  fn record(&self,failure:io::Error){self.failures.lock().unwrap().push(failure.to_string());}
  fn retire_dead(&self)->io::Result<()> {
-  let dead={let mut owners=self.owners.lock().unwrap();let keys=owners.iter().filter(|(_,holder)|!holder.owner.process.is_live()).map(|(key,_)|*key).collect::<Vec<_>>();keys.into_iter().filter_map(|key|owners.remove(&key)).collect::<Vec<_>>()};
+  let dead={let mut owners=self.owners.lock().unwrap();if !self.exits.any(){return Ok(());}let keys=owners.iter().filter(|(_,holder)|!holder.owner.process.is_live()).map(|(key,_)|*key).collect::<Vec<_>>();keys.into_iter().filter_map(|key|owners.remove(&key)).collect::<Vec<_>>()};
   for holder in dead{if let Err(failure)=holder.stop(){eprintln!("[posix-owner] stage=retire-dead controller={:?} actor={:?} error={failure}",self.controller,holder.owner.process);return Err(failure);}}
   Ok(())
  }
@@ -181,7 +202,7 @@ impl State {
    ||crate::process_namespace::mount_namespace_of(&namespace.table,parent.owner.process).map_err(|failure|failed("fork-post-parent-namespace",failure))?!=parent_namespace{holder.stop().map_err(|failure|failed("fork-holder-stop",failure))?;return Err(failed("fork-post-namespace-match",error(libc::EPERM)));}
   let mut owners=self.owners.lock().unwrap();
   if let Some(existing)=owners.get(&key(actor)).cloned(){drop(owners);holder.stop().map_err(|failure|failed("fork-duplicate-holder-stop",failure))?;return Ok(existing);}
-  owners.insert(key(actor),holder.clone());Ok(holder)
+  owners.insert(key(actor),holder.clone());self.exits.watch(actor);Ok(holder)
  }
  fn external_namespace(&self,actor:ProcessIdentity)->io::Result<String> {
   let namespace=self.namespace.lock().unwrap().clone().ok_or_else(||error(libc::EPERM))?;
@@ -211,7 +232,7 @@ impl State {
   if let Some(existing)=owners.get(&key(actor)).cloned(){drop(owners);holder.stop()?;return Ok(existing);}
   // This native-created Holder is the revocable process capability. Its key
   // includes the audited actor birth; retire_dead destroys its final lock owner.
-  owners.insert(key(actor),holder.clone());Ok(holder)
+  owners.insert(key(actor),holder.clone());self.exits.watch(actor);Ok(holder)
  }
  fn begin(&self,request:Request)->io::Result<Option<Forwarded>> {
   self.retire_dead()?;
@@ -271,7 +292,7 @@ impl Controller {
  pub fn start(config:Config)->io::Result<Self>{
   if config.startup_timeout.is_zero()||!config.holder.is_absolute()||!config.holder.is_file(){return Err(error(libc::EINVAL));}
   let endpoint=Endpoint::register(&config.endpoint)?;let process=ProcessIdentity::running(std::process::id()as i32)?;
-  let state=Arc::new(State{config:config.clone(),controller:process,namespace:Mutex::new(None),owners:Mutex::new(BTreeMap::new()),failures:Mutex::new(Vec::new())});let stop=Arc::new(AtomicBool::new(false));
+  let state=Arc::new(State{config:config.clone(),controller:process,namespace:Mutex::new(None),owners:Mutex::new(BTreeMap::new()),exits:Exits::new()?,failures:Mutex::new(Vec::new())});let stop=Arc::new(AtomicBool::new(false));
   let serving=state.clone();let stopped=stop.clone();
   let thread=thread::Builder::new().name("posix-controller".into()).spawn(move||{
    let mut requests:Vec<thread::JoinHandle<io::Result<()>>>=Vec::new();
@@ -309,7 +330,7 @@ impl Controller {
   let mut owners=self.state.owners.lock().unwrap();
   if let Some(holder)=owners.get(&key(owner.process)){if holder.owner!=owner{return Err(error(libc::EINVAL));}let native=holder.native()?;if !native.process.is_live(){return Err(error(libc::ECHILD));}return Ok(native.process);}
   if owners.values().any(|entry|entry.owner.guest_pid==owner.guest_pid&&entry.owner.process.is_live()){return Err(error(libc::EEXIST));}
-  let holder=Holder::spawn(&self.config,owner,self.process)?;let process=holder.native()?.process;owners.insert(key(owner.process),holder);Ok(process)
+  let holder=Holder::spawn(&self.config,owner,self.process)?;let process=holder.native()?.process;owners.insert(key(owner.process),holder);self.state.exits.watch(owner.process);Ok(process)
  }
  /// Native exec handoff retires old blocking requests, while keeping the
  /// same process's file-backed locks and cached holder descriptors.
