@@ -883,6 +883,21 @@ fn install_existing(ctx: &mut Context<'_>, owner: Binder, args: &[String]) -> Re
     ctx.command.println(&format!("Package {package} installed for user: {translated}"));
     Ok(0)
 }
+/// `runBypassStagedInstallerCheck` and `runBypassAllowedApexUpdateCheck`:
+/// the next session skips that check, as `Boolean.parseBoolean` reads it.
+fn bypass(ctx: &mut Context<'_>, owner: Binder, command: &str, value: Option<&String>) -> Result<i32, Exception> {
+    let value = value.is_some_and(|value| value.eq_ignore_ascii_case("true"));
+    let mut p = Parcel::new();
+    let code = if command == "bypass-staged-installer-check" {
+        installer::BypassNextStagedInstallerCheck { value }.write(&mut p);
+        installer::BYPASS_NEXT_STAGED_INSTALLER_CHECK
+    } else {
+        installer::BypassNextAllowedApexUpdateCheck { value }.write(&mut p);
+        installer::BYPASS_NEXT_ALLOWED_APEX_UPDATE_CHECK
+    };
+    checked(ctx.invoke(owner, code, p)?)?;
+    Ok(0)
+}
 /// `None` leaves unrelated commands to the remaining native shell cohorts.
 pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
     let command = ctx.command.command().unwrap_or_default().to_owned();
@@ -899,6 +914,8 @@ pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
             | "remove-splits"
             | "uninstall"
             | "install-existing"
+            | "bypass-staged-installer-check"
+            | "bypass-allowed-apex-update-check"
     ) {
         return Ok(None);
     }
@@ -993,6 +1010,9 @@ pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
         "get-stagedsessions" => staged_list(ctx, owner, &args)?,
         "uninstall" => uninstall(ctx, owner, &args)?,
         "install-existing" => install_existing(ctx, owner, &args)?,
+        "bypass-staged-installer-check" | "bypass-allowed-apex-update-check" => {
+            bypass(ctx, owner, &command, args.first())?
+        }
         "remove-splits" => {
             let package = args.first().ok_or_else(|| bad("Missing package"))?;
             if args.len() < 2 {

@@ -165,6 +165,7 @@ interface IPackageBootstrapBridge {
     boolean isSdkLibraryIndependenceEnabled();
     boolean installerCloudCompilationVerificationEnabled();
     /** Independent calls of this interface in one transaction: an int count, then each call's int
-        code and marshalled data; the reply holds each call's marshalled reply as a byte[]. */
+        code and marshalled data; the reply holds the count answered, at least one, then each
+        answered call's marshalled reply as a byte[], in order. */
     byte[] transactBatch(in byte[] calls);
 }

@@ -240,6 +240,8 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
         return com.android.internal.hidden_from_bootclasspath.android.content.pm.Flags.cloudCompilationVerification();
     }
 
+    private static final int BATCH_REPLY_BUDGET = 256 * 1024;
+
     @Override
     public byte[] transactBatch(byte[] calls) throws RemoteException {
         enforceSystemUid();
@@ -249,8 +251,11 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
             in.unmarshall(calls, 0, calls.length); in.setDataPosition(0);
             int count = in.readInt();
             if (count < 0 || count > in.dataAvail() / 8) throw new IllegalArgumentException("invalid batch count");
-            out.writeInt(count);
-            for (int i = 0; i < count; i++) {
+            out.writeInt(0);
+            int answered = 0;
+            // A reply stays well inside the caller's binder buffer; the caller
+            // sends the calls left unanswered in another batch.
+            while (answered < count && (answered == 0 || out.dataPosition() < BATCH_REPLY_BUDGET)) {
                 int code = in.readInt();
                 byte[] request = in.createByteArray();
                 if (code == TRANSACTION_transactBatch || request == null) throw new IllegalArgumentException("invalid batched call");
@@ -266,8 +271,10 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
                     }
                     out.writeByteArray(reply.marshall());
                 } finally { data.recycle(); reply.recycle(); }
+                answered++;
             }
-            if (in.dataAvail() != 0) throw new IllegalArgumentException("batch trailing data");
+            if (answered == count && in.dataAvail() != 0) throw new IllegalArgumentException("batch trailing data");
+            out.setDataPosition(0); out.writeInt(answered);
             return out.marshall();
         } finally { in.recycle(); out.recycle(); }
     }

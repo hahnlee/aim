@@ -14,7 +14,7 @@
 #[path="component_resolver/priority.rs"] mod priority;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use aim_binder_host::parcel::Parcel;
 use aim_service_aidl::WriteParcelable;
@@ -279,6 +279,48 @@ impl MimeGroupError {
 }
 
 impl ComponentResolver {
+    /// `new` of `state`, shared with the last state that gave it the same
+    /// inputs: most versions change only usage or user state.
+    pub fn latest(state: &Arc<State>) -> std::result::Result<Arc<ComponentResolver>, MimeGroupError> {
+        static LATEST: Mutex<Option<(Arc<State>, Arc<ComponentResolver>)>> = Mutex::new(None);
+        let mut latest = LATEST.lock().unwrap();
+        if let Some((before, resolver)) = &*latest
+            && Self::same_inputs(before, state)
+        {
+            return Ok(resolver.clone());
+        }
+        let resolver = Arc::new(Self::new(state)?);
+        *latest = Some((state.clone(), resolver.clone()));
+        Ok(resolver)
+    }
+
+    /// Whether `a` and `b` give `new` the same inputs: each package's code,
+    /// privilege, MIME groups and syncable authorities, the factory code an
+    /// update's priorities are capped by, and the setup wizard.
+    fn same_inputs(a: &State, b: &State) -> bool {
+        let same_code = |a: &PackageState, b: &PackageState| match (&a.pkg, &b.pkg) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        };
+        let wizard = |state: &State| {
+            state.system.roles.as_ref().and_then(|owner| owner.setup_wizard_priority_owner().map(|name| name.map(str::to_owned)))
+        };
+        a.packages.len() == b.packages.len()
+            && a.packages.iter().zip(&b.packages).all(|((an, a), (bn, b))| {
+                an == bn
+                    && same_code(a, b)
+                    && a.is.privileged == b.is.privileged
+                    && a.mime_groups == b.mime_groups
+                    && a.syncable_authorities == b.syncable_authorities
+            })
+            && a.disabled_system_packages.len() == b.disabled_system_packages.len()
+            && a.disabled_system_packages.iter().zip(&b.disabled_system_packages).all(|((an, a), (bn, b))| {
+                an == bn && same_code(a, b) && a.is.privileged == b.is.privileged
+            })
+            && wizard(a) == wizard(b)
+    }
+
     /// `addAllComponents` of every package with code.
     pub fn new(state: &State) -> std::result::Result<ComponentResolver, MimeGroupError> {
         let mut r = ComponentResolver::default();
