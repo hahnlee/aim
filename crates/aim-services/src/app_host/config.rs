@@ -467,15 +467,7 @@ mod tests {
     /// pinned image).
     #[test]
     fn matches_the_original_on_a_phone_display() {
-        let display = Display {
-            id: 0,
-            width: 1080,
-            height: 1920,
-            x_dpi: 320.0,
-            y_dpi: 320.0,
-            refresh_rate: 60.0,
-            density: 2.0,
-        };
+        let display = Display::phone_for_test();
         let device = Device {
             locales: "ko-KR",
             right_to_left: false,

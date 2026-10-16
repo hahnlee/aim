@@ -406,7 +406,8 @@ fn start_native_services(
 /// `<file>.pending.tsv` samples outstanding calls and their thread/parent
 /// graph every 250 ms; snapshot headers contain pending/returning counts.
 /// A call of `captures` (interface, code) also leaves its whole data in
-/// `<file>.data/<at>-<sender pid>-<code>.bin`, `<at>` its first column.
+/// `<file>.data/<at>-<sender pid>-<code>.bin`, `<at>` its first column,
+/// and its reply's in `...<code>.reply.bin`.
 fn trace_binder(server: &Arc<Server>, file: &std::path::Path, captures: &[(String, u32)]) -> Result<(), String> {
     use std::io::Write;
     let mut out = std::fs::File::create(file).map_err(|e| format!("{}: {e}", file.display()))?;
@@ -436,8 +437,9 @@ fn trace_binder(server: &Arc<Server>, file: &std::path::Path, captures: &[(Strin
                 std::thread::sleep(Duration::from_millis(250));
                 let mut text = String::new();
                 for r in driver.take_trace() {
-                    if let Some(data) = &r.data {
-                        let path = data_dir.join(format!("{}-{}-{}.bin", r.at.as_micros(), r.from_pid, r.code));
+                    for (data, suffix) in [(&r.data, "bin"), (&r.reply, "reply.bin")] {
+                        let Some(data) = data else { continue };
+                        let path = data_dir.join(format!("{}-{}-{}.{suffix}", r.at.as_micros(), r.from_pid, r.code));
                         if let Err(error) = std::fs::write(&path, data) {
                             eprintln!("binder trace: {}: {error}", path.display());
                         }

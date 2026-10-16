@@ -75,6 +75,20 @@ impl Settings {
         self.values.get(&(table, name.to_string()))?.as_deref()
     }
 
+    /// The settings of `table` whose names start with `prefix`
+    /// (`SettingsState.getSettingNamesLocked` filtered as `LIST_config`
+    /// filters them).
+    pub fn list(&self, table: Table, prefix: &str) -> Vec<(String, Option<String>)> {
+        let mut list: Vec<_> = self
+            .values
+            .iter()
+            .filter(|((t, name), _)| *t == table && name.starts_with(prefix))
+            .map(|((_, name), value)| (name.clone(), value.clone()))
+            .collect();
+        list.sort();
+        list
+    }
+
     /// `DeviceConfig.getProperty(namespace, name)`.
     pub fn device_config(&self, namespace: &str, name: &str) -> Option<&str> {
         self.get(Table::Config, &format!("{namespace}/{name}"))

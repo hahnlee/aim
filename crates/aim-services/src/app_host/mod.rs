@@ -8,13 +8,16 @@
 //! at `android-16.0.0_r1`, from the state PackageManager last persisted
 //! (`packages.xml`, `packages.list`).
 
+pub mod activity;
 pub mod bind;
 pub mod compat;
 pub mod config;
 pub mod display;
+pub mod display_service;
 pub mod package_service;
 pub mod packages;
 pub mod settings;
+pub mod settings_provider;
 pub mod zygote;
 
 use std::collections::HashMap;
@@ -39,8 +42,10 @@ use crate::package;
 /// The control service's binder name and descriptor.
 pub const CONTROL: &str = "aim.app_host";
 const CONTROL_DESCRIPTOR: &str = "dev.aim.IAppHost";
-/// `int startProcess(String packageName)`: the started process's pid.
-const START_PROCESS: u32 = 1;
+/// `int startActivity(String component)`: starts the activity of
+/// `package/class` (`package/.Class` for one of the package) in a new
+/// process, as `am start -n` does; the process's pid.
+const START_ACTIVITY: u32 = 1;
 
 /// `Process.FIRST_APPLICATION_UID`, `UserHandle.PER_USER_RANGE`.
 const FIRST_APPLICATION_UID: u32 = 10000;
@@ -137,6 +142,11 @@ struct App {
     start_elapsed: i64,
     start_uptime: i64,
     thread: Option<Strong>,
+    /// The activity the process starts for, launched once its application
+    /// is created.
+    activity: Option<String>,
+    /// The global configuration it was bound with.
+    config: Option<config::Configuration>,
 }
 
 pub struct AppHost {
@@ -154,6 +164,10 @@ pub struct AppHost {
     unimplemented: Mutex<std::collections::HashSet<(String, u32)>>,
     model: OnceLock<Arc<crate::package::model::State>>,
     resolver: crate::package::resolve::Resolver,
+    activities: activity::Activities,
+    display: OnceLock<Arc<(display::Display, display_service::Resources)>>,
+    /// The settings provider and its connection token.
+    settings_provider: OnceLock<(Binder, Binder)>,
 }
 
 impl AppHost {
@@ -171,6 +185,9 @@ impl AppHost {
             unimplemented: Mutex::new(std::collections::HashSet::new()),
             model: OnceLock::new(),
             resolver: Default::default(),
+            activities: Default::default(),
+            display: OnceLock::new(),
+            settings_provider: OnceLock::new(),
         })
     }
 
@@ -202,6 +219,11 @@ impl AppHost {
 
     /// The services it publishes, by binder name.
     pub fn services(self: &Arc<Self>) -> Vec<(&'static str, Arc<dyn Service>)> {
+        let _ = self.settings_provider.set((
+            self.process
+                .add_service(Arc::new(settings_provider::SettingsProvider(self.clone()))),
+            self.process.add_service(Arc::new(activity::Token)),
+        ));
         vec![
             (
                 "activity",
@@ -210,6 +232,18 @@ impl AppHost {
             (
                 "package",
                 Arc::new(package_service::PackageService::new(self.clone())),
+            ),
+            (
+                "display",
+                Arc::new(display_service::DisplayManager::new(self.clone())),
+            ),
+            (
+                "activity_task",
+                Arc::new(activity::ActivityTaskManager(
+                    self.clone(),
+                    self.process
+                        .add_service(Arc::new(activity::ActivityClientController(self.clone()))),
+                )),
             ),
             (CONTROL, Arc::new(Control(self.clone()))),
         ]
@@ -248,6 +282,7 @@ impl AppHost {
             &configured.root,
             &configured.data,
             number("ro.sf.lcd_density")?,
+            &property("persist.sys.locale")?,
             &|name| (configured.properties)(name),
         )
         .map_err(state)?;
@@ -272,8 +307,9 @@ impl AppHost {
     }
 
     /// `ProcessList.startProcessLocked` for an activity of `name`'s
-    /// default process, user 0.
-    fn start_process(&self, name: &str) -> Result<i32, Exception> {
+    /// `ProcessList.startProcessLocked` for the activity `class` of
+    /// `name`'s default process, user 0.
+    fn start_process(&self, name: &str, class: &str) -> Result<i32, Exception> {
         let inputs = self.inputs()?;
         let state = package::State::read(&inputs.data, &[0])
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("package state: {e}")))?
@@ -350,6 +386,8 @@ impl AppHost {
                 start_elapsed: clock_ms(libc::CLOCK_MONOTONIC_RAW),
                 start_uptime: clock_ms(libc::CLOCK_UPTIME_RAW),
                 thread: None,
+                activity: Some(class.to_string()),
+                config: None,
             },
         );
         Ok(pid)
@@ -403,7 +441,8 @@ impl AppHost {
             call.sender_pid,
             app.started.elapsed()
         );
-        let bind = self.bind_application(app)?;
+        let (bind, config) = self.bind_application(app)?;
+        app.config = Some(config);
         strong
             .transact(thread::BIND_APPLICATION, &bind, true)
             .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("bindApplication: {s}")))?;
@@ -458,11 +497,13 @@ impl AppHost {
         }
     }
 
-    /// `finishAttachApplication`: the application's `onCreate` returned.
+    /// `finishAttachApplication`: the application's `onCreate` returned,
+    /// so the activity its process started for is launched
+    /// (`ActivityTaskManagerInternal.attachApplication`).
     fn finish_attach(&self, call: &Call<'_>, start_seq: i64) -> Result<(), Exception> {
-        let apps = self.apps.lock().unwrap();
+        let mut apps = self.apps.lock().unwrap();
         let app = apps
-            .get(&start_seq)
+            .get_mut(&start_seq)
             .filter(|a| a.uid == call.sender_euid && a.thread.is_some())
             .ok_or_else(|| Exception::illegal_argument(format!("no attached start {start_seq}")))?;
         eprintln!(
@@ -470,7 +511,100 @@ impl AppHost {
             app.package,
             app.started.elapsed()
         );
+        let Some(class) = app.activity.take() else {
+            return Ok(());
+        };
+        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
+        let (model, resolution) = self.packages()?;
+        let query = crate::package::query::Query {
+            state: &model,
+            filter: &resolution.apps_filter,
+            calling_uid: 1000,
+        };
+        let component = crate::package::intent::ComponentName {
+            package: app.package.clone(),
+            class: class.clone(),
+        };
+        let info = match query.activity_info(&component, STOCK_PM_FLAGS, 1000, 0) {
+            Ok(Ok(Some(info))) => info,
+            Ok(Ok(None)) => {
+                return Err(Exception::illegal_argument(format!(
+                    "no activity {}/{class}",
+                    app.package
+                )));
+            }
+            Ok(Err(e)) => return Err(e),
+            Err(crate::package::apps_filter::NotModelled(reason)) => {
+                return Err(state(format!("activity info: {reason}")));
+            }
+        };
+        let record = activity::ActivityRecord {
+            package: app.package.clone(),
+            class,
+            uid: app.uid,
+            start_seq,
+            started: app.started,
+            resumed: false,
+            requested_orientation: -1,
+        };
+        let global = app
+            .config
+            .clone()
+            .ok_or_else(|| state("launch before bind".into()))?;
+        let (launch, top) = self.launch_activity(
+            record,
+            activity::Launch {
+                info,
+                global: &global,
+            },
+        );
+        let thread = app.thread.as_ref().unwrap();
+        for (what, transaction) in [("launch", launch), ("top resumed", top)] {
+            thread
+                .transact(thread::SCHEDULE_TRANSACTION, &transaction, true)
+                .map_err(|s| state(format!("scheduleTransaction ({what}): {s}")))?;
+        }
+        eprintln!(
+            "app host: {} launch sent {:?} after its start",
+            app.package,
+            app.started.elapsed()
+        );
         Ok(())
+    }
+
+    /// The default display, from SurfaceFlinger, and the framework's
+    /// resources describing it, read once.
+    fn display(&self) -> Result<Arc<(display::Display, display_service::Resources)>, Exception> {
+        if let Some(display) = self.display.get() {
+            return Ok(display.clone());
+        }
+        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
+        let inputs = self.inputs()?;
+        let display = display::Display::query(&self.process).map_err(state)?;
+        let packages = &inputs.packages;
+        let integer = |name: &str| {
+            packages
+                .framework_integer(name)
+                .ok_or_else(|| state(format!("no {name}")))
+        };
+        let resources = display_service::Resources {
+            name: packages
+                .framework_string("display_manager_built_in_display_name")
+                .ok_or_else(|| state("no display_manager_built_in_display_name".into()))?,
+            density_dpi: display.density_dpi(),
+            brightness: (
+                integer("config_screenBrightnessSettingMinimum")?,
+                integer("config_screenBrightnessSettingMaximum")?,
+                integer("config_screenBrightnessSettingDefault")?,
+            ),
+            brightness_dim: packages
+                .framework_float("config_screenBrightnessDimFloat")
+                .ok_or_else(|| state("no config_screenBrightnessDimFloat".into()))?,
+        };
+        Ok(self
+            .display
+            .get_or_init(|| Arc::new((display, resources)))
+            .clone())
     }
 
     /// The package model's state and its resolution, made once.
@@ -495,6 +629,78 @@ impl AppHost {
         Ok((state, resolution))
     }
 
+    /// The exception of a method `name` of `service` it does not
+    /// implement, logged once.
+    fn unimplemented_named(&self, service: &str, name: &str) -> Exception {
+        if self
+            .unimplemented
+            .lock()
+            .unwrap()
+            .insert((format!("{service}:{name}"), 0))
+        {
+            eprintln!("app host: {service} {name} not implemented");
+        }
+        Exception::new(
+            EX_UNSUPPORTED_OPERATION,
+            format!("{service} {name} is not implemented by the app host"),
+        )
+    }
+
+    /// `ActivityManagerService.getContentProvider`: the providers the app
+    /// host serves (`settings`), else none.
+    fn content_provider(
+        &self,
+        name: Option<&str>,
+    ) -> Result<Option<settings_provider::ContentProviderHolder>, Exception> {
+        const GET_URI_PERMISSION_PATTERNS: i64 = 0x800;
+        let Some("settings") = name else {
+            return Ok(None);
+        };
+        let (state, resolution) = self.packages()?;
+        let state_error = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
+        let registered = resolution
+            .components
+            .provider_by_authority("settings")
+            .ok_or_else(|| state_error("no settings provider".into()))?;
+        let class = state
+            .packages
+            .get(&registered.package)
+            .and_then(|ps| ps.pkg.as_ref())
+            .and_then(|pkg| pkg.providers.get(registered.index))
+            .map(|provider| provider.main.component.name.clone())
+            .ok_or_else(|| state_error("settings provider not parsed".into()))?;
+        let query = crate::package::query::Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: 1000,
+        };
+        let component = crate::package::intent::ComponentName {
+            package: registered.package.clone(),
+            class,
+        };
+        let info = match query.provider_info(
+            &component,
+            STOCK_PM_FLAGS | GET_URI_PERMISSION_PATTERNS,
+            0,
+        ) {
+            Ok(Ok(Some(info))) => info,
+            Ok(Ok(None)) => return Err(state_error("settings provider info".into())),
+            Ok(Err(e)) => return Err(e),
+            Err(crate::package::apps_filter::NotModelled(reason)) => {
+                return Err(state_error(format!("provider info: {reason}")));
+            }
+        };
+        let (provider, connection) = *self
+            .settings_provider
+            .get()
+            .ok_or_else(|| state_error("no settings provider binder".into()))?;
+        Ok(Some(settings_provider::ContentProviderHolder {
+            info,
+            provider,
+            connection,
+        }))
+    }
+
     /// The exception of a method of `service` it does not implement,
     /// logged once.
     fn unimplemented(&self, service: &str, code: u32) -> Exception {
@@ -513,14 +719,14 @@ impl AppHost {
     }
 
     /// `bindApplication`'s call for `app`'s process.
-    fn bind_application(&self, app: &App) -> Result<Parcel, Exception> {
+    fn bind_application(&self, app: &App) -> Result<(Parcel, config::Configuration), Exception> {
         let inputs = self.inputs()?;
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
         let info = inputs
             .packages
             .application_info(&app.package, STOCK_PM_FLAGS)
             .ok_or_else(|| state(format!("no application info of {}", app.package)))?;
-        let display = display::Display::query(&self.process).map_err(state)?;
+        let display = self.display()?.0.clone();
         let config = config::Configuration::of(
             &display,
             &config::Device {
@@ -590,7 +796,7 @@ impl AppHost {
             track_allocation: false,
             restricted_backup_mode: false,
             persistent: false,
-            config: Some(config),
+            config: Some(config.clone()),
             compat_info: Some(compat_info),
             services: Some(services),
             core_settings: Some(bind::Bundle(core_settings)),
@@ -614,7 +820,7 @@ impl AppHost {
             start_requested_uptime: app.start_uptime,
         }
         .write(&mut p);
-        Ok(p)
+        Ok((p, config))
     }
 }
 
@@ -730,6 +936,14 @@ impl Service for Activity {
                         }),
                 )
             }
+            am::GET_CONTENT_PROVIDER => {
+                let args = am::GetContentProvider::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.content_provider(args.name.as_deref()).map(|holder| {
+                    let mut p = Parcel::new();
+                    am::write_get_content_provider_reply(&mut p, holder.as_ref());
+                    p
+                }))
+            }
             am::FINISH_ATTACH_APPLICATION => {
                 let args =
                     am::FinishAttachApplication::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -738,6 +952,17 @@ impl Service for Activity {
                     am::write_finish_attach_application_reply(&mut p);
                     p
                 }))
+            }
+            // `handleApplicationCrash`: the crash is the process's last
+            // act (`RuntimeInit` kills it after the call); it is logged.
+            am::HANDLE_APPLICATION_CRASH => {
+                eprintln!(
+                    "app host: process {} (uid {}) crashed",
+                    call.sender_pid, call.sender_euid
+                );
+                let mut p = Parcel::new();
+                p.write_no_exception();
+                Ok(p)
             }
             // A Java proxy reads an empty reply as success with zero
             // results (a granted permission), so a method the app host
@@ -756,22 +981,33 @@ impl Service for Control {
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
-        if call.code != START_PROCESS {
+        if call.code != START_ACTIVITY {
             return Err(UNKNOWN_TRANSACTION);
         }
         // Root and the shell, as `am start` is theirs.
         if !matches!(call.sender_euid, 0 | 2000) {
-            return reply(Err(Exception::security("startProcess is the shell's")));
+            return reply(Err(Exception::security("startActivity is the shell's")));
         }
         let name = call
             .data
             .enforce_interface(CONTROL_DESCRIPTOR)
             .and_then(|()| call.data.read_string16())
             .map_err(|_| BAD_VALUE)?;
-        let Some(name) = name else {
-            return reply(Err(Exception::new(EX_NULL_POINTER, "packageName")));
+        let Some(component) = name else {
+            return reply(Err(Exception::new(EX_NULL_POINTER, "component")));
         };
-        reply(self.0.start_process(&name).map(|pid| {
+        let Some((package, class)) = component.split_once('/') else {
+            return reply(Err(Exception::illegal_argument(format!(
+                "{component}: not package/class"
+            ))));
+        };
+        // `ComponentName.unflattenFromString`.
+        let class = if class.starts_with('.') {
+            format!("{package}{class}")
+        } else {
+            class.to_string()
+        };
+        reply(self.0.start_process(package, &class).map(|pid| {
             let mut p = Parcel::new();
             p.write_no_exception();
             p.write_i32(pid);

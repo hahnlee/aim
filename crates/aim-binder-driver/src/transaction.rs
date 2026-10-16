@@ -354,6 +354,12 @@ impl State {
             self.enqueue_thread_work(target_proc, target_tid, Work::Transaction(id));
             self.procs.get_mut(&target_proc).unwrap().outstanding_txns += 1;
             if let Some(trace) = &mut self.trace {
+                if trace.captured(in_reply_to) {
+                    let mut data = vec![0u8; (tr.data_size as usize).min(CAPTURE_BYTES)];
+                    if guest.copy_from_user(tr.buffer, &mut data).is_ok() {
+                        trace.reply_data(in_reply_to, data);
+                    }
+                }
                 trace.replied(in_reply_to, id, self.txns[&in_reply_to].to_parent);
             }
             if let Some((parcel, own)) = reply_copy {

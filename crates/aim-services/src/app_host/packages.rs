@@ -41,12 +41,22 @@ impl Packages {
         root: &Path,
         data: &Path,
         density_dpi: i32,
+        locale: &str,
         property: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
         let persisted = package::State::read(data, &[0])?
             .ok_or("no package state: Android never booted on this data")?;
         let mut platform = Platform::load(root, Default::default())?;
         platform.density_dpi = Some(density_dpi);
+        // The device's locale, as `persist.sys.locale` holds it (`ko-KR`).
+        if let Some((language, country)) = locale.split_once('-')
+            && let (Ok(language), Ok(country)) = (
+                <[u8; 2]>::try_from(language.as_bytes()),
+                <[u8; 2]>::try_from(country.as_bytes()),
+            )
+        {
+            platform.locale = (language, country);
+        }
         let restrictions = persisted
             .users
             .iter()
@@ -91,7 +101,9 @@ impl Packages {
                 ..Default::default()
             },
         );
-        let system = system_config::system(root, property, &system_config::Framework::load(root)?)?;
+        let mut system =
+            system_config::system(root, property, &system_config::Framework::load(root)?)?;
+        system.sdk_sandbox_package = Some(Some(sdk_sandbox_package(&packages)?));
         Ok(Packages {
             state: model::State {
                 packages,
@@ -107,17 +119,23 @@ impl Packages {
         &self.state
     }
 
-    /// The framework's integer resource `name`, as its overlays leave it.
-    pub fn framework_integer(&self, name: &str) -> Option<i32> {
-        use crate::package::parse::resources::{
-            Resources, Selected, TYPE_FIRST_INT, TYPE_REFERENCE,
-        };
-        let id = self.platform.framework.id("integer", name)?;
-        let resources = Resources {
+    fn framework_resources(&self) -> crate::package::parse::resources::Resources<'_> {
+        crate::package::parse::resources::Resources {
             tables: vec![&self.platform.framework],
             overlays: &self.platform.framework_overlays,
             config: self.platform.config(),
-        };
+        }
+    }
+
+    /// The framework's resource `kind/name`, resolved as its overlays and
+    /// the device's locale leave it.
+    fn framework_value(
+        &self,
+        kind: &str,
+        name: &str,
+    ) -> Option<crate::package::parse::resources::Selected> {
+        use crate::package::parse::resources::{Selected, TYPE_REFERENCE};
+        let id = self.platform.framework.id(kind, name)?;
         let mut value = Selected {
             kind: TYPE_REFERENCE,
             data: id,
@@ -125,8 +143,29 @@ impl Packages {
             resid: 0,
             flags: 0,
         };
-        resources.resolve(&mut value);
-        (value.kind >= TYPE_FIRST_INT).then_some(value.data as i32)
+        self.framework_resources().resolve(&mut value);
+        Some(value)
+    }
+
+    /// The framework's integer resource `name`.
+    pub fn framework_integer(&self, name: &str) -> Option<i32> {
+        let value = self.framework_value("integer", name)?;
+        (value.kind >= crate::package::parse::resources::TYPE_FIRST_INT)
+            .then_some(value.data as i32)
+    }
+
+    /// The framework's float resource `name` (`<item format="float"
+    /// type="dimen">`).
+    pub fn framework_float(&self, name: &str) -> Option<f32> {
+        let value = self.framework_value("dimen", name)?;
+        (value.kind == crate::package::parse::resources::TYPE_FLOAT)
+            .then_some(f32::from_bits(value.data))
+    }
+
+    /// The framework's string resource `name` in the device's locale.
+    pub fn framework_string(&self, name: &str) -> Option<String> {
+        let id = self.platform.framework.id("string", name)?;
+        self.framework_resources().resource_string(id)
     }
 
     /// `getApplicationInfo(name, flags, 0)`.
@@ -140,6 +179,53 @@ impl Packages {
             user: 0,
         };
         info::generate_application_info(&target, flags)
+    }
+}
+
+/// `SdkSandboxManagerLocal.SERVICE_INTERFACE`.
+const SDK_SANDBOX_SERVICE: &str = "com.android.sdksandbox.SdkSandboxService";
+
+/// `PackageManagerService.getRequiredSdkSandboxPackageName`: the one
+/// installed, enabled system package with an enabled service for the SDK
+/// sandbox's action.
+fn sdk_sandbox_package(packages: &BTreeMap<String, PackageState>) -> Result<String, String> {
+    // `COMPONENT_ENABLED_STATE_DISABLED`, `_DISABLED_USER`,
+    // `_DISABLED_UNTIL_USED`; `_DEFAULT`.
+    const DISABLED: [i32; 3] = [2, 3, 4];
+    const DEFAULT: i32 = 0;
+    let mut found = Vec::new();
+    for ps in packages.values().filter(|ps| ps.is.system) {
+        let (Some(pkg), Some(state)) = (ps.pkg.as_deref(), ps.users.get(&0)) else {
+            continue;
+        };
+        if !state.installed || state.hidden || DISABLED.contains(&state.enabled) {
+            continue;
+        }
+        if state.enabled == DEFAULT && !pkg.is(booleans::ENABLED) {
+            continue;
+        }
+        let matches = pkg.services.iter().any(|service| {
+            let name = &service.main.component.name;
+            let enabled = state.enabled_components.contains(name)
+                || (service.main.enabled && !state.disabled_components.contains(name));
+            enabled
+                && service
+                    .main
+                    .component
+                    .intents
+                    .iter()
+                    .any(|i| i.filter.actions.iter().any(|a| a == SDK_SANDBOX_SERVICE))
+        });
+        if matches {
+            found.push(ps.name.clone());
+        }
+    }
+    match <[String; 1]>::try_from(found) {
+        Ok([name]) => Ok(name),
+        Err(found) => Err(format!(
+            "required SDK sandbox service matches: {}",
+            found.len()
+        )),
     }
 }
 
@@ -280,6 +366,8 @@ fn join(
             enabled: user.enabled,
             install_reason: user.install_reason,
             first_install_time: user.first_install_time,
+            enabled_components: user.enabled_components.clone().unwrap_or_default(),
+            disabled_components: user.disabled_components.clone().unwrap_or_default(),
             data_exists: true,
             ..Default::default()
         },

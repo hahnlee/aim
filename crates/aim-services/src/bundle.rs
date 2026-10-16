@@ -35,6 +35,9 @@ pub enum Value {
     Long(i64),
     Float(f32),
     Bool(bool),
+    /// A `Map<String, String>` (`writeMap`), length-prefixed as
+    /// `Parcel.writeValue` writes maps.
+    StringMap(Vec<(String, Option<String>)>),
     /// A length-prefixed value (`Parcel.isLengthPrefixed`): its type and
     /// where its bytes are in the parcel read.
     Lazy {
@@ -67,6 +70,25 @@ impl Value {
             Value::Bool(v) => {
                 p.write_i32(VAL_BOOLEAN);
                 p.write_bool(*v);
+            }
+            Value::StringMap(entries) => {
+                p.write_i32(VAL_MAP);
+                let length_at = p.position();
+                p.write_i32(-1);
+                let start = p.position();
+                p.write_i32(entries.len() as i32);
+                for (key, value) in entries {
+                    p.write_i32(VAL_STRING);
+                    p.write_string16(Some(key));
+                    match value {
+                        Some(value) => {
+                            p.write_i32(VAL_STRING);
+                            p.write_string16(Some(value));
+                        }
+                        None => p.write_i32(VAL_NULL),
+                    }
+                }
+                p.set_i32_at(length_at, (p.position() - start) as i32);
             }
             Value::Lazy { .. } => unreachable!("lazy values are only read"),
         }
