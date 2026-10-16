@@ -79,6 +79,20 @@ holds `lock`; a `state` left by a keeper that was killed is not one.
 whose data image another guest-init holds (`DATA.lock`, as `cargo aim
 boot` on it does).
 
+## The app host
+
+With `--image` an app host image ([app-host.md](app-host.md),
+`tools/app-host-image.sh`), the resident guest boots without
+system_server: guest-init starts only the services the image lists in
+`/system/etc/aim/app-host-services` (`--only`). `aimctl status` says
+`running` once the app host agent runs, about 3.7 s after `start`;
+zygote is ready about half a second later, and starts wait for it. `aimctl
+open PACKAGE` asks the app host to start the package's launch activity
+(`aim.app_host`), which it resolves as `getLaunchIntentForPackage` does;
+it returns in about 0.3 s, and the app's first frame follows about 0.6 s
+after the command (Calculator, 2026-10-17). There is no window mode yet
+(#1422): `--windows` is refused.
+
 ## Talking to the guest
 
 `shell`, `logs`, `install`, `uninstall`, `open` and `status` run guest

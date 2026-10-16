@@ -689,6 +689,28 @@ impl AppHost {
         self.apps.lock().unwrap().values().find(|a| a.uid == uid && a.thread.is_some()).and_then(|a| a.config.clone())
     }
 
+    /// The activity `ApplicationPackageManager.getLaunchIntentForPackage`
+    /// launches `package` with: the first of its `MAIN` activities in the
+    /// `INFO` category, else in the `LAUNCHER` category.
+    fn launch_activity_of(&self, package: &str, calling_uid: i32) -> Result<String, Exception> {
+        let (_, resolution) = self.packages()?;
+        for category in ["android.intent.category.INFO", "android.intent.category.LAUNCHER"] {
+            let intent = crate::package::intent::Intent {
+                action: Some("android.intent.action.MAIN".into()),
+                categories: Some(vec![category.into()]),
+                package: Some(package.into()),
+                ..Default::default()
+            };
+            let found = resolution
+                .query_intent_activities(&intent, None, 0, 0, calling_uid)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{package}: {e:?}")))?;
+            if let Some(crate::package::component_resolver::Info::Activity(activity)) = found.into_iter().next().map(|r| r.info) {
+                return activity.info.item.name.ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "an activity without a name"));
+            }
+        }
+        Err(Exception::illegal_argument(format!("{package}: no launch activity")))
+    }
+
     /// A window input channel from the agent, for a window on a display of
     /// `width` by `height` pixels: its reply, whose client socket starts at
     /// [`AGENT_CHANNEL_FD`].
@@ -1141,16 +1163,15 @@ impl Service for Control {
         let Some(component) = name else {
             return reply(Err(Exception::new(EX_NULL_POINTER, "component")));
         };
-        let Some((package, class)) = component.split_once('/') else {
-            return reply(Err(Exception::illegal_argument(format!(
-                "{component}: not package/class"
-            ))));
-        };
-        // `ComponentName.unflattenFromString`.
-        let class = if class.starts_with('.') {
-            format!("{package}{class}")
-        } else {
-            class.to_string()
+        // A component (`ComponentName.unflattenFromString`), or a package,
+        // whose launch activity it is.
+        let (package, class) = match component.split_once('/') {
+            Some((package, class)) if class.starts_with('.') => (package, format!("{package}{class}")),
+            Some((package, class)) => (package, class.to_string()),
+            None => match self.0.launch_activity_of(&component, call.sender_euid as i32) {
+                Ok(class) => (component.as_str(), class),
+                Err(e) => return reply(Err(e)),
+            },
         };
         reply(self.0.start_process(package, &class).map(|pid| {
             let mut p = Parcel::new();
