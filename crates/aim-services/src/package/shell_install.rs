@@ -712,7 +712,7 @@ struct Versioned {
 }
 impl WriteParcelable for Versioned {
     fn write_to(&self, p: &mut Parcel) {
-        p.write_string16(Some(&self.package));
+        p.write_string8(Some(&self.package));
         p.write_i64(self.version);
     }
 }
