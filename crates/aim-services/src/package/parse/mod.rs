@@ -161,6 +161,8 @@ pub struct SplitPermission {
 pub enum Error {
     /// The original fails too (`INSTALL_PARSE_FAILED_*`), or skips it.
     Parse(String),
+    /// The original fails with this `INSTALL_PARSE_FAILED_*` status.
+    Status(i32, String),
     /// Original INSTALL_FAILED_OLDER_SDK compatibility rejection.
     OlderSdk(String),
     /// Something this parser does not port yet.
@@ -170,7 +172,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Parse(s) => write!(f, "parse failed: {s}"),
+            Error::Parse(s) | Error::Status(_, s) => write!(f, "parse failed: {s}"),
             Error::OlderSdk(s) => write!(f, "older sdk: {s}"),
             Error::Unsupported(s) => write!(f, "unsupported: {s}"),
         }
@@ -573,7 +575,8 @@ impl Parser<'_> {
                 && !q.tree
                 && (p.protection_level != q.protection_level || p.group != q.group)
             {
-                return fail("Found duplicate permission with a different attribute value.");
+                // PackageManager.INSTALL_PARSE_FAILED_MANIFEST_MALFORMED
+                return Err(Error::Status(-108, "Found duplicate permission with a different attribute value.".into()));
             }
             seen.insert(&p.component.name, p);
         }

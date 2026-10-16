@@ -118,6 +118,7 @@ pub fn verify_batch(
         }
         let package = apks.checked_parsed_path(&path, 0).map_err(|error| match error {
             crate::package::parse::Error::OlderSdk(message) => Failure { legacy_status: -12, committed: false, message },
+            crate::package::parse::Error::Status(status, message) => Failure { legacy_status: status, committed: false, message },
             error => Failure::invalid(error.to_string()),
         })?;
         if record

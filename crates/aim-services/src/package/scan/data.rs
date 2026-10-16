@@ -457,7 +457,7 @@ impl SigningScan {
             let parsed =
                 match apks.checked_parsed_path(&code.location.path, code.location.parse_flags()) {
                     Ok(parsed) => parsed,
-                    Err(crate::package::parse::Error::Parse(message)) => {
+                    Err(crate::package::parse::Error::Parse(message) | crate::package::parse::Error::Status(_, message)) => {
                         factory_rejected.push((
                             code.location.path.clone(),
                             SigningError::Rejected(Error {
