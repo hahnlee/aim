@@ -6,4 +6,6 @@ interface IInstallerCompletionBridge {
         String compilerFilter,boolean debuggable,boolean instantApp,boolean apex,boolean rollbackFromPlatform);
     @nullable InstallDexoptResult dexoptInstalledResult(String packageName,int installScenario,int installReason,int installFlags,
         String compilerFilter,boolean debuggable,boolean instantApp,boolean apex,boolean rollbackFromPlatform);
+    /** InstallPackageHelper.completeInstallProcess: the original app-op owner's package-added state. */
+    void packageAdded(String packageName,int appId);
 }
