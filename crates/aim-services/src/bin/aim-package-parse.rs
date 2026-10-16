@@ -287,7 +287,7 @@ fn run() -> Result<bool, String> {
         let result = match parse(host, guest, flags, &platform) {
             Err(e) => {
                 let c = match &e {
-                    Error::Parse(_) => "(parse failed)".to_owned(),
+                    Error::Parse(_) | Error::Status(..) => "(parse failed)".to_owned(),
                     Error::OlderSdk(_) => "(older SDK)".to_owned(),
                     Error::Unsupported(s) => format!("(unsupported) {s}"),
                 };
