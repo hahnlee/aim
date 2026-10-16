@@ -67,7 +67,12 @@ fn check_free(files: &Files) -> Result<(), String> {
     Ok(())
 }
 
-fn inputs(selected: &crate::inputs::Inputs) -> Result<(), String> {
+fn inputs(selected: &crate::inputs::Inputs, windows: bool) -> Result<(), String> {
+    // Window mode follows system_server's tasks, which the app host has
+    // not (#1422).
+    if windows && selected.app_host_services()?.is_some() {
+        return Err("an app host image has no window mode yet".into());
+    }
     for (path, what) in [
         (selected.image.clone(), "the selected image"),
         (aim_paths::angle(), "ANGLE"),
@@ -87,7 +92,7 @@ fn inputs(selected: &crate::inputs::Inputs) -> Result<(), String> {
 /// log, and back once guest-init has laid out the guest.
 pub fn start(files: &Files, windows: bool, selected: &crate::inputs::Inputs) -> Result<ExitCode, String> {
     check_free(files)?;
-    inputs(selected)?;
+    inputs(selected, windows)?;
     fs::create_dir_all(files.dir()).map_err(|e| format!("{}: {e}", files.dir().display()))?;
     let log =
         fs::File::create(files.log()).map_err(|e| format!("{}: {e}", files.log().display()))?;
@@ -191,7 +196,7 @@ fn shims_args(files: &Files, own: bool, selected: &crate::inputs::Inputs) -> Vec
     args
 }
 
-fn guest_init_args(files: &Files, selected: &crate::inputs::Inputs) -> Vec<OsString> {
+fn guest_init_args(files: &Files, selected: &crate::inputs::Inputs) -> Result<Vec<OsString>, String> {
     let mut args=vec![
         "--image".into(),
         selected.image.clone().into(),
@@ -212,7 +217,10 @@ fn guest_init_args(files: &Files, selected: &crate::inputs::Inputs) -> Vec<OsStr
     ];
     if let Some(path)=&selected.binder_trace {args.extend(["--binder-trace".into(),path.clone().into()]);}
     if let Some(port)=selected.adb_port {args.extend(["--androidboot".into(),format!("aim.adb.port={port}").into()]);}
-    args
+    if let Some(services) = selected.app_host_services()? {
+        args.extend(["--only".into(), services.join(",").into()]);
+    }
+    Ok(args)
 }
 
 /// Children stopped when dropped, by [`end`].
@@ -282,7 +290,7 @@ pub fn run(files: &Files, windows: bool, selected: crate::inputs::Inputs) -> Res
             files.data.display()
         ));
     }
-    inputs(&selected)?;
+    inputs(&selected, windows)?;
     for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
         // SAFETY: the handler only stores to an atomic.
         unsafe {
@@ -408,7 +416,7 @@ fn supervise(files: &Files, state: &mut State) -> Result<ExitCode, String> {
         );
     }
     let mut guest = Command::new(state.inputs.program("guest-init"))
-        .args(guest_init_args(files, &state.inputs))
+        .args(guest_init_args(files, &state.inputs)?)
         .spawn()
         .map_err(|e| format!("guest-init: {e}"))?;
     let guest_birth = ProcessIdentity::running(guest.id() as i32);
@@ -704,7 +712,7 @@ mod tests {
     #[test]
     fn guest_init_boots_the_data_directory() {
         let files = Files::of(Path::new("/d")).unwrap();
-        let args = guest_init_args(&files, &crate::inputs::Inputs::default());
+        let args = guest_init_args(&files, &crate::inputs::Inputs::default()).unwrap();
         let args = strings(&args);
         let after = |flag: &str| args[args.iter().position(|a| *a == flag).unwrap() + 1];
         assert_eq!(after("--data"), "/d");
@@ -729,11 +737,28 @@ mod tests {
     }
 
     #[test]
+    fn an_app_host_image_starts_its_services_without_window_mode() {
+        let image = std::env::temp_dir().join(format!("aimctl-app-host-{}", std::process::id()));
+        fs::create_dir_all(image.join("system/etc/aim")).unwrap();
+        fs::write(image.join("system/etc/aim/app-host-services"), "# what starts\nlogd\n\nzygote # the app's\n").unwrap();
+        let files = Files::of(Path::new("/d")).unwrap();
+        let selected = crate::inputs::Inputs { image: image.clone(), ..Default::default() };
+        let args = guest_init_args(&files, &selected).unwrap();
+        let args = strings(&args);
+        assert_eq!(args[args.iter().position(|a| *a == "--only").unwrap() + 1], "logd,zygote");
+        assert!(inputs(&selected, true).unwrap_err().contains("no window mode"));
+        // An image that boots Android whole starts everything.
+        fs::remove_file(image.join("system/etc/aim/app-host-services")).unwrap();
+        assert!(!strings(&guest_init_args(&files, &selected).unwrap()).contains(&"--only"));
+        fs::remove_dir_all(image).unwrap();
+    }
+
+    #[test]
     fn selected_inputs_reach_init_display_and_shims() {
         let files = Files::of(Path::new("/d")).unwrap();
         let selected = crate::inputs::Inputs { image: "/image".into(),
             host_runtime: "/runtime".into(), userdata: "/templates".into(), binder_trace: Some("/trace.tsv".into()), adb_port: Some(5637) };
-        let args = guest_init_args(&files, &selected);
+        let args = guest_init_args(&files, &selected).unwrap();
         let args = strings(&args);
         let after = |flag: &str| args[args.iter().position(|arg| *arg == flag).unwrap() + 1];
         assert_eq!(after("--image"), "/image");

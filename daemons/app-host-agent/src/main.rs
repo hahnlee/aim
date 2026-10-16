@@ -29,6 +29,10 @@ mod input;
 const SOCKET: &str = "ANDROID_SOCKET_aim_zygote_relay";
 /// The primary zygote's command socket.
 const ZYGOTE: &str = "/dev/socket/zygote";
+/// `ZygoteProcess.ZYGOTE_CONNECT_TIMEOUT_MS`, `ZYGOTE_CONNECT_RETRY_DELAY_MS`:
+/// zygote listens once it has preloaded.
+const ZYGOTE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const ZYGOTE_CONNECT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 /// The app host's control service, and its `attachAgent(IBinder)`.
 const APP_HOST: &str = "aim.app_host";
 const ATTACH_AGENT: u32 = 2;
@@ -87,7 +91,7 @@ fn relay(host: UnixStream) {
             Err(error) => return log::error!("host command: {error}"),
         };
         if zygote.is_none() {
-            match UnixStream::connect(ZYGOTE) {
+            match connect_zygote() {
                 Ok(stream) => zygote = Some(stream),
                 Err(error) => return log::error!("{ZYGOTE}: {error}"),
             }
@@ -104,6 +108,23 @@ fn relay(host: UnixStream) {
         }
         if let Err(error) = reply_to.write_all(&reply) {
             return log::error!("host reply: {error}");
+        }
+    }
+}
+
+/// A session with zygote, waiting for it to listen as
+/// `ZygoteProcess.waitForConnectionToZygote` does.
+fn connect_zygote() -> std::io::Result<UnixStream> {
+    let deadline = std::time::Instant::now() + ZYGOTE_CONNECT_TIMEOUT;
+    loop {
+        match UnixStream::connect(ZYGOTE) {
+            Err(error)
+                if matches!(error.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound)
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(ZYGOTE_CONNECT_RETRY_DELAY)
+            }
+            result => return result,
         }
     }
 }

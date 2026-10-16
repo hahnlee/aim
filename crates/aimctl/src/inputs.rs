@@ -74,8 +74,29 @@ impl Selection {
     }
 }
 
+/// Where an app host image (docs/app-host.md) lists the services init
+/// starts for it.
+const APP_HOST_SERVICES: &str = "system/etc/aim/app-host-services";
+
 impl Inputs {
     pub fn program(&self, name: &str) -> PathBuf { self.host_runtime.join(name) }
+
+    /// The services an app host image starts, one per line (`#` begins a
+    /// comment); None for an image that boots Android whole.
+    pub fn app_host_services(&self) -> Result<Option<Vec<String>>, String> {
+        let path = self.image.join(APP_HOST_SERVICES);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Ok(Some(
+                text.lines()
+                    .map(|l| l.split('#').next().unwrap().trim())
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+            )),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        }
+    }
 
     pub fn arguments(&self) -> Vec<std::ffi::OsString> {
         let mut args=vec!["--image".into(), self.image.clone().into(),

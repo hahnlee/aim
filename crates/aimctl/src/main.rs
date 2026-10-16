@@ -81,8 +81,8 @@ fn running(files: &Files) -> Result<(State, Guest), String> {
 
 /// Like [`running`], and Android finished booting.
 fn booted(files: &Files) -> Result<Guest, String> {
-    let (_, guest) = running(files)?;
-    if !guest.booted() {
+    let (state, guest) = running(files)?;
+    if !guest.booted(state.inputs.app_host_services()?.is_some()) {
         return Err("Android is still booting; `aimctl status` shows when it is ready".into());
     }
     Ok(guest)
@@ -111,7 +111,7 @@ fn status(files: &Files) -> Result<ExitCode, String> {
         None => "stopped",
         Some(s) => match Guest::of(files, s) {
             None => "starting",
-            Some(g) if g.booted() => "running",
+            Some(g) if g.booted(s.inputs.app_host_services()?.is_some()) => "running",
             Some(_) => "booting",
         },
     };
@@ -273,6 +273,17 @@ fn shim_of(dir: &Path, package: &str) -> Option<PathBuf> {
 
 fn open(files: &Files, package: &str) -> Result<ExitCode, String> {
     let (state, _) = running(files)?;
+    // The app host resolves the launch activity itself, from the packages
+    // it loaded (`aim.app_host`'s `startActivity`).
+    if state.inputs.app_host_services()?.is_some() {
+        let guest = booted(files)?;
+        let (status, out) = guest.output(
+            &["/system/bin/service", "call", "aim.app_host", "1", "s16", package],
+            COMMAND_PATIENCE,
+        )?;
+        print!("{out}");
+        return Ok(exit_code(status));
+    }
     let app = launcher_apps(files)?
         .into_iter()
         .find(|i| i.app.package == package)

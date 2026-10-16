@@ -60,13 +60,17 @@ impl Guest {
         crate::output::run(&mut self.command(argv), timeout)
     }
 
-    /// Whether Android finished booting (`sys.boot_completed`).
-    pub fn booted(&self) -> bool {
-        self.output(
-            &["/system/bin/getprop", "sys.boot_completed"],
-            Duration::from_secs(10),
-        )
-        .is_ok_and(|(status, out)| status.success() && out.trim() == "1")
+    /// Whether Android finished booting (`sys.boot_completed`), or, for
+    /// an app host image, which never does, whether its agent runs: app
+    /// starts wait for zygote from then on.
+    pub fn booted(&self, app_host: bool) -> bool {
+        let (property, ready) = if app_host {
+            ("init.svc.aim-app-host-agent", "running")
+        } else {
+            ("sys.boot_completed", "1")
+        };
+        self.output(&["/system/bin/getprop", property], Duration::from_secs(10))
+            .is_ok_and(|(status, out)| status.success() && out.trim() == ready)
     }
 }
 

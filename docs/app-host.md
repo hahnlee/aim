@@ -22,7 +22,7 @@ and boot are unchanged.
 | `input`, `audio` | the host, same | what a touch and a click ask: the velocity tracker's strategy; whether navigation repeats sound, and the click's sound effect while sound effects are off (#1433) |
 | `user`, `appops`, `trust`, `input_method` | the host, same | what an app's start asks of them: the one user's state and restrictions, the clipboard's ops, an unlocked device, the input method's client (no input method yet, #1432) |
 | the `settings` provider | the host, same | `GET_*` and `LIST_config` from the settings the original persisted |
-| `aim.app_host` | the host, same | `startActivity(String component)` (code 1, `package/.Class`) for the shell |
+| `aim.app_host` | the host, same | `startActivity(String)` (code 1: a component, `package/.Class`, or a package, whose launch activity it resolves) for the shell and `aimctl open` |
 
 The start arguments, the configuration and the compat changes follow the
 pinned sources (`android-16.0.0_r1`); their tests cite them. They were
@@ -33,20 +33,26 @@ match, and the app host's `DisplayInfo` is the original's byte for byte.
 
 ## Running it
 
+`aimctl --data DIR start --image target/aim/app-host/root` keeps it
+resident and `aimctl open PACKAGE` starts an app ([aimctl.md](aimctl.md),
+"The app host"). By hand:
+
 ```
 cargo aim build
 tools/app-host-image.sh                 # target/aim/app-host/root
 guest-init --image target/aim/app-host/root --data <data> --run \
-    --only apexd-bootstrap,apexd,keystore2,odsign,vendor.keymint-default,prng_seeder,logd,servicemanager,hwservicemanager,derive_classpath,derive_sdk,art_boot,zygote,surfaceflinger,vendor.graphics.allocator,vendor.hwcomposer-3,gpu,system_aconfigd_platform_init,mainline_aconfigd_init,system_aconfigd_mainline_init,system_aconfigd_socket_service,mainline_aconfigd_socket_service,vendor.power-default,aim-app-host-agent \
+    --only "$(grep -v '^#' image/app-host/services | paste -sd, -)" \
     [--gpu ... --vulkan ... --display ...]
 tools/guest-shell.sh <data> 'service call aim.app_host 1 s16 com.android.calculator2/.Calculator'
 ```
 
-`<data>` must be one Android booted once with its original image (the
+`startActivity` takes a component (`package/.Class`) or a package, whose
+launch activity it starts. `<data>` must be one Android booted once with its original image (the
 app host reads the package and settings state it persisted), with the app
-installed. `--only` leaves out what an app's start does not need; apexd,
-keystore2 and odsign stay, as properties init waits for are theirs;
-the power HAL stays, as SurfaceFlinger waits for it at its first frame.
+installed. `image/app-host/services` (in the image as
+`/system/etc/aim/app-host-services`) leaves out what an app's start does
+not need, and says why the rest stays. The agent waits for zygote to
+listen, as `ZygoteProcess.waitForConnectionToZygote` does.
 
 `guest-init --binder-trace FILE --binder-capture DESCRIPTOR#CODE,...`
 keeps the whole data of the named calls, and of their replies, in

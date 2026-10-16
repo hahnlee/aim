@@ -24,5 +24,7 @@ grep -q -- ' --start-system-server' "$zygote" || { echo "$zygote: no --start-sys
 sed -i '' 's/ --start-system-server//' "$zygote"
 cp "$agent" "$out/system_ext/bin/aim-app-host-agent"
 cp "$root/image/app-host/aim-app-host-agent.rc" "$out/system_ext/etc/init/aim-app-host-agent.rc"
+# The services init starts for it (`aimctl` and `guest-init --only`).
+cp "$root/image/app-host/services" "$out/system/etc/aim/app-host-services"
 printf 'activity         com.android.server.am.ActivityManagerService$Lifecycle\n' >> "$out/system/etc/aim/native-services"
 echo "$out"
