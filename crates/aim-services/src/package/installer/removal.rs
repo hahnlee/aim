@@ -36,7 +36,7 @@ pub struct VersionedPackage {
 impl ReadParcelable for VersionedPackage {
     fn read_from(reader: &mut Reader<'_>) -> Result<Self, i32> {
         Ok(Self {
-            name: reader.read_string16()?.ok_or(BAD_VALUE)?,
+            name: reader.read_string8()?.ok_or(BAD_VALUE)?,
             version: reader.read_i64()?,
         })
     }
@@ -595,17 +595,20 @@ fn installer_matches(q: &Query<'_>, name: Option<&str>) -> Result<bool, Exceptio
             == q.calling_uid,
     )
 }
+/// `permission` is the caller's live check (`checkCallingOrSelfPermission`),
+/// which honors an adopted shell permission identity.
 pub fn admit(
     q: &Query<'_>,
     request: Request,
     admission: &AdmissionPolicy,
+    permission: &dyn Fn(&str) -> Result<bool, Exception>,
     removal: impl FnOnce() -> Result<RemovalPolicy, Exception>,
 ) -> Result<Admission, Exception> {
     policy::cross_user(q, &admission.device, request.user, true, "uninstall")?;
     if !matches!(request.uid, 0 | 2000) {
         policy::check_package(q, request.caller_package.as_deref())?;
     }
-    let has_delete = policy::permission(q, "android.permission.DELETE_PACKAGES")?;
+    let has_delete = permission("android.permission.DELETE_PACKAGES")?;
     if request.existing_only && !has_delete {
         return Err(Exception::security(
             "uninstallExistingPackage requires DELETE_PACKAGES",
@@ -621,7 +624,7 @@ pub fn admit(
             .as_deref()
             .and_then(|name| q.state.packages.get(name));
         if caller.is_none_or(|package| package.target_sdk_version >= 28)
-            && !policy::permission(q, "android.permission.REQUEST_DELETE_PACKAGES")?
+            && !permission("android.permission.REQUEST_DELETE_PACKAGES")?
         {
             return Err(Exception::security(
                 "uninstall requires REQUEST_DELETE_PACKAGES",
@@ -946,7 +949,11 @@ impl Controller {
                 self.external
                     .check_package(request.uid, request.caller_package.as_deref())?;
             }
-            admit(query, request.clone(), &captured, || (self.policy.removal)(query, &request))
+            let permission = |name: &str| match apps_filter::app_id(request.uid as i32) {
+                0 | 1000 => Ok(true),
+                _ => self.external.permission(name, request.pid, request.uid),
+            };
+            admit(query, request.clone(), &captured, &permission, || (self.policy.removal)(query, &request))
         })?;
         match admission {
             Admission::Rejected(status) => self.complete(&request, receiver, status, None),
@@ -1644,16 +1651,16 @@ mod admission_policy_tests {
             calls.fetch_add(1, Ordering::SeqCst);
             Err(illegal("unreachable per-user policy"))
         };
-        assert!(matches!(admit(&query, request(-1), &admission(false), details).unwrap(),
+        assert!(matches!(admit(&query, request(-1), &admission(false), &|name| policy::permission(&query, name), details).unwrap(),
             Admission::Rejected(INTERNAL_ERROR)));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        let invalid = match admit(&query, request(-2), &admission(false), details) {
+        let invalid = match admit(&query, request(-2), &admission(false), &|name| policy::permission(&query, name), details) {
             Err(error) => error,
             Ok(_) => panic!("invalid version accepted"),
         };
         assert_eq!(invalid.code, EX_ILLEGAL_ARGUMENT);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert!(matches!(admit(&query, request(-1), &admission(true), details).unwrap(),
+        assert!(matches!(admit(&query, request(-1), &admission(true), &|name| policy::permission(&query, name), details).unwrap(),
             Admission::Rejected(APP_PINNED)));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
@@ -1673,7 +1680,7 @@ mod admission_policy_tests {
         let request = Request { package: "known.package".into(), version: -1,
             caller_package: Some("caller.package".into()), uid: 10100, pid: 7,
             user: 0, flags: 0, existing_only: false };
-        let error = match admit(&query, request, &admission(false), || {
+        let error = match admit(&query, request, &admission(false), &|name| policy::permission(&query, name), || {
             Err(illegal("known target policy failure"))
         }) {
             Err(error) => error,

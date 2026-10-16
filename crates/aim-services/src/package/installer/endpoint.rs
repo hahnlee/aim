@@ -614,14 +614,20 @@ impl Service for Endpoint {
 mod tests {
     use super::*;
     use aim_binder_host::parcel::Reader;
-    struct UnreachableOwners;
-    impl Owners for UnreachableOwners {
+    /// Records uninstall requests; any other owner call is unexpected.
+    #[derive(Default)]
+    struct TestOwners {
+        uninstalled: std::sync::Mutex<Vec<(String, i64, i32)>>,
+    }
+    impl Owners for TestOwners {
         fn uninstall(
             &self,
-            _: super::super::removal::Request,
-            _: Option<super::super::preapproval::IntentSender>,
+            request: super::super::removal::Request,
+            receiver: Option<super::super::preapproval::IntentSender>,
         ) -> Result<(), Exception> {
-            panic!("Unexpected uninstall")
+            assert!(receiver.is_some());
+            self.uninstalled.lock().unwrap().push((request.package, request.version, request.user));
+            Ok(())
         }
         fn archive(&self, _: u32, _: i32, _: ArchiveAction) -> Result<(), Exception> {
             panic!("Unexpected archive")
@@ -752,7 +758,7 @@ mod tests {
         let sessions = Arc::new(Sessions::default());
         let endpoint = Endpoint {
             sessions: sessions.clone(),
-            owners: Arc::new(UnreachableOwners),
+            owners: Arc::new(TestOwners::default()),
         };
         let reply = endpoint
             .transact(&mut Call {
@@ -771,5 +777,34 @@ mod tests {
             EX_UNSUPPORTED_OPERATION
         );
         assert!(sessions.records().is_empty());
+    }
+
+    #[test]
+    fn uninstall_reads_the_framework_versioned_package() {
+        // PackageInstaller.uninstall: VersionedPackage.writeToParcel writes its
+        // name with writeString8, then the long version code.
+        let mut data = Parcel::new();
+        data.write_interface_token(aidl::DESCRIPTOR);
+        data.write_i32(1);
+        data.write_string8(Some("com.example.app"));
+        data.write_i64(-1);
+        data.write_string16(None);
+        data.write_i32(0);
+        data.write_i32(1);
+        data.write_binder(Some(aim_binder_host::parcel::Binder::Local(7)));
+        data.write_i32(0);
+        let owners = Arc::new(TestOwners::default());
+        let endpoint = Endpoint { sessions: Arc::new(Sessions::default()), owners: owners.clone() };
+        let reply = endpoint
+            .transact(&mut Call {
+                code: aidl::UNINSTALL,
+                flags: 0,
+                sender_pid: 1,
+                sender_euid: 10100,
+                data: Reader::new(data.data(), data.objects()),
+            })
+            .unwrap();
+        aidl::read_uninstall_reply(&mut Reader::new(reply.data(), reply.objects())).unwrap().unwrap();
+        assert_eq!(*owners.uninstalled.lock().unwrap(), [("com.example.app".to_owned(), -1, 0)]);
     }
 }
