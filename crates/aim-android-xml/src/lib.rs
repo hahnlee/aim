@@ -94,6 +94,16 @@ pub fn read(bytes: &[u8]) -> Result<Element, String> {
     }
 }
 
+/// The root elements of a document that may hold several in sequence
+/// (`abx::read_sequence`); a text document holds one.
+pub fn read_sequence(bytes: &[u8]) -> Result<Vec<Element>, String> {
+    if bytes.starts_with(abx::MAGIC) {
+        abx::read_sequence(bytes)
+    } else {
+        text::read(bytes).map(|root| vec![root])
+    }
+}
+
 /// Read a document for owners using `XmlPullParser.next()`. Preserve comments
 /// and other unrelated nodes, but normalize text/CDATA/entity events so a
 /// subsequent ABX write retains their meaning. BinaryXmlPullParser skips a

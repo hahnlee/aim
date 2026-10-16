@@ -32,7 +32,7 @@
 //! decides nothing without them, as on this image).
 
 mod bridge;
-mod mac;
+pub(crate) mod mac;
 mod time;
 
 use std::collections::BTreeMap;

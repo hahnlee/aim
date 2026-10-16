@@ -206,6 +206,9 @@ impl NativeServices {
                 services.push((name.to_string(), process.add_service(service)));
             }
         }
+        if let Some(host) = &app_host {
+            host.set_published(&services);
+        }
         process.start();
         Ok(Self { system, services, package_runtime: std::sync::Mutex::new(None),
             package_constructing: std::sync::atomic::AtomicBool::new(false),
@@ -214,11 +217,11 @@ impl NativeServices {
 
     /// The app host's inputs (`app_host::AppHost::configure`), when
     /// `activity` is native.
-    pub fn configure_app_host(&self, root: &std::path::Path, data: &std::path::Path, sdk: i32,
-        codename: &str, connect: app_host::Connect,
+    pub fn configure_app_host(&self, root: &std::path::Path, data: &std::path::Path,
+        properties: app_host::Properties, connect: app_host::Connect,
     ) -> Result<(), String> {
         match &self.app_host {
-            Some(host) => host.configure(root, data, sdk, codename, connect),
+            Some(host) => host.configure(root, data, properties, connect),
             None => Ok(()),
         }
     }

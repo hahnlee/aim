@@ -14,6 +14,8 @@ use crate::uapi::*;
 
 /// How much of a traced transaction's data is read for its interface token.
 const TOKEN_BYTES: usize = 512;
+/// How much of a captured call's data is kept.
+const CAPTURE_BYTES: usize = 1 << 20;
 
 /// Why a transaction failed: the BR code for the sender and the errno kept
 /// in the extended error.
@@ -401,6 +403,11 @@ impl State {
         if guest.copy_from_user(tr.buffer, &mut head).is_err() {
             head.clear();
         }
+        let descriptor = crate::trace::descriptor(&head);
+        let data = self.trace.as_ref().unwrap().captures(&descriptor, tr.code).then(|| {
+            let mut data = vec![0u8; (tr.data_size as usize).min(CAPTURE_BYTES)];
+            guest.copy_from_user(tr.buffer, &mut data).map(|()| data).unwrap_or_default()
+        });
         let from = &self.procs[&proc];
         let to = &self.procs[&target_proc];
         let record = TraceRecord {
@@ -413,8 +420,9 @@ impl State {
                 .get(&tid)
                 .and_then(|thread| thread.transaction_stack),
             to_pid: to.creds.pid,
-            descriptor: crate::trace::descriptor(&head),
+            descriptor,
             code: tr.code,
+            data,
             oneway: tr.flags & TF_ONE_WAY != 0,
             waiting: to.waiting_threads.len() as u32
                 + to.threads

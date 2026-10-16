@@ -140,7 +140,7 @@ impl Platform {
 
     /// The resources' configuration while parsing (`ResourcesImpl` for
     /// PackageManager's `Resources`).
-    fn config(&self) -> Config {
+    pub(crate) fn config(&self) -> Config {
         Config {
             language: self.locale.0,
             country: self.locale.1,

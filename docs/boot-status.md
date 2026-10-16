@@ -29,6 +29,16 @@ guest-init --image <derived> --data <data> --run \
   removed; `android-image diff` lists them with reasons. The vendor
   `build.prop` still describes the emulator (#206).
 
+## The app host boot (2026-10-16)
+
+The app host image ([app-host.md](app-host.md)) boots without
+system_server: with `--only` its 17 services and one-shots, zygote accepts
+commands 4.8 s after guest-init starts (zygote starts at 2.35 s, its
+preload takes 1.8 s); without `--only`, 7.2-8.0 s. apexd, keystore2 and
+odsign cannot be left out: init waits for properties they set
+(`apexd.status`, `keystore.module_hash.sent`, `odsign.*`), two seconds
+each when excluded.
+
 ## Native system services (2026-09-29, ADR 0013)
 
 `image/native-services` lists the system services implemented natively

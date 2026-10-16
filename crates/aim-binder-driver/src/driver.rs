@@ -140,6 +140,16 @@ impl Driver {
         self.unlock(st);
     }
 
+    /// Keep the whole data of traced calls of `code` on `descriptor`
+    /// ([`crate::TraceRecord::data`]); tracing must have started.
+    pub fn capture_trace(&self, descriptor: &str, code: u32) {
+        let mut st = self.lock();
+        if let Some(trace) = st.trace.as_mut() {
+            trace.capture(descriptor.to_string(), code);
+        }
+        self.unlock(st);
+    }
+
     /// The transactions completed since the last call.
     pub fn take_trace(&self) -> Vec<crate::TraceRecord> {
         let mut st = self.lock();

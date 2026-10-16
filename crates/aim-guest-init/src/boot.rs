@@ -129,6 +129,9 @@ pub struct BootOptions {
     /// Run mode: append every binder transaction to this file
     /// ([`trace_binder`]).
     pub binder_trace: Option<PathBuf>,
+    /// The calls whose whole data the trace keeps, by interface and code:
+    /// each in `<binder_trace>.data/<at>-<sender>-<code>.bin`.
+    pub binder_capture: Vec<(String, u32)>,
     /// Run mode: compare these original services with their native models
     /// and log each call to the file (`aim_services::shadow`).
     pub binder_shadow: Option<(Vec<String>, PathBuf)>,
@@ -167,6 +170,7 @@ impl BootOptions {
             display: None,
             trace: false,
             binder_trace: None,
+            binder_capture: Vec::new(),
             binder_shadow: None,
             package_constructor_capture: None,
             // The device: init.rc imports init.aim.rc and vold reads
@@ -401,7 +405,9 @@ fn start_native_services(
 /// thread and the target thread that took it (0 for none). The sibling
 /// `<file>.pending.tsv` samples outstanding calls and their thread/parent
 /// graph every 250 ms; snapshot headers contain pending/returning counts.
-fn trace_binder(server: &Arc<Server>, file: &std::path::Path) -> Result<(), String> {
+/// A call of `captures` (interface, code) also leaves its whole data in
+/// `<file>.data/<at>-<sender pid>-<code>.bin`, `<at>` its first column.
+fn trace_binder(server: &Arc<Server>, file: &std::path::Path, captures: &[(String, u32)]) -> Result<(), String> {
     use std::io::Write;
     let mut out = std::fs::File::create(file).map_err(|e| format!("{}: {e}", file.display()))?;
     let mut pending_path = file.as_os_str().to_os_string();
@@ -413,6 +419,15 @@ fn trace_binder(server: &Arc<Server>, file: &std::path::Path) -> Result<(), Stri
         .map_err(|error| format!("{}: {error}", pending_path.display()))?;
     let driver = server.driver().clone();
     driver.start_trace();
+    let mut data_dir = file.as_os_str().to_os_string();
+    data_dir.push(".data");
+    let data_dir = PathBuf::from(data_dir);
+    if !captures.is_empty() {
+        std::fs::create_dir_all(&data_dir).map_err(|e| format!("{}: {e}", data_dir.display()))?;
+    }
+    for (descriptor, code) in captures {
+        driver.capture_trace(descriptor, *code);
+    }
     let nanos = |d: Option<Duration>| d.map_or("-".to_string(), |d| d.as_nanos().to_string());
     std::thread::Builder::new()
         .name("binder-trace".into())
@@ -421,6 +436,12 @@ fn trace_binder(server: &Arc<Server>, file: &std::path::Path) -> Result<(), Stri
                 std::thread::sleep(Duration::from_millis(250));
                 let mut text = String::new();
                 for r in driver.take_trace() {
+                    if let Some(data) = &r.data {
+                        let path = data_dir.join(format!("{}-{}-{}.bin", r.at.as_micros(), r.from_pid, r.code));
+                        if let Err(error) = std::fs::write(&path, data) {
+                            eprintln!("binder trace: {}: {error}", path.display());
+                        }
+                    }
                     text.push_str(&format!(
                         "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                         r.at.as_micros(),
@@ -764,16 +785,14 @@ impl Boot {
         if let Some(server) = &binder {
             share_areas(&properties, server);
             if let Some(file) = &options.binder_trace {
-                trace_binder(server, file)?;
+                trace_binder(server, file, &options.binder_capture)?;
             }
             native_services = start_native_services(&image, &layout.data.join("data"), &layout.properties_dir(), server,native_pid,options.package_constructor_capture.as_deref())?;
             if let Some(services) = &native_services {
                 let properties_dir = layout.properties_dir();
-                let property = |name| crate::props::read_property(&properties_dir, name).unwrap_or_default();
-                let sdk = property("ro.build.version.sdk").parse().map_err(|_| "ro.build.version.sdk is not a number")?;
                 let socket_dir = layout.socket_dir();
-                services.configure_app_host(image.root(), &layout.data.join("data"), sdk,
-                    &property("ro.build.version.codename"),
+                services.configure_app_host(image.root(), &layout.data.join("data"),
+                    Box::new(move |name| read_property(&properties_dir, name)),
                     Box::new(move || crate::unixsock::connect_at(&socket_dir, APP_HOST_ZYGOTE_RELAY)))
                     .map_err(|e| format!("app host: {e}"))?;
             }

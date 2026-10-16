@@ -353,6 +353,7 @@ impl Parcel {
 }
 
 /// A received parcel being read.
+#[derive(Clone)]
 pub struct Reader<'a> {
     data: &'a [u8],
     objects: &'a [u64],

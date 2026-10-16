@@ -32,7 +32,7 @@ mod compatibility;
 pub use compatibility::LibraryCompatibility;
 mod bridge;
 pub use bridge::PolicyBridgeError;
-mod abi;
+pub(crate) mod abi;
 pub use abi::{
     AbiPolicy, AbiScanContext, AbiScanMode, AbiSelectionError, BundledAbis, NativeLibraryAbiCopy,
     NativeLibraryCopy, NativeLibraryDestination, NativeLibraryEntry, NativeLibraryEnvironment,
