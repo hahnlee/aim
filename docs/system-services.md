@@ -65,9 +65,11 @@ every step: replace superseded facts instead of appending a log.
    interface, and nothing else in `services/` reaches into it (searched at
    the tag). Both directions go through one bridge ("The system_server
    bridge").
-6. **Conformance.** The CTS module(s) for the service's API, before (the
-   original) and after (native), plus the app checks; failing tests keep
-   the original.
+6. **Conformance.** The CTS-derived tests of the service's API plus the
+   app checks (ADR 0013, "Conformance bar"); the real CTS module(s),
+   before (the original) and after (native), when the service replaces
+   the original. A test the original passes and native fails keeps the
+   original.
 
 **Redirected call sites** (#702 D1, #668). Where the original is not
 started by a `startService(Foo.class)` (PackageManagerService's static

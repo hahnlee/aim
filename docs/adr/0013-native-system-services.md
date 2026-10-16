@@ -94,10 +94,16 @@ migration from the ADR 0012 stack, not a rewrite.
    persists (settings, package state) in Android's formats while the
    original still reads them.
 4. **Conformance bar.** A service is replaced only when its replacement
-   passes the CTS module(s) for that service's API, and the app checks
+   passes the CTS-derived tests of that service's API, and the app checks
    (the integration gate, Settings, Chrome, Calculator and the tracked
-   game set) still pass. Failing tests keep the original. The test results
-   are recorded with the change.
+   game set) still pass. A CTS-derived test reproduces what a CTS test
+   asserts (inputs, results, status codes, messages) against the native
+   service through its AIDL, without booting Android, and cites the CTS
+   test and the pinned original code it follows. The service's real CTS
+   modules run when it replaces the original and at milestones; a test
+   the original passes must pass natively, and one the original fails
+   but the native service passes counts as passing. The test results are
+   recorded with the change.
 5. **Order.** Largest cost and clearest macOS owner first:
    1. **The shell**: launcher, SystemUI (status and navigation bars,
       notification shade, quick settings, keyguard, recents, volume UI,
@@ -435,3 +441,21 @@ The migration's state and conformance results are in
   SystemServer, UserManagerService's 15 calls) and a native `power`
   (#668, core milestone). Details in
   [system-services.md](../system-services.md), "Redirected call sites".
+
+### CTS-derived conformance (2026-10-16)
+
+- A 66-module PackageManager CTS campaign takes 12–20 hours on the
+  development machine (16 GB, one guest at a time): every module boots a
+  whole Android, and each install, process start and shell command pays
+  the syscall layer's process cost (fork 13 ms, exec 41 ms). Run per step,
+  CTS set the pace of the migration instead of its implementation.
+- The conformance bar is now the CTS-derived tests above: fast, run
+  without booting Android, each tied to the CTS test and original code
+  it reproduces. Once app processes run without SystemServer, CTS's
+  device test APKs run against the native services directly. Real CTS
+  modules gate a service's switch and milestones.
+- The order stays the one of #1413: implement as much of the native
+  replacement as possible first (access state, users, PackageManager,
+  the app-start path), hardening compatibility with derived tests as
+  each part lands.
+
