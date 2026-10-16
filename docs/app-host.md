@@ -58,8 +58,8 @@ keeps the whole data of the named calls, and of their replies, in
 | --- | --- |
 | guest start to zygote accepting commands, the services above | 4.8 s (the original image's boot without system_server: 7.2-8.0 s) |
 | of it: zygote's preload | 1.8 s |
-| first `startProcess`: the app host loads its packages (244 parsed) | 4.1 s |
-| `startProcess` to zygote's pid | 119 ms |
+| the app host loads its packages (244 parsed in parallel), while the boot goes on, from the agent's attach | 1.1-1.2 s |
+| `startProcess` to zygote's pid | 119-143 ms |
 | to `attachApplication` | 162 ms |
 | to `finishAttachApplication` (the application created) | 414-428 ms |
 | to `activityResumed` | 438-537 ms |
@@ -76,5 +76,4 @@ effects (#1433); a finished draw's transaction (#1431); the input
 method (#1432); settings generation tracking (#1430); external
 storage (#1423),
 providers and the font map in `bindApplication` (#1424), PackageManager's
-writes (#1425), the parse at the first start (#1426) and system apps'
-hidden API allowlist (#1427).
+writes (#1425) and system apps' hidden API allowlist (#1427).

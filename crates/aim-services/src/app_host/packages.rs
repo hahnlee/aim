@@ -72,8 +72,9 @@ impl Packages {
             .find(|(user, _)| *user == 0)
             .and_then(|(_, user)| user.access.clone())
             .ok_or("no permission state of user 0")?;
-        let mut packages = BTreeMap::new();
-        for setting in &persisted.settings.packages {
+        // Each package's parse, on as many threads as there are cores, as
+        // `ParallelPackageParser` parses.
+        let joined = crate::package::scan::parse_all(&persisted.settings.packages, |setting| {
             let listed = persisted.list.iter().find(|e| e.name == setting.name);
             let user = restrictions
                 .and_then(|r| r.packages.iter().find(|(name, _)| *name == setting.name))
@@ -94,8 +95,9 @@ impl Packages {
             let mut ps = join(setting, listed, user, &host, &platform)
                 .map_err(|e| format!("{}: {e}", setting.name))?;
             ps.users.get_mut(&0).unwrap().granted_permissions = granted;
-            packages.insert(setting.name.clone(), ps);
-        }
+            Ok::<_, String>((setting.name.clone(), ps))
+        });
+        let packages = joined.into_iter().collect::<Result<BTreeMap<_, _>, _>>()?;
         let mut users = BTreeMap::new();
         users.insert(
             0,

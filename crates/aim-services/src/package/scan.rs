@@ -22,6 +22,7 @@ mod enrich;
 pub use enrich::{ScanClock, ScanTime};
 mod identity;
 mod image;
+pub(crate) use image::parse_all;
 mod parse_cache;
 mod policy;
 pub mod process_policy;

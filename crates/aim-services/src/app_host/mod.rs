@@ -1113,6 +1113,15 @@ impl Service for Control {
             };
             *self.0.agent.lock().unwrap() = Some(self.0.process.strong(agent));
             eprintln!("app host: agent attached (pid {})", call.sender_pid);
+            // The guest's properties are set by now: what starts read is
+            // loaded while the boot goes on, as PackageManager scans at its
+            // start, and not by the first start.
+            let host = self.0.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = host.inputs().and_then(|_| host.packages()) {
+                    eprintln!("app host: loading its inputs: {e:?}");
+                }
+            });
             let mut p = Parcel::new();
             p.write_no_exception();
             return Ok(p);
