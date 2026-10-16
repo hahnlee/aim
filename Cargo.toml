@@ -67,7 +67,7 @@ members = [
     "daemons/vold",
     "daemons/windows",
     "daemons/windows/core",
-    "daemons/zygote-relay",
+    "daemons/app-host-agent",
 ]
 default-members = [
     "crates/aim-android-image",

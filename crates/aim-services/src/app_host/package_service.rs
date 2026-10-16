@@ -18,14 +18,12 @@ use crate::shadow::{Answer, ShadowCall};
 pub struct PackageService {
     host: Arc<AppHost>,
     reported: Mutex<HashSet<(u32, &'static str)>>,
+    monitors: Mutex<Vec<aim_binder_host::parcel::Binder>>,
 }
 
 impl PackageService {
     pub fn new(host: Arc<AppHost>) -> Self {
-        PackageService {
-            host,
-            reported: Mutex::new(HashSet::new()),
-        }
+        PackageService { host, reported: Mutex::new(HashSet::new()), monitors: Mutex::new(Vec::new()) }
     }
 
     fn unmodelled(&self, code: u32, reason: &'static str) -> Reply {
@@ -55,6 +53,17 @@ impl Service for PackageService {
                 return Ok(reply);
             }
         };
+        // The packages do not change while the app host runs, so a
+        // monitor is kept and never called.
+        if call.code == pm::REGISTER_PACKAGE_MONITOR_CALLBACK {
+            let args = pm::RegisterPackageMonitorCallback::read(&mut call.data).map_err(|_| aim_binder_host::parcel::BAD_VALUE)?;
+            if let Some(callback) = args.callback {
+                self.monitors.lock().unwrap().push(callback);
+            }
+            let mut p = Parcel::new();
+            pm::write_register_package_monitor_callback_reply(&mut p);
+            return Ok(p);
+        }
         let mut shadow = ShadowCall {
             service: "package",
             descriptor: pm::DESCRIPTOR,

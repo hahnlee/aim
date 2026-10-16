@@ -1,6 +1,6 @@
 //! Process starts through zygote, as system_server's `ZygoteProcess`
 //! sends them (`startViaZygote`, `zygoteSendArgsAndGetResult` at
-//! `android-16.0.0_r1`), over the zygote relay (`aim-zygote-relay`,
+//! `android-16.0.0_r1`), over the app host agent (`aim-app-host-agent`,
 //! docs/app-host.md): zygote takes commands only from the system uid.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 

@@ -275,7 +275,7 @@ fn ints64(r: &mut Reader<'_>) -> ParcelResult<Vec<i64>> {
     (0..n.max(0)).map(|_| r.read_i64()).collect()
 }
 
-fn surface_flinger(process: &LocalProcess) -> Result<Strong, String> {
+pub(super) fn surface_flinger(process: &LocalProcess) -> Result<Strong, String> {
     let mut data = Parcel::new();
     sm::CheckService {
         name: Some(SERVICE.into()),

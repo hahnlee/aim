@@ -9,15 +9,22 @@
 //! (`packages.xml`, `packages.list`).
 
 pub mod activity;
+pub mod appops_service;
 pub mod bind;
 pub mod compat;
 pub mod config;
 pub mod display;
 pub mod display_service;
+pub mod input_method;
 pub mod package_service;
 pub mod packages;
+pub mod permission_controller;
 pub mod settings;
 pub mod settings_provider;
+pub mod surface;
+pub mod trust_service;
+pub mod user_service;
+pub mod window_manager;
 pub mod zygote;
 
 use std::collections::HashMap;
@@ -46,6 +53,14 @@ const CONTROL_DESCRIPTOR: &str = "dev.aim.IAppHost";
 /// `package/class` (`package/.Class` for one of the package) in a new
 /// process, as `am start -n` does; the process's pid.
 const START_ACTIVITY: u32 = 1;
+/// `void attachAgent(IBinder agent)`: the app host agent (`aim-app-host-agent`).
+const ATTACH_AGENT: u32 = 2;
+/// The agent's `openInputChannel(String name)`, and where the client's
+/// socket (a `ParcelFileDescriptor`) starts in its reply: after the status
+/// and the channel's index.
+const AGENT_DESCRIPTOR: &str = "dev.aim.IAppHostAgent";
+const OPEN_INPUT_CHANNEL: u32 = 1;
+const AGENT_CHANNEL_FD: usize = 8;
 
 /// `Process.FIRST_APPLICATION_UID`, `UserHandle.PER_USER_RANGE`.
 const FIRST_APPLICATION_UID: u32 = 10000;
@@ -147,6 +162,10 @@ struct App {
     activity: Option<String>,
     /// The global configuration it was bound with.
     config: Option<config::Configuration>,
+    /// Its start's first frame (`ApplicationStartInfo
+    /// .TIMESTAMP_INITIAL_RENDERTHREAD_FRAME`,
+    /// `TIMESTAMP_SURFACEFLINGER_COMPOSITION_COMPLETE`), uptime nanoseconds.
+    first_frame: Option<(i64, i64)>,
 }
 
 pub struct AppHost {
@@ -168,6 +187,9 @@ pub struct AppHost {
     display: OnceLock<Arc<(display::Display, display_service::Resources)>>,
     /// The settings provider and its connection token.
     settings_provider: OnceLock<(Binder, Binder)>,
+    windows: window_manager::Windows,
+    composer: OnceLock<surface::Composer>,
+    agent: Mutex<Option<Strong>>,
 }
 
 impl AppHost {
@@ -188,6 +210,9 @@ impl AppHost {
             activities: Default::default(),
             display: OnceLock::new(),
             settings_provider: OnceLock::new(),
+            windows: Default::default(),
+            composer: OnceLock::new(),
+            agent: Mutex::new(None),
         })
     }
 
@@ -237,6 +262,12 @@ impl AppHost {
                 "display",
                 Arc::new(display_service::DisplayManager::new(self.clone())),
             ),
+            ("window", Arc::new(window_manager::WindowManager(self.clone()))),
+            ("user", Arc::new(user_service::UserManager::new(self.clone()))),
+            ("appops", Arc::new(appops_service::AppOps::new(self.clone()))),
+            ("trust", Arc::new(trust_service::TrustManager::new(self.clone()))),
+            ("permission", Arc::new(permission_controller::PermissionController(self.clone()))),
+            ("input_method", Arc::new(input_method::InputMethodManager::new(self.clone()))),
             (
                 "activity_task",
                 Arc::new(activity::ActivityTaskManager(
@@ -388,6 +419,7 @@ impl AppHost {
                 thread: None,
                 activity: Some(class.to_string()),
                 config: None,
+                first_frame: None,
             },
         );
         Ok(pid)
@@ -494,6 +526,27 @@ impl AppHost {
                 EX_UNSUPPORTED_OPERATION,
                 format!("checkPermission: {reason}"),
             )),
+        }
+    }
+
+    /// `reportStartInfoViewTimestamps`: the first frame of the caller's
+    /// latest start, kept once (`AppStartInfoTracker.addTimestampToStart`).
+    fn report_view_timestamps(&self, call: &Call<'_>, draw_start: i64, presented: i64) {
+        let mut apps = self.apps.lock().unwrap();
+        let Some(app) = apps
+            .values_mut()
+            .filter(|a| a.pid == call.sender_pid && a.uid == call.sender_euid)
+            .max_by_key(|a| a.started)
+        else {
+            return;
+        };
+        if app.first_frame.is_none() {
+            app.first_frame = Some((draw_start, presented));
+            eprintln!(
+                "app host: {} presented its first frame {} ms after its start",
+                app.package,
+                presented / 1_000_000 - app.start_uptime
+            );
         }
     }
 
@@ -605,6 +658,48 @@ impl AppHost {
             .display
             .get_or_init(|| Arc::new((display, resources)))
             .clone())
+    }
+
+    /// `WindowManagerInternal.isUidFocused`.
+    pub fn uid_focused(&self, uid: i32) -> bool {
+        u32::try_from(uid).is_ok_and(|uid| self.activities.uid_focused(uid))
+    }
+
+    /// The guest's `/data`.
+    fn data(&self) -> Result<&Path, Exception> {
+        Ok(&self.configured.get().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host not configured"))?.data)
+    }
+
+    /// The app host's connection to SurfaceFlinger, made once.
+    fn composer(&self) -> Result<&surface::Composer, Exception> {
+        if let Some(composer) = self.composer.get() {
+            return Ok(composer);
+        }
+        let composer = surface::Composer::connect(&self.process).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        Ok(self.composer.get_or_init(|| composer))
+    }
+
+    /// The global configuration `uid`'s process was bound with.
+    fn global_config(&self, uid: u32) -> Option<config::Configuration> {
+        self.apps.lock().unwrap().values().find(|a| a.uid == uid && a.thread.is_some()).and_then(|a| a.config.clone())
+    }
+
+    /// A window input channel from the agent: its reply, whose client
+    /// socket starts at [`AGENT_CHANNEL_FD`].
+    fn open_input_channel(&self, name: &str) -> Result<aim_binder_host::local::Received, Exception> {
+        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
+        let agent = self.agent.lock().unwrap();
+        let agent = agent.as_ref().ok_or_else(|| state("the app host agent has not attached".into()))?;
+        let mut data = Parcel::new();
+        data.write_interface_token(AGENT_DESCRIPTOR);
+        data.write_string16(Some(name));
+        let reply = agent.transact(OPEN_INPUT_CHANNEL, &data, false).map_err(|s| state(format!("openInputChannel: {s}")))?;
+        let status = reply.reader().read_exception();
+        match status {
+            Ok(Ok(())) => Ok(reply),
+            Ok(Err(e)) => Err(e),
+            Err(s) => Err(state(format!("openInputChannel reply: {s}"))),
+        }
     }
 
     /// The package model's state and its resolution, made once.
@@ -944,6 +1039,24 @@ impl Service for Activity {
                     p
                 }))
             }
+            am::REPORT_START_INFO_VIEW_TIMESTAMPS => {
+                let args = am::ReportStartInfoViewTimestamps::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.0.report_view_timestamps(
+                    call,
+                    args.render_thread_draw_start_time_ns,
+                    args.frame_presented_time_ns,
+                );
+                Ok(Parcel::new())
+            }
+            // The render thread's priority is the process's; the app host
+            // does not boost it.
+            am::SET_RENDER_THREAD => {
+                am::SetRenderThread::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                am::write_set_render_thread_reply(&mut p);
+                Ok(p)
+            }
             am::FINISH_ATTACH_APPLICATION => {
                 let args =
                     am::FinishAttachApplication::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -981,6 +1094,21 @@ impl Service for Control {
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
+        if call.code == ATTACH_AGENT {
+            // The agent runs as the system uid.
+            if call.sender_euid != 1000 {
+                return reply(Err(Exception::security("attachAgent is the agent's")));
+            }
+            call.data.enforce_interface(CONTROL_DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+            let Some(Binder::Handle(agent)) = call.data.read_binder().map_err(|_| BAD_VALUE)? else {
+                return Err(BAD_VALUE);
+            };
+            *self.0.agent.lock().unwrap() = Some(self.0.process.strong(agent));
+            eprintln!("app host: agent attached (pid {})", call.sender_pid);
+            let mut p = Parcel::new();
+            p.write_no_exception();
+            return Ok(p);
+        }
         if call.code != START_ACTIVITY {
             return Err(UNKNOWN_TRANSACTION);
         }

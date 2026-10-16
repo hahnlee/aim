@@ -71,6 +71,19 @@ pub struct Activities {
 }
 
 impl Activities {
+    /// Whether `uid` has the resumed activity: the app host's one task is
+    /// focused (`WindowManagerInternal.isUidFocused`).
+    pub fn uid_focused(&self, uid: u32) -> bool {
+        self.records.lock().unwrap().values().any(|r| r.uid == uid && r.resumed)
+    }
+
+    /// The component (`package/class`) of `uid`'s latest activity, a
+    /// window's name.
+    pub fn top_component(&self, uid: u32) -> Option<String> {
+        let records = self.records.lock().unwrap();
+        records.values().filter(|r| r.uid == uid).max_by_key(|r| r.started).map(|r| format!("{}/{}", r.package, r.class))
+    }
+
     fn with<T>(
         &self,
         token: Option<Binder>,

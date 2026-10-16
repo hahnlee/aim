@@ -208,6 +208,10 @@ impl NativeServices {
         }
         if let Some(host) = &app_host {
             host.set_published(&services);
+            let host = Arc::downgrade(host);
+            system.set_window_manager_internal(Box::new(move |uid| {
+                host.upgrade().is_some_and(|h| h.uid_focused(uid))
+            }));
         }
         process.start();
         Ok(Self { system, services, package_runtime: std::sync::Mutex::new(None),

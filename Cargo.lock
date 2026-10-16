@@ -41,6 +41,16 @@ name = "aim-android-xml"
 version = "0.1.0"
 
 [[package]]
+name = "aim-app-host-agent"
+version = "0.1.0"
+dependencies = [
+ "binder",
+ "daemon-log",
+ "libc",
+ "log",
+]
+
+[[package]]
 name = "aim-apps"
 version = "0.1.0"
 dependencies = [
@@ -321,15 +331,6 @@ dependencies = [
 [[package]]
 name = "aim-windows-core"
 version = "0.1.0"
-
-[[package]]
-name = "aim-zygote-relay"
-version = "0.1.0"
-dependencies = [
- "daemon-log",
- "libc",
- "log",
-]
 
 [[package]]
 name = "aimctl"

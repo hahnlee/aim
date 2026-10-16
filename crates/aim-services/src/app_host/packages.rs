@@ -32,6 +32,10 @@ const APP_LIB32_INSTALL_DIR: &str = "/data/app-lib";
 pub struct Packages {
     state: model::State,
     platform: Platform,
+    /// User 0's permission and app op state (`access.abx`).
+    access: Option<package::permissions::AccessUser>,
+    /// The permissions defined (`access.abx`'s system part).
+    permissions: Vec<package::permissions::Permission>,
 }
 
 impl Packages {
@@ -66,7 +70,7 @@ impl Packages {
             .users
             .iter()
             .find(|(user, _)| *user == 0)
-            .and_then(|(_, user)| user.access.as_ref())
+            .and_then(|(_, user)| user.access.clone())
             .ok_or("no permission state of user 0")?;
         let mut packages = BTreeMap::new();
         for setting in &persisted.settings.packages {
@@ -101,6 +105,7 @@ impl Packages {
                 ..Default::default()
             },
         );
+        let permissions = persisted.access.as_ref().map(|a| a.permissions.clone()).unwrap_or_default();
         let mut system =
             system_config::system(root, property, &system_config::Framework::load(root)?)?;
         system.sdk_sandbox_package = Some(Some(sdk_sandbox_package(&packages)?));
@@ -112,6 +117,8 @@ impl Packages {
                 ..Default::default()
             },
             platform,
+            access: Some(access),
+            permissions,
         })
     }
 
@@ -166,6 +173,16 @@ impl Packages {
     pub fn framework_string(&self, name: &str) -> Option<String> {
         let id = self.platform.framework.id("string", name)?;
         self.framework_resources().resource_string(id)
+    }
+
+    /// The permissions defined.
+    pub fn permissions(&self) -> &[package::permissions::Permission] {
+        &self.permissions
+    }
+
+    /// User 0's permission and app op state.
+    pub fn access(&self) -> Option<&package::permissions::AccessUser> {
+        self.access.as_ref()
     }
 
     /// `getApplicationInfo(name, flags, 0)`.

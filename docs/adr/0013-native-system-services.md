@@ -448,10 +448,12 @@ The migration's state and conformance results are in
   clone of the derived image) starts zygote without
   `--start-system-server`; native `activity` and `package` start an app's
   process and bind its application ([app-host.md](../app-host.md)).
-  Calculator's application is created 414 ms after the start request.
+  Calculator's application is created 414 ms after the start request;
+  native `window` adds its window as a SurfaceFlinger layer, and its
+  first frame is drawn about 0.5 s after the start and shown.
 - **The zygote relay.** Zygote takes commands only from the system uid,
   and the native services run on the host, so a system daemon
-  (`aim-zygote-relay`) sends them; the commands are `ZygoteProcess`'s.
+  (`aim-app-host-agent`) sends them; the commands are `ZygoteProcess`'s.
 - **The oracle.** `guest-init --binder-capture` keeps the whole data of
   chosen calls; the original's `bindApplication` to Calculator fixes the
   configuration, compatibility info, core settings and compat changes the

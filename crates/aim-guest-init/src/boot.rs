@@ -359,7 +359,8 @@ const SERVICEMANAGER_READY: &str = "servicemanager.ready";
 /// image has no SystemUI, so the native status bar takes its place.
 const LIGHTWEIGHT_SHELL: &str = "ro.vendor.aim.lightweight_shell";
 
-/// The zygote relay's socket (`aim-zygote-relay`, docs/app-host.md).
+/// The app host agent's zygote relay socket (`aim-app-host-agent`,
+/// docs/app-host.md).
 const APP_HOST_ZYGOTE_RELAY: &str = "aim_zygote_relay";
 
 /// The system services the image says are native (ADR 0013): SystemServer

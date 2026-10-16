@@ -1,8 +1,0 @@
-# The native ActivityManager's zygote client (docs/app-host.md): zygote
-# takes commands only from the system uid, so this system daemon relays
-# the app host's process starts to it.
-service aim-zygote-relay /system_ext/bin/aim-zygote-relay
-    class main
-    user system
-    group system
-    socket aim_zygote_relay stream 0660 root system
