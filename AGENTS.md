@@ -16,8 +16,10 @@ facts instead of appending a log.
   native implementations backed by macOS (ADR 0013): a replacement
   implements the service's AIDL at the pinned version with generated
   transaction codes, registers under the original name, and replaces the
-  original only once it passes that service's CTS module and the app
-  checks. Until then the original runs.
+  original once it passes the CTS-derived tests of its API and the app
+  checks (ADR 0013, "Conformance bar"). The service's real CTS modules
+  run when it replaces the original and at milestones. Until then the
+  original runs.
 - Other exceptions (a rebuild from AOSP source, a replaced daemon, a
   SystemServer change) must be minimal, maintainable and explicit: a
   `replace` in `image/overlay.toml` with its reason, and a note in the ADR.
