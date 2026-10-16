@@ -55,6 +55,10 @@ pub struct TraceRecord {
     pub latency: Option<Duration>,
     /// Until the sender's read took the reply.
     pub returned: Option<Duration>,
+    /// The whole data of a call captured by its interface and code
+    /// ([`crate::Driver::capture_trace`]), and of its reply.
+    pub data: Option<Vec<u8>>,
+    pub reply: Option<Vec<u8>>,
 }
 
 /// An outstanding call or a reply that its sender has not yet read.
@@ -84,6 +88,8 @@ pub(crate) struct Trace {
     /// Replied to and not yet read by the sender, by reply.
     returning: HashMap<TxnId, (Instant, TraceRecord)>,
     done: Vec<TraceRecord>,
+    /// The interfaces and codes whose calls' data is kept.
+    captures: Vec<(String, u32)>,
 }
 
 impl Trace {
@@ -92,6 +98,16 @@ impl Trace {
             start: Some(Instant::now()),
             ..Self::default()
         }
+    }
+
+    /// Keep the data of calls of `code` on `descriptor`.
+    pub fn capture(&mut self, descriptor: String, code: u32) {
+        self.captures.push((descriptor, code));
+    }
+
+    /// Whether calls of `code` on `descriptor` are captured.
+    pub fn captures(&self, descriptor: &str, code: u32) -> bool {
+        self.captures.iter().any(|(d, c)| d == descriptor && *c == code)
     }
 
     /// A transaction was sent.
@@ -111,6 +127,18 @@ impl Trace {
         if let Some((sent, record)) = self.pending.get_mut(&id) {
             record.delivered = Some(sent.elapsed());
             record.to_tid = tid;
+        }
+    }
+
+    /// Whether pending call `id` is captured, so its reply is too.
+    pub fn captured(&self, id: TxnId) -> bool {
+        self.pending.get(&id).is_some_and(|(_, record)| record.data.is_some())
+    }
+
+    /// The data of the reply to captured call `id`.
+    pub fn reply_data(&mut self, id: TxnId, data: Vec<u8>) {
+        if let Some((_, record)) = self.pending.get_mut(&id) {
+            record.reply = Some(data);
         }
     }
 

@@ -1,8 +1,8 @@
 //! `guest-init --image <derived-root> --data <writable-root> --dry-run|--run
 //! [--only svc1,svc2] [--exclude svc1,svc2] [--runtime DIR] [--linux-run PATH]
 //! [--gpu DIR] [--vulkan DIR] [--display SOCKET] [--trace]
-//! [--binder-trace FILE] [--binder-shadow SERVICES --binder-shadow-log FILE]
-//! [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet] [--userdata DIR] [--package-constructor-capture DIR]`
+//! [--binder-trace FILE [--binder-capture DESCRIPTOR#CODE,...]]
+//! [--binder-shadow SERVICES --binder-shadow-log FILE] [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet] [--userdata DIR] [--package-constructor-capture DIR]`
 //!
 //! Development entry point for aimd's init role. With `--run`, the data
 //! directory's persistent content lives in a case-sensitive disk image
@@ -29,7 +29,7 @@ fn usage() -> ! {
     eprintln!(
         "usage: guest-init --image DIR --data DIR (--dry-run | --run) [--only a,b] [--exclude a,b] [--runtime DIR]\n\
          \x20                 [--linux-run PATH] [--gpu DIR] [--vulkan DIR] [--display SOCKET] [--trace]\n\
-         \x20                 [--binder-trace FILE] [--binder-shadow a,b --binder-shadow-log FILE]\n\
+         \x20                 [--binder-trace FILE [--binder-capture DESCRIPTOR#CODE,...]] [--binder-shadow a,b --binder-shadow-log FILE]\n\
          \x20                 [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet] [--userdata DIR] [--package-constructor-capture DIR]\n\
          \x20 --package-constructor-capture DIR captures the initial construction once; automatic reboots preserve the output and omit this option."
     );
@@ -69,6 +69,7 @@ fn main() {
     let (mut gpu, mut vulkan, mut display) = (None, None, None);
     let mut trace = false;
     let mut binder_trace = None;
+    let mut binder_capture = Vec::new();
     let (mut binder_shadow, mut binder_shadow_log) = (None, None);
     let mut timeout = None;
     let mut androidboot = Vec::new();
@@ -105,6 +106,12 @@ fn main() {
             "--display" => display = Some(PathBuf::from(value())),
             "--trace" => trace = true,
             "--binder-trace" => binder_trace = Some(PathBuf::from(value())),
+            "--binder-capture" => {
+                for entry in value().split(',').filter(|s| !s.is_empty()) {
+                    let (descriptor, code) = entry.rsplit_once('#').unwrap_or_else(|| usage());
+                    binder_capture.push((descriptor.to_string(), code.parse().unwrap_or_else(|_| usage())));
+                }
+            }
             "--binder-shadow" => {
                 binder_shadow = Some(
                     value()
@@ -146,7 +153,11 @@ fn main() {
     options.vulkan = vulkan;
     options.display = display;
     options.trace = trace;
+    if !binder_capture.is_empty() && binder_trace.is_none() {
+        usage();
+    }
     options.binder_trace = binder_trace;
+    options.binder_capture = binder_capture;
     options.package_constructor_capture = package_constructor_capture;
     options.binder_shadow = match (binder_shadow, binder_shadow_log) {
         (None, None) => None,

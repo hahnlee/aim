@@ -41,6 +41,17 @@ name = "aim-android-xml"
 version = "0.1.0"
 
 [[package]]
+name = "aim-app-host-agent"
+version = "0.1.0"
+dependencies = [
+ "aim-input-transport",
+ "binder",
+ "daemon-log",
+ "libc",
+ "log",
+]
+
+[[package]]
 name = "aim-apps"
 version = "0.1.0"
 dependencies = [
@@ -206,6 +217,10 @@ dependencies = [
 
 [[package]]
 name = "aim-hostcall"
+version = "0.1.0"
+
+[[package]]
+name = "aim-input-transport"
 version = "0.1.0"
 
 [[package]]

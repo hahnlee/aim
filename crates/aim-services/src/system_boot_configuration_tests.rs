@@ -280,6 +280,7 @@ mod boot_configuration_epoch {
             package_runtime: Mutex::new(None),
             package_constructing: std::sync::atomic::AtomicBool::new(false),
             shutdown: Mutex::new(crate::Shutdown::open()),
+            app_host: None,
         });
         let retained_services = services.clone();
         assert!(services.package_runtime.lock().unwrap().is_none(), "BootSession owns the actual runtime instead of this direct slot");
@@ -318,7 +319,7 @@ mod boot_configuration_epoch {
         fixture.system.package_bootstrap.lock().unwrap().current.as_mut().unwrap().boot_session=Some(Arc::downgrade(&session));
         fixture.native.add_service(session.clone());
         let services=crate::NativeServices {system:fixture.system.clone(),services:Vec::new(),package_runtime:Mutex::new(None),
-            package_constructing:std::sync::atomic::AtomicBool::new(false),shutdown:Mutex::new(crate::Shutdown::open())};
+            package_constructing:std::sync::atomic::AtomicBool::new(false),shutdown:Mutex::new(crate::Shutdown::open()),app_host:None};
         services.shutdown().unwrap();
         assert!(session.epoch_fixture_is_closed_and_empty(),"shutdown must empty a Session retained outside the Binder registry");
         assert!(disk.upgrade().is_none(),"Session close must release the actual Store");

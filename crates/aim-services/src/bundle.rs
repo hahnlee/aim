@@ -19,6 +19,7 @@ const VAL_INTEGER: i32 = 1;
 const VAL_MAP: i32 = 2;
 const VAL_PARCELABLE: i32 = 4;
 const VAL_LONG: i32 = 6;
+const VAL_FLOAT: i32 = 7;
 const VAL_BOOLEAN: i32 = 9;
 const VAL_LIST: i32 = 11;
 const VAL_SPARSEARRAY: i32 = 12;
@@ -32,7 +33,11 @@ pub enum Value {
     String(Option<String>),
     Int(i32),
     Long(i64),
+    Float(f32),
     Bool(bool),
+    /// A `Map<String, String>` (`writeMap`), length-prefixed as
+    /// `Parcel.writeValue` writes maps.
+    StringMap(Vec<(String, Option<String>)>),
     /// A length-prefixed value (`Parcel.isLengthPrefixed`): its type and
     /// where its bytes are in the parcel read.
     Lazy {
@@ -58,9 +63,32 @@ impl Value {
                 p.write_i32(VAL_LONG);
                 p.write_i64(*v);
             }
+            Value::Float(v) => {
+                p.write_i32(VAL_FLOAT);
+                p.write_f32(*v);
+            }
             Value::Bool(v) => {
                 p.write_i32(VAL_BOOLEAN);
                 p.write_bool(*v);
+            }
+            Value::StringMap(entries) => {
+                p.write_i32(VAL_MAP);
+                let length_at = p.position();
+                p.write_i32(-1);
+                let start = p.position();
+                p.write_i32(entries.len() as i32);
+                for (key, value) in entries {
+                    p.write_i32(VAL_STRING);
+                    p.write_string16(Some(key));
+                    match value {
+                        Some(value) => {
+                            p.write_i32(VAL_STRING);
+                            p.write_string16(Some(value));
+                        }
+                        None => p.write_i32(VAL_NULL),
+                    }
+                }
+                p.set_i32_at(length_at, (p.position() - start) as i32);
             }
             Value::Lazy { .. } => unreachable!("lazy values are only read"),
         }
@@ -107,6 +135,7 @@ pub fn read(r: &mut Reader<'_>) -> Result<Option<HashMap<String, Value>>> {
             VAL_STRING => Value::String(r.read_string16()?),
             VAL_INTEGER => Value::Int(r.read_i32()?),
             VAL_LONG => Value::Long(r.read_i64()?),
+            VAL_FLOAT => Value::Float(r.read_f32()?),
             VAL_BOOLEAN => Value::Bool(r.read_bool()?),
             kind @ (VAL_MAP | VAL_PARCELABLE | VAL_LIST | VAL_SPARSEARRAY | VAL_PARCELABLEARRAY
             | VAL_OBJECTARRAY | VAL_SERIALIZABLE) => {
@@ -137,6 +166,7 @@ mod tests {
             ("_user", Value::Int(10)),
             ("_track_generation", Value::Null),
             ("flag", Value::Bool(true)),
+            ("ratio", Value::Float(5.5)),
         ];
         let mut p = Parcel::new();
         write(&mut p, &entries);

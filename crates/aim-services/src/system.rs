@@ -201,6 +201,9 @@ pub struct System {
     instrumented: Mirror<i32, bool>,
     /// The focused root task's effective uid.
     focus: Mirror<(), Option<i32>>,
+    /// `WindowManagerInternal.isUidFocused` where the window manager is in
+    /// this process (the app host's).
+    window_manager_internal: std::sync::OnceLock<Box<dyn Fn(i32) -> bool + Send + Sync>>,
     /// Whether the system user's device is locked.
     locked: Mirror<(), bool>,
     notes: Sender<Note>,
@@ -521,6 +524,7 @@ impl System {
                 modes: Mirror::new(),
                 instrumented: Mirror::new(),
                 focus: Mirror::new(),
+                window_manager_internal: std::sync::OnceLock::new(),
                 locked: Mirror::new(),
                 notes,
                 collected_ops: Mutex::new(HashMap::new()),
@@ -5035,10 +5039,19 @@ impl System {
         )
     }
 
+    /// The window manager's `isUidFocused` in this process, for the services
+    /// that ask it.
+    pub(crate) fn set_window_manager_internal(&self, is_uid_focused: Box<dyn Fn(i32) -> bool + Send + Sync>) {
+        let _ = self.window_manager_internal.set(is_uid_focused);
+    }
+
     /// Stands in for `WindowManagerInternal.isUidFocused`, which has no
     /// binder form: whether `uid` owns the focused root task (#430).
     /// Any change of the tasks may change it (`ITaskStackListener`).
     pub fn uid_focused(self: &Arc<Self>, uid: i32) -> Result<bool> {
+        if let Some(is_uid_focused) = self.window_manager_internal.get() {
+            return Ok(is_uid_focused(uid));
+        }
         let focused = self.focus.get(
             (),
             || {

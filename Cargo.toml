@@ -12,6 +12,7 @@ members = [
     "crates/aim-android-image",
     "crates/aim-android-init",
     "crates/aim-android-xml",
+    "crates/aim-input-transport",
     "crates/aim-ashmem",
     "crates/aim-apps",
     "crates/aim-guest-init",
@@ -67,11 +68,13 @@ members = [
     "daemons/vold",
     "daemons/windows",
     "daemons/windows/core",
+    "daemons/app-host-agent",
 ]
 default-members = [
     "crates/aim-android-image",
     "crates/aim-android-init",
     "crates/aim-android-xml",
+    "crates/aim-input-transport",
     "crates/aim-ashmem",
     "crates/aim-apps",
     "crates/aim-guest-init",
@@ -116,6 +119,7 @@ async-trait = "0.1"
 # AOSP libbinder_rs, vendor variant; the daemons add the `system` feature.
 binder = { path = "hal/binder" }
 daemon-log = { path = "daemons/log" }
+aim-input-transport = { path = "crates/aim-input-transport" }
 libc = "0.2"
 log = "0.4"
 sha2 = "0.10"

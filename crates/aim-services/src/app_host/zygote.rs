@@ -1,0 +1,188 @@
+//! Process starts through zygote, as system_server's `ZygoteProcess`
+//! sends them (`startViaZygote`, `zygoteSendArgsAndGetResult` at
+//! `android-16.0.0_r1`), over the app host agent (`aim-app-host-agent`,
+//! docs/app-host.md): zygote takes commands only from the system uid.
+//! Copyright (C) The Android Open Source Project, Apache License 2.0.
+
+use std::io::{self, Read, Write};
+use std::os::unix::net::UnixStream;
+
+/// `Zygote.MOUNT_EXTERNAL_*`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MountExternal {
+    None,
+    Default,
+}
+
+/// What `ProcessList.startProcess` passes `Process.start` for a regular
+/// zygote start.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Start {
+    pub uid: u32,
+    pub gids: Vec<u32>,
+    pub runtime_flags: i32,
+    pub mount_external: MountExternal,
+    pub target_sdk_version: i32,
+    pub nice_name: String,
+    pub seinfo: String,
+    pub instruction_set: Option<String>,
+    pub app_data_dir: Option<String>,
+    pub package_name: String,
+    pub is_top_app: bool,
+    pub disabled_compat_changes: Vec<i64>,
+    /// `ProcessList.PROC_START_SEQ_IDENT` and the start's sequence number.
+    pub start_seq: i64,
+}
+
+impl Start {
+    /// `startViaZygote`'s arguments, in its order.
+    pub fn args(&self) -> Vec<String> {
+        let mut args = vec![
+            "--runtime-args".to_string(),
+            format!("--setuid={}", self.uid),
+            format!("--setgid={}", self.uid),
+            format!("--runtime-flags={}", self.runtime_flags),
+        ];
+        if self.mount_external == MountExternal::Default {
+            args.push("--mount-external-default".into());
+        }
+        args.push(format!("--target-sdk-version={}", self.target_sdk_version));
+        if !self.gids.is_empty() {
+            let gids: Vec<String> = self.gids.iter().map(u32::to_string).collect();
+            args.push(format!("--setgroups={}", gids.join(",")));
+        }
+        args.push(format!("--nice-name={}", self.nice_name));
+        args.push(format!("--seinfo={}", self.seinfo));
+        if let Some(isa) = &self.instruction_set {
+            args.push(format!("--instruction-set={isa}"));
+        }
+        if let Some(dir) = &self.app_data_dir {
+            args.push(format!("--app-data-dir={dir}"));
+        }
+        args.push(format!("--package-name={}", self.package_name));
+        if self.is_top_app {
+            args.push("--is-top-app".into());
+        }
+        if !self.disabled_compat_changes.is_empty() {
+            let ids: Vec<String> = self
+                .disabled_compat_changes
+                .iter()
+                .map(i64::to_string)
+                .collect();
+            args.push(format!("--disabled-compat-changes={}", ids.join(",")));
+        }
+        args.push("android.app.ActivityThread".into());
+        args.push(format!("seq={}", self.start_seq));
+        args
+    }
+}
+
+/// `attemptZygoteSendArgsAndGetResult`'s framing: the count, then each
+/// argument on its own line. Zygote reads arguments by line, so none may
+/// hold a newline.
+pub fn frame(args: &[String]) -> io::Result<Vec<u8>> {
+    if args.iter().any(|a| a.contains('\n')) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "embedded newlines not allowed",
+        ));
+    }
+    let mut out = format!("{}\n", args.len());
+    for a in args {
+        out.push_str(a);
+        out.push('\n');
+    }
+    Ok(out.into_bytes())
+}
+
+/// A session with zygote through the relay.
+pub struct Session {
+    stream: UnixStream,
+}
+
+impl Session {
+    pub fn new(stream: UnixStream) -> Self {
+        Session { stream }
+    }
+
+    /// Starts `start`: the new process's pid, as zygote answers it (a
+    /// big-endian `int`, then the `boolean` of a wrapper start, which a
+    /// regular start never has). Zygote answers a failed fork with a
+    /// negative pid (`ZygoteProcess`: "fork() failed").
+    pub fn start(&mut self, start: &Start) -> io::Result<i32> {
+        self.stream.write_all(&frame(&start.args())?)?;
+        let mut reply = [0u8; 5];
+        self.stream.read_exact(&mut reply)?;
+        let pid = i32::from_be_bytes(reply[..4].try_into().unwrap());
+        if pid < 0 {
+            return Err(io::Error::other("zygote: fork() failed"));
+        }
+        Ok(pid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn calculator() -> Start {
+        Start {
+            uid: 10213,
+            gids: vec![50213, 20213, 9997],
+            runtime_flags: 0x2000,
+            mount_external: MountExternal::Default,
+            target_sdk_version: 35,
+            nice_name: "com.android.calculator2".into(),
+            seinfo: "default:targetSdkVersion=35:complete".into(),
+            instruction_set: Some("arm64".into()),
+            app_data_dir: Some("/data/user/0/com.android.calculator2".into()),
+            package_name: "com.android.calculator2".into(),
+            is_top_app: true,
+            disabled_compat_changes: vec![1, 2],
+            start_seq: 7,
+        }
+    }
+
+    #[test]
+    fn arguments_in_start_via_zygote_order() {
+        assert_eq!(
+            calculator().args(),
+            [
+                "--runtime-args",
+                "--setuid=10213",
+                "--setgid=10213",
+                "--runtime-flags=8192",
+                "--mount-external-default",
+                "--target-sdk-version=35",
+                "--setgroups=50213,20213,9997",
+                "--nice-name=com.android.calculator2",
+                "--seinfo=default:targetSdkVersion=35:complete",
+                "--instruction-set=arm64",
+                "--app-data-dir=/data/user/0/com.android.calculator2",
+                "--package-name=com.android.calculator2",
+                "--is-top-app",
+                "--disabled-compat-changes=1,2",
+                "android.app.ActivityThread",
+                "seq=7",
+            ]
+        );
+    }
+
+    #[test]
+    fn framed_by_lines_and_answered_with_a_pid() {
+        let (host, mut zygote) = UnixStream::pair().unwrap();
+        let answer = std::thread::spawn(move || {
+            let mut text = String::new();
+            let mut byte = [0u8];
+            while !text.ends_with("seq=7\n") {
+                zygote.read_exact(&mut byte).unwrap();
+                text.push(byte[0] as char);
+            }
+            zygote.write_all(&[0, 0, 0x30, 0x39, 0]).unwrap();
+            text
+        });
+        assert_eq!(Session::new(host).start(&calculator()).unwrap(), 12345);
+        assert!(answer.join().unwrap().starts_with("16\n--runtime-args\n"));
+        assert!(frame(&["a\nb".into()]).is_err());
+    }
+}

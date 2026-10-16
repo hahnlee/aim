@@ -442,6 +442,25 @@ The migration's state and conformance results are in
   (#668, core milestone). Details in
   [system-services.md](../system-services.md), "Redirected call sites".
 
+### The app host, L1 (2026-10-16)
+
+- **No system_server.** The app host image (`tools/app-host-image.sh`, a
+  clone of the derived image) starts zygote without
+  `--start-system-server`; native `activity` and `package` start an app's
+  process and bind its application ([app-host.md](../app-host.md)).
+  Calculator's application is created 414 ms after the start request;
+  native `window` adds its window as a SurfaceFlinger layer, and its
+  first frame is drawn about 0.5 s after the start and shown. The agent
+  reads the touchscreen and publishes motions on the window's input
+  channel, as InputReader and InputDispatcher would.
+- **The zygote relay.** Zygote takes commands only from the system uid,
+  and the native services run on the host, so a system daemon
+  (`aim-app-host-agent`) sends them; the commands are `ZygoteProcess`'s.
+- **The oracle.** `guest-init --binder-capture` keeps the whole data of
+  chosen calls; the original's `bindApplication` to Calculator fixes the
+  configuration, compatibility info, core settings and compat changes the
+  app host's tests check.
+
 ### CTS-derived conformance (2026-10-16)
 
 - A 66-module PackageManager CTS campaign takes 12–20 hours on the

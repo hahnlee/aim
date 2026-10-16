@@ -116,6 +116,17 @@ pub fn read(bytes: &[u8]) -> Result<Element, String> {
 }
 
 pub fn read_optional(bytes: &[u8]) -> Result<Option<Element>, String> {
+    let mut roots = read_sequence(bytes)?;
+    if roots.len() > 1 {
+        return Err("ABX: a second root element".into());
+    }
+    Ok(roots.pop())
+}
+
+/// The root elements of `bytes` in order: `TypedXmlSerializer` writes
+/// independent sibling sections ([`write_sequence`]), as SettingsState
+/// does after its settings.
+pub fn read_sequence(bytes: &[u8]) -> Result<Vec<Element>, String> {
     if !bytes.starts_with(MAGIC) {
         return Err("not ABX".into());
     }
@@ -125,7 +136,7 @@ pub fn read_optional(bytes: &[u8]) -> Result<Option<Element>, String> {
         interned: Vec::new(),
     };
     let mut open: Vec<Element> = Vec::new();
-    let mut root = None;
+    let mut roots = Vec::new();
     loop {
         let [token] = r.take()?;
         let (event, kind) = (token & 0x0f, token & 0xf0);
@@ -151,8 +162,7 @@ pub fn read_optional(bytes: &[u8]) -> Result<Option<Element>, String> {
                 }
                 match open.last_mut() {
                     Some(parent) => parent.content.push(Node::Element(element)),
-                    None if root.is_none() => root = Some(element),
-                    None => return Err("ABX: a second root element".into()),
+                    None => roots.push(element),
                 }
             }
             START_DOCUMENT => {}
@@ -172,7 +182,7 @@ pub fn read_optional(bytes: &[u8]) -> Result<Option<Element>, String> {
     if !open.is_empty() {
         return Err(format!("ABX: <{}> does not end", open[0].name));
     }
-    Ok(root)
+    Ok(roots)
 }
 
 /// `root` as one binary XML document, written as `BinaryXmlSerializer`
@@ -388,6 +398,15 @@ mod tests {
         b.extend(0u16.to_be_bytes());
         b.push(END_DOCUMENT | TYPE_NULL);
         b
+    }
+
+    #[test]
+    fn sibling_roots_read_in_sequence() {
+        let root = |name: &str| Element { name: name.into(), attrs: Vec::new(), content: Vec::new() };
+        let bytes = write_sequence(&[root("settings"), root("namespaceHashes")]).unwrap();
+        let roots = read_sequence(&bytes).unwrap();
+        assert_eq!(roots.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["settings", "namespaceHashes"]);
+        assert_eq!(read_optional(&bytes).unwrap_err(), "ABX: a second root element");
     }
 
     #[test]

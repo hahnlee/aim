@@ -237,6 +237,27 @@ impl Received {
         parcel
     }
 
+    /// Append the payload from `start` to its end to `parcel`, its Binder
+    /// objects and file descriptors with it, as [`Received::into_parcel`]
+    /// does for the whole payload.
+    pub fn append_from(self, start: usize, parcel: &mut Parcel) -> Result<(), StatusCode> {
+        if start > self.data.len() || start % 4 != 0 {
+            return Err(crate::parcel::BAD_VALUE);
+        }
+        let objects: Vec<u64> = self
+            .objects
+            .iter()
+            .filter(|&&at| at >= start as u64)
+            .map(|at| at - start as u64)
+            .collect();
+        if self.objects.iter().any(|&at| at < start as u64 && at + 24 > start as u64) {
+            return Err(crate::parcel::BAD_VALUE);
+        }
+        parcel.write_raw(&self.data[start..], &objects);
+        parcel.keep_alive(Arc::new(self));
+        Ok(())
+    }
+
     /// Retain a remote node in the process that received this reply.
     pub fn retain_remote_binder(&self, binder: Binder) -> Result<Strong, StatusCode> {
         match binder {
