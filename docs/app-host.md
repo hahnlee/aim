@@ -56,14 +56,14 @@ keeps the whole data of the named calls, and of their replies, in
 
 | Step | Time |
 | --- | --- |
-| guest start to zygote accepting commands, the services above | 4.8 s (the original image's boot without system_server: 7.2-8.0 s) |
-| of it: zygote's preload | 1.8 s |
+| guest start to zygote accepting commands, the services above | 4.2-4.3 s (the original image's boot without system_server: 7.2-8.0 s) |
+| of it: zygote's preload | 1.0-1.05 s |
 | the app host loads its packages (244 parsed in parallel), while the boot goes on, from the agent's attach | 1.1-1.2 s |
 | `startProcess` to zygote's pid | 119-143 ms |
 | to `attachApplication` | 162 ms |
 | to `finishAttachApplication` (the application created) | 414-428 ms |
 | to `activityResumed` | 438-537 ms |
-| to `activityIdle` (its first frame drawn) | 484-582 ms |
+| to `activityIdle` (its first frame drawn) | 355-370 ms |
 
 `aim-display --capture` shows Calculator's whole window on the display;
 taps on 7, +, 8 and = on aim-display's touchscreen show 15.

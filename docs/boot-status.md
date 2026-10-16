@@ -33,13 +33,13 @@ guest-init --image <derived> --data <data> --run \
 
 The app host image ([app-host.md](app-host.md)) boots without
 system_server: with `--only` its 18 services and one-shots, zygote accepts
-commands 4.8 s after guest-init starts (zygote starts at 2.35 s, its
-preload takes 1.8 s); without `--only`, 7.2-8.0 s. apexd, keystore2 and
+commands 4.2-4.3 s after guest-init starts (odsign is done at 2.36 s,
+zygote's preload takes 1.0 s); without `--only`, 7.2-8.0 s. apexd, keystore2 and
 odsign cannot be left out: init waits for properties they set
 (`apexd.status`, `keystore.module_hash.sent`, `odsign.*`), two seconds
 each when excluded. SurfaceFlinger waits for the power HAL at its first
 frame, so `vendor.power-default` stays too. Calculator, started through
-the app host, draws its first frame about 0.5 s after its process starts,
+the app host, draws its first frame about 0.36 s after its process starts,
 its window is on the display, and taps on the display's touchscreen
 reach it (7 + 8 = shows 15).
 
