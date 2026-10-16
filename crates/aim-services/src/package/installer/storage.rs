@@ -162,8 +162,10 @@ impl Store {
             if user < 0 || uid < 0 {
                 return Err(before("negative installer user/UID"));
             }
+            // A staged session's state is the staged owner's (staged_states).
+            let staged = node.bool("stagedSession").map_err(before)?.unwrap_or(false);
             for flag in ["isReady", "isFailed", "isApplied"] {
-                if node.bool(flag).map_err(before)?.unwrap_or(false) {
+                if !staged && node.bool(flag).map_err(before)?.unwrap_or(false) {
                     return Err(before(format!("recovery owner unavailable: {flag}")));
                 }
             }
@@ -1273,6 +1275,23 @@ mod tests {
                 assert!(stage.join(format!("split_{}.apk", parts[1].split.as_ref().unwrap())).exists());
             }
         }
+    }
+    #[test]
+    fn staged_session_state_survives_recovery_but_not_on_ordinary_sessions() {
+        // A staged session ready for the next boot keeps its state for the
+        // staged owner; an ordinary session never carries one.
+        let data = Data::new();
+        fs::create_dir(data.0.join("app-staging")).unwrap();
+        let ready = persisted_prepared_session("/data/app-staging/session_7")
+            .replace("prepared='true'", "prepared='true' stagedSession='true' committed='true' sealed='true' isReady='true'");
+        fs::write(data.main(), &ready).unwrap();
+        let store = data.open(Arc::new(label));
+        let records = store.recovered().unwrap();
+        assert!(records[0].0.parameters.staged);
+        assert!(store.staged_states().unwrap()[&7].ready);
+        drop(store);
+        fs::write(data.main(), ready.replace("stagedSession='true' ", "")).unwrap();
+        assert!(data.open(Arc::new(label)).recovered().is_err());
     }
     #[test]
     fn prepared_missing_stage_recovers_without_creating_files_and_operations_fail() {
