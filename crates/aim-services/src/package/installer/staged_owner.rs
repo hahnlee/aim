@@ -69,6 +69,10 @@ impl Owner {
         Ok(crate::package::staging::ReadySession{id,apex_children:if members.len()==1&&members[0].0.id==id{Vec::new()}else{apex_children}})
     }
     pub fn abort(&self,id:i32)->Result<bool,Exception>{self.call(api::ABORT_APEX,|p|p.write_i32(id),|r|r.read_bool())}
+    /// `StagedSession.setSessionFailed`.
+    pub fn failed(&self,id:i32,code:i32,message:String)->Result<(),Exception>{
+        self.save(id,Status{failed:true,error_code:code,error_message:Some(message),..Default::default()})
+    }
     pub fn applied(&self,id:i32,apex:bool)->Result<(),Exception>{
         if apex{self.call(api::MARK_APEX_SUCCESSFUL,|p|p.write_i32(id),|_|Ok(()))?;}
         self.save(id,Status{applied:true,..Default::default()})
