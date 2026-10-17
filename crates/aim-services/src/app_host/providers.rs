@@ -300,13 +300,14 @@ impl AppHost {
     /// its providers, its own connections removed): its stable clients are
     /// killed, its unstable ones told; waits for a provider look again.
     pub(super) fn providers_process_died(&self, start_seq: i64) {
-        let dying = {
+        // Its providers are held until their clients are told of them.
+        let (_gone, dying) = {
             let mut state = self.providers.state.lock().unwrap();
-            state.published.retain(|_, p| p.start_seq != start_seq);
+            let gone: Vec<Published> = state.published.extract_if(|_, p| p.start_seq == start_seq).map(|(_, p)| p).collect();
             state.connections.retain(|c| c.client != start_seq);
             let (dying, kept) = std::mem::take(&mut state.connections).into_iter().partition::<Vec<_>, _>(|c| c.provider_seq == start_seq);
             state.connections = kept;
-            dying
+            (gone, dying)
         };
         self.providers.changed.notify_all();
         for c in dying {

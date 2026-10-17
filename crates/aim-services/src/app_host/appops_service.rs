@@ -1,9 +1,10 @@
 //! `appops`: AppOps for the app host, for the ops its services decide by
-//! (the clipboard's, the stream volumes', the accounts', usage stats' and
-//! the network requests' WRITE_SETTINGS): an op's mode is ignored while a
-//! user restriction it has is set (but for root and system), else the
-//! uid's, else the package's, as the permission service last persisted
-//! them (`access.abx`), else the op's default
+//! (the clipboard's, the stream volumes', the accounts', usage stats',
+//! running in the background's and the network requests'
+//! WRITE_SETTINGS): an op's mode is ignored while a user restriction it
+//! has is set (but for root and system), else the uid's, else the
+//! package's, as the permission service last persisted them
+//! (`access.abx`), else the op's default
 //! (`AppOpsManager.sAppOpInfos` at `android-16.0.0_r1`). A foreground mode
 //! (TAKE_AUDIO_FOCUS's, which audio focus notes) allows a uid while it has
 //! a process, as each of the app host's processes is top
@@ -64,6 +65,7 @@ const OPS: &[(i32, &str, i32, Option<&str>)] = &[
     (39, "android:audio_bluetooth_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
     (43, "android:get_usage_stats", MODE_DEFAULT, None),
     (OP_GET_ACCOUNTS, "android:get_accounts", MODE_ALLOWED, None),
+    (63, "android:run_in_background", MODE_ALLOWED, None),
     (64, "android:audio_accessibility_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
     (OP_SCHEDULE_EXACT_ALARM, "android:schedule_exact_alarm", MODE_DEFAULT, None),
     (OP_USE_FULL_SCREEN_INTENT, "android:use_full_screen_intent", MODE_DEFAULT, None),

@@ -96,6 +96,20 @@ impl RawIntent {
         }
     }
 
+    /// The intent with its package set (`Intent.setPackage`).
+    pub fn with_package(&self, package: &str) -> Result<RawIntent> {
+        let (start, end) = Spans::of(&self.raw)?.package;
+        let mut p = Parcel::new();
+        p.write_string8(Some(package));
+        let shift = |at: usize| at + p.data().len() - (end - start);
+        Ok(RawIntent {
+            intent: Intent { package: Some(package.into()), ..self.intent.clone() },
+            raw: self.raw.splice(start, end, p.data()),
+            flags_at: self.flags_at,
+            component: (shift(self.component.0), shift(self.component.1)),
+        })
+    }
+
     /// `Intent.hasFileDescriptors`.
     pub fn has_fds(&self) -> bool {
         self.raw.has_fds()
@@ -432,6 +446,17 @@ impl<T: WriteParcelable> WriteParcelable for By<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_package_keeps_the_rest() {
+        let intent = RawIntent::of(Some("a.b"), 0x10, &[]).with_component("p", "p.C");
+        let set = intent.with_package("q").unwrap();
+        assert_eq!(set.intent.package.as_deref(), Some("q"));
+        let back = RawIntent::read_from(&mut Reader::new(set.raw.parcel().data(), &[])).unwrap();
+        assert_eq!((back.intent.package.as_deref(), back.intent.action.as_deref(), back.intent.flags), (Some("q"), Some("a.b"), 0x10));
+        assert_eq!(back.intent.component.map(|c| c.class), Some("p.C".into()));
+        assert_eq!(set.with_component("r", "r.D").intent.component.map(|c| c.package), Some("r".into()));
+    }
 
     /// An intent with an action, a data URI and an extra, as
     /// `Intent.writeToParcel` writes it.
