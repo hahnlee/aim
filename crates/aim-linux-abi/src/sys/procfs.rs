@@ -133,6 +133,9 @@ pub(super) fn fd_link(fd: i32) -> Option<String> {
     if let Some(n) = super::ashmem::link_name(&st) {
         return Some(n);
     }
+    if let Some(n) = super::dma_heap::link_name(fd, &st) {
+        return Some(n);
+    }
     match st.st_mode & libc::S_IFMT {
         libc::S_IFSOCK => return Some(format!("socket:[{}]", st.st_ino)),
         libc::S_IFIFO => return Some(format!("pipe:[{}]", st.st_ino)),

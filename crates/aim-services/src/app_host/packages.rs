@@ -197,6 +197,12 @@ impl Packages {
             .then(|| (value.data & 0xffff_ff00) as i32 as f32 * RADIX_MULTS[((value.data >> 4) & 3) as usize])
     }
 
+    /// The file of the framework's resource `kind/name` (`openRawResource`,
+    /// `getXml`'s compiled XML) in the image whose root is `root`.
+    pub fn framework_file(&self, root: &Path, kind: &str, name: &str) -> Option<Vec<u8>> {
+        self.platform.framework_file(root, kind, name)
+    }
+
     /// The framework's string resource `name` in the device's locale.
     pub fn framework_string(&self, name: &str) -> Option<String> {
         let id = self.platform.framework.id("string", name)?;

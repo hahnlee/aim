@@ -1,9 +1,10 @@
 //! `audio`: AudioService for the app host (`AudioService` at
 //! `android-16.0.0_r1`): the stream volumes ([`super::volume`]), which
 //! audioserver plays at, with the checks AudioService makes of a caller;
-//! whether navigation repeats sound; and the sound effects, which play
-//! only while `Settings.System.SOUND_EFFECTS_ENABLED` is set. The app host
-//! plays none yet (#1433). Volume hardening blocks nothing: AudioService
+//! the sound effects (`SoundEffectsHelper`): each effect's file as the
+//! framework's `audio_assets.xml` names it, played by the agent at the
+//! effects' attenuation while `Settings.System.SOUND_EFFECTS_ENABLED` is
+//! set and the system stream is not muted. Volume hardening blocks nothing: AudioService
 //! enables it only on a test's request (`setEnableHardening`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,10 +38,68 @@ const STREAM_VOLUME_OPS: [i32; 12] = [34, 36, 35, 36, 37, 38, 39, 36, 36, 36, 64
 const FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT: i32 = 0x0400_0000;
 const FLAG_RECEIVER_FOREGROUND: i32 = 0x1000_0000;
 const SYSTEM_UID: i32 = 1000;
+/// `UserHandle.USER_CURRENT`: user 0, the one user.
+const USER_CURRENT: i32 = -2;
+
+/// `AudioManager.FX_*`, by index: the names `audio_assets.xml` uses.
+const EFFECTS: [&str; 16] = [
+    "FX_KEY_CLICK",
+    "FX_FOCUS_NAVIGATION_UP",
+    "FX_FOCUS_NAVIGATION_DOWN",
+    "FX_FOCUS_NAVIGATION_LEFT",
+    "FX_FOCUS_NAVIGATION_RIGHT",
+    "FX_KEYPRESS_STANDARD",
+    "FX_KEYPRESS_SPACEBAR",
+    "FX_KEYPRESS_DELETE",
+    "FX_KEYPRESS_RETURN",
+    "FX_KEYPRESS_INVALID",
+    "FX_BACK",
+    "FX_HOME",
+    "FX_FOCUS_NAVIGATION_REPEAT_1",
+    "FX_FOCUS_NAVIGATION_REPEAT_2",
+    "FX_FOCUS_NAVIGATION_REPEAT_3",
+    "FX_FOCUS_NAVIGATION_REPEAT_4",
+];
+const FX_HOME: usize = 11;
+/// `SoundEffectsHelper.SOUND_EFFECTS_PATH`, below the product partition,
+/// else the system's.
+const SOUND_EFFECTS_PATH: &str = "media/audio/ui/";
+/// The agent's `playSoundEffect(String path, float gain)`.
+const PLAY_SOUND_EFFECT: u32 = 6;
+
+/// `SoundEffectsHelper.loadSoundAssets`: each effect's file (the default
+/// `Effect_Tick.ogg`, else as `audio_assets.xml` version 1.0 names it),
+/// and whether all navigation repeat effects and the home effect were
+/// named, which enables them.
+fn sound_assets(xml: Option<&[u8]>) -> ([String; 16], bool, bool) {
+    let mut files: [String; 16] = std::array::from_fn(|_| "Effect_Tick.ogg".to_string());
+    let mut named = [0; 16];
+    if let Some(root) = xml.and_then(|x| aim_apps::res::xml(x).ok())
+        && root.name == "audio_assets"
+        && matches!(root.named("version"), Some(aim_apps::res::Value::String(v)) if v == "1.0")
+    {
+        for e in &root.children {
+            if e.name != "asset" {
+                continue;
+            }
+            let (Some(aim_apps::res::Value::String(id)), Some(aim_apps::res::Value::String(file))) = (e.named("id"), e.named("file")) else {
+                continue;
+            };
+            if let Some(fx) = EFFECTS.iter().position(|n| n == id) {
+                files[fx] = file.clone();
+                named[fx] += 1;
+            }
+        }
+    }
+    (files, named[12..16].iter().sum::<i32>() == 4, named[FX_HOME] > 0)
+}
 
 pub struct AudioService {
     host: Arc<AppHost>,
     navigation_repeat: AtomicBool,
+    home_sound: AtomicBool,
+    /// The effects' files, read at the first call that needs them.
+    effects: std::sync::OnceLock<[String; 16]>,
     /// The `IAudioManagerNative` node audioserver gets.
     native: Binder,
 }
@@ -48,7 +107,61 @@ pub struct AudioService {
 impl AudioService {
     pub fn new(host: Arc<AppHost>) -> Self {
         let native = host.process.add_service(Arc::new(AudioManagerNative(host.clone())));
-        AudioService { host, navigation_repeat: AtomicBool::new(false), native }
+        AudioService {
+            host,
+            navigation_repeat: AtomicBool::new(false),
+            home_sound: AtomicBool::new(false),
+            effects: std::sync::OnceLock::new(),
+            native,
+        }
+    }
+
+    /// The effects' files; loading them sets the navigation repeat and
+    /// home effects as `loadSoundAssets` does.
+    fn effects(&self) -> Result<&[String; 16], Exception> {
+        if let Some(e) = self.effects.get() {
+            return Ok(e);
+        }
+        let xml = self.host.inputs()?.packages.framework_file(self.host.root()?, "xml", "audio_assets");
+        let (files, repeat, home) = sound_assets(xml.as_deref());
+        if repeat {
+            self.navigation_repeat.store(true, Ordering::Relaxed);
+        }
+        if home {
+            self.home_sound.store(true, Ordering::Relaxed);
+        }
+        Ok(self.effects.get_or_init(|| files))
+    }
+
+    /// `playSoundEffectVolume`: nothing while the system stream is muted
+    /// or for an unknown effect; `volume` below 0 is the effects'
+    /// attenuation (`config_soundEffectVolumeDb`).
+    fn play_effect(&self, effect: i32, volume: f32) -> Result<(), Exception> {
+        {
+            let guard = self.host.volumes()?;
+            if guard.as_ref().unwrap().state(volume::STREAM_SYSTEM as usize)?.muted {
+                return Ok(());
+            }
+        }
+        let Some(file) = usize::try_from(effect).ok().and_then(|e| self.effects().map(|f| f.get(e).cloned()).transpose()) else {
+            return Ok(());
+        };
+        let file = file?;
+        let gain = if volume < 0.0 {
+            let db = self.host.inputs()?.packages.framework_integer("config_soundEffectVolumeDb").unwrap_or(0);
+            10f32.powf(db as f32 / 20.0)
+        } else {
+            // As AudioService passes it on, in thousandths.
+            (volume * 1000.0) as i32 as f32 / 1000.0
+        };
+        let root = self.host.root()?;
+        let partition = if root.join("product").join(SOUND_EFFECTS_PATH).join(&file).is_file() { "product" } else { "system" };
+        let path = format!("/{partition}/{SOUND_EFFECTS_PATH}{file}");
+        self.host.call_agent(PLAY_SOUND_EFFECT, "playSoundEffect", |p| {
+            p.write_string16(Some(&path));
+            p.write_f32(gain);
+        })?;
+        Ok(())
     }
 }
 
@@ -583,20 +696,47 @@ impl Service for AudioService {
             }
             audio::ARE_NAVIGATION_REPEAT_SOUND_EFFECTS_ENABLED => {
                 audio::AreNavigationRepeatSoundEffectsEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.effects() {
+                    return reply(Err(e));
+                }
                 audio::write_are_navigation_repeat_sound_effects_enabled_reply(&mut p, self.navigation_repeat.load(Ordering::Relaxed));
             }
             audio::SET_NAVIGATION_REPEAT_SOUND_EFFECTS_ENABLED => {
                 let args = audio::SetNavigationRepeatSoundEffectsEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.effects() {
+                    return reply(Err(e));
+                }
                 self.navigation_repeat.store(args.enabled, Ordering::Relaxed);
             }
+            audio::IS_HOME_SOUND_EFFECT_ENABLED => {
+                audio::IsHomeSoundEffectEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.effects() {
+                    return reply(Err(e));
+                }
+                audio::write_is_home_sound_effect_enabled_reply(&mut p, self.home_sound.load(Ordering::Relaxed));
+            }
+            audio::SET_HOME_SOUND_EFFECT_ENABLED => {
+                let args = audio::SetHomeSoundEffectEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.effects() {
+                    return reply(Err(e));
+                }
+                self.home_sound.store(args.enabled, Ordering::Relaxed);
+            }
+            // One-way, as the next: `querySoundEffectsEnabled` of the user.
             audio::PLAY_SOUND_EFFECT => {
-                audio::PlaySoundEffect::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args = audio::PlaySoundEffect::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let enabled = match self.host.inputs() {
                     Ok(inputs) => inputs.settings.get(Table::System, SOUND_EFFECTS_ENABLED).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0) != 0,
                     Err(e) => return reply(Err(e)),
                 };
-                if enabled {
-                    return reply(Err(self.host.unimplemented_named("audio", "playSoundEffect with sound effects enabled")));
+                if enabled && matches!(args.user_id, 0 | USER_CURRENT) && let Err(e) = self.play_effect(args.effect_type, -1.0) {
+                    eprintln!("app host: sound effect {}: {e:?}", args.effect_type);
+                }
+            }
+            audio::PLAY_SOUND_EFFECT_VOLUME => {
+                let args = audio::PlaySoundEffectVolume::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.play_effect(args.effect_type, args.volume) {
+                    eprintln!("app host: sound effect {}: {e:?}", args.effect_type);
                 }
             }
             code => return reply(Err(self.host.unimplemented("audio", code))),

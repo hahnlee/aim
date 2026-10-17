@@ -5,6 +5,7 @@
 
 mod arena;
 mod ashmem;
+mod dma_heap;
 mod attrs;
 mod binder;
 mod bpf;
