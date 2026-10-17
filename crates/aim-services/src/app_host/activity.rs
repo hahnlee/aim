@@ -17,7 +17,9 @@ use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_app_iactivityclientcontroller as acc;
 use aim_service_aidl::android_app_iactivitytaskmanager as atm;
 
+use super::activity_start::{Component, Report};
 use super::config::{self, Configuration, SizeBuckets};
+use super::kept::{RawBundle, RawIntent};
 use super::{AppHost, reply};
 use crate::package::info::ActivityInfo;
 
@@ -38,6 +40,32 @@ const EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN: i32 = 1 << 2;
 const USER_CURRENT: i32 = -2;
 /// `ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED`.
 const SCREEN_ORIENTATION_UNSPECIFIED: i32 = -1;
+
+/// `IRequestFinishCallback.requestFinish`, one-way.
+const REQUEST_FINISH_DESCRIPTOR: &str = "android.app.IRequestFinishCallback";
+const REQUEST_FINISH: u32 = 1;
+
+/// A `ProfilerInfo`, read to be refused: its file, its fd, its sampling
+/// interval, whether it stops, streams, its agent, whether the agent
+/// attaches at bind, its clock and output version.
+pub struct ProfilerInfo;
+
+impl aim_service_aidl::ReadParcelable for ProfilerInfo {
+    fn read_from(r: &mut aim_binder_host::parcel::Reader<'_>) -> aim_binder_host::parcel::Result<Self> {
+        r.read_string16()?;
+        if r.read_i32()? != 0 {
+            r.read_fd()?;
+        }
+        r.read_i32()?;
+        r.read_bool()?;
+        r.read_bool()?;
+        r.read_string16()?;
+        r.read_bool()?;
+        r.read_i32()?;
+        r.read_i32()?;
+        Ok(ProfilerInfo)
+    }
+}
 
 /// An activity's tokens: plain binders the app holds and returns.
 pub struct Token;
@@ -70,6 +98,17 @@ pub struct ActivityRecord {
     /// The configuration it was last sent (`mLastReportedConfiguration`'s
     /// merged one).
     pub reported: Option<Configuration>,
+    /// What it launches with and as.
+    pub info: ActivityInfo,
+    pub intent: super::activity_start::LaunchIntent,
+    pub referrer: String,
+    /// Its task (the stack's key).
+    pub task: i32,
+    /// Who asked for its result, and how (`resultTo`, `resultWho`,
+    /// `requestCode`).
+    pub result_to: Option<u64>,
+    pub result_who: Option<String>,
+    pub request_code: i32,
 }
 
 /// `Build.VERSION_CODES.HONEYCOMB_MR2`.
@@ -86,11 +125,15 @@ impl ActivityRecord {
     }
 }
 
-/// The activities, by their token.
+/// The activities, by their token, and their tasks' stack.
 #[derive(Default)]
 pub struct Activities {
-    records: Mutex<HashMap<u64, ActivityRecord>>,
+    pub(super) records: Mutex<HashMap<u64, ActivityRecord>>,
     next_ident: Mutex<i32>,
+    pub(super) stack: Mutex<super::activity_stack::Stack>,
+    /// The results and new intents the stack holds for delivery.
+    pub(super) payloads: Mutex<HashMap<u64, super::activity_start::Payload>>,
+    pub(super) next_payload: std::sync::atomic::AtomicU64,
 }
 
 impl Activities {
@@ -115,9 +158,10 @@ impl Activities {
     /// The activities of the process of `start_seq` are gone with it.
     pub fn remove_start(&self, start_seq: i64) {
         self.records.lock().unwrap().retain(|_, r| r.start_seq != start_seq);
+        self.stack.lock().unwrap().process_died(start_seq);
     }
 
-    fn with<T>(
+    pub(super) fn with<T>(
         &self,
         token: Option<Binder>,
         f: impl FnOnce(&mut ActivityRecord) -> T,
@@ -131,22 +175,18 @@ impl Activities {
 
 /// What a launch needs besides its record.
 pub struct Launch<'a> {
-    pub info: ActivityInfo,
     pub global: &'a Configuration,
     /// The bounds of its task in window mode, else the display's.
     pub task: Option<super::config::Rect>,
 }
 
 impl AppHost {
-    /// `realStartActivityLocked`: the transaction that launches and
-    /// resumes `record`'s activity, then the one that makes it the top
-    /// resumed activity.
-    pub(super) fn launch_activity(
-        &self,
-        mut record: ActivityRecord,
-        launch: Launch<'_>,
-    ) -> (Parcel, Parcel) {
-        let token = self.process.add_service(Arc::new(Token));
+    /// `realStartActivityLocked`: the items that launch and resume the
+    /// activity of `token`.
+    pub(super) fn launch_items(&self, token: Binder, launch: Launch<'_>) -> Option<Vec<Box<dyn Item>>> {
+        let Binder::Local(ptr) = token else { return None };
+        let mut records = self.activities.records.lock().unwrap();
+        let record = records.get_mut(&ptr)?;
         let assist = self.process.add_service(Arc::new(Token));
         let shareable = self.process.add_service(Arc::new(Token));
         let caller_info = self.process.add_service(Arc::new(Token));
@@ -162,11 +202,14 @@ impl AppHost {
         override_config.window.activity_type = ACTIVITY_TYPE_STANDARD;
         record.reported = Some(override_config.clone());
         let bounds = override_config.window.bounds;
-        let intent = Intent {
-            component: (record.package.clone(), record.class.clone()),
-            flags: FLAG_ACTIVITY_NEW_TASK,
-            extended_flags: EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN,
-            content_user_hint: USER_CURRENT,
+        let intent: Box<dyn WriteParcelable> = match &record.intent {
+            super::activity_start::LaunchIntent::Component => Box::new(Intent {
+                component: (record.package.clone(), record.class.clone()),
+                flags: FLAG_ACTIVITY_NEW_TASK,
+                extended_flags: EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN,
+                content_user_hint: USER_CURRENT,
+            }),
+            super::activity_start::LaunchIntent::Raw(kept) => Box::new(kept.intent.clone()),
         };
         let items: Vec<Box<dyn Item>> = vec![
             Box::new(LaunchActivityItem {
@@ -174,7 +217,7 @@ impl AppHost {
                 ident,
                 current: launch.global.clone(),
                 overrides: override_config,
-                referrer: "com.android.shell".into(),
+                referrer: record.referrer.clone(),
                 assist,
                 shareable,
                 caller_info,
@@ -184,7 +227,7 @@ impl AppHost {
                     task_fragment_bounds: bounds,
                 },
                 intent,
-                info: launch.info,
+                info: record.info.clone(),
             }),
             Box::new(ResumeActivityItem {
                 token,
@@ -192,15 +235,7 @@ impl AppHost {
                 forward: true,
             }),
         ];
-        let launch = transaction(items);
-        let top = transaction(vec![Box::new(TopResumedActivityChangeItem {
-            token,
-            on_top: true,
-        })]);
-        if let Binder::Local(ptr) = token {
-            self.activities.records.lock().unwrap().insert(ptr, record);
-        }
-        (launch, top)
+        Some(items)
     }
 }
 
@@ -259,6 +294,16 @@ impl AppHost {
     }
 }
 
+/// `ResumeActivityItem` of a resumed activity coming back.
+pub(super) fn resume_item(token: Binder) -> Box<dyn Item> {
+    Box::new(ResumeActivityItem { token, proc_state: PROCESS_STATE_UNKNOWN, forward: false })
+}
+
+/// `TopResumedActivityChangeItem`.
+pub(super) fn top_resumed_item(token: Binder, on_top: bool) -> Box<dyn Item> {
+    Box::new(TopResumedActivityChangeItem { token, on_top })
+}
+
 /// `IApplicationThread.scheduleTransaction` of `items`.
 pub(super) fn transaction(items: Vec<Box<dyn Item>>) -> Parcel {
     let mut p = Parcel::new();
@@ -299,7 +344,7 @@ struct LaunchActivityItem {
     shareable: Binder,
     caller_info: Binder,
     window: ActivityWindowInfo,
-    intent: Intent,
+    intent: Box<dyn WriteParcelable>,
     info: ActivityInfo,
 }
 
@@ -335,7 +380,7 @@ impl Item for LaunchActivityItem {
         p.write_i32(1);
         self.window.write(p);
         p.write_i32(1);
-        self.intent.write(p);
+        self.intent.write_to(p);
         p.write_i32(1);
         self.info.write_to(p);
     }
@@ -480,8 +525,8 @@ struct Intent {
     content_user_hint: i32,
 }
 
-impl Intent {
-    fn write(&self, p: &mut Parcel) {
+impl WriteParcelable for Intent {
+    fn write_to(&self, p: &mut Parcel) {
         p.write_string8(None); // action
         p.write_i32(0); // no data (`Uri.writeToParcel`)
         p.write_string8(None); // type
@@ -512,6 +557,25 @@ impl Service for ActivityTaskManager {
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         match call.code {
+            atm::START_ACTIVITY => {
+                let a = atm::StartActivity::<RawIntent, ProfilerInfo, RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if a.profiler_info.is_some() {
+                    return reply(Err(self.0.unimplemented_named("activity_task", "a start with a profiler")));
+                }
+                let args = super::activity_start::StartArgs {
+                    caller: a.caller,
+                    intent: a.intent,
+                    resolved_type: a.resolved_type,
+                    result_to: a.result_to,
+                    result_who: a.result_who,
+                    request_code: a.request_code,
+                };
+                reply(self.0.start_activity(call, args).map(|code| {
+                    let mut p = Parcel::new();
+                    atm::write_start_activity_reply(&mut p, code);
+                    p
+                }))
+            }
             atm::GET_ACTIVITY_CLIENT_CONTROLLER => {
                 atm::GetActivityClientController::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let mut p = Parcel::new();
@@ -573,6 +637,7 @@ impl Service for ActivityClientController {
                 if let Some(uid) = self.0.activities.with(token, |r| r.uid) {
                     self.0.task_idle(uid);
                 }
+                self.0.activity_reported(token, Report::Idle);
                 empty()
             }
             acc::ACTIVITY_TOP_RESUMED_STATE_LOST => empty(),
@@ -585,21 +650,53 @@ impl Service for ActivityClientController {
             acc::ACTIVITY_PAUSED => {
                 let token = Self::token(call)?;
                 self.report(token, "paused", |r| r.resumed = false);
+                self.0.activity_reported(token, Report::Paused);
                 empty()
             }
             acc::ACTIVITY_STOPPED | acc::ACTIVITY_DESTROYED => {
                 let token = Self::token(call)?;
-                self.report(
-                    token,
-                    if call.code == acc::ACTIVITY_STOPPED {
-                        "stopped"
-                    } else {
-                        "destroyed"
-                    },
-                    |_| {},
-                );
+                let stopped = call.code == acc::ACTIVITY_STOPPED;
+                self.report(token, if stopped { "stopped" } else { "destroyed" }, |_| {});
+                self.0.activity_reported(token, if stopped { Report::Stopped } else { Report::Destroyed });
                 empty()
             }
+            acc::FINISH_ACTIVITY => {
+                let a = acc::FinishActivity::<RawIntent>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.finish_activity(a.token, a.code, a.data, a.finish_task).map(|finished| {
+                    let mut p = Parcel::new();
+                    acc::write_finish_activity_reply(&mut p, finished);
+                    p
+                }))
+            }
+            acc::GET_CALLING_ACTIVITY | acc::GET_CALLING_PACKAGE => {
+                let token = Self::token(call)?;
+                let calling = self.0.calling_activity(token);
+                let mut p = Parcel::new();
+                if call.code == acc::GET_CALLING_ACTIVITY {
+                    let component = calling.as_ref().map(|(p, c)| Component(p, c));
+                    acc::write_get_calling_activity_reply(&mut p, component.as_ref());
+                } else {
+                    acc::write_get_calling_package_reply(&mut p, &calling.map(|(p, _)| p));
+                }
+                Ok(p)
+            }
+            // `onBackPressed` (one-way): the root of a task the launcher
+            // started goes to the back (#1486); another activity finishes
+            // (`IRequestFinishCallback.requestFinish`).
+            acc::ON_BACK_PRESSED => {
+                let a = acc::OnBackPressed::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if self.0.launcher_root(a.activity_token) {
+                    let _ = self.0.unimplemented_named("activity client controller", "a task to the back (#1486)");
+                } else if let Some(Binder::Handle(callback)) = a.callback {
+                    let mut p = Parcel::new();
+                    p.write_interface_token(REQUEST_FINISH_DESCRIPTOR);
+                    if let Err(e) = self.0.process.transact(callback, REQUEST_FINISH, &p, true) {
+                        eprintln!("app host: requestFinish: {e}");
+                    }
+                }
+                Ok(Parcel::new())
+            }
+            acc::MOVE_ACTIVITY_TASK_TO_BACK => reply(Err(self.0.unimplemented_named("activity client controller", "a task to the back (#1486)"))),
             // The size buckets decide which size changes relaunch it.
             acc::REPORT_SIZE_CONFIGURATIONS => {
                 let args = acc::ReportSizeConfigurations::<SizeBuckets>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -622,7 +719,13 @@ impl Service for ActivityClientController {
             acc::SET_TASK_DESCRIPTION => empty(),
             acc::IS_TOP_OF_TASK => {
                 let token = Self::token(call)?;
-                let top = self.0.activities.with(token, |_| true).unwrap_or(false);
+                let top = match token {
+                    Some(Binder::Local(t)) => {
+                        let stack = self.0.activities.stack.lock().unwrap();
+                        stack.get(t).and_then(|a| stack.top(a.task)).is_some_and(|a| a.token == t)
+                    }
+                    _ => false,
+                };
                 let mut p = Parcel::new();
                 acc::write_is_top_of_task_reply(&mut p, top);
                 Ok(p)

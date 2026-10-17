@@ -9,6 +9,8 @@
 //! (`packages.xml`, `packages.list`).
 
 pub mod activity;
+pub mod activity_stack;
+pub mod activity_start;
 pub mod appops_service;
 pub mod audio_policy;
 pub mod audio_service;
@@ -192,7 +194,7 @@ struct App {
     thread: Option<Strong>,
     /// The activity the process starts for, launched once its application
     /// is created.
-    activity: Option<String>,
+    activity: Option<activity_start::StartRequest>,
     /// The global configuration it was bound with.
     config: Option<config::Configuration>,
     /// Its start's first frame (`ApplicationStartInfo
@@ -424,7 +426,14 @@ impl AppHost {
     /// `ProcessList.startProcessLocked` for an activity of `name`'s
     /// `ProcessList.startProcessLocked` for the activity `class` of
     /// `name`'s default process, user 0.
+    /// Starts the process of package `name` for the launcher's start of
+    /// its activity `class`.
     fn start_process(&self, name: &str, class: &str) -> Result<i32, Exception> {
+        self.start_process_for(name, activity_start::StartRequest::launcher(class))
+    }
+
+    /// Starts the process of package `name` for `request`.
+    fn start_process_for(&self, name: &str, request: activity_start::StartRequest) -> Result<i32, Exception> {
         let inputs = self.inputs()?;
         let state = package::State::read(&inputs.data, &[0])
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("package state: {e}")))?
@@ -515,7 +524,7 @@ impl AppHost {
                 start_elapsed: clock_ms(libc::CLOCK_MONOTONIC_RAW),
                 start_uptime: clock_ms(libc::CLOCK_UPTIME_RAW),
                 thread: None,
-                activity: Some(class.to_string()),
+                activity: Some(request),
                 config: None,
                 first_frame: None,
                 last_activity: 0,
@@ -881,9 +890,10 @@ impl AppHost {
             app.package,
             app.started.elapsed()
         );
-        let Some(class) = app.activity.take() else {
+        let Some(request) = app.activity.take() else {
             return Ok(());
         };
+        let class = request.class.clone();
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
         let (model, resolution) = self.packages()?;
         let query = crate::package::query::Query {
@@ -908,42 +918,18 @@ impl AppHost {
                 return Err(state(format!("activity info: {reason}")));
             }
         };
-        let record = activity::ActivityRecord {
-            package: app.package.clone(),
-            class,
-            uid: app.uid,
-            start_seq,
-            started: app.started,
-            resumed: false,
-            requested_orientation: -1,
-            config_changes: activity::ActivityRecord::real_config_changes(&info),
-            size_buckets: None,
-            reported: None,
-        };
-        let global = app
-            .config
-            .clone()
-            .ok_or_else(|| state("launch before bind".into()))?;
-        let task = self.new_task(start_seq, app.uid, &app.package, &record.class, freeform::Activity::from(&info));
-        let (launch, top) = self.launch_activity(
-            record,
-            activity::Launch {
-                info,
-                global: &global,
-                task,
-            },
-        );
-        let thread = app.thread.as_ref().unwrap();
-        for (what, transaction) in [("launch", launch), ("top resumed", top)] {
-            thread
-                .transact(thread::SCHEDULE_TRANSACTION, &transaction, true)
-                .map_err(|s| state(format!("scheduleTransaction ({what}): {s}")))?;
+        let (uid, package, started) = (app.uid, app.package.clone(), app.started);
+        drop(apps);
+        // `realStartActivityLocked` of the activity on top of a new task.
+        self.new_task(start_seq, uid, &package, &class, freeform::Activity::from(&info));
+        let task = self.tasks.of_uid(uid).map_or(-(start_seq as i32), |(id, _)| id);
+        let result_to = request.result_to;
+        let token = self.new_activity(start_seq, uid, &package, info, task, request);
+        let commands = self.activities.stack.lock().unwrap().start(token, task, start_seq, result_to);
+        if let Some(me) = self.me.upgrade() {
+            me.run(commands);
         }
-        eprintln!(
-            "app host: {} launch sent {:?} after its start",
-            app.package,
-            app.started.elapsed()
-        );
+        eprintln!("app host: {package} launch sent {:?} after its start", started.elapsed());
         Ok(())
     }
 

@@ -218,6 +218,20 @@ impl AppHost {
         }
     }
 
+    /// Task `id` has no activities left: it goes (`Task.removeIfPossible`),
+    /// its layer with it; its process stays.
+    pub(super) fn remove_task(&self, id: i32) {
+        let removed = {
+            let mut tasks = self.tasks.tasks.lock().unwrap();
+            let before = tasks.len();
+            tasks.retain(|t| t.id != id);
+            tasks.len() != before
+        };
+        if removed {
+            self.tasks.send(&Record { op: window::REMOVED, task: id, ..Default::default() });
+        }
+    }
+
     /// The process of `start_seq` died: its tasks are gone.
     pub(super) fn tasks_died(&self, start_seq: i64) {
         let gone: Vec<i32> = {

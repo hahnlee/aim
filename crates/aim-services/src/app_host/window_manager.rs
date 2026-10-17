@@ -48,6 +48,8 @@ struct Window {
     pid: i32,
     /// Its task, in window mode.
     task: Option<i32>,
+    /// The activity it belongs to (`LayoutParams.token`).
+    activity: Option<u64>,
     /// Its input channel's index at the agent.
     channel: i32,
     layer: Option<Layer>,
@@ -130,11 +132,28 @@ impl Session {
         Ok((window, ints))
     }
 
+    /// The activity token of the layout parameters after a call's
+    /// `IWindow` (`LayoutParams.writeToParcel`: nineteen words, then it).
+    fn activity_of(call: &Call<'_>) -> Option<u64> {
+        let mut r = call.data.clone();
+        if r.read_i32().ok()? == 0 {
+            return None;
+        }
+        for _ in 0..19 {
+            r.read_i32().ok()?;
+        }
+        match r.read_binder().ok()? {
+            Some(Binder::Local(token)) => Some(token),
+            _ => None,
+        }
+    }
+
     /// `addToDisplayAsUser`: the window's input channel, its insets, no
     /// insets controls, no attached frame, no size compatibility scale.
-    fn add(&self, window: u32) -> Result<Parcel, Exception> {
+    fn add(&self, window: u32, activity: Option<u64>) -> Result<Parcel, Exception> {
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
-        let name = self.host.activities.top_component(self.uid).ok_or_else(|| state("no activity of the window's app".into()))?;
+        let of_activity = activity.and_then(|t| self.host.activities.records.lock().unwrap().get(&t).map(|r| format!("{}/{}", r.package, r.class)));
+        let name = of_activity.or_else(|| self.host.activities.top_component(self.uid)).ok_or_else(|| state("no activity of the window's app".into()))?;
         let id = {
             let mut next = self.host.windows.next.lock().unwrap();
             *next += 1;
@@ -178,6 +197,7 @@ impl Session {
                 uid: self.uid,
                 pid: self.pid,
                 task: task.map(|(id, _)| id),
+                activity,
                 channel: index,
                 layer: None,
                 frames_seq: FIRST_SEQ,
@@ -200,6 +220,11 @@ impl Session {
         let w = windows.get_mut(&window).ok_or_else(|| Exception::illegal_argument("relayout of an unknown window"))?;
         let mut result = 0;
         let task = w.task.and_then(|id| self.host.tasks.bounds(id).map(|bounds| (id, bounds)));
+        // A window that is not visible has no surface
+        // (`WindowStateAnimator.destroySurfaceLocked`).
+        if view_visibility != VISIBLE {
+            w.layer = None;
+        }
         if view_visibility == VISIBLE && w.layer.is_none() {
             let composer = self.host.composer()?;
             let metadata = [
@@ -214,6 +239,8 @@ impl Session {
             }
             .map_err(state)?;
             eprintln!("app host: window {} has layer {}", w.name, layer.name);
+            // A later window is in front of an earlier one.
+            composer.apply(&[(&layer, surface::Change { z: Some(w.id as i32), ..Default::default() })]).map_err(state)?;
             w.layer = Some(layer);
             result |= RELAYOUT_RES_FIRST_TIME | RELAYOUT_RES_SURFACE_CHANGED;
         }
@@ -373,6 +400,15 @@ impl super::AppHost {
     }
 
     /// The windows of the process `pid` are gone with it.
+    /// The windows of the activity `token`, earlier first: each one's
+    /// `IWindow` and input channel.
+    pub(super) fn windows_of_activity(&self, token: u64) -> Vec<(u32, i32)> {
+        let windows = self.windows.windows.lock().unwrap();
+        let mut of: Vec<_> = windows.iter().filter(|(_, w)| w.activity == Some(token)).map(|(h, w)| (w.id, *h, w.channel)).collect();
+        of.sort();
+        of.into_iter().map(|(_, h, c)| (h, c)).collect()
+    }
+
     pub(super) fn windows_died(&self, pid: i32) {
         self.windows.windows.lock().unwrap().retain(|_, w| w.pid != pid);
     }
@@ -481,7 +517,17 @@ impl Service for Session {
             ws::ADD_TO_DISPLAY_AS_USER => {
                 // ..., viewVisibility, layerStackId, userId, requestedVisibleTypes.
                 let (window, _) = Self::window_and_tail(call, 4)?;
-                reply(self.add(window))
+                let activity = Self::activity_of(call);
+                reply(self.add(window, activity))
+            }
+            // `removeWindow`: its layer goes; the agent sees the app close
+            // its input channel.
+            ws::REMOVE => {
+                let (window, _) = Self::window_and_tail(call, 0)?;
+                self.host.windows.windows.lock().unwrap().remove(&window);
+                let mut p = Parcel::new();
+                p.write_no_exception();
+                Ok(p)
             }
             ws::RELAYOUT => {
                 // ..., requestedWidth, requestedHeight, viewVisibility, flags,
