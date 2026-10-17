@@ -441,28 +441,10 @@ impl AccountManager {
         Ok(Some(oldest.1))
     }
 
-    /// `CompatChanges.isChangeEnabled(change, uid)`: enabled for every
-    /// package of the uid.
-    fn change_enabled(&self, change: i64, uid: i32) -> Result<bool, Exception> {
-        let compat = &self.host.inputs()?.compat;
-        let names = self.packages_for_uid(uid)?;
-        if names.is_empty() {
-            return Ok(compat.default_value(change));
-        }
-        let mut enabled = true;
-        for name in names {
-            enabled &= match self.target_sdk(&name)? {
-                Some(target) => compat.is_enabled(change, target),
-                None => compat.default_value(change),
-            };
-        }
-        Ok(enabled)
-    }
-
     /// `canCallerAccessPackage`.
     fn can_access_package(&self, package: Option<&str>, uid: i32, user: i32) -> Result<bool, Exception> {
         let Some(package) = package else { return Ok(false) };
-        if !self.change_enabled(ENFORCE_PACKAGE_VISIBILITY_FILTERING, uid)? {
+        if !self.host.change_enabled(ENFORCE_PACKAGE_VISIBILITY_FILTERING, uid)? {
             return Ok(self.system_query(|q| q.package_uid_internal(package, 0, user, SYSTEM_UID))? != -1);
         }
         let (state, resolution) = self.host.packages()?;

@@ -12,7 +12,7 @@ writes.
 | Piece | Where |
 | --- | --- |
 | Devices `lo` and `eth0`: flags, MTU, addresses, shared by a boot's processes | `crates/aim-linux-abi/src/sys/netif.rs` |
-| The Mac's network: default route, address, gateway, MTU, DNS servers; watching it | `sys/uplink.rs` |
+| The Mac's network: default route, address, gateway, MTU, DNS servers; watching it | `crates/aim-uplink` (also the app host's `connectivity`); the test hook and the lease: `sys/uplink.rs` |
 | NETLINK_ROUTE: dumps, changes, group announcements | `sys/netlink.rs` |
 | AF_PACKET SOCK_RAW and classic BPF filters | `sys/packet.rs` |
 | `eth0`'s virtual router: DHCP and ARP | `sys/dhcp.rs` |

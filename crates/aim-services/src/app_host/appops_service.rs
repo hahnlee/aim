@@ -1,5 +1,6 @@
 //! `appops`: AppOps for the app host, for the ops its services decide by
-//! (the clipboard's, the stream volumes' and the accounts'): an op's
+//! (the clipboard's, the stream volumes', the accounts' and the network
+//! requests' WRITE_SETTINGS): an op's
 //! mode is ignored while a user restriction it has is set (but for root
 //! and system), else the uid's, else the package's, as the permission
 //! service last persisted them (`access.abx`), else the op's default
@@ -26,17 +27,21 @@ pub(super) const OP_USE_FULL_SCREEN_INTENT: i32 = 133;
 pub(super) const OP_READ_CONTACTS: i32 = 4;
 pub(super) const OP_WRITE_CONTACTS: i32 = 5;
 pub(super) const OP_GET_ACCOUNTS: i32 = 62;
+/// `AppOpsManager.OP_WRITE_SETTINGS`.
+pub(super) const OP_WRITE_SETTINGS: i32 = 23;
 /// `UserManager.DISALLOW_ADJUST_VOLUME`.
 const DISALLOW_ADJUST_VOLUME: &str = "no_adjust_volume";
 /// The ops it decides: their code, name, default mode and user
 /// restriction. Each is its own switch, and none has a permission but
-/// SCHEDULE_EXACT_ALARM's, USE_FULL_SCREEN_INTENT's and the accounts'
-/// (READ_CONTACTS, WRITE_CONTACTS, GET_ACCOUNTS), which AlarmManager,
-/// NotificationManager and AccountManager only check, so their notes are
+/// SCHEDULE_EXACT_ALARM's, USE_FULL_SCREEN_INTENT's, the accounts'
+/// (READ_CONTACTS, WRITE_CONTACTS, GET_ACCOUNTS) and WRITE_SETTINGS',
+/// which AlarmManager, NotificationManager, AccountManager and
+/// ConnectivityService only check or note themselves, so their notes are
 /// not collected (`AppOpsService.shouldCollectNotes`).
 const OPS: &[(i32, &str, i32, Option<&str>)] = &[
     (OP_READ_CONTACTS, "android:read_contacts", MODE_ALLOWED, None),
     (OP_WRITE_CONTACTS, "android:write_contacts", MODE_ALLOWED, None),
+    (OP_WRITE_SETTINGS, "android:write_settings", MODE_DEFAULT, None),
     (29, "android:read_clipboard", MODE_ALLOWED, None),
     (30, "android:write_clipboard", MODE_ALLOWED, None),
     (34, "android:audio_voice_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),

@@ -1,0 +1,10 @@
+[package]
+license.workspace = true
+name = "aim-uplink"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The Mac's network as Android sees it: the default route's interface, address, gateway and MTU, the DNS servers, and watching them"
+
+[dependencies]
+libc.workspace = true
