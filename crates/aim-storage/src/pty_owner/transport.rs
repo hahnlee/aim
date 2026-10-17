@@ -686,6 +686,8 @@ pub struct OwnerConfig {
     pub process: ProcessIdentity,
 }
 impl OwnerConfig {
+    /// Publish the locator whole: readers poll for it while its owner
+    /// starts, so it is written under a private name and linked into place.
     pub fn write(&self, path: &std::path::Path) -> io::Result<()> {
         use std::{io::Write, os::unix::fs::OpenOptionsExt};
         if !self.process.is_live()
@@ -694,23 +696,36 @@ impl OwnerConfig {
         {
             return Err(error(libc::EINVAL));
         }
+        let writer = ProcessIdentity::running(unsafe { libc::getpid() })?;
+        let mut staged = path.as_os_str().to_owned();
+        staged.push(format!(
+            ".{}.{}.{}",
+            writer.host_pid, writer.start_seconds, writer.start_microseconds
+        ));
+        let staged = std::path::PathBuf::from(staged);
         let mut file = crate::private_fd::PrivateFile::allocate(|| {
             std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(path)
+                .open(&staged)
         })?;
-        writeln!(
-            file,
-            "AIMPTY2\t{}\t{}\t{}\t{}",
-            self.process.host_pid,
-            self.process.start_seconds,
-            self.process.start_microseconds,
-            self.endpoint
-        )?;
-        file.sync_all()
+        let published = file
+            .write_all(
+                format!(
+                    "AIMPTY2\t{}\t{}\t{}\t{}\n",
+                    self.process.host_pid,
+                    self.process.start_seconds,
+                    self.process.start_microseconds,
+                    self.endpoint
+                )
+                .as_bytes(),
+            )
+            .and_then(|()| file.sync_all())
+            .and_then(|()| std::fs::hard_link(&staged, path));
+        let removed = std::fs::remove_file(&staged);
+        published.and(removed)
     }
     pub fn read(path: &std::path::Path, init: ProcessIdentity) -> io::Result<Self> {
         let record=Self::read_record(path)?;
