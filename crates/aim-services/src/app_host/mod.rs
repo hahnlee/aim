@@ -36,6 +36,7 @@ pub mod package_service;
 pub mod packages;
 pub mod pending_intents;
 pub mod permission_controller;
+pub mod permission_manager;
 pub mod playback;
 pub mod power_service;
 pub mod sensor_privacy;
@@ -364,6 +365,7 @@ impl AppHost {
             ("appops", Arc::new(appops_service::AppOps::new(self.clone()))),
             ("trust", Arc::new(trust_service::TrustManager::new(self.clone()))),
             ("permission", Arc::new(permission_controller::PermissionController(self.clone()))),
+            ("permissionmgr", Arc::new(permission_manager::PermissionManager::new(self.clone()))),
             ("input_method", Arc::new(input_method::InputMethodManager::new(self.clone()))),
             ("input", Arc::new(input_manager::InputManager::new(self.clone()))),
             ("audio", Arc::new(audio_service::AudioService::new(self.clone()))),
