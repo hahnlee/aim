@@ -252,7 +252,7 @@ fn takes(filter: &IntentFilter, intent: &Intent, resolved_type: Option<&str>) ->
 }
 
 /// `Intent.filterEquals`.
-fn filter_equals(a: &Intent, b: &Intent) -> bool {
+pub(super) fn filter_equals(a: &Intent, b: &Intent) -> bool {
     a.action == b.action
         && a.data.as_ref().map(|d| d.as_str()) == b.data.as_ref().map(|d| d.as_str())
         && a.ty == b.ty

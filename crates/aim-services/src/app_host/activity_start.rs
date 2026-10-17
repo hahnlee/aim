@@ -433,7 +433,7 @@ impl AppHost {
             .map(|(seq, a)| (*seq, a.uid));
         let Some((target_seq, target_uid)) = target else {
             // `startProcessLocked` for the activity.
-            self.start_process_for(&package, request)?;
+            self.start_process_for(&package, Some(request))?;
             return Ok(START_SUCCESS);
         };
         let task = self.task_for(target_seq, target_uid, &package, &info, result_to.filter(|_| target_seq == caller_seq));
@@ -522,6 +522,7 @@ impl AppHost {
     /// `activityDestroyed`: the stack moves on.
     pub(super) fn activity_reported(self: &Arc<Self>, token: Option<Binder>, report: Report) {
         let Some(Binder::Local(token)) = token else { return };
+        let destroyed = matches!(report, Report::Destroyed);
         let commands = {
             let mut stack = self.activities.stack.lock().unwrap();
             match report {
@@ -538,6 +539,9 @@ impl AppHost {
                 }
             }
         };
+        if destroyed {
+            self.activity_connections_gone(token);
+        }
         self.run(commands);
     }
 
