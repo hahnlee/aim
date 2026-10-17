@@ -44,7 +44,9 @@ version = "0.1.0"
 name = "aim-app-host-agent"
 version = "0.1.0"
 dependencies = [
+ "aim-emulated-storage",
  "aim-input-transport",
+ "android_os_vold",
  "binder",
  "daemon-log",
  "libc",
@@ -97,6 +99,13 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+]
+
+[[package]]
+name = "aim-emulated-storage"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

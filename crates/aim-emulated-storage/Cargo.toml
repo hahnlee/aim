@@ -1,0 +1,10 @@
+[package]
+license.workspace = true
+name = "aim-emulated-storage"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The emulated external storage's FUSE daemon of the app host: MediaProvider's FuseDaemon's file operations, passed through to the volume's lower path"
+
+[dependencies]
+libc.workspace = true

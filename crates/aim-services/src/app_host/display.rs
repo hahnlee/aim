@@ -76,7 +76,7 @@ impl Display {
 
     /// The default display, from SurfaceFlinger.
     pub fn query(process: &LocalProcess) -> Result<Display, String> {
-        let sf = surface_flinger(process, SERVICE)?;
+        let sf = check_service(process, SERVICE)?;
         let ids = call(&sf, GET_PHYSICAL_DISPLAY_IDS, |_| {}, |r| ints64(r))?;
         let id = *ids.first().ok_or("SurfaceFlinger has no display")?;
         let (density, secure, install_orientation) = call(
@@ -182,7 +182,7 @@ impl Display {
     /// `getOverlaySupport`'s reply data after its status, as DisplayManager
     /// returns SurfaceFlinger's `OverlayProperties`.
     pub fn overlay_support(process: &LocalProcess) -> Result<Vec<u8>, String> {
-        let sf = surface_flinger(process, SERVICE)?;
+        let sf = check_service(process, SERVICE)?;
         call(
             &sf,
             GET_OVERLAY_SUPPORT,
@@ -275,9 +275,9 @@ fn ints64(r: &mut Reader<'_>) -> ParcelResult<Vec<i64>> {
     (0..n.max(0)).map(|_| r.read_i64()).collect()
 }
 
-/// SurfaceFlinger's service `name`: its AIDL one, or the one of its
-/// transactions.
-pub(super) fn surface_flinger(process: &LocalProcess, name: &str) -> Result<Strong, String> {
+/// The service `name` from servicemanager (`checkService`): one of
+/// SurfaceFlinger's, vold.
+pub(super) fn check_service(process: &LocalProcess, name: &str) -> Result<Strong, String> {
     let mut data = Parcel::new();
     sm::CheckService {
         name: Some(name.into()),

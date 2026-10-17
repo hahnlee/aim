@@ -29,9 +29,35 @@ pub struct Start {
     pub app_data_dir: Option<String>,
     pub package_name: String,
     pub is_top_app: bool,
+    /// App data isolation (`ProcessList.startProcess`): the app's packages'
+    /// and the allowlisted ones' volume and CE data inode, in their
+    /// `ArrayMap`'s order; whether zygote binds the app's data and storage
+    /// directories.
+    pub pkg_data_info: Vec<DataInfo>,
+    pub allowlisted_data_info: Vec<DataInfo>,
+    pub bind_mount_app_storage_dirs: bool,
+    pub bind_mount_app_data_dirs: bool,
     pub disabled_compat_changes: Vec<i64>,
     /// `ProcessList.PROC_START_SEQ_IDENT` and the start's sequence number.
     pub start_seq: i64,
+}
+
+/// A package's data: its name, its volume's UUID, its CE data inode.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DataInfo {
+    pub package: String,
+    pub volume_uuid: Option<String>,
+    pub ce_data_inode: i64,
+}
+
+/// `name=package,volume,inode,...`, as `startViaZygote` joins a map (a
+/// null volume as `null`).
+fn data_info_arg(name: &str, infos: &[DataInfo]) -> String {
+    let entries: Vec<String> = infos
+        .iter()
+        .map(|i| format!("{},{},{}", i.package, i.volume_uuid.as_deref().unwrap_or("null"), i.ce_data_inode))
+        .collect();
+    format!("{name}={}", entries.join(","))
 }
 
 impl Start {
@@ -62,6 +88,18 @@ impl Start {
         args.push(format!("--package-name={}", self.package_name));
         if self.is_top_app {
             args.push("--is-top-app".into());
+        }
+        if !self.pkg_data_info.is_empty() {
+            args.push(data_info_arg("--pkg-data-info-map", &self.pkg_data_info));
+        }
+        if !self.allowlisted_data_info.is_empty() {
+            args.push(data_info_arg("--allowlisted-data-info-map", &self.allowlisted_data_info));
+        }
+        if self.bind_mount_app_storage_dirs {
+            args.push("--bind-mount-storage-dirs".into());
+        }
+        if self.bind_mount_app_data_dirs {
+            args.push("--bind-mount-data-dirs".into());
         }
         if !self.disabled_compat_changes.is_empty() {
             let ids: Vec<String> = self
@@ -138,6 +176,10 @@ mod tests {
             app_data_dir: Some("/data/user/0/com.android.calculator2".into()),
             package_name: "com.android.calculator2".into(),
             is_top_app: true,
+            pkg_data_info: vec![DataInfo { package: "com.android.calculator2".into(), volume_uuid: None, ce_data_inode: 4242 }],
+            allowlisted_data_info: vec![DataInfo { package: "com.google.android.gms".into(), volume_uuid: None, ce_data_inode: 77 }],
+            bind_mount_app_storage_dirs: false,
+            bind_mount_app_data_dirs: true,
             disabled_compat_changes: vec![1, 2],
             start_seq: 7,
         }
@@ -161,6 +203,9 @@ mod tests {
                 "--app-data-dir=/data/user/0/com.android.calculator2",
                 "--package-name=com.android.calculator2",
                 "--is-top-app",
+                "--pkg-data-info-map=com.android.calculator2,null,4242",
+                "--allowlisted-data-info-map=com.google.android.gms,null,77",
+                "--bind-mount-data-dirs",
                 "--disabled-compat-changes=1,2",
                 "android.app.ActivityThread",
                 "seq=7",
@@ -182,7 +227,7 @@ mod tests {
             text
         });
         assert_eq!(Session::new(host).start(&calculator()).unwrap(), 12345);
-        assert!(answer.join().unwrap().starts_with("16\n--runtime-args\n"));
+        assert!(answer.join().unwrap().starts_with("19\n--runtime-args\n"));
         assert!(frame(&["a\nb".into()]).is_err());
     }
 }

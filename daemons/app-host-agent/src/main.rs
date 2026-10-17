@@ -16,6 +16,8 @@
 //!   server's (`input`).
 //! - It kills the process of a task the host removed, as system_server
 //!   does (`ProcessRecord.killLocked`: `Process.killProcessQuiet`).
+//! - It mounts a user's emulated storage through vold and serves its FUSE
+//!   connection (`storage`).
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -26,6 +28,7 @@ use binder::binder_impl::{AssociateClass, BorrowedParcel, IBinderInternal, Remot
 use binder::{BinderFeatures, Interface, ParcelFileDescriptor, Status, StatusCode, declare_binder_interface};
 
 mod input;
+mod storage;
 
 /// init's socket for this service (`socket aim_zygote_relay` in its rc).
 const SOCKET: &str = "ANDROID_SOCKET_aim_zygote_relay";
@@ -46,13 +49,19 @@ const ATTACH_AGENT: u32 = 2;
 const OPEN_INPUT_CHANNEL: u32 = 1;
 const FOCUS_INPUT_CHANNEL: u32 = 2;
 const SET_INPUT_CHANNEL_FRAME: u32 = 3;
-/// `IAppHostAgent.killProcess(int pid)`.
+/// `IAppHostAgent.killProcess(int pid)`, `mountStorage(int userId, int
+/// daemonUid)`.
 const KILL_PROCESS: u32 = 4;
+const MOUNT_STORAGE: u32 = 5;
 /// `InputTransport.cpp`'s `SOCKET_BUFFER_SIZE`.
 const SOCKET_BUFFER_SIZE: libc::c_int = 32 * 1024;
 
 fn main() {
     daemon_log::init("aim-app-host-agent");
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some(storage::SERVE) {
+        return storage::serve_main(args.get(2).map_or("/data/media", String::as_str));
+    }
     let fd: RawFd = match std::env::var(SOCKET).ok().and_then(|v| v.parse().ok()) {
         Some(fd) => fd,
         None => {
@@ -251,6 +260,17 @@ fn on_transact(
                 Status::ok()
             } else {
                 Status::new_exception_str(binder::ExceptionCode::ILLEGAL_ARGUMENT, Some(format!("no input channel {index}")))
+            })?;
+            Ok(())
+        }
+        MOUNT_STORAGE => {
+            let (user, daemon_uid): (i32, i32) = (data.read()?, data.read()?);
+            reply.write(&match storage::mount(user, daemon_uid as u32) {
+                Ok(()) => Status::ok(),
+                Err(error) => {
+                    log::error!("{error}");
+                    Status::new_exception_str(binder::ExceptionCode::ILLEGAL_STATE, Some(error))
+                }
             })?;
             Ok(())
         }
