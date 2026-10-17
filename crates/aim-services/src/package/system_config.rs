@@ -47,6 +47,7 @@ const ALLOW_LIBS: u32 = 0x2;
 const ALLOW_PERMISSIONS: u32 = 0x4;
 const ALLOW_APP_CONFIGS: u32 = 0x8;
 const ALLOW_HIDDENAPI_WHITELISTING: u32 = 0x40;
+const ALLOW_IMPLICIT_BROADCASTS: u32 = 0x200;
 const ALLOW_ALL: u32 = !0;
 
 /// SystemConfig's features, libraries and hidden-API allowlist.
@@ -64,6 +65,8 @@ pub struct SystemConfig {
     /// `mAppDataIsolationWhitelistedApps`, in the order read (an
     /// `ArraySet`: each once).
     pub app_data_isolation_allowlist: Vec<String>,
+    /// `mAllowImplicitBroadcasts`.
+    pub allow_implicit_broadcasts: BTreeSet<String>,
     /// Domain verification's linked apps, in original ArraySet order.
     pub linked_apps: Vec<String>,
     pub staged_installers: BTreeSet<String>,
@@ -136,7 +139,12 @@ impl SystemConfig {
         partition("oem", ALLOW_FEATURES, None);
         partition(
             "product",
-            ALLOW_FEATURES | ALLOW_LIBS | ALLOW_PERMISSIONS | ALLOW_HIDDENAPI_WHITELISTING | ALLOW_APP_CONFIGS,
+            ALLOW_FEATURES
+                | ALLOW_LIBS
+                | ALLOW_PERMISSIONS
+                | ALLOW_HIDDENAPI_WHITELISTING
+                | ALLOW_APP_CONFIGS
+                | ALLOW_IMPLICIT_BROADCASTS,
             prop("ro.boot.hardware.sku"),
         );
         partition("system_ext", ALLOW_ALL, None);
@@ -371,6 +379,11 @@ impl SystemConfig {
                         self.app_data_isolation_allowlist.push(package.into_owned());
                     }
                 }
+                "allow-implicit-broadcast" if flags & ALLOW_IMPLICIT_BROADCASTS != 0 => {
+                    if let Some(action) = e.string("action") {
+                        self.allow_implicit_broadcasts.insert(action.into_owned());
+                    }
+                }
                 "hidden-api-whitelisted-app" if flags & ALLOW_HIDDENAPI_WHITELISTING != 0 => {
                     if let Some(package) = e.string("package")
                         && !self.hidden_api_allowlist.iter().any(|p| *p == package)
@@ -589,6 +602,7 @@ pub fn system(
         gl_es_version: int(prop("ro.opengles.version")).unwrap_or(0),
         hidden_api_allowlist: config.hidden_api_allowlist,
         app_data_isolation_allowlist: config.app_data_isolation_allowlist,
+        allow_implicit_broadcasts: config.allow_implicit_broadcasts,
         named_actors: config.named_actors,
         use_round_icon: framework.use_round_icon,
         // Settings.Global.compatibility_mode's default; PackageManager reads

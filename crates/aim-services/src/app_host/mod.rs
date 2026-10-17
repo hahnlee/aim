@@ -12,14 +12,17 @@ pub mod activity;
 pub mod appops_service;
 pub mod audio_service;
 pub mod bind;
+pub mod broadcasts;
 pub mod compat;
 pub mod config;
+pub mod content_service;
 pub mod display;
 pub mod display_service;
 pub mod freeform;
 pub mod input_manager;
 pub mod input_method;
 pub mod keychars;
+pub mod kept;
 pub mod package_service;
 pub mod packages;
 pub mod permission_controller;
@@ -43,10 +46,10 @@ use std::time::Instant;
 
 use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
 use aim_binder_host::parcel::{
-    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception,
+    BAD_VALUE, Binder, EX_ILLEGAL_ARGUMENT, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception,
     Parcel, UNKNOWN_TRANSACTION,
 };
-use aim_service_aidl::ParcelValue;
+use aim_service_aidl::{ParcelValue, WriteParcelable};
 use aim_service_aidl::android_app_iactivitymanager as am;
 use aim_service_aidl::android_app_iapplicationthread as thread;
 
@@ -192,6 +195,9 @@ struct App {
     /// .TIMESTAMP_INITIAL_RENDERTHREAD_FRAME`,
     /// `TIMESTAMP_SURFACEFLINGER_COMPOSITION_COMPLETE`), uptime nanoseconds.
     first_frame: Option<(i64, i64)>,
+    /// When an activity of it was last resumed, uptime milliseconds
+    /// (`ProcessRecord.getLastActivityTime`).
+    last_activity: i64,
 }
 
 pub struct AppHost {
@@ -224,6 +230,8 @@ pub struct AppHost {
     providers: Mutex<HashMap<String, Published>>,
     storage: storage::Volumes,
     text_input: input_method::TextInput,
+    content_service: OnceLock<Arc<content_service::ContentService>>,
+    broadcasts: broadcasts::Broadcasts,
 }
 
 /// A content provider an app's process published
@@ -262,6 +270,8 @@ impl AppHost {
             providers: Mutex::new(HashMap::new()),
             storage: Default::default(),
             text_input: Default::default(),
+            content_service: OnceLock::new(),
+            broadcasts: Default::default(),
         })
     }
 
@@ -320,6 +330,12 @@ impl AppHost {
             ("input", Arc::new(input_manager::InputManager::new(self.clone()))),
             ("audio", Arc::new(audio_service::AudioService::new(self.clone()))),
             ("mount", Arc::new(storage::StorageManager(self.clone()))),
+            (
+                "content",
+                self.content_service
+                    .get_or_init(|| Arc::new(content_service::ContentService::new(self.clone())))
+                    .clone(),
+            ),
             (
                 "activity_task",
                 Arc::new(activity::ActivityTaskManager(
@@ -486,6 +502,7 @@ impl AppHost {
                 activity: Some(class.to_string()),
                 config: None,
                 first_frame: None,
+                last_activity: 0,
             },
         );
         Ok(pid)
@@ -625,17 +642,129 @@ impl AppHost {
         self.activities.remove_start(start_seq);
         self.windows_died(pid);
         self.tasks_died(start_seq);
+        self.broadcasts.process_died(self, start_seq);
+    }
+
+    /// An activity of the process of `start_seq` was resumed.
+    fn activity_changed(&self, start_seq: i64) {
+        if let Some(app) = self.apps.lock().unwrap().get_mut(&start_seq) {
+            app.last_activity = clock_ms(libc::CLOCK_UPTIME_RAW);
+        }
+    }
+
+    /// `ProcessList.fillInProcMemInfoLOSP` of `app`, the process of
+    /// `start_seq`: each of the app host's processes is top.
+    fn fill_in_proc_mem_info(&self, start_seq: i64, app: &App, info: &mut RunningAppProcessInfo, front: Option<i64>) {
+        info.pid = app.pid;
+        info.uid = app.uid as i32;
+        if self.activities.has_start(start_seq) {
+            info.flags |= FLAG_HAS_ACTIVITIES;
+        }
+        info.importance = IMPORTANCE_FOREGROUND;
+        info.process_state = PROCESS_STATE_TOP;
+        info.is_focused = front == Some(start_seq);
+        info.last_activity_time = app.last_activity;
+    }
+
+    /// `getRunningAppProcesses`: the caller's uid's processes, or its
+    /// user's or all with the permissions, most recently used first.
+    fn running_app_processes(&self, call: &Call<'_>) -> Result<Option<Vec<Option<RunningAppProcessInfo>>>, Exception> {
+        let uid = call.sender_euid as i32;
+        if is_isolated(uid) {
+            return Err(Exception::security("Isolated process not allowed to call getRunningAppProcesses"));
+        }
+        let all_users = self.check_permission(Some("android.permission.INTERACT_ACROSS_USERS_FULL"), uid)? == 0;
+        // `isGetTasksAllowed`.
+        let all_uids = self.check_permission(Some("android.permission.REAL_GET_TASKS"), uid)? == 0;
+        let front = self.tasks.front_start();
+        let apps = self.apps.lock().unwrap();
+        let mut running: Vec<(&i64, &App)> = apps
+            .iter()
+            .filter(|(_, a)| a.thread.is_some())
+            .filter(|(_, a)| all_users || a.uid / PER_USER_RANGE == uid as u32 / PER_USER_RANGE)
+            .filter(|(_, a)| all_uids || a.uid == uid as u32)
+            .collect();
+        running.sort_by_key(|(seq, a)| std::cmp::Reverse((a.last_activity, **seq)));
+        let list: Vec<_> = running
+            .into_iter()
+            .map(|(seq, a)| {
+                let mut info = RunningAppProcessInfo {
+                    process_name: Some(a.package.clone()),
+                    pkg_list: Some(vec![a.package.clone()]),
+                    ..Default::default()
+                };
+                self.fill_in_proc_mem_info(*seq, a, &mut info, front);
+                Some(info)
+            })
+            .collect();
+        Ok((!list.is_empty()).then_some(list))
+    }
+
+    /// `getMyMemoryState`: the calling process's state.
+    fn my_memory_state(&self, call: &Call<'_>) -> Result<RunningAppProcessInfo, Exception> {
+        if is_isolated(call.sender_euid as i32) {
+            return Err(Exception::security("Isolated process not allowed to call getMyMemoryState"));
+        }
+        let mut info = RunningAppProcessInfo::default();
+        let front = self.tasks.front_start();
+        let apps = self.apps.lock().unwrap();
+        if let Some((seq, app)) = apps.iter().find(|(_, a)| a.pid == call.sender_pid && a.thread.is_some()) {
+            self.fill_in_proc_mem_info(*seq, app, &mut info, front);
+        }
+        Ok(info)
+    }
+
+    /// `getRecordForAppLOSP`: the attached process whose thread `thread`
+    /// is: its start, package, uid and pid.
+    fn app_of_thread(&self, thread: Option<Binder>) -> Option<(i64, String, i32, i32)> {
+        let Some(Binder::Handle(handle)) = thread else {
+            return None;
+        };
+        self.apps
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, a)| a.thread.as_ref().is_some_and(|t| t.handle == handle))
+            .map(|(seq, a)| (*seq, a.package.clone(), a.uid as i32, a.pid))
+    }
+
+    /// Sends the process of `start_seq` the one-way call `code` on its
+    /// thread.
+    fn call_thread(&self, start_seq: i64, code: u32, data: &Parcel) -> Result<(), String> {
+        let apps = self.apps.lock().unwrap();
+        let thread = apps.get(&start_seq).and_then(|a| a.thread.as_ref()).ok_or_else(|| format!("no process of start {start_seq}"))?;
+        thread.transact(code, data, true).map(|_| ()).map_err(|s| format!("{code}: {s}"))
+    }
+
+    /// `UserController.handleIncomingUser`: `USER_CURRENT` as user 0,
+    /// another user than the caller's only with `INTERACT_ACROSS_USERS_FULL`
+    /// (or, if `allow_non_full`, `INTERACT_ACROSS_USERS`).
+    fn incoming_user(&self, uid: i32, user: i32, allow_non_full: bool) -> Result<i32, Exception> {
+        const USER_ALL: i32 = -1;
+        const USER_CURRENT: i32 = -2;
+        let user = if user == USER_CURRENT { 0 } else { user };
+        let has = |p: &str| self.check_permission(Some(p), uid).map(|r| r == 0);
+        if user == USER_ALL {
+            if !has("android.permission.INTERACT_ACROSS_USERS_FULL")? {
+                return Err(Exception::security("No access: INTERACT_ACROSS_USERS_FULL"));
+            }
+        } else if user < 0 {
+            return Err(Exception::new(EX_ILLEGAL_ARGUMENT, format!("Invalid user: {user}")));
+        } else if user != uid / PER_USER_RANGE as i32
+            && !has("android.permission.INTERACT_ACROSS_USERS_FULL")?
+            && !(allow_non_full && has("android.permission.INTERACT_ACROSS_USERS")?)
+        {
+            return Err(Exception::security(format!(
+                "Permission Denial: user {uid} is asking for user {user} but does not have INTERACT_ACROSS_USERS_FULL"
+            )));
+        }
+        Ok(user)
     }
 
     /// Sends the process of `start_seq` the transaction of `items`
     /// (`ClientLifecycleManager.scheduleTransactionItems`).
     fn schedule(&self, start_seq: i64, items: Vec<Box<dyn activity::Item>>) -> Result<(), String> {
-        let apps = self.apps.lock().unwrap();
-        let thread = apps.get(&start_seq).and_then(|a| a.thread.as_ref()).ok_or_else(|| format!("no process of start {start_seq}"))?;
-        thread
-            .transact(thread::SCHEDULE_TRANSACTION, &activity::transaction(items), true)
-            .map(|_| ())
-            .map_err(|s| format!("scheduleTransaction: {s}"))
+        self.call_thread(start_seq, thread::SCHEDULE_TRANSACTION, &activity::transaction(items))
     }
 
     /// Kills the process of `start_seq` (`ProcessRecord.killLocked`).
@@ -648,7 +777,11 @@ impl AppHost {
     /// component nobody owns: root and system hold every permission,
     /// isolated processes none, other uids what PackageManager granted
     /// them (`checkUidPermission`).
-    fn check_permission(&self, permission: Option<&str>, uid: i32) -> Result<i32, Exception> {
+    pub(super) fn check_permission(
+        &self,
+        permission: Option<&str>,
+        uid: i32,
+    ) -> Result<i32, Exception> {
         const GRANTED: i32 = 0;
         const DENIED: i32 = -1;
         let app_id = uid.rem_euclid(PER_USER_RANGE as i32);
@@ -656,7 +789,8 @@ impl AppHost {
             return Ok(GRANTED);
         }
         // `Process.isIsolated`: FIRST_ISOLATED_UID..LAST_ISOLATED_UID.
-        if (99000..=99999).contains(&app_id) || (90000..=98999).contains(&app_id) {
+        // `Process.isIsolated`: isolated and app zygote processes.
+        if (90000..=99999).contains(&app_id) {
             return Ok(DENIED);
         }
         let Some(permission) = permission else {
@@ -1007,6 +1141,132 @@ impl AppHost {
         }))
     }
 
+    /// `ActivityManager.checkComponentPermission`: root and system, and the
+    /// owner's app, hold it; isolated processes do not; of a component
+    /// not exported, nobody else; else the permission, if any.
+    pub(super) fn check_component_permission(
+        &self,
+        permission: Option<&str>,
+        uid: i32,
+        owner: i32,
+        exported: bool,
+    ) -> Result<bool, Exception> {
+        let app_id = uid.rem_euclid(PER_USER_RANGE as i32);
+        if app_id == 0 || app_id == 1000 {
+            return Ok(true);
+        }
+        // `Process.isIsolated`: isolated and app zygote processes.
+        if (90000..=99999).contains(&app_id) {
+            return Ok(false);
+        }
+        if owner >= 0 && app_id == owner.rem_euclid(PER_USER_RANGE as i32) {
+            return Ok(true);
+        }
+        if !exported {
+            return Ok(false);
+        }
+        match permission {
+            None => Ok(true),
+            Some(_) => Ok(self.check_permission(permission, uid)? == 0),
+        }
+    }
+
+    /// `ContentProviderHelper.checkContentProviderAccess` of `authority` in
+    /// `user` for `uid`: `None` when it may use it, else why not. The app
+    /// host keeps no URI grants (`UriGrantsManager`).
+    pub(super) fn provider_access(
+        &self,
+        authority: &str,
+        uid: i32,
+        user: i32,
+    ) -> Result<Option<String>, Exception> {
+        const MATCH_DISABLED_COMPONENTS: i64 = 0x200;
+        const MATCH_DIRECT_BOOT_AWARE: i64 = 0x8_0000;
+        const MATCH_DIRECT_BOOT_UNAWARE: i64 = 0x4_0000;
+        let flags = STOCK_PM_FLAGS
+            | GET_URI_PERMISSION_PATTERNS
+            | MATCH_DISABLED_COMPONENTS
+            | MATCH_DIRECT_BOOT_AWARE
+            | MATCH_DIRECT_BOOT_UNAWARE;
+        let Some(cpi) = self.resolve_provider(authority, flags, user)? else {
+            return Ok(Some(format!(
+                "Failed to find provider {authority} for user {user}; expected to find a valid ContentProvider for this authority"
+            )));
+        };
+        let owner = cpi.info.application_info.uid;
+        let exported = cpi.info.exported;
+        let check = |permission: Option<&str>| {
+            self.check_component_permission(permission, uid, owner, exported)
+        };
+        if check(cpi.read_permission.as_deref())? || check(cpi.write_permission.as_deref())? {
+            return Ok(None);
+        }
+        // A path permission grants the provider when it names one the
+        // caller holds.
+        for pp in cpi.path_permissions.iter().flatten() {
+            for permission in [&pp.read_permission, &pp.write_permission].into_iter().flatten() {
+                if check(Some(permission))? {
+                    return Ok(None);
+                }
+            }
+        }
+        let name = cpi.info.item.name.clone().unwrap_or_default();
+        let suffix = if !exported {
+            format!(" that is not exported from UID {owner}")
+        } else if cpi.read_permission.as_deref() == Some("android.permission.MANAGE_DOCUMENTS") {
+            " requires that you obtain access using ACTION_OPEN_DOCUMENT or related APIs"
+                .to_string()
+        } else {
+            format!(
+                " requires {} or {}",
+                cpi.read_permission.as_deref().unwrap_or("null"),
+                cpi.write_permission.as_deref().unwrap_or("null")
+            )
+        };
+        Ok(Some(format!(
+            "Permission Denial: opening provider {name} (uid={uid}){suffix}"
+        )))
+    }
+
+    /// `resolveContentProvider` of `authority` with `flags`, as the system
+    /// asks it.
+    pub(super) fn resolve_provider(
+        &self,
+        authority: &str,
+        flags: i64,
+        user: i32,
+    ) -> Result<Option<package::info::ProviderInfo>, Exception> {
+        let (_, resolution) = self.packages()?;
+        match resolution.resolve_content_provider(authority, flags, user, 1000) {
+            Ok(found) => Ok(found),
+            Err(crate::package::resolve::ResolutionError::Original(e)) => Err(e),
+            Err(e) => Err(Exception::new(
+                EX_UNSUPPORTED_OPERATION,
+                format!("resolveContentProvider: {e:?}"),
+            )),
+        }
+    }
+
+    /// `ContentService.getProviderPackageName`.
+    pub(super) fn provider_package(
+        &self,
+        authority: &str,
+        user: i32,
+    ) -> Result<Option<String>, Exception> {
+        Ok(self
+            .resolve_provider(authority, 0, user)?
+            .and_then(|p| p.info.application_info.item.package_name.clone()))
+    }
+
+    /// `AppOpsManager.checkPackage`: whether `package` is `uid`'s.
+    pub(super) fn owns_package(&self, uid: i32, package: &str) -> Result<bool, Exception> {
+        let (state, _) = self.packages()?;
+        Ok(state
+            .packages
+            .get(package)
+            .is_some_and(|ps| ps.app_id == uid.rem_euclid(PER_USER_RANGE as i32)))
+    }
+
     /// The provider an app published under `authority`, for an app of the
     /// same uid: its other processes reach it as the original's
     /// `getContentProviderImpl` gives a running provider. Another app's
@@ -1306,6 +1566,78 @@ fn instruction_set(abi: &str) -> String {
     .to_string()
 }
 
+/// `Process.isIsolated`: an isolated or app zygote process.
+fn is_isolated(uid: i32) -> bool {
+    (90_000..=99_999).contains(&uid.rem_euclid(PER_USER_RANGE as i32))
+}
+
+/// `RunningAppProcessInfo.FLAG_HAS_ACTIVITIES`, `IMPORTANCE_FOREGROUND`;
+/// `ActivityManager.PROCESS_STATE_IMPORTANT_FOREGROUND`.
+const FLAG_HAS_ACTIVITIES: i32 = 1 << 2;
+const IMPORTANCE_FOREGROUND: i32 = 100;
+const PROCESS_STATE_IMPORTANT_FOREGROUND: i32 = 6;
+
+/// `ActivityManager.RunningAppProcessInfo`, as its `writeToParcel` writes
+/// it; what the app host does not track (trim level, LRU position, the
+/// reason for its importance, package dependencies) is its default.
+struct RunningAppProcessInfo {
+    process_name: Option<String>,
+    pid: i32,
+    uid: i32,
+    pkg_list: Option<Vec<String>>,
+    flags: i32,
+    importance: i32,
+    process_state: i32,
+    is_focused: bool,
+    last_activity_time: i64,
+}
+
+/// `RunningAppProcessInfo()`.
+impl Default for RunningAppProcessInfo {
+    fn default() -> Self {
+        RunningAppProcessInfo {
+            process_name: None,
+            pid: 0,
+            uid: 0,
+            pkg_list: None,
+            flags: 0,
+            importance: IMPORTANCE_FOREGROUND,
+            process_state: PROCESS_STATE_IMPORTANT_FOREGROUND,
+            is_focused: false,
+            last_activity_time: 0,
+        }
+    }
+}
+
+impl WriteParcelable for RunningAppProcessInfo {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_string16(self.process_name.as_deref());
+        p.write_i32(self.pid);
+        p.write_i32(self.uid);
+        match &self.pkg_list {
+            Some(list) => {
+                p.write_i32(list.len() as i32);
+                for name in list {
+                    p.write_string16(Some(name));
+                }
+            }
+            None => p.write_i32(-1),
+        }
+        p.write_i32(-1); // no package dependencies
+        p.write_i32(self.flags);
+        p.write_i32(0); // last trim level
+        p.write_i32(self.importance);
+        p.write_i32(0); // lru
+        p.write_i32(0); // importance reason: unknown
+        p.write_i32(0); // its pid
+        p.write_string16(None); // its component (`ComponentName.writeToParcel(null)`)
+        p.write_i32(0); // its importance
+        p.write_i32(self.process_state);
+        p.write_i32(self.is_focused as i32);
+        p.write_i64(self.last_activity_time);
+    }
+}
+
 fn reply(result: Result<Parcel, Exception>) -> Reply {
     Ok(result.unwrap_or_else(|exception| {
         let mut reply = Parcel::new();
@@ -1398,6 +1730,88 @@ impl Service for Activity {
                     am::write_finish_attach_application_reply(&mut p);
                     p
                 }))
+            }
+            am::GET_RUNNING_APP_PROCESSES => {
+                am::GetRunningAppProcesses::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.running_app_processes(call).map(|list| {
+                    let mut p = Parcel::new();
+                    am::write_get_running_app_processes_reply(&mut p, list.as_deref());
+                    p
+                }))
+            }
+            am::GET_MY_MEMORY_STATE => {
+                am::GetMyMemoryState::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.my_memory_state(call).map(|info| {
+                    let mut p = Parcel::new();
+                    am::write_get_my_memory_state_reply(&mut p, &am::GetMyMemoryStateReply { out_info: Some(info) });
+                    p
+                }))
+            }
+            am::REGISTER_RECEIVER => {
+                let a = am::RegisterReceiver::<broadcasts::ParcelFilter>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args = broadcasts::Registration {
+                    caller: a.caller,
+                    caller_package: a.caller_package,
+                    receiver: a.receiver,
+                    filter: a.filter,
+                    permission: a.required_permission,
+                    user: a.user_id,
+                    flags: a.flags,
+                };
+                reply(self.0.broadcasts.register(&self.0, call, args).map(|sticky| {
+                    let mut p = Parcel::new();
+                    am::write_register_receiver_reply(&mut p, sticky.as_ref());
+                    p
+                }))
+            }
+            am::REGISTER_RECEIVER_WITH_FEATURE => {
+                let a = am::RegisterReceiverWithFeature::<broadcasts::ParcelFilter>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args = broadcasts::Registration {
+                    caller: a.caller,
+                    caller_package: a.caller_package,
+                    receiver: a.receiver,
+                    filter: a.filter,
+                    permission: a.required_permission,
+                    user: a.user_id,
+                    flags: a.flags,
+                };
+                reply(self.0.broadcasts.register(&self.0, call, args).map(|sticky| {
+                    let mut p = Parcel::new();
+                    am::write_register_receiver_with_feature_reply(&mut p, sticky.as_ref());
+                    p
+                }))
+            }
+            am::UNREGISTER_RECEIVER => {
+                let a = am::UnregisterReceiver::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.broadcasts.unregister(&self.0, a.receiver).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_unregister_receiver_reply(&mut p);
+                    p
+                }))
+            }
+            am::BROADCAST_INTENT_WITH_FEATURE => {
+                let a = am::BroadcastIntentWithFeature::<kept::RawIntent, kept::RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.broadcasts.broadcast(&self.0, call, a).map(|result| {
+                    let mut p = Parcel::new();
+                    am::write_broadcast_intent_with_feature_reply(&mut p, result);
+                    p
+                }))
+            }
+            am::UNBROADCAST_INTENT => {
+                let a = am::UnbroadcastIntent::<kept::RawIntent>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.broadcasts.unbroadcast(&self.0, call, a.intent, a.user_id).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_unbroadcast_intent_reply(&mut p);
+                    p
+                }))
+            }
+            // One-way.
+            am::FINISH_RECEIVER => {
+                let a = am::FinishReceiver::<kept::RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.0.broadcasts.finish(&self.0, a) {
+                    eprintln!("app host: finishReceiver: {e:?}");
+                }
+                Ok(Parcel::new())
             }
             // `handleApplicationCrash`: the crash is the process's last
             // act (`RuntimeInit` kills it after the call); it is logged.

@@ -55,7 +55,8 @@ impl PartialEq for Raw {
 }
 
 impl Raw {
-    fn capture(r: &Reader<'_>, start: usize) -> Raw {
+    /// The bytes `r` read since `start`.
+    pub(crate) fn capture(r: &Reader<'_>, start: usize) -> Raw {
         let (bytes, objects) = r.since(start);
         Raw {
             bytes: bytes.to_vec(),
@@ -71,8 +72,18 @@ impl Raw {
         }
     }
 
-    fn write(&self, p: &mut Parcel) {
+    pub(crate) fn write(&self, p: &mut Parcel) {
         p.write_raw_files(&self.bytes, &self.objects, &self.files);
+    }
+
+    /// Overwrites the int at `at`.
+    pub(crate) fn set_i32(&mut self, at: usize, value: i32) {
+        self.bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    /// Whether it carries an fd object (`Parcel.hasFileDescriptors`).
+    pub(crate) fn has_fds(&self) -> bool {
+        self.objects.iter().any(|&at| self.object(at).kind == BINDER_TYPE_FD)
     }
 
     fn object(&self, at: u64) -> FlatBinderObject {
@@ -81,7 +92,7 @@ impl Raw {
     }
 
     /// The handles among its binders.
-    fn handles(&self) -> impl Iterator<Item = u32> + '_ {
+    pub(crate) fn handles(&self) -> impl Iterator<Item = u32> + '_ {
         self.objects.iter().filter_map(|&at| {
             let object = self.object(at);
             (object.kind == BINDER_TYPE_HANDLE).then(|| object.handle())
@@ -90,7 +101,7 @@ impl Raw {
 
     /// Takes the file of each of its fd objects, which the call that
     /// brought it is about to close.
-    fn keep_files(&mut self, file: &dyn Fn(u32) -> Option<File>) -> Result<()> {
+    pub(crate) fn keep_files(&mut self, file: &dyn Fn(u32) -> Option<File>) -> Result<()> {
         for &at in &self.objects {
             let object = self.object(at);
             if object.kind == BINDER_TYPE_FD {

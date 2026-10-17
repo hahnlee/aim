@@ -49,6 +49,11 @@ pub struct Tasks {
 }
 
 impl Tasks {
+    /// The start of the front task's process (`getTopApp`).
+    pub(super) fn front_start(&self) -> Option<i64> {
+        self.tasks.lock().unwrap().last().map(|t| t.start_seq)
+    }
+
     /// Whether the display server shows a window per task.
     pub fn window_mode(&self) -> bool {
         self.windows.get().copied().unwrap_or(false)

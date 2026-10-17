@@ -79,6 +79,16 @@ impl Uri {
         writer.string(Some(&self.string));
     }
 
+    /// `Uri.writeToParcel`: its type, then its string.
+    pub fn write(&self, p: &mut aim_binder_host::parcel::Parcel) {
+        p.write_i32(match self.kind {
+            Kind::String => STRING_TYPE_ID,
+            Kind::Opaque => OPAQUE_TYPE_ID,
+            Kind::Hierarchical | Kind::PreferredHierarchical => HIERARCHICAL_TYPE_ID,
+        });
+        p.write_string8(Some(&self.string));
+    }
+
     /// The string `toString` returns for a URI read from a parcel.
     pub fn as_str(&self) -> &str {
         &self.string
