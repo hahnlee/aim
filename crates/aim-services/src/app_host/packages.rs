@@ -248,6 +248,11 @@ impl Packages {
         self.access.as_ref()
     }
 
+    /// SystemConfig's split permissions.
+    pub fn split_permissions(&self) -> &[parse::SplitPermission] {
+        &self.platform.split_permissions
+    }
+
     /// `ComponentInfo.loadXmlMetaData`'s parser and the attributes of
     /// `getResourcesForApplication`: the compiled XML resource `id` of
     /// `pkg`, from its APKs below the image `root` or the guest's `/data`
@@ -382,7 +387,7 @@ fn sdk_sandbox_package(packages: &BTreeMap<String, PackageState>) -> Result<Stri
 
 /// `PermissionFlags.isPermissionGranted` (services/permission at
 /// `android-16.0.0_r1`).
-fn permission_granted(flags: i32) -> bool {
+pub(super) fn permission_granted(flags: i32) -> bool {
     const INSTALL_GRANTED: i32 = 1 << 0;
     const INSTALL_REVOKED: i32 = 1 << 1;
     const PROTECTION_GRANTED: i32 = 1 << 2;

@@ -830,6 +830,40 @@ impl PermissionInfo {
     }
 }
 
+impl WriteParcelable for PermissionInfo {
+    fn write_to(&self, p: &mut Parcel) {
+        self.write(p);
+    }
+}
+
+/// `PermissionGroupInfo`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PermissionGroupInfo {
+    pub item: PackageItemInfo,
+    pub description_res: i32,
+    pub request_res: i32,
+    pub request_detail_res: i32,
+    pub background_request_res: i32,
+    pub background_request_detail_res: i32,
+    pub flags: i32,
+    pub priority: i32,
+}
+
+impl WriteParcelable for PermissionGroupInfo {
+    fn write_to(&self, p: &mut Parcel) {
+        self.item.write(p);
+        p.write_i32(self.description_res);
+        p.write_i32(self.request_res);
+        p.write_i32(self.request_detail_res);
+        p.write_i32(self.background_request_res);
+        p.write_i32(self.background_request_detail_res);
+        // nonLocalizedDescription.
+        write_char_sequence(p, None);
+        p.write_i32(self.flags);
+        p.write_i32(self.priority);
+    }
+}
+
 /// `SigningDetails` as a reply carries it: the signatures, DER encoded,
 /// and the past signing certificates; `None` is `UNKNOWN`.
 #[derive(Clone, Debug, PartialEq)]
@@ -2052,8 +2086,24 @@ pub(in crate::package) fn generate_instrumentation_info(
     })
 }
 
+/// `PackageInfoUtils.generatePermissionGroupInfo`.
+pub fn generate_permission_group_info(g: &pkg::PermissionGroup, flags: i64) -> PermissionGroupInfo {
+    let mut item = PackageItemInfo::of(&g.component, &PackageUserState::default());
+    item.meta_data = meta_data(&g.component, flags);
+    PermissionGroupInfo {
+        item,
+        description_res: g.component.description_res,
+        request_res: g.request_res,
+        request_detail_res: g.request_detail_res,
+        background_request_res: g.background_request_res,
+        background_request_detail_res: g.background_request_detail_res,
+        flags: g.component.flags,
+        priority: g.priority,
+    }
+}
+
 /// `PackageInfoUtils.generatePermissionInfo`.
-fn generate_permission_info(p: &pkg::Permission, flags: i64) -> PermissionInfo {
+pub fn generate_permission_info(p: &pkg::Permission, flags: i64) -> PermissionInfo {
     let mut item = PackageItemInfo::of(&p.component, &PackageUserState::default());
     item.meta_data = meta_data(&p.component, flags);
     PermissionInfo {
