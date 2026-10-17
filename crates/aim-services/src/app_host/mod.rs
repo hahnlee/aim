@@ -34,6 +34,7 @@ pub mod permission_controller;
 pub mod playback;
 pub mod power_service;
 pub mod sensor_privacy;
+pub mod services;
 pub mod settings;
 pub mod settings_provider;
 pub mod storage;
@@ -243,6 +244,7 @@ pub struct AppHost {
     content_service: OnceLock<Arc<content_service::ContentService>>,
     notification_service: OnceLock<Arc<notification_service::NotificationManager>>,
     power_service: OnceLock<Arc<power_service::PowerManager>>,
+    services: services::Services,
     broadcasts: broadcasts::Broadcasts,
     /// User 0's restrictions.
     user_restrictions: OnceLock<std::collections::BTreeSet<String>>,
@@ -292,6 +294,7 @@ impl AppHost {
             content_service: OnceLock::new(),
             notification_service: OnceLock::new(),
             power_service: OnceLock::new(),
+            services: Default::default(),
             broadcasts: Default::default(),
             user_restrictions: OnceLock::new(),
             audio_policy: OnceLock::new(),
@@ -449,11 +452,12 @@ impl AppHost {
     /// Starts the process of package `name` for the launcher's start of
     /// its activity `class`.
     fn start_process(&self, name: &str, class: &str) -> Result<i32, Exception> {
-        self.start_process_for(name, activity_start::StartRequest::launcher(class))
+        self.start_process_for(name, Some(activity_start::StartRequest::launcher(class)))
     }
 
-    /// Starts the process of package `name` for `request`.
-    fn start_process_for(&self, name: &str, request: activity_start::StartRequest) -> Result<i32, Exception> {
+    /// Starts the process of package `name` for `request`, or for a
+    /// service, a provider or a broadcast (no activity).
+    fn start_process_for(&self, name: &str, request: Option<activity_start::StartRequest>) -> Result<i32, Exception> {
         let inputs = self.inputs()?;
         let state = package::State::read(&inputs.data, &[0])
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("package state: {e}")))?
@@ -544,7 +548,7 @@ impl AppHost {
                 start_elapsed: clock_ms(libc::CLOCK_MONOTONIC_RAW),
                 start_uptime: clock_ms(libc::CLOCK_UPTIME_RAW),
                 thread: None,
-                activity: Some(request),
+                activity: request,
                 config: None,
                 first_frame: None,
                 last_activity: 0,
@@ -688,6 +692,9 @@ impl AppHost {
         self.windows_died(pid);
         self.tasks_died(start_seq);
         self.broadcasts.process_died(self, start_seq);
+        if let Some(me) = self.me.upgrade() {
+            me.services_process_died(start_seq);
+        }
     }
 
     /// User 0's base restrictions, as UserManagerService last persisted
@@ -1712,10 +1719,91 @@ impl Service for Activity {
             am::ATTACH_APPLICATION => {
                 let args = am::AttachApplication::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply(self.0.attach(call, args.app, args.start_seq).map(|()| {
+                    // The services waiting for the process
+                    // (`ActiveServices.attachApplicationLocked`).
+                    self.0.services_attached(args.start_seq);
                     let mut p = Parcel::new();
                     am::write_attach_application_reply(&mut p);
                     p
                 }))
+            }
+            am::START_SERVICE => {
+                let a = am::StartService::<kept::RawIntent>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let Some(intent) = a.service else {
+                    return reply(Err(Exception::illegal_argument("service intent is null")));
+                };
+                reply(self.0.start_service(a.caller, call.sender_euid as i32, intent, a.resolved_type, a.user_id).map(|name| {
+                    let mut p = Parcel::new();
+                    am::write_start_service_reply(&mut p, name.as_ref().map(|(p, c)| activity_start::Component(p, c)).as_ref());
+                    p
+                }))
+            }
+            am::STOP_SERVICE => {
+                let a = am::StopService::<kept::RawIntent>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let Some(intent) = a.service else {
+                    return reply(Err(Exception::illegal_argument("service intent is null")));
+                };
+                reply(self.0.stop_service(call.sender_euid as i32, intent, a.resolved_type, a.user_id).map(|r| {
+                    let mut p = Parcel::new();
+                    am::write_stop_service_reply(&mut p, r);
+                    p
+                }))
+            }
+            am::STOP_SERVICE_TOKEN => {
+                let a = am::StopServiceToken::<services::Name>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let stopped = self.0.stop_service_token(a.class_name, a.token, a.start_id);
+                let mut p = Parcel::new();
+                am::write_stop_service_token_reply(&mut p, stopped);
+                Ok(p)
+            }
+            am::BIND_SERVICE | am::BIND_SERVICE_INSTANCE => {
+                let a = if call.code == am::BIND_SERVICE {
+                    let a = am::BindService::<kept::RawIntent>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                    am::BindServiceInstance { caller: a.caller, token: a.token, service: a.service, resolved_type: a.resolved_type, connection: a.connection, flags: a.flags, instance_name: None, calling_package: a.calling_package, user_id: a.user_id }
+                } else {
+                    am::BindServiceInstance::<kept::RawIntent>::read(&mut call.data).map_err(|_| BAD_VALUE)?
+                };
+                let Some(intent) = a.service else {
+                    return reply(Err(Exception::illegal_argument("service intent is null")));
+                };
+                reply(
+                    self.0
+                        .bind_service(a.caller, call.sender_euid as i32, a.token, intent, a.resolved_type, a.connection, a.flags, a.instance_name, a.user_id)
+                        .map(|r| {
+                            let mut p = Parcel::new();
+                            am::write_bind_service_instance_reply(&mut p, r);
+                            p
+                        }),
+                )
+            }
+            am::UNBIND_SERVICE => {
+                let a = am::UnbindService::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let unbound = self.0.unbind_service(a.connection);
+                let mut p = Parcel::new();
+                am::write_unbind_service_reply(&mut p, unbound);
+                Ok(p)
+            }
+            am::PUBLISH_SERVICE => {
+                let a = am::PublishService::<kept::RawIntent>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.0.publish_service(a.token, a.intent, a.service);
+                let mut p = Parcel::new();
+                am::write_publish_service_reply(&mut p);
+                Ok(p)
+            }
+            am::UNBIND_FINISHED => {
+                let a = am::UnbindFinished::<kept::RawIntent>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.0.unbind_finished(a.token, a.service);
+                let mut p = Parcel::new();
+                am::write_unbind_finished_reply(&mut p);
+                Ok(p)
+            }
+            // One-way.
+            am::SERVICE_DONE_EXECUTING => {
+                let a = am::ServiceDoneExecuting::<kept::RawIntent>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.0.service_done_executing(a.token, a.r#type, a.start_id, a.res) {
+                    eprintln!("app host: serviceDoneExecuting: {}", e.message);
+                }
+                Ok(Parcel::new())
             }
             am::CHECK_PERMISSION => {
                 let args = am::CheckPermission::read(&mut call.data).map_err(|_| BAD_VALUE)?;
