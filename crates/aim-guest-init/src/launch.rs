@@ -804,7 +804,7 @@ mod tests {
         let mut launcher=HostLauncher::new(linux_run,layout);
         // SAFETY: the child touches no shared Rust state and waits for the
         // launcher's shutdown signal.
-        let pid=unsafe{libc::fork()};assert!(pid>0);
+        let pid=unsafe{libc::fork()};assert!(pid>=0);
         if pid==0 {unsafe{libc::setpgid(0,0);loop{libc::pause();}}}
         // Both sides set the group, so the kill below never precedes it.
         unsafe{libc::setpgid(pid,pid);}

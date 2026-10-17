@@ -1918,10 +1918,6 @@ mod tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    /// Held by tests that start processes or need no other process to
-    /// inherit their fds.
-    static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn mounts_symlink_opens_the_same_live_namespace_as_self_mounts() {
         let (_view, root) = crate::vfs::test_view();
@@ -1962,7 +1958,11 @@ mod tests {
 
     #[test]
     fn a_closed_content_file_is_reused_only_when_nothing_else_holds_it() {
-        let _spawns = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+        // Its own process: a child another test spawns or forks meanwhile
+        // inherits the file and rightly keeps it out of the pool.
+        if super::super::fdtab::isolated_kernel_test("sys::procfs::tests::a_closed_content_file_is_reused_only_when_nothing_else_holds_it") {
+            return;
+        }
         let pool = super::Pool(std::sync::Mutex::new(Vec::new()));
         let ino = |fd: i32| {
             let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -2026,7 +2026,6 @@ mod tests {
     /// The host's gzip reads `/proc/config.gz` back verbatim.
     #[test]
     fn config_gz_is_gzip() {
-        let _spawns = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
         let big: String = super::KERNEL_CONFIG.repeat(200);
         for data in ["", super::KERNEL_CONFIG, big.as_str()] {
             let mut child = Command::new("gzip")
