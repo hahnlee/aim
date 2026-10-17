@@ -66,31 +66,40 @@ impl Default for State {
 /// A complete immutable region for a native Parcel blob. The syscall owner
 /// enforces this protection mask when the file reaches a guest.
 pub fn immutable_blob(bytes: &[u8]) -> io::Result<std::fs::File> {
-    let mut name = std::env::temp_dir()
+    let mut file = read_only_region(b"Parcel Blob")?;
+    file.write_all(bytes)?;
+    Ok(file)
+}
+
+/// A region the native side owns, as an owner that mapped it and then
+/// made it `PROT_READ` does (`MemoryIntArray`): empty until the owner
+/// sizes and writes it through the returned file, and read-only for every
+/// guest that receives it.
+pub fn read_only_region(name: &[u8]) -> io::Result<std::fs::File> {
+    let mut template = std::env::temp_dir()
         .join("aim-ashmem.XXXXXX")
         .into_os_string()
         .into_encoded_bytes();
-    name.push(0);
+    template.push(0);
     // SAFETY: mkstemp initializes the mutable NUL-terminated template.
-    let fd = unsafe { libc::mkstemp(name.as_mut_ptr().cast()) };
+    let fd = unsafe { libc::mkstemp(template.as_mut_ptr().cast()) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: ownership of the new fd is transferred exactly once.
-    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
     // SAFETY: the generated name is NUL-terminated and this fd is owned.
-    if unsafe { libc::unlink(name.as_ptr().cast()) } < 0 {
+    if unsafe { libc::unlink(template.as_ptr().cast()) } < 0 {
         return Err(io::Error::last_os_error());
     }
     if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
         return Err(io::Error::last_os_error());
     }
-    file.write_all(bytes)?;
     let state = State {
-        prot: 1,
+        prot: libc::PROT_READ as u32,
         mapped: true,
         unpinned: vec![],
-        name: b"Parcel Blob".to_vec(),
+        name: name.to_vec(),
     }
     .encode();
     // SAFETY: writes the shared metadata from its live encoded buffer.

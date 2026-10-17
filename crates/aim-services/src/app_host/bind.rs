@@ -132,12 +132,12 @@ pub fn core_settings(
     };
     for name in SECURE_INTS {
         if let Some(value) = settings.get(Table::Secure, name) {
-            entries.push((name.to_string(), Value::Int(int(name, value)?)));
+            entries.push((name.to_string(), Value::Int(int(name, &value)?)));
         }
     }
     for name in SYSTEM_STRINGS {
         if let Some(value) = settings.get(Table::System, name) {
-            entries.push((name.to_string(), Value::String(Some(value.to_string()))));
+            entries.push((name.to_string(), Value::String(Some(value))));
         }
     }
     for &(name, is_int) in GLOBALS {
@@ -145,9 +145,9 @@ pub fn core_settings(
             entries.push((
                 name.to_string(),
                 if is_int {
-                    Value::Int(int(name, value)?)
+                    Value::Int(int(name, &value)?)
                 } else {
-                    Value::String(Some(value.to_string()))
+                    Value::String(Some(value))
                 },
             ));
         }
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn core_settings_in_the_original_order() {
         let mut settings = Settings::default();
-        let xml = br#"<settings><setting id="1" name="long_press_timeout" value="400" /><setting id="2" name="multi_press_timeout" value="300" /></settings>"#;
+        let xml = br#"<settings version="226"><setting id="1" name="long_press_timeout" value="400" /><setting id="2" name="multi_press_timeout" value="300" /></settings>"#;
         settings.read_for_test(Table::Secure, xml);
         let keys: Vec<String> = core_settings(&settings, 1)
             .unwrap()

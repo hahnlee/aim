@@ -8,8 +8,8 @@
 //! (frameworks/libs/modules-utils).
 
 pub mod abx;
-mod base64;
-mod double;
+pub mod base64;
+pub mod double;
 pub mod pull;
 pub mod text;
 
