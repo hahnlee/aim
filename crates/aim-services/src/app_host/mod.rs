@@ -32,6 +32,7 @@ pub mod package_service;
 pub mod packages;
 pub mod permission_controller;
 pub mod playback;
+pub mod power_service;
 pub mod sensor_privacy;
 pub mod settings;
 pub mod settings_provider;
@@ -240,6 +241,7 @@ pub struct AppHost {
     text_input: input_method::TextInput,
     content_service: OnceLock<Arc<content_service::ContentService>>,
     notification_service: OnceLock<Arc<notification_service::NotificationManager>>,
+    power_service: OnceLock<Arc<power_service::PowerManager>>,
     broadcasts: broadcasts::Broadcasts,
     /// User 0's restrictions.
     user_restrictions: OnceLock<std::collections::BTreeSet<String>>,
@@ -288,6 +290,7 @@ impl AppHost {
             text_input: Default::default(),
             content_service: OnceLock::new(),
             notification_service: OnceLock::new(),
+            power_service: OnceLock::new(),
             broadcasts: Default::default(),
             user_restrictions: OnceLock::new(),
             audio_policy: OnceLock::new(),
@@ -362,6 +365,12 @@ impl AppHost {
                 "notification",
                 self.notification_service
                     .get_or_init(|| Arc::new(notification_service::NotificationManager::new(self.clone())))
+                    .clone(),
+            ),
+            (
+                "power",
+                self.power_service
+                    .get_or_init(|| Arc::new(power_service::PowerManager::new(self.clone())))
                     .clone(),
             ),
             (

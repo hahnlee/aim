@@ -26,6 +26,7 @@ and boot are unchanged.
 | the `settings` provider | the host, same | `GET_*` and `LIST_config` from the settings the original persisted |
 | `content` | the host, same | `ContentService`'s observers (`ObserverNode`'s tree: a change reaches its URI's observers and the observers of its ancestors that take descendants), `notifyChange` after `checkContentProviderAccess` as the provider's permissions allow, and the content cache; sync adapters: #1460 |
 | `notification` | the host, same | NotificationManagerService for apps: channels and groups as `PreferencesHelper` keeps them, read from and written to `notification_policy.xml` (`app_host/notification_channels.rs`); `enqueueNotificationWithTag` with `fixNotification`'s changes made in the notification's parcel (flags, the allowlist token, the extras only the system sets, null actions, a full-screen intent the app may not use), the channel's and the POST_NOTIFICATIONS checks, the per-app count and rate limits; cancels, group summaries with their children, `getAppActiveNotifications`, `areNotificationsEnabled`; the system's listeners (`registerListener`, ranking updates in shared memory), so the Mac's notification bridge shows apps' notifications as it showed the original's; vibration effects without a pattern: #1487; foreground services, CallStyle, zen beyond the manual rule, ranking, toasts, app listeners, delegates and clicks: #1488 |
+| `power` | the host, same | PowerManagerService for apps: wake locks with their permissions, levels, death and callbacks, and the suspend blockers the original holds in `system_suspend` (`PowerManagerService.WakeLocks` while one keeps the CPU on, `.Display` while the display is on); the device awake and interactive (the app host's display is always on), never idle; battery saver from the persisted `low_power`, its policies not run (#1489) |
 | `aim.app_host` | the host, same | `startActivity(String)` (code 1: a component, `package/.Class`, or a package, whose launch activity it resolves) for the shell and `aimctl open` |
 
 The start arguments, the configuration and the compat changes follow the
@@ -92,4 +93,4 @@ effects (#1433); a finished draw's transaction (#1431); the input
 method's candidates at the caret (#1458); settings generation tracking (#1430); scoped storage's
 per-file ownership and the media database (#1455); the font map in
 `bindApplication`, to come from the Mac's fonts (#1449),
-PackageManager's writes (#1425), sync adapters (#1460), and the power service, which Clock needs next.
+PackageManager's writes (#1425), sync adapters (#1460), and other apps' content providers, which Clock's timer needs next (#1450).
