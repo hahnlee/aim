@@ -313,6 +313,25 @@ impl AppsFilter {
     pub fn is_force_queryable(&self, app_id: i32) -> bool {
         self.force_queryable.contains(&app_id)
     }
+
+    /// `AppsFilterBase.getVisibilityAllowList` for `user`: the app ids of
+    /// the applications that may see `target`, ascending; `None` when
+    /// every one may (it is force queryable).
+    pub fn visibility_allow_list(&self, state: &State, target: &PackageState, user: i32) -> Option<Vec<i32>> {
+        if self.is_force_queryable(target.app_id) {
+            return None;
+        }
+        let mut app_ids: Vec<i32> = state
+            .packages
+            .values()
+            .filter(|ps| ps.app_id >= FIRST_APPLICATION_UID)
+            .filter(|ps| !self.should_filter(state, uid(user, ps.app_id), target, user))
+            .map(|ps| ps.app_id)
+            .collect();
+        app_ids.sort_unstable();
+        app_ids.dedup();
+        Some(app_ids)
+    }
     /// The relations of `state`, shared with the last state that had the
     /// same packages: the original keeps one filter and updates it when a
     /// package is added or removed, not when a user state changes.

@@ -1491,6 +1491,18 @@ impl Resolver {
         Ok(Self { latest: Mutex::new(Some(Arc::new(resolution))), reported: Mutex::new(HashSet::new()) })
     }
 
+    /// Only packages' user states changed from `before` to `state` (an
+    /// enabled setting): the components, relations, preferences and
+    /// domains of `before`'s resolution serve `state`, whose user states
+    /// queries read.
+    pub(crate) fn user_states_changed(&self, before: &Arc<State>, state: Arc<State>)
+        -> std::result::Result<(), MimeGroupError> {
+        let mut resolution = (*self.resolution(before)?).clone();
+        resolution.state = state;
+        *self.latest.lock().unwrap() = Some(Arc::new(resolution));
+        Ok(())
+    }
+
     /// The resolution of `state`, built once per state.
     pub fn resolution(
         &self,

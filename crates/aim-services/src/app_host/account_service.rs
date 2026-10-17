@@ -21,7 +21,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{
@@ -375,13 +375,11 @@ pub struct AccountManager {
     /// `mAuthenticatorCache`'s services, by user.
     authenticators: Mutex<HashMap<i32, Arc<Vec<Authenticator>>>>,
     users: Mutex<HashMap<i32, Arc<UserAccounts>>>,
-    /// Whether the device has a device or profile owner.
-    owned: OnceLock<bool>,
 }
 
 impl AccountManager {
     pub fn new(host: Arc<AppHost>) -> AccountManager {
-        AccountManager { host, authenticators: Mutex::default(), users: Mutex::default(), owned: OnceLock::new() }
+        AccountManager { host, authenticators: Mutex::default(), users: Mutex::default() }
     }
 
     /// `mAuthenticatorCache.getAllServices(user)`.
@@ -487,26 +485,7 @@ impl AccountManager {
     /// `isProfileOwner`: the app host runs no device policy, so a device
     /// with a device or profile owner is not served (#1504); else none is.
     fn is_profile_owner(&self) -> Result<bool, Exception> {
-        let owned = match self.owned.get() {
-            Some(owned) => *owned,
-            None => {
-                let data = &self.host.inputs()?.data;
-                let device = match std::fs::read(data.join("system/device_owner_2.xml")) {
-                    Ok(bytes) => aim_android_xml::read(&bytes)
-                        .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("device_owner_2.xml: {e}")))?
-                        .children()
-                        .any(|e| e.name == "device-owner"),
-                    Err(_) => false,
-                };
-                let profile = std::fs::read_dir(data.join("system/users"))
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                    .any(|user| user.path().join("profile_owner.xml").exists());
-                *self.owned.get_or_init(|| device || profile)
-            }
-        };
-        if owned {
+        if self.host.device_or_profile_owner()? {
             return Err(self.host.unimplemented_named("account", "a device or profile owner (#1504)"));
         }
         Ok(false)

@@ -1,7 +1,8 @@
 //! `Bundle` in its parcel form (`BaseBundle.writeToParcelInner`,
 //! `Parcel.writeArrayMapInternal` and `writeValue` at the pinned tag), for
 //! the few values native services exchange with the original ones: strings,
-//! string arrays, ints and booleans; a length-prefixed value (a parcelable, a map, a
+//! string arrays, ints, int arrays and booleans, and a parcelable written
+//! by the caller; a length-prefixed value read (a parcelable, a map, a
 //! serializable) is kept as its bytes for the caller to read.
 
 use std::collections::HashMap;
@@ -26,6 +27,7 @@ const VAL_SPARSEARRAY: i32 = 12;
 const VAL_STRINGARRAY: i32 = 14;
 const VAL_PARCELABLEARRAY: i32 = 16;
 const VAL_OBJECTARRAY: i32 = 17;
+const VAL_INTARRAY: i32 = 18;
 const VAL_SERIALIZABLE: i32 = 21;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -38,6 +40,11 @@ pub enum Value {
     Bool(bool),
     /// A `String[]` (`writeStringArray`).
     StringArray(Vec<Option<String>>),
+    /// An `int[]` (`writeIntArray`).
+    IntArray(Vec<i32>),
+    /// A parcelable of the class `class`, written to `data`
+    /// (`writeParcelable`, length-prefixed).
+    Parcelable { class: String, data: Vec<u8> },
     /// A `Map<String, String>` (`writeMap`), length-prefixed as
     /// `Parcel.writeValue` writes maps.
     StringMap(Vec<(String, Option<String>)>),
@@ -81,6 +88,22 @@ impl Value {
                     p.write_string16(item.as_deref());
                 }
             }
+            Value::IntArray(items) => {
+                p.write_i32(VAL_INTARRAY);
+                p.write_i32(items.len() as i32);
+                for item in items {
+                    p.write_i32(*item);
+                }
+            }
+            Value::Parcelable { class, data } => {
+                p.write_i32(VAL_PARCELABLE);
+                let length_at = p.position();
+                p.write_i32(-1);
+                let start = p.position();
+                p.write_string16(Some(class));
+                p.write_raw(data, &[]);
+                p.set_i32_at(length_at, (p.position() - start) as i32);
+            }
             Value::StringMap(entries) => {
                 p.write_i32(VAL_MAP);
                 let length_at = p.position();
@@ -121,7 +144,10 @@ pub fn write(p: &mut Parcel, entries: &[(&str, Value)]) {
     }
     let length = (p.position() - start) as i32;
     p.set_i32_at(length_at, length);
-    p.write_bool(false); // has an intent
+    // Whether it holds an intent (`Bundle.putParcelable` of one).
+    p.write_bool(entries.iter().any(|(_, v)| {
+        matches!(v, Value::Parcelable { class, .. } if class == "android.content.Intent")
+    }));
 }
 
 /// `readBundle`: its entries, or none for a null bundle.
@@ -150,6 +176,10 @@ pub fn read(r: &mut Reader<'_>) -> Result<Option<HashMap<String, Value>>> {
             VAL_STRINGARRAY => {
                 let n = r.read_i32()?;
                 Value::StringArray((0..n.max(0)).map(|_| r.read_string16()).collect::<Result<_>>()?)
+            }
+            VAL_INTARRAY => {
+                let n = r.read_i32()?;
+                Value::IntArray((0..n.max(0)).map(|_| r.read_i32()).collect::<Result<_>>()?)
             }
             kind @ (VAL_MAP | VAL_PARCELABLE | VAL_LIST | VAL_SPARSEARRAY | VAL_PARCELABLEARRAY
             | VAL_OBJECTARRAY | VAL_SERIALIZABLE) => {
@@ -182,6 +212,7 @@ mod tests {
             ("flag", Value::Bool(true)),
             ("ratio", Value::Float(5.5)),
             ("names", Value::StringArray(vec![Some("a".into()), None])),
+            ("uids", Value::IntArray(vec![10100, 10101])),
         ];
         let mut p = Parcel::new();
         write(&mut p, &entries);
