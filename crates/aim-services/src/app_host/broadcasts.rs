@@ -265,7 +265,7 @@ pub(super) fn filter_equals(a: &Intent, b: &Intent) -> bool {
 impl AppHost {
     /// `CompatChanges.isChangeEnabled(change, uid)`: enabled for each of
     /// the uid's packages.
-    fn change_enabled_for_uid(&self, change: i64, uid: i32) -> Result<bool, Exception> {
+    pub(super) fn change_enabled_for_uid(&self, change: i64, uid: i32) -> Result<bool, Exception> {
         let (state, _) = self.packages()?;
         let compat = &self.inputs()?.compat;
         let app_id = uid.rem_euclid(PER_USER_RANGE as i32);

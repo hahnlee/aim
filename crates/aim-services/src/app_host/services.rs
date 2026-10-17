@@ -7,8 +7,10 @@
 //! connections, and the service destroyed (`scheduleStopService`) once it
 //! is neither started nor bound to with `BIND_AUTO_CREATE`. When its
 //! process dies, its connections are told and a service still needed is
-//! started again. Services in processes of their own, isolated services
-//! and foreground services are not run (#1492).
+//! started again. The app host binds services itself too, as the system
+//! does (`bindServiceAsUser` from system_server, a connection of its
+//! own). Services in processes of their own, isolated services and
+//! foreground services are not run (#1492).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex};
@@ -104,14 +106,31 @@ struct Record {
     bindings: Vec<Binding>,
 }
 
+/// The app host's end of a binding it makes (the system's
+/// `ServiceConnection`).
+pub(super) trait HostConnection: Send + Sync {
+    /// `IServiceConnection.connected`: the service's binder, or none and
+    /// whether the binding died. It is called with the services locked,
+    /// so it hands the call on (as `ServiceDispatcher` posts it to a
+    /// handler) rather than act on it.
+    fn connected(&self, service: Option<Binder>, dead: bool);
+}
+
+/// A connection's `IServiceConnection`: an app's, or the app host's own.
+enum Conn {
+    App(Strong),
+    Host(Arc<dyn HostConnection>),
+}
+
 /// `ConnectionRecord`.
 struct Connection {
-    conn: Strong,
+    conn: Conn,
     /// Its service's token, and the intent of its binding.
     service: Binder,
     intent: crate::package::intent::Intent,
-    /// The client's process, and the activity it bound from.
-    client: i64,
+    /// The client's process (none for the app host's own), and the
+    /// activity it bound from.
+    client: Option<i64>,
     activity: Option<u64>,
     flags: i64,
 }
@@ -193,7 +212,11 @@ impl State {
 }
 
 /// `IServiceConnection.connected(name, service, dead)`, one-way.
-fn connected(conn: &Strong, package: &str, class: &str, service: Option<Binder>, dead: bool) {
+fn connected(conn: &Conn, package: &str, class: &str, service: Option<Binder>, dead: bool) {
+    let conn = match conn {
+        Conn::App(conn) => conn,
+        Conn::Host(conn) => return conn.connected(service, dead),
+    };
     let mut p = Parcel::new();
     p.write_interface_token(CONNECTION_DESCRIPTOR);
     aim_service_aidl::write_typed(&mut p, Some(&Component(package, class)));
@@ -496,6 +519,56 @@ impl AppHost {
             Lookup::Denied(_) => return Ok(-1),
             Lookup::Found(info) => *info,
         };
+        let conn = Conn::App(self.process.strong(conn));
+        self.bind_found(intent, info, conn, Some(client), activity, flags)?;
+        Ok(1)
+    }
+
+    /// `bindServiceAsUser` of the system: the service `package`/`class`
+    /// of `user` bound with `bind_flags` for `conn`, by an intent of
+    /// `flags`; whether there is one to bind.
+    pub(super) fn bind_service_from_host(
+        &self,
+        package: &str,
+        class: &str,
+        flags: i32,
+        bind_flags: i64,
+        user: i32,
+        conn: Arc<dyn HostConnection>,
+    ) -> Result<bool, Exception> {
+        let intent = RawIntent::of(None, flags, &[]).with_component(package, class);
+        let info = match self.retrieve_service(&intent, None, 1000, user, None)? {
+            Lookup::Found(info) => *info,
+            Lookup::None | Lookup::Denied(_) => return Ok(false),
+        };
+        self.bind_found(intent, info, Conn::Host(conn), None, None, bind_flags)?;
+        Ok(true)
+    }
+
+    /// `unbindService` of a connection of the app host.
+    pub(super) fn unbind_service_from_host(&self, conn: &Arc<dyn HostConnection>) {
+        let mut state = self.services.state.lock().unwrap();
+        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut state.connections)
+            .into_iter()
+            .partition(|c| matches!(&c.conn, Conn::Host(h) if Arc::ptr_eq(h, conn)));
+        state.connections = kept;
+        for c in &gone {
+            self.connection_removed(&mut state, c);
+        }
+    }
+
+    /// The rest of `bindServiceLocked`, for the service `info` found: the
+    /// connection made, the service brought up if it auto-creates, and its
+    /// binder passed or asked for.
+    fn bind_found(
+        &self,
+        intent: RawIntent,
+        info: ServiceInfo,
+        conn: Conn,
+        client: Option<i64>,
+        activity: Option<u64>,
+        flags: i64,
+    ) -> Result<(), Exception> {
         let kept = KeptIntent::new(intent, &self.process);
         let mut state = self.services.state.lock().unwrap();
         let token = Self::service_record(&mut state, info, &self.process);
@@ -512,7 +585,7 @@ impl AppHost {
         }
         let (package, class) = (r.package.clone(), r.class.clone());
         state.connections.push(Connection {
-            conn: self.process.strong(conn),
+            conn,
             service: token,
             intent: kept.intent.intent.clone(),
             client,
@@ -536,7 +609,7 @@ impl AppHost {
         } else if !b.requested {
             self.request_binding(&mut state, token, &kept.intent.intent, false);
         }
-        Ok(1)
+        Ok(())
     }
 
     /// `unbindServiceLocked`: whether the connection was bound.
@@ -548,7 +621,7 @@ impl AppHost {
         let removed: Vec<Connection> = {
             let (gone, kept) = std::mem::take(&mut state.connections)
                 .into_iter()
-                .partition(|c| c.conn.handle == conn);
+                .partition(|c| matches!(&c.conn, Conn::App(s) if s.handle == conn));
             state.connections = kept;
             gone
         };
@@ -941,7 +1014,7 @@ impl AppHost {
         let mut state = self.services.state.lock().unwrap();
         let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut state.connections)
             .into_iter()
-            .partition(|c| c.client == start_seq);
+            .partition(|c| c.client == Some(start_seq));
         state.connections = kept;
         for c in &gone {
             self.connection_removed(&mut state, c);

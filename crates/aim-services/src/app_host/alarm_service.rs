@@ -148,11 +148,11 @@ pub struct AlarmManager {
 }
 
 /// `SystemClock.elapsedRealtime()` and `System.currentTimeMillis()`.
-fn elapsed_ms() -> i64 {
+pub(super) fn elapsed_ms() -> i64 {
     super::clock_ms(libc::CLOCK_MONOTONIC_RAW)
 }
 
-fn wall_ms() -> i64 {
+pub(super) fn wall_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)

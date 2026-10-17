@@ -434,7 +434,7 @@ impl PowerManager {
 
     /// Battery saver: supported (`config_batterySaverSupported`) and on
     /// by the persisted `low_power` setting.
-    fn power_save_mode(&self) -> Result<bool, Exception> {
+    pub(super) fn power_save_mode(&self) -> Result<bool, Exception> {
         let inputs = self.host.inputs()?;
         let supported = inputs
             .packages
