@@ -18,10 +18,14 @@ use super::{AppHost, reply};
 const MODE_ALLOWED: i32 = 0;
 const MODE_IGNORED: i32 = 1;
 const MODE_ERRORED: i32 = 2;
+pub(super) const MODE_DEFAULT: i32 = 3;
+/// `AppOpsManager.OP_USE_FULL_SCREEN_INTENT`.
+pub(super) const OP_USE_FULL_SCREEN_INTENT: i32 = 133;
 /// `UserManager.DISALLOW_ADJUST_VOLUME`.
 const DISALLOW_ADJUST_VOLUME: &str = "no_adjust_volume";
 /// The ops it decides: their code, name, default mode and user
-/// restriction. Each is its own switch, and none has a permission, so
+/// restriction. Each is its own switch, and none has a permission but
+/// USE_FULL_SCREEN_INTENT's, which NotificationManager only checks, so
 /// their notes are not collected (`AppOpsService.shouldCollectNotes`).
 const OPS: &[(i32, &str, i32, Option<&str>)] = &[
     (29, "android:read_clipboard", MODE_ALLOWED, None),
@@ -33,6 +37,7 @@ const OPS: &[(i32, &str, i32, Option<&str>)] = &[
     (38, "android:audio_notification_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
     (39, "android:audio_bluetooth_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
     (64, "android:audio_accessibility_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
+    (OP_USE_FULL_SCREEN_INTENT, "android:use_full_screen_intent", MODE_DEFAULT, None),
 ];
 
 /// `noteOperation`'s mode: an op of a package not `uid`'s errs.
@@ -51,7 +56,7 @@ fn op(code: i32) -> Result<&'static (i32, &'static str, i32, Option<&'static str
 
 /// `checkOperation`: ignored under its restriction, else the uid's mode,
 /// else the package's, else the op's default.
-fn mode(host: &AppHost, code: i32, uid: i32, package: Option<&str>) -> Result<i32, Exception> {
+pub(super) fn mode(host: &AppHost, code: i32, uid: i32, package: Option<&str>) -> Result<i32, Exception> {
     let (_, name, default, restriction) = *op(code)?;
     let app_id = uid.rem_euclid(100_000);
     if let Some(restriction) = restriction

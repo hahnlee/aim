@@ -65,7 +65,8 @@ impl Raw {
         }
     }
 
-    fn of(p: &Parcel) -> Raw {
+    /// The bytes of `p`, which has no objects.
+    pub(crate) fn of(p: &Parcel) -> Raw {
         Raw {
             bytes: p.data().to_vec(),
             ..Raw::default()
@@ -88,6 +89,34 @@ impl Raw {
             objects: self.objects.iter().map(|&at| shift(at)).collect(),
             files: self.files.iter().map(|(at, f)| (shift(*at), f.clone())).collect(),
         }
+    }
+
+    /// The bytes with `start..end` replaced by those of `with` and its
+    /// binder objects (it has no fds); the objects and files of the range
+    /// dropped, those after it moved along.
+    pub(crate) fn replace(&self, start: usize, end: usize, with: &Parcel) -> Raw {
+        let (start64, end64) = (start as u64, end as u64);
+        let shift = |at: u64| at + with.data().len() as u64 - (end64 - start64);
+        let mut bytes = self.bytes[..start].to_vec();
+        bytes.extend_from_slice(with.data());
+        bytes.extend_from_slice(&self.bytes[end..]);
+        let mut objects: Vec<u64> = self.objects.iter().copied().filter(|&at| at < start64).collect();
+        objects.extend(with.objects().iter().map(|at| start64 + at));
+        objects.extend(self.objects.iter().filter(|&&at| at >= end64).map(|&at| shift(at)));
+        let files = self
+            .files
+            .iter()
+            .filter(|(at, _)| *at < start64 || *at >= end64)
+            .map(|(at, f)| (if *at >= end64 { shift(*at) } else { *at }, f.clone()))
+            .collect();
+        Raw { bytes, objects, files }
+    }
+
+    /// The bytes and binder objects, as a parcel to read.
+    pub(crate) fn parcel(&self) -> Parcel {
+        let mut p = Parcel::new();
+        p.write_raw_files(&self.bytes, &self.objects, &[]);
+        p
     }
 
     /// Overwrites the int at `at`.

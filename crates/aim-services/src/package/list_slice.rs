@@ -1,7 +1,7 @@
 //! BaseParceledListSlice android-16 image protocol (AOSP Apache-2.0):
 //! 64 KiB inline/retriever windows, typed creator, and one-shot retained list.
-use aim_binder_host::{local::{LocalProcess,Service,Call,Reply},parcel::{Parcel,Exception,BAD_VALUE,UNKNOWN_TRANSACTION}};
-use aim_service_aidl::WriteParcelable;
+use aim_binder_host::{local::{LocalProcess,Service,Call,Reply},parcel::{Binder,Parcel,Reader,Exception,BAD_VALUE,UNKNOWN_TRANSACTION}};
+use aim_service_aidl::{ReadParcelable,WriteParcelable};
 use std::sync::{Arc,Mutex};
 pub const MAX_IPC_SIZE:usize=64*1024;
 
@@ -34,6 +34,31 @@ impl<T:WriteParcelable+Send+Sync+'static> WriteParcelable for Slice<T> {
         }
     }
 }
+/// `BaseParceledListSlice(Parcel)` of a slice another process wrote: its
+/// items, those not written inline fetched from its retriever
+/// (`FIRST_CALL_TRANSACTION` with the index of the next).
+pub fn read<T:ReadParcelable>(r:&mut Reader<'_>,process:&LocalProcess)->aim_binder_host::parcel::Result<Vec<T>> {
+    let count=r.read_i32()?;
+    if count<=0{return Ok(Vec::new());}
+    r.read_string16()?; // the creator's class
+    let mut items=Vec::with_capacity(count as usize);
+    while items.len()<count as usize&&r.read_i32()?!=0 {items.push(T::read_from(r)?);}
+    if items.len()<count as usize {
+        let Some(Binder::Handle(handle))=r.read_binder()? else {return Err(BAD_VALUE)};
+        let retriever=process.strong(handle);
+        while items.len()<count as usize {
+            let mut data=Parcel::new();data.write_i32(items.len() as i32);
+            let reply=retriever.transact(1,&data,false)?;
+            let mut reply=reply.reader();
+            if reply.read_exception()?.is_err(){return Err(BAD_VALUE);}
+            let before=items.len();
+            while items.len()<count as usize&&reply.read_i32()?!=0 {items.push(T::read_from(&mut reply)?);}
+            if items.len()==before{return Err(BAD_VALUE);}
+        }
+    }
+    Ok(items)
+}
+
 struct Retriever<T> {items:Mutex<Option<Vec<T>>>}
 impl<T:WriteParcelable+Send+Sync+'static> Service for Retriever<T> {
     fn descriptor(&self)->&str{""}

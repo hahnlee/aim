@@ -55,6 +55,15 @@ fn length_prefixed(kind: i32) -> bool {
 }
 
 /// `Notification.FLAG_*`.
+/// `Notification.CallStyle.CALL_TYPE_ONGOING`.
+pub const CALL_TYPE_ONGOING: i32 = 2;
+pub const CALL_STYLE: &str = "android.app.Notification$CallStyle";
+/// The styles `Notification.hasPromotableStyle` accepts besides none.
+pub const PROMOTABLE_STYLES: [&str; 3] = [
+    "android.app.Notification$BigTextStyle",
+    CALL_STYLE,
+    "android.app.Notification$ProgressStyle",
+];
 pub const FLAG_ONGOING_EVENT: i32 = 0x2;
 pub const FLAG_ONLY_ALERT_ONCE: i32 = 0x8;
 pub const FLAG_NO_CLEAR: i32 = 0x20;
@@ -134,6 +143,8 @@ pub struct Extras {
     pub template: Option<String>,
     /// `EXTRA_CALL_TYPE`.
     pub call_type: i32,
+    /// `EXTRA_MEDIA_SESSION` is set.
+    pub media_session: bool,
 }
 
 /// A `Chronometer` of a notification's custom views, from the actions
@@ -158,14 +169,22 @@ pub struct Views {
 pub struct Notification {
     /// The token its `PendingIntent`s are sent with (`mAllowlistToken`).
     pub allowlist_token: Option<Binder>,
-    /// `System.currentTimeMillis()` milliseconds.
+    /// Where its parts are in the parcel.
+    pub layout: Layout,
+    /// `System.currentTimeMillis()` milliseconds, and when it was made.
     pub when: i64,
+    pub creation_time: i64,
     pub small_icon: Option<Icon>,
     pub content_intent: Option<Binder>,
     pub full_screen_intent: Option<Binder>,
     pub ticker: Option<String>,
     pub large_icon: Option<Icon>,
     pub flags: i32,
+    pub priority: i32,
+    /// `defaults`, and whether it has a sound and a vibration pattern.
+    pub defaults: i32,
+    pub sound: bool,
+    pub vibrate: bool,
     pub group: Option<String>,
     /// `Notification.GROUP_ALERT_*`.
     pub group_alert_behavior: i32,
@@ -180,7 +199,39 @@ pub struct Notification {
     pub complete: bool,
 }
 
+/// Where a notification's parts are in the parcel it was read from, for
+/// the system's changes to it (NotificationManagerService's
+/// `fixNotification`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Layout {
+    pub token: usize,
+    pub content_intent: usize,
+    pub flags: usize,
+    pub full_screen_intent: usize,
+    pub extras: usize,
+    /// Its actions' count, and its null actions.
+    pub actions: usize,
+    pub null_actions: Vec<usize>,
+}
+
 impl Notification {
+    /// `Notification.hasPromotableCharacteristics`.
+    pub fn has_promotable_characteristics(&self) -> bool {
+        let e = &self.extras;
+        if self.flags & FLAG_ONGOING_EVENT == 0
+            || self.flags & FLAG_GROUP_SUMMARY != 0
+            || self.views.custom
+            || e.title.as_deref().is_none_or(str::is_empty)
+        {
+            return false;
+        }
+        let style = e.template.as_deref();
+        if style == Some(CALL_STYLE) && e.call_type == CALL_TYPE_ONGOING {
+            return true;
+        }
+        e.colorized && style.is_none_or(|s| PROMOTABLE_STYLES.contains(&s))
+    }
+
     /// Every binder it holds, which must outlive the parcel it came in.
     pub fn binders(&self) -> impl Iterator<Item = Binder> + '_ {
         [
@@ -281,15 +332,17 @@ fn pending_intent(r: &mut Reader<'_>) -> Result<Option<Binder>> {
 
 /// `Notification(Parcel)`, into `n`; stops (with `complete` false) at
 /// what it does not read.
-fn read_notification(r: &mut Reader<'_>, files: &dyn Files, n: &mut Notification) -> Result<()> {
+pub(crate) fn read_notification(r: &mut Reader<'_>, files: &dyn Files, n: &mut Notification) -> Result<()> {
     if r.read_i32()? != 1 {
         return Err(BAD_VALUE);
     }
+    n.layout.token = r.position();
     n.allowlist_token = r.read_binder()?;
     n.when = r.read_i64()?;
-    r.read_i64()?; // creationTime
+    n.creation_time = r.read_i64()?;
     n.small_icon = typed(r, |r| icon(r, files))?;
     r.read_i32()?; // number
+    n.layout.content_intent = r.position();
     n.content_intent = typed(r, pending_intent)?.flatten();
     typed(r, pending_intent)?; // delete intent
     n.ticker = typed(r, char_sequence)?.flatten();
@@ -297,25 +350,34 @@ fn read_notification(r: &mut Reader<'_>, files: &dyn Files, n: &mut Notification
     typed(r, |r| remote_views(r, files, 0, &mut ticker))?;
     n.views.custom |= typed(r, |r| remote_views(r, files, 0, &mut n.views))?.is_some();
     n.large_icon = typed(r, |r| icon(r, files))?;
-    r.read_i32()?; // defaults
+    n.defaults = r.read_i32()?;
+    n.layout.flags = r.position();
     n.flags = r.read_i32()?;
-    typed(r, uri)?; // sound
+    n.sound = typed(r, uri)?.is_some();
     r.read_i32()?; // audioStreamType
     typed(r, audio_attributes)?;
-    skip_array(r, 8)?; // vibrate
+    let vibrate = r.position();
+    n.vibrate = r.read_i32()? > 0;
+    r.set_position(vibrate);
+    skip_array(r, 8)?;
     for _ in 0..4 {
         r.read_i32()?; // ledARGB, ledOnMS, ledOffMS, iconLevel
     }
+    n.layout.full_screen_intent = r.position();
     n.full_screen_intent = typed(r, pending_intent)?.flatten();
-    r.read_i32()?; // priority
+    n.priority = r.read_i32()?;
     r.read_string8()?; // category
     n.group = r.read_string8()?;
     r.read_string8()?; // sortKey
+    n.layout.extras = r.position();
     n.extras = extras(r, files)?;
+    n.layout.actions = r.position();
     let count = r.read_i32()?;
     for _ in 0..count.max(0) {
-        if let Some(a) = typed(r, |r| action(r, files))? {
-            n.actions.push(a);
+        let at = r.position();
+        match typed(r, |r| action(r, files))? {
+            Some(a) => n.actions.push(a),
+            None => n.layout.null_actions.push(at),
         }
     }
     for _ in 0..2 {
@@ -1064,6 +1126,26 @@ pub(crate) fn walk_bundle(
     Ok(())
 }
 
+/// The entries of a `Bundle`: each key, and where its entry starts and
+/// ends.
+pub(crate) fn bundle_entries(r: &mut Reader<'_>) -> Result<Vec<(String, usize, usize)>> {
+    let mut entries = Vec::new();
+    let length = r.read_i32()?;
+    if length <= 0 {
+        return Ok(entries);
+    }
+    if !matches!(r.read_i32()?, BUNDLE_MAGIC | BUNDLE_MAGIC_NATIVE) {
+        return Err(BAD_VALUE);
+    }
+    for _ in 0..r.read_i32()?.max(0) {
+        let start = r.position();
+        let key = r.read_string16()?.unwrap_or_default();
+        skip_value(r)?;
+        entries.push((key, start, r.position()));
+    }
+    Ok(entries)
+}
+
 /// `writeParcelable`'s class name, then the parcelable, if it is a
 /// `Bitmap` or an `Icon`.
 pub(crate) fn parcelable_image(r: &mut Reader<'_>, files: &dyn Files) -> Result<Option<Icon>> {
@@ -1123,6 +1205,10 @@ fn extras(r: &mut Reader<'_>, files: &dyn Files) -> Result<Extras> {
             ("android.progressMax", VAL_INTEGER) => {
                 e.progress_max = Some(r.read_i32()?);
                 Ok(true)
+            }
+            ("android.mediaSession", _) => {
+                e.media_session = true;
+                Ok(false)
             }
             ("android.callType", VAL_INTEGER) => {
                 e.call_type = r.read_i32()?;
@@ -1344,7 +1430,7 @@ impl aim_service_aidl::WriteParcelable for ReplyIntent<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     struct NoFiles;
@@ -1535,7 +1621,7 @@ mod tests {
     /// icon in place, big text and messages in its extras, one action
     /// with a remote input, a channel; with `custom`, custom content and
     /// big content views (`DecoratedCustomViewStyle`).
-    fn java_notification(p: &mut Parcel, intent: Binder, custom: bool) {
+    pub(crate) fn java_notification(p: &mut Parcel, intent: Binder, custom: bool) {
         p.write_i32(1);
         p.write_binder(None); // allowlist token
         p.write_i64(1);
