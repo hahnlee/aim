@@ -172,6 +172,13 @@ impl Packages {
             .then_some(value.data as i32)
     }
 
+    /// The framework's boolean resource `name` (`Resources.getBoolean`:
+    /// any integer, nonzero is true).
+    pub fn framework_bool(&self, name: &str) -> Option<bool> {
+        let value = self.framework_value("bool", name)?;
+        (value.kind >= crate::package::parse::resources::TYPE_FIRST_INT).then_some(value.data != 0)
+    }
+
     /// The framework's float resource `name` (`<item format="float"
     /// type="dimen">`).
     pub fn framework_float(&self, name: &str) -> Option<f32> {

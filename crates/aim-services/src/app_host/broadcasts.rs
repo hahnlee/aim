@@ -714,25 +714,8 @@ impl Broadcasts {
                     .require_compat_change
                     .map(|id| (id, options.flags & OPTION_REQUIRE_COMPAT_CHANGE_ENABLED != 0)),
             };
-            for r in &st.receivers {
-                if user != USER_ALL && r.user != USER_ALL && r.user != user {
-                    continue;
-                }
-                let mut taken = None;
-                for f in &r.filters {
-                    if i.package.as_ref().is_some_and(|p| *p != f.package) || !takes(&f.filter, i, resolved_type.as_deref())? {
-                        continue;
-                    }
-                    taken = Some(f);
-                    break;
-                }
-                let Some(f) = taken else { continue };
-                if !self.skip(host, &sender, r, f, i.flags)? {
-                    targets.push((f.filter.priority, r.receiver.handle, r.start_seq));
-                }
-            }
+            targets = self.registered_targets(host, &st, i, resolved_type.as_deref(), user, &sender)?;
         }
-        targets.sort_by_key(|t| std::cmp::Reverse(t.0));
         if targets.is_empty() && result_to.is_none() {
             return Ok(BROADCAST_SUCCESS);
         }
@@ -766,6 +749,89 @@ impl Broadcasts {
             }
         }
         Ok(BROADCAST_SUCCESS)
+    }
+
+    /// The registered receivers `intent` goes to, by priority, one filter
+    /// per receiver (`mReceiverResolver.queryIntent`, then
+    /// BroadcastSkipPolicy): priority, receiver, its process's start.
+    fn registered_targets(
+        &self,
+        host: &AppHost,
+        st: &State,
+        i: &Intent,
+        resolved_type: Option<&str>,
+        user: i32,
+        sender: &Sender<'_>,
+    ) -> Result<Vec<(i32, u32, i64)>, Exception> {
+        let mut targets = Vec::new();
+        for r in &st.receivers {
+            if user != USER_ALL && r.user != USER_ALL && r.user != user {
+                continue;
+            }
+            let mut taken = None;
+            for f in &r.filters {
+                if i.package.as_ref().is_some_and(|p| *p != f.package) || !takes(&f.filter, i, resolved_type)? {
+                    continue;
+                }
+                taken = Some(f);
+                break;
+            }
+            let Some(f) = taken else { continue };
+            if !self.skip(host, sender, r, f, i.flags)? {
+                targets.push((f.filter.priority, r.receiver.handle, r.start_seq));
+            }
+        }
+        targets.sort_by_key(|t| std::cmp::Reverse(t.0));
+        Ok(targets)
+    }
+
+    /// `sendBroadcastAsUser(intent, UserHandle.ALL)` of a system service of
+    /// the app host: to the registered receivers (manifest receivers:
+    /// #1462).
+    pub fn send_from_system(&self, host: &AppHost, mut intent: RawIntent) {
+        let flags = intent.intent.flags | FLAG_EXCLUDE_STOPPED_PACKAGES;
+        let extended = intent.intent.extended_flags;
+        intent.set_flags(flags, extended);
+        let binders = intent.handles().into_iter().map(|h| host.process.strong(h)).collect();
+        let record = Arc::new(Record {
+            intent,
+            binders: Arc::new(binders),
+            calling_uid: SYSTEM_UID,
+            calling_package: Some("android".into()),
+            ordered: false,
+            initial_sticky: false,
+            user: USER_ALL,
+            share_identity: false,
+            result_code: 0,
+            result_data: None,
+            result_extras: None,
+        });
+        let sender = Sender {
+            uid: SYSTEM_UID,
+            original_uid: SYSTEM_UID,
+            instant: false,
+            required_permissions: &[],
+            excluded_permissions: &[],
+            excluded_packages: &[],
+            app_op: OP_NONE,
+            require_compat_change: None,
+        };
+        let mut st = self.state.lock().unwrap();
+        let targets = match self.registered_targets(host, &st, &record.intent.intent, None, USER_ALL, &sender) {
+            Ok(targets) => targets,
+            Err(e) => {
+                eprintln!("app host: a system broadcast: {e:?}");
+                return;
+            }
+        };
+        let mut touched = Vec::new();
+        for (_, handle, seq) in targets {
+            st.queues.entry(seq).or_default().push_back(Delivery::Once(record.clone(), handle));
+            touched.push(seq);
+        }
+        for seq in touched {
+            self.send_next(host, &mut st, seq);
+        }
     }
 
     /// `unbroadcastIntent`: a sticky broadcast goes.
