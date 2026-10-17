@@ -2339,6 +2339,26 @@ fn compare_signature_arrays(s1: Option<&[Vec<u8>]>, s2: Option<&[Vec<u8>]>) -> i
     }
 }
 
+/// `PackageManagerService.isProtectedBroadcast`: what system packages
+/// declare `<protected-broadcast>`, and the actions of the prefixes it
+/// protects.
+pub fn is_protected_broadcast(state: &State, action: &str) -> std::result::Result<bool, NotModelled> {
+    const PREFIXES: [&str; 4] = [
+        "android.net.netmon.lingerExpired",
+        "com.android.server.sip.SipWakeupTimer",
+        "com.android.internal.telephony.data-reconnect",
+        "android.net.netmon.launchCaptivePortalApp",
+    ];
+    if PREFIXES.iter().any(|prefix| action.starts_with(prefix)) {
+        return Ok(true);
+    }
+    let known = state
+        .protected_broadcasts
+        .as_ref()
+        .ok_or(NotModelled("the registered protected-broadcast owner"))?;
+    Ok(known.contains(action))
+}
+
 #[cfg(test)]
 mod tests;
 

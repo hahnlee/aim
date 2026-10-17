@@ -522,27 +522,9 @@ impl Query<'_> {
             }
             pm::IS_PROTECTED_BROADCAST => {
                 let a = args(pm::IsProtectedBroadcast::read(r))?;
-                let prefix = a.action_name.as_ref().is_some_and(|name| {
-                    [
-                        "android.net.netmon.lingerExpired",
-                        "com.android.server.sip.SipWakeupTimer",
-                        "com.android.internal.telephony.data-reconnect",
-                        "android.net.netmon.launchCaptivePortalApp",
-                    ]
-                    .iter()
-                    .any(|prefix| name.starts_with(prefix))
-                });
-                let protected = if prefix {
-                    true
-                } else {
-                    let known = self
-                        .state
-                        .protected_broadcasts
-                        .as_ref()
-                        .ok_or(NotModelled("the registered protected-broadcast owner"))?;
-                    a.action_name
-                        .as_ref()
-                        .is_some_and(|name| known.contains(name))
+                let protected = match a.action_name.as_deref() {
+                    Some(action) => super::is_protected_broadcast(&self.state, action)?,
+                    None => false,
                 };
                 Ok(reply(|p| {
                     pm::write_is_protected_broadcast_reply(p, protected)

@@ -12,6 +12,7 @@ pub mod activity;
 pub mod appops_service;
 pub mod audio_service;
 pub mod bind;
+pub mod broadcasts;
 pub mod compat;
 pub mod config;
 pub mod content_service;
@@ -21,6 +22,7 @@ pub mod freeform;
 pub mod input_manager;
 pub mod input_method;
 pub mod keychars;
+pub mod kept;
 pub mod package_service;
 pub mod packages;
 pub mod permission_controller;
@@ -44,7 +46,7 @@ use std::time::Instant;
 
 use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
 use aim_binder_host::parcel::{
-    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception,
+    BAD_VALUE, Binder, EX_ILLEGAL_ARGUMENT, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception,
     Parcel, UNKNOWN_TRANSACTION,
 };
 use aim_service_aidl::ParcelValue;
@@ -226,6 +228,7 @@ pub struct AppHost {
     storage: storage::Volumes,
     text_input: input_method::TextInput,
     content_service: OnceLock<Arc<content_service::ContentService>>,
+    broadcasts: broadcasts::Broadcasts,
 }
 
 /// A content provider an app's process published
@@ -265,6 +268,7 @@ impl AppHost {
             storage: Default::default(),
             text_input: Default::default(),
             content_service: OnceLock::new(),
+            broadcasts: Default::default(),
         })
     }
 
@@ -634,17 +638,60 @@ impl AppHost {
         self.activities.remove_start(start_seq);
         self.windows_died(pid);
         self.tasks_died(start_seq);
+        self.broadcasts.process_died(self, start_seq);
+    }
+
+    /// `getRecordForAppLOSP`: the attached process whose thread `thread`
+    /// is: its start, package, uid and pid.
+    fn app_of_thread(&self, thread: Option<Binder>) -> Option<(i64, String, i32, i32)> {
+        let Some(Binder::Handle(handle)) = thread else {
+            return None;
+        };
+        self.apps
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, a)| a.thread.as_ref().is_some_and(|t| t.handle == handle))
+            .map(|(seq, a)| (*seq, a.package.clone(), a.uid as i32, a.pid))
+    }
+
+    /// Sends the process of `start_seq` the one-way call `code` on its
+    /// thread.
+    fn call_thread(&self, start_seq: i64, code: u32, data: &Parcel) -> Result<(), String> {
+        let apps = self.apps.lock().unwrap();
+        let thread = apps.get(&start_seq).and_then(|a| a.thread.as_ref()).ok_or_else(|| format!("no process of start {start_seq}"))?;
+        thread.transact(code, data, true).map(|_| ()).map_err(|s| format!("{code}: {s}"))
+    }
+
+    /// `UserController.handleIncomingUser`: `USER_CURRENT` as user 0,
+    /// another user than the caller's only with `INTERACT_ACROSS_USERS_FULL`
+    /// (or, if `allow_non_full`, `INTERACT_ACROSS_USERS`).
+    fn incoming_user(&self, uid: i32, user: i32, allow_non_full: bool) -> Result<i32, Exception> {
+        const USER_ALL: i32 = -1;
+        const USER_CURRENT: i32 = -2;
+        let user = if user == USER_CURRENT { 0 } else { user };
+        let has = |p: &str| self.check_permission(Some(p), uid).map(|r| r == 0);
+        if user == USER_ALL {
+            if !has("android.permission.INTERACT_ACROSS_USERS_FULL")? {
+                return Err(Exception::security("No access: INTERACT_ACROSS_USERS_FULL"));
+            }
+        } else if user < 0 {
+            return Err(Exception::new(EX_ILLEGAL_ARGUMENT, format!("Invalid user: {user}")));
+        } else if user != uid / PER_USER_RANGE as i32
+            && !has("android.permission.INTERACT_ACROSS_USERS_FULL")?
+            && !(allow_non_full && has("android.permission.INTERACT_ACROSS_USERS")?)
+        {
+            return Err(Exception::security(format!(
+                "Permission Denial: user {uid} is asking for user {user} but does not have INTERACT_ACROSS_USERS_FULL"
+            )));
+        }
+        Ok(user)
     }
 
     /// Sends the process of `start_seq` the transaction of `items`
     /// (`ClientLifecycleManager.scheduleTransactionItems`).
     fn schedule(&self, start_seq: i64, items: Vec<Box<dyn activity::Item>>) -> Result<(), String> {
-        let apps = self.apps.lock().unwrap();
-        let thread = apps.get(&start_seq).and_then(|a| a.thread.as_ref()).ok_or_else(|| format!("no process of start {start_seq}"))?;
-        thread
-            .transact(thread::SCHEDULE_TRANSACTION, &activity::transaction(items), true)
-            .map(|_| ())
-            .map_err(|s| format!("scheduleTransaction: {s}"))
+        self.call_thread(start_seq, thread::SCHEDULE_TRANSACTION, &activity::transaction(items))
     }
 
     /// Kills the process of `start_seq` (`ProcessRecord.killLocked`).
@@ -1538,6 +1585,72 @@ impl Service for Activity {
                     am::write_finish_attach_application_reply(&mut p);
                     p
                 }))
+            }
+            am::REGISTER_RECEIVER => {
+                let a = am::RegisterReceiver::<broadcasts::ParcelFilter>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args = broadcasts::Registration {
+                    caller: a.caller,
+                    caller_package: a.caller_package,
+                    receiver: a.receiver,
+                    filter: a.filter,
+                    permission: a.required_permission,
+                    user: a.user_id,
+                    flags: a.flags,
+                };
+                reply(self.0.broadcasts.register(&self.0, call, args).map(|sticky| {
+                    let mut p = Parcel::new();
+                    am::write_register_receiver_reply(&mut p, sticky.as_ref());
+                    p
+                }))
+            }
+            am::REGISTER_RECEIVER_WITH_FEATURE => {
+                let a = am::RegisterReceiverWithFeature::<broadcasts::ParcelFilter>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args = broadcasts::Registration {
+                    caller: a.caller,
+                    caller_package: a.caller_package,
+                    receiver: a.receiver,
+                    filter: a.filter,
+                    permission: a.required_permission,
+                    user: a.user_id,
+                    flags: a.flags,
+                };
+                reply(self.0.broadcasts.register(&self.0, call, args).map(|sticky| {
+                    let mut p = Parcel::new();
+                    am::write_register_receiver_with_feature_reply(&mut p, sticky.as_ref());
+                    p
+                }))
+            }
+            am::UNREGISTER_RECEIVER => {
+                let a = am::UnregisterReceiver::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.broadcasts.unregister(&self.0, a.receiver).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_unregister_receiver_reply(&mut p);
+                    p
+                }))
+            }
+            am::BROADCAST_INTENT_WITH_FEATURE => {
+                let a = am::BroadcastIntentWithFeature::<kept::RawIntent, kept::RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.broadcasts.broadcast(&self.0, call, a).map(|result| {
+                    let mut p = Parcel::new();
+                    am::write_broadcast_intent_with_feature_reply(&mut p, result);
+                    p
+                }))
+            }
+            am::UNBROADCAST_INTENT => {
+                let a = am::UnbroadcastIntent::<kept::RawIntent>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.broadcasts.unbroadcast(&self.0, call, a.intent, a.user_id).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_unbroadcast_intent_reply(&mut p);
+                    p
+                }))
+            }
+            // One-way.
+            am::FINISH_RECEIVER => {
+                let a = am::FinishReceiver::<kept::RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.0.broadcasts.finish(&self.0, a) {
+                    eprintln!("app host: finishReceiver: {e:?}");
+                }
+                Ok(Parcel::new())
             }
             // `handleApplicationCrash`: the crash is the process's last
             // act (`RuntimeInit` kills it after the call); it is logged.

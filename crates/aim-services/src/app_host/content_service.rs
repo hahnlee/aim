@@ -10,11 +10,12 @@ use std::sync::{Arc, Mutex};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
-    BAD_VALUE, Binder, EX_ILLEGAL_ARGUMENT, Exception, Parcel, Reader, Result as ParcelResult,
+    BAD_VALUE, Binder, Exception, Parcel, Reader, Result as ParcelResult,
 };
 use aim_service_aidl::android_content_icontentservice as cs;
-use aim_service_aidl::{ReadParcelable, WriteParcelable};
+use aim_service_aidl::ReadParcelable;
 
+use super::kept::{By, KeptBundle, RawBundle};
 use super::{AppHost, reply};
 use crate::package::intent_filter::Plain;
 use crate::package::uri::Uri;
@@ -22,9 +23,8 @@ use crate::package::uri::Uri;
 /// `IContentObserver.onChangeEtc`; its descriptor.
 const ON_CHANGE_ETC: u32 = 2;
 const OBSERVER_DESCRIPTOR: &str = "android.database.IContentObserver";
-/// `UserHandle.USER_ALL`, `USER_CURRENT`; `Build.VERSION_CODES.O`.
+/// `UserHandle.USER_ALL`; `Build.VERSION_CODES.O`.
 const USER_ALL: i32 = -1;
-const USER_CURRENT: i32 = -2;
 const O: i32 = 26;
 /// `ContentResolver.NOTIFY_SKIP_NOTIFY_FOR_DESCENDANTS`.
 const NOTIFY_SKIP_NOTIFY_FOR_DESCENDANTS: i32 = 1 << 1;
@@ -35,39 +35,6 @@ struct ParcelUri(Uri);
 impl ReadParcelable for ParcelUri {
     fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
         Uri::read(r, &mut Plain)?.map(ParcelUri).ok_or(BAD_VALUE)
-    }
-}
-
-/// A `Bundle` kept as written (`BaseBundle.writeToParcelInner`): its
-/// length, then (if any) its magic and its map.
-#[derive(Clone)]
-struct RawBundle(Vec<u8>);
-
-impl ReadParcelable for RawBundle {
-    fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
-        let start = r.position();
-        let length = r.read_i32()?;
-        if length > 0 {
-            r.read_i32()?; // magic
-            let mut rest = length as usize;
-            while rest > 0 {
-                r.read_i32()?;
-                rest = rest.saturating_sub(4);
-            }
-        }
-        let end = r.position();
-        r.set_position(start);
-        let mut bytes = Vec::with_capacity(end - start);
-        while r.position() < end {
-            bytes.extend_from_slice(&r.read_i32()?.to_le_bytes());
-        }
-        Ok(RawBundle(bytes))
-    }
-}
-
-impl WriteParcelable for RawBundle {
-    fn write_to(&self, p: &mut Parcel) {
-        p.write_raw(&self.0, &[]);
     }
 }
 
@@ -192,7 +159,7 @@ pub struct ContentService {
     /// handle.
     observers: Mutex<HashMap<u32, (Strong, u64)>>,
     /// `mCache`.
-    cache: Mutex<HashMap<CacheProvider, Vec<(CacheKey, RawBundle)>>>,
+    cache: Mutex<HashMap<CacheProvider, Vec<(CacheKey, KeptBundle)>>>,
 }
 
 impl ContentService {
@@ -203,31 +170,6 @@ impl ContentService {
             observers: Mutex::new(HashMap::new()),
             cache: Mutex::new(HashMap::new()),
         }
-    }
-
-    /// `handleIncomingUser`: `USER_CURRENT` as user 0, another user than
-    /// the caller's only with `INTERACT_ACROSS_USERS[_FULL]`.
-    fn incoming_user(&self, uid: i32, user: i32, allow_non_full: bool) -> Result<i32, Exception> {
-        let user = if user == USER_CURRENT { 0 } else { user };
-        let has = |p: &str| self.host.check_permission(Some(p), uid).map(|r| r == 0);
-        if user == USER_ALL {
-            if !has("android.permission.INTERACT_ACROSS_USERS_FULL")? {
-                return Err(Exception::security("No access: INTERACT_ACROSS_USERS_FULL"));
-            }
-        } else if user < 0 {
-            return Err(Exception::new(
-                EX_ILLEGAL_ARGUMENT,
-                format!("Invalid user: {user}"),
-            ));
-        } else if user != uid / 100_000
-            && !has("android.permission.INTERACT_ACROSS_USERS_FULL")?
-            && !(allow_non_full && has("android.permission.INTERACT_ACROSS_USERS")?)
-        {
-            return Err(Exception::security(format!(
-                "No access: neither user {uid} nor current process has INTERACT_ACROSS_USERS_FULL"
-            )));
-        }
-        Ok(user)
     }
 
     /// The access check of `registerContentObserver` and `notifyChange`:
@@ -259,7 +201,7 @@ impl ContentService {
             ));
         };
         let uid = call.sender_euid as i32;
-        let user = self.incoming_user(uid, args.user_handle, true)?;
+        let user = self.host.incoming_user(uid, args.user_handle, true)?;
         if !self.check_access(&uri, uid, user, args.target_sdk_version)? {
             return Ok(());
         }
@@ -319,7 +261,7 @@ impl ContentService {
         };
         let mut collected: Vec<Notification> = Vec::new();
         let mut touched: Vec<(i32, Option<String>, Uri)> = Vec::new();
-        let user = self.incoming_user(uid, args.user_handle, true)?;
+        let user = self.host.incoming_user(uid, args.user_handle, true)?;
         for ParcelUri(uri) in args.uris.unwrap_or_default().into_iter().flatten() {
             if !self.check_access(&uri, uid, user, args.target_sdk_version)? {
                 continue;
@@ -461,6 +403,7 @@ impl Service for ContentService {
                 let args = cs::PutCache::<ParcelUri, RawBundle>::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
                 let key = args.key.map(|k| k.0);
+                let value = args.value.map(|v| KeptBundle::new(v, &self.host.process)).transpose()?;
                 empty(
                     self.cache_key(
                         call.sender_euid as i32,
@@ -472,7 +415,7 @@ impl Service for ContentService {
                         let mut cache = self.cache.lock().unwrap();
                         let entries = cache.entry(provider).or_default();
                         entries.retain(|(k, _)| *k != key);
-                        if let Some(value) = args.value {
+                        if let Some(value) = value {
                             entries.push((key, value));
                         }
                     }),
@@ -496,7 +439,7 @@ impl Service for ContentService {
                             .and_then(|e| e.iter().find(|(k, _)| *k == key))
                             .map(|(_, v)| v.clone());
                         let mut p = Parcel::new();
-                        cs::write_get_cache_reply(&mut p, value.as_ref());
+                        cs::write_get_cache_reply(&mut p, value.as_ref().map(|v| By(&v.bundle)).as_ref());
                         p
                     }),
                 )

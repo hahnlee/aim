@@ -1,7 +1,7 @@
 //! `Bundle` in its parcel form (`BaseBundle.writeToParcelInner`,
 //! `Parcel.writeArrayMapInternal` and `writeValue` at the pinned tag), for
 //! the few values native services exchange with the original ones: strings,
-//! ints and booleans; a length-prefixed value (a parcelable, a map, a
+//! string arrays, ints and booleans; a length-prefixed value (a parcelable, a map, a
 //! serializable) is kept as its bytes for the caller to read.
 
 use std::collections::HashMap;
@@ -23,6 +23,7 @@ const VAL_FLOAT: i32 = 7;
 const VAL_BOOLEAN: i32 = 9;
 const VAL_LIST: i32 = 11;
 const VAL_SPARSEARRAY: i32 = 12;
+const VAL_STRINGARRAY: i32 = 14;
 const VAL_PARCELABLEARRAY: i32 = 16;
 const VAL_OBJECTARRAY: i32 = 17;
 const VAL_SERIALIZABLE: i32 = 21;
@@ -35,6 +36,8 @@ pub enum Value {
     Long(i64),
     Float(f32),
     Bool(bool),
+    /// A `String[]` (`writeStringArray`).
+    StringArray(Vec<Option<String>>),
     /// A `Map<String, String>` (`writeMap`), length-prefixed as
     /// `Parcel.writeValue` writes maps.
     StringMap(Vec<(String, Option<String>)>),
@@ -70,6 +73,13 @@ impl Value {
             Value::Bool(v) => {
                 p.write_i32(VAL_BOOLEAN);
                 p.write_bool(*v);
+            }
+            Value::StringArray(items) => {
+                p.write_i32(VAL_STRINGARRAY);
+                p.write_i32(items.len() as i32);
+                for item in items {
+                    p.write_string16(item.as_deref());
+                }
             }
             Value::StringMap(entries) => {
                 p.write_i32(VAL_MAP);
@@ -137,6 +147,10 @@ pub fn read(r: &mut Reader<'_>) -> Result<Option<HashMap<String, Value>>> {
             VAL_LONG => Value::Long(r.read_i64()?),
             VAL_FLOAT => Value::Float(r.read_f32()?),
             VAL_BOOLEAN => Value::Bool(r.read_bool()?),
+            VAL_STRINGARRAY => {
+                let n = r.read_i32()?;
+                Value::StringArray((0..n.max(0)).map(|_| r.read_string16()).collect::<Result<_>>()?)
+            }
             kind @ (VAL_MAP | VAL_PARCELABLE | VAL_LIST | VAL_SPARSEARRAY | VAL_PARCELABLEARRAY
             | VAL_OBJECTARRAY | VAL_SERIALIZABLE) => {
                 let len = usize::try_from(r.read_i32()?).map_err(|_| BAD_VALUE)?;
@@ -167,6 +181,7 @@ mod tests {
             ("_track_generation", Value::Null),
             ("flag", Value::Bool(true)),
             ("ratio", Value::Float(5.5)),
+            ("names", Value::StringArray(vec![Some("a".into()), None])),
         ];
         let mut p = Parcel::new();
         write(&mut p, &entries);

@@ -111,11 +111,20 @@ impl Packages {
         let mut system =
             system_config::system(root, property, &system_config::Framework::load(root)?)?;
         system.sdk_sandbox_package = Some(Some(sdk_sandbox_package(&packages)?));
+        // `<protected-broadcast>` counts in system packages only
+        // (`ScanPackageUtils.applyPolicy` clears the others').
+        let protected_broadcasts = packages
+            .values()
+            .filter(|ps| ps.is.system)
+            .filter_map(|ps| ps.pkg.as_ref())
+            .flat_map(|pkg| pkg.protected_broadcasts.iter().cloned())
+            .collect();
         Ok(Packages {
             state: model::State {
                 packages,
                 users,
                 system,
+                protected_broadcasts: Some(protected_broadcasts),
                 ..Default::default()
             },
             platform,
