@@ -430,18 +430,14 @@ impl AppHost {
             result_who: args.result_who,
             request_code: args.request_code,
         };
-        let target = self
-            .apps
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(_, a)| a.package == package && a.thread.is_some())
-            .map(|(seq, a)| (*seq, a.uid));
-        let Some((target_seq, target_uid)) = target else {
+        let process = super::providers::process_name(&info.info);
+        let target = self.running_process(&process, target_uid as u32).filter(|(_, attached)| *attached);
+        let Some((target_seq, _)) = target else {
             // `startProcessLocked` for the activity.
-            self.start_process_for(&package, Some(request))?;
+            self.start_process_for(&package, &process, Some(request))?;
             return Ok(START_SUCCESS);
         };
+        let target_uid = target_uid as u32;
         let task = self.task_for(target_seq, target_uid, &package, &info, result_to.filter(|_| Some(target_seq) == caller_seq));
         // The launch mode's and flags' reuse of an activity of the task.
         let reuse = {

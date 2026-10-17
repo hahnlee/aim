@@ -450,6 +450,11 @@ fn join(
     pkg.uid = setting.app_id;
     pkg.primary_cpu_abi = setting.primary_cpu_abi.clone();
     pkg.secondary_cpu_abi = setting.secondary_cpu_abi.clone();
+    // The signers PackageManager collected and persisted (`<sigs>`).
+    if let Some(saved) = &setting.signatures {
+        let signing = package::sign::SigningDetails::from_saved(saved).and_then(|s| s.parcel_details());
+        pkg.signing_details = Some(signing.map_err(|e| format!("signatures: {e}"))?);
+    }
     let seinfo = listed.map(|l| l.seinfo.clone());
     for (set, flag) in [
         (system, booleans::SYSTEM),

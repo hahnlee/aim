@@ -49,6 +49,7 @@ pub mod permission_checker;
 pub mod permission_controller;
 pub mod permission_manager;
 pub mod playback;
+pub mod providers;
 pub mod power_service;
 pub mod sensor_privacy;
 pub mod services;
@@ -59,6 +60,8 @@ pub mod status_bar;
 pub mod storage;
 pub mod surface;
 pub mod tasks;
+pub mod uid_observers;
+pub mod uri_grants;
 pub mod trust_service;
 pub mod user_service;
 pub mod volume;
@@ -72,7 +75,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
 use aim_binder_host::parcel::{
@@ -208,7 +211,9 @@ struct Isolation {
 
 /// A process started and not yet attached, or attached.
 struct App {
+    /// The package it was started for, and its process name.
     package: String,
+    process: String,
     uid: u32,
     pid: i32,
     started: Instant,
@@ -221,6 +226,11 @@ struct App {
     activity: Option<activity_start::StartRequest>,
     /// The global configuration it was bound with.
     config: Option<config::Configuration>,
+    /// The providers it was handed (`ProcessRecord.mProviders`).
+    providers: Vec<package::info::ProviderInfo>,
+    /// Whether it crashed too often to keep its services
+    /// (`ProcessRecord.setRemoved`).
+    removed: bool,
     /// Its start's first frame (`ApplicationStartInfo
     /// .TIMESTAMP_INITIAL_RENDERTHREAD_FRAME`,
     /// `TIMESTAMP_SURFACEFLINGER_COMPOSITION_COMPLETE`), uptime nanoseconds.
@@ -228,6 +238,12 @@ struct App {
     /// When an activity of it was last resumed, uptime milliseconds
     /// (`ProcessRecord.getLastActivityTime`).
     last_activity: i64,
+}
+
+#[derive(Default)]
+struct AppErrors {
+    crash_times: HashMap<(String, u32), Instant>,
+    crash_counts: HashMap<(String, u32), (Instant, u32)>,
 }
 
 pub struct AppHost {
@@ -258,8 +274,12 @@ pub struct AppHost {
     tasks: tasks::Tasks,
     /// The server's launches, by package, until the package's task is made.
     pending_launches: Mutex<HashMap<String, String>>,
-    /// The content providers apps published, by authority.
-    providers: Mutex<HashMap<String, Published>>,
+    providers: providers::Providers,
+    uri_grants: OnceLock<Vec<uri_grants::Grant>>,
+    uid_observers: uid_observers::UidObservers,
+    /// Processes' last crash and recent crash count, by process name and
+    /// uid (`AppErrors.mProcessCrashTimes`, `mProcessCrashCounts`).
+    app_errors: Mutex<AppErrors>,
     storage: storage::Volumes,
     text_input: input_method::TextInput,
     content_service: OnceLock<Arc<content_service::ContentService>>,
@@ -283,15 +303,6 @@ pub struct AppHost {
     playback: Mutex<playback::Playback>,
     /// The audio focus stack, locked before the players.
     focus: Mutex<audio_focus::Focus<Strong, (Strong, u64)>>,
-}
-
-/// A content provider an app's process published
-/// (`publishContentProviders`).
-struct Published {
-    start_seq: i64,
-    uid: u32,
-    info: package::info::ProviderInfo,
-    provider: Strong,
 }
 
 impl AppHost {
@@ -318,7 +329,10 @@ impl AppHost {
             agent: Mutex::new(None),
             tasks: Default::default(),
             pending_launches: Mutex::new(HashMap::new()),
-            providers: Mutex::new(HashMap::new()),
+            providers: Default::default(),
+            uri_grants: OnceLock::new(),
+            uid_observers: Default::default(),
+            app_errors: Default::default(),
             storage: Default::default(),
             text_input: Default::default(),
             content_service: OnceLock::new(),
@@ -516,18 +530,32 @@ impl AppHost {
         Ok(self.inputs.get_or_init(|| inputs))
     }
 
-    /// `ProcessList.startProcessLocked` for an activity of `name`'s
-    /// `ProcessList.startProcessLocked` for the activity `class` of
-    /// `name`'s default process, user 0.
-    /// Starts the process of package `name` for the launcher's start of
-    /// its activity `class`.
+    /// Starts the process of package `name`'s activity `class`, user 0's,
+    /// for the launcher's start of it.
     fn start_process(&self, name: &str, class: &str) -> Result<i32, Exception> {
-        self.start_process_for(name, Some(activity_start::StartRequest::launcher(class)))
+        let (state, resolution) = self.packages()?;
+        let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: 1000 };
+        let component = crate::package::intent::ComponentName { package: name.to_string(), class: class.to_string() };
+        let info = match query.activity_info(&component, STOCK_PM_FLAGS, 1000, 0) {
+            Ok(Ok(Some(info))) => info,
+            Ok(Ok(None)) => return Err(Exception::illegal_argument(format!("no activity {name}/{class}"))),
+            Ok(Err(e)) => return Err(e),
+            Err(crate::package::apps_filter::NotModelled(reason)) => {
+                return Err(Exception::new(EX_UNSUPPORTED_OPERATION, format!("activity info: {reason}")));
+            }
+        };
+        self.start_process_for(name, &providers::process_name(&info.info), Some(activity_start::StartRequest::launcher(class)))
+    }
+
+    /// The running process `process` of `uid`: its start, and whether it
+    /// attached (`ProcessList.getProcessRecordLocked`).
+    fn running_process(&self, process: &str, uid: u32) -> Option<(i64, bool)> {
+        self.apps.lock().unwrap().iter().find(|(_, a)| a.process == process && a.uid == uid).map(|(seq, a)| (*seq, a.thread.is_some()))
     }
 
     /// Starts the process of package `name` for `request`, or for a
     /// service, a provider or a broadcast (no activity).
-    fn start_process_for(&self, name: &str, request: Option<activity_start::StartRequest>) -> Result<i32, Exception> {
+    fn start_process_for(&self, name: &str, process: &str, request: Option<activity_start::StartRequest>) -> Result<i32, Exception> {
         let inputs = self.inputs()?;
         let state = package::State::read(&inputs.data, &[0])
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("package state: {e}")))?
@@ -575,7 +603,7 @@ impl AppHost {
             // `getExternalStorageMountMode`: every app's scoped view.
             mount_external: zygote::MountExternal::Default,
             target_sdk_version: target_sdk,
-            nice_name: name.to_string(),
+            nice_name: process.to_string(),
             seinfo: format!("{}{SEINFO_COMPLETE}", listed.seinfo),
             instruction_set: setting.primary_cpu_abi.as_deref().map(instruction_set),
             app_data_dir: Some(listed.data_dir.clone()),
@@ -605,13 +633,14 @@ impl AppHost {
             }
         };
         eprintln!(
-            "app host: Start proc {pid}:{name}/{uid} in {:?}",
+            "app host: Start proc {pid}:{process}/{uid} in {:?}",
             started.elapsed()
         );
         self.apps.lock().unwrap().insert(
             start_seq,
             App {
                 package: name.to_string(),
+                process: process.to_string(),
                 uid,
                 pid,
                 started,
@@ -620,6 +649,8 @@ impl AppHost {
                 thread: None,
                 activity: request,
                 config: None,
+                providers: Vec::new(),
+                removed: false,
                 first_frame: None,
                 last_activity: 0,
             },
@@ -715,6 +746,7 @@ impl AppHost {
         };
         let seq = start_seq;
         let pid = app.pid;
+        let uid = app.uid;
         let host = self.me.clone();
         self.process.link_to_death(
             &strong,
@@ -732,8 +764,10 @@ impl AppHost {
             call.sender_pid,
             app.started.elapsed()
         );
-        let (bind, config) = self.bind_application(app)?;
+        let providers = self.process_providers(&app.process, app.uid)?;
+        let (bind, config) = self.bind_application(app, providers.clone())?;
         app.config = Some(config);
+        app.providers = providers;
         strong
             .transact(thread::BIND_APPLICATION, &bind, true)
             .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("bindApplication: {s}")))?;
@@ -751,6 +785,12 @@ impl AppHost {
             app.started.elapsed()
         );
         app.thread = Some(strong);
+        // Its uid's first process.
+        let first = !apps.iter().any(|(s, a)| *s != seq && a.uid == uid && a.thread.is_some());
+        drop(apps);
+        if first {
+            self.uid_changed(uid as i32, uid_observers::Change::Active);
+        }
         Ok(())
     }
 
@@ -761,15 +801,61 @@ impl AppHost {
 
     /// The process of `start_seq`, `pid`, died: what it had goes.
     fn process_died(&self, start_seq: i64, pid: i32) {
-        self.apps.lock().unwrap().remove(&start_seq);
-        self.providers.lock().unwrap().retain(|_, p| p.start_seq != start_seq);
+        let (removed, gone) = {
+            let mut apps = self.apps.lock().unwrap();
+            let app = apps.remove(&start_seq);
+            let gone = app.as_ref().filter(|a| a.thread.is_some() && !apps.values().any(|o| o.uid == a.uid && o.thread.is_some()));
+            (app.as_ref().is_some_and(|a| a.removed), gone.map(|a| a.uid))
+        };
+        if let Some(uid) = gone {
+            self.uid_changed(uid as i32, uid_observers::Change::Gone);
+        }
+        self.providers_process_died(start_seq);
         self.activities.remove_start(start_seq);
         self.windows_died(pid);
         self.tasks_died(start_seq);
         self.broadcasts.process_died(self, start_seq);
         if let Some(me) = self.me.upgrade() {
-            me.services_process_died(start_seq);
+            me.services_process_died(start_seq, !removed);
         }
+    }
+
+    /// `AppErrors.handleAppCrashLSPB` for the process of `pid` and `uid`:
+    /// its services' crash counts go up, and a process that crashed again
+    /// within `MIN_CRASH_INTERVAL`, or too often in the last hours, is
+    /// removed: its services are not started again. (The original also
+    /// marks it bad, which only refuses its starts from the background,
+    /// which the app host does not make.)
+    fn app_crashed(&self, pid: i32, uid: u32) {
+        const PROCESS_CRASH_COUNT_RESET_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
+        const PROCESS_CRASH_COUNT_LIMIT: u32 = 12;
+        let found = self.apps.lock().unwrap().iter().find(|(_, a)| a.pid == pid && a.uid == uid).map(|(seq, a)| (*seq, a.process.clone()));
+        let Some((start_seq, process)) = found else { return };
+        self.services_crashed(start_seq);
+        let now = Instant::now();
+        let key = (process, uid);
+        let mut errors = self.app_errors.lock().unwrap();
+        let quick = errors.crash_times.get(&key).is_some_and(|t| now < *t + services::MIN_CRASH_INTERVAL);
+        let over = errors
+            .crash_counts
+            .get(&key)
+            .is_some_and(|(first, n)| now < *first + PROCESS_CRASH_COUNT_RESET_INTERVAL && *n >= PROCESS_CRASH_COUNT_LIMIT);
+        if quick || over {
+            let reason = if quick { "crashed quickly" } else { "over process crash limit" };
+            eprintln!("app host: process {} has crashed too many times, killing! Reason: {reason}", key.0);
+            errors.crash_times.remove(&key);
+            errors.crash_counts.remove(&key);
+            if let Some(app) = self.apps.lock().unwrap().get_mut(&start_seq) {
+                app.removed = true;
+            }
+            return;
+        }
+        errors.crash_times.insert(key.clone(), now);
+        let count = match errors.crash_counts.get(&key) {
+            Some((first, n)) if *first + PROCESS_CRASH_COUNT_RESET_INTERVAL >= now => (*first, n + 1),
+            _ => (now, 1),
+        };
+        errors.crash_counts.insert(key, count);
     }
 
     /// User 0's base restrictions, as UserManagerService last persisted
@@ -834,7 +920,7 @@ impl AppHost {
             .into_iter()
             .map(|(seq, a)| {
                 let mut info = RunningAppProcessInfo {
-                    process_name: Some(a.package.clone()),
+                    process_name: Some(a.process.clone()),
                     pkg_list: Some(vec![a.package.clone()]),
                     ..Default::default()
                 };
@@ -951,7 +1037,6 @@ impl AppHost {
         if app_id == 0 || app_id == 1000 {
             return Ok(GRANTED);
         }
-        // `Process.isIsolated`: FIRST_ISOLATED_UID..LAST_ISOLATED_UID.
         // `Process.isIsolated`: isolated and app zygote processes.
         if (90000..=99999).contains(&app_id) {
             return Ok(DENIED);
@@ -1252,19 +1337,62 @@ impl AppHost {
         )
     }
 
-    /// `ActivityManagerService.getContentProvider`: the providers the app
-    /// host serves (`settings`), else none.
+    /// `getContentProviderExternal`, the shell's `content`: the provider
+    /// with no client process.
+    fn content_provider_external(&self, call: &Call<'_>, name: Option<&str>, user: i32) -> Result<Option<providers::Holder>, Exception> {
+        self.external_provider_access(call)?;
+        let uid = call.sender_euid as i32;
+        let user = self.incoming_user(uid, user, false)?;
+        match name {
+            Some("settings") => self.settings_holder(),
+            Some(name) => self.provider(None, uid, name, user, true),
+            None => Ok(None),
+        }
+    }
+
+    /// `ACCESS_CONTENT_PROVIDERS_EXTERNALLY`, which external references
+    /// need.
+    fn external_provider_access(&self, call: &Call<'_>) -> Result<(), Exception> {
+        let permission = "android.permission.ACCESS_CONTENT_PROVIDERS_EXTERNALLY";
+        if self.check_permission(Some(permission), call.sender_euid as i32)? != 0 {
+            return Err(Exception::security(format!(
+                "Permission Denial: getContentProviderExternal() from pid={}, uid={} requires {permission}",
+                call.sender_pid, call.sender_euid
+            )));
+        }
+        Ok(())
+    }
+
+    /// `ActivityManagerService.getContentProvider`: the `settings`
+    /// provider the app host serves, else apps' providers.
     fn content_provider(
         &self,
+        call: &Call<'_>,
         name: Option<&str>,
-        calling_uid: u32,
-    ) -> Result<Option<settings_provider::ContentProviderHolder>, Exception> {
-        if let Some(name) = name.filter(|n| *n != "settings") {
-            return self.published_provider(name, calling_uid);
-        }
-        let Some("settings") = name else {
+        user: i32,
+        stable: bool,
+    ) -> Result<Option<providers::Holder>, Exception> {
+        let uid = call.sender_euid as i32;
+        let Some(name) = name else {
             return Ok(None);
         };
+        if name != "settings" {
+            let user = self.incoming_user(uid, user, false)?;
+            let client = self
+                .apps
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(_, a)| a.pid == call.sender_pid && a.uid == call.sender_euid)
+                .map(|(seq, _)| *seq)
+                .ok_or_else(|| Exception::security(format!("Unable to find app for caller (pid={}) when getting content provider {name}", call.sender_pid)))?;
+            return self.provider(Some(client), uid, name, user, stable);
+        }
+        self.settings_holder()
+    }
+
+    /// The `settings` provider's holder: the app host's, a system provider.
+    fn settings_holder(&self) -> Result<Option<providers::Holder>, Exception> {
         let (state, resolution) = self.packages()?;
         let state_error = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
         let registered = resolution
@@ -1303,10 +1431,12 @@ impl AppHost {
             .settings_provider
             .get()
             .ok_or_else(|| state_error("no settings provider binder".into()))?;
-        Ok(Some(settings_provider::ContentProviderHolder {
+        Ok(Some(providers::Holder {
             info,
-            provider,
-            connection,
+            provider: Some(provider),
+            connection: Some(connection),
+            no_release_needed: true,
+            local: false,
         }))
     }
 
@@ -1459,83 +1589,6 @@ impl AppHost {
         }))
     }
 
-    /// The provider an app published under `authority`, for an app of the
-    /// same uid: its other processes reach it as the original's
-    /// `getContentProviderImpl` gives a running provider. Another app's
-    /// provider, or one whose process is not running, is not served yet
-    /// (#1450).
-    fn published_provider(&self, authority: &str, calling_uid: u32) -> Result<Option<settings_provider::ContentProviderHolder>, Exception> {
-        let providers = self.providers.lock().unwrap();
-        match providers.get(authority) {
-            Some(p) if p.uid == calling_uid => Ok(Some(settings_provider::ContentProviderHolder {
-                info: p.info.clone(),
-                provider: p.provider.binder(),
-                connection: self.process.add_service(Arc::new(activity::Token)),
-            })),
-            _ => Err(self.unimplemented_named("activity", &format!("getContentProvider of {authority}"))),
-        }
-    }
-
-    /// `publishContentProviders`: the providers the caller's process
-    /// installed, of those its `bindApplication` named.
-    fn publish_providers(&self, call: &mut Call<'_>) -> Result<(), Exception> {
-        let bad = || Exception::illegal_argument("publishContentProviders");
-        let (start_seq, uid) = self
-            .apps
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(_, a)| a.pid == call.sender_pid && a.uid == call.sender_euid)
-            .map(|(seq, a)| (*seq, a.uid))
-            .ok_or_else(|| Exception::security("publishContentProviders from an unknown process"))?;
-        call.data.enforce_interface(am::DESCRIPTOR).map_err(|_| bad())?;
-        call.data.read_binder().map_err(|_| bad())?;
-        let n = call.data.read_i32().map_err(|_| bad())?;
-        let (model, resolution) = self.packages()?;
-        let query = crate::package::query::Query { state: &model, filter: &resolution.apps_filter, calling_uid: 1000 };
-        let ours = self.app_providers(&query, uid)?;
-        let mut providers = self.providers.lock().unwrap();
-        for _ in 0..n.max(0) {
-            // `ContentProviderHolder`: its `ProviderInfo`, its provider,
-            // its connection, two flags.
-            if call.data.read_i32().map_err(|_| bad())? == 0 {
-                continue;
-            }
-            let info = crate::package::reply::provider_info(&mut call.data).map_err(|_| bad())?;
-            let provider = call.data.read_binder().map_err(|_| bad())?;
-            call.data.read_binder().map_err(|_| bad())?;
-            call.data.read_i32().map_err(|_| bad())?;
-            call.data.read_i32().map_err(|_| bad())?;
-            let name = field(&info, "name");
-            let (Some(name), Some(Binder::Handle(handle))) = (name, provider) else { continue };
-            let Some(ours) = ours.iter().find(|p| p.info.item.name.as_deref() == Some(name)) else { continue };
-            for authority in ours.authority.iter().flat_map(|a| a.split(';')) {
-                providers.insert(authority.to_string(), Published { start_seq, uid, info: ours.clone(), provider: self.process.strong(handle) });
-            }
-            eprintln!("app host: {name} published ({})", ours.authority.as_deref().unwrap_or(""));
-        }
-        Ok(())
-    }
-
-    /// `generateApplicationProvidersLocked`: the providers of `uid`'s
-    /// default process (user 0's, an installed app's).
-    fn app_providers(&self, query: &crate::package::query::Query<'_>, uid: u32) -> Result<Vec<package::info::ProviderInfo>, Exception> {
-        let name = self
-            .apps
-            .lock()
-            .unwrap()
-            .values()
-            .find(|a| a.uid == uid)
-            .map(|a| a.package.clone())
-            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no process of the uid"))?;
-        let flags = STOCK_PM_FLAGS | GET_URI_PERMISSION_PATTERNS | MATCH_DIRECT_BOOT_AUTO;
-        match query.query_content_providers(Some(&name), uid as i32, flags, None) {
-            Ok(Ok(providers)) => Ok(providers),
-            Ok(Err(e)) => Err(e),
-            Err(crate::package::apps_filter::NotModelled(reason)) => Err(Exception::new(EX_UNSUPPORTED_OPERATION, format!("queryContentProviders: {reason}"))),
-        }
-    }
-
     /// The exception of a method of `service` it does not implement,
     /// logged once.
     fn unimplemented(&self, service: &str, code: u32) -> Exception {
@@ -1553,8 +1606,8 @@ impl AppHost {
         )
     }
 
-    /// `bindApplication`'s call for `app`'s process.
-    fn bind_application(&self, app: &App) -> Result<(Parcel, config::Configuration), Exception> {
+    /// `bindApplication`'s call for `app`'s process, with its `providers`.
+    fn bind_application(&self, app: &App, providers: Vec<package::info::ProviderInfo>) -> Result<(Parcel, config::Configuration), Exception> {
         let inputs = self.inputs()?;
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
         let info = inputs
@@ -1600,18 +1653,6 @@ impl AppHost {
             })
             .collect();
         let target_sdk = info.target_sdk_version;
-        let providers = {
-            let (model, resolution) = self.packages()?;
-            let query = crate::package::query::Query { state: &model, filter: &resolution.apps_filter, calling_uid: 1000 };
-            let flags = STOCK_PM_FLAGS | GET_URI_PERMISSION_PATTERNS | MATCH_DIRECT_BOOT_AUTO;
-            match query.query_content_providers(Some(&app.package), app.uid as i32, flags, None) {
-                Ok(Ok(providers)) => providers,
-                Ok(Err(e)) => return Err(e),
-                Err(crate::package::apps_filter::NotModelled(reason)) => {
-                    return Err(Exception::new(EX_UNSUPPORTED_OPERATION, format!("queryContentProviders: {reason}")));
-                }
-            }
-        };
         let mut p = Parcel::new();
         thread::BindApplication::<
             package::info::ApplicationInfo,
@@ -1626,7 +1667,8 @@ impl AppHost {
             bind::Absent,
             bind::RawFileDescriptor,
         > {
-            package_name: Some(app.package.clone()),
+            // `bindApplication`'s first argument is the process's name.
+            package_name: Some(app.process.clone()),
             info: Some(info),
             sdk_sandbox_client_app_volume_uuid: None,
             sdk_sandbox_client_app_package: None,
@@ -2037,11 +2079,92 @@ impl Service for Activity {
             }
             am::GET_CONTENT_PROVIDER => {
                 let args = am::GetContentProvider::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(self.0.content_provider(args.name.as_deref(), call.sender_euid).map(|holder| {
+                reply(self.0.content_provider(call, args.name.as_deref(), args.user_id, args.stable).map(|holder| {
                     let mut p = Parcel::new();
                     am::write_get_content_provider_reply(&mut p, holder.as_ref());
                     p
                 }))
+            }
+            am::GET_CONTENT_PROVIDER_EXTERNAL => {
+                let args = am::GetContentProviderExternal::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.content_provider_external(call, args.name.as_deref(), args.user_id).map(|holder| {
+                    let mut p = Parcel::new();
+                    am::write_get_content_provider_external_reply(&mut p, holder.as_ref());
+                    p
+                }))
+            }
+            am::REMOVE_CONTENT_PROVIDER_EXTERNAL_AS_USER => {
+                am::RemoveContentProviderExternalAsUser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.external_provider_access(call).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_remove_content_provider_external_as_user_reply(&mut p);
+                    p
+                }))
+            }
+            am::CHECK_URI_PERMISSION => {
+                let args = am::CheckUriPermission::<content_service::ParcelUri>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let Some(content_service::ParcelUri(uri)) = args.uri else {
+                    return reply(Err(Exception::new(EX_NULL_POINTER, "uri")));
+                };
+                reply(self.0.check_uri_permission(call, uri, args.uid, args.mode, args.user_id).map(|result| {
+                    let mut p = Parcel::new();
+                    am::write_check_uri_permission_reply(&mut p, result);
+                    p
+                }))
+            }
+            am::REGISTER_UID_OBSERVER => {
+                let args = am::RegisterUidObserver::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.register_uid_observer(call, args.observer, args.which, args.cutpoint, args.calling_package.as_deref()).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_register_uid_observer_reply(&mut p);
+                    p
+                }))
+            }
+            am::UNREGISTER_UID_OBSERVER => {
+                let args = am::UnregisterUidObserver::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.0.unregister_uid_observer(args.observer);
+                let mut p = Parcel::new();
+                am::write_unregister_uid_observer_reply(&mut p);
+                Ok(p)
+            }
+            am::IS_UID_ACTIVE => {
+                let args = am::IsUidActive::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.is_uid_active(call, args.uid, args.calling_package.as_deref()).map(|active| {
+                    let mut p = Parcel::new();
+                    am::write_is_uid_active_reply(&mut p, active);
+                    p
+                }))
+            }
+            am::GET_UID_PROCESS_STATE => {
+                let args = am::GetUidProcessState::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.uid_process_state(call, args.uid, args.calling_package.as_deref()).map(|state| {
+                    let mut p = Parcel::new();
+                    am::write_get_uid_process_state_reply(&mut p, state);
+                    p
+                }))
+            }
+            am::REF_CONTENT_PROVIDER => {
+                let args = am::RefContentProvider::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.ref_provider(args.connection, args.stable_delta, args.unstable_delta).map(|alive| {
+                    let mut p = Parcel::new();
+                    am::write_ref_content_provider_reply(&mut p, alive);
+                    p
+                }))
+            }
+            am::REMOVE_CONTENT_PROVIDER => {
+                let args = am::RemoveContentProvider::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.0.remove_provider(args.connection, args.stable) {
+                    eprintln!("app host: removeContentProvider: {}", e.message);
+                }
+                Ok(Parcel::new())
+            }
+            // The provider's process's death, which its thread's death
+            // notice reports, removes it; a provider still alive stays.
+            am::UNSTABLE_PROVIDER_DIED => {
+                am::UnstableProviderDied::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                am::write_unstable_provider_died_reply(&mut p);
+                Ok(p)
             }
             am::PUBLISH_CONTENT_PROVIDERS => reply(self.0.publish_providers(call).map(|()| {
                 let mut p = Parcel::new();
@@ -2164,6 +2287,7 @@ impl Service for Activity {
                     "app host: process {} (uid {}) crashed",
                     call.sender_pid, call.sender_euid
                 );
+                self.0.app_crashed(call.sender_pid, call.sender_euid);
                 let mut p = Parcel::new();
                 p.write_no_exception();
                 Ok(p)

@@ -7,8 +7,7 @@
 //! checks (`super::settings_validators`), and `LIST_config`. A change bumps
 //! its generation, then is notified to the observers of
 //! `content://settings/<table>/<name>` (`super::content_service`); no
-//! backup is run, so none is told of it. Also the `ContentProviderHolder`
-//! ActivityManager hands out for it.
+//! backup is run, so none is told of it.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::{HashMap, HashSet};
@@ -17,8 +16,7 @@ use std::sync::{Arc, OnceLock};
 
 use aim_android_image::dex::{self, Dex};
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel, Reader};
-use aim_service_aidl::WriteParcelable;
+use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, Reader};
 use aim_service_aidl::android_content_icontentprovider as cp;
 
 use super::appops_service::{self, MODE_DEFAULT, OP_WRITE_SETTINGS};
@@ -27,7 +25,7 @@ use super::settings::{Change, ResetMode, SYSTEM_PACKAGE_NAME, Table};
 use super::settings_validators::{PRIVATE_SETTINGS, PUBLIC_SETTINGS, validate_system_value};
 use super::{AppHost, FIRST_APPLICATION_UID, PER_USER_RANGE, reply};
 use crate::bundle::{self, Value};
-use crate::package::info::{ProviderInfo, array_order, flags};
+use crate::package::info::{array_order, flags};
 use crate::package::uri::Uri;
 
 /// `Settings.NameValueTable.VALUE` and the `Settings.CALL_METHOD_*_KEY`s;
@@ -803,23 +801,6 @@ impl SettingsProvider {
             configured.max(1) as usize
         };
         Ok(self.generations.get_or_init(|| GenerationRegistry::new(max_users)))
-    }
-}
-
-/// `ContentProviderHolder` of a system provider: no release needed.
-pub struct ContentProviderHolder {
-    pub info: ProviderInfo,
-    pub provider: Binder,
-    pub connection: Binder,
-}
-
-impl WriteParcelable for ContentProviderHolder {
-    fn write_to(&self, p: &mut Parcel) {
-        self.info.write_to(p);
-        p.write_binder(Some(self.provider));
-        p.write_binder(Some(self.connection));
-        p.write_i32(1); // no release needed
-        p.write_i32(0); // not local
     }
 }
 

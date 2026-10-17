@@ -9,12 +9,13 @@
 //! process dies, its connections are told and a service still needed is
 //! started again. The app host binds services itself too, as the system
 //! does (`bindServiceAsUser` from system_server, a connection of its
-//! own). Services in processes of their own, isolated services and
-//! foreground services are not run (#1492).
+//! own). A service runs in its process (`android:process`), started for
+//! it when it does not run. Isolated services and foreground services are
+//! not run (#1492).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aim_binder_host::local::Strong;
 use aim_binder_host::parcel::{
@@ -50,9 +51,21 @@ const START_FLAG_RETRY: i32 = 2;
 /// `IServiceConnection.connected`.
 const CONNECTION_DESCRIPTOR: &str = "android.app.IServiceConnection";
 const CONNECTED: u32 = 1;
-/// `ActiveServicesConstants.SERVICE_RESTART_DURATION`: how long after its
-/// process died a service still needed is started again.
-const RESTART_DELAY: Duration = Duration::from_secs(1);
+/// `ActivityManagerConstants`: the first restart's delay, how long a
+/// service must have run for its restarts to start over, the factor of
+/// each further delay, the least time between two services' restarts, how
+/// often a service may crash before it is not restarted, and how soon a
+/// second crash counts as one more (`MIN_CRASH_INTERVAL`).
+const SERVICE_RESTART_DURATION: Duration = Duration::from_secs(1);
+const SERVICE_RESET_RUN_DURATION: Duration = Duration::from_secs(60);
+const SERVICE_RESTART_DURATION_FACTOR: u32 = 4;
+const SERVICE_MIN_RESTART_TIME_BETWEEN: Duration = Duration::from_secs(10);
+const BOUND_SERVICE_CRASH_RESTART_DURATION: Duration = Duration::from_secs(30 * 60);
+const BOUND_SERVICE_MAX_CRASH_RETRY: i32 = 16;
+pub(super) const MIN_CRASH_INTERVAL: Duration = Duration::from_secs(60);
+/// `ServiceRecord.MAX_DELIVERY_COUNT`, `MAX_DONE_EXECUTING_COUNT`.
+const MAX_DELIVERY_COUNT: i32 = 3;
+const MAX_DONE_EXECUTING_COUNT: i32 = 6;
 
 /// A `ComponentName` read.
 pub struct Name {
@@ -75,6 +88,7 @@ struct StartItem {
     intent: Option<KeptIntent>,
     delivery_count: i32,
     done_executing_count: i32,
+    delivered_time: Option<Instant>,
 }
 
 /// `IntentBindRecord`: the bindings of one intent (by `filterEquals`).
@@ -104,6 +118,13 @@ struct Record {
     pending: Vec<StartItem>,
     delivered: Vec<StartItem>,
     bindings: Vec<Binding>,
+    /// Its restarts' count and delay, when it last started in a process,
+    /// when it is to restart, and its crashes.
+    restart_count: i32,
+    restart_delay: Duration,
+    restart_time: Option<Instant>,
+    next_restart_time: Option<Instant>,
+    crash_count: i32,
 }
 
 /// The app host's end of a binding it makes (the system's
@@ -163,7 +184,69 @@ impl WriteParcelable for StartArgs {
     }
 }
 
+/// The restart count and delay after a service with `count` restarts,
+/// the last `delay`, `crashes` and its last start at `started` dies:
+/// `min` at first and after it ran `reset`, else four times the last,
+/// half an hour per crash beyond the first.
+fn back_off(
+    count: i32,
+    delay: Duration,
+    crashes: i32,
+    started: Option<Instant>,
+    min: Duration,
+    reset: Duration,
+    now: Instant,
+) -> (i32, Duration) {
+    if delay.is_zero() {
+        (count + 1, min)
+    } else if crashes > 1 {
+        (count, BOUND_SERVICE_CRASH_RESTART_DURATION * (crashes - 1) as u32)
+    } else if started.is_none_or(|t| now > t + reset) {
+        (1, min)
+    } else {
+        (count, (delay * SERVICE_RESTART_DURATION_FACTOR).max(min))
+    }
+}
+
 impl Record {
+    /// `scheduleServiceRestartLocked`'s back-off: its delivered starts
+    /// pending again (but those delivered or done too often), and the
+    /// delay before it starts again, none when nothing needs it (`auto`:
+    /// a connection creates it).
+    fn schedule_restart(&mut self, auto: bool, now: Instant) -> Option<Duration> {
+        let mut min = SERVICE_RESTART_DURATION;
+        let mut reset = SERVICE_RESET_RUN_DURATION;
+        let mut canceled = false;
+        let mut again = Vec::new();
+        for s in std::mem::take(&mut self.delivered) {
+            // A start without an intent is made again if needed.
+            if s.intent.is_none() {
+                continue;
+            }
+            if s.delivery_count < MAX_DELIVERY_COUNT && s.done_executing_count < MAX_DONE_EXECUTING_COUNT {
+                let dur = s.delivered_time.map_or(Duration::ZERO, |t| now - t) * 2;
+                min = min.max(dur);
+                reset = reset.max(dur);
+                again.push(s);
+            } else {
+                eprintln!("app host: canceling start item {} in service {}/{}", s.id, self.package, self.class);
+                canceled = true;
+            }
+        }
+        self.pending.splice(0..0, again);
+        // `canStopIfKilled`.
+        let stop = self.start_requested && (self.stop_if_killed || canceled) && self.pending.is_empty();
+        if stop && !auto {
+            return None;
+        }
+        (self.restart_count, self.restart_delay) =
+            back_off(self.restart_count, self.restart_delay, self.crash_count, self.restart_time, min, reset, now);
+        if self.start_requested && self.stop_if_killed && self.pending.is_empty() {
+            self.start_requested = false;
+        }
+        Some(self.restart_delay)
+    }
+
     /// `ServiceRecord.makeNextStartId`.
     fn next_start_id(&mut self) -> i32 {
         self.last_start_id = next_id(self.last_start_id);
@@ -188,6 +271,20 @@ impl Record {
 }
 
 impl State {
+    /// When `token` restarts, `at` or later, no two services' restarts
+    /// closer than `SERVICE_MIN_RESTART_TIME_BETWEEN`.
+    fn stagger(&self, token: Binder, mut at: Instant) -> Instant {
+        loop {
+            let near = self.records.iter().filter(|r| r.token != token).filter_map(|r| r.next_restart_time.filter(|_| r.app.is_none())).find(|t| {
+                at + SERVICE_MIN_RESTART_TIME_BETWEEN > *t && at < *t + SERVICE_MIN_RESTART_TIME_BETWEEN
+            });
+            match near {
+                Some(t) => at = t + SERVICE_MIN_RESTART_TIME_BETWEEN,
+                None => return at,
+            }
+        }
+    }
+
     fn record(&mut self, token: Binder) -> Option<&mut Record> {
         self.records.iter_mut().find(|r| r.token == token)
     }
@@ -275,18 +372,8 @@ impl AppHost {
                 format!("not exported from uid {target}")
             }));
         }
-        let package = info
-            .info
-            .application_info
-            .item
-            .package_name
-            .as_deref()
-            .unwrap_or_default();
-        let process = info.info.process_name.as_deref().unwrap_or(package);
-        if info.flags & FLAG_ISOLATED_PROCESS != 0 || process != package {
-            return Err(
-                self.unimplemented_named("activity", "a service in a process of its own (#1492)")
-            );
+        if info.flags & FLAG_ISOLATED_PROCESS != 0 {
+            return Err(self.unimplemented_named("activity", "an isolated service (#1492)"));
         }
         Ok(Lookup::Found(Box::new(info)))
     }
@@ -327,6 +414,11 @@ impl AppHost {
             pending: Vec::new(),
             delivered: Vec::new(),
             bindings: Vec::new(),
+            restart_count: 0,
+            restart_delay: Duration::ZERO,
+            restart_time: None,
+            next_restart_time: None,
+            crash_count: 0,
         });
         token
     }
@@ -379,6 +471,7 @@ impl AppHost {
             intent: Some(kept),
             delivery_count: 0,
             done_executing_count: 0,
+            delivered_time: None,
         });
         let name = (r.package.clone(), r.class.clone());
         self.bring_up(&mut state, token)?;
@@ -779,13 +872,8 @@ impl AppHost {
             return Ok(());
         }
         let package = r.package.clone();
-        let running = self
-            .apps
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(_, a)| a.package == package)
-            .map(|(seq, a)| (*seq, a.thread.is_some()));
+        let process = super::providers::process_name(&r.info.info);
+        let running = self.running_process(&process, r.info.info.application_info.uid as u32);
         match running {
             Some((seq, attached)) => {
                 state.record(token).unwrap().app = Some(seq);
@@ -795,7 +883,7 @@ impl AppHost {
             }
             None => {
                 // `startProcessLocked` with hosting type `service`.
-                let pid = self.start_process_for(&package, None)?;
+                let pid = self.start_process_for(&package, &process, None)?;
                 let seq = self
                     .apps
                     .lock()
@@ -821,6 +909,7 @@ impl AppHost {
             .get(&app)
             .and_then(|a| a.config.clone());
         let Some(config) = config else { return };
+        r.restart_time = Some(Instant::now());
         let compat = super::config::CompatibilityInfo::of(&r.info.info.application_info, &config);
         let mut p = Parcel::new();
         thread::ScheduleCreateService {
@@ -855,6 +944,7 @@ impl AppHost {
                 intent: None,
                 delivery_count: 0,
                 done_executing_count: 0,
+                delivered_time: None,
             });
         }
         self.send_args(state, token);
@@ -915,6 +1005,7 @@ impl AppHost {
                 continue;
             }
             s.delivery_count += 1;
+            s.delivered_time = Some(Instant::now());
             let mut flags = 0;
             if s.delivery_count > 1 {
                 flags |= START_FLAG_RETRY;
@@ -1005,13 +1096,42 @@ impl AppHost {
         }
     }
 
-    /// The process of `start_seq` died: its connections to other services
-    /// go (`removeConnectionLocked`), and its own services' clients are told
-    /// (`killServicesLocked`); a service still started (sticky) or bound
-    /// with `BIND_AUTO_CREATE` is started again after
-    /// `SERVICE_RESTART_DURATION`.
-    pub(super) fn services_process_died(self: &Arc<Self>, start_seq: i64) {
+    /// The process of `start_seq` crashed (`incServiceCrashCountLocked`):
+    /// the crash count of each service running in it goes up, or starts
+    /// over when the service started long enough ago. None of the app
+    /// host's services is foreground, so none is tried again after its
+    /// process crashed too often.
+    pub(super) fn services_crashed(&self, start_seq: i64) {
+        let now = Instant::now();
         let mut state = self.services.state.lock().unwrap();
+        for r in state.records.iter_mut().filter(|r| r.app == Some(start_seq) && r.created) {
+            if r.restart_time.is_none_or(|t| now > t + MIN_CRASH_INTERVAL) {
+                r.crash_count = 1;
+            } else {
+                r.crash_count += 1;
+            }
+        }
+    }
+
+    /// The process of `start_seq` died (`killServicesLocked`): its
+    /// connections go, its services' clients are told, and each service
+    /// still needed is started again after its back-off
+    /// (`scheduleServiceRestartLocked`), unless `allow_restart` is off or
+    /// it crashed too often.
+    pub(super) fn services_process_died(self: &Arc<Self>, start_seq: i64, allow_restart: bool) {
+        let mut state = self.services.state.lock().unwrap();
+        // Its services are no longer in it, so that its connections to them
+        // are not unbound in it.
+        let tokens: Vec<Binder> = state
+            .records
+            .iter_mut()
+            .filter(|r| r.app == Some(start_seq))
+            .map(|r| {
+                r.app = None;
+                r.created = false;
+                r.token
+            })
+            .collect();
         let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut state.connections)
             .into_iter()
             .partition(|c| c.client == Some(start_seq));
@@ -1019,61 +1139,57 @@ impl AppHost {
         for c in &gone {
             self.connection_removed(&mut state, c);
         }
+        let now = Instant::now();
         let mut restart = Vec::new();
-        let tokens: Vec<Binder> = state
-            .records
-            .iter()
-            .filter(|r| r.app == Some(start_seq))
-            .map(|r| r.token)
-            .collect();
         for token in tokens {
             let auto = state.auto_created(token);
-            let r = state.record(token).unwrap();
-            r.app = None;
-            r.created = false;
+            // Brought down with its last connection.
+            let Some(r) = state.record(token) else { continue };
             for b in &mut r.bindings {
                 b.binder = None;
                 b.requested = false;
                 b.received = false;
                 b.has_bound = false;
             }
-            // Delivered starts are delivered again unless they are done.
-            let delivered = std::mem::take(&mut r.delivered);
-            r.pending.splice(0..0, delivered);
-            if r.start_requested
-                && r.stop_if_killed
-                && r.pending.iter().all(|s| s.done_executing_count == 0)
-            {
-                r.start_requested = false;
-            }
             let (package, class) = (r.package.clone(), r.class.clone());
-            let needed = r.start_requested || auto;
+            let delay = if !allow_restart {
+                None
+            } else if r.crash_count >= BOUND_SERVICE_MAX_CRASH_RETRY {
+                eprintln!("app host: service {package}/{class} crashed {} times, stopping", r.crash_count);
+                None
+            } else {
+                r.schedule_restart(auto, now)
+            };
             for c in state.connections.iter().filter(|c| c.service == token) {
                 connected(&c.conn, &package, &class, None, true);
             }
-            if needed {
-                restart.push(token);
-            } else {
-                state.records.retain(|r| r.token != token);
+            match delay {
+                Some(delay) => {
+                    let at = state.stagger(token, now + delay);
+                    let r = state.record(token).unwrap();
+                    r.restart_delay = at - now;
+                    r.next_restart_time = Some(at);
+                    eprintln!("app host: scheduling restart of crashed service {package}/{class} in {:?}", r.restart_delay);
+                    restart.push((token, at));
+                }
+                None => state.records.retain(|r| r.token != token),
             }
         }
         drop(state);
-        if restart.is_empty() {
-            return;
-        }
-        let me = Arc::downgrade(self);
-        std::thread::spawn(move || {
-            std::thread::sleep(RESTART_DELAY);
-            let Some(host) = me.upgrade() else { return };
-            let mut state = host.services.state.lock().unwrap();
-            for token in restart {
-                if state.record(token).is_some_and(|r| r.app.is_none())
+        for (token, at) in restart {
+            let me = Arc::downgrade(self);
+            std::thread::spawn(move || {
+                std::thread::sleep(at.saturating_duration_since(Instant::now()));
+                let Some(host) = me.upgrade() else { return };
+                let mut state = host.services.state.lock().unwrap();
+                // `performServiceRestartLocked`, unless it started since.
+                if state.record(token).is_some_and(|r| r.app.is_none() && r.next_restart_time == Some(at))
                     && let Err(e) = host.bring_up(&mut state, token)
                 {
                     eprintln!("app host: restarting a service: {}", e.message);
                 }
-            }
-        });
+            });
+        }
     }
 
     /// The connections made from activity `token` go with it
@@ -1098,6 +1214,21 @@ fn next_id(last: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `scheduleServiceRestartLocked`'s delays: one second, then four
+    /// times the last while it keeps dying soon, one second again once it
+    /// ran a minute, half an hour per crash beyond the first.
+    #[test]
+    fn restarts_back_off_as_the_original() {
+        let now = Instant::now();
+        let (min, reset) = (SERVICE_RESTART_DURATION, SERVICE_RESET_RUN_DURATION);
+        let soon = Some(now - Duration::from_secs(2));
+        assert_eq!(back_off(0, Duration::ZERO, 0, None, min, reset, now), (1, min));
+        assert_eq!(back_off(1, min, 0, soon, min, reset, now), (1, min * 4));
+        assert_eq!(back_off(1, min * 4, 0, soon, min, reset, now), (1, min * 16));
+        assert_eq!(back_off(3, min * 16, 0, Some(now - reset * 2), min, reset, now), (1, min));
+        assert_eq!(back_off(1, min, 3, soon, min, reset, now), (1, BOUND_SERVICE_CRASH_RESTART_DURATION * 2));
+    }
 
     #[test]
     fn start_ids_grow_and_skip_zero() {
