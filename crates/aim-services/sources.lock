@@ -121,7 +121,7 @@ INTERFACES=(
   "android.view.IWindowSession|system/framework/framework.jar|getWindowId"
   "android.view.IWindowId|system/framework/framework.jar|*"
   "android.os.storage.IStorageManager|system/framework/framework.jar|getVolumeList,mkdirs"
-  "android.hardware.input.IInputManager|system/framework/framework.jar|getVelocityTrackerStrategy"
+  "android.hardware.input.IInputManager|system/framework/framework.jar|getVelocityTrackerStrategy,getInputDevice,getInputDeviceIds,registerInputDevicesChangedListener"
   "com.android.internal.view.IInputMethodManager|system/framework/framework.jar|addClient"
   "android.os.IPermissionController|system/framework/framework.jar|*"
   "android.app.IApplicationThread|system/framework/framework.jar|bindApplication,scheduleTransaction,setProcessState,scheduleExit"
