@@ -19,6 +19,7 @@ pub mod display_service;
 pub mod freeform;
 pub mod input_manager;
 pub mod input_method;
+pub mod keychars;
 pub mod package_service;
 pub mod packages;
 pub mod permission_controller;
@@ -314,7 +315,7 @@ impl AppHost {
             ("trust", Arc::new(trust_service::TrustManager::new(self.clone()))),
             ("permission", Arc::new(permission_controller::PermissionController(self.clone()))),
             ("input_method", Arc::new(input_method::InputMethodManager::new(self.clone()))),
-            ("input", Arc::new(input_manager::InputManager(self.clone()))),
+            ("input", Arc::new(input_manager::InputManager::new(self.clone()))),
             ("audio", Arc::new(audio_service::AudioService::new(self.clone()))),
             ("mount", Arc::new(storage::StorageManager(self.clone()))),
             (
@@ -814,6 +815,11 @@ impl AppHost {
     /// `WindowManagerInternal.isUidFocused`.
     pub fn uid_focused(&self, uid: i32) -> bool {
         u32::try_from(uid).is_ok_and(|uid| self.activities.uid_focused(uid))
+    }
+
+    /// The image's root.
+    fn root(&self) -> Result<&Path, Exception> {
+        Ok(&self.configured.get().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host not configured"))?.root)
     }
 
     /// The guest's `/data`.
