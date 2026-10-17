@@ -77,7 +77,7 @@ impl Display {
     /// The default display, from SurfaceFlinger.
     pub fn query(process: &LocalProcess) -> Result<Display, String> {
         let sf = check_service(process, SERVICE)?;
-        let ids = call(&sf, GET_PHYSICAL_DISPLAY_IDS, |_| {}, |r| ints64(r))?;
+        let ids = call(&sf, GET_PHYSICAL_DISPLAY_IDS, |_| {}, ints64)?;
         let id = *ids.first().ok_or("SurfaceFlinger has no display")?;
         let (density, secure, install_orientation) = call(
             &sf,
@@ -327,7 +327,7 @@ fn present(r: &mut Reader<'_>) -> ParcelResult<()> {
 /// A structured parcelable: its size, which includes the size's own
 /// four bytes, then its fields; fields past the ones `read` reads are
 /// skipped, as a reader of an older version skips them.
-fn parcelable<T>(
+pub(super) fn parcelable<T>(
     r: &mut Reader<'_>,
     read: impl FnOnce(&mut Reader<'_>) -> ParcelResult<T>,
 ) -> ParcelResult<T> {

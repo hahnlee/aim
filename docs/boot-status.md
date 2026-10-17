@@ -32,7 +32,7 @@ guest-init --image <derived> --data <data> --run \
 ## The app host boot (2026-10-16)
 
 The app host image ([app-host.md](app-host.md)) boots without
-system_server: with `--only` its 32 services and one-shots, zygote accepts
+system_server: with `--only` its 33 services and one-shots, zygote accepts
 commands 4.2-4.3 s after guest-init starts (odsign is done at 2.36 s,
 zygote's preload takes 1.0 s); without `--only`, 7.2-8.0 s. apexd, keystore2 and
 odsign cannot be left out: init waits for properties they set
@@ -44,7 +44,10 @@ for the app host's `sensor_privacy`, and aborts unless the app host's
 `audio` gives it `getNativeInterface`; the app host then initializes the
 stream volumes in it. The media services (mediaserver, mediaextractor,
 mediametrics, media.swcodec) start too: Codec2's software decoders take
-their buffers from `/dev/dma_heap/system`, which the syscall layer serves. Calculator, started through
+their buffers from `/dev/dma_heap/system`, which the syscall layer serves. The health HAL
+(`vendor.health-aim`) starts for the app host's battery service, which
+is its client (not yet run on a boot; the times above are from before it
+joined). Calculator, started through
 the app host, draws its first frame about 0.36 s after its process starts,
 its window is on the display, and taps on the display's touchscreen
 reach it (7 + 8 = shows 15); its overflow menu opens under its button, and

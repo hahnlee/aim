@@ -848,6 +848,38 @@ impl Broadcasts {
         }
     }
 
+    /// `ActivityManager.broadcastStickyIntent(intent, OP_NONE,
+    /// USER_ALL)` of a system service of the app host: kept as the sticky
+    /// of all users, in place of one filter-equal to it, then sent as
+    /// [`Self::send_from_system`] sends.
+    pub fn send_sticky_from_system(&self, host: &AppHost, mut intent: RawIntent) {
+        let flags = intent.intent.flags | FLAG_EXCLUDE_STOPPED_PACKAGES;
+        let extended = intent.intent.extended_flags;
+        intent.set_flags(flags, extended);
+        let record = Arc::new(Record {
+            intent: intent.clone(),
+            binders: Arc::new(intent.handles().into_iter().map(|h| host.process.strong(h)).collect()),
+            calling_uid: SYSTEM_UID,
+            calling_package: Some("android".into()),
+            ordered: false,
+            initial_sticky: false,
+            user: USER_ALL,
+            share_identity: false,
+            result_code: 0,
+            result_data: None,
+            result_extras: None,
+        });
+        {
+            let mut st = self.state.lock().unwrap();
+            let sticky = Sticky { record, resolved_type: None };
+            match st.stickies.iter().position(|s| s.record.user == USER_ALL && filter_equals(&s.record.intent.intent, &intent.intent)) {
+                Some(at) => st.stickies[at] = sticky,
+                None => st.stickies.push(sticky),
+            }
+        }
+        self.send_from_system(host, intent);
+    }
+
     /// `unbroadcastIntent`: a sticky broadcast goes.
     pub fn unbroadcast(&self, host: &AppHost, call: &Call<'_>, intent: Option<RawIntent>, user: i32) -> Result<(), Exception> {
         let uid = call.sender_euid as i32;

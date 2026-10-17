@@ -194,6 +194,11 @@ impl Packages {
         Some(value)
     }
 
+    /// The id of the framework's resource `kind/name`: its `R` constant.
+    pub fn framework_id(&self, kind: &str, name: &str) -> Option<u32> {
+        self.platform.framework.id(kind, name)
+    }
+
     /// The framework's integer resource `name`.
     pub fn framework_integer(&self, name: &str) -> Option<i32> {
         let value = self.framework_value("integer", name)?;
