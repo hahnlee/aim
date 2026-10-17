@@ -14,6 +14,8 @@ use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_NULL_POINTER, Exception, Par
 use aim_service_aidl::android_media_iaudioservice as audio;
 
 use super::audio_policy::AudioPolicy;
+use super::kept::RawBundle;
+use super::playback::{self, Attributes, PlayerIdCard};
 use super::kept::RawIntent;
 use super::settings::Table;
 use super::volume::{self, Absolute, Config, DeviceAttributes, Effects, VolumeInfo, Volumes};
@@ -74,11 +76,20 @@ impl Service for AudioManagerNative {
                 p.write_no_exception();
                 Ok(p)
             }
-            // One-way: the playback monitor's (#1477).
-            PLAYBACK_HARDENING_EVENT | PORT_MUTE_EVENT => {
-                let _ = self.0.unimplemented_named("audio", "the playback monitor's audioserver events (#1477)");
+            // One-way: a port's mute, from audioserver.
+            PORT_MUTE_EVENT => {
+                call.data.enforce_interface(NATIVE_DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                let (port, event) = (call.data.read_i32().map_err(|_| BAD_VALUE)?, call.data.read_i32().map_err(|_| BAD_VALUE)?);
+                if super::broadcasts::is_core(call.sender_euid as i32) {
+                    let mut pb = self.0.playback.lock().unwrap();
+                    if pb.port_mute(port, event) {
+                        pb.dispatch(false);
+                    }
+                }
                 Ok(Parcel::new())
             }
+            // One-way: AudioService only counts these in its metrics.
+            PLAYBACK_HARDENING_EVENT => Ok(Parcel::new()),
             code => reply(Err(self.0.unimplemented("IAudioManagerNative", code))),
         }
     }
@@ -233,6 +244,86 @@ impl AppHost {
         Ok(())
     }
 
+    /// `validateAudioAttributesUsage`: a system usage takes
+    /// MODIFY_AUDIO_ROUTING, and is one of the supported (the call
+    /// assistant's).
+    fn validate_usage(&self, attributes: &Attributes, uid: i32) -> Result<(), Exception> {
+        if !playback::is_system_usage(attributes.usage) {
+            return Ok(());
+        }
+        if !self.granted(MODIFY_AUDIO_ROUTING, uid)? {
+            return Err(Exception::security("Missing MODIFY_AUDIO_ROUTING permission"));
+        }
+        if attributes.usage != 17 {
+            return Err(Exception::illegal_argument(format!("Unsupported usage {}", attributes.usage)));
+        }
+        Ok(())
+    }
+
+    /// `trackPlayer`: the player's id from AudioFlinger, or
+    /// `PLAYER_PIID_INVALID` before audioserver is there.
+    fn track_player(&self, call: &Call<'_>, card: Option<PlayerIdCard>) -> Result<i32, Exception> {
+        let uid = call.sender_euid as i32;
+        let Some(card) = card else {
+            return Err(Exception::new(EX_NULL_POINTER, "pic"));
+        };
+        self.validate_usage(&card.attributes, uid)?;
+        let Some(policy) = self.audio_policy.get() else {
+            return Ok(playback::PLAYER_PIID_INVALID);
+        };
+        let piid = match policy.new_client_id() {
+            Ok(id) if id != 0 => id,
+            Ok(_) => return Ok(playback::PLAYER_PIID_INVALID),
+            Err(e) => return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, e)),
+        };
+        // `IPlayerShell.monitorDeath`: a player whose process dies is
+        // released.
+        let player = card.player.map(|handle| {
+            let strong = self.process.strong(handle);
+            let me = self.me.clone();
+            let cookie = self.process.link_to_death(
+                &strong,
+                Box::new(move || {
+                    if let Some(host) = me.upgrade() {
+                        let mut pb = host.playback.lock().unwrap();
+                        for piid in pb.players_of(handle) {
+                            let (changed, _) = pb.release(piid, 0);
+                            if changed {
+                                pb.dispatch(true);
+                            }
+                        }
+                    }
+                }),
+            );
+            (strong, cookie)
+        });
+        self.playback.lock().unwrap().track(piid, card, uid, call.sender_pid, player);
+        Ok(piid)
+    }
+
+    /// `trackRecorder`.
+    fn track_recorder(&self, recorder: Option<Binder>) -> Result<i32, Exception> {
+        let Some(Binder::Handle(handle)) = recorder else {
+            return Ok(playback::RECORD_RIID_INVALID);
+        };
+        let Some(policy) = self.audio_policy.get() else {
+            return Ok(playback::RECORD_RIID_INVALID);
+        };
+        let riid = policy.new_client_id().map_err(|e| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, e))?;
+        let strong = self.process.strong(handle);
+        let me = self.me.clone();
+        let cookie = self.process.link_to_death(
+            &strong,
+            Box::new(move || {
+                if let Some(host) = me.upgrade() {
+                    host.playback.lock().unwrap().release_recorder(riid);
+                }
+            }),
+        );
+        self.playback.lock().unwrap().track_recorder(riid, strong, cookie);
+        Ok(riid)
+    }
+
     /// `registerDeviceVolumeDispatcherForAbsoluteVolume`.
     fn register_absolute(&self, uid: i32, args: audio::RegisterDeviceVolumeDispatcherForAbsoluteVolume<DeviceAttributes, VolumeInfo>) -> Result<(), Exception> {
         if !self.granted(MODIFY_AUDIO_ROUTING, uid)? && !self.granted(BLUETOOTH_PRIVILEGED, uid)? {
@@ -295,6 +386,120 @@ impl Service for AudioService {
             f(v, stream)
         };
         match call.code {
+            audio::TRACK_PLAYER => {
+                let a = audio::TrackPlayer::<PlayerIdCard>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match host.track_player(call, a.pic) {
+                    Ok(piid) => audio::write_track_player_reply(&mut p, piid),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            // One-way, as the rest of the players' and recorders' events.
+            audio::PLAYER_ATTRIBUTES => {
+                let a = audio::PlayerAttributes::<Attributes>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Some(attr) = a.attr
+                    && host.validate_usage(&attr, uid).is_ok()
+                {
+                    let mut pb = host.playback.lock().unwrap();
+                    if pb.attributes(a.piid, attr, uid) {
+                        pb.dispatch(false);
+                    }
+                }
+            }
+            audio::PLAYER_EVENT => {
+                let a = audio::PlayerEvent::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut pb = host.playback.lock().unwrap();
+                if pb.event(a.piid, a.event, &a.event_id.unwrap_or_default(), uid) {
+                    pb.dispatch(a.event == 0);
+                }
+            }
+            audio::RELEASE_PLAYER => {
+                let a = audio::ReleasePlayer::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut pb = host.playback.lock().unwrap();
+                let (changed, link) = pb.release(a.piid, uid);
+                playback::clear(&host.process, link);
+                if changed {
+                    pb.dispatch(true);
+                }
+            }
+            audio::PLAYER_SESSION_ID => {
+                let a = audio::PlayerSessionId::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                // An invalid session throws, which a one-way caller does
+                // not hear.
+                if a.session_id > 0 {
+                    let mut pb = host.playback.lock().unwrap();
+                    if pb.session(a.piid, a.session_id, uid) {
+                        pb.dispatch(false);
+                    }
+                }
+            }
+            audio::PORT_EVENT => {
+                let a = audio::PortEvent::<RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if super::broadcasts::is_core(uid) {
+                    let extras = a.extras.as_ref().and_then(playback::read_extras);
+                    let mut pb = host.playback.lock().unwrap();
+                    if pb.port_event(a.port_id, a.event, extras.as_ref()) {
+                        pb.dispatch(false);
+                    }
+                }
+            }
+            // PlaybackActivityMonitor does nothing with it.
+            audio::PLAYER_HAS_OP_PLAY_AUDIO => {
+                audio::PlayerHasOpPlayAudio::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+            }
+            audio::TRACK_RECORDER => {
+                let a = audio::TrackRecorder::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match host.track_recorder(a.recorder) {
+                    Ok(riid) => audio::write_track_recorder_reply(&mut p, riid),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            audio::RECORDER_EVENT => {
+                let a = audio::RecorderEvent::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                host.playback.lock().unwrap().recorder_event(a.riid, a.event);
+            }
+            audio::RELEASE_RECORDER => {
+                let a = audio::ReleaseRecorder::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let link = host.playback.lock().unwrap().release_recorder(a.riid);
+                playback::clear(&host.process, link);
+            }
+            audio::REGISTER_PLAYBACK_CALLBACK => {
+                let a = audio::RegisterPlaybackCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Some(Binder::Handle(handle)) = a.pcdb {
+                    let privileged = match host.granted(MODIFY_AUDIO_ROUTING, uid) {
+                        Ok(v) => v,
+                        Err(e) => return reply(Err(e)),
+                    };
+                    let strong = host.process.strong(handle);
+                    let me = host.me.clone();
+                    let cookie = host.process.link_to_death(
+                        &strong,
+                        Box::new(move || {
+                            if let Some(host) = me.upgrade() {
+                                host.playback.lock().unwrap().remove_client(handle);
+                            }
+                        }),
+                    );
+                    host.playback.lock().unwrap().add_client(strong, cookie, privileged);
+                }
+                audio::write_register_playback_callback_reply(&mut p);
+            }
+            audio::UNREGISTER_PLAYBACK_CALLBACK => {
+                let a = audio::UnregisterPlaybackCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Some(Binder::Handle(handle)) = a.pcdb {
+                    for link in host.playback.lock().unwrap().remove_client(handle) {
+                        playback::clear(&host.process, Some(link));
+                    }
+                }
+            }
+            audio::GET_ACTIVE_PLAYBACK_CONFIGURATIONS => {
+                audio::GetActivePlaybackConfigurations::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let privileged = match host.granted(MODIFY_AUDIO_ROUTING, uid) {
+                    Ok(v) => v,
+                    Err(e) => return reply(Err(e)),
+                };
+                p.write_no_exception();
+                host.playback.lock().unwrap().write_configurations(&mut p, privileged);
+            }
             audio::GET_NATIVE_INTERFACE => {
                 audio::GetNativeInterface::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 p.write_no_exception();

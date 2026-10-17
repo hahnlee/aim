@@ -229,7 +229,7 @@ fn strings(list: Option<Vec<Option<String>>>) -> Vec<String> {
 }
 
 /// `UserHandle.isCore`.
-fn is_core(uid: i32) -> bool {
+pub(super) fn is_core(uid: i32) -> bool {
     uid >= 0 && uid.rem_euclid(PER_USER_RANGE as i32) < FIRST_APPLICATION_UID
 }
 
