@@ -246,73 +246,80 @@ const SIZE: usize = 8 + FEATURES_CACHE + NONCE_STORE_HEADER + MAX_NONCE * 8 + MA
 
 impl ApplicationSharedMemory {
     pub fn new() -> std::io::Result<Self> {
-        let name = CString::new(format!("/aim-asm-{:x}-{:x}", std::process::id(), unsafe {
-            libc::arc4random()
-        }))
-        .unwrap();
-        // SAFETY: a fresh name; the descriptors are owned below.
-        let fd = unsafe {
-            libc::shm_open(
-                name.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-                0o600,
-            )
-        };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
+        let mut bytes = vec![0u8; SIZE];
+        bytes[..8].copy_from_slice(&INVALID_NETWORK_TIME.to_le_bytes());
+        let store = 8 + FEATURES_CACHE;
+        let header = [
+            MAX_NONCE as i32,
+            MAX_BYTE as i32,
+            NONCE_STORE_HEADER as i32,
+            (NONCE_STORE_HEADER + MAX_NONCE * 8) as i32,
+        ];
+        for (i, v) in header.iter().enumerate() {
+            bytes[store + 4 * i..store + 4 * i + 4].copy_from_slice(&v.to_le_bytes());
         }
-        let writer = unsafe { OwnedFd::from_raw_fd(fd) };
-        let result = (|| {
-            if unsafe { libc::ftruncate(writer.as_raw_fd(), SIZE as libc::off_t) } != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            let mut bytes = vec![0u8; SIZE];
-            bytes[..8].copy_from_slice(&INVALID_NETWORK_TIME.to_le_bytes());
-            let store = 8 + FEATURES_CACHE;
-            let header = [
-                MAX_NONCE as i32,
-                MAX_BYTE as i32,
-                NONCE_STORE_HEADER as i32,
-                (NONCE_STORE_HEADER + MAX_NONCE * 8) as i32,
-            ];
-            for (i, v) in header.iter().enumerate() {
-                bytes[store + 4 * i..store + 4 * i + 4].copy_from_slice(&v.to_le_bytes());
-            }
-            // Darwin's shared memory objects are only mapped, never read
-            // or written.
-            let base = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    SIZE,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_SHARED,
-                    writer.as_raw_fd(),
-                    0,
-                )
-            };
-            if base == libc::MAP_FAILED {
-                return Err(std::io::Error::last_os_error());
-            }
-            unsafe {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), base.cast(), SIZE);
-                libc::munmap(base, SIZE);
-            }
-            let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
-            if fd < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(ApplicationSharedMemory {
-                reader: unsafe { OwnedFd::from_raw_fd(fd) },
-            })
-        })();
-        unsafe { libc::shm_unlink(name.as_ptr()) };
-        result
+        Ok(ApplicationSharedMemory {
+            reader: read_only_memory(&bytes)?,
+        })
     }
 
     pub fn file(&self) -> std::io::Result<aim_binder_driver::File> {
         aim_binder_host::server::file_from_fd(self.reader.as_fd())
             .ok_or_else(|| std::io::Error::other("application shared memory fileport failed"))
     }
+}
+
+/// A shared memory object holding `bytes`, opened read-only: what a
+/// `SharedMemory` set to `PROT_READ` gives the processes it is passed to.
+pub(super) fn read_only_memory(bytes: &[u8]) -> std::io::Result<OwnedFd> {
+    let name = CString::new(format!("/aim-asm-{:x}-{:x}", std::process::id(), unsafe {
+        libc::arc4random()
+    }))
+    .unwrap();
+    // SAFETY: a fresh name; the descriptors are owned below.
+    let fd = unsafe {
+        libc::shm_open(
+            name.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let writer = unsafe { OwnedFd::from_raw_fd(fd) };
+    let result = (|| {
+        // Darwin's shared memory objects are sized once and only mapped,
+        // never read or written; an empty one is a page.
+        let size = bytes.len().max(1);
+        if unsafe { libc::ftruncate(writer.as_raw_fd(), size as libc::off_t) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                writer.as_raw_fd(),
+                0,
+            )
+        };
+        if base == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), base.cast(), bytes.len());
+            libc::munmap(base, size);
+        }
+        let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    })();
+    unsafe { libc::shm_unlink(name.as_ptr()) };
+    result
 }
 
 #[cfg(test)]

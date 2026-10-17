@@ -57,6 +57,9 @@ const FLAG_LOW_LATENCY: i32 = 1 << 8;
 const FLAG_NO_MEDIA_PROJECTION: i32 = 1 << 10;
 const FLAG_NO_SYSTEM_CAPTURE: i32 = 1 << 12;
 const FLAG_ALL_PUBLIC: i32 = FLAG_AUDIBILITY_ENFORCED | FLAG_HW_AV_SYNC | FLAG_LOW_LATENCY;
+/// `FLAG_ALL_API_SET`: the public flags, `FLAG_BYPASS_INTERRUPTION_POLICY`
+/// and `FLAG_BYPASS_MUTE`.
+const FLAG_ALL_API_SET: i32 = FLAG_ALL_PUBLIC | 1 << 6 | 1 << 7;
 const FLATTEN_TAGS: i32 = 1;
 const ATTR_PARCEL_IS_NULL_BUNDLE: i32 = -1977;
 const ATTR_PARCEL_IS_VALID_BUNDLE: i32 = 1980;
@@ -110,6 +113,32 @@ impl WriteParcelable for Attributes {
 }
 
 impl Attributes {
+    /// `new AudioAttributes.Builder().setUsage(usage).setContentType(content_type)
+    /// .setFlags(flags).build()`: the flags the builder takes, the
+    /// communication notification usages folded into one.
+    pub fn built(usage: i32, content_type: i32, flags: i32) -> Attributes {
+        let usage = if (7..=9).contains(&usage) { USAGE_NOTIFICATION } else { usage };
+        let flags = flags & FLAG_ALL_API_SET;
+        let mut p = Parcel::new();
+        p.write_i32(usage);
+        p.write_i32(content_type);
+        p.write_i32(AUDIO_SOURCE_INVALID);
+        p.write_i32(flags);
+        p.write_i32(0); // not flattened
+        p.write_i32(0); // no tags
+        p.write_i32(ATTR_PARCEL_IS_NULL_BUNDLE);
+        let raw = Raw::of(&p);
+        Attributes { usage, content_type, flags, raw }
+    }
+
+    pub fn content_type(&self) -> i32 {
+        self.content_type
+    }
+
+    pub fn flags(&self) -> i32 {
+        self.flags
+    }
+
     /// `anonymizedCopy`'s: built of the usage, content type, public flags
     /// and whether anyone may capture it.
     fn write_anonymized(&self, p: &mut Parcel) {

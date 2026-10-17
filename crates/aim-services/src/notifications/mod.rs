@@ -83,15 +83,6 @@ const RETRY: Duration = Duration::from_secs(1);
 const MAX_BLOB: usize = 64 << 20;
 /// `UserHandle.USER_SYSTEM`: the user the Mac's setting is mirrored into.
 const USER_SYSTEM: i32 = 0;
-/// `Notification.CallStyle.CALL_TYPE_ONGOING`.
-const CALL_TYPE_ONGOING: i32 = 2;
-const CALL_STYLE: &str = "android.app.Notification$CallStyle";
-/// The styles `Notification.hasPromotableStyle` accepts besides none.
-const PROMOTABLE_STYLES: [&str; 3] = [
-    "android.app.Notification$BigTextStyle",
-    CALL_STYLE,
-    "android.app.Notification$ProgressStyle",
-];
 
 /// Called once with the permission's state after the user's answer.
 pub type Answer = Box<dyn FnOnce(bool) + Send>;
@@ -800,18 +791,12 @@ fn is_live(n: &parcels::Notification) -> bool {
     if n.flags & FLAG_GROUP_SUMMARY != 0 {
         return false;
     }
-    let e = &n.extras;
-    let style = e.template.as_deref();
-    let promotable = !n.views.custom
-        && e.title.as_deref().is_some_and(|t| !t.is_empty())
-        && ((style == Some(CALL_STYLE) && e.call_type == CALL_TYPE_ONGOING)
-            || (e.colorized && style.is_none_or(|s| PROMOTABLE_STYLES.contains(&s))));
     let ongoing = n.flags & FLAG_ONGOING_EVENT != 0
-        && (n.flags & FLAG_PROMOTED_ONGOING != 0 || promotable);
+        && (n.flags & FLAG_PROMOTED_ONGOING != 0 || n.has_promotable_characteristics());
     let chronometer = if n.views.custom {
         n.views.chronometer.is_some()
     } else {
-        e.show_chronometer
+        n.extras.show_chronometer
     };
     ongoing || chronometer
 }
@@ -1017,8 +1002,8 @@ mod tests {
         n.extras.template = Some("android.app.Notification$InboxStyle".into());
         assert!(!is_live(&n));
         let mut call = ongoing();
-        call.extras.template = Some(CALL_STYLE.into());
-        call.extras.call_type = CALL_TYPE_ONGOING;
+        call.extras.template = Some(parcels::CALL_STYLE.into());
+        call.extras.call_type = parcels::CALL_TYPE_ONGOING;
         assert!(is_live(&call));
         call.flags = 0;
         assert!(!is_live(&call));
