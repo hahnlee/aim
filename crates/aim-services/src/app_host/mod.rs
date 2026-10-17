@@ -18,6 +18,7 @@ pub mod alarm_service;
 pub mod appops_service;
 pub mod audio_policy;
 pub mod audio_service;
+pub mod battery_service;
 pub mod bind;
 pub mod broadcasts;
 pub mod compat;
@@ -251,6 +252,7 @@ pub struct AppHost {
     notification_service: OnceLock<Arc<notification_service::NotificationManager>>,
     power_service: OnceLock<Arc<power_service::PowerManager>>,
     alarm_service: OnceLock<Arc<alarm_service::AlarmManager>>,
+    battery_service: OnceLock<Arc<battery_service::BatteryService>>,
     services: services::Services,
     pending_intents: pending_intents::PendingIntents,
     broadcasts: broadcasts::Broadcasts,
@@ -303,6 +305,7 @@ impl AppHost {
             notification_service: OnceLock::new(),
             power_service: OnceLock::new(),
             alarm_service: OnceLock::new(),
+            battery_service: OnceLock::new(),
             services: Default::default(),
             pending_intents: Default::default(),
             broadcasts: Default::default(),
@@ -392,6 +395,14 @@ impl AppHost {
                 self.alarm_service
                     .get_or_init(|| Arc::new(alarm_service::AlarmManager::new(self.clone())))
                     .clone(),
+            ),
+            (
+                "batteryproperties",
+                Arc::new(battery_service::BatteryProperties(
+                    self.battery_service
+                        .get_or_init(|| Arc::new(battery_service::BatteryService::new(self.clone())))
+                        .clone(),
+                )),
             ),
             ("account", Arc::new(account_service::AccountManager::new(self.clone()))),
             ("statusbar", Arc::new(status_bar::StatusBar::new(self.clone()))),
@@ -2088,6 +2099,15 @@ impl Service for Control {
                         eprintln!("app host: audio: {e}");
                     }
                 });
+                // The battery service waits for the health HAL, which init
+                // starts with the HALs.
+                if let Some(battery) = host.battery_service.get().cloned() {
+                    std::thread::spawn(move || {
+                        if let Err(e) = battery.start() {
+                            eprintln!("app host: battery: {e}");
+                        }
+                    });
+                }
                 if let Err(e) = host.start_storage() {
                     eprintln!("app host: external storage: {e}");
                 }

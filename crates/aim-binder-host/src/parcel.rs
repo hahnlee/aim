@@ -31,6 +31,9 @@ pub const FAILED_TRANSACTION: StatusCode = i32::MIN + 2;
 
 /// `Stability::Level::SYSTEM`: what the platform's own binders carry.
 const STABILITY_SYSTEM: i32 = 0b001100;
+/// `Stability::Level::VINTF`: what binders of `@VintfStability`
+/// interfaces carry (`AIBinder_markVintfStability`).
+const STABILITY_VINTF: i32 = 0b111111;
 /// `Parcel::kHeader` of the platform (`B_PACK_CHARS('S', 'Y', 'S', 'T')`).
 const HEADER: i32 = i32::from_be_bytes(*b"SYST");
 /// `STRICT_MODE_PENALTY_GATHER`.
@@ -230,6 +233,16 @@ impl Parcel {
 
     /// A binder and its stability, as `Parcel::flattenBinder` writes it.
     pub fn write_binder(&mut self, binder: Option<Binder>) {
+        self.write_binder_of(binder, STABILITY_SYSTEM);
+    }
+
+    /// A binder of a `@VintfStability` interface: a vendor process calls a
+    /// binder only of its own stability or a wider one (`BpBinder::transact`).
+    pub fn write_vintf_binder(&mut self, binder: Binder) {
+        self.write_binder_of(Some(binder), STABILITY_VINTF);
+    }
+
+    fn write_binder_of(&mut self, binder: Option<Binder>, stability: i32) {
         let object = match binder {
             Some(Binder::Handle(handle)) => FlatBinderObject {
                 kind: BINDER_TYPE_HANDLE,
@@ -254,11 +267,7 @@ impl Parcel {
             self.objects.push(self.data.len() as u64);
         }
         self.data.extend_from_slice(&object.encode());
-        self.write_i32(if binder.is_some() {
-            STABILITY_SYSTEM
-        } else {
-            0
-        });
+        self.write_i32(if binder.is_some() { stability } else { 0 });
     }
 
     /// A file descriptor (`writeFileDescriptor`) for `file`.
@@ -667,6 +676,20 @@ mod tests {
         assert_eq!(r.read_binder(), Ok(None));
         let mut r = Reader::new(p.data(), &[]);
         assert_eq!(r.enforce_interface("android.os.IOther"), Err(BAD_TYPE));
+    }
+
+    /// A binder's stability follows its object: the platform's, or VINTF's.
+    #[test]
+    fn binders_carry_their_stability() {
+        let mut p = Parcel::new();
+        p.write_binder(Some(Binder::Local(0x1000)));
+        p.write_vintf_binder(Binder::Local(0x2000));
+        let stability = |at: usize| i32::from_le_bytes(p.data()[at..at + 4].try_into().unwrap());
+        assert_eq!(stability(FLAT_BINDER_OBJECT_SIZE), STABILITY_SYSTEM);
+        assert_eq!(stability(2 * FLAT_BINDER_OBJECT_SIZE + 4), STABILITY_VINTF);
+        let mut r = Reader::new(p.data(), p.objects());
+        assert_eq!(r.read_binder(), Ok(Some(Binder::Local(0x1000))));
+        assert_eq!(r.read_binder(), Ok(Some(Binder::Local(0x2000))));
     }
 
     #[test]
