@@ -19,14 +19,16 @@ const MODE_ALLOWED: i32 = 0;
 const MODE_IGNORED: i32 = 1;
 const MODE_ERRORED: i32 = 2;
 pub(super) const MODE_DEFAULT: i32 = 3;
-/// `AppOpsManager.OP_USE_FULL_SCREEN_INTENT`.
+/// `AppOpsManager.OP_SCHEDULE_EXACT_ALARM`, `OP_USE_FULL_SCREEN_INTENT`.
+pub(super) const OP_SCHEDULE_EXACT_ALARM: i32 = 107;
 pub(super) const OP_USE_FULL_SCREEN_INTENT: i32 = 133;
 /// `UserManager.DISALLOW_ADJUST_VOLUME`.
 const DISALLOW_ADJUST_VOLUME: &str = "no_adjust_volume";
 /// The ops it decides: their code, name, default mode and user
 /// restriction. Each is its own switch, and none has a permission but
-/// USE_FULL_SCREEN_INTENT's, which NotificationManager only checks, so
-/// their notes are not collected (`AppOpsService.shouldCollectNotes`).
+/// SCHEDULE_EXACT_ALARM's and USE_FULL_SCREEN_INTENT's, which
+/// AlarmManager and NotificationManager only check, so their notes are
+/// not collected (`AppOpsService.shouldCollectNotes`).
 const OPS: &[(i32, &str, i32, Option<&str>)] = &[
     (29, "android:read_clipboard", MODE_ALLOWED, None),
     (30, "android:write_clipboard", MODE_ALLOWED, None),
@@ -37,6 +39,7 @@ const OPS: &[(i32, &str, i32, Option<&str>)] = &[
     (38, "android:audio_notification_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
     (39, "android:audio_bluetooth_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
     (64, "android:audio_accessibility_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
+    (OP_SCHEDULE_EXACT_ALARM, "android:schedule_exact_alarm", MODE_DEFAULT, None),
     (OP_USE_FULL_SCREEN_INTENT, "android:use_full_screen_intent", MODE_DEFAULT, None),
 ];
 

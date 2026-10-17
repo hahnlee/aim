@@ -60,14 +60,14 @@ const ON_STATE_CHANGED: u32 = 1;
 /// count and its chains'. Battery stats, which it attributes power to,
 /// are not kept.
 #[derive(Default)]
-struct WorkSource {
+pub(super) struct WorkSource {
     num: i32,
     chains: Option<usize>,
 }
 
 impl WorkSource {
     /// `isEmpty`.
-    fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.num == 0 && self.chains.is_none_or(|n| n == 0)
     }
 }

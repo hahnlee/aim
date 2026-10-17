@@ -492,7 +492,7 @@ impl AppHost {
                 .intents
                 .last()
                 .map(|k| k.intent.clone())
-                .unwrap_or_else(|| RawIntent::new("", 0, &[]));
+                .unwrap_or_else(|| RawIntent::of(None, 0, &[]));
             let mut resolved = r
                 .resolved_types
                 .as_ref()

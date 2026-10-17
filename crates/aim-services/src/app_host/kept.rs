@@ -34,8 +34,14 @@ impl RawIntent {
     /// `new Intent(action)` with `flags` and the extras `extras`, as
     /// `Intent.writeToParcel` writes it.
     pub fn new(action: &str, flags: i32, extras: &[(&str, crate::bundle::Value)]) -> RawIntent {
+        Self::of(Some(action), flags, extras)
+    }
+
+    /// `new Intent()` (no action) or `new Intent(action)`, with `flags`
+    /// and the extras `extras`.
+    pub fn of(action: Option<&str>, flags: i32, extras: &[(&str, crate::bundle::Value)]) -> RawIntent {
         let mut p = Parcel::new();
-        p.write_string8(Some(action));
+        p.write_string8(action);
         p.write_i32(0); // no data (`Uri.writeToParcel`)
         p.write_string8(None); // type
         p.write_string8(None); // identifier
@@ -499,7 +505,7 @@ mod tests {
         assert_eq!(filled.intent.action.as_deref(), Some("other.ACTION"));
         assert_eq!(filled.intent.component.map(|c| c.class).as_deref(), Some("q.C"));
         // An intent without extras or action takes the other's.
-        let bare = RawIntent::new("", 0, &[]);
+        let bare = RawIntent::of(None, 0, &[]);
         let (filled, _) = bare.fill_in(&other, 0).unwrap();
         assert_eq!(extras(&filled).len(), 2);
     }

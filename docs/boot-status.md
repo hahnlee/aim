@@ -51,10 +51,10 @@ reach it (7 + 8 = shows 15); its overflow menu opens under its button, and
 its licenses activity starts in its task (Calculator paused, the new
 activity launched), whose WebView then finds no `webviewupdate` service
 (#1491).
-Clock starts too (its notification and power services are the app
+Clock starts too (its notification, power and alarm services are the app
 host's): its clock page draws, its tooltip and its menu are popups at
 their places; opening its settings stops at the missing `jobscheduler` (#1490),
-its timer page at Google Services Framework's provider (#1450).
+its timer and alarm pages at Google Services Framework's provider (#1450).
 
 ## Native system services (2026-09-29, ADR 0013)
 
