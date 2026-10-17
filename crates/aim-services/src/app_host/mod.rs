@@ -11,6 +11,7 @@
 pub mod activity;
 pub mod activity_stack;
 pub mod activity_start;
+pub mod alarm_service;
 pub mod appops_service;
 pub mod audio_policy;
 pub mod audio_service;
@@ -246,6 +247,7 @@ pub struct AppHost {
     content_service: OnceLock<Arc<content_service::ContentService>>,
     notification_service: OnceLock<Arc<notification_service::NotificationManager>>,
     power_service: OnceLock<Arc<power_service::PowerManager>>,
+    alarm_service: OnceLock<Arc<alarm_service::AlarmManager>>,
     services: services::Services,
     pending_intents: pending_intents::PendingIntents,
     broadcasts: broadcasts::Broadcasts,
@@ -297,6 +299,7 @@ impl AppHost {
             content_service: OnceLock::new(),
             notification_service: OnceLock::new(),
             power_service: OnceLock::new(),
+            alarm_service: OnceLock::new(),
             services: Default::default(),
             pending_intents: Default::default(),
             broadcasts: Default::default(),
@@ -379,6 +382,12 @@ impl AppHost {
                 "power",
                 self.power_service
                     .get_or_init(|| Arc::new(power_service::PowerManager::new(self.clone())))
+                    .clone(),
+            ),
+            (
+                "alarm",
+                self.alarm_service
+                    .get_or_init(|| Arc::new(alarm_service::AlarmManager::new(self.clone())))
                     .clone(),
             ),
             ("statusbar", Arc::new(status_bar::StatusBar::new(self.clone()))),

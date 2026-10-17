@@ -8,6 +8,9 @@ AOSP_TAG=android-16.0.0_r1
 
 # project|path|sha256
 SOURCE_FILES=(
+  "platform/frameworks/base|apex/jobscheduler/framework/java/android/app/IAlarmManager.aidl|78d732d32eb4f06bc5c6fe24bdaea98888eed17cc73605060827063e6b39a15a"
+  "platform/frameworks/base|apex/jobscheduler/framework/java/android/app/IAlarmListener.aidl|9410b8de3eb90001ace6ddca3cc2bf83228eed5a1bd50b2e8d59824a49aae563"
+  "platform/frameworks/base|apex/jobscheduler/framework/java/android/app/IAlarmCompleteListener.aidl|2ea3aedd260c5c10f8d1398e9e92a043dfb4db538091bb022cbbd491dabada3d"
   "platform/frameworks/base|core/java/com/android/internal/os/IShellCallback.aidl|5350691b694a17b20d7d1d7f1f9b6b61b3f256340070cfd0317b8751cec3fbff"
   "platform/frameworks/base|core/java/android/content/IIntentSender.aidl|05e97a2eca70ee7fe47dbfb6b5938d34c027aab3515136f738f0746cb9af51ae"
   "platform/frameworks/native|libs/binder/aidl/android/content/pm/IStagedApexObserver.aidl|33775d393a32e5e060da8a19ead751381646ea050c123383b7f80dfc89fa7177"
@@ -182,6 +185,9 @@ INTERFACES=(
   "android.app.IUidObserver|system/framework/framework.jar|*"
   "android.permission.IOnPermissionsChangeListener|system/framework/framework.jar|*"
   "android.content.IIntentReceiver|system/framework/framework.jar|*"
+  "android.app.IAlarmManager|system/framework/framework.jar|set,setTime,setTimeZone,remove,removeAll,getNextWakeFromIdleTime,getNextAlarmClock,canScheduleExactAlarms,hasScheduleExactAlarm,getConfigVersion"
+  "android.app.IAlarmListener|system/framework/framework.jar|*"
+  "android.app.IAlarmCompleteListener|system/framework/framework.jar|*"
   "android.database.IContentObserver|system/framework/framework.jar|onChange"
   "android.os.IPowerManager|system/framework/framework.jar|acquireWakeLock,releaseWakeLock,isInteractive,shutdown,acquireWakeLockAsync,releaseWakeLockAsync,updateWakeLockUids,updateWakeLockUidsAsync,updateWakeLockWorkSource,updateWakeLockCallback,isWakeLockLevelSupported,isWakeLockLevelSupportedWithDisplayId,isDisplayInteractive,isPowerSaveMode,getPowerSaveState,isDeviceIdleMode,isLightDeviceIdleMode,isBatterySaverSupported"
   "android.os.IThermalService|system/framework/framework.jar|registerThermalEventListener,registerThermalEventListenerWithType,unregisterThermalEventListener,registerThermalStatusListener,unregisterThermalStatusListener,getCurrentThermalStatus,getThermalHeadroom,registerThermalHeadroomListener,unregisterThermalHeadroomListener"
