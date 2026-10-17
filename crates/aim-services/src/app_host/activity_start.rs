@@ -370,14 +370,20 @@ impl AppHost {
 
     /// `IActivityTaskManager.startActivity`: the start's result code.
     pub(super) fn start_activity(self: &Arc<Self>, call: &Call<'_>, args: StartArgs) -> Result<i32, Exception> {
-        let uid = call.sender_euid as i32;
+        let Some((caller_seq, caller_package, _, caller_pid)) = self.app_of_thread(args.caller) else {
+            return Err(Exception::security("Unable to find app for caller"));
+        };
+        self.start_activity_in_package(call.sender_euid as i32, caller_package, caller_pid, Some(caller_seq), args)
+    }
+
+    /// `ActivityStarter`'s start of `args` by `uid` of `caller_package`,
+    /// from the process of `caller_seq` (none for a PendingIntent sent as
+    /// its creator, `startActivityInPackage`): the start's result code.
+    pub(super) fn start_activity_in_package(self: &Arc<Self>, uid: i32, caller_package: String, caller_pid: i32, caller_seq: Option<i64>, args: StartArgs) -> Result<i32, Exception> {
         let mut intent = args.intent.ok_or_else(|| Exception::illegal_argument("intent"))?;
         if intent.has_fds() {
             return Err(Exception::illegal_argument("File descriptors passed in Intent"));
         }
-        let Some((caller_seq, caller_package, _, caller_pid)) = self.app_of_thread(args.caller) else {
-            return Err(Exception::security("Unable to find app for caller"));
-        };
         // `ActivityTaskSupervisor.resolveIntent`.
         let (_, resolution) = self.packages()?;
         let found = resolution
@@ -436,7 +442,7 @@ impl AppHost {
             self.start_process_for(&package, Some(request))?;
             return Ok(START_SUCCESS);
         };
-        let task = self.task_for(target_seq, target_uid, &package, &info, result_to.filter(|_| target_seq == caller_seq));
+        let task = self.task_for(target_seq, target_uid, &package, &info, result_to.filter(|_| Some(target_seq) == caller_seq));
         // The launch mode's and flags' reuse of an activity of the task.
         let reuse = {
             let stack = self.activities.stack.lock().unwrap();

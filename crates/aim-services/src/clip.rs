@@ -112,6 +112,28 @@ impl Raw {
         Raw { bytes, objects, files }
     }
 
+    /// The bytes of `start..end`, with their objects and files.
+    pub(crate) fn slice(&self, start: usize, end: usize) -> Raw {
+        let (s, e) = (start as u64, end as u64);
+        Raw {
+            bytes: self.bytes[start..end].to_vec(),
+            objects: self.objects.iter().filter(|&&at| at >= s && at < e).map(|at| at - s).collect(),
+            files: self.files.iter().filter(|(at, _)| *at >= s && *at < e).map(|(at, f)| (at - s, f.clone())).collect(),
+        }
+    }
+
+    /// `parts` one after another.
+    pub(crate) fn concat(parts: &[Raw]) -> Raw {
+        let mut raw = Raw::default();
+        for part in parts {
+            let base = raw.bytes.len() as u64;
+            raw.bytes.extend_from_slice(&part.bytes);
+            raw.objects.extend(part.objects.iter().map(|at| base + at));
+            raw.files.extend(part.files.iter().map(|(at, f)| (base + at, f.clone())));
+        }
+        raw
+    }
+
     /// The bytes and binder objects, as a parcel to read.
     pub(crate) fn parcel(&self) -> Parcel {
         let mut p = Parcel::new();
