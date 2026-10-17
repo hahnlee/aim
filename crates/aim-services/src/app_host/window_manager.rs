@@ -102,6 +102,28 @@ impl Service for WindowManager {
                 // The Mac's window has no navigation bar.
                 wm::write_has_navigation_bar_reply(&mut p, false);
             }
+            wm::GET_WINDOW_INSETS => {
+                let a = wm::GetWindowInsets::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if a.display_id != 0 {
+                    return reply(Err(Exception::illegal_argument(format!(
+                        "Display#{}could not be found!",
+                        a.display_id
+                    ))));
+                }
+                // The insets of the display's windows (no system bars), and
+                // whether they are forced consumed (never).
+                let display = match self.0.display() {
+                    Ok(d) => d.0.clone(),
+                    Err(e) => return reply(Err(e)),
+                };
+                wm::write_get_window_insets_reply(
+                    &mut p,
+                    &wm::GetWindowInsetsReply {
+                        result: false,
+                        out_insets_state: Some(DisplayInsets(display.width, display.height)),
+                    },
+                );
+            }
             code => return reply(Err(self.0.unimplemented("window", code))),
         }
         Ok(p)
@@ -467,6 +489,15 @@ impl Service for WindowId {
             code => return reply(Err(self.host.unimplemented("window id", code))),
         }
         Ok(p)
+    }
+}
+
+/// The `InsetsState` of a display of a size, as first sent.
+struct DisplayInsets(i32, i32);
+
+impl WriteParcelable for DisplayInsets {
+    fn write_to(&self, p: &mut Parcel) {
+        write_insets_state(p, self.0, self.1, FIRST_SEQ);
     }
 }
 
