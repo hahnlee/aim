@@ -14,6 +14,7 @@ pub mod audio_service;
 pub mod bind;
 pub mod compat;
 pub mod config;
+pub mod content_service;
 pub mod display;
 pub mod display_service;
 pub mod freeform;
@@ -224,6 +225,7 @@ pub struct AppHost {
     providers: Mutex<HashMap<String, Published>>,
     storage: storage::Volumes,
     text_input: input_method::TextInput,
+    content_service: OnceLock<Arc<content_service::ContentService>>,
 }
 
 /// A content provider an app's process published
@@ -262,6 +264,7 @@ impl AppHost {
             providers: Mutex::new(HashMap::new()),
             storage: Default::default(),
             text_input: Default::default(),
+            content_service: OnceLock::new(),
         })
     }
 
@@ -320,6 +323,12 @@ impl AppHost {
             ("input", Arc::new(input_manager::InputManager::new(self.clone()))),
             ("audio", Arc::new(audio_service::AudioService::new(self.clone()))),
             ("mount", Arc::new(storage::StorageManager(self.clone()))),
+            (
+                "content",
+                self.content_service
+                    .get_or_init(|| Arc::new(content_service::ContentService::new(self.clone())))
+                    .clone(),
+            ),
             (
                 "activity_task",
                 Arc::new(activity::ActivityTaskManager(
@@ -648,7 +657,11 @@ impl AppHost {
     /// component nobody owns: root and system hold every permission,
     /// isolated processes none, other uids what PackageManager granted
     /// them (`checkUidPermission`).
-    fn check_permission(&self, permission: Option<&str>, uid: i32) -> Result<i32, Exception> {
+    pub(super) fn check_permission(
+        &self,
+        permission: Option<&str>,
+        uid: i32,
+    ) -> Result<i32, Exception> {
         const GRANTED: i32 = 0;
         const DENIED: i32 = -1;
         let app_id = uid.rem_euclid(PER_USER_RANGE as i32);
@@ -656,7 +669,8 @@ impl AppHost {
             return Ok(GRANTED);
         }
         // `Process.isIsolated`: FIRST_ISOLATED_UID..LAST_ISOLATED_UID.
-        if (99000..=99999).contains(&app_id) || (90000..=98999).contains(&app_id) {
+        // `Process.isIsolated`: isolated and app zygote processes.
+        if (90000..=99999).contains(&app_id) {
             return Ok(DENIED);
         }
         let Some(permission) = permission else {
@@ -1005,6 +1019,132 @@ impl AppHost {
             provider,
             connection,
         }))
+    }
+
+    /// `ActivityManager.checkComponentPermission`: root and system, and the
+    /// owner's app, hold it; isolated processes do not; of a component
+    /// not exported, nobody else; else the permission, if any.
+    pub(super) fn check_component_permission(
+        &self,
+        permission: Option<&str>,
+        uid: i32,
+        owner: i32,
+        exported: bool,
+    ) -> Result<bool, Exception> {
+        let app_id = uid.rem_euclid(PER_USER_RANGE as i32);
+        if app_id == 0 || app_id == 1000 {
+            return Ok(true);
+        }
+        // `Process.isIsolated`: isolated and app zygote processes.
+        if (90000..=99999).contains(&app_id) {
+            return Ok(false);
+        }
+        if owner >= 0 && app_id == owner.rem_euclid(PER_USER_RANGE as i32) {
+            return Ok(true);
+        }
+        if !exported {
+            return Ok(false);
+        }
+        match permission {
+            None => Ok(true),
+            Some(_) => Ok(self.check_permission(permission, uid)? == 0),
+        }
+    }
+
+    /// `ContentProviderHelper.checkContentProviderAccess` of `authority` in
+    /// `user` for `uid`: `None` when it may use it, else why not. The app
+    /// host keeps no URI grants (`UriGrantsManager`).
+    pub(super) fn provider_access(
+        &self,
+        authority: &str,
+        uid: i32,
+        user: i32,
+    ) -> Result<Option<String>, Exception> {
+        const MATCH_DISABLED_COMPONENTS: i64 = 0x200;
+        const MATCH_DIRECT_BOOT_AWARE: i64 = 0x8_0000;
+        const MATCH_DIRECT_BOOT_UNAWARE: i64 = 0x4_0000;
+        let flags = STOCK_PM_FLAGS
+            | GET_URI_PERMISSION_PATTERNS
+            | MATCH_DISABLED_COMPONENTS
+            | MATCH_DIRECT_BOOT_AWARE
+            | MATCH_DIRECT_BOOT_UNAWARE;
+        let Some(cpi) = self.resolve_provider(authority, flags, user)? else {
+            return Ok(Some(format!(
+                "Failed to find provider {authority} for user {user}; expected to find a valid ContentProvider for this authority"
+            )));
+        };
+        let owner = cpi.info.application_info.uid;
+        let exported = cpi.info.exported;
+        let check = |permission: Option<&str>| {
+            self.check_component_permission(permission, uid, owner, exported)
+        };
+        if check(cpi.read_permission.as_deref())? || check(cpi.write_permission.as_deref())? {
+            return Ok(None);
+        }
+        // A path permission grants the provider when it names one the
+        // caller holds.
+        for pp in cpi.path_permissions.iter().flatten() {
+            for permission in [&pp.read_permission, &pp.write_permission].into_iter().flatten() {
+                if check(Some(permission))? {
+                    return Ok(None);
+                }
+            }
+        }
+        let name = cpi.info.item.name.clone().unwrap_or_default();
+        let suffix = if !exported {
+            format!(" that is not exported from UID {owner}")
+        } else if cpi.read_permission.as_deref() == Some("android.permission.MANAGE_DOCUMENTS") {
+            " requires that you obtain access using ACTION_OPEN_DOCUMENT or related APIs"
+                .to_string()
+        } else {
+            format!(
+                " requires {} or {}",
+                cpi.read_permission.as_deref().unwrap_or("null"),
+                cpi.write_permission.as_deref().unwrap_or("null")
+            )
+        };
+        Ok(Some(format!(
+            "Permission Denial: opening provider {name} (uid={uid}){suffix}"
+        )))
+    }
+
+    /// `resolveContentProvider` of `authority` with `flags`, as the system
+    /// asks it.
+    pub(super) fn resolve_provider(
+        &self,
+        authority: &str,
+        flags: i64,
+        user: i32,
+    ) -> Result<Option<package::info::ProviderInfo>, Exception> {
+        let (_, resolution) = self.packages()?;
+        match resolution.resolve_content_provider(authority, flags, user, 1000) {
+            Ok(found) => Ok(found),
+            Err(crate::package::resolve::ResolutionError::Original(e)) => Err(e),
+            Err(e) => Err(Exception::new(
+                EX_UNSUPPORTED_OPERATION,
+                format!("resolveContentProvider: {e:?}"),
+            )),
+        }
+    }
+
+    /// `ContentService.getProviderPackageName`.
+    pub(super) fn provider_package(
+        &self,
+        authority: &str,
+        user: i32,
+    ) -> Result<Option<String>, Exception> {
+        Ok(self
+            .resolve_provider(authority, 0, user)?
+            .and_then(|p| p.info.application_info.item.package_name.clone()))
+    }
+
+    /// `AppOpsManager.checkPackage`: whether `package` is `uid`'s.
+    pub(super) fn owns_package(&self, uid: i32, package: &str) -> Result<bool, Exception> {
+        let (state, _) = self.packages()?;
+        Ok(state
+            .packages
+            .get(package)
+            .is_some_and(|ps| ps.app_id == uid.rem_euclid(PER_USER_RANGE as i32)))
     }
 
     /// The provider an app published under `authority`, for an app of the

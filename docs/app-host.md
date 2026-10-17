@@ -23,6 +23,7 @@ and boot are unchanged.
 | `input`, `audio` | the host, same | what a touch and a click ask: the velocity tracker's strategy, and the input devices (InputReader's virtual keyboard, whose key character map apps load: `Virtual.kcm` as `KeyCharacterMap` parses and writes it, `app_host/keychars.rs`; the touchscreen, keyboard and mouse: #1434); whether navigation repeats sound, and the click's sound effect while sound effects are off (#1433) |
 | `user`, `appops`, `trust`, `input_method` | the host, same | what an app's start asks of them: the one user's state and restrictions, the clipboard's ops, an unlocked device, and the input method: the Mac's, whose text goes to the app's input connection ([input.md](input.md), "The app host: the Mac's input method") |
 | the `settings` provider | the host, same | `GET_*` and `LIST_config` from the settings the original persisted |
+| `content` | the host, same | `ContentService`'s observers (`ObserverNode`'s tree: a change reaches its URI's observers and the observers of its ancestors that take descendants), `notifyChange` after `checkContentProviderAccess` as the provider's permissions allow, and the content cache; sync adapters: #1460 |
 | `aim.app_host` | the host, same | `startActivity(String)` (code 1: a component, `package/.Class`, or a package, whose launch activity it resolves) for the shell and `aimctl open` |
 
 The start arguments, the configuration and the compat changes follow the
@@ -89,5 +90,4 @@ effects (#1433); a finished draw's transaction (#1431); the input
 method's candidates at the caret (#1458); settings generation tracking (#1430); scoped storage's
 per-file ownership and the media database (#1455); the font map in
 `bindApplication`, to come from the Mac's fonts (#1449),
-PackageManager's writes (#1425), and the content service, which apps
-such as Clock need next (#1452).
+PackageManager's writes (#1425), and sync adapters (#1460).
