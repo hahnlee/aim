@@ -47,7 +47,14 @@ mediametrics, media.swcodec) start too: Codec2's software decoders take
 their buffers from `/dev/dma_heap/system`, which the syscall layer serves. Calculator, started through
 the app host, draws its first frame about 0.36 s after its process starts,
 its window is on the display, and taps on the display's touchscreen
-reach it (7 + 8 = shows 15).
+reach it (7 + 8 = shows 15); its overflow menu opens under its button, and
+its licenses activity starts in its task (Calculator paused, the new
+activity launched), whose WebView then finds no `webviewupdate` service
+(#1491).
+Clock starts too (its notification and power services are the app
+host's): its clock page draws, its tooltip and its menu are popups at
+their places; opening its settings stops at the missing `jobscheduler` (#1490),
+its timer page at Google Services Framework's provider (#1450).
 
 ## Native system services (2026-09-29, ADR 0013)
 

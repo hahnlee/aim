@@ -1,8 +1,10 @@
 //! Input for the app host's windows, as the original's InputReader and
 //! InputDispatcher deliver it: the direct touchscreen's events, cooked
 //! into motions (`aim_input_transport`), published on the input channel
-//! of the front window under a gesture's start, in the window's
-//! coordinates. Windows stack in the order they were added or focused;
+//! of the front window whose touchable region holds a gesture's start, in
+//! the window's coordinates; the windows in front of it that watch
+//! outside touches are told of the start (`ACTION_OUTSIDE`, its position
+//! only for the target's own app). Windows stack in the order they were added or focused;
 //! the front one has the focus and is told so (`publishFocusEvent`). What
 //! a window sends back (finished and timeline messages) is read and
 //! dropped: no input times out (no ANR). Only the touchscreen is read
@@ -13,7 +15,8 @@ use std::io::Read;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
-use aim_input_transport::{ABS_MT_POSITION_X, ABS_MT_POSITION_Y, Touch, focus};
+pub use aim_input_transport::Region;
+use aim_input_transport::{ABS_MT_POSITION_X, ABS_MT_POSITION_Y, Touch, focus, touched};
 
 /// `IdGenerator::Source::INPUT_DISPATCHER`, in an event id's top bits.
 const ID_SOURCE_DISPATCHER: i32 = 1 << 30;
@@ -36,20 +39,19 @@ const fn eviocgabs(axis: u16) -> u64 {
     ioc(2, 0x40 + axis as u64, 24)
 }
 
-/// A window: its channel's index and server end, and its frame on the
-/// display (left, top, right, bottom), in pixels.
+/// A window: its channel's index and server end, and its region.
 struct Target {
     index: i32,
     channel: Arc<OwnedFd>,
-    frame: [i32; 4],
+    region: Region,
 }
 
 impl Target {
-    fn contains(&self, (x, y): (f32, f32)) -> bool {
-        let [left, top, right, bottom] = self.frame.map(|v| v as f32);
-        (left..right).contains(&x) && (top..bottom).contains(&y)
+    fn origin(&self) -> (f32, f32) {
+        (self.region.frame[0] as f32, self.region.frame[1] as f32)
     }
 }
+
 
 /// The windows, back to front, and the display's size in pixels.
 #[derive(Default)]
@@ -81,10 +83,10 @@ impl Dispatcher {
         (next.0, ID_SOURCE_DISPATCHER | next.1)
     }
 
-    /// The channel `index` of a window of `frame` on a display of
+    /// The channel `index` of a window of `region` on a display of
     /// `display` pixels was made: the window comes to the front and takes
     /// the focus. It goes when the app closes its end.
-    pub fn add_window(self: &Arc<Self>, index: i32, channel: OwnedFd, display: (i32, i32), frame: [i32; 4]) {
+    pub fn add_window(self: &Arc<Self>, index: i32, channel: OwnedFd, display: (i32, i32), region: Region) {
         let channel = Arc::new(channel);
         let drained = channel.clone();
         let dispatcher = self.clone();
@@ -94,7 +96,7 @@ impl Dispatcher {
         });
         let mut windows = self.windows.lock().unwrap();
         windows.display = (display.0 as f32, display.1 as f32);
-        windows.stack.push(Target { index, channel, frame });
+        windows.stack.push(Target { index, channel, region });
         self.refocus(&mut windows, None);
     }
 
@@ -109,10 +111,10 @@ impl Dispatcher {
         true
     }
 
-    /// The window of channel `index` moved to `frame`.
-    pub fn set_frame(&self, index: i32, frame: [i32; 4]) -> bool {
+    /// The window of channel `index` has `region` now.
+    pub fn set_region(&self, index: i32, region: Region) -> bool {
         let mut windows = self.windows.lock().unwrap();
-        windows.stack.iter_mut().find(|t| t.index == index).map(|t| t.frame = frame).is_some()
+        windows.stack.iter_mut().find(|t| t.index == index).map(|t| t.region = region).is_some()
     }
 
     fn remove_window(&self, index: i32) {
@@ -171,15 +173,25 @@ impl Dispatcher {
                         let mut windows = self.windows.lock().unwrap();
                         let scale = (windows.display.0 / x_axis.1 as f32, windows.display.1 / y_axis.1 as f32);
                         for motion in touch.report(time, x_axis.0, y_axis.0, scale) {
-                            // A gesture goes to the front window under its
-                            // start, if any (`findTouchedWindowTargets`).
+                            // A gesture goes to the front window that takes its
+                            // start, if any; the windows in front of it that
+                            // watch outside touches are told
+                            // (`findTouchedWindowTargets`).
                             if let Some(start) = motion.gesture_start() {
-                                windows.gesture = windows.stack.iter().rev().find(|t| t.contains(start)).map(|t| t.index);
+                                let regions: Vec<Region> = windows.stack.iter().map(|t| t.region).collect();
+                                let (at, outside) = touched(&regions, start);
+                                windows.gesture = at.map(|at| windows.stack[at].index);
+                                let owner = at.map(|at| regions[at].owner);
+                                for t in outside.into_iter().map(|i| &windows.stack[i]) {
+                                    let (seq, id) = self.ids();
+                                    let own = Some(t.region.owner) == owner;
+                                    send(&t.channel, &motion.outside(own).message(seq, id, t.origin()));
+                                }
                             }
                             let target = windows.gesture.and_then(|index| windows.stack.iter().find(|t| t.index == index));
                             if let Some(target) = target {
                                 let (seq, id) = self.ids();
-                                send(&target.channel, &motion.message(seq, id, (target.frame[0] as f32, target.frame[1] as f32)));
+                                send(&target.channel, &motion.message(seq, id, target.origin()));
                             }
                             if motion.ends_gesture() {
                                 windows.gesture = None;
@@ -260,3 +272,4 @@ fn drain(channel: &OwnedFd) {
         }
     }
 }
+

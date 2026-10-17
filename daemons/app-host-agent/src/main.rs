@@ -190,9 +190,9 @@ fn no_calls(_: &dyn IAppHost, _: TransactionCode, _: &BorrowedParcel<'_>, _: &mu
 }
 
 pub trait IAppHostAgent: Interface {
-    fn open_input_channel(&self, name: &str, display: (i32, i32), frame: [i32; 4]) -> std::io::Result<(i32, OwnedFd)>;
+    fn open_input_channel(&self, name: &str, display: (i32, i32), region: input::Region) -> std::io::Result<(i32, OwnedFd)>;
     fn focus_input_channel(&self, index: i32) -> bool;
-    fn set_input_channel_frame(&self, index: i32, frame: [i32; 4]) -> bool;
+    fn set_input_channel_frame(&self, index: i32, region: input::Region) -> bool;
     fn play_sound_effect(&self, path: &str, gain: f32) -> Result<(), String>;
 }
 
@@ -204,13 +204,13 @@ declare_binder_interface! {
 }
 
 impl IAppHostAgent for BpAppHostAgent {
-    fn open_input_channel(&self, _: &str, _: (i32, i32), _: [i32; 4]) -> std::io::Result<(i32, OwnedFd)> {
+    fn open_input_channel(&self, _: &str, _: (i32, i32), _: input::Region) -> std::io::Result<(i32, OwnedFd)> {
         Err(std::io::ErrorKind::Unsupported.into())
     }
     fn focus_input_channel(&self, _: i32) -> bool {
         false
     }
-    fn set_input_channel_frame(&self, _: i32, _: [i32; 4]) -> bool {
+    fn set_input_channel_frame(&self, _: i32, _: input::Region) -> bool {
         false
     }
     fn play_sound_effect(&self, _: &str, _: f32) -> Result<(), String> {
@@ -219,14 +219,14 @@ impl IAppHostAgent for BpAppHostAgent {
 }
 
 impl IAppHostAgent for binder::binder_impl::Binder<BnAppHostAgent> {
-    fn open_input_channel(&self, name: &str, display: (i32, i32), frame: [i32; 4]) -> std::io::Result<(i32, OwnedFd)> {
-        self.0.open_input_channel(name, display, frame)
+    fn open_input_channel(&self, name: &str, display: (i32, i32), region: input::Region) -> std::io::Result<(i32, OwnedFd)> {
+        self.0.open_input_channel(name, display, region)
     }
     fn focus_input_channel(&self, index: i32) -> bool {
         self.0.focus_input_channel(index)
     }
-    fn set_input_channel_frame(&self, index: i32, frame: [i32; 4]) -> bool {
-        self.0.set_input_channel_frame(index, frame)
+    fn set_input_channel_frame(&self, index: i32, region: input::Region) -> bool {
+        self.0.set_input_channel_frame(index, region)
     }
     fn play_sound_effect(&self, path: &str, gain: f32) -> Result<(), String> {
         self.0.play_sound_effect(path, gain)
@@ -243,8 +243,8 @@ fn on_transact(
         OPEN_INPUT_CHANNEL => {
             let name: String = data.read()?;
             let display: (i32, i32) = (data.read()?, data.read()?);
-            let frame = read_frame(data)?;
-            match agent.open_input_channel(&name, display, frame) {
+            let region = read_region(data)?;
+            match agent.open_input_channel(&name, display, region) {
                 Ok((index, client)) => {
                     reply.write(&Status::ok())?;
                     reply.write(&index)?;
@@ -265,7 +265,7 @@ fn on_transact(
             let known = if code == FOCUS_INPUT_CHANNEL {
                 agent.focus_input_channel(index)
             } else {
-                agent.set_input_channel_frame(index, read_frame(data)?)
+                agent.set_input_channel_frame(index, read_region(data)?)
             };
             reply.write(&if known {
                 Status::ok()
@@ -312,9 +312,20 @@ fn on_transact(
     }
 }
 
-/// A frame's left, top, right and bottom.
-fn read_frame(data: &BorrowedParcel<'_>) -> Result<[i32; 4], StatusCode> {
+/// A rectangle's left, top, right and bottom.
+fn read_rect(data: &BorrowedParcel<'_>) -> Result<[i32; 4], StatusCode> {
     Ok([data.read()?, data.read()?, data.read()?, data.read()?])
+}
+
+/// A window's frame, the region it takes touches in, whether it watches
+/// touches outside it, and its owner's uid.
+fn read_region(data: &BorrowedParcel<'_>) -> Result<input::Region, StatusCode> {
+    Ok(input::Region {
+        frame: read_rect(data)?,
+        touchable: read_rect(data)?,
+        watch_outside: data.read()?,
+        owner: data.read()?,
+    })
 }
 
 /// The agent: its windows' input.
@@ -330,7 +341,7 @@ impl IAppHostAgent for Agent {
     /// `InputChannel::openInputChannelPair`: a sequenced-packet socket
     /// pair with 32 KiB buffers each way; the window, the latest, comes to
     /// the front and takes the focus.
-    fn open_input_channel(&self, _name: &str, display: (i32, i32), frame: [i32; 4]) -> std::io::Result<(i32, OwnedFd)> {
+    fn open_input_channel(&self, _name: &str, display: (i32, i32), region: input::Region) -> std::io::Result<(i32, OwnedFd)> {
         let mut pair = [0; 2];
         // SAFETY: a socket pair into a local array; both ends are owned below.
         if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, pair.as_mut_ptr()) } != 0 {
@@ -352,7 +363,7 @@ impl IAppHostAgent for Agent {
             }
         }
         let index = self.channels.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.input.add_window(index, server, display, frame);
+        self.input.add_window(index, server, display, region);
         Ok((index, client))
     }
 
@@ -360,8 +371,8 @@ impl IAppHostAgent for Agent {
         self.input.focus_window(index)
     }
 
-    fn set_input_channel_frame(&self, index: i32, frame: [i32; 4]) -> bool {
-        self.input.set_frame(index, frame)
+    fn set_input_channel_frame(&self, index: i32, region: input::Region) -> bool {
+        self.input.set_region(index, region)
     }
 
     fn play_sound_effect(&self, path: &str, gain: f32) -> Result<(), String> {
