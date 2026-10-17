@@ -61,6 +61,9 @@ pub struct SystemConfig {
     /// `mAvailableFeatures`, as added: name and version.
     pub features: Vec<(String, i32)>,
     pub hidden_api_allowlist: Vec<String>,
+    /// `mAppDataIsolationWhitelistedApps`, in the order read (an
+    /// `ArraySet`: each once).
+    pub app_data_isolation_allowlist: Vec<String>,
     /// Domain verification's linked apps, in original ArraySet order.
     pub linked_apps: Vec<String>,
     pub staged_installers: BTreeSet<String>,
@@ -361,6 +364,13 @@ impl SystemConfig {
                         self.unavailable.push(name);
                     }
                 }
+                "app-data-isolation-whitelisted-app" => {
+                    if let Some(package) = e.string("package")
+                        && !self.app_data_isolation_allowlist.iter().any(|p| *p == package)
+                    {
+                        self.app_data_isolation_allowlist.push(package.into_owned());
+                    }
+                }
                 "hidden-api-whitelisted-app" if flags & ALLOW_HIDDENAPI_WHITELISTING != 0 => {
                     if let Some(package) = e.string("package")
                         && !self.hidden_api_allowlist.iter().any(|p| *p == package)
@@ -578,6 +588,7 @@ pub fn system(
         // `FeatureInfo.GL_ES_VERSION_UNDEFINED` without the property.
         gl_es_version: int(prop("ro.opengles.version")).unwrap_or(0),
         hidden_api_allowlist: config.hidden_api_allowlist,
+        app_data_isolation_allowlist: config.app_data_isolation_allowlist,
         named_actors: config.named_actors,
         use_round_icon: framework.use_round_icon,
         // Settings.Global.compatibility_mode's default; PackageManager reads

@@ -470,6 +470,12 @@ The migration's state and conformance results are in
   `removeTask` kills it. A resized task's activity relaunches or takes the
   new configuration by its `configChanges` and size buckets, as
   `ActivityRecord` decides.
+- **External storage (2026-10-17).** The app host takes
+  StorageManagerService's side with the original's vold (ours, already)
+  and MediaProvider's FUSE daemon native (`aim-emulated-storage`, run by
+  the agent as MediaProvider's uid): files keep the original's owners on
+  `/data/media`. MediaStore's per-file ownership and database come later
+  (#1455).
 
 ### CTS-derived conformance (2026-10-16)
 

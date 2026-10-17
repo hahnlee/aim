@@ -1,7 +1,8 @@
 # The services and one-shots init starts for the app host (docs/app-host.md,
 # `guest-init --only`): what an app's start needs without system_server.
 # apexd, keystore2 and odsign set properties init waits for; SurfaceFlinger
-# waits for the power HAL at its first frame.
+# waits for the power HAL at its first frame; vold mounts the emulated
+# storage the agent serves.
 apexd-bootstrap
 apexd
 keystore2
@@ -25,4 +26,5 @@ mainline_aconfigd_init
 system_aconfigd_mainline_init
 system_aconfigd_socket_service
 mainline_aconfigd_socket_service
+vold
 aim-app-host-agent

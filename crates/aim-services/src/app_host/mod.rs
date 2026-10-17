@@ -24,6 +24,7 @@ pub mod packages;
 pub mod permission_controller;
 pub mod settings;
 pub mod settings_provider;
+pub mod storage;
 pub mod surface;
 pub mod tasks;
 pub mod trust_service;
@@ -90,6 +91,8 @@ const GWP_ASAN_LEVEL_ALWAYS: i32 = 2 << 21;
 const GWP_ASAN_LEVEL_DEFAULT: i32 = 3 << 21;
 const NATIVE_HEAP_ZERO_INIT_ENABLED: i32 = 1 << 23;
 const FLAG_SYSTEM: i32 = 1;
+/// `ProcessList.APP_DATA_DIRECTORY_ISOLATION`.
+const APP_DATA_DIRECTORY_ISOLATION: i64 = 143937733;
 /// The compat changes `Zygote.getMemorySafetyRuntimeFlags` reads.
 const GWP_ASAN: i64 = 135634846;
 const NATIVE_HEAP_ZERO_INIT: i64 = 178038272;
@@ -160,6 +163,15 @@ struct Inputs {
     shared_memory: bind::ApplicationSharedMemory,
 }
 
+/// A start's app data isolation (`zygote::Start`'s).
+#[derive(Default)]
+struct Isolation {
+    packages: Vec<zygote::DataInfo>,
+    allowlisted: Vec<zygote::DataInfo>,
+    storage_dirs: bool,
+    data_dirs: bool,
+}
+
 /// A process started and not yet attached, or attached.
 struct App {
     package: String,
@@ -209,6 +221,7 @@ pub struct AppHost {
     pending_launches: Mutex<HashMap<String, String>>,
     /// The content providers apps published, by authority.
     providers: Mutex<HashMap<String, Published>>,
+    storage: storage::Volumes,
 }
 
 /// A content provider an app's process published
@@ -245,6 +258,7 @@ impl AppHost {
             tasks: Default::default(),
             pending_launches: Mutex::new(HashMap::new()),
             providers: Mutex::new(HashMap::new()),
+            storage: Default::default(),
         })
     }
 
@@ -302,6 +316,7 @@ impl AppHost {
             ("input_method", Arc::new(input_method::InputMethodManager::new(self.clone()))),
             ("input", Arc::new(input_manager::InputManager(self.clone()))),
             ("audio", Arc::new(audio_service::AudioService::new(self.clone()))),
+            ("mount", Arc::new(storage::StorageManager(self.clone()))),
             (
                 "activity_task",
                 Arc::new(activity::ActivityTaskManager(
@@ -407,6 +422,7 @@ impl AppHost {
             .application_info(name, STOCK_PM_FLAGS)
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("no application info of {name}")))?;
         let start_seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        let isolation = self.data_isolation(name, uid, target_sdk)?;
         let start = zygote::Start {
             uid,
             gids,
@@ -418,8 +434,8 @@ impl AppHost {
             )
                 << API_ENFORCEMENT_POLICY_SHIFT
                 | memory_safety(&inputs.compat, setting.flags, target_sdk),
-            // External storage has no owner in the app host yet (#1423).
-            mount_external: zygote::MountExternal::None,
+            // `getExternalStorageMountMode`: every app's scoped view.
+            mount_external: zygote::MountExternal::Default,
             target_sdk_version: target_sdk,
             nice_name: name.to_string(),
             seinfo: format!("{}{SEINFO_COMPLETE}", listed.seinfo),
@@ -427,6 +443,10 @@ impl AppHost {
             app_data_dir: Some(listed.data_dir.clone()),
             package_name: name.to_string(),
             is_top_app: true,
+            pkg_data_info: isolation.packages,
+            allowlisted_data_info: isolation.allowlisted,
+            bind_mount_app_storage_dirs: isolation.storage_dirs,
+            bind_mount_app_data_dirs: isolation.data_dirs,
             disabled_compat_changes: inputs.compat.disabled_changes(target_sdk),
             start_seq,
         };
@@ -466,6 +486,58 @@ impl AppHost {
             },
         );
         Ok(pid)
+    }
+
+    /// `ProcessList.startProcess`'s app data isolation for `package`'s
+    /// process of `uid`: its packages' data (its shared user's, else its
+    /// own) and the allowlisted apps', which zygote binds alone into the
+    /// process's view of `/data/user` (`--bind-mount-data-dirs`); the
+    /// storage directories' isolation is vold's
+    /// (`persist.sys.vold_app_data_isolation_enabled`).
+    fn data_isolation(&self, package: &str, uid: u32, target_sdk: i32) -> Result<Isolation, Exception> {
+        let inputs = self.inputs()?;
+        let configured = self.configured.get().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host not configured"))?;
+        let flag = |name: &str, default: bool| system_boolean((configured.properties)(name).as_deref(), default);
+        let (state, _) = self.packages()?;
+        let user = (uid / PER_USER_RANGE) as i32;
+        let app_id = uid % PER_USER_RANGE;
+        let mut data_dirs = flag("persist.zygote.app_data_isolation", true)
+            && (FIRST_APPLICATION_UID..=19_999).contains(&app_id)
+            && inputs.compat.is_enabled(APP_DATA_DIRECTORY_ISOLATION, target_sdk);
+        let ps = state.packages.get(package).ok_or_else(|| Exception::illegal_argument(format!("unknown package {package}")))?;
+        let targets: Vec<&str> = match &ps.shared_user {
+            Some(shared) => state.packages.values().filter(|p| p.shared_user.as_ref() == Some(shared)).map(|p| p.name.as_str()).collect(),
+            None => vec![package],
+        };
+        // `getPackageAppDataInfoMap`: none when a package has no CE data
+        // inode yet; unknown packages are left out.
+        let infos = |names: &mut dyn Iterator<Item = &str>| -> Option<Vec<zygote::DataInfo>> {
+            let mut infos = Vec::new();
+            for name in names {
+                let Some(ps) = state.packages.get(name) else { continue };
+                let inode = package::info::user_state(ps, user).ce_data_inode;
+                if inode <= 0 {
+                    return None;
+                }
+                infos.push(zygote::DataInfo { package: name.to_string(), volume_uuid: ps.volume_uuid.clone(), ce_data_inode: inode });
+            }
+            infos.sort_by_key(|i| package::info::java_hash(&i.package));
+            Some(infos)
+        };
+        let packages = infos(&mut targets.iter().copied());
+        let allowlist = &state.system.app_data_isolation_allowlist;
+        let allowlisted = infos(&mut allowlist.iter().map(String::as_str).filter(|p| !targets.contains(p)));
+        data_dirs &= packages.is_some() && allowlisted.is_some();
+        // `hasAppStorage`.
+        let no_storage = ps.pkg.as_ref().and_then(|p| p.properties.as_ref()).is_some_and(|props| {
+            props.iter().any(|(n, p)| n == "android.internal.PROPERTY_NO_APP_DATA_STORAGE" && p.value == package::pkg::PropertyValue::Bool(true))
+        });
+        if no_storage {
+            return Ok(Isolation::default());
+        }
+        // `needsStorageDataIsolation`, with the emulated volume mounted.
+        let storage_dirs = flag("persist.sys.vold_app_data_isolation_enabled", false) && packages.is_some() && self.storage_mounted();
+        Ok(Isolation { packages: packages.unwrap_or_default(), allowlisted: allowlisted.unwrap_or_default(), storage_dirs, data_dirs })
     }
 
     /// `attachApplicationLocked`, up to binding: the start the caller's
@@ -1138,6 +1210,16 @@ impl AppHost {
     }
 }
 
+/// `SystemProperties.getBoolean` of `value`: `default` when unset, empty
+/// or neither true nor false.
+fn system_boolean(value: Option<&str>, default: bool) -> bool {
+    match value {
+        Some("1" | "y" | "yes" | "on" | "true") => true,
+        Some("0" | "n" | "no" | "off" | "false") => false,
+        _ => default,
+    }
+}
+
 /// The string field `name` of a decoded parcelable, at any depth.
 fn field<'v>(value: &'v crate::shadow::Value, name: &str) -> Option<&'v str> {
     let crate::shadow::Value::Fields(fields) = value else { return None };
@@ -1356,6 +1438,9 @@ impl Service for Control {
                 if let Err(e) = host.inputs().and_then(|_| host.packages()) {
                     eprintln!("app host: loading its inputs: {e:?}");
                 }
+                if let Err(e) = host.start_storage() {
+                    eprintln!("app host: external storage: {e}");
+                }
             });
             let mut p = Parcel::new();
             p.write_no_exception();
@@ -1398,6 +1483,12 @@ impl Service for Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_booleans_default_when_unset_or_empty() {
+        assert!(system_boolean(None, true) && system_boolean(Some(""), true) && system_boolean(Some("on"), false));
+        assert!(!system_boolean(Some("false"), true) && !system_boolean(Some("maybe"), false));
+    }
 
     #[test]
     fn hidden_api_policy_by_signer_and_allowlist() {

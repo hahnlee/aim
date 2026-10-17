@@ -3,10 +3,12 @@
 # commands only from the system uid, so the agent relays the app host's
 # process starts to it; window input channels are guest sockets, so it
 # makes them; it kills the processes of removed tasks, as system_server
-# does with the same capability.
+# does with the same capability; it serves the emulated storage's FUSE
+# connection by a process as MediaProvider's uid and groups, as zygote
+# starts the FUSE daemon with the same capabilities.
 service aim-app-host-agent /system_ext/bin/aim-app-host-agent
     class main
     user system
     group system
-    capabilities KILL
+    capabilities KILL SETUID SETGID
     socket aim_zygote_relay stream 0660 root system

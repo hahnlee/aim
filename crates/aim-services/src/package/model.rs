@@ -411,6 +411,8 @@ pub struct System {
     pub gl_es_version: i32,
     /// `SystemConfig.getHiddenApiWhitelistedApps`.
     pub hidden_api_allowlist: Vec<String>,
+    /// `SystemConfig.getAppDataIsolationWhitelistedApps`.
+    pub app_data_isolation_allowlist: Vec<String>,
     /// `ParsingPackageUtils.sUseRoundIcon`.
     pub use_round_icon: bool,
     /// `ParsingPackageUtils.sCompatibilityModeEnabled`.

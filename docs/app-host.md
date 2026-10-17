@@ -12,13 +12,14 @@ and boot are unchanged.
 | Piece | Where | What it does |
 | --- | --- | --- |
 | init, servicemanager, SurfaceFlinger, the HALs, zygote | the guest, original | zygote starts without `--start-system-server` |
-| `aim-app-host-agent` | the guest, `daemons/app-host-agent` | what the host's services need a guest process of the system uid for: zygote takes commands only from the system uid (`ZygoteConnection`), so it relays the app host's process starts; window input channels are guest sockets, so it makes them, and reads the touchscreen and publishes its motions on the channel of the front window under a touch, as InputReader and InputDispatcher do (`crates/aim-input-transport`); it kills the process of a removed task |
+| `aim-app-host-agent` | the guest, `daemons/app-host-agent` | what the host's services need a guest process of the system uid for: it mounts user 0's emulated storage through vold and serves its FUSE connection, as MediaProvider's FuseDaemon does, by a process as MediaProvider's uid and FUSE-daemon groups (`crates/aim-emulated-storage`: the operations on `/data/media`, each user to its own directory); zygote takes commands only from the system uid (`ZygoteConnection`), so it relays the app host's process starts; window input channels are guest sockets, so it makes them, and reads the touchscreen and publishes its motions on the channel of the front window under a touch, as InputReader and InputDispatcher do (`crates/aim-input-transport`); it kills the process of a removed task |
 | `activity` | the host, `crates/aim-services/src/app_host` | starts an app's process as `ProcessList.startProcessLocked` does, takes its `attachApplication`, sends `bindApplication` (with the app's own content providers, `generateApplicationProvidersLocked`) and `setProcessState`, answers `checkPermission[ForDevice]` and `finishAttachApplication`, takes `publishContentProviders` and serves a published provider to its own uid (another app's: #1450) |
 | `package` | the host, same | the native PackageManager queries (`package::query`, `package::resolve`) over the packages the app host joins from `packages.xml`, `packages.list`, the permission state and each package's parse |
 | `activity_task`, the activity client controller | the host, same | launches the activity the process starts for (`LaunchActivityItem`, `ResumeActivityItem`, `TopResumedActivityChangeItem`) once its application is created, and takes its reports |
 | `display` | the host, same | the built-in display SurfaceFlinger reports, as `DisplayInfo` |
 | `window`, its sessions, `IWindowId` | the host, same | adds an app's window as `WindowManagerService.addWindow` does (its input channel from the agent, its insets) and relays it out as a SurfaceFlinger layer of buffers with no system bars: the whole display's, or in window mode its task's ([windows.md](windows.md), "The app host") |
 | `permission` | the host, same | `IPermissionController`, which SurfaceFlinger's permission checks wait for |
+| `mount` | the host, same | StorageManagerService's side of external storage: it connects vold (listener, reset, user 0's start), has the agent mount the emulated volume, and answers `getVolumeList` and `mkdirs` (vold's `setupAppDir`); processes start with the default external mount and app data isolation (`--pkg-data-info-map`, `--bind-mount-data-dirs`) as `ProcessList` starts them |
 | `input`, `audio` | the host, same | what a touch and a click ask: the velocity tracker's strategy; whether navigation repeats sound, and the click's sound effect while sound effects are off (#1433) |
 | `user`, `appops`, `trust`, `input_method` | the host, same | what an app's start asks of them: the one user's state and restrictions, the clipboard's ops, an unlocked device, the input method's client (no input method yet, #1432) |
 | the `settings` provider | the host, same | `GET_*` and `LIST_config` from the settings the original persisted |
@@ -85,8 +86,8 @@ idle 0.33 s after its process's start.
 More than one activity and window per app, focus changes within an app
 and accessibility (#1422); keys, the mouse and the rest of input dispatch (#1434); sound
 effects (#1433); a finished draw's transaction (#1431); the input
-method (#1432); settings generation tracking (#1430); external
-storage (#1423),
-the font map in `bindApplication`, to come from the Mac's fonts (#1449),
+method (#1432); settings generation tracking (#1430); scoped storage's
+per-file ownership and the media database (#1455); the font map in
+`bindApplication`, to come from the Mac's fonts (#1449),
 PackageManager's writes (#1425), and the content service, which apps
 such as Clock need next (#1452).

@@ -74,7 +74,7 @@ pub struct Change {
 
 impl Composer {
     pub fn connect(process: &LocalProcess) -> Result<Composer, String> {
-        let sf = super::display::surface_flinger(process, super::display::SERVICE)?;
+        let sf = super::display::check_service(process, super::display::SERVICE)?;
         let mut data = Parcel::new();
         data.write_interface_token(COMPOSER);
         let reply = sf.transact(CREATE_CONNECTION, &data, false).map_err(|s| format!("createConnection: {s}"))?;
@@ -86,7 +86,7 @@ impl Composer {
         Ok(Composer {
             client: process.strong(handle),
             handle,
-            transactions: super::display::surface_flinger(process, TRANSACTIONS)?,
+            transactions: super::display::check_service(process, TRANSACTIONS)?,
             apply_token: process.add_service(Arc::new(super::activity::Token)),
             next_id: AtomicU32::new(0),
         })
