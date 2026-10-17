@@ -67,12 +67,7 @@ fn check_free(files: &Files) -> Result<(), String> {
     Ok(())
 }
 
-fn inputs(selected: &crate::inputs::Inputs, windows: bool) -> Result<(), String> {
-    // Window mode follows system_server's tasks, which the app host has
-    // not (#1422).
-    if windows && selected.app_host_services()?.is_some() {
-        return Err("an app host image has no window mode yet".into());
-    }
+fn inputs(selected: &crate::inputs::Inputs) -> Result<(), String> {
     for (path, what) in [
         (selected.image.clone(), "the selected image"),
         (aim_paths::angle(), "ANGLE"),
@@ -92,7 +87,7 @@ fn inputs(selected: &crate::inputs::Inputs, windows: bool) -> Result<(), String>
 /// log, and back once guest-init has laid out the guest.
 pub fn start(files: &Files, windows: bool, selected: &crate::inputs::Inputs) -> Result<ExitCode, String> {
     check_free(files)?;
-    inputs(selected, windows)?;
+    inputs(selected)?;
     fs::create_dir_all(files.dir()).map_err(|e| format!("{}: {e}", files.dir().display()))?;
     let log =
         fs::File::create(files.log()).map_err(|e| format!("{}: {e}", files.log().display()))?;
@@ -290,7 +285,7 @@ pub fn run(files: &Files, windows: bool, selected: crate::inputs::Inputs) -> Res
             files.data.display()
         ));
     }
-    inputs(&selected, windows)?;
+    inputs(&selected)?;
     for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
         // SAFETY: the handler only stores to an atomic.
         unsafe {
@@ -737,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn an_app_host_image_starts_its_services_without_window_mode() {
+    fn an_app_host_image_starts_only_its_services() {
         let image = std::env::temp_dir().join(format!("aimctl-app-host-{}", std::process::id()));
         fs::create_dir_all(image.join("system/etc/aim")).unwrap();
         fs::write(image.join("system/etc/aim/app-host-services"), "# what starts\nlogd\n\nzygote # the app's\n").unwrap();
@@ -746,7 +741,6 @@ mod tests {
         let args = guest_init_args(&files, &selected).unwrap();
         let args = strings(&args);
         assert_eq!(args[args.iter().position(|a| *a == "--only").unwrap() + 1], "logd,zygote");
-        assert!(inputs(&selected, true).unwrap_err().contains("no window mode"));
         // An image that boots Android whole starts everything.
         fs::remove_file(image.join("system/etc/aim/app-host-services")).unwrap();
         assert!(!strings(&guest_init_args(&files, &selected).unwrap()).contains(&"--only"));

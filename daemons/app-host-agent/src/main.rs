@@ -14,6 +14,8 @@
 //!   hands the client's end to the host (`dev.aim.IAppHostAgent`, which it
 //!   attaches to `aim.app_host`) and publishes the window's input on the
 //!   server's (`input`).
+//! - It kills the process of a task the host removed, as system_server
+//!   does (`ProcessRecord.killLocked`: `Process.killProcessQuiet`).
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -37,8 +39,15 @@ const ZYGOTE_CONNECT_RETRY_DELAY: std::time::Duration = std::time::Duration::fro
 const APP_HOST: &str = "aim.app_host";
 const ATTACH_AGENT: u32 = 2;
 /// `IAppHostAgent.openInputChannel(String name, int displayWidth, int
-/// displayHeight)`: the channel's index and the client's end.
+/// displayHeight, int left, int top, int right, int bottom)`: the
+/// channel's index and the client's end; `focusInputChannel(int index)`;
+/// `setInputChannelFrame(int index, int left, int top, int right, int
+/// bottom)`.
 const OPEN_INPUT_CHANNEL: u32 = 1;
+const FOCUS_INPUT_CHANNEL: u32 = 2;
+const SET_INPUT_CHANNEL_FRAME: u32 = 3;
+/// `IAppHostAgent.killProcess(int pid)`.
+const KILL_PROCESS: u32 = 4;
 /// `InputTransport.cpp`'s `SOCKET_BUFFER_SIZE`.
 const SOCKET_BUFFER_SIZE: libc::c_int = 32 * 1024;
 
@@ -168,7 +177,9 @@ fn no_calls(_: &dyn IAppHost, _: TransactionCode, _: &BorrowedParcel<'_>, _: &mu
 }
 
 pub trait IAppHostAgent: Interface {
-    fn open_input_channel(&self, name: &str, width: i32, height: i32) -> std::io::Result<(i32, OwnedFd)>;
+    fn open_input_channel(&self, name: &str, display: (i32, i32), frame: [i32; 4]) -> std::io::Result<(i32, OwnedFd)>;
+    fn focus_input_channel(&self, index: i32) -> bool;
+    fn set_input_channel_frame(&self, index: i32, frame: [i32; 4]) -> bool;
 }
 
 declare_binder_interface! {
@@ -179,14 +190,26 @@ declare_binder_interface! {
 }
 
 impl IAppHostAgent for BpAppHostAgent {
-    fn open_input_channel(&self, _: &str, _: i32, _: i32) -> std::io::Result<(i32, OwnedFd)> {
+    fn open_input_channel(&self, _: &str, _: (i32, i32), _: [i32; 4]) -> std::io::Result<(i32, OwnedFd)> {
         Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn focus_input_channel(&self, _: i32) -> bool {
+        false
+    }
+    fn set_input_channel_frame(&self, _: i32, _: [i32; 4]) -> bool {
+        false
     }
 }
 
 impl IAppHostAgent for binder::binder_impl::Binder<BnAppHostAgent> {
-    fn open_input_channel(&self, name: &str, width: i32, height: i32) -> std::io::Result<(i32, OwnedFd)> {
-        self.0.open_input_channel(name, width, height)
+    fn open_input_channel(&self, name: &str, display: (i32, i32), frame: [i32; 4]) -> std::io::Result<(i32, OwnedFd)> {
+        self.0.open_input_channel(name, display, frame)
+    }
+    fn focus_input_channel(&self, index: i32) -> bool {
+        self.0.focus_input_channel(index)
+    }
+    fn set_input_channel_frame(&self, index: i32, frame: [i32; 4]) -> bool {
+        self.0.set_input_channel_frame(index, frame)
     }
 }
 
@@ -199,8 +222,9 @@ fn on_transact(
     match code {
         OPEN_INPUT_CHANNEL => {
             let name: String = data.read()?;
-            let (width, height): (i32, i32) = (data.read()?, data.read()?);
-            match agent.open_input_channel(&name, width, height) {
+            let display: (i32, i32) = (data.read()?, data.read()?);
+            let frame = read_frame(data)?;
+            match agent.open_input_channel(&name, display, frame) {
                 Ok((index, client)) => {
                     reply.write(&Status::ok())?;
                     reply.write(&index)?;
@@ -216,8 +240,39 @@ fn on_transact(
             }
             Ok(())
         }
+        FOCUS_INPUT_CHANNEL | SET_INPUT_CHANNEL_FRAME => {
+            let index: i32 = data.read()?;
+            let known = if code == FOCUS_INPUT_CHANNEL {
+                agent.focus_input_channel(index)
+            } else {
+                agent.set_input_channel_frame(index, read_frame(data)?)
+            };
+            reply.write(&if known {
+                Status::ok()
+            } else {
+                Status::new_exception_str(binder::ExceptionCode::ILLEGAL_ARGUMENT, Some(format!("no input channel {index}")))
+            })?;
+            Ok(())
+        }
+        KILL_PROCESS => {
+            let pid: i32 = data.read()?;
+            // SAFETY: a signal to a process id.
+            let status = if pid > 0 && unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+                Status::ok()
+            } else {
+                let error = std::io::Error::last_os_error();
+                Status::new_exception_str(binder::ExceptionCode::ILLEGAL_STATE, Some(format!("kill {pid}: {error}")))
+            };
+            reply.write(&status)?;
+            Ok(())
+        }
         _ => Err(StatusCode::UNKNOWN_TRANSACTION),
     }
+}
+
+/// A frame's left, top, right and bottom.
+fn read_frame(data: &BorrowedParcel<'_>) -> Result<[i32; 4], StatusCode> {
+    Ok([data.read()?, data.read()?, data.read()?, data.read()?])
 }
 
 /// The agent: its windows' input.
@@ -230,9 +285,9 @@ impl Interface for Agent {}
 
 impl IAppHostAgent for Agent {
     /// `InputChannel::openInputChannelPair`: a sequenced-packet socket
-    /// pair with 32 KiB buffers each way; the window, the latest, takes
-    /// the focus and the input.
-    fn open_input_channel(&self, _name: &str, width: i32, height: i32) -> std::io::Result<(i32, OwnedFd)> {
+    /// pair with 32 KiB buffers each way; the window, the latest, comes to
+    /// the front and takes the focus.
+    fn open_input_channel(&self, _name: &str, display: (i32, i32), frame: [i32; 4]) -> std::io::Result<(i32, OwnedFd)> {
         let mut pair = [0; 2];
         // SAFETY: a socket pair into a local array; both ends are owned below.
         if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, pair.as_mut_ptr()) } != 0 {
@@ -253,8 +308,17 @@ impl IAppHostAgent for Agent {
                 };
             }
         }
-        self.input.add_window(server, width, height);
-        Ok((self.channels.fetch_add(1, std::sync::atomic::Ordering::Relaxed), client))
+        let index = self.channels.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.input.add_window(index, server, display, frame);
+        Ok((index, client))
+    }
+
+    fn focus_input_channel(&self, index: i32) -> bool {
+        self.input.focus_window(index)
+    }
+
+    fn set_input_channel_frame(&self, index: i32, frame: [i32; 4]) -> bool {
+        self.input.set_frame(index, frame)
     }
 }
 

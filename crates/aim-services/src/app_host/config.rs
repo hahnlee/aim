@@ -33,6 +33,7 @@ const SCREENLAYOUT_LONG_NO: i32 = 0x10;
 const SCREENLAYOUT_LONG_YES: i32 = 0x20;
 const SCREENLAYOUT_LAYOUTDIR_LTR: i32 = 0x40;
 const SCREENLAYOUT_LAYOUTDIR_RTL: i32 = 0x80;
+const SCREENLAYOUT_LAYOUTDIR_MASK: i32 = 0xc0;
 const SCREENLAYOUT_ROUND_NO: i32 = 0x100;
 const SCREENLAYOUT_COMPAT_NEEDED: i32 = 0x1000_0000;
 const COLOR_MODE_WIDE_COLOR_GAMUT_NO: i32 = 0x1;
@@ -42,6 +43,7 @@ const UI_MODE_NIGHT_NO: i32 = 0x10;
 const UI_MODE_NIGHT_YES: i32 = 0x20;
 /// `WindowConfiguration`'s.
 const WINDOWING_MODE_FULLSCREEN: i32 = 1;
+const WINDOWING_MODE_FREEFORM: i32 = 5;
 const ACTIVITY_TYPE_UNDEFINED: i32 = 0;
 const ALWAYS_ON_TOP_UNDEFINED: i32 = 0;
 const ROTATION_0: i32 = 0;
@@ -272,6 +274,35 @@ impl Configuration {
             font_weight_adjustment: device.font_weight_adjustment,
             grammatical_gender: 0,
         }
+    }
+}
+
+impl Configuration {
+    /// The configuration of a freeform task of `bounds` on the display of
+    /// this global configuration, merged into it, as `TaskFragment
+    /// .computeConfigResourceOverrides` resolves a floating task's
+    /// (its sizes from its bounds; no insets) and `Configuration
+    /// .updateFrom` merges it.
+    pub fn of_freeform_task(&self, bounds: Rect) -> Configuration {
+        let density = self.density_dpi as f32 / 160.0;
+        let dp = |px: i32| (px as f32 / density + 0.5) as i32;
+        let (width_dp, height_dp) = (dp(bounds.width()).min(self.screen_width_dp), dp(bounds.height()).min(self.screen_height_dp));
+        let mut task = self.clone();
+        task.window.windowing_mode = WINDOWING_MODE_FREEFORM;
+        task.window.bounds = bounds;
+        task.window.app_bounds = Some(bounds);
+        task.screen_width_dp = width_dp;
+        task.screen_height_dp = height_dp;
+        task.smallest_screen_width_dp = dp(bounds.width().min(bounds.height()));
+        task.orientation = if width_dp <= height_dp { ORIENTATION_PORTRAIT } else { ORIENTATION_LANDSCAPE };
+        // `WindowContainer.computeScreenLayout`, keeping the direction.
+        let reduced = reduce_screen_layout(
+            self.screen_layout & (SCREENLAYOUT_LONG_MASK | SCREENLAYOUT_SIZE_MASK),
+            width_dp.max(height_dp),
+            width_dp.min(height_dp),
+        );
+        task.screen_layout = (self.screen_layout & SCREENLAYOUT_LAYOUTDIR_MASK) | reduced;
+        task
     }
 }
 
@@ -517,5 +548,20 @@ mod tests {
             ),
             (4, 320, -1)
         );
+    }
+
+    #[test]
+    fn a_freeform_task_takes_its_sizes_from_its_bounds() {
+        let display = Display::phone_for_test();
+        let device = Device { locales: "en-US", right_to_left: false, night: false, font_scale: 1.0, font_weight_adjustment: 0, seq: 1 };
+        let global = Configuration::of(&display, &device);
+        let bounds = Rect { left: 100, top: 200, right: 900, bottom: 1000 };
+        let task = global.of_freeform_task(bounds);
+        assert_eq!((task.window.windowing_mode, task.window.bounds, task.window.app_bounds), (5, bounds, Some(bounds)));
+        assert_eq!(task.window.max_bounds, global.window.max_bounds);
+        assert_eq!((task.screen_width_dp, task.screen_height_dp, task.smallest_screen_width_dp), (400, 400, 400));
+        assert_eq!(task.orientation, ORIENTATION_PORTRAIT);
+        // 400 dp square: small, not long, the direction kept.
+        assert_eq!(task.screen_layout, SCREENLAYOUT_LAYOUTDIR_LTR | SCREENLAYOUT_LONG_NO | SCREENLAYOUT_SIZE_SMALL);
     }
 }

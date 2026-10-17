@@ -16,6 +16,7 @@ pub mod compat;
 pub mod config;
 pub mod display;
 pub mod display_service;
+pub mod freeform;
 pub mod input_manager;
 pub mod input_method;
 pub mod package_service;
@@ -24,6 +25,7 @@ pub mod permission_controller;
 pub mod settings;
 pub mod settings_provider;
 pub mod surface;
+pub mod tasks;
 pub mod trust_service;
 pub mod user_service;
 pub mod window_manager;
@@ -34,7 +36,7 @@ use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Instant;
 
 use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
@@ -58,12 +60,17 @@ const START_ACTIVITY: u32 = 1;
 /// `void attachAgent(IBinder agent)`: the app host agent (`aim-app-host-agent`).
 const ATTACH_AGENT: u32 = 2;
 /// The agent's `openInputChannel(String name, int displayWidth, int
-/// displayHeight)`, and where the client's socket (a
-/// `ParcelFileDescriptor`) starts in its reply: after the status and the
-/// channel's index.
+/// displayHeight, int left, int top, int right, int bottom)`, and where
+/// the client's socket (a `ParcelFileDescriptor`) starts in its reply:
+/// after the status and the channel's index; its `focusInputChannel(int
+/// index)`, `setInputChannelFrame(int index, int left, int top, int
+/// right, int bottom)` and `killProcess(int pid)`.
 const AGENT_DESCRIPTOR: &str = "dev.aim.IAppHostAgent";
 const OPEN_INPUT_CHANNEL: u32 = 1;
 const AGENT_CHANNEL_FD: usize = 8;
+const FOCUS_INPUT_CHANNEL: u32 = 2;
+const SET_INPUT_CHANNEL_FRAME: u32 = 3;
+const KILL_PROCESS: u32 = 4;
 
 /// `Process.FIRST_APPLICATION_UID`, `UserHandle.PER_USER_RANGE`.
 const FIRST_APPLICATION_UID: u32 = 10000;
@@ -172,6 +179,7 @@ struct App {
 }
 
 pub struct AppHost {
+    me: Weak<AppHost>,
     process: Arc<LocalProcess>,
     configured: OnceLock<Configured>,
     inputs: OnceLock<Inputs>,
@@ -193,11 +201,15 @@ pub struct AppHost {
     windows: window_manager::Windows,
     composer: OnceLock<surface::Composer>,
     agent: Mutex<Option<Strong>>,
+    tasks: tasks::Tasks,
+    /// The server's launches, by package, until the package's task is made.
+    pending_launches: Mutex<HashMap<String, String>>,
 }
 
 impl AppHost {
     pub fn new(process: Arc<LocalProcess>) -> Arc<Self> {
-        Arc::new(AppHost {
+        Arc::new_cyclic(|me| AppHost {
+            me: me.clone(),
             process,
             configured: OnceLock::new(),
             inputs: OnceLock::new(),
@@ -216,6 +228,8 @@ impl AppHost {
             windows: Default::default(),
             composer: OnceLock::new(),
             agent: Mutex::new(None),
+            tasks: Default::default(),
+            pending_launches: Mutex::new(HashMap::new()),
         })
     }
 
@@ -465,10 +479,15 @@ impl AppHost {
             return Ok(());
         };
         let seq = start_seq;
+        let pid = app.pid;
+        let host = self.me.clone();
         self.process.link_to_death(
             &strong,
             Box::new(move || {
                 eprintln!("app host: process of start {seq} died");
+                if let Some(host) = host.upgrade() {
+                    host.process_died(seq, pid);
+                }
             }),
         );
         eprintln!(
@@ -498,6 +517,20 @@ impl AppHost {
         );
         app.thread = Some(strong);
         Ok(())
+    }
+
+    /// The process of `start_seq`, `pid`, died: what it had goes.
+    fn process_died(&self, start_seq: i64, pid: i32) {
+        self.apps.lock().unwrap().remove(&start_seq);
+        self.activities.remove_start(start_seq);
+        self.windows_died(pid);
+        self.tasks_died(start_seq);
+    }
+
+    /// Kills the process of `start_seq` (`ProcessRecord.killLocked`).
+    fn kill_process(&self, start_seq: i64) -> Result<(), String> {
+        let pid = self.apps.lock().unwrap().get(&start_seq).map(|a| a.pid).ok_or_else(|| format!("no process of start {start_seq}"))?;
+        self.call_agent(KILL_PROCESS, "killProcess", |data| data.write_i32(pid)).map(|_| ()).map_err(|e| format!("{e:?}"))
     }
 
     /// `ActivityManager.checkComponentPermission` of an exported
@@ -609,11 +642,13 @@ impl AppHost {
             .config
             .clone()
             .ok_or_else(|| state("launch before bind".into()))?;
+        let task = self.new_task(start_seq, app.uid, &app.package, &record.class, freeform::Activity::from(&info));
         let (launch, top) = self.launch_activity(
             record,
             activity::Launch {
                 info,
                 global: &global,
+                task,
             },
         );
         let thread = app.thread.as_ref().unwrap();
@@ -711,24 +746,48 @@ impl AppHost {
         Err(Exception::illegal_argument(format!("{package}: no launch activity")))
     }
 
-    /// A window input channel from the agent, for a window on a display of
-    /// `width` by `height` pixels: its reply, whose client socket starts at
-    /// [`AGENT_CHANNEL_FD`].
-    fn open_input_channel(&self, name: &str, width: i32, height: i32) -> Result<aim_binder_host::local::Received, Exception> {
+    /// A window input channel from the agent, for a window of `frame` on
+    /// a display of `display` pixels: its index, and the reply, whose
+    /// client socket starts at [`AGENT_CHANNEL_FD`].
+    fn open_input_channel(&self, name: &str, display: (i32, i32), frame: config::Rect) -> Result<(i32, aim_binder_host::local::Received), Exception> {
+        let reply = self.call_agent(OPEN_INPUT_CHANNEL, "openInputChannel", |data| {
+            data.write_string16(Some(name));
+            [display.0, display.1, frame.left, frame.top, frame.right, frame.bottom].iter().for_each(|v| data.write_i32(*v));
+        })?;
+        let mut r = reply.reader();
+        let index = r.read_exception().ok().and_then(|_| r.read_i32().ok());
+        let index = index.ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "openInputChannel reply"))?;
+        Ok((index, reply))
+    }
+
+    /// The input channel `index` takes the focus, its window in front.
+    fn focus_input_channel(&self, index: i32) -> Result<(), Exception> {
+        self.call_agent(FOCUS_INPUT_CHANNEL, "focusInputChannel", |data| data.write_i32(index)).map(|_| ())
+    }
+
+    /// The window of input channel `index` moved to `frame`.
+    fn set_input_frame(&self, index: i32, frame: config::Rect) -> Result<(), Exception> {
+        self.call_agent(SET_INPUT_CHANNEL_FRAME, "setInputChannelFrame", |data| {
+            [index, frame.left, frame.top, frame.right, frame.bottom].iter().for_each(|v| data.write_i32(*v));
+        })
+        .map(|_| ())
+    }
+
+    /// The agent's call `code` (`name`) of the arguments `write` writes:
+    /// its reply, after a status without exception.
+    fn call_agent(&self, code: u32, name: &str, write: impl FnOnce(&mut Parcel)) -> Result<aim_binder_host::local::Received, Exception> {
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
         let agent = self.agent.lock().unwrap();
         let agent = agent.as_ref().ok_or_else(|| state("the app host agent has not attached".into()))?;
         let mut data = Parcel::new();
         data.write_interface_token(AGENT_DESCRIPTOR);
-        data.write_string16(Some(name));
-        data.write_i32(width);
-        data.write_i32(height);
-        let reply = agent.transact(OPEN_INPUT_CHANNEL, &data, false).map_err(|s| state(format!("openInputChannel: {s}")))?;
+        write(&mut data);
+        let reply = agent.transact(code, &data, false).map_err(|s| state(format!("{name}: {s}")))?;
         let status = reply.reader().read_exception();
         match status {
             Ok(Ok(())) => Ok(reply),
             Ok(Err(e)) => Err(e),
-            Err(s) => Err(state(format!("openInputChannel reply: {s}"))),
+            Err(s) => Err(state(format!("{name} reply: {s}"))),
         }
     }
 

@@ -12,12 +12,12 @@ and boot are unchanged.
 | Piece | Where | What it does |
 | --- | --- | --- |
 | init, servicemanager, SurfaceFlinger, the HALs, zygote | the guest, original | zygote starts without `--start-system-server` |
-| `aim-app-host-agent` | the guest, `daemons/app-host-agent` | what the host's services need a guest process of the system uid for: zygote takes commands only from the system uid (`ZygoteConnection`), so it relays the app host's process starts; window input channels are guest sockets, so it makes them, and reads the touchscreen and publishes its motions on the focused window's channel, as InputReader and InputDispatcher do (`crates/aim-input-transport`) |
+| `aim-app-host-agent` | the guest, `daemons/app-host-agent` | what the host's services need a guest process of the system uid for: zygote takes commands only from the system uid (`ZygoteConnection`), so it relays the app host's process starts; window input channels are guest sockets, so it makes them, and reads the touchscreen and publishes its motions on the channel of the front window under a touch, as InputReader and InputDispatcher do (`crates/aim-input-transport`); it kills the process of a removed task |
 | `activity` | the host, `crates/aim-services/src/app_host` | starts an app's process as `ProcessList.startProcessLocked` does, takes its `attachApplication`, sends `bindApplication` and `setProcessState`, answers `checkPermission[ForDevice]` and `finishAttachApplication` |
 | `package` | the host, same | the native PackageManager queries (`package::query`, `package::resolve`) over the packages the app host joins from `packages.xml`, `packages.list`, the permission state and each package's parse |
 | `activity_task`, the activity client controller | the host, same | launches the activity the process starts for (`LaunchActivityItem`, `ResumeActivityItem`, `TopResumedActivityChangeItem`) once its application is created, and takes its reports |
 | `display` | the host, same | the built-in display SurfaceFlinger reports, as `DisplayInfo` |
-| `window`, its sessions, `IWindowId` | the host, same | adds an app's window as `WindowManagerService.addWindow` does (its input channel from the agent, its insets) and relays it out as a SurfaceFlinger layer of buffers at the display's root, the whole display, with no system bars |
+| `window`, its sessions, `IWindowId` | the host, same | adds an app's window as `WindowManagerService.addWindow` does (its input channel from the agent, its insets) and relays it out as a SurfaceFlinger layer of buffers with no system bars: the whole display's, or in window mode its task's ([windows.md](windows.md), "The app host") |
 | `permission` | the host, same | `IPermissionController`, which SurfaceFlinger's permission checks wait for |
 | `input`, `audio` | the host, same | what a touch and a click ask: the velocity tracker's strategy; whether navigation repeats sound, and the click's sound effect while sound effects are off (#1433) |
 | `user`, `appops`, `trust`, `input_method` | the host, same | what an app's start asks of them: the one user's state and restrictions, the clipboard's ops, an unlocked device, the input method's client (no input method yet, #1432) |
@@ -33,9 +33,10 @@ match, and the app host's `DisplayInfo` is the original's byte for byte.
 
 ## Running it
 
-`aimctl --data DIR start --image target/aim/app-host/root` keeps it
-resident and `aimctl open PACKAGE` starts an app ([aimctl.md](aimctl.md),
-"The app host"). By hand:
+`aimctl --data DIR start [--windows] --image target/aim/app-host/root`
+keeps it resident and `aimctl open PACKAGE` starts an app
+([aimctl.md](aimctl.md), "The app host"); with `--windows` each app is a
+Mac window of its own. By hand:
 
 ```
 cargo aim build
@@ -72,12 +73,16 @@ keeps the whole data of the named calls, and of their replies, in
 | to `activityIdle` (its first frame drawn) | 355-370 ms |
 
 `aim-display --capture` shows Calculator's whole window on the display;
-taps on 7, +, 8 and = on aim-display's touchscreen show 15.
+taps on 7, +, 8 and = on aim-display's touchscreen show 15. In window
+mode Calculator opens in its own window, 824×1464 pixels (412×732 dp),
+from its shim; it takes taps, moves with its window, and closing the
+window ends its process; opened again, it is idle 0.33 s after its
+process's start.
 
 ## Not yet
 
-More than one activity and window, focus changes and accessibility
-(#1422); keys, the mouse and the rest of input dispatch (#1434); sound
+More than one activity and window per app, focus changes within an app
+and accessibility (#1422); resizing a task in window mode (#1444); keys, the mouse and the rest of input dispatch (#1434); sound
 effects (#1433); a finished draw's transaction (#1431); the input
 method (#1432); settings generation tracking (#1430); external
 storage (#1423),

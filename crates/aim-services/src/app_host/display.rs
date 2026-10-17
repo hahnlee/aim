@@ -9,7 +9,7 @@ use aim_binder_host::parcel::{Binder, Parcel, Reader, Result as ParcelResult};
 use aim_service_aidl::android_os_iservicemanager as sm;
 
 /// SurfaceFlinger's AIDL service.
-const SERVICE: &str = "SurfaceFlingerAIDL";
+pub(super) const SERVICE: &str = "SurfaceFlingerAIDL";
 const DESCRIPTOR: &str = "android.gui.ISurfaceComposer";
 /// `getPhysicalDisplayIds`, `getStaticDisplayInfo`,
 /// `getDynamicDisplayInfoFromId`: their order in the interface.
@@ -76,7 +76,7 @@ impl Display {
 
     /// The default display, from SurfaceFlinger.
     pub fn query(process: &LocalProcess) -> Result<Display, String> {
-        let sf = surface_flinger(process)?;
+        let sf = surface_flinger(process, SERVICE)?;
         let ids = call(&sf, GET_PHYSICAL_DISPLAY_IDS, |_| {}, |r| ints64(r))?;
         let id = *ids.first().ok_or("SurfaceFlinger has no display")?;
         let (density, secure, install_orientation) = call(
@@ -182,7 +182,7 @@ impl Display {
     /// `getOverlaySupport`'s reply data after its status, as DisplayManager
     /// returns SurfaceFlinger's `OverlayProperties`.
     pub fn overlay_support(process: &LocalProcess) -> Result<Vec<u8>, String> {
-        let sf = surface_flinger(process)?;
+        let sf = surface_flinger(process, SERVICE)?;
         call(
             &sf,
             GET_OVERLAY_SUPPORT,
@@ -275,20 +275,22 @@ fn ints64(r: &mut Reader<'_>) -> ParcelResult<Vec<i64>> {
     (0..n.max(0)).map(|_| r.read_i64()).collect()
 }
 
-pub(super) fn surface_flinger(process: &LocalProcess) -> Result<Strong, String> {
+/// SurfaceFlinger's service `name`: its AIDL one, or the one of its
+/// transactions.
+pub(super) fn surface_flinger(process: &LocalProcess, name: &str) -> Result<Strong, String> {
     let mut data = Parcel::new();
     sm::CheckService {
-        name: Some(SERVICE.into()),
+        name: Some(name.into()),
     }
     .write(&mut data);
     let reply = process
         .transact(0, sm::CHECK_SERVICE, &data, false)
         .map_err(|s| format!("servicemanager: {s}"))?;
     match sm::read_check_service_reply(&mut reply.reader())
-        .map_err(|s| format!("{SERVICE}: {s}"))?
+        .map_err(|s| format!("{name}: {s}"))?
     {
         Ok(Some(Binder::Handle(handle))) => Ok(process.strong(handle)),
-        _ => Err(format!("no {SERVICE}")),
+        _ => Err(format!("no {name}")),
     }
 }
 

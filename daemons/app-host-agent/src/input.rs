@@ -1,10 +1,12 @@
 //! Input for the app host's windows, as the original's InputReader and
 //! InputDispatcher deliver it: the direct touchscreen's events, cooked
-//! into motions (`aim_input_transport`), published on the focused
-//! window's input channel. The focused window is the
-//! latest one added; it is told so (`publishFocusEvent`). What the window
-//! sends back (finished and timeline messages) is read and dropped: no
-//! input times out (no ANR). Only the touchscreen is read (#1434).
+//! into motions (`aim_input_transport`), published on the input channel
+//! of the front window under a gesture's start, in the window's
+//! coordinates. Windows stack in the order they were added or focused;
+//! the front one has the focus and is told so (`publishFocusEvent`). What
+//! a window sends back (finished and timeline messages) is read and
+//! dropped: no input times out (no ANR). Only the touchscreen is read
+//! (#1434).
 
 use std::fs::File;
 use std::io::Read;
@@ -34,22 +36,38 @@ const fn eviocgabs(axis: u16) -> u64 {
     ioc(2, 0x40 + axis as u64, 24)
 }
 
-/// The window input goes to: its channel's server end and the display's
-/// size in pixels.
+/// A window: its channel's index and server end, and its frame on the
+/// display (left, top, right, bottom), in pixels.
 struct Target {
+    index: i32,
     channel: Arc<OwnedFd>,
-    width: f32,
-    height: f32,
+    frame: [i32; 4],
+}
+
+impl Target {
+    fn contains(&self, (x, y): (f32, f32)) -> bool {
+        let [left, top, right, bottom] = self.frame.map(|v| v as f32);
+        (left..right).contains(&x) && (top..bottom).contains(&y)
+    }
+}
+
+/// The windows, back to front, and the display's size in pixels.
+#[derive(Default)]
+struct Windows {
+    stack: Vec<Target>,
+    display: (f32, f32),
+    /// The window of the gesture under way.
+    gesture: Option<i32>,
 }
 
 pub struct Dispatcher {
-    target: Mutex<Option<Target>>,
+    windows: Mutex<Windows>,
     next_seq: Mutex<(u32, i32)>,
 }
 
 impl Dispatcher {
     pub fn new() -> Arc<Dispatcher> {
-        let dispatcher = Arc::new(Dispatcher { target: Mutex::new(None), next_seq: Mutex::new((0, 0)) });
+        let dispatcher = Arc::new(Dispatcher { windows: Mutex::new(Windows::default()), next_seq: Mutex::new((0, 0)) });
         let reader = dispatcher.clone();
         std::thread::spawn(move || reader.read_touchscreen());
         dispatcher
@@ -63,14 +81,65 @@ impl Dispatcher {
         (next.0, ID_SOURCE_DISPATCHER | next.1)
     }
 
-    /// A window's channel was made: it takes the focus.
-    pub fn add_window(&self, channel: OwnedFd, width: i32, height: i32) {
+    /// The channel `index` of a window of `frame` on a display of
+    /// `display` pixels was made: the window comes to the front and takes
+    /// the focus. It goes when the app closes its end.
+    pub fn add_window(self: &Arc<Self>, index: i32, channel: OwnedFd, display: (i32, i32), frame: [i32; 4]) {
         let channel = Arc::new(channel);
         let drained = channel.clone();
-        std::thread::spawn(move || drain(&drained));
-        let (seq, id) = self.ids();
-        send(&channel, &focus(seq, id, true));
-        *self.target.lock().unwrap() = Some(Target { channel, width: width as f32, height: height as f32 });
+        let dispatcher = self.clone();
+        std::thread::spawn(move || {
+            drain(&drained);
+            dispatcher.remove_window(index);
+        });
+        let mut windows = self.windows.lock().unwrap();
+        windows.display = (display.0 as f32, display.1 as f32);
+        windows.stack.push(Target { index, channel, frame });
+        self.refocus(&mut windows, None);
+    }
+
+    /// The window of channel `index` comes to the front and takes the focus.
+    pub fn focus_window(&self, index: i32) -> bool {
+        let mut windows = self.windows.lock().unwrap();
+        let Some(at) = windows.stack.iter().position(|t| t.index == index) else { return false };
+        let previous = windows.stack.last().map(|t| t.index);
+        let target = windows.stack.remove(at);
+        windows.stack.push(target);
+        self.refocus(&mut windows, previous);
+        true
+    }
+
+    /// The window of channel `index` moved to `frame`.
+    pub fn set_frame(&self, index: i32, frame: [i32; 4]) -> bool {
+        let mut windows = self.windows.lock().unwrap();
+        windows.stack.iter_mut().find(|t| t.index == index).map(|t| t.frame = frame).is_some()
+    }
+
+    fn remove_window(&self, index: i32) {
+        let mut windows = self.windows.lock().unwrap();
+        let previous = windows.stack.last().map(|t| t.index);
+        windows.stack.retain(|t| t.index != index);
+        if windows.gesture == Some(index) {
+            windows.gesture = None;
+        }
+        if previous == Some(index) {
+            self.refocus(&mut windows, None);
+        }
+    }
+
+    /// Tells the window that had the focus, `previous` (unless it is the
+    /// front one), that it lost it, and the front one that it has it.
+    fn refocus(&self, windows: &mut Windows, previous: Option<i32>) {
+        let front = windows.stack.last().map(|t| t.index);
+        if previous == front {
+            return;
+        }
+        for target in &windows.stack {
+            if Some(target.index) == previous || Some(target.index) == front {
+                let (seq, id) = self.ids();
+                send(&target.channel, &focus(seq, id, Some(target.index) == front));
+            }
+        }
     }
 
     /// Reads the touchscreen, as long as the agent runs.
@@ -99,12 +168,21 @@ impl Dispatcher {
                 (EV_SYN, SYN_REPORT) => {
                     if !std::mem::take(&mut dropped) {
                         let time = sec * 1_000_000_000 + usec * 1_000;
-                        let target = self.target.lock().unwrap();
-                        if let Some(target) = target.as_ref() {
-                            let scale = (target.width / x_axis.1 as f32, target.height / y_axis.1 as f32);
-                            for motion in touch.report(time, x_axis.0, y_axis.0, scale) {
+                        let mut windows = self.windows.lock().unwrap();
+                        let scale = (windows.display.0 / x_axis.1 as f32, windows.display.1 / y_axis.1 as f32);
+                        for motion in touch.report(time, x_axis.0, y_axis.0, scale) {
+                            // A gesture goes to the front window under its
+                            // start, if any (`findTouchedWindowTargets`).
+                            if let Some(start) = motion.gesture_start() {
+                                windows.gesture = windows.stack.iter().rev().find(|t| t.contains(start)).map(|t| t.index);
+                            }
+                            let target = windows.gesture.and_then(|index| windows.stack.iter().find(|t| t.index == index));
+                            if let Some(target) = target {
                                 let (seq, id) = self.ids();
-                                send(&target.channel, &motion.message(seq, id));
+                                send(&target.channel, &motion.message(seq, id, (target.frame[0] as f32, target.frame[1] as f32)));
+                            }
+                            if motion.ends_gesture() {
+                                windows.gesture = None;
                             }
                         }
                     }

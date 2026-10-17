@@ -84,6 +84,11 @@ impl Activities {
         records.values().filter(|r| r.uid == uid).max_by_key(|r| r.started).map(|r| format!("{}/{}", r.package, r.class))
     }
 
+    /// The activities of the process of `start_seq` are gone with it.
+    pub fn remove_start(&self, start_seq: i64) {
+        self.records.lock().unwrap().retain(|_, r| r.start_seq != start_seq);
+    }
+
     fn with<T>(
         &self,
         token: Option<Binder>,
@@ -100,6 +105,8 @@ impl Activities {
 pub struct Launch<'a> {
     pub info: ActivityInfo,
     pub global: &'a Configuration,
+    /// The bounds of its task in window mode, else the display's.
+    pub task: Option<super::config::Rect>,
 }
 
 impl AppHost {
@@ -120,9 +127,12 @@ impl AppHost {
             *next += 1;
             *next
         };
-        let mut override_config = launch.global.clone();
+        let mut override_config = match launch.task {
+            Some(bounds) => launch.global.of_freeform_task(bounds),
+            None => launch.global.clone(),
+        };
         override_config.window.activity_type = ACTIVITY_TYPE_STANDARD;
-        let bounds = launch.global.window.bounds;
+        let bounds = override_config.window.bounds;
         let intent = Intent {
             component: (record.package.clone(), record.class.clone()),
             flags: FLAG_ACTIVITY_NEW_TASK,
@@ -395,6 +405,9 @@ impl Service for ActivityClientController {
             acc::ACTIVITY_IDLE => {
                 let token = Self::token(call)?;
                 self.report(token, "idle", |_| {});
+                if let Some(uid) = self.0.activities.with(token, |r| r.uid) {
+                    self.0.task_idle(uid);
+                }
                 empty()
             }
             acc::ACTIVITY_TOP_RESUMED_STATE_LOST => empty(),
