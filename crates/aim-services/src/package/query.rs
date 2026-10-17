@@ -1991,6 +1991,65 @@ impl Query<'_> {
         )))
     }
 
+    /// `queryContentProviders`: the providers of the process `process_name`
+    /// of `uid`'s app (any process when `None`), with `meta_data_key` when
+    /// given, as the caller may see them, by descending init order
+    /// (`ComponentResolverBase.queryProviders`, the providers' map walked
+    /// backwards).
+    pub fn query_content_providers(
+        &self,
+        process_name: Option<&str>,
+        uid: i32,
+        flags: i64,
+        meta_data_key: Option<&str>,
+    ) -> Thrown<Vec<info::ProviderInfo>> {
+        let user = if process_name.is_some() { user_id(uid) } else { user_id(self.calling_uid) };
+        if let Err(e) = self.enforce_cross_user(user, false, false, "queryContentProviders")? {
+            return Ok(Err(e));
+        }
+        if self.user(user).is_none() {
+            return Ok(Ok(Vec::new()));
+        }
+        let flags = self.update_flags_for_component(flags, user)?;
+        // `mProviders`: an `ArrayMap` by component, in its hashes' order.
+        let mut rows: Vec<(&PackageState, &AndroidPackage, &crate::package::pkg::Provider)> = self
+            .state
+            .packages
+            .values()
+            .filter_map(|ps| Some((ps, ps.pkg.as_deref()?)))
+            .flat_map(|(ps, pkg)| pkg.providers.iter().map(move |pr| (ps, pkg, pr)))
+            .collect();
+        rows.sort_by_key(|(ps, _, pr)| info::java_hash(&ps.name).wrapping_add(info::java_hash(&pr.main.component.name)));
+        let mut found = Vec::new();
+        for (ps, pkg, pr) in rows.into_iter().rev() {
+            if pr.authority.is_none() {
+                continue;
+            }
+            if let Some(process) = process_name {
+                let own = pr.main.process_name.as_deref().or(pkg.process_name.as_deref()).unwrap_or(&ps.name);
+                if own != process || ps.app_id as i32 != uid.rem_euclid(info::PER_USER_RANGE) {
+                    continue;
+                }
+            }
+            if let Some(key) = meta_data_key
+                && !pr.main.component.meta_data.as_ref().is_some_and(|m| m.0.iter().any(|(k, _)| k == key))
+            {
+                continue;
+            }
+            let state = user_state(ps, user);
+            let t = self.target(ps, pkg, &state, user);
+            let Some(app) = generate_application_info(&t, flags) else { continue };
+            let Some(provider) = info::generate_provider_info(&t, pr, flags, Some(Arc::new(app))) else { continue };
+            let component = ComponentName { package: ps.name.clone(), class: pr.main.component.name.clone() };
+            if !info::is_enabled_and_matches(ps, &pr.main, flags, user) || self.filtered_component(Some(ps), &component, 4, self.calling_uid, user)? {
+                continue;
+            }
+            found.push(provider);
+        }
+        found.sort_by_key(|p| std::cmp::Reverse(p.init_order));
+        Ok(Ok(found))
+    }
+
     /// The package states in `Settings.mPackages`' order.
     pub(crate) fn packages_in_order(&self) -> Vec<&PackageState> {
         if let Some(order) = &self.state.system.settings_package_order {
