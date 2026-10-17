@@ -527,6 +527,17 @@ impl AppHost {
         self.tasks_died(start_seq);
     }
 
+    /// Sends the process of `start_seq` the transaction of `items`
+    /// (`ClientLifecycleManager.scheduleTransactionItems`).
+    fn schedule(&self, start_seq: i64, items: Vec<Box<dyn activity::Item>>) -> Result<(), String> {
+        let apps = self.apps.lock().unwrap();
+        let thread = apps.get(&start_seq).and_then(|a| a.thread.as_ref()).ok_or_else(|| format!("no process of start {start_seq}"))?;
+        thread
+            .transact(thread::SCHEDULE_TRANSACTION, &activity::transaction(items), true)
+            .map(|_| ())
+            .map_err(|s| format!("scheduleTransaction: {s}"))
+    }
+
     /// Kills the process of `start_seq` (`ProcessRecord.killLocked`).
     fn kill_process(&self, start_seq: i64) -> Result<(), String> {
         let pid = self.apps.lock().unwrap().get(&start_seq).map(|a| a.pid).ok_or_else(|| format!("no process of start {start_seq}"))?;
@@ -637,6 +648,9 @@ impl AppHost {
             started: app.started,
             resumed: false,
             requested_orientation: -1,
+            config_changes: activity::ActivityRecord::real_config_changes(&info),
+            size_buckets: None,
+            reported: None,
         };
         let global = app
             .config

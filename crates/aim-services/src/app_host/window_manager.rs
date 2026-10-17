@@ -17,6 +17,7 @@ use aim_service_aidl::android_view_iwindowid as wid;
 use aim_service_aidl::android_view_iwindowmanager as wm;
 use aim_service_aidl::android_view_iwindowsession as ws;
 
+use super::activity::{ActivityWindowInfo, Item};
 use super::config::{Configuration, Rect};
 use super::surface::{self, Layer};
 use super::{AppHost, reply};
@@ -50,6 +51,8 @@ struct Window {
     /// Its input channel's index at the agent.
     channel: i32,
     layer: Option<Layer>,
+    /// The sequence numbers of its frames and insets last sent.
+    frames_seq: i32,
     insets_seq: i32,
     /// Its `IWindowId`, made at the first `getWindowId`.
     window_id: Option<Binder>,
@@ -175,6 +178,7 @@ impl Session {
                 task: task.map(|(id, _)| id),
                 channel: index,
                 layer: None,
+                frames_seq: FIRST_SEQ,
                 insets_seq: FIRST_SEQ,
                 window_id: None,
             },
@@ -217,24 +221,13 @@ impl Session {
         p.write_no_exception();
         p.write_i32(result);
         p.write_i32(1);
-        // `ClientWindowFrames`: the frame and the display's, no parent or
-        // attached frame.
-        for r in [[frame.left, frame.top, frame.right, frame.bottom], [0, 0, width, height], [0, 0, 0, 0]] {
-            r.iter().for_each(|v| p.write_i32(*v));
-        }
-        p.write_i32(0);
-        p.write_bool(false);
-        p.write_f32(1.0);
-        p.write_i32(FIRST_SEQ);
-        // `MergedConfiguration`: global, override, merged.
+        write_frames(&mut p, frame, (width, height), w.frames_seq);
         let mut overrides: Configuration = match task {
             Some((_, bounds)) => global.of_freeform_task(bounds),
             None => global.clone(),
         };
         overrides.window.activity_type = 1;
-        global.write_to(&mut p);
-        overrides.write_to(&mut p);
-        overrides.write_to(&mut p);
+        write_merged(&mut p, &global, &overrides);
         // `SurfaceControl`.
         match &w.layer {
             Some(layer) => {
@@ -263,11 +256,65 @@ impl Session {
         p.write_i32(w.insets_seq);
         p.write_i32(-1); // no sync requested
         p.write_i32(1);
-        p.write_bool(false); // `ActivityWindowInfo`: not embedded, the task's bounds
-        for _ in 0..2 {
-            [frame.left, frame.top, frame.right, frame.bottom].iter().for_each(|v| p.write_i32(*v));
-        }
+        // `ActivityWindowInfo`: not embedded, the task's bounds.
+        ActivityWindowInfo { embedded: false, task_bounds: frame, task_fragment_bounds: frame }.write(&mut p);
         Ok(p)
+    }
+}
+
+/// `ClientWindowFrames`: the frame and the display's, no parent or
+/// attached frame, unscaled, of sequence number `seq`.
+fn write_frames(p: &mut Parcel, frame: Rect, (width, height): (i32, i32), seq: i32) {
+    for r in [[frame.left, frame.top, frame.right, frame.bottom], [0, 0, width, height], [0, 0, 0, 0]] {
+        r.iter().for_each(|v| p.write_i32(*v));
+    }
+    p.write_i32(0);
+    p.write_bool(false);
+    p.write_f32(1.0);
+    p.write_i32(seq);
+}
+
+/// `MergedConfiguration`: global, override, merged (the override is
+/// whole).
+fn write_merged(p: &mut Parcel, global: &Configuration, overrides: &Configuration) {
+    global.write_to(p);
+    overrides.write_to(p);
+    overrides.write_to(p);
+}
+
+/// `WindowStateResizeItem`: a window's new frames, configuration and
+/// insets (`WindowState.reportResized`).
+struct WindowStateResizeItem {
+    window: Binder,
+    frame: Rect,
+    display: (i32, i32),
+    frames_seq: i32,
+    insets_seq: i32,
+    global: Configuration,
+    config: Configuration,
+}
+
+impl Item for WindowStateResizeItem {
+    fn class(&self) -> &'static str {
+        "android.app.servertransaction.WindowStateResizeItem"
+    }
+
+    fn write_fields(&self, p: &mut Parcel) {
+        p.write_binder(Some(self.window));
+        p.write_i32(1);
+        write_frames(p, self.frame, self.display, self.frames_seq);
+        p.write_bool(false); // no draw to report
+        p.write_i32(1);
+        write_merged(p, &self.global, &self.config);
+        p.write_i32(1);
+        write_insets_state(p, self.display.0, self.display.1, self.insets_seq);
+        p.write_bool(false); // no forced layout
+        p.write_bool(false); // system bars not always consumed
+        p.write_i32(0); // the default display
+        p.write_i32(-1); // no sync
+        p.write_bool(false); // not drag resizing
+        p.write_i32(1);
+        ActivityWindowInfo { embedded: false, task_bounds: self.frame, task_fragment_bounds: self.frame }.write(p);
     }
 }
 
@@ -294,6 +341,32 @@ impl super::AppHost {
             self.set_input_frame(channel, frame).map_err(|e| format!("{e:?}"))?;
         }
         Ok(())
+    }
+
+    /// The items that tell `uid`'s windows their task took `frame`, on a
+    /// display of the global configuration `global`.
+    pub(super) fn resize_windows(&self, uid: u32, global: &Configuration, frame: Rect) -> Result<Vec<Box<dyn Item>>, String> {
+        let display = self.display().map_err(|e| format!("{e:?}"))?.0.clone();
+        let mut config = global.of_freeform_task(frame);
+        config.window.activity_type = 1;
+        let mut windows = self.windows.windows.lock().unwrap();
+        Ok(windows
+            .iter_mut()
+            .filter(|(_, w)| w.uid == uid)
+            .map(|(&window, w)| {
+                w.frames_seq += 1;
+                w.insets_seq += 1;
+                Box::new(WindowStateResizeItem {
+                    window: Binder::Handle(window),
+                    frame,
+                    display: (display.width, display.height),
+                    frames_seq: w.frames_seq,
+                    insets_seq: w.insets_seq,
+                    global: global.clone(),
+                    config: config.clone(),
+                }) as Box<dyn Item>
+            })
+            .collect())
     }
 
     /// The windows of the process `pid` are gone with it.
@@ -412,6 +485,16 @@ impl Service for Session {
                 // seq, lastSyncSeqId.
                 let (window, tail) = Self::window_and_tail(call, 6)?;
                 reply(self.relayout(window, tail[2]))
+            }
+            // A relayout whose results the window does not wait for
+            // (oneway): its layer is made and its sequence numbers go on
+            // as with `relayout`.
+            ws::RELAYOUT_ASYNC => {
+                let (window, tail) = Self::window_and_tail(call, 6)?;
+                if let Err(e) = self.relayout(window, tail[2]) {
+                    eprintln!("app host: relayoutAsync: {e:?}");
+                }
+                Ok(Parcel::new())
             }
             ws::GET_WINDOW_ID => {
                 let args = ws::GetWindowId::read(&mut call.data).map_err(|_| BAD_VALUE)?;

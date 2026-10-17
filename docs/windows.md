@@ -136,7 +136,15 @@ from guest-init) and, in window mode:
 - **Takes requests**: `LAUNCH` brings the package's task to the front, or
   starts the activity and answers `DRAWN` when it is idle; `FOCUS` brings
   the task to the front and gives its latest window the input focus;
-  `SET_BOUNDS` moves the task, but keeps its size (#1444); `CLOSE` kills
+  `SET_BOUNDS` (`resizeTask`) gives the task the bounds, at least its
+  minimal size (`Task.adjustForMinimalTaskDimensions`: 220 dp, or its
+  activity's window layout's), and tells its activity as
+  `ActivityRecord.updateReportedConfigurationAndSend` does: a change the
+  activity does not handle (`configChanges`), past its size buckets
+  (`SizeConfigurationBuckets.filterDiff`), relaunches it, keeping its
+  window when only sizes changed; anything else is a configuration change
+  (`ActivityConfigurationChangeItem`) and its windows' new frames
+  (`WindowStateResizeItem`); `CLOSE` kills
   its process, as `removeTask` kills a removed task's
   (`killProcessesForRemovedTask`), and its death removes the task.
 - **Input**: the agent sends a touch to the front window under it, in the

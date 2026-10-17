@@ -2,7 +2,9 @@
 //! `ActivityTaskSupervisor.realStartActivityLocked` makes it at
 //! `android-16.0.0_r1` (one `ClientTransaction` of a `LaunchActivityItem`
 //! and a `ResumeActivityItem`, then a `TopResumedActivityChangeItem`), and
-//! `IActivityClientController`, where the activity reports back.
+//! `IActivityClientController`, where the activity reports back; and
+//! its configuration's changes when its task's bounds change
+//! (`ActivityRecord.updateReportedConfigurationAndSend`).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
@@ -15,7 +17,7 @@ use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_app_iactivityclientcontroller as acc;
 use aim_service_aidl::android_app_iactivitytaskmanager as atm;
 
-use super::config::Configuration;
+use super::config::{self, Configuration, SizeBuckets};
 use super::{AppHost, reply};
 use crate::package::info::ActivityInfo;
 
@@ -61,6 +63,27 @@ pub struct ActivityRecord {
     pub started: Instant,
     pub resumed: bool,
     pub requested_orientation: i32,
+    /// `ActivityInfo.getRealConfigChanged`: the changes it handles itself.
+    pub config_changes: i32,
+    /// The size buckets it reported (`reportSizeConfigurations`).
+    pub size_buckets: Option<SizeBuckets>,
+    /// The configuration it was last sent (`mLastReportedConfiguration`'s
+    /// merged one).
+    pub reported: Option<Configuration>,
+}
+
+/// `Build.VERSION_CODES.HONEYCOMB_MR2`.
+const HONEYCOMB_MR2: i32 = 13;
+
+impl ActivityRecord {
+    /// `ActivityInfo.getRealConfigChanged` of `info`.
+    pub fn real_config_changes(info: &ActivityInfo) -> i32 {
+        if info.info.application_info.target_sdk_version < HONEYCOMB_MR2 {
+            info.config_changes | config::CONFIG_SCREEN_SIZE | config::CONFIG_SMALLEST_SCREEN_SIZE
+        } else {
+            info.config_changes
+        }
+    }
 }
 
 /// The activities, by their token.
@@ -115,7 +138,7 @@ impl AppHost {
     /// resumed activity.
     pub(super) fn launch_activity(
         &self,
-        record: ActivityRecord,
+        mut record: ActivityRecord,
         launch: Launch<'_>,
     ) -> (Parcel, Parcel) {
         let token = self.process.add_service(Arc::new(Token));
@@ -132,6 +155,7 @@ impl AppHost {
             None => launch.global.clone(),
         };
         override_config.window.activity_type = ACTIVITY_TYPE_STANDARD;
+        record.reported = Some(override_config.clone());
         let bounds = override_config.window.bounds;
         let intent = Intent {
             component: (record.package.clone(), record.class.clone()),
@@ -175,8 +199,63 @@ impl AppHost {
     }
 }
 
+impl AppHost {
+    /// `updateReportedConfigurationAndSend` for the activities of the
+    /// process `start_seq` once their task took `bounds`, on a display of
+    /// the global configuration `global`: the items that tell them, and
+    /// whether one relaunches (its windows are not told they resized).
+    pub(super) fn reconfigure_activities(&self, start_seq: i64, global: &Configuration, bounds: config::Rect) -> (Vec<Box<dyn Item>>, bool) {
+        let mut records = self.activities.records.lock().unwrap();
+        let mut items: Vec<Box<dyn Item>> = Vec::new();
+        let mut relaunching = false;
+        for (&ptr, record) in records.iter_mut().filter(|(_, r)| r.start_seq == start_seq) {
+            let token = Binder::Local(ptr);
+            let mut new = global.of_freeform_task(bounds);
+            new.window.activity_type = ACTIVITY_TYPE_STANDARD;
+            let Some(old) = record.reported.replace(new.clone()) else { continue };
+            if old == new {
+                continue;
+            }
+            let window = ActivityWindowInfo { embedded: false, task_bounds: bounds, task_fragment_bounds: bounds };
+            // `getConfigurationChanges`: the size changes its buckets
+            // matter for; a window configuration change alone is none.
+            let mut changes = old.diff(&new);
+            if let Some(buckets) = &record.size_buckets {
+                changes = buckets.filter_diff(changes, &old, &new);
+            }
+            changes &= !config::CONFIG_WINDOW_CONFIGURATION;
+            // `shouldRelaunchLocked`, with `handleAllConfigChanges` (on in
+            // the image): an activity whose resources are unused handles
+            // every change.
+            let handled = record.config_changes;
+            if changes & !handled == 0 || handled & config::CONFIG_RESOURCES_UNUSED != 0 {
+                items.push(Box::new(ActivityConfigurationChangeItem { token, config: new, window }));
+                continue;
+            }
+            // `relaunchActivityLocked`: a resize alone keeps the window.
+            let resize = config::CONFIG_SCREEN_SIZE | config::CONFIG_SMALLEST_SCREEN_SIZE | config::CONFIG_ORIENTATION | config::CONFIG_SCREEN_LAYOUT;
+            relaunching = true;
+            items.push(Box::new(ActivityRelaunchItem {
+                token,
+                global: global.clone(),
+                config: new,
+                window,
+                changes,
+                preserve_window: changes & !resize == 0,
+            }));
+            items.push(Box::new(if record.resumed {
+                Lifecycle::Resume(ResumeActivityItem { token, proc_state: PROCESS_STATE_UNKNOWN, forward: false })
+            } else {
+                Lifecycle::Pause(token)
+            }));
+            eprintln!("app host: relaunching {}/{} for changes {changes:#x}", record.package, record.class);
+        }
+        (items, relaunching)
+    }
+}
+
 /// `IApplicationThread.scheduleTransaction` of `items`.
-fn transaction(items: Vec<Box<dyn Item>>) -> Parcel {
+pub(super) fn transaction(items: Vec<Box<dyn Item>>) -> Parcel {
     let mut p = Parcel::new();
     aim_service_aidl::android_app_iapplicationthread::ScheduleTransaction {
         transaction: Some(ClientTransaction(items)),
@@ -187,7 +266,7 @@ fn transaction(items: Vec<Box<dyn Item>>) -> Parcel {
 
 /// A `ClientTransactionItem`: its class, for `writeParcelable`, and its
 /// fields.
-trait Item {
+pub(super) trait Item {
     fn class(&self) -> &'static str;
     fn write_fields(&self, p: &mut Parcel);
 }
@@ -276,6 +355,84 @@ impl Item for ResumeActivityItem {
     }
 }
 
+struct ActivityConfigurationChangeItem {
+    token: Binder,
+    config: Configuration,
+    window: ActivityWindowInfo,
+}
+
+impl Item for ActivityConfigurationChangeItem {
+    fn class(&self) -> &'static str {
+        "android.app.servertransaction.ActivityConfigurationChangeItem"
+    }
+
+    fn write_fields(&self, p: &mut Parcel) {
+        p.write_binder(Some(self.token));
+        p.write_i32(1);
+        self.config.write_to(p);
+        p.write_i32(1);
+        self.window.write(p);
+    }
+}
+
+struct ActivityRelaunchItem {
+    token: Binder,
+    global: Configuration,
+    config: Configuration,
+    window: ActivityWindowInfo,
+    changes: i32,
+    preserve_window: bool,
+}
+
+impl Item for ActivityRelaunchItem {
+    fn class(&self) -> &'static str {
+        "android.app.servertransaction.ActivityRelaunchItem"
+    }
+
+    fn write_fields(&self, p: &mut Parcel) {
+        p.write_binder(Some(self.token));
+        p.write_i32(-1); // no pending results
+        p.write_i32(-1); // no pending new intents
+        // `MergedConfiguration`: global, override, merged (the override is
+        // whole).
+        p.write_i32(1);
+        self.global.write_to(p);
+        self.config.write_to(p);
+        self.config.write_to(p);
+        p.write_i32(1);
+        self.window.write(p);
+        p.write_i32(self.changes);
+        p.write_bool(self.preserve_window);
+    }
+}
+
+/// The lifecycle a relaunch ends in: resumed, or paused.
+enum Lifecycle {
+    Resume(ResumeActivityItem),
+    Pause(Binder),
+}
+
+impl Item for Lifecycle {
+    fn class(&self) -> &'static str {
+        match self {
+            Lifecycle::Resume(item) => item.class(),
+            Lifecycle::Pause(_) => "android.app.servertransaction.PauseActivityItem",
+        }
+    }
+
+    fn write_fields(&self, p: &mut Parcel) {
+        match self {
+            Lifecycle::Resume(item) => item.write_fields(p),
+            // `PauseActivityItem(token)`: not finishing, not user leaving,
+            // not reported, not entering PiP.
+            Lifecycle::Pause(token) => {
+                p.write_binder(Some(*token));
+                [false, false, true, false].iter().for_each(|v| p.write_bool(*v));
+            }
+        }
+    }
+}
+
 struct TopResumedActivityChangeItem {
     token: Binder,
     on_top: bool,
@@ -292,14 +449,14 @@ impl Item for TopResumedActivityChangeItem {
     }
 }
 
-struct ActivityWindowInfo {
-    embedded: bool,
-    task_bounds: super::config::Rect,
-    task_fragment_bounds: super::config::Rect,
+pub(super) struct ActivityWindowInfo {
+    pub embedded: bool,
+    pub task_bounds: super::config::Rect,
+    pub task_fragment_bounds: super::config::Rect,
 }
 
 impl ActivityWindowInfo {
-    fn write(&self, p: &mut Parcel) {
+    pub(super) fn write(&self, p: &mut Parcel) {
         p.write_bool(self.embedded);
         for r in [self.task_bounds, self.task_fragment_bounds] {
             for v in [r.left, r.top, r.right, r.bottom] {
@@ -411,6 +568,12 @@ impl Service for ActivityClientController {
                 empty()
             }
             acc::ACTIVITY_TOP_RESUMED_STATE_LOST => empty(),
+            // `finishRelaunching`: its relaunch is done (oneway).
+            acc::ACTIVITY_RELAUNCHED => {
+                let token = Self::token(call)?;
+                self.report(token, "relaunched", |_| {});
+                Ok(Parcel::new())
+            }
             acc::ACTIVITY_PAUSED => {
                 let token = Self::token(call)?;
                 self.report(token, "paused", |r| r.resumed = false);
@@ -429,9 +592,12 @@ impl Service for ActivityClientController {
                 );
                 empty()
             }
-            // The size buckets decide which configuration changes relaunch
-            // the activity; a fixed display changes none.
-            acc::REPORT_SIZE_CONFIGURATIONS => empty(),
+            // The size buckets decide which size changes relaunch it.
+            acc::REPORT_SIZE_CONFIGURATIONS => {
+                let args = acc::ReportSizeConfigurations::<SizeBuckets>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.0.activities.with(args.token, |r| r.size_buckets = args.size_configurations);
+                empty()
+            }
             acc::GET_DISPLAY_ID => {
                 let token = Self::token(call)?;
                 let id = self

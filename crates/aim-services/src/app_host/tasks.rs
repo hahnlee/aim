@@ -30,6 +30,8 @@ pub struct Task {
     /// Its activity, `package/class`.
     pub component: String,
     pub bounds: Rect,
+    /// Its root activity's window layout's minimum size, -1 for none.
+    min_size: (i32, i32),
     /// Its layer, made with its first window's.
     layer: Option<Layer>,
     /// The server's `LAUNCH` it answers with `DRAWN` once it is idle.
@@ -167,6 +169,7 @@ impl AppHost {
             package: package.to_string(),
             component: component.clone(),
             bounds,
+            min_size: activity.min_size,
             layer: None,
             launch,
         });
@@ -248,6 +251,7 @@ impl AppHost {
             window::FOCUS => self.focus_task(r.task),
             window::CLOSE => self.close_task(r.task),
             window::SET_BOUNDS => {
+                // `resizeTask`.
                 let [left, top, right, bottom] = r.bounds;
                 self.move_task(r.task, Rect { left, top, right, bottom })
             }
@@ -302,23 +306,60 @@ impl AppHost {
         self.kill_process(start_seq)
     }
 
-    /// `SET_BOUNDS`: a move takes the task to `bounds`; a resize changes
-    /// the app's configuration, which the app host does not send yet
-    /// (#1444), so the task keeps its size. The server takes the bounds
+    /// `SET_BOUNDS` (`resizeTask`): the task takes `bounds`, at least its
+    /// minimal size; its activities and windows are told, as
+    /// `ActivityRecord.updateReportedConfigurationAndSend` and
+    /// `WindowState.reportResized` tell them. The server takes the bounds
     /// the task got.
     fn move_task(&self, id: i32, bounds: Rect) -> Result<(), String> {
-        let (uid, moved) = {
+        let min_dp = self
+            .inputs()
+            .ok()
+            .and_then(|i| i.packages.framework_dimension_dp("default_minimal_size_resizable_task"))
+            .ok_or("no default_minimal_size_resizable_task")? as i32;
+        let density = self.display().map_err(|e| format!("{e:?}"))?.0.density_dpi() as f32 / 160.0;
+        let (uid, start_seq, bounds) = {
             let mut tasks = self.tasks.tasks.lock().unwrap();
             let task = tasks.iter_mut().find(|t| t.id == id).ok_or_else(|| format!("no task {id}"))?;
-            let (width, height) = (task.bounds.width(), task.bounds.height());
-            task.bounds = Rect { left: bounds.left, top: bounds.top, right: bounds.left + width, bottom: bounds.top + height };
-            (task.uid, task.bounds)
+            let default_min = (min_dp as f32 * density) as i32;
+            let min = (if task.min_size.0 < 0 { default_min } else { task.min_size.0 }, if task.min_size.1 < 0 { default_min } else { task.min_size.1 });
+            task.bounds = minimal_dimensions(bounds, task.bounds, min);
+            (task.uid, task.start_seq, task.bounds)
         };
         self.place_tasks()?;
-        self.move_windows_of(uid, moved)?;
-        self.tasks.send_bounds(id, moved);
+        self.move_windows_of(uid, bounds)?;
+        let global = self.global_config(uid).ok_or("the task's app is not bound")?;
+        let (mut items, relaunching) = self.reconfigure_activities(start_seq, &global, bounds);
+        // A relaunching activity's windows are not told (`reportResized`).
+        if !relaunching {
+            items.extend(self.resize_windows(uid, &global, bounds)?);
+        }
+        if !items.is_empty() {
+            self.schedule(start_seq, items)?;
+        }
+        self.tasks.send_bounds(id, bounds);
         Ok(())
     }
+}
+
+/// `Task.adjustForMinimalTaskDimensions`: `bounds` at least `min` wide and
+/// high, grown away from the edge that stayed where it was in `previous`.
+fn minimal_dimensions(mut bounds: Rect, previous: Rect, min: (i32, i32)) -> Rect {
+    if bounds.width() < min.0 {
+        if bounds.right == previous.right {
+            bounds.left = bounds.right - min.0;
+        } else {
+            bounds.right = bounds.left + min.0;
+        }
+    }
+    if bounds.height() < min.1 {
+        if bounds.bottom == previous.bottom {
+            bounds.top = bounds.bottom - min.1;
+        } else {
+            bounds.bottom = bounds.top + min.1;
+        }
+    }
+    bounds
 }
 
 /// A connection to the task bridge of the display server at `socket`, and
@@ -331,4 +372,21 @@ fn bridge(socket: &Path) -> Result<(UnixStream, bool), String> {
         .map_err(|e| e.to_string())?
         .ok_or("the display server closed the connection")?;
     Ok((link, answer.mode == mode::WINDOWS))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_task_keeps_its_minimal_size() {
+        let previous = Rect { left: 100, top: 100, right: 900, bottom: 1500 };
+        // Shrunk from the left: the right edge stays, the left one goes back.
+        let from_left = Rect { left: 800, top: 100, right: 900, bottom: 1500 };
+        assert_eq!(minimal_dimensions(from_left, previous, (440, 440)), Rect { left: 460, top: 100, right: 900, bottom: 1500 });
+        // Shrunk from the bottom: the bottom edge grows back.
+        let from_bottom = Rect { left: 100, top: 100, right: 900, bottom: 200 };
+        assert_eq!(minimal_dimensions(from_bottom, previous, (440, 440)), Rect { left: 100, top: 100, right: 900, bottom: 540 });
+        assert_eq!(minimal_dimensions(previous, previous, (440, 440)), previous);
+    }
 }

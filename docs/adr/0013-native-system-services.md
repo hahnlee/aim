@@ -467,7 +467,9 @@ The migration's state and conformance results are in
   (`setTransactionState`, its `layer_state_t` checked byte for byte against
   one system_server sent), and the agent sends a touch to the window under
   it, in the window's coordinates. A removed task's process is killed as
-  `removeTask` kills it.
+  `removeTask` kills it. A resized task's activity relaunches or takes the
+  new configuration by its `configChanges` and size buckets, as
+  `ActivityRecord` decides.
 
 ### CTS-derived conformance (2026-10-16)
 
