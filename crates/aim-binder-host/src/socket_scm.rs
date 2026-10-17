@@ -74,7 +74,16 @@ impl Service{
     if let Ok(handle)=std::thread::Builder::new().name("socket-scm-control".into()).spawn(move||{
      let _queue_root=match aim_storage::socket_queue_root::SocketQueueRoot::new(server.as_fd()){Ok(root)=>root,Err(_)=>return};
      let mut peer_uid=0;let mut peer_gid=0;if unsafe{libc::getpeereid(server.as_raw_fd(),&mut peer_uid,&mut peer_gid)}<0||peer_uid!=uid{return;}
-     if wait_frame(server.as_raw_fd(),16,1000).is_err(){return;}let mut hello=[0;16];let Ok((count,descriptor))=receive_flags(server.as_raw_fd(),&mut hello,libc::MSG_DONTWAIT)else{return;};if count!=16||descriptor.is_some()||hello!=nonce{return;}
+     // An unconsumed EAGAIN after readiness is XNU's DONTWAIT receive-lock
+     // contention (soreceive's sblock), not a failed hello.
+     loop{
+      if wait_frame(server.as_raw_fd(),16,1000).is_err(){return;}let mut hello=[0;16];
+      match crate::proxy_file::receive_flags_phase(server.as_raw_fd(),&mut hello,libc::MSG_DONTWAIT){
+       Ok((count,descriptor))=>{if count!=16||descriptor.is_some()||hello!=nonce{return;}break;},
+       Err(failure)if !failure.consumed&&matches!(failure.error.kind(),io::ErrorKind::WouldBlock|io::ErrorKind::Interrupted)=>continue,
+       Err(_)=>return,
+      }
+     }
      let ready=[0x52u8];if unsafe{libc::send(server.as_raw_fd(),ready.as_ptr().cast(),1,0)}!=1{return;}
      let timeout=libc::timeval{tv_sec:1,tv_usec:0};if unsafe{libc::setsockopt(server.as_raw_fd(),libc::SOL_SOCKET,libc::SO_SNDTIMEO,(&timeout as*const libc::timeval).cast(),std::mem::size_of_val(&timeout)as u32)}<0{return;}
      serve_channel(server,_queue_root);
