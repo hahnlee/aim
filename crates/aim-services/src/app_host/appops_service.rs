@@ -4,8 +4,12 @@
 //! mode is ignored while a user restriction it has is set (but for root
 //! and system), else the uid's, else the package's, as the permission
 //! service last persisted them (`access.abx`), else the op's default
-//! (`AppOpsManager.sAppOpInfos` at `android-16.0.0_r1`). The modes do not
-//! change while the app host runs, so watchers are kept and never called.
+//! (`AppOpsManager.sAppOpInfos` at `android-16.0.0_r1`). A foreground mode
+//! (TAKE_AUDIO_FOCUS's, which audio focus notes) allows a uid while it has
+//! a process, as each of the app host's processes is top
+//! (`AppOpsUidStateTracker.evalMode`). The modes do not change while the
+//! app host runs, so watchers are kept and never called; foreground
+//! changes are not watched (#1529).
 
 use std::sync::{Arc, Mutex};
 
@@ -20,6 +24,7 @@ const MODE_ALLOWED: i32 = 0;
 const MODE_IGNORED: i32 = 1;
 const MODE_ERRORED: i32 = 2;
 pub(super) const MODE_DEFAULT: i32 = 3;
+const MODE_FOREGROUND: i32 = 4;
 /// `AppOpsManager.OP_SCHEDULE_EXACT_ALARM`, `OP_USE_FULL_SCREEN_INTENT`,
 /// `OP_READ_CONTACTS`, `OP_WRITE_CONTACTS`, `OP_GET_ACCOUNTS`.
 pub(super) const OP_SCHEDULE_EXACT_ALARM: i32 = 107;
@@ -27,8 +32,9 @@ pub(super) const OP_USE_FULL_SCREEN_INTENT: i32 = 133;
 pub(super) const OP_READ_CONTACTS: i32 = 4;
 pub(super) const OP_WRITE_CONTACTS: i32 = 5;
 pub(super) const OP_GET_ACCOUNTS: i32 = 62;
-/// `AppOpsManager.OP_WRITE_SETTINGS`.
+/// `AppOpsManager.OP_WRITE_SETTINGS`, `OP_TAKE_AUDIO_FOCUS`.
 pub(super) const OP_WRITE_SETTINGS: i32 = 23;
+pub(super) const OP_TAKE_AUDIO_FOCUS: i32 = 32;
 /// `UserManager.DISALLOW_ADJUST_VOLUME`.
 const DISALLOW_ADJUST_VOLUME: &str = "no_adjust_volume";
 /// The ops it decides: their code, name, default mode and user
@@ -44,6 +50,7 @@ const OPS: &[(i32, &str, i32, Option<&str>)] = &[
     (OP_WRITE_SETTINGS, "android:write_settings", MODE_DEFAULT, None),
     (29, "android:read_clipboard", MODE_ALLOWED, None),
     (30, "android:write_clipboard", MODE_ALLOWED, None),
+    (OP_TAKE_AUDIO_FOCUS, "android:take_audio_focus", MODE_FOREGROUND, None),
     (34, "android:audio_voice_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
     (35, "android:audio_ring_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
     (36, "android:audio_media_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
@@ -71,7 +78,7 @@ fn op(code: i32) -> Result<&'static (i32, &'static str, i32, Option<&'static str
 }
 
 /// `checkOperation`: ignored under its restriction, else the uid's mode,
-/// else the package's, else the op's default.
+/// else the package's, else the op's default, a foreground mode evaluated.
 pub(super) fn mode(host: &AppHost, code: i32, uid: i32, package: Option<&str>) -> Result<i32, Exception> {
     let (_, name, default, restriction) = *op(code)?;
     let app_id = uid.rem_euclid(100_000);
@@ -87,7 +94,11 @@ pub(super) fn mode(host: &AppHost, code: i32, uid: i32, package: Option<&str>) -
     let package_mode = package
         .and_then(|p| access.and_then(|a| a.package_app_ops.iter().find(|(name, _)| name == p)))
         .and_then(|(_, ops)| named(ops));
-    Ok(uid_mode.or(package_mode).unwrap_or(default))
+    Ok(match uid_mode.or(package_mode).unwrap_or(default) {
+        MODE_FOREGROUND if host.uid_running(uid) => MODE_ALLOWED,
+        MODE_FOREGROUND => MODE_IGNORED,
+        mode => mode,
+    })
 }
 
 /// `checkPackage`: whether `package` is `uid`'s.
