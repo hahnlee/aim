@@ -8,6 +8,9 @@
 //! at `android-16.0.0_r1`, from the state PackageManager last persisted
 //! (`packages.xml`, `packages.list`).
 
+pub mod account_authenticators;
+pub mod account_service;
+pub mod accounts_db;
 pub mod activity;
 pub mod activity_stack;
 pub mod activity_start;
@@ -390,6 +393,7 @@ impl AppHost {
                     .get_or_init(|| Arc::new(alarm_service::AlarmManager::new(self.clone())))
                     .clone(),
             ),
+            ("account", Arc::new(account_service::AccountManager::new(self.clone()))),
             ("statusbar", Arc::new(status_bar::StatusBar::new(self.clone()))),
             (
                 "activity_task",

@@ -4,9 +4,9 @@
 //! native queries answer from (`package::model::State`).
 //!
 //! Only what an app's start reads is joined: the package's code, its
-//! app id, ABI and native library directories, its seinfo and user 0's
-//! state. Shared libraries, overlays, permissions and the apps filter's
-//! inputs are not (#1426).
+//! app id, ABI and native library directories, its seinfo, signatures
+//! and shared user, and user 0's state. Shared libraries, overlays,
+//! permissions and the apps filter's inputs are not (#1426).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -97,7 +97,35 @@ impl Packages {
             ps.users.get_mut(&0).unwrap().granted_permissions = granted;
             Ok::<_, String>((setting.name.clone(), ps))
         });
-        let packages = joined.into_iter().collect::<Result<BTreeMap<_, _>, _>>()?;
+        let mut packages = joined.into_iter().collect::<Result<BTreeMap<_, _>, _>>()?;
+        // The shared users, with their packages and signatures
+        // (`SharedUserSetting`).
+        let mut shared_users = BTreeMap::new();
+        for su in &persisted.settings.shared_users {
+            let members: Vec<String> = persisted
+                .settings
+                .packages
+                .iter()
+                .filter(|p| p.shared_app_id() == Some(su.app_id))
+                .map(|p| p.name.clone())
+                .collect();
+            for name in &members {
+                if let Some(ps) = packages.get_mut(name) {
+                    ps.shared_user = Some(su.name.clone());
+                }
+            }
+            shared_users.insert(
+                su.name.clone(),
+                model::SharedUser {
+                    name: su.name.clone(),
+                    app_id: su.app_id,
+                    flags: su.flags,
+                    packages: members,
+                    signatures: su.signatures.clone(),
+                    ..Default::default()
+                },
+            );
+        }
         let mut users = BTreeMap::new();
         users.insert(
             0,
@@ -122,6 +150,7 @@ impl Packages {
         Ok(Packages {
             state: model::State {
                 packages,
+                shared_users,
                 users,
                 system,
                 protected_broadcasts: Some(protected_broadcasts),
@@ -217,6 +246,77 @@ impl Packages {
     /// User 0's permission and app op state.
     pub fn access(&self) -> Option<&package::permissions::AccessUser> {
         self.access.as_ref()
+    }
+
+    /// `ComponentInfo.loadXmlMetaData`'s parser and the attributes of
+    /// `getResourcesForApplication`: the compiled XML resource `id` of
+    /// `pkg`, from its APKs below the image `root` or the guest's `/data`
+    /// at `data`, its root element given to `read` with the package's
+    /// resources (its own and the framework's; overlays of the package
+    /// are not applied, #1426).
+    pub fn xml_resource<T>(
+        &self,
+        root: &Path,
+        data: &Path,
+        pkg: &AndroidPackage,
+        id: u32,
+        read: impl FnOnce(&aim_apps::res::Element, &parse::attrs::Ctx<'_>) -> T,
+    ) -> Result<T, String> {
+        let base = pkg.base_apk_path.as_deref().ok_or("no base APK")?;
+        let mut paths = vec![base];
+        for split in pkg.split_code_paths.iter().flatten() {
+            paths.push(split.as_deref().ok_or("a null split path")?);
+        }
+        let apks = paths
+            .iter()
+            .map(|path| {
+                let host = host_path(root, data, path)?;
+                aim_apps::apk::Apk::open(&host).map_err(|e| format!("{}: {e}", host.display()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let tables = apks
+            .iter()
+            .map(|apk| {
+                apk.file_if_present("resources.arsc")
+                    .map_err(|e| e.to_string())?
+                    .map(|b| parse::resources::Table::parse(&b).map_err(|e| e.to_string()))
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Each table's APK: the framework's first, then the package's.
+        let mut table_apks = vec![None];
+        let mut resources = vec![&self.platform.framework];
+        for (i, table) in tables.iter().enumerate() {
+            if let Some(table) = table {
+                resources.push(table);
+                table_apks.push(Some(i));
+            }
+        }
+        let resources = parse::resources::Resources {
+            tables: resources,
+            overlays: &self.platform.framework_overlays,
+            config: self.platform.config(),
+        };
+        let (table, file) = resources
+            .resource_string_source(id)
+            .ok_or_else(|| format!("no XML resource {id:#x}"))?;
+        let bytes = match table_apks.get(table).ok_or("an XML resource of an overlay")? {
+            Some(i) => apks[*i].file(file),
+            None => aim_apps::apk::Apk::open(&root.join("system/framework/framework-res.apk"))
+                .and_then(|apk| apk.file(file)),
+        }
+        .map_err(|e| e.to_string())?;
+        let document = aim_apps::res::xml(&bytes).map_err(|e| e.to_string())?;
+        let ctx = parse::attrs::Ctx {
+            res: &resources,
+            attrs: &self.platform.framework_attrs,
+            error: Default::default(),
+        };
+        let value = read(&document, &ctx);
+        match ctx.error.take() {
+            Some(e) => Err(e),
+            None => Ok(value),
+        }
     }
 
     /// `getApplicationInfo(name, flags, 0)`.
@@ -398,6 +498,7 @@ fn join(
         target_sdk_version: setting.target_sdk_version,
         last_modified_time: setting.last_modified_time,
         last_update_time: setting.last_update_time,
+        signatures: setting.signatures.clone(),
         ..Default::default()
     };
     ps.is.system = system;

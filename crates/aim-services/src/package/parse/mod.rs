@@ -18,7 +18,7 @@
 //! `FrameworkParsingPackageUtils`), Copyright (C) The Android Open Source
 //! Project, Licensed under the Apache License, Version 2.0.
 
-mod attrs;
+pub mod attrs;
 mod cluster;
 pub mod component;
 mod components;

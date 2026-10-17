@@ -109,6 +109,12 @@ impl CompatConfig {
             .is_none_or(|c| self.enabled(c, target_sdk))
     }
 
+    /// Change `id`'s value for a uid of no package
+    /// (`CompatConfig.defaultChangeIdValue`): whether it is not disabled.
+    pub fn default_value(&self, id: i64) -> bool {
+        self.changes.get(&id).is_none_or(|c| !c.disabled)
+    }
+
     /// `getDisabledChanges`, sorted.
     pub fn disabled_changes(&self, target_sdk: i32) -> Vec<i64> {
         self.changes
