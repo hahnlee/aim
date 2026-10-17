@@ -154,9 +154,21 @@ impl Touch {
 }
 
 impl Motion {
+    /// Where a gesture starts (the first pointer's down), in the display's
+    /// pixels.
+    pub fn gesture_start(&self) -> Option<(f32, f32)> {
+        (self.action == ACTION_DOWN).then(|| (self.pointers[0].1, self.pointers[0].2))
+    }
+
+    /// Whether the gesture ends with it (the last pointer's up).
+    pub fn ends_gesture(&self) -> bool {
+        self.action == ACTION_UP
+    }
+
     /// `InputMessage` of type `MOTION` as `InputPublisher::publishMotionEvent`
-    /// fills it: the window and the display at the origin, unscaled.
-    pub fn message(&self, seq: u32, id: i32) -> Vec<u8> {
+    /// fills it for a window at `origin` on the display, unscaled: the
+    /// window's transform takes the display's pixels to the window's.
+    pub fn message(&self, seq: u32, id: i32, origin: (f32, f32)) -> Vec<u8> {
         let mut m = header(MOTION, seq);
         let i32s = |m: &mut Vec<u8>, v: &[i32]| v.iter().for_each(|v| m.extend_from_slice(&v.to_ne_bytes()));
         let f32s = |m: &mut Vec<u8>, v: &[f32]| v.iter().for_each(|v| m.extend_from_slice(&v.to_ne_bytes()));
@@ -168,7 +180,7 @@ impl Motion {
         m.extend_from_slice(&[0; 4]); // classification NONE
         i32s(&mut m, &[0]); // no edge flags
         m.extend_from_slice(&self.down_time.to_ne_bytes());
-        f32s(&mut m, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]); // the window's transform
+        f32s(&mut m, &[1.0, 0.0, 0.0, 1.0, -origin.0, -origin.1]); // the window's transform
         f32s(&mut m, &[1.0, 1.0, f32::NAN, f32::NAN]); // precision; no cursor
         f32s(&mut m, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]); // the raw transform
         for &(pointer, x, y) in &self.pointers {
@@ -245,8 +257,12 @@ mod tests {
     #[test]
     fn a_motion_has_the_published_layout() {
         let m = Motion { action: ACTION_DOWN, time: 5, down_time: 5, pointers: vec![(0, 1.0, 2.0)] };
-        let bytes = m.message(1, 2);
+        let bytes = m.message(1, 2, (30.0, 40.0));
         assert_eq!(focus(1, 2, true).len(), 16);
+        assert_eq!(m.gesture_start(), Some((1.0, 2.0)));
+        // The window's transform moves the display's origin to the window's.
+        let float = |at: usize| f32::from_ne_bytes(bytes[at..at + 4].try_into().unwrap());
+        assert_eq!((float(8 + 112), float(8 + 116)), (-30.0, -40.0));
         // The header, the body up to the pointers, one pointer.
         assert_eq!(bytes.len(), 8 + 160 + 144);
         assert_eq!(&bytes[8 + 160..8 + 168], &[0, 0, 0, 0, TOOL_FINGER as u8, 0, 0, 0]);

@@ -90,8 +90,10 @@ zygote is ready about half a second later, and starts wait for it. `aimctl
 open PACKAGE` asks the app host to start the package's launch activity
 (`aim.app_host`), which it resolves as `getLaunchIntentForPackage` does;
 it returns in about 0.3 s, and the app's first frame follows about 0.6 s
-after the command (Calculator, 2026-10-17). There is no window mode yet
-(#1422): `--windows` is refused.
+after the command (Calculator, 2026-10-17). With `--windows` the app
+host is the display server's task bridge ([windows.md](windows.md), "The
+app host"): each app opens in its own window, and `open` opens its shim
+as with a whole Android.
 
 ## Talking to the guest
 

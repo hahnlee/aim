@@ -222,12 +222,15 @@ impl NativeServices {
     /// The app host's inputs (`app_host::AppHost::configure`), when
     /// `activity` is native.
     pub fn configure_app_host(&self, root: &std::path::Path, data: &std::path::Path,
-        properties: app_host::Properties, connect: app_host::Connect,
+        properties: app_host::Properties, connect: app_host::Connect, display: Option<&std::path::Path>,
     ) -> Result<(), String> {
-        match &self.app_host {
-            Some(host) => host.configure(root, data, properties, connect),
-            None => Ok(()),
+        let Some(host) = &self.app_host else { return Ok(()) };
+        host.configure(root, data, properties, connect)?;
+        // Window mode is the display server's (`FN_WINDOWS`).
+        if let Some(display) = display {
+            host.connect_display(display);
         }
+        Ok(())
     }
 
     /// Compares the original services `names` with their native models

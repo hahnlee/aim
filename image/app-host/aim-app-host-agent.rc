@@ -2,9 +2,11 @@
 # host need done by a guest process of the system uid. Zygote takes
 # commands only from the system uid, so the agent relays the app host's
 # process starts to it; window input channels are guest sockets, so it
-# makes them.
+# makes them; it kills the processes of removed tasks, as system_server
+# does with the same capability.
 service aim-app-host-agent /system_ext/bin/aim-app-host-agent
     class main
     user system
     group system
+    capabilities KILL
     socket aim_zygote_relay stream 0660 root system

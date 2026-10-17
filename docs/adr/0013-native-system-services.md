@@ -460,6 +460,14 @@ The migration's state and conformance results are in
   chosen calls; the original's `bindApplication` to Calculator fixes the
   configuration, compatibility info, core settings and compat changes the
   app host's tests check.
+- **Window mode (2026-10-17).** The app host is the display server's task
+  bridge itself, in `aim-windows`' place: a task opens at freeform's
+  default bounds (`TaskLaunchParamsModifier`), its layer is a container
+  the app host places with SurfaceFlinger transactions
+  (`setTransactionState`, its `layer_state_t` checked byte for byte against
+  one system_server sent), and the agent sends a touch to the window under
+  it, in the window's coordinates. A removed task's process is killed as
+  `removeTask` kills it.
 
 ### CTS-derived conformance (2026-10-16)
 

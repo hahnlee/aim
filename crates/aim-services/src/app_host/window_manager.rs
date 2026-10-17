@@ -1,9 +1,10 @@
 //! `window`: WindowManager for the app host's windows, as
 //! `WindowManagerService.addWindow` and `relayoutWindow` answer an app's
 //! window at `android-16.0.0_r1` (`IWindowSession`'s replies). A window is
-//! a layer of buffers at the display's root, the whole display, with no
-//! system bars; its input channel is a guest socket pair the app host
-//! agent makes.
+//! a layer of buffers with no system bars: the whole display's, at its
+//! root, or in window mode its task's (`tasks`), a child of the task's
+//! layer; its input channel is a guest socket pair the app host agent
+//! makes.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
@@ -16,7 +17,7 @@ use aim_service_aidl::android_view_iwindowid as wid;
 use aim_service_aidl::android_view_iwindowmanager as wm;
 use aim_service_aidl::android_view_iwindowsession as ws;
 
-use super::config::Configuration;
+use super::config::{Configuration, Rect};
 use super::surface::{self, Layer};
 use super::{AppHost, reply};
 
@@ -44,6 +45,10 @@ struct Window {
     name: String,
     uid: u32,
     pid: i32,
+    /// Its task, in window mode.
+    task: Option<i32>,
+    /// Its input channel's index at the agent.
+    channel: i32,
     layer: Option<Layer>,
     insets_seq: i32,
     /// Its `IWindowId`, made at the first `getWindowId`.
@@ -132,7 +137,9 @@ impl Session {
         };
         let channel_name = format!("{id:07x} {name}");
         let display = self.host.display()?.0.clone();
-        let channel = self.host.open_input_channel(&channel_name, display.width, display.height)?;
+        let task = self.host.tasks.of_uid(self.uid);
+        let frame = task.map_or(Rect { left: 0, top: 0, right: display.width, bottom: display.height }, |(_, bounds)| bounds);
+        let (index, channel) = self.host.open_input_channel(&channel_name, (display.width, display.height), frame)?;
         let mut p = Parcel::new();
         p.write_no_exception();
         p.write_i32(ADDED);
@@ -165,6 +172,8 @@ impl Session {
                 name: name.clone(),
                 uid: self.uid,
                 pid: self.pid,
+                task: task.map(|(id, _)| id),
+                channel: index,
                 layer: None,
                 insets_seq: FIRST_SEQ,
                 window_id: None,
@@ -183,28 +192,34 @@ impl Session {
         let mut windows = self.host.windows.windows.lock().unwrap();
         let w = windows.get_mut(&window).ok_or_else(|| Exception::illegal_argument("relayout of an unknown window"))?;
         let mut result = 0;
+        let task = w.task.and_then(|id| self.host.tasks.bounds(id).map(|bounds| (id, bounds)));
         if view_visibility == VISIBLE && w.layer.is_none() {
             let composer = self.host.composer()?;
-            let layer = composer
-                .create_surface(&self.host.process, &w.name, surface::BUFFER_STATE, &[
-                    (surface::METADATA_WINDOW_TYPE, TYPE_BASE_APPLICATION),
-                    (surface::METADATA_OWNER_PID, w.pid),
-                    (surface::METADATA_OWNER_UID, w.uid as i32),
-                ])
-                .map_err(state)?;
+            let metadata = [
+                (surface::METADATA_WINDOW_TYPE, TYPE_BASE_APPLICATION),
+                (surface::METADATA_OWNER_PID, w.pid),
+                (surface::METADATA_OWNER_UID, w.uid as i32),
+            ];
+            let create = |parent: Option<&Layer>| composer.create_surface(&self.host.process, &w.name, surface::BUFFER_STATE, parent, &metadata);
+            let layer = match task {
+                Some((id, _)) => self.host.task_layer(id, |parent| create(Some(parent))),
+                None => create(None),
+            }
+            .map_err(state)?;
             eprintln!("app host: window {} has layer {}", w.name, layer.name);
             w.layer = Some(layer);
             result |= RELAYOUT_RES_FIRST_TIME | RELAYOUT_RES_SURFACE_CHANGED;
         }
         w.insets_seq += 1;
         let (width, height) = (display.width, display.height);
+        let frame = task.map_or(Rect { left: 0, top: 0, right: width, bottom: height }, |(_, bounds)| bounds);
         let mut p = Parcel::new();
         p.write_no_exception();
         p.write_i32(result);
         p.write_i32(1);
         // `ClientWindowFrames`: the frame and the display's, no parent or
         // attached frame.
-        for r in [[0, 0, width, height], [0, 0, width, height], [0, 0, 0, 0]] {
+        for r in [[frame.left, frame.top, frame.right, frame.bottom], [0, 0, width, height], [0, 0, 0, 0]] {
             r.iter().for_each(|v| p.write_i32(*v));
         }
         p.write_i32(0);
@@ -212,7 +227,10 @@ impl Session {
         p.write_f32(1.0);
         p.write_i32(FIRST_SEQ);
         // `MergedConfiguration`: global, override, merged.
-        let mut overrides: Configuration = global.clone();
+        let mut overrides: Configuration = match task {
+            Some((_, bounds)) => global.of_freeform_task(bounds),
+            None => global.clone(),
+        };
         overrides.window.activity_type = 1;
         global.write_to(&mut p);
         overrides.write_to(&mut p);
@@ -247,9 +265,40 @@ impl Session {
         p.write_i32(1);
         p.write_bool(false); // `ActivityWindowInfo`: not embedded, the task's bounds
         for _ in 0..2 {
-            [0, 0, width, height].iter().for_each(|v| p.write_i32(*v));
+            [frame.left, frame.top, frame.right, frame.bottom].iter().for_each(|v| p.write_i32(*v));
         }
         Ok(p)
+    }
+}
+
+impl super::AppHost {
+    /// The input channels of `uid`'s windows, latest last.
+    fn channels_of(&self, uid: u32) -> Vec<i32> {
+        let windows = self.windows.windows.lock().unwrap();
+        let mut of_uid: Vec<_> = windows.values().filter(|w| w.uid == uid).map(|w| (w.id, w.channel)).collect();
+        of_uid.sort();
+        of_uid.into_iter().map(|(_, channel)| channel).collect()
+    }
+
+    /// `uid`'s latest window takes the input focus.
+    pub(super) fn focus_window_of(&self, uid: u32) -> Result<(), String> {
+        match self.channels_of(uid).last() {
+            Some(channel) => self.focus_input_channel(*channel).map_err(|e| format!("{e:?}")),
+            None => Ok(()),
+        }
+    }
+
+    /// `uid`'s windows moved to `frame`.
+    pub(super) fn move_windows_of(&self, uid: u32, frame: Rect) -> Result<(), String> {
+        for channel in self.channels_of(uid) {
+            self.set_input_frame(channel, frame).map_err(|e| format!("{e:?}"))?;
+        }
+        Ok(())
+    }
+
+    /// The windows of the process `pid` are gone with it.
+    pub(super) fn windows_died(&self, pid: i32) {
+        self.windows.windows.lock().unwrap().retain(|_, w| w.pid != pid);
     }
 }
 

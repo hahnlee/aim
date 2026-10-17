@@ -273,6 +273,17 @@ fn shim_of(dir: &Path, package: &str) -> Option<PathBuf> {
 
 fn open(files: &Files, package: &str) -> Result<ExitCode, String> {
     let (state, _) = running(files)?;
+    // In window mode the app's shim hosts its windows under its own Dock
+    // icon, and opening it launches the app.
+    if state.windows
+        && let Some(shim) = shim_of(&files.apps(), package)
+    {
+        let status = Command::new("/usr/bin/open")
+            .arg(&shim)
+            .status()
+            .map_err(|e| format!("open: {e}"))?;
+        return Ok(exit_code(status));
+    }
     // The app host resolves the launch activity itself, from the packages
     // it loaded (`aim.app_host`'s `startActivity`).
     if state.inputs.app_host_services()?.is_some() {
@@ -288,17 +299,6 @@ fn open(files: &Files, package: &str) -> Result<ExitCode, String> {
         .into_iter()
         .find(|i| i.app.package == package)
         .ok_or_else(|| format!("{package}: not a launcher app of the guest (`aimctl apps`)"))?;
-    // In window mode the app's shim hosts its windows under its own Dock
-    // icon, and opening it launches the app.
-    if state.windows
-        && let Some(shim) = shim_of(&files.apps(), package)
-    {
-        let status = Command::new("/usr/bin/open")
-            .arg(&shim)
-            .status()
-            .map_err(|e| format!("open: {e}"))?;
-        return Ok(exit_code(status));
-    }
     let guest = booted(files)?;
     let component = format!("{package}/{}", app.app.activity);
     let (status, out) = guest.output(

@@ -61,6 +61,7 @@ task's window lies exactly over the task. The rest follows from that:
 | Which task each layer is (attribution) | `crates/aim-host-display/src/layers.rs` |
 | System panels (layers of no task) | `bin/aim-display/panels.rs` |
 | Task bridge (guest, Rust): task listener and task calls | `daemons/windows` (`/system_ext/bin/aim-windows`) |
+| Task bridge of the app host image (host, Rust): its own tasks | `crates/aim-services/src/app_host/tasks.rs` |
 | `RunningTaskInfo` parcel reading | `daemons/windows/core` |
 | Host-call `FN_WINDOWS`, records | `aim_hostcall::display::{Windows, Window, window}` |
 | Freeform support | `/vendor/etc/permissions/android.software.freeform_window_management.xml` |
@@ -114,6 +115,32 @@ drops the old connection's tasks. The mode:
 | `FOCUS` | server | `setFocusedTask` |
 | `CLOSE` | server | `removeTask` |
 | `LAUNCH` | server | start a package's launcher activity in a new task (`startActivityAndWait`, in a thread of its own; `DRAWN` when it returns) |
+
+## The app host
+
+On the app host image ([app-host.md](app-host.md)) there is no
+system_server and no `aim-windows`: the app host, whose tasks they are,
+is the bridge. It connects to the display server itself (`OP_WINDOWS`,
+from guest-init) and, in window mode:
+
+- **Opens a task** for each activity it launches, at the bounds freeform
+  gives a task started without any (`TaskLaunchParamsModifier
+  .getTaskBounds`: 412×732 dp, 1064×600 dp for a landscape activity, fit
+  into the display and centred, then moved off another task's corners), and
+  reports it (`TASK`, `PACKAGE`, `ACTIVITY`, `FRONT`). The activity's
+  configuration is the freeform task's (`TaskFragment
+  .computeConfigResourceOverrides`: its sizes from its bounds).
+- **Places it**: the task's layer is a container at the display's root,
+  the parent of its windows' layers, moved to the task's bounds and cut to
+  them by a SurfaceFlinger transaction, stacked in the tasks' order.
+- **Takes requests**: `LAUNCH` brings the package's task to the front, or
+  starts the activity and answers `DRAWN` when it is idle; `FOCUS` brings
+  the task to the front and gives its latest window the input focus;
+  `SET_BOUNDS` moves the task, but keeps its size (#1444); `CLOSE` kills
+  its process, as `removeTask` kills a removed task's
+  (`killProcessesForRemovedTask`), and its death removes the task.
+- **Input**: the agent sends a touch to the front window under it, in the
+  window's coordinates (`aim-app-host-agent`).
 
 ## Windows
 

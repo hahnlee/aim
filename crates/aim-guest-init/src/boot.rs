@@ -796,7 +796,8 @@ impl Boot {
                 let socket_dir = layout.socket_dir();
                 services.configure_app_host(image.root(), &layout.data.join("data"),
                     Box::new(move |name| read_property(&properties_dir, name)),
-                    Box::new(move || crate::unixsock::connect_at(&socket_dir, APP_HOST_ZYGOTE_RELAY)))
+                    Box::new(move || crate::unixsock::connect_at(&socket_dir, APP_HOST_ZYGOTE_RELAY)),
+                    options.display.as_deref())
                     .map_err(|e| format!("app host: {e}"))?;
             }
             if let Some((names, log)) = &options.binder_shadow {
