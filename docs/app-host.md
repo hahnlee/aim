@@ -21,7 +21,7 @@ and boot are unchanged.
 | `permission` | the host, same | `IPermissionController`, which SurfaceFlinger's permission checks wait for |
 | `mount` | the host, same | StorageManagerService's side of external storage: it connects vold (listener, reset, user 0's start), has the agent mount the emulated volume, and answers `getVolumeList` and `mkdirs` (vold's `setupAppDir`); processes start with the default external mount and app data isolation (`--pkg-data-info-map`, `--bind-mount-data-dirs`) as `ProcessList` starts them |
 | `input`, `audio` | the host, same | what a touch and a click ask: the velocity tracker's strategy, and the input devices (InputReader's virtual keyboard, whose key character map apps load: `Virtual.kcm` as `KeyCharacterMap` parses and writes it, `app_host/keychars.rs`; the touchscreen, keyboard and mouse: #1434); whether navigation repeats sound, and the click's sound effect while sound effects are off (#1433) |
-| `user`, `appops`, `trust`, `input_method` | the host, same | what an app's start asks of them: the one user's state and restrictions, the clipboard's ops, an unlocked device, the input method's client (no input method yet, #1432) |
+| `user`, `appops`, `trust`, `input_method` | the host, same | what an app's start asks of them: the one user's state and restrictions, the clipboard's ops, an unlocked device, and the input method: the Mac's, whose text goes to the app's input connection ([input.md](input.md), "The app host: the Mac's input method") |
 | the `settings` provider | the host, same | `GET_*` and `LIST_config` from the settings the original persisted |
 | `aim.app_host` | the host, same | `startActivity(String)` (code 1: a component, `package/.Class`, or a package, whose launch activity it resolves) for the shell and `aimctl open` |
 
@@ -86,7 +86,7 @@ idle 0.33 s after its process's start.
 More than one activity and window per app, focus changes within an app
 and accessibility (#1422); keys, the mouse and the rest of input dispatch (#1434); sound
 effects (#1433); a finished draw's transaction (#1431); the input
-method (#1432); settings generation tracking (#1430); scoped storage's
+method's candidates at the caret (#1458); settings generation tracking (#1430); scoped storage's
 per-file ownership and the media database (#1455); the font map in
 `bindApplication`, to come from the Mac's fonts (#1449),
 PackageManager's writes (#1425), and the content service, which apps

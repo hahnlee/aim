@@ -54,6 +54,8 @@ struct Window {
     /// The sequence numbers of its frames and insets last sent.
     frames_seq: i32,
     insets_seq: i32,
+    /// The inset types it asks to be visible (`updateRequestedVisibleTypes`).
+    requested_visible_types: i32,
     /// Its `IWindowId`, made at the first `getWindowId`.
     window_id: Option<Binder>,
 }
@@ -180,6 +182,7 @@ impl Session {
                 layer: None,
                 frames_seq: FIRST_SEQ,
                 insets_seq: FIRST_SEQ,
+                requested_visible_types: 0,
                 window_id: None,
             },
         );
@@ -496,6 +499,19 @@ impl Service for Session {
                 }
                 Ok(Parcel::new())
             }
+            // Oneway: kept as `WindowState.setRequestedVisibleTypes` keeps
+            // it; no inset source (the input method's) has a window here.
+            ws::UPDATE_REQUESTED_VISIBLE_TYPES => {
+                call.data.enforce_interface(ws::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                let window = call.data.read_binder().map_err(|_| BAD_VALUE)?;
+                let types = call.data.read_i32().map_err(|_| BAD_VALUE)?;
+                if let Some(Binder::Handle(window)) = window
+                    && let Some(w) = self.host.windows.windows.lock().unwrap().get_mut(&window)
+                {
+                    w.requested_visible_types = types;
+                }
+                Ok(Parcel::new())
+            }
             ws::GET_WINDOW_ID => {
                 let args = ws::GetWindowId::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let Some(Binder::Handle(window)) = args.window else { return Err(BAD_VALUE) };
@@ -508,6 +524,10 @@ impl Service for Session {
             // The window's buffers reach SurfaceFlinger through the app's
             // own transactions; its draw transaction is not applied (#1431).
             ws::FINISH_DRAWING | ws::SET_ON_BACK_INVOKED_CALLBACK_INFO => Ok(Parcel::new()),
+            // Oneway: WindowManager passes it to accessibility's
+            // magnification (`AccessibilityController`), which no service
+            // runs here.
+            ws::ON_RECTANGLE_ON_SCREEN_REQUESTED => Ok(Parcel::new()),
             code => reply(Err(self.host.unimplemented("window session", code))),
         }
     }

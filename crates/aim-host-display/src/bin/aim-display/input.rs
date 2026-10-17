@@ -5,9 +5,11 @@
 //! (first responder) and the mouse, reads each event's plain values and
 //! hands them to [`Input`] (a window host sends them to the server, which
 //! applies them the same way, `hosts::apply`); the window delegate releases
-//! everything when the window stops being key. IME composition
-//! (`NSTextInputClient`) is not handled yet (#23): keys go out as physical
-//! keys.
+//! everything when the window stops being key. Keys go out as physical
+//! keys, except in a window whose task has an editor the app host serves
+//! (`text_input`): there the view is the Mac's input method's client
+//! (`NSTextInputClient`), and its marked and committed text and editing
+//! commands go to the app's editor.
 //!
 //! The views' cursor is the pointer's sprite (`cursor.rs`). The primary
 //! button is a touch; hovering, the other buttons, scrolling
@@ -18,12 +20,14 @@
 
 use std::ffi::c_void;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use aim_host_display::input::server::Devices;
 use aim_host_display::input::translate::{COMMAND, Input, Phase, double_tap};
 use aim_host_display::input::{KEYBOARD, device_dir, devices, keymap};
 use aim_host_display::wire::{HostInput, input as kind};
+
+use aim_host_display::text_input::Message as Text;
 
 use crate::objc::{CGPoint, CGRect, Id, Sel, class, class_addMethod, sel};
 use crate::objc::{objc_allocateClassPair, objc_registerClassPair};
@@ -113,6 +117,8 @@ fn pointer(view: Id, event: Id, phase: Phase, t: i64) {
 }
 
 extern "C" fn mouse_down(this: Id, _: Sel, event: Id) {
+    // A touch may move the caret.
+    forget_typed();
     pointer(this, event, Phase::Down, time(event));
 }
 
@@ -309,6 +315,31 @@ fn key(view: Id, event: Id, down: bool) {
     if down && !repeat && flags & COMMAND != 0 && window_shortcut(view, code) {
         return;
     }
+    // Typing into an editor: the Mac's input method takes the key.
+    if down && editing(view).is_some() && flags & (COMMAND | CONTROL) == 0 {
+        // The view's input context is made at its first use: it is the
+        // current one before the input method sees the key.
+        let context = send!(view, c"inputContext" => Id);
+        if !context.is_null() && send!(class(c"NSTextInputContext"), c"currentInputContext" => Id) != context {
+            send!(context, c"activate" => ());
+        }
+        let events = send!(class(c"NSArray"), c"arrayWithObject:" => Id, Id = event);
+        send!(view, c"interpretKeyEvents:" => (), Id = events);
+        return;
+    }
+    // A release goes where its press went.
+    {
+        let mut pressed = PRESSED.lock().unwrap();
+        if down {
+            if !pressed.contains(&code) {
+                pressed.push(code);
+            }
+        } else if let Some(at) = pressed.iter().position(|&c| c == code) {
+            pressed.remove(at);
+        } else {
+            return;
+        }
+    }
     deliver(HostInput {
         kind: kind::KEY,
         code: code as u32,
@@ -317,6 +348,240 @@ fn key(view: Id, event: Id, down: bool) {
         time_ns: time(event),
         ..Default::default()
     });
+}
+
+/// `NSEventModifierFlagControl`.
+const CONTROL: u64 = 1 << 18;
+/// `NSNotFound`.
+const NOT_FOUND: usize = isize::MAX as usize;
+/// `EditorInfo.IME_MASK_ACTION`, `IME_ACTION_NONE`, `IME_FLAG_NO_ENTER_ACTION`;
+/// the Android key codes of the editing commands.
+const IME_MASK_ACTION: i32 = 0xff;
+const IME_ACTION_NONE: i32 = 1;
+const IME_FLAG_NO_ENTER_ACTION: i32 = 0x4000_0000;
+const KEYCODE_ENTER: i32 = 66;
+const KEYCODE_TAB: i32 = 61;
+const KEYCODE_ESCAPE: i32 = 111;
+const KEYCODE_DPAD_UP: i32 = 19;
+const KEYCODE_DPAD_DOWN: i32 = 20;
+const KEYCODE_DPAD_LEFT: i32 = 21;
+const KEYCODE_DPAD_RIGHT: i32 = 22;
+
+/// The editor this process's views type into: its task (-1: the
+/// display, in device mode) and its `EditorInfo.imeOptions`.
+static EDITOR: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+/// The input method's marked text.
+static MARKED: Mutex<String> = Mutex::new(String::new());
+/// The text the input method put before the caret since the editor
+/// started, the caret last moved or the view was touched: what the input
+/// method reads back and replaces (Korean input composes a syllable by
+/// replacing the one before the caret). The editor's other text is the
+/// app's.
+static TYPED: Mutex<String> = Mutex::new(String::new());
+/// The keys whose press went to the keyboard device.
+static PRESSED: Mutex<Vec<u16>> = Mutex::new(Vec::new());
+
+/// The app host's editor, or its end (`text_input::Message::Editor`).
+pub fn editor(m: &Text) {
+    let Text::Editor { task, active, ime_options, .. } = *m else { return };
+    let mut editor = EDITOR.lock().unwrap();
+    // A restart of the same task's input keeps what the input method is
+    // composing; another editor, or none, ends it.
+    let same = editor.is_some_and(|(t, _)| t == task);
+    if active {
+        *editor = Some((task, ime_options));
+    } else if same {
+        *editor = None;
+    }
+    if !(active && same) {
+        MARKED.lock().unwrap().clear();
+        TYPED.lock().unwrap().clear();
+    }
+}
+
+/// The caret moved where the input method does not know: what it typed
+/// is no longer before it.
+fn forget_typed() {
+    TYPED.lock().unwrap().clear();
+}
+
+/// The typed text and the marked text after it, in UTF-16 units.
+fn document() -> Vec<u16> {
+    let mut d: Vec<u16> = TYPED.lock().unwrap().encode_utf16().collect();
+    d.extend(MARKED.lock().unwrap().encode_utf16());
+    d
+}
+
+/// A replacement of the typed text from `range` on: the app's text
+/// before the caret goes as far back (`deleteSurroundingText`), and so
+/// does the typed text.
+fn replace(range: NsRange) {
+    if range.location == NOT_FOUND {
+        return;
+    }
+    let mut typed = TYPED.lock().unwrap();
+    let units: Vec<u16> = typed.encode_utf16().collect();
+    let from = range.location.min(units.len());
+    if from < units.len() {
+        give(Text::Delete { before: (units.len() - from) as i32, after: 0 });
+        *typed = String::from_utf16_lossy(&units[..from]);
+    }
+}
+
+/// The editor's `imeOptions`, if `view` shows its task.
+fn editing(view: Id) -> Option<i32> {
+    let (task, options) = (*EDITOR.lock().unwrap())?;
+    (crate::windows::task_of_view(view).unwrap_or(-1) == task).then_some(options)
+}
+
+/// What the input method gave: to the app host, through the server if
+/// this is a window host.
+fn give(m: Text) {
+    if crate::shim::is_host() {
+        crate::shim::text_input(&m);
+    } else {
+        crate::text_input::to_app_host(&m);
+    }
+}
+
+/// `NSRange`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NsRange {
+    location: usize,
+    length: usize,
+}
+
+/// The text of an `NSString` or `NSAttributedString`.
+fn string_of(s: Id) -> String {
+    if send!(s, c"isKindOfClass:" => bool, Id = class(c"NSAttributedString")) {
+        crate::objc::text(send!(s, c"string" => Id))
+    } else {
+        crate::objc::text(s)
+    }
+}
+
+extern "C" fn insert_text(_: Id, _: Sel, s: Id, replacement: NsRange) {
+    replace(replacement);
+    let text = string_of(s);
+    MARKED.lock().unwrap().clear();
+    TYPED.lock().unwrap().push_str(&text);
+    give(Text::Commit { text });
+}
+
+extern "C" fn set_marked_text(_: Id, _: Sel, s: Id, _: NsRange, replacement: NsRange) {
+    replace(replacement);
+    let text = string_of(s);
+    *MARKED.lock().unwrap() = text.clone();
+    // The cursor after the marked text, as the input method keeps it.
+    give(Text::Compose { text, cursor: 1 });
+}
+
+/// The marked text is taken as it is.
+extern "C" fn unmark_text(_: Id, _: Sel) {
+    let text = std::mem::take(&mut *MARKED.lock().unwrap());
+    if !text.is_empty() {
+        TYPED.lock().unwrap().push_str(&text);
+        give(Text::Commit { text });
+    }
+}
+
+extern "C" fn has_marked_text(_: Id, _: Sel) -> bool {
+    !MARKED.lock().unwrap().is_empty()
+}
+
+extern "C" fn marked_range(_: Id, _: Sel) -> NsRange {
+    let length = MARKED.lock().unwrap().encode_utf16().count();
+    let location = TYPED.lock().unwrap().encode_utf16().count();
+    if length == 0 { NsRange { location: NOT_FOUND, length: 0 } } else { NsRange { location, length } }
+}
+
+/// The caret: after the typed and the marked text.
+extern "C" fn selected_range(_: Id, _: Sel) -> NsRange {
+    NsRange { location: document().len(), length: 0 }
+}
+
+/// The marked text's attributes the app shows: its underline and
+/// clauses (`NSUnderlineStyleAttributeName`,
+/// `NSMarkedClauseSegmentAttributeName`), as the composing span does.
+extern "C" fn valid_attributes(_: Id, _: Sel) -> Id {
+    let names = [crate::objc::nsstring("NSUnderline"), crate::objc::nsstring("NSMarkedClauseSegment")];
+    send!(class(c"NSArray"), c"arrayWithObjects:count:" => Id, *const Id = names.as_ptr(), usize = names.len())
+}
+
+/// The part of the typed and marked text in `range`: the input method
+/// reads what is before the caret back to go on composing it.
+extern "C" fn attributed_substring(_: Id, _: Sel, range: NsRange, actual: *mut NsRange) -> Id {
+    let marked = document();
+    let start = range.location.min(marked.len());
+    let end = range.location.saturating_add(range.length).min(marked.len());
+    if range.location == NOT_FOUND || start >= end {
+        return std::ptr::null_mut();
+    }
+    if !actual.is_null() {
+        // SAFETY: AppKit's out parameter for the range given.
+        unsafe { *actual = NsRange { location: start, length: end - start } };
+    }
+    let text = String::from_utf16_lossy(&marked[start..end]);
+    let s = send!(class(c"NSAttributedString"), c"alloc" => Id);
+    let s = send!(s, c"initWithString:" => Id, Id = crate::objc::nsstring(&text));
+    send!(s, c"autorelease" => Id)
+}
+
+/// Where the input method shows its candidates: the window's content's
+/// bottom left, on the screen (the caret's place is not reported yet,
+/// #1458).
+extern "C" fn first_rect(view: Id, _: Sel, _: NsRange, _: *mut NsRange) -> CGRect {
+    let window = send!(view, c"window" => Id);
+    if window.is_null() {
+        return CGRect::default();
+    }
+    let bounds = send!(view, c"bounds" => CGRect);
+    let in_window = send!(view, c"convertRect:toView:" => CGRect, CGRect = bounds, Id = std::ptr::null_mut());
+    let on_screen = send!(window, c"convertRectToScreen:" => CGRect, CGRect = in_window);
+    CGRect { x: on_screen.x, y: on_screen.y, size: crate::objc::CGSize { width: 0.0, height: 20.0 } }
+}
+
+extern "C" fn character_index(_: Id, _: Sel, _: CGPoint) -> usize {
+    NOT_FOUND
+}
+
+/// The input method's editing commands, as an Android input method sends
+/// them: Return as `InputMethodService.sendDefaultEditorAction` does,
+/// deletions as `deleteSurroundingText`, the rest as keys.
+extern "C" fn do_command(view: Id, _: Sel, command: Sel) {
+    // SAFETY: a selector's NUL-terminated name.
+    let name = unsafe { std::ffi::CStr::from_ptr(crate::objc::sel_getName(command)) }.to_bytes();
+    let options = editing(view).unwrap_or(0);
+    let m = match name {
+        b"deleteBackward:" | b"deleteBackwardByDecomposingPreviousCharacter:" => {
+            let mut typed = TYPED.lock().unwrap();
+            let mut units: Vec<u16> = typed.encode_utf16().collect();
+            units.pop();
+            *typed = String::from_utf16_lossy(&units);
+            Text::Delete { before: 1, after: 0 }
+        }
+        b"deleteForward:" => Text::Delete { before: 0, after: 1 },
+        b"insertNewline:" | b"insertLineBreak:" => {
+            let action = options & IME_MASK_ACTION;
+            if options & IME_FLAG_NO_ENTER_ACTION == 0 && action != IME_ACTION_NONE {
+                Text::Action { code: action }
+            } else {
+                Text::Key { code: KEYCODE_ENTER }
+            }
+        }
+        b"insertTab:" => Text::Key { code: KEYCODE_TAB },
+        b"cancelOperation:" => Text::Key { code: KEYCODE_ESCAPE },
+        b"moveUp:" => Text::Key { code: KEYCODE_DPAD_UP },
+        b"moveDown:" => Text::Key { code: KEYCODE_DPAD_DOWN },
+        b"moveLeft:" => Text::Key { code: KEYCODE_DPAD_LEFT },
+        b"moveRight:" => Text::Key { code: KEYCODE_DPAD_RIGHT },
+        _ => return,
+    };
+    if !matches!(m, Text::Delete { .. }) {
+        forget_typed();
+    }
+    give(m);
 }
 
 extern "C" fn key_down(this: Id, _: Sel, event: Id) {
@@ -460,8 +725,28 @@ fn view_class() -> Id {
                 (c"cursorUpdate:", crate::cursor::cursor_update),
             ],
         );
-        // SAFETY: adds BOOL methods to the class registered above.
+        // SAFETY: adds methods of the stated encodings, and the protocol
+        // they make, to the class registered above.
         unsafe {
+            let range = "{_NSRange=QQ}";
+            let rect = "{CGRect={CGPoint=dd}{CGSize=dd}}";
+            for (name, imp, types) in [
+                (c"insertText:replacementRange:", insert_text as *const c_void, format!("v@:@{range}")),
+                (c"setMarkedText:selectedRange:replacementRange:", set_marked_text as *const c_void, format!("v@:@{range}{range}")),
+                (c"unmarkText", unmark_text as *const c_void, "v@:".into()),
+                (c"hasMarkedText", has_marked_text as *const c_void, "B@:".into()),
+                (c"markedRange", marked_range as *const c_void, format!("{range}@:")),
+                (c"selectedRange", selected_range as *const c_void, format!("{range}@:")),
+                (c"validAttributesForMarkedText", valid_attributes as *const c_void, "@@:".into()),
+                (c"attributedSubstringForProposedRange:actualRange:", attributed_substring as *const c_void, format!("@@:{range}^{range}")),
+                (c"firstRectForCharacterRange:actualRange:", first_rect as *const c_void, format!("{rect}@:{range}^{range}")),
+                (c"characterIndexForPoint:", character_index as *const c_void, "Q@:{CGPoint=dd}".into()),
+                (c"doCommandBySelector:", do_command as *const c_void, "v@::".into()),
+            ] {
+                let types = std::ffi::CString::new(types).unwrap();
+                class_addMethod(cls, sel(name), imp, types.as_ptr());
+            }
+            crate::objc::class_addProtocol(cls, crate::objc::objc_getProtocol(c"NSTextInputClient".as_ptr()));
             class_addMethod(
                 cls,
                 sel(c"acceptsFirstResponder"),

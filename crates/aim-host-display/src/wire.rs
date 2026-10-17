@@ -74,6 +74,10 @@ pub const OP_SHELL: u32 = 11;
 /// the present fence's writer, then the acquire fence when `flag` has
 /// [`PRESENT_ACQUIRE`].
 pub const OP_LAYERS: u32 = 12;
+/// The app host's text input connection ([`crate::text_input`]): the
+/// server answers with its mode (a `u32`), then both ends exchange
+/// frames.
+pub const OP_TEXT_INPUT: u32 = 13;
 
 /// [`Host::op`] values.
 pub mod host {
@@ -112,6 +116,8 @@ pub mod host {
     /// with its owner; `flag` = sequence, `id` = the client target (0:
     /// none); [`crate::layers::encode`]'s bytes follow.
     pub const LAYERS: u32 = 14;
+    /// Either way: a [`crate::text_input`] frame follows.
+    pub const TEXT_INPUT: u32 = 15;
 }
 
 /// [`HostInput::kind`] values: `translate::Input`'s methods. Positions

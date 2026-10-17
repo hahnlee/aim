@@ -229,6 +229,7 @@ impl NativeServices {
         // Window mode is the display server's (`FN_WINDOWS`).
         if let Some(display) = display {
             host.connect_display(display);
+            host.connect_text_input(display);
         }
         Ok(())
     }

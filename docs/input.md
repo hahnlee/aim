@@ -307,6 +307,39 @@ through the server's own path from a window host's records
 
 ## IME (#23)
 
+### The app host: the Mac's input method
+
+On the app host image ([app-host.md](app-host.md)) no Android input method
+runs: the app host's native InputMethodManager makes the Mac's input
+method the input method (the owner's choice, 2026-10-17; option A below
+without the APK).
+
+- **Which window types.** An editor's start
+  (`startInputOrWindowGainedFocusAsync` with an `EditorInfo` and an input
+  connection) is told to the display server on the app host's text input
+  connection (`OP_TEXT_INPUT`, `aim_host_display::text_input`), which
+  passes it to the window showing the editor's task (a window host's in
+  window mode). Each start is answered with `InputBindResult.NO_IME`.
+- **The view is the input method's client.** In that window a key
+  without Command or Control goes through `interpretKeyEvents:`: the
+  content view is an `NSTextInputClient`, and what the input method
+  gives becomes the app's `InputConnection` calls: marked text
+  `setComposingText`, inserted text `commitText`, Delete
+  `deleteSurroundingText`, Return the editor's action as
+  `InputMethodService.sendDefaultEditorAction` sends it (else Enter), Tab,
+  Esc and the arrows as soft keyboard key events. Other keys still go out
+  as physical keys.
+- **What the input method reads back.** The view keeps the text the input
+  method typed since the editor started, the caret moved or the view was
+  touched, and reports the caret after it: Korean input composes a
+  syllable by replacing the one before the caret (`insertText:` with a
+  replacement range), which becomes `deleteSurroundingText` and
+  `commitText`. G K S R M F, Space, A K give 한글 마, and Backspace takes a
+  syllable apart, as in an `NSTextView`. The candidate window stays at the
+  window's bottom left (#1458).
+
+### The original image
+
 Keys go out as physical keys, and Android's own input method composes
 text from them. That is enough for Latin layouts and for the Korean,
 Japanese and Chinese input methods that compose from key codes: the

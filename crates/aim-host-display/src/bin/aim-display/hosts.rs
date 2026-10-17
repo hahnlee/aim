@@ -157,6 +157,19 @@ impl Host {
         }
     }
 
+    /// Pass a text input message on: its record, then its frame.
+    pub fn send_text_input(&self, m: &aim_host_display::text_input::Message) {
+        let w = self.writer.lock().unwrap();
+        let r = Rec {
+            op: host::TEXT_INPUT,
+            ..Default::default()
+        };
+        let fd = std::os::fd::AsFd::as_fd(&*w);
+        if wire::send(fd, wire::bytes(&r), None).is_ok() {
+            let _ = wire::send(fd, &m.frame(), None);
+        }
+    }
+
     /// Pass a media message on: its record, then its frame.
     pub fn send_media(&self, m: &aim_host_display::media::Message) {
         let w = self.writer.lock().unwrap();
@@ -386,6 +399,10 @@ pub fn serve(sock: OwnedFd) {
             },
             host::SHELL => match aim_host_display::shell::Message::read(&mut sock) {
                 Ok(Some(m)) => crate::shell::from_host(&m),
+                _ => break,
+            },
+            host::TEXT_INPUT => match aim_host_display::text_input::Message::read(&mut sock) {
+                Ok(Some(m)) => crate::text_input::to_app_host(&m),
                 _ => break,
             },
             _ => break,

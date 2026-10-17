@@ -133,6 +133,20 @@ pub fn notify(m: &aim_host_display::notify::Message) {
     }
 }
 
+/// What the input method gave, for the server (and the app host).
+pub fn text_input(m: &aim_host_display::text_input::Message) {
+    if let Some(l) = LINK.get() {
+        let w = l.writer.lock().unwrap();
+        let r = Rec {
+            op: host::TEXT_INPUT,
+            ..Default::default()
+        };
+        if wire::send(w.as_fd(), wire::bytes(&r), None).is_ok() {
+            let _ = wire::send(w.as_fd(), &m.frame(), None);
+        }
+    }
+}
+
 /// A status bar message for the server.
 pub fn shell(m: &aim_host_display::shell::Message) {
     if let Some(l) = LINK.get() {
@@ -394,6 +408,10 @@ fn serve(sock: &mut UnixStream) {
             },
             host::SHELL => match aim_host_display::shell::Message::read(sock) {
                 Ok(Some(m)) => on_main(move || crate::shell::handle(m)),
+                _ => break,
+            },
+            host::TEXT_INPUT => match aim_host_display::text_input::Message::read(sock) {
+                Ok(Some(m)) => on_main(move || crate::input::editor(&m)),
                 _ => break,
             },
             _ => break,

@@ -19,6 +19,7 @@ pub mod layers;
 pub mod media;
 pub mod notify;
 pub mod shell;
+pub mod text_input;
 pub mod windows;
 pub mod wire;
 

@@ -17,6 +17,9 @@ unsafe extern "C" {
     pub fn objc_allocateClassPair(superclass: Id, name: *const c_char, extra: usize) -> Id;
     pub fn objc_registerClassPair(class: Id);
     pub fn class_addMethod(class: Id, name: Sel, imp: *const c_void, types: *const c_char) -> bool;
+    pub fn class_addProtocol(class: Id, protocol: Id) -> bool;
+    pub fn objc_getProtocol(name: *const c_char) -> Id;
+    pub fn sel_getName(sel: Sel) -> *const c_char;
 }
 
 #[link(name = "Foundation", kind = "framework")]
