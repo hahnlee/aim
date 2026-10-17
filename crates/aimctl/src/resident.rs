@@ -35,6 +35,9 @@ const RUN_PATIENCE: Duration = Duration::from_secs(STOP_PATIENCE.as_secs() + 60)
 const FINISH_PATIENCE: Duration = Duration::from_secs(60);
 /// How long a killed process group may take to go.
 const KILL_PATIENCE: Duration = Duration::from_secs(10);
+/// How long one snapshot of a run's owned processes may take. It bounds
+/// the snapshot alone: SIGTERM's patience ending mid-snapshot is no failure.
+const SNAPSHOT_PATIENCE: Duration = Duration::from_secs(10);
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -638,10 +641,10 @@ fn end_run_owned(lock: &Path, owner: ProcessIdentity, patience: Duration) -> Res
     let deadline = Instant::now() + patience;
     if !same_birth(owner)? { return Err("resident birth ended before stop".into()); }
     let mut members = vec![owner];
-    collect_descendants(&mut members, deadline)?;
+    collect_descendants(&mut members, Instant::now() + SNAPSHOT_PATIENCE)?;
     signal_owned(owner, libc::SIGTERM)?;
     while Instant::now() < deadline {
-        collect_descendants(&mut members, deadline)?;
+        collect_descendants(&mut members, Instant::now() + SNAPSHOT_PATIENCE)?;
         if !same_birth(owner)? {
             for member in members.iter().skip(1).rev() { signal_owned(*member, libc::SIGTERM)?; }
         }
@@ -841,6 +844,17 @@ mod tests {
         collect_descendants(&mut workers, Instant::now() + Duration::from_secs(2)).unwrap();
         assert!(workers.len() > 1);
         assert_eq!(end_run(&lock, pid, KILL_PATIENCE), Ok(false));
+        assert!(all_ended(&workers).unwrap());
+        fs::remove_file(&lock).unwrap();
+    }
+
+    #[test]
+    fn patience_that_ends_before_a_snapshot_still_kills() {
+        let lock = std::env::temp_dir().join(format!("aimctl-no-patience-{}", std::process::id()));
+        let pid = fake_run(&lock, true);
+        let mut workers = vec![ProcessIdentity::running(pid as i32).unwrap()];
+        collect_descendants(&mut workers, Instant::now() + Duration::from_secs(2)).unwrap();
+        assert_eq!(end_run(&lock, pid, Duration::ZERO), Ok(true));
         assert!(all_ended(&workers).unwrap());
         fs::remove_file(&lock).unwrap();
     }
