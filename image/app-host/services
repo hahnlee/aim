@@ -3,7 +3,8 @@
 # apexd, keystore2 and odsign set properties init waits for; SurfaceFlinger
 # waits for the power HAL at its first frame; vold mounts the emulated
 # storage the agent serves; audioserver plays apps' sound, and takes wake
-# locks of system_suspend.
+# locks of system_suspend; the media services decode and play what apps'
+# players and the sound effects play.
 apexd-bootstrap
 apexd
 keystore2
@@ -31,4 +32,8 @@ vold
 system_suspend
 audioserver
 vendor.audio-hal-aidl
+media
+mediaextractor
+mediametrics
+media.swcodec
 aim-app-host-agent

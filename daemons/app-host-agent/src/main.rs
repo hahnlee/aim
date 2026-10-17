@@ -18,6 +18,7 @@
 //!   does (`ProcessRecord.killLocked`: `Process.killProcessQuiet`).
 //! - It mounts a user's emulated storage through vold and serves its FUSE
 //!   connection (`storage`).
+//! - It plays the sound effects AudioService plays (`effects`).
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -27,6 +28,7 @@ use std::sync::Arc;
 use binder::binder_impl::{AssociateClass, BorrowedParcel, IBinderInternal, Remotable, TransactionCode};
 use binder::{BinderFeatures, Interface, ParcelFileDescriptor, Status, StatusCode, declare_binder_interface};
 
+mod effects;
 mod input;
 mod storage;
 
@@ -53,6 +55,8 @@ const SET_INPUT_CHANNEL_FRAME: u32 = 3;
 /// daemonUid)`.
 const KILL_PROCESS: u32 = 4;
 const MOUNT_STORAGE: u32 = 5;
+/// `IAppHostAgent.playSoundEffect(String path, float gain)`.
+const PLAY_SOUND_EFFECT: u32 = 6;
 /// `InputTransport.cpp`'s `SOCKET_BUFFER_SIZE`.
 const SOCKET_BUFFER_SIZE: libc::c_int = 32 * 1024;
 
@@ -189,6 +193,7 @@ pub trait IAppHostAgent: Interface {
     fn open_input_channel(&self, name: &str, display: (i32, i32), frame: [i32; 4]) -> std::io::Result<(i32, OwnedFd)>;
     fn focus_input_channel(&self, index: i32) -> bool;
     fn set_input_channel_frame(&self, index: i32, frame: [i32; 4]) -> bool;
+    fn play_sound_effect(&self, path: &str, gain: f32) -> Result<(), String>;
 }
 
 declare_binder_interface! {
@@ -208,6 +213,9 @@ impl IAppHostAgent for BpAppHostAgent {
     fn set_input_channel_frame(&self, _: i32, _: [i32; 4]) -> bool {
         false
     }
+    fn play_sound_effect(&self, _: &str, _: f32) -> Result<(), String> {
+        Err("not the agent".into())
+    }
 }
 
 impl IAppHostAgent for binder::binder_impl::Binder<BnAppHostAgent> {
@@ -219,6 +227,9 @@ impl IAppHostAgent for binder::binder_impl::Binder<BnAppHostAgent> {
     }
     fn set_input_channel_frame(&self, index: i32, frame: [i32; 4]) -> bool {
         self.0.set_input_channel_frame(index, frame)
+    }
+    fn play_sound_effect(&self, path: &str, gain: f32) -> Result<(), String> {
+        self.0.play_sound_effect(path, gain)
     }
 }
 
@@ -274,6 +285,17 @@ fn on_transact(
             })?;
             Ok(())
         }
+        PLAY_SOUND_EFFECT => {
+            let (path, gain): (String, f32) = (data.read()?, data.read()?);
+            reply.write(&match agent.play_sound_effect(&path, gain) {
+                Ok(()) => Status::ok(),
+                Err(error) => {
+                    log::error!("{error}");
+                    Status::new_exception_str(binder::ExceptionCode::ILLEGAL_STATE, Some(error))
+                }
+            })?;
+            Ok(())
+        }
         KILL_PROCESS => {
             let pid: i32 = data.read()?;
             // SAFETY: a signal to a process id.
@@ -299,6 +321,7 @@ fn read_frame(data: &BorrowedParcel<'_>) -> Result<[i32; 4], StatusCode> {
 struct Agent {
     input: Arc<input::Dispatcher>,
     channels: std::sync::atomic::AtomicI32,
+    effects: Arc<effects::Effects>,
 }
 
 impl Interface for Agent {}
@@ -340,11 +363,15 @@ impl IAppHostAgent for Agent {
     fn set_input_channel_frame(&self, index: i32, frame: [i32; 4]) -> bool {
         self.input.set_frame(index, frame)
     }
+
+    fn play_sound_effect(&self, path: &str, gain: f32) -> Result<(), String> {
+        self.effects.play(path, gain)
+    }
 }
 
 /// Attaches the agent to the app host, which waits for it.
 fn attach() {
-    let agent = BnAppHostAgent::new_binder(Agent { input: input::Dispatcher::new(), channels: Default::default() }, BinderFeatures::default());
+    let agent = BnAppHostAgent::new_binder(Agent { input: input::Dispatcher::new(), channels: Default::default(), effects: Default::default() }, BinderFeatures::default());
     let Some(mut host) = binder::wait_for_service(APP_HOST) else {
         return log::error!("{APP_HOST}: not found");
     };

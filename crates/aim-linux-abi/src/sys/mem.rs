@@ -318,7 +318,7 @@ fn mmap_kernel(a: [u64; 6]) -> i64 {
     }
     if flags & MAP_ANONYMOUS == 0
         && fd >= 0
-        && let Some(e) = super::ashmem::before_mmap(fd, len, prot)
+        && let Some(e) = super::ashmem::before_mmap(fd, len, prot).or_else(|| super::dma_heap::before_mmap(fd, len, off))
     {
         return e;
     }

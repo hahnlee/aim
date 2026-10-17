@@ -163,6 +163,9 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     if let Some(fd) = super::ashmem::open(&r.guest, flags) {
         return fd;
     }
+    if let Some(fd) = super::dma_heap::open(&r.guest, flags) {
+        return fd;
+    }
     if let Some(fd) = super::evdev::open(&r, flags) {
         return fd;
     }
@@ -774,7 +777,7 @@ pub(super) fn stat_fd_kernel(fd:i32)->Result<libc::stat,i64>{
     if unsafe { libc::fstat(fd, &mut st) } < 0 {
         return Err(-(errno::last() as i64));
     }
-    if super::ashmem::as_device(&mut st) {
+    if super::ashmem::as_device(&mut st) || super::dma_heap::as_device(&mut st) {
         return Ok(st);
     }
     if super::evdev::fstat(fd, &mut st).is_some() {
@@ -846,7 +849,7 @@ fn stat_at_as(dirfd: i32, path: &[u8], flags: u64, id: &super::cred::Identity) -
     if let Some(s) = procfs::stat(&r.guest, follow) {
         return s.map_err(|e| -(e as i64));
     }
-    if let Some(s) = super::ashmem::stat(&r.guest) {
+    if let Some(s) = super::ashmem::stat(&r.guest).or_else(|| super::dma_heap::stat(&r.guest)) {
         return Ok(s);
     }
     // SAFETY: host path and local stat buffer.
@@ -1112,7 +1115,7 @@ pub fn faccessat(dirfd: u64, path: u64, mode: u64, flags: u64) -> i64 {
         Err(e) => return -(e as i64),
     };
     if let Some(route)=vfs::fuse_route(&r.guest){return super::fuse_client::access(&route,mode as u32).map(|_|0).unwrap_or_else(|error|-(error as i64));}
-    if super::binder::is_device(&r.guest) || super::ashmem::stat(&r.guest).is_some() {
+    if super::binder::is_device(&r.guest) || super::ashmem::stat(&r.guest).is_some() || super::dma_heap::stat(&r.guest).is_some() {
         return 0;
     }
     if let Some(s) = procfs::stat(&r.guest, follow) {
@@ -1479,6 +1482,9 @@ pub fn ioctl(a:[u64;6])->i64{
         return r;
     }
     if let Some(r) = super::ashmem::ioctl(fd, req, arg) {
+        return r;
+    }
+    if let Some(r) = super::dma_heap::ioctl(fd, req, arg) {
         return r;
     }
     if let Some(r) = super::evdev::ioctl(fd, req, arg) {

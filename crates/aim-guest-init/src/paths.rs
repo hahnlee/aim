@@ -552,6 +552,9 @@ impl Layout {
             // The PTY owner maps numeric slaves to actual host terminals;
             // their guest namespace directory must exist for DAC traversal.
             self.dev_dir().join("pts"),
+            // The DMA-BUF heaps' directory, as devtmpfs makes it; the
+            // syscall layer serves its `system` node.
+            self.dev_dir().join("dma_heap"),
             self.kernfs_dir().join("proc"),
             self.kernfs_dir().join("sys"),
             self.cgroup_dir(),
