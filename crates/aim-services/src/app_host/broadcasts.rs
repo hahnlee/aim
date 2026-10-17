@@ -19,7 +19,7 @@ use aim_service_aidl::android_content_iintentreceiver as intent_receiver;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
 use super::kept::{By, KeptBundle, RawBundle, RawIntent};
-use super::{AppHost, PER_USER_RANGE, PROCESS_STATE_TOP};
+use super::{AppHost, PER_USER_RANGE, PROCESS_STATE_TOP, is_isolated};
 use crate::bundle::{self, Value};
 use crate::package::intent::{FLAG_EXCLUDE_STOPPED_PACKAGES, Intent};
 use crate::package::intent_filter::{IntentFilter, Plain};
@@ -231,11 +231,6 @@ fn strings(list: Option<Vec<Option<String>>>) -> Vec<String> {
 /// `UserHandle.isCore`.
 fn is_core(uid: i32) -> bool {
     uid >= 0 && uid.rem_euclid(PER_USER_RANGE as i32) < FIRST_APPLICATION_UID
-}
-
-/// `Process.isIsolated`: an isolated or app zygote process.
-fn is_isolated(uid: i32) -> bool {
-    (90_000..=99_999).contains(&uid.rem_euclid(PER_USER_RANGE as i32))
 }
 
 /// `ActivityManager.canAccessUnexportedComponents`.

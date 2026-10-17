@@ -107,6 +107,11 @@ impl Activities {
         records.values().filter(|r| r.uid == uid).max_by_key(|r| r.started).map(|r| format!("{}/{}", r.package, r.class))
     }
 
+    /// Whether the process of `start_seq` has activities.
+    pub fn has_start(&self, start_seq: i64) -> bool {
+        self.records.lock().unwrap().values().any(|r| r.start_seq == start_seq)
+    }
+
     /// The activities of the process of `start_seq` are gone with it.
     pub fn remove_start(&self, start_seq: i64) {
         self.records.lock().unwrap().retain(|_, r| r.start_seq != start_seq);
@@ -557,6 +562,9 @@ impl Service for ActivityClientController {
             acc::ACTIVITY_RESUMED => {
                 let token = Self::token(call)?;
                 self.report(token, "resumed", |r| r.resumed = true);
+                if let Some(start_seq) = self.0.activities.with(token, |r| r.start_seq) {
+                    self.0.activity_changed(start_seq);
+                }
                 empty()
             }
             acc::ACTIVITY_IDLE => {

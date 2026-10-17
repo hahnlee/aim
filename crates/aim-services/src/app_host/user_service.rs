@@ -40,6 +40,29 @@ impl UserManager {
             .unwrap_or_default();
         Ok(self.restrictions.get_or_init(|| restrictions))
     }
+
+    /// `checkManageOrInteractPermissionIfCallerInOtherProfileGroup`, or with
+    /// `query` its `checkQueryOrInteract…` form: another user than the
+    /// caller's (user 0 has no profiles) takes root or system, MANAGE_USERS
+    /// (or QUERY_USERS), or INTERACT_ACROSS_USERS.
+    fn check_other_user(&self, call: &Call<'_>, user: i32, query: bool, name: &str) -> Result<(), Exception> {
+        let uid = call.sender_euid as i32;
+        if user == uid / 100_000 || matches!(uid % 100_000, 0 | 1000) {
+            return Ok(());
+        }
+        let held = |p: &str| self.host.check_permission(Some(p), uid).map(|r| r == 0);
+        if held("android.permission.MANAGE_USERS")?
+            || query && held("android.permission.QUERY_USERS")?
+            || held("android.permission.INTERACT_ACROSS_USERS")?
+        {
+            return Ok(());
+        }
+        Err(Exception::security(if query {
+            format!("You need INTERACT_ACROSS_USERS, MANAGE_USERS, or QUERY_USERS permission to: check {name}")
+        } else {
+            format!("You need INTERACT_ACROSS_USERS or MANAGE_USERS permission to: check {name}")
+        }))
+    }
 }
 
 impl Service for UserManager {
@@ -52,10 +75,16 @@ impl Service for UserManager {
         match call.code {
             um::IS_USER_UNLOCKING_OR_UNLOCKED => {
                 let args = um::IsUserUnlockingOrUnlocked::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.check_other_user(call, args.user_id, false, "isUserUnlockingOrUnlocked") {
+                    return reply(Err(e));
+                }
                 um::write_is_user_unlocking_or_unlocked_reply(&mut p, args.user_id == SYSTEM_USER);
             }
             um::IS_USER_RUNNING => {
                 let args = um::IsUserRunning::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.check_other_user(call, args.user_id, false, "isUserRunning") {
+                    return reply(Err(e));
+                }
                 um::write_is_user_running_reply(&mut p, args.user_id == SYSTEM_USER);
             }
             um::IS_USER_VISIBLE => {
@@ -70,6 +99,22 @@ impl Service for UserManager {
             um::GET_CREDENTIAL_OWNER_PROFILE => {
                 let args = um::GetCredentialOwnerProfile::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 um::write_get_credential_owner_profile_reply(&mut p, args.user_id);
+            }
+            // User 0 is a full user, no profile: "" (a user that does not
+            // exist has none).
+            um::GET_PROFILE_TYPE => {
+                let args = um::GetProfileType::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.check_other_user(call, args.user_id, true, "getProfileType") {
+                    return reply(Err(e));
+                }
+                um::write_get_profile_type_reply(&mut p, &(args.user_id == SYSTEM_USER).then(String::new));
+            }
+            um::IS_USER_UNLOCKED => {
+                let args = um::IsUserUnlocked::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.check_other_user(call, args.user_id, false, "isUserUnlocked") {
+                    return reply(Err(e));
+                }
+                um::write_is_user_unlocked_reply(&mut p, args.user_id == SYSTEM_USER);
             }
             um::HAS_USER_RESTRICTION => {
                 let args = um::HasUserRestriction::read(&mut call.data).map_err(|_| BAD_VALUE)?;

@@ -508,7 +508,10 @@ fn kind(ty: &Type) -> Result<Kind, String> {
                 && matches!(kind(&ty.args[0])?, Kind::Parcelable(_))
                 && !ty.args[0].array =>
         {
-            Kind::ParcelableList(ty.args[0].name.clone())
+            // A nested type (`ActivityManager.RunningAppProcessInfo`) by its
+            // own name, as a single one is.
+            let element = &ty.args[0].name;
+            Kind::ParcelableList(element.rsplit('.').next().unwrap_or(element).to_string())
         }
         _ => return Err(format!("type `{}` is not supported", ty.name)),
     })
@@ -1468,6 +1471,14 @@ interface IClipboard {
         assert!(code.contains("write_typed(p, result);"));
         assert!(!code.contains("write_typed_list"));
         assert!(kind(&Type { name: "Map".into(), args: vec![Type { name: "Foo".into(), args: vec![], array: false }], array: false }).is_err());
+    }
+
+    #[test]
+    fn a_list_of_a_nested_type_is_generic_in_its_own_name() {
+        let iface = parse("package own; interface IAm { List<ActivityManager.RunningAppProcessInfo> processes(); }").unwrap();
+        let code = interface_code(&iface, &["*".into()], "test").unwrap();
+        assert!(code.contains("write_processes_reply<RunningAppProcessInfo: WriteParcelable>"));
+        assert!(code.contains("Option<Vec<Option<RunningAppProcessInfo>>>"));
     }
 
     #[test]

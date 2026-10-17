@@ -46,7 +46,7 @@ pub fn node() -> Node {
         inputs,
         outputs: vec![hal_out(), daemon_out(), service_aidl::out()],
         tools: vec![Tool::Aidl, Tool::Python],
-        recipe: 5,
+        recipe: 6,
         action: Action::AidlGen,
         boot: true,
     }
