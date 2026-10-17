@@ -30,6 +30,7 @@ pub mod notification_channels;
 pub mod notification_service;
 pub mod package_service;
 pub mod packages;
+pub mod pending_intents;
 pub mod permission_controller;
 pub mod playback;
 pub mod power_service;
@@ -37,6 +38,7 @@ pub mod sensor_privacy;
 pub mod services;
 pub mod settings;
 pub mod settings_provider;
+pub mod status_bar;
 pub mod storage;
 pub mod surface;
 pub mod tasks;
@@ -245,6 +247,7 @@ pub struct AppHost {
     notification_service: OnceLock<Arc<notification_service::NotificationManager>>,
     power_service: OnceLock<Arc<power_service::PowerManager>>,
     services: services::Services,
+    pending_intents: pending_intents::PendingIntents,
     broadcasts: broadcasts::Broadcasts,
     /// User 0's restrictions.
     user_restrictions: OnceLock<std::collections::BTreeSet<String>>,
@@ -295,6 +298,7 @@ impl AppHost {
             notification_service: OnceLock::new(),
             power_service: OnceLock::new(),
             services: Default::default(),
+            pending_intents: Default::default(),
             broadcasts: Default::default(),
             user_restrictions: OnceLock::new(),
             audio_policy: OnceLock::new(),
@@ -377,6 +381,7 @@ impl AppHost {
                     .get_or_init(|| Arc::new(power_service::PowerManager::new(self.clone())))
                     .clone(),
             ),
+            ("statusbar", Arc::new(status_bar::StatusBar::new(self.clone()))),
             (
                 "activity_task",
                 Arc::new(activity::ActivityTaskManager(
@@ -1796,6 +1801,67 @@ impl Service for Activity {
                 let mut p = Parcel::new();
                 am::write_unbind_finished_reply(&mut p);
                 Ok(p)
+            }
+            am::GET_INTENT_SENDER | am::GET_INTENT_SENDER_WITH_FEATURE => {
+                let req = if call.code == am::GET_INTENT_SENDER {
+                    let a = am::GetIntentSender::<kept::RawIntent, kept::RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                    pending_intents::Request { kind: a.r#type, package: a.package_name, feature: None, token: a.token, result_who: a.result_who, request_code: a.request_code, intents: a.intents, resolved_types: a.resolved_types, flags: a.flags, options: a.options, user: a.user_id }
+                } else {
+                    let a = am::GetIntentSenderWithFeature::<kept::RawIntent, kept::RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                    pending_intents::Request { kind: a.r#type, package: a.package_name, feature: a.feature_id, token: a.token, result_who: a.result_who, request_code: a.request_code, intents: a.intents, resolved_types: a.resolved_types, flags: a.flags, options: a.options, user: a.user_id }
+                };
+                reply(self.0.get_intent_sender(call.sender_euid as i32, req).map(|sender| {
+                    let mut p = Parcel::new();
+                    am::write_get_intent_sender_with_feature_reply(&mut p, sender);
+                    p
+                }))
+            }
+            am::CANCEL_INTENT_SENDER => {
+                let a = am::CancelIntentSender::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.cancel_intent_sender(call.sender_euid as i32, a.sender).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_cancel_intent_sender_reply(&mut p);
+                    p
+                }))
+            }
+            am::GET_INFO_FOR_INTENT_SENDER => {
+                let a = am::GetInfoForIntentSender::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                am::write_get_info_for_intent_sender_reply(&mut p, Some(&self.0.intent_sender_info(a.sender)));
+                Ok(p)
+            }
+            am::REGISTER_INTENT_SENDER_CANCEL_LISTENER_EX => {
+                let a = am::RegisterIntentSenderCancelListenerEx::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                am::write_register_intent_sender_cancel_listener_ex_reply(&mut p, self.0.listen_for_cancel(a.sender, a.receiver));
+                Ok(p)
+            }
+            am::UNREGISTER_INTENT_SENDER_CANCEL_LISTENER => {
+                let a = am::UnregisterIntentSenderCancelListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.0.unlisten_for_cancel(a.sender, a.receiver);
+                let mut p = Parcel::new();
+                am::write_unregister_intent_sender_cancel_listener_reply(&mut p);
+                Ok(p)
+            }
+            am::GET_INTENT_FOR_INTENT_SENDER => {
+                let a = am::GetIntentForIntentSender::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.intent_for_intent_sender(call.sender_euid as i32, a.sender).map(|intent| {
+                    let mut p = Parcel::new();
+                    am::write_get_intent_for_intent_sender_reply(&mut p, intent.as_ref());
+                    p
+                }))
+            }
+            am::SEND_INTENT_SENDER => {
+                let a = am::SendIntentSender::<kept::RawIntent, kept::RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(
+                    self.0
+                        .send_intent_sender(call.sender_euid as i32, a.caller, a.target, a.code, a.intent, a.resolved_type, a.finished_receiver, a.required_permission, a.options)
+                        .map(|r| {
+                            let mut p = Parcel::new();
+                            am::write_send_intent_sender_reply(&mut p, r);
+                            p
+                        }),
+                )
             }
             // One-way.
             am::SERVICE_DONE_EXECUTING => {

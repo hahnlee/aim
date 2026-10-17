@@ -47,7 +47,9 @@ use crate::notifications::parcels::{
 use crate::package::list_slice::{self, Slice};
 
 /// `Notification.FLAG_*` the service sets or clears.
+const FLAG_AUTO_CANCEL: i32 = 0x10;
 const FLAG_HIGH_PRIORITY: i32 = 0x80;
+const FLAG_BUBBLE: i32 = 0x1000;
 const FLAG_AUTOGROUP_SUMMARY: i32 = 0x400;
 const FLAG_CAN_COLORIZE: i32 = 0x800;
 const FLAG_NO_DISMISS: i32 = 0x2000;
@@ -67,6 +69,7 @@ const USER_LOCKED_IMPORTANCE: i32 = 0x4;
 const USER_LOCKED_VIBRATION: i32 = 0x10;
 const USER_LOCKED_SOUND: i32 = 0x20;
 /// `NotificationListenerService.REASON_*`.
+const REASON_CLICK: i32 = 1;
 const REASON_APP_CANCEL: i32 = 8;
 const REASON_APP_CANCEL_ALL: i32 = 9;
 const REASON_LISTENER_CANCEL: i32 = 10;
@@ -1226,6 +1229,32 @@ impl NotificationManager {
         for (package, user, group) in summaries {
             self.cancel_children(state, &package, user, &group, REASON_GROUP_SUMMARY_CANCELED);
         }
+    }
+
+    /// `NotificationDelegate.onNotificationClick`: an auto-cancel
+    /// notification goes, unless a foreground service's, a job's or a
+    /// bubble.
+    pub(super) fn clicked(&self, key: &str) -> Result<(), Exception> {
+        let mut guard = self.state()?;
+        let state = guard.as_mut().unwrap();
+        let Some(r) = state.records.iter().find(|r| r.key == key) else {
+            return Ok(());
+        };
+        let (package, tag, id, user) = (r.package.clone(), r.tag.clone(), r.id, r.user);
+        self.cancel(
+            state,
+            &Cancel {
+                package: Some(&package),
+                tag: Some(tag.as_deref()),
+                id: Some(id),
+                channel: None,
+                must_have: FLAG_AUTO_CANCEL,
+                must_not_have: FLAG_FOREGROUND_SERVICE | FLAG_USER_INITIATED_JOB | FLAG_BUBBLE,
+                user,
+                reason: REASON_CLICK,
+            },
+        );
+        Ok(())
     }
 
     fn register_listener(&self, call: &mut Call<'_>) -> Result<(), Exception> {

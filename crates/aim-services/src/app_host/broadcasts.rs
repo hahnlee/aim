@@ -487,7 +487,23 @@ impl Broadcasts {
 
     /// `broadcastIntentWithFeature` (`broadcastIntentLocked`).
     pub fn broadcast(&self, host: &AppHost, call: &Call<'_>, args: am::BroadcastIntentWithFeature<RawIntent, RawBundle>) -> Result<i32, Exception> {
-        let calling_uid = call.sender_euid as i32;
+        let caller = host.app_of_thread(args.caller);
+        let (app, package) = (caller.as_ref().map(|c| c.0), caller.map(|c| c.1));
+        self.broadcast_as(host, call.sender_euid as i32, call.sender_pid, app, package, args)
+    }
+
+    /// `broadcastIntentLocked` of `calling_uid` (of `calling_pid`) from its
+    /// process `caller_app` and package, if known:
+    /// `broadcastIntentInPackage` for a PendingIntent's creator.
+    pub fn broadcast_as(
+        &self,
+        host: &AppHost,
+        calling_uid: i32,
+        calling_pid: i32,
+        caller_app: Option<i64>,
+        caller_package: Option<String>,
+        args: am::BroadcastIntentWithFeature<RawIntent, RawBundle>,
+    ) -> Result<i32, Exception> {
         if is_isolated(calling_uid) {
             return Err(Exception::security("Isolated process not allowed to call broadcastIntent"));
         }
@@ -504,8 +520,6 @@ impl Broadcasts {
             flags &= !FLAG_RECEIVER_FROM_SHELL;
         }
         let extended_flags = intent.intent.extended_flags & !EXTENDED_FLAG_FILTER_MISMATCH;
-        let caller = host.app_of_thread(args.caller);
-        let caller_package = caller.as_ref().map(|c| c.1.clone());
         let options = Options::read(args.options.as_ref())?;
         // `enforceBroadcastOptionPermissionsInternal`.
         if calling_uid != SYSTEM_UID {
@@ -515,7 +529,7 @@ impl Broadcasts {
             if options.flags & OPTION_INTERACTIVE != 0 && !host.holds("android.permission.BROADCAST_OPTION_INTERACTIVE", calling_uid)? {
                 return Err(Exception::security(format!(
                     "Permission Denial: setInteractive() from pid={}, uid={calling_uid} requires android.permission.BROADCAST_OPTION_INTERACTIVE",
-                    call.sender_pid
+                    calling_pid
                 )));
             }
         }
@@ -544,7 +558,7 @@ impl Broadcasts {
                 "Permission Denial: {} broadcast from {} (pid={}, uid={calling_uid}) requires {permission}",
                 intent.intent.action.as_deref().unwrap_or("null"),
                 caller_package.as_deref().unwrap_or("null"),
-                call.sender_pid
+                calling_pid
             ))
         };
         if options.temporary_allowlist_duration > 0
@@ -568,7 +582,7 @@ impl Broadcasts {
                 "recordResponseEventWhileInBackground: Neither user {calling_uid} nor current process has android.permission.ACCESS_BROADCAST_RESPONSE_STATS."
             )));
         }
-        let result_to_app = caller.as_ref().map(|c| c.0);
+        let result_to_app = caller_app;
         let mut st = self.state.lock().unwrap();
         // User 0 is the one user, and runs.
         if user != USER_ALL && user != 0 {
@@ -589,7 +603,7 @@ impl Broadcasts {
                 return Err(Exception::security(format!(
                     "Permission Denial: not allowed to send broadcast {} from pid={}, uid={calling_uid}",
                     action.as_deref().unwrap_or("null"),
-                    call.sender_pid
+                    calling_pid
                 )));
             }
             if matches!(action.as_deref(), Some("android.appwidget.action.APPWIDGET_CONFIGURE" | "android.appwidget.action.APPWIDGET_UPDATE")) {
@@ -630,7 +644,7 @@ impl Broadcasts {
                         return Err(Exception::security(format!(
                             "Permission Denial: android.intent.action.CLOSE_SYSTEM_DIALOGS broadcast from {} (pid={}, uid={calling_uid}) requires android.permission.BROADCAST_CLOSE_SYSTEM_DIALOGS.",
                             caller_package.as_deref().unwrap_or("null"),
-                            call.sender_pid
+                            calling_pid
                         )));
                     }
                 }
@@ -670,7 +684,7 @@ impl Broadcasts {
             if !host.check_component_permission(Some(BROADCAST_STICKY), calling_uid, -1, true)? {
                 return Err(Exception::security(format!(
                     "Permission Denial: broadcastIntent() requesting a sticky broadcast from pid={}, uid={calling_uid} requires {BROADCAST_STICKY}",
-                    call.sender_pid
+                    calling_pid
                 )));
             }
             if !required_permissions.is_empty() {
