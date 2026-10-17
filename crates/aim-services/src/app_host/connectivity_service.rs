@@ -660,6 +660,13 @@ fn mac_network() -> Option<(Uplink, Vec<Ipv4Addr>)> {
 }
 
 impl ConnectivityService {
+    /// The default network's capabilities as the system's own callers see
+    /// them (JobScheduler's `ConnectivityController`); none while the Mac
+    /// has no network.
+    pub(super) fn default_network(&self) -> Option<NetworkCapabilities> {
+        self.shared.state.lock().unwrap().network.as_ref().map(|_| network_capabilities())
+    }
+
     pub fn new(host: Arc<AppHost>) -> ConnectivityService {
         let shared = Arc::new(Shared {
             state: Mutex::new(State::new(mac_network())),

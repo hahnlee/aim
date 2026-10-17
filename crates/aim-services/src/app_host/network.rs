@@ -30,7 +30,7 @@ pub const FOREGROUND: u32 = 19;
 pub const NOT_CONGESTED: u32 = 20;
 pub const NOT_SUSPENDED: u32 = 21;
 const PARTIAL_CONNECTIVITY: u32 = 24;
-const TEMPORARILY_NOT_METERED: u32 = 25;
+pub const TEMPORARILY_NOT_METERED: u32 = 25;
 pub const NOT_VCN_MANAGED: u32 = 28;
 const HEAD_UNIT: u32 = 32;
 pub const LOCAL_NETWORK: u32 = 36;
@@ -58,6 +58,24 @@ pub const TRANSPORT_ETHERNET: u32 = 3;
 const TRANSPORT_VPN: u32 = 4;
 const TRANSPORT_THREAD: u32 = 9;
 const ALL_VALID_TRANSPORTS: u64 = (1 << 11) - 1;
+/// `NetworkCapabilitiesUtils`' capabilities of restricted networks, of
+/// those forced restricted, and of unrestricted ones.
+const RESTRICTED_CAPABILITIES: u64 = (1 << 31) // BIP
+    | (1 << 5) // CBS
+    | (1 << 2) // DUN
+    | (1 << 10) // EIMS
+    | (1 << 29) // ENTERPRISE
+    | (1 << 3) // FOTA
+    | (1 << 7) // IA
+    | (1 << 4) // IMS
+    | (1 << 23) // MCX
+    | (1 << 8) // RCS
+    | (1 << 27) // VEHICLE_INTERNAL
+    | (1 << 30) // VSIM
+    | (1 << 9) // XCAP
+    | (1 << 33); // MMTEL
+const FORCE_RESTRICTED_CAPABILITIES: u64 = (1 << 29) | (1 << 22) | (1 << 26);
+const UNRESTRICTED_CAPABILITIES: u64 = (1 << 12) | 1 | (1 << 1) | (1 << 6);
 /// `NET_ENTERPRISE_ID_1` to `_5`.
 const ALL_VALID_ENTERPRISE_IDS: i32 = 0b11_1110;
 const NET_ENTERPRISE_ID_1: i32 = 1;
@@ -209,6 +227,15 @@ impl NetworkCapabilities {
             enterprise_id: 0,
             reservation_id: 0,
             match_non_thread_local: false,
+        }
+    }
+
+    /// `maybeMarkCapabilitiesRestricted`
+    /// (`NetworkCapabilitiesUtils.inferRestrictedCapability`).
+    pub fn mark_restricted(&mut self) {
+        let c = self.capabilities;
+        if c & FORCE_RESTRICTED_CAPABILITIES != 0 || (c & UNRESTRICTED_CAPABILITIES == 0 && c & RESTRICTED_CAPABILITIES != 0) {
+            self.remove(NOT_RESTRICTED);
         }
     }
 

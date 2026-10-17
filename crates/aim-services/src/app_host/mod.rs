@@ -30,6 +30,9 @@ pub mod display_service;
 pub mod freeform;
 pub mod input_manager;
 pub mod input_method;
+pub mod job_info;
+pub mod job_scheduler;
+pub mod job_store;
 pub mod keychars;
 pub mod kept;
 pub mod network;
@@ -257,6 +260,7 @@ pub struct AppHost {
     alarm_service: OnceLock<Arc<alarm_service::AlarmManager>>,
     battery_service: OnceLock<Arc<battery_service::BatteryService>>,
     connectivity_service: OnceLock<Arc<connectivity_service::ConnectivityService>>,
+    job_scheduler: OnceLock<Arc<job_scheduler::JobScheduler>>,
     services: services::Services,
     pending_intents: pending_intents::PendingIntents,
     broadcasts: broadcasts::Broadcasts,
@@ -311,6 +315,7 @@ impl AppHost {
             alarm_service: OnceLock::new(),
             battery_service: OnceLock::new(),
             connectivity_service: OnceLock::new(),
+            job_scheduler: OnceLock::new(),
             services: Default::default(),
             pending_intents: Default::default(),
             broadcasts: Default::default(),
@@ -409,6 +414,10 @@ impl AppHost {
                         .get_or_init(|| Arc::new(battery_service::BatteryService::new(self.clone())))
                         .clone(),
                 )),
+            ),
+            (
+                "jobscheduler",
+                self.job_scheduler.get_or_init(|| job_scheduler::JobScheduler::new(self.clone())).clone(),
             ),
             ("account", Arc::new(account_service::AccountManager::new(self.clone()))),
             (
@@ -2145,6 +2154,12 @@ impl Service for Control {
                 }
                 if let Err(e) = host.start_storage() {
                     eprintln!("app host: external storage: {e}");
+                }
+                // Apps' storage is mounted: the persisted jobs are read and
+                // run, as at JobSchedulerService's
+                // `PHASE_THIRD_PARTY_APPS_CAN_START`.
+                if let Some(jobs) = host.job_scheduler.get() {
+                    jobs.start();
                 }
             });
             let mut p = Parcel::new();
