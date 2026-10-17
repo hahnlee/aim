@@ -2,15 +2,15 @@
 //! `android-16.0.0_r1`): `JobInfo` as `JobInfo(Parcel)` reads it and
 //! `writeToParcel` writes it, with `enforceValidity`, the `JobInfo.Builder`
 //! a persisted job is rebuilt with (`JobStore`), and its required network
-//! (`NetworkRequest` and its `NetworkCapabilities`, Connectivity at the same
-//! tag); `JobWorkItem`; and the `JobParameters` a job is started with.
+//! (`super::network`'s `NetworkRequest`); `JobWorkItem`; and the `JobParameters` a job is started with.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use aim_binder_host::local::LocalProcess;
-use aim_binder_host::parcel::{BAD_VALUE, Binder, Exception, Parcel, Reader, Result};
+use aim_binder_host::parcel::{BAD_TYPE, BAD_VALUE, Binder, Exception, Parcel, Reader, Result};
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
 use super::kept::{KeptIntent, RawIntent};
+use super::network::{NetworkCapabilities, NetworkRequest, RequestType};
 use crate::clip::{self, Raw};
 use crate::package::restrictions::persistable::Bundle;
 
@@ -57,38 +57,13 @@ const MAX_TRACE_TAG_LENGTH: usize = 127;
 /// `JobParameters.STOP_REASON_UNDEFINED`, `INTERNAL_STOP_REASON_UNKNOWN`.
 pub const STOP_REASON_UNDEFINED: i32 = 0;
 pub const INTERNAL_STOP_REASON_UNKNOWN: i32 = -1;
-/// `NetworkCapabilities.NET_CAPABILITY_*` the request's builders read.
-const NET_CAPABILITY_NOT_RESTRICTED: u32 = 13;
-/// `NetworkCapabilitiesUtils`' capabilities of restricted networks, of
-/// those forced restricted, and of unrestricted ones.
-const RESTRICTED_CAPABILITIES: u64 = (1 << 31) // BIP
-    | (1 << 5) // CBS
-    | (1 << 2) // DUN
-    | (1 << 10) // EIMS
-    | (1 << 29) // ENTERPRISE
-    | (1 << 3) // FOTA
-    | (1 << 7) // IA
-    | (1 << 4) // IMS
-    | (1 << 23) // MCX
-    | (1 << 8) // RCS
-    | (1 << 27) // VEHICLE_INTERNAL
-    | (1 << 30) // VSIM
-    | (1 << 9) // XCAP
-    | (1 << 33); // MMTEL
-const FORCE_RESTRICTED_CAPABILITIES: u64 = (1 << 29) | (1 << 22) | (1 << 26);
-const UNRESTRICTED_CAPABILITIES: u64 = (1 << 12) | 1 | (1 << 1) | (1 << 6);
 /// `NetworkCapabilities.MAX_NET_CAPABILITY` (`NOT_BANDWIDTH_CONSTRAINED`),
 /// `MAX_TRANSPORT` (`TRANSPORT_SATELLITE`).
 const MAX_NET_CAPABILITY: u32 = 37;
 const MAX_TRANSPORT: u32 = 10;
-/// `NetworkCapabilities.SIGNAL_STRENGTH_UNSPECIFIED`; `Process.INVALID_UID`.
-const SIGNAL_STRENGTH_UNSPECIFIED: i32 = i32::MIN;
-const INVALID_UID: i32 = -1;
 /// `ConnectivityManager.TYPE_NONE`, `REQUEST_ID_UNSET`.
 const TYPE_NONE: i32 = -1;
 const REQUEST_ID_UNSET: i32 = 0;
-/// `UidRange`'s class, as `writeParcelable` names it.
-const UID_RANGE: &str = "android.net.UidRange";
 /// `ComponentName`'s class.
 const COMPONENT_NAME: &str = "android.content.ComponentName";
 /// `Intent.FLAG_GRANT_READ_URI_PERMISSION`, `FLAG_GRANT_WRITE_URI_PERMISSION`.
@@ -111,213 +86,51 @@ fn write_persistable(p: &mut Parcel, b: &Bundle) {
     p.write_raw(bytes.data(), &[]);
 }
 
-fn read_int_array(r: &mut Reader<'_>) -> Result<Vec<i32>> {
-    aim_service_aidl::read_int_array(r)?.ok_or(BAD_VALUE)
-}
-
 /// The values of the bits set in `bits`, lowest first
 /// (`BitUtils.unpackBits`).
 pub fn unpack_bits(bits: u64) -> Vec<i32> {
     (0..64).filter(|b| bits & (1 << b) != 0).collect()
 }
 
-/// `NetworkRequest`, with its `NetworkCapabilities`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct NetworkRequest {
-    pub capabilities: u64,
-    pub forbidden: u64,
-    pub transports: u64,
-    link_up_kbps: i32,
-    link_down_kbps: i32,
-    signal_strength: i32,
-    /// Its `UidRange`s, start and stop.
-    uids: Option<Vec<(i32, i32)>>,
-    allowed_uids: Vec<i32>,
-    ssid: Option<String>,
-    private_dns_broken: bool,
-    administrator_uids: Vec<i32>,
-    owner_uid: i32,
-    requestor_uid: i32,
-    requestor_package: Option<String>,
-    sub_ids: Vec<i32>,
-    enterprise_id: i32,
-    reservation_id: i32,
-    match_non_thread_local: bool,
-    legacy_type: i32,
-    request_id: i32,
-    kind: String,
-}
-
-/// A parcelable that `NetworkRequest` holds and the app host does not
-/// read: a network specifier, transport info or underlying networks.
+/// A parcelable that a job's `NetworkRequest` holds and the app host does
+/// not read: a network specifier other than Ethernet's or transport info.
 pub struct Unsupported(pub &'static str);
 
-impl NetworkRequest {
-    /// `NetworkRequest(Parcel)`; `Err(Ok(..))` for what is not read.
-    fn read(r: &mut Reader<'_>) -> Result<std::result::Result<NetworkRequest, Unsupported>> {
-        let capabilities = r.read_i64()? as u64;
-        let forbidden = r.read_i64()? as u64;
-        let transports = r.read_i64()? as u64;
-        let link_up_kbps = r.read_i32()?;
-        let link_down_kbps = r.read_i32()?;
-        if r.read_string16()?.is_some() {
-            return Ok(Err(Unsupported("a network specifier")));
-        }
-        if r.read_string16()?.is_some() {
-            return Ok(Err(Unsupported("transport info")));
-        }
-        let signal_strength = r.read_i32()?;
-        let n = r.read_i32()?;
-        let uids = if n < 0 {
-            None
-        } else {
-            let mut ranges = Vec::new();
-            for _ in 0..n {
-                if r.read_string16()?.as_deref() != Some(UID_RANGE) {
-                    return Err(BAD_VALUE);
-                }
-                ranges.push((r.read_i32()?, r.read_i32()?));
-            }
-            Some(ranges)
-        };
-        let allowed_uids = read_int_array(r)?;
-        let ssid = r.read_string16()?;
-        let private_dns_broken = r.read_bool()?;
-        let administrator_uids = read_int_array(r)?;
-        let owner_uid = r.read_i32()?;
-        let requestor_uid = r.read_i32()?;
-        let requestor_package = r.read_string16()?;
-        let sub_ids = read_int_array(r)?;
-        if r.read_i32()? >= 0 {
-            return Ok(Err(Unsupported("underlying networks")));
-        }
-        Ok(Ok(NetworkRequest {
-            capabilities,
-            forbidden,
-            transports,
-            link_up_kbps,
-            link_down_kbps,
-            signal_strength,
-            uids,
-            allowed_uids,
-            ssid,
-            private_dns_broken,
-            administrator_uids,
-            owner_uid,
-            requestor_uid,
-            requestor_package,
-            sub_ids,
-            enterprise_id: r.read_i32()?,
-            reservation_id: r.read_i32()?,
-            match_non_thread_local: r.read_bool()?,
-            legacy_type: r.read_i32()?,
-            request_id: r.read_i32()?,
-            kind: r.read_string16()?.ok_or(BAD_VALUE)?,
-        }))
+/// A job's `NetworkRequest`; `Err(Ok(..))` for what is not read.
+fn read_request(r: &mut Reader<'_>) -> Result<std::result::Result<NetworkRequest, Unsupported>> {
+    match NetworkRequest::read_from(r) {
+        Ok(n) => Ok(Ok(n)),
+        Err(BAD_TYPE) => Ok(Err(Unsupported("a network specifier or transport info"))),
+        Err(e) => Err(e),
     }
+}
 
-    fn write(&self, p: &mut Parcel) {
-        p.write_i64(self.capabilities as i64);
-        p.write_i64(self.forbidden as i64);
-        p.write_i64(self.transports as i64);
-        p.write_i32(self.link_up_kbps);
-        p.write_i32(self.link_down_kbps);
-        p.write_string16(None); // no specifier
-        p.write_string16(None); // no transport info
-        p.write_i32(self.signal_strength);
-        match &self.uids {
-            None => p.write_i32(-1),
-            Some(ranges) => {
-                p.write_i32(ranges.len() as i32);
-                for (start, stop) in ranges {
-                    p.write_string16(Some(UID_RANGE));
-                    p.write_i32(*start);
-                    p.write_i32(*stop);
-                }
-            }
-        }
-        aim_service_aidl::write_int_array(p, Some(self.allowed_uids.as_slice()));
-        p.write_string16(self.ssid.as_deref());
-        p.write_bool(self.private_dns_broken);
-        aim_service_aidl::write_int_array(p, Some(self.administrator_uids.as_slice()));
-        p.write_i32(self.owner_uid);
-        p.write_i32(self.requestor_uid);
-        p.write_string16(self.requestor_package.as_deref());
-        aim_service_aidl::write_int_array(p, Some(self.sub_ids.as_slice()));
-        p.write_i32(-1); // no underlying networks
-        p.write_i32(self.enterprise_id);
-        p.write_i32(self.reservation_id);
-        p.write_bool(self.match_non_thread_local);
-        p.write_i32(self.legacy_type);
-        p.write_i32(self.request_id);
-        p.write_string16(Some(&self.kind));
+/// The request `JobStore` rebuilds from what it persisted:
+/// `new NetworkRequest.Builder().clearCapabilities()`, the capabilities,
+/// forbidden capabilities and transports added, then `build()`.
+pub fn restored_request(capabilities: &[i32], forbidden: &[i32], transports: &[i32]) -> NetworkRequest {
+    let mut caps = NetworkCapabilities::cleared();
+    // Invalid capabilities and transports are logged and dropped.
+    for &c in capabilities.iter().filter(|&&c| (0..=MAX_NET_CAPABILITY as i32).contains(&c)) {
+        caps.add(c as u32);
     }
+    for &c in forbidden.iter().filter(|&&c| (0..=MAX_NET_CAPABILITY as i32).contains(&c)) {
+        caps.forbid(c as u32);
+    }
+    for &t in transports.iter().filter(|&&t| (0..=MAX_TRANSPORT as i32).contains(&t)) {
+        caps.transports |= 1 << t;
+    }
+    caps.mark_restricted();
+    NetworkRequest { caps, legacy_type: TYPE_NONE, request_id: REQUEST_ID_UNSET, kind: RequestType::None }
+}
 
-    /// The request `JobStore` rebuilds from what it persisted:
-    /// `new NetworkRequest.Builder().clearCapabilities()`, the capabilities,
-    /// forbidden capabilities and transports added, then `build()`.
-    pub fn restored(capabilities: &[i32], forbidden: &[i32], transports: &[i32]) -> NetworkRequest {
-        let mut r = NetworkRequest {
-            capabilities: 0,
-            forbidden: 0,
-            transports: 0,
-            link_up_kbps: 0,
-            link_down_kbps: 0,
-            signal_strength: SIGNAL_STRENGTH_UNSPECIFIED,
-            uids: None,
-            allowed_uids: Vec::new(),
-            ssid: None,
-            private_dns_broken: false,
-            administrator_uids: Vec::new(),
-            owner_uid: INVALID_UID,
-            requestor_uid: INVALID_UID,
-            requestor_package: None,
-            sub_ids: Vec::new(),
-            enterprise_id: 0,
-            reservation_id: 0,
-            match_non_thread_local: false,
-            legacy_type: TYPE_NONE,
-            request_id: REQUEST_ID_UNSET,
-            kind: "NONE".into(),
-        };
-        // Invalid capabilities and transports are logged and dropped.
-        for &c in capabilities.iter().filter(|&&c| (0..=MAX_NET_CAPABILITY as i32).contains(&c)) {
-            r.capabilities |= 1 << c;
-            r.forbidden &= !(1 << c);
-        }
-        for &c in forbidden.iter().filter(|&&c| (0..=MAX_NET_CAPABILITY as i32).contains(&c)) {
-            r.forbidden |= 1 << c;
-            r.capabilities &= !(1 << c);
-        }
-        for &t in transports.iter().filter(|&&t| (0..=MAX_TRANSPORT as i32).contains(&t)) {
-            r.transports |= 1 << t;
-        }
-        r.mark_restricted();
-        r
-    }
-
-    /// `JobStatus`'s copy of the request for its source uid: `new
-    /// NetworkRequest.Builder(request).setUids({uid..uid}).build()`.
-    pub fn for_uid(&self, uid: i32) -> NetworkRequest {
-        let mut r = self.clone();
-        r.uids = Some(vec![(uid, uid)]);
-        r.legacy_type = TYPE_NONE;
-        r.request_id = REQUEST_ID_UNSET;
-        r.kind = "NONE".into();
-        r.mark_restricted();
-        r
-    }
-
-    /// `NetworkCapabilities.maybeMarkCapabilitiesRestricted`
-    /// (`NetworkCapabilitiesUtils.inferRestrictedCapability`).
-    fn mark_restricted(&mut self) {
-        let c = self.capabilities;
-        let restricted = c & FORCE_RESTRICTED_CAPABILITIES != 0
-            || (c & UNRESTRICTED_CAPABILITIES == 0 && c & RESTRICTED_CAPABILITIES != 0);
-        if restricted {
-            self.capabilities &= !(1 << NET_CAPABILITY_NOT_RESTRICTED);
-        }
-    }
+/// `JobStatus`'s copy of `request` for its source uid: `new
+/// NetworkRequest.Builder(request).setUids({uid..uid}).build()`.
+pub fn request_for_uid(request: &NetworkRequest, uid: i32) -> NetworkRequest {
+    let mut caps = request.caps.clone();
+    caps.uids = Some(vec![(uid, uid)]);
+    caps.mark_restricted();
+    NetworkRequest { caps, legacy_type: TYPE_NONE, request_id: REQUEST_ID_UNSET, kind: RequestType::None }
 }
 
 /// `JobInfo`.
@@ -392,7 +205,7 @@ impl JobInfo {
         let trigger_content_update_delay = r.read_i64()?;
         let trigger_content_max_delay = r.read_i64()?;
         let network = if r.read_i32()? != 0 {
-            match NetworkRequest::read(r)? {
+            match read_request(r)? {
                 Ok(n) => Some(n),
                 Err(u) => return Ok(Err(u)),
             }
@@ -788,7 +601,7 @@ impl WriteParcelable for JobInfo {
         match &self.network {
             Some(n) => {
                 p.write_i32(1);
-                n.write(p);
+                n.write_to(p);
             }
             None => p.write_i32(0),
         }
@@ -997,9 +810,9 @@ mod tests {
         p.write_i32(0);
         p.write_string16(None);
         p.write_string16(None);
-        p.write_i32(SIGNAL_STRENGTH_UNSPECIFIED);
+        p.write_i32(i32::MIN); // SIGNAL_STRENGTH_UNSPECIFIED
         p.write_i32(1); // the app's uid
-        p.write_string16(Some(UID_RANGE));
+        p.write_string16(Some("android.net.UidRange"));
         p.write_i32(10123);
         p.write_i32(10123);
         p.write_i32(0); // allowed uids
@@ -1047,7 +860,7 @@ mod tests {
         assert!(job.periodic && job.has_early_constraint && !job.persisted);
         assert_eq!(job.extras.entries, vec![(Some("count".into()), Value::Int(3))]);
         let network = job.network.as_ref().unwrap();
-        assert_eq!(unpack_bits(network.capabilities), [12, 14, 16, 28]);
+        assert_eq!(unpack_bits(network.caps.capabilities), [12, 14, 16, 28]);
         assert_eq!(job.debug_tags, ["sync"]);
         let mut back = Parcel::new();
         job.write_to(&mut back);
@@ -1064,20 +877,20 @@ mod tests {
         p.write_i32(0);
         p.write_i32(0);
         p.write_string16(Some("android.net.wifi.WifiNetworkSpecifier"));
-        assert!(matches!(NetworkRequest::read(&mut p.reader()), Ok(Err(Unsupported("a network specifier")))));
+        assert!(matches!(read_request(&mut p.reader()), Ok(Err(Unsupported(_)))));
     }
 
     /// `JobStore`'s rebuilt request: what was persisted, with
     /// NOT_RESTRICTED dropped from a request of restricted capabilities.
     #[test]
     fn a_persisted_request_is_rebuilt_as_the_builder_builds_it() {
-        let r = NetworkRequest::restored(&[12, 13, 16], &[15], &[1]);
-        assert_eq!(unpack_bits(r.capabilities), [12, 13, 16]);
-        assert_eq!((unpack_bits(r.forbidden), unpack_bits(r.transports)), (vec![15], vec![1]));
-        assert_eq!(r.uids, None);
-        let ims = NetworkRequest::restored(&[4, 13], &[], &[]);
-        assert_eq!(unpack_bits(ims.capabilities), [4]);
-        assert_eq!(r.for_uid(10123).uids, Some(vec![(10123, 10123)]));
+        let r = restored_request(&[12, 13, 16], &[15], &[1]);
+        assert_eq!(unpack_bits(r.caps.capabilities), [12, 13, 16]);
+        assert_eq!((unpack_bits(r.caps.forbidden), unpack_bits(r.caps.transports)), (vec![15], vec![1]));
+        assert_eq!(r.caps.uids, None);
+        let ims = restored_request(&[4, 13], &[], &[]);
+        assert_eq!(unpack_bits(ims.caps.capabilities), [4]);
+        assert_eq!(request_for_uid(&r, 10123).caps.uids, Some(vec![(10123, 10123)]));
     }
 
     #[test]

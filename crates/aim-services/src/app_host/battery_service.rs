@@ -521,6 +521,14 @@ impl BatteryService {
         BatteryService { host, state: Mutex::default(), health: Mutex::new(None), callback: OnceLock::new() }
     }
 
+    /// `BatteryManagerInternal.isPowered(BATTERY_PLUGGED_ANY)` and
+    /// `getBatteryLevelLow`: as the service starts (neither) until the HAL
+    /// first reports.
+    pub(super) fn powered_and_low(&self) -> (bool, bool) {
+        let s = self.state.lock().unwrap();
+        (s.info.as_ref().is_some_and(|i| i.is_powered(PLUGGED_ANY)), s.level_low)
+    }
+
     /// The constructor's and `updateBatteryWarningLevelLocked`'s levels,
     /// then the HAL.
     pub(super) fn start(self: &Arc<Self>) -> Result<(), String> {

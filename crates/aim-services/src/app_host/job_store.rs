@@ -15,7 +15,6 @@ use aim_android_xml::{Element, Node, Value};
 use super::job_info::{
     self, CONSTRAINT_FLAG_BATTERY_NOT_LOW, CONSTRAINT_FLAG_CHARGING, CONSTRAINT_FLAG_DEVICE_IDLE,
     CONSTRAINT_FLAG_STORAGE_NOT_LOW, JobInfo, JobWorkItem, MAX_NUM_DEBUG_TAGS, NETWORK_BYTES_UNKNOWN,
-    NetworkRequest,
 };
 use crate::package::restrictions::persistable::{self, Bundle};
 
@@ -259,7 +258,7 @@ fn read_constraints(job: &mut JobInfo, e: &Element) -> Result<(), String> {
     let transports = e.string("net-transport-types-csv");
     if let (Some(caps), Some(transports)) = (&caps, &transports) {
         let forbidden = e.string("net-forbidden-capabilities-csv").unwrap_or_default();
-        job.network = Some(NetworkRequest::restored(&int_list(caps)?, &int_list(&forbidden)?, &int_list(transports)?));
+        job.network = Some(job_info::restored_request(&int_list(caps)?, &int_list(&forbidden)?, &int_list(transports)?));
         job.network_download_bytes = e.long("estimated-download-bytes")?.unwrap_or(NETWORK_BYTES_UNKNOWN);
         job.network_upload_bytes = e.long("estimated-upload-bytes")?.unwrap_or(NETWORK_BYTES_UNKNOWN);
         let chunk = e.long("minimum-network-chunk-bytes")?.unwrap_or(NETWORK_BYTES_UNKNOWN);
@@ -349,9 +348,9 @@ fn job_element(s: &Stored, now_elapsed: i64, now_wall: i64) -> Result<Node, Stri
     if let Some(n) = &job.network {
         let csv = |bits: u64| job_info::unpack_bits(bits).iter().map(i32::to_string).collect::<Vec<_>>().join(",");
         constraints.extend([
-            string("net-capabilities-csv", csv(n.capabilities)),
-            string("net-forbidden-capabilities-csv", csv(n.forbidden)),
-            string("net-transport-types-csv", csv(n.transports)),
+            string("net-capabilities-csv", csv(n.caps.capabilities)),
+            string("net-forbidden-capabilities-csv", csv(n.caps.forbidden)),
+            string("net-transport-types-csv", csv(n.caps.transports)),
         ]);
         for (name, v) in [
             ("estimated-download-bytes", job.network_download_bytes),
@@ -503,7 +502,7 @@ mod tests {
         assert_eq!((sync.uid, sync.job.id, sync.job.periodic, sync.job.persisted), (10123, 42, true, true));
         assert_eq!((sync.earliest, sync.latest), (NOW_ELAPSED, NOW_ELAPSED + 3_600_000));
         assert_eq!(sync.job.constraint_flags, CONSTRAINT_FLAG_CHARGING);
-        assert_eq!(job_info::unpack_bits(sync.job.network.as_ref().unwrap().capabilities), [12, 16]);
+        assert_eq!(job_info::unpack_bits(sync.job.network.as_ref().unwrap().caps.capabilities), [12, 16]);
         assert_eq!(sync.job.extras.entries, vec![(Some("count".into()), P::Int(3))]);
         let index = &jobs[1];
         assert_eq!(index.namespace.as_deref(), Some("index"));

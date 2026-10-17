@@ -295,7 +295,6 @@ dependencies = [
  "aim-binder-host",
  "aim-host-audio",
  "aim-host-display",
- "aim-host-health",
  "aim-host-location",
  "aim-host-sensors",
  "aim-hostcall",

@@ -9,12 +9,13 @@
 //! `/data/system/job` (`app_host/job_store.rs`). A job is ready as the
 //! controllers decide it on the Mac's state: its delay and deadline on the
 //! elapsed clock, periodic jobs with their flex; charging and battery not
-//! low from the Mac's battery as BatteryService would report it, storage
+//! low as the battery service reports them, storage
 //! not low as DeviceStorageMonitorService decides it for the volume of
 //! `/data`, both read each minute while a job waits on them; the device
 //! never idle (the display is always on); battery saver restricting the
-//! jobs of apps not running. The app host has no network yet (#1509): a
-//! network constraint is never satisfied. A ready job runs as
+//! jobs of apps not running; a network constraint as ConnectivityController
+//! decides it on ConnectivityService's default network, re-read with the
+//! battery. A ready job runs as
 //! `JobServiceContext` runs it: its `JobService` bound by the app host
 //! (`app_host/services.rs`), `startJob` with an `IJobCallback` of its own,
 //! the op timeouts, the runtime limits, its work items, stops with their
@@ -44,6 +45,7 @@ use super::job_info::{
     PRIORITY_DEFAULT, PRIORITY_HIGH, PRIORITY_LOW, PRIORITY_MAX, PRIORITY_MIN, ReadWorkItem, STOP_REASON_UNDEFINED,
 };
 use super::job_store::{self, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, Stored};
+use super::network::{self, NetworkCapabilities};
 use super::services::HostConnection;
 use super::{AppHost, PER_USER_RANGE, reply};
 
@@ -69,7 +71,8 @@ const CONSTRAINTS_OF_INTEREST: i32 = CONSTRAINT_CHARGING
     | CONSTRAINT_CONTENT_TRIGGER
     | CONSTRAINT_PREFETCH;
 /// The device-wide constraints, read from the Mac.
-const DEVICE_CONSTRAINTS: i32 = CONSTRAINT_CHARGING | CONSTRAINT_BATTERY_NOT_LOW | CONSTRAINT_STORAGE_NOT_LOW;
+const DEVICE_CONSTRAINTS: i32 =
+    CONSTRAINT_CHARGING | CONSTRAINT_BATTERY_NOT_LOW | CONSTRAINT_STORAGE_NOT_LOW | CONSTRAINT_CONNECTIVITY;
 /// `JobStatus.INTERNAL_FLAG_DEMOTED_BY_USER`, `_BY_SYSTEM_UIJ`.
 const INTERNAL_FLAG_DEMOTED_BY_USER: i32 = 1 << 1;
 const INTERNAL_FLAG_DEMOTED_BY_SYSTEM_UIJ: i32 = 1 << 2;
@@ -116,6 +119,8 @@ const MINUTE: i64 = 60 * 1000;
 const RUNTIME_FREE_QUOTA_MAX_LIMIT_MS: i64 = 30 * MINUTE;
 const RUNTIME_MIN_GUARANTEE_MS: i64 = 10 * MINUTE;
 const RUNTIME_MIN_EJ_GUARANTEE_MS: i64 = 3 * MINUTE;
+/// `ConnectivityController`'s `CONN_CONGESTION_DELAY_FRAC` default.
+const CONN_CONGESTION_DELAY_FRAC: f64 = 0.5;
 const SYSTEM_STOP_TO_FAILURE_RATIO: i32 = 3;
 const ABANDONED_JOB_TIMEOUTS_BEFORE_AGGRESSIVE_BACKOFF: i32 = 3;
 const MAX_CPU_ONLY_JOB_BATCH_DELAY_MS: i64 = 31 * MINUTE;
@@ -162,7 +167,7 @@ const FLAG_ENFORCE_SCHEDULE_LIMIT_TO_PROXY_JOBS: &str = "com.android.server.job.
 const FLAG_BATCH_ACTIVE_BUCKET_JOBS: &str = "com.android.server.job.batch_active_bucket_jobs";
 
 /// What the controllers read of the Mac.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Device {
     /// `isPowerConnected`, and `isBatteryCharging` (`isConsideredCharging`).
     power_connected: bool,
@@ -170,6 +175,8 @@ struct Device {
     battery_not_low: bool,
     storage_not_low: bool,
     battery_saver: bool,
+    /// The default network's capabilities, if there is one.
+    network: Option<NetworkCapabilities>,
 }
 
 /// `JobServiceContext.VERB_*`.
@@ -242,7 +249,7 @@ impl JobStatus {
         latest: i64,
         binders: Arc<Vec<Strong>>,
     ) -> JobStatus {
-        job.network = job.network.map(|n| n.for_uid(source.uid));
+        job.network = job.network.map(|n| job_info::request_for_uid(&n, source.uid));
         let mut required = job.constraint_flags;
         if job.network.is_some() {
             required |= CONSTRAINT_CONNECTIVITY;
@@ -327,6 +334,62 @@ impl JobStatus {
         self.latest != NO_LATEST_RUNTIME
     }
 
+    /// `getMaxJobExecutionTimeMs`: its guaranteed runtime.
+    fn max_execution_ms(&self) -> i64 {
+        if self.expedited() { RUNTIME_MIN_GUARANTEE_MS } else { RUNTIME_FREE_QUOTA_MAX_LIMIT_MS }
+    }
+
+    /// `getFractionRunTime`: how far into its window it is.
+    fn fraction_run_time(&self, now: i64) -> f64 {
+        match (self.earliest == NO_EARLIEST_RUNTIME, self.latest == NO_LATEST_RUNTIME) {
+            (true, true) => 1.0,
+            (true, false) => (now >= self.latest) as i32 as f64,
+            (false, true) => (now >= self.earliest) as i32 as f64,
+            _ if now <= self.earliest => 0.0,
+            _ if now >= self.latest => 1.0,
+            _ => (now - self.earliest) as f64 / (self.latest - self.earliest) as f64,
+        }
+    }
+
+    /// `ConnectivityController.isSatisfied` on the default network: it is
+    /// usable, the job's transfers fit its runtime (`isInsane`), metered
+    /// use is allowed (`isMeteredAllowed`: the app host's apps are top
+    /// while they run), it is not congested early in the job's window, and
+    /// it satisfies the job's request (`isStrictSatisfied`; the relaxed
+    /// match only differs on a metered network). The Mac's network is
+    /// Ethernet, so signal strength never holds a job back.
+    fn network_satisfied(&self, now: i64, device: &Device, top: bool) -> bool {
+        let (Some(request), Some(nc)) = (&self.job.network, &device.network) else { return false };
+        if !nc.has(network::NOT_SUSPENDED) {
+            return false;
+        }
+        let max = self.max_execution_ms();
+        let too_long = |bytes: i64, kbps: i32| bytes != NETWORK_BYTES_UNKNOWN && kbps > 0 && bytes * 1000 / (kbps as i64 * 1000 / 8) > max;
+        let chunk = self.job.minimum_network_chunk_bytes;
+        let insane = if chunk != NETWORK_BYTES_UNKNOWN {
+            too_long(chunk, nc.link_down_kbps) || too_long(chunk, nc.link_up_kbps)
+        } else if nc.has(network::NOT_METERED) && device.charging {
+            false
+        } else {
+            too_long(self.job.network_download_bytes, nc.link_down_kbps) || too_long(self.job.network_upload_bytes, nc.link_up_kbps)
+        };
+        if insane {
+            return false;
+        }
+        let metered_allowed = nc.has(network::NOT_METERED)
+            || nc.has(network::TEMPORARILY_NOT_METERED)
+            || top
+            || self.job.flags & FLAG_WILL_BE_FOREGROUND != 0
+            || self.job.is_user_initiated();
+        if !metered_allowed {
+            return false;
+        }
+        if !nc.has(network::NOT_CONGESTED) && self.fraction_run_time(now) < CONN_CONGESTION_DELAY_FRAC {
+            return false;
+        }
+        request.caps.satisfied_by(nc)
+    }
+
     /// `shouldTreatAsExpeditedJob`: every expedited job is within its
     /// quota, the app host keeping none.
     fn expedited(&self) -> bool {
@@ -393,6 +456,7 @@ impl JobStatus {
             // `TimeController`.
             (CONSTRAINT_TIMING_DELAY, now >= self.earliest),
             (CONSTRAINT_DEADLINE, now >= self.latest),
+            (CONSTRAINT_CONNECTIVITY, self.network_satisfied(now, device, top)),
         ] {
             if on {
                 satisfied |= constraint;
@@ -756,33 +820,21 @@ impl JobScheduler {
     /// The Mac's battery, storage and battery saver, read each
     /// `DEVICE_READ_INTERVAL`.
     fn device(&self, state: &mut State, now: i64) -> Device {
-        if let Some((d, at)) = state.device
+        if let Some((d, at)) = &state.device
             && now - at < DEVICE_READ_INTERVAL
         {
-            return d;
+            return d.clone();
         }
         let d = self.read_device();
-        state.device = Some((d, now));
+        state.device = Some((d.clone(), now));
         d
     }
 
-    /// BatteryService's plug state and `mBatteryLevelLow` (its low warning
-    /// level from `low_power_trigger_level` or the framework's, not below
-    /// the critical one), DeviceStorageMonitorService's low storage of the
-    /// volume of `/data`, and battery saver.
+    /// BatteryService's plug state and `mBatteryLevelLow`,
+    /// DeviceStorageMonitorService's low storage of the volume of `/data`,
+    /// battery saver, and ConnectivityService's default network.
     fn read_device(&self) -> Device {
-        let battery = aim_host_health::battery();
-        let plugged = battery.ac_online != 0;
-        let warning = self.host.inputs().ok().map_or(20, |inputs| {
-            let default = inputs.packages.framework_integer("config_lowBatteryWarningLevel").unwrap_or(20);
-            let critical = inputs.packages.framework_integer("config_criticalBatteryWarningLevel").unwrap_or(0);
-            let set = inputs.settings.get(super::settings::Table::Global, "low_power_trigger_level");
-            let level = set.and_then(|v| v.parse().ok()).filter(|&l| l != 0).unwrap_or(default);
-            level.max(critical)
-        });
-        let low = !plugged
-            && battery.status != aim_hostcall::health::status::UNKNOWN
-            && battery.level_percent <= warning;
+        let (plugged, low) = self.host.battery_service.get().map_or((false, false), |b| b.powered_and_low());
         let battery_saver = self.host.power_service.get().is_some_and(|p| p.power_save_mode().unwrap_or(false));
         Device {
             power_connected: plugged,
@@ -790,6 +842,7 @@ impl JobScheduler {
             battery_not_low: !low,
             storage_not_low: self.storage_not_low(),
             battery_saver,
+            network: self.host.connectivity_service.get().and_then(|c| c.default_network()),
         }
     }
 
@@ -1342,7 +1395,7 @@ impl JobScheduler {
         let j = &state.jobs[&key];
         let expedited = j.expedited();
         let min_guarantee = if expedited { RUNTIME_MIN_EJ_GUARANTEE_MS } else { RUNTIME_MIN_GUARANTEE_MS };
-        let max = if expedited { RUNTIME_MIN_GUARANTEE_MS } else { RUNTIME_FREE_QUOTA_MAX_LIMIT_MS };
+        let max = j.max_execution_ms();
         let mut flags = BIND_AUTO_CREATE | BIND_NOT_APP_COMPONENT_USAGE | BIND_NOT_FOREGROUND;
         flags |= if expedited { BIND_ALMOST_PERCEPTIBLE } else { BIND_NOT_PERCEPTIBLE };
         let (package, class) = j.job.service.clone();
@@ -1557,7 +1610,7 @@ impl JobScheduler {
     /// minimum guarantee: battery saver, or ready jobs waiting for its
     /// slot (expedited ones for an expedited job).
     fn should_stop(&self, state: &State, i: usize) -> Option<String> {
-        if state.device.is_some_and(|(d, _)| d.battery_saver) {
+        if state.device.as_ref().is_some_and(|(d, _)| d.battery_saver) {
             return Some("battery saver".into());
         }
         if state.contexts.len() > self.limit * 3 / 4 {
@@ -1689,7 +1742,8 @@ impl JobScheduler {
     }
 
     /// `IJobCallback`'s calls of `callback`; the data transfer reports
-    /// are of network jobs, which do not run (#1509).
+    /// (`updateEstimatedNetworkBytes`, `updateTransferredNetworkBytes`) and
+    /// notifications are not implemented (#1490).
     fn callback_call(&self, callback: &JobCallback, call: &mut Call<'_>) -> Reply {
         let mut state = self.state.lock().unwrap();
         let now = elapsed_ms();
@@ -1804,7 +1858,7 @@ impl JobScheduler {
             .jobs
             .values()
             .any(|j| j.tracked && j.required & DEVICE_CONSTRAINTS != 0);
-        let before = state.device.map(|(d, _)| d);
+        let before = state.device.as_ref().map(|(d, _)| d.clone());
         let mut changed = false;
         if state.running && watching {
             changed |= before.is_some_and(|b| b != self.device(state, now));
@@ -2136,7 +2190,7 @@ mod tests {
     use super::*;
 
     const PLUGGED: Device =
-        Device { power_connected: true, charging: true, battery_not_low: true, storage_not_low: true, battery_saver: false };
+        Device { power_connected: true, charging: true, battery_not_low: true, storage_not_low: true, battery_saver: false, network: None };
 
     fn job(build: impl FnOnce(&mut JobInfo)) -> JobInfo {
         let mut j = JobInfo::persisted_builder(1, "com.example".into(), "com.example.Job".into());
@@ -2199,12 +2253,38 @@ mod tests {
 
     /// No network is known: a network job waits (`ConnectivityController`).
     #[test]
-    fn a_network_job_waits() {
-        let network = job(|j| j.network = Some(job_info::NetworkRequest::restored(&[12], &[], &[])));
+    fn a_network_job_waits_for_a_network_that_satisfies_it() {
+        let network = job(|j| j.network = Some(job_info::restored_request(&[12, 11], &[], &[])));
         let mut j = status(network, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME);
         assert!(!j.evaluate(0, &PLUGGED, true));
         assert_eq!(j.pending_reasons(true), [PENDING_JOB_REASON_CONSTRAINT_CONNECTIVITY]);
-        assert_eq!(j.job.network.as_ref().map(|n| n.capabilities), Some(1 << 12));
+        let mut caps = NetworkCapabilities::default();
+        for c in [network::INTERNET, network::NOT_METERED, network::NOT_SUSPENDED, network::NOT_CONGESTED, network::VALIDATED] {
+            caps.add(c);
+        }
+        caps.link_down_kbps = 100_000;
+        caps.link_up_kbps = 100_000;
+        let online = Device { network: Some(caps.clone()), ..PLUGGED };
+        assert!(j.evaluate(0, &online, true));
+        // Unmetered was asked for.
+        caps.remove(network::NOT_METERED);
+        assert!(!j.evaluate(0, &Device { network: Some(caps), ..PLUGGED }, true));
+    }
+
+    /// `isInsane`: transfers that cannot finish in the job's runtime.
+    #[test]
+    fn an_insane_transfer_waits() {
+        let big = job(|j| {
+            j.network = Some(job_info::restored_request(&[12], &[], &[]));
+            j.network_download_bytes = 100 * 1024 * 1024 * 1024;
+        });
+        let mut j = status(big, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME);
+        let mut caps = NetworkCapabilities::default();
+        for c in [network::INTERNET, network::NOT_SUSPENDED, network::NOT_CONGESTED] {
+            caps.add(c);
+        }
+        caps.link_down_kbps = 1_000;
+        assert!(!j.evaluate(0, &Device { network: Some(caps), charging: false, ..PLUGGED }, true));
     }
 
     /// `getRescheduleJobForFailureLocked`'s delays.
