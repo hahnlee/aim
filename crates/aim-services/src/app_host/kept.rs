@@ -29,6 +29,33 @@ impl RawIntent {
         self.raw.set_i32(self.flags_at + 4, extended_flags);
     }
 
+    /// `new Intent(action)` with `flags` and the extras `extras`, as
+    /// `Intent.writeToParcel` writes it.
+    pub fn new(action: &str, flags: i32, extras: &[(&str, crate::bundle::Value)]) -> RawIntent {
+        let mut p = Parcel::new();
+        p.write_string8(Some(action));
+        p.write_i32(0); // no data (`Uri.writeToParcel`)
+        p.write_string8(None); // type
+        p.write_string8(None); // identifier
+        p.write_i32(flags);
+        p.write_i32(0); // extended flags
+        p.write_string8(None); // package
+        p.write_string16(None); // no component
+        p.write_i32(0); // no source bounds
+        p.write_i32(0); // no categories
+        p.write_i32(0); // no selector
+        p.write_i32(0); // no clip data
+        p.write_i32(-2); // content user hint: `UserHandle.USER_CURRENT`
+        if extras.is_empty() {
+            p.write_i32(-1); // no extras
+        } else {
+            crate::bundle::write(&mut p, extras);
+        }
+        p.write_i32(0); // no original intent
+        p.write_i32(0); // no creator token
+        RawIntent::read_from(&mut Reader::new(p.data(), &[])).expect("a written intent reads")
+    }
+
     /// `Intent.hasFileDescriptors`.
     pub fn has_fds(&self) -> bool {
         self.raw.has_fds()
@@ -136,6 +163,15 @@ mod tests {
         p.write_i32(0); // original intent
         p.write_i32(0); // creator token
         p
+    }
+
+    #[test]
+    fn a_new_intent_has_its_action_and_extras() {
+        let i = RawIntent::new("a.B", 0x10, &[("k", crate::bundle::Value::Int(3))]);
+        assert_eq!((i.intent.action.as_deref(), i.intent.flags), (Some("a.B"), 0x10));
+        let mut p = Parcel::new();
+        i.write_to(&mut p);
+        assert_eq!(RawIntent::read_from(&mut Reader::new(p.data(), &[])).unwrap().intent, i.intent);
     }
 
     #[test]

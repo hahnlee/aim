@@ -105,6 +105,7 @@ SOURCE_FILES=(
   "platform/frameworks/base|core/java/android/app/IOnProjectionStateChangedListener.aidl|9c48475603563cccf3554f43158fc8e6d6b9d453eefcb813e8000fbe9e2c5ad2"
   "platform/frameworks/base|core/java/com/android/internal/inputmethod/IImeTracker.aidl|ea42ae1467e76d431961a200697fc0c322a791ea9b6fd65a330b21f910a0dc80"
   "platform/frameworks/base|core/java/android/content/IContentService.aidl|855d605f790eea2001f9ef52229a7a9612eed53f0cadf88b5c8e3bfd1db31657"
+  "platform/frameworks/base|core/java/android/hardware/ISensorPrivacyManager.aidl|9c9a03a190a71635200518a49e3c5fdb06bfde5ece2f390071c45e14199c0eaf"
   "platform/frameworks/base|core/java/android/os/storage/IStorageManager.aidl|eb7653710abed8896df375b7d9b2224404c9fd015e18dce86bdf73a42f1119a9"
 )
 
@@ -124,6 +125,7 @@ INTERFACES=(
   "android.view.IWindowId|system/framework/framework.jar|*"
   "android.os.storage.IStorageManager|system/framework/framework.jar|getVolumeList,mkdirs"
   "android.content.IContentService|system/framework/framework.jar|registerContentObserver,unregisterContentObserver,notifyChange,putCache,getCache"
+  "android.hardware.ISensorPrivacyManager|system/framework/framework.jar|supportsSensorToggle,addSensorPrivacyListener,addToggleSensorPrivacyListener,removeSensorPrivacyListener,removeToggleSensorPrivacyListener,isSensorPrivacyEnabled,isCombinedToggleSensorPrivacyEnabled,isToggleSensorPrivacyEnabled,getToggleSensorPrivacyState"
   "android.hardware.input.IInputManager|system/framework/framework.jar|getVelocityTrackerStrategy,getInputDevice,getInputDeviceIds,registerInputDevicesChangedListener"
   "com.android.internal.view.IInputMethodManager|system/framework/framework.jar|addClient,showSoftInput,hideSoftInput,getImeTrackerService"
   "com.android.internal.inputmethod.IImeTracker|system/framework/framework.jar|onStart"
@@ -198,7 +200,7 @@ INTERFACES=(
   "com.android.internal.widget.ILockSettings|system/framework/framework.jar|verifyCredential,verifyGatekeeperPasswordHandle,removeGatekeeperPasswordHandle,getCredentialType,userPresent"
   "com.android.internal.statusbar.IAddTileResultCallback|system/framework/framework.jar|*"
   "android.view.accessibility.IAccessibilityManager|system/framework/framework.jar|sendAccessibilityEvent"
-  "android.media.IAudioService|system/framework/framework.jar|registerDeviceVolumeDispatcherForAbsoluteVolume,setStreamVolumeWithAttribution,adjustStreamVolumeWithAttribution,getStreamMinVolume,getStreamMaxVolume,areNavigationRepeatSoundEffectsEnabled,setNavigationRepeatSoundEffectsEnabled,playSoundEffect"
+  "android.media.IAudioService|system/framework/framework.jar|getNativeInterface,registerDeviceVolumeDispatcherForAbsoluteVolume,setStreamVolumeWithAttribution,adjustStreamVolumeWithAttribution,getStreamMinVolume,getStreamMaxVolume,getStreamVolume,isStreamMute,getLastAudibleStreamVolume,isStreamAffectedByMute,areNavigationRepeatSoundEffectsEnabled,setNavigationRepeatSoundEffectsEnabled,playSoundEffect"
   "android.media.IAudioDeviceVolumeDispatcher|system/framework/framework.jar|*"
   "android.media.session.ISessionManager|system/framework/framework.jar|getMediaKeyEventSession,addOnMediaKeyEventSessionChangedListener"
   "android.media.session.IOnMediaKeyEventSessionChangedListener|system/framework/framework.jar|*"

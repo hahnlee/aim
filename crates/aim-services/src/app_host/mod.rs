@@ -10,6 +10,7 @@
 
 pub mod activity;
 pub mod appops_service;
+pub mod audio_policy;
 pub mod audio_service;
 pub mod bind;
 pub mod broadcasts;
@@ -26,6 +27,7 @@ pub mod kept;
 pub mod package_service;
 pub mod packages;
 pub mod permission_controller;
+pub mod sensor_privacy;
 pub mod settings;
 pub mod settings_provider;
 pub mod storage;
@@ -33,6 +35,7 @@ pub mod surface;
 pub mod tasks;
 pub mod trust_service;
 pub mod user_service;
+pub mod volume;
 pub mod window_manager;
 pub mod zygote;
 
@@ -232,6 +235,11 @@ pub struct AppHost {
     text_input: input_method::TextInput,
     content_service: OnceLock<Arc<content_service::ContentService>>,
     broadcasts: broadcasts::Broadcasts,
+    /// User 0's restrictions.
+    user_restrictions: OnceLock<std::collections::BTreeSet<String>>,
+    /// audioserver, once it registered, and the stream volumes.
+    audio_policy: OnceLock<audio_policy::AudioPolicy>,
+    volumes: Mutex<Option<volume::Volumes>>,
 }
 
 /// A content provider an app's process published
@@ -272,6 +280,9 @@ impl AppHost {
             text_input: Default::default(),
             content_service: OnceLock::new(),
             broadcasts: Default::default(),
+            user_restrictions: OnceLock::new(),
+            audio_policy: OnceLock::new(),
+            volumes: Mutex::new(None),
         })
     }
 
@@ -330,6 +341,7 @@ impl AppHost {
             ("input", Arc::new(input_manager::InputManager::new(self.clone()))),
             ("audio", Arc::new(audio_service::AudioService::new(self.clone()))),
             ("mount", Arc::new(storage::StorageManager(self.clone()))),
+            ("sensor_privacy", Arc::new(sensor_privacy::SensorPrivacy::new(self.clone()))),
             (
                 "content",
                 self.content_service
@@ -643,6 +655,24 @@ impl AppHost {
         self.windows_died(pid);
         self.tasks_died(start_seq);
         self.broadcasts.process_died(self, start_seq);
+    }
+
+    /// User 0's base restrictions, as UserManagerService last persisted
+    /// them (`/data/system/users/0.xml`'s `<restrictions>`).
+    fn user_restrictions(&self) -> Result<&std::collections::BTreeSet<String>, Exception> {
+        if let Some(r) = self.user_restrictions.get() {
+            return Ok(r);
+        }
+        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
+        let path = self.data()?.join("system/users/0.xml");
+        let bytes = std::fs::read(&path).map_err(|e| state(format!("{}: {e}", path.display())))?;
+        let root = aim_android_xml::read(&bytes).map_err(|e| state(format!("{}: {e}", path.display())))?;
+        let restrictions = root
+            .children()
+            .find(|e| e.name == "restrictions")
+            .map(|r| r.attrs.iter().filter(|(_, v)| matches!(v, aim_android_xml::Value::Bool(true))).map(|(k, _)| k.clone()).collect())
+            .unwrap_or_default();
+        Ok(self.user_restrictions.get_or_init(|| restrictions))
     }
 
     /// An activity of the process of `start_seq` was resumed.
@@ -1860,6 +1890,14 @@ impl Service for Control {
                 if let Err(e) = host.inputs().and_then(|_| host.packages()) {
                     eprintln!("app host: loading its inputs: {e:?}");
                 }
+                // audioserver starts with its HAL, which asks the Mac for
+                // its devices: apart from the storage's start.
+                let audio = host.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = audio.start_audio() {
+                        eprintln!("app host: audio: {e}");
+                    }
+                });
                 if let Err(e) = host.start_storage() {
                     eprintln!("app host: external storage: {e}");
                 }
