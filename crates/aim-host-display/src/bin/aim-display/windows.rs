@@ -991,6 +991,11 @@ pub fn locate(
     .flatten()
 }
 
+/// The task `view` shows, if it is a task window's.
+pub fn task_of_view(view: Id) -> Option<i32> {
+    with(|s| s.tasks.iter().find(|(_, tw)| tw.view == view).map(|(&task, _)| task)).flatten()
+}
+
 /// Whether `view` is a task window's.
 pub fn is_task_view(view: Id) -> bool {
     with(|s| s.tasks.values().any(|tw| tw.view == view)) == Some(true)

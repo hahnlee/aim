@@ -223,6 +223,7 @@ pub struct AppHost {
     /// The content providers apps published, by authority.
     providers: Mutex<HashMap<String, Published>>,
     storage: storage::Volumes,
+    text_input: input_method::TextInput,
 }
 
 /// A content provider an app's process published
@@ -260,6 +261,7 @@ impl AppHost {
             pending_launches: Mutex::new(HashMap::new()),
             providers: Mutex::new(HashMap::new()),
             storage: Default::default(),
+            text_input: Default::default(),
         })
     }
 

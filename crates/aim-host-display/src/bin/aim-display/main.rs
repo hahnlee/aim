@@ -43,6 +43,7 @@ mod shim;
 mod stats;
 mod status;
 mod system_icons;
+mod text_input;
 mod toast;
 mod un;
 mod vsync;
@@ -476,6 +477,12 @@ impl Display {
                     // process.
                     if wire::send(sock.as_fd(), wire::bytes(&self.mode), None).is_ok() {
                         media::serve_bridge(sock.into(), self.mode == mode::WINDOWS);
+                    }
+                    return;
+                }
+                wire::OP_TEXT_INPUT if r.id == wire::VERSION => {
+                    if wire::send(sock.as_fd(), wire::bytes(&self.mode), None).is_ok() {
+                        text_input::serve_bridge(sock.into(), self.mode == mode::WINDOWS);
                     }
                     return;
                 }
