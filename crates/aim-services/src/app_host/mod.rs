@@ -42,6 +42,7 @@ pub mod tasks;
 pub mod trust_service;
 pub mod user_service;
 pub mod volume;
+pub mod window_layout;
 pub mod window_manager;
 pub mod zygote;
 
@@ -1041,10 +1042,11 @@ impl AppHost {
     /// A window input channel from the agent, for a window of `frame` on
     /// a display of `display` pixels: its index, and the reply, whose
     /// client socket starts at [`AGENT_CHANNEL_FD`].
-    fn open_input_channel(&self, name: &str, display: (i32, i32), frame: config::Rect) -> Result<(i32, aim_binder_host::local::Received), Exception> {
+    fn open_input_channel(&self, name: &str, display: (i32, i32), input: &window_manager::Input) -> Result<(i32, aim_binder_host::local::Received), Exception> {
         let reply = self.call_agent(OPEN_INPUT_CHANNEL, "openInputChannel", |data| {
             data.write_string16(Some(name));
-            [display.0, display.1, frame.left, frame.top, frame.right, frame.bottom].iter().for_each(|v| data.write_i32(*v));
+            [display.0, display.1].iter().for_each(|v| data.write_i32(*v));
+            write_input(data, input);
         })?;
         let mut r = reply.reader();
         let index = r.read_exception().ok().and_then(|_| r.read_i32().ok());
@@ -1057,10 +1059,12 @@ impl AppHost {
         self.call_agent(FOCUS_INPUT_CHANNEL, "focusInputChannel", |data| data.write_i32(index)).map(|_| ())
     }
 
-    /// The window of input channel `index` moved to `frame`.
-    fn set_input_frame(&self, index: i32, frame: config::Rect) -> Result<(), Exception> {
+    /// The window of input channel `index` moved to `input`'s frame and
+    /// touchable region.
+    fn set_input_frame(&self, index: i32, input: &window_manager::Input) -> Result<(), Exception> {
         self.call_agent(SET_INPUT_CHANNEL_FRAME, "setInputChannelFrame", |data| {
-            [index, frame.left, frame.top, frame.right, frame.bottom].iter().for_each(|v| data.write_i32(*v));
+            data.write_i32(index);
+            write_input(data, input);
         })
         .map(|_| ())
     }
@@ -1535,6 +1539,16 @@ fn field<'v>(value: &'v crate::shadow::Value, name: &str) -> Option<&'v str> {
         crate::shadow::Value::Fields(_) => field(v, name),
         _ => None,
     })
+}
+
+/// A window's input for the agent: its frame, its touchable region,
+/// whether it watches touches outside it and its app's uid.
+fn write_input(data: &mut Parcel, input: &window_manager::Input) {
+    for r in [input.frame, input.touchable] {
+        [r.left, r.top, r.right, r.bottom].iter().for_each(|v| data.write_i32(*v));
+    }
+    data.write_bool(input.watch_outside);
+    data.write_i32(input.owner as i32);
 }
 
 /// `clock`'s milliseconds, as the guest's `SystemClock` reads them: its

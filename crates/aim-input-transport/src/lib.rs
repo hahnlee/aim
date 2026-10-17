@@ -3,6 +3,8 @@
 //! (`InputPublisher`), and a direct touchscreen's multitouch protocol B
 //! cooked into motions in the display's pixels, as InputReader's
 //! `MultiTouchInputMapper` and `TouchInputMapper::dispatchTouches` cook it.
+//! The window a touch goes to is chosen as `InputDispatcher` chooses it
+//! (`findTouchedWindowTargets`).
 
 /// `InputMessage::Type`.
 const MOTION: u32 = 1;
@@ -14,6 +16,7 @@ const TOOL_FINGER: i32 = 1;
 const ACTION_DOWN: i32 = 0;
 const ACTION_UP: i32 = 1;
 const ACTION_MOVE: i32 = 2;
+const ACTION_OUTSIDE: i32 = 4;
 const ACTION_POINTER_DOWN: i32 = 5;
 const ACTION_POINTER_UP: i32 = 6;
 const POINTER_INDEX_SHIFT: i32 = 8;
@@ -40,6 +43,35 @@ pub fn focus(seq: u32, id: i32, has_focus: bool) -> Vec<u8> {
     m.extend_from_slice(&id.to_ne_bytes());
     m.extend_from_slice(&[has_focus as u8, 0, 0, 0]);
     m
+}
+
+/// What WindowManager tells of a window's input (`InputWindowInfo`): its
+/// frame and the region it takes touches in, on the display (left, top,
+/// right, bottom, in pixels), whether it watches touches outside it, and
+/// the uid of its app.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Region {
+    pub frame: [i32; 4],
+    pub touchable: [i32; 4],
+    pub watch_outside: bool,
+    pub owner: i32,
+}
+
+impl Region {
+    fn takes(&self, (x, y): (f32, f32)) -> bool {
+        let [left, top, right, bottom] = self.touchable.map(|v| v as f32);
+        (left..right).contains(&x) && (top..bottom).contains(&y)
+    }
+}
+
+/// `findTouchedWindowTargets` at a gesture's `start` among windows back
+/// to front: the front one that takes it, and those in front of it that
+/// watch outside touches.
+pub fn touched(regions: &[Region], start: (f32, f32)) -> (Option<usize>, Vec<usize>) {
+    let at = regions.iter().rposition(|r| r.takes(start));
+    let above = at.map_or(0, |at| at + 1);
+    let outside = (above..regions.len()).filter(|&i| regions[i].watch_outside).collect();
+    (at, outside)
 }
 
 /// A multitouch slot.
@@ -160,6 +192,15 @@ impl Motion {
         (self.action == ACTION_DOWN).then(|| (self.pointers[0].1, self.pointers[0].2))
     }
 
+    /// The `ACTION_OUTSIDE` a window watching outside touches gets of a
+    /// gesture's start: its first pointer, where it is only if `visible`
+    /// (the window is of the touched window's app), zeroed otherwise.
+    pub fn outside(&self, visible: bool) -> Motion {
+        let (id, x, y) = self.pointers[0];
+        let (x, y) = if visible { (x, y) } else { (0.0, 0.0) };
+        Motion { action: ACTION_OUTSIDE, time: self.time, down_time: self.down_time, pointers: vec![(id, x, y)] }
+    }
+
     /// Whether the gesture ends with it (the last pointer's up).
     pub fn ends_gesture(&self) -> bool {
         self.action == ACTION_UP
@@ -209,6 +250,28 @@ fn header(kind: u32, seq: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn region(touchable: [i32; 4], watch_outside: bool) -> Region {
+        Region { frame: touchable, touchable, watch_outside, owner: 10_001 }
+    }
+
+    /// A touch goes to the front window that takes it; the windows in
+    /// front of it that watch outside touches are told.
+    #[test]
+    fn touches_go_to_the_front_window_that_takes_them() {
+        let activity = region([0, 0, 1080, 1920], false);
+        let tooltip = region([0, 0, 400, 120], true);
+        // Outside the tooltip: the activity, the tooltip told.
+        assert_eq!(touched(&[activity, tooltip], (540.0, 1000.0)), (Some(0), vec![1]));
+        // On it: the tooltip.
+        assert_eq!(touched(&[activity, tooltip], (100.0, 50.0)), (Some(1), vec![]));
+        // A modal popup takes its task's touches, outside it too.
+        let menu = region([0, 0, 1080, 1920], true);
+        assert_eq!(touched(&[activity, menu], (540.0, 1000.0)), (Some(1), vec![]));
+        // An untouchable window takes none.
+        let untouchable = region([0, 0, 0, 0], false);
+        assert_eq!(touched(&[activity, untouchable], (5.0, 5.0)), (Some(0), vec![]));
+    }
 
     fn slot(t: &mut Touch, slot: i32, tracking: i32, x: i32, y: i32) {
         t.abs(ABS_MT_SLOT, slot);

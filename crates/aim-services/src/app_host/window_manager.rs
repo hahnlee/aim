@@ -1,10 +1,12 @@
 //! `window`: WindowManager for the app host's windows, as
 //! `WindowManagerService.addWindow` and `relayoutWindow` answer an app's
 //! window at `android-16.0.0_r1` (`IWindowSession`'s replies). A window is
-//! a layer of buffers with no system bars: the whole display's, at its
-//! root, or in window mode its task's (`tasks`), a child of the task's
-//! layer; its input channel is a guest socket pair the app host agent
-//! makes.
+//! a layer of buffers with no system bars, laid out in the display, at its
+//! root, or in window mode in its task (`tasks`), a child of the task's
+//! layer (`window_layout`: an activity's window takes the whole, a popup
+//! or a dialog its place and size); its input channel is a guest socket
+//! pair the app host agent makes, which takes the touches of the region
+//! the window takes them in.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
@@ -20,6 +22,7 @@ use aim_service_aidl::android_view_iwindowsession as ws;
 use super::activity::{ActivityWindowInfo, Item};
 use super::config::{Configuration, Rect};
 use super::surface::{self, Layer};
+use super::window_layout::{self, Frames, LayoutParams, UNSPECIFIED_LENGTH};
 use super::{AppHost, reply};
 
 /// `WindowManagerGlobal.ADD_FLAG_IN_TOUCH_MODE | ADD_FLAG_APP_VISIBLE`.
@@ -27,9 +30,8 @@ const ADDED: i32 = 0x1 | 0x2;
 /// `WindowManagerGlobal.RELAYOUT_RES_FIRST_TIME`, `RELAYOUT_RES_SURFACE_CHANGED`.
 const RELAYOUT_RES_FIRST_TIME: i32 = 1;
 const RELAYOUT_RES_SURFACE_CHANGED: i32 = 1 << 1;
-/// `View.VISIBLE`; `WindowManager.LayoutParams.TYPE_BASE_APPLICATION`.
+/// `View.VISIBLE`.
 const VISIBLE: i32 = 0;
-const TYPE_BASE_APPLICATION: i32 = 1;
 /// `PixelFormat.TRANSLUCENT`.
 const TRANSLUCENT: i32 = -3;
 /// The first sequence numbers of `InsetsState` and `ClientWindowFrames`
@@ -48,10 +50,20 @@ struct Window {
     pid: i32,
     /// Its task, in window mode.
     task: Option<i32>,
-    /// The activity it belongs to (`LayoutParams.token`).
+    /// The activity it belongs to (`LayoutParams.token`, or its parent's).
     activity: Option<u64>,
+    /// A sub-window's parent window.
+    parent: Option<u32>,
+    attrs: LayoutParams,
+    /// The size its view asked for at its last relayout.
+    requested: (i32, i32),
+    frames: Frames,
     /// Its input channel's index at the agent.
     channel: i32,
+    /// Its own layer (`WindowState`'s surface), placed at its frame, and
+    /// the layer of its buffers (`WindowSurfaceController`'s), a child of
+    /// it, while it is visible.
+    container: Option<Layer>,
     layer: Option<Layer>,
     /// The sequence numbers of its frames and insets last sent.
     frames_seq: i32,
@@ -139,8 +151,7 @@ struct Session {
 
 impl Session {
     /// The window of a call whose first argument is its `IWindow`, and the
-    /// call's trailing `int`s (after the layout parameters, which the app
-    /// host does not read).
+    /// call's trailing `int`s (after the layout parameters).
     fn window_and_tail(call: &mut Call<'_>, tail: usize) -> Result<(u32, Vec<i32>), i32> {
         call.data.enforce_interface(ws::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
         let Some(Binder::Handle(window)) = call.data.read_binder().map_err(|_| BAD_VALUE)? else {
@@ -154,26 +165,36 @@ impl Session {
         Ok((window, ints))
     }
 
-    /// The activity token of the layout parameters after a call's
-    /// `IWindow` (`LayoutParams.writeToParcel`: nineteen words, then it).
-    fn activity_of(call: &Call<'_>) -> Option<u64> {
+    /// The layout parameters after a call's `IWindow`, if any.
+    fn attrs_of(call: &Call<'_>) -> Result<Option<LayoutParams>, i32> {
         let mut r = call.data.clone();
-        if r.read_i32().ok()? == 0 {
-            return None;
+        if r.read_i32().map_err(|_| BAD_VALUE)? == 0 {
+            return Ok(None);
         }
-        for _ in 0..19 {
-            r.read_i32().ok()?;
-        }
-        match r.read_binder().ok()? {
-            Some(Binder::Local(token)) => Some(token),
-            _ => None,
-        }
+        LayoutParams::read(&mut r).map(Some).map_err(|_| BAD_VALUE)
     }
 
     /// `addToDisplayAsUser`: the window's input channel, its insets, no
-    /// insets controls, no attached frame, no size compatibility scale.
-    fn add(&self, window: u32, activity: Option<u64>) -> Result<Parcel, Exception> {
+    /// insets controls, its parent's frame if it is a sub-window, no size
+    /// compatibility scale.
+    fn add(&self, window: u32, attrs: LayoutParams) -> Result<Parcel, Exception> {
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
+        // A sub-window's token is its parent's `IWindow`; it belongs to its
+        // parent's activity.
+        let (parent, parent_activity, attached) = match attrs.token {
+            Some(Binder::Handle(h)) if attrs.is_sub_window() => {
+                let windows = self.host.windows.windows.lock().unwrap();
+                let p = windows
+                    .get(&h)
+                    .ok_or_else(|| Exception::illegal_argument("Attempted to add window with token that is not a window"))?;
+                (Some(h), p.activity, Some(p.frames.frame))
+            }
+            _ => (None, None, None),
+        };
+        let activity = match attrs.token {
+            Some(Binder::Local(token)) => Some(token),
+            _ => parent_activity,
+        };
         let of_activity = activity.and_then(|t| self.host.activities.records.lock().unwrap().get(&t).map(|r| format!("{}/{}", r.package, r.class)));
         let name = of_activity.or_else(|| self.host.activities.top_component(self.uid)).ok_or_else(|| state("no activity of the window's app".into()))?;
         let id = {
@@ -184,8 +205,11 @@ impl Session {
         let channel_name = format!("{id:07x} {name}");
         let display = self.host.display()?.0.clone();
         let task = self.host.tasks.of_uid(self.uid);
-        let frame = task.map_or(Rect { left: 0, top: 0, right: display.width, bottom: display.height }, |(_, bounds)| bounds);
-        let (index, channel) = self.host.open_input_channel(&channel_name, (display.width, display.height), frame)?;
+        let bounds = task.map_or(Rect { left: 0, top: 0, right: display.width, bottom: display.height }, |(_, bounds)| bounds);
+        let requested = (UNSPECIFIED_LENGTH, UNSPECIFIED_LENGTH);
+        let frames = window_layout::compute_frames(&attrs, bounds, attached, task.is_some(), requested);
+        let input = Input::of(&attrs, frames.frame, bounds, self.uid);
+        let (index, channel) = self.host.open_input_channel(&channel_name, (display.width, display.height), &input)?;
         let mut p = Parcel::new();
         p.write_no_exception();
         p.write_i32(ADDED);
@@ -205,8 +229,9 @@ impl Session {
         p.write_i32(-1); // no insets source controls
         p.write_i32(FIRST_SEQ);
         p.write_i32(1);
-        for v in [0, 0, -1, -1] {
-            p.write_i32(v); // no attached frame
+        let attached = attached.unwrap_or(Rect { left: 0, top: 0, right: -1, bottom: -1 });
+        for v in [attached.left, attached.top, attached.right, attached.bottom] {
+            p.write_i32(v);
         }
         p.write_i32(1);
         p.write_f32(1.0); // the size compatibility scale
@@ -220,7 +245,12 @@ impl Session {
                 pid: self.pid,
                 task: task.map(|(id, _)| id),
                 activity,
+                parent,
+                attrs,
+                requested,
+                frames,
                 channel: index,
+                container: None,
                 layer: None,
                 frames_seq: FIRST_SEQ,
                 insets_seq: FIRST_SEQ,
@@ -233,15 +263,29 @@ impl Session {
     }
 
     /// `relayout`: the window's frames, configuration, surface and
-    /// insets; its layer is made the first time it is visible.
-    fn relayout(&self, window: u32, view_visibility: i32) -> Result<Parcel, Exception> {
+    /// insets; its layer is made the first time it is visible, and placed
+    /// and its input region set where its frame is.
+    fn relayout(&self, window: u32, attrs: Option<LayoutParams>, requested: (i32, i32), view_visibility: i32) -> Result<Parcel, Exception> {
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
         let display = self.host.display()?.0.clone();
         let global = self.host.global_config(self.uid).ok_or_else(|| state("relayout of an unbound app".into()))?;
         let mut windows = self.host.windows.windows.lock().unwrap();
+        let attached = windows
+            .get(&window)
+            .and_then(|w| w.parent)
+            .and_then(|p| windows.get(&p))
+            .map(|p| p.frames.frame);
         let w = windows.get_mut(&window).ok_or_else(|| Exception::illegal_argument("relayout of an unknown window"))?;
         let mut result = 0;
         let task = w.task.and_then(|id| self.host.tasks.bounds(id).map(|bounds| (id, bounds)));
+        if let Some(attrs) = attrs {
+            w.attrs = attrs;
+        }
+        w.requested = requested;
+        let bounds = task.map_or(Rect { left: 0, top: 0, right: display.width, bottom: display.height }, |(_, bounds)| bounds);
+        let frames = window_layout::compute_frames(&w.attrs, bounds, attached, task.is_some(), requested);
+        let moved = frames.frame != w.frames.frame;
+        w.frames = frames;
         // A window that is not visible has no surface
         // (`WindowStateAnimator.destroySurfaceLocked`).
         if view_visibility != VISIBLE {
@@ -249,31 +293,40 @@ impl Session {
         }
         if view_visibility == VISIBLE && w.layer.is_none() {
             let composer = self.host.composer()?;
+            if w.container.is_none() {
+                let create = |parent: Option<&Layer>| composer.create_surface(&self.host.process, &w.name, surface::CONTAINER, parent, &[]);
+                let container = match task {
+                    Some((id, _)) => self.host.task_layer(id, |parent| create(Some(parent))),
+                    None => create(None),
+                }
+                .map_err(state)?;
+                // A later window is in front of an earlier one.
+                composer.apply(&[(&container, surface::Change { z: Some(w.id as i32), ..Default::default() })]).map_err(state)?;
+                w.container = Some(container);
+            }
             let metadata = [
-                (surface::METADATA_WINDOW_TYPE, TYPE_BASE_APPLICATION),
+                (surface::METADATA_WINDOW_TYPE, w.attrs.kind),
                 (surface::METADATA_OWNER_PID, w.pid),
                 (surface::METADATA_OWNER_UID, w.uid as i32),
             ];
-            let create = |parent: Option<&Layer>| composer.create_surface(&self.host.process, &w.name, surface::BUFFER_STATE, parent, &metadata);
-            let layer = match task {
-                Some((id, _)) => self.host.task_layer(id, |parent| create(Some(parent))),
-                None => create(None),
-            }
-            .map_err(state)?;
+            let layer = composer
+                .create_surface(&self.host.process, &w.name, surface::BUFFER_STATE, w.container.as_ref(), &metadata)
+                .map_err(state)?;
             eprintln!("app host: window {} has layer {}", w.name, layer.name);
-            // A later window is in front of an earlier one.
-            composer.apply(&[(&layer, surface::Change { z: Some(w.id as i32), ..Default::default() })]).map_err(state)?;
             w.layer = Some(layer);
             result |= RELAYOUT_RES_FIRST_TIME | RELAYOUT_RES_SURFACE_CHANGED;
         }
+        if moved || result & RELAYOUT_RES_FIRST_TIME != 0 {
+            self.host.place_window(w, bounds).map_err(state)?;
+        }
         w.insets_seq += 1;
         let (width, height) = (display.width, display.height);
-        let frame = task.map_or(Rect { left: 0, top: 0, right: width, bottom: height }, |(_, bounds)| bounds);
+        let frame = bounds;
         let mut p = Parcel::new();
         p.write_no_exception();
         p.write_i32(result);
         p.write_i32(1);
-        write_frames(&mut p, frame, (width, height), w.frames_seq);
+        write_frames(&mut p, &w.frames, w.frames_seq);
         let mut overrides: Configuration = match task {
             Some((_, bounds)) => global.of_freeform_task(bounds),
             None => global.clone(),
@@ -314,16 +367,40 @@ impl Session {
     }
 }
 
-/// `ClientWindowFrames`: the frame and the display's, no parent or
-/// attached frame, unscaled, of sequence number `seq`.
-fn write_frames(p: &mut Parcel, frame: Rect, (width, height): (i32, i32), seq: i32) {
-    for r in [[frame.left, frame.top, frame.right, frame.bottom], [0, 0, width, height], [0, 0, 0, 0]] {
-        r.iter().for_each(|v| p.write_i32(*v));
+/// `ClientWindowFrames`: the frames, unscaled, of sequence number `seq`.
+fn write_frames(p: &mut Parcel, frames: &Frames, seq: i32) {
+    let write = |p: &mut Parcel, r: Rect| [r.left, r.top, r.right, r.bottom].iter().for_each(|v| p.write_i32(*v));
+    write(p, frames.frame);
+    write(p, frames.display);
+    write(p, frames.parent);
+    p.write_i32(frames.attached.is_some() as i32);
+    if let Some(a) = frames.attached {
+        write(p, a);
     }
-    p.write_i32(0);
-    p.write_bool(false);
+    p.write_bool(false); // not clipped by a cutout
     p.write_f32(1.0);
     p.write_i32(seq);
+}
+
+/// What the agent's input takes of a window: its frame (where its
+/// coordinates start), the region it takes touches in, whether it is
+/// told of touches outside it, and its app's uid.
+pub(super) struct Input {
+    pub frame: Rect,
+    pub touchable: Rect,
+    pub watch_outside: bool,
+    pub owner: u32,
+}
+
+impl Input {
+    fn of(attrs: &LayoutParams, frame: Rect, task_bounds: Rect, owner: u32) -> Input {
+        Input {
+            frame,
+            touchable: window_layout::touchable_region(attrs, frame, task_bounds),
+            watch_outside: attrs.watches_outside(),
+            owner,
+        }
+    }
 }
 
 /// `MergedConfiguration`: global, override, merged (the override is
@@ -338,7 +415,8 @@ fn write_merged(p: &mut Parcel, global: &Configuration, overrides: &Configuratio
 /// insets (`WindowState.reportResized`).
 struct WindowStateResizeItem {
     window: Binder,
-    frame: Rect,
+    frames: Frames,
+    task: Rect,
     display: (i32, i32),
     frames_seq: i32,
     insets_seq: i32,
@@ -354,7 +432,7 @@ impl Item for WindowStateResizeItem {
     fn write_fields(&self, p: &mut Parcel) {
         p.write_binder(Some(self.window));
         p.write_i32(1);
-        write_frames(p, self.frame, self.display, self.frames_seq);
+        write_frames(p, &self.frames, self.frames_seq);
         p.write_bool(false); // no draw to report
         p.write_i32(1);
         write_merged(p, &self.global, &self.config);
@@ -366,7 +444,7 @@ impl Item for WindowStateResizeItem {
         p.write_i32(-1); // no sync
         p.write_bool(false); // not drag resizing
         p.write_i32(1);
-        ActivityWindowInfo { embedded: false, task_bounds: self.frame, task_fragment_bounds: self.frame }.write(p);
+        ActivityWindowInfo { embedded: false, task_bounds: self.task, task_fragment_bounds: self.task }.write(p);
     }
 }
 
@@ -387,12 +465,26 @@ impl super::AppHost {
         }
     }
 
-    /// `uid`'s windows moved to `frame`.
-    pub(super) fn move_windows_of(&self, uid: u32, frame: Rect) -> Result<(), String> {
-        for channel in self.channels_of(uid) {
-            self.set_input_frame(channel, frame).map_err(|e| format!("{e:?}"))?;
+    /// `uid`'s windows laid out again in their task's bounds `task`,
+    /// parents before their sub-windows: each one's `IWindow` and frames.
+    fn relayout_windows_of(&self, uid: u32, task: Rect) -> Result<Vec<(u32, Frames)>, String> {
+        let mut windows = self.windows.windows.lock().unwrap();
+        let mut of_uid: Vec<(u32, u32)> = windows.iter().filter(|(_, w)| w.uid == uid).map(|(h, w)| (w.id, *h)).collect();
+        of_uid.sort();
+        let mut laid = Vec::new();
+        for (_, handle) in of_uid {
+            let attached = windows.get(&handle).and_then(|w| w.parent).and_then(|p| windows.get(&p)).map(|p| p.frames.frame);
+            let w = windows.get_mut(&handle).unwrap();
+            w.frames = window_layout::compute_frames(&w.attrs, task, attached, w.task.is_some(), w.requested);
+            self.place_window(w, task)?;
+            laid.push((handle, w.frames));
         }
-        Ok(())
+        Ok(laid)
+    }
+
+    /// `uid`'s task moved to `frame`: its windows with it.
+    pub(super) fn move_windows_of(&self, uid: u32, frame: Rect) -> Result<(), String> {
+        self.relayout_windows_of(uid, frame).map(|_| ())
     }
 
     /// The items that tell `uid`'s windows their task took `frame`, on a
@@ -401,24 +493,43 @@ impl super::AppHost {
         let display = self.display().map_err(|e| format!("{e:?}"))?.0.clone();
         let mut config = global.of_freeform_task(frame);
         config.window.activity_type = 1;
+        let laid = self.relayout_windows_of(uid, frame)?;
         let mut windows = self.windows.windows.lock().unwrap();
-        Ok(windows
-            .iter_mut()
-            .filter(|(_, w)| w.uid == uid)
-            .map(|(&window, w)| {
+        Ok(laid
+            .into_iter()
+            .filter_map(|(window, frames)| {
+                let w = windows.get_mut(&window)?;
                 w.frames_seq += 1;
                 w.insets_seq += 1;
-                Box::new(WindowStateResizeItem {
+                Some(Box::new(WindowStateResizeItem {
                     window: Binder::Handle(window),
-                    frame,
+                    frames,
+                    task: frame,
                     display: (display.width, display.height),
                     frames_seq: w.frames_seq,
                     insets_seq: w.insets_seq,
                     global: global.clone(),
                     config: config.clone(),
-                }) as Box<dyn Item>
+                }) as Box<dyn Item>)
             })
             .collect())
+    }
+
+    /// A window's layer placed at its frame, less its surface insets
+    /// (relative to its task's layer at the task's `bounds`, or to the
+    /// display), and its input region set
+    /// (`WindowState.updateSurfacePosition`, `populateInputWindowHandle`).
+    fn place_window(&self, w: &Window, bounds: Rect) -> Result<(), String> {
+        let frame = w.frames.frame;
+        if let Some(layer) = &w.container {
+            let origin = if w.task.is_some() { (bounds.left, bounds.top) } else { (0, 0) };
+            let [inset_left, inset_top, ..] = w.attrs.surface_insets;
+            let position = ((frame.left - origin.0 - inset_left) as f32, (frame.top - origin.1 - inset_top) as f32);
+            self.composer()
+                .map_err(|e| format!("{e:?}"))?
+                .apply(&[(layer, surface::Change { position: Some(position), ..Default::default() })])?;
+        }
+        self.set_input_frame(w.channel, &Input::of(&w.attrs, frame, bounds, w.uid)).map_err(|e| format!("{e:?}"))
     }
 
     /// The windows of the process `pid` are gone with it.
@@ -548,8 +659,8 @@ impl Service for Session {
             ws::ADD_TO_DISPLAY_AS_USER => {
                 // ..., viewVisibility, layerStackId, userId, requestedVisibleTypes.
                 let (window, _) = Self::window_and_tail(call, 4)?;
-                let activity = Self::activity_of(call);
-                reply(self.add(window, activity))
+                let attrs = Self::attrs_of(call)?.ok_or(BAD_VALUE)?;
+                reply(self.add(window, attrs))
             }
             // `removeWindow`: its layer goes; the agent sees the app close
             // its input channel.
@@ -564,14 +675,16 @@ impl Service for Session {
                 // ..., requestedWidth, requestedHeight, viewVisibility, flags,
                 // seq, lastSyncSeqId.
                 let (window, tail) = Self::window_and_tail(call, 6)?;
-                reply(self.relayout(window, tail[2]))
+                let attrs = Self::attrs_of(call)?;
+                reply(self.relayout(window, attrs, (tail[0], tail[1]), tail[2]))
             }
             // A relayout whose results the window does not wait for
             // (oneway): its layer is made and its sequence numbers go on
             // as with `relayout`.
             ws::RELAYOUT_ASYNC => {
                 let (window, tail) = Self::window_and_tail(call, 6)?;
-                if let Err(e) = self.relayout(window, tail[2]) {
+                let attrs = Self::attrs_of(call)?;
+                if let Err(e) = self.relayout(window, attrs, (tail[0], tail[1]), tail[2]) {
                     eprintln!("app host: relayoutAsync: {e:?}");
                 }
                 Ok(Parcel::new())
