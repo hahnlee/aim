@@ -75,14 +75,15 @@ keeps the whole data of the named calls, and of their replies, in
 `aim-display --capture` shows Calculator's whole window on the display;
 taps on 7, +, 8 and = on aim-display's touchscreen show 15. In window
 mode Calculator opens in its own window, 824×1464 pixels (412×732 dp),
-from its shim; it takes taps, moves with its window, and closing the
-window ends its process; opened again, it is idle 0.33 s after its
-process's start.
+from its shim; it takes taps, moves and resizes with its window (made
+landscape it relaunches into its landscape layout, with the advanced
+panel), and closing the window ends its process; opened again, it is
+idle 0.33 s after its process's start.
 
 ## Not yet
 
 More than one activity and window per app, focus changes within an app
-and accessibility (#1422); resizing a task in window mode (#1444); keys, the mouse and the rest of input dispatch (#1434); sound
+and accessibility (#1422); keys, the mouse and the rest of input dispatch (#1434); sound
 effects (#1433); a finished draw's transaction (#1431); the input
 method (#1432); settings generation tracking (#1430); external
 storage (#1423),

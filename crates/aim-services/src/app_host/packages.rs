@@ -171,6 +171,16 @@ impl Packages {
             .then_some(f32::from_bits(value.data))
     }
 
+    /// The framework's dimension resource `name` given in dp
+    /// (`TypedValue.complexToFloat` of a `COMPLEX_UNIT_DIP` dimension).
+    pub fn framework_dimension_dp(&self, name: &str) -> Option<f32> {
+        const COMPLEX_UNIT_DIP: u32 = 1;
+        const RADIX_MULTS: [f32; 4] = [1.0 / 256.0, 1.0 / 32768.0, 1.0 / 8388608.0, 1.0 / 2147483648.0];
+        let value = self.framework_value("dimen", name)?;
+        (value.kind == crate::package::parse::resources::TYPE_DIMENSION && value.data & 0xf == COMPLEX_UNIT_DIP)
+            .then(|| (value.data & 0xffff_ff00) as i32 as f32 * RADIX_MULTS[((value.data >> 4) & 3) as usize])
+    }
+
     /// The framework's string resource `name` in the device's locale.
     pub fn framework_string(&self, name: &str) -> Option<String> {
         let id = self.platform.framework.id("string", name)?;
