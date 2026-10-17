@@ -13,7 +13,7 @@ and boot are unchanged.
 | --- | --- | --- |
 | init, servicemanager, SurfaceFlinger, the HALs, zygote | the guest, original | zygote starts without `--start-system-server` |
 | `aim-app-host-agent` | the guest, `daemons/app-host-agent` | what the host's services need a guest process of the system uid for: zygote takes commands only from the system uid (`ZygoteConnection`), so it relays the app host's process starts; window input channels are guest sockets, so it makes them, and reads the touchscreen and publishes its motions on the channel of the front window under a touch, as InputReader and InputDispatcher do (`crates/aim-input-transport`); it kills the process of a removed task |
-| `activity` | the host, `crates/aim-services/src/app_host` | starts an app's process as `ProcessList.startProcessLocked` does, takes its `attachApplication`, sends `bindApplication` and `setProcessState`, answers `checkPermission[ForDevice]` and `finishAttachApplication` |
+| `activity` | the host, `crates/aim-services/src/app_host` | starts an app's process as `ProcessList.startProcessLocked` does, takes its `attachApplication`, sends `bindApplication` (with the app's own content providers, `generateApplicationProvidersLocked`) and `setProcessState`, answers `checkPermission[ForDevice]` and `finishAttachApplication`, takes `publishContentProviders` and serves a published provider to its own uid (another app's: #1450) |
 | `package` | the host, same | the native PackageManager queries (`package::query`, `package::resolve`) over the packages the app host joins from `packages.xml`, `packages.list`, the permission state and each package's parse |
 | `activity_task`, the activity client controller | the host, same | launches the activity the process starts for (`LaunchActivityItem`, `ResumeActivityItem`, `TopResumedActivityChangeItem`) once its application is created, and takes its reports |
 | `display` | the host, same | the built-in display SurfaceFlinger reports, as `DisplayInfo` |
@@ -87,5 +87,6 @@ and accessibility (#1422); keys, the mouse and the rest of input dispatch (#1434
 effects (#1433); a finished draw's transaction (#1431); the input
 method (#1432); settings generation tracking (#1430); external
 storage (#1423),
-providers and the font map in `bindApplication` (#1424), PackageManager's
-writes (#1425) and system apps' hidden API allowlist (#1427).
+the font map in `bindApplication`, to come from the Mac's fonts (#1449),
+PackageManager's writes (#1425), and the content service, which apps
+such as Clock need next (#1452).

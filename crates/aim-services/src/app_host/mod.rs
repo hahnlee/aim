@@ -127,6 +127,9 @@ const COMMON_SERVICES: &[&str] = &[
 /// `PackageManager.GET_SHARED_LIBRARY_FILES | MATCH_DEBUG_TRIAGED_MISSING`,
 /// `ActivityManagerService.STOCK_PM_FLAGS`.
 const STOCK_PM_FLAGS: i64 = 0x400 | 0x1000_0000;
+/// `PackageManager.GET_URI_PERMISSION_PATTERNS`, `MATCH_DIRECT_BOOT_AUTO`.
+const GET_URI_PERMISSION_PATTERNS: i64 = 0x800;
+const MATCH_DIRECT_BOOT_AUTO: i64 = 0x1000_0000;
 /// `ActivityManager.PROCESS_STATE_TOP`.
 const PROCESS_STATE_TOP: i32 = 2;
 /// `Build.VERSION_CODES.P`: from it, apps get `Build.UNKNOWN` as the serial.
@@ -204,6 +207,17 @@ pub struct AppHost {
     tasks: tasks::Tasks,
     /// The server's launches, by package, until the package's task is made.
     pending_launches: Mutex<HashMap<String, String>>,
+    /// The content providers apps published, by authority.
+    providers: Mutex<HashMap<String, Published>>,
+}
+
+/// A content provider an app's process published
+/// (`publishContentProviders`).
+struct Published {
+    start_seq: i64,
+    uid: u32,
+    info: package::info::ProviderInfo,
+    provider: Strong,
 }
 
 impl AppHost {
@@ -230,6 +244,7 @@ impl AppHost {
             agent: Mutex::new(None),
             tasks: Default::default(),
             pending_launches: Mutex::new(HashMap::new()),
+            providers: Mutex::new(HashMap::new()),
         })
     }
 
@@ -387,11 +402,20 @@ impl AppHost {
         }
         gids.push(SHARED_USER_GID);
         let target_sdk = setting.target_sdk_version;
+        let app_info = inputs
+            .packages
+            .application_info(name, STOCK_PM_FLAGS)
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("no application info of {name}")))?;
         let start_seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let start = zygote::Start {
             uid,
             gids,
-            runtime_flags: hidden_api_policy(&listed.seinfo, setting.flags)?
+            runtime_flags: hidden_api_policy(
+                app_info.flags,
+                app_info.private_flags,
+                app_info.private_flags_ext,
+                inputs.settings.get(settings::Table::Global, "hidden_api_policy"),
+            )
                 << API_ENFORCEMENT_POLICY_SHIFT
                 | memory_safety(&inputs.compat, setting.flags, target_sdk),
             // External storage has no owner in the app host yet (#1423).
@@ -522,6 +546,7 @@ impl AppHost {
     /// The process of `start_seq`, `pid`, died: what it had goes.
     fn process_died(&self, start_seq: i64, pid: i32) {
         self.apps.lock().unwrap().remove(&start_seq);
+        self.providers.lock().unwrap().retain(|_, p| p.start_seq != start_seq);
         self.activities.remove_start(start_seq);
         self.windows_died(pid);
         self.tasks_died(start_seq);
@@ -849,8 +874,11 @@ impl AppHost {
     fn content_provider(
         &self,
         name: Option<&str>,
+        calling_uid: u32,
     ) -> Result<Option<settings_provider::ContentProviderHolder>, Exception> {
-        const GET_URI_PERMISSION_PATTERNS: i64 = 0x800;
+        if let Some(name) = name.filter(|n| *n != "settings") {
+            return self.published_provider(name, calling_uid);
+        }
         let Some("settings") = name else {
             return Ok(None);
         };
@@ -897,6 +925,83 @@ impl AppHost {
             provider,
             connection,
         }))
+    }
+
+    /// The provider an app published under `authority`, for an app of the
+    /// same uid: its other processes reach it as the original's
+    /// `getContentProviderImpl` gives a running provider. Another app's
+    /// provider, or one whose process is not running, is not served yet
+    /// (#1450).
+    fn published_provider(&self, authority: &str, calling_uid: u32) -> Result<Option<settings_provider::ContentProviderHolder>, Exception> {
+        let providers = self.providers.lock().unwrap();
+        match providers.get(authority) {
+            Some(p) if p.uid == calling_uid => Ok(Some(settings_provider::ContentProviderHolder {
+                info: p.info.clone(),
+                provider: p.provider.binder(),
+                connection: self.process.add_service(Arc::new(activity::Token)),
+            })),
+            _ => Err(self.unimplemented_named("activity", &format!("getContentProvider of {authority}"))),
+        }
+    }
+
+    /// `publishContentProviders`: the providers the caller's process
+    /// installed, of those its `bindApplication` named.
+    fn publish_providers(&self, call: &mut Call<'_>) -> Result<(), Exception> {
+        let bad = || Exception::illegal_argument("publishContentProviders");
+        let (start_seq, uid) = self
+            .apps
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, a)| a.pid == call.sender_pid && a.uid == call.sender_euid)
+            .map(|(seq, a)| (*seq, a.uid))
+            .ok_or_else(|| Exception::security("publishContentProviders from an unknown process"))?;
+        call.data.enforce_interface(am::DESCRIPTOR).map_err(|_| bad())?;
+        call.data.read_binder().map_err(|_| bad())?;
+        let n = call.data.read_i32().map_err(|_| bad())?;
+        let (model, resolution) = self.packages()?;
+        let query = crate::package::query::Query { state: &model, filter: &resolution.apps_filter, calling_uid: 1000 };
+        let ours = self.app_providers(&query, uid)?;
+        let mut providers = self.providers.lock().unwrap();
+        for _ in 0..n.max(0) {
+            // `ContentProviderHolder`: its `ProviderInfo`, its provider,
+            // its connection, two flags.
+            if call.data.read_i32().map_err(|_| bad())? == 0 {
+                continue;
+            }
+            let info = crate::package::reply::provider_info(&mut call.data).map_err(|_| bad())?;
+            let provider = call.data.read_binder().map_err(|_| bad())?;
+            call.data.read_binder().map_err(|_| bad())?;
+            call.data.read_i32().map_err(|_| bad())?;
+            call.data.read_i32().map_err(|_| bad())?;
+            let name = field(&info, "name");
+            let (Some(name), Some(Binder::Handle(handle))) = (name, provider) else { continue };
+            let Some(ours) = ours.iter().find(|p| p.info.item.name.as_deref() == Some(name)) else { continue };
+            for authority in ours.authority.iter().flat_map(|a| a.split(';')) {
+                providers.insert(authority.to_string(), Published { start_seq, uid, info: ours.clone(), provider: self.process.strong(handle) });
+            }
+            eprintln!("app host: {name} published ({})", ours.authority.as_deref().unwrap_or(""));
+        }
+        Ok(())
+    }
+
+    /// `generateApplicationProvidersLocked`: the providers of `uid`'s
+    /// default process (user 0's, an installed app's).
+    fn app_providers(&self, query: &crate::package::query::Query<'_>, uid: u32) -> Result<Vec<package::info::ProviderInfo>, Exception> {
+        let name = self
+            .apps
+            .lock()
+            .unwrap()
+            .values()
+            .find(|a| a.uid == uid)
+            .map(|a| a.package.clone())
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no process of the uid"))?;
+        let flags = STOCK_PM_FLAGS | GET_URI_PERMISSION_PATTERNS | MATCH_DIRECT_BOOT_AUTO;
+        match query.query_content_providers(Some(&name), uid as i32, flags, None) {
+            Ok(Ok(providers)) => Ok(providers),
+            Ok(Err(e)) => Err(e),
+            Err(crate::package::apps_filter::NotModelled(reason)) => Err(Exception::new(EX_UNSUPPORTED_OPERATION, format!("queryContentProviders: {reason}"))),
+        }
     }
 
     /// The exception of a method of `service` it does not implement,
@@ -963,6 +1068,18 @@ impl AppHost {
             })
             .collect();
         let target_sdk = info.target_sdk_version;
+        let providers = {
+            let (model, resolution) = self.packages()?;
+            let query = crate::package::query::Query { state: &model, filter: &resolution.apps_filter, calling_uid: 1000 };
+            let flags = STOCK_PM_FLAGS | GET_URI_PERMISSION_PATTERNS | MATCH_DIRECT_BOOT_AUTO;
+            match query.query_content_providers(Some(&app.package), app.uid as i32, flags, None) {
+                Ok(Ok(providers)) => providers,
+                Ok(Err(e)) => return Err(e),
+                Err(crate::package::apps_filter::NotModelled(reason)) => {
+                    return Err(Exception::new(EX_UNSUPPORTED_OPERATION, format!("queryContentProviders: {reason}")));
+                }
+            }
+        };
         let mut p = Parcel::new();
         thread::BindApplication::<
             package::info::ApplicationInfo,
@@ -982,8 +1099,7 @@ impl AppHost {
             sdk_sandbox_client_app_volume_uuid: None,
             sdk_sandbox_client_app_package: None,
             is_sdk_in_sandbox: false,
-            // The app host does not publish providers yet (#1424).
-            provider_list: Some(bind::ProviderInfoList(Vec::new())),
+            provider_list: Some(bind::ProviderInfoList(providers)),
             test_name: None,
             profiler_info: None,
             test_arguments: None,
@@ -1022,6 +1138,16 @@ impl AppHost {
     }
 }
 
+/// The string field `name` of a decoded parcelable, at any depth.
+fn field<'v>(value: &'v crate::shadow::Value, name: &str) -> Option<&'v str> {
+    let crate::shadow::Value::Fields(fields) = value else { return None };
+    fields.iter().find_map(|(n, v)| match v {
+        crate::shadow::Value::Str(s) if n == name => Some(s.as_str()),
+        crate::shadow::Value::Fields(_) => field(v, name),
+        _ => None,
+    })
+}
+
 /// `clock`'s milliseconds, as the guest's `SystemClock` reads them: its
 /// MONOTONIC (uptime) is Darwin's `mach_absolute_time`, its BOOTTIME
 /// (elapsed) `mach_continuous_time` (`aim_linux_abi`'s vDSO).
@@ -1034,20 +1160,29 @@ fn clock_ms(clock: libc::clockid_t) -> i64 {
     ts.tv_sec * 1000 + ts.tv_nsec / 1_000_000
 }
 
-/// `ApplicationInfo.getHiddenApiEnforcementPolicy` with the device's
-/// default policy: disabled for apps signed with the platform key, which
-/// `isAllowedToUseHiddenApis`; a system app's allowlist is not modelled.
-fn hidden_api_policy(seinfo: &str, flags: i32) -> Result<i32, Exception> {
-    if seinfo == "platform" || seinfo.starts_with("platform:") {
-        return Ok(HIDDEN_API_ENFORCEMENT_DISABLED);
+/// `ApplicationInfo.getHiddenApiEnforcementPolicy` of an app of `flags`,
+/// `private_flags` and `private_flags_ext`, after `ProcessList` applied
+/// `Settings.Global.HIDDEN_API_POLICY` (`setting`): disabled for an app
+/// allowed hidden APIs (`isAllowedToUseHiddenApis`: signed with the
+/// platform key, or a system app using non-SDK APIs or allowlisted by
+/// `SystemConfig`) or by the setting, else the setting's, else enabled.
+fn hidden_api_policy(flags: i32, private_flags: i32, private_flags_ext: i32, setting: Option<&str>) -> i32 {
+    const FLAG_UPDATED_SYSTEM_APP: i32 = 1 << 7;
+    const PRIVATE_FLAG_SIGNED_WITH_PLATFORM_KEY: i32 = 1 << 20;
+    const PRIVATE_FLAG_USES_NON_SDK_API: i32 = 1 << 22;
+    const PRIVATE_FLAG_EXT_ALLOWLISTED_FOR_HIDDEN_APIS: i32 = 1 << 4;
+    let system = flags & (FLAG_SYSTEM | FLAG_UPDATED_SYSTEM_APP) != 0;
+    let allowed = private_flags & PRIVATE_FLAG_SIGNED_WITH_PLATFORM_KEY != 0
+        || system
+            && (private_flags & PRIVATE_FLAG_USES_NON_SDK_API != 0
+                || private_flags_ext & PRIVATE_FLAG_EXT_ALLOWLISTED_FOR_HIDDEN_APIS != 0);
+    // `HiddenApiSettings.getValidEnforcementPolicy`: DEFAULT (-1) to ENABLED.
+    let setting = setting.and_then(|v| v.parse::<i32>().ok()).filter(|p| (-1..=HIDDEN_API_ENFORCEMENT_ENABLED).contains(p));
+    match setting {
+        _ if allowed => HIDDEN_API_ENFORCEMENT_DISABLED,
+        Some(policy) if policy >= 0 => policy,
+        _ => HIDDEN_API_ENFORCEMENT_ENABLED,
     }
-    if flags & FLAG_SYSTEM != 0 {
-        return Err(Exception::new(
-            EX_UNSUPPORTED_OPERATION,
-            "hidden API allowlist of system apps",
-        ));
-    }
-    Ok(HIDDEN_API_ENFORCEMENT_ENABLED)
 }
 
 /// `Zygote.getMemorySafetyRuntimeFlags` for an app with no manifest
@@ -1136,12 +1271,17 @@ impl Service for Activity {
             }
             am::GET_CONTENT_PROVIDER => {
                 let args = am::GetContentProvider::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(self.0.content_provider(args.name.as_deref()).map(|holder| {
+                reply(self.0.content_provider(args.name.as_deref(), call.sender_euid).map(|holder| {
                     let mut p = Parcel::new();
                     am::write_get_content_provider_reply(&mut p, holder.as_ref());
                     p
                 }))
             }
+            am::PUBLISH_CONTENT_PROVIDERS => reply(self.0.publish_providers(call).map(|()| {
+                let mut p = Parcel::new();
+                p.write_no_exception();
+                p
+            })),
             am::REPORT_START_INFO_VIEW_TIMESTAMPS => {
                 let args = am::ReportStartInfoViewTimestamps::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
@@ -1260,16 +1400,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hidden_api_policy_by_signer() {
-        assert_eq!(
-            hidden_api_policy("platform:targetSdkVersion=36", FLAG_SYSTEM).unwrap(),
-            0
-        );
-        assert_eq!(
-            hidden_api_policy("default:targetSdkVersion=35", 0).unwrap(),
-            2
-        );
-        assert!(hidden_api_policy("default:privapp:targetSdkVersion=35", FLAG_SYSTEM).is_err());
+    fn hidden_api_policy_by_signer_and_allowlist() {
+        // Signed with the platform key.
+        assert_eq!(hidden_api_policy(FLAG_SYSTEM, 1 << 20, 0, None), 0);
+        // A user app; one the setting relaxes.
+        assert_eq!(hidden_api_policy(0, 0, 0, None), 2);
+        assert_eq!(hidden_api_policy(0, 0, 0, Some("1")), 1);
+        // A system app: allowlisted, using non-SDK APIs, or neither.
+        assert_eq!(hidden_api_policy(FLAG_SYSTEM, 0, 1 << 4, None), 0);
+        assert_eq!(hidden_api_policy(FLAG_SYSTEM, 1 << 22, 0, None), 0);
+        assert_eq!(hidden_api_policy(FLAG_SYSTEM, 0, 0, Some("bad")), 2);
     }
 
     #[test]
