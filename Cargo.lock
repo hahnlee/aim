@@ -266,6 +266,7 @@ dependencies = [
  "aim-paths",
  "aim-storage",
  "aim-sync-file",
+ "aim-uplink",
  "libc",
  "sha2",
 ]
@@ -300,6 +301,7 @@ dependencies = [
  "aim-paths",
  "aim-service-aidl",
  "aim-storage",
+ "aim-uplink",
  "android-image-extract",
  "crc32fast",
  "dsa",
@@ -329,6 +331,13 @@ name = "aim-sync-file"
 version = "0.1.0"
 dependencies = [
  "aim-hostcall",
+ "libc",
+]
+
+[[package]]
+name = "aim-uplink"
+version = "0.1.0"
+dependencies = [
  "libc",
 ]
 

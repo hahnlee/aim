@@ -1171,6 +1171,8 @@ pub const VAL_PARCELABLEARRAY: i32 = 16;
 
 /// A value the service writes into a bundle.
 pub enum Value<'a> {
+    /// Null (`putParcelable(key, null)`).
+    Null,
     Bool(bool),
     Int(i32),
     Long(i64),
@@ -1194,6 +1196,7 @@ impl Value<'_> {
             p.set_i32_at(at, (p.position() - start) as i32);
         };
         match self {
+            Value::Null => p.write_i32(VAL_NULL),
             Value::Bool(v) => {
                 p.write_i32(VAL_BOOLEAN);
                 p.write_bool(*v);

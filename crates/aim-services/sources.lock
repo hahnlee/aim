@@ -112,6 +112,8 @@ SOURCE_FILES=(
   "platform/frameworks/base|core/java/android/hardware/ISensorPrivacyManager.aidl|9c9a03a190a71635200518a49e3c5fdb06bfde5ece2f390071c45e14199c0eaf"
   "platform/frameworks/base|core/java/android/os/storage/IStorageManager.aidl|eb7653710abed8896df375b7d9b2224404c9fd015e18dce86bdf73a42f1119a9"
   "platform/frameworks/base|core/java/android/accounts/IAccountManager.aidl|204f128526c9a44c0a10a266639b0edeb7ab48bb0a0b652ff60dd9e374be4a16"
+  "platform/packages/modules/Connectivity|framework/src/android/net/IConnectivityManager.aidl|c846de8b106a8667d83f96e81817c6a15e9849262256e99a83bd791584bb2699"
+  "platform/frameworks/base|core/java/android/os/IMessenger.aidl|e907dd5f8beeb9cd47e8dde2b40d0bcb9f8cad42b115809b3ca5cb5537d917cb"
 )
 
 # descriptor|jar of its stub in the image|methods to marshal (`*`: all).
@@ -221,6 +223,8 @@ INTERFACES=(
   "android.app.IUiModeManagerCallback|system/framework/framework.jar|*"
   "android.app.IOnProjectionStateChangedListener|system/framework/framework.jar|*"
   "android.accounts.IAccountManager|system/framework/framework.jar|getPassword,getUserData,getAuthenticatorTypes,getAccountsForPackage,getAccountsByTypeForPackage,getAccountsAsUser,peekAuthToken,getPreviousName,someUserHasAccount,getPackagesAndVisibilityForAccount,getAccountVisibility,getAccountsAndVisibilityForPackage,registerAccountListener,unregisterAccountListener,hasAccountAccess,onAccountAccessed"
+  "android.net.IConnectivityManager|apex/com.android.tethering/javalib/framework-connectivity.jar|getActiveNetwork,getActiveNetworkForUid,getActiveNetworkInfo,getActiveNetworkInfoForUid,getNetworkInfo,getNetworkInfoForUid,getAllNetworks,getLinkProperties,getNetworkCapabilities,isActiveNetworkMetered,getGlobalProxy,getProxyForNetwork,requestNetwork,listenForNetwork,releaseNetworkRequest,getMultipathPreference,getRestrictBackgroundStatusByCaller,getEnabledConnectivityManagerFeatures"
+  "android.os.IMessenger|system/framework/framework.jar|*"
 )
 
 # Binder interfaces the framework writes by hand, without AIDL:

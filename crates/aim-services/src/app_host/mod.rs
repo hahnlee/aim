@@ -23,6 +23,7 @@ pub mod bind;
 pub mod broadcasts;
 pub mod compat;
 pub mod config;
+pub mod connectivity_service;
 pub mod content_service;
 pub mod display;
 pub mod display_service;
@@ -31,6 +32,7 @@ pub mod input_manager;
 pub mod input_method;
 pub mod keychars;
 pub mod kept;
+pub mod network;
 pub mod notification_channels;
 pub mod notification_service;
 pub mod package_service;
@@ -254,6 +256,7 @@ pub struct AppHost {
     power_service: OnceLock<Arc<power_service::PowerManager>>,
     alarm_service: OnceLock<Arc<alarm_service::AlarmManager>>,
     battery_service: OnceLock<Arc<battery_service::BatteryService>>,
+    connectivity_service: OnceLock<Arc<connectivity_service::ConnectivityService>>,
     services: services::Services,
     pending_intents: pending_intents::PendingIntents,
     broadcasts: broadcasts::Broadcasts,
@@ -307,6 +310,7 @@ impl AppHost {
             power_service: OnceLock::new(),
             alarm_service: OnceLock::new(),
             battery_service: OnceLock::new(),
+            connectivity_service: OnceLock::new(),
             services: Default::default(),
             pending_intents: Default::default(),
             broadcasts: Default::default(),
@@ -407,6 +411,12 @@ impl AppHost {
                 )),
             ),
             ("account", Arc::new(account_service::AccountManager::new(self.clone()))),
+            (
+                "connectivity",
+                self.connectivity_service
+                    .get_or_init(|| Arc::new(connectivity_service::ConnectivityService::new(self.clone())))
+                    .clone(),
+            ),
             ("statusbar", Arc::new(status_bar::StatusBar::new(self.clone()))),
             (
                 "activity_task",
@@ -1346,6 +1356,29 @@ impl AppHost {
             .packages
             .get(package)
             .is_some_and(|ps| ps.app_id == uid.rem_euclid(PER_USER_RANGE as i32)))
+    }
+
+    /// `CompatChanges.isChangeEnabled(change, uid)`: enabled for every
+    /// package of the uid.
+    pub(super) fn change_enabled(&self, change: i64, uid: i32) -> Result<bool, Exception> {
+        let inputs = self.inputs()?;
+        let (state, resolution) = self.packages()?;
+        let query = crate::package::query::Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: 1000,
+        };
+        let names = query
+            .packages_for_uid(uid)
+            .map_err(|e| Exception::new(EX_UNSUPPORTED_OPERATION, format!("getPackagesForUid: {}", e.0)))?;
+        let mut names = names.into_iter().flatten().flatten().peekable();
+        if names.peek().is_none() {
+            return Ok(inputs.compat.default_value(change));
+        }
+        Ok(names.all(|name| match inputs.packages.application_info(&name, 0) {
+            Some(ai) => inputs.compat.is_enabled(change, ai.target_sdk_version),
+            None => inputs.compat.default_value(change),
+        }))
     }
 
     /// The provider an app published under `authority`, for an app of the
