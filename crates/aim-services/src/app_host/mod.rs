@@ -25,6 +25,7 @@ pub mod compat;
 pub mod config;
 pub mod connectivity_service;
 pub mod content_service;
+pub mod device_policy;
 pub mod display;
 pub mod display_service;
 pub mod freeform;
@@ -265,13 +266,13 @@ pub struct AppHost {
     battery_service: OnceLock<Arc<battery_service::BatteryService>>,
     connectivity_service: OnceLock<Arc<connectivity_service::ConnectivityService>>,
     job_scheduler: OnceLock<Arc<job_scheduler::JobScheduler>>,
+    /// What DevicePolicyManagerService persisted, read once.
+    device_policies: OnceLock<device_policy::Policies>,
     services: services::Services,
     pending_intents: pending_intents::PendingIntents,
     broadcasts: broadcasts::Broadcasts,
     /// User 0's restrictions.
     user_restrictions: OnceLock<std::collections::BTreeSet<String>>,
-    /// Whether the device has a device or profile owner.
-    owners: OnceLock<bool>,
     /// audioserver, once it registered, and the stream volumes.
     audio_policy: OnceLock<audio_policy::AudioPolicy>,
     volumes: Mutex<Option<volume::Volumes>>,
@@ -322,11 +323,11 @@ impl AppHost {
             battery_service: OnceLock::new(),
             connectivity_service: OnceLock::new(),
             job_scheduler: OnceLock::new(),
+            device_policies: OnceLock::new(),
             services: Default::default(),
             pending_intents: Default::default(),
             broadcasts: Default::default(),
             user_restrictions: OnceLock::new(),
-            owners: OnceLock::new(),
             audio_policy: OnceLock::new(),
             volumes: Mutex::new(None),
             playback: Mutex::default(),
@@ -432,6 +433,7 @@ impl AppHost {
                 self.job_scheduler.get_or_init(|| job_scheduler::JobScheduler::new(self.clone())).clone(),
             ),
             ("account", Arc::new(account_service::AccountManager::new(self.clone()))),
+            ("device_policy", Arc::new(device_policy::DevicePolicy::new(self.clone()))),
             (
                 "connectivity",
                 self.connectivity_service
@@ -757,29 +759,6 @@ impl AppHost {
         if let Some(me) = self.me.upgrade() {
             me.services_process_died(start_seq);
         }
-    }
-
-    /// Whether DevicePolicyManagerService persisted a device owner
-    /// (`device_owner_2.xml`) or a user's profile owner
-    /// (`profile_owner.xml`): the app host runs no device policy.
-    fn device_or_profile_owner(&self) -> Result<bool, Exception> {
-        if let Some(owned) = self.owners.get() {
-            return Ok(*owned);
-        }
-        let data = &self.inputs()?.data;
-        let device = match std::fs::read(data.join("system/device_owner_2.xml")) {
-            Ok(bytes) => aim_android_xml::read(&bytes)
-                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("device_owner_2.xml: {e}")))?
-                .children()
-                .any(|e| e.name == "device-owner"),
-            Err(_) => false,
-        };
-        let profile = std::fs::read_dir(data.join("system/users"))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .any(|user| user.path().join("profile_owner.xml").exists());
-        Ok(*self.owners.get_or_init(|| device || profile))
     }
 
     /// User 0's base restrictions, as UserManagerService last persisted
@@ -1111,6 +1090,15 @@ impl AppHost {
     /// The guest's `/data`.
     fn data(&self) -> Result<&Path, Exception> {
         Ok(&self.configured.get().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host not configured"))?.data)
+    }
+
+    /// What DevicePolicyManagerService persisted, read once.
+    fn device_policies(&self) -> Result<&device_policy::Policies, Exception> {
+        if let Some(policies) = self.device_policies.get() {
+            return Ok(policies);
+        }
+        let policies = device_policy::Policies::load(self.data()?).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        Ok(self.device_policies.get_or_init(|| policies))
     }
 
     /// The app host's connection to SurfaceFlinger, made once.

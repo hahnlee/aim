@@ -160,10 +160,10 @@ impl Writes {
     }
 
     /// `ProtectedPackages.isPackageStateProtected` in the app host: the
-    /// provisioning package; the packages of a device or profile owner,
-    /// which no device policy here knows, are not modelled.
+    /// provisioning package; the packages of a device or profile owner are
+    /// not modelled.
     fn protected(&self, package: &str) -> Result<Option<bool>, Exception> {
-        if self.host.device_or_profile_owner()? {
+        if self.host.device_policies()?.owned() {
             return Ok(None);
         }
         let provisioning = self.host.inputs()?.packages.framework_string("config_deviceProvisioningPackage");

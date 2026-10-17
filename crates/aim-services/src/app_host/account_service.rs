@@ -482,10 +482,11 @@ impl AccountManager {
         Ok(false)
     }
 
-    /// `isProfileOwner`: the app host runs no device policy, so a device
-    /// with a device or profile owner is not served (#1504); else none is.
+    /// `isProfileOwner`: the app host's device policy serves no owner, so a
+    /// device with a device or profile owner is not served (#1504); else
+    /// none is.
     fn is_profile_owner(&self) -> Result<bool, Exception> {
-        if self.host.device_or_profile_owner()? {
+        if self.host.device_policies()?.owned() {
             return Err(self.host.unimplemented_named("account", "a device or profile owner (#1504)"));
         }
         Ok(false)
