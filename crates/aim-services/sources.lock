@@ -110,6 +110,7 @@ SOURCE_FILES=(
   "platform/frameworks/base|core/java/android/content/IContentService.aidl|855d605f790eea2001f9ef52229a7a9612eed53f0cadf88b5c8e3bfd1db31657"
   "platform/frameworks/base|core/java/android/hardware/ISensorPrivacyManager.aidl|9c9a03a190a71635200518a49e3c5fdb06bfde5ece2f390071c45e14199c0eaf"
   "platform/frameworks/base|core/java/android/os/storage/IStorageManager.aidl|eb7653710abed8896df375b7d9b2224404c9fd015e18dce86bdf73a42f1119a9"
+  "platform/frameworks/base|core/java/android/accounts/IAccountManager.aidl|204f128526c9a44c0a10a266639b0edeb7ab48bb0a0b652ff60dd9e374be4a16"
 )
 
 # descriptor|jar of its stub in the image|methods to marshal (`*`: all).
@@ -217,6 +218,7 @@ INTERFACES=(
   "android.app.IUiModeManager|system/framework/framework.jar|*"
   "android.app.IUiModeManagerCallback|system/framework/framework.jar|*"
   "android.app.IOnProjectionStateChangedListener|system/framework/framework.jar|*"
+  "android.accounts.IAccountManager|system/framework/framework.jar|getPassword,getUserData,getAuthenticatorTypes,getAccountsForPackage,getAccountsByTypeForPackage,getAccountsAsUser,peekAuthToken,getPreviousName,someUserHasAccount,getPackagesAndVisibilityForAccount,getAccountVisibility,getAccountsAndVisibilityForPackage,registerAccountListener,unregisterAccountListener,hasAccountAccess,onAccountAccessed"
 )
 
 # Binder interfaces the framework writes by hand, without AIDL:
