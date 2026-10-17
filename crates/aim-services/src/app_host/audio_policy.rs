@@ -15,8 +15,11 @@ const INIT_STREAM_VOLUME: u32 = 18;
 const SET_STREAM_VOLUME_INDEX: u32 = 19;
 const FLINGER: &str = "media.audio_flinger";
 const FLINGER_DESCRIPTOR: &str = "android.media.IAudioFlingerService";
+const NEW_AUDIO_UNIQUE_ID: u32 = 34;
 /// One-way.
 const SYSTEM_READY: u32 = 53;
+/// `AudioUniqueIdUse.CLIENT`: the ids of players and recorders.
+const USE_CLIENT: i32 = 7;
 /// How long audioserver may take to register: its HAL waits up to 3 s for
 /// the Mac's devices (docs/audio.md, "Start-up").
 const PATIENCE: Duration = Duration::from_secs(30);
@@ -119,6 +122,21 @@ impl AudioPolicy {
             p.write_bool(enabled);
             p.write_i32(stream);
         })
+    }
+
+    /// `AudioSystem.newAudioPlayerId`, `newAudioRecorderId`: an id of
+    /// AudioFlinger's for a client's player or recorder.
+    pub fn new_client_id(&self) -> Result<i32, String> {
+        let mut data = Parcel::new();
+        data.write_interface_token(FLINGER_DESCRIPTOR);
+        data.write_i32(USE_CLIENT);
+        let reply = self.flinger.transact(NEW_AUDIO_UNIQUE_ID, &data, false).map_err(|s| format!("newAudioUniqueId: {s}"))?;
+        let mut r = reply.reader();
+        match r.read_exception() {
+            Ok(Ok(())) => r.read_i32().map_err(|s| format!("newAudioUniqueId: {s}")),
+            Ok(Err(e)) => Err(format!("newAudioUniqueId: {e:?}")),
+            Err(s) => Err(format!("newAudioUniqueId: {s}")),
+        }
     }
 
     /// `AudioSystem.systemReady`.

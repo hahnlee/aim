@@ -27,6 +27,7 @@ pub mod kept;
 pub mod package_service;
 pub mod packages;
 pub mod permission_controller;
+pub mod playback;
 pub mod sensor_privacy;
 pub mod settings;
 pub mod settings_provider;
@@ -240,6 +241,8 @@ pub struct AppHost {
     /// audioserver, once it registered, and the stream volumes.
     audio_policy: OnceLock<audio_policy::AudioPolicy>,
     volumes: Mutex<Option<volume::Volumes>>,
+    /// The players and recorders apps made.
+    playback: Mutex<playback::Playback>,
 }
 
 /// A content provider an app's process published
@@ -283,6 +286,7 @@ impl AppHost {
             user_restrictions: OnceLock::new(),
             audio_policy: OnceLock::new(),
             volumes: Mutex::new(None),
+            playback: Mutex::default(),
         })
     }
 
