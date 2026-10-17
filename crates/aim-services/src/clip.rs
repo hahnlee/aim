@@ -76,6 +76,20 @@ impl Raw {
         p.write_raw_files(&self.bytes, &self.objects, &self.files);
     }
 
+    /// The bytes with `start..end` replaced by `with`, its objects and
+    /// files after them moved along (none is between).
+    pub(crate) fn splice(&self, start: usize, end: usize, with: &[u8]) -> Raw {
+        let shift = |at: u64| if at as usize >= end { at + with.len() as u64 - (end - start) as u64 } else { at };
+        let mut bytes = self.bytes[..start].to_vec();
+        bytes.extend_from_slice(with);
+        bytes.extend_from_slice(&self.bytes[end..]);
+        Raw {
+            bytes,
+            objects: self.objects.iter().map(|&at| shift(at)).collect(),
+            files: self.files.iter().map(|(at, f)| (shift(*at), f.clone())).collect(),
+        }
+    }
+
     /// Overwrites the int at `at`.
     pub(crate) fn set_i32(&mut self, at: usize, value: i32) {
         self.bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());

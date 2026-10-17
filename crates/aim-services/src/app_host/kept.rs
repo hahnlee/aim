@@ -18,6 +18,8 @@ pub struct RawIntent {
     raw: Raw,
     /// Where its flags are; its extended flags follow.
     flags_at: usize,
+    /// Where its component is.
+    component: (usize, usize),
 }
 
 impl RawIntent {
@@ -56,6 +58,23 @@ impl RawIntent {
         RawIntent::read_from(&mut Reader::new(p.data(), &[])).expect("a written intent reads")
     }
 
+    /// The intent with its component set (`Intent.setComponent`).
+    pub fn with_component(&self, package: &str, class: &str) -> RawIntent {
+        let mut p = Parcel::new();
+        p.write_string16(Some(package));
+        p.write_string16(Some(class));
+        let (start, end) = self.component;
+        RawIntent {
+            intent: Intent {
+                component: Some(crate::package::intent::ComponentName { package: package.into(), class: class.into() }),
+                ..self.intent.clone()
+            },
+            raw: self.raw.splice(start, end, p.data()),
+            flags_at: self.flags_at,
+            component: (start, start + p.data().len()),
+        }
+    }
+
     /// `Intent.hasFileDescriptors`.
     pub fn has_fds(&self) -> bool {
         self.raw.has_fds()
@@ -75,9 +94,17 @@ impl ReadParcelable for RawIntent {
         r.read_string8()?;
         r.read_string8()?;
         let flags_at = r.position() - start;
+        r.read_i32()?;
+        r.read_i32()?;
+        r.read_string8()?; // package
+        let component_at = r.position() - start;
+        if r.read_string16()?.is_some() {
+            r.read_string16()?;
+        }
+        let component = (component_at, r.position() - start);
         r.set_position(start);
         let intent = Intent::read(r, &mut Plain)?;
-        Ok(RawIntent { intent, raw: Raw::capture(r, start), flags_at })
+        Ok(RawIntent { intent, raw: Raw::capture(r, start), flags_at, component })
     }
 }
 
@@ -109,6 +136,20 @@ impl ReadParcelable for RawBundle {
 impl WriteParcelable for RawBundle {
     fn write_to(&self, p: &mut Parcel) {
         self.0.write(p);
+    }
+}
+
+/// An intent kept past its call: the binders among it held.
+#[derive(Clone)]
+pub struct KeptIntent {
+    pub intent: RawIntent,
+    _binders: std::sync::Arc<Vec<Strong>>,
+}
+
+impl KeptIntent {
+    pub fn new(intent: RawIntent, process: &LocalProcess) -> KeptIntent {
+        let binders = intent.handles().into_iter().map(|h| process.strong(h)).collect();
+        KeptIntent { intent, _binders: std::sync::Arc::new(binders) }
     }
 }
 
@@ -185,6 +226,13 @@ mod tests {
         let mut again = Parcel::new();
         kept.write_to(&mut again);
         assert_eq!(again.data(), sent.data());
+        // A component set where there was none.
+        let explicit = kept.with_component("p", "p.Main");
+        let mut out = Parcel::new();
+        explicit.write_to(&mut out);
+        let read = RawIntent::read_from(&mut Reader::new(out.data(), &[])).unwrap();
+        assert_eq!(read.intent.component.map(|c| c.class).as_deref(), Some("p.Main"));
+        assert_eq!(read.intent.action.as_deref(), Some("a.ACTION"));
         kept.set_flags(0x30, 1);
         let mut flagged = Parcel::new();
         kept.write_to(&mut flagged);
