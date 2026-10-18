@@ -44,6 +44,7 @@ pub mod job_info;
 pub mod job_scheduler;
 pub mod job_store;
 pub mod keychars;
+pub mod media_router;
 pub mod memory_info;
 pub mod kept;
 pub mod network;
@@ -479,6 +480,7 @@ impl AppHost {
             ("crossprofileapps", Arc::new(cross_profile_apps::CrossProfileApps::new(self.clone()))),
             ("overlay", Arc::new(overlay_service::OverlayManager::new(self.clone()))),
             ("vpn_management", Arc::new(vpn_manager::VpnManager::new(self.clone()))),
+            ("media_router", Arc::new(media_router::MediaRouter::new(self.clone()))),
             ("role", self.role_service.get_or_init(|| Arc::new(role_service::RoleManager::new(self.clone()))).clone()),
             ("settings", Arc::new(settings_service::SettingsService::new(self.clone(), settings))),
             (

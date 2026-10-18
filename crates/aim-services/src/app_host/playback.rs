@@ -419,6 +419,12 @@ pub struct Playback {
 }
 
 impl Playback {
+    /// `AudioPlayerStateMonitor.isPlaybackActive`: an active player of
+    /// `uid` (`mActiveAudioUids`).
+    pub fn uid_active(&self, uid: i32) -> bool {
+        self.players.values().any(|p| p.uid == uid && p.active())
+    }
+
     /// `trackPlayer` of a caller of `uid`, `pid` given `piid`: the player's
     /// `IPlayer` and death link, made by the caller.
     pub fn track(&mut self, piid: i32, card: PlayerIdCard, uid: i32, pid: i32, player: Option<(Strong, u64)>) {
