@@ -68,6 +68,7 @@ const DEVICE_OWNER_XML: &str = "device_owner_2.xml";
 const PROFILE_OWNER_XML: &str = "profile_owner.xml";
 const DEVICE_POLICIES_XML: &str = "device_policies.xml";
 const DEVICE_POLICY_STATE_XML: &str = "device_policy_state.xml";
+const UPDATED_RESOURCES_XML: &str = "updated_resources.xml";
 /// The tags `DeviceOwnerReadWriter.readInner` and
 /// `ProfileOwnerReadWriter.readInner` know; an unknown one ends the read.
 const DEVICE_OWNER_TAGS: &[&str] = &[
@@ -81,6 +82,15 @@ const DEVICE_OWNER_TAGS: &[&str] = &[
     "policy-engine-migration",
 ];
 const PROFILE_OWNER_TAGS: &[&str] = &["profile-owner"];
+
+/// A `ParcelableResource`, of which the service answers none.
+enum ParcelableResource {}
+
+impl aim_service_aidl::WriteParcelable for ParcelableResource {
+    fn write_to(&self, _: &mut Parcel) {
+        match *self {}
+    }
+}
 
 /// One user's `DevicePolicyData`, as far as its reads need it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -107,6 +117,9 @@ pub struct Policies {
     /// A policy the policy engine keeps.
     policies: bool,
     users: HashMap<i32, UserData>,
+    /// The ids of the strings a device policy resource update replaced
+    /// (`DeviceManagementResourcesProvider.mUpdatedStrings`).
+    updated_strings: Vec<String>,
 }
 
 impl Policies {
@@ -164,6 +177,19 @@ impl Policies {
                 .map_err(|e| format!("{}: {e}", engine.display()))?
                 .iter()
                 .any(|e| e.name == "local-policy-entry" || e.name == "global-policy-entry");
+        }
+        // `ResourcesReaderWriter.readFromFileLocked`: nothing under another
+        // root, and nothing after a tag it does not know.
+        if let Some(root) = read_atomic(&system.join(UPDATED_RESOURCES_XML))?
+            && root.name == "root"
+        {
+            for e in root.children() {
+                match e.name.as_str() {
+                    "drawable-style-entry" | "drawable-source-entry" => {}
+                    "string-entry" => policies.updated_strings.extend(e.string("source-id").map(|s| s.into_owned())),
+                    _ => break,
+                }
+            }
         }
         Ok(policies)
     }
@@ -834,6 +860,21 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                 Ok(())
             })()
         }
+        // `DeviceManagementResourcesProvider.getString`, which only loads
+        // with the feature: none of a string no update replaced.
+        dp::GET_STRING => {
+            let a = dp::GetString::read(r).map_err(|_| BAD_VALUE)?;
+            (|| {
+                if feature()? {
+                    let updated = &device.policies()?.updated_strings;
+                    if a.string_id.as_ref().is_some_and(|id| updated.contains(id)) {
+                        return Err(device.unimplemented("an updated device policy resource string (#1521)"));
+                    }
+                }
+                dp::write_get_string_reply::<ParcelableResource>(&mut p, None);
+                Ok(())
+            })()
+        }
         dp::GET_DEVICE_OWNER_TYPE => {
             dp::GetDeviceOwnerType::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
             (|| {
@@ -944,6 +985,17 @@ mod tests {
 
     fn write(path: &Path, root: &Element) {
         fs::write(path, aim_android_xml::abx::write(root).unwrap()).unwrap();
+    }
+
+    /// The strings an update replaced, read as `ResourcesReaderWriter`
+    /// reads them: up to a tag it does not know.
+    #[test]
+    fn updated_strings_are_read_up_to_an_unknown_tag() {
+        let dir = data("resources");
+        let entry = |id: &str| element("string-entry", &[("source-id", string(id))], vec![]);
+        let unknown = element("other", &[], vec![]);
+        write(&dir.join("system").join(UPDATED_RESOURCES_XML), &element("root", &[], vec![entry("a"), unknown, entry("b")]));
+        assert_eq!(Policies::load(&dir).unwrap().updated_strings, ["a"]);
     }
 
     /// `OwnersData`'s files as a device without owners keeps them (the
