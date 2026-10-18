@@ -39,6 +39,7 @@ pub mod fgs_types;
 pub mod freeform;
 pub mod game_service;
 pub mod generations;
+pub mod hint_manager;
 pub mod input_manager;
 pub mod input_method;
 pub mod job_info;
@@ -490,6 +491,7 @@ impl AppHost {
             ("shortcut", Arc::new(shortcut_service::ShortcutManager::new(self.clone()))),
             ("netstats", Arc::new(netstats::NetworkStats::new(self.clone()))),
             ("game", Arc::new(game_service::GameManager::new(self.clone()))),
+            ("performance_hint", Arc::new(hint_manager::HintManager::new(self.clone()))),
             ("role", self.role_service.get_or_init(|| Arc::new(role_service::RoleManager::new(self.clone()))).clone()),
             ("settings", Arc::new(settings_service::SettingsService::new(self.clone(), settings))),
             (
