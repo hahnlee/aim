@@ -37,6 +37,7 @@ pub mod display_service;
 pub mod exit_info;
 pub mod fgs_types;
 pub mod freeform;
+pub mod game_service;
 pub mod generations;
 pub mod input_manager;
 pub mod input_method;
@@ -47,6 +48,7 @@ pub mod keychars;
 pub mod media_router;
 pub mod memory_info;
 pub mod kept;
+pub mod netstats;
 pub mod network;
 mod network_native;
 pub mod notification_channels;
@@ -486,6 +488,8 @@ impl AppHost {
             ("vpn_management", Arc::new(vpn_manager::VpnManager::new(self.clone()))),
             ("media_router", Arc::new(media_router::MediaRouter::new(self.clone()))),
             ("shortcut", Arc::new(shortcut_service::ShortcutManager::new(self.clone()))),
+            ("netstats", Arc::new(netstats::NetworkStats::new(self.clone()))),
+            ("game", Arc::new(game_service::GameManager::new(self.clone()))),
             ("role", self.role_service.get_or_init(|| Arc::new(role_service::RoleManager::new(self.clone()))).clone()),
             ("settings", Arc::new(settings_service::SettingsService::new(self.clone(), settings))),
             (
