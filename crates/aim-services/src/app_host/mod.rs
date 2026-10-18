@@ -61,6 +61,7 @@ pub mod permission_controller;
 pub mod permission_manager;
 pub mod playback;
 pub mod providers;
+pub mod role_service;
 pub mod power_service;
 pub mod sensor_privacy;
 pub mod services;
@@ -321,6 +322,7 @@ pub struct AppHost {
     storage: storage::Volumes,
     text_input: input_method::TextInput,
     content_service: OnceLock<Arc<content_service::ContentService>>,
+    role_service: OnceLock<Arc<role_service::RoleManager>>,
     notification_service: OnceLock<Arc<notification_service::NotificationManager>>,
     power_service: OnceLock<Arc<power_service::PowerManager>>,
     alarm_service: OnceLock<Arc<alarm_service::AlarmManager>>,
@@ -385,6 +387,7 @@ impl AppHost {
             storage: Default::default(),
             text_input: Default::default(),
             content_service: OnceLock::new(),
+            role_service: OnceLock::new(),
             notification_service: OnceLock::new(),
             power_service: OnceLock::new(),
             alarm_service: OnceLock::new(),
@@ -476,6 +479,7 @@ impl AppHost {
             ("crossprofileapps", Arc::new(cross_profile_apps::CrossProfileApps::new(self.clone()))),
             ("overlay", Arc::new(overlay_service::OverlayManager::new(self.clone()))),
             ("vpn_management", Arc::new(vpn_manager::VpnManager::new(self.clone()))),
+            ("role", self.role_service.get_or_init(|| Arc::new(role_service::RoleManager::new(self.clone()))).clone()),
             ("settings", Arc::new(settings_service::SettingsService::new(self.clone(), settings))),
             (
                 "content",
