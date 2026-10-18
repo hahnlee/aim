@@ -1294,11 +1294,15 @@ pub fn thread_nice(tid: i32) -> i32 {
     nice.unwrap_or_else(|| read(|id| id.priority))
 }
 
-/// The calling thread's host QoS after its nice value changed to `nice`.
+/// The host scheduling of thread `tid` of this process after its nice value
+/// changed to `nice`: set now for the calling thread, by `tid` itself at its
+/// next syscall otherwise.
 fn nice_changed(tid: i32, nice: i32) {
     if tid == super::thread::gettid() as i32 {
         let policy = super::thread::current().map_or(0, |t| t.sched.policy.load(Ordering::SeqCst));
-        super::process::apply_host_qos(nice, policy);
+        super::process::apply_host_sched(nice, policy);
+    } else if let Some(th) = super::thread::find(tid) {
+        th.sched.host_stale.store(true, Ordering::SeqCst);
     }
 }
 
@@ -1316,8 +1320,8 @@ fn may_set_prio(p: i32, nice: i32) -> Result<(), i64> {
     Ok(())
 }
 
-/// setpriority (140). The calling thread's nice value also sets its host
-/// QoS (`process::host_qos`).
+/// setpriority (140). A thread's nice value also sets its host scheduling
+/// (`process::apply_host_sched`).
 pub fn setpriority(a: [u64; 6]) -> i64 {
     let mut a=a;
     if a[0]==PRIO_PROCESS{a[1]=match super::pidns::syscall_pid(a[1] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};}

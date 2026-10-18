@@ -198,6 +198,9 @@ pub fn dispatch(ctx: &mut GuestContext) {
             break r;
         }
     };
+    if let Some(th) = thread::current() {
+        process::apply_stale_sched(th);
+    }
     if let Some((pid, tid, call)) = trace {
         if (-4095..0).contains(&r) {
             crate::diag!("{line} = -{} ({}) [pid={pid} tid={tid} call={call} leave]", -r, names::errno_name(-r as i32));

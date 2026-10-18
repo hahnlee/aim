@@ -192,7 +192,16 @@ fn connect(
     (config, patch)
 }
 
+/// Run the calling thread as AudioFlinger runs its playback and record
+/// threads, at ANDROID_PRIORITY_URGENT_AUDIO (-19).
+fn urgent_audio() {
+    // SAFETY: plain setpriority of the calling thread.
+    let set = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, -19) };
+    assert_eq!(set, 0, "setpriority: {}", std::io::Error::last_os_error());
+}
+
 fn play(module: &Strong<dyn IModule>, ports: &[AudioPort], ms: i64) {
+    urgent_audio();
     let (mix, speaker) = (
         find_port(ports, false, true),
         find_port(ports, false, false),

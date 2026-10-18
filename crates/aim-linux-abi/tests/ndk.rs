@@ -399,13 +399,20 @@ fn background_qos() {
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
-    // Darwin's base priorities of the default, utility and background QoS.
+    // Darwin's base priorities of the default, utility and background QoS,
+    // then of raised threads: the timeshare priority 31 - nice (within
+    // 15-47) and the fixed priority 47 of the real-time policies.
     for (step, want) in [
         ("default", 31),
         ("utility", 20),
         ("background", 4),
         ("default", 31),
         ("background", 4),
+        ("foreground", 33),
+        ("urgent-audio", 47),
+        ("fifo", 47),
+        ("default", 31),
+        ("fifo", 47),
     ] {
         let mut line = String::new();
         out.read_line(&mut line).unwrap();

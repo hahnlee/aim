@@ -26,7 +26,8 @@ our own, because the Mac offers nothing a power HAL could drive:
 - modes flow from Android to the HAL. macOS lets an unprivileged process
   neither enter Low Power Mode (`pmset` needs root) nor change CPU
   frequency or scheduling policy for the machine. The Darwin scheduler
-  already places the guest's threads by QoS;
+  already places the guest's threads by their Linux scheduling, which the
+  syscall layer maps to QoS classes and Darwin priorities;
 - the reverse direction (the Mac is in Low Power Mode, so Android should
   save power) is not a power HAL input. It would be battery-saver policy
   in the framework. `NSProcessInfo.isLowPowerModeEnabled` is there if it is

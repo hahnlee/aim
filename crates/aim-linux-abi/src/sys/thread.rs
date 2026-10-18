@@ -13,7 +13,7 @@
 //! aimd owns the pid space (ADR 0012, section 7) it assigns them.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 use super::park::Parker;
@@ -70,6 +70,9 @@ pub struct Sched {
     pub nice: AtomicI32,
     pub policy: AtomicI32,
     pub priority: AtomicI32,
+    /// Another thread changed this one's scheduling: Darwin lets only a
+    /// thread set its own QoS, so it applies the change at its next syscall.
+    pub host_stale: AtomicBool,
 }
 
 pub struct Thread {
@@ -108,6 +111,7 @@ impl Thread {
                 nice: AtomicI32::new(0),
                 policy: AtomicI32::new(0),
                 priority: AtomicI32::new(0),
+                host_stale: AtomicBool::new(false),
             },
             stacks: Mutex::new(None),
         }
