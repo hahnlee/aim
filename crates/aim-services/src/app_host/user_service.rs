@@ -16,6 +16,12 @@ const SYSTEM_USER: i32 = 0;
 const FLAG_DEMO: i32 = 0x200;
 const FLAG_FULL: i32 = 0x400;
 
+/// The profiles of `user`'s profile group: user 0 alone, and none of a
+/// user that does not exist.
+pub(super) fn profile_ids(user: i32) -> Vec<i32> {
+    if user == SYSTEM_USER { vec![SYSTEM_USER] } else { Vec::new() }
+}
+
 pub struct UserManager {
     host: Arc<AppHost>,
 }
@@ -77,8 +83,7 @@ impl Service for UserManager {
             }
             um::GET_PROFILE_IDS => {
                 let args = um::GetProfileIds::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let ids = if args.user_id == SYSTEM_USER { vec![SYSTEM_USER] } else { Vec::new() };
-                um::write_get_profile_ids_reply(&mut p, &Some(ids));
+                um::write_get_profile_ids_reply(&mut p, &Some(profile_ids(args.user_id)));
             }
             um::GET_CREDENTIAL_OWNER_PROFILE => {
                 let args = um::GetCredentialOwnerProfile::read(&mut call.data).map_err(|_| BAD_VALUE)?;

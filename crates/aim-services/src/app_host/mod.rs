@@ -29,6 +29,7 @@ pub mod compat;
 pub mod config;
 pub mod connectivity_service;
 pub mod content_service;
+pub mod cross_profile_apps;
 pub mod cursor;
 pub mod device_policy;
 pub mod display;
@@ -49,6 +50,7 @@ pub mod network;
 mod network_native;
 pub mod notification_channels;
 pub mod notification_service;
+pub mod overlay_service;
 pub mod package_service;
 mod package_writes;
 pub mod packages;
@@ -76,6 +78,7 @@ pub mod uri_grants;
 pub mod trust_service;
 pub mod user_service;
 pub mod volume;
+pub mod vpn_manager;
 pub mod window_layout;
 pub mod window_manager;
 pub mod zygote;
@@ -469,6 +472,9 @@ impl AppHost {
             ("uri_grants", Arc::new(uri_grants::UriGrantsManager(self.clone()))),
             ("platform_compat", Arc::new(platform_compat::PlatformCompat(self.clone()))),
             ("sensor_privacy", Arc::new(sensor_privacy::SensorPrivacy::new(self.clone()))),
+            ("crossprofileapps", Arc::new(cross_profile_apps::CrossProfileApps::new(self.clone()))),
+            ("overlay", Arc::new(overlay_service::OverlayManager::new(self.clone()))),
+            ("vpn_management", Arc::new(vpn_manager::VpnManager::new(self.clone()))),
             ("settings", Arc::new(settings_service::SettingsService::new(self.clone(), settings))),
             (
                 "content",
