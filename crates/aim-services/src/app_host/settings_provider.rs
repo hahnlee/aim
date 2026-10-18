@@ -178,6 +178,9 @@ impl Service for SettingsProvider {
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
+        if matches!(call.code, OPEN_FILE_TRANSACTION | OPEN_ASSET_FILE_TRANSACTION | OPEN_TYPED_ASSET_FILE_TRANSACTION) {
+            return self.open(call);
+        }
         if call.code != cp::CALL_TRANSACTION {
             return reply(Err(self.host.unimplemented("settings provider", call.code)));
         }
@@ -200,6 +203,227 @@ impl Service for SettingsProvider {
             }
             p
         }))
+    }
+}
+
+/// `IContentProvider`'s file transactions.
+const OPEN_FILE_TRANSACTION: u32 = 14;
+const OPEN_ASSET_FILE_TRANSACTION: u32 = 15;
+const OPEN_TYPED_ASSET_FILE_TRANSACTION: u32 = 23;
+/// `DatabaseUtils.writeExceptionToParcel`'s codes.
+const FILE_NOT_FOUND: i32 = 1;
+const ILLEGAL_ARGUMENT: i32 = 2;
+/// `AssetFileDescriptor.UNKNOWN_LENGTH`.
+const UNKNOWN_LENGTH: i64 = -1;
+
+/// An exception a provider's transaction writes as
+/// `DatabaseUtils.writeExceptionToParcel` writes it: one of its codes, or
+/// the binder's own.
+enum Thrown {
+    Database(i32, String),
+    Binder(Exception),
+}
+
+impl From<Exception> for Thrown {
+    fn from(e: Exception) -> Self {
+        Thrown::Binder(e)
+    }
+}
+
+/// A file a provider opened: `ParcelFileDescriptor`'s parcel, and for an
+/// `AssetFileDescriptor` its whole extent and no extras.
+struct Opened(crate::package::app_metadata::Descriptor);
+
+impl SettingsProvider {
+    /// `ContentProviderNative`'s `OPEN_FILE`, `OPEN_ASSET_FILE` and
+    /// `OPEN_TYPED_ASSET_FILE` through `ContentProvider.Transport`.
+    fn open(&self, call: &mut Call<'_>) -> Reply {
+        let code = call.code;
+        let uid = call.sender_euid as i32;
+        let r = &mut call.data;
+        r.enforce_interface(cp::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+        let package = read_attribution_source(r)?;
+        let uri = Uri::read(r, &mut crate::package::intent_filter::Plain).map_err(|_| BAD_VALUE)?.ok_or(BAD_VALUE)?;
+        let mode = r.read_string16().map_err(|_| BAD_VALUE)?;
+        let mime_type = if code == OPEN_TYPED_ASSET_FILE_TRANSACTION {
+            let mime_type = r.read_string16().map_err(|_| BAD_VALUE)?;
+            bundle::read(r).map_err(|_| BAD_VALUE)?; // the options, which openFile ignores
+            mime_type
+        } else {
+            None
+        };
+        let caller = Caller { uid, package };
+        let opened = (|| -> Result<Opened, Thrown> {
+            // `validateIncomingUri`: the settings authority (the provider is
+            // a single user's, so the URI keeps its user); its read and
+            // write permissions are none (`enforceFilePermission`).
+            let authority = uri.authority().unwrap_or_default();
+            if authority.rsplit('@').next() != Some("settings") {
+                return Err(Exception::security(format!(
+                    "The authority of the uri {} does not match the one of the contentProvider: settings",
+                    uri.as_str()
+                ))
+                .into());
+            }
+            match code {
+                OPEN_TYPED_ASSET_FILE_TRANSACTION => {
+                    let filter = mime_type.unwrap_or_default();
+                    if filter != "*/*" && !self.has_mime_type(&uri, &filter)? {
+                        return Err(Thrown::Database(FILE_NOT_FOUND, format!("Can't open {} as type {filter}", uri.as_str())));
+                    }
+                    self.open_file(&caller, &uri, "r")
+                }
+                _ => self.open_file(&caller, &uri, mode.as_deref().unwrap_or_default()),
+            }
+        })();
+        let mut p = Parcel::new();
+        match opened {
+            Ok(Opened(fd)) => {
+                p.write_no_exception();
+                p.write_i32(1);
+                aim_service_aidl::WriteParcelable::write_to(&fd, &mut p);
+                if code != OPEN_FILE_TRANSACTION {
+                    p.write_i64(0);
+                    p.write_i64(UNKNOWN_LENGTH);
+                    p.write_i32(0);
+                }
+                Ok(p)
+            }
+            Err(Thrown::Database(code, message)) => {
+                p.write_i32(code);
+                p.write_string16(Some(&message));
+                Ok(p)
+            }
+            Err(Thrown::Binder(e)) => reply(Err(e)),
+        }
+    }
+
+    /// Whether `getType` of `uri` is of `desired`
+    /// (`ClipDescription.compareMimeTypes`): a table's directory, or one
+    /// of its settings. A setting moved between tables is of the table it
+    /// moved to, which the app host does not know (#1525); that matters
+    /// only to a desired type naming the table.
+    fn has_mime_type(&self, uri: &Uri, desired: &str) -> Result<bool, Thrown> {
+        const ITEM: &str = "vnd.android.cursor.item/";
+        let segments = uri.path_segments();
+        let table = segments.first().ok_or_else(|| Thrown::Database(ILLEGAL_ARGUMENT, format!("Invalid URI:{}", uri.as_str())))?;
+        if !matches!(table.as_str(), "system" | "secure" | "global") {
+            return Err(Thrown::Database(ILLEGAL_ARGUMENT, format!("Bad root path: {table}")));
+        }
+        match segments.len() {
+            1 => Ok(compare_mime_types(&format!("vnd.android.cursor.dir/{table}"), desired)),
+            2 if desired.starts_with(ITEM) && desired != format!("{ITEM}*") => {
+                Err(self.host.unimplemented_named("settings provider", "the table of a setting moved between tables (#1525)").into())
+            }
+            2 => Ok(compare_mime_types(&format!("{ITEM}{table}"), desired)),
+            _ => Err(Thrown::Database(
+                ILLEGAL_ARGUMENT,
+                format!(
+                    "Supported SQL:\n  uri content://some_table/some_property with null where and where args\n  uri content://some_table with query name=? and single name as arg\n  uri content://some_table with query name=some_name and null args\n  but got - uri:{}, where:null whereArgs:null",
+                    uri.as_str()
+                ),
+            )),
+        }
+    }
+
+    /// `SettingsProvider.openFile`: only the ringtone caches, opened as
+    /// `ParcelFileDescriptor.open` opens them.
+    fn open_file(&self, caller: &Caller, uri: &Uri, mode: &str) -> Result<Opened, Thrown> {
+        let calling_user = caller.user();
+        let authority = uri.authority().unwrap_or_default();
+        // `getUserIdFromUri`.
+        let user = match authority.split_once('@') {
+            Some((user, _)) => user.parse().unwrap_or(-10_000),
+            None => calling_user,
+        };
+        if user != calling_user && !self.has(caller, "android.permission.INTERACT_ACROSS_USERS")? {
+            return Err(Exception::security(format!(
+                "Access files from the settings of another user: Neither user {} nor current process has android.permission.INTERACT_ACROSS_USERS.",
+                caller.uid
+            ))
+            .into());
+        }
+        if mode.contains('w') {
+            self.check_and_note_write_settings(caller, caller.package.as_deref())?;
+        }
+        // `getUriWithoutUserId`.
+        let without_user = match authority.split_once('@') {
+            Some((prefix, _)) => uri.as_str().replacen(&format!("{prefix}@"), "", 1),
+            None => uri.as_str().to_string(),
+        };
+        let setting = ["ringtone", "notification_sound", "alarm_alert"]
+            .into_iter()
+            .find(|s| without_user == format!("content://settings/system/{}", ringtone_cache(s).unwrap_or_default()))
+            .ok_or_else(|| {
+                Thrown::Database(FILE_NOT_FOUND, "Direct file access no longer supported; ringtone playback is available through android.media.Ringtone".into())
+            })?;
+        let (read, write, create, truncate, append) = match mode {
+            "r" => (true, false, false, false, false),
+            "w" | "wt" => (false, true, true, true, false),
+            "wa" => (false, true, true, false, true),
+            "rw" => (true, true, true, false, false),
+            "rwt" => (true, true, true, true, false),
+            _ => return Err(Thrown::Database(ILLEGAL_ARGUMENT, format!("Bad mode '{mode}'"))),
+        };
+        // `getCacheFile` in `getRingtoneCacheDir`, made if missing.
+        let data = self.host.data()?;
+        let dir = data.join(format!("system_de/{user}/ringtones"));
+        if !dir.exists() {
+            std::fs::create_dir(&dir).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", dir.display())))?;
+            aim_storage::guest_inode::record(&dir, aim_storage::guest_inode::GuestInode { uid: Some(SYSTEM_UID as u32), gid: Some(SYSTEM_UID as u32), mode: Some(0o700) })
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", dir.display())))?;
+        }
+        let path = dir.join(ringtone_cache(setting).unwrap_or_default());
+        let existed = path.exists();
+        let file = std::fs::OpenOptions::new()
+            .read(read)
+            .write(write)
+            .create(create)
+            .truncate(truncate)
+            .append(append)
+            .open(&path)
+            .map_err(|e| Thrown::Database(FILE_NOT_FOUND, open_failed(&e)))?;
+        if create && !existed {
+            aim_storage::guest_inode::record(&path, aim_storage::guest_inode::GuestInode { uid: Some(SYSTEM_UID as u32), gid: Some(SYSTEM_UID as u32), mode: Some(0o700) })
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display())))?;
+        }
+        let file = aim_binder_host::server::file_from_fd(std::os::fd::AsFd::as_fd(&file))
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "settings provider: no fileport"))?;
+        Ok(Opened(crate::package::app_metadata::Descriptor(file)))
+    }
+}
+
+/// `ErrnoException.getMessage` of `Os.open`'s failure.
+fn open_failed(e: &std::io::Error) -> String {
+    let errno = e.raw_os_error().unwrap_or(0);
+    let name = match errno {
+        libc::ENOENT => "ENOENT",
+        libc::EACCES => "EACCES",
+        libc::EISDIR => "EISDIR",
+        libc::ENOTDIR => "ENOTDIR",
+        libc::EROFS => "EROFS",
+        libc::ENOSPC => "ENOSPC",
+        _ => return format!("open failed: {e}"),
+    };
+    let text = std::io::Error::from_raw_os_error(errno).to_string();
+    let text = text.split(" (os error").next().unwrap_or_default();
+    format!("open failed: {name} ({text})")
+}
+
+/// `ClipDescription.compareMimeTypes(concrete, desired)`.
+fn compare_mime_types(concrete: &str, desired: &str) -> bool {
+    if desired == "*/*" {
+        return true;
+    }
+    match desired.find('/') {
+        Some(slash) if slash > 0 => {
+            if desired.len() == slash + 2 && desired.as_bytes()[slash + 1] == b'*' {
+                concrete.as_bytes().get(..=slash) == Some(&desired.as_bytes()[..=slash])
+            } else {
+                desired == concrete
+            }
+        }
+        _ => false,
     }
 }
 
@@ -807,6 +1031,20 @@ impl SettingsProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mime_types_compare_as_clip_description_compares_them() {
+        assert!(compare_mime_types("vnd.android.cursor.item/system", "vnd.android.cursor.item/*"));
+        assert!(compare_mime_types("vnd.android.cursor.item/system", "vnd.android.cursor.item/system"));
+        assert!(!compare_mime_types("vnd.android.cursor.item/system", "audio/*"));
+        assert!(!compare_mime_types("vnd.android.cursor.item/system", "*"));
+    }
+
+    #[test]
+    fn an_open_failure_reads_as_errno_exception() {
+        let e = std::io::Error::from_raw_os_error(libc::ENOENT);
+        assert_eq!(open_failed(&e), "open failed: ENOENT (No such file or directory)");
+    }
 
     /// A tracked `GET_secure`'s reply, as the original's to Calculator:
     /// the bundle in `ArrayMap` order, the `MemoryIntArray` as a
