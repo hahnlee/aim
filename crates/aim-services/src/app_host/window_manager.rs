@@ -290,8 +290,10 @@ impl Session {
         w.frames = frames;
         // A window that is not visible has no surface
         // (`WindowStateAnimator.destroySurfaceLocked`).
-        if view_visibility != VISIBLE {
-            w.layer = None;
+        if view_visibility != VISIBLE
+            && let Some(layer) = w.layer.take()
+        {
+            self.host.remove_layers(vec![layer]);
         }
         if view_visibility == VISIBLE && w.layer.is_none() {
             let composer = self.host.composer()?;
@@ -537,7 +539,6 @@ impl super::AppHost {
         self.set_input_frame(w.channel, &Input::of(&w.attrs, frame, bounds, w.uid)).map_err(|e| format!("{e:?}"))
     }
 
-    /// The windows of the process `pid` are gone with it.
     /// The windows of the activity `token`, earlier first: each one's
     /// `IWindow` and input channel.
     pub(super) fn windows_of_activity(&self, token: u64) -> Vec<(u32, i32)> {
@@ -547,8 +548,28 @@ impl super::AppHost {
         of.into_iter().map(|(_, h, c)| (h, c)).collect()
     }
 
+    /// The windows of the process `pid` are gone with it, and their
+    /// layers (`WindowState.removeImmediately`).
     pub(super) fn windows_died(&self, pid: i32) {
-        self.windows.windows.lock().unwrap().retain(|_, w| w.pid != pid);
+        let mut gone = Vec::new();
+        self.windows.windows.lock().unwrap().retain(|_, w| {
+            if w.pid == pid {
+                gone.extend(w.container.take());
+            }
+            w.pid != pid
+        });
+        self.remove_layers(gone);
+    }
+
+    /// `Transaction.remove` of `layers`, which go with their children.
+    pub(super) fn remove_layers(&self, layers: Vec<Layer>) {
+        if layers.is_empty() {
+            return;
+        }
+        let changes: Vec<_> = layers.iter().map(|l| (l, surface::Change { remove: true, ..Default::default() })).collect();
+        if let Err(e) = self.composer().and_then(|c| c.apply(&changes).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))) {
+            eprintln!("app host: removing layers: {e:?}");
+        }
     }
 }
 
@@ -671,7 +692,8 @@ impl Service for Session {
             // its input channel.
             ws::REMOVE => {
                 let (window, _) = Self::window_and_tail(call, 0)?;
-                self.host.windows.windows.lock().unwrap().remove(&window);
+                let removed = self.host.windows.windows.lock().unwrap().remove(&window);
+                self.host.remove_layers(removed.and_then(|w| w.container).into_iter().collect());
                 let mut p = Parcel::new();
                 p.write_no_exception();
                 Ok(p)

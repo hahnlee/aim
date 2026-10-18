@@ -127,6 +127,7 @@ impl Tasks {
                     position: Some((b.left as f32, b.top as f32)),
                     z: Some(z as i32),
                     crop: Some([0.0, 0.0, b.width() as f32, b.height() as f32]),
+                    ..Default::default()
                 }))
             })
             .collect()
