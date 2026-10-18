@@ -166,8 +166,9 @@ impl AppHost {
 
     /// A new task, in front, for the activity `class` of `uid`'s
     /// `package`: its id. It has the display, or in window mode freeform's
-    /// default bounds.
-    pub(super) fn new_task(&self, uid: u32, package: &str, class: &str, activity: super::freeform::Activity) -> Result<i32, Exception> {
+    /// default bounds. It answers the package's pending launch, else the
+    /// launch `source`'s task has not answered yet.
+    pub(super) fn new_task(&self, uid: u32, package: &str, class: &str, activity: super::freeform::Activity, source: Option<i32>) -> Result<i32, Exception> {
         let display = self.display()?.0.clone();
         let area = Rect { left: 0, top: 0, right: display.width, bottom: display.height };
         let windows = self.tasks.window_mode();
@@ -179,7 +180,9 @@ impl AppHost {
         };
         let component = format!("{package}/{class}");
         let launch = if windows { self.pending_launches.lock().unwrap().remove(package) } else { None };
-        self.tasks.tasks.lock().unwrap().push(Task {
+        let mut tasks = self.tasks.tasks.lock().unwrap();
+        let launch = launch.or_else(|| tasks.iter_mut().find(|t| Some(t.id) == source).and_then(|t| t.launch.take()));
+        tasks.push(Task {
             id,
             uid,
             package: package.to_string(),
@@ -189,6 +192,7 @@ impl AppHost {
             layer: None,
             launch,
         });
+        drop(tasks);
         if windows {
             self.tasks.send_bounds(id, bounds);
             self.tasks.send_text(window::PACKAGE, id, package);
