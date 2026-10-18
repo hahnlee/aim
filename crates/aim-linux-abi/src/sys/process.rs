@@ -109,11 +109,12 @@ fn priority_range(policy: i32) -> Option<(i32, i32)> {
     }
 }
 
-/// The Darwin QoS class for a thread's Linux scheduling. Android runs
-/// background work at a nice value of ANDROID_PRIORITY_BACKGROUND (10) or
-/// more, or in SCHED_BATCH or SCHED_IDLE; Darwin runs that at utility QoS,
-/// the lowest nice value and SCHED_IDLE at background QoS (`PRIO_DARWIN_BG`:
-/// efficiency cores, throttled I/O), and everything else at the default.
+/// The Darwin QoS class for a thread's Linux scheduling that does not
+/// raise it. Android runs background work at a nice value of
+/// ANDROID_PRIORITY_BACKGROUND (10) or more, or in SCHED_BATCH or
+/// SCHED_IDLE; Darwin runs that at utility QoS, the lowest nice value and
+/// SCHED_IDLE at background QoS (`PRIO_DARWIN_BG`: efficiency cores,
+/// throttled I/O), and everything else at the default.
 pub fn host_qos(nice: i32, policy: i32) -> libc::qos_class_t {
     use libc::qos_class_t::*;
     match policy {
@@ -125,12 +126,62 @@ pub fn host_qos(nice: i32, policy: i32) -> libc::qos_class_t {
     }
 }
 
-/// Give the calling thread the QoS of its Linux scheduling. Darwin sets a
-/// thread's QoS only from the thread itself, so a thread that changes
-/// another's scheduling changes only what the guest reads back.
-pub fn apply_host_qos(nice: i32, policy: i32) {
-    // SAFETY: plain call on the calling thread.
-    unsafe { libc::pthread_set_qos_class_self_np(host_qos(nice, policy), 0) };
+/// The Darwin timeshare priority of a nice value, as Darwin's own nice
+/// value sets it: the task importance `-nice` over the default priority
+/// (31), within the user range (15-47).
+fn timeshare_priority(nice: i32) -> i32 {
+    (31 - nice).clamp(15, 47)
+}
+
+thread_local! {
+    /// The calling thread has a Darwin scheduling policy, which opts it
+    /// out of QoS for good (`pthread_set_qos_class_self_np` then fails).
+    static HOST_POLICY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Give the calling thread the host scheduling of its Linux scheduling.
+/// Linux runs a SCHED_FIFO or SCHED_RR thread before every normal one and
+/// weighs normal threads by nice value; Android raises display and audio
+/// threads to negative nice values (-4 display to -19 urgent audio) and
+/// FAST audio threads to SCHED_FIFO. Darwin caps a thread's QoS at its
+/// task's, below what a raised thread needs, so a raised thread takes a
+/// Darwin policy instead: the real-time policies Darwin's fixed priority 47
+/// (the highest outside its real-time band, which needs a period), a
+/// negative nice value its timeshare priority ([`timeshare_priority`]).
+/// Other scheduling is a QoS class ([`host_qos`]) until a thread was raised.
+/// Darwin sets a thread's QoS only from the thread itself, so a thread that
+/// changes another's scheduling marks it ([`thread::Sched::host_stale`])
+/// and that thread applies it at its next syscall ([`apply_stale_sched`]).
+pub fn apply_host_sched(nice: i32, policy: i32) {
+    let raised = matches!(policy, SCHED_FIFO | SCHED_RR)
+        || nice < 0 && !matches!(policy, SCHED_BATCH | SCHED_IDLE);
+    if !raised && !HOST_POLICY.get() {
+        // SAFETY: plain call on the calling thread.
+        unsafe { libc::pthread_set_qos_class_self_np(host_qos(nice, policy), 0) };
+        return;
+    }
+    HOST_POLICY.set(true);
+    let (policy, priority) = match policy {
+        SCHED_FIFO => (libc::SCHED_FIFO, 47),
+        SCHED_RR => (libc::SCHED_RR, 47),
+        SCHED_IDLE => (libc::SCHED_OTHER, 15),
+        SCHED_BATCH => (libc::SCHED_OTHER, timeshare_priority(nice.max(10))),
+        _ => (libc::SCHED_OTHER, timeshare_priority(nice)),
+    };
+    // SAFETY: sched_param is plain data; plain call on the calling thread.
+    unsafe {
+        let mut param: libc::sched_param = std::mem::zeroed();
+        param.sched_priority = priority;
+        libc::pthread_setschedparam(libc::pthread_self(), policy, &param);
+    }
+}
+
+/// Apply the calling thread's scheduling, changed by another thread, to
+/// the host.
+pub fn apply_stale_sched(th: &Thread) {
+    if th.sched.host_stale.load(SeqCst) && th.sched.host_stale.swap(false, SeqCst) {
+        apply_host_sched(super::cred::thread_nice(th.tid), th.sched.policy.load(SeqCst));
+    }
 }
 
 /// A change to another process's scheduling (a thread of it, `pid`) needs
@@ -145,8 +196,8 @@ fn may_change(pid: i64) -> Result<(), i64> {
 
 /// sched_setparam (118), sched_setscheduler (119), sched_getscheduler
 /// (120), sched_getparam (121). The policy and priority are recorded per
-/// thread; the calling thread's policy also sets its host QoS
-/// ([`host_qos`]). Darwin schedules the host threads as it sees fit.
+/// thread and set its host scheduling ([`apply_host_sched`]); another
+/// process's threads are checked, not changed (#1616).
 pub fn sched_policy(nr: u64, a: [u64; 6]) -> i64 {
     let mut a=a;
     a[0]=match super::pidns::syscall_pid(a[0] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};
@@ -186,7 +237,9 @@ pub fn sched_policy(nr: u64, a: [u64; 6]) -> i64 {
                         th.sched.policy.store(policy, SeqCst);
                         th.sched.priority.store(prio, SeqCst);
                         if th.tid == thread::gettid() as i32 {
-                            apply_host_qos(super::cred::thread_nice(th.tid), policy);
+                            apply_host_sched(super::cred::thread_nice(th.tid), policy);
+                        } else {
+                            th.sched.host_stale.store(true, SeqCst);
                         }
                     }
                     0

@@ -49,6 +49,9 @@ struct Command {
     value: i32,
 }
 
+/// `system/core/libsystem/include/system/thread_defs.h`.
+const ANDROID_PRIORITY_URGENT_AUDIO: i32 = -19;
+
 const HAL_RESERVED_EXIT: i8 = 0;
 const GET_STATUS: i8 = 1;
 const START: i8 = 2;
@@ -188,9 +191,25 @@ impl Core {
             xruns_seen: 0,
             cookie,
         };
+        // The worker is an audio service thread: like the AOSP default HAL's
+        // stream workers (StreamWorker.cpp), it sets itself to
+        // ANDROID_PRIORITY_URGENT_AUDIO, and the stream fails if it cannot.
+        let (started, start) = std::sync::mpsc::sync_channel(1);
         let handle = std::thread::Builder::new()
             .name(if params.input { "reader" } else { "writer" }.into())
-            .spawn(move || worker.run())?;
+            .spawn(move || {
+                // SAFETY: plain setpriority of the calling thread.
+                let set = unsafe {
+                    libc::setpriority(libc::PRIO_PROCESS, 0, ANDROID_PRIORITY_URGENT_AUDIO)
+                };
+                let result = if set == 0 { Ok(()) } else { Err(io::Error::last_os_error()) };
+                let ok = result.is_ok();
+                let _ = started.send(result);
+                if ok {
+                    worker.run();
+                }
+            })?;
+        start.recv().map_err(|_| io::Error::other("stream worker exited before starting"))??;
         Ok((
             Arc::new(Self {
                 shared,

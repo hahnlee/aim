@@ -139,7 +139,11 @@ libaudiohal ── data FMQ ──>  worker: burst → ring write (blocks if ful
 - **Worker.** One thread per stream runs the `StreamDescriptor` state
   machine as the reference `StreamOutWorkerLogic`/`StreamInWorkerLogic`
   do: `start`, `burst`, `drain`, `pause`, `flush`, `standby`, and the
-  internal exit command that `close` sends.
+  internal exit command that `close` sends. Like the reference
+  `StreamWorker`, it sets itself to ANDROID_PRIORITY_URGENT_AUDIO (-19)
+  first, and the stream fails to open if it cannot; the syscall layer
+  gives a raised nice value Darwin's timeshare priority 31 - nice, so the
+  worker runs at 47 and keeps the ring filled under host load (#1510).
 - **Host ring.** Each stream has a ring in a memfd that the host module
   and the CoreAudio process map too (`aim_hostcall::audio::Ring`): single producer, single
   consumer, positions in frames, with a header the host fills in (callback
