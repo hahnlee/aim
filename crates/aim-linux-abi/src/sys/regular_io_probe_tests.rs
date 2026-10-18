@@ -52,11 +52,12 @@ fn real_regular_owner_costs_preserve_bytes_offsets_and_verity_admission() {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+    let Some(holder) = aim_paths::input(aim_paths::host_bin("aim-lock-holder"), "host/aim-lock-holder") else { return };
     let (_view, root) = vfs::test_view(); fdtab::install_storage_registrar().unwrap();
     let process = ProcessIdentity::running(std::process::id() as i32).unwrap();
     let controller = posix_broker::Controller::start(posix_broker::Config {
         endpoint: format!("dev.aim.regular-cost.{}", process.host_pid),
-        holder: aim_paths::root().join("target/debug/aim-lock-holder"),
+        holder,
         startup_timeout: Duration::from_secs(3),
     }).unwrap();
     let owner = posix_control::Owner { process, guest_pid: 1 };

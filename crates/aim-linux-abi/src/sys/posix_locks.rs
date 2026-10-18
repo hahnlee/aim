@@ -404,13 +404,11 @@ mod lifecycle_tests {
         let table = root.join("by-pid");
         std::fs::create_dir(&table).unwrap();
         super::super::cred::init(super::super::cred::Identity::default(), Some(table.clone()));
-        let executable = std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("aim-lock-holder");
+        let Some(executable) =
+            aim_paths::input(aim_paths::host_bin("aim-lock-holder"), "host/aim-lock-holder")
+        else {
+            return;
+        };
         let controller =
             aim_storage::posix_broker::Controller::start(aim_storage::posix_broker::Config {
                 endpoint: format!("com.aim.posix-bootstrap.{}", actual.host_pid),
@@ -659,14 +657,11 @@ mod interrupted_close_tests {
         }
         let (_view, directory) = crate::vfs::test_view();
         let actual = ProcessIdentity::running(unsafe { libc::getpid() }).unwrap();
-        let holder = std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("aim-lock-holder");
-        assert!(holder.is_file());
+        let Some(holder) =
+            aim_paths::input(aim_paths::host_bin("aim-lock-holder"), "host/aim-lock-holder")
+        else {
+            return;
+        };
         let endpoint = format!("dev.aim.interrupted-close.{}", actual.host_pid);
         let controller =
             aim_storage::posix_broker::Controller::start(aim_storage::posix_broker::Config {

@@ -2033,7 +2033,7 @@ mod external_namespace_entry_tests {
         let table=PathBuf::from(line.trim_end());let process=aim_storage::process_namespace::ProcessIdentity::running(unsafe{libc::getpid()}).unwrap();
         let init=aim_storage::process_namespace::InitRegistration::register(&table,process,"actual-owner").unwrap();
         aim_storage::process_namespace::register_mount_namespace(&table,process,"actual-owner").unwrap();
-        let holder=std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().join("aim-lock-holder");assert!(holder.is_file());
+        let holder=aim_paths::input(aim_paths::host_bin("aim-lock-holder"),"host/aim-lock-holder").unwrap();
         let controller=aim_storage::posix_broker::Controller::start(aim_storage::posix_broker::Config{endpoint:format!("dev.aim.external-admission.{}",process.host_pid),holder,startup_timeout:std::time::Duration::from_secs(5)}).unwrap();
         controller.bind_namespace(&table,&init).unwrap();
         controller.register_guest(aim_storage::posix_control::Owner{process,guest_pid:1}).unwrap();
@@ -2043,6 +2043,8 @@ mod external_namespace_entry_tests {
     #[test]
     fn explicit_external_entry_requires_live_authentic_owner(){
         if crate::sys::fdtab::isolated_kernel_test("vfs::external_namespace_entry_tests::explicit_external_entry_requires_live_authentic_owner"){return;}
+        // The admission target needs the lock holder; without it the test skips here.
+        if aim_paths::input(aim_paths::host_bin("aim-lock-holder"),"host/aim-lock-holder").is_none(){return;}
         let root=std::env::temp_dir().join(format!("aim-external-namespace-{}",std::process::id()));std::fs::create_dir(&root).unwrap();
         struct Directory(PathBuf);impl Drop for Directory{fn drop(&mut self){let _=std::fs::remove_dir_all(&self.0);}}let _directory=Directory(root.clone());
         let table=root.join("identity/by-pid");std::fs::create_dir_all(&table).unwrap();

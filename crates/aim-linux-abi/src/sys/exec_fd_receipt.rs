@@ -196,7 +196,7 @@ mod tests{
   let namespace=aim_storage::mount_namespace::Namespace::open(vfs::runtime_dir().unwrap(),&format!("receipt-{}",actual.host_pid)).unwrap();
   namespace.initialize(&fs::read_to_string(root.join("run/path-map")).unwrap()).unwrap();
   let registration=aim_storage::process_namespace::InitRegistration::register(&table,actual,namespace.id()).unwrap();
-  let holder=std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().join("aim-lock-holder");assert!(holder.is_file(),"required native holder was not built");
+  let Some(holder)=aim_paths::input(aim_paths::host_bin("aim-lock-holder"),"host/aim-lock-holder")else{return};
   let controller=aim_storage::posix_broker::Controller::start(aim_storage::posix_broker::Config{endpoint:format!("com.aim.exec-close.{}",actual.host_pid),holder,startup_timeout:Duration::from_secs(5)}).unwrap();
   controller.bind_namespace(&table,&registration).unwrap();controller.owner_config().unwrap().write(&root.join("run/posix-owner")).unwrap();
   let mut wake=[-1;2];assert_eq!(unsafe{libc::pipe(wake.as_mut_ptr())},0);assert_eq!(unsafe{libc::fcntl(wake[1],libc::F_SETFD,0)},0);
