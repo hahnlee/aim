@@ -68,6 +68,7 @@ pub mod providers;
 pub mod role_service;
 pub mod power_service;
 pub mod sensor_privacy;
+pub mod sensor_service;
 pub mod services;
 pub mod shortcut_service;
 pub mod settings;
@@ -492,6 +493,7 @@ impl AppHost {
             ("netstats", Arc::new(netstats::NetworkStats::new(self.clone()))),
             ("game", Arc::new(game_service::GameManager::new(self.clone()))),
             ("performance_hint", Arc::new(hint_manager::HintManager::new(self.clone()))),
+            ("sensorservice", Arc::new(sensor_service::SensorService)),
             ("role", self.role_service.get_or_init(|| Arc::new(role_service::RoleManager::new(self.clone()))).clone()),
             ("settings", Arc::new(settings_service::SettingsService::new(self.clone(), settings))),
             (
