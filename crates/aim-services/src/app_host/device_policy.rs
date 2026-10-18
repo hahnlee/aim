@@ -894,7 +894,7 @@ impl Device for DevicePolicy {
     }
 
     fn setting(&self, table: Table, name: &str) -> Result<Option<String>, Exception> {
-        Ok(self.host.inputs()?.settings.get(table, name).map(str::to_string))
+        Ok(self.host.inputs()?.settings.get(table, name))
     }
 
     fn property(&self, name: &str) -> Option<String> {

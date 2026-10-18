@@ -9,8 +9,8 @@
 //! the Mac's output, `aim_services::volume`) plays at full scale, and its
 //! dispatcher gets each change of its streams.
 //!
-//! Not kept: a change is not persisted (the app host writes no settings,
-//! #1474); the ringer and zen modes are read, not changed, so a change
+//! Not kept: a change is not persisted through the settings (#1524); the
+//! ringer and zen modes are read, not changed, so a change
 //! that would change them is not implemented (#1475).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 

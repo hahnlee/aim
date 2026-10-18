@@ -1,11 +1,13 @@
 //! `Bundle` in its parcel form (`BaseBundle.writeToParcelInner`,
 //! `Parcel.writeArrayMapInternal` and `writeValue` at the pinned tag), for
 //! the few values native services exchange with the original ones: strings,
-//! string arrays, ints, int arrays and booleans, and a parcelable written
-//! by the caller; a length-prefixed value read (a parcelable, a map, a
-//! serializable) is kept as its bytes for the caller to read.
+//! string arrays, ints, int arrays and booleans, a parcelable written by
+//! the caller and a `MemoryIntArray`; a length-prefixed value read (a
+//! parcelable, a map, a serializable) is kept as its bytes for the caller
+//! to read.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use aim_binder_host::parcel::{BAD_VALUE, Parcel, Reader, Result};
 
@@ -48,6 +50,9 @@ pub enum Value {
     /// A `Map<String, String>` (`writeMap`), length-prefixed as
     /// `Parcel.writeValue` writes maps.
     StringMap(Vec<(String, Option<String>)>),
+    /// A `MemoryIntArray` (`writeParcelable`): its shared memory, as the
+    /// `ParcelFileDescriptor` its `writeToParcel` writes.
+    MemoryIntArray(SharedFile),
     /// A length-prefixed value (`Parcel.isLengthPrefixed`): its type and
     /// where its bytes are in the parcel read.
     Lazy {
@@ -95,20 +100,11 @@ impl Value {
                     p.write_i32(*item);
                 }
             }
-            Value::Parcelable { class, data } => {
-                p.write_i32(VAL_PARCELABLE);
-                let length_at = p.position();
-                p.write_i32(-1);
-                let start = p.position();
+            Value::Parcelable { class, data } => length_prefixed(p, VAL_PARCELABLE, |p| {
                 p.write_string16(Some(class));
                 p.write_raw(data, &[]);
-                p.set_i32_at(length_at, (p.position() - start) as i32);
-            }
-            Value::StringMap(entries) => {
-                p.write_i32(VAL_MAP);
-                let length_at = p.position();
-                p.write_i32(-1);
-                let start = p.position();
+            }),
+            Value::StringMap(entries) => length_prefixed(p, VAL_MAP, |p| {
                 p.write_i32(entries.len() as i32);
                 for (key, value) in entries {
                     p.write_i32(VAL_STRING);
@@ -121,13 +117,43 @@ impl Value {
                         None => p.write_i32(VAL_NULL),
                     }
                 }
-                p.set_i32_at(length_at, (p.position() - start) as i32);
-            }
+            }),
+            Value::MemoryIntArray(file) => length_prefixed(p, VAL_PARCELABLE, |p| {
+                p.write_string16(Some("android.util.MemoryIntArray"));
+                p.write_string16(Some("android.os.ParcelFileDescriptor"));
+                p.write_i32(0); // no comm fd
+                p.write_file(file.0.clone());
+            }),
             Value::Lazy { .. } => unreachable!("lazy values are only read"),
         }
     }
 }
 
+/// `writeValue` of a length-prefixed value of `kind`.
+fn length_prefixed(p: &mut Parcel, kind: i32, value: impl FnOnce(&mut Parcel)) {
+    p.write_i32(kind);
+    let length_at = p.position();
+    p.write_i32(-1);
+    let start = p.position();
+    value(p);
+    p.set_i32_at(length_at, (p.position() - start) as i32);
+}
+
+/// A file a value carries: values are equal when they carry the same one.
+#[derive(Clone)]
+pub struct SharedFile(pub aim_binder_driver::File);
+
+impl PartialEq for SharedFile {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::addr_eq(Arc::as_ptr(&self.0), Arc::as_ptr(&other.0))
+    }
+}
+
+impl std::fmt::Debug for SharedFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SharedFile({:p})", Arc::as_ptr(&self.0))
+    }
+}
 /// `writeBundle` of a bundle with `entries`, in their order.
 pub fn write(p: &mut Parcel, entries: &[(&str, Value)]) {
     if entries.is_empty() {

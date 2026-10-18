@@ -138,7 +138,7 @@ impl Service for InputManager {
                     Err(e) => return reply(Err(e)),
                 };
                 let strategy = inputs.settings.device_config(NAMESPACE_INPUT_NATIVE_BOOT, VELOCITYTRACKER_STRATEGY);
-                im::write_get_velocity_tracker_strategy_reply(&mut p, &strategy.map(str::to_string));
+                im::write_get_velocity_tracker_strategy_reply(&mut p, &strategy);
             }
             im::GET_INPUT_DEVICE_IDS => {
                 im::GetInputDeviceIds::read(&mut call.data).map_err(|_| BAD_VALUE)?;

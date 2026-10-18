@@ -383,6 +383,33 @@ mod tests {
         assert_eq!(read, bytes);
     }
 
+    /// `MemoryIntArray`'s client: `ashmem_valid`, the size, a read-only
+    /// mapping that sees the native owner's later writes, and `get`'s pin.
+    #[test]
+    fn native_read_only_region_shows_owner_writes() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::FileExt;
+        let file = aim_ashmem::read_only_region(b"generations").unwrap();
+        file.set_len(4096).unwrap();
+        let fd = file.as_raw_fd();
+        let mut st = stat_of(fd).unwrap();
+        assert!(as_device(&mut st));
+        assert_eq!(ioctl(fd, GET_SIZE, 0), Some(4096));
+        assert_eq!(before_mmap(fd, 4096, 3), Some(-(EPERM as i64)));
+        assert_eq!(before_mmap(fd, 4096, 1), None);
+        // SAFETY: a read-only shared mapping of the region, unmapped below.
+        let base = unsafe {
+            libc::mmap(std::ptr::null_mut(), 4096, libc::PROT_READ, libc::MAP_SHARED, fd, 0)
+        };
+        assert_ne!(base, libc::MAP_FAILED);
+        file.write_all_at(&7i32.to_le_bytes(), 8).unwrap();
+        // SAFETY: inside the mapping.
+        assert_eq!(unsafe { base.cast::<i32>().add(2).read_volatile() }, 7);
+        assert_eq!(ioctl(fd, PIN, [0u32, 0].as_ptr() as u64), Some(NOT_PURGED));
+        // SAFETY: the mapping made above.
+        unsafe { libc::munmap(base, 4096) };
+    }
+
     #[test]
     fn state_round_trips() {
         let s = State {

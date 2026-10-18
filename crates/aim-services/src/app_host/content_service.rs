@@ -26,7 +26,9 @@ const OBSERVER_DESCRIPTOR: &str = "android.database.IContentObserver";
 /// `UserHandle.USER_ALL`; `Build.VERSION_CODES.O`.
 const USER_ALL: i32 = -1;
 const O: i32 = 26;
-/// `ContentResolver.NOTIFY_SKIP_NOTIFY_FOR_DESCENDANTS`.
+/// `ContentResolver.NOTIFY_SYNC_TO_NETWORK`,
+/// `NOTIFY_SKIP_NOTIFY_FOR_DESCENDANTS`.
+const NOTIFY_SYNC_TO_NETWORK: i32 = 1;
 const NOTIFY_SKIP_NOTIFY_FOR_DESCENDANTS: i32 = 1 << 1;
 
 /// A parcelled `Uri`.
@@ -259,37 +261,56 @@ impl ContentService {
             Some(Binder::Handle(h)) => Some(h),
             _ => None,
         };
-        let mut collected: Vec<Notification> = Vec::new();
-        let mut touched: Vec<(i32, Option<String>, Uri)> = Vec::new();
         let user = self.host.incoming_user(uid, args.user_handle, true)?;
+        let mut uris = Vec::new();
         for ParcelUri(uri) in args.uris.unwrap_or_default().into_iter().flatten() {
-            if !self.check_access(&uri, uid, user, args.target_sdk_version)? {
-                continue;
+            if self.check_access(&uri, uid, user, args.target_sdk_version)? {
+                uris.push(uri);
             }
-            let Some(segments) = segments(&uri) else {
-                continue;
-            };
-            let change = Change {
+        }
+        self.change(
+            uris,
+            &Change {
                 observer,
                 wants_self: args.observer_wants_self_notifications,
                 flags: args.flags,
                 user,
+            },
+        )
+    }
+
+    /// The system's `notifyChange` of `uri` for `user`, as
+    /// `ContentResolver.notifyChange(uri, null, true, user)` makes it
+    /// (no observer, `NOTIFY_SYNC_TO_NETWORK`).
+    pub(super) fn notify_from_system(&self, uri: Uri, user: i32) -> Result<(), Exception> {
+        let change = Change { observer: None, wants_self: false, flags: NOTIFY_SYNC_TO_NETWORK, user };
+        self.change(vec![uri], &change)
+    }
+
+    /// `notifyChange` of the URIs that passed its access checks: their
+    /// observers told, the content cache of their providers invalidated.
+    fn change(&self, uris: Vec<Uri>, change: &Change) -> Result<(), Exception> {
+        let mut collected: Vec<Notification> = Vec::new();
+        let mut touched: Vec<(i32, Option<String>, Uri)> = Vec::new();
+        let (flags, user) = (change.flags, change.user);
+        for uri in uris {
+            let Some(segments) = segments(&uri) else {
+                continue;
             };
             let mut found = Vec::new();
             self.root
                 .lock()
                 .unwrap()
-                .collect(&segments, 0, &change, &mut found);
+                .collect(&segments, 0, change, &mut found);
             // `ObserverCollector`: one call per observer, uid, selfChange,
             // flags and user, with its URIs.
             for (binder, self_change) in found {
-                match collected.iter_mut().find(|n| {
-                    n.0 == binder && n.1 == self_change && n.2 == args.flags && n.3 == user
-                }) {
+                match collected
+                    .iter_mut()
+                    .find(|n| n.0 == binder && n.1 == self_change && n.2 == flags && n.3 == user)
+                {
                     Some(n) => n.4.push(uri.clone()),
-                    None => {
-                        collected.push((binder, self_change, args.flags, user, vec![uri.clone()]))
-                    }
+                    None => collected.push((binder, self_change, flags, user, vec![uri.clone()])),
                 }
             }
             touched.push((

@@ -916,7 +916,7 @@ impl ConnectivityService {
         let global = |name| settings.get(Table::Global, name).filter(|v| !v.is_empty());
         let mode = global("private_dns_mode").or_else(|| global("private_dns_default_mode"));
         let strict =
-            (mode == Some("hostname")).then(|| global("private_dns_specifier").map(str::to_string));
+            (mode.as_deref() == Some("hostname")).then(|| global("private_dns_specifier"));
         Ok(link_properties(&net.uplink, &net.dns, strict))
     }
 
@@ -1415,6 +1415,7 @@ impl ConnectivityService {
             .inputs()?
             .settings
             .get(Table::Global, "default_restrict_background_data")
+            .as_deref()
             == Some("1");
         Ok(NetPolicy::read(bytes.as_deref(), default).unwrap_or_else(|e| {
             eprintln!("app host: connectivity: problem reading {}: {e}", path.display());

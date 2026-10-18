@@ -29,6 +29,7 @@ pub mod device_policy;
 pub mod display;
 pub mod display_service;
 pub mod freeform;
+pub mod generations;
 pub mod input_manager;
 pub mod input_method;
 pub mod job_info;
@@ -52,6 +53,7 @@ pub mod sensor_privacy;
 pub mod services;
 pub mod settings;
 pub mod settings_provider;
+pub mod settings_validators;
 pub mod status_bar;
 pub mod storage;
 pub mod surface;
@@ -364,7 +366,7 @@ impl AppHost {
     pub fn services(self: &Arc<Self>) -> Vec<(&'static str, Arc<dyn Service>)> {
         let _ = self.settings_provider.set((
             self.process
-                .add_service(Arc::new(settings_provider::SettingsProvider(self.clone()))),
+                .add_service(Arc::new(settings_provider::SettingsProvider::new(self.clone()))),
             self.process.add_service(Arc::new(activity::Token)),
         ));
         let permission_manager = Arc::new(permission_manager::PermissionManager::new(self.clone()));
@@ -562,7 +564,7 @@ impl AppHost {
                 app_info.flags,
                 app_info.private_flags,
                 app_info.private_flags_ext,
-                inputs.settings.get(settings::Table::Global, "hidden_api_policy"),
+                inputs.settings.get(settings::Table::Global, "hidden_api_policy").as_deref(),
             )
                 << API_ENFORCEMENT_POLICY_SHIFT
                 | memory_safety(&inputs.compat, setting.flags, target_sdk),

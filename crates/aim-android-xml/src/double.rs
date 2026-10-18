@@ -1,5 +1,5 @@
 //! The text syntax accepted by `Double.parseDouble` and `Float.parseFloat`.
-pub(super) fn parse(text: &str) -> Option<f64> {
+pub fn parse(text: &str) -> Option<f64> {
     let text = text.trim_matches(|c: char| c <= '\u{20}');
     let (negative, body) = match text.as_bytes().first()? {
         b'-' => (true, &text[1..]),
@@ -22,7 +22,7 @@ pub(super) fn parse(text: &str) -> Option<f64> {
     body.parse::<f64>().ok().map(|v| sign * v)
 }
 
-pub(super) fn parse_float(text: &str) -> Option<f32> {
+pub fn parse_float(text: &str) -> Option<f32> {
     let text = text.trim_matches(|c: char| c <= '\u{20}');
     let (negative, body) = match text.as_bytes().first()? {
         b'-' => (true, &text[1..]),

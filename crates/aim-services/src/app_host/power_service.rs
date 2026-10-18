@@ -440,7 +440,7 @@ impl PowerManager {
             .packages
             .framework_bool("config_batterySaverSupported")
             .unwrap_or(true);
-        Ok(supported && inputs.settings.get(Table::Global, "low_power") == Some("1"))
+        Ok(supported && inputs.settings.get(Table::Global, "low_power").as_deref() == Some("1"))
     }
 }
 
