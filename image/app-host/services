@@ -4,7 +4,8 @@
 # waits for the power HAL at its first frame; vold mounts the emulated
 # storage the agent serves; audioserver plays apps' sound, and takes wake
 # locks of system_suspend; the media services decode and play what apps'
-# players and the sound effects play; the health HAL reports the Mac's
+# players and the sound effects play; cameraserver serves apps the Mac's
+# cameras through the camera provider; the health HAL reports the Mac's
 # battery to the battery service; netd hosts DnsResolver, which resolves
 # apps' names on the network the connectivity service gives it, once
 # bpfloader has marked the BPF programs loaded.
@@ -42,4 +43,6 @@ media
 mediaextractor
 mediametrics
 media.swcodec
+cameraserver
+vendor.camera-provider-aim
 aim-app-host-agent
