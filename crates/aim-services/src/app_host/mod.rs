@@ -39,6 +39,7 @@ pub mod network;
 pub mod notification_channels;
 pub mod notification_service;
 pub mod package_service;
+mod package_writes;
 pub mod packages;
 pub mod pending_intents;
 pub mod permission_controller;
@@ -238,7 +239,9 @@ pub struct AppHost {
     /// The global configuration's sequence number.
     config_seq: AtomicI64,
     unimplemented: Mutex<std::collections::HashSet<(String, u32)>>,
-    model: OnceLock<Arc<crate::package::model::State>>,
+    /// The package model's state, replaced as PackageManager's writes
+    /// change it.
+    model: Mutex<Option<Arc<crate::package::model::State>>>,
     resolver: crate::package::resolve::Resolver,
     activities: activity::Activities,
     display: OnceLock<Arc<(display::Display, display_service::Resources)>>,
@@ -266,6 +269,8 @@ pub struct AppHost {
     broadcasts: broadcasts::Broadcasts,
     /// User 0's restrictions.
     user_restrictions: OnceLock<std::collections::BTreeSet<String>>,
+    /// Whether the device has a device or profile owner.
+    owners: OnceLock<bool>,
     /// audioserver, once it registered, and the stream volumes.
     audio_policy: OnceLock<audio_policy::AudioPolicy>,
     volumes: Mutex<Option<volume::Volumes>>,
@@ -296,7 +301,7 @@ impl AppHost {
             published: Mutex::new(Vec::new()),
             config_seq: AtomicI64::new(1),
             unimplemented: Mutex::new(std::collections::HashSet::new()),
-            model: OnceLock::new(),
+            model: Mutex::new(None),
             resolver: Default::default(),
             activities: Default::default(),
             display: OnceLock::new(),
@@ -320,6 +325,7 @@ impl AppHost {
             pending_intents: Default::default(),
             broadcasts: Default::default(),
             user_restrictions: OnceLock::new(),
+            owners: OnceLock::new(),
             audio_policy: OnceLock::new(),
             volumes: Mutex::new(None),
             playback: Mutex::default(),
@@ -747,6 +753,29 @@ impl AppHost {
         }
     }
 
+    /// Whether DevicePolicyManagerService persisted a device owner
+    /// (`device_owner_2.xml`) or a user's profile owner
+    /// (`profile_owner.xml`): the app host runs no device policy.
+    fn device_or_profile_owner(&self) -> Result<bool, Exception> {
+        if let Some(owned) = self.owners.get() {
+            return Ok(*owned);
+        }
+        let data = &self.inputs()?.data;
+        let device = match std::fs::read(data.join("system/device_owner_2.xml")) {
+            Ok(bytes) => aim_android_xml::read(&bytes)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("device_owner_2.xml: {e}")))?
+                .children()
+                .any(|e| e.name == "device-owner"),
+            Err(_) => false,
+        };
+        let profile = std::fs::read_dir(data.join("system/users"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|user| user.path().join("profile_owner.xml").exists());
+        Ok(*self.owners.get_or_init(|| device || profile))
+    }
+
     /// User 0's base restrictions, as UserManagerService last persisted
     /// them (`/data/system/users/0.xml`'s `<restrictions>`).
     fn user_restrictions(&self) -> Result<&std::collections::BTreeSet<String>, Exception> {
@@ -891,6 +920,24 @@ impl AppHost {
     fn kill_process(&self, start_seq: i64) -> Result<(), String> {
         let pid = self.apps.lock().unwrap().get(&start_seq).map(|a| a.pid).ok_or_else(|| format!("no process of start {start_seq}"))?;
         self.call_agent(KILL_PROCESS, "killProcess", |data| data.write_i32(pid)).map(|_| ()).map_err(|e| format!("{e:?}"))
+    }
+
+    /// `ProcessList.killPackageProcessesLSP` of `package` in the user and
+    /// app id of `uid`: its processes are killed.
+    fn kill_package_processes(&self, package: &str, uid: u32) {
+        let starts: Vec<i64> = self
+            .apps
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, a)| a.package == package && a.uid == uid)
+            .map(|(seq, _)| *seq)
+            .collect();
+        for seq in starts {
+            if let Err(e) = self.kill_process(seq) {
+                eprintln!("app host: killing {package}'s process of start {seq}: {e}");
+            }
+        }
     }
 
     /// `ActivityManager.checkComponentPermission` of an exported
@@ -1157,13 +1204,30 @@ impl AppHost {
         let inputs = self.inputs()?;
         let state = self
             .model
-            .get_or_init(|| Arc::new(inputs.packages.state().clone()))
+            .lock()
+            .unwrap()
+            .get_or_insert_with(|| Arc::new(inputs.packages.state().clone()))
             .clone();
         let resolution = self
             .resolver
             .resolution(&state)
             .map_err(|_| Exception::new(EX_ILLEGAL_STATE, "package resolution: MIME groups"))?;
         Ok((state, resolution))
+    }
+
+    /// Replaces the package model's state `before` with `state`, which
+    /// differs from it in packages' user states only.
+    fn user_states_changed(
+        &self,
+        before: &Arc<crate::package::model::State>,
+        state: Arc<crate::package::model::State>,
+    ) -> Result<(), Exception> {
+        let mut model = self.model.lock().unwrap();
+        self.resolver
+            .user_states_changed(before, state.clone())
+            .map_err(|_| Exception::new(EX_ILLEGAL_STATE, "package resolution: MIME groups"))?;
+        *model = Some(state);
+        Ok(())
     }
 
     /// The exception of a method `name` of `service` it does not

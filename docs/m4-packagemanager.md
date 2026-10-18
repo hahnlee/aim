@@ -501,6 +501,8 @@ native code disabled Settings, the original PMS booted and read
 `enabled=2`, then native code restored the default; the original booted
 again and launched Settings (`am start -W`: status ok, 85 ms). No native
 writer runs beside PMS; this store is not yet wired into the C service.
+The app host, which runs no PMS, writes its enabled settings through it
+([app-host.md](app-host.md)).
 
 `package::service::PackageQueries` implements the host Binder receiver for
 `package` and `package_native` over the owner's published scan snapshot.

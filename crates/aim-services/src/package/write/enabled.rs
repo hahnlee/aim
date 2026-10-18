@@ -178,7 +178,7 @@ pub fn decide_with_policy(q: &Query<'_>, s: &Setting, calling_pid: i32,
     if !caller_is_target {
         match policy.and_then(|policy| policy.protected) {
             None => return Err(NotModelled("ProtectedPackages: the provisioning package and DevicePolicy's owners")),
-            Some(true) => return Ok(Err(Exception::security("Cannot change the package state of a protected package"))),
+            Some(true) => return Ok(Err(Exception::security(format!("Cannot disable a protected package: {}", s.package)))),
             Some(false) => {}
         }
     }

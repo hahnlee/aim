@@ -116,7 +116,7 @@ pub struct Enabled {
 }
 
 impl Enabled {
-    fn of(ps: &PackageState, user: i32) -> Enabled {
+    pub(crate) fn of(ps: &PackageState, user: i32) -> Enabled {
         let u = user_state(ps, user);
         Enabled {
             enabled: u.enabled,

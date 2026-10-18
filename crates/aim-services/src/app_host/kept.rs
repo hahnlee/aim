@@ -40,14 +40,29 @@ impl RawIntent {
     /// `new Intent()` (no action) or `new Intent(action)`, with `flags`
     /// and the extras `extras`.
     pub fn of(action: Option<&str>, flags: i32, extras: &[(&str, crate::bundle::Value)]) -> RawIntent {
+        Self::with_data(action, None, None, flags, extras)
+    }
+
+    /// `new Intent(action, data)`, with its package (`setPackage`),
+    /// `flags` and the extras `extras`.
+    pub fn with_data(
+        action: Option<&str>,
+        data: Option<&Uri>,
+        package: Option<&str>,
+        flags: i32,
+        extras: &[(&str, crate::bundle::Value)],
+    ) -> RawIntent {
         let mut p = Parcel::new();
         p.write_string8(action);
-        p.write_i32(0); // no data (`Uri.writeToParcel`)
+        match data {
+            Some(uri) => uri.write(&mut p),
+            None => p.write_i32(0), // `Uri.writeToParcel` of null
+        }
         p.write_string8(None); // type
         p.write_string8(None); // identifier
         p.write_i32(flags);
         p.write_i32(0); // extended flags
-        p.write_string8(None); // package
+        p.write_string8(package);
         p.write_string16(None); // no component
         p.write_i32(0); // no source bounds
         p.write_i32(0); // no categories

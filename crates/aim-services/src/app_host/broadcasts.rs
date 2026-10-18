@@ -802,7 +802,33 @@ impl Broadcasts {
     /// `sendBroadcastAsUser(intent, UserHandle.ALL)` of a system service of
     /// the app host: to the registered receivers (manifest receivers:
     /// #1462).
-    pub fn send_from_system(&self, host: &AppHost, mut intent: RawIntent) {
+    pub fn send_from_system(&self, host: &AppHost, intent: RawIntent) {
+        self.send_as_system(host, intent, USER_ALL, None, &[]);
+    }
+
+    /// `ActivityManagerInternal.broadcastIntentWithCallback` of
+    /// PackageManager: to `user`'s registered receivers holding
+    /// `required_permissions`, an application's only if its app id is in
+    /// `allow_list` when there is one.
+    pub fn send_from_package_manager(
+        &self,
+        host: &AppHost,
+        intent: RawIntent,
+        user: i32,
+        allow_list: Option<&[i32]>,
+        required_permissions: &[String],
+    ) {
+        self.send_as_system(host, intent, user, allow_list, required_permissions);
+    }
+
+    fn send_as_system(
+        &self,
+        host: &AppHost,
+        mut intent: RawIntent,
+        user: i32,
+        allow_list: Option<&[i32]>,
+        required_permissions: &[String],
+    ) {
         let flags = intent.intent.flags | FLAG_EXCLUDE_STOPPED_PACKAGES;
         let extended = intent.intent.extended_flags;
         intent.set_flags(flags, extended);
@@ -814,7 +840,7 @@ impl Broadcasts {
             calling_package: Some("android".into()),
             ordered: false,
             initial_sticky: false,
-            user: USER_ALL,
+            user,
             share_identity: false,
             result_code: 0,
             result_data: None,
@@ -824,20 +850,28 @@ impl Broadcasts {
             uid: SYSTEM_UID,
             original_uid: SYSTEM_UID,
             instant: false,
-            required_permissions: &[],
+            required_permissions,
             excluded_permissions: &[],
             excluded_packages: &[],
             app_op: OP_NONE,
             require_compat_change: None,
         };
         let mut st = self.state.lock().unwrap();
-        let targets = match self.registered_targets(host, &st, &record.intent.intent, None, USER_ALL, &sender) {
+        let targets = match self.registered_targets(host, &st, &record.intent.intent, None, user, &sender) {
             Ok(targets) => targets,
             Err(e) => {
                 eprintln!("app host: a system broadcast: {e:?}");
                 return;
             }
         };
+        let owner = |handle: u32| st.receivers.iter().find(|r| r.receiver.handle == handle).map(|r| r.uid);
+        let targets: Vec<_> = targets
+            .into_iter()
+            .filter(|&(_, handle, _)| {
+                let app_id = owner(handle).unwrap_or_default().rem_euclid(PER_USER_RANGE as i32);
+                allow_list.is_none_or(|allowed| app_id < FIRST_APPLICATION_UID || allowed.binary_search(&app_id).is_ok())
+            })
+            .collect();
         let mut touched = Vec::new();
         for (_, handle, seq) in targets {
             st.queues.entry(seq).or_default().push_back(Delivery::Once(record.clone(), handle));
