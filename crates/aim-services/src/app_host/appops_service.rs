@@ -1,20 +1,25 @@
 //! `appops`: AppOps for the app host, for the ops its services decide by
-//! (the clipboard's, the stream volumes', the accounts' and the network
-//! requests' WRITE_SETTINGS): an op's
-//! mode is ignored while a user restriction it has is set (but for root
-//! and system), else the uid's, else the package's, as the permission
-//! service last persisted them (`access.abx`), else the op's default
+//! (the clipboard's, the stream volumes', the accounts', usage stats' and
+//! the network requests' WRITE_SETTINGS): an op's mode is ignored while a
+//! user restriction it has is set (but for root and system), else the
+//! uid's, else the package's, as the permission service last persisted
+//! them (`access.abx`), else the op's default
 //! (`AppOpsManager.sAppOpInfos` at `android-16.0.0_r1`). A foreground mode
 //! (TAKE_AUDIO_FOCUS's, which audio focus notes) allows a uid while it has
 //! a process, as each of the app host's processes is top
 //! (`AppOpsUidStateTracker.evalMode`). The modes do not change while the
-//! app host runs, so watchers are kept and never called; foreground
-//! changes are not watched (#1529).
+//! app host runs, so mode watchers are kept and never called; foreground
+//! changes are not watched (#1529). An op noted for an app by another uid
+//! with `shouldCollectAsyncNotedOp` goes to the app's async-noted watchers
+//! (`collectAsyncNotedOp`), or waits for its `extractAsyncOps` when none
+//! took it.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_UNSUPPORTED_OPERATION, Exception, Parcel};
+use aim_binder_host::local::{Call, Reply, Service, Strong};
+use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception, Parcel};
+use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::com_android_internal_app_iappopsservice as appops;
 
 use super::{AppHost, reply};
@@ -57,6 +62,7 @@ const OPS: &[(i32, &str, i32, Option<&str>)] = &[
     (37, "android:audio_alarm_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
     (38, "android:audio_notification_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
     (39, "android:audio_bluetooth_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
+    (43, "android:get_usage_stats", MODE_DEFAULT, None),
     (OP_GET_ACCOUNTS, "android:get_accounts", MODE_ALLOWED, None),
     (64, "android:audio_accessibility_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
     (OP_SCHEDULE_EXACT_ALARM, "android:schedule_exact_alarm", MODE_DEFAULT, None),
@@ -108,15 +114,117 @@ fn package_mode(host: &AppHost, uid: i32, package: Option<&str>) -> Result<i32, 
     Ok(if owns { MODE_ALLOWED } else { MODE_ERRORED })
 }
 
+/// `IAppOpsAsyncNotedCallback`'s descriptor and `opNoted`.
+const ASYNC_NOTED_DESCRIPTOR: &str = "com.android.internal.app.IAppOpsAsyncNotedCallback";
+const OP_NOTED: u32 = 1;
+/// `AppOpsService.MAX_UNFORWARDED_OPS`.
+const MAX_UNFORWARDED_OPS: usize = 10;
+
+/// `AsyncNotedAppOp`.
+struct AsyncNoted {
+    op: i32,
+    noting_uid: i32,
+    attribution_tag: Option<String>,
+    message: String,
+    time: i64,
+}
+
+/// Its parcel: which nullable fields follow, then the fields.
+impl WriteParcelable for AsyncNoted {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i32(if self.attribution_tag.is_some() { 0x4 } else { 0 });
+        p.write_i32(self.op);
+        p.write_i32(self.noting_uid);
+        if let Some(tag) = &self.attribution_tag {
+            p.write_string16(Some(tag));
+        }
+        p.write_string16(Some(&self.message));
+        p.write_i64(self.time);
+    }
+}
+
+/// An app's async-noted watchers and the ops none took, by package and
+/// uid (`mAsyncOpWatchers`, `mUnforwardedAsyncNotedOps`).
+#[derive(Default)]
+struct Async {
+    watchers: HashMap<(String, i32), Vec<(Strong, u64)>>,
+    unforwarded: HashMap<(String, i32), Vec<AsyncNoted>>,
+}
+
 pub struct AppOps {
     host: Arc<AppHost>,
     watchers: Mutex<Vec<(i32, Binder)>>,
+    async_noted: Arc<Mutex<Async>>,
 }
 
 impl AppOps {
     pub fn new(host: Arc<AppHost>) -> Self {
-        AppOps { host, watchers: Mutex::new(Vec::new()) }
+        AppOps { host, watchers: Mutex::new(Vec::new()), async_noted: Default::default() }
     }
+
+    /// `verifyAndGetBypass`'s package check.
+    fn verify(&self, uid: i32, package: &str) -> Result<(), Exception> {
+        match package_mode(&self.host, uid, Some(package))? {
+            MODE_ALLOWED => Ok(()),
+            _ => Err(Exception::security(format!("Specified package \"{package}\" under uid {uid} but it is not"))),
+        }
+    }
+
+    /// `collectAsyncNotedOp`: the op noted for `package` of `uid` by
+    /// `noting_uid`, to its watchers, else kept for `extractAsyncOps`.
+    fn collect(&self, uid: i32, package: String, op: i32, attribution_tag: Option<String>, message: String, noting_uid: i32) {
+        let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+        let noted = AsyncNoted { op, noting_uid, attribution_tag, message, time };
+        let key = (package, uid);
+        let mut state = self.async_noted.lock().unwrap();
+        let Some(watchers) = state.watchers.get(&key) else { return };
+        let mut p = Parcel::new();
+        p.write_interface_token(ASYNC_NOTED_DESCRIPTOR);
+        p.write_i32(1);
+        noted.write_to(&mut p);
+        let forwarded = watchers.iter().fold(false, |sent, (w, _)| w.transact(OP_NOTED, &p, true).is_ok() || sent);
+        if !forwarded {
+            let unforwarded = state.unforwarded.entry(key).or_default();
+            unforwarded.push(noted);
+            if unforwarded.len() > MAX_UNFORWARDED_OPS {
+                unforwarded.remove(0);
+            }
+        }
+    }
+
+    /// `startWatchingAsyncNoted`: a watcher of the caller's `package`,
+    /// gone at its death.
+    fn start_watching_async(&self, uid: i32, package: String, callback: Binder) -> Result<(), Exception> {
+        self.verify(uid, &package)?;
+        let Binder::Handle(handle) = callback else {
+            return Err(Exception::illegal_argument("startWatchingAsyncNoted: a local callback"));
+        };
+        let strong = self.host.process.strong(handle);
+        let state = Arc::downgrade(&self.async_noted);
+        let key = (package, uid);
+        let dead = key.clone();
+        let death = self.host.process.link_to_death(
+            &strong,
+            Box::new(move || {
+                if let Some(state) = state.upgrade() {
+                    remove_watcher(&mut state.lock().unwrap(), &dead, handle);
+                }
+            }),
+        );
+        self.async_noted.lock().unwrap().watchers.entry(key).or_default().push((strong, death));
+        Ok(())
+    }
+}
+
+/// Removes the watcher `handle` of `key`, and the key with its last.
+fn remove_watcher(state: &mut Async, key: &(String, i32), handle: u32) -> Option<(Strong, u64)> {
+    let watchers = state.watchers.get_mut(key)?;
+    let i = watchers.iter().position(|(w, _)| w.handle == handle)?;
+    let removed = watchers.remove(i);
+    if watchers.is_empty() {
+        state.watchers.remove(key);
+    }
+    Some(removed)
 }
 
 impl Service for AppOps {
@@ -147,6 +255,13 @@ impl Service for AppOps {
                     Ok(mode) => mode,
                     Err(e) => return reply(Err(e)),
                 };
+                if mode == MODE_ALLOWED
+                    && args.should_collect_async_noted_op
+                    && let Some(package) = args.package_name.clone()
+                {
+                    let message = args.message.clone().unwrap_or_default();
+                    self.collect(args.uid, package, args.code, args.attribution_tag.clone(), message, call.sender_euid as i32);
+                }
                 // `SyncNotedAppOp`: which nullable fields follow, the mode,
                 // the op, the attribution tag, the package.
                 p.write_no_exception();
@@ -176,6 +291,46 @@ impl Service for AppOps {
                     self.watchers.lock().unwrap().push((args.op, callback));
                 }
                 appops::write_start_watching_mode_with_flags_reply(&mut p);
+            }
+            appops::START_WATCHING_ASYNC_NOTED => {
+                let args = appops::StartWatchingAsyncNoted::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let (Some(package), Some(callback)) = (args.package_name, args.callback) else {
+                    return reply(Err(Exception::new(EX_NULL_POINTER, "packageName or callback")));
+                };
+                if let Err(e) = self.start_watching_async(call.sender_euid as i32, package, callback) {
+                    return reply(Err(e));
+                }
+                appops::write_start_watching_async_noted_reply(&mut p);
+            }
+            appops::STOP_WATCHING_ASYNC_NOTED => {
+                let args = appops::StopWatchingAsyncNoted::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let (Some(package), Some(callback)) = (args.package_name, args.callback) else {
+                    return reply(Err(Exception::new(EX_NULL_POINTER, "packageName or callback")));
+                };
+                let uid = call.sender_euid as i32;
+                if let Err(e) = self.verify(uid, &package) {
+                    return reply(Err(e));
+                }
+                if let Binder::Handle(handle) = callback
+                    && let Some((strong, death)) = remove_watcher(&mut self.async_noted.lock().unwrap(), &(package, uid), handle)
+                {
+                    self.host.process.clear_death(&strong, death);
+                }
+                appops::write_stop_watching_async_noted_reply(&mut p);
+            }
+            appops::EXTRACT_ASYNC_OPS => {
+                let args = appops::ExtractAsyncOps::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let Some(package) = args.package_name else {
+                    return reply(Err(Exception::new(EX_NULL_POINTER, "packageName")));
+                };
+                let uid = call.sender_euid as i32;
+                if let Err(e) = self.verify(uid, &package) {
+                    return reply(Err(e));
+                }
+                // Null when none waits.
+                let ops = self.async_noted.lock().unwrap().unforwarded.remove(&(package, uid));
+                let ops: Option<Vec<Option<AsyncNoted>>> = ops.map(|ops| ops.into_iter().map(Some).collect());
+                appops::write_extract_async_ops_reply(&mut p, ops.as_deref());
             }
             code => return reply(Err(self.host.unimplemented("appops", code))),
         }

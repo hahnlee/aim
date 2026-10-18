@@ -32,7 +32,7 @@ const NOTIFY_SYNC_TO_NETWORK: i32 = 1;
 const NOTIFY_SKIP_NOTIFY_FOR_DESCENDANTS: i32 = 1 << 1;
 
 /// A parcelled `Uri`.
-struct ParcelUri(Uri);
+pub(super) struct ParcelUri(pub(super) Uri);
 
 impl ReadParcelable for ParcelUri {
     fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
