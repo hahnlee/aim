@@ -626,7 +626,7 @@ fn meminfo() -> String {
     let (free, active, inactive, wired) = (pages(0), pages(1), pages(2), pages(3));
     // external_page_count (file-backed) is word 34 of vm_statistics64.
     let cached = pages(34);
-    let avail = free + inactive;
+    let avail = aim_host_memory::available() / 1024;
     let kb = total / 1024;
     format!(
         "MemTotal:       {kb:>8} kB\nMemFree:        {free:>8} kB\nMemAvailable:   {avail:>8} kB\n\

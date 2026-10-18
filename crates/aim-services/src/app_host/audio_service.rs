@@ -19,7 +19,7 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
@@ -43,6 +43,7 @@ const MODIFY_AUDIO_SETTINGS: &str = "android.permission.MODIFY_AUDIO_SETTINGS";
 const MODIFY_AUDIO_ROUTING: &str = "android.permission.MODIFY_AUDIO_ROUTING";
 const MODIFY_PHONE_STATE: &str = "android.permission.MODIFY_PHONE_STATE";
 const QUERY_AUDIO_STATE: &str = "android.permission.QUERY_AUDIO_STATE";
+const REMOTE_AUDIO_PLAYBACK: &str = "android.permission.REMOTE_AUDIO_PLAYBACK";
 const CHANGE_ACCESSIBILITY_VOLUME: &str = "android.permission.CHANGE_ACCESSIBILITY_VOLUME";
 const BLUETOOTH_PRIVILEGED: &str = "android.permission.BLUETOOTH_PRIVILEGED";
 /// The permissions the focus calls check.
@@ -131,6 +132,9 @@ pub struct AudioService {
     effects: std::sync::OnceLock<[String; 16]>,
     /// The `IAudioManagerNative` node audioserver gets.
     native: Binder,
+    /// The ringtone player SystemUI sets (`mRingtonePlayer`): none in the
+    /// app host until one is set.
+    ringtone_player: Mutex<Option<Strong>>,
 }
 
 impl AudioService {
@@ -142,6 +146,7 @@ impl AudioService {
             home_sound: AtomicBool::new(false),
             effects: std::sync::OnceLock::new(),
             native,
+            ringtone_player: Mutex::new(None),
         }
     }
 
@@ -838,6 +843,26 @@ impl Service for AudioService {
                 }
                 let uids = host.playback.lock().unwrap().ducked_uids().into_iter().map(ParcelValue::Integer).collect();
                 audio::write_get_focus_ducked_uids_for_test_reply(&mut p, &Some(uids));
+            }
+            audio::SET_RINGTONE_PLAYER => {
+                let a = audio::SetRingtonePlayer::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match host.granted(REMOTE_AUDIO_PLAYBACK, uid) {
+                    Ok(true) => {}
+                    Ok(false) => return reply(Err(Exception::security(format!("Access denied, requires: {REMOTE_AUDIO_PLAYBACK}")))),
+                    Err(e) => return reply(Err(e)),
+                }
+                let player = match a.player {
+                    Some(Binder::Handle(handle)) => Some(host.process.strong(handle)),
+                    None => None,
+                    Some(_) => return Err(BAD_VALUE),
+                };
+                *self.ringtone_player.lock().unwrap() = player;
+                audio::write_set_ringtone_player_reply(&mut p);
+            }
+            audio::GET_RINGTONE_PLAYER => {
+                audio::GetRingtonePlayer::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let player = self.ringtone_player.lock().unwrap().as_ref().map(Strong::binder);
+                audio::write_get_ringtone_player_reply(&mut p, player);
             }
             audio::GET_FOCUS_STACK => {
                 audio::GetFocusStack::read(&mut call.data).map_err(|_| BAD_VALUE)?;

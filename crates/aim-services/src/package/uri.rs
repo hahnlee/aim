@@ -79,6 +79,15 @@ impl Uri {
         writer.string(Some(&self.string));
     }
 
+    /// The class of the `Uri`, as `Parcel.writeParcelable` names it.
+    pub fn class_name(&self) -> &'static str {
+        match self.kind {
+            Kind::String => "android.net.Uri$StringUri",
+            Kind::Opaque => "android.net.Uri$OpaqueUri",
+            Kind::Hierarchical | Kind::PreferredHierarchical => "android.net.Uri$HierarchicalUri",
+        }
+    }
+
     /// `Uri.writeToParcel`: its type, then its string.
     pub fn write(&self, p: &mut aim_binder_host::parcel::Parcel) {
         p.write_i32(match self.kind {

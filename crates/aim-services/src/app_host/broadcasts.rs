@@ -931,6 +931,11 @@ impl Broadcasts {
             Ok(targets) => self.enqueue(host, &mut st, &record, targets),
             Err(e) => eprintln!("app host: a system broadcast: {e:?}"),
         }
+        drop(st);
+        // `broadcastIntentLocked`'s own handling of the zone's change.
+        if record.intent.intent.action.as_deref() == Some("android.intent.action.TIMEZONE_CHANGED") {
+            host.update_time_zone();
+        }
     }
 
     /// `collectReceiverComponents` for `intent`, then BroadcastSkipPolicy's

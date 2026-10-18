@@ -246,7 +246,7 @@ fn derived_image_tzdata_has_the_macs_zones() {
     let Some(image) = derived_image() else {
         return;
     };
-    let tzdata = std::fs::read(image.join(aim_guest_init::mac::TZDATA.trim_start_matches('/')))
+    let tzdata = std::fs::read(image.join(aim_services::tzdata::PATH.trim_start_matches('/')))
         .expect("tzdata");
     for zone in [
         "Asia/Seoul",
@@ -255,7 +255,7 @@ fn derived_image_tzdata_has_the_macs_zones() {
         "UTC",
         "Etc/GMT-14",
     ] {
-        assert!(aim_guest_init::mac::tzdata_has(&tzdata, zone), "{zone}");
+        assert!(aim_services::tzdata::has(&tzdata, zone), "{zone}");
     }
-    assert!(!aim_guest_init::mac::tzdata_has(&tzdata, "Mars/Olympus"));
+    assert!(!aim_services::tzdata::has(&tzdata, "Mars/Olympus"));
 }

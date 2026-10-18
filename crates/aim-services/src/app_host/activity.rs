@@ -90,6 +90,8 @@ pub struct ActivityRecord {
     pub start_seq: i64,
     pub started: Instant,
     pub resumed: bool,
+    /// Whether it reported itself fully drawn (`reportFullyDrawn`).
+    pub fully_drawn: bool,
     pub requested_orientation: i32,
     /// `ActivityInfo.getRealConfigChanged`: the changes it handles itself.
     pub config_changes: i32,
@@ -639,6 +641,15 @@ impl Service for ActivityClientController {
                 }
                 self.0.activity_reported(token, Report::Idle);
                 empty()
+            }
+            // `ActivityMetricsLogger.notifyFullyDrawn`: its launch's first
+            // report is logged (one-way).
+            acc::REPORT_ACTIVITY_FULLY_DRAWN => {
+                let a = acc::ReportActivityFullyDrawn::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if self.0.activities.with(a.token, |r| !std::mem::replace(&mut r.fully_drawn, true)) == Some(true) {
+                    self.report(a.token, "fully drawn", |_| {});
+                }
+                Ok(Parcel::new())
             }
             acc::ACTIVITY_TOP_RESUMED_STATE_LOST => empty(),
             // `finishRelaunching`: its relaunch is done (oneway).

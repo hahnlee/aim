@@ -10,11 +10,16 @@
 //! rescheduled; alarm clocks and `getNextAlarmClock`, with
 //! `ACTION_NEXT_ALARM_CLOCK_CHANGED`; and the clock's own broadcasts,
 //! `ACTION_TIME_TICK` each minute and `ACTION_DATE_CHANGED` at local
-//! midnight. Batching, standby buckets, quotas and idle (doze) are not run:
-//! the app host's apps are all top, the device never idles. A wakeup alarm
-//! does not wake the Mac, and the time and time zone are the Mac's
-//! (`setTime` and `setTimeZone` are not implemented, nor a change of the
-//! Mac's clock followed, #1501).
+//! midnight. A change of the Mac's clock is noticed as `AlarmThread`
+//! notices one (more than a second off the elapsed clock), RTC alarms then
+//! moved to it and `ACTION_TIME_CHANGED` sent. The time zone follows the
+//! Mac's, as the vendor init has the original's follow it
+//! (`vendor.aim.mac.time_zone`, docs/mac-settings.md): `setTimeZoneImpl`
+//! sets `persist.sys.timezone` and sends `ACTION_TIMEZONE_CHANGED`; apps may
+//! set it too (`setTimeZone`). Batching, standby buckets, quotas and idle
+//! (doze) are not run: the app host's apps are all top, the device never
+//! idles. A wakeup alarm does not wake the Mac; the time is the Mac's
+//! (`setTime` is not implemented, #1501).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Condvar, Mutex, Weak};
@@ -59,6 +64,18 @@ const EXTRA_ALARM_COUNT: &str = "android.intent.extra.ALARM_COUNT";
 const ACTION_TIME_TICK: &str = "android.intent.action.TIME_TICK";
 const ACTION_DATE_CHANGED: &str = "android.intent.action.DATE_CHANGED";
 const ACTION_NEXT_ALARM_CLOCK_CHANGED: &str = "android.app.action.NEXT_ALARM_CLOCK_CHANGED";
+const ACTION_TIME_CHANGED: &str = "android.intent.action.TIME_SET";
+const ACTION_TIMEZONE_CHANGED: &str = "android.intent.action.TIMEZONE_CHANGED";
+const EXTRA_TIMEZONE: &str = "time-zone";
+const FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT: i32 = 0x0400_0000;
+/// The Mac's zone (guest-init sets it), the device's, and how sure it is
+/// (`SystemTimeZone`, `TIME_ZONE_CONFIDENCE_HIGH`).
+const MAC_TIME_ZONE: &str = "vendor.aim.mac.time_zone";
+const TIME_ZONE: &str = "persist.sys.timezone";
+const TIME_ZONE_CONFIDENCE: &str = "persist.sys.timezone_confidence";
+const TIME_ZONE_CONFIDENCE_HIGH: i32 = 100;
+/// How often the alarms' thread looks at the clock and the Mac's zone.
+const POLL_MS: i64 = 2000;
 const FLAG_RECEIVER_REGISTERED_ONLY: i32 = 0x4000_0000;
 const FLAG_RECEIVER_REPLACE_PENDING: i32 = 0x2000_0000;
 const FLAG_RECEIVER_FOREGROUND: i32 = 0x1000_0000;
@@ -110,8 +127,10 @@ impl WriteParcelable for ClockInfo {
 /// It is delivered at the start of its window, since alarms are not
 /// batched.
 struct Alarm {
-    /// The elapsed time of the start of its window.
+    /// The elapsed time of the start of its window, and an RTC alarm's
+    /// wall time (`origWhen`), which a change of the clock moves it to.
     requested: i64,
+    rtc_when: Option<i64>,
     interval: i64,
     flags: i32,
     operation: Option<Binder>,
@@ -135,6 +154,11 @@ struct State {
     /// Elapsed times of the next minute and the next local midnight.
     next_tick: i64,
     next_date: i64,
+    /// The wall and elapsed times the clock was last right at
+    /// (`mLastTimeChangeClockTime`, `mLastTimeChangeRealtime`).
+    last_clock: (i64, i64),
+    /// The Mac's zone last followed.
+    mac_zone: Option<String>,
 }
 
 struct Shared {
@@ -145,6 +169,10 @@ struct Shared {
 pub struct AlarmManager {
     host: Arc<AppHost>,
     shared: Arc<Shared>,
+}
+
+unsafe extern "C" {
+    fn tzset();
 }
 
 /// `SystemClock.elapsedRealtime()` and `System.currentTimeMillis()`.
@@ -181,7 +209,7 @@ impl AlarmManager {
         let now = elapsed_ms();
         let (next_tick, next_date) = next_tick_and_date(now);
         let shared = Arc::new(Shared {
-            state: Mutex::new(State { next_tick, next_date, ..Default::default() }),
+            state: Mutex::new(State { next_tick, next_date, last_clock: (wall_ms(), now), ..Default::default() }),
             changed: Condvar::new(),
         });
         let weak = Arc::downgrade(&host);
@@ -317,7 +345,8 @@ impl AlarmManager {
         }
         // An alarm of the same operation or listener is replaced.
         remove_matching(&self.host, &mut state, operation, listener.as_ref().map(|(l, _)| l.handle));
-        state.alarms.push(Alarm { requested, interval, flags, operation, listener, clock, uid, package });
+        let rtc_when = matches!(kind, RTC | RTC_WAKEUP).then_some(when);
+        state.alarms.push(Alarm { requested, rtc_when, interval, flags, operation, listener, clock, uid, package });
         self.alarm_clocks_changed(&mut state);
         self.shared.changed.notify_all();
         Ok(())
@@ -384,13 +413,16 @@ fn run(host: Weak<AppHost>, shared: Arc<Shared>) {
     loop {
         let mut state = shared.state.lock().unwrap();
         let now = elapsed_ms();
+        let Some(host) = host.upgrade() else { return };
+        follow_mac_zone(&host, &mut state, now);
+        let time_changed = clock_changed(&mut state, now);
         let next = state.alarms.iter().map(|a| a.requested).chain([state.next_tick, state.next_date]).min().unwrap_or(now);
-        if next > now {
-            let wait = Duration::from_millis((next - now) as u64);
+        if next > now && !time_changed {
+            drop(host);
+            let wait = Duration::from_millis((next - now).min(POLL_MS) as u64);
             drop(shared.changed.wait_timeout(state, wait).unwrap());
             continue;
         }
-        let Some(host) = host.upgrade() else { return };
         let mut due = Vec::new();
         let mut kept = Vec::new();
         for mut a in std::mem::take(&mut state.alarms) {
@@ -406,6 +438,7 @@ fn run(host: Weak<AppHost>, shared: Arc<Shared>) {
                 // Repeating alarms have no listener (`set` refuses one).
                 due.push((a.operation, None, count, a.package.clone()));
                 a.requested = next;
+                a.rtc_when = a.rtc_when.map(|w| w + count * a.interval);
                 kept.push(a);
             } else {
                 let listener = a.listener.map(|(l, death)| {
@@ -451,7 +484,75 @@ fn run(host: Weak<AppHost>, shared: Arc<Shared>) {
             let flags = FLAG_RECEIVER_REPLACE_PENDING | FLAG_RECEIVER_INCLUDE_BACKGROUND | FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS;
             host.broadcasts.send_from_system(&host, RawIntent::of(Some(ACTION_DATE_CHANGED), flags, &[]));
         }
+        if time_changed {
+            let flags = FLAG_RECEIVER_REPLACE_PENDING
+                | FLAG_RECEIVER_FOREGROUND
+                | FLAG_RECEIVER_INCLUDE_BACKGROUND
+                | FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS;
+            host.broadcasts.send_from_system(&host, RawIntent::of(Some(ACTION_TIME_CHANGED), flags, &[]));
+        }
     }
+}
+
+/// `AlarmThread`'s time change: the wall clock more than a second off
+/// where the elapsed clock puts it moves the RTC alarms
+/// (`rebatchAllAlarms`), the next minute and midnight; whether it changed.
+fn clock_changed(state: &mut State, now: i64) -> bool {
+    let wall = wall_ms();
+    let (last_wall, last_elapsed) = state.last_clock;
+    let expected = last_wall + (now - last_elapsed);
+    state.last_clock = (wall, now);
+    if (wall - expected).abs() <= 1000 {
+        return false;
+    }
+    eprintln!("app host: the clock changed by {} ms", wall - expected);
+    for a in &mut state.alarms {
+        if let Some(when) = a.rtc_when {
+            a.requested = to_elapsed(when, RTC);
+        }
+    }
+    (state.next_tick, state.next_date) = next_tick_and_date(now);
+    true
+}
+
+/// The Mac's zone, followed when it changes.
+fn follow_mac_zone(host: &AppHost, state: &mut State, now: i64) {
+    if let Some(zone) = host.property(MAC_TIME_ZONE)
+        && state.mac_zone.as_ref() != Some(&zone)
+    {
+        state.mac_zone = Some(zone.clone());
+        set_time_zone(host, state, now, &zone);
+    }
+}
+
+/// `setTimeZoneImpl` with `SystemTimeZone.setTimeZoneId`: a zone of the
+/// image's tzdata becomes the device's, with high confidence; a new one
+/// moves midnight and is broadcast.
+fn set_time_zone(host: &AppHost, state: &mut State, now: i64, zone: &str) {
+    if zone.is_empty() || !host.valid_time_zone(zone) {
+        eprintln!("app host: setTimeZoneId: Invalid time zone ID. timeZoneId={zone}");
+        return;
+    }
+    let changed = host.property(TIME_ZONE).as_deref() != Some(zone);
+    if changed {
+        host.set_property(TIME_ZONE, zone);
+    }
+    if host.property(TIME_ZONE_CONFIDENCE).and_then(|c| c.parse().ok()) != Some(TIME_ZONE_CONFIDENCE_HIGH) {
+        host.set_property(TIME_ZONE_CONFIDENCE, &TIME_ZONE_CONFIDENCE_HIGH.to_string());
+    }
+    if !changed {
+        return;
+    }
+    // The date changes at the zone's midnight (the Mac's, re-read).
+    // SAFETY: tzset re-reads the process's zone.
+    unsafe { tzset() };
+    state.next_date = next_tick_and_date(now).1;
+    let flags = FLAG_RECEIVER_REPLACE_PENDING
+        | FLAG_RECEIVER_INCLUDE_BACKGROUND
+        | FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT
+        | FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS;
+    let extras = [(EXTRA_TIMEZONE, crate::bundle::Value::String(Some(zone.to_string())))];
+    host.broadcasts.send_from_system(host, RawIntent::of(Some(ACTION_TIMEZONE_CHANGED), flags, &extras));
 }
 
 impl Service for AlarmManager {
@@ -577,6 +678,16 @@ impl Service for AlarmManager {
                     alarm::write_has_schedule_exact_alarm_reply(&mut p, has);
                     Ok(p)
                 })())
+            }
+            alarm::SET_TIME_ZONE => {
+                let a = alarm::SetTimeZone::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if self.host.check_permission(Some("android.permission.SET_TIME_ZONE"), uid).map_err(|_| BAD_VALUE)? != 0 {
+                    return reply(Err(Exception::security(format!("setTimeZone: Neither user {uid} nor current process has android.permission.SET_TIME_ZONE."))));
+                }
+                set_time_zone(&self.host, &mut self.shared.state.lock().unwrap(), elapsed_ms(), a.zone.as_deref().unwrap_or_default());
+                let mut p = Parcel::new();
+                alarm::write_set_time_zone_reply(&mut p);
+                Ok(p)
             }
             code => reply(Err(self.host.unimplemented("alarm", code))),
         }

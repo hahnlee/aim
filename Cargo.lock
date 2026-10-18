@@ -296,6 +296,7 @@ dependencies = [
  "aim-host-audio",
  "aim-host-display",
  "aim-host-location",
+ "aim-host-memory",
  "aim-host-sensors",
  "aim-hostcall",
  "aim-paths",

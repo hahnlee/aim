@@ -45,9 +45,6 @@ pub fn keyboard_layout(id: &str) -> &'static str {
         .map_or("keyboard_layout_english_us", |(_, android)| android)
 }
 
-/// The guest's tzdata: bionic and libcore resolve zone names in it.
-pub const TZDATA: &str = "/apex/com.android.tzdata/etc/tz/tzdata";
-
 /// The IANA name `/etc/localtime` links to
 /// (`/var/db/timezone/zoneinfo/Asia/Seoul`).
 pub fn zone_from_localtime(target: &str) -> Option<&str> {
@@ -63,36 +60,13 @@ pub fn zone_from_localtime(target: &str) -> Option<&str> {
     valid.then_some(name)
 }
 
-/// Whether bionic's tzdata file (`ZoneInfoDb`: a 12-byte version, the
-/// index, data and final offsets, then 52-byte entries of a 40-byte name
-/// and three integers) has a zone called `name`.
-pub fn tzdata_has(tzdata: &[u8], name: &str) -> bool {
-    let be = |at: usize| -> Option<usize> {
-        Some(u32::from_be_bytes(tzdata.get(at..at + 4)?.try_into().ok()?) as usize)
-    };
-    if !tzdata.starts_with(b"tzdata") || name.len() >= 40 {
-        return false;
-    }
-    let (Some(index), Some(data)) = (be(12), be(16)) else {
-        return false;
-    };
-    let Some(entries) = tzdata.get(index..data.min(tzdata.len())) else {
-        return false;
-    };
-    entries.chunks_exact(52).any(|entry| {
-        let stored = &entry[..40];
-        let end = stored.iter().position(|&b| b == 0).unwrap_or(40);
-        &stored[..end] == name.as_bytes()
-    })
-}
-
 /// The Mac's current values of the `vendor.aim.mac.*` properties. The time
 /// zone is left out when the guest's tzdata (`tzdata`) lacks it.
 pub fn properties(tzdata: &[u8]) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
     if let Ok(target) = std::fs::read_link("/etc/localtime")
         && let Some(zone) = zone_from_localtime(&target.to_string_lossy())
-        && tzdata_has(tzdata, zone)
+        && aim_services::tzdata::has(tzdata, zone)
     {
         out.push((TIME_ZONE_PROP, zone.to_string()));
     }
@@ -238,36 +212,6 @@ mod tests {
         assert_eq!(zone("/var/db/timezone/zoneinfo/"), None);
         assert_eq!(zone("/var/db/timezone/zoneinfo/../../etc"), None);
         assert_eq!(zone("/etc/foo"), None);
-    }
-
-    fn tzdata(names: &[&str]) -> Vec<u8> {
-        let mut out = b"tzdata2025a\0".to_vec();
-        let index = 24u32;
-        let data = index + 52 * names.len() as u32;
-        for offset in [index, data, data] {
-            out.extend(offset.to_be_bytes());
-        }
-        for name in names {
-            let mut entry = [0u8; 52];
-            entry[..name.len()].copy_from_slice(name.as_bytes());
-            out.extend(entry);
-        }
-        out
-    }
-
-    #[test]
-    fn tzdata_index_lookup() {
-        let data = tzdata(&[
-            "Africa/Abidjan",
-            "Asia/Seoul",
-            "America/Argentina/ComodRivadavia",
-        ]);
-        assert!(tzdata_has(&data, "Asia/Seoul"));
-        assert!(tzdata_has(&data, "America/Argentina/ComodRivadavia"));
-        assert!(!tzdata_has(&data, "Asia/Seo"));
-        assert!(!tzdata_has(&data, "Mars/Olympus"));
-        assert!(!tzdata_has(b"nottzdata", "Asia/Seoul"));
-        assert!(!tzdata_has(&data[..30], "Asia/Seoul"));
     }
 
     #[test]

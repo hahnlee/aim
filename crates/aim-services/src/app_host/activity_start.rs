@@ -221,6 +221,7 @@ impl AppHost {
             start_seq,
             started: std::time::Instant::now(),
             resumed: false,
+            fully_drawn: false,
             requested_orientation: -1,
             config_changes: ActivityRecord::real_config_changes(&info),
             size_buckets: None,

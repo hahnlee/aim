@@ -1,6 +1,6 @@
 //! `appops`: AppOps for the app host, for the ops its services decide by
 //! (the clipboard's, the stream volumes', the accounts', usage stats',
-//! running in the background's and the network requests'
+//! running in the background's (and any in it) and the network requests'
 //! WRITE_SETTINGS): an op's mode is ignored while a user restriction it
 //! has is set (but for root and system), else the uid's, else the
 //! package's, as the permission service last persisted them
@@ -26,7 +26,7 @@ use aim_service_aidl::com_android_internal_app_iappopsservice as appops;
 use super::{AppHost, reply};
 
 /// `AppOpsManager.MODE_ALLOWED`, `MODE_IGNORED`, `MODE_ERRORED`.
-const MODE_ALLOWED: i32 = 0;
+pub(super) const MODE_ALLOWED: i32 = 0;
 const MODE_IGNORED: i32 = 1;
 const MODE_ERRORED: i32 = 2;
 pub(super) const MODE_DEFAULT: i32 = 3;
@@ -66,6 +66,7 @@ const OPS: &[(i32, &str, i32, Option<&str>)] = &[
     (43, "android:get_usage_stats", MODE_DEFAULT, None),
     (OP_GET_ACCOUNTS, "android:get_accounts", MODE_ALLOWED, None),
     (63, "android:run_in_background", MODE_ALLOWED, None),
+    (70, "android:run_any_in_background", MODE_ALLOWED, None),
     (64, "android:audio_accessibility_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
     (OP_SCHEDULE_EXACT_ALARM, "android:schedule_exact_alarm", MODE_DEFAULT, None),
     (OP_USE_FULL_SCREEN_INTENT, "android:use_full_screen_intent", MODE_DEFAULT, None),
