@@ -935,6 +935,24 @@ impl Preferences {
         self.packages.last_mut().unwrap()
     }
 
+    /// `setNotificationDelegate`: an enabled delegate of the package.
+    pub fn set_delegate(&mut self, name: &str, uid: i32, delegate: &str, delegate_uid: i32, defaults: &Defaults<'_>) {
+        self.package_or_create(name, uid, defaults).delegate = Some(Element {
+            name: "delegate".into(),
+            attrs: vec![("name".into(), Value::String(delegate.into())), ("uid".into(), Value::Int(delegate_uid))],
+            content: Vec::new(),
+        });
+    }
+
+    /// `revokeNotificationDelegate`: the package's delegate disabled
+    /// (`writeXml` names `enabled` only when it is not the default).
+    pub fn revoke_delegate(&mut self, name: &str, uid: i32) {
+        if let Some(d) = self.package_mut(name, uid).and_then(|p| p.delegate.as_mut()) {
+            d.attrs.retain(|(n, _)| n != "enabled");
+            d.attrs.push(("enabled".into(), Value::Bool(false)));
+        }
+    }
+
     /// `createNotificationChannelGroup`; whether it changed.
     pub fn create_group(
         &mut self,
@@ -1499,6 +1517,20 @@ mod tests {
     fn long_text_is_trimmed() {
         let c = Channel::new(&"x".repeat(1200), "n", 3);
         assert_eq!(c.id.len(), MAX_TEXT_LENGTH);
+    }
+
+    /// A delegate set is written enabled (no `enabled`); revoked, it is
+    /// written disabled.
+    #[test]
+    fn delegates_are_set_and_revoked() {
+        let ranking = aim_android_xml::read(br#"<ranking version="4" />"#).unwrap();
+        let mut prefs = Preferences::read(&ranking, &defaults(), 0);
+        prefs.set_delegate("app", 10001, "d", 10002, &defaults());
+        let delegate = |prefs: &Preferences| prefs.to_xml().children().next().unwrap().children().find(|c| c.name == "delegate").cloned().unwrap();
+        let d = delegate(&prefs);
+        assert_eq!((d.string("name").as_deref(), d.int("uid").unwrap(), d.attr("enabled").is_none()), (Some("d"), Some(10002), true));
+        prefs.revoke_delegate("app", 10001);
+        assert_eq!(delegate(&prefs).bool("enabled").unwrap(), Some(false));
     }
 
     /// The `<ranking>` element is written back with what it held.
