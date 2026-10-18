@@ -165,6 +165,26 @@ impl WriteParcelable for DisplayInfo<'_> {
     }
 }
 
+/// `WifiDisplayStatus()`: unavailable, not scanning, not connected, no
+/// displays, and a default `WifiDisplaySessionInfo` (a client, session 0,
+/// empty group, passphrase and address).
+struct NoWifiDisplay;
+
+impl WriteParcelable for NoWifiDisplay {
+    fn write_to(&self, p: &mut Parcel) {
+        for _ in 0..3 {
+            p.write_i32(0); // feature, scan and active display states
+        }
+        p.write_i32(0); // no active display
+        p.write_i32(0); // no displays
+        p.write_i32(1);
+        p.write_i32(0);
+        for _ in 0..3 {
+            p.write_string16(Some(""));
+        }
+    }
+}
+
 /// `PersistentDataStore`'s file under the guest's `/data`.
 const STATE_XML: &str = "system/display-manager-state.xml";
 
@@ -354,6 +374,27 @@ impl Service for DisplayManager {
                 p.write_no_exception();
                 p.write_raw(&support, &[]);
             }
+            // `getWifiDisplayStatusInternal`: the default status without a
+            // Wi-Fi display adapter (`registerWifiDisplayAdapterLocked`:
+            // `config_enableWifiDisplay` or `persist.debug.wfd.enable`), whose
+            // Wi-Fi P2P is not modelled.
+            dm::GET_WIFI_DISPLAY_STATUS => {
+                dm::GetWifiDisplayStatus::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let configured = self.host.inputs().and_then(|inputs| {
+                    inputs
+                        .packages
+                        .framework_bool("config_enableWifiDisplay")
+                        .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no config_enableWifiDisplay"))
+                });
+                let forced = self.host.property("persist.debug.wfd.enable").and_then(|v| super::activity::parse_int(&v)) == Some(1);
+                match configured {
+                    Ok(true) => return reply(Err(self.host.unimplemented_named("display", "a Wi-Fi display adapter (#1658)"))),
+                    Ok(false) if forced => return reply(Err(self.host.unimplemented_named("display", "a Wi-Fi display adapter (#1658)"))),
+                    Ok(false) => {}
+                    Err(e) => return reply(Err(e)),
+                }
+                dm::write_get_wifi_display_status_reply(&mut p, Some(&NoWifiDisplay));
+            }
             dm::GET_STABLE_DISPLAY_SIZE => {
                 dm::GetStableDisplaySize::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 match self.stable_display_size() {
@@ -373,6 +414,21 @@ mod tests {
 
     /// The stable values are read as `loadFromXml` reads them, and set in
     /// a document as `saveToXml` writes them.
+    /// The default `WifiDisplayStatus`, as `writeToParcel` writes it.
+    #[test]
+    fn no_wifi_display_is_the_default_status() {
+        let mut p = Parcel::new();
+        NoWifiDisplay.write_to(&mut p);
+        let mut expected = Parcel::new();
+        for v in [0, 0, 0, 0, 0, 1, 0] {
+            expected.write_i32(v);
+        }
+        for _ in 0..3 {
+            expected.write_string16(Some(""));
+        }
+        assert_eq!(p.data(), expected.data());
+    }
+
     #[test]
     fn stable_values_are_read_and_set_as_the_store_does() {
         let xml = b"<display-manager-state><display-states /><stable-device-values><stable-display-width>1080</stable-display-width><stable-display-height>x</stable-display-height></stable-device-values></display-manager-state>";
