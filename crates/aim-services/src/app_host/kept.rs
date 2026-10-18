@@ -307,9 +307,12 @@ impl RawIntent {
                 if ma != mb {
                     return Err(aim_binder_host::parcel::BAD_VALUE);
                 }
-                let mut parts: Vec<Raw> = eb.into_iter().filter(|(k, _)| !ea.iter().any(|(m, _)| m == k)).map(|(_, r)| r).collect();
-                let count = parts.len() + ea.len();
-                parts.extend(ea.into_iter().map(|(_, r)| r));
+                // A new Bundle of the other's, `putAll` of this one's: in
+                // their `ArrayMap` order.
+                let mut parts: Vec<_> = eb.into_iter().filter(|(k, _)| !ea.iter().any(|(m, _)| m == k)).collect();
+                parts.extend(ea);
+                let count = parts.len();
+                let parts: Vec<Raw> = crate::package::info::array_order(parts, |(k, _)| k.as_str()).into_iter().map(|(_, r)| r).collect();
                 let body = Raw::concat(&parts);
                 let mut head = Parcel::new();
                 head.write_i32((4 + body.parcel().data().len()) as i32);
@@ -624,6 +627,15 @@ mod tests {
         let bare = RawIntent::of(None, 0, &[]);
         let (filled, _) = bare.fill_in(&other, 0).unwrap();
         assert_eq!(extras(&filled).len(), 2);
+        // Merged extras keep their `ArrayMap` order, as an alarm's count
+        // filled into its intent does.
+        let count = RawIntent::of(None, 0, &[("android.intent.extra.ALARM_COUNT", Value::Int(1)), ("type", Value::Int(2))]);
+        let (filled, _) = mine.fill_in(&count, 0).unwrap();
+        let (_, keys, _) = entries(&filled.raw, Spans::of(&filled.raw).unwrap().extras).unwrap().unwrap();
+        let keys: Vec<&str> = keys.iter().map(|(k, _)| k.as_str()).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_by_key(|k| crate::package::info::java_hash(k));
+        assert_eq!((keys.len(), keys), (3, sorted));
     }
 
     /// `Intent.cloneFilter` keeps what `filterEquals` compares and drops
