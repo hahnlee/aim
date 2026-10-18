@@ -81,6 +81,125 @@ pub struct Windows {
     next: Mutex<u32>,
 }
 
+/// A window context's registration (`WindowContextListenerController`):
+/// its process, its client token held with its death link, its caller's
+/// uid, and the configuration last reported to it.
+pub(super) struct WindowContext {
+    start_seq: i64,
+    token: aim_binder_host::local::Strong,
+    death: u64,
+    uid: u32,
+    reported: Configuration,
+}
+
+/// `WindowContextInfo`: a configuration on a display.
+struct WindowContextInfo<'a>(&'a Configuration, i32);
+
+impl WriteParcelable for WindowContextInfo<'_> {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i32(1);
+        self.0.write_to(p);
+        p.write_i32(self.1);
+    }
+}
+
+/// A `WindowContextInfo` on the default display.
+struct WindowContextInfoBody<'a>(&'a Configuration);
+
+impl WriteParcelable for WindowContextInfoBody<'_> {
+    fn write_to(&self, p: &mut Parcel) {
+        WindowContextInfo(self.0, 0).write_to(p);
+    }
+}
+
+/// `WindowContextInfoChangeItem`: a window context's new configuration.
+struct WindowContextInfoChangeItem {
+    token: Binder,
+    config: Configuration,
+}
+
+impl Item for WindowContextInfoChangeItem {
+    fn class(&self) -> &'static str {
+        "android.app.servertransaction.WindowContextInfoChangeItem"
+    }
+
+    fn write_fields(&self, p: &mut Parcel) {
+        p.write_binder(Some(self.token.clone()));
+        p.write_i32(1);
+        WindowContextInfo(&self.config, 0).write_to(p);
+    }
+}
+
+impl AppHost {
+    /// `attachWindowContextToDisplayArea`: none for a caller that is not
+    /// a process of the app host or a display that does not exist; else
+    /// the context registered on the display area its type goes in, which
+    /// in the app host (no decor) has the display's configuration.
+    fn attach_window_context(&self, call: &Call<'_>, thread: Option<Binder>, token: Option<Binder>, display: i32) -> Result<Option<Configuration>, Exception> {
+        let (Some(thread), Some(Binder::Handle(token))) = (thread, token) else {
+            return Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "attachWindowContextToDisplayArea"));
+        };
+        let start_seq = self.apps.lock().unwrap().iter().find(|(_, a)| a.thread.as_ref().is_some_and(|t| t.binder() == thread)).map(|(s, _)| *s);
+        let Some(start_seq) = start_seq else {
+            eprintln!("app host: attachWindowContextToDisplayArea: calling from non-existing process pid={} uid={}", call.sender_pid, call.sender_euid);
+            return Ok(None);
+        };
+        if display != 0 {
+            eprintln!("app host: attachWindowContextToDisplayArea: trying to attach to a non-existing display:{display}");
+            return Ok(None);
+        }
+        let config = self.global_configuration()?;
+        let strong = self.process.strong(token);
+        // `WindowContextListenerImpl`'s death recipient unregisters it.
+        let contexts = Arc::downgrade(&self.window_contexts);
+        let death = self.process.link_to_death(
+            &strong,
+            Box::new(move || {
+                if let Some(contexts) = contexts.upgrade() {
+                    contexts.lock().unwrap().remove(&token);
+                }
+            }),
+        );
+        let old = self.window_contexts.lock().unwrap().insert(token, WindowContext { start_seq, token: strong, death, uid: call.sender_euid, reported: config.clone() });
+        if let Some(old) = old {
+            self.process.clear_death(&old.token, old.death);
+        }
+        Ok(Some(config))
+    }
+
+    /// `detachWindowContext`: only by the caller that attached it, or one
+    /// that may manage app tokens (`assertCallerCanModifyListener`).
+    fn detach_window_context(&self, uid: u32, token: Option<Binder>) -> Result<(), Exception> {
+        let Some(Binder::Handle(token)) = token else {
+            return Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "clientToken"));
+        };
+        let manage = self.check_permission(Some("android.permission.MANAGE_APP_TOKENS"), uid as i32)? == 0;
+        let mut contexts = self.window_contexts.lock().unwrap();
+        match contexts.get(&token) {
+            Some(c) if c.uid == uid || manage => {
+                let c = contexts.remove(&token).unwrap();
+                self.process.clear_death(&c.token, c.death);
+            }
+            Some(_) => eprintln!("app host: Uid mismatch. Caller uid is {uid}, while the listener's owner is from another uid"),
+            None => {}
+        }
+        Ok(())
+    }
+
+    /// `WindowContextListenerImpl.onConfigurationChanged` of each window
+    /// context whose area's configuration is not the one last reported.
+    pub(super) fn reconfigure_window_contexts(&self, global: &Configuration) -> ProcessItems {
+        let mut items: ProcessItems = Vec::new();
+        for context in self.window_contexts.lock().unwrap().values_mut() {
+            if context.reported != *global {
+                context.reported = global.clone();
+                items.push((context.start_seq, Box::new(WindowContextInfoChangeItem { token: context.token.binder(), config: global.clone() })));
+            }
+        }
+        items
+    }
+}
+
 /// `window`.
 pub struct WindowManager(pub Arc<AppHost>);
 
@@ -135,6 +254,26 @@ impl Service for WindowManager {
                         out_insets_state: Some(DisplayInsets(display.width, display.height)),
                     },
                 );
+            }
+            wm::ATTACH_WINDOW_CONTEXT_TO_DISPLAY_AREA => {
+                let a = wm::AttachWindowContextToDisplayArea::<super::kept::RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match self.0.attach_window_context(call, a.app_thread, a.client_token, a.display_id) {
+                    Ok(config) => wm::write_attach_window_context_to_display_area_reply(&mut p, config.as_ref().map(|c| WindowContextInfoBody(c)).as_ref()),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            wm::DETACH_WINDOW_CONTEXT => {
+                let a = wm::DetachWindowContext::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.0.detach_window_context(call.sender_euid, a.client_token) {
+                    return reply(Err(e));
+                }
+                wm::write_detach_window_context_reply(&mut p);
+            }
+            // `PhoneWindowManager.isKeyguardLocked`: the app host has no
+            // keyguard (as `trust` has no locked device).
+            wm::IS_KEYGUARD_LOCKED => {
+                wm::IsKeyguardLocked::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                wm::write_is_keyguard_locked_reply(&mut p, false);
             }
             code => return reply(Err(self.0.unimplemented("window", code))),
         }
@@ -747,5 +886,26 @@ impl Service for Session {
             ws::ON_RECTANGLE_ON_SCREEN_REQUESTED => Ok(Parcel::new()),
             code => reply(Err(self.host.unimplemented("window session", code))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `WindowContextInfoChangeItem.writeToParcel`: the token, then the
+    /// typed `WindowContextInfo` (its typed configuration, the display).
+    #[test]
+    fn window_context_changes_are_written_as_the_item_writes_them() {
+        let config = Configuration::default();
+        let mut p = Parcel::new();
+        WindowContextInfoChangeItem { token: Binder::Handle(5), config: config.clone() }.write_fields(&mut p);
+        let mut expected = Parcel::new();
+        expected.write_binder(Some(Binder::Handle(5)));
+        expected.write_i32(1);
+        expected.write_i32(1);
+        config.write_to(&mut expected);
+        expected.write_i32(0);
+        assert_eq!(p.data(), expected.data());
     }
 }
