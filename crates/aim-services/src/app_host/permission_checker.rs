@@ -1,32 +1,39 @@
 //! `permission_checker`: PermissionManagerService's
 //! `PermissionCheckerService` (`IPermissionChecker`) for the app host, at
-//! `android-16.0.0_r1` (ADR 0013): `checkPermission` and `checkOp` of an
-//! attribution chain (`AttributionSourceState` and its `next`), which
-//! `PermissionChecker` asks for permissions with an app op. Every uid in
-//! the chain must hold the permission (as the native `permissionmgr`
-//! answers `checkUidPermission`, without a renounced one); a runtime
-//! permission's op must be allowed and an app op permission's op decides,
-//! falling back to the permission at its default mode; the op is checked
-//! raw for a preflight and noted for data delivery by the app host's
-//! `appops`, which errs for an op it does not decide. A datasource vets
-//! only the chain after it, and only the accessor's own op is noted.
-//! Started ops (`startDataDelivery`, `finishDataDelivery` of an op),
-//! proxy ops, trusted (registered) attribution sources, a virtual
-//! device's permissions and Health Connect's are not implemented (#1527).
+//! `android-16.0.0_r1` (ADR 0013): `checkPermission`, `checkOp` and
+//! `finishDataDelivery` of an attribution chain (`AttributionSourceState`
+//! and its `next`), which `PermissionChecker` asks for permissions with an
+//! app op. Every uid in the chain must hold the permission (as the native
+//! `permissionmgr` answers `checkUidPermission`, without a renounced one);
+//! a runtime permission's op must be allowed and an app op permission's op
+//! decides, falling back to the permission at its default mode. The op is
+//! checked for a preflight (evaluated, not raw: #1595), noted for data
+//! delivery and started for `startDataDelivery` by the app host's `appops`
+//! as the caller asks it, not collected for the app (#1592): a
+//! proxy op where a link proxies for the next or where the caller may not
+//! blame the accessor alone, a started chain attributed (its id and each
+//! link's accessor, intermediary or receiver flags), and each started link
+//! registered until its delivery finishes or its token dies. A datasource
+//! vets only the chain after it. Trusted (registered) attribution sources,
+//! a virtual device's permissions and Health Connect's are not implemented
+//! (#1527).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 
-use aim_binder_host::local::{Call, Reply, Service};
+use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
-    BAD_VALUE, Binder, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception, Parcel, Reader, Result as ParcelResult,
+    BAD_VALUE, Binder, EX_NULL_POINTER, EX_SECURITY, EX_UNSUPPORTED_OPERATION, Exception, Parcel, Reader, Result as ParcelResult,
 };
 use aim_service_aidl::android_permission_ipermissionchecker as checker;
 use aim_service_aidl::{ReadParcelable, read_string_list, read_typed_list};
 
+use super::appops_service::{self, ATTRIBUTION_CHAIN_ID_NONE, ATTRIBUTION_FLAG_TRUSTED, SYSTEM_UID};
 use super::display::parcelable;
 use super::permission_manager::PermissionManager;
-use super::{AppHost, appops_service, reply};
+use super::{AppHost, reply};
 use crate::package::apps_filter::NotModelled;
 use crate::package::query::Query;
 
@@ -43,6 +50,12 @@ const MODE_IGNORED: i32 = 1;
 const MODE_ERRORED: i32 = 2;
 const MODE_DEFAULT: i32 = 3;
 const MODE_FOREGROUND: i32 = 4;
+/// `AppOpsManager.ATTRIBUTION_FLAGS_NONE`, `ATTRIBUTION_FLAG_ACCESSOR`,
+/// `ATTRIBUTION_FLAG_INTERMEDIARY`, `ATTRIBUTION_FLAG_RECEIVER`.
+const ATTRIBUTION_FLAGS_NONE: i32 = 0;
+const ATTRIBUTION_FLAG_ACCESSOR: i32 = 0x1;
+const ATTRIBUTION_FLAG_INTERMEDIARY: i32 = 0x2;
+const ATTRIBUTION_FLAG_RECEIVER: i32 = 0x4;
 /// `PermissionInfo.PROTECTION_MASK_BASE`, `PROTECTION_DANGEROUS`,
 /// `PROTECTION_FLAG_APPOP`.
 const PROTECTION_MASK_BASE: i32 = 0xf;
@@ -51,6 +64,7 @@ const PROTECTION_FLAG_APPOP: i32 = 0x40;
 /// `Context.DEVICE_ID_DEFAULT`.
 const DEVICE_ID_DEFAULT: i32 = 0;
 const RENOUNCE_PERMISSIONS: &str = "android.permission.RENOUNCE_PERMISSIONS";
+const UPDATE_APP_OPS_STATS: &str = "android.permission.UPDATE_APP_OPS_STATS";
 /// `HealthConnectManager.HEALTH_PERMISSION_PREFIX`.
 const HEALTH_PERMISSION_PREFIX: &str = "android.permission.health.";
 const RANGING: &str = "android.permission.flags.ranging_permission_enabled";
@@ -180,7 +194,84 @@ fn chain(source: &AttributionSourceState) -> Result<Vec<&AttributionSourceState>
     Ok(chain)
 }
 
-/// What the checks ask of the rest of the system server.
+/// How a link of a chain is attributed in its started op
+/// (`resolveProxyAttributionFlags`, `resolveProxiedAttributionFlags`):
+/// the proxy's and the proxied's `ATTRIBUTION_FLAG_*` and the chain id.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Attribution {
+    proxy_flags: i32,
+    proxied_flags: i32,
+    chain_id: i32,
+}
+
+impl Attribution {
+    const NONE: Attribution =
+        Attribution { proxy_flags: ATTRIBUTION_FLAGS_NONE, proxied_flags: ATTRIBUTION_FLAGS_NONE, chain_id: ATTRIBUTION_CHAIN_ID_NONE };
+}
+
+/// `sAttributionChainIds`.
+static ATTRIBUTION_CHAIN_IDS: AtomicI32 = AtomicI32::new(0);
+
+/// `getAttributionChainId`: a new id for a start of a chain of more than
+/// one source.
+fn attribution_chain_id(start_data_delivery: bool, chain: &[&AttributionSourceState]) -> i32 {
+    if !start_data_delivery || chain.len() < 2 {
+        return ATTRIBUTION_CHAIN_ID_NONE;
+    }
+    let id = ATTRIBUTION_CHAIN_IDS.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    if id < 0 {
+        ATTRIBUTION_CHAIN_IDS.store(1, Ordering::Relaxed);
+        return 1;
+    }
+    id
+}
+
+/// `resolveAttributionFlags` of the link `at` (none past the chain's end)
+/// of a chain of `len` sources: the accessor, an intermediary or the
+/// receiver, trusted or not.
+fn attribution_flags(len: usize, at: Option<usize>, from_datasource: bool, self_access: bool, trusted: bool, for_proxy: bool) -> i32 {
+    let Some(at) = at else { return ATTRIBUTION_FLAGS_NONE };
+    let trusted = if trusted { ATTRIBUTION_FLAG_TRUSTED } else { ATTRIBUTION_FLAGS_NONE };
+    if for_proxy {
+        if self_access || (!from_datasource && at == 0) {
+            return trusted | ATTRIBUTION_FLAG_ACCESSOR;
+        }
+    } else if self_access {
+        return trusted | ATTRIBUTION_FLAG_RECEIVER;
+    } else if from_datasource && at == 1 {
+        return trusted | ATTRIBUTION_FLAG_ACCESSOR;
+    } else if at + 1 >= len {
+        return trusted | ATTRIBUTION_FLAG_RECEIVER;
+    }
+    if from_datasource && at == 0 {
+        return ATTRIBUTION_FLAGS_NONE;
+    }
+    trusted | ATTRIBUTION_FLAG_INTERMEDIARY
+}
+
+/// The message of a proxy op's SecurityException as `performOpTransaction`
+/// rethrows it: the op, the source and its next two links.
+fn security_message(op: i32, source: &AttributionSourceState, e: &Exception) -> String {
+    let next = |s: &AttributionSourceState| s.next.as_deref().and_then(<[_]>::first).cloned().flatten();
+    let name = |s: Option<&AttributionSourceState>| s.and_then(|s| s.package.clone()).unwrap_or_else(|| "null".into());
+    let uid = |s: Option<&AttributionSourceState>| s.map_or(-1, |s| s.uid);
+    let after = next(source);
+    let mut message = format!(
+        "Security exception for op {op} with source {}:{}, {}:{}",
+        source.uid,
+        name(Some(source)),
+        uid(after.as_ref()),
+        name(after.as_ref())
+    );
+    if let Some(after) = &after {
+        let last = next(after);
+        message.push_str(&format!(", {}:{}", name(last.as_ref()), uid(last.as_ref())));
+    }
+    format!("{message}:{}", e.message)
+}
+
+/// What the checks ask of the rest of the system server, as the caller
+/// of `permission_checker` asks it (`AppOpsManager` in its binder call).
 trait System {
     /// The protection level `getPermissionInfo(permission, 0)` returns,
     /// none for a permission not defined.
@@ -189,11 +280,40 @@ trait System {
     fn holds(&self, uid: i32, permission: &str) -> Result<bool, Exception>;
     /// `getPackagesForUid`.
     fn packages_for_uid(&self, uid: i32) -> Result<Vec<String>, Exception>;
-    /// `checkOpNoThrow` and `unsafeCheckOpRawNoThrow`, which the app
-    /// host's ops answer alike: none has a foreground mode.
+    /// `checkOpNoThrow`, also for `unsafeCheckOpRawNoThrow` (#1595).
     fn check_op(&self, op: i32, uid: i32, package: &str) -> Result<i32, Exception>;
-    /// `noteOpNoThrow`.
-    fn note_op(&self, op: i32, uid: i32, package: &str) -> Result<i32, Exception>;
+    /// `noteOpNoThrow` of a source.
+    fn note_op(&self, op: i32, source: &AttributionSourceState) -> Result<i32, Exception>;
+    /// `noteProxyOpNoThrow` of a source and its next.
+    fn note_proxy_op(&self, op: i32, source: &AttributionSourceState, skip_proxy: bool) -> Result<i32, Exception>;
+    /// `startOpNoThrow` of a source by the client `token`, not at the
+    /// default mode, attributed with the proxy's flags.
+    fn start_op(
+        &self,
+        token: Option<Binder>,
+        op: i32,
+        source: &AttributionSourceState,
+        attribution: &Attribution,
+    ) -> Result<i32, Exception>;
+    /// `startProxyOpNoThrow` of a source and its next by the client
+    /// `token`.
+    fn start_proxy_op(
+        &self,
+        token: Option<Binder>,
+        op: i32,
+        source: &AttributionSourceState,
+        skip_proxy: bool,
+        attribution: &Attribution,
+    ) -> Result<i32, Exception>;
+    /// `finishOp` of a source by the client `token`.
+    fn finish_op(&self, token: Option<Binder>, op: i32, source: &AttributionSourceState) -> Result<(), Exception>;
+    /// `finishProxyOp` of a source and its next by the client `token`.
+    fn finish_proxy_op(&self, token: Option<Binder>, op: i32, source: &AttributionSourceState, skip_proxy: bool) -> Result<(), Exception>;
+    /// `sRunningAttributionSources.put` of a `RegisteredAttribution`: the
+    /// death of `source`'s token finishes `op`'s data delivery to it.
+    fn register(&self, op: i32, source: &AttributionSourceState, from_datasource: bool) -> Result<(), Exception>;
+    /// `sRunningAttributionSources.remove` of `token`, unregistered.
+    fn unregister(&self, token: Option<&Binder>) -> Result<(), Exception>;
     /// An aconfig flag of the image.
     fn flag(&self, name: &str) -> Result<bool, Exception>;
     /// What is not implemented (#1527).
@@ -269,6 +389,41 @@ impl<S: System> Checks<'_, S> {
         .map(String::from))
     }
 
+    /// The attribution of a start by the link `i` of `chain` with the id
+    /// `chain_id`: trusted where the chain's start is and the link's
+    /// sources are registered (`isLinkTrusted`, asked only where a chain
+    /// is attributed, `isTrusted` reading nothing else).
+    #[allow(clippy::too_many_arguments)]
+    fn link_attribution(
+        &self,
+        chain: &[&AttributionSourceState],
+        i: usize,
+        from_datasource: bool,
+        self_access: bool,
+        skip_current_checks: bool,
+        chain_start_trusted: bool,
+        chain_id: i32,
+    ) -> Result<Attribution, Exception> {
+        if chain_id == ATTRIBUTION_CHAIN_ID_NONE {
+            return Ok(Attribution::NONE);
+        }
+        let next = chain.get(i + 1);
+        let trusted = chain_start_trusted
+            && (self.trusted(chain[i])? || i == 0)
+            && match next {
+                None => true,
+                Some(next) => self.trusted(next)?,
+            };
+        let len = chain.len();
+        let proxy_flags = if skip_current_checks {
+            ATTRIBUTION_FLAGS_NONE
+        } else {
+            attribution_flags(len, Some(i), from_datasource, self_access, trusted, true)
+        };
+        let proxied_flags = attribution_flags(len, next.map(|_| i + 1), from_datasource, self_access, trusted, false);
+        Ok(Attribution { proxy_flags, proxied_flags, chain_id })
+    }
+
     /// `checkPermission`: an unknown permission is hard denied; app op and
     /// runtime permissions have their own checks, any other must be held
     /// by each source (but a datasource).
@@ -299,14 +454,7 @@ impl<S: System> Checks<'_, S> {
             return Ok(HARD_DENIED);
         }
         if chain.len() > 1 {
-            return self.check_permission(
-                permission,
-                &chain[1..],
-                for_data_delivery,
-                start_data_delivery,
-                false,
-                attributed_op,
-            );
+            return self.check_permission(permission, &chain[1..], for_data_delivery, start_data_delivery, false, attributed_op);
         }
         Ok(GRANTED)
     }
@@ -333,6 +481,7 @@ impl<S: System> Checks<'_, S> {
             let single_receiver = from_datasource && i == 0 && next.is_some() && chain.len() == 2;
             let self_access = single_receiver || next.is_none();
             let mode = self.perform_op_transaction(
+                chain[0].token,
                 op,
                 &chain[i..],
                 for_data_delivery,
@@ -341,6 +490,7 @@ impl<S: System> Checks<'_, S> {
                 self_access,
                 single_receiver,
                 OP_NONE,
+                &Attribution::NONE,
             )?;
             match mode {
                 MODE_IGNORED | MODE_ERRORED => return Ok(HARD_DENIED),
@@ -366,7 +516,8 @@ impl<S: System> Checks<'_, S> {
     /// `checkRuntimePermission`: each source (but a datasource) holds the
     /// permission and the op allows it, an ignored op soft denying it. A
     /// permission without an op (background location) needs only the
-    /// grants.
+    /// grants. Each link that starts its delivery is registered, and a
+    /// link that fails to start finishes the previous one's.
     fn check_runtime_permission(
         &self,
         permission: &str,
@@ -377,6 +528,8 @@ impl<S: System> Checks<'_, S> {
         attributed_op: i32,
     ) -> Result<i32, Exception> {
         let op = self.permission_to_op(permission)?;
+        let chain_id = attribution_chain_id(start_data_delivery, chain);
+        let chain_start_trusted = chain_id == ATTRIBUTION_CHAIN_ID_NONE || self.holds(UPDATE_APP_OPS_STATS, chain[0])?;
         for i in 0.. {
             let skip_current_checks = from_datasource || i > 0;
             let next = chain.get(i + 1);
@@ -399,10 +552,10 @@ impl<S: System> Checks<'_, S> {
             }
             let single_receiver = from_datasource && i == 0 && next.is_some() && chain.len() == 2;
             let self_access = single_receiver || next.is_none();
-            // Starting an op is not implemented, so with
-            // `startDataDelivery` this fails before any op is started that
-            // a denial would finish or a source's death unregister.
+            let attribution =
+                self.link_attribution(chain, i, from_datasource, self_access, skip_current_checks, chain_start_trusted, chain_id)?;
             let mode = self.perform_op_transaction(
+                chain[0].token,
                 op,
                 &chain[i..],
                 for_data_delivery,
@@ -411,11 +564,24 @@ impl<S: System> Checks<'_, S> {
                 self_access,
                 single_receiver,
                 attributed_op,
+                &attribution,
             )?;
+            // The previous link's started proxy op, cut where this one
+            // failed.
+            if start_data_delivery && mode != MODE_ALLOWED && i > 0 {
+                let mut cut = chain[i - 1].clone();
+                if let Some(Some(next)) = cut.next.as_mut().and_then(|next| next.first_mut()) {
+                    next.next = Some(Vec::new());
+                }
+                self.finish_data_delivery(attributed_op, &self::chain(&cut)?, from_datasource)?;
+            }
             match mode {
                 MODE_ERRORED => return Ok(HARD_DENIED),
                 MODE_IGNORED => return Ok(SOFT_DENIED),
                 _ => {}
+            }
+            if start_data_delivery {
+                self.0.register(op, chain[i], from_datasource)?;
             }
             if chain.len() <= i + 2 {
                 break;
@@ -435,20 +601,26 @@ impl<S: System> Checks<'_, S> {
         if op < 0 || chain[0].package.is_none() {
             return Ok(HARD_DENIED);
         }
+        let chain_id = attribution_chain_id(start_data_delivery, chain);
+        let chain_start_trusted = chain_id == ATTRIBUTION_CHAIN_ID_NONE || self.holds(UPDATE_APP_OPS_STATS, chain[0])?;
         for i in 0.. {
             let next = chain.get(i + 1);
             if next.is_some() && !self.trusted(chain[i])? {
                 return Ok(HARD_DENIED);
             }
+            let self_access = next.is_none();
+            let attribution = self.link_attribution(chain, i, false, self_access, i > 0, chain_start_trusted, chain_id)?;
             let mode = self.perform_op_transaction(
+                chain[i].token,
                 op,
                 &chain[i..],
                 for_data_delivery,
                 start_data_delivery,
                 i > 0,
-                next.is_none(),
+                self_access,
                 false,
                 OP_NONE,
+                &attribution,
             )?;
             match mode {
                 MODE_ERRORED => return Ok(HARD_DENIED),
@@ -463,15 +635,18 @@ impl<S: System> Checks<'_, S> {
     }
 
     /// `performOpTransaction` for `source`, the first of the rest of the
-    /// chain: for a preflight the accessor's op raw, and with it the
-    /// next's when the accessor proxies (a proxy already vetted, but a
-    /// single receiver, counts as allowed); for data delivery the op
-    /// noted for the accessor, an attributed op instead once the
+    /// chain, whose start is the client `token`: for a preflight the
+    /// accessor's op raw, and with it the next's when the accessor proxies
+    /// (a proxy already vetted, but a single receiver, counts as allowed);
+    /// for data delivery the accessor's op noted or started, a proxy op
+    /// when it proxies (or when the caller may not blame the accessor
+    /// alone: a SecurityException), an attributed op instead once the
     /// permission's op does not err. A source without a package is its
     /// uid's.
     #[allow(clippy::too_many_arguments)]
     fn perform_op_transaction(
         &self,
+        token: Option<Binder>,
         op: i32,
         source: &[&AttributionSourceState],
         for_data_delivery: bool,
@@ -480,6 +655,7 @@ impl<S: System> Checks<'_, S> {
         self_access: bool,
         single_receiver_from_datasource: bool,
         attributed_op: i32,
+        attribution: &Attribution,
     ) -> Result<i32, Exception> {
         let accessor = usize::from(single_receiver_from_datasource);
         let Some(package) = self.resolve_package(source[accessor])? else { return Ok(MODE_ERRORED) };
@@ -497,52 +673,100 @@ impl<S: System> Checks<'_, S> {
             self.default_device(next)?;
             return self.0.check_op(op, next.uid, &next_package);
         }
+        let resolved = AttributionSourceState { package: Some(package), ..source[accessor].clone() };
         let mut performed = op;
         let mut checked = MODE_ALLOWED;
         if attributed_op != OP_NONE && attributed_op != op {
-            checked = self.0.check_op(op, source[accessor].uid, &package)?;
+            checked = self.0.check_op(op, resolved.uid, resolved.package.as_deref().unwrap_or_default())?;
             if checked == MODE_ERRORED {
                 return Ok(checked);
             }
             performed = attributed_op;
         }
-        if start_data_delivery {
-            return Err(self.0.unimplemented("started ops (startDataDelivery)"));
-        }
-        if !self_access {
-            return Err(self.0.unimplemented("proxy ops (noteProxyOperation)"));
-        }
-        Ok(checked.max(self.0.note_op(performed, source[accessor].uid, &package)?))
+        let skip = skip_proxy_operation;
+        let mode = if self_access {
+            let own = if start_data_delivery {
+                self.0.start_op(token, performed, &resolved, attribution)
+            } else {
+                self.0.note_op(performed, &resolved)
+            };
+            match own {
+                // The datasource blames the app and itself; a start's proxy
+                // op is the attributed one, as the original passes it.
+                Err(e) if e.code == EX_SECURITY && start_data_delivery => {
+                    self.0.start_proxy_op(token, attributed_op, source[0], skip, attribution)?
+                }
+                Err(e) if e.code == EX_SECURITY => self.0.note_proxy_op(performed, source[0], skip)?,
+                own => own?,
+            }
+        } else {
+            let proxied = if start_data_delivery {
+                self.0.start_proxy_op(token, performed, &resolved, skip, attribution)
+            } else {
+                self.0.note_proxy_op(performed, &resolved, skip)
+            };
+            proxied.map_err(|e| match e.code {
+                EX_SECURITY => Exception::security(security_message(performed, source[0], &e)),
+                _ => e,
+            })?
+        };
+        Ok(checked.max(mode))
     }
 
-    /// `finishDataDelivery`: no op is nothing to finish; else the first
-    /// link's op is finished, unless an untrusted proxy or a source of no
-    /// package ends the walk first. The app host keeps no started ops.
-    fn finish_data_delivery(
-        &self,
-        op: i32,
-        chain: &[&AttributionSourceState],
-        from_datasource: bool,
-    ) -> Result<(), Exception> {
+    /// `finishDataDelivery`: no op is nothing to finish; else each link's
+    /// op is finished for the chain's client and the link unregistered,
+    /// until an untrusted proxy or a source of no package ends the walk.
+    fn finish_data_delivery(&self, op: i32, chain: &[&AttributionSourceState], from_datasource: bool) -> Result<(), Exception> {
         if op == OP_NONE {
             return Ok(());
         }
-        let next = chain.get(1);
-        if !from_datasource && next.is_some() && !self.trusted(chain[0])? {
-            return Ok(());
+        let token = chain[0].token;
+        for i in 0.. {
+            let skip_current_finish = from_datasource || i > 0;
+            let next = chain.get(i + 1).copied();
+            if !(from_datasource && i == 0) && next.is_some() && !self.trusted(chain[i])? {
+                return Ok(());
+            }
+            let single_receiver = from_datasource && i == 0 && next.is_some() && chain.len() == 2;
+            let self_access = single_receiver || next.is_none();
+            let accessor = if single_receiver { chain[i + 1] } else { chain[i] };
+            let Some(package) = self.resolve_package(accessor)? else { return Ok(()) };
+            let resolved = AttributionSourceState { package: Some(package), ..accessor.clone() };
+            if self_access {
+                self.0.finish_op(token, op, &resolved)?;
+            } else {
+                self.0.finish_proxy_op(token, op, &resolved, skip_current_finish)?;
+            }
+            self.0.unregister(chain[i].token.as_ref())?;
+            if chain.len() <= i + 2 {
+                if let Some(next) = next {
+                    self.0.unregister(next.token.as_ref())?;
+                }
+                return Ok(());
+            }
         }
-        let single_receiver = from_datasource && next.is_some() && chain.len() == 2;
-        if self.resolve_package(chain[usize::from(single_receiver)])?.is_none() {
-            return Ok(());
-        }
-        Err(self.0.unimplemented("started ops (finishOp, finishProxyOp)"))
+        Ok(())
     }
 }
 
-/// The app host's system server: the native `permissionmgr` and `appops`.
+/// The app host's system server, as `caller` asks it with `message`: the
+/// native `permissionmgr` and `appops`.
 struct Host<'a> {
     host: &'a AppHost,
     permissions: &'a PermissionManager,
+    caller: i32,
+    message: Option<&'a str>,
+}
+
+impl Host<'_> {
+    fn appops_attribution(&self, attribution: &Attribution) -> appops_service::ProxyAttribution {
+        appops_service::ProxyAttribution {
+            start_if_mode_default: false,
+            proxy_flags: attribution.proxy_flags,
+            proxied_flags: attribution.proxied_flags,
+            chain_id: attribution.chain_id,
+        }
+    }
 }
 
 impl System for Host<'_> {
@@ -564,11 +788,96 @@ impl System for Host<'_> {
     }
 
     fn check_op(&self, op: i32, uid: i32, package: &str) -> Result<i32, Exception> {
-        appops_service::mode(self.host, op, uid, Some(package))
+        appops_service::check_from(self.host, self.caller, op, uid, Some(package))
     }
 
-    fn note_op(&self, op: i32, uid: i32, package: &str) -> Result<i32, Exception> {
-        appops_service::note(self.host, op, uid, Some(package))
+    fn note_op(&self, op: i32, source: &AttributionSourceState) -> Result<i32, Exception> {
+        appops_service::note_from(self.host, self.caller, op, source.uid, source.package.as_deref(), source.tag.as_deref())
+    }
+
+    fn note_proxy_op(&self, op: i32, source: &AttributionSourceState, skip_proxy: bool) -> Result<i32, Exception> {
+        appops_service::note_proxy(self.host, self.caller, op, source, skip_proxy, self.message)
+    }
+
+    fn start_op(
+        &self,
+        token: Option<Binder>,
+        op: i32,
+        source: &AttributionSourceState,
+        attribution: &Attribution,
+    ) -> Result<i32, Exception> {
+        let attribution =
+            appops_service::Attribution { start_if_mode_default: false, flags: attribution.proxy_flags, chain_id: attribution.chain_id };
+        let (package, tag) = (source.package.as_deref(), source.tag.as_deref());
+        appops_service::start(self.host, self.caller, token, op, source.uid, package, tag, attribution)
+    }
+
+    fn start_proxy_op(
+        &self,
+        token: Option<Binder>,
+        op: i32,
+        source: &AttributionSourceState,
+        skip_proxy: bool,
+        attribution: &Attribution,
+    ) -> Result<i32, Exception> {
+        let attribution = self.appops_attribution(attribution);
+        appops_service::start_proxy(self.host, self.caller, token, op, source, skip_proxy, attribution, self.message)
+    }
+
+    fn finish_op(&self, token: Option<Binder>, op: i32, source: &AttributionSourceState) -> Result<(), Exception> {
+        let (package, tag) = (source.package.as_deref(), source.tag.as_deref());
+        appops_service::finish(self.host, self.caller, token, op, source.uid, package, tag)
+    }
+
+    fn finish_proxy_op(&self, token: Option<Binder>, op: i32, source: &AttributionSourceState, skip_proxy: bool) -> Result<(), Exception> {
+        appops_service::finish_proxy(self.host, self.caller, token, op, source, skip_proxy)
+    }
+
+    /// A token of the app host's own does not die; another's death finishes
+    /// the delivery once, as the system server.
+    fn register(&self, op: i32, source: &AttributionSourceState, from_datasource: bool) -> Result<(), Exception> {
+        let token = source.token.ok_or_else(|| Exception::new(EX_NULL_POINTER, "token"))?;
+        let mut running = self.host.running_attributions.lock().unwrap();
+        let id = running.next;
+        running.next += 1;
+        let link = match token {
+            Binder::Handle(handle) => {
+                let strong = self.host.process.strong(handle);
+                let (me, source) = (self.host.me.clone(), source.clone());
+                let death = self.host.process.link_to_death(
+                    &strong,
+                    Box::new(move || {
+                        let Some(host) = me.upgrade() else { return };
+                        if host.running_attributions.lock().unwrap().registered.remove(&id).is_none() {
+                            return;
+                        }
+                        let permissions = PermissionManager::new(host.clone());
+                        let system = Host { host: &host, permissions: &permissions, caller: SYSTEM_UID, message: None };
+                        if let Err(e) =
+                            self::chain(&source).and_then(|chain| Checks(&system).finish_data_delivery(op, &chain, from_datasource))
+                        {
+                            eprintln!("app host: permission_checker finishDataDelivery at a death: {e:?}");
+                        }
+                    }),
+                );
+                Some((strong, death))
+            }
+            Binder::Local(_) => None,
+        };
+        running.registered.insert(id, link);
+        running.by_token.insert(token, id);
+        Ok(())
+    }
+
+    fn unregister(&self, token: Option<&Binder>) -> Result<(), Exception> {
+        let token = token.ok_or_else(|| Exception::new(EX_NULL_POINTER, "token"))?;
+        let mut running = self.host.running_attributions.lock().unwrap();
+        if let Some(id) = running.by_token.remove(token)
+            && let Some(Some((strong, death))) = running.registered.remove(&id)
+        {
+            self.host.process.clear_death(&strong, death);
+        }
+        Ok(())
     }
 
     fn flag(&self, name: &str) -> Result<bool, Exception> {
@@ -579,6 +888,17 @@ impl System for Host<'_> {
     fn unimplemented(&self, what: &str) -> Exception {
         self.host.unimplemented_named("permission_checker", &format!("{what} (#1527)"))
     }
+}
+
+/// The attribution sources whose data delivery started, each a
+/// `RegisteredAttribution`: the latest of each token, and each one not
+/// yet finished with the link to its token's death (one a later one
+/// replaced stays linked, as the original's does).
+#[derive(Default)]
+pub(super) struct Running {
+    by_token: HashMap<Binder, u64>,
+    registered: HashMap<u64, Option<(Strong, u64)>>,
+    next: u64,
 }
 
 /// `ForegroundServiceTypePolicy.RegularPermission.checkPermission` of
@@ -596,7 +916,7 @@ pub(super) fn fgs_type_permission(
     allow_while_in_use: bool,
 ) -> Result<bool, Exception> {
     let permissions = PermissionManager::new(host.clone());
-    let system = Host { host, permissions: &permissions };
+    let system = Host { host, permissions: &permissions, caller: SYSTEM_UID, message: None };
     let checks = Checks(&system);
     let source = AttributionSourceState {
         pid: -1,
@@ -647,24 +967,19 @@ impl Service for PermissionChecker {
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
-        let system = Host { host: &self.host, permissions: &self.permissions };
-        let checks = Checks(&system);
+        let caller = call.sender_euid as i32;
         let mut p = Parcel::new();
         let result = match call.code {
             checker::CHECK_PERMISSION => {
                 let a = checker::CheckPermission::<AttributionSourceState>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let system = Host { host: &self.host, permissions: &self.permissions, caller, message: a.message.as_deref() };
+                let checks = Checks(&system);
                 (|| {
                     let permission = non_null(a.permission.as_deref(), "permission")?;
                     let chain = chain(non_null(a.attribution_source.as_ref(), "attributionSource")?)?;
                     let (start, from_datasource) = (a.start_data_delivery, a.from_datasource);
-                    let result = checks.check_permission(
-                        permission,
-                        &chain,
-                        a.for_data_delivery,
-                        start,
-                        from_datasource,
-                        a.attributed_op,
-                    )?;
+                    let result =
+                        checks.check_permission(permission, &chain, a.for_data_delivery, start, from_datasource, a.attributed_op)?;
                     // Finishes any op started before a link failed.
                     if start && result == HARD_DENIED {
                         let op = match a.attributed_op {
@@ -679,6 +994,8 @@ impl Service for PermissionChecker {
             }
             checker::CHECK_OP => {
                 let a = checker::CheckOp::<AttributionSourceState>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let system = Host { host: &self.host, permissions: &self.permissions, caller, message: a.message.as_deref() };
+                let checks = Checks(&system);
                 (|| {
                     let chain = chain(non_null(a.attribution_source.as_ref(), "attributionSource")?)?;
                     let result = checks.check_op(a.op, &chain, a.for_data_delivery, a.start_data_delivery)?;
@@ -690,11 +1007,11 @@ impl Service for PermissionChecker {
                 .map(|result| checker::write_check_op_reply(&mut p, result))
             }
             checker::FINISH_DATA_DELIVERY => {
-                let a = checker::FinishDataDelivery::<AttributionSourceState>::read(&mut call.data)
-                    .map_err(|_| BAD_VALUE)?;
+                let a = checker::FinishDataDelivery::<AttributionSourceState>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let system = Host { host: &self.host, permissions: &self.permissions, caller, message: None };
                 non_null(a.attribution_source.as_ref(), "attributionSource")
                     .and_then(chain)
-                    .and_then(|chain| checks.finish_data_delivery(a.op, &chain, a.from_datasource))
+                    .and_then(|chain| Checks(&system).finish_data_delivery(a.op, &chain, a.from_datasource))
                     .map(|()| checker::write_finish_data_delivery_reply(&mut p))
             }
             code => Err(self.host.unimplemented("permission_checker", code)),
@@ -706,7 +1023,7 @@ impl Service for PermissionChecker {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use super::*;
 
@@ -722,14 +1039,58 @@ mod tests {
     const APP: i32 = 10_002;
     const OTHER: i32 = 10_003;
 
+    /// What the checks asked of appops and the running sources: an op
+    /// noted, proxy-noted (the proxy's uid, the proxied's, the skip),
+    /// started, proxy-started, finished or proxy-finished, a source
+    /// registered (the op, the uid) or a token unregistered.
+    #[derive(Debug, PartialEq)]
+    enum Asked {
+        Note(i32, i32, String),
+        NoteProxy(i32, i32, i32, bool),
+        Start(i32, i32, Attribution),
+        StartProxy(i32, i32, i32, bool, Attribution),
+        Finish(i32, i32),
+        FinishProxy(i32, i32, i32, bool),
+        Register(i32, i32),
+        Unregister(Binder),
+    }
+
     /// A system server: the permissions' protections, each uid's grants,
-    /// each (op, uid)'s mode, and the ops noted.
+    /// each (op, uid)'s mode, the uids the caller may not blame alone
+    /// (a SecurityException of their own op, or of a proxy op they
+    /// proxy), and what was asked.
     #[derive(Default)]
     struct Fake {
         protections: HashMap<&'static str, i32>,
         grants: HashMap<i32, Vec<&'static str>>,
         modes: HashMap<(i32, i32), i32>,
-        noted: RefCell<Vec<(i32, i32, String)>>,
+        blamed: HashSet<i32>,
+        asked: RefCell<Vec<Asked>>,
+    }
+
+    impl Fake {
+        fn mode(&self, op: i32, uid: i32) -> i32 {
+            self.modes.get(&(op, uid)).copied().unwrap_or(MODE_ALLOWED)
+        }
+
+        fn own(&self, uid: i32) -> Result<(), Exception> {
+            match self.blamed.contains(&uid) {
+                true => Err(Exception::security("denied")),
+                false => Ok(()),
+            }
+        }
+
+        fn next_uid(source: &AttributionSourceState) -> i32 {
+            source.next.as_deref().and_then(<[_]>::first).cloned().flatten().map_or(-1, |n| n.uid)
+        }
+
+        fn proxy_mode(&self, op: i32, source: &AttributionSourceState, skip_proxy: bool) -> Result<i32, Exception> {
+            self.own(source.uid)?;
+            match skip_proxy {
+                false if self.mode(op, source.uid) != MODE_ALLOWED => Ok(self.mode(op, source.uid)),
+                _ => Ok(self.mode(op, Self::next_uid(source))),
+            }
+        }
     }
 
     impl System for Fake {
@@ -746,12 +1107,66 @@ mod tests {
         }
 
         fn check_op(&self, op: i32, uid: i32, _: &str) -> Result<i32, Exception> {
-            Ok(self.modes.get(&(op, uid)).copied().unwrap_or(MODE_ALLOWED))
+            Ok(self.mode(op, uid))
         }
 
-        fn note_op(&self, op: i32, uid: i32, package: &str) -> Result<i32, Exception> {
-            self.noted.borrow_mut().push((op, uid, package.to_string()));
-            self.check_op(op, uid, package)
+        fn note_op(&self, op: i32, source: &AttributionSourceState) -> Result<i32, Exception> {
+            self.own(source.uid)?;
+            self.asked.borrow_mut().push(Asked::Note(op, source.uid, source.package.clone().unwrap()));
+            Ok(self.mode(op, source.uid))
+        }
+
+        fn note_proxy_op(&self, op: i32, source: &AttributionSourceState, skip_proxy: bool) -> Result<i32, Exception> {
+            let mode = self.proxy_mode(op, source, skip_proxy)?;
+            self.asked.borrow_mut().push(Asked::NoteProxy(op, source.uid, Self::next_uid(source), skip_proxy));
+            Ok(mode)
+        }
+
+        fn start_op(
+            &self,
+            _: Option<Binder>,
+            op: i32,
+            source: &AttributionSourceState,
+            attribution: &Attribution,
+        ) -> Result<i32, Exception> {
+            self.own(source.uid)?;
+            self.asked.borrow_mut().push(Asked::Start(op, source.uid, *attribution));
+            Ok(self.mode(op, source.uid))
+        }
+
+        fn start_proxy_op(
+            &self,
+            _: Option<Binder>,
+            op: i32,
+            source: &AttributionSourceState,
+            skip_proxy: bool,
+            attribution: &Attribution,
+        ) -> Result<i32, Exception> {
+            let mode = self.proxy_mode(op, source, skip_proxy)?;
+            self.asked.borrow_mut().push(Asked::StartProxy(op, source.uid, Self::next_uid(source), skip_proxy, *attribution));
+            Ok(mode)
+        }
+
+        fn finish_op(&self, _: Option<Binder>, op: i32, source: &AttributionSourceState) -> Result<(), Exception> {
+            self.asked.borrow_mut().push(Asked::Finish(op, source.uid));
+            Ok(())
+        }
+
+        fn finish_proxy_op(&self, _: Option<Binder>, op: i32, source: &AttributionSourceState, skip_proxy: bool) -> Result<(), Exception> {
+            self.asked.borrow_mut().push(Asked::FinishProxy(op, source.uid, Self::next_uid(source), skip_proxy));
+            Ok(())
+        }
+
+        fn register(&self, op: i32, source: &AttributionSourceState, _: bool) -> Result<(), Exception> {
+            source.token.ok_or_else(|| Exception::new(EX_NULL_POINTER, "token"))?;
+            self.asked.borrow_mut().push(Asked::Register(op, source.uid));
+            Ok(())
+        }
+
+        fn unregister(&self, token: Option<&Binder>) -> Result<(), Exception> {
+            let token = token.ok_or_else(|| Exception::new(EX_NULL_POINTER, "token"))?;
+            self.asked.borrow_mut().push(Asked::Unregister(*token));
+            Ok(())
         }
 
         fn flag(&self, _: &str) -> Result<bool, Exception> {
@@ -794,14 +1209,27 @@ mod tests {
         }
     }
 
+    /// A source with its token, as an app's `AttributionSource` has.
+    fn tokened(uid: i32, package: &str) -> AttributionSourceState {
+        AttributionSourceState { token: Some(Binder::Handle(uid as u32)), ..source(uid, package) }
+    }
+
     /// `ContentProvider.checkPermission`'s chain: the provider, then its
     /// caller.
     fn from_provider(caller: AttributionSourceState) -> AttributionSourceState {
-        AttributionSourceState { next: Some(vec![Some(caller)]), ..source(PROVIDER, "provider") }
+        AttributionSourceState { next: Some(vec![Some(caller)]), ..tokened(PROVIDER, "provider") }
     }
 
     fn check(system: &Fake, permission: &str, source: &AttributionSourceState, from_datasource: bool) -> Result<i32, Exception> {
         Checks(system).check_permission(permission, &chain(source).unwrap(), true, false, from_datasource, OP_NONE)
+    }
+
+    fn start(system: &Fake, permission: &str, source: &AttributionSourceState, from_datasource: bool) -> Result<i32, Exception> {
+        Checks(system).check_permission(permission, &chain(source).unwrap(), true, true, from_datasource, OP_NONE)
+    }
+
+    fn noted(op: i32, uid: i32, package: &str) -> Asked {
+        Asked::Note(op, uid, package.into())
     }
 
     /// `AttributionSourceState` as the Java backend writes it: its size,
@@ -847,12 +1275,8 @@ mod tests {
         assert_eq!(r.read_i32().unwrap(), 9);
         assert_eq!(state.token, Some(Binder::Local(0x1000)));
         assert_eq!(state.renounced, None);
-        let app = AttributionSourceState {
-            pid: 4242,
-            tag: Some("tag".into()),
-            renounced: Some(vec![Some(CAMERA.into())]),
-            ..source(APP, "app")
-        };
+        let app =
+            AttributionSourceState { pid: 4242, tag: Some("tag".into()), renounced: Some(vec![Some(CAMERA.into())]), ..source(APP, "app") };
         assert_eq!(state.next, Some(vec![Some(app.clone())]));
         assert_eq!(chain(&state).unwrap(), [&state, &app]);
         let broken = AttributionSourceState { next: Some(vec![None]), ..source(APP, "app") };
@@ -869,7 +1293,7 @@ mod tests {
         let mut system = fake();
         let app = source(APP, "app");
         assert_eq!(check(&system, CAMERA, &app, false).unwrap(), GRANTED);
-        assert_eq!(*system.noted.borrow(), [(OP_CAMERA, APP, "app".to_string())]);
+        assert_eq!(*system.asked.borrow(), [noted(OP_CAMERA, APP, "app")]);
         system.modes.insert((OP_CAMERA, APP), MODE_IGNORED);
         assert_eq!(check(&system, CAMERA, &app, false).unwrap(), SOFT_DENIED);
         system.modes.insert((OP_CAMERA, APP), MODE_ERRORED);
@@ -877,10 +1301,10 @@ mod tests {
         assert_eq!(check(&system, CAMERA, &source(OTHER, "other"), false).unwrap(), HARD_DENIED);
         assert_eq!(check(&system, "no.such.permission", &app, false).unwrap(), HARD_DENIED);
         // A preflight checks the op without noting it.
-        system.noted.borrow_mut().clear();
+        system.asked.borrow_mut().clear();
         let checks = Checks(&system);
         assert_eq!(checks.check_permission(RECORD_AUDIO, &[&app], false, false, false, OP_NONE).unwrap(), GRANTED);
-        assert!(system.noted.borrow().is_empty());
+        assert!(system.asked.borrow().is_empty());
         // Background location has no op: the grant decides.
         assert_eq!(check(&system, BACKGROUND_LOCATION, &app, false).unwrap(), GRANTED);
     }
@@ -897,26 +1321,31 @@ mod tests {
 
     /// A provider's chain from the datasource: the provider is not
     /// vetted, its caller holds the permission and its op is noted for
-    /// the caller, the single receiver.
+    /// the caller, the single receiver; a provider that may not blame its
+    /// caller alone notes a proxy op of both.
     #[test]
     fn datasource_chains() {
         let mut system = fake();
         let chain = from_provider(source(APP, "app"));
         assert_eq!(check(&system, CAMERA, &chain, true).unwrap(), GRANTED);
-        assert_eq!(*system.noted.borrow(), [(OP_CAMERA, APP, "app".to_string())]);
+        assert_eq!(*system.asked.borrow(), [noted(OP_CAMERA, APP, "app")]);
         assert_eq!(check(&system, CAMERA, &from_provider(source(OTHER, "other")), true).unwrap(), HARD_DENIED);
         system.modes.insert((OP_CAMERA, APP), MODE_IGNORED);
         assert_eq!(check(&system, CAMERA, &chain, true).unwrap(), SOFT_DENIED);
         // A caller without a package is its uid's.
         system.modes.clear();
-        system.noted.borrow_mut().clear();
+        system.asked.borrow_mut().clear();
         let anonymous = from_provider(AttributionSourceState { package: None, ..source(APP, "app") });
         assert_eq!(check(&system, CAMERA, &anonymous, true).unwrap(), GRANTED);
-        assert_eq!(*system.noted.borrow(), [(OP_CAMERA, APP, format!("uid.{APP}"))]);
+        assert_eq!(*system.asked.borrow(), [noted(OP_CAMERA, APP, &format!("uid.{APP}"))]);
         // A permission without an op: each source after the datasource
         // holds it.
         assert_eq!(check(&system, INTERNET, &chain, true).unwrap(), GRANTED);
         assert_eq!(check(&system, INTERNET, &source(OTHER, "other"), false).unwrap(), HARD_DENIED);
+        system.asked.borrow_mut().clear();
+        system.blamed.insert(APP);
+        assert_eq!(check(&system, CAMERA, &chain, true).unwrap(), GRANTED);
+        assert_eq!(*system.asked.borrow(), [Asked::NoteProxy(OP_CAMERA, PROVIDER, APP, true)]);
     }
 
     /// Not from a datasource, a proxy must be trusted: one without a
@@ -930,6 +1359,23 @@ mod tests {
         assert_eq!(checks.check_op(OP_RECORD_AUDIO, &chain(&proxied).unwrap(), true, false).unwrap(), HARD_DENIED);
         let trusted = AttributionSourceState { token: Some(Binder::Handle(3)), ..proxied };
         assert!(check(&system, RECORD_AUDIO, &trusted, false).is_err());
+    }
+
+    /// From a datasource, the first link proxies for the rest of the
+    /// chain; an intermediary without a registered token ends it.
+    #[test]
+    fn proxied_chains_from_a_datasource() {
+        let system = fake();
+        let middle = AttributionSourceState { next: Some(vec![Some(source(APP, "app"))]), ..source(OTHER, "other") };
+        let chain = from_provider(middle);
+        assert_eq!(check(&system, RECORD_AUDIO, &chain, true).unwrap(), HARD_DENIED);
+        assert_eq!(*system.asked.borrow(), [Asked::NoteProxy(OP_RECORD_AUDIO, PROVIDER, OTHER, true)]);
+        // A proxy op the caller may not make is rethrown with the chain.
+        let mut system = fake();
+        system.blamed.insert(PROVIDER);
+        let denied = check(&system, RECORD_AUDIO, &chain, true).unwrap_err();
+        assert_eq!(denied.code, EX_SECURITY);
+        assert_eq!(denied.message, "Security exception for op 27 with source 10001:provider, 10003:other, app:10002:denied");
     }
 
     /// An app op permission: the op decides, at its default mode the
@@ -953,9 +1399,8 @@ mod tests {
         let mut system = fake();
         let app = source(APP, "app");
         let anonymous = AttributionSourceState { package: None, ..source(APP, "app") };
-        let checks = |system: &Fake, op: i32, s: &AttributionSourceState| {
-            Checks(system).check_op(op, &chain(s).unwrap(), false, false).unwrap()
-        };
+        let checks =
+            |system: &Fake, op: i32, s: &AttributionSourceState| Checks(system).check_op(op, &chain(s).unwrap(), false, false).unwrap();
         assert_eq!(checks(&system, OP_CAMERA, &app), GRANTED);
         assert_eq!(checks(&system, OP_NONE, &app), HARD_DENIED);
         assert_eq!(checks(&system, OP_CAMERA, &anonymous), HARD_DENIED);
@@ -965,21 +1410,78 @@ mod tests {
         assert_eq!(checks(&system, OP_CAMERA, &app), HARD_DENIED);
     }
 
-    /// Starting and finishing ops, noting a proxy op and virtual devices
-    /// are not implemented; finishing no op is nothing.
+    /// `startDataDelivery` of one source starts its op, unattributed, and
+    /// registers it; `finishDataDelivery` finishes the op and unregisters
+    /// the token. An ignored op is soft denied and not registered.
+    #[test]
+    fn started_delivery_of_one_source() {
+        let mut system = fake();
+        let app = tokened(APP, "app");
+        assert_eq!(start(&system, CAMERA, &app, false).unwrap(), GRANTED);
+        let checks = Checks(&system);
+        checks.finish_data_delivery(OP_CAMERA, &[&app], false).unwrap();
+        let token = app.token.unwrap();
+        let expected = [
+            Asked::Start(OP_CAMERA, APP, Attribution::NONE),
+            Asked::Register(OP_CAMERA, APP),
+            Asked::Finish(OP_CAMERA, APP),
+            Asked::Unregister(token),
+        ];
+        assert_eq!(*system.asked.borrow(), expected);
+        assert!(checks.finish_data_delivery(OP_NONE, &[&app], false).is_ok());
+        system.asked.borrow_mut().clear();
+        system.modes.insert((OP_CAMERA, APP), MODE_IGNORED);
+        assert_eq!(start(&system, CAMERA, &app, false).unwrap(), SOFT_DENIED);
+        assert_eq!(*system.asked.borrow(), [Asked::Start(OP_CAMERA, APP, Attribution::NONE)]);
+        // A source without a token cannot be registered (a null key).
+        system.modes.clear();
+        assert_eq!(start(&system, CAMERA, &source(APP, "app"), false).unwrap_err().code, EX_NULL_POINTER);
+    }
+
+    /// A provider's started delivery to its caller: a chain, attributed to
+    /// the caller as its untrusted receiver, the provider registered; a
+    /// provider that may not blame its caller alone starts a proxy op of
+    /// the attributed op, as the original passes it. Finishing unregisters
+    /// both.
+    #[test]
+    fn started_delivery_from_a_datasource() {
+        let mut system = fake();
+        let chain = from_provider(tokened(APP, "app"));
+        assert_eq!(start(&system, CAMERA, &chain, true).unwrap(), GRANTED);
+        let asked = std::mem::take(&mut *system.asked.borrow_mut());
+        let Asked::Start(OP_CAMERA, APP, attribution) = asked[0] else { panic!("{asked:?}") };
+        assert_eq!((attribution.proxy_flags, attribution.proxied_flags), (ATTRIBUTION_FLAGS_NONE, ATTRIBUTION_FLAG_RECEIVER));
+        assert_ne!(attribution.chain_id, ATTRIBUTION_CHAIN_ID_NONE);
+        assert_eq!(asked[1..], [Asked::Register(OP_CAMERA, PROVIDER)]);
+        Checks(&system).finish_data_delivery(OP_CAMERA, &self::chain(&chain).unwrap(), true).unwrap();
+        let unregistered = [Asked::Unregister(Binder::Handle(PROVIDER as u32)), Asked::Unregister(Binder::Handle(APP as u32))];
+        assert_eq!(system.asked.borrow()[0], Asked::Finish(OP_CAMERA, APP));
+        assert_eq!(system.asked.borrow()[1..], unregistered);
+        system.asked.borrow_mut().clear();
+        system.blamed.insert(APP);
+        assert_eq!(start(&system, CAMERA, &chain, true).unwrap(), GRANTED);
+        assert!(matches!(system.asked.borrow()[0], Asked::StartProxy(OP_NONE, PROVIDER, APP, true, _)));
+    }
+
+    /// `resolveAttributionFlags`: the accessor, intermediaries and the
+    /// receiver of a chain of three, and of one from a datasource.
+    #[test]
+    fn attribution_flags_of_links() {
+        let trusted = ATTRIBUTION_FLAG_TRUSTED;
+        assert_eq!(attribution_flags(3, Some(0), false, false, true, true), trusted | ATTRIBUTION_FLAG_ACCESSOR);
+        assert_eq!(attribution_flags(3, Some(1), false, false, true, false), trusted | ATTRIBUTION_FLAG_INTERMEDIARY);
+        assert_eq!(attribution_flags(3, Some(2), false, false, false, false), ATTRIBUTION_FLAG_RECEIVER);
+        assert_eq!(attribution_flags(3, Some(1), true, false, false, false), ATTRIBUTION_FLAG_ACCESSOR);
+        assert_eq!(attribution_flags(3, Some(0), true, false, true, true), ATTRIBUTION_FLAGS_NONE);
+        assert_eq!(attribution_flags(2, Some(1), true, true, false, false), ATTRIBUTION_FLAG_RECEIVER);
+        assert_eq!(attribution_flags(2, None, false, false, true, false), ATTRIBUTION_FLAGS_NONE);
+        assert_eq!(attribution_chain_id(false, &[]), ATTRIBUTION_CHAIN_ID_NONE);
+    }
+
+    /// A virtual device's permissions are not implemented.
     #[test]
     fn not_implemented() {
         let system = fake();
-        let checks = Checks(&system);
-        let app = source(APP, "app");
-        assert!(checks.check_permission(CAMERA, &[&app], true, true, false, OP_NONE).is_err());
-        assert!(checks.finish_data_delivery(OP_CAMERA, &[&app], false).is_err());
-        assert!(checks.finish_data_delivery(OP_NONE, &[&app], false).is_ok());
-        // The provider's caller proxies for another app.
-        let provider = source(PROVIDER, "provider");
-        let other = source(OTHER, "other");
-        let proxy = [&provider, &other, &app];
-        assert!(checks.check_permission(RECORD_AUDIO, &proxy, true, false, true, OP_NONE).is_err());
         let virtual_device = AttributionSourceState { device_id: 5, ..source(APP, "app") };
         assert!(check(&system, CAMERA, &virtual_device, false).is_err());
     }

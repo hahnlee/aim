@@ -1,25 +1,37 @@
 //! `appops`: AppOps for the app host (`AppOpsService` at
 //! `android-16.0.0_r1`), deciding every op of `sAppOpInfos`
-//! (`app_op_infos`) as `checkOperationImpl` (by `getAppOpMode`) and
-//! `noteOperationImpl` do. A package the caller may not see or that is not
-//! the uid's is not decided by; an op is ignored while a sensor privacy
-//! toggle restricts it, a user restriction it has is set and the app may
-//! not bypass it, or (for checks of the ops suspension restricts) the
-//! package is suspended; root and system have every op once
-//! `runtime_permission_appops_mapping_enabled` is on; else the op's switch
-//! decides: the uid's mode where it is not the switch's default, else the
-//! package's, as the permission service last persisted them
-//! (`access.abx`), else the switch's default. A foreground mode allows a
-//! uid while it has a process, as each of the app host's processes is top
-//! (`AppOpsUidStateTracker.evalMode`). Notes go through SystemServer's
-//! `AppOpsPolicy`: without a hotword detection service RECORD_AUDIO_HOTWORD
-//! is noted as RECORD_AUDIO; datasource attribution tags: #1561. The modes
-//! do not change while the app host runs, so mode watchers are kept and
-//! never called, as are active watchers, no op being started; foreground
-//! changes are not watched (#1529). An op noted for an app by another uid
-//! with `shouldCollectAsyncNotedOp` goes to the app's async-noted watchers
-//! (`collectAsyncNotedOp`), or waits for its `extractAsyncOps` when none
-//! took it. The app host's own services ask as the system server does.
+//! (`app_op_infos`) as `checkOperationImpl` (by `getAppOpMode`),
+//! `noteOperationImpl` and `startOperationImpl` do. A package the caller
+//! may not see or that is not the uid's is not decided by, and only the
+//! installed packages' uids and AppOpsService's non-package uids have ops;
+//! an attribution tag the package (or its proxy) does not declare is
+//! dropped where SECURITY_EXCEPTION_ON_INVALID_ATTRIBUTION_TAG_CHANGE is
+//! enabled. An op is ignored while a sensor privacy toggle restricts it, a
+//! user restriction it has is set and the app may not bypass it, or (for
+//! checks of the ops suspension restricts) the package is suspended; root
+//! and system have every op once `runtime_permission_appops_mapping_enabled`
+//! is on; else the op's switch decides: the uid's mode where it is not the
+//! switch's default, else the package's, as the permission service last
+//! persisted them (`access.abx`), else the switch's default. A foreground
+//! mode allows a uid while it has a process, as each of the app host's
+//! processes is top (`AppOpsUidStateTracker.evalMode`). Notes and starts go
+//! through SystemServer's `AppOpsPolicy`: without a hotword detection
+//! service RECORD_AUDIO_HOTWORD is RECORD_AUDIO; datasource attribution
+//! tags: #1561. A started op (`startOperation`, `startProxyOperation`)
+//! runs for its client binder until the client finishes each of its
+//! starts or dies (`AttributedOp`), paused instead while restricted; active
+//! watchers hear an op's first start and last finish, started watchers
+//! each start. The modes and restrictions do not change while the app host
+//! runs, so mode watchers are kept and never called and no started op is
+//! paused or resumed later (#1594); foreground changes are not watched
+//! (#1529); no access history is kept (#1593). An op noted or started for
+//! an app by another uid with `shouldCollectAsyncNotedOp`, or by a proxy
+//! without UPDATE_APP_OPS_STATS for itself, goes to the app's async-noted
+//! watchers (`collectAsyncNotedOp`), or waits for its `extractAsyncOps`
+//! when none took it. The app host's own services ask as the system server
+//! does; an attribution source with a token is not known to be registered
+//! (#1527).
+//! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -27,9 +39,12 @@ use std::sync::{Arc, Mutex};
 use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
+use aim_service_aidl::com_android_internal_app_iappopsactivecallback as active_callback;
 use aim_service_aidl::com_android_internal_app_iappopsservice as appops;
+use aim_service_aidl::com_android_internal_app_iappopsstartedcallback as started_callback;
 
 use super::app_op_infos::{APP_OP_INFOS, AppOpInfo, Bypass, DefaultMode, NUM_OP, OP_NONE, UNRESTRICTED};
+use super::permission_checker::AttributionSourceState;
 use super::permission_manager::PermissionManager;
 use super::{AppHost, reply};
 
@@ -59,27 +74,51 @@ pub(super) const OP_START_FOREGROUND: i32 = 76;
 pub(super) const OP_ACTIVATE_PLATFORM_VPN: i32 = 94;
 pub(super) const OP_SYSTEM_EXEMPT_FROM_POWER_RESTRICTIONS: i32 = 128;
 /// `AppOpsManager.OP_CAMERA`, `OP_RECORD_AUDIO`,
-/// `OP_RECORD_AUDIO_HOTWORD`.
+/// `OP_RECORD_AUDIO_HOTWORD`, `OP_RECEIVE_AMBIENT_TRIGGER_AUDIO`,
+/// `OP_CAMERA_SANDBOXED`, `OP_RECORD_AUDIO_SANDBOXED`.
 const OP_CAMERA: i32 = 26;
 const OP_RECORD_AUDIO: i32 = 27;
 const OP_RECORD_AUDIO_HOTWORD: i32 = 102;
+const OP_RECEIVE_AMBIENT_TRIGGER_AUDIO: i32 = 120;
+const OP_CAMERA_SANDBOXED: i32 = 134;
+const OP_RECORD_AUDIO_SANDBOXED: i32 = 135;
 /// `AppOpsService.OPS_RESTRICTED_ON_SUSPEND`: PLAY_AUDIO, RECORD_AUDIO,
 /// CAMERA, VIBRATE.
 const OPS_RESTRICTED_ON_SUSPEND: [i32; 4] = [28, OP_RECORD_AUDIO, OP_CAMERA, 3];
 /// The ops `AppOpsPolicy.resolveDatasourceOp` resolves by attribution tag:
 /// COARSE_LOCATION, FINE_LOCATION, ACTIVITY_RECOGNITION.
 const DATASOURCE_OPS: [i32; 3] = [0, 1, 79];
+/// `AppOpsManager.OP_FLAG_SELF`, `OP_FLAG_TRUSTED_PROXY`,
+/// `OP_FLAG_UNTRUSTED_PROXY`, `OP_FLAG_TRUSTED_PROXIED`,
+/// `OP_FLAG_UNTRUSTED_PROXIED`.
+const OP_FLAG_SELF: i32 = 0x1;
+const OP_FLAG_TRUSTED_PROXY: i32 = 0x2;
+const OP_FLAG_UNTRUSTED_PROXY: i32 = 0x4;
+const OP_FLAG_TRUSTED_PROXIED: i32 = 0x8;
+const OP_FLAG_UNTRUSTED_PROXIED: i32 = 0x10;
+/// `AppOpsManager.ATTRIBUTION_FLAG_TRUSTED`, `ATTRIBUTION_CHAIN_ID_NONE`.
+pub(super) const ATTRIBUTION_FLAG_TRUSTED: i32 = 0x8;
+pub(super) const ATTRIBUTION_CHAIN_ID_NONE: i32 = -1;
+/// `OnOpStartedListener.START_TYPE_FAILED`, `START_TYPE_STARTED`.
+const START_TYPE_FAILED: i32 = 0;
+const START_TYPE_STARTED: i32 = 1;
 /// `Process.ROOT_UID`, `SYSTEM_UID`, `SHELL_UID`, `MEDIA_UID`,
-/// `AUDIOSERVER_UID`, `CAMERASERVER_UID`, `FIRST_SDK_SANDBOX_UID`,
+/// `AUDIOSERVER_UID`, `CAMERASERVER_UID`, `INVALID_UID`,
+/// `FIRST_APPLICATION_UID`, `FIRST_SDK_SANDBOX_UID`,
 /// `LAST_SDK_SANDBOX_UID`; `UserHandle.PER_USER_RANGE`.
 const ROOT_UID: i32 = 0;
-const SYSTEM_UID: i32 = 1000;
+pub(super) const SYSTEM_UID: i32 = 1000;
 const SHELL_UID: i32 = 2000;
 const MEDIA_UID: i32 = 1013;
 const AUDIOSERVER_UID: i32 = 1041;
 const CAMERASERVER_UID: i32 = 1047;
+const INVALID_UID: i32 = -1;
+const FIRST_APPLICATION_UID: i32 = 10_000;
 const SDK_SANDBOX_UIDS: std::ops::RangeInclusive<i32> = 20000..=29999;
 const PER_USER_RANGE: i32 = 100_000;
+/// `AppOpsService.NON_PACKAGE_UIDS`: root, phone, bluetooth, audioserver,
+/// NFC, the network stack and shell.
+const NON_PACKAGE_UIDS: [i32; 7] = [ROOT_UID, 1001, 1002, AUDIOSERVER_UID, 1027, 1073, SHELL_UID];
 /// `Context.DEVICE_ID_DEFAULT`.
 const DEVICE_ID_DEFAULT: i32 = 0;
 /// `PermissionInfo.PROTECTION_MASK_BASE`, `PROTECTION_DANGEROUS`,
@@ -87,14 +126,17 @@ const DEVICE_ID_DEFAULT: i32 = 0;
 const PROTECTION_MASK_BASE: i32 = 0xf;
 const PROTECTION_DANGEROUS: i32 = 1;
 const PROTECTION_FLAG_APPOP: i32 = 0x40;
+/// `AppOpsManager.SECURITY_EXCEPTION_ON_INVALID_ATTRIBUTION_TAG_CHANGE`.
+const SECURITY_EXCEPTION_ON_INVALID_ATTRIBUTION_TAG_CHANGE: i64 = 151_105_954;
 /// `PackageManager.FEATURE_AUTOMOTIVE`, `FEATURE_LEANBACK`.
 const FEATURE_AUTOMOTIVE: &str = "android.hardware.type.automotive";
 const FEATURE_LEANBACK: &str = "android.software.leanback";
 const UPDATE_APP_OPS_STATS: &str = "android.permission.UPDATE_APP_OPS_STATS";
+const WATCH_APPOPS: &str = "android.permission.WATCH_APPOPS";
+const MANAGE_APPOPS: &str = "android.permission.MANAGE_APPOPS";
 const EXEMPT_FROM_AUDIO_RECORD_RESTRICTIONS: &str = "android.permission.EXEMPT_FROM_AUDIO_RECORD_RESTRICTIONS";
 /// The permissions one of which reads a restricted-read op.
-const READ_RESTRICTED: [&str; 3] =
-    ["android.permission.MANAGE_APPOPS", "android.permission.GET_APP_OPS_STATS", "android.permission.MANAGE_APP_OPS_MODES"];
+const READ_RESTRICTED: [&str; 3] = [MANAGE_APPOPS, "android.permission.GET_APP_OPS_STATS", "android.permission.MANAGE_APP_OPS_MODES"];
 const RUNTIME_PERMISSION_APPOPS_MAPPING: &str = "android.permission.flags.runtime_permission_appops_mapping_enabled";
 const APPOP_MODE_CACHING: &str = "android.permission.flags.appop_mode_caching_enabled";
 const CHECK_OP_VALIDATE_PACKAGE: &str = "android.permission.flags.check_op_validate_package";
@@ -116,6 +158,17 @@ trait System {
     fn global_restriction(&self, op: i32) -> Result<bool, Exception>;
     /// The package `name` (`getPackageStateInternal`), in `user`.
     fn package(&self, name: &str, user: i32) -> Result<Option<Package>, Exception>;
+    /// Whether a package of `uid` is installed (`initializeUidStates`).
+    fn uid_has_package(&self, uid: i32) -> Result<bool, Exception>;
+    /// Whether the parsed package `name` declares the attribution `tag`
+    /// (`isAttributionInPackage` of `getPackage`): any for no tag, none
+    /// without the package.
+    fn attribution_in_package(&self, name: &str, tag: Option<&str>) -> Result<bool, Exception>;
+    /// `PackageManagerInternal.isSystemPackage`.
+    fn system_package(&self, name: &str) -> Result<bool, Exception>;
+    /// Whether SECURITY_EXCEPTION_ON_INVALID_ATTRIBUTION_TAG_CHANGE is
+    /// enabled for `package` and for the uid `caller`.
+    fn invalid_tags_rejected(&self, package: &str, caller: i32) -> Result<bool, Exception>;
     /// `PackageManagerInternal.filterAppAccess(package, caller, user)`.
     fn filtered(&self, package: &str, caller: i32, user: i32) -> Result<bool, Exception>;
     /// `checkPermission(permission, -1, uid)`.
@@ -139,10 +192,11 @@ struct Package {
     suspended: bool,
 }
 
-/// `verifyAndGetBypass`: the package's restriction bypass, or that it is
-/// not the uid's (its SecurityException).
+/// `verifyAndGetBypass`: the package's restriction bypass and whether the
+/// attribution tag is valid for it, or that it is not the uid's (its
+/// SecurityException).
 enum Verified {
-    Bypass(Option<Bypass>),
+    Bypass(Option<Bypass>, bool),
     NotUids,
 }
 
@@ -166,11 +220,51 @@ fn verify_incoming_op(sys: &dyn System, caller: i32, code: i32) -> Result<&'stat
 }
 
 /// `verifyIncomingUid`: the caller's own uid, else UPDATE_APP_OPS_STATS.
+/// The system server's own calls are the system uid's, which holds it.
 fn verify_incoming_uid(sys: &dyn System, caller: i32, uid: i32) -> Result<(), Exception> {
     if uid == caller || sys.holds(caller, UPDATE_APP_OPS_STATS)? {
         return Ok(());
     }
     Err(Exception::security(format!("uid {caller} does not have {UPDATE_APP_OPS_STATS}.")))
+}
+
+/// `AttributionSource.getNext`: the first of `next`.
+fn next_of(source: &AttributionSourceState) -> Result<Option<&AttributionSourceState>, Exception> {
+    match source.next.as_deref().and_then(<[_]>::first) {
+        None => Ok(None),
+        Some(next) => next.as_ref().map(Some).ok_or_else(|| Exception::new(EX_NULL_POINTER, "next")),
+    }
+}
+
+/// `AttributionSource.isTrusted`: a source with a token the permission
+/// manager registered (#1527).
+fn trusted(sys: &dyn System, source: &AttributionSourceState) -> Result<bool, Exception> {
+    match source.token {
+        None => Ok(false),
+        Some(_) => Err(sys.unimplemented("trusted attribution sources (isRegisteredAttributionSource, #1527)")),
+    }
+}
+
+/// `verifyIncomingProxyUid`: the caller's own source, or the system
+/// server's call, or a trusted source, else UPDATE_APP_OPS_STATS.
+fn verify_incoming_proxy_uid(sys: &dyn System, caller: i32, source: &AttributionSourceState) -> Result<(), Exception> {
+    if source.uid == caller || caller == SYSTEM_UID || trusted(sys, source)? {
+        return Ok(());
+    }
+    verify_incoming_uid(sys, caller, source.uid)
+}
+
+/// `isCallerAndAttributionTrusted`: another uid's trusted source (and its
+/// next), or a caller with UPDATE_APP_OPS_STATS.
+fn caller_and_attribution_trusted(sys: &dyn System, caller: i32, source: &AttributionSourceState) -> Result<bool, Exception> {
+    if source.uid != caller && trusted(sys, source)? {
+        match next_of(source)? {
+            None => return Ok(true),
+            Some(next) if trusted(sys, next)? => return Ok(true),
+            Some(_) => {}
+        }
+    }
+    sys.holds(caller, UPDATE_APP_OPS_STATS)
 }
 
 /// `opToDefaultMode`.
@@ -223,30 +317,63 @@ fn valid_package(sys: &dyn System, caller: i32, package: Option<&str>, user: i32
     Ok(sys.package(package, user)?.is_some() && !sys.filtered(package, caller, user)?)
 }
 
-/// `verifyAndGetBypass`: root has no bypass, a non-app uid's own name is
-/// unrestricted, else the package must be the uid's.
-fn verify_and_get_bypass(sys: &dyn System, uid: i32, package: &str) -> Result<Verified, Exception> {
+/// `verifyAndGetBypass` of `uid`'s `package` and attribution `tag` for
+/// `caller`, with the proxy's uid and package for a proxied op: root has
+/// no bypass, a non-app uid's own name is unrestricted (with any tag
+/// unless a proxy that is an app is not a system one), else the package
+/// must be the uid's and declare the tag, or its proxy must, or the tag
+/// is kept where the package or the caller may give an undeclared one.
+fn verify_and_get_bypass(
+    sys: &dyn System,
+    caller: i32,
+    uid: i32,
+    package: Option<&str>,
+    tag: Option<&str>,
+    proxy: Option<(i32, &str)>,
+) -> Result<Verified, Exception> {
     if uid == ROOT_UID {
-        return Ok(Verified::Bypass(None));
+        return Ok(Verified::Bypass(None, true));
     }
     if SDK_SANDBOX_UIDS.contains(&app_id(uid)) {
         return Err(sys.unimplemented("an SDK sandbox uid's ops (#1562)"));
     }
-    let non_app = if package == "com.android.shell" { Some(SHELL_UID) } else { non_app_uid(package) };
+    let non_app = if package == Some("com.android.shell") { Some(SHELL_UID) } else { package.and_then(non_app_uid) };
     if let Some(non_app) = non_app {
-        return Ok(if non_app == app_id(uid) { Verified::Bypass(Some(UNRESTRICTED)) } else { Verified::NotUids });
+        if non_app != app_id(uid) {
+            return Ok(Verified::NotUids);
+        }
+        let proxy_system_or_none = match proxy {
+            Some((proxy_uid, proxy_package)) if app_id(proxy_uid) >= FIRST_APPLICATION_UID => sys.system_package(proxy_package)?,
+            _ => true,
+        };
+        return Ok(Verified::Bypass(Some(UNRESTRICTED), proxy_system_or_none));
     }
     let user = uid.div_euclid(PER_USER_RANGE);
+    let Some(package) = package else { return Ok(Verified::NotUids) };
     let Some(ps) = sys.package(package, user)?.filter(|p| p.parsed) else { return Ok(Verified::NotUids) };
+    let mut tag_valid = sys.attribution_in_package(package, tag)?;
+    if !tag_valid {
+        tag_valid = match proxy {
+            Some((_, proxy_package)) => sys.attribution_in_package(proxy_package, tag)?,
+            None => false,
+        } || !sys.invalid_tags_rejected(package, caller)?;
+    }
     if user * PER_USER_RANGE + ps.app_id != uid {
         return Ok(Verified::NotUids);
     }
     // `getBypassforPackage`.
-    Ok(Verified::Bypass(Some(Bypass {
+    let bypass = Bypass {
         system_uid: ps.app_id == SYSTEM_UID,
         privileged: ps.privileged,
         record_audio_exempt: sys.holds(ps.app_id, EXEMPT_FROM_AUDIO_RECORD_RESTRICTIONS)?,
-    })))
+    };
+    Ok(Verified::Bypass(Some(bypass), tag_valid))
+}
+
+/// Whether appops keeps a uid state of `uid` (`getOpsLocked`): the
+/// non-package uids' and the installed packages'.
+fn has_ops(sys: &dyn System, uid: i32) -> Result<bool, Exception> {
+    Ok(NON_PACKAGE_UIDS.contains(&uid) || sys.uid_has_package(uid)?)
 }
 
 /// `isOpRestrictedLocked` of the default device: a global restriction, or
@@ -305,6 +432,16 @@ fn eval(sys: &dyn System, uid: i32, mode: i32) -> i32 {
     }
 }
 
+/// The mode a note or a start evaluates: root and system's
+/// (`isOpAllowedForUid`, which a start's dry run does not ask), else the
+/// switch's.
+fn op_mode(sys: &dyn System, uid: i32, package: &str, info: &AppOpInfo, allow_uid: bool) -> Result<i32, Exception> {
+    if allow_uid && allowed_for_uid(sys, uid)? {
+        return Ok(MODE_ALLOWED);
+    }
+    Ok(eval(sys, uid, persisted_mode(sys, uid, package, info)?))
+}
+
 /// `checkOperationImpl`, by `getAppOpMode`: `raw` keeps a foreground mode.
 /// The app host has no virtual devices (`isValidVirtualDeviceId`).
 fn check(sys: &dyn System, caller: i32, code: i32, uid: i32, package: Option<&str>, device: i32, raw: bool) -> Result<i32, Exception> {
@@ -321,7 +458,9 @@ fn check(sys: &dyn System, caller: i32, code: i32, uid: i32, package: Option<&st
     if !sys.flag(APPOP_MODE_CACHING)? {
         return Err(sys.unimplemented("checkOperationUnchecked (#1565)"));
     }
-    let Verified::Bypass(bypass) = verify_and_get_bypass(sys, uid, &package)? else { return Ok(MODE_IGNORED) };
+    let Verified::Bypass(bypass, _) = verify_and_get_bypass(sys, caller, uid, Some(&package), None, None)? else {
+        return Ok(MODE_IGNORED);
+    };
     // `isOpRestrictedDueToSuspend`.
     if OPS_RESTRICTED_ON_SUSPEND.contains(&code) && sys.package(&package, user)?.is_some_and(|p| p.suspended) {
         return Ok(MODE_IGNORED);
@@ -353,45 +492,33 @@ fn resolve_datasource_op(sys: &dyn System, code: i32, tag: Option<&str>) -> Resu
     Ok(code)
 }
 
-/// `noteOperationImpl` behind `AppOpsPolicy.noteOperation`: a package that
-/// is not the uid's errs.
-fn note_op(
+/// `validateOpRequest`, or the checks before it (by
+/// `check_op_validate_package`) of `noteOperationImpl` and
+/// `startOperationImpl`: the package resolved, or the mode a request that
+/// fails them answers. The app host has no virtual devices.
+fn validate_request(
     sys: &dyn System,
     caller: i32,
     code: i32,
     uid: i32,
     package: Option<&str>,
-    tag: Option<&str>,
     device: i32,
-) -> Result<i32, Exception> {
-    let code = resolve_datasource_op(sys, code, tag)?;
-    let user = uid.div_euclid(PER_USER_RANGE);
+) -> Result<Result<String, i32>, Exception> {
     let validate = sys.flag(CHECK_OP_VALIDATE_PACKAGE)?;
-    // `validateOpRequest` verifies the op first.
-    let info = if validate {
-        let info = verify_incoming_op(sys, caller, code)?;
+    if validate {
+        verify_incoming_op(sys, caller, code)?;
         verify_incoming_uid(sys, caller, uid)?;
-        info
     } else {
         verify_incoming_uid(sys, caller, uid)?;
-        verify_incoming_op(sys, caller, code)?
-    };
+        verify_incoming_op(sys, caller, code)?;
+    }
     if device != DEVICE_ID_DEFAULT {
-        return Ok(MODE_IGNORED);
+        return Ok(Err(MODE_IGNORED));
     }
-    if !valid_package(sys, caller, package, user)? {
-        return Ok(if validate { MODE_IGNORED } else { MODE_ERRORED });
+    if !valid_package(sys, caller, package, uid.div_euclid(PER_USER_RANGE))? {
+        return Ok(Err(if validate { MODE_IGNORED } else { MODE_ERRORED }));
     }
-    let Some(package) = resolve_package_name(uid, package) else { return Ok(MODE_IGNORED) };
-    // `noteOperationUnchecked`.
-    let Verified::Bypass(bypass) = verify_and_get_bypass(sys, uid, &package)? else { return Ok(MODE_ERRORED) };
-    if restricted(sys, uid, info, bypass)? {
-        return Ok(MODE_IGNORED);
-    }
-    if allowed_for_uid(sys, uid)? {
-        return Ok(MODE_ALLOWED);
-    }
-    Ok(eval(sys, uid, persisted_mode(sys, uid, &package, info)?))
+    Ok(resolve_package_name(uid, package).ok_or(MODE_IGNORED))
 }
 
 /// `shouldCollectNotes`: an op whose notes are always collected, or whose
@@ -417,6 +544,702 @@ fn should_collect_notes(
     };
     Ok(protection(permission)?
         .is_some_and(|level| level & PROTECTION_MASK_BASE == PROTECTION_DANGEROUS || level & PROTECTION_FLAG_APPOP != 0))
+}
+
+/// `Preconditions.checkArrayElementsInRange` of the ops a watcher gives.
+fn ops_in_range(ops: &[i32]) -> Result<(), Exception> {
+    let name = format!("Invalid op code in: [{}]", ops.iter().map(i32::to_string).collect::<Vec<_>>().join(", "));
+    for (i, &op) in ops.iter().enumerate() {
+        let side = if op < 0 {
+            "too low"
+        } else if op > NUM_OP - 1 {
+            "too high"
+        } else {
+            continue;
+        };
+        return Err(Exception::illegal_argument(format!("{name}[{i}] is out of range of [0, {}] ({side})", NUM_OP - 1)));
+    }
+    Ok(())
+}
+
+/// `SyncNotedAppOp`: the mode an op was noted or started with, for the
+/// attribution tag and the package it was decided for.
+#[derive(Debug, PartialEq)]
+pub(super) struct SyncNoted {
+    pub mode: i32,
+    op: i32,
+    tag: Option<String>,
+    package: Option<String>,
+}
+
+impl SyncNoted {
+    fn new(mode: i32, op: i32, tag: Option<&str>, package: Option<&str>) -> Self {
+        SyncNoted { mode, op, tag: tag.map(String::from), package: package.map(String::from) }
+    }
+}
+
+/// Its parcel: which nullable fields follow, the mode, the op, the
+/// attribution tag, the package.
+impl WriteParcelable for SyncNoted {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i32(if self.tag.is_some() { 0x4 } else { 0 } | if self.package.is_some() { 0x8 } else { 0 });
+        p.write_i32(self.mode);
+        p.write_i32(self.op);
+        if let Some(tag) = &self.tag {
+            p.write_string16(Some(tag));
+        }
+        if let Some(package) = &self.package {
+            p.write_string16(Some(package));
+        }
+    }
+}
+
+/// An op of a uid's package and attribution tag as `noteOperationUnchecked`
+/// and `startOperationUnchecked` take it: the proxy's uid and package for a
+/// proxied one, its `OP_FLAG_*`, and the message it is collected with for
+/// the app (`shouldCollectAsyncNotedOp`).
+struct Unchecked<'a> {
+    code: i32,
+    uid: i32,
+    package: Option<&'a str>,
+    tag: Option<&'a str>,
+    proxy: Option<(i32, &'a str)>,
+    flags: i32,
+    collect: Option<String>,
+}
+
+/// How a start is attributed: whether it starts at the default mode, its
+/// `ATTRIBUTION_FLAG_*` and its attribution chain.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Attribution {
+    pub start_if_mode_default: bool,
+    pub flags: i32,
+    pub chain_id: i32,
+}
+
+/// How a proxy start is attributed: as `Attribution`, with the proxy's and
+/// the proxied's flags.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ProxyAttribution {
+    pub start_if_mode_default: bool,
+    pub proxy_flags: i32,
+    pub proxied_flags: i32,
+    pub chain_id: i32,
+}
+
+/// `shouldStartForMode`.
+fn should_start(mode: i32, start_if_mode_default: bool) -> bool {
+    mode == MODE_ALLOWED || (mode == MODE_DEFAULT && start_if_mode_default)
+}
+
+/// An op of a uid's package (`Op`).
+type OpKey = (i32, String, i32);
+
+/// A client binder of an attributed op (`AttributedOp`), which its death
+/// finishes.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Client {
+    key: OpKey,
+    tag: Option<String>,
+    binder: Binder,
+}
+
+/// A client's unfinished starts of an attributed op
+/// (`InProgressStartOpEvent`): their count, the first's attribution, and
+/// the link to the client's death.
+struct InProgress<L> {
+    starts: u32,
+    attribution_flags: i32,
+    chain_id: i32,
+    link: L,
+}
+
+/// `AttributedOp`: its clients' running and paused (restricted at their
+/// start) events.
+struct Attributed<L> {
+    running: HashMap<Binder, InProgress<L>>,
+    paused: HashMap<Binder, InProgress<L>>,
+}
+
+impl<L> Default for Attributed<L> {
+    fn default() -> Self {
+        Attributed { running: HashMap::new(), paused: HashMap::new() }
+    }
+}
+
+/// Which watchers: `startWatchingActive`'s or `startWatchingStarted`'s.
+#[derive(Clone, Copy)]
+enum Watch {
+    Active,
+    Started,
+}
+
+/// A watcher (`ActiveCallback`, `StartedCallback`): by op, the uid it
+/// watches (`Process.INVALID_UID` for all) and the uid that registered
+/// it; and the link to its death.
+struct Watcher<L> {
+    link: L,
+    ops: HashMap<i32, (i32, i32)>,
+}
+
+/// What a watcher hears: `opActiveChanged`, or `opStarted` with the op's
+/// flags, mode and start type.
+#[derive(Debug, PartialEq)]
+enum Heard {
+    Active(bool),
+    Started { flags: i32, mode: i32, start_type: i32 },
+}
+
+/// A call to the watchers of an op (`scheduleOpActiveChangedIfNeededLocked`,
+/// `scheduleOpStartedIfNeededLocked`): their binders and the uids that
+/// registered them.
+#[derive(Debug, PartialEq)]
+pub(super) struct Notice {
+    watchers: Vec<(u32, i32)>,
+    op: i32,
+    uid: i32,
+    package: Option<String>,
+    tag: Option<String>,
+    attribution_flags: i32,
+    chain_id: i32,
+    heard: Heard,
+}
+
+/// An op noted or started for an app, to collect for it
+/// (`collectAsyncNotedOp`).
+#[derive(Debug, PartialEq)]
+struct Collected {
+    uid: i32,
+    package: String,
+    op: i32,
+    tag: Option<String>,
+    message: String,
+}
+
+/// What a note, start or finish leaves to do once appops' lock is
+/// released: the watchers to call and the ops to collect.
+#[derive(Default)]
+struct Effects {
+    notices: Vec<Notice>,
+    collected: Vec<Collected>,
+}
+
+/// The started ops of each uid's packages by attribution tag, and the
+/// watchers of their starts.
+pub(super) struct Started<L> {
+    ops: HashMap<OpKey, HashMap<Option<String>, Attributed<L>>>,
+    active: HashMap<u32, Watcher<L>>,
+    started: HashMap<u32, Watcher<L>>,
+}
+
+impl<L> Default for Started<L> {
+    fn default() -> Self {
+        Started { ops: HashMap::new(), active: HashMap::new(), started: HashMap::new() }
+    }
+}
+
+impl<L> Started<L> {
+    fn watchers(&mut self, which: Watch) -> &mut HashMap<u32, Watcher<L>> {
+        match which {
+            Watch::Active => &mut self.active,
+            Watch::Started => &mut self.started,
+        }
+    }
+
+    /// `Op.isRunning`: a client of one of its attributed ops runs.
+    fn running(&self, key: &OpKey) -> bool {
+        self.ops.get(key).is_some_and(|tags| tags.values().any(|a| !a.running.is_empty()))
+    }
+
+    /// `binder` watches `ops` of `watched` for the uid `calling`.
+    fn watch(&mut self, which: Watch, binder: u32, ops: &[i32], watched: i32, calling: i32, link: impl FnOnce() -> L) {
+        let watcher = self.watchers(which).entry(binder).or_insert_with(|| Watcher { link: link(), ops: HashMap::new() });
+        for &op in ops {
+            watcher.ops.insert(op, (watched, calling));
+        }
+    }
+
+    fn unwatch(&mut self, which: Watch, binder: u32) -> Option<L> {
+        self.watchers(which).remove(&binder).map(|w| w.link)
+    }
+
+    /// Tells `which` watchers of `op` that watch `uid`.
+    #[allow(clippy::too_many_arguments)]
+    fn notify(
+        &self,
+        which: Watch,
+        op: i32,
+        uid: i32,
+        package: Option<&str>,
+        tag: Option<&str>,
+        attribution_flags: i32,
+        chain_id: i32,
+        heard: Heard,
+        effects: &mut Effects,
+    ) {
+        let watchers = match which {
+            Watch::Active => &self.active,
+            Watch::Started => &self.started,
+        };
+        let mut watching: Vec<(u32, i32)> = watchers
+            .iter()
+            .filter_map(|(binder, w)| {
+                w.ops.get(&op).filter(|(watched, _)| *watched < 0 || *watched == uid).map(|(_, calling)| (*binder, *calling))
+            })
+            .collect();
+        if watching.is_empty() {
+            return;
+        }
+        watching.sort_unstable();
+        effects.notices.push(Notice {
+            watchers: watching,
+            op,
+            uid,
+            package: package.map(String::from),
+            tag: tag.map(String::from),
+            attribution_flags,
+            chain_id,
+            heard,
+        });
+    }
+
+    fn notify_active(&self, client: &Client, active: bool, attribution_flags: i32, chain_id: i32, effects: &mut Effects) {
+        let (uid, package, op) = &client.key;
+        let heard = Heard::Active(active);
+        self.notify(Watch::Active, *op, *uid, Some(package), client.tag.as_deref(), attribution_flags, chain_id, heard, effects);
+    }
+
+    /// `AttributedOp.started`, or `createPaused` for a restricted op: one
+    /// more start of `client`, the op active from its first.
+    fn start(
+        &mut self,
+        client: &Client,
+        restricted: bool,
+        attribution: Attribution,
+        link: &mut dyn FnMut(&Client) -> L,
+        effects: &mut Effects,
+    ) {
+        if !restricted && !self.running(&client.key) {
+            self.notify_active(client, true, attribution.flags, attribution.chain_id, effects);
+        }
+        let attributed = self.ops.entry(client.key.clone()).or_default().entry(client.tag.clone()).or_default();
+        let events = if restricted { &mut attributed.paused } else { &mut attributed.running };
+        let event = events.entry(client.binder).or_insert_with(|| InProgress {
+            starts: 0,
+            attribution_flags: attribution.flags,
+            chain_id: attribution.chain_id,
+            link: link(client),
+        });
+        event.starts += 1;
+    }
+
+    /// `AttributedOp.finished`: one start of `client` finished, the op
+    /// inactive once none of its clients runs; the links of the events
+    /// that ended.
+    fn finished(&mut self, client: &Client, effects: &mut Effects) -> Vec<L> {
+        let Some(attributed) = self.ops.get_mut(&client.key).and_then(|tags| tags.get_mut(&client.tag)) else {
+            return Vec::new();
+        };
+        let mut ended = Vec::new();
+        let mut inactive = None;
+        if let Some(event) = attributed.running.get_mut(&client.binder) {
+            event.starts -= 1;
+            if event.starts == 0 {
+                let event = attributed.running.remove(&client.binder).expect("a running event");
+                inactive = attributed.running.is_empty().then_some((event.attribution_flags, event.chain_id));
+                ended.push(event.link);
+            }
+        } else if let Some(event) = attributed.paused.get_mut(&client.binder) {
+            // `finishPossiblyPaused`.
+            event.starts -= 1;
+            if event.starts == 0 {
+                ended.push(attributed.paused.remove(&client.binder).expect("a paused event").link);
+            }
+        }
+        if attributed.running.is_empty() && attributed.paused.is_empty() {
+            let tags = self.ops.get_mut(&client.key).expect("the op's tags");
+            tags.remove(&client.tag);
+            if tags.is_empty() {
+                self.ops.remove(&client.key);
+            }
+        }
+        if let Some((attribution_flags, chain_id)) = inactive
+            && !self.running(&client.key)
+        {
+            self.notify_active(client, false, attribution_flags, chain_id, effects);
+        }
+        ended
+    }
+
+    /// `AttributedOp.onClientDeath`: the client's starts all finished, of
+    /// the paused events while any is paused.
+    fn client_died(&mut self, client: &Client, effects: &mut Effects) -> Vec<L> {
+        let Some(attributed) = self.ops.get_mut(&client.key).and_then(|tags| tags.get_mut(&client.tag)) else {
+            return Vec::new();
+        };
+        let events = if attributed.paused.is_empty() { &mut attributed.running } else { &mut attributed.paused };
+        if let Some(event) = events.get_mut(&client.binder) {
+            event.starts = 1;
+        }
+        self.finished(client, effects)
+    }
+}
+
+/// AppOps as one caller reaches it: the system server it reads, and the
+/// started ops it keeps with how a client's death is linked; what it
+/// leaves to do, and the links of the events that ended.
+struct Ops<'a, L> {
+    sys: &'a dyn System,
+    caller: i32,
+    started: &'a mut Started<L>,
+    link: &'a mut dyn FnMut(&Client) -> L,
+    effects: Effects,
+    ended: Vec<L>,
+}
+
+impl<L> Ops<'_, L> {
+    /// `noteOperationImpl` behind `AppOpsPolicy.noteOperation`.
+    fn note(&mut self, op: &Unchecked<'_>, device: i32) -> Result<SyncNoted, Exception> {
+        let code = resolve_datasource_op(self.sys, op.code, op.tag)?;
+        let resolved = match validate_request(self.sys, self.caller, code, op.uid, op.package, device)? {
+            Ok(resolved) => resolved,
+            Err(mode) => return Ok(SyncNoted::new(mode, code, op.tag, op.package)),
+        };
+        self.note_unchecked(&Unchecked { code, package: Some(&resolved), collect: op.collect.clone(), ..*op })
+    }
+
+    /// `noteOperationUnchecked`: a package that is not the uid's errs.
+    fn note_unchecked(&mut self, op: &Unchecked<'_>) -> Result<SyncNoted, Exception> {
+        let sys = self.sys;
+        let info = &APP_OP_INFOS[op.code as usize];
+        let Verified::Bypass(bypass, tag_valid) = verify_and_get_bypass(sys, self.caller, op.uid, op.package, op.tag, op.proxy)? else {
+            return Ok(SyncNoted::new(MODE_ERRORED, op.code, op.tag, op.package));
+        };
+        let tag = op.tag.filter(|_| tag_valid);
+        if !has_ops(sys, op.uid)? {
+            return Ok(SyncNoted::new(MODE_ERRORED, op.code, tag, op.package));
+        }
+        let package = op.package.ok_or_else(|| Exception::new(EX_NULL_POINTER, "packageName"))?;
+        let mode = if restricted(sys, op.uid, info, bypass)? { MODE_IGNORED } else { op_mode(sys, op.uid, package, info, true)? };
+        if mode == MODE_ALLOWED {
+            self.collect(op, package, tag);
+        }
+        Ok(SyncNoted::new(mode, op.code, tag, Some(package)))
+    }
+
+    fn collect(&mut self, op: &Unchecked<'_>, package: &str, tag: Option<&str>) {
+        if let Some(message) = &op.collect {
+            let (uid, op, package, tag, message) = (op.uid, op.code, package.to_string(), tag.map(String::from), message.clone());
+            self.effects.collected.push(Collected { uid, package, op, tag, message });
+        }
+    }
+
+    /// `noteProxyOperationImpl` behind `AppOpsPolicy`: the proxy's op noted
+    /// (unless a trusted caller skips it), then the proxied's; a proxy
+    /// without UPDATE_APP_OPS_STATS, but for the proxied's own call, is
+    /// collected for itself.
+    fn note_proxy(
+        &mut self,
+        code: i32,
+        source: &AttributionSourceState,
+        skip_proxy: bool,
+        collect: bool,
+        message: Option<&str>,
+    ) -> Result<SyncNoted, Exception> {
+        let (sys, caller) = (self.sys, self.caller);
+        let code = resolve_datasource_op(sys, code, source.tag.as_deref())?;
+        let next = next_of(source)?;
+        let proxied_uid = next.map_or(INVALID_UID, |n| n.uid);
+        let (proxied_package, proxied_tag) = (next.and_then(|n| n.package.as_deref()), next.and_then(|n| n.tag.as_deref()));
+        let synced = |mode| SyncNoted::new(mode, code, proxied_tag, proxied_package);
+        verify_incoming_proxy_uid(sys, caller, source)?;
+        verify_incoming_op(sys, caller, code)?;
+        if source.device_id != DEVICE_ID_DEFAULT {
+            return Ok(synced(MODE_IGNORED));
+        }
+        if !valid_package(sys, caller, proxied_package, proxied_uid.div_euclid(PER_USER_RANGE))?
+            || !valid_package(sys, caller, source.package.as_deref(), source.uid.div_euclid(PER_USER_RANGE))?
+        {
+            return Ok(synced(MODE_ERRORED));
+        }
+        let skip = skip_proxy && caller_and_attribution_trusted(sys, caller, source)?;
+        let Some(proxy_package) = resolve_package_name(source.uid, source.package.as_deref()) else {
+            return Ok(synced(MODE_IGNORED));
+        };
+        let proxy_trusted = sys.holds(source.uid, UPDATE_APP_OPS_STATS)? || caller == proxied_uid;
+        if !skip {
+            let proxy = Unchecked {
+                code,
+                uid: source.uid,
+                package: Some(&proxy_package),
+                tag: source.tag.as_deref(),
+                proxy: None,
+                flags: if proxy_trusted { OP_FLAG_TRUSTED_PROXY } else { OP_FLAG_UNTRUSTED_PROXY },
+                collect: (!proxy_trusted).then(|| format!("proxy {}", message.unwrap_or("null"))),
+            };
+            let noted = self.note_unchecked(&proxy)?;
+            if noted.mode != MODE_ALLOWED {
+                return Ok(synced(noted.mode));
+            }
+        }
+        let Some(proxied) = resolve_package_name(proxied_uid, proxied_package) else { return Ok(synced(MODE_IGNORED)) };
+        self.note_unchecked(&Unchecked {
+            code,
+            uid: proxied_uid,
+            package: Some(&proxied),
+            tag: proxied_tag,
+            proxy: Some((source.uid, &proxy_package)),
+            flags: if proxy_trusted { OP_FLAG_TRUSTED_PROXIED } else { OP_FLAG_UNTRUSTED_PROXIED },
+            collect: collect.then(|| message.unwrap_or_default().to_string()),
+        })
+    }
+
+    /// `startOperationImpl` behind `AppOpsPolicy.startOperation`: the
+    /// hotword, ambient trigger and sandboxed audio ops need RECORD_AUDIO
+    /// allowed, the sandboxed camera CAMERA; the package is started as
+    /// given.
+    fn start(&mut self, client: Option<Binder>, op: &Unchecked<'_>, attribution: Attribution) -> Result<SyncNoted, Exception> {
+        let code = resolve_datasource_op(self.sys, op.code, op.tag)?;
+        if let Err(mode) = validate_request(self.sys, self.caller, code, op.uid, op.package, DEVICE_ID_DEFAULT)? {
+            return Ok(SyncNoted::new(mode, code, op.tag, op.package));
+        }
+        let needed = match code {
+            OP_RECORD_AUDIO_HOTWORD | OP_RECEIVE_AMBIENT_TRIGGER_AUDIO | OP_RECORD_AUDIO_SANDBOXED => Some(OP_RECORD_AUDIO),
+            OP_CAMERA_SANDBOXED => Some(OP_CAMERA),
+            _ => None,
+        };
+        if let Some(needed) = needed {
+            let mode = check(self.sys, self.caller, needed, op.uid, op.package, DEVICE_ID_DEFAULT, false)?;
+            if mode != MODE_ALLOWED {
+                return Ok(SyncNoted::new(mode, code, op.tag, op.package));
+            }
+        }
+        self.start_unchecked(client, &Unchecked { code, collect: op.collect.clone(), ..*op }, attribution)
+    }
+
+    /// `startOperationUnchecked`: where the op's mode allows it (or is the
+    /// default, with `startIfModeDefault`) `client` starts it, paused while
+    /// it is restricted; the started watchers hear each start and
+    /// rejection.
+    fn start_unchecked(&mut self, client: Option<Binder>, op: &Unchecked<'_>, attribution: Attribution) -> Result<SyncNoted, Exception> {
+        let (tag, package, mode, restricted) = match decide(self.sys, self.caller, op, true)? {
+            Decided::NotUids => return Ok(SyncNoted::new(MODE_ERRORED, op.code, op.tag, op.package)),
+            Decided::NoOps(tag) => {
+                self.notify_started(op, tag, MODE_IGNORED, START_TYPE_FAILED, attribution);
+                return Ok(SyncNoted::new(MODE_ERRORED, op.code, tag, op.package));
+            }
+            Decided::Mode { tag, package, mode, restricted } => (tag, package, mode, restricted),
+        };
+        if !should_start(mode, attribution.start_if_mode_default) {
+            self.notify_started(op, tag, mode, START_TYPE_FAILED, attribution);
+            return Ok(SyncNoted::new(mode, op.code, tag, Some(package)));
+        }
+        let binder = client.ok_or_else(|| Exception::new(EX_NULL_POINTER, "clientId"))?;
+        let client = Client { key: (op.uid, package.to_string(), op.code), tag: tag.map(String::from), binder };
+        self.started.start(&client, restricted, attribution, self.link, &mut self.effects);
+        let (mode, start_type) = if restricted { (MODE_IGNORED, START_TYPE_FAILED) } else { (MODE_ALLOWED, START_TYPE_STARTED) };
+        self.notify_started(op, tag, mode, start_type, attribution);
+        if !restricted {
+            self.collect(op, package, tag);
+        }
+        Ok(SyncNoted::new(mode, op.code, tag, Some(package)))
+    }
+
+    fn notify_started(&mut self, op: &Unchecked<'_>, tag: Option<&str>, mode: i32, start_type: i32, attribution: Attribution) {
+        let heard = Heard::Started { flags: op.flags, mode, start_type };
+        let (flags, chain_id) = (attribution.flags, attribution.chain_id);
+        self.started.notify(Watch::Started, op.code, op.uid, op.package, tag, flags, chain_id, heard, &mut self.effects);
+    }
+
+    /// `startProxyOperationImpl` behind `AppOpsPolicy`: unless a trusted
+    /// caller skips it, the proxy starts the op once the proxied could
+    /// (`startOperationDryRun`), then the proxied starts it. A proxy is
+    /// trusted with UPDATE_APP_OPS_STATS, for the proxied's own call, or in
+    /// a trusted caller's trusted chain; one that is not is collected for
+    /// itself.
+    #[allow(clippy::too_many_arguments)]
+    fn start_proxy(
+        &mut self,
+        client: Option<Binder>,
+        code: i32,
+        source: &AttributionSourceState,
+        skip_proxy: bool,
+        attribution: ProxyAttribution,
+        collect: bool,
+        message: Option<&str>,
+    ) -> Result<SyncNoted, Exception> {
+        let (sys, caller) = (self.sys, self.caller);
+        let code = resolve_datasource_op(sys, code, source.tag.as_deref())?;
+        let next = next_of(source)?;
+        let (proxied_uid, proxied_device) = next.map_or((INVALID_UID, DEVICE_ID_DEFAULT), |n| (n.uid, n.device_id));
+        let (proxied_package, proxied_tag) = (next.and_then(|n| n.package.as_deref()), next.and_then(|n| n.tag.as_deref()));
+        let synced = |mode| SyncNoted::new(mode, code, proxied_tag, proxied_package);
+        verify_incoming_proxy_uid(sys, caller, source)?;
+        verify_incoming_op(sys, caller, code)?;
+        if source.device_id != DEVICE_ID_DEFAULT || proxied_device != DEVICE_ID_DEFAULT {
+            return Ok(synced(MODE_IGNORED));
+        }
+        if !valid_package(sys, caller, source.package.as_deref(), source.uid.div_euclid(PER_USER_RANGE))?
+            || !valid_package(sys, caller, proxied_package, proxied_uid.div_euclid(PER_USER_RANGE))?
+        {
+            return Ok(synced(MODE_ERRORED));
+        }
+        let caller_trusted = caller_and_attribution_trusted(sys, caller, source)?;
+        let skip = caller_trusted && skip_proxy;
+        let Some(proxy_package) = resolve_package_name(source.uid, source.package.as_deref()) else {
+            return Ok(synced(MODE_IGNORED));
+        };
+        let chain_trusted = caller_trusted
+            && attribution.chain_id != ATTRIBUTION_CHAIN_ID_NONE
+            && (attribution.proxy_flags | attribution.proxied_flags) & ATTRIBUTION_FLAG_TRUSTED != 0;
+        let proxy_trusted = sys.holds(source.uid, UPDATE_APP_OPS_STATS)? || caller == proxied_uid || chain_trusted;
+        let Some(proxied) = resolve_package_name(proxied_uid, proxied_package) else { return Ok(synced(MODE_IGNORED)) };
+        let start_if_mode_default = attribution.start_if_mode_default;
+        let proxied_op = Unchecked {
+            code,
+            uid: proxied_uid,
+            package: Some(&proxied),
+            tag: proxied_tag,
+            proxy: Some((source.uid, &proxy_package)),
+            flags: if proxy_trusted { OP_FLAG_TRUSTED_PROXIED } else { OP_FLAG_UNTRUSTED_PROXIED },
+            collect: collect.then(|| message.unwrap_or_default().to_string()),
+        };
+        if !skip {
+            let tested = start_dry_run(sys, caller, &proxied_op, start_if_mode_default)?;
+            if !should_start(tested.mode, start_if_mode_default) {
+                return Ok(tested);
+            }
+            let proxy_op = Unchecked {
+                code,
+                uid: source.uid,
+                package: Some(&proxy_package),
+                tag: source.tag.as_deref(),
+                proxy: None,
+                flags: if proxy_trusted { OP_FLAG_TRUSTED_PROXY } else { OP_FLAG_UNTRUSTED_PROXY },
+                collect: (!proxy_trusted).then(|| format!("proxy {}", message.unwrap_or("null"))),
+            };
+            let flags = attribution.proxy_flags;
+            let started =
+                self.start_unchecked(client, &proxy_op, Attribution { start_if_mode_default, flags, chain_id: attribution.chain_id })?;
+            if !should_start(started.mode, start_if_mode_default) {
+                return Ok(started);
+            }
+        }
+        let flags = attribution.proxied_flags;
+        self.start_unchecked(client, &proxied_op, Attribution { start_if_mode_default, flags, chain_id: attribution.chain_id })
+    }
+
+    /// `finishOperationImpl` behind `AppOpsPolicy.finishOperation`.
+    fn finish(&mut self, client: Option<Binder>, code: i32, uid: i32, package: Option<&str>, tag: Option<&str>) -> Result<(), Exception> {
+        let code = resolve_datasource_op(self.sys, code, tag)?;
+        verify_incoming_uid(self.sys, self.caller, uid)?;
+        verify_incoming_op(self.sys, self.caller, code)?;
+        if !valid_package(self.sys, self.caller, package, uid.div_euclid(PER_USER_RANGE))? {
+            return Ok(());
+        }
+        let Some(resolved) = resolve_package_name(uid, package) else { return Ok(()) };
+        self.finish_unchecked(client, code, uid, &resolved, tag)
+    }
+
+    /// `finishOperationUnchecked`: one of `client`'s starts of the op
+    /// finished.
+    fn finish_unchecked(&mut self, client: Option<Binder>, code: i32, uid: i32, package: &str, tag: Option<&str>) -> Result<(), Exception> {
+        let Verified::Bypass(_, tag_valid) = verify_and_get_bypass(self.sys, self.caller, uid, Some(package), tag, None)? else {
+            return Ok(());
+        };
+        if !has_ops(self.sys, uid)? {
+            return Ok(());
+        }
+        let Some(binder) = client else { return Ok(()) };
+        let client = Client { key: (uid, package.to_string(), code), tag: tag.filter(|_| tag_valid).map(String::from), binder };
+        let ended = self.started.finished(&client, &mut self.effects);
+        self.ended.extend(ended);
+        Ok(())
+    }
+
+    /// `finishProxyOperationImpl` behind `AppOpsPolicy`: the proxy's op
+    /// (unless a trusted caller skips it) and the proxied's.
+    fn finish_proxy(
+        &mut self,
+        client: Option<Binder>,
+        code: i32,
+        source: &AttributionSourceState,
+        skip_proxy: bool,
+    ) -> Result<(), Exception> {
+        let (sys, caller) = (self.sys, self.caller);
+        let code = resolve_datasource_op(sys, code, source.tag.as_deref())?;
+        let next = next_of(source)?;
+        let proxied_uid = next.map_or(INVALID_UID, |n| n.uid);
+        let (proxied_package, proxied_tag) = (next.and_then(|n| n.package.as_deref()), next.and_then(|n| n.tag.as_deref()));
+        let skip = skip_proxy && caller_and_attribution_trusted(sys, caller, source)?;
+        verify_incoming_proxy_uid(sys, caller, source)?;
+        verify_incoming_op(sys, caller, code)?;
+        if source.device_id != DEVICE_ID_DEFAULT
+            || !valid_package(sys, caller, source.package.as_deref(), source.uid.div_euclid(PER_USER_RANGE))?
+            || !valid_package(sys, caller, proxied_package, proxied_uid.div_euclid(PER_USER_RANGE))?
+        {
+            return Ok(());
+        }
+        let Some(proxy_package) = resolve_package_name(source.uid, source.package.as_deref()) else { return Ok(()) };
+        if !skip {
+            self.finish_unchecked(client, code, source.uid, &proxy_package, source.tag.as_deref())?;
+        }
+        let Some(proxied) = resolve_package_name(proxied_uid, proxied_package) else { return Ok(()) };
+        self.finish_unchecked(client, code, proxied_uid, &proxied, proxied_tag)
+    }
+
+    /// `isOperationActive`: another uid's op only with WATCH_APPOPS.
+    fn active(&self, code: i32, uid: i32, package: Option<&str>) -> Result<bool, Exception> {
+        if self.caller != uid && !self.sys.holds(self.caller, WATCH_APPOPS)? {
+            return Ok(false);
+        }
+        verify_incoming_op(self.sys, self.caller, code)?;
+        if !valid_package(self.sys, self.caller, package, uid.div_euclid(PER_USER_RANGE))? {
+            return Ok(false);
+        }
+        let Some(resolved) = resolve_package_name(uid, package) else { return Ok(false) };
+        Ok(self.started.running(&(uid, resolved, code)))
+    }
+}
+
+/// What `startOperationUnchecked` and `startOperationDryRun` decide before
+/// starting: that the package is not the uid's, that the uid has no ops,
+/// or the op's mode and whether it is restricted; with the attribution tag
+/// (none where it is not valid).
+enum Decided<'a> {
+    NotUids,
+    NoOps(Option<&'a str>),
+    Mode { tag: Option<&'a str>, package: &'a str, mode: i32, restricted: bool },
+}
+
+fn decide<'a>(sys: &dyn System, caller: i32, op: &Unchecked<'a>, allow_uid: bool) -> Result<Decided<'a>, Exception> {
+    let info = &APP_OP_INFOS[op.code as usize];
+    let Verified::Bypass(bypass, tag_valid) = verify_and_get_bypass(sys, caller, op.uid, op.package, op.tag, op.proxy)? else {
+        return Ok(Decided::NotUids);
+    };
+    let tag = op.tag.filter(|_| tag_valid);
+    if !has_ops(sys, op.uid)? {
+        return Ok(Decided::NoOps(tag));
+    }
+    let package = op.package.ok_or_else(|| Exception::new(EX_NULL_POINTER, "packageName"))?;
+    let restricted = restricted(sys, op.uid, info, bypass)?;
+    let mode = op_mode(sys, op.uid, package, info, allow_uid)?;
+    Ok(Decided::Mode { tag, package, mode, restricted })
+}
+
+/// `startOperationDryRun`: what a start would answer, without root and
+/// system's own allowance, starting nothing.
+fn start_dry_run(sys: &dyn System, caller: i32, op: &Unchecked<'_>, start_if_mode_default: bool) -> Result<SyncNoted, Exception> {
+    Ok(match decide(sys, caller, op, false)? {
+        Decided::NotUids => SyncNoted::new(MODE_ERRORED, op.code, op.tag, op.package),
+        Decided::NoOps(tag) => SyncNoted::new(MODE_ERRORED, op.code, tag, op.package),
+        Decided::Mode { tag, package, mode, .. } if !should_start(mode, start_if_mode_default) => {
+            SyncNoted::new(mode, op.code, tag, Some(package))
+        }
+        Decided::Mode { tag, package, restricted, .. } => {
+            SyncNoted::new(if restricted { MODE_IGNORED } else { MODE_ALLOWED }, op.code, tag, Some(package))
+        }
+    })
 }
 
 /// The app host as the system server appops reads.
@@ -455,6 +1278,41 @@ impl System for Host<'_> {
         }))
     }
 
+    fn uid_has_package(&self, uid: i32) -> Result<bool, Exception> {
+        let (state, _) = self.0.packages()?;
+        Ok(uid.div_euclid(PER_USER_RANGE) == 0 && state.packages.values().any(|ps| !ps.is.apex && ps.app_id == app_id(uid)))
+    }
+
+    fn attribution_in_package(&self, name: &str, tag: Option<&str>) -> Result<bool, Exception> {
+        let (state, _) = self.0.packages()?;
+        let Some(pkg) = state.packages.get(name).and_then(|ps| ps.pkg.as_ref()) else { return Ok(false) };
+        Ok(tag.is_none_or(|tag| pkg.attributions.iter().any(|a| a.tag.as_deref() == Some(tag))))
+    }
+
+    /// `ensureSystemPackageName`: a factory package of user 0.
+    fn system_package(&self, name: &str) -> Result<bool, Exception> {
+        use crate::package::info::flags::MATCH_FACTORY_ONLY;
+        let (state, resolution) = self.0.packages()?;
+        let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
+        match query.package_info(name, -1, MATCH_FACTORY_ONLY, 0) {
+            Ok(info) => info.map(|info| info.is_some()),
+            Err(e) => Err(Exception::new(EX_UNSUPPORTED_OPERATION, format!("appops isSystemPackage: {}", e.0))),
+        }
+    }
+
+    /// `isChangeEnabledByPackageName` (the installed package's, else
+    /// whether the change will be enabled for it) and
+    /// `isChangeEnabledByUid`.
+    fn invalid_tags_rejected(&self, package: &str, caller: i32) -> Result<bool, Exception> {
+        let change = SECURITY_EXCEPTION_ON_INVALID_ATTRIBUTION_TAG_CHANGE;
+        let inputs = self.0.inputs()?;
+        let by_package = match inputs.packages.application_info(package, 0) {
+            Some(ai) => inputs.compat.is_enabled(change, Some(package), ai.target_sdk_version),
+            None => inputs.compat.will_be_enabled(change, package),
+        };
+        Ok(by_package && self.0.change_enabled(change, caller)?)
+    }
+
     fn filtered(&self, package: &str, caller: i32, user: i32) -> Result<bool, Exception> {
         let (state, resolution) = self.0.packages()?;
         let ps = state.packages.get(package);
@@ -487,14 +1345,224 @@ impl System for Host<'_> {
     }
 }
 
+/// A link to a binder's death: its reference and the cookie; none for a
+/// binder of the app host's own, which does not die.
+type Link = Option<(Strong, u64)>;
+
+/// AppOpsService's state in the app host: the started ops and their
+/// watchers, and the async-noted watchers and the ops none took.
+#[derive(Default)]
+pub(super) struct State {
+    started: Mutex<Started<Link>>,
+    async_noted: Mutex<Async>,
+}
+
+/// Runs `f` over the app host's appops as `caller`, then unlinks the
+/// events that ended and does what it left to do.
+fn with_ops<T>(host: &AppHost, caller: i32, f: impl FnOnce(&mut Ops<'_, Link>) -> Result<T, Exception>) -> Result<T, Exception> {
+    let sys = Host(host);
+    let mut link = |client: &Client| link_client(host, client);
+    let (result, effects, ended) = {
+        let mut started = host.app_ops.started.lock().unwrap();
+        let mut ops = Ops { sys: &sys, caller, started: &mut started, link: &mut link, effects: Effects::default(), ended: Vec::new() };
+        let result = f(&mut ops);
+        (result, ops.effects, ops.ended)
+    };
+    unlink(host, ended);
+    dispatch(host, caller, effects);
+    result
+}
+
+fn unlink(host: &AppHost, links: Vec<Link>) {
+    for (strong, death) in links.into_iter().flatten() {
+        host.process.clear_death(&strong, death);
+    }
+}
+
+/// Links `client`'s death to `AttributedOp.onClientDeath`.
+fn link_client(host: &AppHost, client: &Client) -> Link {
+    let Binder::Handle(handle) = client.binder else { return None };
+    let strong = host.process.strong(handle);
+    let (me, client) = (host.me.clone(), client.clone());
+    let death = host.process.link_to_death(
+        &strong,
+        Box::new(move || {
+            let Some(host) = me.upgrade() else { return };
+            let mut effects = Effects::default();
+            let ended = host.app_ops.started.lock().unwrap().client_died(&client, &mut effects);
+            unlink(&host, ended);
+            dispatch(&host, SYSTEM_UID, effects);
+        }),
+    );
+    Some((strong, death))
+}
+
+/// Calls the watchers a note, start or finish told, as
+/// `notifyOpActiveChanged` and `notifyOpStarted` do (a restricted-read
+/// op's only with MANAGE_APPOPS), and collects the ops it left for their
+/// apps as noted by `caller`.
+fn dispatch(host: &AppHost, caller: i32, effects: Effects) {
+    for notice in effects.notices {
+        let mut p = Parcel::new();
+        let (op, uid, package_name, attribution_tag) = (notice.op, notice.uid, notice.package, notice.tag);
+        let (attribution_flags, attribution_chain_id) = (notice.attribution_flags, notice.chain_id);
+        let code = match notice.heard {
+            Heard::Active(active) => {
+                let virtual_device_id = DEVICE_ID_DEFAULT;
+                let call = active_callback::OpActiveChanged {
+                    op,
+                    uid,
+                    package_name,
+                    attribution_tag,
+                    virtual_device_id,
+                    active,
+                    attribution_flags,
+                    attribution_chain_id,
+                };
+                call.write(&mut p);
+                active_callback::OP_ACTIVE_CHANGED
+            }
+            Heard::Started { flags, mode, start_type } => {
+                let call = started_callback::OpStarted {
+                    op,
+                    uid,
+                    package_name,
+                    attribution_tag,
+                    virtual_device_id: DEVICE_ID_DEFAULT,
+                    flags,
+                    mode,
+                    started_type: start_type,
+                    attribution_flags,
+                    attribution_chain_id,
+                };
+                call.write(&mut p);
+                started_callback::OP_STARTED
+            }
+        };
+        for (handle, calling) in notice.watchers {
+            // `shouldIgnoreCallback`.
+            if APP_OP_INFOS[op as usize].restrict_read {
+                match host.check_permission(Some(MANAGE_APPOPS), calling) {
+                    Ok(0) => {}
+                    Ok(_) => continue,
+                    Err(e) => {
+                        eprintln!("app host: appops watcher of op {op}: {e:?}");
+                        continue;
+                    }
+                }
+            }
+            // One-way; a watcher that died is not called (its
+            // RemoteException is dropped).
+            let _ = host.process.transact(handle, code, &p, true);
+        }
+    }
+    for collected in effects.collected {
+        collect(host, collected, caller);
+    }
+}
+
 /// `checkOperation` as the system server asks it.
 pub(super) fn mode(host: &AppHost, code: i32, uid: i32, package: Option<&str>) -> Result<i32, Exception> {
-    check(&Host(host), SYSTEM_UID, code, uid, package, DEVICE_ID_DEFAULT, false)
+    check_from(host, SYSTEM_UID, code, uid, package)
+}
+
+/// `checkOperation` from `caller`.
+pub(super) fn check_from(host: &AppHost, caller: i32, code: i32, uid: i32, package: Option<&str>) -> Result<i32, Exception> {
+    check(&Host(host), caller, code, uid, package, DEVICE_ID_DEFAULT, false)
 }
 
 /// `noteOperation` as the system server asks it.
 pub(super) fn note(host: &AppHost, code: i32, uid: i32, package: Option<&str>) -> Result<i32, Exception> {
-    note_op(&Host(host), SYSTEM_UID, code, uid, package, None, DEVICE_ID_DEFAULT)
+    note_from(host, SYSTEM_UID, code, uid, package, None)
+}
+
+/// The ops the system server's own `AppOpsManager` notes or starts for an
+/// app are not collected for it (`getNotedOpCollectionMode`, #1592).
+const NOT_COLLECTED: Option<String> = None;
+
+/// `noteOperation` of `uid`'s package and attribution tag from `caller`.
+pub(super) fn note_from(
+    host: &AppHost,
+    caller: i32,
+    code: i32,
+    uid: i32,
+    package: Option<&str>,
+    tag: Option<&str>,
+) -> Result<i32, Exception> {
+    let op = Unchecked { code, uid, package, tag, proxy: None, flags: OP_FLAG_SELF, collect: NOT_COLLECTED };
+    with_ops(host, caller, |ops| ops.note(&op, DEVICE_ID_DEFAULT)).map(|noted| noted.mode)
+}
+
+/// `noteProxyOperation` of `source` and its next from `caller`.
+pub(super) fn note_proxy(
+    host: &AppHost,
+    caller: i32,
+    code: i32,
+    source: &AttributionSourceState,
+    skip_proxy: bool,
+    message: Option<&str>,
+) -> Result<i32, Exception> {
+    with_ops(host, caller, |ops| ops.note_proxy(code, source, skip_proxy, false, message)).map(|noted| noted.mode)
+}
+
+/// `startOperation` of `uid`'s package and attribution tag by `client`
+/// from `caller`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn start(
+    host: &AppHost,
+    caller: i32,
+    client: Option<Binder>,
+    code: i32,
+    uid: i32,
+    package: Option<&str>,
+    tag: Option<&str>,
+    attribution: Attribution,
+) -> Result<i32, Exception> {
+    let op = Unchecked { code, uid, package, tag, proxy: None, flags: OP_FLAG_SELF, collect: NOT_COLLECTED };
+    with_ops(host, caller, |ops| ops.start(client, &op, attribution)).map(|started| started.mode)
+}
+
+/// `startProxyOperation` of `source` and its next by `client` from
+/// `caller`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn start_proxy(
+    host: &AppHost,
+    caller: i32,
+    client: Option<Binder>,
+    code: i32,
+    source: &AttributionSourceState,
+    skip_proxy: bool,
+    attribution: ProxyAttribution,
+    message: Option<&str>,
+) -> Result<i32, Exception> {
+    with_ops(host, caller, |ops| ops.start_proxy(client, code, source, skip_proxy, attribution, false, message)).map(|started| started.mode)
+}
+
+/// `finishOperation` of `uid`'s package and attribution tag by `client`
+/// from `caller`.
+pub(super) fn finish(
+    host: &AppHost,
+    caller: i32,
+    client: Option<Binder>,
+    code: i32,
+    uid: i32,
+    package: Option<&str>,
+    tag: Option<&str>,
+) -> Result<(), Exception> {
+    with_ops(host, caller, |ops| ops.finish(client, code, uid, package, tag))
+}
+
+/// `finishProxyOperation` of `source` and its next by `client` from
+/// `caller`.
+pub(super) fn finish_proxy(
+    host: &AppHost,
+    caller: i32,
+    client: Option<Binder>,
+    code: i32,
+    source: &AttributionSourceState,
+    skip_proxy: bool,
+) -> Result<(), Exception> {
+    with_ops(host, caller, |ops| ops.finish_proxy(client, code, source, skip_proxy))
 }
 
 /// `AppOpsManager.NotedOp`, a batched note.
@@ -569,123 +1637,29 @@ struct Async {
     unforwarded: HashMap<(String, i32), Vec<AsyncNoted>>,
 }
 
-/// The active watchers by their binder (`mActiveWatchers`): each op's
-/// watched uid (`Process.INVALID_UID` for all). No op is started in the
-/// app host, so none is called.
-type ActiveWatchers = HashMap<u32, (Strong, u64, Vec<(i32, i32)>)>;
-
-pub struct AppOps {
-    host: Arc<AppHost>,
-    permissions: Arc<PermissionManager>,
-    watchers: Mutex<Vec<(i32, Binder)>>,
-    active_watchers: Arc<Mutex<ActiveWatchers>>,
-    async_noted: Arc<Mutex<Async>>,
-}
-
-impl AppOps {
-    pub fn new(host: Arc<AppHost>, permissions: Arc<PermissionManager>) -> Self {
-        AppOps { host, permissions, watchers: Mutex::new(Vec::new()), active_watchers: Default::default(), async_noted: Default::default() }
-    }
-
-    /// `startWatchingActive`: the caller's own uid's ops watched, unless it
-    /// holds WATCH_APPOPS.
-    fn start_watching_active(&self, uid: i32, ops: Option<Vec<i32>>, callback: Option<Binder>) -> Result<(), Exception> {
-        const INVALID_UID: i32 = -1;
-        let watched = if self.host.check_permission(Some("android.permission.WATCH_APPOPS"), uid)? == 0 { INVALID_UID } else { uid };
-        // `Preconditions.checkArrayElementsInRange`, of the ops given.
-        let given = ops.as_deref().unwrap_or_default();
-        let name = format!("Invalid op code in: [{}]", given.iter().map(i32::to_string).collect::<Vec<_>>().join(", "));
-        for (i, &op) in given.iter().enumerate() {
-            let side = if op < 0 { "too low" } else if op > NUM_OP - 1 { "too high" } else { continue };
-            return Err(Exception::illegal_argument(format!("{name}[{i}] is out of range of [0, {}] ({side})", NUM_OP - 1)));
+/// `collectAsyncNotedOp`: the op noted for an app by `noting_uid`, to its
+/// watchers, else kept for `extractAsyncOps`.
+fn collect(host: &AppHost, collected: Collected, noting_uid: i32) {
+    let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+    let Collected { uid, package, op, tag, message } = collected;
+    let noted = AsyncNoted { op, noting_uid, attribution_tag: tag, message, time };
+    let key = (package, uid);
+    let watchers: Vec<u32> = match host.app_ops.async_noted.lock().unwrap().watchers.get(&key) {
+        Some(watchers) => watchers.iter().map(|(w, _)| w.handle).collect(),
+        None => return,
+    };
+    let mut p = Parcel::new();
+    p.write_interface_token(ASYNC_NOTED_DESCRIPTOR);
+    p.write_i32(1);
+    noted.write_to(&mut p);
+    let forwarded = watchers.iter().fold(false, |sent, &w| host.process.transact(w, OP_NOTED, &p, true).is_ok() || sent);
+    if !forwarded {
+        let mut state = host.app_ops.async_noted.lock().unwrap();
+        let unforwarded = state.unforwarded.entry(key).or_default();
+        unforwarded.push(noted);
+        if unforwarded.len() > MAX_UNFORWARDED_OPS {
+            unforwarded.remove(0);
         }
-        let Some(callback) = callback else { return Ok(()) };
-        let ops = ops.ok_or_else(|| Exception::new(EX_NULL_POINTER, "ops"))?;
-        let Binder::Handle(handle) = callback else {
-            return Err(Exception::illegal_argument("startWatchingActive: a local callback"));
-        };
-        let mut watchers = self.active_watchers.lock().unwrap();
-        let entry = watchers.entry(handle).or_insert_with(|| {
-            // `ActiveCallback` links to its binder's death.
-            let strong = self.host.process.strong(handle);
-            let state = Arc::downgrade(&self.active_watchers);
-            let death = self.host.process.link_to_death(
-                &strong,
-                Box::new(move || {
-                    if let Some(state) = state.upgrade() {
-                        state.lock().unwrap().remove(&handle);
-                    }
-                }),
-            );
-            (strong, death, Vec::new())
-        });
-        for op in ops {
-            entry.2.retain(|(o, _)| *o != op);
-            entry.2.push((op, watched));
-        }
-        Ok(())
-    }
-
-    /// `stopWatchingActive`.
-    fn stop_watching_active(&self, callback: Option<Binder>) {
-        if let Some(Binder::Handle(handle)) = callback
-            && let Some((strong, death, _)) = self.active_watchers.lock().unwrap().remove(&handle)
-        {
-            self.host.process.clear_death(&strong, death);
-        }
-    }
-
-    /// `verifyAndGetBypass`'s package check.
-    fn verify(&self, uid: i32, package: &str) -> Result<(), Exception> {
-        match check_package(&self.host, uid, Some(package))? {
-            MODE_ALLOWED => Ok(()),
-            _ => Err(Exception::security(format!("Specified package \"{package}\" under uid {uid} but it is not"))),
-        }
-    }
-
-    /// `collectAsyncNotedOp`: the op noted for `package` of `uid` by
-    /// `noting_uid`, to its watchers, else kept for `extractAsyncOps`.
-    fn collect(&self, uid: i32, package: String, op: i32, attribution_tag: Option<String>, message: String, noting_uid: i32) {
-        let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
-        let noted = AsyncNoted { op, noting_uid, attribution_tag, message, time };
-        let key = (package, uid);
-        let mut state = self.async_noted.lock().unwrap();
-        let Some(watchers) = state.watchers.get(&key) else { return };
-        let mut p = Parcel::new();
-        p.write_interface_token(ASYNC_NOTED_DESCRIPTOR);
-        p.write_i32(1);
-        noted.write_to(&mut p);
-        let forwarded = watchers.iter().fold(false, |sent, (w, _)| w.transact(OP_NOTED, &p, true).is_ok() || sent);
-        if !forwarded {
-            let unforwarded = state.unforwarded.entry(key).or_default();
-            unforwarded.push(noted);
-            if unforwarded.len() > MAX_UNFORWARDED_OPS {
-                unforwarded.remove(0);
-            }
-        }
-    }
-
-    /// `startWatchingAsyncNoted`: a watcher of the caller's `package`,
-    /// gone at its death.
-    fn start_watching_async(&self, uid: i32, package: String, callback: Binder) -> Result<(), Exception> {
-        self.verify(uid, &package)?;
-        let Binder::Handle(handle) = callback else {
-            return Err(Exception::illegal_argument("startWatchingAsyncNoted: a local callback"));
-        };
-        let strong = self.host.process.strong(handle);
-        let state = Arc::downgrade(&self.async_noted);
-        let key = (package, uid);
-        let dead = key.clone();
-        let death = self.host.process.link_to_death(
-            &strong,
-            Box::new(move || {
-                if let Some(state) = state.upgrade() {
-                    remove_watcher(&mut state.lock().unwrap(), &dead, handle);
-                }
-            }),
-        );
-        self.async_noted.lock().unwrap().watchers.entry(key).or_default().push((strong, death));
-        Ok(())
     }
 }
 
@@ -700,6 +1674,95 @@ fn remove_watcher(state: &mut Async, key: &(String, i32), handle: u32) -> Option
     Some(removed)
 }
 
+pub struct AppOps {
+    host: Arc<AppHost>,
+    permissions: Arc<PermissionManager>,
+    watchers: Mutex<Vec<(i32, Binder)>>,
+}
+
+impl AppOps {
+    pub fn new(host: Arc<AppHost>, permissions: Arc<PermissionManager>) -> Self {
+        AppOps { host, permissions, watchers: Mutex::new(Vec::new()) }
+    }
+
+    /// `startWatchingActive` and `startWatchingStarted`: the caller's own
+    /// uid's ops watched, unless it holds WATCH_APPOPS; a watcher goes at
+    /// its death.
+    fn start_watching(&self, which: Watch, uid: i32, ops: Option<Vec<i32>>, callback: Option<Binder>) -> Result<(), Exception> {
+        let watched = if self.host.check_permission(Some(WATCH_APPOPS), uid)? == 0 { INVALID_UID } else { uid };
+        let (ops, callback) = match which {
+            Watch::Active => {
+                ops_in_range(ops.as_deref().unwrap_or_default())?;
+                let Some(callback) = callback else { return Ok(()) };
+                (ops.ok_or_else(|| Exception::new(EX_NULL_POINTER, "ops"))?, callback)
+            }
+            Watch::Started => {
+                let ops = ops.filter(|ops| !ops.is_empty()).ok_or_else(|| Exception::illegal_argument("Ops cannot be null or empty"))?;
+                ops_in_range(&ops)?;
+                (ops, callback.ok_or_else(|| Exception::new(EX_NULL_POINTER, "Callback cannot be null"))?)
+            }
+        };
+        let Binder::Handle(handle) = callback else {
+            return Err(Exception::illegal_argument("startWatching: a local callback"));
+        };
+        let host = &self.host;
+        let link = || {
+            let strong = host.process.strong(handle);
+            let me = host.me.clone();
+            let death = host.process.link_to_death(
+                &strong,
+                Box::new(move || {
+                    if let Some(host) = me.upgrade() {
+                        host.app_ops.started.lock().unwrap().unwatch(which, handle);
+                    }
+                }),
+            );
+            Some((strong, death))
+        };
+        host.app_ops.started.lock().unwrap().watch(which, handle, &ops, watched, uid, link);
+        Ok(())
+    }
+
+    /// `stopWatchingActive` and `stopWatchingStarted`.
+    fn stop_watching(&self, which: Watch, callback: Binder) {
+        if let Binder::Handle(handle) = callback {
+            let link = self.host.app_ops.started.lock().unwrap().unwatch(which, handle);
+            unlink(&self.host, link.into_iter().collect());
+        }
+    }
+
+    /// `verifyAndGetBypass`'s package check.
+    fn verify(&self, uid: i32, package: &str) -> Result<(), Exception> {
+        match check_package(&self.host, uid, Some(package))? {
+            MODE_ALLOWED => Ok(()),
+            _ => Err(Exception::security(format!("Specified package \"{package}\" under uid {uid} but it is not"))),
+        }
+    }
+
+    /// `startWatchingAsyncNoted`: a watcher of the caller's `package`,
+    /// gone at its death.
+    fn start_watching_async(&self, uid: i32, package: String, callback: Binder) -> Result<(), Exception> {
+        self.verify(uid, &package)?;
+        let Binder::Handle(handle) = callback else {
+            return Err(Exception::illegal_argument("startWatchingAsyncNoted: a local callback"));
+        };
+        let strong = self.host.process.strong(handle);
+        let me = self.host.me.clone();
+        let key = (package, uid);
+        let dead = key.clone();
+        let death = self.host.process.link_to_death(
+            &strong,
+            Box::new(move || {
+                if let Some(host) = me.upgrade() {
+                    remove_watcher(&mut host.app_ops.async_noted.lock().unwrap(), &dead, handle);
+                }
+            }),
+        );
+        self.host.app_ops.async_noted.lock().unwrap().watchers.entry(key).or_default().push((strong, death));
+        Ok(())
+    }
+}
+
 impl Service for AppOps {
     fn descriptor(&self) -> &str {
         appops::DESCRIPTOR
@@ -707,6 +1770,7 @@ impl Service for AppOps {
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let mut p = Parcel::new();
+        let caller = call.sender_euid as i32;
         match call.code {
             appops::CHECK_PACKAGE => {
                 let args = appops::CheckPackage::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -717,7 +1781,6 @@ impl Service for AppOps {
             }
             appops::CHECK_OPERATION => {
                 let args = appops::CheckOperation::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let caller = call.sender_euid as i32;
                 match check(&Host(&self.host), caller, args.code, args.uid, args.package_name.as_deref(), DEVICE_ID_DEFAULT, false) {
                     Ok(mode) => appops::write_check_operation_reply(&mut p, mode),
                     Err(e) => return reply(Err(e)),
@@ -727,7 +1790,6 @@ impl Service for AppOps {
             // app host (`setAudioRestriction`), so the op's check decides.
             appops::CHECK_AUDIO_OPERATION => {
                 let args = appops::CheckAudioOperation::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let caller = call.sender_euid as i32;
                 match check(&Host(&self.host), caller, args.code, args.uid, args.package_name.as_deref(), DEVICE_ID_DEFAULT, false) {
                     Ok(mode) => appops::write_check_audio_operation_reply(&mut p, mode),
                     Err(e) => return reply(Err(e)),
@@ -735,7 +1797,6 @@ impl Service for AppOps {
             }
             appops::CHECK_OPERATION_FOR_DEVICE => {
                 let args = appops::CheckOperationForDevice::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let caller = call.sender_euid as i32;
                 let package = args.package_name.as_deref();
                 match check(&Host(&self.host), caller, args.code, args.uid, package, args.virtual_device_id, false) {
                     Ok(mode) => appops::write_check_operation_for_device_reply(&mut p, mode),
@@ -744,7 +1805,6 @@ impl Service for AppOps {
             }
             appops::CHECK_OPERATION_RAW_FOR_DEVICE => {
                 let args = appops::CheckOperationRawForDevice::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let caller = call.sender_euid as i32;
                 let package = args.package_name.as_deref();
                 match check(&Host(&self.host), caller, args.code, args.uid, package, args.virtual_device_id, true) {
                     Ok(mode) => appops::write_check_operation_raw_for_device_reply(&mut p, mode),
@@ -753,50 +1813,115 @@ impl Service for AppOps {
             }
             appops::NOTE_OPERATION => {
                 let args = appops::NoteOperation::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let caller = call.sender_euid as i32;
-                let (package, tag) = (args.package_name.as_deref(), args.attribution_tag.as_deref());
-                let mode = match note_op(&Host(&self.host), caller, args.code, args.uid, package, tag, DEVICE_ID_DEFAULT) {
-                    Ok(mode) => mode,
-                    Err(e) => return reply(Err(e)),
+                let op = Unchecked {
+                    code: args.code,
+                    uid: args.uid,
+                    package: args.package_name.as_deref(),
+                    tag: args.attribution_tag.as_deref(),
+                    proxy: None,
+                    flags: OP_FLAG_SELF,
+                    collect: args.should_collect_async_noted_op.then(|| args.message.clone().unwrap_or_default()),
                 };
-                if mode == MODE_ALLOWED
-                    && args.should_collect_async_noted_op
-                    && let Some(package) = args.package_name.clone()
-                {
-                    let message = args.message.clone().unwrap_or_default();
-                    self.collect(args.uid, package, args.code, args.attribution_tag.clone(), message, call.sender_euid as i32);
-                }
-                // `SyncNotedAppOp`: which nullable fields follow, the mode,
-                // the op, the attribution tag, the package.
-                p.write_no_exception();
-                p.write_i32(1);
-                p.write_i32(if tag.is_some() { 0x4 } else { 0 } | if package.is_some() { 0x8 } else { 0 });
-                p.write_i32(mode);
-                p.write_i32(args.code);
-                if let Some(tag) = tag {
-                    p.write_string16(Some(tag));
-                }
-                if let Some(package) = package {
-                    p.write_string16(Some(package));
+                match with_ops(&self.host, caller, |ops| ops.note(&op, DEVICE_ID_DEFAULT)) {
+                    Ok(noted) => appops::write_note_operation_reply(&mut p, Some(&noted)),
+                    Err(e) => return reply(Err(e)),
                 }
             }
             // One-way: each batched note as `noteOperation` notes it.
             appops::NOTE_OPERATIONS_IN_BATCH => {
                 let args = appops::NoteOperationsInBatch::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 for (key, _count) in args.batched_note_ops.unwrap_or_default() {
-                    let op = noted_op(&key).ok_or(BAD_VALUE)?;
-                    let (package, tag) = (op.package.as_deref(), op.attribution_tag.as_deref());
-                    match note_op(&Host(&self.host), call.sender_euid as i32, op.op, op.uid, package, tag, op.virtual_device_id) {
-                        Ok(MODE_ALLOWED) if op.should_collect_async_noted_op => {
-                            if let Some(package) = op.package.clone() {
-                                self.collect(op.uid, package, op.op, op.attribution_tag.clone(), op.message.unwrap_or_default(), call.sender_euid as i32);
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(e) => eprintln!("app host: appops noteOperationsInBatch: {e:?}"),
+                    let noted = noted_op(&key).ok_or(BAD_VALUE)?;
+                    let op = Unchecked {
+                        code: noted.op,
+                        uid: noted.uid,
+                        package: noted.package.as_deref(),
+                        tag: noted.attribution_tag.as_deref(),
+                        proxy: None,
+                        flags: OP_FLAG_SELF,
+                        collect: noted.should_collect_async_noted_op.then(|| noted.message.clone().unwrap_or_default()),
+                    };
+                    if let Err(e) = with_ops(&self.host, caller, |ops| ops.note(&op, noted.virtual_device_id)) {
+                        eprintln!("app host: appops noteOperationsInBatch: {e:?}");
                     }
                 }
                 return Ok(Parcel::new());
+            }
+            appops::NOTE_PROXY_OPERATION_WITH_STATE => {
+                let args = appops::NoteProxyOperationWithState::<AttributionSourceState>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let Some(source) = args.attribution_source_state_state.as_ref() else {
+                    return reply(Err(Exception::new(EX_NULL_POINTER, "attributionSource")));
+                };
+                let (skip, collect, message) = (args.skip_proxy_operation, args.should_collect_async_noted_op, args.message.as_deref());
+                match with_ops(&self.host, caller, |ops| ops.note_proxy(args.code, source, skip, collect, message)) {
+                    Ok(noted) => appops::write_note_proxy_operation_with_state_reply(&mut p, Some(&noted)),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            appops::START_OPERATION => {
+                let args = appops::StartOperation::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let op = Unchecked {
+                    code: args.code,
+                    uid: args.uid,
+                    package: args.package_name.as_deref(),
+                    tag: args.attribution_tag.as_deref(),
+                    proxy: None,
+                    flags: OP_FLAG_SELF,
+                    collect: args.should_collect_async_noted_op.then(|| args.message.clone().unwrap_or_default()),
+                };
+                let attribution = Attribution {
+                    start_if_mode_default: args.start_if_mode_default,
+                    flags: args.attribution_flags,
+                    chain_id: args.attribution_chain_id,
+                };
+                match with_ops(&self.host, caller, |ops| ops.start(args.client_id, &op, attribution)) {
+                    Ok(started) => appops::write_start_operation_reply(&mut p, Some(&started)),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            appops::START_PROXY_OPERATION_WITH_STATE => {
+                let args = appops::StartProxyOperationWithState::<AttributionSourceState>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let Some(source) = args.attribution_source_state_state.as_ref() else {
+                    return reply(Err(Exception::new(EX_NULL_POINTER, "attributionSource")));
+                };
+                let attribution = ProxyAttribution {
+                    start_if_mode_default: args.start_if_mode_default,
+                    proxy_flags: args.proxy_attribution_flags,
+                    proxied_flags: args.proxied_attribution_flags,
+                    chain_id: args.attribution_chain_id,
+                };
+                let (skip, collect, message) = (args.skip_proxy_operation, args.should_collect_async_noted_op, args.message.as_deref());
+                match with_ops(&self.host, caller, |ops| {
+                    ops.start_proxy(args.client_id, args.code, source, skip, attribution, collect, message)
+                }) {
+                    Ok(started) => appops::write_start_proxy_operation_with_state_reply(&mut p, Some(&started)),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            appops::FINISH_OPERATION => {
+                let args = appops::FinishOperation::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let (package, tag) = (args.package_name.as_deref(), args.attribution_tag.as_deref());
+                match with_ops(&self.host, caller, |ops| ops.finish(args.client_id, args.code, args.uid, package, tag)) {
+                    Ok(()) => appops::write_finish_operation_reply(&mut p),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            appops::FINISH_PROXY_OPERATION_WITH_STATE => {
+                let args = appops::FinishProxyOperationWithState::<AttributionSourceState>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let Some(source) = args.attribution_source_state_state.as_ref() else {
+                    return reply(Err(Exception::new(EX_NULL_POINTER, "attributionSource")));
+                };
+                match with_ops(&self.host, caller, |ops| ops.finish_proxy(args.client_id, args.code, source, args.skip_proxy_operation)) {
+                    Ok(()) => appops::write_finish_proxy_operation_with_state_reply(&mut p),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            appops::IS_OPERATION_ACTIVE => {
+                let args = appops::IsOperationActive::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match with_ops(&self.host, caller, |ops| ops.active(args.code, args.uid, args.package_name.as_deref())) {
+                    Ok(active) => appops::write_is_operation_active_reply(&mut p, active),
+                    Err(e) => return reply(Err(e)),
+                }
             }
             appops::SHOULD_COLLECT_NOTES => {
                 let args = appops::ShouldCollectNotes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -822,22 +1947,39 @@ impl Service for AppOps {
             }
             appops::START_WATCHING_ACTIVE => {
                 let args = appops::StartWatchingActive::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                if let Err(e) = self.start_watching_active(call.sender_euid as i32, args.ops, args.callback) {
+                if let Err(e) = self.start_watching(Watch::Active, caller, args.ops, args.callback) {
                     return reply(Err(e));
                 }
                 appops::write_start_watching_active_reply(&mut p);
             }
             appops::STOP_WATCHING_ACTIVE => {
                 let args = appops::StopWatchingActive::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.stop_watching_active(args.callback);
+                if let Some(callback) = args.callback {
+                    self.stop_watching(Watch::Active, callback);
+                }
                 appops::write_stop_watching_active_reply(&mut p);
+            }
+            appops::START_WATCHING_STARTED => {
+                let args = appops::StartWatchingStarted::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.start_watching(Watch::Started, caller, args.ops, args.callback) {
+                    return reply(Err(e));
+                }
+                appops::write_start_watching_started_reply(&mut p);
+            }
+            appops::STOP_WATCHING_STARTED => {
+                let args = appops::StopWatchingStarted::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let Some(callback) = args.callback else {
+                    return reply(Err(Exception::new(EX_NULL_POINTER, "Callback cannot be null")));
+                };
+                self.stop_watching(Watch::Started, callback);
+                appops::write_stop_watching_started_reply(&mut p);
             }
             appops::START_WATCHING_ASYNC_NOTED => {
                 let args = appops::StartWatchingAsyncNoted::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let (Some(package), Some(callback)) = (args.package_name, args.callback) else {
                     return reply(Err(Exception::new(EX_NULL_POINTER, "packageName or callback")));
                 };
-                if let Err(e) = self.start_watching_async(call.sender_euid as i32, package, callback) {
+                if let Err(e) = self.start_watching_async(caller, package, callback) {
                     return reply(Err(e));
                 }
                 appops::write_start_watching_async_noted_reply(&mut p);
@@ -847,12 +1989,12 @@ impl Service for AppOps {
                 let (Some(package), Some(callback)) = (args.package_name, args.callback) else {
                     return reply(Err(Exception::new(EX_NULL_POINTER, "packageName or callback")));
                 };
-                let uid = call.sender_euid as i32;
-                if let Err(e) = self.verify(uid, &package) {
+                if let Err(e) = self.verify(caller, &package) {
                     return reply(Err(e));
                 }
                 if let Binder::Handle(handle) = callback
-                    && let Some((strong, death)) = remove_watcher(&mut self.async_noted.lock().unwrap(), &(package, uid), handle)
+                    && let Some((strong, death)) =
+                        remove_watcher(&mut self.host.app_ops.async_noted.lock().unwrap(), &(package, caller), handle)
                 {
                     self.host.process.clear_death(&strong, death);
                 }
@@ -863,12 +2005,11 @@ impl Service for AppOps {
                 let Some(package) = args.package_name else {
                     return reply(Err(Exception::new(EX_NULL_POINTER, "packageName")));
                 };
-                let uid = call.sender_euid as i32;
-                if let Err(e) = self.verify(uid, &package) {
+                if let Err(e) = self.verify(caller, &package) {
                     return reply(Err(e));
                 }
                 // Null when none waits.
-                let ops = self.async_noted.lock().unwrap().unforwarded.remove(&(package, uid));
+                let ops = self.host.app_ops.async_noted.lock().unwrap().unforwarded.remove(&(package, caller));
                 let ops: Option<Vec<Option<AsyncNoted>>> = ops.map(|ops| ops.into_iter().map(Some).collect());
                 appops::write_extract_async_ops_reply(&mut p, ops.as_deref());
             }
@@ -904,6 +2045,8 @@ mod tests {
         uid_modes: BTreeMap<(i32, &'static str), i32>,
         package_modes: BTreeMap<(&'static str, &'static str), i32>,
         running: BTreeSet<i32>,
+        attributions: BTreeMap<&'static str, Vec<&'static str>>,
+        invalid_tags_rejected: bool,
     }
 
     impl System for Fake {
@@ -929,6 +2072,23 @@ mod tests {
 
         fn package(&self, name: &str, _: i32) -> Result<Option<Package>, Exception> {
             Ok(self.packages.get(name).copied())
+        }
+
+        fn uid_has_package(&self, uid: i32) -> Result<bool, Exception> {
+            Ok(self.packages.values().any(|p| p.app_id == uid))
+        }
+
+        fn attribution_in_package(&self, name: &str, tag: Option<&str>) -> Result<bool, Exception> {
+            let declared = self.attributions.get(name).cloned().unwrap_or_default();
+            Ok(self.packages.contains_key(name) && tag.is_none_or(|tag| declared.contains(&tag)))
+        }
+
+        fn system_package(&self, name: &str) -> Result<bool, Exception> {
+            Ok(self.packages.get(name).is_some_and(|p| p.privileged))
+        }
+
+        fn invalid_tags_rejected(&self, _: &str, _: i32) -> Result<bool, Exception> {
+            Ok(self.invalid_tags_rejected)
         }
 
         fn filtered(&self, package: &str, _: i32, _: i32) -> Result<bool, Exception> {
@@ -973,8 +2133,31 @@ mod tests {
         check(f, uid, code, uid, Some(package), DEVICE_ID_DEFAULT, false).unwrap()
     }
 
+    /// Runs `op` over `f`'s appops as `caller` with `started`, each client
+    /// linked as itself: its result, what it left to do and the clients
+    /// whose events ended.
+    fn run<T>(
+        f: &Fake,
+        caller: i32,
+        started: &mut Started<Binder>,
+        op: impl FnOnce(&mut Ops<'_, Binder>) -> Result<T, Exception>,
+    ) -> (Result<T, Exception>, Effects, Vec<Binder>) {
+        let mut link = |client: &Client| client.binder;
+        let mut ops = Ops { sys: f, caller, started, link: &mut link, effects: Effects::default(), ended: Vec::new() };
+        let result = op(&mut ops);
+        (result, ops.effects, ops.ended)
+    }
+
+    fn own(code: i32, uid: i32, package: &str) -> Unchecked<'_> {
+        Unchecked { code, uid, package: Some(package), tag: None, proxy: None, flags: OP_FLAG_SELF, collect: None }
+    }
+
+    fn note_with(f: &Fake, caller: i32, code: i32, uid: i32, package: &str) -> Result<SyncNoted, Exception> {
+        run(f, caller, &mut Started::default(), |ops| ops.note(&own(code, uid, package), DEVICE_ID_DEFAULT)).0
+    }
+
     fn note_mode(f: &Fake, caller: i32, code: i32, uid: i32, package: &str) -> i32 {
-        note_op(f, caller, code, uid, Some(package), None, DEVICE_ID_DEFAULT).unwrap()
+        note_with(f, caller, code, uid, package).unwrap().mode
     }
 
     #[test]
@@ -1084,7 +2267,7 @@ mod tests {
         assert!(check(&f, APP, OP_ACCESS_RESTRICTED_SETTINGS, APP, Some("app"), DEVICE_ID_DEFAULT, false).is_err());
         assert_eq!(check_mode(&f, OP_ACCESS_RESTRICTED_SETTINGS, SYSTEM_UID, "android"), MODE_DEFAULT);
         // Noting for another uid needs UPDATE_APP_OPS_STATS.
-        assert!(note_op(&f, PRIV_APP, OP_READ_CLIPBOARD, APP, Some("app"), None, DEVICE_ID_DEFAULT).is_err());
+        assert!(note_with(&f, PRIV_APP, OP_READ_CLIPBOARD, APP, "app").is_err());
         assert_eq!(note_mode(&f, SYSTEM_UID, OP_READ_CLIPBOARD, APP, "app"), MODE_ALLOWED);
         // The deprecated op 96 has no switch.
         assert!(check(&f, APP, 96, APP, Some("app"), DEVICE_ID_DEFAULT, false).is_err());
@@ -1125,5 +2308,247 @@ mod tests {
         assert!(collect(&f, 149));
         let out = should_collect_notes(&f, protection, NUM_OP).unwrap_err();
         assert_eq!(out.message, "opCode is out of range of [0, 162] (too high)");
+    }
+
+    const CLIENT: Binder = Binder::Handle(7);
+    const OTHER_CLIENT: Binder = Binder::Handle(8);
+    const WATCHER: u32 = 40;
+    const OTHER_WATCHER: u32 = 41;
+    const NO_CHAIN: Attribution = Attribution { start_if_mode_default: false, flags: 0, chain_id: ATTRIBUTION_CHAIN_ID_NONE };
+
+    fn active(op: i32, uid: i32, package: &str, active: bool, watchers: Vec<(u32, i32)>) -> Notice {
+        Notice {
+            watchers,
+            op,
+            uid,
+            package: Some(package.into()),
+            tag: None,
+            attribution_flags: 0,
+            chain_id: ATTRIBUTION_CHAIN_ID_NONE,
+            heard: Heard::Active(active),
+        }
+    }
+
+    fn start(
+        f: &Fake,
+        started: &mut Started<Binder>,
+        client: Binder,
+        op: &Unchecked<'_>,
+        attribution: Attribution,
+    ) -> (SyncNoted, Vec<Notice>) {
+        let (synced, effects, _) = run(f, op.uid, started, |ops| ops.start(Some(client), op, attribution));
+        (synced.unwrap(), effects.notices)
+    }
+
+    fn finish(f: &Fake, started: &mut Started<Binder>, client: Binder, code: i32, uid: i32, package: &str) -> (Vec<Notice>, Vec<Binder>) {
+        let (result, effects, ended) = run(f, uid, started, |ops| ops.finish(Some(client), code, uid, Some(package), None));
+        result.unwrap();
+        (effects.notices, ended)
+    }
+
+    fn is_active(f: &Fake, started: &mut Started<Binder>, code: i32, uid: i32, package: &str) -> bool {
+        run(f, uid, started, |ops| ops.active(code, uid, Some(package))).0.unwrap()
+    }
+
+    /// An op a client starts twice is active (watchers hear it once)
+    /// until the client finished both starts.
+    #[test]
+    fn a_started_op_is_active_until_its_starts_finish() {
+        let f = fake();
+        let mut started = Started::default();
+        started.watch(Watch::Active, WATCHER, &[OP_CAMERA], INVALID_UID, SYSTEM_UID, || Binder::Handle(WATCHER));
+        let camera = own(OP_CAMERA, APP, "app");
+        let (synced, notices) = start(&f, &mut started, CLIENT, &camera, NO_CHAIN);
+        assert_eq!(synced, SyncNoted::new(MODE_ALLOWED, OP_CAMERA, None, Some("app")));
+        assert_eq!(notices, [active(OP_CAMERA, APP, "app", true, vec![(WATCHER, SYSTEM_UID)])]);
+        assert!(start(&f, &mut started, CLIENT, &camera, NO_CHAIN).1.is_empty());
+        assert!(is_active(&f, &mut started, OP_CAMERA, APP, "app"));
+        assert_eq!(finish(&f, &mut started, CLIENT, OP_CAMERA, APP, "app"), (vec![], vec![]));
+        assert!(is_active(&f, &mut started, OP_CAMERA, APP, "app"));
+        let inactive = active(OP_CAMERA, APP, "app", false, vec![(WATCHER, SYSTEM_UID)]);
+        assert_eq!(finish(&f, &mut started, CLIENT, OP_CAMERA, APP, "app"), (vec![inactive], vec![CLIENT]));
+        assert!(!is_active(&f, &mut started, OP_CAMERA, APP, "app"));
+        // Another uid's op only with WATCH_APPOPS.
+        start(&f, &mut started, CLIENT, &camera, NO_CHAIN);
+        assert!(!run(&f, PRIV_APP, &mut started, |ops| ops.active(OP_CAMERA, APP, Some("app"))).0.unwrap());
+        assert!(run(&f, SYSTEM_UID, &mut started, |ops| ops.active(OP_CAMERA, APP, Some("app"))).0.unwrap());
+    }
+
+    /// A client's death finishes all of its starts; the op stays active
+    /// while another client runs it.
+    #[test]
+    fn a_clients_death_finishes_its_starts() {
+        let f = fake();
+        let mut started = Started::default();
+        started.watch(Watch::Active, WATCHER, &[OP_RECORD_AUDIO], INVALID_UID, SYSTEM_UID, || Binder::Handle(WATCHER));
+        let audio = own(OP_RECORD_AUDIO, APP, "app");
+        start(&f, &mut started, CLIENT, &audio, NO_CHAIN);
+        start(&f, &mut started, CLIENT, &audio, NO_CHAIN);
+        start(&f, &mut started, OTHER_CLIENT, &audio, NO_CHAIN);
+        let dead = Client { key: (APP, "app".into(), OP_RECORD_AUDIO), tag: None, binder: CLIENT };
+        let mut effects = Effects::default();
+        assert_eq!(started.client_died(&dead, &mut effects), [CLIENT]);
+        assert!(effects.notices.is_empty());
+        assert!(is_active(&f, &mut started, OP_RECORD_AUDIO, APP, "app"));
+        let (notices, ended) = finish(&f, &mut started, OTHER_CLIENT, OP_RECORD_AUDIO, APP, "app");
+        assert_eq!(notices, [active(OP_RECORD_AUDIO, APP, "app", false, vec![(WATCHER, SYSTEM_UID)])]);
+        assert_eq!(ended, [OTHER_CLIENT]);
+        // A dead client that had finished is nothing.
+        assert!(started.client_died(&dead, &mut effects).is_empty());
+    }
+
+    /// A watcher of one uid hears only that uid's ops; started watchers
+    /// hear each start with its flags, mode and type.
+    #[test]
+    fn watchers_hear_their_uids_ops() {
+        let f = fake();
+        let mut started = Started::default();
+        started.watch(Watch::Active, WATCHER, &[OP_CAMERA], APP, APP, || Binder::Handle(WATCHER));
+        started.watch(Watch::Active, OTHER_WATCHER, &[OP_CAMERA], PRIV_APP, PRIV_APP, || Binder::Handle(OTHER_WATCHER));
+        started.watch(Watch::Started, WATCHER, &[OP_CAMERA], INVALID_UID, SYSTEM_UID, || Binder::Handle(WATCHER));
+        let attribution = Attribution { start_if_mode_default: false, flags: 0x1, chain_id: 5 };
+        let (_, notices) = start(&f, &mut started, CLIENT, &own(OP_CAMERA, APP, "app"), attribution);
+        let heard = Heard::Started { flags: OP_FLAG_SELF, mode: MODE_ALLOWED, start_type: START_TYPE_STARTED };
+        let attributed = |notice: Notice| Notice { attribution_flags: 0x1, chain_id: 5, ..notice };
+        assert_eq!(
+            notices,
+            [
+                attributed(active(OP_CAMERA, APP, "app", true, vec![(WATCHER, APP)])),
+                attributed(Notice { heard, ..active(OP_CAMERA, APP, "app", true, vec![(WATCHER, SYSTEM_UID)]) }),
+            ]
+        );
+        assert_eq!(started.unwatch(Watch::Started, WATCHER), Some(Binder::Handle(WATCHER)));
+        assert!(start(&f, &mut started, OTHER_CLIENT, &own(OP_CAMERA, APP, "app"), NO_CHAIN).1.is_empty());
+    }
+
+    /// A start the mode rejects starts nothing; a default mode starts only
+    /// with `startIfModeDefault`; a restricted op starts paused, inactive.
+    #[test]
+    fn rejected_and_restricted_starts() {
+        let mut f = fake();
+        let mut started = Started::default();
+        let watched = [OP_CAMERA, OP_LEGACY_STORAGE];
+        started.watch(Watch::Started, WATCHER, &watched, INVALID_UID, SYSTEM_UID, || Binder::Handle(WATCHER));
+        f.uid_modes.insert((APP, "android:camera"), MODE_IGNORED);
+        let (synced, notices) = start(&f, &mut started, CLIENT, &own(OP_CAMERA, APP, "app"), NO_CHAIN);
+        assert_eq!(synced.mode, MODE_IGNORED);
+        assert_eq!(notices[0].heard, Heard::Started { flags: OP_FLAG_SELF, mode: MODE_IGNORED, start_type: START_TYPE_FAILED });
+        assert!(!is_active(&f, &mut started, OP_CAMERA, APP, "app"));
+        let storage = own(OP_LEGACY_STORAGE, APP, "app");
+        assert_eq!(start(&f, &mut started, CLIENT, &storage, NO_CHAIN).0.mode, MODE_DEFAULT);
+        let if_default = Attribution { start_if_mode_default: true, ..NO_CHAIN };
+        assert_eq!(start(&f, &mut started, CLIENT, &storage, if_default).0.mode, MODE_ALLOWED);
+        assert!(is_active(&f, &mut started, OP_LEGACY_STORAGE, APP, "app"));
+        f.uid_modes.clear();
+        f.global.insert(OP_CAMERA);
+        started.watch(Watch::Active, OTHER_WATCHER, &[OP_CAMERA], INVALID_UID, SYSTEM_UID, || Binder::Handle(OTHER_WATCHER));
+        let (synced, notices) = start(&f, &mut started, CLIENT, &own(OP_CAMERA, APP, "app"), NO_CHAIN);
+        assert_eq!(synced.mode, MODE_IGNORED);
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].heard, Heard::Started { flags: OP_FLAG_SELF, mode: MODE_IGNORED, start_type: START_TYPE_FAILED });
+        assert!(!is_active(&f, &mut started, OP_CAMERA, APP, "app"));
+        assert_eq!(finish(&f, &mut started, CLIENT, OP_CAMERA, APP, "app"), (vec![], vec![CLIENT]));
+    }
+
+    /// A package not the uid's errs, a uid without packages has no ops,
+    /// starting needs a client, and another uid's start UPDATE_APP_OPS_STATS.
+    #[test]
+    fn starts_that_err() {
+        let f = fake();
+        let mut started = Started::default();
+        assert_eq!(start(&f, &mut started, CLIENT, &own(OP_CAMERA, APP, "priv"), NO_CHAIN).0.mode, MODE_ERRORED);
+        let media = own(OP_CAMERA, MEDIA_UID, "media");
+        assert_eq!(run(&f, SYSTEM_UID, &mut started, |ops| ops.start(Some(CLIENT), &media, NO_CHAIN)).0.unwrap().mode, MODE_ERRORED);
+        let (result, _, _) = run(&f, APP, &mut started, |ops| ops.start(None, &own(OP_CAMERA, APP, "app"), NO_CHAIN));
+        assert_eq!(result.unwrap_err().code, EX_NULL_POINTER);
+        let (result, _, _) = run(&f, PRIV_APP, &mut started, |ops| ops.start(Some(CLIENT), &own(OP_CAMERA, APP, "app"), NO_CHAIN));
+        assert_eq!(result.unwrap_err().code, aim_binder_host::parcel::EX_SECURITY);
+    }
+
+    /// A tag the package does not declare is dropped only where invalid
+    /// tags are rejected; the proxy's declaring it suffices.
+    #[test]
+    fn attribution_tags_the_package_does_not_declare() {
+        let mut f = fake();
+        f.attributions.insert("app", vec!["declared"]);
+        f.attributions.insert("priv", vec!["proxied"]);
+        let tagged = |tag| Unchecked { tag: Some(tag), ..own(OP_READ_CLIPBOARD, APP, "app") };
+        let tag_of =
+            |f: &Fake, op: &Unchecked<'_>| run(f, SYSTEM_UID, &mut Started::default(), |ops| ops.note_unchecked(op)).0.unwrap().tag;
+        assert_eq!(tag_of(&f, &tagged("undeclared")).as_deref(), Some("undeclared"));
+        f.invalid_tags_rejected = true;
+        assert_eq!(tag_of(&f, &tagged("undeclared")), None);
+        assert_eq!(tag_of(&f, &tagged("declared")).as_deref(), Some("declared"));
+        let proxied = Unchecked { proxy: Some((PRIV_APP, "priv")), ..tagged("proxied") };
+        assert_eq!(tag_of(&f, &proxied).as_deref(), Some("proxied"));
+    }
+
+    fn source(uid: i32, package: &str, next: Option<AttributionSourceState>) -> AttributionSourceState {
+        AttributionSourceState {
+            pid: -1,
+            uid,
+            device_id: DEVICE_ID_DEFAULT,
+            package: Some(package.into()),
+            tag: None,
+            token: None,
+            renounced: None,
+            next: next.map(|next| vec![Some(next)]),
+        }
+    }
+
+    /// A proxy without UPDATE_APP_OPS_STATS starts the op for itself (its
+    /// skip not honored) and for the proxied, untrusted and collected for
+    /// itself; a proxied that could not start it starts nothing.
+    #[test]
+    fn proxy_starts() {
+        let mut f = fake();
+        let mut started = Started::default();
+        started.watch(Watch::Started, WATCHER, &[OP_CAMERA], INVALID_UID, SYSTEM_UID, || Binder::Handle(WATCHER));
+        let chain = source(PRIV_APP, "priv", Some(source(APP, "app", None)));
+        let attribution = ProxyAttribution { start_if_mode_default: false, proxy_flags: 0x1, proxied_flags: 0x4, chain_id: 9 };
+        let (synced, effects, _) =
+            run(&f, PRIV_APP, &mut started, |ops| ops.start_proxy(Some(CLIENT), OP_CAMERA, &chain, true, attribution, true, Some("why")));
+        assert_eq!(synced.unwrap(), SyncNoted::new(MODE_ALLOWED, OP_CAMERA, None, Some("app")));
+        let heard: Vec<_> = effects.notices.iter().map(|n| (n.uid, &n.heard, n.attribution_flags)).collect();
+        let started_with = |flags| Heard::Started { flags, mode: MODE_ALLOWED, start_type: START_TYPE_STARTED };
+        let proxy = started_with(OP_FLAG_UNTRUSTED_PROXY);
+        let proxied = started_with(OP_FLAG_UNTRUSTED_PROXIED);
+        assert_eq!(heard, [(PRIV_APP, &proxy, 0x1), (APP, &proxied, 0x4)]);
+        let collected = |uid, package: &str, message: &str| Collected {
+            uid,
+            package: package.into(),
+            op: OP_CAMERA,
+            tag: None,
+            message: message.into(),
+        };
+        assert_eq!(effects.collected, [collected(PRIV_APP, "priv", "proxy why"), collected(APP, "app", "why")]);
+        assert!(is_active(&f, &mut started, OP_CAMERA, PRIV_APP, "priv"));
+        assert!(is_active(&f, &mut started, OP_CAMERA, APP, "app"));
+        let (result, _, ended) = run(&f, PRIV_APP, &mut started, |ops| ops.finish_proxy(Some(CLIENT), OP_CAMERA, &chain, true));
+        result.unwrap();
+        assert_eq!(ended, [CLIENT, CLIENT]);
+        f.uid_modes.insert((APP, "android:camera"), MODE_ERRORED);
+        let (synced, effects, _) =
+            run(&f, PRIV_APP, &mut started, |ops| ops.start_proxy(Some(CLIENT), OP_CAMERA, &chain, false, attribution, false, None));
+        assert_eq!(synced.unwrap().mode, MODE_ERRORED);
+        assert!(effects.notices.is_empty());
+        assert!(!is_active(&f, &mut started, OP_CAMERA, PRIV_APP, "priv"));
+    }
+
+    /// A trusted proxy's skip is honored: only the proxied's op is noted.
+    #[test]
+    fn proxy_notes() {
+        let mut f = fake();
+        let chain = source(PRIV_APP, "priv", Some(source(APP, "app", None)));
+        let note = |f: &Fake, skip| run(f, PRIV_APP, &mut Started::default(), |ops| ops.note_proxy(OP_CAMERA, &chain, skip, false, None));
+        let (noted, effects, _) = note(&f, true);
+        assert_eq!(noted.unwrap(), SyncNoted::new(MODE_ALLOWED, OP_CAMERA, None, Some("app")));
+        assert_eq!(effects.collected.len(), 1);
+        f.uid_modes.insert((PRIV_APP, "android:camera"), MODE_IGNORED);
+        assert_eq!(note(&f, true).0.unwrap().mode, MODE_IGNORED);
+        f.granted.insert((PRIV_APP, UPDATE_APP_OPS_STATS));
+        let (noted, effects, _) = note(&f, true);
+        assert_eq!(noted.unwrap().mode, MODE_ALLOWED);
+        assert!(effects.collected.is_empty());
     }
 }

@@ -335,6 +335,11 @@ pub struct AppHost {
     playback: Mutex<playback::Playback>,
     /// The audio focus stack, locked before the players.
     focus: Mutex<audio_focus::Focus<Strong, (Strong, u64)>>,
+    /// AppOps' started ops, their watchers and the async-noted ops.
+    app_ops: appops_service::State,
+    /// The attribution sources whose data delivery started
+    /// (`PermissionCheckerService.sRunningAttributionSources`).
+    running_attributions: Mutex<permission_checker::Running>,
 }
 
 impl AppHost {
@@ -388,6 +393,8 @@ impl AppHost {
             volumes: Mutex::new(None),
             playback: Mutex::default(),
             focus: Mutex::default(),
+            app_ops: Default::default(),
+            running_attributions: Mutex::default(),
         })
     }
 
