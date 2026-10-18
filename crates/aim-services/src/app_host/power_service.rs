@@ -444,6 +444,25 @@ impl PowerManager {
     }
 }
 
+impl PowerManager {
+    /// `LowPowerStandbyController.isEnabled`: supported
+    /// (`config_lowPowerStandbySupported`) and on by the
+    /// `low_power_standby_enabled` setting, else by
+    /// `config_lowPowerStandbyEnabledByDefault`. The default is read, not
+    /// written into the setting as `initSettingsLocked` does.
+    fn low_power_standby_enabled(&self) -> Result<bool, Exception> {
+        let inputs = self.host.inputs()?;
+        let config = |name| inputs.packages.framework_bool(name).unwrap_or(false);
+        let by_default = config("config_lowPowerStandbyEnabledByDefault");
+        let enabled = inputs
+            .settings
+            .get(Table::Global, "low_power_standby_enabled")
+            .and_then(|v| v.parse::<i32>().ok())
+            .map_or(by_default, |v| v != 0);
+        Ok(config("config_lowPowerStandbySupported") && enabled)
+    }
+}
+
 impl Service for PowerManager {
     fn descriptor(&self) -> &str {
         pm::DESCRIPTOR
@@ -583,6 +602,10 @@ impl Service for PowerManager {
                     pm::write_get_power_save_state_reply(&mut p, Some(&s));
                     p
                 }))
+            }
+            pm::IS_LOW_POWER_STANDBY_ENABLED => {
+                pm::IsLowPowerStandbyEnabled::read(&mut call.data).map_err(bad)?;
+                bool_reply(self.low_power_standby_enabled())
             }
             pm::IS_DEVICE_IDLE_MODE => {
                 pm::IsDeviceIdleMode::read(&mut call.data).map_err(bad)?;
