@@ -624,19 +624,16 @@ impl AppHost {
         })?;
         let uid = listed.uid;
         let app_id = uid % PER_USER_RANGE;
-        let mut gids = listed.gids.clone();
-        if app_id >= FIRST_APPLICATION_UID {
-            gids.push(app_id - FIRST_APPLICATION_UID + FIRST_SHARED_APPLICATION_GID);
-            gids.push(app_id - FIRST_APPLICATION_UID + FIRST_APPLICATION_CACHE_GID);
-        }
-        gids.push(SHARED_USER_GID);
+        let mount_external = self.mount_mode(uid as i32, name)?;
+        let external_storage_access = self.has_external_storage_access(uid as i32, name)?;
+        let gids = process_gids(listed.gids.clone(), uid, mount_external, external_storage_access);
         let target_sdk = setting.target_sdk_version;
         let app_info = inputs
             .packages
             .application_info(name, STOCK_PM_FLAGS)
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("no application info of {name}")))?;
         let start_seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        let isolation = self.data_isolation(name, uid, target_sdk)?;
+        let isolation = self.data_isolation(name, uid, target_sdk, mount_external)?;
         let start = zygote::Start {
             uid,
             gids,
@@ -648,8 +645,7 @@ impl AppHost {
             )
                 << API_ENFORCEMENT_POLICY_SHIFT
                 | memory_safety(&inputs.compat, name, setting.flags, target_sdk),
-            // `getExternalStorageMountMode`: every app's scoped view.
-            mount_external: zygote::MountExternal::Default,
+            mount_external,
             target_sdk_version: target_sdk,
             nice_name: process.to_string(),
             seinfo: format!("{}{SEINFO_COMPLETE}", listed.seinfo),
@@ -716,7 +712,7 @@ impl AppHost {
     /// process's view of `/data/user` (`--bind-mount-data-dirs`); the
     /// storage directories' isolation is vold's
     /// (`persist.sys.vold_app_data_isolation_enabled`).
-    fn data_isolation(&self, package: &str, uid: u32, target_sdk: i32) -> Result<Isolation, Exception> {
+    fn data_isolation(&self, package: &str, uid: u32, target_sdk: i32, mount_external: zygote::MountExternal) -> Result<Isolation, Exception> {
         let inputs = self.inputs()?;
         let configured = self.configured.get().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host not configured"))?;
         let flag = |name: &str, default: bool| system_boolean((configured.properties)(name).as_deref(), default);
@@ -757,8 +753,13 @@ impl AppHost {
         if no_storage {
             return Ok(Isolation::default());
         }
-        // `needsStorageDataIsolation`, with the emulated volume mounted.
-        let storage_dirs = flag("persist.sys.vold_app_data_isolation_enabled", false) && packages.is_some() && self.storage_mounted();
+        // `needsStorageDataIsolation`, with the emulated volume mounted:
+        // not for the media store's uid (`isExternalStorageService`, whose
+        // mode is pass-through) or a mode that does not use `/mnt/user`.
+        let storage_dirs = flag("persist.sys.vold_app_data_isolation_enabled", false)
+            && packages.is_some()
+            && self.storage_mounted()
+            && mount_external == zygote::MountExternal::Default;
         Ok(Isolation { packages: packages.unwrap_or_default(), allowlisted: allowlisted.unwrap_or_default(), storage_dirs, data_dirs })
     }
 
@@ -1999,6 +2000,38 @@ fn hidden_api_policy(flags: i32, private_flags: i32, private_flags_ext: i32, set
     }
 }
 
+/// `ProcessList.computeGidsForProcess`: the package's permission gids,
+/// its shared and cache gids, its user's, and those of its storage mode
+/// and access.
+fn process_gids(mut gids: Vec<u32>, uid: u32, mount_external: zygote::MountExternal, external_storage_access: bool) -> Vec<u32> {
+    /// `Process.SDCARD_RW_GID`, `EXT_DATA_RW_GID`, `EXT_OBB_RW_GID`,
+    /// `MEDIA_RW_GID`, `EXTERNAL_STORAGE_GID`.
+    const SDCARD_RW_GID: u32 = 1015;
+    const EXT_DATA_RW_GID: u32 = 1078;
+    const EXT_OBB_RW_GID: u32 = 1079;
+    const MEDIA_RW_GID: u32 = 1023;
+    const EXTERNAL_STORAGE_GID: u32 = 1077;
+    let (user, app_id) = (uid / PER_USER_RANGE, uid % PER_USER_RANGE);
+    if app_id >= FIRST_APPLICATION_UID {
+        gids.push(app_id - FIRST_APPLICATION_UID + FIRST_SHARED_APPLICATION_GID);
+        gids.push(app_id - FIRST_APPLICATION_UID + FIRST_APPLICATION_CACHE_GID);
+    }
+    gids.push(user * PER_USER_RANGE + SHARED_USER_GID);
+    if matches!(mount_external, zygote::MountExternal::AndroidWritable | zygote::MountExternal::PassThrough) {
+        gids.extend([user * PER_USER_RANGE + SDCARD_RW_GID, EXT_DATA_RW_GID, EXT_OBB_RW_GID]);
+    }
+    if mount_external == zygote::MountExternal::Installer {
+        gids.push(EXT_OBB_RW_GID);
+    }
+    if mount_external == zygote::MountExternal::PassThrough {
+        gids.push(MEDIA_RW_GID);
+    }
+    if external_storage_access {
+        gids.push(EXTERNAL_STORAGE_GID);
+    }
+    gids
+}
+
 /// `Zygote.getMemorySafetyRuntimeFlags` for an app with no manifest
 /// overrides, on a kernel without tagged pointers (the layer answers
 /// `PR_GET_TAGGED_ADDR_CTRL` with `EINVAL`), which disables tagging.
@@ -2800,6 +2833,13 @@ impl Service for Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fuse_daemon_has_the_lower_filesystem_gids() {
+        let gids = process_gids(vec![3007], 10_208, zygote::MountExternal::PassThrough, false);
+        assert_eq!(gids, [3007, 50_208, 20_208, 9997, 1015, 1078, 1079, 1023]);
+        assert_eq!(process_gids(vec![], 10_213, zygote::MountExternal::Default, true), [50_213, 20_213, 9997, 1077]);
+    }
 
     #[test]
     fn system_booleans_default_when_unset_or_empty() {
