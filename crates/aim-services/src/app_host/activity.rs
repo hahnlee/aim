@@ -875,6 +875,14 @@ impl Service for ActivityClientController {
             // app host's is never locked and always on (`power`), so
             // nothing follows, as on the original's awake, unlocked one.
             acc::SET_SHOW_WHEN_LOCKED | acc::SET_INHERIT_SHOW_WHEN_LOCKED => Ok(Parcel::new()),
+            // `setRecentsScreenshotEnabled` (one-way) chooses between a
+            // screenshot and the app's theme for its task's snapshot in
+            // recents (`shouldUseAppThemeSnapshot`); the app host takes no
+            // task snapshots, so nothing follows.
+            acc::SET_RECENTS_SCREENSHOT_ENABLED => {
+                acc::SetRecentsScreenshotEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                Ok(Parcel::new())
+            }
             // `enableTaskLocaleOverride` (the system's alone) aligns a
             // task's other packages with the locales its root package has
             // of its own; no package has any in the app host (#1642), so
