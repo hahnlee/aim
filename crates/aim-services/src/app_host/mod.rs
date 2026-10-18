@@ -295,6 +295,8 @@ pub struct AppHost {
     pending_launches: Mutex<HashMap<String, String>>,
     providers: providers::Providers,
     uri_grants: uri_grants::UriGrants,
+    /// `permissionmgr`, which the app host's own permission checks ask.
+    permission_manager: OnceLock<Arc<permission_manager::PermissionManager>>,
     /// Processes' exit history (`AppExitInfoTracker`), loaded at its first use.
     exit_infos: OnceLock<Arc<exit_info::Tracker>>,
     uid_observers: uid_observers::UidObservers,
@@ -356,6 +358,7 @@ impl AppHost {
             pending_launches: Mutex::new(HashMap::new()),
             providers: Default::default(),
             uri_grants: Default::default(),
+            permission_manager: OnceLock::new(),
             exit_infos: OnceLock::new(),
             uid_observers: Default::default(),
             tzdata: OnceLock::new(),
@@ -417,7 +420,7 @@ impl AppHost {
                 .add_service(Arc::new(settings_provider::SettingsProvider::new(self.clone()))),
             self.process.add_service(Arc::new(activity::Token)),
         ));
-        let permission_manager = Arc::new(permission_manager::PermissionManager::new(self.clone()));
+        let permission_manager = self.permission_manager.get_or_init(|| Arc::new(permission_manager::PermissionManager::new(self.clone()))).clone();
         vec![
             (
                 "activity",
@@ -628,7 +631,6 @@ impl AppHost {
             Exception::new(EX_ILLEGAL_STATE, format!("{name} not in packages.list"))
         })?;
         let uid = listed.uid;
-        let app_id = uid % PER_USER_RANGE;
         let mount_external = self.mount_mode(uid as i32, name)?;
         let external_storage_access = self.has_external_storage_access(uid as i32, name)?;
         let gids = process_gids(listed.gids.clone(), uid, mount_external, external_storage_access);
@@ -1297,42 +1299,17 @@ impl AppHost {
         }
     }
 
-    /// `ActivityManager.checkComponentPermission` of an exported
-    /// component nobody owns: root and system hold every permission,
-    /// isolated processes none, other uids what PackageManager granted
-    /// them (`checkUidPermission`).
-    pub(super) fn check_permission(
-        &self,
-        permission: Option<&str>,
-        uid: i32,
-    ) -> Result<i32, Exception> {
+    /// `ActivityManagerService.checkPermission`: no permission is denied;
+    /// else `ActivityManager.checkComponentPermission` of an exported
+    /// component nobody owns, which ends in PermissionManagerService's
+    /// `checkUidPermission` (`permissionmgr`'s), so that `Context` and
+    /// `PackageManager` checks agree.
+    pub(super) fn check_permission(&self, permission: Option<&str>, uid: i32) -> Result<i32, Exception> {
         const GRANTED: i32 = 0;
         const DENIED: i32 = -1;
-        let app_id = uid.rem_euclid(PER_USER_RANGE as i32);
-        if app_id == 0 || app_id == 1000 {
-            return Ok(GRANTED);
-        }
-        // `Process.isIsolated`: isolated and app zygote processes.
-        if (90000..=99999).contains(&app_id) {
-            return Ok(DENIED);
-        }
-        let Some(permission) = permission else {
-            return Ok(DENIED);
-        };
-        let (state, resolution) = self.packages()?;
-        let query = crate::package::query::Query {
-            state: &state,
-            filter: &resolution.apps_filter,
-            calling_uid: uid,
-        };
-        match query.uid_has_permission(uid, permission) {
-            Ok(true) => Ok(GRANTED),
-            Ok(false) => Ok(DENIED),
-            Err(crate::package::apps_filter::NotModelled(reason)) => Err(Exception::new(
-                EX_UNSUPPORTED_OPERATION,
-                format!("checkPermission: {reason}"),
-            )),
-        }
+        let Some(permission) = permission else { return Ok(DENIED) };
+        let permissions = self.permission_manager.get().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no permissionmgr"))?;
+        Ok(if permissions.holds(uid, permission)? { GRANTED } else { DENIED })
     }
 
     /// `reportStartInfoViewTimestamps`: the first frame of the caller's
