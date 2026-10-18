@@ -44,6 +44,7 @@ pub mod keychars;
 pub mod memory_info;
 pub mod kept;
 pub mod network;
+mod network_native;
 pub mod notification_channels;
 pub mod notification_service;
 pub mod package_service;
