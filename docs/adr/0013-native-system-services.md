@@ -1,6 +1,6 @@
 # ADR 0013: Android's system services as native macOS implementations
 
-Status: accepted 2026-09-29 (migration tracked in #153); amended by ADR 0014: a service whose subsystem macOS owns may be served in the app process instead of at its binder interface.
+Status: accepted 2026-09-29 (migration tracked in #153); amended by ADR 0014: a service may also be served in the app process, its binder interface kept for compatibility.
 
 M4 D1 source: `NativePackageManagerService` provides the typed static entry
 points and native/local owner coordinator. Its ten redirect rows remain in

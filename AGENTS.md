@@ -9,12 +9,13 @@ facts instead of appending a log.
 
 ## Principles
 
-- An app's own process (ART, the boot classpath, bionic, its native
-  libraries) runs original, except framework classes that ADR 0014
-  replaces with natively backed ones where macOS owns the subsystem
-  (windows, their configuration and display). Implement what lies below
-  it: Linux syscall semantics, the binder driver, host-call and the HALs.
-  A gap there is closed there, never by patching the guest ad hoc.
+- The goal is Wine's (ADR 0014). An app's own process (ART, the boot
+  classpath, bionic, its native libraries) runs original, except framework
+  classes that ADR 0014 replaces, listed, with natively backed ones (JNI
+  and host-call, the long-term direction); the binder interface they
+  bypass stays served for compatibility. Below the app, implement Linux
+  syscall semantics, the binder driver, host-call and the HALs. A gap is
+  closed at its owner, never by patching the guest ad hoc.
 - System services move, one at a time, from the original SystemServer to
   native implementations backed by macOS (ADR 0013): by default a
   replacement implements the service's AIDL at the pinned version with
