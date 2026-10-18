@@ -113,7 +113,7 @@ fn fuse_device_guest_syscall_vectors_clone_poll_and_character_metadata(){
 
 #[test]
 fn long_guest_runtime_uses_short_transport_with_actual_linux_run_broker_cli(){
- let helper=aim_paths::root().join("target/release/linux-run");assert!(helper.is_file(),"release linux-run required for FUSE CLI integration");
+ let Some(helper)=aim_paths::input(aim_paths::host_bin("linux-run"),"host/linux-run")else{return};
  let long_runtime=std::env::temp_dir().join(format!("aim-fuse-runtime-{}",id().unwrap())).join("long-guest-runtime-component".repeat(8));fs::create_dir_all(&long_runtime).unwrap();
  use std::os::unix::ffi::OsStrExt;assert!(long_runtime.as_os_str().as_bytes().len()>104);
  let fd=open_device_with_helper(&long_runtime,0,&helper).unwrap();let key=session_for_fd(fd).unwrap();let directory=key.0.parent().unwrap().to_owned();

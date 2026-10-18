@@ -94,6 +94,12 @@ pub fn ndk_wrappers() -> PathBuf {
     out().join("ndk")
 }
 
+/// A host program the `host/<name>` node publishes in cargo's release
+/// directory, which the tests' own (debug or release) builds do not make.
+pub fn host_bin(name: &str) -> PathBuf {
+    root().join("target/release").join(name)
+}
+
 /// A vendor HAL service (`/vendor/bin/hw`).
 pub fn hal_bin(name: &str) -> PathBuf {
     out().join("hal/bin").join(name)
