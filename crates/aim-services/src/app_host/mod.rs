@@ -1057,6 +1057,27 @@ impl AppHost {
         root.int(name).map_err(state)?.ok_or_else(|| state(format!("{}: no {name}", path.display())))
     }
 
+    /// User 0's persisted properties: `users/0.xml`'s `<userProperties>`
+    /// attributes, as `UserProperties.updateFromXml` reads them (booleans
+    /// 0 or 1).
+    fn user_properties(&self) -> Result<Vec<(String, i32)>, Exception> {
+        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
+        let path = self.data()?.join("system/users/0.xml");
+        let bytes = std::fs::read(&path).map_err(|e| state(format!("{}: {e}", path.display())))?;
+        let root = aim_android_xml::read(&bytes).map_err(|e| state(format!("{}: {e}", path.display())))?;
+        let mut out = Vec::new();
+        for props in root.children().filter(|e| e.name == "userProperties") {
+            for (name, _) in &props.attrs {
+                let value = match props.bool(name) {
+                    Ok(Some(b)) => i32::from(b),
+                    _ => props.int(name).map_err(state)?.unwrap_or(0),
+                };
+                out.push((name.clone(), value));
+            }
+        }
+        Ok(out)
+    }
+
     /// User 0's serial number (`UserInfo.serialNumber`).
     fn user_serial(&self) -> Result<i32, Exception> {
         self.user_attribute("serialNumber")

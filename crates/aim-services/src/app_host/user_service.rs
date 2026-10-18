@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, Exception, Parcel};
+use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_os_iusermanager as um;
 
 use super::{AppHost, reply};
@@ -15,6 +16,80 @@ const SYSTEM_USER: i32 = 0;
 /// `UserInfo.FLAG_DEMO`, `FLAG_FULL`.
 const FLAG_DEMO: i32 = 0x200;
 const FLAG_FULL: i32 = 0x400;
+
+/// Who may read a `UserProperties` field in a copy
+/// (`UserProperties(orig, exposeAllFields, hasManage, hasQueryOrManage)`).
+#[derive(Clone, Copy, PartialEq)]
+enum Visible {
+    Anyone,
+    Manage,
+    System,
+}
+
+/// `UserProperties`' fields in parcel order: the persisted attribute, the
+/// index of its presence bit, who may read it in a copy, and the full
+/// system user type's value (`UserProperties.Builder`'s defaults, as
+/// `UserTypeFactory.getDefaultTypeFullSystem` sets none). Booleans are 0 or 1.
+const USER_PROPERTIES: [(&str, u32, Visible, i32); 19] = [
+    ("showInLauncher", 0, Visible::Anyone, 0),
+    ("startWithParent", 1, Visible::System, 0),
+    ("showInSettings", 2, Visible::Manage, 0),
+    ("showInQuietMode", 12, Visible::Anyone, 0),
+    // SHOW_IN_SHARING_SURFACES_SEPARATE.
+    ("showInSharingSurfaces", 14, Visible::Anyone, 1),
+    ("inheritDevicePolicy", 3, Visible::System, 0),
+    ("useParentsContacts", 4, Visible::Manage, 0),
+    ("updateCrossProfileIntentFiltersOnOTA", 5, Visible::System, 0),
+    ("crossProfileIntentFilterAccessControl", 6, Visible::System, 0),
+    ("crossProfileIntentResolutionStrategy", 7, Visible::System, 0),
+    ("mediaSharedWithParent", 8, Visible::Anyone, 0),
+    ("credentialShareableWithParent", 9, Visible::Anyone, 0),
+    ("authAlwaysRequiredToDisableQuietMode", 13, Visible::Manage, 0),
+    ("allowStoppingUserWithDelayedLocking", 16, Visible::System, 0),
+    ("deleteAppWithParent", 10, Visible::System, 0),
+    ("alwaysVisible", 11, Visible::System, 0),
+    ("crossProfileContentSharingStrategy", 15, Visible::Anyone, 0),
+    ("profileApiVisibility", 17, Visible::Anyone, 0),
+    ("itemsRestrictedOnHomeScreen", 18, Visible::Anyone, 0),
+];
+
+/// A copy of user 0's `UserProperties`: the fields present, and every
+/// field's value (0 when not copied), written as `writeToParcel` writes
+/// them.
+struct UserProperties {
+    present: i64,
+    values: [i32; 19],
+}
+
+impl UserProperties {
+    /// User 0's properties (its type's, then those `users/0.xml`'s
+    /// `<userProperties>` holds) as copied for a caller that is the system
+    /// (`expose_all`) or holds MANAGE_USERS (`manage`).
+    fn copy(persisted: &[(String, i32)], expose_all: bool, manage: bool) -> UserProperties {
+        let mut copy = UserProperties { present: 0, values: [0; 19] };
+        for (i, (name, index, visible, default)) in USER_PROPERTIES.iter().enumerate() {
+            let shown = match visible {
+                Visible::Anyone => true,
+                Visible::Manage => manage,
+                Visible::System => expose_all,
+            };
+            if shown {
+                copy.present |= 1 << index;
+                copy.values[i] = persisted.iter().find(|(n, _)| n == name).map_or(*default, |(_, v)| *v);
+            }
+        }
+        copy
+    }
+}
+
+impl WriteParcelable for UserProperties {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i64(self.present);
+        for v in self.values {
+            p.write_i32(v);
+        }
+    }
+}
 
 /// The profiles of `user`'s profile group: user 0 alone, and none of a
 /// user that does not exist.
@@ -97,6 +172,42 @@ impl Service for UserManager {
                     return reply(Err(e));
                 }
                 um::write_get_profile_type_reply(&mut p, &(args.user_id == SYSTEM_USER).then(String::new));
+            }
+            um::GET_USER_PROPERTIES_COPY => {
+                let args = um::GetUserPropertiesCopy::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.check_other_user(call, args.user_id, true, "getUserProperties") {
+                    return reply(Err(e));
+                }
+                if args.user_id != SYSTEM_USER {
+                    return reply(Err(Exception::illegal_argument(format!("Cannot access properties for user {}", args.user_id))));
+                }
+                let uid = call.sender_euid as i32;
+                let manage = matches!(uid % 100_000, 1000) || uid == 0
+                    || matches!(self.host.check_permission(Some("android.permission.MANAGE_USERS"), uid), Ok(0));
+                match self.host.user_properties() {
+                    Ok(persisted) => um::write_get_user_properties_copy_reply(&mut p, Some(&UserProperties::copy(&persisted, uid == 1000, manage))),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            // User 0 is no profile, so never in quiet mode.
+            um::IS_QUIET_MODE_ENABLED => {
+                um::IsQuietModeEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                um::write_is_quiet_mode_enabled_reply(&mut p, false);
+            }
+            // A restriction of the base set `users/0.xml` holds; a key no
+            // valid restriction has is in none.
+            um::HAS_BASE_USER_RESTRICTION => {
+                let args = um::HasBaseUserRestriction::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let uid = call.sender_euid as i32;
+                let held = |perm: &str| matches!(self.host.check_permission(Some(perm), uid), Ok(0));
+                if !matches!(uid % 100_000, 0 | 1000) && !held("android.permission.MANAGE_USERS") && !held("android.permission.CREATE_USERS") {
+                    return reply(Err(Exception::security("You either need MANAGE_USERS or CREATE_USERS permission to: hasBaseUserRestriction")));
+                }
+                let restricted = match self.host.user_restrictions() {
+                    Ok(r) => args.user_id == SYSTEM_USER && args.restriction_key.is_some_and(|k| r.contains(&k)),
+                    Err(e) => return reply(Err(e)),
+                };
+                um::write_has_base_user_restriction_reply(&mut p, restricted);
             }
             um::IS_USER_UNLOCKED => {
                 let args = um::IsUserUnlocked::read(&mut call.data).map_err(|_| BAD_VALUE)?;
