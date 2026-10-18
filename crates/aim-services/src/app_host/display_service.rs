@@ -1,13 +1,18 @@
 //! `display`: DisplayManager for the app host's one display, the built-in
 //! one SurfaceFlinger reports, as `LocalDisplayAdapter` and
 //! `LogicalDisplay` describe it at `android-16.0.0_r1` (`DisplayInfo`'s
-//! parcel form), with no decor taking from apps' area.
+//! parcel form), with no decor taking from apps' area, and the stable
+//! display size `PersistentDataStore` keeps
+//! (`/data/system/display-manager-state.xml`).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use aim_android_xml::{Element, Node, TEXT};
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, Binder, Parcel};
+use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_hardware_display_idisplaymanager as dm;
 
@@ -160,10 +165,86 @@ impl WriteParcelable for DisplayInfo<'_> {
     }
 }
 
+/// `PersistentDataStore`'s file under the guest's `/data`.
+const STATE_XML: &str = "system/display-manager-state.xml";
+
+/// A `Point`.
+struct Point(i32, i32);
+
+impl WriteParcelable for Point {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i32(self.0);
+        p.write_i32(self.1);
+    }
+}
+
+/// The text of `e`'s child `name` (`nextText`).
+fn child_text<'a>(e: &'a Element, name: &str) -> Option<&'a str> {
+    e.children().find(|c| c.name == name)?.content.iter().find_map(|n| match n {
+        Node::Token(TEXT, Some(text)) => Some(text.as_str()),
+        _ => None,
+    })
+}
+
+/// `StableDeviceValues.loadFromXml`: the persisted width and height, 0
+/// where one is not a number.
+fn stable_values(root: &Element) -> (i32, i32) {
+    let Some(values) = root.children().find(|e| e.name == "stable-device-values") else { return (0, 0) };
+    let int = |name: &str| child_text(values, name).and_then(|t| t.parse().ok()).unwrap_or(0);
+    (int("stable-display-width"), int("stable-display-height"))
+}
+
+/// `root` with its stable values set to `size` (`saveToXml`), or the
+/// document `PersistentDataStore` writes from an empty state.
+fn with_stable_values(root: Option<Element>, size: (i32, i32)) -> Element {
+    let element = |name: &str, content: Vec<Node>| Element { name: name.into(), attrs: Vec::new(), content };
+    let text = |name: &str, value: String| Node::Element(element(name, vec![Node::Token(TEXT, Some(value))]));
+    let mut root = root.unwrap_or_else(|| {
+        let empty = |name: &str| Node::Element(element(name, Vec::new()));
+        element(
+            "display-manager-state",
+            vec![
+                empty("remembered-wifi-displays"),
+                empty("display-states"),
+                empty("stable-device-values"),
+                empty("brightness-configurations"),
+                text("brightness-nits-for-default-display", "-1.0".into()),
+            ],
+        )
+    });
+    let values = vec![text("stable-display-width", size.0.to_string()), text("stable-display-height", size.1.to_string())];
+    match root.content.iter_mut().find_map(|n| match n {
+        Node::Element(e) if e.name == "stable-device-values" => Some(e),
+        _ => None,
+    }) {
+        Some(e) => e.content = values,
+        None => root.content.push(Node::Element(element("stable-device-values", values))),
+    }
+    root
+}
+
+/// Writes `root` to the store's file, as the system's, through a new file
+/// (`AtomicFile`).
+fn write_state(data: &Path, root: &Element) -> std::io::Result<()> {
+    let bytes = aim_android_xml::abx::write(root).map_err(std::io::Error::other)?;
+    let path = data.join(STATE_XML);
+    let new = data.join(format!("{STATE_XML}.new"));
+    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&new)?;
+    std::io::Write::write_all(&mut file, &bytes)?;
+    crate::fsync(&file)?;
+    aim_storage::guest_inode::record(
+        &new,
+        aim_storage::guest_inode::GuestInode { uid: Some(1000), gid: Some(1000), mode: Some(0o600) },
+    )?;
+    std::fs::rename(&new, path)
+}
+
 /// `display`.
 pub struct DisplayManager {
     host: Arc<AppHost>,
     callbacks: Mutex<Vec<(Binder, i64)>>,
+    /// `mStableDisplaySize`, once loaded.
+    stable: Mutex<Option<(i32, i32)>>,
 }
 
 impl DisplayManager {
@@ -171,7 +252,50 @@ impl DisplayManager {
         DisplayManager {
             host,
             callbacks: Mutex::new(Vec::new()),
+            stable: Mutex::new(None),
         }
+    }
+
+    /// `mStableDisplaySize`: the persisted size
+    /// (`loadStableDisplayValuesLocked`), else the configured one, else
+    /// the default display's natural size
+    /// (`recordStableDisplayStatsIfNeededLocked`); one not persisted is
+    /// (`setStableDisplaySizeLocked`). A store that cannot be read is
+    /// empty, as `PersistentDataStore.load` clears it.
+    fn stable_display_size(&self) -> Result<(i32, i32), Exception> {
+        let mut stable = self.stable.lock().unwrap();
+        if let Some(size) = *stable {
+            return Ok(size);
+        }
+        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
+        let data = self.host.data()?;
+        let path = data.join(STATE_XML);
+        let root = match std::fs::read(&path) {
+            Ok(bytes) => aim_android_xml::read(&bytes)
+                .inspect_err(|e| eprintln!("app host: Failed to load display manager persistent store data: {e}"))
+                .ok()
+                .filter(|r| r.name == "display-manager-state"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(state(format!("{}: {e}", path.display()))),
+        };
+        let persisted = root.as_ref().map_or((0, 0), stable_values);
+        let size = if persisted.0 > 0 && persisted.1 > 0 {
+            persisted
+        } else {
+            let packages = &self.host.inputs()?.packages;
+            let integer = |name: &str| packages.framework_integer(name).ok_or_else(|| state(format!("no {name}")));
+            let configured = (integer("config_stableDeviceDisplayWidth")?, integer("config_stableDeviceDisplayHeight")?);
+            let size = if configured.0 > 0 && configured.1 > 0 {
+                configured
+            } else {
+                let display = self.host.display()?;
+                (display.0.width, display.0.height)
+            };
+            write_state(&data, &with_stable_values(root, size)).map_err(|e| state(format!("{}: {e}", path.display())))?;
+            size
+        };
+        *stable = Some(size);
+        Ok(size)
     }
 }
 
@@ -230,6 +354,13 @@ impl Service for DisplayManager {
                 p.write_no_exception();
                 p.write_raw(&support, &[]);
             }
+            dm::GET_STABLE_DISPLAY_SIZE => {
+                dm::GetStableDisplaySize::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match self.stable_display_size() {
+                    Ok((w, h)) => dm::write_get_stable_display_size_reply(&mut p, Some(&Point(w, h))),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
             code => return reply(Err(self.host.unimplemented("display", code))),
         }
         Ok(p)
@@ -239,6 +370,20 @@ impl Service for DisplayManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The stable values are read as `loadFromXml` reads them, and set in
+    /// a document as `saveToXml` writes them.
+    #[test]
+    fn stable_values_are_read_and_set_as_the_store_does() {
+        let xml = b"<display-manager-state><display-states /><stable-device-values><stable-display-width>1080</stable-display-width><stable-display-height>x</stable-display-height></stable-device-values></display-manager-state>";
+        let root = aim_android_xml::read(xml).unwrap();
+        assert_eq!(stable_values(&root), (1080, 0));
+        assert_eq!(stable_values(&with_stable_values(Some(root), (1200, 1920))), (1200, 1920));
+        let fresh = with_stable_values(None, (800, 1280));
+        assert_eq!(stable_values(&fresh), (800, 1280));
+        assert_eq!(child_text(&fresh, "brightness-nits-for-default-display"), Some("-1.0"));
+        assert_eq!(fresh.children().count(), 5);
+    }
 
     /// The original's `getDisplayInfo(0)` reply to Calculator on the
     /// display server's 1080x1920 panel, ko-KR (captured on the pinned
