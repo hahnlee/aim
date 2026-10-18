@@ -2,7 +2,8 @@
 //! `android-16.0.0_r1`: `startService` and `stopService`, `bindService`
 //! and `unbindService`, a service created in its app's process (started
 //! for it when it does not run) with `scheduleCreateService`, its starts
-//! delivered with `scheduleServiceArgs` and its bindings requested with
+//! delivered with `scheduleServiceArgs` (each holding the URI grants of
+//! its intent while delivered) and its bindings requested with
 //! `scheduleBindService`, the binder it publishes passed to its
 //! connections, and the service destroyed (`scheduleStopService`) once it
 //! is neither started nor bound to with `BIND_AUTO_CREATE`. When its
@@ -46,6 +47,7 @@ use super::broadcasts::filter_equals;
 use super::fgs_types::{self, Check};
 use super::kept::{By, KeptIntent, RawIntent};
 use super::notification_service::{Enqueue, Incoming};
+use super::uri_grants::{NeededUriGrants, Owner};
 use super::{AppHost, PER_USER_RANGE, PROCESS_STATE_TOP, STOCK_PM_FLAGS};
 use crate::bundle::Value;
 use crate::package::info::{ServiceInfo, java_hash};
@@ -163,6 +165,9 @@ impl ReadParcelable for Name {
 struct StartItem {
     id: i32,
     intent: Option<KeptIntent>,
+    /// The URI grants its intent carries, and their owner once delivered
+    /// (`neededGrants`, `uriPermissions`).
+    grants: Option<(NeededUriGrants, Owner)>,
     delivery_count: i32,
     done_executing_count: i32,
     delivered_time: Option<Instant>,
@@ -855,6 +860,10 @@ impl AppHost {
                 }
                 Lookup::Found(info) => *info,
             };
+        // `startServiceInnerLocked`: the intent's grants, checked for the
+        // caller (before the services are locked: a provider may be asked).
+        let package = info.info.application_info.item.package_name.as_deref().unwrap_or_default();
+        let grants = self.check_grant_from_intent(&intent, uid, package, user)?.map(|n| (n, self.new_start_owner()));
         let kept = KeptIntent::new(intent, &self.process);
         let mut state = self.services.state.lock().unwrap();
         let token = Self::service_record(&mut state, info, &self.process);
@@ -898,6 +907,7 @@ impl AppHost {
         r.pending.push(StartItem {
             id,
             intent: Some(kept),
+            grants,
             delivery_count: 0,
             done_executing_count: 0,
             delivered_time: None,
@@ -974,7 +984,9 @@ impl AppHost {
         if start_id >= 0 {
             // The starts delivered up to this one are done.
             if let Some(at) = r.delivered.iter().position(|s| s.id == start_id) {
-                r.delivered.drain(..=at);
+                for s in r.delivered.drain(..=at) {
+                    self.release_start_grants(&s);
+                }
             }
             if r.last_start_id != start_id {
                 return false;
@@ -1387,6 +1399,7 @@ impl AppHost {
             r.pending.push(StartItem {
                 id,
                 intent: None,
+                grants: None,
                 delivery_count: 0,
                 done_executing_count: 0,
                 delivered_time: None,
@@ -1453,6 +1466,11 @@ impl AppHost {
             }
             s.delivery_count += 1;
             s.delivered_time = Some(Instant::now());
+            if let Some((needed, owner)) = &s.grants
+                && let Err(e) = self.grant_from_intent(Some(needed), Some(*owner))
+            {
+                eprintln!("app host: service {}/{}: URI grants: {}", r.package, r.class, e.message);
+            }
             // A service started with `startForegroundService` must call
             // `startForeground` in time
             // (`scheduleServiceForegroundTransitionTimeoutLocked`).
@@ -1506,6 +1524,13 @@ impl AppHost {
         }
     }
 
+    /// `StartItem.removeUriPermissionsLocked`.
+    fn release_start_grants(&self, s: &StartItem) {
+        if let Some((_, owner)) = &s.grants {
+            self.release_uri_grants(*owner);
+        }
+    }
+
     /// `bringDownServiceIfNeededLocked`: a service neither started nor
     /// bound to with `BIND_AUTO_CREATE` is destroyed (`bringDownServiceLocked`).
     fn bring_down_if_needed(&self, state: &mut State, token: Binder) {
@@ -1518,6 +1543,10 @@ impl AppHost {
             return;
         };
         let r = state.records.remove(at);
+        // `clearDeliveredStartsLocked`.
+        for s in &r.delivered {
+            self.release_start_grants(s);
+        }
         // Its connections learn it is gone.
         let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut state.connections)
             .into_iter()
@@ -1640,6 +1669,11 @@ impl AppHost {
                 b.has_bound = false;
             }
             let (package, class) = (r.package.clone(), r.class.clone());
+            // Its delivered starts' grants go, whether they are delivered
+            // again or it is brought down.
+            for s in &r.delivered {
+                self.release_start_grants(s);
+            }
             let delay = if !allow_restart {
                 None
             } else if r.crash_count >= BOUND_SERVICE_MAX_CRASH_RETRY {
@@ -1808,7 +1842,7 @@ impl AppHost {
     }
 
     /// Whether an aconfig flag of the image is on.
-    fn flag(&self, name: &str) -> Result<bool, Exception> {
+    pub(super) fn flag(&self, name: &str) -> Result<bool, Exception> {
         let (state, _) = self.packages()?;
         Ok(state.system.flags.iter().any(|(n, on)| n == name && *on))
     }

@@ -280,6 +280,62 @@ impl Uri {
     pub fn fragment(&self) -> Option<String> {
         self.fsi().map(|fsi| decode(&self.string[fsi + 1..]))
     }
+
+    /// `isHierarchical`.
+    fn is_hierarchical(&self) -> bool {
+        match self.kind {
+            Kind::Opaque => false,
+            Kind::Hierarchical | Kind::PreferredHierarchical => true,
+            Kind::String => self.ssi().is_none_or(|ssi| self.string.as_bytes().get(ssi + 1) == Some(&b'/')),
+        }
+    }
+
+    /// `getUserInfo`: the decoded part of the authority before its last
+    /// `@`.
+    pub fn user_info(&self) -> Option<String> {
+        let authority = self.encoded_authority()?;
+        authority.rfind('@').map(|end| decode(&authority[..end]))
+    }
+
+    /// `buildUpon().encodedAuthority(authority).build()`: a hierarchical
+    /// URI with its authority replaced (none for null), its path made
+    /// absolute and an empty query or fragment left out, as
+    /// `HierarchicalUri` writes it; an opaque one as `OpaqueUri` writes it.
+    pub fn with_encoded_authority(&self, authority: Option<&str>) -> Uri {
+        let mut string = self.scheme().map(|s| format!("{s}:")).unwrap_or_default();
+        let fragment = self.fsi().map(|fsi| &self.string[fsi + 1..]).filter(|f| !f.is_empty());
+        if !self.is_hierarchical() {
+            string.push_str(&self.encoded_ssp());
+            if let Some(fragment) = fragment {
+                string.push('#');
+                string.push_str(fragment);
+            }
+            return Uri { kind: Kind::Opaque, string };
+        }
+        if let Some(authority) = authority {
+            string.push_str("//");
+            string.push_str(authority);
+        }
+        let path = self.encoded_path().unwrap_or_default();
+        if !path.is_empty() && !path.starts_with('/') && (self.scheme().is_some() || authority.is_some()) {
+            string.push('/');
+        }
+        string.push_str(&path);
+        if let Some(query) = self.encoded_query().filter(|q| !q.is_empty()) {
+            string.push('?');
+            string.push_str(query);
+        }
+        if let Some(fragment) = fragment {
+            string.push('#');
+            string.push_str(fragment);
+        }
+        Uri { kind: Kind::Hierarchical, string }
+    }
+}
+
+/// `Uri.encode`: what is not an unreserved character escaped.
+pub fn encode(value: &str) -> String {
+    preferred_encode(value, "")
 }
 
 /// `findPortSeparator`: the last `:` of the authority when only digits
@@ -426,6 +482,18 @@ mod tests {
         assert_eq!(decode("%zz"), "\u{fffd}\0z");
         assert_eq!(decode("ab%4"), "ab\u{fffd}");
         assert_eq!(decode("%FF"), "\u{fffd}");
+    }
+
+    #[test]
+    fn builds_upon_a_uri_with_another_authority() {
+        let uri = Uri::parse("content://10@a.b/x%20y?q#f");
+        assert_eq!(uri.user_info().as_deref(), Some("10"));
+        let built = uri.with_encoded_authority(Some(&encode("a.b")));
+        assert_eq!((built.as_str(), built.class_name()), ("content://a.b/x%20y?q#f", "android.net.Uri$HierarchicalUri"));
+        assert_eq!(Uri::parse("content://a.b?#").with_encoded_authority(Some("a.b")).as_str(), "content://a.b");
+        assert_eq!(Uri::parse("content://a:1/x").with_encoded_authority(Some(&encode("a:1"))).as_str(), "content://a%3A1/x");
+        assert_eq!(Uri::parse("content:x#").with_encoded_authority(Some("y")).as_str(), "content:x");
+        assert_eq!(Uri::parse("content://a.b/x").user_info(), None);
     }
 }
 

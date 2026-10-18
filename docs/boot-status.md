@@ -65,8 +65,9 @@ the services, the emulated volume's `ACTION_MEDIA_MOUNTED` has
 MediaProvider attach external storage. The time's-up screen and an
 alarm's own activity open in tasks of their own (not yet seen live: the
 timer page in front shows the ringing timer itself). Apps around Clock
-still stop at DownloadProvider's `grantUriPermission` (#1503) and at app
-ops the app host does not decide (#1558).
+stopped at DownloadProvider's `grantUriPermission`, which the app host
+now makes (not yet seen live), and still stop at app ops the app host
+does not decide (#1558).
 
 ## Native system services (2026-09-29, ADR 0013)
 

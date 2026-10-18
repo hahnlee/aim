@@ -164,11 +164,11 @@ impl Activities {
         self.records.lock().unwrap().values().any(|r| r.start_seq == start_seq)
     }
 
-    /// The activities of the process of `start_seq` are gone with it: what
-    /// the stack does then.
-    pub fn remove_start(&self, start_seq: i64) -> Vec<super::activity_stack::Command> {
-        self.records.lock().unwrap().retain(|_, r| r.start_seq != start_seq);
-        self.stack.lock().unwrap().process_died(start_seq)
+    /// The activities of the process of `start_seq` are gone with it:
+    /// their tokens, and what the stack does then.
+    pub fn remove_start(&self, start_seq: i64) -> (Vec<u64>, Vec<super::activity_stack::Command>) {
+        let gone = self.records.lock().unwrap().extract_if(|_, r| r.start_seq == start_seq).map(|(token, _)| token).collect();
+        (gone, self.stack.lock().unwrap().process_died(start_seq))
     }
 
     pub(super) fn with<T>(
@@ -704,7 +704,7 @@ impl Service for ActivityClientController {
             }
             acc::FINISH_ACTIVITY => {
                 let a = acc::FinishActivity::<RawIntent>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(self.0.finish_activity(a.token, a.code, a.data, a.finish_task).map(|finished| {
+                reply(self.0.finish_activity(call.sender_euid as i32, a.token, a.code, a.data, a.finish_task).map(|finished| {
                     let mut p = Parcel::new();
                     acc::write_finish_activity_reply(&mut p, finished);
                     p

@@ -293,7 +293,7 @@ pub struct AppHost {
     /// The server's launches, by package, until the package's task is made.
     pending_launches: Mutex<HashMap<String, String>>,
     providers: providers::Providers,
-    uri_grants: OnceLock<Vec<uri_grants::Grant>>,
+    uri_grants: uri_grants::UriGrants,
     /// Processes' exit history (`AppExitInfoTracker`), loaded at its first use.
     exit_infos: OnceLock<Arc<exit_info::Tracker>>,
     uid_observers: uid_observers::UidObservers,
@@ -354,7 +354,7 @@ impl AppHost {
             tasks: Default::default(),
             pending_launches: Mutex::new(HashMap::new()),
             providers: Default::default(),
-            uri_grants: OnceLock::new(),
+            uri_grants: Default::default(),
             exit_infos: OnceLock::new(),
             uid_observers: Default::default(),
             tzdata: OnceLock::new(),
@@ -871,7 +871,10 @@ impl AppHost {
             self.uid_changed(uid as i32, uid_observers::Change::Gone);
         }
         self.providers_process_died(start_seq);
-        let commands = self.activities.remove_start(start_seq);
+        let (gone, commands) = self.activities.remove_start(start_seq);
+        for token in gone {
+            self.release_uri_grants(uri_grants::Owner::Activity(token));
+        }
         self.windows_died(pid);
         self.broadcasts.process_died(self, start_seq);
         if let Some(me) = self.me.upgrade() {
@@ -1691,8 +1694,8 @@ impl AppHost {
     }
 
     /// `ContentProviderHelper.checkContentProviderAccess` of `authority` in
-    /// `user` for `uid`: `None` when it may use it, else why not. The app
-    /// host keeps no URI grants (`UriGrantsManager`).
+    /// `user` for `uid`: `None` when it may use it (by the provider's
+    /// permissions, or a URI grant of it), else why not.
     pub(super) fn provider_access(
         &self,
         authority: &str,
@@ -1729,6 +1732,9 @@ impl AppHost {
                 }
             }
         }
+        if self.authority_granted(uid, &cpi, user)? {
+            return Ok(None);
+        }
         let name = cpi.info.item.name.clone().unwrap_or_default();
         let suffix = if !exported {
             format!(" that is not exported from UID {owner}")
@@ -1755,8 +1761,20 @@ impl AppHost {
         flags: i64,
         user: i32,
     ) -> Result<Option<package::info::ProviderInfo>, Exception> {
+        self.resolve_provider_as(authority, flags, user, 1000)
+    }
+
+    /// `resolveContentProvider` of `authority` with `flags`, as `uid` may
+    /// see it.
+    pub(super) fn resolve_provider_as(
+        &self,
+        authority: &str,
+        flags: i64,
+        user: i32,
+        uid: i32,
+    ) -> Result<Option<package::info::ProviderInfo>, Exception> {
         let (_, resolution) = self.packages()?;
-        match resolution.resolve_content_provider(authority, flags, user, 1000) {
+        match resolution.resolve_content_provider(authority, flags, user, uid) {
             Ok(found) => Ok(found),
             Err(crate::package::resolve::ResolutionError::Original(e)) => Err(e),
             Err(e) => Err(Exception::new(
@@ -2393,6 +2411,24 @@ impl Service for Activity {
                 reply(self.0.check_uri_permission(call, uri, args.uid, args.mode, args.user_id).map(|result| {
                     let mut p = Parcel::new();
                     am::write_check_uri_permission_reply(&mut p, result);
+                    p
+                }))
+            }
+            am::GRANT_URI_PERMISSION => {
+                let a = am::GrantUriPermission::<content_service::ParcelUri>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let uri = a.uri.map(|content_service::ParcelUri(uri)| uri);
+                reply(self.0.grant_uri_permission(call, a.caller, a.target_pkg, uri, a.mode, a.user_id).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_grant_uri_permission_reply(&mut p);
+                    p
+                }))
+            }
+            am::REVOKE_URI_PERMISSION => {
+                let a = am::RevokeUriPermission::<content_service::ParcelUri>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let uri = a.uri.map(|content_service::ParcelUri(uri)| uri);
+                reply(self.0.revoke_uri_permission(call, a.caller, a.target_pkg, uri, a.mode, a.user_id).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_revoke_uri_permission_reply(&mut p);
                     p
                 }))
             }
