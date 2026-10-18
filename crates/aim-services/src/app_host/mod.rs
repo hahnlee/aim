@@ -80,7 +80,7 @@ pub mod window_layout;
 pub mod window_manager;
 pub mod zygote;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -269,6 +269,9 @@ struct App {
 struct AppErrors {
     crash_times: HashMap<(String, u32), Instant>,
     crash_counts: HashMap<(String, u32), (Instant, u32)>,
+    /// `mBadProcesses`: processes that crashed too often, which a start
+    /// from the background does not start again.
+    bad: HashSet<(String, u32)>,
 }
 
 pub struct AppHost {
@@ -626,8 +629,12 @@ impl AppHost {
     }
 
     /// Starts the process of package `name` for `request`, or for a
-    /// service, a provider or a broadcast (no activity).
-    fn start_process_for(&self, name: &str, process: &str, request: Option<activity_start::StartRequest>) -> Result<i32, Exception> {
+    /// service, a provider or a broadcast (no activity). As
+    /// `ProcessList.startProcessLocked` decides by `FLAG_FROM_BACKGROUND`,
+    /// a start `from_background` (a broadcast's) fails for a bad process,
+    /// and any other start makes the process good again and resets its
+    /// crash counts.
+    fn start_process_for(&self, name: &str, process: &str, request: Option<activity_start::StartRequest>, from_background: bool) -> Result<i32, Exception> {
         if process == "system" {
             return Err(self.unimplemented_named("activity", &format!("a component of {name} in system_server's process (#1518)")));
         }
@@ -650,6 +657,19 @@ impl AppHost {
             Exception::new(EX_ILLEGAL_STATE, format!("{name} not in packages.list"))
         })?;
         let uid = listed.uid;
+        {
+            let key = (process.to_string(), uid);
+            let mut errors = self.app_errors.lock().unwrap();
+            if from_background {
+                if errors.bad.contains(&key) {
+                    return Err(Exception::new(EX_ILLEGAL_STATE, format!("bad process {uid}/{process}")));
+                }
+            } else {
+                errors.crash_times.remove(&key);
+                errors.crash_counts.remove(&key);
+                errors.bad.remove(&key);
+            }
+        }
         let mount_external = self.mount_mode(uid as i32, name)?;
         let external_storage_access = self.has_external_storage_access(uid as i32, name)?;
         let gids = process_gids(listed.gids.clone(), uid, mount_external, external_storage_access);
@@ -935,8 +955,8 @@ impl AppHost {
     /// a process that crashed again within `MIN_CRASH_INTERVAL`, or too
     /// often in the last hours, is removed: its services are not started
     /// again, unless a foreground one may be (`removeProcessLocked`'s
-    /// `allowRestart`). (The original also marks it bad, which only refuses its
-    /// starts from the background, which the app host does not make.)
+    /// `allowRestart`), and it is marked bad, so broadcasts no longer start
+    /// it until something else does (`markBadProcess`).
     fn app_crashed(&self, pid: i32, uid: u32, native: bool) {
         const PROCESS_CRASH_COUNT_RESET_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
         const PROCESS_CRASH_COUNT_LIMIT: u32 = 12;
@@ -961,6 +981,7 @@ impl AppHost {
             eprintln!("app host: process {} has crashed too many times, killing! Reason: {reason}", key.0);
             errors.crash_times.remove(&key);
             errors.crash_counts.remove(&key);
+            errors.bad.insert(key);
             if let Some(app) = self.apps.lock().unwrap().get_mut(&start_seq) {
                 app.removed = !try_again;
             }
