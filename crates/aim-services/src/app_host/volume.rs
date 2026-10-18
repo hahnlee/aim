@@ -634,6 +634,24 @@ pub fn device_for_stream(_stream: usize) -> i32 {
     DEVICE_OUT_SPEAKER
 }
 
+/// `getDeviceVolumeBehaviorInt` is FIXED: the device is one of
+/// `mFixedVolumeDevices`, the analog dock headset and the aux line, as
+/// nothing sets another's behavior.
+fn fixed_device(device: i32) -> bool {
+    const DEVICE_OUT_ANLG_DOCK_HEADSET: i32 = 0x800;
+    const DEVICE_OUT_AUX_LINE: i32 = 0x20_0000;
+    matches!(device, DEVICE_OUT_ANLG_DOCK_HEADSET | DEVICE_OUT_AUX_LINE)
+}
+
+impl Volumes {
+    /// `isVolumeFixed`: `config_useFixedVolume`, or a fixed-volume device
+    /// among media's (`getDevicesForAttributesInt` of `USAGE_MEDIA`: the
+    /// one output).
+    pub fn is_volume_fixed(&self) -> bool {
+        self.fixed_volume || fixed_device(device_for_stream(STREAM_MUSIC as usize))
+    }
+}
+
 impl Volumes {
     /// `setStreamVolume` past the caller's checks: `index` in the
     /// stream's steps.
@@ -841,6 +859,17 @@ mod tests {
             property: &none,
             setting,
         })
+    }
+
+    /// Volume is fixed by `config_useFixedVolume` alone, as the speaker's
+    /// behavior is variable.
+    #[test]
+    fn volume_is_fixed_by_the_config() {
+        let mut v = volumes(&|_, _| None);
+        assert!(!v.is_volume_fixed());
+        v.fixed_volume = true;
+        assert!(v.is_volume_fixed());
+        assert!(fixed_device(0x800) && !fixed_device(DEVICE_OUT_SPEAKER));
     }
 
     #[test]
