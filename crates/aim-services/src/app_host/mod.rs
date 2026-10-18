@@ -29,6 +29,7 @@ pub mod content_service;
 pub mod device_policy;
 pub mod display;
 pub mod display_service;
+pub mod exit_info;
 pub mod freeform;
 pub mod generations;
 pub mod input_manager;
@@ -280,6 +281,8 @@ pub struct AppHost {
     pending_launches: Mutex<HashMap<String, String>>,
     providers: providers::Providers,
     uri_grants: OnceLock<Vec<uri_grants::Grant>>,
+    /// Processes' exit history (`AppExitInfoTracker`), loaded at its first use.
+    exit_infos: OnceLock<Arc<exit_info::Tracker>>,
     uid_observers: uid_observers::UidObservers,
     /// The image's tzdata, read once.
     tzdata: OnceLock<Vec<u8>>,
@@ -337,6 +340,7 @@ impl AppHost {
             pending_launches: Mutex::new(HashMap::new()),
             providers: Default::default(),
             uri_grants: OnceLock::new(),
+            exit_infos: OnceLock::new(),
             uid_observers: Default::default(),
             tzdata: OnceLock::new(),
             app_errors: Default::default(),
@@ -814,14 +818,19 @@ impl AppHost {
         self.apps.lock().unwrap().values().any(|a| a.uid as i32 == uid)
     }
 
-    /// The process of `start_seq`, `pid`, died: what it had goes.
+    /// The process of `start_seq`, `pid`, died: what it had goes, and its
+    /// exit is noted (`noteProcessDiedLocked`).
     fn process_died(&self, start_seq: i64, pid: i32) {
-        let (removed, gone) = {
+        let (removed, gone, exit) = {
             let mut apps = self.apps.lock().unwrap();
             let app = apps.remove(&start_seq);
             let gone = app.as_ref().filter(|a| a.thread.is_some() && !apps.values().any(|o| o.uid == a.uid && o.thread.is_some()));
-            (app.as_ref().is_some_and(|a| a.removed), gone.map(|a| a.uid))
+            let exit = app.as_ref().map(|a| exit_info::ExitInfo::raw(&a.package, &a.process, a.uid, a.pid, a.thread.is_some()));
+            (app.as_ref().is_some_and(|a| a.removed), gone.map(|a| a.uid), exit)
         };
+        if let Some(exit) = exit {
+            self.note_exit(&exit, false);
+        }
         if let Some(uid) = gone {
             self.uid_changed(uid as i32, uid_observers::Change::Gone);
         }
@@ -835,17 +844,23 @@ impl AppHost {
         }
     }
 
-    /// `AppErrors.handleAppCrashLSPB` for the process of `pid` and `uid`:
-    /// its services' crash counts go up, and a process that crashed again
-    /// within `MIN_CRASH_INTERVAL`, or too often in the last hours, is
-    /// removed: its services are not started again. (The original also
-    /// marks it bad, which only refuses its starts from the background,
-    /// which the app host does not make.)
-    fn app_crashed(&self, pid: i32, uid: u32) {
+    /// `AppErrors.crashApplicationInner` for the process of `pid` and
+    /// `uid`: its exit is noted as a crash (`native` for a native one), and
+    /// as `handleAppCrashLSPB` does, its services' crash counts go up, and
+    /// a process that crashed again within `MIN_CRASH_INTERVAL`, or too
+    /// often in the last hours, is removed: its services are not started
+    /// again. (The original also marks it bad, which only refuses its
+    /// starts from the background, which the app host does not make.)
+    fn app_crashed(&self, pid: i32, uid: u32, native: bool) {
         const PROCESS_CRASH_COUNT_RESET_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
         const PROCESS_CRASH_COUNT_LIMIT: u32 = 12;
-        let found = self.apps.lock().unwrap().iter().find(|(_, a)| a.pid == pid && a.uid == uid).map(|(seq, a)| (*seq, a.process.clone()));
-        let Some((start_seq, process)) = found else { return };
+        let found = self.apps.lock().unwrap().iter().find(|(_, a)| a.pid == pid && a.uid == uid).map(|(seq, a)| {
+            (*seq, a.process.clone(), exit_info::ExitInfo::raw(&a.package, &a.process, a.uid, a.pid, a.thread.is_some()))
+        });
+        let Some((start_seq, process, mut exit)) = found else { return };
+        exit.reason = if native { exit_info::REASON_CRASH_NATIVE } else { exit_info::REASON_CRASH };
+        exit.description = Some("crash".into());
+        self.note_exit(&exit, true);
         self.services_crashed(start_seq);
         let now = Instant::now();
         let key = (process, uid);
@@ -1125,14 +1140,24 @@ impl AppHost {
         self.call_thread(start_seq, thread::SCHEDULE_TRANSACTION, &activity::transaction(items))
     }
 
-    /// Kills the process of `start_seq` (`ProcessRecord.killLocked`).
-    fn kill_process(&self, start_seq: i64) -> Result<(), String> {
-        let pid = self.apps.lock().unwrap().get(&start_seq).map(|a| a.pid).ok_or_else(|| format!("no process of start {start_seq}"))?;
+    /// Kills the process of `start_seq` (`ProcessRecord.killLocked`) for
+    /// `reason`, `sub_reason` and `description`, noting its exit first.
+    fn kill_process(&self, start_seq: i64, reason: i32, sub_reason: i32, description: &str) -> Result<(), String> {
+        let exit = self
+            .apps
+            .lock()
+            .unwrap()
+            .get(&start_seq)
+            .map(|a| exit_info::ExitInfo::raw(&a.package, &a.process, a.uid, a.pid, a.thread.is_some()))
+            .ok_or_else(|| format!("no process of start {start_seq}"))?;
+        let pid = exit.pid;
+        self.note_exit(&exit_info::ExitInfo { reason, sub_reason, description: Some(description.into()), ..exit }, true);
         self.call_agent(KILL_PROCESS, "killProcess", |data| data.write_i32(pid)).map(|_| ()).map_err(|e| format!("{e:?}"))
     }
 
     /// `ProcessList.killPackageProcessesLSP` of `package` in the user and
-    /// app id of `uid`: its processes are killed.
+    /// app id of `uid`, for a change of its state (`REASON_PACKAGE_STATE_CHANGE`):
+    /// its processes are killed.
     fn kill_package_processes(&self, package: &str, uid: u32) {
         let starts: Vec<i64> = self
             .apps
@@ -1143,7 +1168,8 @@ impl AppHost {
             .map(|(seq, _)| *seq)
             .collect();
         for seq in starts {
-            if let Err(e) = self.kill_process(seq) {
+            let description = format!("change {package}");
+            if let Err(e) = self.kill_process(seq, exit_info::REASON_PACKAGE_STATE_CHANGE, exit_info::SUBREASON_UNKNOWN, &description) {
                 eprintln!("app host: killing {package}'s process of start {seq}: {e}");
             }
         }
@@ -2492,14 +2518,37 @@ impl Service for Activity {
             // `handleApplicationCrash`: the crash is the process's last
             // act (`RuntimeInit` kills it after the call); it is logged.
             am::HANDLE_APPLICATION_CRASH => {
+                let a = am::HandleApplicationCrash::<CrashInfo>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let Some(crash) = a.crash_info else {
+                    return reply(Err(Exception::new(EX_NULL_POINTER, "crashInfo")));
+                };
                 eprintln!(
                     "app host: process {} (uid {}) crashed",
                     call.sender_pid, call.sender_euid
                 );
-                self.0.app_crashed(call.sender_pid, call.sender_euid);
+                let native = crash.exception_class_name.as_deref() == Some("Native crash");
+                self.0.app_crashed(call.sender_pid, call.sender_euid, native);
                 let mut p = Parcel::new();
-                p.write_no_exception();
+                am::write_handle_application_crash_reply(&mut p);
                 Ok(p)
+            }
+            am::GET_HISTORICAL_PROCESS_EXIT_REASONS => {
+                let a = am::GetHistoricalProcessExitReasons::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let exits = self.0.historical_process_exit_reasons(call, a.package_name.as_deref(), a.pid, a.max_num, a.user_id);
+                reply(exits.map(|exits| {
+                    let slice = crate::package::list_slice::Slice::new(self.0.process.clone(), "android.app.ApplicationExitInfo", exits);
+                    let mut p = Parcel::new();
+                    am::write_get_historical_process_exit_reasons_reply(&mut p, Some(&slice));
+                    p
+                }))
+            }
+            am::SET_PROCESS_STATE_SUMMARY => {
+                let a = am::SetProcessStateSummary::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.set_process_state_summary(call, a.state).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_set_process_state_summary_reply(&mut p);
+                    p
+                }))
             }
             // A Java proxy reads an empty reply as success with zero
             // results (a granted permission), so a method the app host
@@ -2510,8 +2559,9 @@ impl Service for Activity {
 }
 
 /// `ApplicationErrorReport.ParcelableCrashInfo`, of which the app host
-/// reads the message.
+/// reads the exception's class and message.
 struct CrashInfo {
+    exception_class_name: Option<String>,
     exception_message: Option<String>,
 }
 
@@ -2520,7 +2570,7 @@ impl aim_service_aidl::ReadParcelable for CrashInfo {
         // The handler's and the exception's class, the message, where it
         // was thrown, the stack and the tag.
         r.read_string16()?;
-        r.read_string16()?;
+        let exception_class_name = r.read_string16()?;
         let exception_message = r.read_string16()?;
         for _ in 0..3 {
             r.read_string16()?;
@@ -2528,7 +2578,7 @@ impl aim_service_aidl::ReadParcelable for CrashInfo {
         r.read_i32()?;
         r.read_string16()?;
         r.read_string16()?;
-        Ok(CrashInfo { exception_message })
+        Ok(CrashInfo { exception_class_name, exception_message })
     }
 }
 

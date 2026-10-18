@@ -197,7 +197,7 @@ fn suffixed(path: &Path, suffix: &str) -> PathBuf {
 
 /// `path`'s bytes as `AtomicFile.openRead` reads them: its legacy backup's
 /// in its place if there is one.
-fn read_atomic_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
+pub(super) fn read_atomic_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
     match read_bytes(&suffixed(path, ".bak"))? {
         Some(bytes) => Ok(Some(bytes)),
         None => read_bytes(path),

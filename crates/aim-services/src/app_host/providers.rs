@@ -22,7 +22,7 @@ use aim_binder_host::local::{Call, Strong};
 use aim_binder_host::parcel::{Binder, EX_ILLEGAL_STATE, EX_UNSUPPORTED_OPERATION, Exception, Parcel};
 use aim_service_aidl::android_app_iapplicationthread as thread;
 
-use super::{AppHost, GET_URI_PERMISSION_PATTERNS, MATCH_DIRECT_BOOT_AUTO, PER_USER_RANGE, STOCK_PM_FLAGS, activity, field};
+use super::{AppHost, GET_URI_PERMISSION_PATTERNS, MATCH_DIRECT_BOOT_AUTO, PER_USER_RANGE, STOCK_PM_FLAGS, activity, exit_info, field};
 use crate::package;
 use crate::package::info::ProviderInfo;
 
@@ -301,7 +301,7 @@ impl AppHost {
     /// killed, its unstable ones told; waits for a provider look again.
     pub(super) fn providers_process_died(&self, start_seq: i64) {
         // Its providers are held until their clients are told of them.
-        let (_gone, dying) = {
+        let (gone, dying) = {
             let mut state = self.providers.state.lock().unwrap();
             let gone: Vec<Published> = state.published.extract_if(|_, p| p.start_seq == start_seq).map(|(_, p)| p).collect();
             state.connections.retain(|c| c.client != start_seq);
@@ -313,7 +313,17 @@ impl AppHost {
         for c in dying {
             if c.stable > 0 {
                 eprintln!("app host: killing start {} as it depends on provider {} in dying start {start_seq}", c.client, c.class);
-                if let Err(e) = self.kill_process(c.client) {
+                // `killLocked`'s description: the provider's
+                // `flattenToShortString` and its process, whose adj is the
+                // top's (`FOREGROUND_APP_ADJ`).
+                let dying = gone.iter().find(|p| p.info.info.item.name.as_deref() == Some(c.class.as_str()));
+                let name = dying.and_then(|p| p.info.info.item.package_name.clone()).map_or(c.class.clone(), |package| {
+                    let short = c.class.strip_prefix(package.as_str()).filter(|r| r.starts_with('.')).unwrap_or(&c.class);
+                    format!("{package}/{short}")
+                });
+                let process = dying.map_or("??".to_string(), |p| process_name(&p.info.info));
+                let description = format!("depends on provider {name} in dying proc {process} (adj 0)");
+                if let Err(e) = self.kill_process(c.client, exit_info::REASON_DEPENDENCY_DIED, exit_info::SUBREASON_UNKNOWN, &description) {
                     eprintln!("app host: kill start {}: {e}", c.client);
                 }
             } else {

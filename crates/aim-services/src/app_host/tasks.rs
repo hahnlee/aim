@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use aim_host_display::wire;
 use aim_hostcall::display::{Window as Record, Windows, mode, window};
 
-use super::AppHost;
+use super::{AppHost, exit_info};
 use super::config::Rect;
 use super::surface::{self, Change, Layer};
 
@@ -322,7 +322,7 @@ impl AppHost {
     fn close_task(&self, id: i32) -> Result<(), String> {
         let start_seq = self.tasks.tasks.lock().unwrap().iter().find(|t| t.id == id).map(|t| t.start_seq).ok_or_else(|| format!("no task {id}"))?;
         eprintln!("app host: removing task {id}");
-        self.kill_process(start_seq)
+        self.kill_process(start_seq, exit_info::REASON_USER_REQUESTED, exit_info::SUBREASON_REMOVE_TASK, "remove task")
     }
 
     /// `SET_BOUNDS` (`resizeTask`): the task takes `bounds`, at least its
