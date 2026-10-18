@@ -348,6 +348,56 @@ impl RawIntent {
         let filled = RawIntent::read_from(&mut raw.parcel().reader())?;
         Ok((RawIntent { raw, ..filled }, changes))
     }
+
+    /// `Intent.cloneFilter`: its action, data, type, identifier, package,
+    /// component and categories, with no flags, source bounds, selector,
+    /// clip data or extras.
+    pub fn clone_filter(&self) -> Result<RawIntent> {
+        let a = &self.raw;
+        let s = Spans::of(a)?;
+        let int = |v: i32| Raw::of(&{
+            let mut p = Parcel::new();
+            p.write_i32(v);
+            p
+        });
+        let raw = Raw::concat(&[
+            a.slice(s.action.0, s.identifier.1),
+            int(0), // flags
+            int(0), // extended flags
+            a.slice(s.package.0, s.component.1),
+            int(0), // no source bounds
+            a.slice(s.categories.0, s.categories.1),
+            int(0), // no selector
+            int(0), // no clip data
+            int(USER_CURRENT),
+            int(-1), // no extras
+            a.slice(s.rest.0, s.rest.1),
+        ]);
+        let filter = RawIntent::read_from(&mut raw.parcel().reader())?;
+        Ok(RawIntent { raw, ..filter })
+    }
+
+    /// What `bindServiceLocked` reads of a system caller's intent: its
+    /// `EXTRA_CLIENT_LABEL` when it carries an `EXTRA_CLIENT_INTENT`, else
+    /// 0 (`getIntExtra`'s default, also for a value of another type).
+    pub fn client_label(&self) -> Result<i32> {
+        let Some((_, extras, _)) = entries(&self.raw, Spans::of(&self.raw)?.extras)? else {
+            return Ok(0);
+        };
+        let (mut intent, mut label) = (false, 0);
+        for (key, raw) in &extras {
+            let p = raw.parcel();
+            let mut r = p.reader();
+            r.read_string16()?;
+            let kind = r.read_i32()?;
+            match key.as_str() {
+                "android.intent.extra.client_intent" => intent = kind == crate::bundle::VAL_PARCELABLE,
+                "android.intent.extra.client_label" if kind == crate::bundle::VAL_INTEGER => label = r.read_i32()?,
+                _ => {}
+            }
+        }
+        Ok(if intent { label } else { 0 })
+    }
 }
 
 impl ReadParcelable for RawIntent {
@@ -548,5 +598,34 @@ mod tests {
         let bare = RawIntent::of(None, 0, &[]);
         let (filled, _) = bare.fill_in(&other, 0).unwrap();
         assert_eq!(extras(&filled).len(), 2);
+    }
+
+    /// `Intent.cloneFilter` keeps what `filterEquals` compares and drops
+    /// the flags and extras.
+    #[test]
+    fn a_filter_clone_drops_flags_and_extras() {
+        let sent = intent();
+        let i = RawIntent::read_from(&mut Reader::new(sent.data(), &[])).unwrap().with_component("p", "p.S");
+        let filter = i.clone_filter().unwrap();
+        let mut p = Parcel::new();
+        filter.write_to(&mut p);
+        let read = RawIntent::read_from(&mut Reader::new(p.data(), &[])).unwrap();
+        assert_eq!(read.intent, crate::package::intent::Intent { flags: 0, ..i.intent.clone() });
+        assert!(extras(&read).is_empty());
+        assert!(!present(&read.raw, Spans::of(&read.raw).unwrap().extras));
+    }
+
+    /// A system caller's label counts only beside a client intent, and only
+    /// as an int.
+    #[test]
+    fn client_labels_need_a_client_intent() {
+        use crate::bundle::Value;
+        let pending = || Value::Parcelable { class: "android.app.PendingIntent".into(), data: vec![0; 4] };
+        let label = |extras: &[(&str, Value)]| RawIntent::of(None, 0, extras).client_label().unwrap();
+        assert_eq!(label(&[("android.intent.extra.client_intent", pending()), ("android.intent.extra.client_label", Value::Int(17))]), 17);
+        assert_eq!(label(&[("android.intent.extra.client_label", Value::Int(17))]), 0);
+        assert_eq!(label(&[("android.intent.extra.client_intent", Value::Null), ("android.intent.extra.client_label", Value::Int(17))]), 0);
+        assert_eq!(label(&[("android.intent.extra.client_intent", pending()), ("android.intent.extra.client_label", Value::Long(17))]), 0);
+        assert_eq!(label(&[]), 0);
     }
 }
