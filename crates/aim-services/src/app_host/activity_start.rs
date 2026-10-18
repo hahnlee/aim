@@ -93,6 +93,10 @@ pub struct StartRequest {
     pub request_code: i32,
     /// The task it goes on top of, else a new one.
     pub task: Option<i32>,
+    /// The caller's task: a launch it has not drawn yet goes on with this
+    /// start (`ActivityMetricsLogger.notifyActivityLaunching` with the
+    /// caller in the transition, as a trampoline's).
+    pub source_task: Option<i32>,
     /// The URI grants its intent carries, the activity's once it is made.
     pub(super) grants: Option<NeededUriGrants>,
 }
@@ -108,6 +112,7 @@ impl StartRequest {
             result_who: None,
             request_code: -1,
             task: None,
+            source_task: None,
             grants: None,
         }
     }
@@ -445,7 +450,7 @@ impl AppHost {
         let (task, new) = match existing {
             Some(task) => (task, None),
             None => {
-                let id = self.new_task(uid, package, &request.class, super::freeform::Activity::from(&info))?;
+                let id = self.new_task(uid, package, &request.class, super::freeform::Activity::from(&info), request.source_task)?;
                 let task = stack::Task {
                     id,
                     affinity: affinity.clone(),
@@ -535,13 +540,13 @@ impl AppHost {
         }
         // `sourceRecord`, the caller's activity, and `resultRecord`, the
         // source when it asks for a result.
-        let (source, result_to) = {
+        let (source, source_task, result_to) = {
             let stack = self.activities.stack.lock().unwrap();
             let source = match args.result_to {
                 Some(Binder::Local(t)) => stack.get(t),
                 _ => None,
             };
-            (source.map(|a| a.token), source.filter(|a| args.request_code >= 0 && !a.finishing).map(|a| a.token))
+            (source.map(|a| a.token), source.map(|a| a.task), source.filter(|a| args.request_code >= 0 && !a.finishing).map(|a| a.token))
         };
         intent = intent.with_component(&package, &class);
         let real = real_component(&info);
@@ -599,6 +604,7 @@ impl AppHost {
             result_who: args.result_who,
             request_code: args.request_code,
             task,
+            source_task,
             grants,
         };
         let process = super::providers::process_name(&info.info);
