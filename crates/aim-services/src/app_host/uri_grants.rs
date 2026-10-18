@@ -687,13 +687,13 @@ fn now_ms() -> i64 {
 /// `AttributionSource(uid, package, null).writeToParcel`: its
 /// `AttributionSourceState` (its size, then pid, uid, device id, package,
 /// attribution tag, token, renounced permissions and the next sources).
-fn write_attribution_source(p: &mut Parcel, uid: i32, package: &str) {
+pub(super) fn write_attribution_source(p: &mut Parcel, uid: i32, package: Option<&str>) {
     let start = p.position();
     p.write_i32(0);
     p.write_i32(INVALID_PID);
     p.write_i32(uid);
     p.write_i32(0); // Context.DEVICE_ID_DEFAULT
-    p.write_string16(Some(package));
+    p.write_string16(package);
     p.write_string16(None);
     p.write_binder(None);
     p.write_i32(-1); // no renounced permissions
@@ -811,7 +811,7 @@ impl AppHost {
     }
 
     /// `PackageManagerInternal.filterAppAccess(package, uid, user)`.
-    fn filter_package_access(&self, package: &str, uid: i32, user: i32) -> Result<bool, Exception> {
+    pub(super) fn filter_package_access(&self, package: &str, uid: i32, user: i32) -> Result<bool, Exception> {
         let (state, resolution) = self.packages()?;
         let ps = state.packages.get(package);
         should_filter_application(&state, &resolution.apps_filter, ps, uid, user, true, true)
@@ -941,7 +941,7 @@ impl AppHost {
         };
         let mut p = Parcel::new();
         p.write_interface_token(PROVIDER_DESCRIPTOR);
-        write_attribution_source(&mut p, uid, SYSTEM_PACKAGE);
+        write_attribution_source(&mut p, uid, Some(SYSTEM_PACKAGE));
         uri.write(&mut p);
         p.write_i32(uid);
         p.write_i32(modes);

@@ -251,7 +251,7 @@ INTERFACES=(
 CONSTANTS=(
   "android.os.Process|system/framework/framework.jar|PACKAGE_INFO_GID"
   "android.system.keystore2.Domain|system/framework/framework.jar|APP"
-  "android.content.IContentProvider|system/framework/framework.jar|CALL_TRANSACTION"
+  "android.content.IContentProvider|system/framework/framework.jar|QUERY_TRANSACTION,GET_TYPE_TRANSACTION,INSERT_TRANSACTION,DELETE_TRANSACTION,UPDATE_TRANSACTION,BULK_INSERT_TRANSACTION,OPEN_FILE_TRANSACTION,OPEN_ASSET_FILE_TRANSACTION,CALL_TRANSACTION,OPEN_TYPED_ASSET_FILE_TRANSACTION,GET_TYPE_ASYNC_TRANSACTION,GET_TYPE_ANONYMOUS_ASYNC_TRANSACTION"
 )
 
 # Interfaces of ours (java/device-services/aidl): descriptor|file|methods

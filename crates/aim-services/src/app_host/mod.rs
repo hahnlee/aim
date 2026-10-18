@@ -29,6 +29,7 @@ pub mod compat;
 pub mod config;
 pub mod connectivity_service;
 pub mod content_service;
+pub mod cursor;
 pub mod device_policy;
 pub mod display;
 pub mod display_service;
@@ -63,6 +64,7 @@ pub mod sensor_privacy;
 pub mod services;
 pub mod settings;
 pub mod settings_provider;
+pub mod settings_service;
 pub mod settings_validators;
 pub mod status_bar;
 pub mod storage;
@@ -418,9 +420,9 @@ impl AppHost {
 
     /// The services it publishes, by binder name.
     pub fn services(self: &Arc<Self>) -> Vec<(&'static str, Arc<dyn Service>)> {
+        let settings = Arc::new(settings_provider::SettingsProvider::new(self.clone()));
         let _ = self.settings_provider.set((
-            self.process
-                .add_service(Arc::new(settings_provider::SettingsProvider::new(self.clone()))),
+            self.process.add_service(settings.clone()),
             self.process.add_service(Arc::new(activity::Token)),
         ));
         let permission_manager = self.permission_manager.get_or_init(|| Arc::new(permission_manager::PermissionManager::new(self.clone()))).clone();
@@ -454,6 +456,7 @@ impl AppHost {
             ("uri_grants", Arc::new(uri_grants::UriGrantsManager(self.clone()))),
             ("platform_compat", Arc::new(platform_compat::PlatformCompat(self.clone()))),
             ("sensor_privacy", Arc::new(sensor_privacy::SensorPrivacy::new(self.clone()))),
+            ("settings", Arc::new(settings_service::SettingsService::new(self.clone(), settings))),
             (
                 "content",
                 self.content_service

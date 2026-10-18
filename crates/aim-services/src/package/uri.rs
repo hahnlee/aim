@@ -331,6 +331,18 @@ impl Uri {
         }
         Uri { kind: Kind::Hierarchical, string }
     }
+
+    /// `Uri.withAppendedPath` of a hierarchical URI with no query or
+    /// fragment: `segment` appended to its path as it is
+    /// (`appendEncodedPath`).
+    pub fn with_appended_path(&self, segment: &str) -> Uri {
+        let mut string = self.with_encoded_authority(self.encoded_authority()).string;
+        if !string.ends_with('/') {
+            string.push('/');
+        }
+        string.push_str(segment);
+        Uri { kind: Kind::Hierarchical, string }
+    }
 }
 
 /// `Uri.encode`: what is not an unreserved character escaped.
@@ -494,6 +506,14 @@ mod tests {
         assert_eq!(Uri::parse("content://a:1/x").with_encoded_authority(Some(&encode("a:1"))).as_str(), "content://a%3A1/x");
         assert_eq!(Uri::parse("content:x#").with_encoded_authority(Some("y")).as_str(), "content:x");
         assert_eq!(Uri::parse("content://a.b/x").user_info(), None);
+    }
+
+    /// `Settings.Global.CONTENT_URI` with a name appended, encoded as it is.
+    #[test]
+    fn appends_a_path() {
+        let uri = Uri::parse("content://settings/global").with_appended_path("a b");
+        assert_eq!((uri.as_str(), uri.class_name()), ("content://settings/global/a b", "android.net.Uri$HierarchicalUri"));
+        assert_eq!(Uri::parse("content://settings/").with_appended_path("x").as_str(), "content://settings/x");
     }
 }
 

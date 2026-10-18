@@ -121,6 +121,11 @@ impl ShellCommand {
         arg
     }
 
+    /// `peekNextArg`.
+    pub fn peek_next_arg(&self) -> Option<&str> {
+        self.args.get(self.next).map(String::as_str)
+    }
+
     /// `getNextArgRequired`: the argument, or the exception it throws as
     /// `toString` prints it.
     pub fn next_arg_required(&mut self) -> std::result::Result<String, String> {
@@ -128,6 +133,13 @@ impl ShellCommand {
         self.next_arg().ok_or_else(|| {
             format!("java.lang.IllegalArgumentException: Argument expected after \"{previous}\"")
         })
+    }
+
+    /// Text on the output (`getOutPrintWriter().print`).
+    pub fn print(&mut self, text: &str) {
+        if let Some(out) = &mut self.out {
+            let _ = write!(out, "{text}");
+        }
     }
 
     /// A line on the output (`getOutPrintWriter().println`).
