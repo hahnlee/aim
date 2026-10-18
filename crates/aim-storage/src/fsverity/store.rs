@@ -239,13 +239,16 @@ mod tests{
  }
  #[test]
  fn abort_removes_private_prepared_path_without_revoking_retained_proof(){
+  // Lease release is observed at once; a concurrent spawn's child would
+  // still hold the lease's descriptor until it execs. The fixture runs alone.
+  const MARKER:&str="VERITY_STORE_ABORT_EXECUTED";if crate::inode_lease::tests::isolated_fork_fixture("fsverity::store::tests::abort_removes_private_prepared_path_without_revoking_retained_proof",MARKER){return;}
   let files=Data::new();fs::write(files.0.join("data"),b"private proof").unwrap();let data=files.data();let store=files.store();
   let admission=store.lock_inode(&data).unwrap();let guard=admission.begin_enable().unwrap();drop(admission);
   let prepared=guard.build(super::super::BuildOptions::new(1,4096,vec![],4096,4096).unwrap(),&[],||false).unwrap();let view=prepared.metadata_view().unwrap();
   assert_eq!(fs::read_dir(&store.directory).unwrap().count(),1);drop(prepared);
   assert_eq!(fs::read_dir(&store.directory).unwrap().count(),0);assert!(store.lookup(guard.identity()).unwrap().is_none());
   assert_eq!(view.verify_range(&data,0,13).unwrap(),b"private proof");assert_eq!(view.read_metadata(2,0,256).unwrap(),view.descriptor().bytes());drop(guard);
-  let admission=store.lock_inode(&data).unwrap();assert!(admission.begin_enable().is_ok(),"aborted proof releases both exclusive owners");
+  let admission=store.lock_inode(&data).unwrap();assert!(admission.begin_enable().is_ok(),"aborted proof releases both exclusive owners");println!("{MARKER}");
  }
  #[test]
  fn persistent_inode_binding_and_verified_range_survive_rename_and_restart(){
@@ -295,13 +298,16 @@ mod tests{
  }
  #[test]
  fn admission_distinguishes_writers_enablers_and_enabled_state(){
+  // Lease release is observed at once; a concurrent spawn's child would
+  // still hold the lease's descriptor until it execs. The fixture runs alone.
+  const MARKER:&str="VERITY_STORE_ADMISSION_EXECUTED";if crate::inode_lease::tests::isolated_fork_fixture("fsverity::store::tests::admission_distinguishes_writers_enablers_and_enabled_state",MARKER){return;}
   let files=Data::new();fs::write(files.0.join("data"),b"content").unwrap();let data=files.data();let store=files.store();
   let writable=File::options().read(true).write(true).open(files.0.join("data")).unwrap();let admission=store.lock_inode(&writable).unwrap();let writer=admission.writer_lease().unwrap();drop(admission);
   let admission=store.lock_inode(&data).unwrap();assert!(matches!(admission.begin_enable(),Err(Error::Linux(26))));drop(writer);
   let guard=admission.begin_enable().unwrap();drop(admission);
   let other=store.lock_inode(&data).unwrap();assert!(matches!(other.begin_enable(),Err(Error::Linux(16))));assert!(matches!(other.writer_lease(),Err(Error::Linux(26))));drop(other);
   let prepared=guard.build(super::super::BuildOptions::new(1,4096,vec![],4096,4096).unwrap(),&[],||false).unwrap();guard.commit(prepared).unwrap();
-  let admission=store.lock_inode(&data).unwrap();assert!(matches!(admission.begin_enable(),Err(Error::Linux(17))));assert!(matches!(admission.writer_lease(),Err(Error::Linux(1))));
+  let admission=store.lock_inode(&data).unwrap();assert!(matches!(admission.begin_enable(),Err(Error::Linux(17))));assert!(matches!(admission.writer_lease(),Err(Error::Linux(1))));println!("{MARKER}");
  }
  #[test]
  fn exclusion_cannot_authorize_a_different_inode_or_lease_domain(){

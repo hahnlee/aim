@@ -468,6 +468,10 @@ mod tests {
 
     #[test]
     fn detach_handoff_keeps_the_image_lock_until_the_boot_owner_drops() {
+        // The lock's release is observed at once; a concurrent spawn's child
+        // would still hold its descriptor until it execs. The fixture runs alone.
+        const MARKER:&str="DATA_HANDOFF_LOCK_EXECUTED";
+        if crate::inode_lease::tests::isolated_fork_fixture("data::tests::detach_handoff_keeps_the_image_lock_until_the_boot_owner_drops",MARKER){return;}
         let root=std::env::temp_dir().join(format!("aim-data-handoff-lock-{}",std::process::id()));
         fs::create_dir(&root).unwrap();let lock_path=root.join("data.lock");
         let lock=File::create(&lock_path).unwrap();
@@ -479,7 +483,7 @@ mod tests {
         assert_eq!(unsafe{libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},-1);
         assert_eq!(std::io::Error::last_os_error().raw_os_error(),Some(libc::EWOULDBLOCK));
         drop(data);assert_eq!(unsafe{libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},0);
-        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(root).unwrap();println!("{MARKER}");
     }
 
     #[test]
