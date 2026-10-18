@@ -1690,6 +1690,40 @@ impl NotificationManager {
         Ok(())
     }
 
+    /// `setNotificationDelegate`: `checkCallerIsSameApp`, then the
+    /// delegate (by its `ApplicationInfo` as the caller sees it, none if
+    /// it does not) set, or revoked without one.
+    fn set_delegate(&self, call: &Call<'_>, package: Option<String>, delegate: Option<String>) -> Result<(), Exception> {
+        let uid = call.sender_euid as i32;
+        let package = package.unwrap_or_default();
+        if !(uid == 0 && package == "root") && !self.host.owns_package(uid, &package)? {
+            return Err(Exception::security(format!("Package {package} is not owned by uid {uid}")));
+        }
+        let delegate_uid = match &delegate {
+            None => None,
+            Some(delegate) => {
+                /// `MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE`.
+                const FLAGS: i64 = 0x0004_0000 | 0x0008_0000;
+                let (state, resolution) = self.host.packages()?;
+                let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: uid };
+                let info = query
+                    .application_info(delegate, FLAGS, uid / PER_USER_RANGE as i32)
+                    .map_err(|e| Exception::new(EX_UNSUPPORTED_OPERATION, format!("notification: {}", e.0)))??;
+                match info {
+                    Some(info) => Some(info.uid),
+                    None => return Ok(()),
+                }
+            }
+        };
+        self.with_prefs(|state, defaults| {
+            match (&delegate, delegate_uid) {
+                (Some(delegate), Some(delegate_uid)) => state.prefs.set_delegate(&package, uid, delegate, delegate_uid, defaults),
+                _ => state.prefs.revoke_delegate(&package, uid),
+            }
+            Self::save(state)
+        })
+    }
+
     fn delete_group(&self, call: &Call<'_>, package: &str, id: &str) -> Result<(), Exception> {
         let uid = call.sender_euid as i32;
         self.check_system_or_same_app(uid, package)?;
@@ -2191,6 +2225,10 @@ impl Service for NotificationManager {
                     &a.pkg.unwrap_or_default(),
                     &a.channel_id.unwrap_or_default(),
                 ))
+            }
+            nm::SET_NOTIFICATION_DELEGATE => {
+                let a = nm::SetNotificationDelegate::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                empty(self.set_delegate(call, a.calling_pkg, a.delegate))
             }
             nm::DELETE_NOTIFICATION_CHANNEL_GROUP => {
                 let a = nm::DeleteNotificationChannelGroup::read(&mut call.data)
