@@ -1,7 +1,8 @@
 # Working on AIM
 
-Read [ADR 0012](docs/adr/0012-original-android-userspace.md) and
-[ADR 0013](docs/adr/0013-native-system-services.md) before work, and
+Read [ADR 0012](docs/adr/0012-original-android-userspace.md),
+[ADR 0013](docs/adr/0013-native-system-services.md) and
+[ADR 0014](docs/adr/0014-in-process-framework-surfaces.md) before work, and
 [docs/boot-status.md](docs/boot-status.md) for how far the image boots. Keep
 boot-status.md current with every boot-relevant change: replace superseded
 facts instead of appending a log.
@@ -9,15 +10,17 @@ facts instead of appending a log.
 ## Principles
 
 - An app's own process (ART, the boot classpath, bionic, its native
-  libraries) runs original and unmodified. Implement what lies below it:
-  Linux syscall semantics, the binder driver, host-call and the HALs. A gap
-  there is closed there, never by patching or bypassing the guest.
+  libraries) runs original, except framework classes that ADR 0014
+  replaces with natively backed ones where macOS owns the subsystem
+  (windows, their configuration and display). Implement what lies below
+  it: Linux syscall semantics, the binder driver, host-call and the HALs.
+  A gap there is closed there, never by patching the guest ad hoc.
 - System services move, one at a time, from the original SystemServer to
-  native implementations backed by macOS (ADR 0013): a replacement
-  implements the service's AIDL at the pinned version with generated
-  transaction codes, registers under the original name, and replaces the
-  original once it passes the CTS-derived tests of its API and the app
-  checks (ADR 0013, "Conformance bar"). The service's real CTS modules
+  native implementations backed by macOS (ADR 0013): by default a
+  replacement implements the service's AIDL at the pinned version with
+  generated transaction codes, registers under the original name, and
+  replaces the original once it passes the CTS-derived tests of its API
+  and the app checks (ADR 0013, "Conformance bar"). The service's real CTS modules
   run when it replaces the original and at milestones. Until then the
   original runs.
 - Other exceptions (a rebuild from AOSP source, a replaced daemon, a
