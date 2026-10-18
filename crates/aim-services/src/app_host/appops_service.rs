@@ -9,7 +9,8 @@
 //! (TAKE_AUDIO_FOCUS's, which audio focus notes) allows a uid while it has
 //! a process, as each of the app host's processes is top
 //! (`AppOpsUidStateTracker.evalMode`). The modes do not change while the
-//! app host runs, so mode watchers are kept and never called; foreground
+//! app host runs, so mode watchers are kept and never called, as are
+//! active watchers, no op being started; foreground
 //! changes are not watched (#1529). An op noted for an app by another uid
 //! with `shouldCollectAsyncNotedOp` goes to the app's async-noted watchers
 //! (`collectAsyncNotedOp`), or waits for its `extractAsyncOps` when none
@@ -30,6 +31,8 @@ pub(super) const MODE_ALLOWED: i32 = 0;
 const MODE_IGNORED: i32 = 1;
 const MODE_ERRORED: i32 = 2;
 pub(super) const MODE_DEFAULT: i32 = 3;
+/// `AppOpsManager._NUM_OP`.
+const NUM_OP: i32 = 163;
 const MODE_FOREGROUND: i32 = 4;
 /// `AppOpsManager.OP_SCHEDULE_EXACT_ALARM`, `OP_USE_FULL_SCREEN_INTENT`,
 /// `OP_READ_CONTACTS`, `OP_WRITE_CONTACTS`, `OP_GET_ACCOUNTS`.
@@ -154,15 +157,69 @@ struct Async {
     unforwarded: HashMap<(String, i32), Vec<AsyncNoted>>,
 }
 
+/// The active watchers by their binder (`mActiveWatchers`): each op's
+/// watched uid (`Process.INVALID_UID` for all). No op is started in the
+/// app host, so none is called.
+type ActiveWatchers = HashMap<u32, (Strong, u64, Vec<(i32, i32)>)>;
+
 pub struct AppOps {
     host: Arc<AppHost>,
     watchers: Mutex<Vec<(i32, Binder)>>,
+    active_watchers: Arc<Mutex<ActiveWatchers>>,
     async_noted: Arc<Mutex<Async>>,
 }
 
 impl AppOps {
     pub fn new(host: Arc<AppHost>) -> Self {
-        AppOps { host, watchers: Mutex::new(Vec::new()), async_noted: Default::default() }
+        AppOps { host, watchers: Mutex::new(Vec::new()), active_watchers: Default::default(), async_noted: Default::default() }
+    }
+
+    /// `startWatchingActive`: the caller's own uid's ops watched, unless it
+    /// holds WATCH_APPOPS.
+    fn start_watching_active(&self, uid: i32, ops: Option<Vec<i32>>, callback: Option<Binder>) -> Result<(), Exception> {
+        const INVALID_UID: i32 = -1;
+        let watched = if self.host.check_permission(Some("android.permission.WATCH_APPOPS"), uid)? == 0 { INVALID_UID } else { uid };
+        // `Preconditions.checkArrayElementsInRange`, of the ops given.
+        let given = ops.as_deref().unwrap_or_default();
+        let name = format!("Invalid op code in: [{}]", given.iter().map(i32::to_string).collect::<Vec<_>>().join(", "));
+        for (i, &op) in given.iter().enumerate() {
+            let side = if op < 0 { "too low" } else if op > NUM_OP - 1 { "too high" } else { continue };
+            return Err(Exception::illegal_argument(format!("{name}[{i}] is out of range of [0, {}] ({side})", NUM_OP - 1)));
+        }
+        let Some(callback) = callback else { return Ok(()) };
+        let ops = ops.ok_or_else(|| Exception::new(EX_NULL_POINTER, "ops"))?;
+        let Binder::Handle(handle) = callback else {
+            return Err(Exception::illegal_argument("startWatchingActive: a local callback"));
+        };
+        let mut watchers = self.active_watchers.lock().unwrap();
+        let entry = watchers.entry(handle).or_insert_with(|| {
+            // `ActiveCallback` links to its binder's death.
+            let strong = self.host.process.strong(handle);
+            let state = Arc::downgrade(&self.active_watchers);
+            let death = self.host.process.link_to_death(
+                &strong,
+                Box::new(move || {
+                    if let Some(state) = state.upgrade() {
+                        state.lock().unwrap().remove(&handle);
+                    }
+                }),
+            );
+            (strong, death, Vec::new())
+        });
+        for op in ops {
+            entry.2.retain(|(o, _)| *o != op);
+            entry.2.push((op, watched));
+        }
+        Ok(())
+    }
+
+    /// `stopWatchingActive`.
+    fn stop_watching_active(&self, callback: Option<Binder>) {
+        if let Some(Binder::Handle(handle)) = callback
+            && let Some((strong, death, _)) = self.active_watchers.lock().unwrap().remove(&handle)
+        {
+            self.host.process.clear_death(&strong, death);
+        }
     }
 
     /// `verifyAndGetBypass`'s package check.
@@ -294,6 +351,18 @@ impl Service for AppOps {
                     self.watchers.lock().unwrap().push((args.op, callback));
                 }
                 appops::write_start_watching_mode_with_flags_reply(&mut p);
+            }
+            appops::START_WATCHING_ACTIVE => {
+                let args = appops::StartWatchingActive::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.start_watching_active(call.sender_euid as i32, args.ops, args.callback) {
+                    return reply(Err(e));
+                }
+                appops::write_start_watching_active_reply(&mut p);
+            }
+            appops::STOP_WATCHING_ACTIVE => {
+                let args = appops::StopWatchingActive::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.stop_watching_active(args.callback);
+                appops::write_stop_watching_active_reply(&mut p);
             }
             appops::START_WATCHING_ASYNC_NOTED => {
                 let args = appops::StartWatchingAsyncNoted::read(&mut call.data).map_err(|_| BAD_VALUE)?;

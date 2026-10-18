@@ -3,15 +3,17 @@
 //! (`setListener`, `reset`, user 0's addition and start), has the agent
 //! mount user 0's emulated volume (`aim-app-host-agent`, which serves its
 //! FUSE connection in MediaProvider's place), follows the volume's state
-//! from vold's listener calls, and answers apps' `getVolumeList` and
-//! `mkdirs`.
+//! from vold's listener calls, answers apps' `getVolumeList` and
+//! `mkdirs`, and tells the listeners apps register of the volume's state
+//! changes (`registerListener`).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
-use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel};
+use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_os_storage_istoragemanager as sm;
 
@@ -30,7 +32,17 @@ const SETUP_APP_DIR: u32 = 23;
 const LISTENER_DESCRIPTOR: &str = "android.os.IVoldListener";
 const ON_VOLUME_CREATED: u32 = 5;
 const ON_VOLUME_STATE_CHANGED: u32 = 6;
+const ON_VOLUME_METADATA_CHANGED: u32 = 7;
+const ON_VOLUME_PATH_CHANGED: u32 = 8;
+const ON_VOLUME_INTERNAL_PATH_CHANGED: u32 = 9;
 const ON_VOLUME_DESTROYED: u32 = 10;
+/// `IStorageEventListener`'s descriptor and its state calls.
+const EVENT_LISTENER_DESCRIPTOR: &str = "android.os.storage.IStorageEventListener";
+const ON_STORAGE_STATE_CHANGED: u32 = 2;
+const ON_VOLUME_STATE_CHANGED_EVENT: u32 = 3;
+/// `VolumeInfo.MOUNT_FLAG_PRIMARY`, `MOUNT_FLAG_VISIBLE_FOR_WRITE`.
+const MOUNT_FLAG_PRIMARY: i32 = 1 << 0;
+const MOUNT_FLAG_VISIBLE_FOR_WRITE: i32 = 1 << 2;
 /// How long vold may take to register.
 const VOLD_PATIENCE: Duration = Duration::from_secs(30);
 /// The agent's `mountStorage(int userId)`.
@@ -43,15 +55,73 @@ const STATE_MOUNTED: i32 = 2;
 const VOLUME: &str = "emulated;0";
 const USER: i32 = 0;
 const SERIAL: i32 = 0;
+/// `Manifest.permission.WRITE_MEDIA_STORAGE`.
+const WRITE_MEDIA_STORAGE: &str = "android.permission.WRITE_MEDIA_STORAGE";
 /// `PackageManager.PROPERTY_NO_APP_DATA_STORAGE`.
 const NO_APP_DATA_STORAGE: &str = "android.internal.PROPERTY_NO_APP_DATA_STORAGE";
 
-/// The emulated volume's state, as vold reports it; `None` until vold
-/// created it.
+/// The emulated volume, as vold reports it (`None` until vold created
+/// it), and the listeners apps registered (`mCallbacks`).
 #[derive(Default)]
 pub struct Volumes {
-    state: Mutex<Option<i32>>,
+    volume: Mutex<Option<VolumeInfo>>,
     vold: Mutex<Option<Strong>>,
+    listeners: Mutex<HashMap<u32, (Strong, u64)>>,
+    /// Each user's cloud media provider's authority, as MediaProvider set
+    /// it (`mCloudMediaProviders`).
+    cloud_media_providers: Mutex<HashMap<i32, Option<String>>>,
+}
+
+/// `VolumeInfo` of user 0's emulated volume, as StorageManagerService
+/// keeps it from vold's calls.
+#[derive(Clone)]
+struct VolumeInfo {
+    kind: i32,
+    part_guid: Option<String>,
+    mount_flags: i32,
+    mount_user: i32,
+    state: i32,
+    fs_type: Option<String>,
+    fs_uuid: Option<String>,
+    fs_label: Option<String>,
+    path: Option<String>,
+    internal_path: Option<String>,
+}
+
+impl VolumeInfo {
+    /// `onVolumeCreatedLocked` of the primary emulated volume on internal
+    /// storage: primary and visible for writing.
+    fn created(kind: i32, part_guid: Option<String>, mount_user: i32) -> Self {
+        VolumeInfo {
+            kind,
+            part_guid,
+            mount_flags: MOUNT_FLAG_PRIMARY | MOUNT_FLAG_VISIBLE_FOR_WRITE,
+            mount_user,
+            state: STATE_UNMOUNTED,
+            fs_type: None,
+            fs_uuid: None,
+            fs_label: None,
+            path: None,
+            internal_path: None,
+        }
+    }
+}
+
+impl WriteParcelable for VolumeInfo {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_string8(Some(VOLUME));
+        p.write_i32(self.kind);
+        p.write_i32(0); // no disk
+        p.write_string8(self.part_guid.as_deref());
+        p.write_i32(self.mount_flags);
+        p.write_i32(self.mount_user);
+        p.write_i32(self.state);
+        p.write_string8(self.fs_type.as_deref());
+        p.write_string8(self.fs_uuid.as_deref());
+        p.write_string8(self.fs_label.as_deref());
+        p.write_string8(self.path.as_deref());
+        p.write_string8(self.internal_path.as_deref());
+    }
 }
 
 impl AppHost {
@@ -103,7 +173,7 @@ impl AppHost {
     /// Whether user 0's emulated volume is mounted
     /// (`StorageManagerInternal.isFuseMounted`).
     pub(super) fn storage_mounted(&self) -> bool {
-        *self.storage.state.lock().unwrap() == Some(STATE_MOUNTED)
+        self.storage.volume.lock().unwrap().as_ref().is_some_and(|v| v.state == STATE_MOUNTED)
     }
 
     /// The uid the FUSE daemon runs as: user 0's of the app holding the
@@ -127,7 +197,7 @@ impl AppHost {
         if uid / 100_000 != user {
             return Err(Exception::security("Need INTERACT_ACROSS_USERS to get volumes for another user"));
         }
-        let state = *self.storage.state.lock().unwrap();
+        let state = self.storage.volume.lock().unwrap().as_ref().map(|v| v.state);
         let inputs = self.inputs()?;
         let unknown = inputs.packages.framework_string("unknownName").ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no unknownName"))?;
         let volume = match state.filter(|_| user == USER) {
@@ -226,6 +296,109 @@ impl AppHost {
         let (state, _) = self.packages()?;
         let owns = package.and_then(|p| state.packages.get(p)).is_some_and(|ps| ps.app_id as i32 == uid % 100_000);
         if owns { Ok(()) } else { Err(Exception::security("callingPackage does not match UID")) }
+    }
+}
+
+impl AppHost {
+    /// `registerListener` (`RemoteCallbackList.register`): once per
+    /// binder, until it dies.
+    fn register_storage_listener(&self, handle: u32) {
+        let mut listeners = self.storage.listeners.lock().unwrap();
+        if listeners.contains_key(&handle) {
+            return;
+        }
+        let strong = self.process.strong(handle);
+        let me = self.me.clone();
+        let cookie = self.process.link_to_death(
+            &strong,
+            Box::new(move || {
+                if let Some(host) = me.upgrade() {
+                    host.storage.listeners.lock().unwrap().remove(&handle);
+                }
+            }),
+        );
+        listeners.insert(handle, (strong, cookie));
+    }
+
+    /// `unregisterListener`.
+    fn unregister_storage_listener(&self, handle: u32) {
+        if let Some((strong, cookie)) = self.storage.listeners.lock().unwrap().remove(&handle) {
+            self.process.clear_death(&strong, cookie);
+        }
+    }
+
+    /// `setCloudMediaProvider`, which only the external storage service
+    /// (MediaProvider) may call. No system service of the app host listens
+    /// for the change (`CloudProviderChangeListener`).
+    fn set_cloud_media_provider(&self, call: &Call<'_>, authority: Option<String>) -> Result<(), Exception> {
+        let uid = call.sender_euid as i32;
+        if self.check_permission(Some(WRITE_MEDIA_STORAGE), uid)? != 0 {
+            return Err(Exception::security(format!(
+                "{WRITE_MEDIA_STORAGE}: Neither user {uid} nor current process has {WRITE_MEDIA_STORAGE}."
+            )));
+        }
+        if uid % 100_000 != self.media_provider_uid()? % 100_000 {
+            return Err(Exception::security("Only the ExternalStorageService is permitted"));
+        }
+        self.storage.cloud_media_providers.lock().unwrap().insert(uid / 100_000, authority);
+        Ok(())
+    }
+
+    /// `getCloudMediaProvider`: the caller's user's, if the caller may see
+    /// its provider.
+    fn cloud_media_provider(&self, call: &Call<'_>) -> Result<Option<String>, Exception> {
+        let uid = call.sender_euid as i32;
+        let user = uid / 100_000;
+        let Some(authority) = self.storage.cloud_media_providers.lock().unwrap().get(&user).cloned().flatten() else {
+            return Ok(None);
+        };
+        let Some(package) = self.provider_package(&authority, user)? else { return Ok(None) };
+        let (state, resolution) = self.packages()?;
+        // `PackageManagerInternal.filterAppAccess`.
+        let ps = state.packages.get(&package);
+        let filtered = ps.is_none()
+            || crate::package::apps_filter::should_filter_application(&state, &resolution.apps_filter, ps, uid, user, true, true)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("filterAppAccess: {}", e.0)))?;
+        Ok((!filtered).then_some(authority))
+    }
+
+    /// `onVolumeStateChangedAsync`'s calls of the listeners: the volume's
+    /// new state, then, when its environment changed, the storage state of
+    /// each user it is visible to (user 0's, unlocked).
+    fn volume_state_changed(&self, info: &VolumeInfo, old: i32) {
+        let listeners: Vec<u32> = self.storage.listeners.lock().unwrap().keys().copied().collect();
+        // `RemoteCallbackList.broadcast`: a listener that failed is left
+        // to its death notice.
+        let send = |handle: u32, code: u32, data: &Parcel| {
+            if let Err(e) = self.process.strong(handle).transact(code, data, true) {
+                eprintln!("app host: a storage listener: {e:?}");
+            }
+        };
+        for &listener in &listeners {
+            let mut data = Parcel::new();
+            data.write_interface_token(EVENT_LISTENER_DESCRIPTOR);
+            data.write_i32(1);
+            info.write_to(&mut data);
+            data.write_i32(old);
+            data.write_i32(info.state);
+            send(listener, ON_VOLUME_STATE_CHANGED_EVENT, &data);
+        }
+        let (old_env, new_env) = (environment(old), environment(info.state));
+        let visible = info.mount_user == USER && info.mount_flags & MOUNT_FLAG_VISIBLE_FOR_WRITE != 0;
+        if old_env == new_env || !visible {
+            return;
+        }
+        // `buildStorageVolume(user).getPath()`: the emulated volume's path
+        // for the user.
+        let Some(path) = info.path.as_deref().map(|p| format!("{p}/{USER}")) else { return };
+        for &listener in &listeners {
+            let mut data = Parcel::new();
+            data.write_interface_token(EVENT_LISTENER_DESCRIPTOR);
+            data.write_string16(Some(&path));
+            data.write_string16(Some(old_env));
+            data.write_string16(Some(new_env));
+            send(listener, ON_STORAGE_STATE_CHANGED, &data);
+        }
     }
 }
 
@@ -334,12 +507,49 @@ impl Service for Listener {
         if id.as_deref() != Some(VOLUME) {
             return Ok(Parcel::new());
         }
-        let mut state = host.storage.state.lock().unwrap();
-        match call.code {
-            ON_VOLUME_CREATED => *state = Some(STATE_UNMOUNTED),
-            ON_VOLUME_STATE_CHANGED => *state = Some(call.data.read_i32().map_err(|_| BAD_VALUE)?),
-            ON_VOLUME_DESTROYED => *state = None,
-            _ => {}
+        let r = &mut call.data;
+        let changed = {
+            let mut volume = host.storage.volume.lock().unwrap();
+            match (call.code, volume.as_mut()) {
+                (ON_VOLUME_CREATED, _) => {
+                    let kind = r.read_i32().map_err(|_| BAD_VALUE)?;
+                    r.read_string16().map_err(|_| BAD_VALUE)?; // its disk: none
+                    let part_guid = r.read_string16().map_err(|_| BAD_VALUE)?;
+                    let user = r.read_i32().map_err(|_| BAD_VALUE)?;
+                    *volume = Some(VolumeInfo::created(kind, part_guid, user));
+                    None
+                }
+                (ON_VOLUME_STATE_CHANGED, Some(v)) => {
+                    let state = r.read_i32().map_err(|_| BAD_VALUE)?;
+                    let user = r.read_i32().map_err(|_| BAD_VALUE)?;
+                    let old = std::mem::replace(&mut v.state, state);
+                    let mut info = v.clone();
+                    info.mount_user = user;
+                    Some((info, old))
+                }
+                (ON_VOLUME_METADATA_CHANGED, Some(v)) => {
+                    v.fs_type = r.read_string16().map_err(|_| BAD_VALUE)?;
+                    v.fs_uuid = r.read_string16().map_err(|_| BAD_VALUE)?;
+                    v.fs_label = r.read_string16().map_err(|_| BAD_VALUE)?;
+                    None
+                }
+                (ON_VOLUME_PATH_CHANGED, Some(v)) => {
+                    v.path = r.read_string16().map_err(|_| BAD_VALUE)?;
+                    None
+                }
+                (ON_VOLUME_INTERNAL_PATH_CHANGED, Some(v)) => {
+                    v.internal_path = r.read_string16().map_err(|_| BAD_VALUE)?;
+                    None
+                }
+                (ON_VOLUME_DESTROYED, _) => {
+                    *volume = None;
+                    None
+                }
+                _ => None,
+            }
+        };
+        if let Some((info, old)) = changed {
+            host.volume_state_changed(&info, old);
         }
         Ok(Parcel::new())
     }
@@ -363,6 +573,40 @@ impl Service for StorageManager {
                 let args = sm::Mkdirs::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply(self.0.mkdirs(call, args.calling_pkg.as_deref(), args.path.as_deref()))
             }
+            sm::REGISTER_LISTENER => {
+                let args = sm::RegisterListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Some(Binder::Handle(listener)) = args.listener {
+                    self.0.register_storage_listener(listener);
+                }
+                let mut p = Parcel::new();
+                sm::write_register_listener_reply(&mut p);
+                Ok(p)
+            }
+            sm::UNREGISTER_LISTENER => {
+                let args = sm::UnregisterListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Some(Binder::Handle(listener)) = args.listener {
+                    self.0.unregister_storage_listener(listener);
+                }
+                let mut p = Parcel::new();
+                sm::write_unregister_listener_reply(&mut p);
+                Ok(p)
+            }
+            sm::SET_CLOUD_MEDIA_PROVIDER => {
+                let args = sm::SetCloudMediaProvider::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.set_cloud_media_provider(call, args.authority).map(|()| {
+                    let mut p = Parcel::new();
+                    sm::write_set_cloud_media_provider_reply(&mut p);
+                    p
+                }))
+            }
+            sm::GET_CLOUD_MEDIA_PROVIDER => {
+                sm::GetCloudMediaProvider::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.cloud_media_provider(call).map(|authority| {
+                    let mut p = Parcel::new();
+                    sm::write_get_cloud_media_provider_reply(&mut p, &authority);
+                    p
+                }))
+            }
             code => reply(Err(self.0.unimplemented("mount", code))),
         }
     }
@@ -381,5 +625,27 @@ mod tests {
         assert_eq!(known_app_dir("/storage/1234-ABCD/android/OBB/com.example/"), Some((None, "com.example".into())));
         assert_eq!(known_app_dir("/storage/emulated/0/Download/"), None);
         assert_eq!(normalize("/storage/emulated/0/Android/data/x/../com.example/./files"), "/storage/emulated/0/Android/data/com.example/files");
+    }
+
+    #[test]
+    fn a_volume_info_parcels_as_the_original() {
+        let mut info = VolumeInfo::created(2, None, 0);
+        info.state = STATE_MOUNTED;
+        info.path = Some("/storage/emulated".into());
+        let mut p = Parcel::new();
+        info.write_to(&mut p);
+        let mut r = p.reader();
+        assert_eq!(r.read_string8().unwrap().as_deref(), Some(VOLUME));
+        assert_eq!(r.read_i32().unwrap(), 2); // `TYPE_EMULATED`
+        assert_eq!(r.read_i32().unwrap(), 0); // no disk
+        assert_eq!(r.read_string8().unwrap(), None);
+        assert_eq!(r.read_i32().unwrap(), MOUNT_FLAG_PRIMARY | MOUNT_FLAG_VISIBLE_FOR_WRITE);
+        assert_eq!(r.read_i32().unwrap(), 0);
+        assert_eq!(r.read_i32().unwrap(), STATE_MOUNTED);
+        for _ in 0..3 {
+            assert_eq!(r.read_string8().unwrap(), None);
+        }
+        assert_eq!(r.read_string8().unwrap().as_deref(), Some("/storage/emulated"));
+        assert_eq!(r.read_string8().unwrap(), None);
     }
 }
