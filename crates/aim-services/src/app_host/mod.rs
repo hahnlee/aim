@@ -233,9 +233,9 @@ struct App {
     start_elapsed: i64,
     start_uptime: i64,
     thread: Option<Strong>,
-    /// The activity the process starts for, launched once its application
-    /// is created.
-    activity: Option<activity_start::StartRequest>,
+    /// The activities the process starts for, launched once its
+    /// application is created.
+    activities: Vec<activity_start::StartRequest>,
     /// The global configuration it was bound with.
     config: Option<config::Configuration>,
     /// The providers it was handed (`ProcessRecord.mProviders`).
@@ -562,11 +562,15 @@ impl AppHost {
         Ok(self.inputs.get_or_init(|| inputs))
     }
 
-    /// Starts the process of package `name`'s activity `class`, user 0's,
-    /// for the launcher's start of it.
+    /// The launcher's start of package `name`'s activity `class`, user
+    /// 0's: in its process if that runs, else in the one started for it,
+    /// whose pid it answers.
     fn start_process(&self, name: &str, class: &str) -> Result<i32, Exception> {
         let info = self.activity_info_of(name, class)?;
-        self.start_process_for(name, &providers::process_name(&info.info), Some(activity_start::StartRequest::launcher(class)))
+        let (process, uid) = (providers::process_name(&info.info), info.info.application_info.uid as u32);
+        let me = self.me.upgrade().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host gone"))?;
+        me.start_launcher(name, class, info)?;
+        Ok(self.apps.lock().unwrap().values().find(|a| a.process == process && a.uid == uid).map_or(0, |a| a.pid))
     }
 
     /// User 0's activity `class` of package `name`, as the system sees it.
@@ -661,8 +665,28 @@ impl AppHost {
             start_seq,
         };
         let started = Instant::now();
+        // Starts are serialized: a process of this name and uid that runs
+        // or is starting is kept, and what this start was for joins it
+        // (`ProcessList.startProcessLocked` with a pending `ProcessRecord`).
+        let mut zygote = self.zygote.lock().unwrap();
+        let mut request = request;
+        let joined = {
+            let mut apps = self.apps.lock().unwrap();
+            apps.iter_mut().find(|(_, a)| a.process == process && a.uid == uid).map(|(seq, a)| {
+                if a.thread.is_none() {
+                    a.activities.extend(request.take());
+                }
+                (*seq, a.pid, a.package.clone())
+            })
+        };
+        if let Some((seq, pid, package)) = joined {
+            drop(zygote);
+            if let Some(request) = request {
+                self.launch_in_attached(seq, uid, &package, request)?;
+            }
+            return Ok(pid);
+        }
         let pid = {
-            let mut zygote = self.zygote.lock().unwrap();
             if zygote.is_none() {
                 let stream = (self.configured.get().unwrap().connect)()
                     .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("zygote relay: {e}")))?;
@@ -691,7 +715,7 @@ impl AppHost {
                 start_elapsed: clock_ms(libc::CLOCK_MONOTONIC_RAW),
                 start_uptime: clock_ms(libc::CLOCK_UPTIME_RAW),
                 thread: None,
-                activity: request,
+                activities: request.into_iter().collect(),
                 config: None,
                 providers: Vec::new(),
                 removed: false,
@@ -1345,19 +1369,28 @@ impl AppHost {
             app.package,
             app.started.elapsed()
         );
-        let Some(request) = app.activity.take() else {
+        let requests = std::mem::take(&mut app.activities);
+        if requests.is_empty() {
             return Ok(());
-        };
+        }
         let (uid, package, started) = (app.uid, app.package.clone(), app.started);
         drop(apps);
-        let info = self.activity_info_of(&package, &request.class)?;
-        // `realStartActivityLocked` of the activity on top of the task the
-        // start placed it in, else of a new one.
-        let decision = activity_stack::Decision { outcome: activity_stack::Outcome::New(request.task), ..Default::default() };
-        if let Some(me) = self.me.upgrade() {
-            me.start_in_process(start_seq, uid, &package, info, request, &decision)?;
+        for request in requests {
+            self.launch_in_attached(start_seq, uid, &package, request)?;
         }
         eprintln!("app host: {package} launch sent {:?} after its start", started.elapsed());
+        Ok(())
+    }
+
+    /// `realStartActivityLocked` of `request` in the attached process of
+    /// `start_seq`, on top of the task the start placed it in, else of a
+    /// new one.
+    fn launch_in_attached(&self, start_seq: i64, uid: u32, package: &str, request: activity_start::StartRequest) -> Result<(), Exception> {
+        let info = self.activity_info_of(package, &request.class)?;
+        let decision = activity_stack::Decision { outcome: activity_stack::Outcome::New(request.task), ..Default::default() };
+        if let Some(me) = self.me.upgrade() {
+            me.start_in_process(start_seq, uid, package, info, request, &decision)?;
+        }
         Ok(())
     }
 
