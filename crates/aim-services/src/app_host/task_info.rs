@@ -6,13 +6,19 @@
 //! task and the original's values otherwise (picture-in-picture, app
 //! compat and desktop windowing state: #1589), and it is written as
 //! `RunningTaskInfo.writeToParcel` and `TaskInfo.writeTaskToParcel` write
-//! it.
+//! it. Also `getAppTasks` (`RecentTasks.getAppTasksList`), whose
+//! `IAppTask`s answer `getTaskInfo` with `createRecentTaskInfo`; the
+//! recents list is the app host's tasks, the most recently active first,
+//! and the other `IAppTask` methods and `getRecentTasks` are not
+//! implemented (#1588).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::Arc;
 
-use aim_binder_host::parcel::{Binder, EX_ILLEGAL_STATE, Exception, Parcel};
+use aim_binder_host::local::{Call, Reply, Service};
+use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
+use aim_service_aidl::android_app_iapptask as iat;
 
 use super::activity::{ACTIVITY_TYPE_STANDARD, DEFAULT_DISPLAY, EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN, INVALID_DISPLAY, Token, USER_CURRENT};
 use super::activity_stack::{Stack, Visibility};
@@ -172,6 +178,25 @@ fn write_rect(p: &mut Parcel, r: Option<&Rect>) {
 impl WriteParcelable for RunningTaskInfo {
     fn write_to(&self, p: &mut Parcel) {
         p.write_i32(self.task_id); // RunningTaskInfo.id
+        self.write_task(p);
+    }
+}
+
+/// `ActivityManager.RecentTaskInfo` of a running task: its `id` and
+/// `persistentId` are its task id, then the `TaskInfo`.
+pub struct RecentTaskInfo(RunningTaskInfo);
+
+impl WriteParcelable for RecentTaskInfo {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i32(self.0.task_id);
+        p.write_i32(self.0.task_id);
+        self.0.write_task(p);
+    }
+}
+
+impl RunningTaskInfo {
+    /// `TaskInfo.writeTaskToParcel`.
+    fn write_task(&self, p: &mut Parcel) {
         p.write_i32(self.user_id);
         p.write_i32(self.task_id);
         p.write_i32(self.effective_uid);
@@ -301,6 +326,37 @@ impl AppHost {
         }
         let multi_window = self.multi_window()?;
         chosen.into_iter().map(|(task, last_active)| self.task_info(task, last_active, !keep_intent_extra, allowed, &multi_window).map(Some)).collect()
+    }
+
+    /// `getAppTasks` by `uid` for `package`: the tasks of `RecentTasks
+    /// .getAppTasksList`, the most recently active first, each the caller's
+    /// `IAppTask`.
+    pub(super) fn app_tasks(&self, uid: i32, package: Option<&str>) -> Result<Vec<Binder>, Exception> {
+        // `assertPackageMatchesCallingUid`: `isSameApp`, the system's for
+        // no package.
+        let same = match package {
+            Some(p) => self.owns_package(uid, p)?,
+            None => uid == 1000,
+        };
+        if !same {
+            return Err(Exception::security(format!(
+                "Permission Denial: package={} does not belong to uid={uid}",
+                package.unwrap_or("null")
+            )));
+        }
+        let package = package.unwrap_or_default();
+        let mut tasks: Vec<(i64, i32)> = {
+            let stack = self.activities.stack.lock().unwrap();
+            stack
+                .tasks
+                .iter()
+                .filter(|t| t.uid as i32 == uid && t.real_activity.split('/').next() == Some(package))
+                .map(|t| (t.last_active, t.id))
+                .collect()
+        };
+        tasks.sort_by(|a, b| b.0.cmp(&a.0));
+        let me = self.me.upgrade().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host gone"))?;
+        Ok(tasks.into_iter().map(|(_, task)| self.process.add_service(Arc::new(AppTask { host: me.clone(), task, uid }))).collect())
     }
 
     /// `retrieveSettings`' multi-window support.
@@ -593,5 +649,51 @@ mod tests {
         assert_eq!(ints(&mut r, 2), [1, 0]);
         assert_eq!(rect(&mut r), None); // topActivityMainWindowFrame
         assert_eq!(r.remaining(), 0);
+    }
+}
+
+/// `AppTaskImpl`: a task of `getAppTasks`, for its caller `uid`.
+struct AppTask {
+    host: Arc<AppHost>,
+    task: i32,
+    uid: i32,
+}
+
+impl Service for AppTask {
+    fn descriptor(&self) -> &str {
+        iat::DESCRIPTOR
+    }
+
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        // `checkCallerOrSystemOrRoot`.
+        let caller = call.sender_euid as i32;
+        if caller != self.uid && caller != 1000 && caller != 0 {
+            return super::reply(Err(Exception::security(format!(
+                "Caller {} does not match caller of getAppTasks(): {caller}",
+                self.uid
+            ))));
+        }
+        match call.code {
+            // `createRecentTaskInfo(task, stripExtras false, getTasksAllowed
+            // true)`.
+            iat::GET_TASK_INFO => {
+                iat::GetTaskInfo::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let host = &self.host;
+                let info = (|| {
+                    let last_active = {
+                        let stack = host.activities.stack.lock().unwrap();
+                        stack.task(self.task).map(|t| t.last_active)
+                    };
+                    let last_active = last_active.ok_or_else(|| Exception::illegal_argument(format!("Unable to find task ID {}", self.task)))?;
+                    host.task_info(self.task, last_active, false, true, &host.multi_window()?)
+                })();
+                super::reply(info.map(|info| {
+                    let mut p = Parcel::new();
+                    iat::write_get_task_info_reply(&mut p, Some(&RecentTaskInfo(info)));
+                    p
+                }))
+            }
+            code => super::reply(Err(self.host.unimplemented("app_task", code))),
+        }
     }
 }

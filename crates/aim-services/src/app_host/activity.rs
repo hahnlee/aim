@@ -692,6 +692,21 @@ impl Service for ActivityTaskManager {
                     p
                 }))
             }
+            // `List<IBinder> getAppTasks(String callingPackage)`, read and
+            // written by hand (`writeBinderList`).
+            atm::GET_APP_TASKS => {
+                call.data.enforce_interface(atm::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                let package = call.data.read_string16().map_err(|_| BAD_VALUE)?;
+                reply(self.0.app_tasks(call.sender_euid as i32, package.as_deref()).map(|tasks| {
+                    let mut p = Parcel::new();
+                    p.write_no_exception();
+                    p.write_i32(tasks.len() as i32);
+                    for task in tasks {
+                        p.write_binder(Some(task));
+                    }
+                    p
+                }))
+            }
             atm::GET_ACTIVITY_CLIENT_CONTROLLER => {
                 atm::GetActivityClientController::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let mut p = Parcel::new();
