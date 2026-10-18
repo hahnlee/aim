@@ -25,7 +25,11 @@ impl ProcessIdentity {
         if returned!=size{return Err(io::Error::from_raw_os_error(if errno!=0{errno}else{libc::EIO}));}
         Ok(info)
     }
-    pub fn is_live(self)->bool{Self::running(self.host_pid).is_ok_and(|current|current==self)}
+    /// A zombie has exited: PROC_PIDTBSDINFO with arg 1 still reports it until it is reaped.
+    pub fn is_live(self)->bool{
+        Self::metadata_strict(self.host_pid).is_ok_and(|info|info.pbi_status!=libc::SZOMB
+            &&Self{host_pid:self.host_pid,start_seconds:info.pbi_start_tvsec,start_microseconds:info.pbi_start_tvusec}==self)
+    }
 }
 #[derive(Clone,Debug)]
 pub struct InitRegistration {pub process:ProcessIdentity,pub mount_namespace:String}
@@ -183,6 +187,16 @@ mod tests{
   assert!(!stale.is_live());assert!(InitRegistration::register(&root,stale,"namespace-original").is_err());
   child.0.kill().unwrap();child.0.wait().unwrap();assert!(InitRegistration::read(&root).is_err());
   registration.remove(&root).unwrap();fs::remove_dir_all(root).unwrap();
+ }
+ #[test]
+ fn exited_unreaped_process_is_not_live(){
+  let mut child=Child(Command::new("true").spawn().unwrap());
+  let process=ProcessIdentity::running(child.0.id() as i32).unwrap();
+  let mut info:libc::siginfo_t=unsafe{std::mem::zeroed()};
+  // WNOWAIT leaves the exited child a zombie.
+  assert_eq!(unsafe{libc::waitid(libc::P_PID,process.host_pid as libc::id_t,&mut info,libc::WEXITED|libc::WNOWAIT)},0);
+  assert!(ProcessIdentity::running(process.host_pid).is_ok());assert!(!process.is_live());
+  child.0.wait().unwrap();
  }
  #[test]
  fn retirement_closes_namespace_admission_while_owner_process_is_live(){
