@@ -54,10 +54,19 @@ reach it (7 + 8 = shows 15); its overflow menu opens under its button, and
 its licenses activity starts in its task (Calculator paused, the new
 activity launched), whose WebView then finds no `webviewupdate` service
 (#1491).
-Clock starts too (its notification, power and alarm services are the app
-host's): its clock page draws, its tooltip and its menu are popups at
-their places; opening its settings stops at the missing `jobscheduler` (#1490),
-its timer and alarm pages at Google Services Framework's provider (#1450).
+Clock starts too, and with it Google Search, Play services, Photos and
+MediaProvider, whose processes its providers, jobs and broadcasts start
+(2026-10-18): its clock page draws, its tooltip and its menu are popups
+at their places, and its alarm page lists its alarms. A 5-second timer
+started on its timer page counts down, fires (AlarmManager, then its
+foreground `TimerService`) and rings: mediaserver plays its ringtone
+once audioserver has the app host's permission state. With vold among
+the services, the emulated volume's `ACTION_MEDIA_MOUNTED` has
+MediaProvider attach external storage. The time's-up screen and an
+alarm's own activity open in tasks of their own (not yet seen live: the
+timer page in front shows the ringing timer itself). Apps around Clock
+still stop at DownloadProvider's `grantUriPermission` (#1503) and at app
+ops the app host does not decide (#1558).
 
 ## Native system services (2026-09-29, ADR 0013)
 
