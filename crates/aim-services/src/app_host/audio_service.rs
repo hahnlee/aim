@@ -925,6 +925,13 @@ impl Service for AudioService {
                     Err(e) => return reply(Err(e)),
                 }
             }
+            audio::IS_VOLUME_FIXED => {
+                audio::IsVolumeFixed::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match self.host.volumes() {
+                    Ok(v) => audio::write_is_volume_fixed_reply(&mut p, v.as_ref().unwrap().is_volume_fixed()),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
             audio::IS_STREAM_AFFECTED_BY_MUTE => {
                 let args = audio::IsStreamAffectedByMute::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 match read(args.stream_type, &|v, s| Ok(v.affected_by_mute(s) as i32)) {
