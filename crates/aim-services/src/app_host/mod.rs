@@ -553,18 +553,31 @@ impl AppHost {
     /// Starts the process of package `name`'s activity `class`, user 0's,
     /// for the launcher's start of it.
     fn start_process(&self, name: &str, class: &str) -> Result<i32, Exception> {
+        let info = self.activity_info_of(name, class)?;
+        self.start_process_for(name, &providers::process_name(&info.info), Some(activity_start::StartRequest::launcher(class)))
+    }
+
+    /// User 0's activity `class` of package `name`, as the system sees it.
+    fn activity_info_of(&self, name: &str, class: &str) -> Result<package::info::ActivityInfo, Exception> {
         let (state, resolution) = self.packages()?;
         let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: 1000 };
         let component = crate::package::intent::ComponentName { package: name.to_string(), class: class.to_string() };
-        let info = match query.activity_info(&component, STOCK_PM_FLAGS, 1000, 0) {
-            Ok(Ok(Some(info))) => info,
-            Ok(Ok(None)) => return Err(Exception::illegal_argument(format!("no activity {name}/{class}"))),
-            Ok(Err(e)) => return Err(e),
-            Err(crate::package::apps_filter::NotModelled(reason)) => {
-                return Err(Exception::new(EX_UNSUPPORTED_OPERATION, format!("activity info: {reason}")));
-            }
-        };
-        self.start_process_for(name, &providers::process_name(&info.info), Some(activity_start::StartRequest::launcher(class)))
+        match query.activity_info(&component, STOCK_PM_FLAGS, 1000, 0) {
+            Ok(Ok(Some(info))) => Ok(info),
+            Ok(Ok(None)) => Err(Exception::illegal_argument(format!("no activity {name}/{class}"))),
+            Ok(Err(e)) => Err(e),
+            Err(crate::package::apps_filter::NotModelled(reason)) => Err(Exception::new(EX_UNSUPPORTED_OPERATION, format!("activity info: {reason}"))),
+        }
+    }
+
+    /// The starts of the processes of `package` for `user`.
+    fn starts_of_package(&self, package: &str, user: u32) -> Vec<i64> {
+        self.apps.lock().unwrap().iter().filter(|(_, a)| a.package == package && a.uid / PER_USER_RANGE == user).map(|(seq, _)| *seq).collect()
+    }
+
+    /// The start of the process `pid`.
+    fn start_of_pid(&self, pid: i32) -> Option<i64> {
+        self.apps.lock().unwrap().iter().find(|(_, a)| a.pid == pid).map(|(seq, _)| *seq)
     }
 
     /// The running process `process` of `uid`: its start, and whether it
@@ -844,11 +857,11 @@ impl AppHost {
             self.uid_changed(uid as i32, uid_observers::Change::Gone);
         }
         self.providers_process_died(start_seq);
-        self.activities.remove_start(start_seq);
+        let commands = self.activities.remove_start(start_seq);
         self.windows_died(pid);
-        self.tasks_died(start_seq);
         self.broadcasts.process_died(self, start_seq);
         if let Some(me) = self.me.upgrade() {
+            me.run(commands);
             me.services_process_died(start_seq, !removed);
         }
     }
@@ -1057,7 +1070,7 @@ impl AppHost {
         }
         let all_users = self.check_permission(Some("android.permission.INTERACT_ACROSS_USERS_FULL"), uid)? == 0;
         let all_uids = self.get_tasks_allowed(uid)?;
-        let front = self.tasks.front_start();
+        let front = self.activities.front_start();
         let apps = self.apps.lock().unwrap();
         let mut running: Vec<(&i64, &App)> = apps
             .iter()
@@ -1120,7 +1133,7 @@ impl AppHost {
             return Err(Exception::security("Isolated process not allowed to call getMyMemoryState"));
         }
         let mut info = RunningAppProcessInfo::default();
-        let front = self.tasks.front_start();
+        let front = self.activities.front_start();
         let apps = self.apps.lock().unwrap();
         if let Some((seq, app)) = apps.iter().find(|(_, a)| a.pid == call.sender_pid && a.thread.is_some()) {
             self.fill_in_proc_mem_info(*seq, app, &mut info, front);
@@ -1292,41 +1305,14 @@ impl AppHost {
         let Some(request) = app.activity.take() else {
             return Ok(());
         };
-        let class = request.class.clone();
-        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
-        let (model, resolution) = self.packages()?;
-        let query = crate::package::query::Query {
-            state: &model,
-            filter: &resolution.apps_filter,
-            calling_uid: 1000,
-        };
-        let component = crate::package::intent::ComponentName {
-            package: app.package.clone(),
-            class: class.clone(),
-        };
-        let info = match query.activity_info(&component, STOCK_PM_FLAGS, 1000, 0) {
-            Ok(Ok(Some(info))) => info,
-            Ok(Ok(None)) => {
-                return Err(Exception::illegal_argument(format!(
-                    "no activity {}/{class}",
-                    app.package
-                )));
-            }
-            Ok(Err(e)) => return Err(e),
-            Err(crate::package::apps_filter::NotModelled(reason)) => {
-                return Err(state(format!("activity info: {reason}")));
-            }
-        };
         let (uid, package, started) = (app.uid, app.package.clone(), app.started);
         drop(apps);
-        // `realStartActivityLocked` of the activity on top of a new task.
-        self.new_task(start_seq, uid, &package, &class, freeform::Activity::from(&info));
-        let task = self.tasks.of_uid(uid).map_or(-(start_seq as i32), |(id, _)| id);
-        let result_to = request.result_to;
-        let token = self.new_activity(start_seq, uid, &package, info, task, request);
-        let commands = self.activities.stack.lock().unwrap().start(token, task, start_seq, result_to);
+        let info = self.activity_info_of(&package, &request.class)?;
+        // `realStartActivityLocked` of the activity on top of the task the
+        // start placed it in, else of a new one.
+        let decision = activity_stack::Decision { outcome: activity_stack::Outcome::New(request.task), ..Default::default() };
         if let Some(me) = self.me.upgrade() {
-            me.run(commands);
+            me.start_in_process(start_seq, uid, &package, info, request, &decision)?;
         }
         eprintln!("app host: {package} launch sent {:?} after its start", started.elapsed());
         Ok(())

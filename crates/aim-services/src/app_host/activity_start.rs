@@ -1,18 +1,18 @@
 //! An app's own starts and finishes of activities, as ActivityTaskManager
 //! takes them at `android-16.0.0_r1`: `startActivity` (`ActivityStarter`:
-//! the intent resolved, `checkStartAnyActivityPermission`, the launch
-//! mode's and flags' reuse of an activity in the task, the activity put on
-//! top of its task or, of another app, started in that app's process),
-//! `finishActivity` with its result, and what the activities' reports set
-//! moving ([`super::activity_stack`]), sent as client transactions.
-//! Not yet: activities in tasks of their own within a process
-//! (`singleInstance`, documents, `FLAG_ACTIVITY_MULTIPLE_TASK`), forwarded
-//! results, launch options, and the resolver for an intent of several
-//! activities (#1485).
+//! the intent resolved, `checkStartAnyActivityPermission`, the task it goes
+//! into and the reuse of an activity there as [`super::activity_stack`]
+//! decides them, the activity put on top of its task, in its app's
+//! process, started for it if need be), `finishActivity` with its result,
+//! and what the activities' reports set moving, sent as client
+//! transactions. Not yet: forwarded results, documents, a task's reset,
+//! launch options, and the resolver for an intent of several activities
+//! (#1485).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use aim_binder_host::local::Call;
 use aim_binder_host::parcel::{Binder, EX_ILLEGAL_STATE, Exception, Parcel};
@@ -20,29 +20,26 @@ use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_app_iapplicationthread as thread;
 
 use super::activity::{ActivityRecord, Item, Token};
-use super::activity_stack::Command;
+use super::activity_stack::{self as stack, Command, Decision, Outcome, Then};
 use super::kept::{KeptIntent, RawIntent};
 use super::{AppHost, PER_USER_RANGE};
 use crate::package::info::ActivityInfo;
+use crate::package::intent::{ComponentName, Intent};
 
 /// `ActivityManager.START_*`.
-pub const START_SUCCESS: i32 = 0;
-const START_DELIVERED_TO_TOP: i32 = 3;
+pub const START_SUCCESS: i32 = stack::START_SUCCESS;
 const START_INTENT_NOT_RESOLVED: i32 = -1;
 const START_CLASS_NOT_FOUND: i32 = -2;
-/// `Intent.FLAG_ACTIVITY_*`, `EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN`.
-const FLAG_ACTIVITY_SINGLE_TOP: i32 = 0x2000_0000;
-const FLAG_ACTIVITY_MULTIPLE_TASK: i32 = 0x0800_0000;
-const FLAG_ACTIVITY_CLEAR_TOP: i32 = 0x0400_0000;
+/// `Intent.FLAG_ACTIVITY_FORWARD_RESULT`,
+/// `EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN`.
 const FLAG_ACTIVITY_FORWARD_RESULT: i32 = 0x0200_0000;
-const FLAG_ACTIVITY_NEW_DOCUMENT: i32 = 0x0008_0000;
-const FLAG_ACTIVITY_NO_USER_ACTION: i32 = 0x0004_0000;
 const EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN: i32 = 1 << 2;
-/// `ActivityInfo.LAUNCH_*`.
-const LAUNCH_SINGLE_TOP: i32 = 1;
-const LAUNCH_SINGLE_TASK: i32 = 2;
-const LAUNCH_SINGLE_INSTANCE: i32 = 3;
-const LAUNCH_SINGLE_INSTANCE_PER_TASK: i32 = 4;
+/// `ActivityInfo.FLAG_EXCLUDE_FROM_RECENTS`.
+pub const FLAG_EXCLUDE_FROM_RECENTS: i32 = 0x20;
+/// `Activity.RESULT_CANCELED`.
+const RESULT_CANCELED: i32 = 0;
+/// `ActivityTaskSupervisor.TOP_RESUMED_STATE_LOSS_TIMEOUT`.
+const TOP_RESUMED_STATE_LOSS_TIMEOUT: Duration = Duration::from_millis(500);
 /// `PackageManager.MATCH_DEFAULT_ONLY`.
 const MATCH_DEFAULT_ONLY: i64 = 0x1_0000;
 /// `ActivityManager.FINISH_TASK_WITH_ROOT_ACTIVITY`, `FINISH_TASK_WITH_ACTIVITY`.
@@ -63,7 +60,21 @@ pub enum LaunchIntent {
     Raw(Box<KeptIntent>),
 }
 
-/// What starts an activity in a process yet to start.
+impl LaunchIntent {
+    /// The intent as a task keeps it, of `package`'s `class`.
+    fn intent(&self, package: &str, class: &str) -> Intent {
+        match self {
+            LaunchIntent::Component => Intent {
+                flags: stack::FLAG_ACTIVITY_NEW_TASK,
+                component: Some(ComponentName { package: package.to_string(), class: class.to_string() }),
+                ..Default::default()
+            },
+            LaunchIntent::Raw(kept) => kept.intent.intent.clone(),
+        }
+    }
+}
+
+/// What starts an activity, in a process yet to start.
 pub struct StartRequest {
     pub class: String,
     pub intent: LaunchIntent,
@@ -71,6 +82,8 @@ pub struct StartRequest {
     pub result_to: Option<u64>,
     pub result_who: Option<String>,
     pub request_code: i32,
+    /// The task it goes on top of, else a new one.
+    pub task: Option<i32>,
 }
 
 impl StartRequest {
@@ -83,8 +96,25 @@ impl StartRequest {
             result_to: None,
             result_who: None,
             request_code: -1,
+            task: None,
         }
     }
+
+    /// Whether the user leaves the activity below it
+    /// (`FLAG_ACTIVITY_NO_USER_ACTION` unset).
+    fn user_leaving(&self) -> bool {
+        match &self.intent {
+            LaunchIntent::Component => true,
+            LaunchIntent::Raw(kept) => kept.intent.intent.flags & stack::FLAG_ACTIVITY_NO_USER_ACTION == 0,
+        }
+    }
+}
+
+/// `mActivityComponent` of `info`: its class, or an alias's target.
+pub fn real_component(info: &ActivityInfo) -> String {
+    let package = info.info.item.package_name.as_deref().unwrap_or_default();
+    let class = info.target_activity.as_deref().or(info.info.item.name.as_deref()).unwrap_or_default();
+    format!("{package}/{class}")
 }
 
 /// A result or a new intent the stack holds for an activity.
@@ -260,7 +290,7 @@ impl AppHost {
                 let (start_seq, uid) = start_of(t).ok_or("no activity to launch")?;
                 let global = self.global_config(uid).ok_or("launch before bind")?;
                 let task = self.activities.records.lock().unwrap().get(&t).map(|r| r.task);
-                let bounds = task.and_then(|id| self.tasks.bounds(id));
+                let bounds = task.and_then(|id| self.tasks.freeform_bounds(id));
                 let items = self
                     .launch_items(token_of(t), super::activity::Launch { global: &global, task: bounds })
                     .ok_or("no activity to launch")?;
@@ -324,20 +354,34 @@ impl AppHost {
             }
             Command::Stop(t) => send(t, vec![Box::new(StopActivityItem(token_of(t)))]),
             Command::Destroy(t) => send(t, vec![Box::new(DestroyActivityItem(token_of(t)))]),
-            Command::TopResumed { token, on_top } => send(token, vec![super::activity::top_resumed_item(token_of(token), on_top)]),
+            // The top resumed activity's latest window takes the input
+            // focus.
+            Command::TopResumed { token, on_top } => {
+                send(token, vec![super::activity::top_resumed_item(token_of(token), on_top)])?;
+                match self.windows_of_activity(token).last() {
+                    Some((_, channel)) if on_top => self.focus_input_channel(*channel).map_err(|e| format!("{e:?}")),
+                    _ => Ok(()),
+                }
+            }
+            Command::LossTimeout(loss) => {
+                let host = self.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(TOP_RESUMED_STATE_LOSS_TIMEOUT);
+                    let commands = host.activities.stack.lock().unwrap().top_resumed_released(Some(loss));
+                    host.run(commands);
+                });
+                Ok(())
+            }
             Command::Visible { token, visible } => {
                 let mut p = Parcel::new();
                 p.write_interface_token(WINDOW_DESCRIPTOR);
                 p.write_bool(visible);
-                let windows = self.windows_of_activity(token);
-                for (window, _) in &windows {
-                    self.process.transact(*window, DISPATCH_APP_VISIBILITY, &p, true).map_err(|s| format!("dispatchAppVisibility: {s}"))?;
-                }
-                if visible && let Some((_, channel)) = windows.last() {
-                    self.focus_input_channel(*channel).map_err(|e| format!("{e:?}"))?;
+                for (window, _) in self.windows_of_activity(token) {
+                    self.process.transact(window, DISPATCH_APP_VISIBILITY, &p, true).map_err(|s| format!("dispatchAppVisibility: {s}"))?;
                 }
                 Ok(())
             }
+            Command::Front(task) => self.task_to_front(task),
             Command::TaskEmpty(task) => {
                 self.remove_task(task);
                 Ok(())
@@ -352,35 +396,56 @@ impl AppHost {
         }
     }
 
-    /// The task an activity of `start_seq`'s process starts into: that of
-    /// `result_to`, else of the process's top activity, else a new one.
-    fn task_for(&self, start_seq: i64, uid: u32, package: &str, info: &ActivityInfo, result_to: Option<u64>) -> i32 {
-        let stack = self.activities.stack.lock().unwrap();
-        let of = |t: u64| stack.get(t).filter(|a| a.start_seq == start_seq).map(|a| a.task);
-        if let Some(task) = result_to.and_then(of) {
-            return task;
+    /// `startActivityInner`'s new activity for `request`, `info` of
+    /// `package`, in the attached process of `start_seq` of `uid`: on top
+    /// of the task `d` placed it in if that is still there, else of a new
+    /// one, and the focused tasks' tops resumed.
+    pub(super) fn start_in_process(self: &Arc<Self>, start_seq: i64, uid: u32, package: &str, info: ActivityInfo, request: StartRequest, d: &Decision) -> Result<(), Exception> {
+        let real = real_component(&info);
+        let user = uid / PER_USER_RANGE;
+        let user_leaving = request.user_leaving();
+        let intent = request.intent.intent(package, &request.class);
+        let affinity = info.task_affinity.clone();
+        let existing = request.task.filter(|&t| self.activities.stack.lock().unwrap().task(t).is_some());
+        let (task, new) = match existing {
+            Some(task) => (task, None),
+            None => {
+                let id = self.new_task(uid, package, &request.class, super::freeform::Activity::from(&info))?;
+                let task = stack::Task { id, affinity: affinity.clone(), real_activity: real.clone(), intent: intent.clone(), user };
+                (id, Some(Box::new(task)))
+            }
+        };
+        let (launch_mode, result_to) = (info.launch_mode, request.result_to);
+        let token = self.new_activity(start_seq, uid, package, info, task, request);
+        let activity = stack::Activity::new(token, task, start_seq, &real, launch_mode, user, result_to);
+        let commands = self.activities.stack.lock().unwrap().apply(d, Then::Add(activity, new), Some((&real, &intent, affinity.as_deref())), user_leaving);
+        self.run(commands);
+        Ok(())
+    }
+
+    /// The launcher's start of `package`'s `class` (`info`) in a new task:
+    /// in its process if that runs, else in the process started for it.
+    pub(super) fn start_launcher(self: &Arc<Self>, package: &str, class: &str, info: ActivityInfo) -> Result<(), Exception> {
+        let process = super::providers::process_name(&info.info);
+        let uid = info.info.application_info.uid as u32;
+        match self.running_process(&process, uid).filter(|(_, attached)| *attached) {
+            Some((start_seq, _)) => self.start_in_process(start_seq, uid, package, info, StartRequest::launcher(class), &Decision::default()),
+            None => self.start_process_for(package, &process, Some(StartRequest::launcher(class))).map(|_| ()),
         }
-        if let Some(task) = stack.activities.iter().rev().find(|a| a.start_seq == start_seq && !a.finishing).map(|a| a.task) {
-            return task;
-        }
-        drop(stack);
-        let class = info.info.item.name.clone().unwrap_or_default();
-        self.new_task(start_seq, uid, package, &class, super::freeform::Activity::from(info));
-        self.tasks.of_uid(uid).map_or(-(start_seq as i32), |(id, _)| id)
     }
 
     /// `IActivityTaskManager.startActivity`: the start's result code.
     pub(super) fn start_activity(self: &Arc<Self>, call: &Call<'_>, args: StartArgs) -> Result<i32, Exception> {
-        let Some((caller_seq, caller_package, _, caller_pid)) = self.app_of_thread(args.caller) else {
+        let Some((_, caller_package, _, caller_pid)) = self.app_of_thread(args.caller) else {
             return Err(Exception::security("Unable to find app for caller"));
         };
-        self.start_activity_in_package(call.sender_euid as i32, caller_package, caller_pid, Some(caller_seq), args)
+        self.start_activity_in_package(call.sender_euid as i32, caller_package, caller_pid, args)
     }
 
-    /// `ActivityStarter`'s start of `args` by `uid` of `caller_package`,
-    /// from the process of `caller_seq` (none for a PendingIntent sent as
-    /// its creator, `startActivityInPackage`): the start's result code.
-    pub(super) fn start_activity_in_package(self: &Arc<Self>, uid: i32, caller_package: String, caller_pid: i32, caller_seq: Option<i64>, args: StartArgs) -> Result<i32, Exception> {
+    /// `ActivityStarter`'s start of `args` by `uid` of `caller_package`
+    /// (a PendingIntent's creator for one it sends,
+    /// `startActivityInPackage`): the start's result code.
+    pub(super) fn start_activity_in_package(self: &Arc<Self>, uid: i32, caller_package: String, caller_pid: i32, args: StartArgs) -> Result<i32, Exception> {
         let mut intent = args.intent.ok_or_else(|| Exception::illegal_argument("intent"))?;
         if intent.has_fds() {
             return Err(Exception::illegal_argument("File descriptors passed in Intent"));
@@ -409,78 +474,88 @@ impl AppHost {
                 format!("{what} not exported from uid {target_uid}")
             }));
         }
-        let flags = intent.intent.flags;
-        if flags & (FLAG_ACTIVITY_MULTIPLE_TASK | FLAG_ACTIVITY_NEW_DOCUMENT | FLAG_ACTIVITY_FORWARD_RESULT) != 0
-            || matches!(info.launch_mode, LAUNCH_SINGLE_INSTANCE | LAUNCH_SINGLE_INSTANCE_PER_TASK)
-        {
-            return Err(self.unimplemented_named("activity_task", "an activity in a task of its own, or a forwarded result (#1485)"));
+        if intent.intent.flags & FLAG_ACTIVITY_FORWARD_RESULT != 0 {
+            return Err(self.unimplemented_named("activity_task", "a forwarded result (#1485)"));
         }
+        // `sourceRecord`, the caller's activity, and `resultRecord`, the
+        // source when it asks for a result.
+        let (source, result_to) = {
+            let stack = self.activities.stack.lock().unwrap();
+            let source = match args.result_to {
+                Some(Binder::Local(t)) => stack.get(t),
+                _ => None,
+            };
+            (source.map(|a| a.token), source.filter(|a| args.request_code >= 0 && !a.finishing).map(|a| a.token))
+        };
         intent = intent.with_component(&package, &class);
+        let real = real_component(&info);
+        let target_uid = target_uid as u32;
+        let start = stack::Start {
+            component: &real,
+            affinity: info.task_affinity.as_deref(),
+            launch_mode: info.launch_mode,
+            document_launch_mode: info.document_launch_mode,
+            intent: &intent.intent,
+            user: target_uid / PER_USER_RANGE,
+            source,
+            result_to,
+        };
+        let d = self.activities.stack.lock().unwrap().decide(&start).map_err(|what| self.unimplemented_named("activity_task", &format!("{what} (#1485)")))?;
+        // `ActivityRecord`'s intent: the launch flags, and its exclusion
+        // from recents.
+        let exclude = if info.flags & FLAG_EXCLUDE_FROM_RECENTS != 0 { stack::FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS } else { 0 };
         let extended = intent.intent.extended_flags | EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN;
-        intent.set_flags(flags, extended);
+        intent.set_flags(d.flags | exclude, extended);
         let kept = KeptIntent::new(intent, &self.process);
-        let result_to = match args.result_to {
-            Some(Binder::Local(t)) if args.request_code >= 0 => Some(t),
-            _ => None,
+        let base = kept.intent.intent.clone();
+        let identity = Some((real.as_str(), &base, info.task_affinity.as_deref()));
+        let user_leaving = d.flags & stack::FLAG_ACTIVITY_NO_USER_ACTION == 0;
+        let mut commands = Vec::new();
+        if d.cancel_result
+            && let Some(to) = result_to
+        {
+            let payload = self.new_payload(Payload::Result { who: args.result_who.clone(), request_code: args.request_code, result_code: RESULT_CANCELED, data: None });
+            commands.extend(self.activities.stack.lock().unwrap().send_result(to, payload));
+        }
+        let task = match d.outcome {
+            Outcome::Deliver(token, code) => {
+                let payload = self.new_payload(Payload::NewIntent { intent: kept, referrer: caller_package });
+                commands.extend(self.activities.stack.lock().unwrap().apply(&d, Then::Deliver(token, payload), identity, user_leaving));
+                self.run(commands);
+                return Ok(code);
+            }
+            Outcome::Front(code) => {
+                commands.extend(self.activities.stack.lock().unwrap().apply(&d, Then::Nothing, identity, user_leaving));
+                self.run(commands);
+                return Ok(code);
+            }
+            Outcome::New(task) => task,
         };
         let request = StartRequest {
-            class: class.clone(),
-            intent: LaunchIntent::Raw(Box::new(kept.clone())),
-            referrer: caller_package.clone(),
-            result_to,
+            class,
+            intent: LaunchIntent::Raw(Box::new(kept)),
+            referrer: caller_package,
+            result_to: d.result_to,
             result_who: args.result_who,
             request_code: args.request_code,
+            task,
         };
         let process = super::providers::process_name(&info.info);
-        let target = self.running_process(&process, target_uid as u32).filter(|(_, attached)| *attached);
-        let Some((target_seq, _)) = target else {
-            // `startProcessLocked` for the activity.
-            self.start_process_for(&package, &process, Some(request))?;
-            return Ok(START_SUCCESS);
-        };
-        let target_uid = target_uid as u32;
-        let task = self.task_for(target_seq, target_uid, &package, &info, result_to.filter(|_| Some(target_seq) == caller_seq));
-        // The launch mode's and flags' reuse of an activity of the task.
-        let reuse = {
-            let stack = self.activities.stack.lock().unwrap();
-            let records = self.activities.records.lock().unwrap();
-            let same = |t: u64| records.get(&t).is_some_and(|r| r.class == class);
-            let top = stack.top(task).map(|a| a.token).filter(|&t| same(t));
-            let clear = flags & FLAG_ACTIVITY_CLEAR_TOP != 0 || info.launch_mode == LAUNCH_SINGLE_TASK;
-            let existing = stack.activities.iter().rev().find(|a| a.task == task && !a.finishing && same(a.token)).map(|a| a.token);
-            if clear && let Some(existing) = existing {
-                // A standard activity under CLEAR_TOP is made anew.
-                let again = info.launch_mode == 0 && flags & FLAG_ACTIVITY_SINGLE_TOP == 0 && info.launch_mode != LAUNCH_SINGLE_TASK;
-                Some((existing, true, again))
-            } else if (flags & FLAG_ACTIVITY_SINGLE_TOP != 0 || info.launch_mode == LAUNCH_SINGLE_TOP) && let Some(top) = top {
-                Some((top, false, false))
-            } else {
-                None
-            }
-        };
-        let mut commands = Vec::new();
-        if let Some((existing, clear, again)) = reuse {
-            if clear {
-                commands.extend(self.activities.stack.lock().unwrap().clear_above(existing, again));
-            }
-            if !again {
-                let payload = self.new_payload(Payload::NewIntent { intent: kept, referrer: caller_package });
-                commands.extend(self.activities.stack.lock().unwrap().new_intent(existing, payload));
+        match self.running_process(&process, target_uid).filter(|(_, attached)| *attached) {
+            Some((target_seq, _)) => {
                 self.run(commands);
-                return Ok(START_DELIVERED_TO_TOP);
+                self.start_in_process(target_seq, target_uid, &package, info, request, &d)?;
             }
-        }
-        let token = self.new_activity(target_seq, target_uid, &package, info, task, request);
-        let mut started = self.activities.stack.lock().unwrap().start(token, task, target_seq, result_to);
-        if flags & FLAG_ACTIVITY_NO_USER_ACTION != 0 {
-            for c in &mut started {
-                if let Command::Pause { user_leaving, .. } = c {
-                    *user_leaving = false;
+            None => {
+                // What comes before the activity is done now; it is added
+                // once its process attached (`startProcessLocked`).
+                if d.front.is_some() || !d.clear.is_empty() || d.reorder.is_some() {
+                    commands.extend(self.activities.stack.lock().unwrap().apply(&d, Then::Nothing, None, user_leaving));
                 }
+                self.run(commands);
+                self.start_process_for(&package, &process, Some(request))?;
             }
         }
-        commands.extend(started);
-        self.run(commands);
         Ok(START_SUCCESS)
     }
 
@@ -498,27 +573,43 @@ impl AppHost {
             let data = data.map(|d| KeptIntent::new(d, &self.process));
             self.new_payload(Payload::Result { who, request_code, result_code, data })
         });
-        let task_root = {
+        let (task, root) = {
             let stack = self.activities.stack.lock().unwrap();
             let task = stack.get(token).map(|a| a.task);
-            let root = stack.activities.iter().find(|a| Some(a.task) == task && !a.finishing).map(|a| a.token);
-            (task, root == Some(token))
+            (task, task.and_then(|t| stack.root(t)).is_some_and(|r| r.token == token))
         };
-        let mut commands = Vec::new();
-        let (finished, out) = self.activities.stack.lock().unwrap().finish(token, result);
-        commands.extend(out);
+        let (finished, mut commands) = self.activities.stack.lock().unwrap().finish(token, result);
         // The task goes with it: the rest of its activities finish.
-        if finish_task == FINISH_TASK_WITH_ACTIVITY || (finish_task == FINISH_TASK_WITH_ROOT_ACTIVITY && task_root.1) {
-            let rest: Vec<u64> = {
-                let stack = self.activities.stack.lock().unwrap();
-                stack.activities.iter().rev().filter(|a| Some(a.task) == task_root.0 && !a.finishing).map(|a| a.token).collect()
-            };
-            for t in rest {
-                commands.extend(self.activities.stack.lock().unwrap().finish(t, None).1);
-            }
+        if let Some(task) = task
+            && (finish_task == FINISH_TASK_WITH_ACTIVITY || (finish_task == FINISH_TASK_WITH_ROOT_ACTIVITY && root))
+        {
+            commands.extend(self.activities.stack.lock().unwrap().remove(task));
         }
         self.run(commands);
         Ok(finished)
+    }
+
+    /// `activityTopResumedStateLost`: the activity told it lost the top
+    /// resumed state handled it.
+    pub(super) fn top_resumed_lost(self: &Arc<Self>) {
+        let commands = self.activities.stack.lock().unwrap().top_resumed_released(None);
+        self.run(commands);
+    }
+
+    /// `getTaskForActivity`: `token`'s task, if it is the task's root or
+    /// `only_root` is not asked, else -1.
+    pub(super) fn task_of_activity(&self, token: Option<Binder>, only_root: bool) -> i32 {
+        let Some(Binder::Local(token)) = token else { return -1 };
+        let stack = self.activities.stack.lock().unwrap();
+        let Some(task) = stack.get(token).map(|a| a.task) else { return -1 };
+        // Above the root (`getRootActivity`: the bottom one not finishing,
+        // else the bottom one).
+        let root = stack.root(task).or_else(|| stack.activities.iter().find(|a| a.task == task)).map(|a| a.token);
+        let position = |t| stack.activities.iter().position(|a| Some(a.token) == t);
+        if only_root && position(Some(token)) > position(root) {
+            return -1;
+        }
+        task
     }
 
     /// `activityPaused`, `activityIdle`, `activityStopped`,
@@ -553,7 +644,7 @@ impl AppHost {
     pub(super) fn launcher_root(&self, token: Option<Binder>) -> bool {
         let Some(Binder::Local(token)) = token else { return false };
         let stack = self.activities.stack.lock().unwrap();
-        let root = stack.get(token).and_then(|a| stack.activities.iter().find(|r| r.task == a.task && !r.finishing)).map(|a| a.token);
+        let root = stack.get(token).and_then(|a| stack.root(a.task)).map(|a| a.token);
         root == Some(token) && self.activities.records.lock().unwrap().get(&token).is_some_and(|r| matches!(r.intent, LaunchIntent::Component))
     }
 

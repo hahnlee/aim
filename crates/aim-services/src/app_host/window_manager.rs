@@ -1,9 +1,9 @@
 //! `window`: WindowManager for the app host's windows, as
 //! `WindowManagerService.addWindow` and `relayoutWindow` answer an app's
 //! window at `android-16.0.0_r1` (`IWindowSession`'s replies). A window is
-//! a layer of buffers with no system bars, laid out in the display, at its
-//! root, or in window mode in its task (`tasks`), a child of the task's
-//! layer (`window_layout`: an activity's window takes the whole, a popup
+//! a layer of buffers with no system bars, laid out in its task (`tasks`),
+//! a child of the task's layer, which has the display or in window mode its
+//! bounds (`window_layout`: an activity's window takes the whole, a popup
 //! or a dialog its place and size); its input channel is a guest socket
 //! pair the app host agent makes, which takes the touches of the region
 //! the window takes them in.
@@ -19,7 +19,7 @@ use aim_service_aidl::android_view_iwindowid as wid;
 use aim_service_aidl::android_view_iwindowmanager as wm;
 use aim_service_aidl::android_view_iwindowsession as ws;
 
-use super::activity::{ActivityWindowInfo, Item};
+use super::activity::{ActivityWindowInfo, Item, ProcessItems};
 use super::config::{Configuration, Rect};
 use super::surface::{self, Layer};
 use super::window_layout::{self, Frames, LayoutParams, UNSPECIFIED_LENGTH};
@@ -48,7 +48,7 @@ struct Window {
     name: String,
     uid: u32,
     pid: i32,
-    /// Its task, in window mode.
+    /// Its task: its activity's, else the front one of its app's.
     task: Option<i32>,
     /// The activity it belongs to (`LayoutParams.token`, or its parent's).
     activity: Option<u64>,
@@ -204,10 +204,11 @@ impl Session {
         };
         let channel_name = format!("{id:07x} {name}");
         let display = self.host.display()?.0.clone();
-        let task = self.host.tasks.of_uid(self.uid);
-        let bounds = task.map_or(Rect { left: 0, top: 0, right: display.width, bottom: display.height }, |(_, bounds)| bounds);
+        let task = activity.and_then(|t| self.host.activities.records.lock().unwrap().get(&t).map(|r| r.task)).or_else(|| self.host.tasks.of_uid(self.uid));
+        let freeform = task.and_then(|id| self.host.tasks.freeform_bounds(id));
+        let bounds = freeform.unwrap_or(Rect { left: 0, top: 0, right: display.width, bottom: display.height });
         let requested = (UNSPECIFIED_LENGTH, UNSPECIFIED_LENGTH);
-        let frames = window_layout::compute_frames(&attrs, bounds, attached, task.is_some(), requested);
+        let frames = window_layout::compute_frames(&attrs, bounds, attached, freeform.is_some(), requested);
         let input = Input::of(&attrs, frames.frame, bounds, self.uid);
         let (index, channel) = self.host.open_input_channel(&channel_name, (display.width, display.height), &input)?;
         let mut p = Parcel::new();
@@ -243,7 +244,7 @@ impl Session {
                 name: name.clone(),
                 uid: self.uid,
                 pid: self.pid,
-                task: task.map(|(id, _)| id),
+                task,
                 activity,
                 parent,
                 attrs,
@@ -278,12 +279,13 @@ impl Session {
         let w = windows.get_mut(&window).ok_or_else(|| Exception::illegal_argument("relayout of an unknown window"))?;
         let mut result = 0;
         let task = w.task.and_then(|id| self.host.tasks.bounds(id).map(|bounds| (id, bounds)));
+        let freeform = w.task.and_then(|id| self.host.tasks.freeform_bounds(id));
         if let Some(attrs) = attrs {
             w.attrs = attrs;
         }
         w.requested = requested;
         let bounds = task.map_or(Rect { left: 0, top: 0, right: display.width, bottom: display.height }, |(_, bounds)| bounds);
-        let frames = window_layout::compute_frames(&w.attrs, bounds, attached, task.is_some(), requested);
+        let frames = window_layout::compute_frames(&w.attrs, bounds, attached, freeform.is_some(), requested);
         let moved = frames.frame != w.frames.frame;
         w.frames = frames;
         // A window that is not visible has no surface
@@ -327,8 +329,8 @@ impl Session {
         p.write_i32(result);
         p.write_i32(1);
         write_frames(&mut p, &w.frames, w.frames_seq);
-        let mut overrides: Configuration = match task {
-            Some((_, bounds)) => global.of_freeform_task(bounds),
+        let mut overrides: Configuration = match freeform {
+            Some(bounds) => global.of_freeform_task(bounds),
             None => global.clone(),
         };
         overrides.window.activity_type = 1;
@@ -449,59 +451,62 @@ impl Item for WindowStateResizeItem {
 }
 
 impl super::AppHost {
-    /// The input channels of `uid`'s windows, latest last.
-    fn channels_of(&self, uid: u32) -> Vec<i32> {
-        let windows = self.windows.windows.lock().unwrap();
-        let mut of_uid: Vec<_> = windows.values().filter(|w| w.uid == uid).map(|w| (w.id, w.channel)).collect();
-        of_uid.sort();
-        of_uid.into_iter().map(|(_, channel)| channel).collect()
-    }
-
-    /// `uid`'s latest window takes the input focus.
-    pub(super) fn focus_window_of(&self, uid: u32) -> Result<(), String> {
-        match self.channels_of(uid).last() {
-            Some(channel) => self.focus_input_channel(*channel).map_err(|e| format!("{e:?}")),
-            None => Ok(()),
+    /// The windows of task `id` come to the front, earlier first, and its
+    /// latest takes the input focus.
+    pub(super) fn raise_windows_of(&self, id: i32) -> Result<(), String> {
+        let channels: Vec<i32> = {
+            let windows = self.windows.windows.lock().unwrap();
+            let mut of_task: Vec<_> = windows.values().filter(|w| w.task == Some(id)).map(|w| (w.id, w.channel)).collect();
+            of_task.sort();
+            of_task.into_iter().map(|(_, channel)| channel).collect()
+        };
+        for channel in channels {
+            self.focus_input_channel(channel).map_err(|e| format!("{e:?}"))?;
         }
+        Ok(())
     }
 
-    /// `uid`'s windows laid out again in their task's bounds `task`,
-    /// parents before their sub-windows: each one's `IWindow` and frames.
-    fn relayout_windows_of(&self, uid: u32, task: Rect) -> Result<Vec<(u32, Frames)>, String> {
+    /// The windows of task `id` laid out again in its bounds `task`,
+    /// parents before their sub-windows: each one's `IWindow`, frames, uid
+    /// and pid.
+    fn relayout_windows_of(&self, id: i32, task: Rect) -> Result<Vec<(u32, Frames, u32, i32)>, String> {
+        let freeform = self.tasks.window_mode();
         let mut windows = self.windows.windows.lock().unwrap();
-        let mut of_uid: Vec<(u32, u32)> = windows.iter().filter(|(_, w)| w.uid == uid).map(|(h, w)| (w.id, *h)).collect();
-        of_uid.sort();
+        let mut of_task: Vec<(u32, u32)> = windows.iter().filter(|(_, w)| w.task == Some(id)).map(|(h, w)| (w.id, *h)).collect();
+        of_task.sort();
         let mut laid = Vec::new();
-        for (_, handle) in of_uid {
+        for (_, handle) in of_task {
             let attached = windows.get(&handle).and_then(|w| w.parent).and_then(|p| windows.get(&p)).map(|p| p.frames.frame);
             let w = windows.get_mut(&handle).unwrap();
-            w.frames = window_layout::compute_frames(&w.attrs, task, attached, w.task.is_some(), w.requested);
+            w.frames = window_layout::compute_frames(&w.attrs, task, attached, freeform, w.requested);
             self.place_window(w, task)?;
-            laid.push((handle, w.frames));
+            laid.push((handle, w.frames, w.uid, w.pid));
         }
         Ok(laid)
     }
 
-    /// `uid`'s task moved to `frame`: its windows with it.
-    pub(super) fn move_windows_of(&self, uid: u32, frame: Rect) -> Result<(), String> {
-        self.relayout_windows_of(uid, frame).map(|_| ())
+    /// Task `id` moved to `frame`: its windows with it.
+    pub(super) fn move_windows_of(&self, id: i32, frame: Rect) -> Result<(), String> {
+        self.relayout_windows_of(id, frame).map(|_| ())
     }
 
-    /// The items that tell `uid`'s windows their task took `frame`, on a
-    /// display of the global configuration `global`.
-    pub(super) fn resize_windows(&self, uid: u32, global: &Configuration, frame: Rect) -> Result<Vec<Box<dyn Item>>, String> {
+    /// The items that tell the windows of task `id` it took `frame`, each
+    /// on a display of its uid's global configuration in `globals`, each
+    /// with its process's start.
+    pub(super) fn resize_windows(&self, id: i32, globals: &HashMap<u32, Configuration>, frame: Rect) -> Result<ProcessItems, String> {
         let display = self.display().map_err(|e| format!("{e:?}"))?.0.clone();
-        let mut config = global.of_freeform_task(frame);
-        config.window.activity_type = 1;
-        let laid = self.relayout_windows_of(uid, frame)?;
+        let laid = self.relayout_windows_of(id, frame)?;
+        let laid: Vec<_> = laid.into_iter().filter_map(|(window, frames, uid, pid)| Some((window, frames, globals.get(&uid)?, self.start_of_pid(pid)?))).collect();
         let mut windows = self.windows.windows.lock().unwrap();
         Ok(laid
             .into_iter()
-            .filter_map(|(window, frames)| {
+            .filter_map(|(window, frames, global, start_seq)| {
                 let w = windows.get_mut(&window)?;
                 w.frames_seq += 1;
                 w.insets_seq += 1;
-                Some(Box::new(WindowStateResizeItem {
+                let mut config = global.of_freeform_task(frame);
+                config.window.activity_type = 1;
+                Some((start_seq, Box::new(WindowStateResizeItem {
                     window: Binder::Handle(window),
                     frames,
                     task: frame,
@@ -509,8 +514,8 @@ impl super::AppHost {
                     frames_seq: w.frames_seq,
                     insets_seq: w.insets_seq,
                     global: global.clone(),
-                    config: config.clone(),
-                }) as Box<dyn Item>)
+                    config,
+                }) as Box<dyn Item>))
             })
             .collect())
     }
