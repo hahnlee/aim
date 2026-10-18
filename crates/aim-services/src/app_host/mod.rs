@@ -2718,6 +2718,30 @@ impl Service for Activity {
                     p
                 }))
             }
+            am::REGISTER_UID_OBSERVER_FOR_UIDS => {
+                let args = am::RegisterUidObserverForUids::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.register_uid_observer_for_uids(call, args.observer, args.which, args.cutpoint, args.calling_package.as_deref(), args.uids).map(|token| {
+                    let mut p = Parcel::new();
+                    am::write_register_uid_observer_for_uids_reply(&mut p, Some(token));
+                    p
+                }))
+            }
+            am::ADD_UID_TO_OBSERVER => {
+                let args = am::AddUidToObserver::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.change_observer_uids(call, args.observer_token, args.calling_package.as_deref(), args.uid, true).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_add_uid_to_observer_reply(&mut p);
+                    p
+                }))
+            }
+            am::REMOVE_UID_FROM_OBSERVER => {
+                let args = am::RemoveUidFromObserver::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.change_observer_uids(call, args.observer_token, args.calling_package.as_deref(), args.uid, false).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_remove_uid_from_observer_reply(&mut p);
+                    p
+                }))
+            }
             am::UNREGISTER_UID_OBSERVER => {
                 let args = am::UnregisterUidObserver::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.0.unregister_uid_observer(args.observer);
