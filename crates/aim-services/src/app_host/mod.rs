@@ -22,6 +22,7 @@ pub mod audio_permissions;
 pub mod audio_policy;
 pub mod audio_service;
 pub mod battery_service;
+pub mod battery_stats;
 pub mod bind;
 pub mod broadcasts;
 pub mod compat;
@@ -312,6 +313,7 @@ pub struct AppHost {
     power_service: OnceLock<Arc<power_service::PowerManager>>,
     alarm_service: OnceLock<Arc<alarm_service::AlarmManager>>,
     battery_service: OnceLock<Arc<battery_service::BatteryService>>,
+    battery_stats: OnceLock<Arc<battery_stats::BatteryStats>>,
     connectivity_service: OnceLock<Arc<connectivity_service::ConnectivityService>>,
     job_scheduler: OnceLock<Arc<job_scheduler::JobScheduler>>,
     /// What DevicePolicyManagerService persisted, read once.
@@ -370,6 +372,7 @@ impl AppHost {
             power_service: OnceLock::new(),
             alarm_service: OnceLock::new(),
             battery_service: OnceLock::new(),
+            battery_stats: OnceLock::new(),
             connectivity_service: OnceLock::new(),
             job_scheduler: OnceLock::new(),
             device_policies: OnceLock::new(),
@@ -483,6 +486,7 @@ impl AppHost {
                         .clone(),
                 )),
             ),
+            ("batterystats", self.battery_stats.get_or_init(|| Arc::new(battery_stats::BatteryStats::new(self))).clone()),
             (
                 "jobscheduler",
                 self.job_scheduler.get_or_init(|| job_scheduler::JobScheduler::new(self.clone())).clone(),
