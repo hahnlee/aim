@@ -9,8 +9,13 @@
 //! A notification is kept as the app wrote it, its parts the system
 //! changes (`fixNotification`: flags, the allowlist token, removed extras
 //! and actions, a full-screen intent the app may not use) changed in its
-//! parcel. What the original does that this does not: notifications of
-//! foreground services and jobs (none run in the app host), zen (DND)
+//! parcel. A foreground service's notification (ActivityManager's policy
+//! for it, `applyForegroundServiceNotification`) keeps its flag, cannot be
+//! cleared or auto-cancelled, is not counted against its app's limit, and
+//! raises a minimal or blocked channel to low; ActivityManager posts,
+//! cancels and unflags it as the system. What the original does that this
+//! does not: notifications of user-initiated jobs (none run in the app
+//! host), zen (DND)
 //! filtering beyond the manual rule, ranking by `NotificationComparator`
 //! (listeners get posting order), autogrouping, snoozing, toasts, app
 //! `NotificationListenerService`s and assistants, and the
@@ -24,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use aim_android_xml::{Element, Node};
-use aim_binder_host::local::{Call, Reply, Service, Strong};
+use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
 use aim_binder_host::parcel::{
     BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception,
     Parcel, Reader,
@@ -38,6 +43,7 @@ use super::notification_channels::{
     CHANNEL_CLASS, Channel, DEFAULT_CHANNEL_ID, Defaults, GROUP_CLASS, Group, GroupParcel,
     IMPORTANCE_NONE, IMPORTANCE_UNSPECIFIED, Preferences, SYSTEM_RESERVED_IDS,
 };
+use super::services::FgsPolicy;
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::clip::Raw;
 use crate::notifications::parcels::{
@@ -56,6 +62,9 @@ const FLAG_NO_DISMISS: i32 = 0x2000;
 const FLAG_FSI_REQUESTED_BUT_DENIED: i32 = 0x4000;
 const FLAG_USER_INITIATED_JOB: i32 = 0x8000;
 const FLAG_LIFETIME_EXTENDED_BY_DIRECT_REPLY: i32 = 0x10000;
+/// `Notification.FOREGROUND_SERVICE_IMMEDIATE`, `FOREGROUND_SERVICE_DEFERRED`.
+const FOREGROUND_SERVICE_IMMEDIATE: i32 = 1;
+const FOREGROUND_SERVICE_DEFERRED: i32 = 2;
 /// `Notification.DEFAULT_SOUND`, `DEFAULT_VIBRATE`.
 const DEFAULT_SOUND: i32 = 1;
 const DEFAULT_VIBRATE: i32 = 2;
@@ -134,12 +143,13 @@ impl Files for NoFiles {
 }
 
 /// A notification's parcel, its binders held.
+#[derive(Clone)]
 struct Kept {
     raw: Raw,
     /// Where its allowlist token and flags are.
     token_at: usize,
     flags_at: usize,
-    _binders: Vec<Strong>,
+    _binders: Arc<Vec<Strong>>,
 }
 
 /// `NotificationRecord`: a posted notification.
@@ -687,58 +697,63 @@ impl NotificationManager {
             )));
         };
         let op_package = op_package.unwrap_or_else(|| package.clone());
-        let start = r.position();
-        let mut n = parcels::Notification::default();
-        let read = parcels::read_notification(r, &NoFiles, &mut n);
-        if read.is_err() || !n.complete {
-            return Err(unsupported("a notification this service cannot read"));
-        }
-        let raw = Raw::capture(r, start);
+        let incoming = Incoming::read(r, &self.host.process)?;
         let incoming_user = r.read_i32().map_err(bad)?;
-        let calling_uid = call.sender_euid as i32;
-        let user = self.host.incoming_user(calling_uid, incoming_user, true)?;
-        let uid = self.notification_uid(&op_package, &package, calling_uid, user)?;
+        self.enqueue_internal(Enqueue {
+            package,
+            op_package,
+            calling_uid: call.sender_euid as i32,
+            pid: call.sender_pid,
+            tag,
+            id,
+            notification: incoming,
+            incoming_user,
+        })
+    }
+
+    /// `enqueueNotificationInternal`, of an app's notification or of a
+    /// foreground service's (`NotificationManagerInternal
+    /// .enqueueNotification`, which ActivityManager posts as the app).
+    pub(super) fn enqueue_internal(&self, e: Enqueue) -> Result<(), Exception> {
+        let user = self.host.incoming_user(e.calling_uid, e.incoming_user, true)?;
+        let uid = self.notification_uid(&e.op_package, &e.package, e.calling_uid, user)?;
+        let mut n = e.notification.n.clone();
         if n.allowlist_token.is_some_and(|t| t != self.token) {
             return Err(Exception::security(format!(
-                "Unexpected allowlist token received from {calling_uid}"
+                "Unexpected allowlist token received from {}",
+                e.calling_uid
             )));
         }
-        // Positions in the notification's own parcel.
-        let mut layout = n.layout.clone();
-        for at in [
-            &mut layout.token,
-            &mut layout.content_intent,
-            &mut layout.flags,
-            &mut layout.full_screen_intent,
-            &mut layout.extras,
-            &mut layout.actions,
-        ] {
-            *at -= start;
-        }
-        for at in &mut layout.null_actions {
-            *at -= start;
-        }
-        n.layout = layout;
-        let target_sdk = self.target_sdk(&package)?;
-        let fixes = self.fixes(&n, &package, uid, target_sdk)?;
-        let (mut raw, flags_at) = apply(raw, &mut n, &fixes)?;
+        // ActivityManager's policy for a foreground service's
+        // notification, asked outside the service's locks.
+        let policy = self.host.apply_foreground_service_notification(&e.notification, e.tag.as_deref(), e.id, &e.package, user);
+        let target_sdk = self.target_sdk(&e.package)?;
+        let fixes = self.fixes(&n, &e.package, uid, target_sdk, policy != FgsPolicy::NotForegroundService)?;
+        let (raw, flags_at) = apply(e.notification.raw.clone(), &mut n, &fixes)?;
         let process = &self.host.process;
-        raw.keep_files(&|fd| process.file(fd))
-            .map_err(|_| Exception::illegal_argument("a notification's file"))?;
         let binders = raw.handles().map(|h| process.strong(h)).collect();
         let kept = Kept {
             raw,
             token_at: n.layout.token,
             flags_at,
-            _binders: binders,
+            _binders: Arc::new(binders),
         };
+        if policy == FgsPolicy::UpdateOnly {
+            // Posted only as an update of what shows; the service posts it
+            // once its deferral ends.
+            let key = key(user, &e.package, e.id, e.tag.as_deref(), uid);
+            if !self.state()?.as_ref().unwrap().records.iter().any(|r| r.key == key) {
+                self.host.foreground_service_notification_updated(false, e.id, &e.package, user);
+                return Ok(());
+            }
+        }
         self.post(Post {
-            package,
-            op_package,
-            tag,
-            id,
+            package: e.package,
+            op_package: e.op_package,
+            tag: e.tag,
+            id: e.id,
             uid,
-            pid: call.sender_pid,
+            pid: e.pid,
             user,
             target_sdk,
             notification: n,
@@ -746,14 +761,15 @@ impl NotificationManager {
         })
     }
 
-    /// `fixNotification`, in the notification's parcel `raw`.
-    /// `fixNotification`'s decisions of a notification of `package`.
+    /// `fixNotification`'s decisions of a notification of `package`, a
+    /// foreground service's or not (`fgs`, ActivityManager's policy).
     fn fixes(
         &self,
         n: &parcels::Notification,
         package: &str,
         uid: i32,
         target_sdk: i32,
+        fgs: bool,
     ) -> Result<Fixes, Exception> {
         let held = |p: &str| self.host.check_permission(Some(p), uid).map(|r| r == 0);
         let style = n.extras.template.as_deref();
@@ -763,8 +779,18 @@ impl NotificationManager {
             return Err(unsupported("a CallStyle notification"));
         }
         let mut flags = n.flags;
-        // No foreground service or user-initiated job runs in the app host.
-        flags &= !(FLAG_FOREGROUND_SERVICE | FLAG_USER_INITIATED_JOB);
+        // A foreground service's notification is flagged as one
+        // (`applyForegroundServiceNotificationLocked`), any other not. No
+        // user-initiated job runs in the app host.
+        if fgs {
+            flags |= FLAG_FOREGROUND_SERVICE;
+        } else {
+            flags &= !FLAG_FOREGROUND_SERVICE;
+        }
+        flags &= !FLAG_USER_INITIATED_JOB;
+        if flags & (FLAG_FOREGROUND_SERVICE | FLAG_USER_INITIATED_JOB) != 0 {
+            flags &= !FLAG_AUTO_CANCEL;
+        }
         flags &= !FLAG_LIFETIME_EXTENDED_BY_DIRECT_REPLY;
         // canBeNonDismissible: a media notification, or the default search
         // selector's; there are no enterprise admins.
@@ -919,6 +945,75 @@ impl NotificationManager {
         }
         let mut kept = p.kept;
         kept.raw.set_i32(kept.flags_at, n.flags);
+        // NotificationRecord: its importance, sound and vibration.
+        let mut channel = channel;
+        let pre_channels = channel.id == DEFAULT_CHANNEL_ID && p.target_sdk < O;
+        let user_importance = channel.user_locked_fields & USER_LOCKED_IMPORTANCE != 0;
+        let sound = if pre_channels && channel.user_locked_fields & USER_LOCKED_SOUND == 0 {
+            n.defaults & DEFAULT_SOUND != 0 || n.sound
+        } else {
+            channel.sound.is_some()
+        };
+        let vibration = if pre_channels && channel.user_locked_fields & USER_LOCKED_VIBRATION == 0 {
+            n.defaults & DEFAULT_VIBRATE != 0 || n.vibrate
+        } else {
+            channel.vibration_enabled
+        };
+        let noisy = sound || vibration;
+        let (mut importance, mut explanation) =
+            if pre_channels && (channel.importance == IMPORTANCE_UNSPECIFIED || !user_importance) {
+                let priority = if n.flags & FLAG_HIGH_PRIORITY != 0 {
+                    2
+                } else {
+                    n.priority.clamp(-2, 2)
+                };
+                let mut requested = match priority {
+                    -2 => IMPORTANCE_MIN,
+                    -1 => IMPORTANCE_LOW,
+                    0 => IMPORTANCE_DEFAULT,
+                    _ => IMPORTANCE_HIGH,
+                };
+                if !noisy && requested > IMPORTANCE_LOW {
+                    requested = IMPORTANCE_LOW;
+                }
+                if noisy && requested < IMPORTANCE_DEFAULT {
+                    requested = IMPORTANCE_DEFAULT;
+                }
+                if n.full_screen_intent.is_some() {
+                    requested = IMPORTANCE_HIGH;
+                }
+                (requested, "app")
+            } else {
+                (
+                    channel.importance,
+                    if user_importance { "user" } else { "app" },
+                )
+            };
+        // A foreground service's or job's notification of a minimal or
+        // blocked importance is raised to low, unless the user chose it
+        // after the channel showed one.
+        let fgs_or_uij = n.flags & (FLAG_FOREGROUND_SERVICE | FLAG_USER_INITIATED_JOB) != 0;
+        if fgs_or_uij {
+            if (!user_importance || !channel.user_visible_task_shown)
+                && matches!(importance, IMPORTANCE_MIN | IMPORTANCE_NONE)
+            {
+                channel.importance = IMPORTANCE_LOW;
+                (importance, explanation) = (IMPORTANCE_LOW, "system");
+                if !channel.user_visible_task_shown {
+                    channel.user_locked_fields &= !USER_LOCKED_IMPORTANCE;
+                    channel.user_visible_task_shown = true;
+                }
+                state
+                    .prefs
+                    .update_channel(&p.package, p.uid, &mut channel)
+                    .map_err(channel_error)?;
+                Self::save(state)?;
+            } else if !channel.user_visible_task_shown
+                && n.channel_id.as_deref().is_some_and(|c| !c.is_empty() && c != DEFAULT_CHANNEL_ID)
+            {
+                channel.user_visible_task_shown = true;
+            }
+        }
         // checkDisqualifyingFeatures.
         let system = is_system(p.uid) || p.package == "android";
         let exists = state.records.iter().any(|r| r.key == key);
@@ -933,12 +1028,13 @@ impl NotificationManager {
                 );
                 return Ok(());
             }
+            // A foreground service's or job's is not counted against it.
             let count = state
                 .records
                 .iter()
                 .filter(|r| r.package == p.package && r.user == p.user && r.key != key)
                 .count();
-            if count >= MAX_PACKAGE_NOTIFICATIONS {
+            if !fgs_or_uij && count >= MAX_PACKAGE_NOTIFICATIONS {
                 eprintln!(
                     "app host: notification: Package has already posted or enqueued {count} notifications.  Not showing more.  package={}",
                     p.package
@@ -972,55 +1068,22 @@ impl NotificationManager {
                 .or_default()
                 .update(elapsed_ms());
         }
-        // NotificationRecord: its importance, sound and vibration.
-        let pre_channels = channel.id == DEFAULT_CHANNEL_ID && p.target_sdk < O;
-        let user_importance = channel.user_locked_fields & USER_LOCKED_IMPORTANCE != 0;
-        let sound = if pre_channels && channel.user_locked_fields & USER_LOCKED_SOUND == 0 {
-            n.defaults & DEFAULT_SOUND != 0 || n.sound
-        } else {
-            channel.sound.is_some()
-        };
-        let vibration = if pre_channels && channel.user_locked_fields & USER_LOCKED_VIBRATION == 0 {
-            n.defaults & DEFAULT_VIBRATE != 0 || n.vibrate
-        } else {
-            channel.vibration_enabled
-        };
-        let noisy = sound || vibration;
-        let (importance, explanation) =
-            if pre_channels && (channel.importance == IMPORTANCE_UNSPECIFIED || !user_importance) {
-                let priority = if n.flags & FLAG_HIGH_PRIORITY != 0 {
-                    2
-                } else {
-                    n.priority.clamp(-2, 2)
-                };
-                let mut requested = match priority {
-                    -2 => IMPORTANCE_MIN,
-                    -1 => IMPORTANCE_LOW,
-                    0 => IMPORTANCE_DEFAULT,
-                    _ => IMPORTANCE_HIGH,
-                };
-                if !noisy && requested > IMPORTANCE_LOW {
-                    requested = IMPORTANCE_LOW;
-                }
-                if noisy && requested < IMPORTANCE_DEFAULT {
-                    requested = IMPORTANCE_DEFAULT;
-                }
-                if n.full_screen_intent.is_some() {
-                    requested = IMPORTANCE_HIGH;
-                }
-                (requested, "app")
-            } else {
-                (
-                    channel.importance,
-                    if user_importance { "user" } else { "app" },
-                )
-            };
         let old = state.records.iter().position(|r| r.key == key);
-        // isVisuallyInterruptive, of the texts it compares.
+        if let Some(at) = old {
+            // A foreground service's notification stays one when updated.
+            n.flags |= state.records[at].parsed.flags & FLAG_FOREGROUND_SERVICE;
+        }
+        if n.flags & FLAG_FOREGROUND_SERVICE != 0 {
+            n.flags |= FLAG_NO_CLEAR;
+        }
+        kept.raw.set_i32(kept.flags_at, n.flags);
+        // isVisuallyInterruptive, of the texts it compares; a foreground
+        // service's or job's update is not.
         let text_changed = old.is_none_or(|at| {
             let o = &state.records[at].parsed.extras;
             let e = &n.extras;
-            n.flags & parcels::FLAG_ONLY_ALERT_ONCE == 0
+            n.flags & (FLAG_FOREGROUND_SERVICE | FLAG_USER_INITIATED_JOB) == 0
+                && n.flags & parcels::FLAG_ONLY_ALERT_ONCE == 0
                 && (o.title != e.title
                     || o.text != e.text
                     || o.big_text != e.big_text
@@ -1068,6 +1131,57 @@ impl NotificationManager {
                 self.cancel_children(state, &package, user, &group, REASON_GROUP_SUMMARY_CANCELED);
             }
         }
+        self.notify_posted(state, at);
+        // maybeReportForegroundServiceUpdate, outside the lock.
+        let r = &state.records[at];
+        let fgs = (r.parsed.flags & FLAG_FOREGROUND_SERVICE != 0).then(|| (r.id, r.package.clone(), r.user));
+        drop(guard);
+        if let Some((id, package, user)) = fgs {
+            self.host.foreground_service_notification_updated(true, id, &package, user);
+        }
+        Ok(())
+    }
+
+    /// `NotificationManagerInternal.cancelNotification` of a foreground
+    /// service's notification, as the system.
+    pub(super) fn cancel_foreground_service_notification(&self, package: &str, id: i32, user: i32) -> Result<(), Exception> {
+        let mut guard = self.state()?;
+        self.cancel(
+            guard.as_mut().unwrap(),
+            &Cancel {
+                package: Some(package),
+                tag: Some(None),
+                id: Some(id),
+                channel: None,
+                must_have: 0,
+                must_not_have: 0,
+                user,
+                reason: REASON_APP_CANCEL,
+            },
+        );
+        Ok(())
+    }
+
+    /// `removeForegroundServiceFlagFromNotification`: the notification of
+    /// a service no longer foreground loses its flag, its listeners told,
+    /// or goes if the package is over its count.
+    pub(super) fn remove_foreground_service_flag(&self, package: &str, id: i32, user: i32) -> Result<(), Exception> {
+        let mut guard = self.state()?;
+        let state = guard.as_mut().unwrap();
+        let count = state.records.iter().filter(|r| r.package == package && r.user == user).count();
+        let Some(at) = state.records.iter().position(|r| r.package == package && r.tag.is_none() && r.id == id && r.user == user) else {
+            return Ok(());
+        };
+        if count > MAX_PACKAGE_NOTIFICATIONS {
+            let r = state.records.remove(at);
+            self.notify_removed(state, &r, REASON_APP_CANCEL);
+            return Ok(());
+        }
+        let r = &mut state.records[at];
+        r.parsed.flags &= !FLAG_FOREGROUND_SERVICE;
+        let mut kept = Kept::clone(&r.notification);
+        kept.raw.set_i32(kept.flags_at, r.parsed.flags);
+        r.notification = Arc::new(kept);
         self.notify_posted(state, at);
         Ok(())
     }
@@ -1493,6 +1607,14 @@ impl NotificationManager {
         })
     }
 
+    /// `NotificationManagerInternal.getNotificationChannel`: whether
+    /// `package` of `uid` has the channel `id` (the default one for none).
+    pub(super) fn has_channel(&self, package: &str, uid: i32, id: Option<&str>) -> Result<bool, Exception> {
+        self.with_prefs(|state, defaults| {
+            Ok(state.prefs.conversation_channel(package, uid, id, None, true, false, defaults).is_some())
+        })
+    }
+
     fn delete_channel(&self, call: &Call<'_>, package: &str, id: &str) -> Result<(), Exception> {
         let uid = call.sender_euid as i32;
         self.check_system_or_same_app(uid, package)?;
@@ -1577,6 +1699,96 @@ impl NotificationManager {
         );
         Ok(p)
     }
+}
+
+/// A notification as its sender parcelled it, its binders and files
+/// held: what was read of it, and its parcel (which its layout is in).
+#[derive(Clone)]
+pub(super) struct Incoming {
+    n: parcels::Notification,
+    raw: Raw,
+    _binders: Arc<Vec<Strong>>,
+}
+
+impl Incoming {
+    /// `Notification(Parcel)`, read from `r` after its parcelable's
+    /// presence, the binders and files of it held in `process`.
+    pub(super) fn read(r: &mut Reader<'_>, process: &LocalProcess) -> Result<Incoming, Exception> {
+        let start = r.position();
+        let mut n = parcels::Notification::default();
+        let read = parcels::read_notification(r, &NoFiles, &mut n);
+        if read.is_err() || !n.complete {
+            return Err(unsupported("a notification this service cannot read"));
+        }
+        let mut raw = Raw::capture(r, start);
+        // Positions in the notification's own parcel.
+        let layout = &mut n.layout;
+        for at in [
+            &mut layout.token,
+            &mut layout.content_intent,
+            &mut layout.flags,
+            &mut layout.full_screen_intent,
+            &mut layout.extras,
+            &mut layout.actions,
+        ] {
+            *at -= start;
+        }
+        for at in &mut layout.null_actions {
+            *at -= start;
+        }
+        raw.keep_files(&|fd| process.file(fd))
+            .map_err(|_| Exception::illegal_argument("a notification's file"))?;
+        let binders = raw.handles().map(|h| process.strong(h)).collect();
+        Ok(Incoming { n, raw, _binders: Arc::new(binders) })
+    }
+
+    /// It flagged `FLAG_FOREGROUND_SERVICE`.
+    pub(super) fn foreground_service(&self) -> Incoming {
+        let mut fgs = self.clone();
+        fgs.n.flags |= FLAG_FOREGROUND_SERVICE;
+        fgs.raw.set_i32(fgs.n.layout.flags, fgs.n.flags);
+        fgs
+    }
+
+    pub(super) fn has_small_icon(&self) -> bool {
+        self.n.small_icon.is_some()
+    }
+
+    pub(super) fn channel_id(&self) -> Option<&str> {
+        self.n.channel_id.as_deref()
+    }
+
+    /// `Notification.isForegroundDisplayForceDeferred`.
+    pub(super) fn force_deferred(&self) -> bool {
+        self.n.fgs_defer_behavior == FOREGROUND_SERVICE_DEFERRED
+    }
+
+    /// `Notification.shouldShowForegroundImmediately`: asked to, or not
+    /// asked to defer and a media notification, a call's, navigation's or
+    /// one with actions.
+    pub(super) fn show_foreground_immediately(&self) -> bool {
+        let n = &self.n;
+        match n.fgs_defer_behavior {
+            FOREGROUND_SERVICE_IMMEDIATE => true,
+            FOREGROUND_SERVICE_DEFERRED => false,
+            _ => {
+                let media = n.extras.template.as_deref().is_some_and(|s| MEDIA_STYLES.contains(&s)) && n.extras.media_session;
+                media || matches!(n.category.as_deref(), Some("call" | "navigation")) || !n.actions.is_empty()
+            }
+        }
+    }
+}
+
+/// What `enqueue_internal` enqueues.
+pub(super) struct Enqueue {
+    pub package: String,
+    pub op_package: String,
+    pub calling_uid: i32,
+    pub pid: i32,
+    pub tag: Option<String>,
+    pub id: i32,
+    pub notification: Incoming,
+    pub incoming_user: i32,
 }
 
 /// What `post` posts.
@@ -2075,8 +2287,28 @@ mod tests {
             raw,
             token_at,
             flags_at,
-            _binders: Vec::new(),
+            _binders: Arc::default(),
         })
+    }
+
+    /// A foreground service's notification is flagged in its parcel; one
+    /// with actions shows at once unless the app forces its deferral.
+    #[test]
+    fn a_foreground_service_notification_is_flagged_and_shown_as_the_original_shows_it() {
+        let (raw, n) = builder_notification();
+        let incoming = Incoming { n, raw, _binders: Arc::default() };
+        let fgs = incoming.foreground_service();
+        let (_, flagged) = read(&fgs.raw);
+        assert_eq!(flagged.flags, incoming.n.flags | FLAG_FOREGROUND_SERVICE);
+        assert!(incoming.show_foreground_immediately());
+        let mut deferred = incoming.clone();
+        deferred.n.fgs_defer_behavior = FOREGROUND_SERVICE_DEFERRED;
+        assert!(deferred.force_deferred() && !deferred.show_foreground_immediately());
+        let mut plain = incoming.clone();
+        plain.n.actions.clear();
+        assert!(!plain.show_foreground_immediately());
+        plain.n.category = Some("navigation".into());
+        assert!(plain.show_foreground_immediately());
     }
 
     #[test]

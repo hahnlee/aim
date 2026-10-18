@@ -43,6 +43,8 @@ const MODIFY_AUDIO_SETTINGS: &str = "android.permission.MODIFY_AUDIO_SETTINGS";
 const MODIFY_AUDIO_ROUTING: &str = "android.permission.MODIFY_AUDIO_ROUTING";
 const MODIFY_PHONE_STATE: &str = "android.permission.MODIFY_PHONE_STATE";
 const QUERY_AUDIO_STATE: &str = "android.permission.QUERY_AUDIO_STATE";
+/// `AudioSystem.MODE_NORMAL`.
+const MODE_NORMAL: i32 = 0;
 const REMOTE_AUDIO_PLAYBACK: &str = "android.permission.REMOTE_AUDIO_PLAYBACK";
 const CHANGE_ACCESSIBILITY_VOLUME: &str = "android.permission.CHANGE_ACCESSIBILITY_VOLUME";
 const BLUETOOTH_PRIVILEGED: &str = "android.permission.BLUETOOTH_PRIVILEGED";
@@ -843,6 +845,12 @@ impl Service for AudioService {
                 }
                 let uids = host.playback.lock().unwrap().ducked_uids().into_iter().map(ParcelValue::Integer).collect();
                 audio::write_get_focus_ducked_uids_for_test_reply(&mut p, &Some(uids));
+            }
+            // `getMode`: the mode owner's (`getAudioModeOwnerHandler`); the
+            // app host takes no `setMode`, so no app owns the mode.
+            audio::GET_MODE => {
+                audio::GetMode::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                audio::write_get_mode_reply(&mut p, MODE_NORMAL);
             }
             audio::SET_RINGTONE_PLAYER => {
                 let a = audio::SetRingtonePlayer::read(&mut call.data).map_err(|_| BAD_VALUE)?;

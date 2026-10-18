@@ -344,6 +344,12 @@ impl AppHost {
         Ok(())
     }
 
+    /// The uid that made the PendingIntent `target`, if it is the app
+    /// host's (`PendingIntentRecord.uid`).
+    pub(super) fn intent_sender_uid(&self, target: Binder) -> Option<i32> {
+        self.pending_intents.records.lock().unwrap().iter().find(|r| r.binder == target).map(|r| r.uid)
+    }
+
     /// `getInfoForIntentSender`.
     pub(super) fn intent_sender_info(&self, target: Option<Binder>) -> impl WriteParcelable {
         let records = self.pending_intents.records.lock().unwrap();
@@ -577,14 +583,8 @@ impl AppHost {
                 }
             }
             INTENT_SENDER_SERVICE | INTENT_SENDER_FOREGROUND_SERVICE => {
-                if kind == INTENT_SENDER_FOREGROUND_SERVICE {
-                    return Err(self.unimplemented_named(
-                        "activity",
-                        "a foreground service's PendingIntent (#1492)",
-                    ));
-                }
-                if let Err(e) = self.start_service(None, uid, final_intent.clone(), resolved, user)
-                {
+                let foreground = kind == INTENT_SENDER_FOREGROUND_SERVICE;
+                if let Err(e) = self.start_service(None, uid, final_intent.clone(), resolved, foreground, Some(&package), user) {
                     eprintln!(
                         "app host: a PendingIntent's service of {package}: {}",
                         e.message
