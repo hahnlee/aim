@@ -16,6 +16,7 @@ pub mod activity_stack;
 pub mod activity_start;
 pub mod alarm_service;
 pub mod appops_service;
+pub mod audio_focus;
 pub mod audio_policy;
 pub mod audio_service;
 pub mod battery_service;
@@ -280,6 +281,8 @@ pub struct AppHost {
     volumes: Mutex<Option<volume::Volumes>>,
     /// The players and recorders apps made.
     playback: Mutex<playback::Playback>,
+    /// The audio focus stack, locked before the players.
+    focus: Mutex<audio_focus::Focus<Strong, (Strong, u64)>>,
 }
 
 /// A content provider an app's process published
@@ -333,6 +336,7 @@ impl AppHost {
             audio_policy: OnceLock::new(),
             volumes: Mutex::new(None),
             playback: Mutex::default(),
+            focus: Mutex::default(),
         })
     }
 
@@ -748,6 +752,11 @@ impl AppHost {
         );
         app.thread = Some(strong);
         Ok(())
+    }
+
+    /// Whether `uid` has a process (each of which is top).
+    fn uid_running(&self, uid: i32) -> bool {
+        self.apps.lock().unwrap().values().any(|a| a.uid as i32 == uid)
     }
 
     /// The process of `start_seq`, `pid`, died: what it had goes.

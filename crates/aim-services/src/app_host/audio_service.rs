@@ -6,17 +6,30 @@
 //! effects' attenuation while `Settings.System.SOUND_EFFECTS_ENABLED` is
 //! set and the system stream is not muted. Volume hardening blocks nothing: AudioService
 //! enables it only on a test's request (`setEnableHardening`).
+//!
+//! Audio focus ([`super::audio_focus`]) with AudioService's checks of a
+//! request: a system usage's permission, a lock only for the call's
+//! client with MODIFY_PHONE_STATE (no audio policy registers to lock it),
+//! and the focus hardening of an app without MODIFY_AUDIO_SETTINGS_PRIVILEGED
+//! or MODIFY_AUDIO_ROUTING (`HardeningEnforcer.blockFocusMethod`): one of
+//! an SDK from Vanilla Ice Cream whose TAKE_AUDIO_FOCUS op is not allowed
+//! fails; CONTROL_AUDIO, which the original also notes, decides only with
+//! all hardening on. An accessibility request forces a duck only for root,
+//! as the app host runs no accessibility services.
+//! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, MutexGuard};
+use std::time::Duration;
 
-use aim_binder_host::local::{Call, Reply, Service};
+use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_NULL_POINTER, Exception, Parcel};
-use aim_service_aidl::android_media_iaudioservice as audio;
+use aim_service_aidl::{ParcelValue, android_media_iaudioservice as audio};
 
+use super::audio_focus::{self, Focus, FocusInfo, Request};
 use super::audio_policy::AudioPolicy;
 use super::kept::RawBundle;
-use super::playback::{self, Attributes, PlayerIdCard};
+use super::playback::{self, Attributes, Playback, PlayerIdCard};
 use super::kept::RawIntent;
 use super::settings::Table;
 use super::volume::{self, Absolute, Config, DeviceAttributes, Effects, VolumeInfo, Volumes};
@@ -32,6 +45,22 @@ const MODIFY_PHONE_STATE: &str = "android.permission.MODIFY_PHONE_STATE";
 const QUERY_AUDIO_STATE: &str = "android.permission.QUERY_AUDIO_STATE";
 const CHANGE_ACCESSIBILITY_VOLUME: &str = "android.permission.CHANGE_ACCESSIBILITY_VOLUME";
 const BLUETOOTH_PRIVILEGED: &str = "android.permission.BLUETOOTH_PRIVILEGED";
+/// The permissions the focus calls check.
+const MODIFY_AUDIO_SETTINGS_PRIVILEGED: &str = "android.permission.MODIFY_AUDIO_SETTINGS_PRIVILEGED";
+const CALL_AUDIO_INTERCEPTION: &str = "android.permission.CALL_AUDIO_INTERCEPTION";
+/// `AudioAttributes.FLAG_CALL_REDIRECTION`, `USAGE_CALL_ASSISTANT` (the
+/// one supported system usage), `USAGE_ASSISTANCE_ACCESSIBILITY`.
+const FLAG_CALL_REDIRECTION: i32 = 1 << 16;
+const USAGE_CALL_ASSISTANT: i32 = 17;
+const USAGE_ASSISTANCE_ACCESSIBILITY: i32 = 11;
+/// `Build.VERSION_CODES.VANILLA_ICE_CREAM`.
+const VANILLA_ICE_CREAM: i32 = 35;
+/// `Process.FIRST_APPLICATION_UID`.
+const FIRST_APPLICATION_UID: i32 = 10_000;
+/// `Settings.System.MULTI_AUDIO_FOCUS_ENABLED`.
+const MULTI_AUDIO_FOCUS_ENABLED: &str = "multi_audio_focus_enabled";
+/// `IBinder.PING_TRANSACTION`.
+const PING_TRANSACTION: u32 = u32::from_be_bytes(*b"_PNG");
 /// `AudioService.STREAM_VOLUME_OPS`.
 const STREAM_VOLUME_OPS: [i32; 12] = [34, 36, 35, 36, 37, 38, 39, 36, 36, 36, 64, 36];
 /// `Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT`, `FLAG_RECEIVER_FOREGROUND`.
@@ -480,6 +509,142 @@ impl AppHost {
         self.volume_effects(effects);
         Ok(())
     }
+
+    /// Runs `f` on the focus stack and the players, then sends the
+    /// players' calls, clears the death links of the requesters released
+    /// and schedules the timers asked for.
+    fn with_focus<T>(&self, f: impl FnOnce(&mut Focus<Strong, (Strong, u64)>, &mut Playback) -> T) -> T {
+        let mut focus = self.focus.lock().unwrap();
+        let out = {
+            let mut pb = self.playback.lock().unwrap();
+            let out = f(&mut focus, &mut pb);
+            pb.send();
+            out
+        };
+        self.settle_focus(focus);
+        out
+    }
+
+    /// What `with_focus` does once the players are unlocked.
+    fn settle_focus(&self, mut focus: MutexGuard<'_, Focus<Strong, (Strong, u64)>>) {
+        for link in focus.take_released() {
+            playback::clear(&self.process, Some(link));
+        }
+        for timer in focus.take_timers() {
+            let me = self.me.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(timer.delay_ms()));
+                if let Some(host) = me.upgrade() {
+                    host.with_focus(|f, pb| f.fire(timer, pb));
+                }
+            });
+        }
+    }
+
+    /// `isValidAudioAttributesUsage`: a system usage is the supported one,
+    /// of a caller with MODIFY_AUDIO_ROUTING, or redirecting a call with
+    /// CALL_AUDIO_INTERCEPTION.
+    fn valid_focus_usage(&self, attributes: &Attributes, uid: i32) -> Result<bool, Exception> {
+        if !playback::is_system_usage(attributes.usage) {
+            return Ok(true);
+        }
+        Ok(attributes.usage == USAGE_CALL_ASSISTANT
+            && (attributes.flags() & FLAG_CALL_REDIRECTION != 0 && self.granted(CALL_AUDIO_INTERCEPTION, uid)?
+                || self.granted(MODIFY_AUDIO_ROUTING, uid)?))
+    }
+
+    /// `HardeningEnforcer.blockFocusMethod`: a caller targeting Vanilla
+    /// Ice Cream or later fails without TAKE_AUDIO_FOCUS; an empty
+    /// package is the uid's first (`getPackNameForUid`).
+    fn focus_blocked(&self, uid: i32, package: &str, sdk: i32) -> Result<bool, Exception> {
+        let package = if package.is_empty() {
+            let (state, resolution) = self.packages()?;
+            let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
+            let names = query.packages_for_uid(uid).map_err(|e| Exception::new(aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION, format!("getPackagesForUid: {}", e.0)))?;
+            names.into_iter().flatten().flatten().find(|n| !n.is_empty()).unwrap_or_else(|| format!("[{uid}]"))
+        } else {
+            package.to_string()
+        };
+        let allowed = super::appops_service::note(self, super::appops_service::OP_TAKE_AUDIO_FOCUS, uid, Some(&package))? == 0;
+        Ok(!allowed && sdk >= VANILLA_ICE_CREAM)
+    }
+
+    /// `requestAudioFocus`, then `MediaFocusControl`'s.
+    fn request_focus(&self, uid: i32, a: audio::RequestAudioFocus<Attributes>) -> Result<i32, Exception> {
+        if a.flags & audio_focus::AUDIOFOCUS_FLAG_TEST != 0 {
+            return Err(Exception::illegal_argument("Invalid test flag"));
+        }
+        if let Some(aa) = &a.aa
+            && !self.valid_focus_usage(aa, uid)?
+        {
+            return Ok(audio_focus::AUDIOFOCUS_REQUEST_FAILED);
+        }
+        if a.flags & audio_focus::AUDIOFOCUS_FLAG_LOCK != 0 {
+            if a.client_id.as_deref() == Some(audio_focus::IN_VOICE_COMM_FOCUS_ID) {
+                if !self.granted(MODIFY_PHONE_STATE, uid)? {
+                    return Ok(audio_focus::AUDIOFOCUS_REQUEST_FAILED);
+                }
+            } else if a.pcb.is_none() {
+                return Err(Exception::new(EX_NULL_POINTER, "pcb"));
+            } else {
+                // Only a registered audio policy locks focus, and none is.
+                return Ok(audio_focus::AUDIOFOCUS_REQUEST_FAILED);
+            }
+        }
+        let (Some(package), Some(client_id), Some(attributes)) = (a.calling_package_name, a.client_id, a.aa) else {
+            return Ok(audio_focus::AUDIOFOCUS_REQUEST_FAILED);
+        };
+        let overrides = self.granted(MODIFY_AUDIO_SETTINGS_PRIVILEGED, uid)? || self.granted(MODIFY_AUDIO_ROUTING, uid)? || uid < FIRST_APPLICATION_UID;
+        if !overrides && self.focus_blocked(uid, &package, a.sdk)? {
+            return Ok(audio_focus::AUDIOFOCUS_REQUEST_FAILED);
+        }
+        // `forceFocusDuckingForAccessibility`.
+        let force_duck = attributes.public_usage() == USAGE_ASSISTANCE_ACCESSIBILITY
+            && a.focus_req_type == audio_focus::AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+            && attributes.force_ducking()
+            && uid == 0;
+        let handle = |b: Option<Binder>, name: &str| match b {
+            None => Ok(None),
+            Some(Binder::Handle(h)) => Ok(Some(h)),
+            Some(Binder::Local(_)) => Err(self.unimplemented_named("audio", &format!("focus requests with a {name} of the app host's"))),
+        };
+        let Some(source) = handle(a.cb, "token")? else {
+            return Err(Exception::new(EX_NULL_POINTER, "cb"));
+        };
+        let dispatcher = handle(a.fd, "dispatcher")?.map(|h| self.process.strong(h));
+        let cb = self.process.strong(source);
+        if cb.transact(PING_TRANSACTION, &Parcel::new(), false).is_err() {
+            return Ok(audio_focus::AUDIOFOCUS_REQUEST_FAILED);
+        }
+        if self.inputs()?.settings.get(Table::System, MULTI_AUDIO_FOCUS_ENABLED).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0) != 0 {
+            return Err(self.unimplemented_named("audio", "multiple audio focus"));
+        }
+        let request = Request {
+            attributes,
+            gain: a.focus_req_type,
+            source,
+            dispatcher,
+            client_id,
+            package,
+            flags: a.flags,
+            sdk: a.sdk,
+            force_duck,
+            uid,
+        };
+        let me = self.me.clone();
+        let link = || {
+            let cookie = self.process.link_to_death(
+                &cb,
+                Box::new(move || {
+                    if let Some(host) = me.upgrade() {
+                        host.with_focus(|f, pb| f.died(source, pb));
+                    }
+                }),
+            );
+            (cb, cookie)
+        };
+        Ok(self.with_focus(|f, pb| f.request(request, link, pb)))
+    }
 }
 
 impl Service for AudioService {
@@ -524,6 +689,8 @@ impl Service for AudioService {
                 if pb.event(a.piid, a.event, &a.event_id.unwrap_or_default(), uid) {
                     pb.dispatch(a.event == 0);
                 }
+                // A player that starts while its app is ducked or faded is too.
+                pb.send();
             }
             audio::RELEASE_PLAYER => {
                 let a = audio::ReleasePlayer::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -612,6 +779,75 @@ impl Service for AudioService {
                 };
                 p.write_no_exception();
                 host.playback.lock().unwrap().write_configurations(&mut p, privileged);
+            }
+            audio::REQUEST_AUDIO_FOCUS => {
+                let a = audio::RequestAudioFocus::<Attributes>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match host.request_focus(uid, a) {
+                    Ok(result) => audio::write_request_audio_focus_reply(&mut p, result),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            audio::ABANDON_AUDIO_FOCUS => {
+                let a = audio::AbandonAudioFocus::<Attributes>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let valid = match a.aa.as_ref().map(|aa| host.valid_focus_usage(aa, uid)) {
+                    Some(Err(e)) => return reply(Err(e)),
+                    Some(Ok(valid)) => valid,
+                    None => true,
+                };
+                // Telecom's abandon waits for its mode's reset, of which
+                // none is pending: the app host sets no modes (`setMode`).
+                let result = match (valid, a.client_id) {
+                    (false, _) => audio_focus::AUDIOFOCUS_REQUEST_FAILED,
+                    (true, None) => return reply(Err(Exception::new(EX_NULL_POINTER, "clientId"))),
+                    (true, Some(client_id)) => host.with_focus(|f, pb| f.abandon(&client_id, pb)),
+                };
+                audio::write_abandon_audio_focus_reply(&mut p, result);
+            }
+            audio::UNREGISTER_AUDIO_FOCUS_CLIENT => {
+                let a = audio::UnregisterAudioFocusClient::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = host.with_focus(|f, pb| match a.client_id {
+                    Some(client_id) => {
+                        f.unregister(&client_id, pb);
+                        Ok(())
+                    }
+                    // A null client matches no entry, but compares with them.
+                    None if f.is_empty() => Ok(()),
+                    None => Err(Exception::new(EX_NULL_POINTER, "clientId")),
+                }) {
+                    return reply(Err(e));
+                }
+                audio::write_unregister_audio_focus_client_reply(&mut p);
+            }
+            audio::GET_CURRENT_AUDIO_FOCUS => {
+                audio::GetCurrentAudioFocus::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                audio::write_get_current_audio_focus_reply(&mut p, host.focus.lock().unwrap().current());
+            }
+            audio::GET_FOCUS_RAMP_TIME_MS => {
+                let a = audio::GetFocusRampTimeMs::<Attributes>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let Some(attr) = a.attr else {
+                    return reply(Err(Exception::new(EX_NULL_POINTER, "attr")));
+                };
+                audio::write_get_focus_ramp_time_ms_reply(&mut p, audio_focus::ramp_time_ms(&attr));
+            }
+            audio::GET_FOCUS_DUCKED_UIDS_FOR_TEST => {
+                audio::GetFocusDuckedUidsForTest::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match host.granted(QUERY_AUDIO_STATE, uid) {
+                    Ok(true) => {}
+                    Ok(false) => return reply(Err(Exception::security(format!("Access denied, requires: {QUERY_AUDIO_STATE}")))),
+                    Err(e) => return reply(Err(e)),
+                }
+                let uids = host.playback.lock().unwrap().ducked_uids().into_iter().map(ParcelValue::Integer).collect();
+                audio::write_get_focus_ducked_uids_for_test_reply(&mut p, &Some(uids));
+            }
+            audio::GET_FOCUS_STACK => {
+                audio::GetFocusStack::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match host.granted(MODIFY_AUDIO_ROUTING, uid) {
+                    Ok(true) => {}
+                    Ok(false) => return reply(Err(Exception::security(format!("Access denied, requires: {MODIFY_AUDIO_ROUTING}")))),
+                    Err(e) => return reply(Err(e)),
+                }
+                let infos: Vec<Option<FocusInfo>> = host.focus.lock().unwrap().infos();
+                audio::write_get_focus_stack_reply(&mut p, Some(&infos));
             }
             audio::GET_NATIVE_INTERFACE => {
                 audio::GetNativeInterface::read(&mut call.data).map_err(|_| BAD_VALUE)?;
