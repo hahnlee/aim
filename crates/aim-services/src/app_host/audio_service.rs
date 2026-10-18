@@ -18,13 +18,14 @@
 //! as the app host runs no accessibility services.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_NULL_POINTER, Exception, Parcel};
-use aim_service_aidl::{ParcelValue, android_media_iaudioservice as audio};
+use aim_service_aidl::{ParcelValue, WriteParcelable, android_media_iaudioservice as audio};
 
 use super::audio_focus::{self, Focus, FocusInfo, Request};
 use super::audio_policy::AudioPolicy;
@@ -137,6 +138,22 @@ pub struct AudioService {
     /// The ringtone player SystemUI sets (`mRingtonePlayer`): none in the
     /// app host until one is set.
     ringtone_player: Mutex<Option<Strong>>,
+    /// `AudioDeviceInventory.mRoutesObservers`, by handle: the binder and
+    /// its death link.
+    routes_observers: Arc<Mutex<HashMap<u32, (Strong, u64)>>>,
+}
+
+/// `AudioRoutesInfo`: `AudioDeviceInventory.mCurAudioRoutes`, which the
+/// connection of a wired, dock, HDMI, USB or Bluetooth device changes; the
+/// app host's one output is none of them, so the main route is the
+/// speaker (`MAIN_SPEAKER`), with no Bluetooth device.
+struct SpeakerRoute;
+
+impl WriteParcelable for SpeakerRoute {
+    fn write_to(&self, p: &mut Parcel) {
+        crate::clip::write_char_sequence(p, None);
+        p.write_i32(0);
+    }
 }
 
 impl AudioService {
@@ -149,6 +166,28 @@ impl AudioService {
             effects: std::sync::OnceLock::new(),
             native,
             ringtone_player: Mutex::new(None),
+            routes_observers: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// `startWatchingRoutes`' `mRoutesObservers.register`: kept until dead,
+    /// notified of no change, as the routes do not change.
+    fn watch_routes(&self, observer: u32) {
+        let strong = self.host.process.strong(observer);
+        let observers = Arc::downgrade(&self.routes_observers);
+        let process = self.host.process.clone();
+        let cookie = self.host.process.link_to_death(
+            &strong,
+            Box::new(move || {
+                if let Some(observers) = observers.upgrade()
+                    && let Some((strong, cookie)) = observers.lock().unwrap().remove(&observer)
+                {
+                    process.clear_death(&strong, cookie);
+                }
+            }),
+        );
+        if let Some((strong, cookie)) = self.routes_observers.lock().unwrap().insert(observer, (strong, cookie)) {
+            self.host.process.clear_death(&strong, cookie);
         }
     }
 
@@ -932,6 +971,19 @@ impl Service for AudioService {
                     Err(e) => return reply(Err(e)),
                 }
             }
+            // `AudioDeviceBroker.mBluetoothA2dpEnabled`, which only a
+            // Bluetooth A2DP connection sets; the app host has no Bluetooth.
+            audio::IS_BLUETOOTH_A2DP_ON => {
+                audio::IsBluetoothA2dpOn::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                audio::write_is_bluetooth_a2dp_on_reply(&mut p, false);
+            }
+            audio::START_WATCHING_ROUTES => {
+                let args = audio::StartWatchingRoutes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Some(Binder::Handle(observer)) = args.observer {
+                    self.watch_routes(observer);
+                }
+                audio::write_start_watching_routes_reply(&mut p, Some(&SpeakerRoute));
+            }
             audio::IS_STREAM_AFFECTED_BY_MUTE => {
                 let args = audio::IsStreamAffectedByMute::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 match read(args.stream_type, &|v, s| Ok(v.affected_by_mute(s) as i32)) {
@@ -1020,5 +1072,23 @@ impl Service for AudioService {
             code => return reply(Err(self.host.unimplemented("audio", code))),
         }
         Ok(p)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The speaker route, as `AudioRoutesInfo.writeToParcel` writes a
+    /// default one: no Bluetooth name, `MAIN_SPEAKER`.
+    #[test]
+    fn the_route_is_the_speaker() {
+        let mut p = Parcel::new();
+        SpeakerRoute.write_to(&mut p);
+        let mut expected = Parcel::new();
+        expected.write_i32(1);
+        expected.write_string8(None);
+        expected.write_i32(0);
+        assert_eq!(p.data(), expected.data());
     }
 }
