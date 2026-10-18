@@ -2436,9 +2436,12 @@ impl Query<'_> {
         let Some(package) = self.state.packages.get(name) else { return Ok(false); };
         if apps_filter::is_caller_same_app(self.state, Some(name), filter_uid)?
             || self.internal_can_view_instant(filter_uid, user)? { return Ok(user_state(package, user).instant_app); }
+        // `isInstantAccessGranted && getInstantApp`: a package that is not
+        // an instant app needs no grant.
+        if !user_state(package, user).instant_app { return Ok(false); }
         let access = self.state.system.instant_access.as_ref()
             .ok_or(NotModelled("native instant app access-grant owner"))?;
-        Ok(access.granted(user, app_id(filter_uid), package.app_id) && user_state(package, user).instant_app)
+        Ok(access.granted(user, app_id(filter_uid), package.app_id))
     }
     pub(crate) fn internal_check_uid_signatures_all_users(&self, uid1: i32, uid2: i32) -> Thrown<i32> {
         self.check_uid_signatures_captured(uid1, uid2, true)
@@ -2944,6 +2947,33 @@ fn fuller(permission: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod permission_tests {
     use super::*;
+
+    /// A package that is not an instant app is not one to any caller,
+    /// without the instant access grants (`isInstantAccessGranted &&
+    /// getInstantApp`).
+    #[test]
+    fn a_package_that_is_not_instant_needs_no_grant() {
+        let package = |name: &str, app_id: i32, instant_app: bool| {
+            (
+                name.to_string(),
+                PackageState {
+                    name: name.into(),
+                    app_id,
+                    users: [(0, PackageUserState { instant_app, ..Default::default() })].into(),
+                    ..Default::default()
+                },
+            )
+        };
+        let state = State {
+            packages: [package("p", 10100, false), package("q", 10101, false), package("i", 10102, true)].into(),
+            users: [(0, User { id: 0, ..Default::default() })].into(),
+            ..Default::default()
+        };
+        let filter = AppsFilter::new(&state, &Default::default()).unwrap();
+        let query = Query { state: &state, filter: &filter, calling_uid: 10100 };
+        assert!(!query.internal_is_instant("q", 0, 10100).unwrap());
+        assert!(query.internal_is_instant("i", 0, 10100).is_err());
+    }
 
     #[test]
     fn app_metadata_source_uses_settings_and_encodes_missing_target_cause() {
