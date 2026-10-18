@@ -41,6 +41,7 @@ use super::network::{
     NetworkInfo, NetworkRequest, RTN_UNICAST, RequestType, RouteInfo, Specifier,
     TRANSPORT_ETHERNET, TRANSPORT_WIFI, TYPE_ETHERNET, TYPE_NONE, VALIDATED,
 };
+use super::network_native;
 use super::settings::Table;
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::location::parcels::Value;
@@ -646,6 +647,9 @@ fn callback_data(
 pub struct ConnectivityService {
     host: Arc<AppHost>,
     shared: Arc<Shared>,
+    /// netd and DnsResolver, once registered, and the network they were
+    /// last given.
+    native: Mutex<(Option<network_native::Native>, Option<network_native::NativeNetwork>)>,
 }
 
 struct Shared {
@@ -689,14 +693,113 @@ impl ConnectivityService {
         let _ = std::thread::Builder::new()
             .name("connectivity-timeouts".into())
             .spawn(move || timeouts(weak, s));
-        ConnectivityService { host, shared }
+        let weak = Arc::downgrade(&host);
+        let _ = std::thread::Builder::new().name("connectivity-netd".into()).spawn(move || {
+            // netd registers itself and the DnsResolver it hosts once the
+            // BPF programs are loaded.
+            let service = |name: &str| loop {
+                let host = weak.upgrade()?;
+                if let Ok(s) = super::display::check_service(&host.process, name) {
+                    return Some(s);
+                }
+                drop(host);
+                std::thread::sleep(Duration::from_millis(200));
+            };
+            let (Some(netd), Some(resolver)) = (service("netd"), service("dnsresolver")) else { return };
+            let Some(cs) = weak.upgrade().and_then(|h| h.connectivity_service.get().cloned()) else { return };
+            cs.native.lock().unwrap().0 = Some(network_native::Native { netd, resolver });
+            // The settings the network's description reads are loaded once
+            // the guest's properties are set.
+            while cs.host.inputs().is_err() {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            cs.sync_native();
+        });
+        ConnectivityService { host, shared, native: Mutex::new((None, None)) }
     }
 
     /// Follows the Mac's network.
     fn follow(&self) {
-        let mut state = self.shared.state.lock().unwrap();
-        let callbacks = state.follow(mac_network());
-        self.deliver(&state, &callbacks);
+        {
+            let mut state = self.shared.state.lock().unwrap();
+            let callbacks = state.follow(mac_network());
+            self.deliver(&state, &callbacks);
+        }
+        self.sync_native();
+    }
+
+    /// Gives netd and DnsResolver the network as ConnectivityService gives
+    /// it them: a new one made and made the default, a lost one destroyed,
+    /// new DNS servers or private DNS sent to the resolver, each followed
+    /// by `flushVmDnsCache`.
+    fn sync_native(&self) {
+        if self.native.lock().unwrap().0.is_none() {
+            return;
+        }
+        let wanted = {
+            let state = self.shared.state.lock().unwrap();
+            state.network.as_ref().map(|net| self.native_network(net))
+        };
+        let wanted = match wanted.transpose() {
+            Ok(wanted) => wanted,
+            Err(e) => return eprintln!("app host: connectivity: {e:?}"),
+        };
+        let mut native = self.native.lock().unwrap();
+        let (Some(services), configured) = &mut *native else { return };
+        if *configured == wanted {
+            return;
+        }
+        let result = match (configured.as_ref(), wanted.as_ref()) {
+            (Some(old), Some(new)) if old.net_id == new.net_id => services.configure_dns(new),
+            (old, new) => old
+                .map_or(Ok(()), |old| services.destroy(old.net_id))
+                .and_then(|()| new.map_or(Ok(()), |new| services.create(new))),
+        };
+        match result {
+            Ok(()) => {
+                let flush = wanted.is_some();
+                *configured = wanted;
+                drop(native);
+                if flush {
+                    self.flush_vm_dns_cache();
+                }
+            }
+            Err(e) => eprintln!("app host: connectivity: netd: {e}"),
+        }
+    }
+
+    /// The network as netd and DnsResolver are to know it.
+    fn native_network(&self, net: &Net) -> Result<network_native::NativeNetwork, Exception> {
+        let lp = self.link_properties(net)?;
+        let settings = &self.host.inputs()?.settings;
+        let global = |name: &str| settings.get(Table::Global, name).filter(|v| !v.is_empty());
+        // `getPrivateDnsMode`: off, opportunistic (the default) or strict.
+        let private_dns = match global("private_dns_mode").or_else(|| global("private_dns_default_mode")).as_deref() {
+            Some("off") => None,
+            Some("hostname") => Some(global("private_dns_specifier")),
+            _ => Some(None),
+        };
+        Ok(network_native::NativeNetwork {
+            net_id: net.id,
+            interface: INTERFACE.into(),
+            routes: lp.routes,
+            dns: net.dns.clone(),
+            private_dns,
+            transports: vec![TRANSPORT_ETHERNET as i32],
+            settings: network_native::ResolverSettings::read(|name| global(name).and_then(|v| v.parse().ok())),
+        })
+    }
+
+    /// `DnsManager.flushVmDnsCache`: apps drop the names they resolved.
+    fn flush_vm_dns_cache(&self) {
+        const FLAG_RECEIVER_REPLACE_PENDING: i32 = 0x2000_0000;
+        const FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT: i32 = 0x0400_0000;
+        let intent = super::kept::RawIntent::new(
+            "android.intent.action.CLEAR_DNS_CACHE",
+            FLAG_RECEIVER_REPLACE_PENDING | FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT,
+            &[],
+        );
+        self.host.broadcasts.send_from_system(&self.host, intent);
     }
 
     fn has(&self, uid: i32, permission: &str) -> Result<bool, Exception> {

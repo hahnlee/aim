@@ -5,7 +5,9 @@
 # storage the agent serves; audioserver plays apps' sound, and takes wake
 # locks of system_suspend; the media services decode and play what apps'
 # players and the sound effects play; the health HAL reports the Mac's
-# battery to the battery service.
+# battery to the battery service; netd hosts DnsResolver, which resolves
+# apps' names on the network the connectivity service gives it, once
+# bpfloader has marked the BPF programs loaded.
 apexd-bootstrap
 apexd
 keystore2
@@ -31,6 +33,8 @@ system_aconfigd_mainline_init
 system_aconfigd_socket_service
 mainline_aconfigd_socket_service
 vold
+bpfloader
+netd
 system_suspend
 audioserver
 vendor.audio-hal-aidl
