@@ -147,11 +147,15 @@ mod tests {
  use super::*;use std::os::unix::net::UnixListener;use std::process::{Command,Stdio};
  #[test]
  fn disconnected_accepted_peer_is_rejected_before_socket_configuration(){
+  // The peer's close disconnects only once no concurrent spawn's child still
+  // holds a copy of its descriptor; the fixture runs alone.
+  const MARKER:&str="VERITY_DISCONNECTED_PEER_EXECUTED";
+  if crate::inode_lease::tests::isolated_fork_fixture("verity_control::tests::disconnected_accepted_peer_is_rejected_before_socket_configuration",MARKER){return;}
   let root=std::env::temp_dir().join(format!("aim-control-disconnected-{}",std::process::id()));std::fs::create_dir(&root).unwrap();
   let listener=UnixListener::bind(root.join("ctl")).unwrap();let client=UnixStream::connect(root.join("ctl")).unwrap();let(stream,_)=listener.accept().unwrap();drop(client);
   assert_eq!(stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap_err().raw_os_error(),Some(libc::EINVAL));
   let failure=match Channel::new(stream,None,Duration::from_secs(2)){Err(failure)=>failure,Ok(_)=>panic!("disconnected peer authenticated")};
-  assert_eq!(failure.raw_os_error(),Some(libc::ENOTCONN));drop(listener);std::fs::remove_dir_all(root).unwrap();
+  assert_eq!(failure.raw_os_error(),Some(libc::ENOTCONN));drop(listener);std::fs::remove_dir_all(root).unwrap();println!("{MARKER}");
  }
  #[test]
  fn bound_owner_without_listener_threads_still_retires_owned_sockets(){

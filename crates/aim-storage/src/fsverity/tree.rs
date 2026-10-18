@@ -93,7 +93,7 @@ mod tests {
  use super::*;
  use std::{fs::{self,File},path::PathBuf};
  struct Data(PathBuf);
- impl Data{fn new(bytes:&[u8])->Self{let path=std::env::temp_dir().join(format!("aim-verity-core-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));fs::create_dir(&path).unwrap();fs::write(path.join("data"),bytes).unwrap();Self(path)}fn data(&self)->File{File::open(self.0.join("data")).unwrap()}fn tree(&self)->File{File::options().create_new(true).read(true).write(true).open(self.0.join("tree")).unwrap()}}
+ impl Data{fn new(bytes:&[u8])->Self{static NEXT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);let path=std::env::temp_dir().join(format!("aim-verity-core-{}-{}",std::process::id(),NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed)));fs::create_dir(&path).unwrap();fs::write(path.join("data"),bytes).unwrap();Self(path)}fn data(&self)->File{File::open(self.0.join("data")).unwrap()}fn tree(&self)->File{File::options().create_new(true).read(true).write(true).open(self.0.join("tree")).unwrap()}}
  impl Drop for Data{fn drop(&mut self){fs::remove_dir_all(&self.0).unwrap();}}
  fn hex(bytes:&[u8])->String{bytes.iter().map(|byte|format!("{byte:02x}")).collect()}
  #[test]
