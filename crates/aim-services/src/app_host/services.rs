@@ -1334,7 +1334,7 @@ impl AppHost {
             }
             None => {
                 // `startProcessLocked` with hosting type `service`.
-                let pid = self.start_process_for(&package, &process, None)?;
+                let pid = self.start_process_for(&package, &process, None, false)?;
                 let seq = self
                     .apps
                     .lock()

@@ -1067,7 +1067,7 @@ impl Broadcasts {
             return Some(seq);
         }
         let package = m.info.info.application_info.item.package_name.clone().unwrap_or_default();
-        if let Err(e) = host.start_process_for(&package, &m.process, None) {
+        if let Err(e) = host.start_process_for(&package, &m.process, None, true) {
             eprintln!("app host: unable to launch {} for broadcast: {}", m.process, e.message);
             return None;
         }

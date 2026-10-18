@@ -249,7 +249,7 @@ impl AppHost {
             };
             match next {
                 Next::Start(package) => {
-                    self.start_process_for(&package, &process, None)?;
+                    self.start_process_for(&package, &process, None, false)?;
                     launched = true;
                 }
                 Next::Install(seq) => {

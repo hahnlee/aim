@@ -480,7 +480,7 @@ impl AppHost {
         let uid = info.info.application_info.uid as u32;
         match self.running_process(&process, uid).filter(|(_, attached)| *attached) {
             Some((start_seq, _)) => self.start_in_process(start_seq, uid, package, info, StartRequest::launcher(class), &Decision::default()),
-            None => self.start_process_for(package, &process, Some(StartRequest::launcher(class))).map(|_| ()),
+            None => self.start_process_for(package, &process, Some(StartRequest::launcher(class)), false).map(|_| ()),
         }
     }
 
@@ -614,7 +614,7 @@ impl AppHost {
                     commands.extend(self.activities.stack.lock().unwrap().apply(&d, Then::Nothing, None, user_leaving));
                 }
                 self.run(commands);
-                self.start_process_for(&package, &process, Some(request))?;
+                self.start_process_for(&package, &process, Some(request), false)?;
             }
         }
         Ok(START_SUCCESS)
