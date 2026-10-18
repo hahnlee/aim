@@ -14,7 +14,8 @@ recorded in [docs/boot-status.md](docs/boot-status.md).
 ## Requirements
 
 - macOS on Apple Silicon, Rust (with `rustup target add aarch64-linux-android`)
-- the Android SDK with NDK `28.2.13676358` and `build-tools/36.0.0` (for `aidl`)
+- the Android SDK with NDK `28.2.13676358`, `build-tools/36.0.0` (for `aidl`)
+  and `platforms/android-36` (for aim-build's tests)
 - Homebrew `openjdk@17`, `python3`
 - the pinned original image archive in `_prebuilt` (`image/original.lock`,
   [docs/gsi-base.md](docs/gsi-base.md))

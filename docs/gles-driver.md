@@ -52,6 +52,10 @@ namespace. One library serves EGL, GLES 1 and GLES 2/3.
   target_cpu = "arm64"
   ```
 
+  plus `mac_sdk_path`, the macOS SDK the pin's Chromium build is made with
+  (`MAC_SDK_VERSION` of the lock): its lld cannot link against later
+  SDKs (#1603).
+
 ## Thunks
 
 `tools/gen-gpu-thunks.py` forwards every command that the registry defines

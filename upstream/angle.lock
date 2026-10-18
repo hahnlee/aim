@@ -16,3 +16,7 @@
 # 9cb90ca4902d588bef3c830fbb1da484893bd5fb, EGL-Registry
 # 7dea2ed79187cd13f76183c4b9100159b9e3e071.
 ANGLE_REVISION=37c976ffba9d2940add977cad9945b23de14c150
+# The macOS SDK the pin's Chromium build is made with (its
+# build/config/mac/mac_sdk.gni, mac_sdk_official_version); its toolchain
+# cannot link against later SDKs (#1603).
+MAC_SDK_VERSION=26.5
