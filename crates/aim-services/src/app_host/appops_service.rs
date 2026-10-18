@@ -49,10 +49,9 @@ const DISALLOW_ADJUST_VOLUME: &str = "no_adjust_volume";
 /// The ops it decides: their code, name, default mode and user
 /// restriction. Each is its own switch, and none has a permission but
 /// SCHEDULE_EXACT_ALARM's, USE_FULL_SCREEN_INTENT's, the accounts'
-/// (READ_CONTACTS, WRITE_CONTACTS, GET_ACCOUNTS) and WRITE_SETTINGS',
-/// which AlarmManager, NotificationManager, AccountManager and
-/// ConnectivityService only check or note themselves, so their notes are
-/// not collected (`AppOpsService.shouldCollectNotes`).
+/// (READ_CONTACTS, WRITE_CONTACTS, GET_ACCOUNTS), WRITE_SETTINGS' and
+/// MANAGE_EXTERNAL_STORAGE's (which MediaProvider checks). Their notes are
+/// not collected (`AppOpsService.shouldCollectNotes`: #1558).
 const OPS: &[(i32, &str, i32, Option<&str>)] = &[
     (OP_READ_CONTACTS, "android:read_contacts", MODE_ALLOWED, None),
     (OP_WRITE_CONTACTS, "android:write_contacts", MODE_ALLOWED, None),
@@ -68,6 +67,7 @@ const OPS: &[(i32, &str, i32, Option<&str>)] = &[
     (39, "android:audio_bluetooth_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
     (43, "android:get_usage_stats", MODE_DEFAULT, None),
     (OP_GET_ACCOUNTS, "android:get_accounts", MODE_ALLOWED, None),
+    (92, "android:manage_external_storage", MODE_DEFAULT, None),
     (63, "android:run_in_background", MODE_ALLOWED, None),
     (70, "android:run_any_in_background", MODE_ALLOWED, None),
     (64, "android:audio_accessibility_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
