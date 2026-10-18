@@ -2623,6 +2623,24 @@ impl Service for Activity {
                     p
                 }))
             }
+            // `UserController.getCurrentUserIdChecked`: user 0, with
+            // INTERACT_ACROSS_USERS or its FULL form.
+            am::GET_CURRENT_USER_ID => {
+                am::GetCurrentUserId::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let uid = call.sender_euid as i32;
+                let held = |p: &str| self.0.check_permission(Some(p), uid).map(|r| r == 0);
+                reply(held("android.permission.INTERACT_ACROSS_USERS").and_then(|a| Ok(a || held("android.permission.INTERACT_ACROSS_USERS_FULL")?)).and_then(|held| {
+                    if !held {
+                        return Err(Exception::security(format!(
+                            "Permission Denial: getCurrentUser() from pid={}, uid={uid} requires android.permission.INTERACT_ACROSS_USERS",
+                            call.sender_pid
+                        )));
+                    }
+                    let mut p = Parcel::new();
+                    am::write_get_current_user_id_reply(&mut p, 0);
+                    Ok(p)
+                }))
+            }
             am::HANDLE_INCOMING_USER => {
                 let a = am::HandleIncomingUser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply(self.0.handle_incoming_user(a.calling_uid, a.user_id, a.allow_all, a.require_full, a.name.as_deref()).map(|user| {
