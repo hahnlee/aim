@@ -38,6 +38,24 @@ pub struct Packages {
     permissions: Vec<package::permissions::Permission>,
 }
 
+/// `ActivityRecord.WindowStyle`: what an activity's theme says of its
+/// window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowStyle {
+    pub translucent: bool,
+    pub floating: bool,
+    pub show_wallpaper: bool,
+    pub no_display: bool,
+}
+
+impl WindowStyle {
+    /// `mOccludesParent` of an activity of this style: not translucent
+    /// or floating, or showing the wallpaper.
+    pub fn occludes_parent(&self) -> bool {
+        !(self.translucent || self.floating) || self.show_wallpaper
+    }
+}
+
 impl Packages {
     /// The packages of the guest's `/data` at `data`, their code read
     /// below the image `root` or `data`, on a display of `density_dpi`.
@@ -272,6 +290,80 @@ impl Packages {
         id: u32,
         read: impl FnOnce(&aim_apps::res::Element, &parse::attrs::Ctx<'_>) -> T,
     ) -> Result<T, String> {
+        self.with_resources(root, data, pkg, |resources, apks, table_apks| {
+            let (table, file) = resources
+                .resource_string_source(id)
+                .ok_or_else(|| format!("no XML resource {id:#x}"))?;
+            let bytes = match table_apks.get(table).ok_or("an XML resource of an overlay")? {
+                Some(i) => apks[*i].file(file),
+                None => aim_apps::apk::Apk::open(&root.join("system/framework/framework-res.apk"))
+                    .and_then(|apk| apk.file(file)),
+            }
+            .map_err(|e| e.to_string())?;
+            let document = aim_apps::res::xml(&bytes).map_err(|e| e.to_string())?;
+            let ctx = parse::attrs::Ctx {
+                res: resources,
+                attrs: &self.platform.framework_attrs,
+                error: Default::default(),
+            };
+            let value = read(&document, &ctx);
+            match ctx.error.take() {
+                Some(e) => Err(e),
+                None => Ok(value),
+            }
+        })
+    }
+
+    /// `ActivityRecord.WindowStyle` of the theme `theme` of `pkg`, an app
+    /// targeting `target_sdk` (`getThemeResource`, else `Theme` or
+    /// `Theme_Holo`): the `R.styleable.Window` attributes
+    /// `AttributeCache.get` obtains on the theme of a package's context
+    /// (`Resources.selectDefaultTheme`).
+    pub fn window_style(&self, root: &Path, data: &Path, pkg: &AndroidPackage, theme: u32, target_sdk: i32) -> Result<WindowStyle, String> {
+        const HONEYCOMB: i32 = 11;
+        const ICE_CREAM_SANDWICH: i32 = 14;
+        const N: i32 = 24;
+        let style = |name: &str| self.platform.framework.id("style", name).ok_or_else(|| format!("no framework style {name}"));
+        let theme = match theme {
+            0 => style(if target_sdk < HONEYCOMB { "Theme" } else { "Theme.Holo" })?,
+            theme => theme,
+        };
+        let default = style(if target_sdk < HONEYCOMB {
+            "Theme"
+        } else if target_sdk < ICE_CREAM_SANDWICH {
+            "Theme.Holo"
+        } else if target_sdk < N {
+            "Theme.DeviceDefault"
+        } else {
+            "Theme.DeviceDefault.Light.DarkActionBar"
+        })?;
+        self.with_resources(root, data, pkg, |resources, _, _| {
+            // `TypedArray.getBoolean`: an integer's, else false.
+            let flag = |name: &str| -> Result<bool, String> {
+                let attr = self.platform.framework.id("attr", name).ok_or_else(|| format!("no attribute {name}"))?;
+                let int = parse::resources::TYPE_FIRST_INT..=parse::resources::TYPE_LAST_INT;
+                Ok(resources.styled_attr(theme, default, attr).is_some_and(|v| int.contains(&v.kind) && v.data != 0))
+            };
+            Ok(WindowStyle {
+                translucent: flag("windowIsTranslucent")?,
+                floating: flag("windowIsFloating")?,
+                show_wallpaper: flag("windowShowWallpaper")?,
+                no_display: flag("windowNoDisplay")?,
+            })
+        })
+    }
+
+    /// `pkg`'s resources (its own and the framework's), from its APKs
+    /// below the image `root` or the guest's `/data` at `data`, given to
+    /// `f` with the APKs and each table's APK among them (None for the
+    /// framework's).
+    fn with_resources<T>(
+        &self,
+        root: &Path,
+        data: &Path,
+        pkg: &AndroidPackage,
+        f: impl FnOnce(&parse::resources::Resources<'_>, &[aim_apps::apk::Apk], &[Option<usize>]) -> Result<T, String>,
+    ) -> Result<T, String> {
         let base = pkg.base_apk_path.as_deref().ok_or("no base APK")?;
         let mut paths = vec![base];
         for split in pkg.split_code_paths.iter().flatten() {
@@ -307,26 +399,7 @@ impl Packages {
             overlays: &self.platform.framework_overlays,
             config: self.platform.config(),
         };
-        let (table, file) = resources
-            .resource_string_source(id)
-            .ok_or_else(|| format!("no XML resource {id:#x}"))?;
-        let bytes = match table_apks.get(table).ok_or("an XML resource of an overlay")? {
-            Some(i) => apks[*i].file(file),
-            None => aim_apps::apk::Apk::open(&root.join("system/framework/framework-res.apk"))
-                .and_then(|apk| apk.file(file)),
-        }
-        .map_err(|e| e.to_string())?;
-        let document = aim_apps::res::xml(&bytes).map_err(|e| e.to_string())?;
-        let ctx = parse::attrs::Ctx {
-            res: &resources,
-            attrs: &self.platform.framework_attrs,
-            error: Default::default(),
-        };
-        let value = read(&document, &ctx);
-        match ctx.error.take() {
-            Some(e) => Err(e),
-            None => Ok(value),
-        }
+        f(&resources, &apks, &table_apks)
     }
 
     /// `getApplicationInfo(name, flags, 0)`.

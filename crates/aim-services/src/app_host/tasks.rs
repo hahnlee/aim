@@ -89,6 +89,11 @@ impl Tasks {
         self.tasks.lock().unwrap().iter().find(|t| t.id == id).map(|t| t.bounds)
     }
 
+    /// The minimal size of task `id` (`mMinWidth`, `mMinHeight`).
+    pub fn min_size(&self, id: i32) -> Option<(i32, i32)> {
+        self.tasks.lock().unwrap().iter().find(|t| t.id == id).map(|t| t.min_size)
+    }
+
     /// The bounds of task `id` in window mode, a freeform task's.
     pub fn freeform_bounds(&self, id: i32) -> Option<Rect> {
         self.bounds(id).filter(|_| self.window_mode())
@@ -247,6 +252,7 @@ impl AppHost {
             tasks.retain(|t| t.id != id);
             tasks.len() != before
         };
+        self.activities.task_tokens.lock().unwrap().remove(&id);
         if removed {
             self.tasks.send(&Record { op: window::REMOVED, task: id, ..Default::default() });
         }

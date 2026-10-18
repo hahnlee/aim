@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, Binder, Parcel, UNKNOWN_TRANSACTION};
+use aim_binder_host::parcel::{BAD_VALUE, Binder, Exception, Parcel, UNKNOWN_TRANSACTION};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_app_iactivityclientcontroller as acc;
 use aim_service_aidl::android_app_iactivitytaskmanager as atm;
@@ -21,6 +21,7 @@ use super::activity_stack::{FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS, FLAG_ACTIVITY_NE
 use super::activity_start::{Component, FLAG_EXCLUDE_FROM_RECENTS, Report};
 use super::config::{self, Configuration, SizeBuckets};
 use super::kept::{RawBundle, RawIntent};
+use super::packages::WindowStyle;
 use super::{AppHost, reply};
 use crate::package::info::ActivityInfo;
 
@@ -30,14 +31,14 @@ use crate::package::info::ActivityInfo;
 const PROCESS_STATE_UNKNOWN: i32 = -1;
 const PROCESS_STATE_CACHED_EMPTY: i32 = 19;
 /// `WindowConfiguration.ACTIVITY_TYPE_STANDARD`.
-const ACTIVITY_TYPE_STANDARD: i32 = 1;
+pub(super) const ACTIVITY_TYPE_STANDARD: i32 = 1;
 /// `Display.DEFAULT_DISPLAY`, `Display.INVALID_DISPLAY`.
-const DEFAULT_DISPLAY: i32 = 0;
-const INVALID_DISPLAY: i32 = -1;
+pub(super) const DEFAULT_DISPLAY: i32 = 0;
+pub(super) const INVALID_DISPLAY: i32 = -1;
 /// `Intent.EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN`, which a start
 /// without a creator token gets; `UserHandle.USER_CURRENT`.
-const EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN: i32 = 1 << 2;
-const USER_CURRENT: i32 = -2;
+pub(super) const EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN: i32 = 1 << 2;
+pub(super) const USER_CURRENT: i32 = -2;
 /// `ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED`.
 const SCREEN_ORIENTATION_UNSPECIFIED: i32 = -1;
 
@@ -100,8 +101,9 @@ pub struct ActivityRecord {
     /// The configuration it was last sent (`mLastReportedConfiguration`'s
     /// merged one).
     pub reported: Option<Configuration>,
-    /// What it launches with and as.
+    /// What it launches with and as, and its theme's window style.
     pub info: ActivityInfo,
+    pub style: WindowStyle,
     pub intent: super::activity_start::LaunchIntent,
     pub referrer: String,
     /// Its task (the stack's key).
@@ -136,6 +138,10 @@ pub struct Activities {
     /// The results and new intents the stack holds for delivery.
     pub(super) payloads: Mutex<HashMap<u64, super::activity_start::Payload>>,
     pub(super) next_payload: std::sync::atomic::AtomicU64,
+    /// The window styles read, by base APK and theme (`AttributeCache`).
+    styles: Mutex<HashMap<(String, u32), WindowStyle>>,
+    /// The tasks' `WindowContainerToken`s, by task.
+    pub(super) task_tokens: Mutex<HashMap<i32, Binder>>,
 }
 
 impl Activities {
@@ -165,10 +171,17 @@ impl Activities {
     }
 
     /// The activities of the process of `start_seq` are gone with it:
-    /// their tokens, and what the stack does then.
+    /// their tokens, and what the stack does then; their results never
+    /// sent go too.
     pub fn remove_start(&self, start_seq: i64) -> (Vec<u64>, Vec<super::activity_stack::Command>) {
         let gone = self.records.lock().unwrap().extract_if(|_, r| r.start_seq == start_seq).map(|(token, _)| token).collect();
-        (gone, self.stack.lock().unwrap().process_died(start_seq))
+        let mut stack = self.stack.lock().unwrap();
+        let mut payloads = self.payloads.lock().unwrap();
+        for result in stack.activities.iter().filter(|a| a.start_seq == start_seq).filter_map(|a| a.result) {
+            payloads.remove(&result);
+        }
+        drop(payloads);
+        (gone, stack.process_died(start_seq))
     }
 
     pub(super) fn with<T>(
@@ -180,6 +193,42 @@ impl Activities {
             return None;
         };
         self.records.lock().unwrap().get_mut(&ptr).map(f)
+    }
+}
+
+impl AppHost {
+    /// The window style of an activity of `info` (`getWindowStyle`): read
+    /// from its package's resources once per APK and theme. One whose
+    /// theme cannot be read is opaque, as the original's is when
+    /// `AttributeCache` has no entry for it.
+    pub(super) fn window_style(&self, info: &ActivityInfo) -> WindowStyle {
+        let app = &info.info.application_info;
+        let theme = if info.theme != 0 { info.theme } else { app.theme } as u32;
+        let read = || -> Result<(String, Result<WindowStyle, String>), Exception> {
+            let (state, _) = self.packages()?;
+            let package = app.item.package_name.as_deref().unwrap_or_default();
+            let pkg = state.packages.get(package).and_then(|ps| ps.pkg.clone()).ok_or_else(|| Exception::illegal_argument(format!("no package {package}")))?;
+            let apk = pkg.base_apk_path.clone().unwrap_or_default();
+            if let Some(style) = self.activities.styles.lock().unwrap().get(&(apk.clone(), theme)) {
+                return Ok((apk, Ok(*style)));
+            }
+            let inputs = self.inputs()?;
+            Ok((apk, inputs.packages.window_style(self.root()?, &inputs.data, &pkg, theme, app.target_sdk_version)))
+        };
+        match read() {
+            Ok((apk, Ok(style))) => {
+                self.activities.styles.lock().unwrap().insert((apk, theme), style);
+                style
+            }
+            Ok((_, Err(e))) => {
+                eprintln!("app host: the window style of theme {theme:#x}: {e}");
+                WindowStyle::default()
+            }
+            Err(e) => {
+                eprintln!("app host: the window style of theme {theme:#x}: {}", e.message);
+                WindowStyle::default()
+            }
+        }
     }
 }
 
@@ -533,11 +582,11 @@ impl ActivityWindowInfo {
 
 /// An explicit `Intent` to a component, as `Intent.writeToParcel` writes
 /// it with intent redirect prevention (`preventIntentRedirect`) on.
-struct Intent {
-    component: (String, String),
-    flags: i32,
-    extended_flags: i32,
-    content_user_hint: i32,
+pub(super) struct Intent {
+    pub component: (String, String),
+    pub flags: i32,
+    pub extended_flags: i32,
+    pub content_user_hint: i32,
 }
 
 impl WriteParcelable for Intent {
@@ -588,6 +637,16 @@ impl Service for ActivityTaskManager {
                 reply(self.0.start_activity(call, args).map(|code| {
                     let mut p = Parcel::new();
                     atm::write_start_activity_reply(&mut p, code);
+                    p
+                }))
+            }
+            // `filterOnlyVisibleRecents` filters none of the app host's
+            // tasks (`task_info::running_tasks`).
+            atm::GET_TASKS => {
+                let a = atm::GetTasks::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.get_tasks(call.sender_euid as i32, a.max_num, a.keep_intent_extra, a.display_id).map(|list| {
+                    let mut p = Parcel::new();
+                    atm::write_get_tasks_reply(&mut p, Some(&list));
                     p
                 }))
             }
@@ -754,6 +813,23 @@ impl Service for ActivityClientController {
                     .unwrap_or(INVALID_DISPLAY);
                 let mut p = Parcel::new();
                 acc::write_get_display_id_reply(&mut p, id);
+                Ok(p)
+            }
+            acc::CONVERT_FROM_TRANSLUCENT => {
+                let a = acc::ConvertFromTranslucent::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                acc::write_convert_from_translucent_reply(&mut p, self.0.set_occludes_parent(a.token, true));
+                Ok(p)
+            }
+            // The options are a scene transition's to return to the
+            // activity below, which the app host does not run (#1587).
+            acc::CONVERT_TO_TRANSLUCENT => {
+                let a = acc::ConvertToTranslucent::<RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if a.options.is_some() {
+                    return reply(Err(self.0.unimplemented_named("activity client controller", "convertToTranslucent with a scene transition (#1587)")));
+                }
+                let mut p = Parcel::new();
+                acc::write_convert_to_translucent_reply(&mut p, self.0.set_occludes_parent(a.token, false));
                 Ok(p)
             }
             // The task's description is the Mac window's once activities
