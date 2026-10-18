@@ -204,7 +204,7 @@ pub(crate) fn registered_class(fd:i32)->io::Result<u32>{let Some(identity)=carri
 pub(crate) mod tests {
  use super::*;
  use std::io::Read;
- fn receive_ready(channel:i32)->io::Result<Reply>{
+ pub(crate) fn receive_ready(channel:i32)->io::Result<Reply>{
   let deadline=std::time::Instant::now()+std::time::Duration::from_millis(1000);
   loop{
    check_auth_deadline(deadline)?;let remaining=deadline.saturating_duration_since(std::time::Instant::now()).as_millis().max(1).min(1000)as i32;wait_frame(channel,RESPONSE,remaining)?;
@@ -227,27 +227,31 @@ pub(crate) mod tests {
  fn eof(peer:&UnixStream){drain();let mut byte=0u8;assert_eq!(unsafe{libc::recv(peer.as_raw_fd(),(&mut byte as *mut u8).cast(),1,libc::MSG_DONTWAIT)},0,"registry must not anchor the real socket after final carrier close");}
  #[test]
  fn socket_scm_repeated_resolve_preserves_receipt_and_actual_socket_without_registry_anchor(){
+  const MARKER:&str="SCM_REPEATED_RESOLVE_EXECUTED";if isolated_exec_fixture("socket_scm::tests::socket_scm_repeated_resolve_preserves_receipt_and_actual_socket_without_registry_anchor",MARKER){return;}
   let(backing,peer)=UnixStream::pair().unwrap();let receipt=Receipt::mint(backing.as_raw_fd()).unwrap();let carrier=carrier(backing.into(),receipt);
   for _ in 0..2{
    let reply=Channel::new().resolve(&carrier);assert_eq!(reply.receipt,Some(receipt));let descriptor=reply.descriptor.unwrap();receipt.validate(descriptor.as_raw_fd()).unwrap();drop(descriptor);live(&peer);
   }
-  drop(carrier);eof(&peer);
+  drop(carrier);eof(&peer);println!("{MARKER}");
  }
  #[test]
  fn socket_scm_outer_queued_rights_hold_socket_but_discard_closes_it_immediately(){
+  const MARKER:&str="SCM_OUTER_QUEUED_RIGHTS_EXECUTED";if isolated_exec_fixture("socket_scm::tests::socket_scm_outer_queued_rights_hold_socket_but_discard_closes_it_immediately",MARKER){return;}
   let(backing,peer)=UnixStream::pair().unwrap();let receipt=Receipt::mint(backing.as_raw_fd()).unwrap();let carrier=carrier(backing.into(),receipt);
-  let(sender,receiver)=UnixStream::pair().unwrap();let root=aim_storage::socket_queue_root::SocketQueueRoot::new(receiver.as_fd()).unwrap();send(sender.as_raw_fd(),b"guest",carrier.as_raw_fd()).unwrap();drop(carrier);live(&peer);drop(receiver);drop(root);eof(&peer);
+  let(sender,receiver)=UnixStream::pair().unwrap();let root=aim_storage::socket_queue_root::SocketQueueRoot::new(receiver.as_fd()).unwrap();send(sender.as_raw_fd(),b"guest",carrier.as_raw_fd()).unwrap();drop(carrier);live(&peer);drop(receiver);drop(root);eof(&peer);println!("{MARKER}");
  }
  #[test]
  fn socket_scm_outer_receipt_preserves_payload_and_one_fd_then_retained_import(){
+  const MARKER:&str="SCM_OUTER_RECEIPT_EXECUTED";if isolated_exec_fixture("socket_scm::tests::socket_scm_outer_receipt_preserves_payload_and_one_fd_then_retained_import",MARKER){return;}
   let(backing,mut peer)=UnixStream::pair().unwrap();let receipt=Receipt::mint(backing.as_raw_fd()).unwrap();let carrier=carrier(backing.into(),receipt);
   let(sender,receiver)=UnixStream::pair().unwrap();let _root=aim_storage::socket_queue_root::SocketQueueRoot::new(receiver.as_fd()).unwrap();send(sender.as_raw_fd(),b"guest",carrier.as_raw_fd()).unwrap();drop(carrier);
   let mut data=[0;5];let(count,received)=receive_flags(receiver.as_raw_fd(),&mut data,0).unwrap();assert_eq!(count,5);assert_eq!(&data,b"guest");let received=received.unwrap();assert_eq!(registered_class(received.as_raw_fd()).unwrap(),CLASS);
   let reply=Channel::new().resolve(&received);let mut imported=std::fs::File::from(reply.descriptor.unwrap());drop(received);live(&peer);
-  use std::io::Write;receipt.validate(imported.as_raw_fd()).unwrap();peer.write_all(b"real").unwrap();let mut bytes=[0;4];imported.read_exact(&mut bytes).unwrap();assert_eq!(&bytes,b"real");drop(imported);eof(&peer);
+  use std::io::Write;receipt.validate(imported.as_raw_fd()).unwrap();peer.write_all(b"real").unwrap();let mut bytes=[0;4];imported.read_exact(&mut bytes).unwrap();assert_eq!(&bytes,b"real");drop(imported);eof(&peer);println!("{MARKER}");
  }
  #[test]
  fn socket_scm_reexport_and_reply_receiver_death_release_actual_kernel_lease(){
+  const MARKER:&str="SCM_REEXPORT_RECEIVER_DEATH_EXECUTED";if isolated_exec_fixture("socket_scm::tests::socket_scm_reexport_and_reply_receiver_death_release_actual_kernel_lease",MARKER){return;}
   let(backing,peer)=UnixStream::pair().unwrap();let receipt=Receipt::mint(backing.as_raw_fd()).unwrap();let carrier=carrier(backing.into(),receipt);
   let(first_sender,first_receiver)=UnixStream::pair().unwrap();send(first_sender.as_raw_fd(),b"x",carrier.as_raw_fd()).unwrap();drop(carrier);drain();live(&peer);
   let mut byte=[0];let(_,received)=receive_flags(first_receiver.as_raw_fd(),&mut byte,0).unwrap();let received=received.unwrap();
@@ -255,7 +259,7 @@ pub(crate) mod tests {
   drop(second_receiver);eof(&peer);
   let(backing,peer)=UnixStream::pair().unwrap();let receipt=Receipt::mint(backing.as_raw_fd()).unwrap();let channel=Channel::new();
   request_create(channel.socket.as_raw_fd(),backing.as_raw_fd(),receipt).unwrap();drop(backing);wait_reply(channel.socket.as_raw_fd()).unwrap();
-  channel._root.prepare_last_close(channel.socket.as_fd()).unwrap();drop(channel);eof(&peer);
+  channel._root.prepare_last_close(channel.socket.as_fd()).unwrap();drop(channel);eof(&peer);println!("{MARKER}");
  }
  pub(crate) fn isolated_exec_fixture(name:&str,marker:&str)->bool{
   if std::env::args().any(|arg|arg==marker){return false;}
@@ -294,7 +298,7 @@ pub(crate) mod tests {
  fn socket_scm_nonblocking_authentication_sends_one_hello_then_accepts_real_request(){
   let service=Service::start().unwrap();let channel=UnixStream::connect(std::path::Path::new(std::ffi::OsStr::from_bytes(&service.endpoint().path))).unwrap();channel.set_nonblocking(true).unwrap();
   let root=aim_storage::socket_queue_root::SocketQueueRoot::new(channel.as_fd()).unwrap();authenticate(channel.as_raw_fd(),service.endpoint()).unwrap();
-  let(first,_second)=UnixStream::pair().unwrap();request_classify(channel.as_raw_fd(),first.as_raw_fd()).unwrap();wait_reply(channel.as_raw_fd()).unwrap();let reply=receive_reply(channel.as_raw_fd()).unwrap();assert_eq!(reply.class,0);assert!(reply.descriptor.is_none());assert!(reply.receipt.is_none());
+  let(first,_second)=UnixStream::pair().unwrap();request_classify(channel.as_raw_fd(),first.as_raw_fd()).unwrap();let reply=receive_ready(channel.as_raw_fd()).unwrap();assert_eq!(reply.class,0);assert!(reply.descriptor.is_none());assert!(reply.receipt.is_none());
   root.prepare_last_close(channel.as_fd()).unwrap();drop(channel);drop(root);drop(service);
  }
  #[test]

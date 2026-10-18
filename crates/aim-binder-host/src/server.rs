@@ -1015,8 +1015,8 @@ mod path_carrier_tests {
         let queue=aim_storage::socket_queue_root::SocketQueueRoot::new(channel.as_fd()).unwrap();
         crate::socket_scm::authenticate(channel.as_raw_fd(),service.endpoint()).unwrap();
         let(backing,peer)=std::os::unix::net::UnixStream::pair().unwrap();let receipt=aim_storage::socket_inode::Receipt::mint(backing.as_raw_fd()).unwrap();
-        crate::socket_scm::request_create(channel.as_raw_fd(),backing.as_raw_fd(),receipt).unwrap();crate::socket_scm::wait_reply(channel.as_raw_fd()).unwrap();
-        let carrier=crate::socket_scm::receive_reply(channel.as_raw_fd()).unwrap().descriptor.unwrap();
+        crate::socket_scm::request_create(channel.as_raw_fd(),backing.as_raw_fd(),receipt).unwrap();
+        let carrier=crate::socket_scm::tests::receive_ready(channel.as_raw_fd()).unwrap().descriptor.unwrap();
         let port=mach::fd_to_port(backing.as_raw_fd()).unwrap();
         let mut io=Ioctl{fds:vec![8],file_classes:vec![crate::socket_scm::CLASS],regular:vec![None],sockets:vec![Some(receipt)],..Default::default()};
         assert!(valid_exported_files(&io,&[port]));
@@ -1025,7 +1025,7 @@ mod path_carrier_tests {
         io.sockets[0]=None;assert!(!valid_exported_files(&io,&[port]));io.sockets[0]=Some(receipt);io.file_classes[0]=0;assert!(!valid_exported_files(&io,&[port]));mach::release_send(port);
         let file=file_from_fd(carrier.as_fd()).unwrap();assert_eq!(file_class(&file),Some(crate::socket_scm::CLASS));
         let queued=file.clone();drop(file);drop(backing);drop(carrier);
-        crate::socket_scm::request_drain(channel.as_raw_fd()).unwrap();crate::socket_scm::wait_reply(channel.as_raw_fd()).unwrap();drop(crate::socket_scm::receive_reply(channel.as_raw_fd()).unwrap());
+        crate::socket_scm::request_drain(channel.as_raw_fd()).unwrap();drop(crate::socket_scm::tests::receive_ready(channel.as_raw_fd()).unwrap());
         let received=file_fd(&queued).unwrap();receipt.validate(received.as_raw_fd()).unwrap();
         assert_eq!(queued.downcast_ref::<FilePort>().unwrap().3,Some(receipt));
         let mut duplicate=received.try_clone().unwrap();drop(queued);drop(received);
@@ -1036,6 +1036,8 @@ mod path_carrier_tests {
     }
     #[test]
     fn actual_client_socket_scm_rpc_repeated_resolve_preserves_receipt_and_exact_eof(){
+        const MARKER:&str="SCM_CLIENT_RPC_EXACT_EOF_EXECUTED";
+        if crate::socket_scm::tests::isolated_exec_fixture("server::path_carrier_tests::actual_client_socket_scm_rpc_repeated_resolve_preserves_receipt_and_exact_eof",MARKER){return;}
         use std::os::unix::ffi::OsStrExt;
         let(backing,peer)=std::os::unix::net::UnixStream::pair().unwrap();let receipt=aim_storage::socket_inode::Receipt::mint(backing.as_raw_fd()).unwrap();let socket_service=crate::socket_scm::Service::start().unwrap();
         let service=mach::new_port(true).unwrap();let descriptor=socket_service.endpoint().clone();let worker=std::thread::spawn(move||{
@@ -1043,9 +1045,9 @@ mod path_carrier_tests {
             let mut data=0i32.to_le_bytes().to_vec();data.extend(descriptor.encode());let message=Msg{id:wire::REPLY,ports:vec![],data};mach::reply_bounded(&mut buffer,request.reply,&message,1000).unwrap();
         });let mut worker=FiniteScmService{port:service,thread:Some(worker)};let client=crate::client::Client::from_service_port(service);
         let endpoint=client.socket_scm_endpoint().unwrap();let channel=std::os::unix::net::UnixStream::connect(std::path::Path::new(std::ffi::OsStr::from_bytes(&endpoint.path))).unwrap();let _channel_root=aim_storage::socket_queue_root::SocketQueueRoot::new(channel.as_fd()).unwrap();crate::socket_scm::authenticate(channel.as_raw_fd(),&endpoint).unwrap();worker.join();drop(worker);
-        crate::socket_scm::request_create(channel.as_raw_fd(),backing.as_raw_fd(),receipt).unwrap();crate::socket_scm::wait_reply(channel.as_raw_fd()).unwrap();let reply=crate::socket_scm::receive_reply(channel.as_raw_fd()).unwrap();let carrier=reply.descriptor.unwrap();assert_eq!(reply.receipt,Some(receipt));drop(backing);
-        for _ in 0..2{crate::socket_scm::request_resolve(channel.as_raw_fd(),carrier.as_raw_fd()).unwrap();crate::socket_scm::wait_reply(channel.as_raw_fd()).unwrap();let reply=crate::socket_scm::receive_reply(channel.as_raw_fd()).unwrap();assert_eq!(reply.receipt,Some(receipt));let imported=reply.descriptor.unwrap();receipt.validate(imported.as_raw_fd()).unwrap();drop(imported);}
-        drop(carrier);crate::socket_scm::request_drain(channel.as_raw_fd()).unwrap();crate::socket_scm::wait_reply(channel.as_raw_fd()).unwrap();let drained=crate::socket_scm::receive_reply(channel.as_raw_fd()).unwrap();assert_eq!(drained.class,0);assert!(drained.descriptor.is_none());assert!(drained.receipt.is_none());_channel_root.prepare_last_close(channel.as_fd()).unwrap();drop(channel);drop(_channel_root);drop(socket_service);let mut byte=0u8;assert_eq!(unsafe{libc::recv(peer.as_raw_fd(),(&mut byte as*mut u8).cast(),1,libc::MSG_DONTWAIT)},0);
+        crate::socket_scm::request_create(channel.as_raw_fd(),backing.as_raw_fd(),receipt).unwrap();let reply=crate::socket_scm::tests::receive_ready(channel.as_raw_fd()).unwrap();let carrier=reply.descriptor.unwrap();assert_eq!(reply.receipt,Some(receipt));drop(backing);
+        for _ in 0..2{crate::socket_scm::request_resolve(channel.as_raw_fd(),carrier.as_raw_fd()).unwrap();let reply=crate::socket_scm::tests::receive_ready(channel.as_raw_fd()).unwrap();assert_eq!(reply.receipt,Some(receipt));let imported=reply.descriptor.unwrap();receipt.validate(imported.as_raw_fd()).unwrap();drop(imported);}
+        drop(carrier);crate::socket_scm::request_drain(channel.as_raw_fd()).unwrap();let drained=crate::socket_scm::tests::receive_ready(channel.as_raw_fd()).unwrap();assert_eq!(drained.class,0);assert!(drained.descriptor.is_none());assert!(drained.receipt.is_none());_channel_root.prepare_last_close(channel.as_fd()).unwrap();drop(channel);drop(_channel_root);drop(socket_service);let mut byte=0u8;assert_eq!(unsafe{libc::recv(peer.as_raw_fd(),(&mut byte as*mut u8).cast(),1,libc::MSG_DONTWAIT)},0);println!("{MARKER}");
     }
     #[test]
     fn actual_client_regular_scm_control_rpc_preserves_identity_writer_and_drains_eof(){
@@ -1101,6 +1103,8 @@ mod path_carrier_tests {
     }
     #[test]
     fn regular_writer_sidecar_survives_real_binder_reply_buffer_and_sender_close() {
+        const MARKER:&str="REGULAR_SIDECAR_REPLY_EXECUTED";
+        if crate::socket_scm::tests::isolated_exec_fixture("server::path_carrier_tests::regular_writer_sidecar_survives_real_binder_reply_buffer_and_sender_close",MARKER){return;}
         use crate::{local::{LocalProcess,Service,Call,Reply},parcel::{Binder,Parcel}};
         use std::{fs::OpenOptions,sync::Weak};
         struct Echo(Weak<LocalProcess>);
@@ -1148,8 +1152,12 @@ mod path_carrier_tests {
         received.seek(SeekFrom::Start(0)).unwrap();
         let mut bytes=Vec::new();received.read_to_end(&mut bytes).unwrap();assert_eq!(bytes,b"actual backing");
         drop(received);
-        assert_eq!(unsafe {libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},0,"last writer descriptor closes synchronously");
-        std::fs::remove_dir_all(path).unwrap();
+        // The owner releases its copy of the reply's file after the driver
+        // completed the reply, as libbinder destroys a reply Parcel after
+        // sending it; once it has stopped, the received descriptor was the last.
+        owner.shutdown().unwrap();
+        assert_eq!(unsafe {libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},0,"last writer descriptor releases the lease");
+        std::fs::remove_dir_all(path).unwrap();println!("{MARKER}");
     }
     #[test]
     fn regular_fileport_keeps_exact_writer_lock_until_final_reference_closes() {
