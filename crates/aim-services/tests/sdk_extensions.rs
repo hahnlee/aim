@@ -4,8 +4,9 @@ use std::{fs,path::PathBuf,process::Command};
 struct Data(PathBuf);
 impl Drop for Data {fn drop(&mut self){fs::remove_dir_all(&self.0).unwrap();}}
 fn data()->Data {
+    static NEXT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
     let path=std::env::temp_dir().join(format!("aim-extension-sdk-{}-{}",std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed)));
     fs::create_dir(&path).unwrap();Data(path)
 }
 fn compile(data:&Data,name:&str,manifest:&str)->PathBuf {

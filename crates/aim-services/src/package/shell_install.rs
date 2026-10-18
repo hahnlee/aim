@@ -1153,6 +1153,21 @@ mod retained_install_file_tests {
     }
     #[test]
     fn real_install_leaf_reexport_retains_regular_identity_and_writer() {
+        // The writer lease's release is observed through flock, which a
+        // concurrent test's spawn delays while its child holds copies of this
+        // process's descriptors (until exec); the fixture runs alone.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "package::shell_install::retained_install_file_tests::real_install_leaf_reexport_fixture",
+                "--ignored", "--nocapture"])
+            .output().unwrap();
+        assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout)
+            .contains("retained_install_file_tests::real_install_leaf_reexport_fixture ... ok"));
+    }
+    #[test]
+    #[ignore = "run alone by real_install_leaf_reexport_retains_regular_identity_and_writer"]
+    fn real_install_leaf_reexport_fixture() {
         let root=std::env::temp_dir().join(format!("aim-install-retained-file-{}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         let mut source=OpenOptions::new().read(true).write(true).create_new(true).open(root.join("apk")).unwrap();
