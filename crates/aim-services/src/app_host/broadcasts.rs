@@ -1469,7 +1469,7 @@ impl Broadcasts {
             app.thread.as_ref()?;
             app.config.clone()?
         };
-        let compat = super::config::CompatibilityInfo::of(&m.info.info.application_info, &config);
+        let compat = super::config::CompatibilityInfo::of(&m.info.info.application_info, &config, host.inputs().ok()?.device_density);
         let package = m.info.info.application_info.item.package_name.clone().unwrap_or_default();
         let intent = record.intent.with_component(&package, m.info.info.item.name.as_deref().unwrap_or_default());
         let mut p = Parcel::new();

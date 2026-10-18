@@ -214,6 +214,8 @@ struct Inputs {
     locales: String,
     /// `ro.serialno`, the serial of apps targeting an SDK before P.
     serial: String,
+    /// `ro.sf.lcd_density`, the processes' `DisplayMetrics.DENSITY_DEVICE`.
+    device_density: i32,
     shared_memory: bind::ApplicationSharedMemory,
 }
 
@@ -553,10 +555,11 @@ impl AppHost {
             &property("ro.build.version.codename")?,
         )
         .map_err(state)?;
+        let device_density = number("ro.sf.lcd_density")?;
         let packages = packages::Packages::load(
             &configured.root,
             &configured.data,
-            number("ro.sf.lcd_density")?,
+            device_density,
             &property("persist.sys.locale")?,
             &|name| (configured.properties)(name),
         )
@@ -576,6 +579,7 @@ impl AppHost {
             settings,
             locales: property("persist.sys.locale")?,
             serial: property("ro.serialno").unwrap_or_else(|_| "unknown".into()),
+            device_density,
             shared_memory,
         };
         Ok(self.inputs.get_or_init(|| inputs))
@@ -1965,7 +1969,7 @@ impl AppHost {
             .application_info(&app.package, STOCK_PM_FLAGS)
             .ok_or_else(|| state(format!("no application info of {}", app.package)))?;
         let config = self.global_configuration()?;
-        let compat_info = config::CompatibilityInfo::of(&info, &config);
+        let compat_info = config::CompatibilityInfo::of(&info, &config, inputs.device_density);
         let analog_clock_fps = inputs
             .packages
             .framework_integer("config_defaultAnalogClockSecondsHandFps")
