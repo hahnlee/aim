@@ -11,23 +11,44 @@
 //! unstable ones (`removeDyingProviderLocked`). The app host keeps every
 //! process it started until it dies or its task is removed, so external
 //! references (`getContentProviderExternal`) keep nothing alive and are not
-//! counted.
+//! counted. The app host is a provider client itself, as system_server's
+//! `ContentResolver` is one: `getType` (through `getMimeTypeFilterAsync`
+//! for an identity other than the system's) and `openInputStream`.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
-use std::sync::{Condvar, Mutex};
+use std::io::Read;
+use std::os::unix::fs::{FileExt, FileTypeExt};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use aim_binder_host::local::{Call, Strong};
-use aim_binder_host::parcel::{Binder, EX_ILLEGAL_STATE, EX_UNSUPPORTED_OPERATION, Exception, Parcel};
+use aim_binder_host::local::{Call, Reply, Service, Strong};
+use aim_binder_host::parcel::{
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_SECURITY, EX_UNSUPPORTED_OPERATION, Exception, Parcel, Reader, UNKNOWN_TRANSACTION,
+};
+use aim_binder_host::server::RetainedFd;
 use aim_service_aidl::android_app_iapplicationthread as thread;
+use aim_service_aidl::android_content_icontentprovider as cp;
+use aim_service_aidl::android_os_iremotecallback as remote_callback;
 
+use super::uri_grants::write_attribution_source;
 use super::{AppHost, GET_URI_PERMISSION_PATTERNS, MATCH_DIRECT_BOOT_AUTO, PER_USER_RANGE, STOCK_PM_FLAGS, activity, exit_info, field};
+use crate::bundle::{self, Value};
 use crate::package;
 use crate::package::info::ProviderInfo;
+use crate::package::uri::Uri;
 
 /// `ContentProviderHelper.CONTENT_PROVIDER_WAIT_TIMEOUT`.
 const WAIT_TIMEOUT: Duration = Duration::from_secs(20);
+/// `ContentResolver.CONTENT_PROVIDER_TIMEOUT_MILLIS`,
+/// `REMOTE_CONTENT_PROVIDER_TIMEOUT_MILLIS` and `REMOTE_CALLBACK_RESULT`.
+const CONTENT_PROVIDER_TIMEOUT: Duration = Duration::from_secs(3);
+const REMOTE_CONTENT_PROVIDER_TIMEOUT: Duration = Duration::from_secs(23);
+const REMOTE_CALLBACK_RESULT: &str = "result";
+/// `Process.SYSTEM_UID` and system_server's package.
+const SYSTEM_UID: i32 = 1000;
+const SYSTEM_PACKAGE: &str = "android";
+const GET_ANY_PROVIDER_TYPE: &str = "android.permission.GET_ANY_PROVIDER_TYPE";
 
 /// `ContentProviderHolder`.
 pub struct Holder {
@@ -334,5 +355,223 @@ impl AppHost {
                 }
             }
         }
+    }
+}
+
+/// A `RemoteCallback` the app host passes (its `IRemoteCallback`): the
+/// bundle it is sent.
+struct ResultCallback(Mutex<mpsc::Sender<HashMap<String, Value>>>);
+
+impl Service for ResultCallback {
+    fn descriptor(&self) -> &str {
+        remote_callback::DESCRIPTOR
+    }
+
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        if call.code != remote_callback::SEND_RESULT {
+            return Err(UNKNOWN_TRANSACTION);
+        }
+        let r = &mut call.data;
+        r.enforce_interface(remote_callback::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+        let result = if r.read_i32().map_err(|_| BAD_VALUE)? != 0 { bundle::read(r).map_err(|_| BAD_VALUE)? } else { None };
+        let _ = self.0.lock().unwrap().send(result.unwrap_or_default());
+        Ok(Parcel::new())
+    }
+}
+
+/// `AssetFileDescriptor.createInputStream` of a provider's file: from its
+/// start for its length when it has one (`SeekableAutoCloseInputStream`,
+/// or skipped to by `NonSeekableAutoCloseInputStream`), else to its end.
+pub struct ProviderInput {
+    fd: RetainedFd,
+    offset: u64,
+    remaining: Option<u64>,
+    seekable: bool,
+}
+
+impl Read for ProviderInput {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let Some(remaining) = self.remaining else {
+            return self.fd.read(buffer);
+        };
+        let len = buffer.len().min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        if len == 0 {
+            return Ok(0);
+        }
+        let n = if self.seekable { self.fd.read_at(&mut buffer[..len], self.offset)? } else { self.fd.read(&mut buffer[..len])? };
+        self.offset += n as u64;
+        self.remaining = Some(remaining - n as u64);
+        Ok(n)
+    }
+}
+
+/// A provider's reply status: a `DatabaseUtils.writeExceptionToParcel`
+/// exception as `readExceptionFromParcel` throws it, or the binder's.
+fn provider_status(r: &mut Reader<'_>) -> Result<Result<(), String>, i32> {
+    let start = r.position();
+    let code = r.read_i32()?;
+    if code > 0 {
+        let class = match code {
+            1 => "java.io.FileNotFoundException",
+            2 => "java.lang.IllegalArgumentException",
+            3 => "java.lang.UnsupportedOperationException",
+            11 => "android.os.OperationCanceledException",
+            _ => "android.database.sqlite.SQLiteException",
+        };
+        return Ok(Err(format!("{class}: {}", r.read_string16()?.unwrap_or_default())));
+    }
+    r.set_position(start);
+    Ok(r.read_exception()?.map_err(|e| e.message))
+}
+
+/// `ContentProvider.getAuthorityWithoutUserId` and the user of a URI's
+/// authority (`resolveUserIdFromAuthority`, user 0 for system_server).
+fn authority_and_user(uri: &Uri) -> Option<(String, i32)> {
+    let authority = uri.authority()?;
+    Some(match authority.rsplit_once('@') {
+        Some((user, name)) => (name.to_string(), user.parse().unwrap_or(-10_000)),
+        None => (authority, 0),
+    })
+}
+
+impl AppHost {
+    /// `ContentResolver.getType` of `uri` from system_server, run as `uid`.
+    /// As the system it asks the provider it acquires (`getTypeAsync`); an
+    /// app's identity (one SettingsProvider did not clear) does not own
+    /// system_server's package, so acquiring fails and AMS's
+    /// `getMimeTypeFilterAsync` answers: none for a provider hidden from
+    /// the app, `getTypeAnonymous` without GET_ANY_PROVIDER_TYPE. A failure
+    /// is a type of none, as the resolver logs it.
+    pub(super) fn provider_type(&self, uri: &Uri, uid: i32) -> Result<Option<String>, Exception> {
+        let Some((name, user)) = authority_and_user(uri).filter(|_| uri.scheme() == Some("content")) else {
+            return Ok(None);
+        };
+        let system = uid.rem_euclid(PER_USER_RANGE as i32) == SYSTEM_UID;
+        let holder = match self.provider(None, SYSTEM_UID, &name, user, true) {
+            Ok(holder) => holder,
+            Err(e) if e.code == EX_SECURITY => {
+                eprintln!("app host: Failed to get type for: {} ({})", uri.as_str(), e.message);
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+        let Some((Some(Binder::Handle(handle)), info)) = holder.map(|h| (h.provider, h.info)) else {
+            return Ok(None);
+        };
+        // `isHolderVisibleToCaller`.
+        let package = info.info.item.package_name.unwrap_or_default();
+        if !system && self.filter_package_access(&package, uid, user)? {
+            return Ok(None);
+        }
+        let (sender, results) = mpsc::channel();
+        let callback = self.process.add_service(Arc::new(ResultCallback(Mutex::new(sender))));
+        let mut p = Parcel::new();
+        p.write_interface_token(cp::DESCRIPTOR);
+        let code = if system || self.check_permission(Some(GET_ANY_PROVIDER_TYPE), uid)? == 0 {
+            write_attribution_source(&mut p, uid, system.then_some(SYSTEM_PACKAGE));
+            cp::GET_TYPE_ASYNC_TRANSACTION
+        } else {
+            cp::GET_TYPE_ANONYMOUS_ASYNC_TRANSACTION
+        };
+        // AMS asks of the URI without its user (`getUriWithoutUserId`).
+        if system { uri.clone() } else { uri.with_encoded_authority(Some(&name)) }.write(&mut p);
+        p.write_binder(Some(callback));
+        if let Err(status) = self.process.transact(handle, code, &p, true) {
+            eprintln!("app host: Failed to get type for: {} (binder status {status})", uri.as_str());
+            return Ok(None);
+        }
+        let timeout = if system { CONTENT_PROVIDER_TIMEOUT } else { REMOTE_CONTENT_PROVIDER_TIMEOUT };
+        let Ok(result) = results.recv_timeout(timeout) else {
+            return Ok(None);
+        };
+        Ok(match result.get(REMOTE_CALLBACK_RESULT) {
+            Some(Value::String(mime_type)) => mime_type.clone(),
+            _ => None,
+        })
+    }
+
+    /// `ContentResolver.openInputStream` of a `content` URI from
+    /// system_server as the system: the provider's `openTypedAssetFile` of
+    /// any type, read as its `AssetFileDescriptor` says; else the
+    /// exception thrown, as it prints.
+    pub(super) fn open_provider_input(&self, uri: &Uri) -> Result<ProviderInput, String> {
+        let not_found = || format!("java.io.FileNotFoundException: No content provider: {}", uri.as_str());
+        let (name, user) = authority_and_user(uri).filter(|_| uri.scheme() == Some("content")).ok_or_else(not_found)?;
+        let holder = self.provider(None, SYSTEM_UID, &name, user, false).map_err(|e| e.message)?;
+        let Some(Binder::Handle(handle)) = holder.and_then(|h| h.provider) else {
+            return Err(not_found());
+        };
+        let mut p = Parcel::new();
+        p.write_interface_token(cp::DESCRIPTOR);
+        write_attribution_source(&mut p, SYSTEM_UID, Some(SYSTEM_PACKAGE));
+        uri.write(&mut p);
+        p.write_string16(Some("*/*"));
+        p.write_i32(-1); // no options
+        p.write_binder(None); // no cancellation signal
+        let reply = self
+            .process
+            .transact(handle, cp::OPEN_TYPED_ASSET_FILE_TRANSACTION, &p, false)
+            .map_err(|status| format!("android.os.DeadObjectException: binder status {status}"))?;
+        let mut r = reply.reader();
+        let bad = |status: i32| format!("java.io.IOException: bad reply: {status}");
+        provider_status(&mut r).map_err(bad)??;
+        if r.read_i32().map_err(bad)? == 0 {
+            return Err(format!("java.io.FileNotFoundException: {}", uri.as_str()));
+        }
+        // `ParcelFileDescriptor` (whether it has a comm fd, its fd and
+        // that one), then the start and the length.
+        let comm = r.read_i32().map_err(bad)? != 0;
+        let fd = r.read_fd().map_err(bad)?;
+        if comm {
+            r.read_fd().map_err(bad)?;
+        }
+        let (start, length) = (r.read_i64().map_err(bad)?, r.read_i64().map_err(bad)?);
+        let fd = self
+            .process
+            .file(fd)
+            .and_then(|f| aim_binder_host::server::file_fd(&f))
+            .ok_or_else(|| "java.io.IOException: no descriptor".to_string())?;
+        let io = |e: std::io::Error| format!("java.io.IOException: {e}");
+        let file_type = fd.metadata().map_err(io)?.file_type();
+        let mut input = ProviderInput {
+            fd,
+            offset: start.max(0) as u64,
+            remaining: u64::try_from(length).ok(),
+            seekable: !(file_type.is_fifo() || file_type.is_socket()),
+        };
+        if input.remaining.is_some() && !input.seekable {
+            std::io::copy(&mut (&mut input.fd).take(input.offset), &mut std::io::sink()).map_err(io)?;
+        }
+        Ok(input)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A provider's reply status: a `DatabaseUtils` exception (its code
+    /// and message), the binder's, or none.
+    #[test]
+    fn provider_statuses() {
+        let mut p = Parcel::new();
+        p.write_i32(1);
+        p.write_string16(Some("No such file"));
+        assert_eq!(provider_status(&mut Reader::new(p.data(), &[])), Ok(Err("java.io.FileNotFoundException: No such file".into())));
+        let mut p = Parcel::new();
+        p.write_exception(&Exception::security("denied"));
+        assert_eq!(provider_status(&mut Reader::new(p.data(), &[])), Ok(Err("denied".into())));
+        let mut p = Parcel::new();
+        p.write_no_exception();
+        p.write_i32(7);
+        let mut r = Reader::new(p.data(), &[]);
+        assert_eq!(provider_status(&mut r), Ok(Ok(())));
+        assert_eq!(r.read_i32(), Ok(7));
+    }
+
+    #[test]
+    fn users_of_authorities() {
+        assert_eq!(authority_and_user(&Uri::parse("content://media/internal/audio/media/1")), Some(("media".into(), 0)));
+        assert_eq!(authority_and_user(&Uri::parse("content://10@media/x")), Some(("media".into(), 10)));
     }
 }

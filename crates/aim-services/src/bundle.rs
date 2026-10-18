@@ -1,10 +1,10 @@
 //! `Bundle` in its parcel form (`BaseBundle.writeToParcelInner`,
 //! `Parcel.writeArrayMapInternal` and `writeValue` at the pinned tag), for
 //! the few values native services exchange with the original ones: strings,
-//! string arrays, ints, int arrays and booleans, a parcelable written by
-//! the caller and a `MemoryIntArray`; a length-prefixed value read (a
-//! parcelable, a map, a serializable) is kept as its bytes for the caller
-//! to read.
+//! string arrays and lists, ints, int arrays and booleans, a parcelable
+//! written by the caller and a `MemoryIntArray`; a length-prefixed value
+//! read (a parcelable, a map, a serializable) is kept as its bytes for the
+//! caller to read.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -47,6 +47,9 @@ pub enum Value {
     /// A parcelable of the class `class`, written to `data`
     /// (`writeParcelable`, length-prefixed).
     Parcelable { class: String, data: Vec<u8> },
+    /// An `ArrayList<String>` (`putStringArrayList`, `writeList`),
+    /// length-prefixed as `Parcel.writeValue` writes lists.
+    StringList(Vec<String>),
     /// A `Map<String, String>` (`writeMap`), length-prefixed as
     /// `Parcel.writeValue` writes maps.
     StringMap(Vec<(String, Option<String>)>),
@@ -103,6 +106,13 @@ impl Value {
             Value::Parcelable { class, data } => length_prefixed(p, VAL_PARCELABLE, |p| {
                 p.write_string16(Some(class));
                 p.write_raw(data, &[]);
+            }),
+            Value::StringList(items) => length_prefixed(p, VAL_LIST, |p| {
+                p.write_i32(items.len() as i32);
+                for item in items {
+                    p.write_i32(VAL_STRING);
+                    p.write_string16(Some(item));
+                }
             }),
             Value::StringMap(entries) => length_prefixed(p, VAL_MAP, |p| {
                 p.write_i32(entries.len() as i32);
@@ -248,6 +258,22 @@ mod tests {
         for (key, value) in entries {
             assert_eq!(read[key], value);
         }
+    }
+
+    /// `putStringArrayList`: a length-prefixed list of string values.
+    #[test]
+    fn writes_string_lists() {
+        let mut p = Parcel::new();
+        write(&mut p, &[("l", Value::StringList(vec!["a=1".into()]))]);
+        let mut r = Reader::new(p.data(), &[]);
+        let Value::Lazy { kind, start, len } = read(&mut r).unwrap().unwrap()["l"] else {
+            panic!("not lazy");
+        };
+        assert_eq!(kind, VAL_LIST);
+        r.set_position(start);
+        assert_eq!((r.read_i32(), r.read_i32()), (Ok(1), Ok(VAL_STRING)));
+        assert_eq!(r.read_string16().unwrap().as_deref(), Some("a=1"));
+        assert_eq!(r.position(), start + len);
     }
 
     #[test]

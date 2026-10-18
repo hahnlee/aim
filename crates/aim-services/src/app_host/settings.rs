@@ -574,6 +574,14 @@ impl Settings {
         list
     }
 
+    /// The settings of `table` in `getSettingNamesLocked`'s order (its
+    /// `ArrayMap`'s).
+    pub fn all(&self, table: Table) -> Vec<Setting> {
+        let tables = self.shared.tables.lock().unwrap();
+        let settings = tables.get(&table).map(|state| state.settings.clone()).unwrap_or_default();
+        crate::package::info::array_order(settings, |s| &s.name)
+    }
+
     /// `DeviceConfig.getProperty(namespace, name)`.
     pub fn device_config(&self, namespace: &str, name: &str) -> Option<String> {
         self.get(Table::Config, &format!("{namespace}/{name}"))

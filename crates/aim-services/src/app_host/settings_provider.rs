@@ -1,36 +1,62 @@
-//! The `settings` provider for the app host: `IContentProvider.call` of
-//! `SettingsProvider` at `android-16.0.0_r1` over the settings the app
-//! host keeps (`super::settings`): `GET_*` with the generation tracking a
+//! The `settings` provider for the app host: `SettingsProvider` at
+//! `android-16.0.0_r1` over the settings the app host keeps
+//! (`super::settings`). Its `call`: `GET_*` with the generation tracking a
 //! client asks for (`_track_generation`, `super::generations`), `PUT_*`,
 //! `DELETE_*` and `RESET_*` of the system, secure and global settings with
 //! the original's permission, app op, user restriction and validator
-//! checks (`super::settings_validators`), and `LIST_config`. A change bumps
-//! its generation, then is notified to the observers of
-//! `content://settings/<table>/<name>` (`super::content_service`); no
-//! backup is run, so none is told of it.
+//! checks (`super::settings_validators`), `LIST_config` and `LIST_*` of a
+//! table. A change bumps its generation, then is notified to the observers
+//! of `content://settings/<table>/<name>` (`super::content_service`); no
+//! backup is run, so none is told of it. Its table transactions: `query`
+//! of a setting or a table (a `MatrixCursor` sent as `super::cursor`
+//! sends it), `insert`, `bulkInsert`, `update`, `delete` and `getType`,
+//! with the URI and where clause read as `Arguments` reads them and the
+//! settings moved between tables (`Settings.*.getMovedTo*Settings`) found
+//! in the table they moved to. A ringtone setting's sound must be audio or
+//! video (`isValidMediaUri`, its type asked of its provider) and is copied
+//! into the ringtone cache as the system (`openRingtone`). The `settings`
+//! service runs the shell's `settings` command (`SettingsService`).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use aim_android_image::dex::{self, Dex};
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, Reader};
+use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader, UNKNOWN_TRANSACTION};
 use aim_service_aidl::android_content_icontentprovider as cp;
 
 use super::appops_service::{self, MODE_DEFAULT, OP_WRITE_SETTINGS};
+use super::cursor::{BulkCursor, Rows};
 use super::generations::{self, GenerationRegistry, TRACK_GENERATION};
-use super::settings::{Change, ResetMode, SYSTEM_PACKAGE_NAME, Table};
+use super::settings::{Change, ResetMode, SYSTEM_PACKAGE_NAME, Setting, Table};
 use super::settings_validators::{PRIVATE_SETTINGS, PUBLIC_SETTINGS, validate_system_value};
 use super::{AppHost, FIRST_APPLICATION_UID, PER_USER_RANGE, reply};
 use crate::bundle::{self, Value};
 use crate::package::info::{array_order, flags};
+use crate::package::intent_filter::Plain;
 use crate::package::uri::Uri;
 
-/// `Settings.NameValueTable.VALUE` and the `Settings.CALL_METHOD_*_KEY`s;
-/// `SettingsProvider.RESULT_ROWS_DELETED`.
+/// `Settings.NameValueTable`'s columns: `_ID`, `NAME`, `VALUE`,
+/// `IS_PRESERVED_IN_RESTORE`; `SettingsProvider.ALL_COLUMNS`.
+const ID: &str = "_id";
+const NAME: &str = "name";
 const VALUE: &str = "value";
+const IS_PRESERVED_IN_RESTORE: &str = "is_preserved_in_restore";
+const ALL_COLUMNS: [&str; 4] = [ID, NAME, VALUE, IS_PRESERVED_IN_RESTORE];
+/// `DatabaseHelper`'s valid tables; `SettingsProvider.REMOVED_LEGACY_TABLES`
+/// among them.
+const VALID_TABLES: [&str; 7] =
+    ["system", "secure", "global", "bluetooth_devices", "favorites", "old_favorites", "android_metadata"];
+const REMOVED_LEGACY_TABLES: [&str; 5] = ["favorites", "old_favorites", "bluetooth_devices", "bookmarks", "android_metadata"];
+/// `ContentResolver.QUERY_ARG_SQL_SELECTION`, `QUERY_ARG_SQL_SELECTION_ARGS`.
+const QUERY_ARG_SQL_SELECTION: &str = "android:query-arg-sql-selection";
+const QUERY_ARG_SQL_SELECTION_ARGS: &str = "android:query-arg-sql-selection-args";
+/// The provider's class (`getProviderName`), which names its cursor windows.
+const PROVIDER_NAME: &str = "com.android.providers.settings.SettingsProvider";
+/// The `Settings.CALL_METHOD_*_KEY`s; `SettingsProvider.RESULT_ROWS_DELETED`
+/// and `RESULT_SETTINGS_LIST`.
 const USER: &str = "_user";
 const PREFIX: &str = "_prefix";
 const TAG: &str = "_tag";
@@ -38,6 +64,7 @@ const MAKE_DEFAULT: &str = "_make_default";
 const RESET_MODE: &str = "_reset_mode";
 const OVERRIDEABLE_BY_RESTORE: &str = "_overrideable_by_restore";
 const RESULT_ROWS_DELETED: &str = "result_rows_deleted";
+const RESULT_SETTINGS_LIST: &str = "result_settings_list";
 /// The permissions it checks.
 const WRITE_SECURE_SETTINGS: &str = "android.permission.WRITE_SECURE_SETTINGS";
 const WRITE_SETTINGS: &str = "android.permission.WRITE_SETTINGS";
@@ -58,7 +85,7 @@ const PRIVATE_FLAG_SIGNED_WITH_PLATFORM_KEY: i32 = 1 << 20;
 /// `CRITICAL_GLOBAL_SETTINGS`, `CRITICAL_SECURE_SETTINGS`: written at once.
 const CRITICAL_GLOBAL_SETTINGS: &[&str] = &["device_provisioned"];
 const CRITICAL_SECURE_SETTINGS: &[&str] = &["user_setup_complete"];
-/// The DeviceConfig and listing calls not taken (#1526).
+/// The DeviceConfig calls not taken (#1526).
 const NOT_TAKEN: &[&str] = &[
     "PUT_config",
     "DELETE_config",
@@ -69,9 +96,6 @@ const NOT_TAKEN: &[&str] = &[
     "LIST_namespaces_config",
     "REGISTER_MONITOR_CALLBACK_config",
     "UNREGISTER_MONITOR_CALLBACK_config",
-    "LIST_global",
-    "LIST_secure",
-    "LIST_system",
 ];
 
 impl Table {
@@ -84,12 +108,17 @@ impl Table {
             Table::Config => "config",
         }
     }
+
+    /// The table of the system, secure or global settings a path names.
+    fn named(path: &str) -> Option<Table> {
+        [Table::System, Table::Secure, Table::Global].into_iter().find(|t| t.path() == path)
+    }
 }
 
 /// The caller of a call: its uid and its `AttributionSource`'s package.
-struct Caller {
-    uid: i32,
-    package: Option<String>,
+pub(super) struct Caller {
+    pub(super) uid: i32,
+    pub(super) package: Option<String>,
 }
 
 impl Caller {
@@ -103,7 +132,8 @@ impl Caller {
     }
 }
 
-/// A mutation (`MUTATION_OPERATION_*`); an update is an insertion here.
+/// A mutation (`MUTATION_OPERATION_*`); an update is an insertion of a
+/// setting there is.
 #[derive(Clone, Copy)]
 enum Op<'a> {
     Insert {
@@ -111,6 +141,7 @@ enum Op<'a> {
         tag: Option<&'a str>,
         make_default: bool,
         overrideable_by_restore: bool,
+        update: bool,
     },
     Delete,
     Reset {
@@ -178,11 +209,18 @@ impl Service for SettingsProvider {
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
-        if matches!(call.code, OPEN_FILE_TRANSACTION | OPEN_ASSET_FILE_TRANSACTION | OPEN_TYPED_ASSET_FILE_TRANSACTION) {
-            return self.open(call);
-        }
-        if call.code != cp::CALL_TRANSACTION {
-            return reply(Err(self.host.unimplemented("settings provider", call.code)));
+        match call.code {
+            cp::CALL_TRANSACTION => {}
+            cp::OPEN_FILE_TRANSACTION | cp::OPEN_ASSET_FILE_TRANSACTION | cp::OPEN_TYPED_ASSET_FILE_TRANSACTION => {
+                return provider_reply(self.open(call));
+            }
+            cp::QUERY_TRANSACTION
+            | cp::GET_TYPE_TRANSACTION
+            | cp::INSERT_TRANSACTION
+            | cp::BULK_INSERT_TRANSACTION
+            | cp::DELETE_TRANSACTION
+            | cp::UPDATE_TRANSACTION => return provider_reply(self.table_transaction(call)),
+            code => return reply(Err(self.host.unimplemented("settings provider", code))),
         }
         let r = &mut call.data;
         r.enforce_interface(cp::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
@@ -206,10 +244,6 @@ impl Service for SettingsProvider {
     }
 }
 
-/// `IContentProvider`'s file transactions.
-const OPEN_FILE_TRANSACTION: u32 = 14;
-const OPEN_ASSET_FILE_TRANSACTION: u32 = 15;
-const OPEN_TYPED_ASSET_FILE_TRANSACTION: u32 = 23;
 /// `DatabaseUtils.writeExceptionToParcel`'s codes.
 const FILE_NOT_FOUND: i32 = 1;
 const ILLEGAL_ARGUMENT: i32 = 2;
@@ -217,11 +251,13 @@ const ILLEGAL_ARGUMENT: i32 = 2;
 const UNKNOWN_LENGTH: i64 = -1;
 
 /// An exception a provider's transaction writes as
-/// `DatabaseUtils.writeExceptionToParcel` writes it: one of its codes, or
-/// the binder's own.
+/// `DatabaseUtils.writeExceptionToParcel` writes it: one of its codes, the
+/// binder's own, or a status for one no parcel carries (the transaction
+/// fails).
 enum Thrown {
     Database(i32, String),
     Binder(Exception),
+    Status(i32),
 }
 
 impl From<Exception> for Thrown {
@@ -230,100 +266,236 @@ impl From<Exception> for Thrown {
     }
 }
 
+impl From<i32> for Thrown {
+    fn from(status: i32) -> Self {
+        Thrown::Status(status)
+    }
+}
+
+fn illegal_argument(message: String) -> Thrown {
+    Thrown::Database(ILLEGAL_ARGUMENT, message)
+}
+
+/// A transaction's reply as `ContentProviderNative` writes it: the
+/// result, or its exception.
+fn provider_reply(result: Result<Parcel, Thrown>) -> Reply {
+    match result {
+        Ok(p) => Ok(p),
+        Err(Thrown::Database(code, message)) => {
+            let mut p = Parcel::new();
+            p.write_i32(code);
+            p.write_string16(Some(&message));
+            Ok(p)
+        }
+        Err(Thrown::Binder(e)) => reply(Err(e)),
+        Err(Thrown::Status(status)) => Err(status),
+    }
+}
+
+/// `validateIncomingUri`: the settings authority (the provider is a single
+/// user's, so the URI keeps its user). Its read and write permissions are
+/// none, so `enforceReadPermission` and `enforceWritePermission` pass.
+fn validate_authority(uri: &Uri) -> Result<(), Thrown> {
+    let authority = uri.authority().unwrap_or_default();
+    if authority.rsplit('@').next() != Some("settings") {
+        return Err(Exception::security(format!(
+            "The authority of the uri {} does not match the one of the contentProvider: settings",
+            uri.as_str()
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 /// A file a provider opened: `ParcelFileDescriptor`'s parcel, and for an
 /// `AssetFileDescriptor` its whole extent and no extras.
 struct Opened(crate::package::app_metadata::Descriptor);
 
+/// A `ContentValues` value: a string, or the class of one whose
+/// `toString` the app host does not reproduce.
+#[derive(Debug, PartialEq)]
+enum Content {
+    Text(Option<String>),
+    Other(&'static str),
+}
+
+/// `ContentValues.CREATOR.createFromParcel`: its map
+/// (`readArrayMap`) of `writeValue`s, each as `getAsString` reads it.
+fn read_content_values(r: &mut Reader<'_>) -> Result<HashMap<String, Content>, i32> {
+    r.read_i32()?; // the capacity
+    let n = r.read_i32()?;
+    let mut values = HashMap::new();
+    for _ in 0..n.max(0) {
+        let key = r.read_string16()?.unwrap_or_default();
+        let value = match r.read_i32()? {
+            -1 => Content::Text(None),
+            0 => Content::Text(r.read_string16()?),
+            // `Integer`, `Short`, `Byte` and `Long`, `Boolean`.
+            1 | 5 | 20 => Content::Text(Some(r.read_i32()?.to_string())),
+            6 => Content::Text(Some(r.read_i64()?.to_string())),
+            9 => Content::Text(Some((r.read_i32()? != 0).to_string())),
+            7 => {
+                r.read_i32()?;
+                Content::Other("java.lang.Float")
+            }
+            8 => {
+                r.read_i64()?;
+                Content::Other("java.lang.Double")
+            }
+            13 => {
+                let len = r.read_i32()?;
+                r.skip((len.max(0) as usize).div_ceil(4) * 4)?;
+                Content::Other("byte[]")
+            }
+            _ => return Err(BAD_VALUE),
+        };
+        values.insert(key, value);
+    }
+    Ok(values)
+}
+
 impl SettingsProvider {
+    /// `ContentValues.getAsString(key)`.
+    fn content_string(&self, values: &HashMap<String, Content>, key: &str) -> Result<Option<String>, Exception> {
+        match values.get(key) {
+            None | Some(Content::Text(None)) => Ok(None),
+            Some(Content::Text(Some(s))) => Ok(Some(s.clone())),
+            Some(Content::Other(class)) => {
+                Err(self.host.unimplemented_named("settings provider", &format!("a {class} setting value (#1583)")))
+            }
+        }
+    }
+
+    /// `ContentProviderNative`'s `QUERY`, `GET_TYPE`, `INSERT`,
+    /// `BULK_INSERT`, `DELETE` and `UPDATE` through
+    /// `ContentProvider.Transport` and the provider's defaults
+    /// (`query`'s, `delete`'s and `update`'s selection from their
+    /// arguments).
+    fn table_transaction(&self, call: &mut Call<'_>) -> Result<Parcel, Thrown> {
+        let (code, uid) = (call.code, call.sender_euid as i32);
+        let r = &mut call.data;
+        r.enforce_interface(cp::DESCRIPTOR)?;
+        let package = read_attribution_source(r)?;
+        let uri = Uri::read(r, &mut Plain)?.ok_or(BAD_VALUE)?;
+        let caller = Caller { uid, package };
+        validate_authority(&uri)?;
+        let mut p = Parcel::new();
+        match code {
+            cp::QUERY_TRANSACTION => {
+                let n = r.read_i32()?;
+                let projection = (0..n.max(0)).map(|_| r.read_string16()).collect::<Result<Vec<_>, _>>()?;
+                let args = bundle::read(r)?.unwrap_or_default();
+                let observer = r.read_binder()?;
+                r.read_binder()?; // the cancellation signal
+                let (selection, selection_args) = selection(&args);
+                let projection = (n > 0).then_some(projection);
+                let rows = self.query(&caller, &uri, projection.as_deref(), selection, selection_args.as_deref())?;
+                let window_size = self.window_size()?;
+                let cursor = BulkCursor::new(self.host.process.clone(), rows, observer, PROVIDER_NAME, window_size)?;
+                let binder = self.host.process.add_service(cursor.clone());
+                p.write_no_exception();
+                p.write_i32(1);
+                cursor.write_descriptor(binder, &mut p)?;
+            }
+            cp::GET_TYPE_TRANSACTION => {
+                let mime_type = get_type(&uri)?;
+                p.write_no_exception();
+                p.write_string16(Some(&mime_type));
+            }
+            cp::INSERT_TRANSACTION => {
+                let values = read_content_values(r)?;
+                bundle::read(r)?; // the extras, which `insert(uri, values)` has not
+                let inserted = self.insert(&caller, &uri, &values)?;
+                p.write_no_exception();
+                // `maybeAddUserId` of the URI's user, unless current (-2).
+                let user = uri.authority().unwrap_or_default().rsplit_once('@').map(|(u, _)| u.parse().unwrap_or(-10_000));
+                let user = user.filter(|&user: &i32| user != -2);
+                match (inserted, user) {
+                    (Some(inserted), Some(user)) => {
+                        inserted.with_encoded_authority(Some(&format!("{user}@settings"))).write(&mut p)
+                    }
+                    (Some(inserted), None) => inserted.write(&mut p),
+                    (None, _) => p.write_i32(0),
+                }
+            }
+            cp::BULK_INSERT_TRANSACTION => {
+                // `createTypedArray`; `bulkInsert` inserts each.
+                let n = r.read_i32()?;
+                if n < 0 {
+                    return Err(Exception::new(EX_NULL_POINTER, "Attempt to get length of null array").into());
+                }
+                let mut all = Vec::new();
+                for _ in 0..n {
+                    all.push(if r.read_i32()? != 0 { Some(read_content_values(r)?) } else { None });
+                }
+                let mut count = 0;
+                for values in all {
+                    let values = values.ok_or_else(|| {
+                        Exception::new(EX_NULL_POINTER, "Attempt to invoke virtual method 'java.lang.String android.content.ContentValues.getAsString(java.lang.String)' on a null object reference")
+                    })?;
+                    count += self.insert(&caller, &uri, &values)?.is_some() as i32;
+                }
+                p.write_no_exception();
+                p.write_i32(count);
+            }
+            cp::DELETE_TRANSACTION => {
+                let extras = bundle::read(r)?.unwrap_or_default();
+                let (selection, selection_args) = selection(&extras);
+                let count = self.delete(&caller, &uri, selection, selection_args.as_deref())?;
+                p.write_no_exception();
+                p.write_i32(count);
+            }
+            _ => {
+                let values = read_content_values(r)?;
+                let extras = bundle::read(r)?.unwrap_or_default();
+                let (selection, selection_args) = selection(&extras);
+                let count = self.update(&caller, &uri, &values, selection, selection_args.as_deref())?;
+                p.write_no_exception();
+                p.write_i32(count);
+            }
+        }
+        Ok(p)
+    }
+
     /// `ContentProviderNative`'s `OPEN_FILE`, `OPEN_ASSET_FILE` and
     /// `OPEN_TYPED_ASSET_FILE` through `ContentProvider.Transport`.
-    fn open(&self, call: &mut Call<'_>) -> Reply {
-        let code = call.code;
-        let uid = call.sender_euid as i32;
+    fn open(&self, call: &mut Call<'_>) -> Result<Parcel, Thrown> {
+        let (code, uid) = (call.code, call.sender_euid as i32);
         let r = &mut call.data;
-        r.enforce_interface(cp::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+        r.enforce_interface(cp::DESCRIPTOR)?;
         let package = read_attribution_source(r)?;
-        let uri = Uri::read(r, &mut crate::package::intent_filter::Plain).map_err(|_| BAD_VALUE)?.ok_or(BAD_VALUE)?;
-        let mode = r.read_string16().map_err(|_| BAD_VALUE)?;
-        let mime_type = if code == OPEN_TYPED_ASSET_FILE_TRANSACTION {
-            let mime_type = r.read_string16().map_err(|_| BAD_VALUE)?;
-            bundle::read(r).map_err(|_| BAD_VALUE)?; // the options, which openFile ignores
+        let uri = Uri::read(r, &mut Plain)?.ok_or(BAD_VALUE)?;
+        let mode = r.read_string16()?;
+        let mime_type = if code == cp::OPEN_TYPED_ASSET_FILE_TRANSACTION {
+            let mime_type = r.read_string16()?;
+            bundle::read(r)?; // the options, which openFile ignores
             mime_type
         } else {
             None
         };
         let caller = Caller { uid, package };
-        let opened = (|| -> Result<Opened, Thrown> {
-            // `validateIncomingUri`: the settings authority (the provider is
-            // a single user's, so the URI keeps its user); its read and
-            // write permissions are none (`enforceFilePermission`).
-            let authority = uri.authority().unwrap_or_default();
-            if authority.rsplit('@').next() != Some("settings") {
-                return Err(Exception::security(format!(
-                    "The authority of the uri {} does not match the one of the contentProvider: settings",
-                    uri.as_str()
-                ))
-                .into());
-            }
-            match code {
-                OPEN_TYPED_ASSET_FILE_TRANSACTION => {
-                    let filter = mime_type.unwrap_or_default();
-                    if filter != "*/*" && !self.has_mime_type(&uri, &filter)? {
-                        return Err(Thrown::Database(FILE_NOT_FOUND, format!("Can't open {} as type {filter}", uri.as_str())));
-                    }
-                    self.open_file(&caller, &uri, "r")
+        validate_authority(&uri)?;
+        let Opened(fd) = match code {
+            // `openTypedAssetFile`: any type, or the URI's.
+            cp::OPEN_TYPED_ASSET_FILE_TRANSACTION => {
+                let filter = mime_type.unwrap_or_default();
+                if filter != "*/*" && !compare_mime_types(&get_type(&uri)?, &filter) {
+                    return Err(Thrown::Database(FILE_NOT_FOUND, format!("Can't open {} as type {filter}", uri.as_str())));
                 }
-                _ => self.open_file(&caller, &uri, mode.as_deref().unwrap_or_default()),
+                self.open_file(&caller, &uri, "r")?
             }
-        })();
+            _ => self.open_file(&caller, &uri, mode.as_deref().unwrap_or_default())?,
+        };
         let mut p = Parcel::new();
-        match opened {
-            Ok(Opened(fd)) => {
-                p.write_no_exception();
-                p.write_i32(1);
-                aim_service_aidl::WriteParcelable::write_to(&fd, &mut p);
-                if code != OPEN_FILE_TRANSACTION {
-                    p.write_i64(0);
-                    p.write_i64(UNKNOWN_LENGTH);
-                    p.write_i32(0);
-                }
-                Ok(p)
-            }
-            Err(Thrown::Database(code, message)) => {
-                p.write_i32(code);
-                p.write_string16(Some(&message));
-                Ok(p)
-            }
-            Err(Thrown::Binder(e)) => reply(Err(e)),
+        p.write_no_exception();
+        p.write_i32(1);
+        aim_service_aidl::WriteParcelable::write_to(&fd, &mut p);
+        if code != cp::OPEN_FILE_TRANSACTION {
+            p.write_i64(0);
+            p.write_i64(UNKNOWN_LENGTH);
+            p.write_i32(0);
         }
-    }
-
-    /// Whether `getType` of `uri` is of `desired`
-    /// (`ClipDescription.compareMimeTypes`): a table's directory, or one
-    /// of its settings. A setting moved between tables is of the table it
-    /// moved to, which the app host does not know (#1525); that matters
-    /// only to a desired type naming the table.
-    fn has_mime_type(&self, uri: &Uri, desired: &str) -> Result<bool, Thrown> {
-        const ITEM: &str = "vnd.android.cursor.item/";
-        let segments = uri.path_segments();
-        let table = segments.first().ok_or_else(|| Thrown::Database(ILLEGAL_ARGUMENT, format!("Invalid URI:{}", uri.as_str())))?;
-        if !matches!(table.as_str(), "system" | "secure" | "global") {
-            return Err(Thrown::Database(ILLEGAL_ARGUMENT, format!("Bad root path: {table}")));
-        }
-        match segments.len() {
-            1 => Ok(compare_mime_types(&format!("vnd.android.cursor.dir/{table}"), desired)),
-            2 if desired.starts_with(ITEM) && desired != format!("{ITEM}*") => {
-                Err(self.host.unimplemented_named("settings provider", "the table of a setting moved between tables (#1525)").into())
-            }
-            2 => Ok(compare_mime_types(&format!("{ITEM}{table}"), desired)),
-            _ => Err(Thrown::Database(
-                ILLEGAL_ARGUMENT,
-                format!(
-                    "Supported SQL:\n  uri content://some_table/some_property with null where and where args\n  uri content://some_table with query name=? and single name as arg\n  uri content://some_table with query name=some_name and null args\n  but got - uri:{}, where:null whereArgs:null",
-                    uri.as_str()
-                ),
-            )),
-        }
+        Ok(p)
     }
 
     /// `SettingsProvider.openFile`: only the ringtone caches, opened as
@@ -365,15 +537,7 @@ impl SettingsProvider {
             "rwt" => (true, true, true, true, false),
             _ => return Err(Thrown::Database(ILLEGAL_ARGUMENT, format!("Bad mode '{mode}'"))),
         };
-        // `getCacheFile` in `getRingtoneCacheDir`, made if missing.
-        let data = self.host.data()?;
-        let dir = data.join(format!("system_de/{user}/ringtones"));
-        if !dir.exists() {
-            std::fs::create_dir(&dir).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", dir.display())))?;
-            aim_storage::guest_inode::record(&dir, aim_storage::guest_inode::GuestInode { uid: Some(SYSTEM_UID as u32), gid: Some(SYSTEM_UID as u32), mode: Some(0o700) })
-                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", dir.display())))?;
-        }
-        let path = dir.join(ringtone_cache(setting).unwrap_or_default());
+        let path = self.ringtone_cache_dir(user)?.join(ringtone_cache(setting).unwrap_or_default());
         let existed = path.exists();
         let file = std::fs::OpenOptions::new()
             .read(read)
@@ -384,13 +548,82 @@ impl SettingsProvider {
             .open(&path)
             .map_err(|e| Thrown::Database(FILE_NOT_FOUND, open_failed(&e)))?;
         if create && !existed {
-            aim_storage::guest_inode::record(&path, aim_storage::guest_inode::GuestInode { uid: Some(SYSTEM_UID as u32), gid: Some(SYSTEM_UID as u32), mode: Some(0o700) })
-                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display())))?;
+            record_system(&path, 0o700)?;
         }
         let file = aim_binder_host::server::file_from_fd(std::os::fd::AsFd::as_fd(&file))
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "settings provider: no fileport"))?;
         Ok(Opened(crate::package::app_metadata::Descriptor(file)))
     }
+
+    /// `getRingtoneCacheDir`: user `user`'s, made if missing.
+    fn ringtone_cache_dir(&self, user: i32) -> Result<PathBuf, Exception> {
+        let dir = self.host.data()?.join(format!("system_de/{user}/ringtones"));
+        if !dir.exists() {
+            std::fs::create_dir(&dir).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", dir.display())))?;
+            record_system(&dir, 0o700)?;
+        }
+        Ok(dir)
+    }
+
+    /// `isValidMediaUri`: a sound that is not a setting of this provider,
+    /// set by a package there is, of an audio or video type as the
+    /// content resolver tells it, asked as the system for a privileged
+    /// app and as the app otherwise.
+    fn valid_media_uri(&self, caller: &Caller, package: Option<&str>, name: &str, value: &str) -> Result<bool, Exception> {
+        let uri = Uri::parse(value);
+        if uri.authority().is_some_and(|a| a.rsplit('@').next() == Some("settings")) {
+            return Ok(false);
+        }
+        // `getCallingApplicationInfoOrThrow`.
+        let info = package.and_then(|p| self.host.inputs().ok()?.packages.application_info(p, 0));
+        let Some(info) = info else {
+            eprintln!("app host: settings: isValidMediaUri: cannot get calling app info for setting: {name} URI: {value}");
+            return Ok(false);
+        };
+        let uid = if info.private_flags & PRIVATE_FLAG_PRIVILEGED != 0 { SYSTEM_UID } else { caller.uid };
+        let Some(mime_type) = self.host.provider_type(&uri, uid)? else {
+            eprintln!(
+                "app host: settings: mutateSystemSetting for setting: {name} URI: {value} ignored: failure to find mimeType (no access from this context?)"
+            );
+            return Ok(false);
+        };
+        if !(mime_type.starts_with("audio/")
+            || matches!(mime_type.as_str(), "application/ogg" | "application/x-flac" | "application/mp4")
+            || mime_type.starts_with("video/"))
+        {
+            eprintln!(
+                "app host: settings: mutateSystemSetting for setting: {name} URI: {value} ignored: associated MIME type:{mime_type} is not a recognized audio or video type"
+            );
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// The sound of a ringtone setting streamed into its cache as the
+    /// system (`openRingtone`, then `FileUtils.copy`), so that it plays
+    /// while credential storage is locked; a failure only logged. A sound
+    /// the system cannot open directly would be asked of the ringtone
+    /// player (#1584).
+    fn cache_ringtone(&self, path: &Path, value: &str) {
+        let copied = (|| -> Result<(), String> {
+            let mut input = self.host.open_provider_input(&Uri::parse(value))?;
+            let existed = path.exists();
+            let mut out = std::fs::File::create(path).map_err(|e| format!("java.io.FileNotFoundException: {}", open_failed(&e)))?;
+            if !existed {
+                record_system(path, 0o600).map_err(|e| e.message)?;
+            }
+            std::io::copy(&mut input, &mut out).map(|_| ()).map_err(|e| format!("java.io.IOException: {e}"))
+        })();
+        if let Err(e) = copied {
+            eprintln!("app host: settings: Failed to cache ringtone: {e}");
+        }
+    }
+}
+
+/// A file or directory the system made, as the guest sees it.
+fn record_system(path: &Path, mode: u32) -> Result<(), Exception> {
+    let inode = aim_storage::guest_inode::GuestInode { uid: Some(SYSTEM_UID as u32), gid: Some(SYSTEM_UID as u32), mode: Some(mode) };
+    aim_storage::guest_inode::record(path, inode).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display())))
 }
 
 /// `ErrnoException.getMessage` of `Os.open`'s failure.
@@ -594,13 +827,253 @@ fn shell_or_root(package: &str) -> bool {
     matches!(package, "com.android.shell" | "root")
 }
 
+/// `Settings.System.getMovedToSecureSettings`,
+/// `System.getMovedToGlobalSettings` (`MOVED_TO_GLOBAL` and
+/// `MOVED_TO_SECURE_THEN_GLOBAL`), `Secure.getMovedToGlobalSettings`,
+/// `Global.getMovedToSecureSettings` and `Global.getMovedToSystemSettings`
+/// at the tag.
+const SYSTEM_MOVED_TO_SECURE: &[&str] = &[
+    "adaptive_sleep", "android_id", "http_proxy", "location_providers_allowed", "lock_biometric_weak_flags",
+    "lock_pattern_autolock", "lock_pattern_visible_pattern", "lock_pattern_tactile_feedback_enabled", "logging_id",
+    "parental_control_enabled", "parental_control_last_update", "parental_control_redirect_url", "settings_classname",
+    "use_google_mail", "wifi_networks_available_repeat_delay", "wifi_num_open_networks_kept", "wifi_on",
+    "wifi_watchdog_acceptable_packet_loss_percentage", "wifi_watchdog_ap_count", "wifi_watchdog_background_check_delay_ms",
+    "wifi_watchdog_background_check_enabled", "wifi_watchdog_background_check_timeout_ms",
+    "wifi_watchdog_initial_ignored_ping_count", "wifi_watchdog_max_ap_checks", "wifi_watchdog_on", "wifi_watchdog_ping_count",
+    "wifi_watchdog_ping_delay_ms", "wifi_watchdog_ping_timeout_ms", "install_non_market_apps",
+];
+const SYSTEM_MOVED_TO_GLOBAL: &[&str] = &[
+    "airplane_mode_on", "airplane_mode_radios", "airplane_mode_toggleable_radios", "auto_time", "auto_time_zone",
+    "car_dock_sound", "car_undock_sound", "desk_dock_sound", "desk_undock_sound", "dock_sounds_enabled", "lock_sound",
+    "unlock_sound", "low_battery_sound", "power_sounds_enabled", "stay_on_while_plugged_in", "wifi_sleep_policy",
+    "mode_ringer", "window_animation_scale", "transition_animation_scale", "animator_duration_scale",
+    "fancy_ime_animations", "compatibility_mode", "emergency_tone", "call_auto_retry", "debug_app", "wait_for_debugger",
+    "always_finish_activities", "tzinfo_content_url", "tzinfo_metadata_url", "selinux_content_url",
+    "selinux_metadata_url", "sms_short_codes_content_url", "sms_short_codes_metadata_url", "cert_pin_content_url",
+    "cert_pin_metadata_url", "nfc", "cell", "wifi", "bluetooth", "wimax", "show_processes",
+    // `MOVED_TO_SECURE_THEN_GLOBAL`.
+    "adb_enabled", "bluetooth_on", "data_roaming", "device_provisioned", "http_proxy", "network_preference",
+    "usb_mass_storage_enabled", "wifi_mobile_data_transition_wakelock_timeout_ms", "wifi_max_dhcp_retry_count",
+    "wifi_networks_available_notification_on",
+];
+const SECURE_MOVED_TO_GLOBAL: &[&str] = &[
+    "adb_enabled", "assisted_gps_enabled", "bluetooth_on", "cdma_cell_broadcast_sms", "roaming_settings",
+    "subscription_mode", "data_activity_timeout_mobile", "data_activity_timeout_wifi", "data_roaming",
+    "development_settings_enabled", "device_provisioned", "display_size_forced", "download_manager_max_bytes_over_mobile",
+    "download_manager_recommended_max_bytes_over_mobile", "mobile_data", "netstats_dev_bucket_duration",
+    "netstats_dev_delete_age", "netstats_dev_persist_bytes", "netstats_dev_rotate_age", "netstats_enabled",
+    "netstats_global_alert_bytes", "netstats_poll_interval", "netstats_sample_enabled", "netstats_time_cache_max_age",
+    "netstats_uid_bucket_duration", "netstats_uid_delete_age", "netstats_uid_persist_bytes", "netstats_uid_rotate_age",
+    "netstats_uid_tag_bucket_duration", "netstats_uid_tag_delete_age", "netstats_uid_tag_persist_bytes",
+    "netstats_uid_tag_rotate_age", "network_preference", "nitz_update_diff", "nitz_update_spacing", "ntp_server",
+    "ntp_timeout", "pdp_watchdog_error_poll_count", "pdp_watchdog_long_poll_interval_ms",
+    "pdp_watchdog_max_pdp_reset_fail_count", "pdp_watchdog_poll_interval_ms", "pdp_watchdog_trigger_packet_count",
+    "setup_prepaid_data_service_url", "setup_prepaid_detection_redir_host", "setup_prepaid_detection_target_url",
+    "tether_dun_apn", "tether_dun_required", "tether_supported", "usb_mass_storage_enabled", "use_google_mail",
+    "wifi_country_code", "wifi_framework_scan_interval_ms", "wifi_frequency_band", "wifi_idle_ms",
+    "wifi_max_dhcp_retry_count", "wifi_mobile_data_transition_wakelock_timeout_ms",
+    "wifi_networks_available_notification_on", "wifi_networks_available_repeat_delay", "wifi_num_open_networks_kept",
+    "wifi_on", "wifi_p2p_device_name", "wifi_supplicant_scan_interval_ms", "wifi_verbose_logging_enabled",
+    "wifi_enhanced_auto_join", "wifi_network_show_rssi", "wifi_watchdog_on", "wifi_watchdog_poor_network_test_enabled",
+    "wifi_p2p_pending_factory_reset", "wimax_networks_available_notification_on", "verifier_timeout",
+    "verifier_default_response", "data_stall_alarm_non_aggressive_delay_in_ms", "data_stall_alarm_aggressive_delay_in_ms",
+    "gprs_register_check_period_ms", "wtf_is_fatal", "battery_discharge_duration_threshold",
+    "battery_discharge_threshold", "send_action_app_error", "dropbox_age_seconds", "dropbox_max_files",
+    "dropbox_quota_kb", "dropbox_quota_percent", "dropbox_reserve_percent", "dropbox:", "logcat_for_",
+    "sys_free_storage_log_interval", "disk_free_change_reporting_threshold", "sys_storage_threshold_percentage",
+    "sys_storage_threshold_max_bytes", "sys_storage_full_threshold_bytes", "sync_max_retry_delay_in_seconds",
+    "connectivity_change_delay", "captive_portal_detection_enabled", "captive_portal_server", "set_install_location",
+    "default_install_location", "inet_condition_debounce_up_delay", "inet_condition_debounce_down_delay",
+    "read_external_storage_enforced_default", "http_proxy", "global_http_proxy_host", "global_http_proxy_port",
+    "global_http_proxy_exclusion_list", "set_global_http_proxy", "default_dns_server", "preferred_network_mode",
+    "webview_data_reduction_proxy_key", "secure_frp_mode",
+];
+const GLOBAL_MOVED_TO_SECURE: &[&str] = &[
+    "install_non_market_apps", "zen_duration", "charging_sounds_enabled", "charging_vibration_enabled",
+    "notification_bubbles", "bugreport_in_power_menu", "custom_bugreport_handler_app", "custom_bugreport_handler_user",
+];
+const GLOBAL_MOVED_TO_SYSTEM: &[&str] = &["apply_ramping_ringer"];
+
+/// `Arguments`: the table and the setting a URI and a where clause name.
+#[derive(Debug, PartialEq)]
+struct Arguments {
+    table: String,
+    name: Option<String>,
+}
+
+/// `java.util.regex`'s `\s`.
+fn java_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\u{b}' | '\u{c}' | '\r')
+}
+
+/// The where clause inside `\s*` and, if `brackets`, `\(\s*...\s*\)\s*`;
+/// then after `name\s*=\s*`.
+fn where_value(clause: &str, brackets: bool) -> Option<&str> {
+    let mut s = clause.trim_matches(java_space);
+    if brackets {
+        s = s.strip_prefix('(')?.strip_suffix(')')?.trim_matches(java_space);
+    }
+    s.strip_prefix("name")?.trim_start_matches(java_space).strip_prefix('=').map(|v| v.trim_start_matches(java_space))
+}
+
+/// `WHERE_PATTERN_WITH_PARAM_*`: `name = ?`, bare or in brackets.
+fn where_with_param(clause: &str) -> bool {
+    [false, true].into_iter().any(|brackets| where_value(clause, brackets) == Some("?"))
+}
+
+/// `WHERE_PATTERN_NO_PARAM_*`: `name = 'value'` (or `"value"`), bare or in
+/// brackets; `.` matches no line terminator.
+fn where_no_param(clause: &str) -> bool {
+    [false, true].into_iter().any(|brackets| {
+        where_value(clause, brackets).is_some_and(|v| {
+            let mut chars = v.chars();
+            let quoted = |c: Option<char>| matches!(c, Some('\'' | '"'));
+            quoted(chars.next())
+                && quoted(chars.next_back())
+                && !chars.any(|c| matches!(c, '\n' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}'))
+        })
+    })
+}
+
+/// `Arrays.toString` of the where arguments.
+fn arrays_to_string(args: Option<&[Option<String>]>) -> String {
+    match args {
+        None => "null".into(),
+        Some(args) => format!("[{}]", args.iter().map(|a| a.as_deref().unwrap_or("null")).collect::<Vec<_>>().join(", ")),
+    }
+}
+
+/// `new Arguments(uri, where, whereArgs, supportAll)`.
+fn arguments(
+    uri: &Uri,
+    clause: Option<&str>,
+    args: Option<&[Option<String>]>,
+    support_all: bool,
+) -> Result<Arguments, Thrown> {
+    let segments = uri.path_segments();
+    let table_for = |name: Option<String>| -> Result<Arguments, Thrown> { Ok(Arguments { table: table_for_setting(uri, name.as_deref())?, name }) };
+    match (segments.len(), clause) {
+        (1, Some(clause)) if where_with_param(clause) => match args {
+            Some([name]) => return table_for(name.clone()),
+            Some(_) => {}
+            None => return Err(Exception::new(EX_NULL_POINTER, "Attempt to get length of null array").into()),
+        },
+        (1, Some(clause)) if where_no_param(clause) => {
+            // `substring` between the first and the last quote, of
+            // either kind; one before the other has no substring.
+            let first = |q| clause.find(q).map_or(-1, |i| i as i64);
+            let last = |q| clause.rfind(q).map_or(-1, |i| i as i64);
+            let (start, end) = (first('\'').max(first('"')) + 1, last('\'').max(last('"')));
+            if start > end {
+                eprintln!("app host: settings: StringIndexOutOfBoundsException: begin {start}, end {end}");
+                return Err(UNKNOWN_TRANSACTION.into());
+            }
+            return table_for(Some(clause[start as usize..end as usize].to_string()));
+        }
+        (1, None) if support_all && args.is_none() => return table_for(None),
+        (2, None) if args.is_none() => return table_for(Some(segments[1].clone())),
+        _ => {}
+    }
+    Err(illegal_argument(format!(
+        "Supported SQL:\n  uri content://some_table/some_property with null where and where args\n  uri content://some_table with query name=? and single name as arg\n  uri content://some_table with query name=some_name and null args\n  but got - uri:{}, where:{} whereArgs:{}",
+        uri.as_str(),
+        clause.unwrap_or("null"),
+        arrays_to_string(args)
+    )))
+}
+
+/// `getValidTableOrThrow`.
+fn valid_table(uri: &Uri) -> Result<String, Thrown> {
+    let segments = uri.path_segments();
+    let table = segments.first().ok_or_else(|| illegal_argument(format!("Invalid URI:{}", uri.as_str())))?;
+    if !VALID_TABLES.contains(&table.as_str()) {
+        return Err(illegal_argument(format!("Bad root path: {table}")));
+    }
+    Ok(table.clone())
+}
+
+/// `computeTableForSetting`: the URI's table, or the one its setting
+/// moved to.
+fn table_for_setting(uri: &Uri, name: Option<&str>) -> Result<String, Thrown> {
+    let mut table = valid_table(uri)?;
+    if let Some(name) = name {
+        for (moved, to) in [
+            (SYSTEM_MOVED_TO_SECURE, "secure"),
+            (SYSTEM_MOVED_TO_GLOBAL, "global"),
+            (SECURE_MOVED_TO_GLOBAL, "global"),
+            (GLOBAL_MOVED_TO_SECURE, "secure"),
+            (GLOBAL_MOVED_TO_SYSTEM, "system"),
+        ] {
+            if moved.contains(&name) {
+                table = to.to_string();
+            }
+        }
+    }
+    Ok(table)
+}
+
+/// `SettingsProvider.getType`.
+fn get_type(uri: &Uri) -> Result<String, Thrown> {
+    let args = arguments(uri, None, None, true)?;
+    let kind = if args.name.as_deref().is_none_or(str::is_empty) { "dir" } else { "item" };
+    Ok(format!("vnd.android.cursor.{kind}/{}", args.table))
+}
+
+/// The selection `ContentProvider.query(uri, projection, queryArgs,
+/// signal)`, `delete` and `update` take from their arguments.
+fn selection(args: &HashMap<String, Value>) -> (Option<&str>, Option<Vec<Option<String>>>) {
+    let clause = match args.get(QUERY_ARG_SQL_SELECTION) {
+        Some(Value::String(s)) => s.as_deref(),
+        _ => None,
+    };
+    let clause_args = match args.get(QUERY_ARG_SQL_SELECTION_ARGS) {
+        Some(Value::StringArray(a)) => Some(a.clone()),
+        _ => None,
+    };
+    (clause, clause_args)
+}
+
+/// `normalizeProjection`: all the columns, or those asked for if each is
+/// one.
+fn normalize_projection(projection: Option<&[Option<String>]>) -> Result<Vec<String>, Thrown> {
+    let Some(projection) = projection else {
+        return Ok(ALL_COLUMNS.map(str::to_string).to_vec());
+    };
+    projection
+        .iter()
+        .map(|column| match column.as_deref() {
+            Some(c) if ALL_COLUMNS.contains(&c) => Ok(c.to_string()),
+            c => Err(illegal_argument(format!("Invalid column: {}", c.unwrap_or("null")))),
+        })
+        .collect()
+}
+
+/// `appendSettingToCursor`'s row.
+fn setting_row(setting: &Setting, columns: &[String]) -> Vec<Option<String>> {
+    columns
+        .iter()
+        .map(|column| match column.as_str() {
+            ID => Some(setting.id.to_string()),
+            NAME => Some(setting.name.clone()),
+            VALUE => setting.value.clone(),
+            _ => Some(setting.preserved_in_restore.to_string()),
+        })
+        .collect()
+}
+
+/// `isKeyValid`: not empty, nor what `SettingsState.isBinary` would not
+/// write to XML.
+fn key_valid(key: &str) -> bool {
+    !key.is_empty() && key.chars().all(|c| matches!(c, '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}'))
+}
+
 impl SettingsProvider {
     pub fn new(host: Arc<AppHost>) -> SettingsProvider {
         SettingsProvider { host, generations: OnceLock::new(), declared: OnceLock::new(), setup_wizard: OnceLock::new() }
     }
 
     /// `SettingsProvider.call`.
-    fn call(
+    pub(super) fn call(
         &self,
         caller: &Caller,
         method: &str,
@@ -635,6 +1108,7 @@ impl SettingsProvider {
                     tag: if system { None } else { string(TAG) },
                     make_default: !system && boolean(MAKE_DEFAULT),
                     overrideable_by_restore: boolean(OVERRIDEABLE_BY_RESTORE),
+                    update: false,
                 };
                 self.mutate(caller, table, name, insert, requesting)?;
                 None
@@ -661,6 +1135,12 @@ impl SettingsProvider {
                 }
                 Some(array_order(result, |(key, _)| key))
             }
+            // `buildSettingsList` of `getAll*Settings`.
+            ("LIST", Some(table)) => {
+                let lines = self.all(caller, table, requesting)?;
+                let lines = lines.iter().map(|s| format!("{}={}", s.name, s.value.as_deref().unwrap_or("null"))).collect();
+                Some(vec![(RESULT_SETTINGS_LIST.to_string(), Value::StringList(lines))])
+            }
             _ if NOT_TAKEN.contains(&method) => {
                 return Err(self.host.unimplemented_named("settings provider", &format!("{method} (#1526)")));
             }
@@ -682,15 +1162,7 @@ impl SettingsProvider {
         tracking: bool,
     ) -> Result<Vec<(String, Value)>, Exception> {
         let name = name.unwrap_or_default();
-        let user = match table {
-            Table::Secure | Table::System => self.calling_user(caller, requesting)?,
-            Table::Global | Table::Config => 0,
-        };
-        // `isSecureSettingAccessible`: the Bluetooth address only to who
-        // may see the device's MAC addresses.
-        let accessible = table != Table::Secure || name != "bluetooth_address" || self.has(caller, LOCAL_MAC_ADDRESS)?;
-        // The app host keeps user 0's settings only (#1523).
-        let setting = if accessible && user == 0 { self.host.inputs()?.settings.setting(table, name) } else { None };
+        let setting = self.setting_of(caller, table, name, requesting)?;
         let mut generation = Vec::new();
         if tracking {
             // A setting set or declared has its own generation, the unset
@@ -699,6 +1171,130 @@ impl SettingsProvider {
             generation = self.generations()?.generation_data(table, requesting, key);
         }
         Ok(value_result(setting.and_then(|s| s.value), generation))
+    }
+
+    /// The setting `getGlobalSetting`, `getSecureSetting` and
+    /// `getSystemSetting` read for `requesting` (a config flag's is user
+    /// 0's): none when absent or hidden from the caller.
+    fn setting_of(&self, caller: &Caller, table: Table, name: &str, requesting: i32) -> Result<Option<Setting>, Exception> {
+        let user = match table {
+            Table::Secure | Table::System => self.calling_user(caller, requesting)?,
+            Table::Global | Table::Config => 0,
+        };
+        // `isSecureSettingAccessible`: the Bluetooth address only to who
+        // may see the device's MAC addresses.
+        let accessible = table != Table::Secure || name != "bluetooth_address" || self.has(caller, LOCAL_MAC_ADDRESS)?;
+        // The app host keeps user 0's settings only (#1523).
+        Ok(if accessible && user == 0 { self.host.inputs()?.settings.setting(table, name) } else { None })
+    }
+
+    /// `getAllGlobalSettings`, `getAllSecureSettings` and
+    /// `getAllSystemSettings`: the settings of `table` the caller sees.
+    fn all(&self, caller: &Caller, table: Table, requesting: i32) -> Result<Vec<Setting>, Exception> {
+        let user = if table == Table::Global { 0 } else { self.calling_user(caller, requesting)? };
+        if user != 0 {
+            return Err(self.host.unimplemented_named("settings provider", "another user's settings (#1523)"));
+        }
+        let hidden = table == Table::Secure && !self.has(caller, LOCAL_MAC_ADDRESS)?;
+        let mut settings = self.host.inputs()?.settings.all(table);
+        settings.retain(|s| !(hidden && s.name == "bluetooth_address"));
+        Ok(settings)
+    }
+
+    /// `SettingsProvider.query`: the setting the URI or its where clause
+    /// names, or its table's settings, in the columns asked for.
+    fn query(
+        &self,
+        caller: &Caller,
+        uri: &Uri,
+        projection: Option<&[Option<String>]>,
+        selection: Option<&str>,
+        selection_args: Option<&[Option<String>]>,
+    ) -> Result<Rows, Thrown> {
+        let args = arguments(uri, selection, selection_args, true)?;
+        let columns = normalize_projection(projection)?;
+        let settings = if REMOVED_LEGACY_TABLES.contains(&args.table.as_str()) {
+            Vec::new()
+        } else {
+            let table = Table::named(&args.table).ok_or_else(|| illegal_argument(format!("Invalid Uri path:{}", uri.as_str())))?;
+            match &args.name {
+                Some(name) => self.setting_of(caller, table, name, caller.user())?.into_iter().collect(),
+                None => self.all(caller, table, caller.user())?,
+            }
+        };
+        let rows = settings.iter().map(|s| setting_row(s, &columns)).collect();
+        Ok(Rows { columns, rows })
+    }
+
+    /// `SettingsProvider.insert`: the URI of the setting changed, if it
+    /// changed.
+    fn insert(&self, caller: &Caller, uri: &Uri, values: &HashMap<String, Content>) -> Result<Option<Uri>, Thrown> {
+        let table = valid_table(uri)?;
+        if REMOVED_LEGACY_TABLES.contains(&table.as_str()) {
+            return Ok(None);
+        }
+        let Some(name) = self.content_string(values, NAME)?.filter(|n| key_valid(n)) else {
+            return Ok(None);
+        };
+        let value = self.content_string(values, VALUE)?;
+        let table = Table::named(&table).ok_or_else(|| illegal_argument(format!("Bad Uri path:{}", uri.as_str())))?;
+        let insert = Op::Insert { value: value.as_deref(), tag: None, make_default: false, overrideable_by_restore: false, update: false };
+        let inserted = self.mutate(caller, table, Some(&name), insert, caller.user())?;
+        Ok(inserted.then(|| Uri::parse(&format!("content://settings/{}", table.path())).with_appended_path(&name)))
+    }
+
+    /// `SettingsProvider.delete`: the rows deleted.
+    fn delete(
+        &self,
+        caller: &Caller,
+        uri: &Uri,
+        selection: Option<&str>,
+        selection_args: Option<&[Option<String>]>,
+    ) -> Result<i32, Thrown> {
+        let args = arguments(uri, selection, selection_args, false)?;
+        if REMOVED_LEGACY_TABLES.contains(&args.table.as_str()) {
+            return Ok(0);
+        }
+        let Some(name) = args.name.filter(|n| key_valid(n)) else {
+            return Ok(0);
+        };
+        let table = Table::named(&args.table).ok_or_else(|| illegal_argument(format!("Bad Uri path:{}", uri.as_str())))?;
+        Ok(self.mutate(caller, table, Some(&name), Op::Delete, caller.user())? as i32)
+    }
+
+    /// `SettingsProvider.update`: the setting the URI or its where clause
+    /// names set to the values' value, when there is one and the values
+    /// name a setting; the rows updated.
+    fn update(
+        &self,
+        caller: &Caller,
+        uri: &Uri,
+        values: &HashMap<String, Content>,
+        selection: Option<&str>,
+        selection_args: Option<&[Option<String>]>,
+    ) -> Result<i32, Thrown> {
+        let args = arguments(uri, selection, selection_args, false)?;
+        if REMOVED_LEGACY_TABLES.contains(&args.table.as_str()) {
+            return Ok(0);
+        }
+        if !self.content_string(values, NAME)?.is_some_and(|n| key_valid(&n)) {
+            return Ok(0);
+        }
+        let value = self.content_string(values, VALUE)?;
+        let table = Table::named(&args.table).ok_or_else(|| illegal_argument(format!("Invalid Uri path:{}", uri.as_str())))?;
+        let update = Op::Insert { value: value.as_deref(), tag: None, make_default: false, overrideable_by_restore: false, update: true };
+        Ok(self.mutate(caller, table, args.name.as_deref(), update, caller.user())? as i32)
+    }
+
+    /// `CursorWindow.getCursorWindowSize`: `config_cursorWindowSize` KiB.
+    fn window_size(&self) -> Result<usize, Exception> {
+        let kib = self
+            .host
+            .inputs()?
+            .packages
+            .framework_integer("config_cursorWindowSize")
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no config_cursorWindowSize"))?;
+        Ok(kib.max(0) as usize * 1024)
     }
 
     /// `mutateGlobalSetting`, `mutateSecureSetting` and
@@ -765,10 +1361,12 @@ impl SettingsProvider {
                 .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "Calling package doesn't exist"))?;
             Ok((info.private_flags & PRIVATE_FLAG_PRIVILEGED != 0, info.target_sdk_version))
         })?;
-        let cache = ringtone_cache(name);
-        // `isValidMediaUri`: a sound's type is MediaProvider's (#1525).
-        if cache.is_some() && value.is_some() {
-            return Err(self.host.unimplemented_named("settings provider", "a ringtone setting (#1525)"));
+        let cache = ringtone_cache(name).map(|cache| self.ringtone_cache_dir(user).map(|dir| dir.join(cache))).transpose()?;
+        if cache.is_some()
+            && let Some(value) = value
+            && !self.valid_media_uri(caller, package, name, value)?
+        {
+            return Ok(false);
         }
         if let Op::Insert { value, .. } = op {
             validate_system_value(name, value)?;
@@ -778,12 +1376,14 @@ impl SettingsProvider {
         if !self.apply(caller, Table::System, state_user, name, op, package, &[])? {
             return Ok(false);
         }
-        if let Some(cache) = cache {
-            let path = self.host.data()?.join(format!("system_de/{user}/ringtones/{cache}"));
+        if let Some(path) = cache {
             if let Err(e) = std::fs::remove_file(&path)
                 && e.kind() != std::io::ErrorKind::NotFound
             {
                 eprintln!("app host: settings: {}: {e}", path.display());
+            }
+            if let (Op::Insert { .. }, Some(value)) = (op, value) {
+                self.cache_ringtone(&path, value);
             }
         }
         Ok(true)
@@ -808,7 +1408,11 @@ impl SettingsProvider {
         let generations = self.generations()?;
         let settings = &self.host.inputs()?.settings;
         let changed = match op {
-            Op::Insert { value, tag, make_default, overrideable_by_restore } => {
+            Op::Insert { value, tag, make_default, overrideable_by_restore, update } => {
+                // `updateSettingLocked`: only a setting there is.
+                if update && settings.setting(table, name).is_none() {
+                    return Ok(false);
+                }
                 if overrideable_by_restore && !self.has(caller, MODIFY_SETTINGS_OVERRIDEABLE_BY_RESTORE)? {
                     return Err(Exception::security(format!(
                         "Caller is not allowed to modify settings overrideable by restore: Neither user {} nor current process has {MODIFY_SETTINGS_OVERRIDEABLE_BY_RESTORE}.",
@@ -1099,7 +1703,7 @@ mod tests {
     /// any; others fail by their target SDK.
     #[test]
     fn apps_write_public_system_settings() {
-        let insert = Op::Insert { value: Some("1"), tag: None, make_default: false, overrideable_by_restore: false };
+        let insert = Op::Insert { value: Some("1"), tag: None, make_default: false, overrideable_by_restore: false, update: false };
         let app = |privileged, sdk| move || Ok((privileged, sdk));
         assert!(enforce_system_mutation(10_050, &insert, "font_scale", &app(false, 34)).is_ok());
         let e = enforce_system_mutation(10_050, &insert, "pointer_speed", &app(false, 34)).unwrap_err();
@@ -1157,5 +1761,103 @@ mod tests {
         }
         assert!(declared.secure.contains("user_setup_complete"));
         assert!(declared.global.contains("device_provisioned"));
+        // The moved settings are declared where they moved to.
+        for name in SYSTEM_MOVED_TO_SECURE.iter().chain(GLOBAL_MOVED_TO_SECURE) {
+            assert!(declared.secure.contains(*name), "{name}");
+        }
+        for name in SYSTEM_MOVED_TO_GLOBAL.iter().chain(SECURE_MOVED_TO_GLOBAL) {
+            assert!(declared.global.contains(*name), "{name}");
+        }
+        for name in GLOBAL_MOVED_TO_SYSTEM {
+            assert!(declared.system.contains(*name), "{name}");
+        }
+    }
+
+    fn args(uri: &str, clause: Option<&str>, args: Option<&[&str]>, all: bool) -> Result<Arguments, String> {
+        let args: Option<Vec<Option<String>>> = args.map(|a| a.iter().map(|s| Some(s.to_string())).collect());
+        arguments(&Uri::parse(uri), clause, args.as_deref(), all).map_err(|e| match e {
+            Thrown::Database(code, message) => format!("{code}: {message}"),
+            Thrown::Binder(e) => format!("binder {}: {}", e.code, e.message),
+            Thrown::Status(s) => format!("status {s}"),
+        })
+    }
+
+    fn named(table: &str, name: Option<&str>) -> Result<Arguments, String> {
+        Ok(Arguments { table: table.into(), name: name.map(str::to_string) })
+    }
+
+    /// `SettingsProviderTest`'s query forms and `Arguments`' patterns.
+    #[test]
+    fn arguments_read_as_the_provider_reads_them() {
+        let uri = "content://settings/system";
+        assert_eq!(args("content://settings/system/font_scale", None, None, false), named("system", Some("font_scale")));
+        assert_eq!(args(uri, Some("name=?"), Some(&["font_scale"]), false), named("system", Some("font_scale")));
+        assert_eq!(args(uri, Some(" ( name = ? ) "), Some(&["font_scale"]), false), named("system", Some("font_scale")));
+        assert_eq!(args(uri, Some("name='font_scale'"), None, false), named("system", Some("font_scale")));
+        assert_eq!(args(uri, Some("(name = \"font_scale\")"), None, false), named("system", Some("font_scale")));
+        assert_eq!(args(uri, None, None, true), named("system", None));
+        // A moved setting is found where it moved to.
+        assert_eq!(args("content://settings/system/adb_enabled", None, None, false), named("global", Some("adb_enabled")));
+        assert_eq!(args("content://settings/system/android_id", None, None, false), named("secure", Some("android_id")));
+        assert_eq!(args("content://settings/global/apply_ramping_ringer", None, None, false), named("system", Some("apply_ramping_ringer")));
+        let unsupported = "2: Supported SQL:\n  uri content://some_table/some_property with null where and where args\n  uri content://some_table with query name=? and single name as arg\n  uri content://some_table with query name=some_name and null args\n  but got - uri:content://settings/system, where:value=? whereArgs:[1, 2]";
+        assert_eq!(args(uri, Some("value=?"), Some(&["1", "2"]), true), Err(unsupported.into()));
+        assert!(args(uri, None, None, false).unwrap_err().ends_with("where:null whereArgs:null"));
+        assert!(args(uri, Some("name=?"), Some(&["a", "b"]), true).unwrap_err().ends_with("whereArgs:[a, b]"));
+        assert_eq!(args(uri, Some("name=?"), None, true), Err("binder -4: Attempt to get length of null array".into()));
+        // `.` matches no line terminator.
+        assert!(args(uri, Some("name='a\nb'"), None, true).is_err());
+        assert_eq!(args(uri, Some("name='\"'"), None, true), named("system", Some("")));
+        assert_eq!(args(uri, Some("name='\""), None, true), Err("status -74".into()));
+        assert_eq!(args("content://settings/nope/a", None, None, false), Err("2: Bad root path: nope".into()));
+        assert_eq!(args("content://settings", None, None, true).unwrap_err().lines().last(), Some("  but got - uri:content://settings, where:null whereArgs:null"));
+    }
+
+    #[test]
+    fn types_are_of_the_table_a_setting_is_in() {
+        let ty = |uri| get_type(&Uri::parse(uri)).map_err(|_| ());
+        assert_eq!(ty("content://settings/secure"), Ok("vnd.android.cursor.dir/secure".into()));
+        // Moved to secure, then from there to global.
+        assert_eq!(ty("content://settings/system/wifi_on"), Ok("vnd.android.cursor.item/global".into()));
+        assert_eq!(ty("content://settings/system/android_id"), Ok("vnd.android.cursor.item/secure".into()));
+        assert_eq!(ty("content://settings/favorites"), Ok("vnd.android.cursor.dir/favorites".into()));
+        assert!(ty("content://settings/system/a/b").is_err());
+    }
+
+    #[test]
+    fn projections_rows_and_keys() {
+        assert_eq!(normalize_projection(None).ok(), Some(ALL_COLUMNS.map(str::to_string).to_vec()));
+        let projection = [Some("value".to_string()), Some("name".to_string())];
+        let columns = normalize_projection(Some(&projection)).ok().unwrap();
+        let setting = Setting { name: "a".into(), value: None, id: 7, preserved_in_restore: true, ..Default::default() };
+        assert_eq!(setting_row(&setting, &columns), [None, Some("a".into())]);
+        assert_eq!(setting_row(&setting, &ALL_COLUMNS.map(str::to_string)), [Some("7".into()), Some("a".into()), None, Some("true".into())]);
+        let Err(Thrown::Database(ILLEGAL_ARGUMENT, message)) = normalize_projection(Some(&[None])) else { panic!() };
+        assert_eq!(message, "Invalid column: null");
+        assert!(key_valid("font_scale") && !key_valid("") && !key_valid("a\u{1}") && !key_valid("\u{1f600}"));
+    }
+
+    /// `ContentValues.writeToParcel` of a name and values of the types
+    /// `getAsString` reads.
+    #[test]
+    fn content_values() {
+        let mut p = Parcel::new();
+        p.write_i32(4);
+        p.write_i32(4);
+        for (key, kind) in [("name", 0), ("value", 1), ("flag", 9), ("ratio", 7)] {
+            p.write_string16(Some(key));
+            p.write_i32(kind);
+            match kind {
+                0 => p.write_string16(Some("font_scale")),
+                1 => p.write_i32(2),
+                9 => p.write_i32(1),
+                _ => p.write_f32(1.5),
+            }
+        }
+        let values = read_content_values(&mut Reader::new(p.data(), &[])).unwrap();
+        assert_eq!(values["name"], Content::Text(Some("font_scale".into())));
+        assert_eq!(values["value"], Content::Text(Some("2".into())));
+        assert_eq!(values["flag"], Content::Text(Some("true".into())));
+        assert_eq!(values["ratio"], Content::Other("java.lang.Float"));
     }
 }
