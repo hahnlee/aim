@@ -81,6 +81,7 @@ pub mod volume;
 pub mod vpn_manager;
 pub mod window_layout;
 pub mod window_manager;
+pub mod zen_config;
 pub mod zygote;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
