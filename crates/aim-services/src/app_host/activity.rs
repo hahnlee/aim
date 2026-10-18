@@ -728,7 +728,7 @@ impl Service for ActivityTaskManager {
 
 /// `android::base::ParseInt` of an `int` (`SystemProperties.getInt`):
 /// `strtoll` in base 0, after leading whitespace, with nothing after it.
-fn parse_int(s: &str) -> Option<i32> {
+pub(super) fn parse_int(s: &str) -> Option<i32> {
     let s = s.trim_start_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
     let (negative, s) = match s.as_bytes().first()? {
         b'-' => (true, &s[1..]),
