@@ -584,6 +584,8 @@ fn join(
         seinfo,
         version_code: setting.version_code,
         target_sdk_version: setting.target_sdk_version,
+        // `categoryHint`: `CATEGORY_UNDEFINED` without one.
+        category_override: setting.category_hint,
         last_modified_time: setting.last_modified_time,
         last_update_time: setting.last_update_time,
         signatures: setting.signatures.clone(),
