@@ -775,6 +775,16 @@ impl Service for ActivityClientController {
             // app host's is never locked and always on (`power`), so
             // nothing follows, as on the original's awake, unlocked one.
             acc::SET_SHOW_WHEN_LOCKED | acc::SET_INHERIT_SHOW_WHEN_LOCKED => Ok(Parcel::new()),
+            // `enableTaskLocaleOverride` (the system's alone) aligns a
+            // task's other packages with the locales its root package has
+            // of its own; no package has any in the app host (#1642), so
+            // nothing follows, as on an original where none set them.
+            acc::ENABLE_TASK_LOCALE_OVERRIDE => {
+                acc::EnableTaskLocaleOverride::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                acc::write_enable_task_locale_override_reply(&mut p);
+                Ok(p)
+            }
             acc::SET_TURN_SCREEN_ON => empty(),
             acc::GET_TASK_FOR_ACTIVITY => {
                 let token = Self::token(call)?;
