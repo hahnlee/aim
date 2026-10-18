@@ -164,7 +164,8 @@ impl std::fmt::Debug for SharedFile {
         write!(f, "SharedFile({:p})", Arc::as_ptr(&self.0))
     }
 }
-/// `writeBundle` of a bundle with `entries`, in their order.
+/// `writeBundle` of a bundle with `entries`, in the order its `ArrayMap`
+/// keeps them: by key hash, then as put.
 pub fn write(p: &mut Parcel, entries: &[(&str, Value)]) {
     if entries.is_empty() {
         return p.write_i32(0);
@@ -174,7 +175,7 @@ pub fn write(p: &mut Parcel, entries: &[(&str, Value)]) {
     p.write_i32(MAGIC);
     let start = p.position();
     p.write_i32(entries.len() as i32);
-    for (key, value) in entries {
+    for (key, value) in crate::package::info::array_order(entries.iter().collect(), |(k, _)| k) {
         p.write_string16(Some(key));
         value.write(p);
     }
@@ -258,6 +259,22 @@ mod tests {
         for (key, value) in entries {
             assert_eq!(read[key], value);
         }
+    }
+
+    /// `ArrayMap.append` logs and re-sorts keys a parcel holds out of hash
+    /// order, whatever order they were put in.
+    #[test]
+    fn keys_are_written_in_array_map_order() {
+        let mut p = Parcel::new();
+        write(&mut p, &[("android.os.extra.CYCLE_COUNT", Value::Int(2)), ("seq", Value::Int(1))]);
+        let mut r = Reader::new(p.data(), &[]);
+        r.read_i32().unwrap();
+        r.read_i32().unwrap();
+        assert_eq!(r.read_i32().unwrap(), 2);
+        assert_eq!(r.read_string16().unwrap().as_deref(), Some("seq"));
+        r.read_i32().unwrap();
+        r.read_i32().unwrap();
+        assert_eq!(r.read_string16().unwrap().as_deref(), Some("android.os.extra.CYCLE_COUNT"));
     }
 
     /// `putStringArrayList`: a length-prefixed list of string values.

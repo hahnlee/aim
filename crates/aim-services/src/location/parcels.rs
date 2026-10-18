@@ -1228,7 +1228,7 @@ impl Value<'_> {
     }
 }
 
-/// `writeBundle` of a bundle of `entries`.
+/// `writeBundle` of a bundle of `entries`, in their `ArrayMap` order.
 pub fn write_bundle(p: &mut Parcel, entries: &[(&str, Value<'_>)]) {
     if entries.is_empty() {
         return p.write_i32(0);
@@ -1238,7 +1238,7 @@ pub fn write_bundle(p: &mut Parcel, entries: &[(&str, Value<'_>)]) {
     p.write_i32(crate::bundle::MAGIC);
     let start = p.position();
     p.write_i32(entries.len() as i32);
-    for (key, value) in entries {
+    for (key, value) in crate::package::info::array_order(entries.iter().collect(), |(k, _)| k) {
         p.write_string16(Some(key));
         value.write(p);
     }
