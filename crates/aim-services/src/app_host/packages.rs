@@ -65,6 +65,7 @@ impl Packages {
         density_dpi: i32,
         locale: &str,
         property: &dyn Fn(&str) -> Option<String>,
+        enforce_native_dependencies: &dyn Fn(&str, i32) -> bool,
     ) -> Result<Self, String> {
         let persisted = package::State::read(data, &[0])?
             .ok_or("no package state: Android never booted on this data")?;
@@ -115,7 +116,25 @@ impl Packages {
             ps.users.get_mut(&0).unwrap().granted_permissions = granted;
             Ok::<_, String>((setting.name.clone(), ps))
         });
-        let mut packages = joined.into_iter().collect::<Result<BTreeMap<_, _>, _>>()?;
+        let packages = joined.into_iter().collect::<Result<BTreeMap<_, _>, _>>()?;
+        // `SharedLibrariesImpl`: the system's libraries, then those the
+        // packages declare in their scan's order, and each package's
+        // dependencies resolved (`updateAllSharedLibrariesLPw`), native
+        // ones as `ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES` asks.
+        let mut libraries = package::libraries::Registry::new(&system_config::SystemConfig::read(root, property));
+        for setting in &persisted.settings.packages {
+            if let Some(ps) = packages.get(&setting.name) {
+                libraries.add_package(ps, None).map_err(|e| format!("{}: shared libraries: {}", setting.name, e.0))?;
+            }
+        }
+        let resolved = libraries
+            .resolve(&packages, &|ps| {
+                let target_sdk = ps.pkg.as_ref().map_or(0, |pkg| pkg.target_sdk_version);
+                Ok(package::libraries::Policy::pinned(enforce_native_dependencies(&ps.name, target_sdk)))
+            })
+            .map_err(|e| format!("{}: shared libraries: {:?}", e.package, e.cause))?;
+        let shared_libraries = resolved.registry.entries().cloned().collect();
+        let mut packages = resolved.packages;
         // The shared users, with their packages and signatures
         // (`SharedUserSetting`).
         let mut shared_users = BTreeMap::new();
@@ -171,6 +190,7 @@ impl Packages {
                 shared_users,
                 users,
                 system,
+                shared_libraries: Some(shared_libraries),
                 protected_broadcasts: Some(protected_broadcasts),
                 ..Default::default()
             },

@@ -587,6 +587,8 @@ impl AppHost {
             device_density,
             &property("persist.sys.locale")?,
             &|name| (configured.properties)(name),
+            // `SharedLibrariesImpl.ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES`.
+            &|name, target_sdk| compat.is_enabled(142_191_088, Some(name), target_sdk),
         )
         .map_err(state)?;
         let settings = settings::Settings::load(&configured.data).map_err(state)?;
