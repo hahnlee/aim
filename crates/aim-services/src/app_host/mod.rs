@@ -66,6 +66,7 @@ pub mod role_service;
 pub mod power_service;
 pub mod sensor_privacy;
 pub mod services;
+pub mod shortcut_service;
 pub mod settings;
 pub mod settings_provider;
 pub mod settings_service;
@@ -484,6 +485,7 @@ impl AppHost {
             ("overlay", Arc::new(overlay_service::OverlayManager::new(self.clone()))),
             ("vpn_management", Arc::new(vpn_manager::VpnManager::new(self.clone()))),
             ("media_router", Arc::new(media_router::MediaRouter::new(self.clone()))),
+            ("shortcut", Arc::new(shortcut_service::ShortcutManager::new(self.clone()))),
             ("role", self.role_service.get_or_init(|| Arc::new(role_service::RoleManager::new(self.clone()))).clone()),
             ("settings", Arc::new(settings_service::SettingsService::new(self.clone(), settings))),
             (
