@@ -123,6 +123,7 @@ struct HealthInfo {
     charge_counter: i32,
     technology: Option<String>,
     capacity_level: i32,
+    charge_time_to_full: i64,
     charging_state: i32,
 }
 
@@ -171,7 +172,7 @@ impl HealthInfo {
         skip_parcelables(r)?; // disk stats
         skip_parcelables(r)?; // storage infos
         info.capacity_level = r.read_i32()?;
-        r.read_i64()?; // time to full
+        info.charge_time_to_full = r.read_i64()?;
         r.read_i32()?; // full charge design capacity
         info.charging_state = r.read_i32()?;
         Ok(info)
@@ -598,9 +599,15 @@ impl BatteryService {
     /// `update`: the HAL's new health info, processed, and its
     /// broadcasts sent in order.
     fn update(&self, info: HealthInfo) {
+        let now = super::clock_ms(libc::CLOCK_MONOTONIC_RAW);
+        // `processValuesLocked` first lets the battery stats keep track of
+        // the level (`IBatteryStats.setBatteryState`).
+        if let Some(stats) = self.host.battery_stats.get() {
+            stats.set_battery_state(info.status, info.plug_type(), info.level, info.charge_time_to_full, now);
+        }
         let mut state = self.state.lock().unwrap();
         state.info = Some(info);
-        for o in state.process(false, super::clock_ms(libc::CLOCK_MONOTONIC_RAW)) {
+        for o in state.process(false, now) {
             let intent = RawIntent::new(o.action, o.flags, &o.extras);
             if o.sticky {
                 self.host.broadcasts.send_sticky_from_system(&self.host, intent);
@@ -807,6 +814,7 @@ mod tests {
                 charge_counter: 3_960_000,
                 technology: Some("Li-ion".into()),
                 capacity_level: -1,
+                charge_time_to_full: 3600,
                 charging_state: 1,
                 ..HealthInfo::default()
             }
