@@ -2,7 +2,9 @@
 //! `android-16.0.0_r1`): content observers by URI, the notification of
 //! their changes, and the content cache. Who may observe or notify a URI
 //! is ActivityManager's `checkContentProviderAccess`. Sync adapters
-//! (SyncManager) are not run: its calls are not implemented (#1460).
+//! (SyncManager) are not run (#1460): of SyncStorageEngine there are the
+//! master sync settings it persisted (`/data/system/sync/accounts.xml`)
+//! and its status listeners, which no sync's progress notifies.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
@@ -10,13 +12,13 @@ use std::sync::{Arc, Mutex};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
-    BAD_VALUE, Binder, Exception, Parcel, Reader, Result as ParcelResult,
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel, Reader, Result as ParcelResult,
 };
 use aim_service_aidl::android_content_icontentservice as cs;
 use aim_service_aidl::ReadParcelable;
 
 use super::kept::{By, KeptBundle, RawBundle};
-use super::{AppHost, reply};
+use super::{AppHost, PER_USER_RANGE, reply};
 use crate::package::intent_filter::Plain;
 use crate::package::uri::Uri;
 
@@ -30,6 +32,22 @@ const O: i32 = 26;
 /// `NOTIFY_SKIP_NOTIFY_FOR_DESCENDANTS`.
 const NOTIFY_SYNC_TO_NETWORK: i32 = 1;
 const NOTIFY_SKIP_NOTIFY_FOR_DESCENDANTS: i32 = 1 << 1;
+
+/// `readAccountInfoLocked`'s master sync setting of `user` in the
+/// accounts document `root`: the root's `listen-for-tickles` for user 0,
+/// then each `listenForTickles` entry's; none under another root.
+fn master_sync_of(root: &aim_android_xml::Element, user: i32) -> Option<bool> {
+    if root.name != "accounts" {
+        return None;
+    }
+    let mut listen = (user == 0).then(|| root.bool("listen-for-tickles").ok().flatten().unwrap_or(true));
+    for e in root.children().filter(|e| e.name == "listenForTickles") {
+        if e.int("user").ok().flatten().unwrap_or(0) == user {
+            listen = Some(e.bool("enabled").ok().flatten().unwrap_or(true));
+        }
+    }
+    listen
+}
 
 /// A parcelled `Uri`.
 pub(super) struct ParcelUri(pub(super) Uri);
@@ -162,6 +180,9 @@ pub struct ContentService {
     observers: Mutex<HashMap<u32, (Strong, u64)>>,
     /// `mCache`.
     cache: Mutex<HashMap<CacheProvider, Vec<(CacheKey, KeptBundle)>>>,
+    /// SyncStorageEngine's `mChangeListeners`: by handle, the binder and
+    /// its death link, and the cookie (the caller's uid and the mask).
+    status_listeners: Mutex<HashMap<u32, (Strong, u64, (i32, i32))>>,
 }
 
 impl ContentService {
@@ -171,6 +192,66 @@ impl ContentService {
             root: Mutex::new(Node::default()),
             observers: Mutex::new(HashMap::new()),
             cache: Mutex::new(HashMap::new()),
+            status_listeners: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// `enforceCallingOrSelfPermission(permission, message)`.
+    fn enforce(&self, uid: i32, permission: &str, message: &str) -> Result<(), Exception> {
+        if self.host.check_permission(Some(permission), uid)? == 0 {
+            return Ok(());
+        }
+        Err(Exception::security(format!("{message}: Neither user {uid} nor current process has {permission}.")))
+    }
+
+    /// `getMasterSyncAutomaticallyAsUser`: `enforceCrossUserPermission`,
+    /// READ_SYNC_SETTINGS, then SyncStorageEngine's setting of the user.
+    fn master_sync(&self, uid: i32, user: i32) -> Result<bool, Exception> {
+        if uid / PER_USER_RANGE as i32 != user {
+            self.enforce(
+                uid,
+                "android.permission.INTERACT_ACROSS_USERS_FULL",
+                &format!("no permission to read the sync settings for user {user}"),
+            )?;
+        }
+        self.enforce(uid, "android.permission.READ_SYNC_SETTINGS", "no permission to read the sync settings")?;
+        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
+        let path = self.host.data()?.join("system/sync/accounts.xml");
+        let bytes = super::device_policy::read_atomic_bytes(&path).map_err(state)?;
+        let root = bytes.and_then(|b| {
+            aim_android_xml::read(&b).inspect_err(|e| eprintln!("app host: Error reading accounts: {e}")).ok()
+        });
+        if let Some(listen) = root.as_ref().and_then(|r| master_sync_of(r, user)) {
+            return Ok(listen);
+        }
+        let packages = &self.host.inputs()?.packages;
+        packages
+            .framework_bool("config_syncstorageengine_masterSyncAutomatically")
+            .ok_or_else(|| state("no config_syncstorageengine_masterSyncAutomatically".into()))
+    }
+
+    /// `addStatusChangeListener`: a listener kept, as a
+    /// `RemoteCallbackList` keeps it, until removed or dead.
+    fn add_status_listener(&self, uid: i32, mask: i32, listener: u32) {
+        let strong = self.host.process.strong(listener);
+        let me = Arc::downgrade(&self.host);
+        let cookie = self.host.process.link_to_death(
+            &strong,
+            Box::new(move || {
+                if let Some(cs) = me.upgrade().and_then(|h| h.content_service.get().cloned()) {
+                    cs.remove_status_listener(listener);
+                }
+            }),
+        );
+        let old = self.status_listeners.lock().unwrap().insert(listener, (strong, cookie, (uid, mask)));
+        if let Some((strong, cookie, _)) = old {
+            self.host.process.clear_death(&strong, cookie);
+        }
+    }
+
+    fn remove_status_listener(&self, listener: u32) {
+        if let Some((strong, cookie, _)) = self.status_listeners.lock().unwrap().remove(&listener) {
+            self.host.process.clear_death(&strong, cookie);
         }
     }
 
@@ -465,6 +546,37 @@ impl Service for ContentService {
                     }),
                 )
             }
+            cs::GET_MASTER_SYNC_AUTOMATICALLY => {
+                cs::GetMasterSyncAutomatically::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let uid = call.sender_euid as i32;
+                reply(self.master_sync(uid, uid / PER_USER_RANGE as i32).map(|listen| {
+                    let mut p = Parcel::new();
+                    cs::write_get_master_sync_automatically_reply(&mut p, listen);
+                    p
+                }))
+            }
+            cs::GET_MASTER_SYNC_AUTOMATICALLY_AS_USER => {
+                let a = cs::GetMasterSyncAutomaticallyAsUser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.master_sync(call.sender_euid as i32, a.user_id).map(|listen| {
+                    let mut p = Parcel::new();
+                    cs::write_get_master_sync_automatically_as_user_reply(&mut p, listen);
+                    p
+                }))
+            }
+            cs::ADD_STATUS_CHANGE_LISTENER => {
+                let a = cs::AddStatusChangeListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Some(Binder::Handle(listener)) = a.callback {
+                    self.add_status_listener(call.sender_euid as i32, a.mask, listener);
+                }
+                empty(Ok(()))
+            }
+            cs::REMOVE_STATUS_CHANGE_LISTENER => {
+                let a = cs::RemoveStatusChangeListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Some(Binder::Handle(listener)) = a.callback {
+                    self.remove_status_listener(listener);
+                }
+                empty(Ok(()))
+            }
             code => reply(Err(self.host.unimplemented("content", code))),
         }
     }
@@ -473,6 +585,20 @@ impl Service for ContentService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The master sync setting as `readAccountInfoLocked` reads it: the
+    /// root's attribute for user 0, then each user's entry.
+    #[test]
+    fn master_sync_is_read_as_the_storage_engine_reads_it() {
+        let xml = br#"<accounts version="3" listen-for-tickles="false"><listenForTickles user="10" enabled="true" /><listenForTickles user="11" /></accounts>"#;
+        let root = aim_android_xml::read(xml).unwrap();
+        assert_eq!(master_sync_of(&root, 0), Some(false));
+        assert_eq!(master_sync_of(&root, 10), Some(true));
+        assert_eq!(master_sync_of(&root, 11), Some(true));
+        assert_eq!(master_sync_of(&root, 12), None);
+        let other = aim_android_xml::read(b"<other />").unwrap();
+        assert_eq!(master_sync_of(&other, 0), None);
+    }
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
