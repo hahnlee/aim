@@ -250,6 +250,9 @@ struct App {
     /// `ProcessRecord.isPersistent`: user 0's process of a persistent
     /// system app, named as the app.
     persistent: bool,
+    /// The packages it loaded code of (`ProcessRecord.getPkgDeps`): a
+    /// change of one kills it.
+    package_deps: Vec<String>,
 }
 
 #[derive(Default)]
@@ -695,6 +698,7 @@ impl AppHost {
                 persistent: uid / PER_USER_RANGE == 0
                     && app_info.flags & PERSISTENT_MASK == PERSISTENT_MASK
                     && app_info.process_name.as_deref() == Some(process),
+                package_deps: Vec::new(),
             },
         );
         Ok(pid)
@@ -979,6 +983,29 @@ impl AppHost {
         self.user_attribute("flags")
     }
 
+    /// `addPackageDependency`: the calling process loaded `package`'s
+    /// code, unless the caller may not see it.
+    fn add_package_dependency(&self, call: &Call<'_>, package: Option<String>) -> Result<(), Exception> {
+        let Some(package) = package else { return Ok(()) };
+        let calling_uid = call.sender_euid as i32;
+        let (state, resolution) = self.packages()?;
+        // `PackageManagerInternal.filterAppAccess`.
+        let ps = state.packages.get(&package);
+        let filtered = ps.is_none()
+            || crate::package::apps_filter::should_filter_application(&state, &resolution.apps_filter, ps, calling_uid, calling_uid / PER_USER_RANGE as i32, true, true)
+                .map_err(|e| Exception::new(EX_UNSUPPORTED_OPERATION, format!("addPackageDependency: {}", e.0)))?;
+        if filtered {
+            eprintln!("app host: Failed trying to add dependency on non-existing package: {package}");
+            return Ok(());
+        }
+        if let Some(app) = self.apps.lock().unwrap().values_mut().find(|a| a.pid == call.sender_pid) {
+            if !app.package_deps.contains(&package) {
+                app.package_deps.push(package);
+            }
+        }
+        Ok(())
+    }
+
     /// `isBackgroundRestricted` of the caller's own `package`: whether its
     /// RUN_ANY_IN_BACKGROUND op is not allowed.
     fn background_restricted(&self, call: &Call<'_>, package: Option<String>) -> Result<bool, Exception> {
@@ -1221,7 +1248,9 @@ impl AppHost {
             .lock()
             .unwrap()
             .iter()
-            .filter(|(_, a)| a.package == package && a.uid == uid)
+            // `killPackageProcessesLSP`: the package's processes, and those
+            // of its user depending on it.
+            .filter(|(_, a)| a.package == package && a.uid == uid || a.uid / PER_USER_RANGE == uid / PER_USER_RANGE && a.package_deps.iter().any(|d| d == package))
             .map(|(seq, _)| *seq)
             .collect();
         for seq in starts {
@@ -2317,6 +2346,14 @@ impl Service for Activity {
                 let mut p = Parcel::new();
                 am::write_is_user_a_monkey_reply(&mut p, false);
                 Ok(p)
+            }
+            am::ADD_PACKAGE_DEPENDENCY => {
+                let a = am::AddPackageDependency::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.add_package_dependency(call, a.package_name).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_add_package_dependency_reply(&mut p);
+                    p
+                }))
             }
             am::IS_BACKGROUND_RESTRICTED => {
                 let a = am::IsBackgroundRestricted::read(&mut call.data).map_err(|_| BAD_VALUE)?;

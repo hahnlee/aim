@@ -845,6 +845,12 @@ impl Broadcasts {
         self.send_as_system(host, intent, USER_ALL, None, &[]);
     }
 
+    /// `Context.sendBroadcastAsUser(intent, user)` of a system service of
+    /// the app host.
+    pub fn send_from_system_as_user(&self, host: &AppHost, intent: RawIntent, user: i32) {
+        self.send_as_system(host, intent, user, None, &[]);
+    }
+
     /// `ActivityManagerInternal.broadcastIntentWithCallback` of
     /// PackageManager: to `user`'s registered receivers holding
     /// `required_permissions`, an application's only if its app id is in

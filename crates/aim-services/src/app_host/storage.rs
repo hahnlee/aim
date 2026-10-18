@@ -55,6 +55,11 @@ const STATE_MOUNTED: i32 = 2;
 const VOLUME: &str = "emulated;0";
 const USER: i32 = 0;
 const SERIAL: i32 = 0;
+/// `Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT`,
+/// `FLAG_RECEIVER_INCLUDE_BACKGROUND`; `StorageVolume.EXTRA_STORAGE_VOLUME`.
+const FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT: i32 = 0x0400_0000;
+const FLAG_RECEIVER_INCLUDE_BACKGROUND: i32 = 0x0100_0000;
+const EXTRA_STORAGE_VOLUME: &str = "android.os.storage.extra.STORAGE_VOLUME";
 /// `Manifest.permission.WRITE_MEDIA_STORAGE`.
 const WRITE_MEDIA_STORAGE: &str = "android.permission.WRITE_MEDIA_STORAGE";
 /// `PackageManager.PROPERTY_NO_APP_DATA_STORAGE`.
@@ -203,24 +208,7 @@ impl AppHost {
         let volume = match state.filter(|_| user == USER) {
             // Mounted visible for writing by user 0, so listed for writing
             // or reading alike (`isVisibleForWrite`, `isVisibleForUser`).
-            Some(state) => {
-                let description = inputs
-                    .packages
-                    .framework_string("storage_internal")
-                    .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no storage_internal"))?;
-                StorageVolume {
-                    id: VOLUME.into(),
-                    path: format!("/storage/emulated/{user}"),
-                    internal_path: format!("/data/media/{user}"),
-                    description,
-                    emulated: true,
-                    user,
-                    // `StorageManager.UUID_DEFAULT`, written as its
-                    // string, null for internal storage.
-                    uuid: Some(None),
-                    state: environment(state).into(),
-                }
-            }
+            Some(state) => self.storage_volume(user, state)?,
             None => {
                 eprintln!("app host: No primary storage defined yet; hacking together a stub");
                 StorageVolume {
@@ -327,6 +315,49 @@ impl AppHost {
         }
     }
 
+    /// `VolumeInfo.buildStorageVolume` of the emulated volume for `user`
+    /// in `state`.
+    fn storage_volume(&self, user: i32, state: i32) -> Result<StorageVolume, Exception> {
+        let description = self
+            .inputs()?
+            .packages
+            .framework_string("storage_internal")
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no storage_internal"))?;
+        Ok(StorageVolume {
+            id: VOLUME.into(),
+            path: format!("/storage/emulated/{user}"),
+            internal_path: format!("/data/media/{user}"),
+            description,
+            emulated: true,
+            user,
+            // `StorageManager.UUID_DEFAULT`, written as its string, null
+            // for internal storage.
+            uuid: Some(None),
+            state: environment(state).into(),
+        })
+    }
+
+    /// `H_VOLUME_BROADCAST` of the emulated volume for `user`: the
+    /// broadcast of its environment's state, if it has one
+    /// (`VolumeInfo.getBroadcastForEnvironment`), with the volume.
+    fn volume_broadcast(&self, user: i32, state: i32) -> Result<(), Exception> {
+        let Some(action) = broadcast_for_environment(environment(state)) else { return Ok(()) };
+        let volume = self.storage_volume(user, state)?;
+        eprintln!("app host: Volume {VOLUME} broadcasting {} to UserHandle{{{user}}}", volume.state);
+        let mut data = Parcel::new();
+        volume.write_to(&mut data);
+        let path = volume.path.clone();
+        let intent = super::kept::RawIntent::with_data(
+            Some(action),
+            Some(&crate::package::uri::Uri::preferred_hierarchical("file", Some(""), Some(&path))),
+            None,
+            FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT | FLAG_RECEIVER_INCLUDE_BACKGROUND,
+            &[(EXTRA_STORAGE_VOLUME, crate::bundle::Value::Parcelable { class: "android.os.storage.StorageVolume".into(), data: data.data().to_vec() })],
+        );
+        self.broadcasts.send_from_system_as_user(self, intent, user);
+        Ok(())
+    }
+
     /// `setCloudMediaProvider`, which only the external storage service
     /// (MediaProvider) may call. No system service of the app host listens
     /// for the change (`CloudProviderChangeListener`).
@@ -391,6 +422,10 @@ impl AppHost {
         // `buildStorageVolume(user).getPath()`: the emulated volume's path
         // for the user.
         let Some(path) = info.path.as_deref().map(|p| format!("{p}/{USER}")) else { return };
+        // User 0 is unlocked while the app host runs (`mSystemUnlockedUsers`).
+        if let Err(e) = self.volume_broadcast(USER, info.state) {
+            eprintln!("app host: a volume broadcast: {e:?}");
+        }
         for &listener in &listeners {
             let mut data = Parcel::new();
             data.write_interface_token(EVENT_LISTENER_DESCRIPTOR);
@@ -400,6 +435,20 @@ impl AppHost {
             send(listener, ON_STORAGE_STATE_CHANGED, &data);
         }
     }
+}
+
+/// `VolumeInfo.getBroadcastForEnvironment`.
+fn broadcast_for_environment(environment: &str) -> Option<&'static str> {
+    Some(match environment {
+        "unmounted" => "android.intent.action.MEDIA_UNMOUNTED",
+        "checking" => "android.intent.action.MEDIA_CHECKING",
+        "mounted" | "mounted_ro" => "android.intent.action.MEDIA_MOUNTED",
+        "ejecting" => "android.intent.action.MEDIA_EJECT",
+        "unmountable" => "android.intent.action.MEDIA_UNMOUNTABLE",
+        "removed" => "android.intent.action.MEDIA_REMOVED",
+        "bad_removal" => "android.intent.action.MEDIA_BAD_REMOVAL",
+        _ => return None,
+    })
 }
 
 /// `VolumeInfo.getEnvironmentForState`.
