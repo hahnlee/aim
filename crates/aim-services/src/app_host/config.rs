@@ -517,12 +517,15 @@ impl WriteParcelable for CompatibilityInfo {
 
 impl CompatibilityInfo {
     /// `new CompatibilityInfo(appInfo, screenLayout, sw, forceCompat=false,
-    /// scaleFactor=1, densityScaleFactor=1)` on a display of
-    /// `density_dpi`.
-    pub fn of(app: &ApplicationInfo, config: &Configuration) -> CompatibilityInfo {
+    /// scaleFactor=1, densityScaleFactor=1)` in processes whose
+    /// `DisplayMetrics.DENSITY_DEVICE` is `device_density`
+    /// (`ro.sf.lcd_density`), whatever the display's density: an app that
+    /// needs no compatibility then has the default compatibility info,
+    /// which `ViewRootImpl` applies to no configuration.
+    pub fn of(app: &ApplicationInfo, config: &Configuration, device_density: i32) -> CompatibilityInfo {
         let screen_layout = config.screen_layout;
         let sw = config.smallest_screen_width_dp;
-        let density = config.density_dpi;
+        let density = device_density;
         let mut flags = if app.target_sdk_version < O {
             NEEDS_COMPAT_RES
         } else {
@@ -617,6 +620,8 @@ impl CompatibilityInfo {
                 info.application_density = DENSITY_DEFAULT;
                 info.application_scale = density as f32 / DENSITY_DEFAULT as f32;
                 info.application_inverted_scale = 1.0 / info.application_scale;
+                info.application_density_scale = info.application_scale;
+                info.application_density_inverted_scale = info.application_inverted_scale;
                 flags |= SCALING_REQUIRED;
             }
         }
@@ -675,7 +680,7 @@ mod tests {
                 | FLAG_SUPPORTS_XLARGE_SCREENS,
             ..Default::default()
         };
-        let compat = CompatibilityInfo::of(&app, &c);
+        let compat = CompatibilityInfo::of(&app, &c, 320);
         assert_eq!(
             (
                 compat.flags,
@@ -684,6 +689,33 @@ mod tests {
             ),
             (4, 320, -1)
         );
+    }
+
+    /// `DisplayMetrics.DENSITY_DEVICE`, not the display's density, is a
+    /// modern app's density, so on a Mac display whose density differs
+    /// from `ro.sf.lcd_density` its compatibility info stays the default
+    /// (`CompatibilityInfo(ApplicationInfo, ...)`, android-16.0.0_r1).
+    #[test]
+    fn a_modern_app_keeps_the_device_density_on_another_display_density() {
+        let mut c = Configuration::of(&Display::phone_for_test(), &Device {
+            locales: "en-US",
+            right_to_left: false,
+            night: false,
+            font_scale: 1.0,
+            font_weight_adjustment: 0,
+            seq: 1,
+        });
+        c.density_dpi = 144;
+        let app = ApplicationInfo {
+            target_sdk_version: 33,
+            flags: FLAG_SUPPORTS_LARGE_SCREENS
+                | FLAG_RESIZEABLE_FOR_SCREENS
+                | FLAG_SUPPORTS_SCREEN_DENSITIES
+                | FLAG_SUPPORTS_XLARGE_SCREENS,
+            ..Default::default()
+        };
+        let compat = CompatibilityInfo::of(&app, &c, 320);
+        assert_eq!((compat.flags, compat.application_density, compat.application_scale), (4, 320, 1.0));
     }
 
     #[test]

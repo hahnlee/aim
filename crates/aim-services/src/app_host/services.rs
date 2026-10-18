@@ -1367,7 +1367,8 @@ impl AppHost {
             .and_then(|a| a.config.clone());
         let Some(config) = config else { return };
         r.restart_time = Some(Instant::now());
-        let compat = super::config::CompatibilityInfo::of(&r.info.info.application_info, &config);
+        let Ok(inputs) = self.inputs() else { return };
+        let compat = super::config::CompatibilityInfo::of(&r.info.info.application_info, &config, inputs.device_density);
         let mut p = Parcel::new();
         thread::ScheduleCreateService {
             token: Some(r.token),
