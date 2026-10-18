@@ -110,6 +110,11 @@ impl RawIntent {
         })
     }
 
+    /// Its parcel, to read again.
+    pub fn parcel(&self) -> Parcel {
+        self.raw.parcel()
+    }
+
     /// `Intent.hasFileDescriptors`.
     pub fn has_fds(&self) -> bool {
         self.raw.has_fds()

@@ -23,7 +23,7 @@
 //! the original's concurrency, an app's jobs `TOP` while its process runs.
 //! Standby buckets, quotas beyond it, doze, flexibility (off by default),
 //! prefetch launch estimates, content triggers, user-initiated jobs and
-//! a job's wake lock are not run (#1490), nor URI grants (#1503).
+//! a job's wake lock are not run (#1490), nor URI grants (#1573).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -1103,7 +1103,7 @@ impl JobScheduler {
         if job.clip.as_ref().is_some_and(|(_, grants)| grants & FLAG_GRANT_URI_PERMISSIONS != 0)
             || work.as_ref().and_then(JobWorkItem::intent_flags).is_some_and(|f| f & FLAG_GRANT_URI_PERMISSIONS != 0)
         {
-            return Err(self.host.unimplemented_named("jobscheduler", "a job's URI grants (#1503)"));
+            return Err(self.host.unimplemented_named("jobscheduler", "a job's URI grants (#1573)"));
         }
         if job.trigger_content_uris.is_some() {
             return Err(self.host.unimplemented_named("jobscheduler", "content trigger jobs (#1490)"));

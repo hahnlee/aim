@@ -4,7 +4,9 @@
 //! into and the reuse of an activity there as [`super::activity_stack`]
 //! decides them, the activity put on top of its task, in its app's
 //! process, started for it if need be), `finishActivity` with its result,
-//! and what the activities' reports set moving, sent as client
+//! the URI grants an intent or a result carries held by the activity it
+//! goes to ([`super::uri_grants`]), and what the activities' reports set
+//! moving, sent as client
 //! transactions. Not yet: forwarded results, documents, a task's reset,
 //! launch options, and the resolver for an intent of several activities
 //! (#1485).
@@ -22,6 +24,7 @@ use aim_service_aidl::android_app_iapplicationthread as thread;
 use super::activity::{ActivityRecord, Item, Token};
 use super::activity_stack::{self as stack, Command, Decision, Outcome, Then};
 use super::kept::{KeptIntent, RawIntent};
+use super::uri_grants::{NeededUriGrants, Owner};
 use super::{AppHost, PER_USER_RANGE};
 use crate::package::info::ActivityInfo;
 use crate::package::intent::{ComponentName, Intent};
@@ -50,6 +53,10 @@ const WINDOW_DESCRIPTOR: &str = "android.view.IWindow";
 const DISPATCH_APP_VISIBILITY: u32 = 7;
 /// The resolver the system shows for an intent of several activities.
 const RESOLVER: &str = "com.android.internal.app.ResolverActivity";
+/// `ActivityInfo.CONTENT_URI_PERMISSION_NONE`, and the flag that has an
+/// activity's other values enforced.
+const CONTENT_URI_PERMISSION_NONE: i32 = 0;
+const CONTENT_URI_PERMISSION_APIS: &str = "android.security.content_uri_permission_apis";
 
 /// The intent an activity launches with.
 #[derive(Clone)]
@@ -84,6 +91,8 @@ pub struct StartRequest {
     pub request_code: i32,
     /// The task it goes on top of, else a new one.
     pub task: Option<i32>,
+    /// The URI grants its intent carries, the activity's once it is made.
+    pub(super) grants: Option<NeededUriGrants>,
 }
 
 impl StartRequest {
@@ -97,6 +106,7 @@ impl StartRequest {
             result_who: None,
             request_code: -1,
             task: None,
+            grants: None,
         }
     }
 
@@ -241,9 +251,10 @@ impl AppHost {
         package: &str,
         info: ActivityInfo,
         task: i32,
-        request: StartRequest,
+        mut request: StartRequest,
     ) -> u64 {
         let Binder::Local(token) = self.process.add_service(Arc::new(Token)) else { unreachable!("a local binder") };
+        let grants = request.grants.take();
         let record = ActivityRecord {
             package: package.to_string(),
             class: request.class,
@@ -265,6 +276,10 @@ impl AppHost {
             request_code: request.request_code,
         };
         self.activities.records.lock().unwrap().insert(token, record);
+        // `startActivityInner`: the intent's grants are the activity's.
+        if let Err(e) = self.grant_from_intent(grants.as_ref(), Some(Owner::Activity(token))) {
+            eprintln!("app host: activity {token:#x}: URI grants: {}", e.message);
+        }
         token
     }
 
@@ -465,6 +480,12 @@ impl AppHost {
         let target_uid = info.info.application_info.uid;
         let package = info.info.application_info.item.package_name.clone().unwrap_or_default();
         let class = info.info.item.name.clone().unwrap_or_default();
+        // `ActivityStarter.Request.resolveActivity`: the intent's grants,
+        // checked for the caller.
+        if info.require_content_uri_permission_from_caller != CONTENT_URI_PERMISSION_NONE && self.flag(CONTENT_URI_PERMISSION_APIS)? {
+            return Err(self.unimplemented_named("activity_task", "requireContentUriPermissionFromCaller (#1568)"));
+        }
+        let grants = self.check_grant_from_intent(&intent, uid, &package, target_uid / PER_USER_RANGE as i32)?;
         // `checkStartAnyActivityPermission`.
         if !self.check_component_permission(info.permission.as_deref(), uid, target_uid, info.info.exported)? {
             let what = format!("Permission Denial: starting Intent {{ cmp={package}/{class} }} from {caller_package} (pid={caller_pid}, uid={uid})");
@@ -519,6 +540,9 @@ impl AppHost {
         }
         let task = match d.outcome {
             Outcome::Deliver(token, code) => {
+                // `deliverNewIntentLocked`: the activity gets the intent's
+                // grants.
+                self.grant_from_intent(grants.as_ref(), Some(Owner::Activity(token)))?;
                 let payload = self.new_payload(Payload::NewIntent { intent: kept, referrer: caller_package });
                 commands.extend(self.activities.stack.lock().unwrap().apply(&d, Then::Deliver(token, payload), identity, user_leaving));
                 self.run(commands);
@@ -539,6 +563,7 @@ impl AppHost {
             result_who: args.result_who,
             request_code: args.request_code,
             task,
+            grants,
         };
         let process = super::providers::process_name(&info.info);
         match self.running_process(&process, target_uid).filter(|(_, attached)| *attached) {
@@ -559,17 +584,24 @@ impl AppHost {
         Ok(START_SUCCESS)
     }
 
-    /// `finishActivity`: whether it finishes; its result to the activity
-    /// that asked for it; its task too with `FINISH_TASK_WITH_*`.
-    pub(super) fn finish_activity(self: &Arc<Self>, token: Option<Binder>, result_code: i32, data: Option<RawIntent>, finish_task: i32) -> Result<bool, Exception> {
+    /// `finishActivity` by `uid`: whether it finishes; its result to the
+    /// activity that asked for it, with the URI grants of its data; its
+    /// task too with `FINISH_TASK_WITH_*`.
+    pub(super) fn finish_activity(self: &Arc<Self>, uid: i32, token: Option<Binder>, result_code: i32, data: Option<RawIntent>, finish_task: i32) -> Result<bool, Exception> {
         let Some(Binder::Local(token)) = token else { return Ok(true) };
         if data.as_ref().is_some_and(RawIntent::has_fds) {
             return Err(Exception::illegal_argument("File descriptors passed in Intent"));
         }
-        let Some((who, request_code, asked)) = self.activities.records.lock().unwrap().get(&token).map(|r| (r.result_who.clone(), r.request_code, r.result_to.is_some())) else {
+        let Some((who, request_code, result_to)) = self.activities.records.lock().unwrap().get(&token).map(|r| (r.result_who.clone(), r.request_code, r.result_to)) else {
             return Ok(true);
         };
-        let result = asked.then(|| {
+        // `collectGrants`: what the data grants the activity that asked.
+        let asker = result_to.and_then(|to| self.activities.records.lock().unwrap().get(&to).map(|r| (r.package.clone(), r.uid)));
+        let grants = match (&data, asker) {
+            (Some(data), Some((package, asker_uid))) => self.check_grant_from_intent(data, uid, &package, (asker_uid / PER_USER_RANGE) as i32)?,
+            _ => None,
+        };
+        let result = result_to.is_some().then(|| {
             let data = data.map(|d| KeptIntent::new(d, &self.process));
             self.new_payload(Payload::Result { who, request_code, result_code, data })
         });
@@ -579,6 +611,10 @@ impl AppHost {
             (task, task.and_then(|t| stack.root(t)).is_some_and(|r| r.token == token))
         };
         let (finished, mut commands) = self.activities.stack.lock().unwrap().finish(token, result);
+        // `finishActivityResults`: the grants are the asker's.
+        if finished && let Some(to) = result_to {
+            self.grant_from_intent(grants.as_ref(), Some(Owner::Activity(to)))?;
+        }
         // The task goes with it: the rest of its activities finish.
         if let Some(task) = task
             && (finish_task == FINISH_TASK_WITH_ACTIVITY || (finish_task == FINISH_TASK_WITH_ROOT_ACTIVITY && root))
@@ -629,6 +665,8 @@ impl AppHost {
                 Report::Destroyed => {
                     let out = stack.destroyed(token);
                     self.activities.records.lock().unwrap().remove(&token);
+                    // `removeUriPermissionsLocked`.
+                    self.release_uri_grants(Owner::Activity(token));
                     out
                 }
             }

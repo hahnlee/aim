@@ -492,7 +492,7 @@ fn skip_parcelable_name(r: &mut Reader<'_>) -> Result<bool> {
 }
 
 /// `TextLinks.writeToParcel`: the text, its links and extras.
-fn text_links(r: &mut Reader<'_>) -> Result<()> {
+pub(crate) fn text_links(r: &mut Reader<'_>) -> Result<()> {
     r.read_string16()?;
     for _ in 0..r.read_i32()?.max(0) {
         if r.read_i32()? != 0 {
