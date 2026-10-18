@@ -29,14 +29,16 @@ selects a group (`cargo aim build hal`). `-v` shows the tools' output,
 
 - macOS on Apple Silicon; Rust with `rustup target add aarch64-linux-android`.
 - The Android SDK (`ANDROID_SDK_ROOT`, else `~/Library/Android/sdk`) with
-  NDK `28.2.13676358` and `build-tools/36.0.0` (its `aidl` is pinned by
-  sha256 in `hal/sources.lock`).
+  NDK `28.2.13676358`, `build-tools/36.0.0` (its `aidl` is pinned by
+  sha256 in `hal/sources.lock`) and, for aim-build's tests,
+  `platforms/android-36`.
 - JDK 17 (Homebrew `openjdk@17`) for the ART build and xsdc, `python3`,
   `git`, `curl`, `unzip`. The device services' toolchain is fetched
   ("Java").
 - The pinned image archive in `_prebuilt` (`image/original.lock`).
 - For ANGLE only: an ANGLE checkout (fetched when missing, ~15 GB with its
-  toolchain; see "ANGLE") and the system `ninja`.
+  toolchain; see "ANGLE"), the system `ninja`, and the macOS SDK of
+  `upstream/angle.lock` in Xcode or the Command Line Tools.
 
 ## Layout
 
@@ -261,7 +263,8 @@ tools; nothing of them is linked into the output or put in the image.
 
 The `angle` node checks that `_build/angle-source` is the pin of
 `upstream/angle.lock`, writes `out/AimRelease/args.gn` from
-`upstream/angle-args.gn` (running `gn gen` only when it differs) and runs
+`upstream/angle-args.gn` and the lock's macOS SDK, linked into
+`out/AimRelease/sdk` (running `gn gen` only when it differs) and runs
 `ninja libEGL libGLESv2` there, a no-op when nothing changed. A missing
 checkout is fetched (git at the pin, `scripts/bootstrap.py`, depot_tools'
 `gclient sync`); an existing one is never changed, since other checkouts may

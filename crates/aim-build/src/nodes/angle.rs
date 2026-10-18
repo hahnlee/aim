@@ -3,7 +3,8 @@
 //! `upstream/angle.lock`. The checkout is fetched (git, then depot_tools'
 //! `gclient sync`) when missing and never changed when present: other
 //! checkouts may share it. gn writes `out/AimRelease` with
-//! `upstream/angle-args.gn`, and ninja builds libEGL and libGLESv2 there.
+//! `upstream/angle-args.gn` and the pin's macOS SDK, and ninja builds
+//! libEGL and libGLESv2 there.
 //!
 //! This is the one node that runs the system `ninja` rather than n2
 //! (docs/build.md, "n2"): n2 expands a rule's `${rspfile}` inside that
@@ -19,7 +20,7 @@ use crate::log::Log;
 use crate::tools::Tool;
 use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const LOCK: &str = "upstream/angle.lock";
@@ -34,7 +35,7 @@ pub fn node() -> Node {
         inputs: vec![repo(LOCK), repo(ARGS)],
         outputs: vec![out.join("libEGL.dylib"), out.join("libGLESv2.dylib")],
         tools: vec![Tool::Python, Tool::Ninja],
-        recipe: 1,
+        recipe: 2,
         action: Action::Angle,
         boot: true,
     }
@@ -101,6 +102,23 @@ fn fetch(src: &Path, revision: &str, log: &mut Log) -> Result<(), String> {
     )
 }
 
+/// The macOS SDK `version` (`MAC_SDK_VERSION` of the lock), from the
+/// selected Xcode or the Command Line Tools: the pin's toolchain cannot
+/// link against later SDKs, whose stubs name targets its lld does not know
+/// (#1603).
+fn mac_sdk(version: &str, log: &mut Log) -> Result<PathBuf, String> {
+    let name = format!("MacOSX{version}.sdk");
+    let developer = PathBuf::from(log.output(Command::new("xcode-select").arg("-p"))?.trim());
+    [
+        developer.join("Platforms/MacOSX.platform/Developer/SDKs"),
+        PathBuf::from("/Library/Developer/CommandLineTools/SDKs"),
+    ]
+    .iter()
+    .map(|dir| dir.join(&name))
+    .find(|sdk| sdk.exists())
+    .ok_or_else(|| format!("{name} is in neither Xcode nor the Command Line Tools ({LOCK})"))
+}
+
 pub fn run(log: &mut Log) -> Result<(), String> {
     let lock = Lock::read(&repo(LOCK))?;
     let revision = lock.get("ANGLE_REVISION")?;
@@ -117,7 +135,18 @@ pub fn run(log: &mut Log) -> Result<(), String> {
         ));
     }
     let out = aim_paths::angle();
-    let args = fs::read(repo(ARGS)).map_err(|e| e.to_string())?;
+    let sdk = mac_sdk(lock.get("MAC_SDK_VERSION")?, log)?;
+    let sdk_name = sdk.file_name().unwrap().to_string_lossy().into_owned();
+    // gn takes the SDK only inside the build directory, where Chromium's
+    // build links Xcode's own.
+    let link = out.join("sdk").join(&sdk_name);
+    if fs::read_link(&link).ok() != Some(sdk.clone()) {
+        fs::create_dir_all(out.join("sdk")).map_err(|e| e.to_string())?;
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(&sdk, &link).map_err(|e| e.to_string())?;
+    }
+    let mut args = fs::read(repo(ARGS)).map_err(|e| e.to_string())?;
+    args.extend(format!("mac_sdk_path = \"//out/AimRelease/sdk/{sdk_name}\"\n").as_bytes());
     let path = path_with(&aim_paths::fetched().join("depot_tools"));
     // An existing tree with these args regenerates itself (build.ninja's
     // own gn rule) when a .gn file changes.

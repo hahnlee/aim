@@ -152,6 +152,7 @@ pub fn template() -> Node {
             Dep::order_only("host/linux-run"),
             Dep::order_only("host/aim-display"),
             Dep::order_only("host/aim-binderd"),
+            Dep::order_only("angle"),
         ],
         inputs: Vec::new(),
         // Named after the SKU, which the build boot names.
