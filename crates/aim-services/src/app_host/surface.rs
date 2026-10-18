@@ -27,9 +27,11 @@ const TRANSACTIONS_DESCRIPTOR: &str = "android.ui.ISurfaceComposer";
 /// a layer of buffers; a layer of layers.
 pub const BUFFER_STATE: i32 = 0x0004_0000;
 pub const CONTAINER: i32 = 0x0008_0000;
-/// `layer_state_t::ePositionChanged`, `eLayerChanged`, `eCropChanged`.
+/// `layer_state_t::ePositionChanged`, `eLayerChanged`, `eReparent`,
+/// `eCropChanged`.
 const POSITION_CHANGED: u64 = 0x1;
 const LAYER_CHANGED: u64 = 0x2;
+const REPARENT: u64 = 0x8000;
 const CROP_CHANGED: u64 = 0x10_0000;
 /// `ui::Transform::ROT_INVALID`; `gui::CachingHint::Enabled`.
 const ROT_INVALID: u32 = 0x80;
@@ -63,13 +65,16 @@ pub struct Composer {
 }
 
 /// What a transaction changes of one layer (`SurfaceComposerClient
-/// ::Transaction`'s `setPosition`, `setLayer`, `setCrop`).
+/// ::Transaction`'s `setPosition`, `setLayer`, `setCrop`, `remove`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Change {
     pub position: Option<(f32, f32)>,
     pub z: Option<i32>,
     /// Left, top, right, bottom, in the layer's space.
     pub crop: Option<[f32; 4]>,
+    /// `remove`: reparented to none, so SurfaceFlinger destroys it and
+    /// its children once their handles go (a layer with a parent stays).
+    pub remove: bool,
 }
 
 impl Composer {
@@ -200,6 +205,9 @@ fn write_layer_state(p: &mut Parcel, handle: Binder, id: i32, change: &Change) {
     let z = change.z.inspect(|_| what |= LAYER_CHANGED).unwrap_or(0);
     // `Rect::INVALID_RECT`, else the crop; written top, left, bottom, right.
     let [left, top, right, bottom] = change.crop.inspect(|_| what |= CROP_CHANGED).unwrap_or([0.0, 0.0, -1.0, -1.0]);
+    if change.remove {
+        what |= REPARENT;
+    }
     p.write_binder(Some(handle));
     p.write_i32(id);
     p.write_i64(what as i64);
@@ -337,7 +345,7 @@ mod tests {
 
     #[test]
     fn a_transaction_places_layers() {
-        let change = Change { position: Some((100.0, 50.0)), z: Some(3), crop: Some([0.0, 0.0, 640.0, 480.0]) };
+        let change = Change { position: Some((100.0, 50.0)), z: Some(3), crop: Some([0.0, 0.0, 640.0, 480.0]), remove: false };
         let p = transaction(5, Binder::Local(1), &[(Binder::Handle(9), 7, change)]);
         let data = p.data();
         let after_token = 4 * 3 + 4 + 2 * ("android.ui.ISurfaceComposer".len() + 1);
@@ -357,5 +365,14 @@ mod tests {
         let mut one = Parcel::new();
         write_layer_state(&mut one, Binder::Handle(9), 7, &change);
         assert_eq!(data.len(), state + one.data().len() + 4 * 6);
+    }
+
+    #[test]
+    fn a_removed_layer_is_reparented_to_none() {
+        let mut p = Parcel::new();
+        write_layer_state(&mut p, Binder::Handle(9), 7, &Change { remove: true, ..Default::default() });
+        let data = p.data();
+        // The handle (its object's 28 bytes), the id, then `what`.
+        assert_eq!(u64::from_le_bytes(data[32..40].try_into().unwrap()), REPARENT);
     }
 }
