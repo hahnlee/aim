@@ -36,12 +36,13 @@ const GRANTED: i32 = 0;
 const SOFT_DENIED: i32 = 1;
 const HARD_DENIED: i32 = 2;
 /// `AppOpsManager.OP_NONE`, `MODE_ALLOWED`, `MODE_IGNORED`,
-/// `MODE_ERRORED`, `MODE_DEFAULT`.
+/// `MODE_ERRORED`, `MODE_DEFAULT`, `MODE_FOREGROUND`.
 const OP_NONE: i32 = -1;
 const MODE_ALLOWED: i32 = 0;
 const MODE_IGNORED: i32 = 1;
 const MODE_ERRORED: i32 = 2;
 const MODE_DEFAULT: i32 = 3;
+const MODE_FOREGROUND: i32 = 4;
 /// `PermissionInfo.PROTECTION_MASK_BASE`, `PROTECTION_DANGEROUS`,
 /// `PROTECTION_FLAG_APPOP`.
 const PROTECTION_MASK_BASE: i32 = 0xf;
@@ -578,6 +579,50 @@ impl System for Host<'_> {
     fn unimplemented(&self, what: &str) -> Exception {
         self.host.unimplemented_named("permission_checker", &format!("{what} (#1527)"))
     }
+}
+
+/// `ForegroundServiceTypePolicy.RegularPermission.checkPermission` of
+/// `permission` for `package` of `uid`: its preflight check
+/// (`PermissionChecker.checkPermissionForPreflight`), then its op, raw,
+/// if it has one; an op the caller holds only in the foreground grants it
+/// while-in-use permissions (`allow_while_in_use`, the type enforcement
+/// flag at its default), as does a soft denial of an ignored one. The app
+/// host has no virtual devices to try the permission on.
+pub(super) fn fgs_type_permission(
+    host: &Arc<AppHost>,
+    permission: &str,
+    uid: i32,
+    package: &str,
+    allow_while_in_use: bool,
+) -> Result<bool, Exception> {
+    let permissions = PermissionManager::new(host.clone());
+    let system = Host { host, permissions: &permissions };
+    let checks = Checks(&system);
+    let source = AttributionSourceState {
+        pid: -1,
+        uid,
+        device_id: DEVICE_ID_DEFAULT,
+        package: Some(package.to_string()),
+        tag: None,
+        token: None,
+        renounced: None,
+        next: None,
+    };
+    let result = checks.check_permission(permission, &[&source], false, false, false, OP_NONE)?;
+    if result == HARD_DENIED {
+        return Ok(false);
+    }
+    let op = checks.permission_to_op(permission)?;
+    if op == OP_NONE {
+        return Ok(result == GRANTED);
+    }
+    Ok(match system.check_op(op, uid, package)? {
+        MODE_ALLOWED => true,
+        MODE_DEFAULT => result == GRANTED,
+        MODE_FOREGROUND => allow_while_in_use,
+        MODE_IGNORED => allow_while_in_use && result == SOFT_DENIED,
+        _ => false,
+    })
 }
 
 pub struct PermissionChecker {

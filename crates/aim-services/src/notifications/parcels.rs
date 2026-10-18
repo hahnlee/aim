@@ -181,6 +181,7 @@ pub struct Notification {
     pub large_icon: Option<Icon>,
     pub flags: i32,
     pub priority: i32,
+    pub category: Option<String>,
     /// `defaults`, and whether it has a sound and a vibration pattern.
     pub defaults: i32,
     pub sound: bool,
@@ -195,6 +196,8 @@ pub struct Notification {
     pub actions: Vec<Action>,
     pub channel_id: Option<String>,
     pub shortcut_id: Option<String>,
+    /// `Notification.FOREGROUND_SERVICE_*` (`mFgsDeferBehavior`).
+    pub fgs_defer_behavior: i32,
     /// Read to its end.
     pub complete: bool,
 }
@@ -366,7 +369,7 @@ pub(crate) fn read_notification(r: &mut Reader<'_>, files: &dyn Files, n: &mut N
     n.layout.full_screen_intent = r.position();
     n.full_screen_intent = typed(r, pending_intent)?.flatten();
     n.priority = r.read_i32()?;
-    r.read_string8()?; // category
+    n.category = r.read_string8()?;
     n.group = r.read_string8()?;
     r.read_string8()?; // sortKey
     n.layout.extras = r.position();
@@ -402,7 +405,7 @@ pub(crate) fn read_notification(r: &mut Reader<'_>, files: &dyn Files, n: &mut N
     n.group_alert_behavior = r.read_i32()?;
     n.bubble_flags = typed(r, |r| bubble_metadata(r, files))?.unwrap_or(0);
     r.read_bool()?; // allow system generated contextual actions
-    r.read_i32()?; // FGS defer behavior
+    n.fgs_defer_behavior = r.read_i32()?;
     // Notification.writeToParcel ends with the PendingIntents it wrote:
     // an ArraySet of values.
     for _ in 0..r.read_i32()?.max(0) {

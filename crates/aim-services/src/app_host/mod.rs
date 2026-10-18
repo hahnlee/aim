@@ -30,6 +30,7 @@ pub mod device_policy;
 pub mod display;
 pub mod display_service;
 pub mod exit_info;
+pub mod fgs_types;
 pub mod freeform;
 pub mod generations;
 pub mod input_manager;
@@ -238,7 +239,7 @@ struct App {
     /// The providers it was handed (`ProcessRecord.mProviders`).
     providers: Vec<package::info::ProviderInfo>,
     /// Whether it crashed too often to keep its services
-    /// (`ProcessRecord.setRemoved`).
+    /// (`ProcessRecord.setRemoved`, without `allowRestart`).
     removed: bool,
     /// Its start's first frame (`ApplicationStartInfo
     /// .TIMESTAMP_INITIAL_RENDERTHREAD_FRAME`,
@@ -878,7 +879,8 @@ impl AppHost {
     /// as `handleAppCrashLSPB` does, its services' crash counts go up, and
     /// a process that crashed again within `MIN_CRASH_INTERVAL`, or too
     /// often in the last hours, is removed: its services are not started
-    /// again. (The original also marks it bad, which only refuses its
+    /// again, unless a foreground one may be (`removeProcessLocked`'s
+    /// `allowRestart`). (The original also marks it bad, which only refuses its
     /// starts from the background, which the app host does not make.)
     fn app_crashed(&self, pid: i32, uid: u32, native: bool) {
         const PROCESS_CRASH_COUNT_RESET_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
@@ -890,7 +892,7 @@ impl AppHost {
         exit.reason = if native { exit_info::REASON_CRASH_NATIVE } else { exit_info::REASON_CRASH };
         exit.description = Some("crash".into());
         self.note_exit(&exit, true);
-        self.services_crashed(start_seq);
+        let try_again = self.services_crashed(start_seq);
         let now = Instant::now();
         let key = (process, uid);
         let mut errors = self.app_errors.lock().unwrap();
@@ -905,7 +907,7 @@ impl AppHost {
             errors.crash_times.remove(&key);
             errors.crash_counts.remove(&key);
             if let Some(app) = self.apps.lock().unwrap().get_mut(&start_seq) {
-                app.removed = true;
+                app.removed = !try_again;
             }
             return;
         }
@@ -2129,7 +2131,9 @@ impl Service for Activity {
                 let Some(intent) = a.service else {
                     return reply(Err(Exception::illegal_argument("service intent is null")));
                 };
-                reply(self.0.start_service(a.caller, call.sender_euid as i32, intent, a.resolved_type, a.user_id).map(|name| {
+                let uid = call.sender_euid as i32;
+                let started = self.0.start_service(a.caller, uid, intent, a.resolved_type, a.require_foreground, a.calling_package.as_deref(), a.user_id);
+                reply(started.map(|name| {
                     let mut p = Parcel::new();
                     am::write_start_service_reply(&mut p, name.as_ref().map(|(p, c)| activity_start::Component(p, c)).as_ref());
                     p
@@ -2151,6 +2155,35 @@ impl Service for Activity {
                 let stopped = self.0.stop_service_token(a.class_name, a.token, a.start_id);
                 let mut p = Parcel::new();
                 am::write_stop_service_token_reply(&mut p, stopped);
+                Ok(p)
+            }
+            // Read as written, its notification held as NotificationManager
+            // holds one.
+            am::SET_SERVICE_FOREGROUND => {
+                let r = &mut call.data;
+                r.enforce_interface(am::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                let name = aim_service_aidl::read_typed::<services::Name>(r).map_err(|_| BAD_VALUE)?;
+                let token = r.read_binder().map_err(|_| BAD_VALUE)?;
+                let id = r.read_i32().map_err(|_| BAD_VALUE)?;
+                let notification = match r.read_i32().map_err(|_| BAD_VALUE)? {
+                    0 => None,
+                    _ => match notification_service::Incoming::read(r, &self.0.process) {
+                        Ok(n) => Some(n),
+                        Err(e) => return reply(Err(e)),
+                    },
+                };
+                let flags = r.read_i32().map_err(|_| BAD_VALUE)?;
+                let service_type = r.read_i32().map_err(|_| BAD_VALUE)?;
+                reply(self.0.set_service_foreground(call.sender_euid as i32, name, token, id, notification, flags, service_type).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_set_service_foreground_reply(&mut p);
+                    p
+                }))
+            }
+            am::GET_FOREGROUND_SERVICE_TYPE => {
+                let a = am::GetForegroundServiceType::<services::Name>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                am::write_get_foreground_service_type_reply(&mut p, self.0.foreground_service_type(call.sender_euid as i32, a.class_name, a.token));
                 Ok(p)
             }
             am::BIND_SERVICE | am::BIND_SERVICE_INSTANCE => {

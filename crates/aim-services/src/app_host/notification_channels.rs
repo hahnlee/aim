@@ -738,6 +738,17 @@ impl Package {
         }
     }
 
+    /// Sets the attribute `name` to `value`, or removes it.
+    fn set_attr(&mut self, name: &str, value: Option<Value>) {
+        let at = self.attrs.iter().position(|(n, _)| n == name);
+        match (at, value) {
+            (Some(at), Some(v)) => self.attrs[at].1 = v,
+            (None, Some(v)) => self.attrs.push((name.into(), v)),
+            (Some(at), None) => drop(self.attrs.remove(at)),
+            (None, None) => {}
+        }
+    }
+
     /// A channel by id.
     pub fn channel(&self, id: &str) -> Option<&Channel> {
         self.channels.iter().find(|c| c.id == id)
@@ -1071,6 +1082,33 @@ impl Preferences {
         p.channels.retain(|c| c.id != channel.id);
         array_map_insert(&mut p.channels, channel, |c| Some(&c.id));
         Ok(true)
+    }
+
+    /// `updateNotificationChannel` by the system, not from the user:
+    /// `channel` replaces the one of its id, its fields unlocked (but an
+    /// importance a critical device function locked); a package with only
+    /// the default channel takes its priority, visibility and badge.
+    pub fn update_channel(&mut self, name: &str, uid: i32, channel: &mut Channel) -> Result<(), String> {
+        let p = self.package_mut(name, uid).ok_or("IllegalArgumentException: Invalid package")?;
+        let Some(existing) = p.channel(&channel.id).filter(|c| !c.deleted) else {
+            return Err("IllegalArgumentException: Channel does not exist".into());
+        };
+        if channel.lockscreen_visibility == VISIBILITY_PUBLIC {
+            channel.lockscreen_visibility = VISIBILITY_NO_OVERRIDE;
+        }
+        channel.user_locked_fields = 0;
+        if existing.importance_locked_default_app && !(existing.blockable_system || existing.importance == IMPORTANCE_NONE) {
+            channel.importance = existing.importance;
+        }
+        if p.channels.len() == 1 && channel.id == DEFAULT_CHANNEL_ID {
+            let priority = if channel.bypass_dnd { PRIORITY_MAX } else { 0 };
+            p.set_attr("priority", (priority != 0).then_some(Value::Int(priority)));
+            let visibility = channel.lockscreen_visibility;
+            p.set_attr("visibility", (visibility != VISIBILITY_NO_OVERRIDE).then_some(Value::Int(visibility)));
+            p.set_attr("show_badge", Some(Value::Bool(channel.show_badge)));
+        }
+        *p.channel_mut(&channel.id).unwrap() = channel.clone();
+        Ok(())
     }
 
     /// `getConversationNotificationChannel`, with the package's

@@ -1,7 +1,8 @@
 //! `appops`: AppOps for the app host, for the ops its services decide by
 //! (the clipboard's, the stream volumes', the accounts', usage stats',
-//! running in the background's (and any in it) and the network requests'
-//! WRITE_SETTINGS): an op's mode is ignored while a user restriction it
+//! running in the background's (and any in it), the network requests'
+//! WRITE_SETTINGS, and foreground services' starting, overlays, VPNs and
+//! exemption from power restrictions): an op's mode is ignored while a user restriction it
 //! has is set (but for root and system), else the uid's, else the
 //! package's, as the permission service last persisted them
 //! (`access.abx`), else the op's default
@@ -28,7 +29,7 @@ use super::{AppHost, reply};
 
 /// `AppOpsManager.MODE_ALLOWED`, `MODE_IGNORED`, `MODE_ERRORED`.
 pub(super) const MODE_ALLOWED: i32 = 0;
-const MODE_IGNORED: i32 = 1;
+pub(super) const MODE_IGNORED: i32 = 1;
 const MODE_ERRORED: i32 = 2;
 pub(super) const MODE_DEFAULT: i32 = 3;
 /// `AppOpsManager._NUM_OP`.
@@ -44,18 +45,30 @@ pub(super) const OP_GET_ACCOUNTS: i32 = 62;
 /// `AppOpsManager.OP_WRITE_SETTINGS`, `OP_TAKE_AUDIO_FOCUS`.
 pub(super) const OP_WRITE_SETTINGS: i32 = 23;
 pub(super) const OP_TAKE_AUDIO_FOCUS: i32 = 32;
+/// `AppOpsManager.OP_SYSTEM_ALERT_WINDOW`, `OP_ACTIVATE_VPN`,
+/// `OP_START_FOREGROUND`, `OP_ACTIVATE_PLATFORM_VPN`,
+/// `OP_SYSTEM_EXEMPT_FROM_POWER_RESTRICTIONS`.
+pub(super) const OP_SYSTEM_ALERT_WINDOW: i32 = 24;
+pub(super) const OP_ACTIVATE_VPN: i32 = 47;
+pub(super) const OP_START_FOREGROUND: i32 = 76;
+pub(super) const OP_ACTIVATE_PLATFORM_VPN: i32 = 94;
+pub(super) const OP_SYSTEM_EXEMPT_FROM_POWER_RESTRICTIONS: i32 = 128;
 /// `UserManager.DISALLOW_ADJUST_VOLUME`.
 const DISALLOW_ADJUST_VOLUME: &str = "no_adjust_volume";
 /// The ops it decides: their code, name, default mode and user
 /// restriction. Each is its own switch, and none has a permission but
 /// SCHEDULE_EXACT_ALARM's, USE_FULL_SCREEN_INTENT's, the accounts'
-/// (READ_CONTACTS, WRITE_CONTACTS, GET_ACCOUNTS), WRITE_SETTINGS' and
-/// MANAGE_EXTERNAL_STORAGE's (which MediaProvider checks). Their notes are
-/// not collected (`AppOpsService.shouldCollectNotes`: #1558).
+/// (READ_CONTACTS, WRITE_CONTACTS, GET_ACCOUNTS), WRITE_SETTINGS',
+/// SYSTEM_ALERT_WINDOW's, START_FOREGROUND's and MANAGE_EXTERNAL_STORAGE's
+/// (which MediaProvider checks). Their notes are not collected
+/// (`AppOpsService.shouldCollectNotes`: #1558). SYSTEM_ALERT_WINDOW's
+/// default is `getSystemAlertWindowDefault`'s on a device that is not
+/// low on RAM.
 const OPS: &[(i32, &str, i32, Option<&str>)] = &[
     (OP_READ_CONTACTS, "android:read_contacts", MODE_ALLOWED, None),
     (OP_WRITE_CONTACTS, "android:write_contacts", MODE_ALLOWED, None),
     (OP_WRITE_SETTINGS, "android:write_settings", MODE_DEFAULT, None),
+    (OP_SYSTEM_ALERT_WINDOW, "android:system_alert_window", MODE_DEFAULT, None),
     (29, "android:read_clipboard", MODE_ALLOWED, None),
     (30, "android:write_clipboard", MODE_ALLOWED, None),
     (OP_TAKE_AUDIO_FOCUS, "android:take_audio_focus", MODE_FOREGROUND, None),
@@ -68,10 +81,14 @@ const OPS: &[(i32, &str, i32, Option<&str>)] = &[
     (43, "android:get_usage_stats", MODE_DEFAULT, None),
     (OP_GET_ACCOUNTS, "android:get_accounts", MODE_ALLOWED, None),
     (92, "android:manage_external_storage", MODE_DEFAULT, None),
+    (OP_ACTIVATE_VPN, "android:activate_vpn", MODE_IGNORED, None),
     (63, "android:run_in_background", MODE_ALLOWED, None),
     (70, "android:run_any_in_background", MODE_ALLOWED, None),
     (64, "android:audio_accessibility_volume", MODE_ALLOWED, Some(DISALLOW_ADJUST_VOLUME)),
+    (OP_START_FOREGROUND, "android:start_foreground", MODE_ALLOWED, None),
+    (OP_ACTIVATE_PLATFORM_VPN, "android:activate_platform_vpn", MODE_IGNORED, None),
     (OP_SCHEDULE_EXACT_ALARM, "android:schedule_exact_alarm", MODE_DEFAULT, None),
+    (OP_SYSTEM_EXEMPT_FROM_POWER_RESTRICTIONS, "android:system_exempt_from_power_restrictions", MODE_DEFAULT, None),
     (OP_USE_FULL_SCREEN_INTENT, "android:use_full_screen_intent", MODE_DEFAULT, None),
 ];
 

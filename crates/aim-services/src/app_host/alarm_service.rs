@@ -7,7 +7,9 @@
 //! realtime and wall time, as the guest's `SystemClock` and
 //! `System.currentTimeMillis` read them) through their PendingIntent (with
 //! `EXTRA_ALARM_COUNT`) or their `IAlarmListener`, repeating alarms
-//! rescheduled; alarm clocks and `getNextAlarmClock`, with
+//! rescheduled, an exact alarm's PendingIntent (before exact alarms
+//! needed a permission, an alarm clock's or one allowed while idle) letting
+//! its app start foreground services for ten seconds; alarm clocks and `getNextAlarmClock`, with
 //! `ACTION_NEXT_ALARM_CLOCK_CHANGED`; and the clock's own broadcasts,
 //! `ACTION_TIME_TICK` each minute and `ACTION_DATE_CHANGED` at local
 //! midnight. A change of the Mac's clock is noticed as `AlarmThread`
@@ -138,6 +140,9 @@ struct Alarm {
     clock: Option<ClockInfo>,
     uid: i32,
     package: String,
+    /// Why its delivery lets its PendingIntent's app start foreground
+    /// services for a while, if it does.
+    fgs_allowlist: Option<i32>,
 }
 
 impl Alarm {
@@ -218,6 +223,14 @@ impl AlarmManager {
         AlarmManager { host, shared }
     }
 
+    /// `isExactAlarmChangeEnabled`: whether `package` needs a permission
+    /// for exact alarms.
+    fn exact_alarm_change_enabled(&self, package: &str) -> Result<bool, Exception> {
+        let (state, _) = self.host.packages()?;
+        let compat = &self.host.inputs()?.compat;
+        Ok(state.packages.get(package).is_some_and(|ps| compat.is_enabled(REQUIRE_EXACT_ALARM_PERMISSION, Some(package), ps.target_sdk_version)))
+    }
+
     /// `isExactAlarmChangeEnabled`, `hasUseExactAlarmInternal`,
     /// `hasScheduleExactAlarmInternal` and the core uids' exemption: may
     /// `package` of `uid` set exact alarms?
@@ -290,6 +303,21 @@ impl AlarmManager {
             flags &= !(FLAG_ALLOW_WHILE_IDLE | FLAG_PRIORITIZE);
         }
         let exact = window == 0;
+        // Its delivery may let its app start foreground services for a
+        // while (`mOptsWithFgs`, `mOptsWithFgsForAlarmClock`): an exact
+        // alarm's, or before exact alarms needed a permission, an alarm
+        // clock's or one allowed while idle.
+        let fgs_allowlist = if flags & FLAG_PRIORITIZE != 0 {
+            None
+        } else if self.exact_alarm_change_enabled(&package)? {
+            exact.then_some(if clock.is_some() {
+                super::services::REASON_ALARM_MANAGER_ALARM_CLOCK
+            } else {
+                super::services::REASON_ALARM_MANAGER_WHILE_IDLE
+            })
+        } else {
+            (flags & FLAG_ALLOW_WHILE_IDLE != 0 || clock.is_some()).then_some(super::services::REASON_ALARM_MANAGER_WHILE_IDLE)
+        };
         if flags & FLAG_PRIORITIZE != 0 {
             if self.host.check_permission(Some("android.permission.SCHEDULE_PRIORITIZED_ALARM"), uid)? != 0 {
                 return Err(Exception::security("AlarmManager.setPrioritized requires android.permission.SCHEDULE_PRIORITIZED_ALARM"));
@@ -346,7 +374,7 @@ impl AlarmManager {
         // An alarm of the same operation or listener is replaced.
         remove_matching(&self.host, &mut state, operation, listener.as_ref().map(|(l, _)| l.handle));
         let rtc_when = matches!(kind, RTC | RTC_WAKEUP).then_some(when);
-        state.alarms.push(Alarm { requested, rtc_when, interval, flags, operation, listener, clock, uid, package });
+        state.alarms.push(Alarm { requested, rtc_when, interval, flags, operation, listener, clock, uid, package, fgs_allowlist });
         self.alarm_clocks_changed(&mut state);
         self.shared.changed.notify_all();
         Ok(())
@@ -436,7 +464,7 @@ fn run(host: Weak<AppHost>, shared: Arc<Shared>) {
                 count += (now - a.requested) / a.interval;
                 let next = a.requested + count * a.interval;
                 // Repeating alarms have no listener (`set` refuses one).
-                due.push((a.operation, None, count, a.package.clone()));
+                due.push((a.operation, None, count, a.package.clone(), a.fgs_allowlist));
                 a.requested = next;
                 a.rtc_when = a.rtc_when.map(|w| w + count * a.interval);
                 kept.push(a);
@@ -445,7 +473,7 @@ fn run(host: Weak<AppHost>, shared: Arc<Shared>) {
                     host.process.clear_death(&l, death);
                     l
                 });
-                due.push((a.operation, listener, count, a.package));
+                due.push((a.operation, listener, count, a.package, a.fgs_allowlist));
             }
         }
         state.alarms = kept;
@@ -461,8 +489,13 @@ fn run(host: Weak<AppHost>, shared: Arc<Shared>) {
             service.alarm_clocks_changed(&mut state);
         }
         drop(state);
-        for (operation, listener, count, package) in due {
+        for (operation, listener, count, package, fgs_allowlist) in due {
             if let Some(op) = operation {
+                // Sent with its options' temporary allowlist, for the
+                // PendingIntent's creator (`tempAllowlistForPendingIntent`).
+                if let (Some(reason), Some(uid)) = (fgs_allowlist, host.intent_sender_uid(op)) {
+                    host.temp_allowlist_for_fgs(uid, super::services::ALLOW_WHILE_IDLE_ALLOWLIST_DURATION, reason);
+                }
                 let fill = RawIntent::of(None, 0, &[(EXTRA_ALARM_COUNT, crate::bundle::Value::Int(count as i32))]);
                 if let Err(e) = host.send_intent_sender(1000, None, Some(op), 0, Some(fill), None, None, None, None) {
                     eprintln!("app host: alarm of {package}: {}", e.message);

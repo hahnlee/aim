@@ -10,12 +10,27 @@
 //! started again. The app host binds services itself too, as the system
 //! does (`bindServiceAsUser` from system_server, a connection of its
 //! own). A service runs in its process (`android:process`), started for
-//! it when it does not run. Isolated services and foreground services are
-//! not run (#1492). `getServices` lists them as
-//! `getRunningServiceInfoLocked` does.
+//! it when it does not run. Isolated services are not run (#1492).
+//! `getServices` lists them as `getRunningServiceInfoLocked` does.
+//!
+//! A service becomes foreground (`setServiceForegroundLocked`) with the
+//! original's checks: FOREGROUND_SERVICE, its type a subset of its
+//! manifest's and allowed by `ForegroundServiceTypePolicy`
+//! ([`fgs_types`](super::fgs_types)), START_FOREGROUND's op, and whether
+//! its app may start one from the background (`setFgsRestrictionLocked`'s
+//! reasons). Each of the app host's processes is top, so an app with a
+//! running process may, as may one an alarm or a service launch
+//! temporarily allowed (`mFgsStartTempAllowList`); the process state stays
+//! top, above PROCESS_STATE_FOREGROUND_SERVICE. Its notification is
+//! posted as its app's, deferred as `shouldShowFgsNotificationLocked`
+//! defers it, and cancelled or unflagged when it stops being foreground.
+//! A service started with `startForegroundService` that does not call
+//! `startForeground` in time is stopped and its app crashed. Short and
+//! time-limited services' timeouts, and the ANRs, are not run (#1551).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use aim_binder_host::local::Strong;
@@ -26,9 +41,13 @@ use aim_service_aidl::android_app_iapplicationthread as thread;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
 use super::activity_start::Component;
+use super::appops_service::{self as appops, MODE_ALLOWED, MODE_DEFAULT};
 use super::broadcasts::filter_equals;
+use super::fgs_types::{self, Check};
 use super::kept::{By, KeptIntent, RawIntent};
-use super::{AppHost, PROCESS_STATE_TOP, STOCK_PM_FLAGS};
+use super::notification_service::{Enqueue, Incoming};
+use super::{AppHost, PER_USER_RANGE, PROCESS_STATE_TOP, STOCK_PM_FLAGS};
+use crate::bundle::Value;
 use crate::package::info::{ServiceInfo, java_hash};
 use crate::package::list_slice::Slice;
 
@@ -69,6 +88,61 @@ pub(super) const MIN_CRASH_INTERVAL: Duration = Duration::from_secs(60);
 /// `ServiceRecord.MAX_DELIVERY_COUNT`, `MAX_DONE_EXECUTING_COUNT`.
 const MAX_DELIVERY_COUNT: i32 = 3;
 const MAX_DONE_EXECUTING_COUNT: i32 = 6;
+/// `Service.STOP_FOREGROUND_REMOVE`, `STOP_FOREGROUND_DETACH`.
+const STOP_FOREGROUND_REMOVE: i32 = 1;
+const STOP_FOREGROUND_DETACH: i32 = 2;
+/// `ActivityManagerConstants`: how long a service started with
+/// `startForegroundService` has to call `startForeground`, how long after
+/// its creation a first `startForeground` asks again whether its app may,
+/// how long a foreground service's notification is deferred, and how long
+/// its app's are then not (`mFgsNotificationDeferralExclusionTime`).
+const SERVICE_START_FOREGROUND_TIMEOUT: Duration = Duration::from_secs(30);
+const FGS_START_FOREGROUND_TIMEOUT_MS: i64 = 10_000;
+const FGS_NOTIFICATION_DEFERRAL_INTERVAL: Duration = Duration::from_secs(10);
+const FGS_NOTIFICATION_DEFERRAL_EXCLUSION_TIME: Duration = Duration::from_secs(120);
+/// `ActiveServices.FGS_IMMEDIATE_DISPLAY_MASK`.
+const FGS_IMMEDIATE_DISPLAY_MASK: i32 = fgs_types::TYPE_MEDIA_PLAYBACK
+    | fgs_types::TYPE_PHONE_CALL
+    | fgs_types::TYPE_CONNECTED_DEVICE
+    | fgs_types::TYPE_MEDIA_PROJECTION;
+/// `AlarmManagerService`'s `ALLOW_WHILE_IDLE_WHITELIST_DURATION`.
+pub(super) const ALLOW_WHILE_IDLE_ALLOWLIST_DURATION: Duration = Duration::from_secs(10);
+/// The compat changes of foreground services: their restriction from the
+/// background, its exception, the time-limited types, and overlays no
+/// longer exempting.
+const FGS_BG_START_RESTRICTION_CHANGE_ID: i64 = 170_668_199;
+const FGS_START_EXCEPTION_CHANGE_ID: i64 = 174_041_399;
+const FGS_INTRODUCE_TIME_LIMITS: i64 = 317_799_821;
+const FGS_SAW_RESTRICTIONS: i64 = 319_471_980;
+/// The aconfig flags of the time-limited types' callback and of the
+/// overlay restriction.
+const INTRODUCE_NEW_SERVICE_ONTIMEOUT_CALLBACK: &str = "android.app.introduce_new_service_ontimeout_callback";
+const FGS_DISABLE_SAW: &str = "com.android.server.am.fgs_disable_saw";
+/// `PowerExemptionManager.REASON_*`.
+const REASON_DENIED: i32 = -1;
+const REASON_PROC_STATE_TOP: i32 = 12;
+const REASON_SYSTEM_UID: i32 = 51;
+const REASON_BACKGROUND_ACTIVITY_PERMISSION: i32 = 58;
+const REASON_BACKGROUND_FGS_PERMISSION: i32 = 59;
+const REASON_SYSTEM_ALERT_WINDOW_PERMISSION: i32 = 62;
+const REASON_DEVICE_DEMO_MODE: i32 = 63;
+const REASON_OP_ACTIVATE_VPN: i32 = 68;
+const REASON_OP_ACTIVATE_PLATFORM_VPN: i32 = 69;
+const REASON_CURRENT_INPUT_METHOD: i32 = 71;
+pub(super) const REASON_ALARM_MANAGER_ALARM_CLOCK: i32 = 301;
+pub(super) const REASON_ALARM_MANAGER_WHILE_IDLE: i32 = 302;
+const REASON_SERVICE_LAUNCH: i32 = 303;
+const REASON_SYSTEM_EXEMPT_APP_OP: i32 = 327;
+/// `RemoteServiceException`s' type ids.
+const FOREGROUND_SERVICE_DID_NOT_START_IN_TIME: i32 = 1;
+const CANNOT_POST_FOREGROUND_SERVICE_NOTIFICATION: i32 = 2;
+/// `Build.VERSION_CODES` the foreground service checks compare with.
+const LOLLIPOP: i32 = 21;
+const O: i32 = 26;
+const O_MR1: i32 = 27;
+const P: i32 = 28;
+/// `ApplicationInfo.PRIVATE_FLAG_INSTANT`.
+const PRIVATE_FLAG_INSTANT: i32 = 1 << 7;
 
 /// A `ComponentName` read.
 pub struct Name {
@@ -131,6 +205,197 @@ struct Record {
     /// When it was made, `elapsedRealtime` and `uptimeMillis`.
     create_real_time: i64,
     last_activity: i64,
+    fg: Foreground,
+}
+
+/// `ActiveServices.ServiceNotificationPolicy`: whether a notification is
+/// a foreground service's, and if so whether it shows now or only as an
+/// update of one that shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum FgsPolicy {
+    NotForegroundService,
+    ShowImmediately,
+    UpdateOnly,
+}
+
+/// What becomes of a foreground service's notification when it stops
+/// being foreground (`setServiceForegroundInnerLocked` with no id).
+#[derive(Debug, PartialEq)]
+enum Stopped {
+    /// `STOP_FOREGROUND_REMOVE`: cancelled.
+    Cancel,
+    /// It stays, no longer a foreground service's
+    /// (`dropFgsNotificationStateLocked`), posted first if it was
+    /// deferred.
+    Unflag { post: bool },
+    /// An app targeting an SDK before L keeps it as it is.
+    Keep,
+}
+
+/// The notification of a foreground service: its app's package and uid,
+/// and its id.
+#[derive(Clone)]
+struct FgsNotification {
+    package: String,
+    uid: i32,
+    id: i32,
+}
+
+/// A service's foreground state (`ServiceRecord`'s).
+struct Foreground {
+    /// `fgRequired`: started with `startForegroundService`, and `fgWaiting`,
+    /// the generation of its timeout while it runs.
+    required: bool,
+    waiting: Option<u64>,
+    /// `isForeground`, `foregroundId`, `foregroundNoti`,
+    /// `foregroundServiceType`, `mStartForegroundCount`.
+    is_foreground: bool,
+    id: i32,
+    notification: Option<Incoming>,
+    service_type: i32,
+    start_count: i32,
+    /// Why it may be foreground (`mAllowStart_*`) and have while-in-use
+    /// permissions (`mAllowWiu_*`), of its starts and of its bindings.
+    allow_start: (i32, i32),
+    allow_wiu: (i32, i32),
+    /// Whether a device or profile owner's exemption, not answered, may
+    /// have allowed what was denied.
+    owner_unknown: bool,
+    /// Its notification's deferral: `mFgsNotificationDeferred`,
+    /// `fgDisplayTime`, `mFgsNotificationShown`, and whether it is in
+    /// `mPendingFgsNotifications`.
+    deferred: bool,
+    display_time: Option<Instant>,
+    shown: bool,
+    pending: bool,
+}
+
+impl Default for Foreground {
+    fn default() -> Self {
+        Foreground {
+            required: false,
+            waiting: None,
+            is_foreground: false,
+            id: 0,
+            notification: None,
+            service_type: fgs_types::TYPE_NONE,
+            start_count: 0,
+            allow_start: (REASON_DENIED, REASON_DENIED),
+            allow_wiu: (REASON_DENIED, REASON_DENIED),
+            owner_unknown: false,
+            deferred: false,
+            display_time: None,
+            shown: false,
+            pending: false,
+        }
+    }
+}
+
+/// `ServiceRecord.reasonOr`.
+fn reason_or(a: i32, b: i32) -> i32 {
+    if a != REASON_DENIED { a } else { b }
+}
+
+impl Foreground {
+    /// `isFgsAllowedStart`, `isFgsAllowedWiu_forStart`.
+    fn allowed_start(&self) -> bool {
+        reason_or(self.allow_start.0, self.allow_start.1) != REASON_DENIED
+    }
+
+    fn allowed_wiu(&self) -> bool {
+        reason_or(self.allow_wiu.0, self.allow_wiu.1) != REASON_DENIED
+    }
+
+    /// `resetFgsRestrictionLocked`.
+    fn reset_restriction(&mut self) {
+        self.allow_start = (REASON_DENIED, REASON_DENIED);
+        self.allow_wiu = (REASON_DENIED, REASON_DENIED);
+        self.owner_unknown = false;
+    }
+
+    /// Stops being foreground with `flags` (`STOP_FOREGROUND_*`), in an app
+    /// targeting `target_sdk`: what becomes of its notification, its id and
+    /// notification forgotten when removed or detached.
+    fn stop(&mut self, flags: i32, target_sdk: i32) -> Stopped {
+        let stopped = if flags & STOP_FOREGROUND_REMOVE != 0 {
+            Stopped::Cancel
+        } else if target_sdk >= LOLLIPOP {
+            Stopped::Unflag { post: !self.shown }
+        } else {
+            Stopped::Keep
+        };
+        if flags & STOP_FOREGROUND_REMOVE != 0 || (target_sdk >= LOLLIPOP && flags & STOP_FOREGROUND_DETACH != 0) {
+            self.id = 0;
+            self.notification = None;
+        }
+        self.is_foreground = false;
+        self.service_type = fgs_types::TYPE_NONE;
+        self.reset_restriction();
+        stopped
+    }
+
+    /// `shouldShowFgsNotificationLocked` at `now`, the app's notifications
+    /// not deferred until `eligible` (`withinFgsDeferRateLimit`).
+    fn show_now(&self, now: Instant, eligible: Option<Instant>, force_deferred: bool, immediately: bool) -> bool {
+        if self.deferred && self.display_time.is_some_and(|t| now >= t) {
+            return true;
+        }
+        let within_deferral = self.display_time.is_some_and(|t| now < t);
+        if !within_deferral && eligible.is_some_and(|e| now < e) {
+            return true;
+        }
+        if self.shown {
+            return true;
+        }
+        !force_deferred && (immediately || self.service_type & FGS_IMMEDIATE_DISPLAY_MASK != 0)
+    }
+}
+
+/// `startForeground`'s type (`foregroundServiceType`) as it takes effect:
+/// the manifest's for `FOREGROUND_SERVICE_TYPE_MANIFEST`, which it must be
+/// a subset of, and short-service dropped when combined with another.
+fn effective_type(requested: i32, manifest: i32) -> Result<i32, Exception> {
+    let mut ty = if requested == fgs_types::TYPE_MANIFEST { manifest } else { requested };
+    if ty & manifest != ty {
+        return Err(Exception::illegal_argument(format!(
+            "foregroundServiceType 0x{ty:08X} is not a subset of foregroundServiceType attribute 0x{manifest:08X} in service element of manifest file"
+        )));
+    }
+    if ty & fgs_types::TYPE_SHORT_SERVICE != 0 && ty != fgs_types::TYPE_SHORT_SERVICE {
+        eprintln!("app host: startForeground(): FOREGROUND_SERVICE_TYPE_SHORT_SERVICE is combined with other types. SHORT_SERVICE will be ignored.");
+        ty &= !fgs_types::TYPE_SHORT_SERVICE;
+    }
+    Ok(ty)
+}
+
+/// A parcelable exception of `class` (its `writeToParcel` writes its
+/// message).
+fn parcelable_exception(class: &str, message: String) -> Exception {
+    let mut p = Parcel::new();
+    p.write_string16(Some(class));
+    p.write_string16(Some(&message));
+    Exception::parcelable(Some(&message), &p).expect("a message has no objects")
+}
+
+/// `ComponentName.flattenToShortString`.
+fn short_name(package: &str, class: &str) -> String {
+    match class.strip_prefix(package).filter(|rest| rest.starts_with('.')) {
+        Some(rest) => format!("{package}/{rest}"),
+        None => format!("{package}/{class}"),
+    }
+}
+
+/// `ProcessRecord.toString`, without its identity hash.
+fn process_record(pid: i32, process: &str, uid: i32) -> String {
+    let app_id = uid.rem_euclid(PER_USER_RANGE as i32);
+    let who = if uid < 10_000 {
+        uid.to_string()
+    } else if app_id >= 10_000 {
+        format!("u{}a{}", uid / PER_USER_RANGE as i32, app_id - 10_000)
+    } else {
+        format!("u{}s{app_id}", uid / PER_USER_RANGE as i32)
+    };
+    format!("ProcessRecord{{{pid}:{process}/{who}}}")
 }
 
 /// The app host's end of a binding it makes (the system's
@@ -175,9 +440,15 @@ struct Connection {
     client_label: i32,
 }
 
+/// A job of the activity manager's handler.
+type Job = Box<dyn FnOnce(&Arc<AppHost>) + Send>;
+
 #[derive(Default)]
 pub struct Services {
     state: Mutex<State>,
+    /// The handler (`mAm.mHandler`) the services' notifications are posted
+    /// and cancelled on, in order and outside their lock.
+    handler: Mutex<Option<mpsc::Sender<Job>>>,
 }
 
 #[derive(Default)]
@@ -185,6 +456,14 @@ struct State {
     records: Vec<Record>,
     connections: Vec<Connection>,
     next_bind_seq: i64,
+    /// `mFgsStartTempAllowList`: until when a uid may start foreground
+    /// services, and why.
+    fgs_temp_allowlist: HashMap<i32, (Instant, i32)>,
+    /// `mFgsDeferralEligible`: until when a uid's foreground services'
+    /// notifications show at once.
+    deferral_eligible: HashMap<i32, Instant>,
+    /// The generation of the last `startForegroundService` timeout.
+    next_timeout: u64,
 }
 
 /// One start's arguments (`ServiceStartArgs`).
@@ -204,7 +483,7 @@ impl WriteParcelable for StartArgs {
 }
 
 /// `ActivityManager.RunningServiceInfo`. None of the app host's services
-/// is foreground (#1492) or runs in the system's process.
+/// runs in the system's process.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RunningServiceInfo {
     package: String,
@@ -212,6 +491,7 @@ pub struct RunningServiceInfo {
     pid: i32,
     uid: i32,
     process: String,
+    foreground: bool,
     active_since: i64,
     started: bool,
     client_count: i32,
@@ -223,8 +503,10 @@ pub struct RunningServiceInfo {
     client_label: i32,
 }
 
-/// `RunningServiceInfo.FLAG_STARTED`, `FLAG_PERSISTENT_PROCESS`.
+/// `RunningServiceInfo.FLAG_STARTED`, `FLAG_FOREGROUND`,
+/// `FLAG_PERSISTENT_PROCESS`.
 const FLAG_STARTED: i32 = 1 << 0;
+const FLAG_FOREGROUND: i32 = 1 << 1;
 const FLAG_PERSISTENT_PROCESS: i32 = 1 << 3;
 
 impl WriteParcelable for RunningServiceInfo {
@@ -233,7 +515,7 @@ impl WriteParcelable for RunningServiceInfo {
         p.write_i32(self.pid);
         p.write_i32(self.uid);
         p.write_string16(Some(&self.process));
-        p.write_i32(0); // not foreground
+        p.write_i32(self.foreground as i32);
         p.write_i64(self.active_since);
         p.write_i32(self.started as i32);
         p.write_i32(self.client_count);
@@ -342,6 +624,15 @@ impl Record {
             self.start_requested = false;
         }
         Some(self.restart_delay)
+    }
+
+    /// The notification it shows as a foreground service, if any.
+    fn fgs_notification(&self) -> Option<FgsNotification> {
+        self.fg.notification.as_ref().map(|_| FgsNotification {
+            package: self.package.clone(),
+            uid: self.info.info.application_info.uid,
+            id: self.fg.id,
+        })
     }
 
     /// `ServiceRecord.makeNextStartId`.
@@ -518,18 +809,24 @@ impl AppHost {
             crash_count: 0,
             create_real_time: super::clock_ms(libc::CLOCK_MONOTONIC_RAW),
             last_activity: super::clock_ms(libc::CLOCK_UPTIME_RAW),
+            fg: Foreground::default(),
         });
         token
     }
 
-    /// `startServiceLocked`: the service's name, `!` and why if the
-    /// caller may not start it, none if there is no such service.
+    /// `startServiceLocked`, of a foreground service (`fg_required`,
+    /// `startForegroundService`) or not, by `uid` of `calling_package`: the
+    /// service's name, `!` (or `!!`) and why if it may not be started, none
+    /// if there is no such service or a foreground one is silently not.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn start_service(
         &self,
         caller: Option<Binder>,
         uid: i32,
         intent: RawIntent,
         resolved_type: Option<String>,
+        mut fg_required: bool,
+        calling_package: Option<&str>,
         user: i32,
     ) -> Result<Option<(String, String)>, Exception> {
         if intent.has_fds() {
@@ -561,9 +858,42 @@ impl AppHost {
         let kept = KeptIntent::new(intent, &self.process);
         let mut state = self.services.state.lock().unwrap();
         let token = Self::service_record(&mut state, info, &self.process);
+        self.set_fgs_restriction(&mut state, token, calling_package, uid, false)?;
+        let r = state.record(token).unwrap();
+        let (app_uid, package, target_sdk) =
+            (r.info.info.application_info.uid, r.package.clone(), r.info.info.application_info.target_sdk_version);
+        if fg_required {
+            if !r.fg.allowed_start() && self.bg_fgs_restricted(app_uid, uid)? {
+                if r.fg.owner_unknown {
+                    return Err(self.owner_exemption());
+                }
+                let message = format!(
+                    "startForegroundService() not allowed due to mAllowStartForeground false: service {}",
+                    short_name(&r.package, &r.class)
+                );
+                eprintln!("app host: {message}");
+                if self.change_enabled(FGS_START_EXCEPTION_CHANGE_ID, uid)? {
+                    return Err(parcelable_exception("android.app.ForegroundServiceStartNotAllowedException", message));
+                }
+                return Ok(None);
+            }
+            match appops::mode(self, appops::OP_START_FOREGROUND, app_uid, Some(&package))? {
+                MODE_ALLOWED | MODE_DEFAULT => {}
+                // Started as a service that is not foreground; the app
+                // host's apps are all allowed to start those.
+                appops::MODE_IGNORED => {
+                    eprintln!("app host: startForegroundService not allowed due to app op: service {package}");
+                    fg_required = false;
+                }
+                _ => return Ok(Some(("!!".into(), "foreground not allowed as per app op".into()))),
+            }
+            // Only an app targeting O or later must call startForeground.
+            fg_required &= target_sdk >= O;
+        }
         let r = state.record(token).unwrap();
         r.start_requested = true;
         r.stop_if_killed = false;
+        r.fg.required = fg_required;
         let id = r.next_start_id();
         r.pending.push(StartItem {
             id,
@@ -1000,7 +1330,13 @@ impl AppHost {
                     .iter()
                     .find(|(_, a)| a.pid == pid)
                     .map(|(seq, _)| *seq);
-                state.record(token).unwrap().app = seq;
+                let r = state.record(token).unwrap();
+                r.app = seq;
+                // `fg-service-launch`: its app may make it foreground.
+                if r.fg.required {
+                    let uid = r.info.info.application_info.uid;
+                    Self::temp_allowlist(state, uid, SERVICE_START_FOREGROUND_TIMEOUT, REASON_SERVICE_LAUNCH);
+                }
             }
         }
         Ok(())
@@ -1103,18 +1439,31 @@ impl AppHost {
 
     /// `sendServiceArgsLocked`: the pending starts delivered.
     fn send_args(&self, state: &mut State, token: Binder) {
+        let generation = state.next_timeout + 1;
         let Some(r) = state.record(token) else { return };
         let Some(app) = r.app.filter(|_| r.created) else {
             return;
         };
         let n = r.pending.len();
         let mut args = Vec::new();
+        let mut timeout = false;
         for mut s in std::mem::take(&mut r.pending) {
             if s.intent.is_none() && n > 1 {
                 continue;
             }
             s.delivery_count += 1;
             s.delivered_time = Some(Instant::now());
+            // A service started with `startForegroundService` must call
+            // `startForeground` in time
+            // (`scheduleServiceForegroundTransitionTimeoutLocked`).
+            if r.fg.required && r.fg.waiting.is_none() {
+                if r.fg.is_foreground {
+                    r.fg.required = false;
+                } else {
+                    timeout = true;
+                    r.fg.waiting = Some(generation);
+                }
+            }
             let mut flags = 0;
             if s.delivery_count > 1 {
                 flags |= START_FLAG_RETRY;
@@ -1145,6 +1494,16 @@ impl AppHost {
         if let Err(e) = self.call_thread(app, thread::SCHEDULE_SERVICE_ARGS, &p) {
             eprintln!("app host: service {}/{}: start: {e}", r.package, r.class);
         }
+        if timeout {
+            state.next_timeout = generation;
+            let me = self.me.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(SERVICE_START_FOREGROUND_TIMEOUT);
+                if let Some(host) = me.upgrade() {
+                    host.service_foreground_timeout(token, generation);
+                }
+            });
+        }
     }
 
     /// `bringDownServiceIfNeededLocked`: a service neither started nor
@@ -1166,6 +1525,23 @@ impl AppHost {
         state.connections = kept;
         for c in &gone {
             connected(&c.conn, &r.package, &r.class, None, true);
+        }
+        // Brought down before it called `startForeground`, which is not
+        // allowed: its app is crashed (`SERVICE_FOREGROUND_CRASH_MSG`).
+        if r.fg.required
+            && let Some(seq) = r.app
+        {
+            eprintln!("app host: bringing down service while still waiting for start foreground: {}", short_name(&r.package, &r.class));
+            let message = format!(
+                "Context.startForegroundService() did not then call Service.startForeground(): ServiceRecord{{u{} {}}}",
+                r.info.info.application_info.uid / PER_USER_RANGE as i32,
+                short_name(&r.package, &r.class)
+            );
+            let extras = vec![("serviceclassname".to_string(), Value::String(Some(r.class.clone())))];
+            self.post_job(move |host| host.crash_application(seq, &message, FOREGROUND_SERVICE_DID_NOT_START_IN_TIME, extras));
+        }
+        if let Some(shown) = r.fgs_notification() {
+            self.cancel_foreground_notification(state, token, &shown);
         }
         let Some(app) = r.app.filter(|_| r.created) else {
             return;
@@ -1207,19 +1583,22 @@ impl AppHost {
 
     /// The process of `start_seq` crashed (`incServiceCrashCountLocked`):
     /// the crash count of each service running in it goes up, or starts
-    /// over when the service started long enough ago. None of the app
-    /// host's services is foreground, so none is tried again after its
-    /// process crashed too often.
-    pub(super) fn services_crashed(&self, start_seq: i64) {
+    /// over when the service started long enough ago. Whether to try its
+    /// services again after it crashed too often: a foreground one that
+    /// did not crash too often is.
+    pub(super) fn services_crashed(&self, start_seq: i64) -> bool {
         let now = Instant::now();
         let mut state = self.services.state.lock().unwrap();
+        let mut try_again = false;
         for r in state.records.iter_mut().filter(|r| r.app == Some(start_seq) && r.created) {
             if r.restart_time.is_none_or(|t| now > t + MIN_CRASH_INTERVAL) {
                 r.crash_count = 1;
             } else {
                 r.crash_count += 1;
             }
+            try_again |= r.crash_count < BOUND_SERVICE_MAX_CRASH_RETRY && r.fg.is_foreground;
         }
+        try_again
     }
 
     /// The process of `start_seq` died (`killServicesLocked`): its
@@ -1269,6 +1648,12 @@ impl AppHost {
             } else {
                 r.schedule_restart(auto, now)
             };
+            // Its notification goes, and the wait for `startForeground`
+            // ends: a restarted service calls it again.
+            r.fg.waiting = None;
+            if let Some(shown) = r.fgs_notification() {
+                self.cancel_foreground_notification(&state, token, &shown);
+            }
             for c in state.connections.iter().filter(|c| c.service == token) {
                 connected(&c.conn, &package, &class, None, true);
             }
@@ -1323,6 +1708,9 @@ impl AppHost {
                 let client_count = clients.iter().enumerate().filter(|(i, c)| !clients[..*i].iter().any(|d| d.conn.same(&c.conn))).count();
                 let labelled = clients.iter().rev().find(|c| c.client_label != 0);
                 let mut flags = if r.start_requested { FLAG_STARTED } else { 0 };
+                if r.fg.is_foreground {
+                    flags |= FLAG_FOREGROUND;
+                }
                 if app.is_some_and(|a| a.persistent) {
                     flags |= FLAG_PERSISTENT_PROCESS;
                 }
@@ -1334,6 +1722,7 @@ impl AppHost {
                         pid: app.map_or(0, |a| a.pid),
                         uid,
                         process: super::providers::process_name(&r.info.info),
+                        foreground: r.fg.is_foreground,
                         active_since: r.create_real_time,
                         started: r.start_requested,
                         client_count: client_count as i32,
@@ -1363,6 +1752,709 @@ impl AppHost {
         state.connections = kept;
         for c in &gone {
             self.connection_removed(&mut state, c);
+        }
+    }
+}
+
+/// What `setServiceForegroundInnerLocked` asks of the system to check a
+/// foreground service's type, for its app.
+struct TypeChecker<'a> {
+    host: &'a Arc<AppHost>,
+    uid: i32,
+    package: &'a str,
+}
+
+impl fgs_types::Checker for TypeChecker<'_> {
+    fn change_enabled(&self, change: i64) -> Result<bool, Exception> {
+        self.host.change_enabled(change, self.uid)
+    }
+
+    fn flag(&self, name: &str) -> Result<bool, Exception> {
+        self.host.flag(name)
+    }
+
+    fn regular(&self, permission: &str, allow_while_in_use: bool) -> Result<bool, Exception> {
+        super::permission_checker::fgs_type_permission(self.host, permission, self.uid, self.package, allow_while_in_use)
+    }
+
+    /// The app host's ops answer a foreground mode as the uid's state
+    /// decides it (each of its processes is top).
+    fn app_op(&self, op: i32, _: bool) -> Result<bool, Exception> {
+        Ok(appops::mode(self.host, op, self.uid, Some(self.package))? == MODE_ALLOWED)
+    }
+
+    fn unimplemented(&self, what: &str) -> Exception {
+        self.host.unimplemented_named("activity", &format!("{what} (#1552)"))
+    }
+}
+
+impl AppHost {
+    /// Runs `job` on the activity manager's handler, after the jobs before
+    /// it and outside the services' lock.
+    fn post_job(&self, job: impl FnOnce(&Arc<AppHost>) + Send + 'static) {
+        let mut handler = self.services.handler.lock().unwrap();
+        let sender = handler.get_or_insert_with(|| {
+            let (sender, jobs) = mpsc::channel::<Job>();
+            let me = self.me.clone();
+            std::thread::spawn(move || {
+                for job in jobs {
+                    let Some(host) = me.upgrade() else { return };
+                    job(&host);
+                }
+            });
+            sender
+        });
+        let _ = sender.send(Box::new(job));
+    }
+
+    /// Whether an aconfig flag of the image is on.
+    fn flag(&self, name: &str) -> Result<bool, Exception> {
+        let (state, _) = self.packages()?;
+        Ok(state.system.flags.iter().any(|(n, on)| n == name && *on))
+    }
+
+    /// `tempAllowlistUidLocked` for foreground services: `uid` may start
+    /// them for `duration` (or longer, if it already may), for `reason`.
+    fn temp_allowlist(state: &mut State, uid: i32, duration: Duration, reason: i32) {
+        let until = Instant::now() + duration;
+        let entry = state.fgs_temp_allowlist.entry(uid).or_insert((until, reason));
+        if entry.0 < until {
+            *entry = (until, reason);
+        }
+    }
+
+    /// `tempAllowlistForPendingIntent`, of a PendingIntent sent with
+    /// options that allow its creator `uid` foreground services (an
+    /// alarm's).
+    pub(super) fn temp_allowlist_for_fgs(&self, uid: i32, duration: Duration, reason: i32) {
+        Self::temp_allowlist(&mut self.services.state.lock().unwrap(), uid, duration, reason);
+    }
+
+    /// `isAllowlistedForFgsStartLOSP`: why `uid` may start foreground
+    /// services now, if it is temporarily allowed.
+    fn temp_allowlisted(state: &State, uid: i32) -> Option<i32> {
+        state.fgs_temp_allowlist.get(&uid).filter(|(until, _)| Instant::now() < *until).map(|(_, reason)| *reason)
+    }
+
+    /// `isBgFgsRestrictionEnabled`: whether a service of `service_uid`,
+    /// started or made foreground by `calling_uid`, may not become
+    /// foreground from the background (both target S or later).
+    fn bg_fgs_restricted(&self, service_uid: i32, calling_uid: i32) -> Result<bool, Exception> {
+        if !self.change_enabled(FGS_BG_START_RESTRICTION_CHANGE_ID, service_uid)? {
+            return Ok(false);
+        }
+        Ok(calling_uid == SYSTEM_UID || self.change_enabled(FGS_BG_START_RESTRICTION_CHANGE_ID, calling_uid)?)
+    }
+
+    /// A device or profile owner's exemption (`isDeviceOwner`,
+    /// `isProfileOwner`), which the app host does not answer, when it
+    /// would decide.
+    fn owner_exemption(&self) -> Exception {
+        self.unimplemented_named("activity", "a device or profile owner's foreground service exemption (#1553)")
+    }
+
+    /// `shouldAllowFgsWhileInUsePermissionLocked` for `calling_uid`. A uid
+    /// with a process is top in the app host, and so visible and within
+    /// its activities' grace period. No while-in-use temporary allowlist
+    /// (MediaSession's, telephony's) and no instrumentation runs, and the
+    /// allowlisted packages are the attention and system captions
+    /// services', which the app host does not run.
+    fn fgs_while_in_use_reason(&self, calling_uid: i32) -> Result<i32, Exception> {
+        if self.uid_running(calling_uid) {
+            return Ok(REASON_PROC_STATE_TOP);
+        }
+        // Root, the system, NFC and the shell.
+        if matches!(calling_uid.rem_euclid(PER_USER_RANGE as i32), 0 | 1000 | 1027 | 2000) {
+            return Ok(REASON_SYSTEM_UID);
+        }
+        if self.check_permission(Some("android.permission.START_ACTIVITIES_FROM_BACKGROUND"), calling_uid)? == 0 {
+            return Ok(REASON_BACKGROUND_ACTIVITY_PERMISSION);
+        }
+        // A device owner's comes last (`set_fgs_restriction`).
+        Ok(REASON_DENIED)
+    }
+
+    /// `shouldAllowFgsStartForegroundWithBindingCheckLocked` for
+    /// `calling_uid` of `calling_package`, after its while-in-use reason
+    /// `wiu`, `allowlisted` if it is temporarily allowed. Past the first
+    /// check the uid has no process, so none of its processes is top or
+    /// bound by one (`canBindingClientStartFgsLocked`) or shows an overlay;
+    /// no companion device is associated (no CompanionDeviceManager runs),
+    /// and `mFgsAllowOptOut` is off.
+    fn fgs_start_reason(&self, wiu: i32, calling_package: Option<&str>, calling_uid: i32, allowlisted: Option<i32>) -> Result<i32, Exception> {
+        if wiu != REASON_DENIED {
+            return Ok(wiu);
+        }
+        let held = |p: &str| self.check_permission(Some(p), calling_uid).map(|r| r == 0);
+        if held("android.permission.START_FOREGROUND_SERVICES_FROM_BACKGROUND")? {
+            return Ok(REASON_BACKGROUND_FGS_PERMISSION);
+        }
+        // `hasSystemAlertWindowPermission`; from V an overlay must show.
+        if let Some(package) = calling_package {
+            let saw = match appops::note(self, appops::OP_SYSTEM_ALERT_WINDOW, calling_uid, Some(package))? {
+                MODE_DEFAULT => held("android.permission.SYSTEM_ALERT_WINDOW")?,
+                mode => mode == MODE_ALLOWED,
+            };
+            if saw && !(self.flag(FGS_DISABLE_SAW)? && self.change_enabled(FGS_SAW_RESTRICTIONS, calling_uid)?) {
+                return Ok(REASON_SYSTEM_ALERT_WINDOW_PERMISSION);
+            }
+        }
+        if let Some(reason) = allowlisted {
+            return Ok(reason);
+        }
+        let settings = &self.inputs()?.settings;
+        if settings.get(super::settings::Table::Global, "device_demo_mode").and_then(|v| v.parse::<i32>().ok()).is_some_and(|v| v > 0) {
+            return Ok(REASON_DEVICE_DEMO_MODE);
+        }
+        // A profile owner's comes last (`set_fgs_restriction`).
+        let Some(package) = calling_package else { return Ok(REASON_DENIED) };
+        let allowed = |op: i32| appops::mode(self, op, calling_uid, Some(package)).map(|m| m == MODE_ALLOWED);
+        if allowed(appops::OP_SYSTEM_EXEMPT_FROM_POWER_RESTRICTIONS)? {
+            return Ok(REASON_SYSTEM_EXEMPT_APP_OP);
+        }
+        if allowed(appops::OP_ACTIVATE_VPN)? {
+            return Ok(REASON_OP_ACTIVATE_VPN);
+        }
+        if allowed(appops::OP_ACTIVATE_PLATFORM_VPN)? {
+            return Ok(REASON_OP_ACTIVATE_PLATFORM_VPN);
+        }
+        let input_method = settings.get(super::settings::Table::Secure, "default_input_method");
+        if input_method.as_deref().and_then(|m| m.split_once('/')).is_some_and(|(p, _)| p == package) {
+            return Ok(REASON_CURRENT_INPUT_METHOD);
+        }
+        Ok(REASON_DENIED)
+    }
+
+    /// `setFgsRestrictionLocked` of a start (not a binding) by
+    /// `calling_uid` of `calling_package`: the reasons the service has not
+    /// yet computed, kept as its start's, or its bindings' for a bound
+    /// service made foreground (`for_bound`). The bindings' own check
+    /// (`shouldAllowFgsWhileInUsePermissionByBindingsLocked`) looks at the
+    /// caller's processes, which are top here, so it allows nothing the
+    /// start did not. Where nothing else allowed and the device has an
+    /// owner, whose exemption is not answered, that is noted, for when it
+    /// decides.
+    fn set_fgs_restriction(
+        &self,
+        state: &mut State,
+        token: Binder,
+        calling_package: Option<&str>,
+        calling_uid: i32,
+        for_bound: bool,
+    ) -> Result<(), Exception> {
+        let allowlisted = Self::temp_allowlisted(state, calling_uid);
+        let fg = &state.record(token).unwrap().fg;
+        let (mut wiu, mut start) = (fg.allow_wiu.0, fg.allow_start.0);
+        if wiu == REASON_DENIED || start == REASON_DENIED {
+            let w = self.fgs_while_in_use_reason(calling_uid)?;
+            let s = self.fgs_start_reason(w, calling_package, calling_uid, allowlisted)?;
+            (wiu, start) = (reason_or(wiu, w), reason_or(start, s));
+        }
+        let owner_unknown = (wiu == REASON_DENIED || start == REASON_DENIED) && self.device_policies()?.owned();
+        let fg = &mut state.record(token).unwrap().fg;
+        fg.owner_unknown = owner_unknown;
+        if for_bound {
+            fg.allow_wiu.1 = reason_or(fg.allow_wiu.1, wiu);
+            fg.allow_start.1 = reason_or(fg.allow_start.1, start);
+        } else {
+            (fg.allow_wiu.0, fg.allow_start.0) = (wiu, start);
+        }
+        fg.allow_start.1 = reason_or(fg.allow_start.1, fg.allow_wiu.1);
+        Ok(())
+    }
+
+    /// `setServiceForegroundLocked`: the service of `name` and `token` (in
+    /// the caller's user) made foreground with notification `id`
+    /// (`startForeground`), or no longer (`stopForeground`, `id` 0, with
+    /// `flags`).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn set_service_foreground(
+        self: &Arc<Self>,
+        calling_uid: i32,
+        name: Option<Name>,
+        token: Option<Binder>,
+        id: i32,
+        notification: Option<Incoming>,
+        flags: i32,
+        service_type: i32,
+    ) -> Result<(), Exception> {
+        let mut state = self.services.state.lock().unwrap();
+        let user = calling_uid / PER_USER_RANGE as i32;
+        let found = token.and_then(|t| state.record(t)).filter(|r| {
+            name.as_ref().is_some_and(|n| n.package == r.package && n.class == r.class)
+                && r.info.info.application_info.uid / PER_USER_RANGE as i32 == user
+        });
+        let Some(token) = found.map(|r| r.token) else {
+            return Ok(());
+        };
+        if id != 0 {
+            let notification = notification.ok_or_else(|| Exception::illegal_argument("null notification"))?;
+            self.start_foreground(&mut state, token, id, notification, service_type, calling_uid)
+        } else {
+            self.stop_foreground(&mut state, token, flags);
+            Ok(())
+        }
+    }
+
+    /// `getForegroundServiceTypeLocked`.
+    pub(super) fn foreground_service_type(&self, calling_uid: i32, name: Option<Name>, token: Option<Binder>) -> i32 {
+        let mut state = self.services.state.lock().unwrap();
+        let user = calling_uid / PER_USER_RANGE as i32;
+        token
+            .and_then(|t| state.record(t))
+            .filter(|r| {
+                name.as_ref().is_some_and(|n| n.package == r.package && n.class == r.class)
+                    && r.info.info.application_info.uid / PER_USER_RANGE as i32 == user
+            })
+            .map_or(fgs_types::TYPE_NONE, |r| r.fg.service_type)
+    }
+
+    /// `setServiceForegroundInnerLocked` with an id: its checks, then the
+    /// service foreground and its notification posted.
+    fn start_foreground(
+        self: &Arc<Self>,
+        state: &mut State,
+        token: Binder,
+        id: i32,
+        notification: Incoming,
+        requested_type: i32,
+        calling_uid: i32,
+    ) -> Result<(), Exception> {
+        let r = state.record(token).unwrap();
+        let app_info = &r.info.info.application_info;
+        let (uid, target_sdk, package, class) = (app_info.uid, app_info.target_sdk_version, r.package.clone(), r.class.clone());
+        let instant = app_info.private_flags & PRIVATE_FLAG_INSTANT != 0;
+        let Some(seq) = r.app else {
+            return Err(Exception::new(EX_ILLEGAL_STATE, format!("startForeground of {package}/{class}, which does not run")));
+        };
+        let (pid, process) = self.apps.lock().unwrap().get(&seq).map(|a| (a.pid, a.process.clone())).unwrap_or_default();
+        let short = short_name(&package, &class);
+        if instant {
+            return Err(self.unimplemented_named("activity", "an instant app's foreground service (#1552)"));
+        }
+        if target_sdk >= P && self.check_permission(Some("android.permission.FOREGROUND_SERVICE"), uid)? != 0 {
+            return Err(Exception::security(format!(
+                "Permission Denial: startForeground from pid={pid}, uid={uid} requires android.permission.FOREGROUND_SERVICE"
+            )));
+        }
+        if !notification.has_small_icon() {
+            // `postNotification` makes one naming the app.
+            return Err(self.unimplemented_named("activity", "a foreground service's notification without an icon (#1552)"));
+        }
+        let manifest_type = r.info.foreground_service_type;
+        let skip_check = super::system_boolean(self.property("debug.skip_fgs_manifest_type_check").as_deref(), false);
+        let mut service_type = match effective_type(requested_type, manifest_type) {
+            Err(_) if skip_check => requested_type,
+            result => result?,
+        };
+        if service_type == fgs_types::TYPE_MANIFEST {
+            service_type = manifest_type;
+        }
+        // It called `startForeground` as required.
+        if r.fg.required {
+            r.fg.required = false;
+            r.fg.waiting = None;
+        }
+        let mut ignore = false;
+        match appops::mode(self, appops::OP_START_FOREGROUND, uid, Some(&package))? {
+            MODE_ALLOWED | MODE_DEFAULT => {}
+            appops::MODE_IGNORED => {
+                eprintln!("app host: Service.startForeground() not allowed due to app op: service {short}");
+                ignore = true;
+            }
+            _ => return Err(Exception::security("Foreground not allowed as per app op")),
+        }
+        // An app restricted in the background may still make a service
+        // foreground while top (`isForegroundServiceAllowedInBackgroundRestricted`),
+        // which each process here is.
+        let restricted = self.bg_fgs_restricted(uid, calling_uid)?;
+        if !ignore {
+            if service_type == fgs_types::TYPE_SHORT_SERVICE {
+                return Err(self.unimplemented_named("activity", "a short foreground service (#1551)"));
+            }
+            let r = state.record(token).unwrap();
+            let elapsed = super::clock_ms(libc::CLOCK_MONOTONIC_RAW) - r.create_real_time;
+            let (start_count, fg_required, start_requested) = (r.fg.start_count, r.fg.required, r.start_requested);
+            let time_limited = service_type & (fgs_types::TYPE_DATA_SYNC | fgs_types::TYPE_MEDIA_PROCESSING) != 0
+                && self.change_enabled(FGS_INTRODUCE_TIME_LIMITS, uid)?
+                && self.flag(INTRODUCE_NEW_SERVICE_ONTIMEOUT_CALLBACK)?;
+            // Whether its app may still start a foreground service is asked
+            // again: for a time-limited type (whose limits are not run,
+            // #1551), a first start long after its creation, and any later.
+            let mut recalculated = true;
+            if time_limited {
+                r.fg.allow_start.0 = REASON_DENIED;
+                r.fg.allow_start.1 = REASON_DENIED;
+            } else if start_count == 0 {
+                recalculated = !fg_required && elapsed > FGS_START_FOREGROUND_TIMEOUT_MS;
+                if recalculated {
+                    r.fg.reset_restriction();
+                }
+            }
+            if recalculated {
+                self.set_fgs_restriction(state, token, Some(&package), uid, false)?;
+            } else if !start_requested {
+                self.set_fgs_restriction(state, token, Some(&package), uid, true)?;
+            }
+            let r = state.record(token).unwrap();
+            if !r.fg.allowed_start() && restricted {
+                if r.fg.owner_unknown {
+                    return Err(self.owner_exemption());
+                }
+                let message = format!("Service.startForeground() not allowed due to mAllowStartForeground false: service {short}");
+                eprintln!("app host: {message}");
+                ignore = true;
+                if self.change_enabled(FGS_START_EXCEPTION_CHANGE_ID, uid)? {
+                    return Err(parcelable_exception("android.app.ForegroundServiceStartNotAllowedException", message));
+                }
+            }
+        }
+        if !ignore {
+            let fg = &state.record(token).unwrap().fg;
+            let wiu = fg.allowed_wiu();
+            if !wiu && fg.owner_unknown {
+                return Err(self.owner_exemption());
+            }
+            self.validate_types(service_type, requested_type, wiu, uid, pid, &process, &package, target_sdk)?;
+        }
+        if ignore {
+            return Ok(());
+        }
+        let r = state.record(token).unwrap();
+        if r.fg.id != id
+            && let Some(shown) = r.fgs_notification()
+        {
+            self.cancel_foreground_notification(state, token, &shown);
+        }
+        let r = state.record(token).unwrap();
+        r.fg.id = id;
+        r.fg.notification = Some(notification.foreground_service());
+        if r.fg.is_foreground && r.fg.service_type != service_type {
+            eprintln!("app host: FGS type change for {short} from {} to {service_type}", r.fg.service_type);
+        }
+        r.fg.service_type = service_type;
+        if !r.fg.is_foreground {
+            r.fg.is_foreground = true;
+            r.fg.start_count += 1;
+        }
+        self.post_foreground_notification(r);
+        Ok(())
+    }
+
+    /// `validateForegroundServiceType` of each of `service_type`'s types
+    /// (from the highest), an unknown one taken as special use when that
+    /// is among them, for the app of `uid`, allowed while-in-use
+    /// permissions or not (`wiu`).
+    #[allow(clippy::too_many_arguments)]
+    fn validate_types(
+        self: &Arc<Self>,
+        service_type: i32,
+        requested_type: i32,
+        wiu: bool,
+        uid: i32,
+        pid: i32,
+        process: &str,
+        package: &str,
+        target_sdk: i32,
+    ) -> Result<(), Exception> {
+        let checker = TypeChecker { host: self, uid, package };
+        let default_to = if service_type & fgs_types::TYPE_SPECIAL_USE != 0 { fgs_types::TYPE_SPECIAL_USE } else { fgs_types::TYPE_NONE };
+        let types: Vec<i32> = if service_type == fgs_types::TYPE_NONE {
+            vec![fgs_types::TYPE_NONE]
+        } else {
+            (0..32).rev().map(|bit| 1i32 << bit).filter(|t| service_type & t != 0).collect()
+        };
+        let app = process_record(pid, process, uid);
+        for ty in types {
+            let policy = fgs_types::policy_of(ty, default_to)?;
+            let label = fgs_types::label(ty);
+            let foreground_only = if policy.foreground_only {
+                " and the app must be in the eligible state/exemptions to access the foreground only permission"
+            } else {
+                ""
+            };
+            match fgs_types::check(policy, &checker, wiu)? {
+                Check::Ok => {}
+                Check::Deprecated => eprintln!("app host: Starting FGS with type {label} callerApp={app} targetSDK={target_sdk}"),
+                Check::PermissionDeniedPermissive => eprintln!(
+                    "app host: Starting FGS with type {label} callerApp={app} targetSDK={target_sdk} requiredPermissions={}{foreground_only}",
+                    policy.permission_string()
+                ),
+                Check::Disabled if requested_type == fgs_types::TYPE_MANIFEST && ty == fgs_types::TYPE_NONE => {
+                    return Err(parcelable_exception(
+                        "android.app.MissingForegroundServiceTypeException",
+                        format!("Starting FGS without a type  callerApp={app} targetSDK={target_sdk}"),
+                    ));
+                }
+                Check::Disabled => {
+                    return Err(parcelable_exception(
+                        "android.app.InvalidForegroundServiceTypeException",
+                        format!("Starting FGS with type {label} callerApp={app} targetSDK={target_sdk} has been prohibited"),
+                    ));
+                }
+                Check::PermissionDeniedEnforced => {
+                    return Err(Exception::security(format!(
+                        "Starting FGS with type {label} callerApp={app} targetSDK={target_sdk} requires permissions: {}{foreground_only}",
+                        policy.permission_string()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `setServiceForegroundInnerLocked` without an id: a foreground
+    /// service no longer is, its notification cancelled, unflagged or
+    /// kept as `flags` say.
+    fn stop_foreground(&self, state: &mut State, token: Binder, flags: i32) {
+        let r = state.record(token).unwrap();
+        if !r.fg.is_foreground {
+            return;
+        }
+        let target_sdk = r.info.info.application_info.target_sdk_version;
+        // Its notification as it was, which a deferred one is posted as.
+        let shown = r.fgs_notification();
+        let post = r.app.zip(r.fg.notification.clone());
+        let stopped = r.fg.stop(flags, target_sdk);
+        let Some(shown) = shown else { return };
+        match stopped {
+            Stopped::Cancel => self.cancel_foreground_notification(state, token, &shown),
+            Stopped::Unflag { post: deferred } => {
+                if let (true, Some((seq, notification))) = (deferred, post) {
+                    self.post_notification(token, &shown, seq, notification);
+                }
+                // `dropFgsNotificationStateLocked`: unless another
+                // foreground service of the app shows it.
+                if !Self::shared(state, token, &shown) {
+                    let FgsNotification { package, uid, id } = shown;
+                    self.post_job(move |host| {
+                        let Some(nms) = host.notification_service.get() else { return };
+                        if let Err(e) = nms.remove_foreground_service_flag(&package, id, uid / PER_USER_RANGE as i32) {
+                            eprintln!("app host: unflagging the notification of a service of {package}: {}", e.message);
+                        }
+                    });
+                }
+            }
+            Stopped::Keep => {}
+        }
+    }
+
+    /// Whether a foreground service of the app other than `token` shows
+    /// the notification `n`.
+    fn shared(state: &State, token: Binder, n: &FgsNotification) -> bool {
+        state
+            .records
+            .iter()
+            .any(|o| o.token != token && o.fg.is_foreground && o.fg.id == n.id && o.package == n.package)
+    }
+
+    /// `cancelForegroundNotificationLocked` of the notification `n` of the
+    /// service `token`: cancelled as the system (`cancelNotification`),
+    /// unless another foreground service of the app shows it.
+    fn cancel_foreground_notification(&self, state: &State, token: Binder, n: &FgsNotification) {
+        if Self::shared(state, token, n) {
+            return;
+        }
+        let FgsNotification { package, uid, id } = n.clone();
+        self.post_job(move |host| {
+            let Some(nms) = host.notification_service.get() else { return };
+            if let Err(e) = nms.cancel_foreground_service_notification(&package, id, uid / PER_USER_RANGE as i32) {
+                eprintln!("app host: canceling the notification of a service of {package}: {}", e.message);
+            }
+        });
+    }
+
+    /// `ServiceRecord.postNotification` of a foreground service `r`.
+    fn post_foreground_notification(&self, r: &Record) {
+        if let (true, Some(shown), Some(seq), Some(notification)) =
+            (r.fg.is_foreground, r.fgs_notification(), r.app, r.fg.notification.clone())
+        {
+            self.post_notification(r.token, &shown, seq, notification);
+        }
+    }
+
+    /// `ServiceRecord.postNotification`'s post, on the handler, of the
+    /// service `token` in the process of `seq`: as its app's, which must
+    /// have its channel; one that cannot be posted stops the service and
+    /// crashes its app (`killMisbehavingService`).
+    fn post_notification(&self, token: Binder, n: &FgsNotification, seq: i64, notification: Incoming) {
+        let pid = self.apps.lock().unwrap().get(&seq).map_or(0, |a| a.pid);
+        let FgsNotification { package, uid, id } = n.clone();
+        self.post_job(move |host| {
+            let Some(nms) = host.notification_service.get() else { return };
+            if !notification.has_small_icon() {
+                // The original posts one naming the app.
+                eprintln!("app host: {}", host.unimplemented_named("activity", "a foreground service's notification without an icon (#1552)").message);
+                return;
+            }
+            let posted = (|| {
+                let target_sdk = host.packages()?.0.packages.get(&package).map_or(O_MR1, |p| p.target_sdk_version);
+                if !nms.has_channel(&package, uid, notification.channel_id())? && target_sdk >= O_MR1 {
+                    return Err(Exception::new(EX_ILLEGAL_STATE, "invalid channel for service notification"));
+                }
+                nms.enqueue_internal(Enqueue {
+                    package: package.clone(),
+                    op_package: package.clone(),
+                    calling_uid: uid,
+                    pid,
+                    tag: None,
+                    id,
+                    notification,
+                    incoming_user: uid / PER_USER_RANGE as i32,
+                })
+            })();
+            if let Err(e) = posted {
+                eprintln!("app host: error showing notification for service of {package}: {}", e.message);
+                host.kill_misbehaving_service(token, seq);
+            }
+        });
+    }
+
+    /// `killMisbehavingService`: the service `token` stopped, and the app
+    /// of `seq` crashed for its notification.
+    fn kill_misbehaving_service(&self, token: Binder, seq: i64) {
+        {
+            let mut state = self.services.state.lock().unwrap();
+            if let Some(r) = state.record(token) {
+                r.start_requested = false;
+                self.bring_down_if_needed(&mut state, token);
+            }
+        }
+        self.crash_application(seq, "Bad notification for startForeground", CANNOT_POST_FOREGROUND_SERVICE_NOTIFICATION, Vec::new());
+    }
+
+    /// `AppErrors.scheduleAppCrashLocked` of the process of `seq`: it is
+    /// asked to crash (`scheduleCrash`) with `message`, its
+    /// `RemoteServiceException`'s type and `extras`.
+    fn crash_application(&self, seq: i64, message: &str, type_id: i32, extras: Vec<(String, Value)>) {
+        let mut p = Parcel::new();
+        thread::ScheduleCrash {
+            msg: Some(message.to_string()),
+            type_id,
+            extras: Some(super::bind::Bundle(extras)),
+        }
+        .write(&mut p);
+        if let Err(e) = self.call_thread(seq, thread::SCHEDULE_CRASH, &p) {
+            eprintln!("app host: crashing the process of start {seq}: {e}");
+        }
+    }
+
+    /// `serviceForegroundTimeout`: a service started with
+    /// `startForegroundService` that did not call `startForeground` (its
+    /// wait `generation`) is stopped, which crashes its app.
+    fn service_foreground_timeout(&self, token: Binder, generation: u64) {
+        let mut state = self.services.state.lock().unwrap();
+        let Some(r) = state.record(token).filter(|r| r.fg.required && r.fg.waiting == Some(generation)) else {
+            return;
+        };
+        eprintln!("app host: service foreground-required timeout for {}", short_name(&r.package, &r.class));
+        r.fg.waiting = None;
+        r.start_requested = false;
+        self.bring_down_if_needed(&mut state, token);
+        // The ANR that follows is not raised (#1551).
+    }
+
+    /// `applyForegroundServiceNotificationLocked` of `notification`, posted
+    /// with `tag` and `id` by `package` in `user`: a foreground service's
+    /// keeps it, flagged, as its notification, shown now or deferred.
+    pub(super) fn apply_foreground_service_notification(
+        &self,
+        notification: &Incoming,
+        tag: Option<&str>,
+        id: i32,
+        package: &str,
+        user: i32,
+    ) -> FgsPolicy {
+        if tag.is_some() {
+            return FgsPolicy::NotForegroundService;
+        }
+        let mut state = self.services.state.lock().unwrap();
+        let found = state.records.iter().find(|r| {
+            r.fg.is_foreground
+                && r.fg.id == id
+                && r.package == package
+                && r.info.info.application_info.uid / PER_USER_RANGE as i32 == user
+        });
+        let Some((token, uid)) = found.map(|r| (r.token, r.info.info.application_info.uid)) else {
+            return FgsPolicy::NotForegroundService;
+        };
+        let now = Instant::now();
+        let eligible = state.deferral_eligible.get(&uid).copied();
+        let r = state.record(token).unwrap();
+        r.fg.notification = Some(notification.foreground_service());
+        if r.fg.show_now(now, eligible, notification.force_deferred(), notification.show_foreground_immediately()) {
+            r.fg.deferred = false;
+            return FgsPolicy::ShowImmediately;
+        }
+        self.start_fgs_deferral_timer(&mut state, token, now);
+        FgsPolicy::UpdateOnly
+    }
+
+    /// `startFgsDeferralTimerLocked`: the notification of `token` shown
+    /// after the deferral, or with another of its app's deferred before;
+    /// the app's are then not deferred for a while.
+    fn start_fgs_deferral_timer(&self, state: &mut State, token: Binder, now: Instant) {
+        let r = state.records.iter().find(|r| r.token == token).unwrap();
+        if r.fg.pending {
+            return;
+        }
+        let uid = r.info.info.application_info.uid;
+        let when = state
+            .records
+            .iter()
+            .filter(|o| o.fg.pending && o.info.info.application_info.uid == uid)
+            .filter_map(|o| o.fg.display_time)
+            .fold(now + FGS_NOTIFICATION_DEFERRAL_INTERVAL, Instant::min);
+        state.deferral_eligible.insert(uid, when + FGS_NOTIFICATION_DEFERRAL_EXCLUSION_TIME);
+        let r = state.record(token).unwrap();
+        r.fg.display_time = Some(when);
+        r.fg.deferred = true;
+        r.fg.shown = false;
+        r.fg.pending = true;
+        let me = self.me.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(when.saturating_duration_since(Instant::now()));
+            if let Some(host) = me.upgrade() {
+                host.post_deferred_fgs_notifications();
+            }
+        });
+    }
+
+    /// `mPostDeferredFGSNotifications`: the deferred notifications whose
+    /// time came, of services still foreground, posted.
+    fn post_deferred_fgs_notifications(&self) {
+        let now = Instant::now();
+        let mut state = self.services.state.lock().unwrap();
+        let due: Vec<Binder> = state
+            .records
+            .iter()
+            .filter(|r| r.fg.pending && r.fg.display_time.is_some_and(|t| t <= now))
+            .map(|r| r.token)
+            .collect();
+        for token in due {
+            let r = state.record(token).unwrap();
+            r.fg.pending = false;
+            if r.fg.is_foreground && r.app.is_some() {
+                self.post_foreground_notification(r);
+                r.fg.shown = true;
+            }
+        }
+    }
+
+    /// `onForegroundServiceNotificationUpdateLocked`: a notification of
+    /// `package` with `id` in `user` was posted (`shown`) or kept back; a
+    /// deferred one shown is no longer pending.
+    pub(super) fn foreground_service_notification_updated(&self, shown: bool, id: i32, package: &str, user: i32) {
+        if !shown {
+            return;
+        }
+        let mut state = self.services.state.lock().unwrap();
+        for r in state.records.iter_mut().filter(|r| {
+            r.fg.pending && r.fg.id == id && r.package == package && r.info.info.application_info.uid / PER_USER_RANGE as i32 == user
+        }) {
+            r.fg.shown = true;
+            r.fg.deferred = false;
+            r.fg.pending = false;
         }
     }
 }
@@ -1400,6 +2492,7 @@ mod tests {
             pid: 42,
             uid: 10100,
             process: "p:remote".into(),
+            foreground: true,
             active_since: 5,
             started: true,
             client_count: 2,
@@ -1416,7 +2509,7 @@ mod tests {
         assert_eq!((r.read_string16().unwrap(), r.read_string16().unwrap()), (Some("p".into()), Some("p.S".into())));
         assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap()), (42, 10100));
         assert_eq!(r.read_string16().unwrap().as_deref(), Some("p:remote"));
-        assert_eq!(r.read_i32().unwrap(), 0); // not foreground
+        assert_eq!(r.read_i32().unwrap(), 1); // foreground
         assert_eq!(r.read_i64().unwrap(), 5);
         assert_eq!([r.read_i32().unwrap(), r.read_i32().unwrap(), r.read_i32().unwrap()], [1, 2, 1]);
         assert_eq!([r.read_i64().unwrap(), r.read_i64().unwrap()], [6, 7]);
@@ -1451,6 +2544,99 @@ mod tests {
         assert_eq!(names(pick(&services, 10, 10100, false, true)), [n("p.B", 0), n("p.C", 0), n("p.R", 0), n("p.R", 99)]);
         assert_eq!(names(pick(&services, 2, 10100, true, false)), [n("p.B", 0), n("p.C", 0)]);
         assert!(pick(&services, -1, 10100, true, true).is_empty());
+    }
+
+    /// `setServiceForegroundInnerLocked`'s type: the manifest's for
+    /// `FOREGROUND_SERVICE_TYPE_MANIFEST`, a subset of it, short-service
+    /// dropped when combined.
+    #[test]
+    fn a_foreground_type_must_be_the_manifests() {
+        use fgs_types::*;
+        let manifest = TYPE_SPECIAL_USE | TYPE_SHORT_SERVICE | TYPE_DATA_SYNC;
+        assert_eq!(effective_type(TYPE_MANIFEST, TYPE_SPECIAL_USE).unwrap(), TYPE_SPECIAL_USE);
+        assert_eq!(effective_type(TYPE_DATA_SYNC, manifest).unwrap(), TYPE_DATA_SYNC);
+        assert_eq!(effective_type(TYPE_NONE, TYPE_NONE).unwrap(), TYPE_NONE);
+        assert_eq!(effective_type(TYPE_MANIFEST, manifest).unwrap(), TYPE_SPECIAL_USE | TYPE_DATA_SYNC);
+        assert_eq!(effective_type(TYPE_SHORT_SERVICE, manifest).unwrap(), TYPE_SHORT_SERVICE);
+        let e = effective_type(TYPE_MEDIA_PLAYBACK, TYPE_SPECIAL_USE).unwrap_err();
+        assert_eq!(
+            e.message,
+            "foregroundServiceType 0x00000002 is not a subset of foregroundServiceType attribute 0x40000000 in service element of manifest file"
+        );
+    }
+
+    /// `stopForeground`: removed, the notification is cancelled and
+    /// forgotten; detached, unflagged and forgotten; else unflagged (and
+    /// posted if still deferred), but kept as it is before L; the service
+    /// no longer foreground, of no type, its restriction reset.
+    #[test]
+    fn stopping_foreground_cancels_detaches_or_keeps_the_notification() {
+        let foreground = |shown: bool| Foreground {
+            is_foreground: true,
+            id: 7,
+            service_type: fgs_types::TYPE_SPECIAL_USE,
+            allow_start: (REASON_PROC_STATE_TOP, REASON_DENIED),
+            allow_wiu: (REASON_PROC_STATE_TOP, REASON_DENIED),
+            shown,
+            ..Default::default()
+        };
+        let mut fg = foreground(true);
+        assert_eq!(fg.stop(STOP_FOREGROUND_REMOVE, 34), Stopped::Cancel);
+        assert_eq!((fg.is_foreground, fg.id, fg.service_type), (false, 0, fgs_types::TYPE_NONE));
+        assert!(!fg.allowed_start() && !fg.allowed_wiu());
+        let mut fg = foreground(false);
+        assert_eq!(fg.stop(STOP_FOREGROUND_DETACH, 34), Stopped::Unflag { post: true });
+        assert_eq!(fg.id, 0);
+        let mut fg = foreground(true);
+        assert_eq!(fg.stop(0, 34), Stopped::Unflag { post: false });
+        assert_eq!(fg.id, 7);
+        let mut fg = foreground(true);
+        assert_eq!(fg.stop(STOP_FOREGROUND_DETACH, 19), Stopped::Keep);
+        assert_eq!((fg.id, fg.is_foreground), (7, false));
+    }
+
+    /// `shouldShowFgsNotificationLocked`: shown at once if asked, for a
+    /// media, call or navigation notification or one with actions, for an
+    /// immediate type, when already shown, at the deferral's end, or while
+    /// the app's are not deferred; else deferred, as when the app forces
+    /// it.
+    #[test]
+    fn foreground_notifications_are_deferred_as_the_original_defers_them() {
+        let now = Instant::now();
+        let fg = Foreground { is_foreground: true, service_type: fgs_types::TYPE_SPECIAL_USE, ..Default::default() };
+        assert!(!fg.show_now(now, None, false, false));
+        assert!(fg.show_now(now, None, false, true));
+        assert!(!fg.show_now(now, None, true, true));
+        assert!(fg.show_now(now, Some(now + Duration::from_secs(1)), true, false));
+        let media = Foreground { service_type: fgs_types::TYPE_MEDIA_PLAYBACK, ..Default::default() };
+        assert!(media.show_now(now, None, false, false));
+        let shown = Foreground { shown: true, ..Default::default() };
+        assert!(shown.show_now(now, None, true, false));
+        // Within its own deferral, the app's exclusion does not show it.
+        let deferred = Foreground { deferred: true, display_time: Some(now + Duration::from_secs(5)), ..Default::default() };
+        assert!(!deferred.show_now(now, Some(now + Duration::from_secs(60)), false, false));
+        assert!(deferred.show_now(now + Duration::from_secs(5), None, false, false));
+    }
+
+    /// The reasons of a start and of its bindings: a start's first.
+    #[test]
+    fn a_service_may_start_foreground_for_its_start_or_its_bindings() {
+        let mut fg = Foreground::default();
+        assert!(!fg.allowed_start());
+        fg.allow_start.1 = REASON_SYSTEM_UID;
+        assert!(fg.allowed_start());
+        assert_eq!(reason_or(REASON_PROC_STATE_TOP, REASON_SYSTEM_UID), REASON_PROC_STATE_TOP);
+        assert_eq!(reason_or(REASON_DENIED, REASON_SYSTEM_UID), REASON_SYSTEM_UID);
+    }
+
+    #[test]
+    fn names_are_written_as_the_original_writes_them() {
+        assert_eq!(short_name("com.android.deskclock", "com.android.deskclock.timer.TimerService"), "com.android.deskclock/.timer.TimerService");
+        assert_eq!(short_name("p", "q.S"), "p/q.S");
+        assert_eq!(process_record(42, "p", 10_123), "ProcessRecord{42:p/u0a123}");
+        assert_eq!(process_record(42, "system", 1000), "ProcessRecord{42:system/1000}");
+        let e = parcelable_exception("android.app.ForegroundServiceStartNotAllowedException", "m".into());
+        assert_eq!((e.code, e.message.as_str()), (aim_binder_host::parcel::EX_PARCELABLE, "m"));
     }
 
     #[test]
