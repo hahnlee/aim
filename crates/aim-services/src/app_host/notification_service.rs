@@ -44,6 +44,7 @@ use super::notification_channels::{
     IMPORTANCE_NONE, IMPORTANCE_UNSPECIFIED, Preferences, SYSTEM_RESERVED_IDS,
 };
 use super::services::FgsPolicy;
+use super::zen_config;
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::clip::Raw;
 use crate::notifications::parcels::{
@@ -525,6 +526,49 @@ impl NotificationManager {
             });
         }
         Ok(guard)
+    }
+
+    /// `getAutomaticZenRules` (`enforcePolicyAccess`, then the rules
+    /// `canManageAutomaticZenRule` lets `uid` see). The app host runs user
+    /// 0 alone, the zen user of every caller (`getCallingZenUser`).
+    fn automatic_zen_rules(&self, uid: i32) -> Result<Vec<zen_config::AzrWithId>, Exception> {
+        let manage = self.host.check_permission(Some("android.permission.MANAGE_NOTIFICATIONS"), uid)? == 0;
+        let packages = self.packages_for_uid(uid)?;
+        let guard = self.state()?;
+        let policy = &guard.as_ref().unwrap().policy;
+        let user = uid / PER_USER_RANGE as i32;
+        if !manage && !packages.iter().any(|p| zen_config::policy_access_approved(policy, p, user)) {
+            eprintln!("app host: Notification policy access denied calling getAutomaticZenRules");
+            return Err(Exception::security("Notification policy access denied"));
+        }
+        let rules = zen_config::read(policy)?
+            .rules()
+            .into_iter()
+            .filter(|r| uid == 0 || uid == 1000 || manage || r.pkg.as_ref().is_some_and(|p| packages.contains(p)))
+            .collect();
+        zen_config::automatic_zen_rules(rules)
+    }
+
+    /// `getZenModeConfig`: the system or the phone, else STATUS_BAR_SERVICE.
+    fn zen_mode_config(&self, uid: i32) -> Result<zen_config::ZenModeConfig, Exception> {
+        let system_or_phone = uid == 0 || matches!(uid % PER_USER_RANGE as i32, 1000 | 1001);
+        if !system_or_phone && self.host.check_permission(Some("android.permission.STATUS_BAR_SERVICE"), uid)? != 0 {
+            return Err(Exception::security(format!(
+                "INotificationManager.getZenModeConfig: uid {uid} does not have android.permission.STATUS_BAR_SERVICE."
+            )));
+        }
+        let guard = self.state()?;
+        zen_config::read(&guard.as_ref().unwrap().policy)
+    }
+
+    /// `getPackagesForUid`.
+    fn packages_for_uid(&self, uid: i32) -> Result<Vec<String>, Exception> {
+        let (state, resolution) = self.host.packages()?;
+        let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: 1000 };
+        let packages = query
+            .packages_for_uid(uid)
+            .map_err(|e| Exception::new(EX_UNSUPPORTED_OPERATION, format!("notification: {}", e.0)))?;
+        Ok(packages.into_iter().flatten().flatten().collect())
     }
 
     /// `R.string.default_notification_channel_label`.
@@ -2223,6 +2267,26 @@ impl Service for NotificationManager {
                 let a =
                     nm::GetAppActiveNotifications::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply(self.app_active(call, &a.calling_pkg.unwrap_or_default(), a.user_id))
+            }
+            // `enforceSystemOrSystemUI`, then a copy of the config.
+            nm::GET_ZEN_MODE_CONFIG => {
+                nm::GetZenModeConfig::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.zen_mode_config(call.sender_euid as i32).map(|config| {
+                    let mut p = Parcel::new();
+                    nm::write_get_zen_mode_config_reply(&mut p, Some(&zen_config::ConfigParcel(config, self.host.process.clone())));
+                    p
+                }))
+            }
+            nm::GET_AUTOMATIC_ZEN_RULES => {
+                nm::GetAutomaticZenRules::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.automatic_zen_rules(call.sender_euid as i32).map(|rules| {
+                    let mut p = Parcel::new();
+                    nm::write_get_automatic_zen_rules_reply(
+                        &mut p,
+                        Some(&Slice::new(self.host.process.clone(), zen_config::AZR_WITH_ID_CLASS, rules)),
+                    );
+                    p
+                }))
             }
             nm::GET_ZEN_MODE => {
                 nm::GetZenMode::read(&mut call.data).map_err(|_| BAD_VALUE)?;
