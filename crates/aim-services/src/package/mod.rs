@@ -37,6 +37,7 @@ pub mod launch;
 pub mod app_metadata;
 pub mod lifecycle;
 pub mod intent;
+pub mod intent_uri;
 pub mod intent_filter;
 pub mod intent_resolver;
 pub mod keysets;
