@@ -257,7 +257,7 @@ impl AppHost {
 
     /// `uid`'s editor on `connection` takes the text input, in its task.
     fn start_editor(&self, uid: u32, connection: Strong, input_type: i32, ime_options: i32) {
-        let task = self.tasks.of_uid(uid).map_or(-1, |(id, _)| id);
+        let task = self.tasks.of_uid(uid).filter(|_| self.tasks.window_mode()).unwrap_or(-1);
         *self.text_input.editor.lock().unwrap() = Some(Editor { uid, connection, task });
         self.tell_display(&Message::Editor { task, active: true, input_type, ime_options });
     }

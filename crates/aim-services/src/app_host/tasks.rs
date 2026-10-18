@@ -1,12 +1,15 @@
-//! Window mode for the app host (docs/windows.md): each activity's task
-//! is a Mac window. The app host is the display server's task bridge,
-//! which `aim-windows` is for the original's tasks: on the connection
-//! `FN_WINDOWS` makes (`aim_hostcall::display::window`) it reports its
-//! tasks and takes the server's requests. A task opens at freeform's
-//! default bounds (`freeform`); its layer is a container at its bounds,
-//! the parent of its windows' layers, as a task's surface is the parent
-//! of its windows' in WindowManager.
+//! The app host's tasks on the display, and window mode
+//! (docs/windows.md): each task is a Mac window. A task's layer is a
+//! container at its bounds, the parent of its windows' layers, as a task's
+//! surface is the parent of its windows' in WindowManager, stacked in the
+//! tasks' order (`activity_stack` decides it). On a fullscreen display a
+//! task has the whole display; in window mode the app host is the display
+//! server's task bridge, which `aim-windows` is for the original's tasks:
+//! on the connection `FN_WINDOWS` makes (`aim_hostcall::display::window`)
+//! it reports its tasks and takes the server's requests, and a task opens
+//! at freeform's default bounds (`freeform`).
 
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
@@ -16,15 +19,18 @@ use std::sync::{Arc, Mutex, OnceLock};
 use aim_host_display::wire;
 use aim_hostcall::display::{Window as Record, Windows, mode, window};
 
+use aim_binder_host::parcel::Exception;
+
+use super::activity::Item;
+use super::activity_stack::Command;
+use super::config::{Configuration, Rect};
 use super::{AppHost, exit_info};
-use super::config::Rect;
 use super::surface::{self, Change, Layer};
 
-/// A task: one activity's, in its own window.
+/// A task on the display: in window mode, a window.
 pub struct Task {
     pub id: i32,
-    /// The start of its app's process.
-    pub start_seq: i64,
+    /// Its root activity's uid.
     pub uid: u32,
     pub package: String,
     /// Its activity, `package/class`.
@@ -49,11 +55,6 @@ pub struct Tasks {
 }
 
 impl Tasks {
-    /// The start of the front task's process (`getTopApp`).
-    pub(super) fn front_start(&self) -> Option<i64> {
-        self.tasks.lock().unwrap().last().map(|t| t.start_seq)
-    }
-
     /// Whether the display server shows a window per task.
     pub fn window_mode(&self) -> bool {
         self.windows.get().copied().unwrap_or(false)
@@ -78,14 +79,19 @@ impl Tasks {
         self.send(&Record { op: window::TASK, task, bounds: [bounds.left, bounds.top, bounds.right, bounds.bottom], ..Default::default() });
     }
 
-    /// The latest task of `uid`: its id and bounds.
-    pub fn of_uid(&self, uid: u32) -> Option<(i32, Rect)> {
-        self.tasks.lock().unwrap().iter().rev().find(|t| t.uid == uid).map(|t| (t.id, t.bounds))
+    /// The front task of `uid`'s root activities.
+    pub fn of_uid(&self, uid: u32) -> Option<i32> {
+        self.tasks.lock().unwrap().iter().rev().find(|t| t.uid == uid).map(|t| t.id)
     }
 
     /// The bounds of task `id`.
     pub fn bounds(&self, id: i32) -> Option<Rect> {
         self.tasks.lock().unwrap().iter().find(|t| t.id == id).map(|t| t.bounds)
+    }
+
+    /// The bounds of task `id` in window mode, a freeform task's.
+    pub fn freeform_bounds(&self, id: i32) -> Option<Rect> {
+        self.bounds(id).filter(|_| self.window_mode())
     }
 
     /// The bounds of the tasks.
@@ -137,6 +143,7 @@ impl AppHost {
         std::thread::spawn(move || match bridge(&socket) {
             Ok((stream, windows)) => {
                 let _ = host.tasks.windows.set(windows);
+                host.activities.stack.lock().unwrap().freeform = windows;
                 if !windows {
                     return;
                 }
@@ -151,25 +158,23 @@ impl AppHost {
         });
     }
 
-    /// A new task for the activity `class` of the process `start_seq`
-    /// started for `uid`'s `package`: its bounds, in window mode.
-    pub(super) fn new_task(&self, start_seq: i64, uid: u32, package: &str, class: &str, activity: super::freeform::Activity) -> Option<Rect> {
-        if !self.tasks.window_mode() {
-            return None;
-        }
-        let display = self.display().ok()?.0.clone();
+    /// A new task, in front, for the activity `class` of `uid`'s
+    /// `package`: its id. It has the display, or in window mode freeform's
+    /// default bounds.
+    pub(super) fn new_task(&self, uid: u32, package: &str, class: &str, activity: super::freeform::Activity) -> Result<i32, Exception> {
+        let display = self.display()?.0.clone();
         let area = Rect { left: 0, top: 0, right: display.width, bottom: display.height };
-        let bounds = super::freeform::default_bounds(&activity, area, display.density_dpi(), false, &self.tasks.all_bounds());
+        let windows = self.tasks.window_mode();
+        let bounds = if windows { super::freeform::default_bounds(&activity, area, display.density_dpi(), false, &self.tasks.all_bounds()) } else { area };
         let id = {
             let mut next = self.tasks.next.lock().unwrap();
             *next += 1;
             *next
         };
         let component = format!("{package}/{class}");
-        let launch = self.pending_launches.lock().unwrap().remove(package);
+        let launch = if windows { self.pending_launches.lock().unwrap().remove(package) } else { None };
         self.tasks.tasks.lock().unwrap().push(Task {
             id,
-            start_seq,
             uid,
             package: package.to_string(),
             component: component.clone(),
@@ -178,12 +183,29 @@ impl AppHost {
             layer: None,
             launch,
         });
-        self.tasks.send_bounds(id, bounds);
-        self.tasks.send_text(window::PACKAGE, id, package);
-        self.tasks.send_text(window::ACTIVITY, id, &component);
-        self.tasks.send(&Record { op: window::FRONT, task: id, ..Default::default() });
+        if windows {
+            self.tasks.send_bounds(id, bounds);
+            self.tasks.send_text(window::PACKAGE, id, package);
+            self.tasks.send_text(window::ACTIVITY, id, &component);
+        }
         eprintln!("app host: task {id} of {component} at {bounds:?}");
-        Some(bounds)
+        Ok(id)
+    }
+
+    /// Task `id` is in front and focused: its layer goes over the others,
+    /// its windows in front of the others' with the latest focused, and
+    /// the server is told.
+    pub(super) fn task_to_front(&self, id: i32) -> Result<(), String> {
+        {
+            let mut tasks = self.tasks.tasks.lock().unwrap();
+            let at = tasks.iter().position(|t| t.id == id).ok_or_else(|| format!("no task {id}"))?;
+            let task = tasks.remove(at);
+            tasks.push(task);
+        }
+        self.place_tasks()?;
+        self.raise_windows_of(id)?;
+        self.tasks.send(&Record { op: window::FRONT, task: id, ..Default::default() });
+        Ok(())
     }
 
     /// The layer of task `id`, the parent of its windows: made at its
@@ -206,20 +228,17 @@ impl AppHost {
         composer.apply(&Tasks::placement(&tasks))
     }
 
-    /// An activity of `uid` is idle: the launch its task answers drew its
-    /// first frame.
-    pub(super) fn task_idle(&self, uid: u32) {
-        let launch = {
-            let mut tasks = self.tasks.tasks.lock().unwrap();
-            tasks.iter_mut().rev().find(|t| t.uid == uid).and_then(|t| t.launch.take().map(|l| (t.id, l)))
-        };
-        if let Some((id, launch)) = launch {
+    /// An activity of task `id` is idle: the launch the task answers drew
+    /// its first frame.
+    pub(super) fn task_idle(&self, id: i32) {
+        let launch = self.tasks.tasks.lock().unwrap().iter_mut().find(|t| t.id == id).and_then(|t| t.launch.take());
+        if let Some(launch) = launch {
             self.tasks.send_text(window::DRAWN, id, &launch);
         }
     }
 
     /// Task `id` has no activities left: it goes (`Task.removeIfPossible`),
-    /// its layer with it; its process stays.
+    /// its layer with it; its processes stay.
     pub(super) fn remove_task(&self, id: i32) {
         let removed = {
             let mut tasks = self.tasks.tasks.lock().unwrap();
@@ -232,21 +251,8 @@ impl AppHost {
         }
     }
 
-    /// The process of `start_seq` died: its tasks are gone.
-    pub(super) fn tasks_died(&self, start_seq: i64) {
-        let gone: Vec<i32> = {
-            let mut tasks = self.tasks.tasks.lock().unwrap();
-            let gone = tasks.iter().filter(|t| t.start_seq == start_seq).map(|t| t.id).collect();
-            tasks.retain(|t| t.start_seq != start_seq);
-            gone
-        };
-        for id in gone {
-            self.tasks.send(&Record { op: window::REMOVED, task: id, ..Default::default() });
-        }
-    }
-
     /// Takes the server's requests until it closes the connection.
-    fn take_requests(&self, mut stream: UnixStream) {
+    fn take_requests(self: &Arc<Self>, mut stream: UnixStream) {
         loop {
             let mut record = Record::default();
             // SAFETY: `Record` is plain old data; every byte pattern is one.
@@ -261,7 +267,7 @@ impl AppHost {
         }
     }
 
-    fn request(&self, r: &Record) -> Result<(), String> {
+    fn request(self: &Arc<Self>, r: &Record) -> Result<(), String> {
         if r.op == window::LAUNCH {
             eprintln!("app host: launch of {}", r.text());
         }
@@ -278,19 +284,26 @@ impl AppHost {
         }
     }
 
-    /// `LAUNCH` of `package/class`: its package's task comes to the front,
-    /// else the activity starts in a new one.
-    fn launch(&self, component: &str) -> Result<(), String> {
+    /// `LAUNCH` of `package/class`: the task a launcher's start would find
+    /// for it (`findTask`) comes to the front, else the activity starts in
+    /// a new one.
+    fn launch(self: &Arc<Self>, component: &str) -> Result<(), String> {
         let (package, class) = component.split_once('/').ok_or_else(|| format!("{component}: not a component"))?;
-        let running = self.tasks.tasks.lock().unwrap().iter().find(|t| t.package == package).map(|t| t.id);
-        if let Some(id) = running {
+        let class = if class.starts_with('.') { format!("{package}{class}") } else { class.to_string() };
+        let info = self.activity_info_of(package, &class).map_err(|e| format!("{e:?}"))?;
+        let user = info.info.application_info.uid as u32 / super::PER_USER_RANGE;
+        let real = super::activity_start::real_component(&info);
+        let found = {
+            let stack = self.activities.stack.lock().unwrap();
+            stack.find_task(&real, info.task_affinity.as_deref(), user).and_then(|t| stack.get(t)).map(|a| a.task)
+        };
+        if let Some(id) = found {
             self.focus_task(id)?;
             self.tasks.send_text(window::DRAWN, id, component);
             return Ok(());
         }
         self.pending_launches.lock().unwrap().insert(package.to_string(), component.to_string());
-        let class = if class.starts_with('.') { format!("{package}{class}") } else { class.to_string() };
-        if let Err(e) = self.start_process(package, &class) {
+        if let Err(e) = self.start_launcher(package, &class, info) {
             self.pending_launches.lock().unwrap().remove(package);
             // The server's splash waits for the launch's end.
             self.tasks.send_text(window::DRAWN, 0, component);
@@ -299,30 +312,34 @@ impl AppHost {
         Ok(())
     }
 
-    /// `FOCUS`: the task comes to the front, and its latest window takes
-    /// the input focus.
-    fn focus_task(&self, id: i32) -> Result<(), String> {
-        let uid = {
-            let mut tasks = self.tasks.tasks.lock().unwrap();
-            let at = tasks.iter().position(|t| t.id == id).ok_or_else(|| format!("no task {id}"))?;
-            let task = tasks.remove(at);
-            let uid = task.uid;
-            tasks.push(task);
-            uid
-        };
-        self.place_tasks()?;
-        self.focus_window_of(uid)?;
-        self.tasks.send(&Record { op: window::FRONT, task: id, ..Default::default() });
+    /// `FOCUS`: the task comes to the front (`moveTaskToFront`), and its
+    /// latest window takes the input focus.
+    fn focus_task(self: &Arc<Self>, id: i32) -> Result<(), String> {
+        let commands = self.activities.stack.lock().unwrap().bring_to_front(id);
+        if !commands.contains(&Command::Front(id)) {
+            self.task_to_front(id)?;
+        }
+        self.run(commands);
         Ok(())
     }
 
-    /// `CLOSE`: removes the task as `removeTask` does, killing its
-    /// process (`killProcessesForRemovedTask`: the process has no other
-    /// task here); its death removes the task.
-    fn close_task(&self, id: i32) -> Result<(), String> {
-        let start_seq = self.tasks.tasks.lock().unwrap().iter().find(|t| t.id == id).map(|t| t.start_seq).ok_or_else(|| format!("no task {id}"))?;
+    /// `CLOSE`: removes the task as `removeTask` does: its activities
+    /// finish, and the processes of its package are killed
+    /// (`killTaskProcessesIfPossible`) unless one has an activity in
+    /// another task.
+    fn close_task(self: &Arc<Self>, id: i32) -> Result<(), String> {
+        let (package, uid) = self.tasks.tasks.lock().unwrap().iter().find(|t| t.id == id).map(|t| (t.package.clone(), t.uid)).ok_or_else(|| format!("no task {id}"))?;
         eprintln!("app host: removing task {id}");
-        self.kill_process(start_seq, exit_info::REASON_USER_REQUESTED, exit_info::SUBREASON_REMOVE_TASK, "remove task")
+        let starts = self.starts_of_package(&package, uid / super::PER_USER_RANGE);
+        let elsewhere = self.activities.stack.lock().unwrap().activities.iter().any(|a| a.task != id && starts.contains(&a.start_seq));
+        let commands = self.activities.stack.lock().unwrap().remove(id);
+        self.run(commands);
+        if !elsewhere {
+            for start_seq in starts {
+                self.kill_process(start_seq, exit_info::REASON_USER_REQUESTED, exit_info::SUBREASON_REMOVE_TASK, "remove task")?;
+            }
+        }
+        Ok(())
     }
 
     /// `SET_BOUNDS` (`resizeTask`): the task takes `bounds`, at least its
@@ -337,23 +354,28 @@ impl AppHost {
             .and_then(|i| i.packages.framework_dimension_dp("default_minimal_size_resizable_task"))
             .ok_or("no default_minimal_size_resizable_task")? as i32;
         let density = self.display().map_err(|e| format!("{e:?}"))?.0.density_dpi() as f32 / 160.0;
-        let (uid, start_seq, bounds) = {
+        let bounds = {
             let mut tasks = self.tasks.tasks.lock().unwrap();
             let task = tasks.iter_mut().find(|t| t.id == id).ok_or_else(|| format!("no task {id}"))?;
             let default_min = (min_dp as f32 * density) as i32;
             let min = (if task.min_size.0 < 0 { default_min } else { task.min_size.0 }, if task.min_size.1 < 0 { default_min } else { task.min_size.1 });
             task.bounds = minimal_dimensions(bounds, task.bounds, min);
-            (task.uid, task.start_seq, task.bounds)
+            task.bounds
         };
         self.place_tasks()?;
-        self.move_windows_of(uid, bounds)?;
-        let global = self.global_config(uid).ok_or("the task's app is not bound")?;
-        let (mut items, relaunching) = self.reconfigure_activities(start_seq, &global, bounds);
+        self.move_windows_of(id, bounds)?;
+        let uids: BTreeSet<u32> = self.activities.records.lock().unwrap().values().filter(|r| r.task == id).map(|r| r.uid).collect();
+        let globals: HashMap<u32, Configuration> = uids.into_iter().filter_map(|uid| Some((uid, self.global_config(uid)?))).collect();
+        let (mut items, relaunching) = self.reconfigure_activities(id, &globals, bounds);
         // A relaunching activity's windows are not told (`reportResized`).
         if !relaunching {
-            items.extend(self.resize_windows(uid, &global, bounds)?);
+            items.extend(self.resize_windows(id, &globals, bounds)?);
         }
-        if !items.is_empty() {
+        let mut by_start: BTreeMap<i64, Vec<Box<dyn Item>>> = BTreeMap::new();
+        for (start_seq, item) in items {
+            by_start.entry(start_seq).or_default().push(item);
+        }
+        for (start_seq, items) in by_start {
             self.schedule(start_seq, items)?;
         }
         self.tasks.send_bounds(id, bounds);

@@ -531,7 +531,7 @@ impl AppHost {
                     result_who: None,
                     request_code: -1,
                 };
-                res = match self.start_activity_in_package(uid, package.clone(), 0, None, args) {
+                res = match self.start_activity_in_package(uid, package.clone(), 0, args) {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!(

@@ -120,22 +120,33 @@ drops the old connection's tasks. The mode:
 
 On the app host image ([app-host.md](app-host.md)) there is no
 system_server and no `aim-windows`: the app host, whose tasks they are,
-is the bridge. It connects to the display server itself (`OP_WINDOWS`,
+is the bridge. Its tasks are the original's (`ActivityStarter`): an app
+has as many as its starts make (a `singleInstance` activity, a NEW_TASK
+of another affinity, MULTIPLE_TASK, a start from a service), and the
+front one with a running activity is focused. Without window mode each
+task has the whole display and hides those behind it, whose activities
+pause and stop. It connects to the display server itself (`OP_WINDOWS`,
 from guest-init) and, in window mode:
 
-- **Opens a task** for each activity it launches, at the bounds freeform
+- **Opens a task** for each task it makes, at the bounds freeform
   gives a task started without any (`TaskLaunchParamsModifier
   .getTaskBounds`: 412×732 dp, 1064×600 dp for a landscape activity, fit
   into the display and centred, then moved off another task's corners), and
-  reports it (`TASK`, `PACKAGE`, `ACTIVITY`, `FRONT`). The activity's
-  configuration is the freeform task's (`TaskFragment
-  .computeConfigResourceOverrides`: its sizes from its bounds).
+  reports it (`TASK`, `PACKAGE`, `ACTIVITY`, then `FRONT`). Its
+  activities' configuration is the freeform task's (`TaskFragment
+  .computeConfigResourceOverrides`: its sizes from its bounds). Every
+  task's top activity stays resumed; the focused one's is the top resumed
+  one, and a task Android brings to the front, or that becomes focused as
+  the one in front of it finishes its last activity, is reported (`FRONT`).
+  A task goes (`REMOVED`) with its last activity.
 - **Places it**: the task's layer is a container at the display's root,
   the parent of its windows' layers, moved to the task's bounds and cut to
   them by a SurfaceFlinger transaction, stacked in the tasks' order.
-- **Takes requests**: `LAUNCH` brings the package's task to the front, or
-  starts the activity and answers `DRAWN` when it is idle; `FOCUS` brings
-  the task to the front and gives its latest window the input focus;
+- **Takes requests**: `LAUNCH` brings the task a launcher's start would
+  find (`findTask`: the one started with the activity, else of its
+  affinity) to the front, or starts the activity in a new task and answers
+  `DRAWN` when it is idle; `FOCUS` brings the task to the front, its
+  windows in front of the others and its latest one with the input focus;
   `SET_BOUNDS` (`resizeTask`) gives the task the bounds, at least its
   minimal size (`Task.adjustForMinimalTaskDimensions`: 220 dp, or its
   activity's window layout's), and tells its activity as
@@ -144,9 +155,10 @@ from guest-init) and, in window mode:
   (`SizeConfigurationBuckets.filterDiff`), relaunches it, keeping its
   window when only sizes changed; anything else is a configuration change
   (`ActivityConfigurationChangeItem`) and its windows' new frames
-  (`WindowStateResizeItem`); `CLOSE` kills
-  its process, as `removeTask` kills a removed task's
-  (`killProcessesForRemovedTask`), and its death removes the task.
+  (`WindowStateResizeItem`); `CLOSE` finishes the task's activities and
+  kills its package's processes, as `removeTask` does
+  (`killTaskProcessesIfPossible`), unless one has an activity in another
+  task: closing Clock's alarm window leaves Clock's own window.
 - **Input**: the agent sends a touch to the front window under it, in the
   window's coordinates (`aim-app-host-agent`).
 

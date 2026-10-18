@@ -17,7 +17,8 @@ use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_app_iactivityclientcontroller as acc;
 use aim_service_aidl::android_app_iactivitytaskmanager as atm;
 
-use super::activity_start::{Component, Report};
+use super::activity_stack::{FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS, FLAG_ACTIVITY_NEW_TASK};
+use super::activity_start::{Component, FLAG_EXCLUDE_FROM_RECENTS, Report};
 use super::config::{self, Configuration, SizeBuckets};
 use super::kept::{RawBundle, RawIntent};
 use super::{AppHost, reply};
@@ -33,9 +34,8 @@ const ACTIVITY_TYPE_STANDARD: i32 = 1;
 /// `Display.DEFAULT_DISPLAY`, `Display.INVALID_DISPLAY`.
 const DEFAULT_DISPLAY: i32 = 0;
 const INVALID_DISPLAY: i32 = -1;
-/// `Intent.FLAG_ACTIVITY_NEW_TASK`; `Intent.EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN`,
-/// which a start without a creator token gets; `UserHandle.USER_CURRENT`.
-const FLAG_ACTIVITY_NEW_TASK: i32 = 0x1000_0000;
+/// `Intent.EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN`, which a start
+/// without a creator token gets; `UserHandle.USER_CURRENT`.
 const EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN: i32 = 1 << 2;
 const USER_CURRENT: i32 = -2;
 /// `ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED`.
@@ -139,10 +139,17 @@ pub struct Activities {
 }
 
 impl Activities {
-    /// Whether `uid` has the resumed activity: the app host's one task is
-    /// focused (`WindowManagerInternal.isUidFocused`).
+    /// Whether `uid` has the focused task's top activity
+    /// (`WindowManagerInternal.isUidFocused`).
     pub fn uid_focused(&self, uid: u32) -> bool {
-        self.records.lock().unwrap().values().any(|r| r.uid == uid && r.resumed)
+        let top = self.stack.lock().unwrap().focused_top().map(|a| a.token);
+        top.is_some_and(|t| self.records.lock().unwrap().get(&t).is_some_and(|r| r.uid == uid))
+    }
+
+    /// The start of the process of the focused task's top activity
+    /// (`getTopApp`).
+    pub fn front_start(&self) -> Option<i64> {
+        self.stack.lock().unwrap().focused_top().map(|a| a.start_seq)
     }
 
     /// The component (`package/class`) of `uid`'s latest activity, a
@@ -157,10 +164,11 @@ impl Activities {
         self.records.lock().unwrap().values().any(|r| r.start_seq == start_seq)
     }
 
-    /// The activities of the process of `start_seq` are gone with it.
-    pub fn remove_start(&self, start_seq: i64) {
+    /// The activities of the process of `start_seq` are gone with it: what
+    /// the stack does then.
+    pub fn remove_start(&self, start_seq: i64) -> Vec<super::activity_stack::Command> {
         self.records.lock().unwrap().retain(|_, r| r.start_seq != start_seq);
-        self.stack.lock().unwrap().process_died(start_seq);
+        self.stack.lock().unwrap().process_died(start_seq)
     }
 
     pub(super) fn with<T>(
@@ -207,7 +215,7 @@ impl AppHost {
         let intent: Box<dyn WriteParcelable> = match &record.intent {
             super::activity_start::LaunchIntent::Component => Box::new(Intent {
                 component: (record.package.clone(), record.class.clone()),
-                flags: FLAG_ACTIVITY_NEW_TASK,
+                flags: FLAG_ACTIVITY_NEW_TASK | if record.info.flags & FLAG_EXCLUDE_FROM_RECENTS != 0 { FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS } else { 0 },
                 extended_flags: EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN,
                 content_user_hint: USER_CURRENT,
             }),
@@ -242,16 +250,18 @@ impl AppHost {
 }
 
 impl AppHost {
-    /// `updateReportedConfigurationAndSend` for the activities of the
-    /// process `start_seq` once their task took `bounds`, on a display of
-    /// the global configuration `global`: the items that tell them, and
-    /// whether one relaunches (its windows are not told they resized).
-    pub(super) fn reconfigure_activities(&self, start_seq: i64, global: &Configuration, bounds: config::Rect) -> (Vec<Box<dyn Item>>, bool) {
+    /// `updateReportedConfigurationAndSend` for the activities of task
+    /// `task` once it took `bounds`, each on a display of its uid's global
+    /// configuration in `globals`: the items that tell them, each with its
+    /// process's start, and whether one relaunches (its windows are not
+    /// told they resized).
+    pub(super) fn reconfigure_activities(&self, task: i32, globals: &HashMap<u32, Configuration>, bounds: config::Rect) -> (ProcessItems, bool) {
         let mut records = self.activities.records.lock().unwrap();
-        let mut items: Vec<Box<dyn Item>> = Vec::new();
+        let mut items: ProcessItems = Vec::new();
         let mut relaunching = false;
-        for (&ptr, record) in records.iter_mut().filter(|(_, r)| r.start_seq == start_seq) {
+        for (&ptr, record) in records.iter_mut().filter(|(_, r)| r.task == task) {
             let token = Binder::Local(ptr);
+            let Some(global) = globals.get(&record.uid) else { continue };
             let mut new = global.of_freeform_task(bounds);
             new.window.activity_type = ACTIVITY_TYPE_STANDARD;
             let Some(old) = record.reported.replace(new.clone()) else { continue };
@@ -271,25 +281,25 @@ impl AppHost {
             // every change.
             let handled = record.config_changes;
             if changes & !handled == 0 || handled & config::CONFIG_RESOURCES_UNUSED != 0 {
-                items.push(Box::new(ActivityConfigurationChangeItem { token, config: new, window }));
+                items.push((record.start_seq, Box::new(ActivityConfigurationChangeItem { token, config: new, window })));
                 continue;
             }
             // `relaunchActivityLocked`: a resize alone keeps the window.
             let resize = config::CONFIG_SCREEN_SIZE | config::CONFIG_SMALLEST_SCREEN_SIZE | config::CONFIG_ORIENTATION | config::CONFIG_SCREEN_LAYOUT;
             relaunching = true;
-            items.push(Box::new(ActivityRelaunchItem {
+            items.push((record.start_seq, Box::new(ActivityRelaunchItem {
                 token,
                 global: global.clone(),
                 config: new,
                 window,
                 changes,
                 preserve_window: changes & !resize == 0,
-            }));
-            items.push(Box::new(if record.resumed {
+            })));
+            items.push((record.start_seq, Box::new(if record.resumed {
                 Lifecycle::Resume(ResumeActivityItem { token, proc_state: PROCESS_STATE_UNKNOWN, forward: false })
             } else {
                 Lifecycle::Pause(token)
-            }));
+            })));
             eprintln!("app host: relaunching {}/{} for changes {changes:#x}", record.package, record.class);
         }
         (items, relaunching)
@@ -315,6 +325,9 @@ pub(super) fn transaction(items: Vec<Box<dyn Item>>) -> Parcel {
     .write(&mut p);
     p
 }
+
+/// Items, each with the start of the process it goes to.
+pub(super) type ProcessItems = Vec<(i64, Box<dyn Item>)>;
 
 /// A `ClientTransactionItem`: its class, for `writeParcelable`, and its
 /// fields.
@@ -636,8 +649,8 @@ impl Service for ActivityClientController {
             acc::ACTIVITY_IDLE => {
                 let token = Self::token(call)?;
                 self.report(token, "idle", |_| {});
-                if let Some(uid) = self.0.activities.with(token, |r| r.uid) {
-                    self.0.task_idle(uid);
+                if let Some(task) = self.0.activities.with(token, |r| r.task) {
+                    self.0.task_idle(task);
                 }
                 self.0.activity_reported(token, Report::Idle);
                 empty()
@@ -651,7 +664,25 @@ impl Service for ActivityClientController {
                 }
                 Ok(Parcel::new())
             }
-            acc::ACTIVITY_TOP_RESUMED_STATE_LOST => empty(),
+            acc::ACTIVITY_TOP_RESUMED_STATE_LOST => {
+                call.data.enforce_interface(acc::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                self.0.top_resumed_lost();
+                empty()
+            }
+            // `setShowWhenLocked`, `setInheritShowWhenLocked` (one-way) and
+            // `setTurnScreenOn` matter to a locked or sleeping display; the
+            // app host's is never locked and always on (`power`), so
+            // nothing follows, as on the original's awake, unlocked one.
+            acc::SET_SHOW_WHEN_LOCKED | acc::SET_INHERIT_SHOW_WHEN_LOCKED => Ok(Parcel::new()),
+            acc::SET_TURN_SCREEN_ON => empty(),
+            acc::GET_TASK_FOR_ACTIVITY => {
+                let token = Self::token(call)?;
+                let only_root = call.data.read_bool().map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                p.write_no_exception();
+                p.write_i32(self.0.task_of_activity(token, only_root));
+                Ok(p)
+            }
             // `finishRelaunching`: its relaunch is done (oneway).
             acc::ACTIVITY_RELAUNCHED => {
                 let token = Self::token(call)?;
