@@ -793,7 +793,7 @@ impl AppHost {
 
     /// `PackageManagerInternal.getPackageUid` of `package` in `user`; -1
     /// for none.
-    fn package_uid(&self, package: &str, flags: i64, user: i32) -> Result<i32, Exception> {
+    pub(super) fn package_uid(&self, package: &str, flags: i64, user: i32) -> Result<i32, Exception> {
         let (state, resolution) = self.packages()?;
         let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
         query

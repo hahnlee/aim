@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aim_binder_host::parcel::{EX_SECURITY, Exception, Parcel, Reader, Result as ParcelResult};
-use aim_service_aidl::ReadParcelable;
+use aim_service_aidl::{ReadParcelable, WriteParcelable};
 use aim_service_aidl::android_content_pm_ipackagemanager as pm;
 use aim_service_aidl::android_content_pm_ipackagemanagernative as native;
 
@@ -80,6 +80,14 @@ impl ReadParcelable for ComponentName {
             package: r.read_string16()?.unwrap_or_default(),
             class: r.read_string16()?.unwrap_or_default(),
         })
+    }
+}
+
+impl WriteParcelable for ComponentName {
+    /// `ComponentName.writeToParcel`.
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_string16(Some(&self.package));
+        p.write_string16(Some(&self.class));
     }
 }
 
