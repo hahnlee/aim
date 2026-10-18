@@ -80,7 +80,7 @@ pub mod window_layout;
 pub mod window_manager;
 pub mod zygote;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -1870,16 +1870,14 @@ impl AppHost {
         )
     }
 
-    /// `bindApplication`'s call for `app`'s process, with its `providers`.
-    fn bind_application(&self, app: &App, providers: Vec<package::info::ProviderInfo>) -> Result<(Parcel, config::Configuration), Exception> {
+    /// The global configuration (`ActivityTaskManagerService
+    /// .getGlobalConfiguration`): the display's, the locales and fonts the
+    /// settings hold, night as the Mac's appearance, at the current
+    /// sequence number.
+    fn global_configuration(&self) -> Result<config::Configuration, Exception> {
         let inputs = self.inputs()?;
-        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
-        let info = inputs
-            .packages
-            .application_info(&app.package, STOCK_PM_FLAGS)
-            .ok_or_else(|| state(format!("no application info of {}", app.package)))?;
         let display = self.display()?.0.clone();
-        let config = config::Configuration::of(
+        Ok(config::Configuration::of(
             &display,
             &config::Device {
                 locales: &inputs.locales,
@@ -1897,7 +1895,76 @@ impl AppHost {
                     .unwrap_or(0),
                 seq: self.config_seq.load(Ordering::Relaxed) as i32,
             },
-        );
+        ))
+    }
+
+    /// `ActivityTaskManagerService.updateGlobalConfigurationLocked` once
+    /// what the global configuration is made of changed (the Mac's
+    /// appearance): unless nothing changed, a new sequence number, each
+    /// process told (`ConfigurationChangeItem`), then each activity
+    /// (`RootWindowContainer.onConfigurationChanged`), and the
+    /// broadcasts `broadcastGlobalConfigurationChanged` sends.
+    fn update_global_configuration(&self) -> Result<(), Exception> {
+        const FLAG_RECEIVER_REGISTERED_ONLY: i32 = 0x4000_0000;
+        const FLAG_RECEIVER_REPLACE_PENDING: i32 = 0x2000_0000;
+        const FLAG_RECEIVER_FOREGROUND: i32 = 0x1000_0000;
+        const FLAG_RECEIVER_INCLUDE_BACKGROUND: i32 = 0x0100_0000;
+        const FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS: i32 = 0x0020_0000;
+        const FLAG_RECEIVER_OFFLOAD_FOREGROUND: i32 = 0x0000_0800;
+        let Some(old) = self.apps.lock().unwrap().values().find_map(|a| a.config.clone()) else {
+            // No process was bound with one: the next is bound with the new.
+            return Ok(());
+        };
+        let changes = old.diff(&self.global_configuration()?);
+        if changes == 0 {
+            return Ok(());
+        }
+        self.config_seq.fetch_add(1, Ordering::Relaxed);
+        let global = self.global_configuration()?;
+        eprintln!("app host: Config changes={changes:x}");
+        let bound: Vec<i64> = {
+            let mut apps = self.apps.lock().unwrap();
+            apps.iter_mut()
+                .filter(|(_, a)| a.thread.is_some())
+                .map(|(seq, a)| {
+                    a.config = Some(global.clone());
+                    *seq
+                })
+                .collect()
+        };
+        for start_seq in bound {
+            let item: Box<dyn activity::Item> = Box::new(activity::ConfigurationChangeItem { config: global.clone() });
+            if let Err(e) = self.schedule(start_seq, vec![item]) {
+                eprintln!("app host: configuration of start {start_seq}: {e}");
+            }
+        }
+        let mut by_start: BTreeMap<i64, Vec<Box<dyn activity::Item>>> = BTreeMap::new();
+        for (start_seq, item) in self.reconfigure_all_activities(&global, |task| self.tasks.freeform_bounds(task)) {
+            by_start.entry(start_seq).or_default().push(item);
+        }
+        for (start_seq, items) in by_start {
+            if let Err(e) = self.schedule(start_seq, items) {
+                eprintln!("app host: activities of start {start_seq}: {e}");
+            }
+        }
+        let flags = FLAG_RECEIVER_REGISTERED_ONLY | FLAG_RECEIVER_REPLACE_PENDING | FLAG_RECEIVER_FOREGROUND | FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS;
+        self.broadcasts.send_from_system(self, kept::RawIntent::new("android.intent.action.CONFIGURATION_CHANGED", flags, &[]));
+        if changes & config::CONFIG_LOCALE != 0 {
+            let flags = FLAG_RECEIVER_OFFLOAD_FOREGROUND | FLAG_RECEIVER_INCLUDE_BACKGROUND | FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS;
+            self.broadcasts.send_from_system(self, kept::RawIntent::new("android.intent.action.LOCALE_CHANGED", flags, &[]));
+        }
+        Ok(())
+    }
+
+    /// `bindApplication`'s call for `app`'s process, with its `providers`.
+    fn bind_application(&self, app: &App, providers: Vec<package::info::ProviderInfo>) -> Result<(Parcel, config::Configuration), Exception> {
+        let inputs = self.inputs()?;
+        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
+        let info = inputs
+            .packages
+            .application_info(&app.package, STOCK_PM_FLAGS)
+            .ok_or_else(|| state(format!("no application info of {}", app.package)))?;
+        let config = self.global_configuration()?;
         let compat_info = config::CompatibilityInfo::of(&info, &config);
         let analog_clock_fps = inputs
             .packages
@@ -2827,6 +2894,16 @@ impl Service for Control {
                 if let Err(e) = host.inputs().and_then(|_| host.packages()) {
                     eprintln!("app host: loading its inputs: {e:?}");
                 }
+                // The Mac's appearance is the configuration's night mode, as
+                // UiModeManagerService's is.
+                let weak = Arc::downgrade(&host);
+                crate::uimode::mac::watch(Box::new(move |_| {
+                    if let Some(host) = weak.upgrade()
+                        && let Err(e) = host.update_global_configuration()
+                    {
+                        eprintln!("app host: the global configuration: {e:?}");
+                    }
+                }));
                 // audioserver starts with its HAL, which asks the Mac for
                 // its devices: apart from the storage's start.
                 let audio = host.clone();
