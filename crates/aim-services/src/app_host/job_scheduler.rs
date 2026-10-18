@@ -776,7 +776,7 @@ impl JobScheduler {
     }
 
     fn change(&self, change: i64, uid: i32) -> Result<bool, Exception> {
-        self.host.change_enabled_for_uid(change, uid)
+        self.host.change_enabled(change, uid)
     }
 
     /// Whether `uid` has a process: the app host's processes are all top.

@@ -548,8 +548,8 @@ impl Access<'_> {
         if permission == ACCESS_BACKGROUND_LOCATION {
             // `PlatformCompat.isChangeEnabledByPackageName`.
             let enabled = match ps.pkg.as_deref() {
-                Some(pkg) => self.compat.is_enabled(BACKGROUND_RATIONALE_CHANGE_ID, pkg.target_sdk_version),
-                None => self.compat.default_value(BACKGROUND_RATIONALE_CHANGE_ID),
+                Some(pkg) => self.compat.is_enabled(BACKGROUND_RATIONALE_CHANGE_ID, Some(&ps.name), pkg.target_sdk_version),
+                None => self.compat.will_be_enabled(BACKGROUND_RATIONALE_CHANGE_ID, &ps.name),
             };
             if enabled {
                 return Ok(true);

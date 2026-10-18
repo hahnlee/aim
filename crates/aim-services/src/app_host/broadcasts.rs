@@ -322,15 +322,6 @@ pub(super) fn filter_equals(a: &Intent, b: &Intent) -> bool {
 }
 
 impl AppHost {
-    /// `CompatChanges.isChangeEnabled(change, uid)`: enabled for each of
-    /// the uid's packages.
-    pub(super) fn change_enabled_for_uid(&self, change: i64, uid: i32) -> Result<bool, Exception> {
-        let (state, _) = self.packages()?;
-        let compat = &self.inputs()?.compat;
-        let app_id = uid.rem_euclid(PER_USER_RANGE as i32);
-        Ok(state.packages.values().filter(|ps| ps.app_id == app_id).all(|ps| compat.is_enabled(change, ps.target_sdk_version)))
-    }
-
     /// Whether `package` is an instant app for `user`.
     fn instant_app(&self, package: &str, user: i32) -> Result<bool, Exception> {
         let (state, _) = self.packages()?;
@@ -400,7 +391,7 @@ impl Broadcasts {
         if flags & RECEIVER_EXPORTED != 0 && flags & RECEIVER_NOT_EXPORTED != 0 {
             return Err(Exception::illegal_argument("Receiver can't specify both RECEIVER_EXPORTED and RECEIVER_NOT_EXPORTEDflag"));
         }
-        let require_explicit = host.change_enabled_for_uid(DYNAMIC_RECEIVER_EXPLICIT_EXPORT_REQUIRED, uid)?;
+        let require_explicit = host.change_enabled(DYNAMIC_RECEIVER_EXPLICIT_EXPORT_REQUIRED, uid)?;
         if flags & RECEIVER_VISIBLE_TO_INSTANT_APPS != 0 && flags & RECEIVER_NOT_EXPORTED != 0 && require_explicit {
             return Err(Exception::illegal_argument("Receiver can't specify both RECEIVER_VISIBLE_TO_INSTANT_APPS and RECEIVER_NOT_EXPORTED flag"));
         }
@@ -699,7 +690,7 @@ impl Broadcasts {
                 // apps are in front).
                 "android.intent.action.CLOSE_SYSTEM_DIALOGS" => {
                     if !host.holds("android.permission.BROADCAST_CLOSE_SYSTEM_DIALOGS", calling_uid)?
-                        && host.change_enabled_for_uid(LOCK_DOWN_CLOSE_SYSTEM_DIALOGS, calling_uid)?
+                        && host.change_enabled(LOCK_DOWN_CLOSE_SYSTEM_DIALOGS, calling_uid)?
                     {
                         return Err(Exception::security(format!(
                             "Permission Denial: android.intent.action.CLOSE_SYSTEM_DIALOGS broadcast from {} (pid={}, uid={calling_uid}) requires android.permission.BROADCAST_CLOSE_SYSTEM_DIALOGS.",
@@ -778,7 +769,7 @@ impl Broadcasts {
         let block_null_action = action.is_none()
             && !can_access_unexported(calling_uid)
             && model.system.flags.iter().any(|(name, on)| name == "android.security.block_null_action_intents" && *on)
-            && host.change_enabled_for_uid(BLOCK_NULL_ACTION_INTENTS, calling_uid)?;
+            && host.change_enabled(BLOCK_NULL_ACTION_INTENTS, calling_uid)?;
         if record.intent.intent.component.is_none() && !block_null_action {
             registered = self.registered_targets(host, &st, &record.intent.intent, resolved_type.as_deref(), user, &sender)?;
         }
@@ -967,7 +958,7 @@ impl Broadcasts {
         let name = format!("{package}/{}", info.info.item.name.as_deref().unwrap_or_default());
         let action = intent.action.as_deref().unwrap_or("null");
         if let Some((change, enabled)) = s.require_compat_change
-            && host.change_enabled_for_uid(change, uid)? != enabled
+            && host.change_enabled(change, uid)? != enabled
         {
             return Ok(Some(format!("Compat change filtered: broadcasting {action} to uid {uid} due to compat change {change}")));
         }
@@ -1209,7 +1200,7 @@ impl Broadcasts {
     /// broadcast skips it.
     fn skip(&self, host: &AppHost, s: &Sender<'_>, r: &Receiver, f: &Filter, intent_flags: i32) -> Result<bool, Exception> {
         if let Some((change, enabled)) = s.require_compat_change
-            && host.change_enabled_for_uid(change, r.uid)? != enabled
+            && host.change_enabled(change, r.uid)? != enabled
         {
             return Ok(true);
         }

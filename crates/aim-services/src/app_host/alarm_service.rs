@@ -228,11 +228,11 @@ impl AlarmManager {
         };
         let compat = &self.host.inputs()?.compat;
         let target = ps.target_sdk_version;
-        if !compat.is_enabled(REQUIRE_EXACT_ALARM_PERMISSION, target) || uid.rem_euclid(PER_USER_RANGE as i32) < 10_000 {
+        if !compat.is_enabled(REQUIRE_EXACT_ALARM_PERMISSION, Some(package), target) || uid.rem_euclid(PER_USER_RANGE as i32) < 10_000 {
             return Ok(true);
         }
         let requested = |p: &str| ps.pkg.as_ref().is_some_and(|pkg| pkg.requested_permissions.iter().any(|r| r == p));
-        if compat.is_enabled(ENABLE_USE_EXACT_ALARM, target) && self.host.check_permission(Some("android.permission.USE_EXACT_ALARM"), uid)? == 0 {
+        if compat.is_enabled(ENABLE_USE_EXACT_ALARM, Some(package), target) && self.host.check_permission(Some("android.permission.USE_EXACT_ALARM"), uid)? == 0 {
             return Ok(true);
         }
         let mode = super::appops_service::mode(&self.host, super::appops_service::OP_SCHEDULE_EXACT_ALARM, uid, Some(package))?;
@@ -240,7 +240,7 @@ impl AlarmManager {
             0 => true,
             super::appops_service::MODE_DEFAULT => {
                 requested("android.permission.SCHEDULE_EXACT_ALARM")
-                    && !compat.is_enabled(SCHEDULE_EXACT_ALARM_DENIED_BY_DEFAULT, target)
+                    && !compat.is_enabled(SCHEDULE_EXACT_ALARM_DENIED_BY_DEFAULT, Some(package), target)
             }
             _ => false,
         })
@@ -671,7 +671,7 @@ impl Service for AlarmManager {
                     let compat = &self.host.inputs()?.compat;
                     let has = match mode {
                         0 => true,
-                        super::appops_service::MODE_DEFAULT => requested && !compat.is_enabled(SCHEDULE_EXACT_ALARM_DENIED_BY_DEFAULT, ps.target_sdk_version),
+                        super::appops_service::MODE_DEFAULT => requested && !compat.is_enabled(SCHEDULE_EXACT_ALARM_DENIED_BY_DEFAULT, Some(&package), ps.target_sdk_version),
                         _ => false,
                     };
                     let mut p = Parcel::new();
