@@ -64,7 +64,8 @@ mod tests {
     fn signed(root: &Path, data: &Data, key: &str, output: &Path) {
         let input = data.0.join(format!("{key}-unsigned.zip"));
         fs::write(&input, unsigned(root)).unwrap();
-        let result = std::process::Command::new("java").arg("-jar").arg(root.join("apksigner.jar"))
+        let jdk = aim_paths::fetched().join("java/temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
+        let result = std::process::Command::new(jdk.join("bin/java")).arg("-jar").arg(root.join("apksigner.jar"))
             .arg("sign").arg("--key").arg(root.join(format!("{key}.pk8")))
             .arg("--cert").arg(root.join(format!("{key}.x509.pem")))
             .args(["--min-sdk-version", "36", "--v1-signing-enabled", "false", "--v2-signing-enabled", "false", "--v3-signing-enabled", "true", "--v4-signing-enabled", "false"])
