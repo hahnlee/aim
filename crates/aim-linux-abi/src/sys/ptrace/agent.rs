@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use super::tracee::{self, Traced};
 use crate::sys::fork_state::{Reader, Writer};
-use crate::sys::{fdtab, misc, procfs, thread};
+use crate::sys::{fdtab, misc, procfs, smaps, thread};
 
 pub(super) const SEIZE: u32 = 1;
 pub(super) const INTERRUPT: u32 = 2;
@@ -35,6 +35,7 @@ pub(super) const FD_LINK: u32 = 13;
 pub(super) const NET_SOCKET_METADATA: u32 = 16;
 pub(super) const STOPPED: u32 = 14;
 pub(super) const SIGNAL: u32 = 15;
+pub(super) const SMAPS: u32 = 17;
 
 const NT_PRSTATUS: u32 = 1;
 const NT_PRFPREG: u32 = 2;
@@ -494,6 +495,7 @@ fn handle(op: u32, r: &mut Reader, peer: i32) -> Vec<u8> {
             reply(crate::sys::signal::from_peer(tid, info), |_| {})
         }
         MAPS => reply(0, |w| w.str(&procfs::maps())),
+        SMAPS => reply(0, |w| w.str(&smaps::smaps(r.bool()))),
         FDS => {
             let fds: Vec<i32> = fdtab::open_fds()
                 .into_iter()

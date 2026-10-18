@@ -493,11 +493,29 @@ fn statm(p: i32) -> Option<String> {
     ))
 }
 
+/// A mapping as `maps` and `smaps` show it.
+pub(super) struct Vma {
+    pub region: vmmap::Region,
+    /// Its `maps` line, with the newline.
+    pub line: String,
+    /// Its name in the line, if any.
+    pub name: String,
+    /// Mapped from a file of the guest.
+    pub file: bool,
+    /// A memfd's memory.
+    pub shmem: bool,
+}
+
 /// Linux-format `/proc/self/maps` from the VM map.
 pub(super) fn maps() -> String {
+    vmas().into_iter().map(|v| v.line).collect()
+}
+
+/// This process's mappings, from the VM map.
+pub(super) fn vmas() -> Vec<Vma> {
     let paths = vfs::HostPathView::capture();
     let stack = stack().unwrap_or_default();
-    let mut out = String::new();
+    let mut out = Vec::new();
     let mut regions = vmmap::regions(0, u64::MAX).peekable();
     while let Some(mut r) = regions.next() {
         // The string pages are the top of the stack, mapped from the
@@ -510,6 +528,7 @@ pub(super) fn maps() -> String {
             n.start == r.end && n.prot == r.prot && super::procrec::is_strings(n.start)
         }) {
             r.end = n.end;
+            r.usage.merge(&n.usage);
         }
         let prot = r.prot;
         let perms = format!(
@@ -523,8 +542,10 @@ pub(super) fn maps() -> String {
         // A host file outside the guest's view (linux-run, dyld, host
         // libraries, the process record) reads as anonymous memory: its
         // path is the Mac's, not a file of the guest.
+        let memfd = r.file.as_ref().and_then(|(path, d, i)| super::memfd::link_name(path, *d, *i));
+        let mut shmem = memfd.is_some();
         let guest_file = r.file.as_ref().and_then(|(path, d, i)| {
-            super::memfd::link_name(path, *d, *i)
+            memfd
                 .or_else(|| crate::xrt::original_guest_path_of_host(path))
                 .or_else(|| paths.as_ref().and_then(|view| view.guest_path(path)))
                 .map(|n| (n, *d, *i))
@@ -547,22 +568,28 @@ pub(super) fn maps() -> String {
             name = n.into();
         } else if let Some(n) = super::memfd::anon_name(r.start) {
             name = n;
+            shmem = true;
         }
-        let line = format!(
+        let mut line = format!(
             "{:08x}-{:08x} {perms} {offset:08x} {:02x}:{:02x} {ino}",
             r.start,
             r.end,
             (dev >> 24) & 0xff,
             dev & 0xff_ffff
         );
-        out.push_str(&line);
         if !name.is_empty() {
-            out.push_str(&" ".repeat(73usize.saturating_sub(line.len()).max(1)));
-            out.push_str(&name);
+            push_name(&mut line, &name);
         }
-        out.push('\n');
+        line.push('\n');
+        out.push(Vma { region: r, line, name, file: ino != 0, shmem });
     }
     out
+}
+
+/// A mapping's name after its `maps` line, from column 73 on.
+pub(super) fn push_name(line: &mut String, name: &str) {
+    line.push_str(&" ".repeat(73usize.saturating_sub(line.len()).max(1)));
+    line.push_str(name);
 }
 
 fn sysctl_u64(name: &str) -> u64 {
@@ -908,6 +935,8 @@ const PID_ENTRIES: &[(&str, u8)] = &[
     ("mounts", dir::DT_REG),
     ("oom_score_adj", dir::DT_REG),
     ("root", dir::DT_LNK),
+    ("smaps", dir::DT_REG),
+    ("smaps_rollup", dir::DT_REG),
     ("stat", dir::DT_REG),
     ("statm", dir::DT_REG),
     ("status", dir::DT_REG),
@@ -1036,6 +1065,8 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
         "statm" => Node::File(statm(p)?.into_bytes()),
         "maps" if me => Node::File(maps().into_bytes()),
         "maps" => Node::File(super::ptrace::remote_maps(p)?.into_bytes()),
+        "smaps" | "smaps_rollup" if me => Node::File(super::smaps::smaps(rest == "smaps_rollup").into_bytes()),
+        "smaps" | "smaps_rollup" => Node::File(super::ptrace::remote_smaps(p, rest == "smaps_rollup")?.into_bytes()),
         "mounts" => Node::MountTable {host_pid:p,info:false},
         "mountinfo" => Node::MountTable {host_pid:p,info:true},
         "oom_score_adj" if me => {

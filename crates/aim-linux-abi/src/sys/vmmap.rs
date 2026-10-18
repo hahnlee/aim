@@ -1,5 +1,5 @@
-//! Walking this process's VM map, for `/proc/self/maps`, madvise and memfd
-//! views.
+//! Walking this process's VM map, for `/proc/self/maps` and `smaps`,
+//! madvise and memfd views.
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
@@ -52,6 +52,45 @@ pub struct Region {
     pub offset: u64,
     /// The backing file, if any: host path, device and inode.
     pub file: Option<(PathBuf, u64, u64)>,
+    /// Darwin's page counts of the whole entry, which clipping keeps.
+    pub usage: Usage,
+}
+
+/// What Darwin counts of a VM map entry's pages (`proc_regioninfo`: the
+/// extended walk of `vm_map_region_walk` over the entry's pages and the
+/// top walk of its objects), in pages of the map.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Usage {
+    /// Maximum Darwin VM_PROT bits.
+    pub max_prot: u32,
+    /// `mlock`ed (wired by the user).
+    pub wired: bool,
+    pub resident: u64,
+    /// Resident and modified.
+    pub dirtied: u64,
+    /// In the compressor.
+    pub swapped_out: u64,
+    /// Found in a shadow object no other entry references any more.
+    pub shared_now_private: u64,
+    /// Resident in the top object, when only this entry references it.
+    pub private_resident: u64,
+    /// `SM_*`.
+    pub share_mode: u32,
+    /// References to the entry's objects.
+    pub ref_count: u32,
+}
+
+impl Usage {
+    /// The counts of two adjacent entries reported as one, with the
+    /// first's sharing.
+    pub fn merge(&mut self, n: &Usage) {
+        self.resident += n.resident;
+        self.dirtied += n.dirtied;
+        self.swapped_out += n.swapped_out;
+        self.shared_now_private += n.shared_now_private;
+        self.private_resident += n.private_resident;
+        self.wired |= n.wired;
+    }
 }
 
 /// A raw VM map entry: bounds and Darwin VM tag.
@@ -75,7 +114,10 @@ pub struct Info {
     pub tag: u32,
 }
 
-const SM_EMPTY: u32 = 3;
+pub const SM_COW: u32 = 1;
+pub const SM_PRIVATE: u32 = 2;
+pub const SM_EMPTY: u32 = 3;
+pub const SM_LARGE_PAGE: u32 = 8;
 
 /// The entry containing `addr`, or the next one above it (no path lookup).
 pub fn info_at(addr: u64) -> Option<Info> {
@@ -176,6 +218,17 @@ pub fn region_at(addr: u64) -> Option<Region> {
         shared: r.info.inheritance == VM_INHERIT_SHARE,
         offset: r.info.offset,
         file,
+        usage: Usage {
+            max_prot: r.info.max_protection,
+            wired: r.info.user_wired_count > 0,
+            resident: r.info.pages_resident.into(),
+            dirtied: r.info.pages_dirtied.into(),
+            swapped_out: r.info.pages_swapped_out.into(),
+            shared_now_private: r.info.pages_shared_now_private.into(),
+            private_resident: r.info.private_pages_resident.into(),
+            share_mode: r.info.share_mode,
+            ref_count: r.info.ref_count,
+        },
     })
 }
 

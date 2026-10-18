@@ -658,8 +658,19 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   read or write another, so each process serves its peers through a
   socket next to its by-pid entry: ptrace (SEIZE, INTERRUPT, CONT, DETACH,
   GETREGSET, PEEKDATA, clone events; no signal-delivery-stops, #594),
-  `process_vm_readv`/`writev`, and `/proc/<pid>/{maps,fd}`. A traced
-  thread stops where the layer delivers signals.
+  `process_vm_readv`/`writev`, and `/proc/<pid>/{maps,smaps,smaps_rollup,fd}`.
+  A traced thread stops where the layer delivers signals.
+- **`smaps` and `smaps_rollup`** (`sys/smaps.rs`) have Linux 6.12's
+  fields from Darwin's page counts of each VM map entry
+  (`proc_regioninfo`), which are per entry, not per page. Shared or
+  private follows the entry's share mode (copied on write: the top
+  object's pages private, the shadows' shared); a shared page's mappers
+  are its objects' references, so Pss of shared memory can be lower than
+  Linux's; dirty pages go to the private ones first; Swap is the
+  compressor's pages; Referenced comes from `mincore`. LazyFree, KSM, THP
+  and hugetlb are 0, and VmFlags has only what protections, sharing, the
+  stack and mlock tell. Names set with `PR_SET_VMA_ANON_NAME` are not
+  kept (#1581).
 - **Answered "unsupported" (Android falls back):** cgroup v1 controllers,
   the other namespaces, SELinux enforcement (permissive), userfaultfd (ART
   uses its copying collector) and BINDER_FREEZE.
