@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -62,6 +63,54 @@ static void maps_and_main_stack(void) {
   size_t size;
   CHECK(pthread_attr_getstack(&a, &base, &size) == 0);
   CHECK((uintptr_t)base <= me && me < (uintptr_t)base + size);
+}
+
+static char smaps_text[8 << 20];
+
+// The Rss (kB) of the mapping of smaps_text that contains addr, or -1.
+static long rss_at(uintptr_t addr) {
+  for (char* line = strtok(smaps_text, "\n"); line; line = strtok(NULL, "\n")) {
+    uintptr_t lo, hi;
+    if (sscanf(line, "%lx-%lx ", &lo, &hi) != 2 || addr < lo || addr >= hi) continue;
+    while ((line = strtok(NULL, "\n")) && strncmp(line, "Rss:", 4) != 0) {}
+    return line ? strtol(line + 4, NULL, 10) : -1;
+  }
+  return -1;
+}
+
+// smaps (proc(5)): each mapping's maps line, then its sizes in the
+// kernel's order up to VmFlags; an anonymous mapping's Rss grows as its
+// pages are touched, and smaps_rollup adds every mapping up.
+static void smaps(void) {
+  size_t len = 64 * sysconf(_SC_PAGESIZE);
+  char* p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(p != MAP_FAILED);
+  CHECK(slurp("/proc/self/smaps", smaps_text, sizeof smaps_text) > 0);
+  long before = rss_at((uintptr_t)p);
+  CHECK(before >= 0);
+  memset(p, 1, len);
+  ssize_t n = slurp("/proc/self/smaps", smaps_text, sizeof smaps_text);
+  CHECK(n > 0 && (size_t)n < sizeof smaps_text - 1);
+  int vmas = 0, flags = 0, sizes = 0;
+  long size = -1, rss = -1, pss = -1, total_rss = 0;
+  for (char* s = smaps_text; *s; s = strchr(s, '\n') + 1) {
+    uintptr_t lo, hi;
+    if (sscanf(s, "%lx-%lx ", &lo, &hi) == 2) vmas++;
+    if (sscanf(s, "Size: %ld kB", &size) == 1) sizes++;
+    if (sscanf(s, "Rss: %ld kB", &rss) == 1) total_rss += rss;
+    if (sscanf(s, "Pss: %ld kB", &pss) == 1) CHECK(pss <= rss && rss <= size);
+    if (!strncmp(s, "VmFlags: ", 9)) flags++;
+  }
+  CHECK(vmas > 0 && sizes == vmas && flags == vmas);
+  long after = rss_at((uintptr_t)p);
+  CHECK(after >= before + (long)(len / 1024));
+  CHECK(slurp("/proc/self/smaps_rollup", big, sizeof big) > 0);
+  CHECK(strstr(big, " ---p 00000000 00:00 0 ") && strstr(big, "[rollup]\nRss:"));
+  long rollup_rss = -1, rollup_pss = -1;
+  CHECK(sscanf(strstr(big, "\nRss:"), "\nRss: %ld kB\nPss: %ld kB", &rollup_rss, &rollup_pss) == 2);
+  CHECK(rollup_rss >= after && rollup_pss <= rollup_rss && strstr(big, "\nPss_Anon:"));
+  CHECK(labs(rollup_rss - total_rss) < total_rss / 4);
+  munmap(p, len);
 }
 
 static void status_stat_cmdline(void) {
@@ -388,6 +437,7 @@ int main(int argc, char** argv) {
   snprintf(self_path, sizeof self_path, "%s", argv[0]);
   RUN(maps_and_main_stack);
   RUN(status_stat_cmdline);
+  RUN(smaps);
   RUN(setproctitle_area);
   RUN(fds_and_links);
   RUN(system_files);

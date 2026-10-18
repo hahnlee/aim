@@ -367,6 +367,16 @@ pub fn remote_maps(pid: i32) -> Option<String> {
     Some(Reader::new(&b).str())
 }
 
+/// Another process's `/proc/<pid>/smaps` (or `smaps_rollup`), for a
+/// caller that may read it (PTRACE_MODE_READ_FSCREDS).
+pub fn remote_smaps(pid: i32, rollup: bool) -> Option<String> {
+    if !cred::may_ptrace(pid, true) {
+        return None;
+    }
+    let b = call_result(pid, &request(agent::SMAPS, |w| w.bool(rollup))).ok()?;
+    Some(Reader::new(&b).str())
+}
+
 /// Another process's open fds, as `/proc/<pid>/fd` lists them.
 pub fn remote_fds(pid: i32) -> Option<Vec<i32>> {
     if !cred::may_ptrace(pid, true) {

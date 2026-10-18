@@ -7708,8 +7708,10 @@ presented buffer there.
 - **Memory** (host RSS, shared pages counted in each process): 74 guest
   processes with about 2.8 GB together at `sys.boot_completed`, system_server
   369 MB, zygote 144 MB; about 4.4 GB for 92 processes once Settings and the
-  first-boot apps (GMS, launcher, SystemUI) run. `dumpsys meminfo` has no
-  PSS (no `smaps_rollup`).
+  first-boot apps (GMS, launcher, SystemUI) run. The layer serves
+  `smaps` and `smaps_rollup` from Darwin's per-entry page counts (ADR
+  0012); `dumpsys meminfo`'s PSS over them has not been measured yet, and
+  its heaps are not sorted by anonymous names (#1581).
 - **Settings:** `am start -W -n com.android.settings/.Settings` 1 s after
   boot completion: `Status: ok`, `LaunchState: WARM` (its process was up for
   a broadcast), `TotalTime: 243` ms (`wm_activity_launch_time` 243).

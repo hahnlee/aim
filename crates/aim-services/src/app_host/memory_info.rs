@@ -234,7 +234,7 @@ impl AppHost {
     /// `getProcessMemoryInfo` of `uid` for `pids`: an empty
     /// `Debug.MemoryInfo` for each process it may not see. Measuring one
     /// it may see (`Debug.getMemoryInfo`) takes the guest's
-    /// `/proc/<pid>/smaps`, which nothing provides yet (#1543).
+    /// `/proc/<pid>/smaps`, which only a guest process can read (#1543).
     pub(super) fn process_memory_info(&self, uid: i32, pids: Option<Vec<i32>>) -> Result<Vec<Option<ProcessMemoryInfo>>, Exception> {
         if super::is_isolated(uid) {
             return Err(Exception::security("Isolated process not allowed to call getProcessMemoryInfo"));
