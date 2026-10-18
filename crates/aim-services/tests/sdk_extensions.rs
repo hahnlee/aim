@@ -27,7 +27,8 @@ fn platform()->Platform {
 fn official_manifests()->String {
     let jar=aim_paths::fetched().join("cts-tradefed/android-cts/testcases/CtsPackageManagerParsingHostTestCases/CtsPackageManagerParsingHostTestCases.jar");
     assert!(jar.is_file(),"official CTS parsing JAR is required");
-    let output=Command::new("javap").args(["-c","-p","-classpath"]).arg(jar)
+    let jdk=aim_paths::fetched().join("java/temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
+    let output=Command::new(jdk.join("bin/javap")).args(["-c","-p","-classpath"]).arg(jar)
         .arg("android.content.pm.parsing.cts.host.UsesSdkTest").output().expect("JDK javap required");
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     String::from_utf8(output.stdout).unwrap()
