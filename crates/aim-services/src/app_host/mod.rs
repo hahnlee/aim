@@ -37,6 +37,7 @@ pub mod job_info;
 pub mod job_scheduler;
 pub mod job_store;
 pub mod keychars;
+pub mod memory_info;
 pub mod kept;
 pub mod network;
 pub mod notification_channels;
@@ -177,12 +178,15 @@ const P: i32 = 28;
 
 /// Reads one of the device's properties.
 pub type Properties = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+/// Sets a guest property as the system (`SystemProperties.set`).
+pub type SetProperty = Box<dyn Fn(&str, &str) + Send + Sync>;
 
 /// Where the app host finds its inputs, set once guest-init knows them.
 struct Configured {
     root: PathBuf,
     data: PathBuf,
     properties: Properties,
+    set_property: SetProperty,
     connect: Connect,
 }
 
@@ -277,6 +281,8 @@ pub struct AppHost {
     providers: providers::Providers,
     uri_grants: OnceLock<Vec<uri_grants::Grant>>,
     uid_observers: uid_observers::UidObservers,
+    /// The image's tzdata, read once.
+    tzdata: OnceLock<Vec<u8>>,
     /// Processes' last crash and recent crash count, by process name and
     /// uid (`AppErrors.mProcessCrashTimes`, `mProcessCrashCounts`).
     app_errors: Mutex<AppErrors>,
@@ -332,6 +338,7 @@ impl AppHost {
             providers: Default::default(),
             uri_grants: OnceLock::new(),
             uid_observers: Default::default(),
+            tzdata: OnceLock::new(),
             app_errors: Default::default(),
             storage: Default::default(),
             text_input: Default::default(),
@@ -368,6 +375,7 @@ impl AppHost {
         root: &Path,
         data: &Path,
         properties: Properties,
+        set_property: SetProperty,
         connect: Connect,
     ) -> Result<(), String> {
         self.configured
@@ -375,6 +383,7 @@ impl AppHost {
                 root: root.to_path_buf(),
                 data: data.to_path_buf(),
                 properties,
+                set_property,
                 connect,
             })
             .map_err(|_| "app host already configured".to_string())
@@ -415,6 +424,7 @@ impl AppHost {
             ("input", Arc::new(input_manager::InputManager::new(self.clone()))),
             ("audio", Arc::new(audio_service::AudioService::new(self.clone()))),
             ("mount", Arc::new(storage::StorageManager(self.clone()))),
+            ("uri_grants", Arc::new(uri_grants::UriGrantsManager(self.clone()))),
             ("sensor_privacy", Arc::new(sensor_privacy::SensorPrivacy::new(self.clone()))),
             (
                 "content",
@@ -556,6 +566,9 @@ impl AppHost {
     /// Starts the process of package `name` for `request`, or for a
     /// service, a provider or a broadcast (no activity).
     fn start_process_for(&self, name: &str, process: &str, request: Option<activity_start::StartRequest>) -> Result<i32, Exception> {
+        if process == "system" {
+            return Err(self.unimplemented_named("activity", &format!("a component of {name} in system_server's process (#1518)")));
+        }
         let inputs = self.inputs()?;
         let state = package::State::read(&inputs.data, &[0])
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("package state: {e}")))?
@@ -858,6 +871,118 @@ impl AppHost {
             _ => (now, 1),
         };
         errors.crash_counts.insert(key, count);
+    }
+
+    /// `UserController.handleIncomingUser` for `uid`: the user it acts as.
+    fn handle_incoming_user(&self, uid: i32, user: i32, allow_all: bool, require_full: bool, name: Option<&str>) -> Result<i32, Exception> {
+        let target = self.incoming_user(uid, user, !require_full)?;
+        if !allow_all && target < 0 {
+            return Err(Exception::illegal_argument(format!(
+                "Call does not support special user #{target}{}",
+                name.map(|n| format!(" ({n})")).unwrap_or_default()
+            )));
+        }
+        Ok(target)
+    }
+
+    /// A guest property.
+    pub(super) fn property(&self, name: &str) -> Option<String> {
+        (self.configured.get()?.properties)(name)
+    }
+
+    /// Sets a guest property, as the system.
+    pub(super) fn set_property(&self, name: &str, value: &str) {
+        if let Some(c) = self.configured.get() {
+            (c.set_property)(name, value);
+        }
+    }
+
+    /// `SystemTimeZone.isValidTimeZoneId`: whether the image's tzdata has
+    /// `zone`.
+    pub(super) fn valid_time_zone(&self, zone: &str) -> bool {
+        let tzdata = self.tzdata.get_or_init(|| {
+            let root = self.configured.get().map(|c| c.root.clone()).unwrap_or_default();
+            std::fs::read(root.join(crate::tzdata::PATH.trim_start_matches('/'))).unwrap_or_default()
+        });
+        crate::tzdata::has(tzdata, zone)
+    }
+
+    /// The running processes re-read the time zone (`updateTimeZone`, on
+    /// `ACTION_TIMEZONE_CHANGED`).
+    pub(super) fn update_time_zone(&self) {
+        let seqs: Vec<i64> = self.apps.lock().unwrap().iter().filter(|(_, a)| a.thread.is_some()).map(|(s, _)| *s).collect();
+        let mut p = Parcel::new();
+        thread::UpdateTimeZone {}.write(&mut p);
+        for seq in seqs {
+            if let Err(e) = self.call_thread(seq, thread::UPDATE_TIME_ZONE, &p) {
+                eprintln!("app host: updateTimeZone: {e}");
+            }
+        }
+    }
+
+    /// User 0's `UserInfo` attribute `name` (`/data/system/users/0.xml`).
+    fn user_attribute(&self, name: &str) -> Result<i32, Exception> {
+        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
+        let path = self.data()?.join("system/users/0.xml");
+        let bytes = std::fs::read(&path).map_err(|e| state(format!("{}: {e}", path.display())))?;
+        let root = aim_android_xml::read(&bytes).map_err(|e| state(format!("{}: {e}", path.display())))?;
+        root.int(name).map_err(state)?.ok_or_else(|| state(format!("{}: no {name}", path.display())))
+    }
+
+    /// User 0's serial number (`UserInfo.serialNumber`).
+    fn user_serial(&self) -> Result<i32, Exception> {
+        self.user_attribute("serialNumber")
+    }
+
+    /// User 0's `UserInfo.flags`.
+    fn user_flags(&self) -> Result<i32, Exception> {
+        self.user_attribute("flags")
+    }
+
+    /// `isBackgroundRestricted` of the caller's own `package`: whether its
+    /// RUN_ANY_IN_BACKGROUND op is not allowed.
+    fn background_restricted(&self, call: &Call<'_>, package: Option<String>) -> Result<bool, Exception> {
+        /// `PackageManager.MATCH_DEBUG_TRIAGED_MISSING`;
+        /// `AppOpsManager.OP_RUN_ANY_IN_BACKGROUND`.
+        const MATCH_DEBUG_TRIAGED_MISSING: i64 = 0x1000_0000;
+        const OP_RUN_ANY_IN_BACKGROUND: i32 = 70;
+        let calling_uid = call.sender_euid as i32;
+        let (state, resolution) = self.packages()?;
+        let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: 1000 };
+        let package_uid = match &package {
+            Some(package) => match query.package_uid(package, MATCH_DEBUG_TRIAGED_MISSING, calling_uid / PER_USER_RANGE as i32) {
+                Ok(uid) => uid?,
+                Err(crate::package::apps_filter::NotModelled(reason)) => {
+                    return Err(Exception::new(EX_UNSUPPORTED_OPERATION, format!("activity isBackgroundRestricted: {reason}")));
+                }
+            },
+            None => -1,
+        };
+        if package_uid != calling_uid {
+            return Err(Exception::illegal_argument(format!(
+                "Uid {calling_uid} cannot query restriction state for package {}",
+                package.as_deref().unwrap_or("null")
+            )));
+        }
+        Ok(appops_service::mode(self, OP_RUN_ANY_IN_BACKGROUND, calling_uid, package.as_deref())? != appops_service::MODE_ALLOWED)
+    }
+
+    /// `UserController.isUserRunning`: user 0 runs, unlocked; no other user
+    /// is started.
+    fn user_running(&self, call: &Call<'_>, user: i32, flags: i32) -> Result<bool, Exception> {
+        const FLAG_OR_STOPPED: i32 = 1 << 0;
+        const FLAG_AND_LOCKED: i32 = 1 << 1;
+        let uid = call.sender_euid as i32;
+        if user != uid / PER_USER_RANGE as i32 && self.check_permission(Some("android.permission.INTERACT_ACROSS_USERS"), uid)? != 0 {
+            return Err(Exception::security(format!(
+                "Permission Denial: isUserRunning() from pid={}, uid={uid} requires android.permission.INTERACT_ACROSS_USERS",
+                call.sender_pid
+            )));
+        }
+        if user != 0 {
+            return Ok(false);
+        }
+        Ok(flags & FLAG_OR_STOPPED != 0 || flags & FLAG_AND_LOCKED == 0)
     }
 
     /// User 0's base restrictions, as UserManagerService last persisted
@@ -2114,6 +2239,88 @@ impl Service for Activity {
                     p
                 }))
             }
+            // `CachedAppOptimizer.binderError`: logged; the app host freezes
+            // no process (one-way).
+            am::FROZEN_BINDER_TRANSACTION_DETECTED => {
+                let a = am::FrozenBinderTransactionDetected::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let name = self.0.apps.lock().unwrap().values().find(|app| app.pid == a.debug_pid).map(|app| app.process.clone());
+                eprintln!(
+                    "app host: pid {} {} sent binder code {} with flags {} to frozen apps and got error {}",
+                    a.debug_pid,
+                    name.as_deref().unwrap_or("null"),
+                    a.code,
+                    a.flags,
+                    a.err
+                );
+                Ok(Parcel::new())
+            }
+            // No monkey runs (`mUserIsMonkey`, a monkey controller).
+            am::IS_USER_A_MONKEY => {
+                am::IsUserAMonkey::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                am::write_is_user_a_monkey_reply(&mut p, false);
+                Ok(p)
+            }
+            am::IS_BACKGROUND_RESTRICTED => {
+                let a = am::IsBackgroundRestricted::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.background_restricted(call, a.package_name).map(|restricted| {
+                    let mut p = Parcel::new();
+                    am::write_is_background_restricted_reply(&mut p, restricted);
+                    p
+                }))
+            }
+            am::IS_USER_RUNNING => {
+                let a = am::IsUserRunning::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.user_running(call, a.userid, a.flags).map(|running| {
+                    let mut p = Parcel::new();
+                    am::write_is_user_running_reply(&mut p, running);
+                    p
+                }))
+            }
+            am::HANDLE_INCOMING_USER => {
+                let a = am::HandleIncomingUser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.handle_incoming_user(a.calling_uid, a.user_id, a.allow_all, a.require_full, a.name.as_deref()).map(|user| {
+                    let mut p = Parcel::new();
+                    am::write_handle_incoming_user_reply(&mut p, user);
+                    p
+                }))
+            }
+            // `handleApplicationWtf`: logged; fatal for an app when
+            // `wtf_is_fatal` is set (the image is not `eng`).
+            am::HANDLE_APPLICATION_WTF => {
+                let a = am::HandleApplicationWtf::<CrashInfo>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let Some(crash) = a.crash_info else {
+                    return reply(Err(Exception::new(EX_NULL_POINTER, "crashInfo")));
+                };
+                let app = self.0.app_of_thread(a.app);
+                let process = match (&a.app, &app) {
+                    (None, _) => "system_server".to_string(),
+                    (Some(_), None) => "unknown".to_string(),
+                    (Some(_), Some((seq, ..))) => self.0.apps.lock().unwrap().get(seq).map_or("unknown".into(), |p| p.process.clone()),
+                };
+                eprintln!(
+                    "app host: WTF in {process} (pid {}): {}: {}",
+                    call.sender_pid,
+                    a.tag.as_deref().unwrap_or("null"),
+                    crash.exception_message.as_deref().unwrap_or("unknown")
+                );
+                let fatal = self.0.inputs().is_ok_and(|i| i.settings.get(settings::Table::Global, "wtf_is_fatal").is_some_and(|v| v != "0"));
+                let killed = !a.system && app.is_some() && fatal;
+                let mut p = Parcel::new();
+                am::write_handle_application_wtf_reply(&mut p, killed);
+                Ok(p)
+            }
+            // `logFgsApiBegin`, `logFgsApiEnd`: statsd's, which the app host
+            // does not run (one-way).
+            am::LOG_FGS_API_BEGIN | am::LOG_FGS_API_END => Ok(Parcel::new()),
+            am::GET_MEMORY_INFO => {
+                am::GetMemoryInfo::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.memory_info().map(|info| {
+                    let mut p = Parcel::new();
+                    am::write_get_memory_info_reply(&mut p, &am::GetMemoryInfoReply { out_info: Some(info) });
+                    p
+                }))
+            }
             am::REGISTER_UID_OBSERVER => {
                 let args = am::RegisterUidObserver::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply(self.0.register_uid_observer(call, args.observer, args.which, args.cutpoint, args.calling_package.as_deref()).map(|()| {
@@ -2299,6 +2506,29 @@ impl Service for Activity {
             // does not implement throws.
             code => reply(Err(self.0.unimplemented("activity", code))),
         }
+    }
+}
+
+/// `ApplicationErrorReport.ParcelableCrashInfo`, of which the app host
+/// reads the message.
+struct CrashInfo {
+    exception_message: Option<String>,
+}
+
+impl aim_service_aidl::ReadParcelable for CrashInfo {
+    fn read_from(r: &mut aim_binder_host::parcel::Reader<'_>) -> aim_binder_host::parcel::Result<Self> {
+        // The handler's and the exception's class, the message, where it
+        // was thrown, the stack and the tag.
+        r.read_string16()?;
+        r.read_string16()?;
+        let exception_message = r.read_string16()?;
+        for _ in 0..3 {
+            r.read_string16()?;
+        }
+        r.read_i32()?;
+        r.read_string16()?;
+        r.read_string16()?;
+        Ok(CrashInfo { exception_message })
     }
 }
 

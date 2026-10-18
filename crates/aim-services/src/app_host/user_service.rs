@@ -12,6 +12,9 @@ use super::{AppHost, reply};
 
 /// The only user.
 const SYSTEM_USER: i32 = 0;
+/// `UserInfo.FLAG_DEMO`, `FLAG_FULL`.
+const FLAG_DEMO: i32 = 0x200;
+const FLAG_FULL: i32 = 0x400;
 
 pub struct UserManager {
     host: Arc<AppHost>,
@@ -74,7 +77,7 @@ impl Service for UserManager {
             }
             um::GET_PROFILE_IDS => {
                 let args = um::GetProfileIds::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let ids = (args.user_id == SYSTEM_USER).then(|| vec![SYSTEM_USER]).unwrap_or_default();
+                let ids = if args.user_id == SYSTEM_USER { vec![SYSTEM_USER] } else { Vec::new() };
                 um::write_get_profile_ids_reply(&mut p, &Some(ids));
             }
             um::GET_CREDENTIAL_OWNER_PROFILE => {
@@ -104,6 +107,58 @@ impl Service for UserManager {
                     Err(e) => return reply(Err(e)),
                 };
                 um::write_has_user_restriction_reply(&mut p, restricted);
+            }
+            // The user of a serial number, -1 for none.
+            um::GET_USER_HANDLE => {
+                let args = um::GetUserHandle::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match self.host.user_serial() {
+                    Ok(serial) => um::write_get_user_handle_reply(&mut p, if serial == args.user_serial_number { SYSTEM_USER } else { -1 }),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            um::IS_DEMO_USER => {
+                let args = um::IsDemoUser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let uid = call.sender_euid as i32;
+                if args.user_id != uid / 100_000
+                    && !matches!(uid % 100_000, 0 | 1000)
+                    && self.host.check_permission(Some("android.permission.MANAGE_USERS"), uid).map_err(|_| BAD_VALUE)? != 0
+                {
+                    return reply(Err(Exception::security(format!(
+                        "You need MANAGE_USERS permission to query if u={} is a demo user",
+                        args.user_id
+                    ))));
+                }
+                let demo = self.host.property("ro.boot.arc_demo_mode").is_some_and(|v| matches!(v.as_str(), "1" | "true" | "y" | "yes" | "on"))
+                    || args.user_id == SYSTEM_USER && matches!(self.host.user_flags(), Ok(f) if f & FLAG_DEMO != 0);
+                um::write_is_demo_user_reply(&mut p, demo);
+            }
+            // The system user is not full.
+            um::IS_HEADLESS_SYSTEM_USER_MODE => {
+                um::IsHeadlessSystemUserMode::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match self.host.user_flags() {
+                    Ok(flags) => um::write_is_headless_system_user_mode_reply(&mut p, flags & FLAG_FULL == 0),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            // `readApplicationRestrictionsLAr`: none without the file.
+            um::GET_APPLICATION_RESTRICTIONS_FOR_USER => {
+                let args = um::GetApplicationRestrictionsForUser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let package = args.package_name.unwrap_or_default();
+                let uid = call.sender_euid as i32;
+                let same_app = self.host.owns_package(uid, &package).unwrap_or(false);
+                if (uid / 100_000 != args.user_id || !same_app) && !matches!(uid % 100_000, 0 | 1000) {
+                    return reply(Err(Exception::security(format!(
+                        "get application restrictions for other user/app {package} is only allowed for the system"
+                    ))));
+                }
+                let file = self.host.data().map(|d| d.join(format!("system/users/{}/res_{package}.xml", args.user_id)));
+                match file {
+                    Ok(f) if f.exists() => {
+                        return reply(Err(self.host.unimplemented_named("user", "an app's persisted restrictions (#1519)")));
+                    }
+                    Ok(_) => um::write_get_application_restrictions_for_user_reply(&mut p, Some(&super::bind::Bundle(Vec::new()))),
+                    Err(e) => return reply(Err(e)),
+                }
             }
             code => return reply(Err(self.host.unimplemented("user", code))),
         }

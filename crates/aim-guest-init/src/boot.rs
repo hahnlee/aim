@@ -327,7 +327,8 @@ pub struct Boot {
     props: Rc<RefCell<Properties>>,
     linux_run: LinuxRun,
     events: Option<Receiver<PropertyEvent>>,
-    /// Run mode: changes of the Mac's settings (`mac::watch`).
+    /// Run mode: the properties the host sets, changes of the Mac's
+    /// settings (`mac::watch`) and the app host's.
     mac: Option<Receiver<(String, String)>>,
     _sockets: Option<PropertySockets>,
     /// Run mode: the binder host behind every service's `--binder`.
@@ -677,7 +678,7 @@ impl Boot {
         diagnostics.extend(start_property_service(&mut properties));
         // The Mac's settings the device follows, before init's first
         // action reads them (docs/mac-settings.md).
-        let tzdata = image.read(crate::mac::TZDATA).unwrap_or_default();
+        let tzdata = image.read(aim_services::tzdata::PATH).unwrap_or_default();
         let mac = match options.mode {
             RunMode::Run => crate::mac::properties(&tzdata),
             RunMode::DryRun => Vec::new(),
@@ -785,6 +786,9 @@ impl Boot {
             if init.process.host_pid!=unsafe{libc::getpid()}{return Err("native init registration names another process".into());}1
         }else{unsafe{libc::getpid()}};
         let mut native_services = None;
+        // The properties the host sets while the guest runs: the Mac's
+        // settings (`mac::watch`) and the app host's.
+        let (host_properties, host_property_sets) = mpsc::channel();
         if let Some(server) = &binder {
             share_areas(&properties, server);
             if let Some(file) = &options.binder_trace {
@@ -794,8 +798,10 @@ impl Boot {
             if let Some(services) = &native_services {
                 let properties_dir = layout.properties_dir();
                 let socket_dir = layout.socket_dir();
+                let sets = std::sync::Mutex::new(host_properties.clone());
                 services.configure_app_host(image.root(), &layout.data.join("data"),
                     Box::new(move |name| read_property(&properties_dir, name)),
+                    Box::new(move |name, value| drop(sets.lock().unwrap().send((name.to_string(), value.to_string())))),
                     Box::new(move || crate::unixsock::connect_at(&socket_dir, APP_HOST_ZYGOTE_RELAY)),
                     options.display.as_deref())
                     .map_err(|e| format!("app host: {e}"))?;
@@ -891,9 +897,8 @@ impl Boot {
         executor.sync_services(manager.services());
 
         let mac = (options.mode == RunMode::Run).then(|| {
-            let (sender, receiver) = mpsc::channel();
-            crate::mac::watch(sender, tzdata, mac);
-            receiver
+            crate::mac::watch(host_properties, tzdata, mac);
+            host_property_sets
         });
         let (events, sockets) = if options.mode == RunMode::Run {
             let (sender, receiver) = mpsc::channel();

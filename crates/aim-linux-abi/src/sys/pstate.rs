@@ -74,7 +74,6 @@ unsafe extern "C" {
     fn mach_thread_self() -> libc::mach_port_t;
     static mach_task_self_: libc::mach_port_t;
     fn mach_port_deallocate(task: libc::mach_port_t, name: libc::mach_port_t) -> i32;
-    fn mach_host_self() -> libc::mach_port_t;
 }
 
 /// User and system time of the calling thread.
@@ -233,41 +232,6 @@ pub fn uname(a: [u64; 6]) -> i64 {
     0
 }
 
-fn sysctl_u64(name: &std::ffi::CStr) -> u64 {
-    let mut v = 0u64;
-    let mut size = std::mem::size_of::<u64>();
-    // SAFETY: sysctl reading an integer into a local.
-    unsafe {
-        libc::sysctlbyname(
-            name.as_ptr(),
-            (&mut v as *mut u64).cast(),
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    v
-}
-
-/// Free physical memory in bytes.
-fn free_memory() -> u64 {
-    // SAFETY: HOST_VM_INFO64 into a local of the right size.
-    unsafe {
-        let mut info: libc::vm_statistics64 = std::mem::zeroed();
-        let mut count = (std::mem::size_of::<libc::vm_statistics64>() / 4) as u32;
-        if libc::host_statistics64(
-            mach_host_self(),
-            libc::HOST_VM_INFO64,
-            (&mut info as *mut libc::vm_statistics64).cast(),
-            &mut count,
-        ) != 0
-        {
-            return 0;
-        }
-        (info.free_count as u64 + info.inactive_count as u64) * libc::vm_page_size as u64
-    }
-}
-
 /// sysinfo (179): Linux arm64 `struct sysinfo` (112 bytes, mem_unit 1).
 /// `procs` counts the processes of the guest's pid namespace.
 pub fn sysinfo(a: [u64; 6]) -> i64 {
@@ -284,8 +248,8 @@ pub fn sysinfo(a: [u64; 6]) -> i64 {
     for i in 0..3 {
         w[1 + i] = (load[i] * 65536.0) as u64;
     }
-    w[4] = sysctl_u64(c"hw.memsize");
-    w[5] = free_memory();
+    w[4] = aim_host_memory::total();
+    w[5] = aim_host_memory::available();
     // sharedram, bufferram, totalswap, freeswap stay 0.
     w[10] = procs.min(u16::MAX as i32) as u64;
     // totalhigh and freehigh are 0; mem_unit is 1.

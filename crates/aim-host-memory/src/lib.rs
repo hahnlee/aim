@@ -105,7 +105,7 @@ pub fn read() -> Memory {
     Memory {
         level,
         reserved: 0,
-        total: sysctl::<u64>(c"hw.memsize").unwrap_or(0),
+        total: total(),
         free: if ok {
             bytes(vm.free_count) + bytes(vm.speculative_count)
         } else {
@@ -117,6 +117,28 @@ pub fn read() -> Memory {
             0
         },
     }
+}
+
+/// The memory the guest sees as available (`/proc/meminfo`'s
+/// `MemAvailable`, `sysinfo`'s `freeram`): the Mac's free and inactive
+/// pages, in bytes.
+pub fn available() -> u64 {
+    // SAFETY: an all-zero vm_statistics64 is valid.
+    let mut vm: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    // SAFETY: HOST_VM_INFO64 into a vm_statistics64 of `count` words.
+    #[allow(deprecated)]
+    let ok = unsafe {
+        libc::host_statistics64(libc::mach_host_self(), libc::HOST_VM_INFO64, (&raw mut vm).cast(), &mut count)
+    } == 0;
+    // SAFETY: plain sysconf.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+    if ok { (vm.free_count as u64 + vm.inactive_count as u64) * page } else { 0 }
+}
+
+/// The Mac's physical memory, in bytes (`MemTotal`, `totalram`).
+pub fn total() -> u64 {
+    sysctl::<u64>(c"hw.memsize").unwrap_or(0)
 }
 
 /// The write ends of the watchers' pipes.
