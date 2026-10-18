@@ -707,7 +707,11 @@ impl ConnectivityService {
             };
             let (Some(netd), Some(resolver)) = (service("netd"), service("dnsresolver")) else { return };
             let Some(cs) = weak.upgrade().and_then(|h| h.connectivity_service.get().cloned()) else { return };
-            cs.native.lock().unwrap().0 = Some(network_native::Native { netd, resolver });
+            let native = network_native::Native { netd, resolver };
+            if let Err(e) = native.set_interface_up(INTERFACE) {
+                eprintln!("app host: connectivity: netd: {e}");
+            }
+            cs.native.lock().unwrap().0 = Some(native);
             // The settings the network's description reads are loaded once
             // the guest's properties are set.
             while cs.host.inputs().is_err() {
@@ -752,7 +756,7 @@ impl ConnectivityService {
         let result = match (configured.as_ref(), wanted.as_ref()) {
             (Some(old), Some(new)) if old.net_id == new.net_id => services.configure_dns(new),
             (old, new) => old
-                .map_or(Ok(()), |old| services.destroy(old.net_id))
+                .map_or(Ok(()), |old| services.destroy(old))
                 .and_then(|()| new.map_or(Ok(()), |new| services.create(new))),
         };
         match result {
@@ -782,6 +786,7 @@ impl ConnectivityService {
         Ok(network_native::NativeNetwork {
             net_id: net.id,
             interface: INTERFACE.into(),
+            address: (net.uplink.addr, net.uplink.prefix),
             routes: lp.routes,
             dns: net.dns.clone(),
             private_dns,
