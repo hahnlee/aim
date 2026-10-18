@@ -42,6 +42,7 @@ pub mod package_service;
 mod package_writes;
 pub mod packages;
 pub mod pending_intents;
+pub mod permission_checker;
 pub mod permission_controller;
 pub mod permission_manager;
 pub mod playback;
@@ -365,6 +366,7 @@ impl AppHost {
                 .add_service(Arc::new(settings_provider::SettingsProvider(self.clone()))),
             self.process.add_service(Arc::new(activity::Token)),
         ));
+        let permission_manager = Arc::new(permission_manager::PermissionManager::new(self.clone()));
         vec![
             (
                 "activity",
@@ -383,7 +385,11 @@ impl AppHost {
             ("appops", Arc::new(appops_service::AppOps::new(self.clone()))),
             ("trust", Arc::new(trust_service::TrustManager::new(self.clone()))),
             ("permission", Arc::new(permission_controller::PermissionController(self.clone()))),
-            ("permissionmgr", Arc::new(permission_manager::PermissionManager::new(self.clone()))),
+            ("permissionmgr", permission_manager.clone()),
+            (
+                "permission_checker",
+                Arc::new(permission_checker::PermissionChecker::new(self.clone(), permission_manager)),
+            ),
             ("input_method", Arc::new(input_method::InputMethodManager::new(self.clone()))),
             ("input", Arc::new(input_manager::InputManager::new(self.clone()))),
             ("audio", Arc::new(audio_service::AudioService::new(self.clone()))),

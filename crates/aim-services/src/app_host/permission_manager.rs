@@ -634,6 +634,19 @@ impl PermissionManager {
         })
     }
 
+    /// `Context.checkPermission(permission, INVALID_PID, uid)` in the
+    /// system server, of the default device.
+    pub(super) fn holds(&self, uid: i32, permission: &str) -> Result<bool, Exception> {
+        self.access(|access| access.holds(uid, permission))
+    }
+
+    /// The protection level of `permission` as `getPermissionInfo` gives
+    /// it to the system server; none for one not defined.
+    pub(super) fn protection_level(&self, permission: &str) -> Result<Option<i32>, Exception> {
+        self.access(|access| access.get_permission_info(SYSTEM_UID, permission, "android", 0))
+            .map(|info| info.map(|info| info.protection_level))
+    }
+
     /// A persistent device id: the app host has no virtual devices, and
     /// another device's permissions are not implemented (#1508).
     fn default_device(&self, device: &str) -> Result<(), Exception> {
