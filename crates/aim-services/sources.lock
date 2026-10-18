@@ -257,7 +257,7 @@ INTERFACES=(
   "android.accounts.IAccountManager|system/framework/framework.jar|getPassword,getUserData,getAuthenticatorTypes,getAccountsForPackage,getAccountsByTypeForPackage,getAccountsAsUser,peekAuthToken,getPreviousName,someUserHasAccount,getPackagesAndVisibilityForAccount,getAccountVisibility,getAccountsAndVisibilityForPackage,registerAccountListener,unregisterAccountListener,hasAccountAccess,onAccountAccessed"
   "android.media.IMediaRouterService|system/framework/framework.jar|registerClientAsUser,unregisterClient,registerClientGroupId,getState,isPlaybackActive,setDiscoveryRequest,setSelectedRoute"
   "android.app.IGameManagerService|system/framework/framework.jar|getGameMode,notifyGraphicsEnvironmentSetup"
-  "android.os.IHintManager|system/framework/framework.jar|registerClient,getClientData"
+  "android.os.IHintManager|system/framework/framework.jar|getSessionChannel,closeSessionChannel,registerClient,getClientData"
   "android.content.pm.IShortcutService|system/framework/framework.jar|getMaxShortcutCountPerActivity,getShortcuts,getIconMaxDimensions,getRemainingCallCount,getRateLimitResetTime"
   "android.app.role.IRoleManager|apex/com.android.permission/javalib/framework-permission-s.jar|isRoleAvailableAsUser,isRoleHeldAsUser,getRoleHoldersAsUser,getDefaultApplicationAsUser,addOnRoleHoldersChangedListenerAsUser,removeOnRoleHoldersChangedListenerAsUser,isRoleFallbackEnabledAsUser,getHeldRolesFromControllerAsUser,isBypassingRoleQualification,getBrowserRoleHolder,getSmsRoleHolder,getEmergencyRoleHolder"
   "android.net.INetworkStatsService|apex/com.android.tethering/javalib/framework-connectivity-t.jar|getRateLimitCacheConfig"
