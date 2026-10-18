@@ -69,6 +69,7 @@ pub mod settings_validators;
 pub mod status_bar;
 pub mod storage;
 pub mod surface;
+pub mod task_info;
 pub mod tasks;
 pub mod uid_observers;
 pub mod uri_grants;

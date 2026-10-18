@@ -63,6 +63,7 @@ task's window lies exactly over the task. The rest follows from that:
 | Task bridge (guest, Rust): task listener and task calls | `daemons/windows` (`/system_ext/bin/aim-windows`) |
 | Task bridge of the app host image (host, Rust): its own tasks | `crates/aim-services/src/app_host/tasks.rs` |
 | `RunningTaskInfo` parcel reading | `daemons/windows/core` |
+| `RunningTaskInfo` of the app host's tasks (`getTasks`) | `crates/aim-services/src/app_host/task_info.rs` |
 | Host-call `FN_WINDOWS`, records | `aim_hostcall::display::{Windows, Window, window}` |
 | Freeform support | `/vendor/etc/permissions/android.software.freeform_window_management.xml` |
 | Window hosts (the server's side; a shim's side) | `bin/aim-display/hosts.rs`, `bin/aim-display/shim.rs` |
@@ -125,8 +126,13 @@ has as many as its starts make (a `singleInstance` activity, a NEW_TASK
 of another affinity, MULTIPLE_TASK, a start from a service), and the
 front one with a running activity is focused. Without window mode each
 task has the whole display and hides those behind it, whose activities
-pause and stop. It connects to the display server itself (`OP_WINDOWS`,
-from guest-init) and, in window mode:
+pause and stop, unless none of its activities occludes it (their themes
+translucent or floating): a task behind it stays visible, paused
+(`TaskFragment.getVisibility`'s visible behind translucent). Within a
+task, an activity hides those under it unless it is translucent. Apps see
+the tasks as `getTasks` lists them (`RunningTaskInfo`, its bounds and
+visibility included). It connects to the display server itself
+(`OP_WINDOWS`, from guest-init) and, in window mode:
 
 - **Opens a task** for each task it makes, at the bounds freeform
   gives a task started without any (`TaskLaunchParamsModifier

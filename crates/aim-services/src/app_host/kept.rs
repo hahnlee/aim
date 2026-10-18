@@ -382,6 +382,27 @@ impl RawIntent {
         Ok(RawIntent { raw, ..filter })
     }
 
+    /// The intent a task keeps of it (`Task.setIntent`): without its
+    /// selector and source bounds.
+    pub fn for_task(&self) -> Result<RawIntent> {
+        let a = &self.raw;
+        let s = Spans::of(a)?;
+        let none = Raw::of(&{
+            let mut p = Parcel::new();
+            p.write_i32(0);
+            p
+        });
+        let raw = Raw::concat(&[
+            a.slice(s.action.0, s.component.1),
+            none.clone(), // no source bounds
+            a.slice(s.categories.0, s.categories.1),
+            none, // no selector
+            a.slice(s.clip.0, s.rest.1),
+        ]);
+        let kept = RawIntent::read_from(&mut raw.parcel().reader())?;
+        Ok(RawIntent { raw, ..kept })
+    }
+
     /// What `bindServiceLocked` reads of a system caller's intent: its
     /// `EXTRA_CLIENT_LABEL` when it carries an `EXTRA_CLIENT_INTENT`, else
     /// 0 (`getIntExtra`'s default, also for a value of another type).
@@ -618,6 +639,42 @@ mod tests {
         assert_eq!(read.intent, crate::package::intent::Intent { flags: 0, ..i.intent.clone() });
         assert!(extras(&read).is_empty());
         assert!(!present(&read.raw, Spans::of(&read.raw).unwrap().extras));
+    }
+
+    #[test]
+    fn a_task_keeps_an_intent_without_its_selector_and_bounds() {
+        let selector = intent();
+        let mut p = Parcel::new();
+        p.write_string8(Some("a.MAIN"));
+        p.write_i32(0); // no data
+        p.write_string8(None); // type
+        p.write_string8(None); // identifier
+        p.write_i32(0x1000_0000); // flags
+        p.write_i32(0); // extended flags
+        p.write_string8(None); // package
+        p.write_string16(Some("p")); // component
+        p.write_string16(Some("p.Main"));
+        p.write_i32(1); // source bounds
+        [1, 2, 3, 4].iter().for_each(|v| p.write_i32(*v));
+        p.write_i32(1); // a category
+        p.write_string8(Some("a.LAUNCHER"));
+        p.write_i32(1); // a selector
+        p.write_raw(selector.data(), &[]);
+        p.write_i32(0); // clip data
+        p.write_i32(-2); // content user hint
+        crate::bundle::write(&mut p, &[("k", crate::bundle::Value::Int(7))]);
+        p.write_i32(0); // original intent
+        p.write_i32(0); // creator token
+        let i = RawIntent::read_from(&mut Reader::new(p.data(), &[])).unwrap();
+        assert!(i.intent.selector.is_some());
+        let kept = i.for_task().unwrap();
+        let mut out = Parcel::new();
+        kept.write_to(&mut out);
+        let read = RawIntent::read_from(&mut Reader::new(out.data(), &[])).unwrap();
+        assert_eq!(read.intent, crate::package::intent::Intent { selector: None, ..i.intent.clone() });
+        let spans = Spans::of(&read.raw).unwrap();
+        assert!(!present(&read.raw, spans.bounds));
+        assert_eq!(extras(&read).len(), 1);
     }
 
     /// A system caller's label counts only beside a client intent, and only

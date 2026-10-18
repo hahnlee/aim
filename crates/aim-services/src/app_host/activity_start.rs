@@ -24,6 +24,7 @@ use aim_service_aidl::android_app_iapplicationthread as thread;
 use super::activity::{ActivityRecord, Item, Token};
 use super::activity_stack::{self as stack, Command, Decision, Outcome, Then};
 use super::kept::{KeptIntent, RawIntent};
+use super::packages::WindowStyle;
 use super::uri_grants::{NeededUriGrants, Owner};
 use super::{AppHost, PER_USER_RANGE};
 use crate::package::info::ActivityInfo;
@@ -37,8 +38,9 @@ const START_CLASS_NOT_FOUND: i32 = -2;
 /// `EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN`.
 const FLAG_ACTIVITY_FORWARD_RESULT: i32 = 0x0200_0000;
 const EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN: i32 = 1 << 2;
-/// `ActivityInfo.FLAG_EXCLUDE_FROM_RECENTS`.
+/// `ActivityInfo.FLAG_EXCLUDE_FROM_RECENTS`, `FLAG_NO_HISTORY`.
 pub const FLAG_EXCLUDE_FROM_RECENTS: i32 = 0x20;
+const FLAG_NO_HISTORY: i32 = 0x80;
 /// `Activity.RESULT_CANCELED`.
 const RESULT_CANCELED: i32 = 0;
 /// `ActivityTaskSupervisor.TOP_RESUMED_STATE_LOSS_TIMEOUT`.
@@ -180,6 +182,19 @@ impl Item for PauseActivityItem {
     }
 }
 
+struct StartActivityItem(Binder);
+
+impl Item for StartActivityItem {
+    fn class(&self) -> &'static str {
+        "android.app.servertransaction.StartActivityItem"
+    }
+
+    fn write_fields(&self, p: &mut Parcel) {
+        p.write_binder(Some(self.0));
+        p.write_i32(0); // no scene transition
+    }
+}
+
 struct StopActivityItem(Binder);
 
 impl Item for StopActivityItem {
@@ -242,7 +257,8 @@ impl AppHost {
         id
     }
 
-    /// A new activity of `start_seq`'s process in `task`: its token.
+    /// A new activity of `start_seq`'s process in `task`, of `style`: its
+    /// token.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new_activity(
         &self,
@@ -250,6 +266,7 @@ impl AppHost {
         uid: u32,
         package: &str,
         info: ActivityInfo,
+        style: WindowStyle,
         task: i32,
         mut request: StartRequest,
     ) -> u64 {
@@ -268,6 +285,7 @@ impl AppHost {
             size_buckets: None,
             reported: None,
             info,
+            style,
             intent: request.intent,
             referrer: request.referrer,
             task,
@@ -367,6 +385,7 @@ impl AppHost {
                 self.forget_payloads(intents.iter());
                 sent
             }
+            Command::Start(t) => send(t, vec![Box::new(StartActivityItem(token_of(t)))]),
             Command::Stop(t) => send(t, vec![Box::new(StopActivityItem(token_of(t)))]),
             Command::Destroy(t) => send(t, vec![Box::new(DestroyActivityItem(token_of(t)))]),
             // The top resumed activity's latest window takes the input
@@ -420,20 +439,36 @@ impl AppHost {
         let user = uid / PER_USER_RANGE;
         let user_leaving = request.user_leaving();
         let intent = request.intent.intent(package, &request.class);
+        let base = request.intent.clone();
         let affinity = info.task_affinity.clone();
         let existing = request.task.filter(|&t| self.activities.stack.lock().unwrap().task(t).is_some());
         let (task, new) = match existing {
             Some(task) => (task, None),
             None => {
                 let id = self.new_task(uid, package, &request.class, super::freeform::Activity::from(&info))?;
-                let task = stack::Task { id, affinity: affinity.clone(), real_activity: real.clone(), intent: intent.clone(), user };
+                let task = stack::Task {
+                    id,
+                    affinity: affinity.clone(),
+                    real_activity: real.clone(),
+                    intent: intent.clone(),
+                    base: base.clone(),
+                    uid,
+                    user,
+                    last_active: 0,
+                };
                 (id, Some(Box::new(task)))
             }
         };
+        let style = self.window_style(&info);
+        let no_history = intent.flags & stack::FLAG_ACTIVITY_NO_HISTORY != 0 || info.flags & FLAG_NO_HISTORY != 0;
         let (launch_mode, result_to) = (info.launch_mode, request.result_to);
-        let token = self.new_activity(start_seq, uid, package, info, task, request);
-        let activity = stack::Activity::new(token, task, start_seq, &real, launch_mode, user, result_to);
-        let commands = self.activities.stack.lock().unwrap().apply(d, Then::Add(activity, new), Some((&real, &intent, affinity.as_deref())), user_leaving);
+        // Its result, `RESULT_CANCELED` until it sets one.
+        let result = result_to.map(|_| self.new_payload(Payload::Result { who: request.result_who.clone(), request_code: request.request_code, result_code: RESULT_CANCELED, data: None }));
+        let token = self.new_activity(start_seq, uid, package, info, style, task, request);
+        let mut activity = stack::Activity::new(token, task, start_seq, &real, launch_mode, user, result_to);
+        (activity.result, activity.occludes_parent, activity.no_history) = (result, style.occludes_parent(), no_history);
+        let identity = stack::Identity { component: &real, intent: &intent, base: &base, affinity: affinity.as_deref(), uid };
+        let commands = self.activities.stack.lock().unwrap().apply(d, Then::Add(activity, new), Some(identity), user_leaving);
         self.run(commands);
         Ok(())
     }
@@ -529,7 +564,8 @@ impl AppHost {
         intent.set_flags(d.flags | exclude, extended);
         let kept = KeptIntent::new(intent, &self.process);
         let base = kept.intent.intent.clone();
-        let identity = Some((real.as_str(), &base, info.task_affinity.as_deref()));
+        let launch = LaunchIntent::Raw(Box::new(kept.clone()));
+        let identity = || stack::Identity { component: &real, intent: &base, base: &launch, affinity: info.task_affinity.as_deref(), uid: target_uid };
         let user_leaving = d.flags & stack::FLAG_ACTIVITY_NO_USER_ACTION == 0;
         let mut commands = Vec::new();
         if d.cancel_result
@@ -544,12 +580,12 @@ impl AppHost {
                 // grants.
                 self.grant_from_intent(grants.as_ref(), Some(Owner::Activity(token)))?;
                 let payload = self.new_payload(Payload::NewIntent { intent: kept, referrer: caller_package });
-                commands.extend(self.activities.stack.lock().unwrap().apply(&d, Then::Deliver(token, payload), identity, user_leaving));
+                commands.extend(self.activities.stack.lock().unwrap().apply(&d, Then::Deliver(token, payload), Some(identity()), user_leaving));
                 self.run(commands);
                 return Ok(code);
             }
             Outcome::Front(code) => {
-                commands.extend(self.activities.stack.lock().unwrap().apply(&d, Then::Nothing, identity, user_leaving));
+                commands.extend(self.activities.stack.lock().unwrap().apply(&d, Then::Nothing, Some(identity()), user_leaving));
                 self.run(commands);
                 return Ok(code);
             }
@@ -601,16 +637,18 @@ impl AppHost {
             (Some(data), Some((package, asker_uid))) => self.check_grant_from_intent(data, uid, &package, (asker_uid / PER_USER_RANGE) as i32)?,
             _ => None,
         };
-        let result = result_to.is_some().then(|| {
-            let data = data.map(|d| KeptIntent::new(d, &self.process));
-            self.new_payload(Payload::Result { who, request_code, result_code, data })
-        });
-        let (task, root) = {
+        let (task, root, result) = {
             let stack = self.activities.stack.lock().unwrap();
-            let task = stack.get(token).map(|a| a.task);
-            (task, task.and_then(|t| stack.root(t)).is_some_and(|r| r.token == token))
+            let a = stack.get(token);
+            let task = a.map(|a| a.task);
+            (task, task.and_then(|t| stack.root(t)).is_some_and(|r| r.token == token), a.and_then(|a| a.result))
         };
-        let (finished, mut commands) = self.activities.stack.lock().unwrap().finish(token, result);
+        // The result it sets, in place of its `RESULT_CANCELED`.
+        if let Some(result) = result {
+            let data = data.map(|d| KeptIntent::new(d, &self.process));
+            self.activities.payloads.lock().unwrap().insert(result, Payload::Result { who, request_code, result_code, data });
+        }
+        let (finished, mut commands) = self.activities.stack.lock().unwrap().finish(token);
         // `finishActivityResults`: the grants are the asker's.
         if finished && let Some(to) = result_to {
             self.grant_from_intent(grants.as_ref(), Some(Owner::Activity(to)))?;
@@ -630,6 +668,16 @@ impl AppHost {
     pub(super) fn top_resumed_lost(self: &Arc<Self>) {
         let commands = self.activities.stack.lock().unwrap().top_resumed_released(None);
         self.run(commands);
+    }
+
+    /// `convertFromTranslucent` (`occludes`), `convertToTranslucent`:
+    /// whether `token`'s activity changed; the activities' visibility
+    /// follows.
+    pub(super) fn set_occludes_parent(self: &Arc<Self>, token: Option<Binder>, occludes: bool) -> bool {
+        let Some(Binder::Local(token)) = token else { return false };
+        let (changed, commands) = self.activities.stack.lock().unwrap().set_occludes_parent(token, occludes);
+        self.run(commands);
+        changed
     }
 
     /// `getTaskForActivity`: `token`'s task, if it is the task's root or

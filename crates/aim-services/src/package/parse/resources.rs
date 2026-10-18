@@ -894,6 +894,42 @@ impl Resources<'_> {
         }
     }
 
+    /// Attribute `attr` of the style `style`'s bag, its parents' bags
+    /// under it (`GetBag`).
+    fn bag_value(&self, style: u32, attr: u32) -> Option<Selected> {
+        let mut style = runtime_id(style);
+        for _ in 0..32 {
+            let (table, Entry::Bag(parent, items), flags) = self.find(style)? else {
+                return None;
+            };
+            if let Some(&(_, kind, data)) = items.iter().find(|(key, ..)| runtime_id(*key) == attr) {
+                return Some(Selected { kind, data, table: Some(table), resid: 0, flags });
+            }
+            if *parent == 0 {
+                return None;
+            }
+            style = runtime_id(*parent);
+        }
+        None
+    }
+
+    /// `Theme.obtainStyledAttributes(null, {attr}, 0, style)` on a theme
+    /// of the style `theme` (`ApplyStyle`): the attribute's value in
+    /// `style`, else in the theme, a theme attribute (`?attr`) followed
+    /// through the theme, then a reference to its value.
+    pub fn styled_attr(&self, style: u32, theme: u32, attr: u32) -> Option<Selected> {
+        const TYPE_DYNAMIC_ATTRIBUTE: u8 = 0x08;
+        let mut value = self.bag_value(style, attr).or_else(|| self.bag_value(theme, attr))?;
+        for _ in 0..20 {
+            if !matches!(value.kind, TYPE_ATTRIBUTE | TYPE_DYNAMIC_ATTRIBUTE) {
+                break;
+            }
+            value = self.bag_value(theme, runtime_id(value.data))?;
+        }
+        self.resolve(&mut value);
+        Some(value)
+    }
+
     /// `getResourceTypeName`.
     pub fn type_name(&self, id: u32) -> Option<&str> {
         self.tables.iter().find_map(|t| t.type_name(runtime_id(id)))
@@ -985,6 +1021,37 @@ mod tests {
                 ids: HashMap::new(),
             }],
         }
+    }
+
+    /// A style's attribute: its own, its parent's, else the theme's, a
+    /// theme attribute followed through the theme.
+    #[test]
+    fn styled_attributes_follow_parents_then_the_theme() {
+        const BOOLEAN: u8 = TYPE_INT_BOOLEAN;
+        let (own, parents, through, themes, none) = (0x0101_0001, 0x0101_0002, 0x0101_0003, 0x0101_0004, 0x0101_0005);
+        let bags = [
+            (0, Entry::Bag(0x7f02_0001, vec![(own, BOOLEAN, u32::MAX)])),
+            (1, Entry::Bag(0, vec![(parents, BOOLEAN, 1), (own, BOOLEAN, 0), (through, TYPE_ATTRIBUTE, themes)])),
+            (2, Entry::Bag(0, vec![(themes, BOOLEAN, 1)])),
+        ];
+        let t = Table {
+            strings: Strings::parse(&[0; 28]).unwrap(),
+            styled_strings: HashMap::new(),
+            packages: vec![Package {
+                id: 0x7f,
+                types: [(2, TypeGroup { spec_flags: vec![0; 3], types: vec![Type { config: Config::default(), entries: bags.into() }] })].into(),
+                overlayables: Vec::new(),
+                type_names: HashMap::new(),
+                ids: HashMap::new(),
+            }],
+        };
+        let res = Resources { tables: vec![&t], overlays: &[], config: Config::default() };
+        let value = |attr| res.styled_attr(0x7f02_0000, 0x7f02_0002, attr).map(|v| (v.kind, v.data));
+        assert_eq!(value(own), Some((BOOLEAN, u32::MAX)));
+        assert_eq!(value(parents), Some((BOOLEAN, 1)));
+        assert_eq!(value(through), Some((BOOLEAN, 1)));
+        assert_eq!(value(themes), Some((BOOLEAN, 1)));
+        assert_eq!(value(none), None);
     }
 
     #[test]
