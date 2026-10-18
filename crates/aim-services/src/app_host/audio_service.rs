@@ -279,11 +279,13 @@ impl AppHost {
         Ok(volumes)
     }
 
-    /// AudioService's start against audioserver (`onSystemReady`,
-    /// `onReinitVolumes`): the volumes, then AudioFlinger's system ready.
+    /// AudioService's start against audioserver: the permission state
+    /// (`registerOnStartTask`'s), the volumes (`onSystemReady`,
+    /// `onReinitVolumes`), then AudioFlinger's system ready.
     pub(super) fn start_audio(&self) -> Result<(), String> {
         let policy = AudioPolicy::connect(&self.process)?;
         let policy = self.audio_policy.get_or_init(|| policy);
+        self.populate_audio_permissions(&policy.permission_controller(&self.process)?)?;
         {
             let volumes = self.volumes().map_err(|e| format!("{e:?}"))?;
             volumes.as_ref().unwrap().init(policy)?;

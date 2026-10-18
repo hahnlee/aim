@@ -13,6 +13,7 @@ const POLICY_DESCRIPTOR: &str = "android.media.IAudioPolicyService";
 const SET_DEVICE_ABSOLUTE_VOLUME_ENABLED: u32 = 17;
 const INIT_STREAM_VOLUME: u32 = 18;
 const SET_STREAM_VOLUME_INDEX: u32 = 19;
+const GET_PERMISSION_CONTROLLER: u32 = 104;
 const FLINGER: &str = "media.audio_flinger";
 const FLINGER_DESCRIPTOR: &str = "android.media.IAudioFlingerService";
 const NEW_AUDIO_UNIQUE_ID: u32 = 34;
@@ -122,6 +123,24 @@ impl AudioPolicy {
             p.write_bool(enabled);
             p.write_i32(stream);
         })
+    }
+
+    /// `getPermissionController`: audioserver's native permission
+    /// controller.
+    pub fn permission_controller(&self, process: &LocalProcess) -> Result<Strong, String> {
+        let mut data = Parcel::new();
+        data.write_interface_token(POLICY_DESCRIPTOR);
+        let reply = self.policy.transact(GET_PERMISSION_CONTROLLER, &data, false).map_err(|s| format!("getPermissionController: {s}"))?;
+        let mut r = reply.reader();
+        match r.read_exception() {
+            Ok(Ok(())) => match r.read_binder() {
+                Ok(Some(aim_binder_host::parcel::Binder::Handle(handle))) => Ok(process.strong(handle)),
+                Ok(_) => Err("getPermissionController: no controller".into()),
+                Err(s) => Err(format!("getPermissionController: {s}")),
+            },
+            Ok(Err(e)) => Err(format!("getPermissionController: {e:?}")),
+            Err(s) => Err(format!("getPermissionController: {s}")),
+        }
     }
 
     /// `AudioSystem.newAudioPlayerId`, `newAudioRecorderId`: an id of

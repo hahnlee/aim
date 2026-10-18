@@ -17,6 +17,7 @@ pub mod activity_start;
 pub mod alarm_service;
 pub mod appops_service;
 pub mod audio_focus;
+pub mod audio_permissions;
 pub mod audio_policy;
 pub mod audio_service;
 pub mod battery_service;
