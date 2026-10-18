@@ -791,6 +791,8 @@ impl AppHost {
         if first {
             self.uid_changed(uid as i32, uid_observers::Change::Active);
         }
+        // `onApplicationAttachedLocked`: the broadcasts waiting for it.
+        self.broadcasts.process_attached(self, seq);
         Ok(())
     }
 
