@@ -324,6 +324,8 @@ pub struct AppHost {
     text_input: input_method::TextInput,
     content_service: OnceLock<Arc<content_service::ContentService>>,
     role_service: OnceLock<Arc<role_service::RoleManager>>,
+    /// The window contexts attached, by their client token's handle.
+    window_contexts: Arc<Mutex<HashMap<u32, window_manager::WindowContext>>>,
     notification_service: OnceLock<Arc<notification_service::NotificationManager>>,
     power_service: OnceLock<Arc<power_service::PowerManager>>,
     alarm_service: OnceLock<Arc<alarm_service::AlarmManager>>,
@@ -389,6 +391,7 @@ impl AppHost {
             text_input: Default::default(),
             content_service: OnceLock::new(),
             role_service: OnceLock::new(),
+            window_contexts: Arc::new(Mutex::new(HashMap::new())),
             notification_service: OnceLock::new(),
             power_service: OnceLock::new(),
             alarm_service: OnceLock::new(),
@@ -1998,6 +2001,9 @@ impl AppHost {
             }
         }
         let mut by_start: BTreeMap<i64, Vec<Box<dyn activity::Item>>> = BTreeMap::new();
+        for (start_seq, item) in self.reconfigure_window_contexts(&global) {
+            by_start.entry(start_seq).or_default().push(item);
+        }
         for (start_seq, item) in self.reconfigure_all_activities(&global, |task| self.tasks.freeform_bounds(task)) {
             by_start.entry(start_seq).or_default().push(item);
         }
