@@ -92,6 +92,12 @@ fn op(code: i32) -> Result<&'static (i32, &'static str, i32, Option<&'static str
 /// `checkOperation`: ignored under its restriction, else the uid's mode,
 /// else the package's, else the op's default, a foreground mode evaluated.
 pub(super) fn mode(host: &AppHost, code: i32, uid: i32, package: Option<&str>) -> Result<i32, Exception> {
+    raw_or_evaluated(host, code, uid, package, false)
+}
+
+/// `checkOperationUnchecked` with `raw`: a foreground mode kept as it is,
+/// else evaluated for the uid.
+fn raw_or_evaluated(host: &AppHost, code: i32, uid: i32, package: Option<&str>, raw: bool) -> Result<i32, Exception> {
     let (_, name, default, restriction) = *op(code)?;
     let app_id = uid.rem_euclid(100_000);
     if let Some(restriction) = restriction
@@ -107,6 +113,7 @@ pub(super) fn mode(host: &AppHost, code: i32, uid: i32, package: Option<&str>) -
         .and_then(|p| access.and_then(|a| a.package_app_ops.iter().find(|(name, _)| name == p)))
         .and_then(|(_, ops)| named(ops));
     Ok(match uid_mode.or(package_mode).unwrap_or(default) {
+        MODE_FOREGROUND if raw => MODE_FOREGROUND,
         MODE_FOREGROUND if host.uid_running(uid) => MODE_ALLOWED,
         MODE_FOREGROUND => MODE_IGNORED,
         mode => mode,
@@ -306,6 +313,13 @@ impl Service for AppOps {
                 let args = appops::CheckOperationForDevice::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 match mode(&self.host, args.code, args.uid, args.package_name.as_deref()) {
                     Ok(mode) => appops::write_check_operation_for_device_reply(&mut p, mode),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            appops::CHECK_OPERATION_RAW_FOR_DEVICE => {
+                let args = appops::CheckOperationRawForDevice::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match raw_or_evaluated(&self.host, args.code, args.uid, args.package_name.as_deref(), true) {
+                    Ok(mode) => appops::write_check_operation_raw_for_device_reply(&mut p, mode),
                     Err(e) => return reply(Err(e)),
                 }
             }

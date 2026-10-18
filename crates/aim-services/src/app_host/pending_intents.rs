@@ -233,7 +233,7 @@ impl AppHost {
                 && self
                     .inputs()?
                     .compat
-                    .is_enabled(BLOCK_MUTABLE_IMPLICIT_PENDING_INTENT, target_sdk(&package)?)
+                    .is_enabled(BLOCK_MUTABLE_IMPLICIT_PENDING_INTENT, Some(&package), target_sdk(&package)?)
             {
                 return Err(Exception::illegal_argument(format!(
                     "{package}: Targeting U+ (version 34 and above) disallows creating or retrieving a PendingIntent with FLAG_MUTABLE, an implicit Intent within and without FLAG_NO_CREATE and FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT for security reasons. To retrieve an already existing PendingIntent, use FLAG_NO_CREATE, however, to create a new PendingIntent with an implicit Intent use FLAG_IMMUTABLE."

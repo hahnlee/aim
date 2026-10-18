@@ -1063,6 +1063,7 @@ impl ConnectivityService {
             let enabled = match package.and_then(|p| inputs.packages.application_info(p, 0)) {
                 Some(ai) => inputs.compat.is_enabled(
                     ENABLE_SELF_CERTIFIED_CAPABILITIES_DECLARATION,
+                    package,
                     ai.target_sdk_version,
                 ),
                 None => inputs

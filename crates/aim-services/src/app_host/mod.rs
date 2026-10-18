@@ -48,6 +48,7 @@ mod package_writes;
 pub mod packages;
 pub mod pending_intents;
 pub mod permission_checker;
+pub mod platform_compat;
 pub mod permission_controller;
 pub mod permission_manager;
 pub mod playback;
@@ -435,6 +436,7 @@ impl AppHost {
             ("audio", Arc::new(audio_service::AudioService::new(self.clone()))),
             ("mount", Arc::new(storage::StorageManager(self.clone()))),
             ("uri_grants", Arc::new(uri_grants::UriGrantsManager(self.clone()))),
+            ("platform_compat", Arc::new(platform_compat::PlatformCompat(self.clone()))),
             ("sensor_privacy", Arc::new(sensor_privacy::SensorPrivacy::new(self.clone()))),
             (
                 "content",
@@ -518,6 +520,7 @@ impl AppHost {
         };
         let compat = compat::CompatConfig::load(
             &configured.root,
+            &configured.data,
             number("ro.build.version.sdk")?,
             &property("ro.build.version.codename")?,
         )
@@ -635,7 +638,7 @@ impl AppHost {
                 inputs.settings.get(settings::Table::Global, "hidden_api_policy").as_deref(),
             )
                 << API_ENFORCEMENT_POLICY_SHIFT
-                | memory_safety(&inputs.compat, setting.flags, target_sdk),
+                | memory_safety(&inputs.compat, name, setting.flags, target_sdk),
             // `getExternalStorageMountMode`: every app's scoped view.
             mount_external: zygote::MountExternal::Default,
             target_sdk_version: target_sdk,
@@ -649,7 +652,7 @@ impl AppHost {
             allowlisted_data_info: isolation.allowlisted,
             bind_mount_app_storage_dirs: isolation.storage_dirs,
             bind_mount_app_data_dirs: isolation.data_dirs,
-            disabled_compat_changes: inputs.compat.disabled_changes(target_sdk),
+            disabled_compat_changes: inputs.compat.disabled_changes(name, target_sdk),
             start_seq,
         };
         let started = Instant::now();
@@ -712,7 +715,7 @@ impl AppHost {
         let app_id = uid % PER_USER_RANGE;
         let mut data_dirs = flag("persist.zygote.app_data_isolation", true)
             && (FIRST_APPLICATION_UID..=19_999).contains(&app_id)
-            && inputs.compat.is_enabled(APP_DATA_DIRECTORY_ISOLATION, target_sdk);
+            && inputs.compat.is_enabled(APP_DATA_DIRECTORY_ISOLATION, Some(package), target_sdk);
         let ps = state.packages.get(package).ok_or_else(|| Exception::illegal_argument(format!("unknown package {package}")))?;
         let targets: Vec<&str> = match &ps.shared_user {
             Some(shared) => state.packages.values().filter(|p| p.shared_user.as_ref() == Some(shared)).map(|p| p.name.as_str()).collect(),
@@ -1764,7 +1767,7 @@ impl AppHost {
             return Ok(inputs.compat.default_value(change));
         }
         Ok(names.all(|name| match inputs.packages.application_info(&name, 0) {
-            Some(ai) => inputs.compat.is_enabled(change, ai.target_sdk_version),
+            Some(ai) => inputs.compat.is_enabled(change, Some(&name), ai.target_sdk_version),
             None => inputs.compat.default_value(change),
         }))
     }
@@ -1833,6 +1836,7 @@ impl AppHost {
             })
             .collect();
         let target_sdk = info.target_sdk_version;
+        let app_package = info.item.package_name.clone().unwrap_or_default();
         let mut p = Parcel::new();
         thread::BindApplication::<
             package::info::ApplicationInfo,
@@ -1875,8 +1879,8 @@ impl AppHost {
             }),
             autofill_options: None,
             content_capture_options: None,
-            disabled_compat_changes: Some(inputs.compat.disabled_changes(target_sdk)),
-            loggable_compat_changes: Some(inputs.compat.loggable_changes(target_sdk)),
+            disabled_compat_changes: Some(inputs.compat.disabled_changes(&app_package, target_sdk)),
+            loggable_compat_changes: Some(inputs.compat.loggable_changes(&app_package, target_sdk)),
             serialized_system_font_map: None,
             application_shared_memory_fd: bind::RawFileDescriptor(
                 inputs
@@ -1962,15 +1966,15 @@ fn hidden_api_policy(flags: i32, private_flags: i32, private_flags_ext: i32, set
 /// `Zygote.getMemorySafetyRuntimeFlags` for an app with no manifest
 /// overrides, on a kernel without tagged pointers (the layer answers
 /// `PR_GET_TAGGED_ADDR_CTRL` with `EINVAL`), which disables tagging.
-fn memory_safety(compat: &compat::CompatConfig, flags: i32, target_sdk: i32) -> i32 {
-    let gwp_asan = if compat.is_enabled(GWP_ASAN, target_sdk) {
+fn memory_safety(compat: &compat::CompatConfig, package: &str, flags: i32, target_sdk: i32) -> i32 {
+    let gwp_asan = if compat.is_enabled(GWP_ASAN, Some(package), target_sdk) {
         GWP_ASAN_LEVEL_ALWAYS
     } else if flags & FLAG_SYSTEM != 0 {
         GWP_ASAN_LEVEL_LOTTERY
     } else {
         GWP_ASAN_LEVEL_DEFAULT
     };
-    let zero_init = if compat.is_enabled(NATIVE_HEAP_ZERO_INIT, target_sdk) {
+    let zero_init = if compat.is_enabled(NATIVE_HEAP_ZERO_INIT, Some(package), target_sdk) {
         NATIVE_HEAP_ZERO_INIT_ENABLED
     } else {
         0
@@ -2746,7 +2750,7 @@ mod tests {
         let compat = compat::CompatConfig::default();
         // Undeclared changes are enabled.
         assert_eq!(
-            memory_safety(&compat, 0, 35),
+            memory_safety(&compat, "a", 0, 35),
             GWP_ASAN_LEVEL_ALWAYS | NATIVE_HEAP_ZERO_INIT_ENABLED
         );
         assert_eq!(instruction_set("arm64-v8a"), "arm64");
