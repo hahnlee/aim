@@ -3,9 +3,9 @@
 //! (`setListener`, `reset`, user 0's addition and start), has the agent
 //! mount user 0's emulated volume (`aim-app-host-agent`, which serves its
 //! FUSE connection in MediaProvider's place), follows the volume's state
-//! from vold's listener calls, answers apps' `getVolumeList` and
-//! `mkdirs`, and tells the listeners apps register of the volume's state
-//! changes (`registerListener`).
+//! from vold's listener calls, answers apps' `getVolumeList`,
+//! `getVolumes` and `mkdirs`, and tells the listeners apps register of
+//! the volume's state changes (`registerListener`).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
@@ -48,6 +48,8 @@ const MOUNT_FLAG_VISIBLE_FOR_WRITE: i32 = 1 << 2;
 const VOLD_PATIENCE: Duration = Duration::from_secs(30);
 /// The agent's `mountStorage(int userId)`.
 pub(super) const MOUNT_STORAGE: u32 = 5;
+/// `VolumeInfo.TYPE_PRIVATE` (`IVold.VOLUME_TYPE_PRIVATE`).
+const TYPE_PRIVATE: i32 = 1;
 /// `VolumeInfo.STATE_*` (`IVold.VOLUME_STATE_*`).
 const STATE_UNMOUNTED: i32 = 0;
 const STATE_MOUNTED: i32 = 2;
@@ -81,9 +83,10 @@ pub struct Volumes {
 }
 
 /// `VolumeInfo` of user 0's emulated volume, as StorageManagerService
-/// keeps it from vold's calls.
+/// keeps it from vold's calls, or of internal storage.
 #[derive(Clone)]
 struct VolumeInfo {
+    id: &'static str,
     kind: i32,
     part_guid: Option<String>,
     mount_flags: i32,
@@ -101,6 +104,7 @@ impl VolumeInfo {
     /// storage: primary and visible for writing.
     fn created(kind: i32, part_guid: Option<String>, mount_user: i32) -> Self {
         VolumeInfo {
+            id: VOLUME,
             kind,
             part_guid,
             mount_flags: MOUNT_FLAG_PRIMARY | MOUNT_FLAG_VISIBLE_FOR_WRITE,
@@ -113,11 +117,29 @@ impl VolumeInfo {
             internal_path: None,
         }
     }
+
+    /// `addInternalVolumeLocked`: internal storage, mounted at the data
+    /// directory, present from the service's start and after each reset.
+    fn internal() -> Self {
+        VolumeInfo {
+            id: "private",
+            kind: TYPE_PRIVATE,
+            part_guid: None,
+            mount_flags: 0,
+            mount_user: -10000, // `UserHandle.USER_NULL`
+            state: STATE_MOUNTED,
+            fs_type: None,
+            fs_uuid: None,
+            fs_label: None,
+            path: Some("/data".into()),
+            internal_path: None,
+        }
+    }
 }
 
 impl WriteParcelable for VolumeInfo {
     fn write_to(&self, p: &mut Parcel) {
-        p.write_string8(Some(VOLUME));
+        p.write_string8(Some(self.id));
         p.write_i32(self.kind);
         p.write_i32(0); // no disk
         p.write_string8(self.part_guid.as_deref());
@@ -176,6 +198,14 @@ impl AppHost {
         .map_err(|e| format!("{e:?}"))?;
         eprintln!("app host: {VOLUME} mounted");
         Ok(())
+    }
+
+    /// `getVolumes`: `mVolumes`, internal storage and the emulated
+    /// volume once vold created it, in their `ArrayMap` order.
+    fn volume_infos(&self) -> Vec<Option<VolumeInfo>> {
+        let mut volumes = vec![VolumeInfo::internal()];
+        volumes.extend(self.storage.volume.lock().unwrap().clone());
+        crate::package::info::array_order(volumes, |v| v.id).into_iter().map(Some).collect()
     }
 
     /// Whether user 0's emulated volume is mounted
@@ -674,6 +704,12 @@ impl Service for StorageManager {
                 let args = sm::GetVolumeList::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply(self.0.volume_list(call, args.user_id, args.calling_package.as_deref()))
             }
+            sm::GET_VOLUMES => {
+                sm::GetVolumes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                sm::write_get_volumes_reply(&mut p, Some(&self.0.volume_infos()));
+                Ok(p)
+            }
             sm::MKDIRS => {
                 let args = sm::Mkdirs::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply(self.0.mkdirs(call, args.calling_pkg.as_deref(), args.path.as_deref()))
@@ -752,5 +788,13 @@ mod tests {
         }
         assert_eq!(r.read_string8().unwrap().as_deref(), Some("/storage/emulated"));
         assert_eq!(r.read_string8().unwrap(), None);
+    }
+
+    /// `mVolumes` hashes its ids: `"private"` hashes below `"emulated;0"`
+    /// and sorts first.
+    #[test]
+    fn volumes_keep_their_array_map_order() {
+        let ids = crate::package::info::array_order(vec![VolumeInfo::created(2, None, 0), VolumeInfo::internal()], |v| v.id);
+        assert_eq!(ids.iter().map(|v| v.id).collect::<Vec<_>>(), ["private", VOLUME]);
     }
 }
