@@ -305,18 +305,42 @@ impl AppHost {
     /// process's start, and whether one relaunches (its windows are not
     /// told they resized).
     pub(super) fn reconfigure_activities(&self, task: i32, globals: &HashMap<u32, Configuration>, bounds: config::Rect) -> (ProcessItems, bool) {
+        self.reconfigure(|r| r.task == task, |uid| globals.get(&uid), |_| Some(bounds))
+    }
+
+    /// `ensureActivityConfiguration` of every activity once the global
+    /// configuration became `global` (`RootWindowContainer
+    /// .onConfigurationChanged`): each in its freeform task's bounds
+    /// (`freeform`), else the display's.
+    pub(super) fn reconfigure_all_activities(&self, global: &Configuration, freeform: impl Fn(i32) -> Option<config::Rect>) -> ProcessItems {
+        self.reconfigure(|_| true, |_| Some(global), freeform).0
+    }
+
+    /// `updateReportedConfigurationAndSend` of the activities `pick`
+    /// picks, each on its uid's global configuration, in its task's
+    /// freeform bounds if it has them.
+    fn reconfigure<'g>(
+        &self,
+        pick: impl Fn(&ActivityRecord) -> bool,
+        global_of: impl Fn(u32) -> Option<&'g Configuration>,
+        freeform: impl Fn(i32) -> Option<config::Rect>,
+    ) -> (ProcessItems, bool) {
         let mut records = self.activities.records.lock().unwrap();
         let mut items: ProcessItems = Vec::new();
         let mut relaunching = false;
-        for (&ptr, record) in records.iter_mut().filter(|(_, r)| r.task == task) {
+        for (&ptr, record) in records.iter_mut().filter(|(_, r)| pick(r)) {
             let token = Binder::Local(ptr);
-            let Some(global) = globals.get(&record.uid) else { continue };
-            let mut new = global.of_freeform_task(bounds);
+            let Some(global) = global_of(record.uid) else { continue };
+            let mut new = match freeform(record.task) {
+                Some(bounds) => global.of_freeform_task(bounds),
+                None => global.clone(),
+            };
             new.window.activity_type = ACTIVITY_TYPE_STANDARD;
             let Some(old) = record.reported.replace(new.clone()) else { continue };
             if old == new {
                 continue;
             }
+            let bounds = new.window.bounds;
             let window = ActivityWindowInfo { embedded: false, task_bounds: bounds, task_fragment_bounds: bounds };
             // `getConfigurationChanges`: the size changes its buckets
             // matter for; a window configuration change alone is none.
@@ -466,6 +490,24 @@ impl Item for ResumeActivityItem {
         p.write_i32(self.proc_state);
         p.write_bool(self.forward);
         p.write_bool(false); // no compat fake focus
+    }
+}
+
+/// `ConfigurationChangeItem`: a process's new global configuration, of
+/// the default device.
+pub(super) struct ConfigurationChangeItem {
+    pub config: Configuration,
+}
+
+impl Item for ConfigurationChangeItem {
+    fn class(&self) -> &'static str {
+        "android.app.servertransaction.ConfigurationChangeItem"
+    }
+
+    fn write_fields(&self, p: &mut Parcel) {
+        p.write_i32(1);
+        self.config.write_to(p);
+        p.write_i32(0); // `Context.DEVICE_ID_DEFAULT`
     }
 }
 
@@ -871,5 +913,22 @@ impl Service for ActivityClientController {
                 .0
                 .unimplemented("activity client controller", code))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_configuration_change_is_the_configuration_then_the_default_device() {
+        let config = Configuration::default();
+        let mut expected = Parcel::new();
+        expected.write_i32(1);
+        config.write_to(&mut expected);
+        expected.write_i32(0);
+        let mut p = Parcel::new();
+        ConfigurationChangeItem { config }.write_fields(&mut p);
+        assert_eq!(p.data(), expected.data());
     }
 }
