@@ -30,7 +30,8 @@
 //! watchers (`collectAsyncNotedOp`), or waits for its `extractAsyncOps`
 //! when none took it. The app host's own services ask as the system server
 //! does; an attribution source with a token is not known to be registered
-//! (#1527).
+//! (#1527). Apps' runtime access messages are sampled as the original
+//! samples them (`appops_sampling.rs`).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
@@ -1678,11 +1679,32 @@ pub struct AppOps {
     host: Arc<AppHost>,
     permissions: Arc<PermissionManager>,
     watchers: Mutex<Vec<(i32, Binder)>>,
+    sampling: Mutex<super::appops_sampling::Sampling>,
 }
 
 impl AppOps {
     pub fn new(host: Arc<AppHost>, permissions: Arc<PermissionManager>) -> Self {
-        AppOps { host, permissions, watchers: Mutex::new(Vec::new()) }
+        AppOps { host, permissions, watchers: Mutex::new(Vec::new()), sampling: Mutex::new(super::appops_sampling::Sampling::new()) }
+    }
+
+    /// `getPackageNamesForSampling`: the packages of user 0 that request a
+    /// dangerous permission (`isSamplingTarget`).
+    fn sampling_targets(&self) -> Vec<String> {
+        let Ok((state, _)) = self.host.packages() else { return Vec::new() };
+        let mut names: Vec<String> = state
+            .packages
+            .values()
+            .filter(|ps| ps.users.get(&0).is_none_or(|u| u.installed))
+            .filter_map(|ps| ps.pkg.as_ref())
+            .filter(|pkg| {
+                pkg.requested_permissions.iter().any(|p| {
+                    self.permissions.protection_level(p).ok().flatten().is_some_and(|level| level & PROTECTION_MASK_BASE == PROTECTION_DANGEROUS)
+                })
+            })
+            .map(|pkg| pkg.package_name.clone())
+            .collect();
+        names.sort();
+        names
     }
 
     /// `startWatchingActive` and `startWatchingStarted`: the caller's own
@@ -1929,6 +1951,17 @@ impl Service for AppOps {
                 match should_collect_notes(&Host(&self.host), protection, args.op_code) {
                     Ok(collect) => appops::write_should_collect_notes_reply(&mut p, collect),
                     Err(e) => return reply(Err(e)),
+                }
+            }
+            appops::REPORT_RUNTIME_APP_OP_ACCESS_MESSAGE_AND_GET_CONFIG => {
+                let args = appops::ReportRuntimeAppOpAccessMessageAndGetConfig::<super::appops_sampling::Noted>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let Some(package) = args.package_name else {
+                    return reply(Err(Exception::new(EX_NULL_POINTER, "packageName")));
+                };
+                let config = self.sampling.lock().unwrap().report(&package, args.app_op.as_ref(), args.message.as_deref(), || self.sampling_targets());
+                match config {
+                    Ok(config) => appops::write_report_runtime_app_op_access_message_and_get_config_reply(&mut p, Some(&config)),
+                    Err(what) => return reply(Err(Exception::new(EX_NULL_POINTER, what))),
                 }
             }
             appops::START_WATCHING_MODE => {

@@ -16,6 +16,7 @@ pub mod activity_stack;
 pub mod activity_start;
 pub mod alarm_service;
 mod app_op_infos;
+pub mod appops_sampling;
 pub mod appops_service;
 pub mod audio_focus;
 pub mod audio_permissions;
