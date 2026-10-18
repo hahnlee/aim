@@ -99,6 +99,20 @@ landscape it relaunches into its landscape layout, with the advanced
 panel), and closing the window ends its process; opened again, it is
 idle 0.33 s after its process's start.
 
+## Coverage
+
+`tools/service-coverage.py ORIGINAL APP_HOST` measures how much of the
+original services' binder surface the app host serves (ADR 0014, the AIDL
+axis). It takes the `service list` of a full boot and of the app host,
+and reads two things: every interface's transactions from its stub in the
+original image's jars (SDK `dexdump`), and the transactions the dispatch
+arms of `crates/aim-services/src` name. For each of the original's
+services it reports who serves it (the app host, the service host, the
+original in the guest, or nobody) and its served and total transactions;
+a transaction answered outside a named arm is not counted. On 2026-10-18
+the app host and service host served 35 of the 211 Java services and 563
+of their 5,444 transactions; 158 Java services were absent.
+
 ## Not yet
 
 Focus changes within an app and accessibility (#1422); keys, the mouse
