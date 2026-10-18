@@ -302,7 +302,7 @@ impl AppHost {
         let real = super::activity_start::real_component(&info);
         let found = {
             let stack = self.activities.stack.lock().unwrap();
-            stack.find_task(&real, info.task_affinity.as_deref(), user).and_then(|t| stack.get(t)).map(|a| a.task)
+            stack.find_task(&real, info.task_affinity.as_deref(), user, None).and_then(|t| stack.get(t)).map(|a| a.task)
         };
         if let Some(id) = found {
             self.focus_task(id)?;

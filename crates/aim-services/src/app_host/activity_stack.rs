@@ -25,6 +25,7 @@
 
 use super::activity_start::LaunchIntent;
 use crate::package::intent::Intent;
+use crate::package::uri::Uri;
 
 /// `Intent.FLAG_ACTIVITY_*`.
 pub const FLAG_ACTIVITY_NO_HISTORY: i32 = 0x4000_0000;
@@ -361,16 +362,20 @@ impl Stack {
     }
 
     /// `FindTaskResult`: the top activity of the front task of
-    /// `component`, else of the front task of `affinity`, skipping tasks
-    /// topped by a `singleInstance` activity.
-    pub fn find_task(&self, component: &str, affinity: Option<&str>, user: u32) -> Option<u64> {
+    /// `component` with the same document data, else (neither being a
+    /// document) of the front task of `affinity`, skipping tasks topped by
+    /// a `singleInstance` activity. `document` is the data of a start that
+    /// is a document (`Intent.isDocument`), none of another.
+    pub fn find_task(&self, component: &str, affinity: Option<&str>, user: u32, document: Option<Option<&Uri>>) -> Option<u64> {
         let mut candidate = None;
         for task in self.tasks.iter().rev().filter(|t| t.user == user) {
             let Some(top) = self.top(task.id).filter(|a| a.user == user && a.launch_mode != LAUNCH_SINGLE_INSTANCE) else { continue };
-            if task.real_activity == component {
+            // The task's document data, if its intent is a document.
+            let task_document = (task.intent.flags & FLAG_ACTIVITY_NEW_DOCUMENT != 0).then_some(task.intent.data.as_ref());
+            if task.real_activity == component && document.flatten() == task_document.flatten() {
                 return Some(top.token);
             }
-            if candidate.is_none() && task.affinity.is_some() && task.affinity.as_deref() == affinity {
+            if document.is_none() && task_document.is_none() && candidate.is_none() && task.affinity.is_some() && task.affinity.as_deref() == affinity {
                 candidate = Some(top.token);
             }
         }
@@ -393,9 +398,6 @@ impl Stack {
         let mode = s.launch_mode;
         let single = matches!(mode, LAUNCH_SINGLE_INSTANCE | LAUNCH_SINGLE_TASK);
         let mut flags = document_flags(s.intent.flags, mode, s.document_launch_mode);
-        if flags & FLAG_ACTIVITY_NEW_DOCUMENT != 0 {
-            return Err("documents");
-        }
         // `setInitialState`.
         if mode == LAUNCH_SINGLE_INSTANCE_PER_TASK {
             flags |= FLAG_ACTIVITY_NEW_TASK;
@@ -404,6 +406,14 @@ impl Stack {
         if d.result_to.is_some() && flags & FLAG_ACTIVITY_NEW_TASK != 0 {
             d.cancel_result = true;
             d.result_to = None;
+        }
+        // A document is a task of its own, and one always new is another
+        // each time.
+        if flags & FLAG_ACTIVITY_NEW_DOCUMENT != 0 && d.result_to.is_none() {
+            flags |= FLAG_ACTIVITY_NEW_TASK;
+        }
+        if flags & FLAG_ACTIVITY_NEW_TASK != 0 && s.document_launch_mode == DOCUMENT_LAUNCH_ALWAYS {
+            flags |= FLAG_ACTIVITY_MULTIPLE_TASK;
         }
         let source = s.source.and_then(|t| self.get(t));
         let not_top = s.source.filter(|_| flags & FLAG_ACTIVITY_PREVIOUS_IS_TOP != 0);
@@ -423,7 +433,11 @@ impl Stack {
         let mut reused = match put {
             false => None,
             true if mode == LAUNCH_SINGLE_INSTANCE => self.find_activity(s.component, s.user).map(|a| a.task),
-            true => self.find_task(s.component, s.affinity, s.user).and_then(|t| self.get(t)).map(|a| a.task),
+            true => {
+                // `FindTaskResult` of the start's intent, with its flags.
+                let document = (flags & FLAG_ACTIVITY_NEW_DOCUMENT != 0).then_some(s.intent.data.as_ref());
+                self.find_task(s.component, s.affinity, s.user, document).and_then(|t| self.get(t)).map(|a| a.task)
+            }
         };
         if mode == LAUNCH_SINGLE_INSTANCE_PER_TASK && reused.and_then(|t| self.root(t)).is_some_and(|r| r.component != s.component) {
             reused = None;
@@ -1103,9 +1117,29 @@ mod tests {
         let for_result = super::Start { result_to: Some(1), ..other };
         let d = s.decide(&for_result).unwrap();
         assert!(d.cancel_result && d.result_to.is_none());
-        // Documents are not done.
+        // A document from an activity: a task of its own, no other's
+        // affinity.
         let document = Intent { flags: FLAG_ACTIVITY_NEW_DOCUMENT, ..Default::default() };
-        assert!(s.decide(&start("com.example/B", 0, &document, Some(1))).is_err());
+        let d = s.decide(&start("com.example/B", 0, &document, Some(1))).unwrap();
+        assert_eq!((d.flags & FLAG_ACTIVITY_NEW_TASK, d.outcome), (FLAG_ACTIVITY_NEW_TASK, Outcome::New(None)));
+        // Of the root of a task that is no document, with no data: that
+        // task, as `FindTaskResult` compares no data with none.
+        assert_eq!(s.decide(&start("com.example/Main", 0, &document, Some(1))).unwrap().outcome, Outcome::Front(START_DELIVERED_TO_TOP));
+        // Always a new document: MULTIPLE_TASK.
+        let always = super::Start { document_launch_mode: DOCUMENT_LAUNCH_ALWAYS, ..start("com.example/Main", 0, &none, Some(1)) };
+        let d = s.decide(&always).unwrap();
+        assert_ne!(d.flags & FLAG_ACTIVITY_MULTIPLE_TASK, 0);
+        assert_eq!(d.outcome, Outcome::New(None));
+        // A document task of some data is found by a document of the same
+        // data alone.
+        let data = |uri: &str| Intent { flags: FLAG_ACTIVITY_NEW_DOCUMENT, data: Some(Uri::parse(uri)), ..Default::default() };
+        let mut doc = task(9, "Doc", Some(APP));
+        doc.intent = data("content://a");
+        let d = Decision { outcome: Outcome::New(None), ..Default::default() };
+        s.apply(&d, Then::Add(activity(5, 9, "Doc", 0), Some(doc)), None, true);
+        let (a, b) = (data("content://a"), data("content://b"));
+        assert_eq!(s.decide(&start("com.example/Doc", 0, &a, Some(1))).unwrap().outcome, Outcome::Front(START_DELIVERED_TO_TOP));
+        assert_eq!(s.decide(&start("com.example/Doc", 0, &b, Some(1))).unwrap().outcome, Outcome::New(None));
     }
 
     #[test]
