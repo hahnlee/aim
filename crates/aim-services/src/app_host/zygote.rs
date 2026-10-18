@@ -7,11 +7,14 @@
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 
-/// `Zygote.MOUNT_EXTERNAL_*`.
+/// `Zygote.MOUNT_EXTERNAL_*` (`StorageManager.MOUNT_MODE_EXTERNAL_*`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MountExternal {
     None,
     Default,
+    Installer,
+    PassThrough,
+    AndroidWritable,
 }
 
 /// What `ProcessList.startProcess` passes `Process.start` for a regular
@@ -69,8 +72,12 @@ impl Start {
             format!("--setgid={}", self.uid),
             format!("--runtime-flags={}", self.runtime_flags),
         ];
-        if self.mount_external == MountExternal::Default {
-            args.push("--mount-external-default".into());
+        match self.mount_external {
+            MountExternal::None => {}
+            MountExternal::Default => args.push("--mount-external-default".into()),
+            MountExternal::Installer => args.push("--mount-external-installer".into()),
+            MountExternal::PassThrough => args.push("--mount-external-pass-through".into()),
+            MountExternal::AndroidWritable => args.push("--mount-external-android-writable".into()),
         }
         args.push(format!("--target-sdk-version={}", self.target_sdk_version));
         if !self.gids.is_empty() {

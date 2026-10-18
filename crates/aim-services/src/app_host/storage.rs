@@ -17,6 +17,7 @@ use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Pa
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_os_storage_istoragemanager as sm;
 
+use super::zygote::MountExternal;
 use super::{AppHost, reply};
 
 /// vold's service and `IVold`'s calls the app host makes, in the
@@ -62,6 +63,8 @@ const FLAG_RECEIVER_INCLUDE_BACKGROUND: i32 = 0x0100_0000;
 const EXTRA_STORAGE_VOLUME: &str = "android.os.storage.extra.STORAGE_VOLUME";
 /// `Manifest.permission.WRITE_MEDIA_STORAGE`.
 const WRITE_MEDIA_STORAGE: &str = "android.permission.WRITE_MEDIA_STORAGE";
+/// `ApplicationInfo.PRIVATE_FLAG_SIGNED_WITH_PLATFORM_KEY`.
+const PRIVATE_FLAG_SIGNED_WITH_PLATFORM_KEY: i32 = 1 << 20;
 /// `PackageManager.PROPERTY_NO_APP_DATA_STORAGE`.
 const NO_APP_DATA_STORAGE: &str = "android.internal.PROPERTY_NO_APP_DATA_STORAGE";
 
@@ -179,6 +182,59 @@ impl AppHost {
     /// (`StorageManagerInternal.isFuseMounted`).
     pub(super) fn storage_mounted(&self) -> bool {
         self.storage.volume.lock().unwrap().as_ref().is_some_and(|v| v.state == STATE_MOUNTED)
+    }
+
+    /// `StorageManagerInternal.getExternalStorageMountMode`
+    /// (`getMountModeInternal`) of `package`'s process of `uid`.
+    pub(super) fn mount_mode(&self, uid: i32, package: &str) -> Result<MountExternal, Exception> {
+        /// `AppOpsManager.OP_REQUEST_INSTALL_PACKAGES`.
+        const OP_REQUEST_INSTALL_PACKAGES: i32 = 66;
+        let (state, resolution) = self.packages()?;
+        let user = uid / 100_000;
+        let app_id = uid % 100_000;
+        let packages: Vec<&str> = state.packages.values().filter(|ps| ps.app_id == app_id).map(|ps| ps.name.as_str()).collect();
+        if packages.is_empty() {
+            return Ok(MountExternal::None);
+        }
+        if state.packages.get(package).and_then(|ps| ps.users.get(&user)).is_some_and(|u| u.instant_app) {
+            return Ok(MountExternal::None);
+        }
+        let authority_app_id = |authority: &str| {
+            resolution.components.provider_by_authority(authority).and_then(|p| state.packages.get(&p.package)).map(|ps| ps.app_id)
+        };
+        // `isExternalStorageService`: the media store's.
+        if authority_app_id("media") == Some(app_id) {
+            return Ok(MountExternal::PassThrough);
+        }
+        if authority_app_id("downloads") == Some(app_id) || authority_app_id("com.android.externalstorage.documents") == Some(app_id) {
+            return Ok(MountExternal::AndroidWritable);
+        }
+        if self.check_permission(Some("android.permission.ACCESS_MTP"), uid)? == 0
+            && self.inputs()?.packages.application_info(package, 0).is_some_and(|ai| ai.private_flags & PRIVATE_FLAG_SIGNED_WITH_PLATFORM_KEY != 0)
+        {
+            return Ok(MountExternal::AndroidWritable);
+        }
+        let install = self.check_permission(Some("android.permission.INSTALL_PACKAGES"), uid)? == 0;
+        let mut install_op = false;
+        for name in packages {
+            if super::appops_service::mode(self, OP_REQUEST_INSTALL_PACKAGES, uid, Some(name))? == super::appops_service::MODE_ALLOWED {
+                install_op = true;
+                break;
+            }
+        }
+        Ok(if install || install_op { MountExternal::Installer } else { MountExternal::Default })
+    }
+
+    /// `StorageManagerInternal.hasExternalStorageAccess`: the
+    /// MANAGE_EXTERNAL_STORAGE op allowed, or at its default the
+    /// permission held.
+    pub(super) fn has_external_storage_access(&self, uid: i32, package: &str) -> Result<bool, Exception> {
+        /// `AppOpsManager.OP_MANAGE_EXTERNAL_STORAGE`.
+        const OP_MANAGE_EXTERNAL_STORAGE: i32 = 92;
+        Ok(match super::appops_service::mode(self, OP_MANAGE_EXTERNAL_STORAGE, uid, Some(package))? {
+            super::appops_service::MODE_DEFAULT => self.check_permission(Some("android.permission.MANAGE_EXTERNAL_STORAGE"), uid)? == 0,
+            mode => mode == super::appops_service::MODE_ALLOWED,
+        })
     }
 
     /// The uid the FUSE daemon runs as: user 0's of the app holding the
