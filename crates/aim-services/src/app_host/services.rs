@@ -11,7 +11,8 @@
 //! does (`bindServiceAsUser` from system_server, a connection of its
 //! own). A service runs in its process (`android:process`), started for
 //! it when it does not run. Isolated services and foreground services are
-//! not run (#1492).
+//! not run (#1492). `getServices` lists them as
+//! `getRunningServiceInfoLocked` does.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex};
@@ -19,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use aim_binder_host::local::Strong;
 use aim_binder_host::parcel::{
-    Binder, EX_ILLEGAL_STATE, Exception, Parcel, Reader, Result as ParcelResult,
+    Binder, EX_BAD_PARCELABLE, EX_ILLEGAL_STATE, Exception, Parcel, Reader, Result as ParcelResult,
 };
 use aim_service_aidl::android_app_iapplicationthread as thread;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
@@ -28,7 +29,7 @@ use super::activity_start::Component;
 use super::broadcasts::filter_equals;
 use super::kept::{By, KeptIntent, RawIntent};
 use super::{AppHost, PROCESS_STATE_TOP, STOCK_PM_FLAGS};
-use crate::package::info::ServiceInfo;
+use crate::package::info::{ServiceInfo, java_hash};
 use crate::package::list_slice::Slice;
 
 /// `Context.BIND_AUTO_CREATE`; `BIND_EXTERNAL_SERVICE` (both forms).
@@ -37,6 +38,8 @@ const BIND_EXTERNAL_SERVICE: i64 = 0x8000_0000;
 const BIND_EXTERNAL_SERVICE_LONG: i64 = 1 << 62;
 /// `ServiceInfo.FLAG_ISOLATED_PROCESS`.
 const FLAG_ISOLATED_PROCESS: i32 = 0x1;
+/// `Process.SYSTEM_UID`.
+const SYSTEM_UID: i32 = 1000;
 /// `ActivityThread.SERVICE_DONE_EXECUTING_START`.
 const SERVICE_DONE_EXECUTING_START: i32 = 1;
 /// `Service.START_*` results.
@@ -125,6 +128,9 @@ struct Record {
     restart_time: Option<Instant>,
     next_restart_time: Option<Instant>,
     crash_count: i32,
+    /// When it was made, `elapsedRealtime` and `uptimeMillis`.
+    create_real_time: i64,
+    last_activity: i64,
 }
 
 /// The app host's end of a binding it makes (the system's
@@ -143,6 +149,17 @@ enum Conn {
     Host(Arc<dyn HostConnection>),
 }
 
+impl Conn {
+    /// Whether it is the same `IServiceConnection`.
+    fn same(&self, other: &Conn) -> bool {
+        match (self, other) {
+            (Conn::App(a), Conn::App(b)) => a.handle == b.handle,
+            (Conn::Host(a), Conn::Host(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
 /// `ConnectionRecord`.
 struct Connection {
     conn: Conn,
@@ -154,6 +171,8 @@ struct Connection {
     client: Option<i64>,
     activity: Option<u64>,
     flags: i64,
+    /// What a system client said the binding is for (`clientLabel`).
+    client_label: i32,
 }
 
 #[derive(Default)]
@@ -182,6 +201,84 @@ impl WriteParcelable for StartArgs {
         p.write_i32(self.flags);
         aim_service_aidl::write_typed(p, self.intent.as_ref().map(By).as_ref());
     }
+}
+
+/// `ActivityManager.RunningServiceInfo`. None of the app host's services
+/// is foreground (#1492) or runs in the system's process.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RunningServiceInfo {
+    package: String,
+    class: String,
+    pid: i32,
+    uid: i32,
+    process: String,
+    active_since: i64,
+    started: bool,
+    client_count: i32,
+    crash_count: i32,
+    last_activity_time: i64,
+    restarting: i64,
+    flags: i32,
+    client_package: Option<String>,
+    client_label: i32,
+}
+
+/// `RunningServiceInfo.FLAG_STARTED`, `FLAG_PERSISTENT_PROCESS`.
+const FLAG_STARTED: i32 = 1 << 0;
+const FLAG_PERSISTENT_PROCESS: i32 = 1 << 3;
+
+impl WriteParcelable for RunningServiceInfo {
+    fn write_to(&self, p: &mut Parcel) {
+        Component(&self.package, &self.class).write_to(p);
+        p.write_i32(self.pid);
+        p.write_i32(self.uid);
+        p.write_string16(Some(&self.process));
+        p.write_i32(0); // not foreground
+        p.write_i64(self.active_since);
+        p.write_i32(self.started as i32);
+        p.write_i32(self.client_count);
+        p.write_i32(self.crash_count);
+        p.write_i64(self.last_activity_time);
+        p.write_i64(self.restarting);
+        p.write_i32(self.flags);
+        p.write_string16(self.client_package.as_deref());
+        p.write_i32(self.client_label);
+    }
+}
+
+/// A service as `getRunningServiceInfoLocked` sees it: its info
+/// (`makeRunningServiceInfoLocked`), its user, the uid of the process it
+/// runs in, and when it restarts if it is restarting (uptime
+/// milliseconds).
+struct Running {
+    info: RunningServiceInfo,
+    user: i32,
+    app_uid: Option<i32>,
+    restarting: Option<i64>,
+}
+
+/// `getRunningServiceInfoLocked` for `uid`: at most `max` of `services`,
+/// in their map's order (`ServiceMap`'s `ArrayMap`, by their names'
+/// hashes), with INTERACT_ACROSS_USERS_FULL (`across_users`) those of each
+/// running user (user 0 alone runs), else those of the caller's user in a
+/// process of its uid, or all of its user's when `allowed`; then those of
+/// `services` restarting, in their order and picked alike, again with when
+/// they restart.
+fn pick(services: &[Running], max: i32, uid: i32, allowed: bool, across_users: bool) -> Vec<RunningServiceInfo> {
+    let user = uid / super::PER_USER_RANGE as i32;
+    let visible = |s: &Running| allowed || s.app_uid == Some(uid);
+    let hash = |s: &&Running| java_hash(&s.info.package).wrapping_add(java_hash(&s.info.class));
+    let mut map: Vec<&Running> = services.iter().collect();
+    map.sort_by_key(hash);
+    let listed = map
+        .into_iter()
+        .filter(|s| if across_users { s.user == 0 } else { s.user == user && visible(s) })
+        .map(|s| s.info.clone());
+    let restarting = services.iter().filter_map(|s| {
+        let at = s.restarting.filter(|_| across_users || s.user == user && visible(s))?;
+        Some(RunningServiceInfo { restarting: at, ..s.info.clone() })
+    });
+    listed.chain(restarting).take(max.max(0) as usize).collect()
 }
 
 /// The restart count and delay after a service with `count` restarts,
@@ -419,6 +516,8 @@ impl AppHost {
             restart_time: None,
             next_restart_time: None,
             crash_count: 0,
+            create_real_time: super::clock_ms(libc::CLOCK_MONOTONIC_RAW),
+            last_activity: super::clock_ms(libc::CLOCK_UPTIME_RAW),
         });
         token
     }
@@ -577,7 +676,7 @@ impl AppHost {
                 "File descriptors passed in Intent",
             ));
         }
-        let Some((client, ..)) = self.app_of_thread(caller) else {
+        let Some((client, _, client_uid, _)) = self.app_of_thread(caller) else {
             return Err(Exception::security(
                 "Unable to find app for caller when binding service",
             ));
@@ -595,6 +694,11 @@ impl AppHost {
             Some(_) => return Ok(0),
             None => None,
         };
+        // A system client may say what the binding is for, its intent then
+        // only its filter.
+        let bad = |e| Exception::new(EX_BAD_PARCELABLE, format!("bindService: intent: {e:?}"));
+        let client_label = if client_uid == SYSTEM_UID { intent.client_label().map_err(bad)? } else { 0 };
+        let intent = if client_label != 0 { intent.clone_filter().map_err(bad)? } else { intent };
         if flags & (BIND_EXTERNAL_SERVICE | BIND_EXTERNAL_SERVICE_LONG) != 0 {
             return Err(
                 self.unimplemented_named("activity", "an external service's binding (#1492)")
@@ -613,7 +717,7 @@ impl AppHost {
             Lookup::Found(info) => *info,
         };
         let conn = Conn::App(self.process.strong(conn));
-        self.bind_found(intent, info, conn, Some(client), activity, flags)?;
+        self.bind_found(intent, info, conn, Some(client), activity, flags, client_label)?;
         Ok(1)
     }
 
@@ -634,7 +738,7 @@ impl AppHost {
             Lookup::Found(info) => *info,
             Lookup::None | Lookup::Denied(_) => return Ok(false),
         };
-        self.bind_found(intent, info, Conn::Host(conn), None, None, bind_flags)?;
+        self.bind_found(intent, info, Conn::Host(conn), None, None, bind_flags, 0)?;
         Ok(true)
     }
 
@@ -653,6 +757,7 @@ impl AppHost {
     /// The rest of `bindServiceLocked`, for the service `info` found: the
     /// connection made, the service brought up if it auto-creates, and its
     /// binder passed or asked for.
+    #[allow(clippy::too_many_arguments)]
     fn bind_found(
         &self,
         intent: RawIntent,
@@ -661,6 +766,7 @@ impl AppHost {
         client: Option<i64>,
         activity: Option<u64>,
         flags: i64,
+        client_label: i32,
     ) -> Result<(), Exception> {
         let kept = KeptIntent::new(intent, &self.process);
         let mut state = self.services.state.lock().unwrap();
@@ -684,6 +790,7 @@ impl AppHost {
             client,
             activity,
             flags,
+            client_label,
         });
         if flags & BIND_AUTO_CREATE != 0 {
             self.bring_up(&mut state, token)?;
@@ -867,6 +974,8 @@ impl AppHost {
             self.send_args(state, token);
             return Ok(());
         }
+        // No longer restarting.
+        r.next_restart_time = None;
         if r.app.is_some() {
             // Waiting for its process to attach.
             return Ok(());
@@ -1192,6 +1301,58 @@ impl AppHost {
         }
     }
 
+    /// `getServices` (`ActivityManager.getRunningServices`) of `uid`: the
+    /// services it may see, at most `max`. The call's flags are unused, as
+    /// in the original.
+    pub(super) fn running_services(&self, uid: i32, max: i32) -> Result<Vec<Option<RunningServiceInfo>>, Exception> {
+        if super::is_isolated(uid) {
+            return Err(Exception::security("Isolated process not allowed to call getServices"));
+        }
+        let across_users = self.check_permission(Some("android.permission.INTERACT_ACROSS_USERS_FULL"), uid)? == 0;
+        let allowed = self.get_tasks_allowed(uid)?;
+        let (now, uptime) = (Instant::now(), super::clock_ms(libc::CLOCK_UPTIME_RAW));
+        let state = self.services.state.lock().unwrap();
+        let apps = self.apps.lock().unwrap();
+        let services: Vec<Running> = state
+            .records
+            .iter()
+            .map(|r| {
+                let app = r.app.filter(|_| r.created).and_then(|seq| apps.get(&seq));
+                let clients: Vec<&Connection> = state.connections.iter().filter(|c| c.service == r.token).collect();
+                // Its connections, by their `IServiceConnection`.
+                let client_count = clients.iter().enumerate().filter(|(i, c)| !clients[..*i].iter().any(|d| d.conn.same(&c.conn))).count();
+                let labelled = clients.iter().rev().find(|c| c.client_label != 0);
+                let mut flags = if r.start_requested { FLAG_STARTED } else { 0 };
+                if app.is_some_and(|a| a.persistent) {
+                    flags |= FLAG_PERSISTENT_PROCESS;
+                }
+                let uid = r.info.info.application_info.uid;
+                Running {
+                    info: RunningServiceInfo {
+                        package: r.package.clone(),
+                        class: r.class.clone(),
+                        pid: app.map_or(0, |a| a.pid),
+                        uid,
+                        process: super::providers::process_name(&r.info.info),
+                        active_since: r.create_real_time,
+                        started: r.start_requested,
+                        client_count: client_count as i32,
+                        crash_count: r.crash_count,
+                        last_activity_time: r.last_activity,
+                        restarting: 0,
+                        flags,
+                        client_package: labelled.and_then(|c| apps.get(&c.client?)).map(|a| a.package.clone()),
+                        client_label: labelled.map_or(0, |c| c.client_label),
+                    },
+                    user: uid / super::PER_USER_RANGE as i32,
+                    app_uid: app.map(|a| a.uid as i32),
+                    restarting: r.next_restart_time.map(|at| uptime + at.saturating_duration_since(now).as_millis() as i64),
+                }
+            })
+            .collect();
+        Ok(pick(&services, max, uid, allowed, across_users).into_iter().map(Some).collect())
+    }
+
     /// The connections made from activity `token` go with it
     /// (`ActivityServiceConnectionsHolder.disconnectActivityFromServices`).
     pub(super) fn activity_connections_gone(&self, token: u64) {
@@ -1228,6 +1389,68 @@ mod tests {
         assert_eq!(back_off(1, min * 4, 0, soon, min, reset, now), (1, min * 16));
         assert_eq!(back_off(3, min * 16, 0, Some(now - reset * 2), min, reset, now), (1, min));
         assert_eq!(back_off(1, min, 3, soon, min, reset, now), (1, BOUND_SERVICE_CRASH_RESTART_DURATION * 2));
+    }
+
+    /// `RunningServiceInfo.writeToParcel`.
+    #[test]
+    fn running_service_info_is_written_as_the_original_writes_it() {
+        let info = RunningServiceInfo {
+            package: "p".into(),
+            class: "p.S".into(),
+            pid: 42,
+            uid: 10100,
+            process: "p:remote".into(),
+            active_since: 5,
+            started: true,
+            client_count: 2,
+            crash_count: 1,
+            last_activity_time: 6,
+            restarting: 7,
+            flags: FLAG_STARTED,
+            client_package: Some("android".into()),
+            client_label: 0x0104_0000,
+        };
+        let mut p = Parcel::new();
+        info.write_to(&mut p);
+        let mut r = p.reader();
+        assert_eq!((r.read_string16().unwrap(), r.read_string16().unwrap()), (Some("p".into()), Some("p.S".into())));
+        assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap()), (42, 10100));
+        assert_eq!(r.read_string16().unwrap().as_deref(), Some("p:remote"));
+        assert_eq!(r.read_i32().unwrap(), 0); // not foreground
+        assert_eq!(r.read_i64().unwrap(), 5);
+        assert_eq!([r.read_i32().unwrap(), r.read_i32().unwrap(), r.read_i32().unwrap()], [1, 2, 1]);
+        assert_eq!([r.read_i64().unwrap(), r.read_i64().unwrap()], [6, 7]);
+        assert_eq!(r.read_i32().unwrap(), FLAG_STARTED);
+        assert_eq!(r.read_string16().unwrap().as_deref(), Some("android"));
+        assert_eq!(r.read_i32().unwrap(), 0x0104_0000);
+        assert_eq!(r.remaining(), 0);
+    }
+
+    /// `getRunningServiceInfoLocked`: the caller's uid's services, its
+    /// user's when allowed, every running user's across users, in the
+    /// map's order and then the restarting ones again, at most `max`.
+    #[test]
+    fn running_services_are_picked_as_the_original_picks_them() {
+        let service = |class: &str, uid: i32, app_uid: Option<i32>, restarting: Option<i64>| Running {
+            info: RunningServiceInfo { package: "p".into(), class: class.into(), uid, ..Default::default() },
+            user: uid / 100000,
+            app_uid,
+            restarting,
+        };
+        // By hash, "p.B" comes before "p.C".
+        let services = [
+            service("p.C", 10100, Some(10100), None),
+            service("p.B", 10101, Some(10101), None),
+            service("p.R", 10100, None, Some(99)),
+            service("p.U", 1010100, Some(1010100), None),
+        ];
+        let names = |list: Vec<RunningServiceInfo>| list.into_iter().map(|i| (i.class, i.restarting)).collect::<Vec<_>>();
+        let n = |s: &str, at: i64| (s.to_string(), at);
+        assert_eq!(names(pick(&services, 10, 10100, false, false)), [n("p.C", 0)]);
+        assert_eq!(names(pick(&services, 10, 10100, true, false)), [n("p.B", 0), n("p.C", 0), n("p.R", 0), n("p.R", 99)]);
+        assert_eq!(names(pick(&services, 10, 10100, false, true)), [n("p.B", 0), n("p.C", 0), n("p.R", 0), n("p.R", 99)]);
+        assert_eq!(names(pick(&services, 2, 10100, true, false)), [n("p.B", 0), n("p.C", 0)]);
+        assert!(pick(&services, -1, 10100, true, true).is_empty());
     }
 
     #[test]

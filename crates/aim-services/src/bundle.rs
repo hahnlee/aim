@@ -18,9 +18,9 @@ pub const MAGIC_NATIVE: i32 = 0x4C44_4E44;
 /// `Parcel.VAL_*`.
 const VAL_NULL: i32 = -1;
 const VAL_STRING: i32 = 0;
-const VAL_INTEGER: i32 = 1;
+pub(crate) const VAL_INTEGER: i32 = 1;
 const VAL_MAP: i32 = 2;
-const VAL_PARCELABLE: i32 = 4;
+pub(crate) const VAL_PARCELABLE: i32 = 4;
 const VAL_LONG: i32 = 6;
 const VAL_FLOAT: i32 = 7;
 const VAL_BOOLEAN: i32 = 9;

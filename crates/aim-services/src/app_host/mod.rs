@@ -169,6 +169,9 @@ const COMMON_SERVICES: &[&str] = &[
 /// `PackageManager.GET_SHARED_LIBRARY_FILES | MATCH_DEBUG_TRIAGED_MISSING`,
 /// `ActivityManagerService.STOCK_PM_FLAGS`.
 const STOCK_PM_FLAGS: i64 = 0x400 | 0x1000_0000;
+/// `ActivityManagerService.PERSISTENT_MASK`: `ApplicationInfo.FLAG_SYSTEM`
+/// and `FLAG_PERSISTENT`.
+const PERSISTENT_MASK: i32 = 0x1 | 0x8;
 /// `PackageManager.GET_URI_PERMISSION_PATTERNS`, `MATCH_DIRECT_BOOT_AUTO`.
 const GET_URI_PERMISSION_PATTERNS: i64 = 0x800;
 const MATCH_DIRECT_BOOT_AUTO: i64 = 0x1000_0000;
@@ -243,6 +246,9 @@ struct App {
     /// When an activity of it was last resumed, uptime milliseconds
     /// (`ProcessRecord.getLastActivityTime`).
     last_activity: i64,
+    /// `ProcessRecord.isPersistent`: user 0's process of a persistent
+    /// system app, named as the app.
+    persistent: bool,
 }
 
 #[derive(Default)]
@@ -670,6 +676,9 @@ impl AppHost {
                 removed: false,
                 first_frame: None,
                 last_activity: 0,
+                persistent: uid / PER_USER_RANGE == 0
+                    && app_info.flags & PERSISTENT_MASK == PERSISTENT_MASK
+                    && app_info.process_name.as_deref() == Some(process),
             },
         );
         Ok(pid)
@@ -1047,8 +1056,7 @@ impl AppHost {
             return Err(Exception::security("Isolated process not allowed to call getRunningAppProcesses"));
         }
         let all_users = self.check_permission(Some("android.permission.INTERACT_ACROSS_USERS_FULL"), uid)? == 0;
-        // `isGetTasksAllowed`.
-        let all_uids = self.check_permission(Some("android.permission.REAL_GET_TASKS"), uid)? == 0;
+        let all_uids = self.get_tasks_allowed(uid)?;
         let front = self.tasks.front_start();
         let apps = self.apps.lock().unwrap();
         let mut running: Vec<(&i64, &App)> = apps
@@ -1071,6 +1079,39 @@ impl AppHost {
             })
             .collect();
         Ok((!list.is_empty()).then_some(list))
+    }
+
+    /// `ActivityTaskManagerService.isGetTasksAllowed`: whether `uid` may
+    /// see other uids' tasks and processes: the recents component's, one
+    /// with REAL_GET_TASKS, or a privileged one with the old GET_TASKS.
+    fn get_tasks_allowed(&self, uid: i32) -> Result<bool, Exception> {
+        if self.recents_uid()?.is_some_and(|r| r.rem_euclid(PER_USER_RANGE as i32) == uid.rem_euclid(PER_USER_RANGE as i32)) {
+            return Ok(true);
+        }
+        if self.check_permission(Some("android.permission.REAL_GET_TASKS"), uid)? == 0 {
+            return Ok(true);
+        }
+        if self.check_permission(Some("android.permission.GET_TASKS"), uid)? != 0 {
+            return Ok(false);
+        }
+        let (state, resolution) = self.packages()?;
+        let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: uid };
+        query
+            .uid_privileged(uid)
+            .map_err(|crate::package::apps_filter::NotModelled(e)| Exception::new(EX_UNSUPPORTED_OPERATION, format!("isUidPrivileged: {e}")))
+    }
+
+    /// `RecentTasks.loadRecentsComponent`: the uid of the package of
+    /// `config_recentsComponentName`, if installed.
+    fn recents_uid(&self) -> Result<Option<i32>, Exception> {
+        const MATCH_DISABLED_COMPONENTS: i64 = 0x200;
+        const MATCH_UNINSTALLED_PACKAGES: i64 = 0x2000;
+        let packages = &self.inputs()?.packages;
+        let component = packages.framework_string("config_recentsComponentName").unwrap_or_default();
+        let Some((package, _)) = component.split_once('/') else {
+            return Ok(None);
+        };
+        Ok(packages.application_info(package, MATCH_UNINSTALLED_PACKAGES | MATCH_DISABLED_COMPONENTS).map(|ai| ai.uid))
     }
 
     /// `getMyMemoryState`: the calling process's state.
@@ -2438,6 +2479,22 @@ impl Service for Activity {
                 reply(self.0.running_app_processes(call).map(|list| {
                     let mut p = Parcel::new();
                     am::write_get_running_app_processes_reply(&mut p, list.as_deref());
+                    p
+                }))
+            }
+            am::GET_SERVICES => {
+                let a = am::GetServices::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.running_services(call.sender_euid as i32, a.max_num).map(|list| {
+                    let mut p = Parcel::new();
+                    am::write_get_services_reply(&mut p, Some(&list));
+                    p
+                }))
+            }
+            am::GET_PROCESS_MEMORY_INFO => {
+                let a = am::GetProcessMemoryInfo::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.process_memory_info(call.sender_euid as i32, a.pids).map(|infos| {
+                    let mut p = Parcel::new();
+                    am::write_get_process_memory_info_reply(&mut p, Some(&infos));
                     p
                 }))
             }

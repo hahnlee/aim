@@ -2708,7 +2708,7 @@ impl Query<'_> {
         }
     }
 
-    fn uid_privileged(&self, uid: i32) -> Result<bool, NotModelled> {
+    pub(crate) fn uid_privileged(&self, uid: i32) -> Result<bool, NotModelled> {
         if apps_filter::instant_app_package_name(self.state, self.calling_uid)?.is_some() {
             return Ok(false);
         }

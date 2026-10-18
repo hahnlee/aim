@@ -2,13 +2,14 @@
 //! `updateOomLevels` at `android-16.0.0_r1`): the memory the guest sees
 //! (the Mac's, as its `/proc/meminfo` and `sysinfo` report it), and the
 //! thresholds the original's OOM levels give for the device's memory and
-//! display.
+//! display; and `getProcessMemoryInfo`'s checks of which processes a
+//! caller may see.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use aim_binder_host::parcel::{Exception, Parcel};
+use aim_binder_host::parcel::{EX_NULL_POINTER, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
 
-use super::AppHost;
+use super::{AppHost, PER_USER_RANGE};
 
 /// `ProcessList`'s OOM adjustments and their minimum free memory, low and
 /// high, in KiB.
@@ -45,6 +46,78 @@ impl WriteParcelable for MemoryInfo {
             p.write_i64(v);
         }
     }
+}
+
+/// One kind of memory's sizes in `Debug.MemoryInfo`, in KiB, in the
+/// order of its `OFFSET_*`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Stats {
+    pss: i32,
+    swappable_pss: i32,
+    rss: i32,
+    private_dirty: i32,
+    shared_dirty: i32,
+    private_clean: i32,
+    shared_clean: i32,
+    swapped_out: i32,
+    swapped_out_pss: i32,
+}
+
+/// `Debug.MemoryInfo.NUM_OTHER_STATS + NUM_DVK_STATS`.
+const NUM_OTHER_KINDS: usize = 17 + 15;
+
+/// `Debug.MemoryInfo`: a process's dalvik, native and other memory, and
+/// each other kind's (`otherStats`).
+#[derive(Debug, Default, PartialEq)]
+pub struct ProcessMemoryInfo {
+    dalvik: Stats,
+    native: Stats,
+    other: Stats,
+    has_swapped_out_pss: bool,
+    other_stats: [Stats; NUM_OTHER_KINDS],
+}
+
+impl Stats {
+    fn values(&self) -> [i32; 9] {
+        [
+            self.pss,
+            self.swappable_pss,
+            self.rss,
+            self.private_dirty,
+            self.shared_dirty,
+            self.private_clean,
+            self.shared_clean,
+            self.swapped_out,
+            self.swapped_out_pss,
+        ]
+    }
+}
+
+impl WriteParcelable for ProcessMemoryInfo {
+    fn write_to(&self, p: &mut Parcel) {
+        for v in self.dalvik.values().into_iter().chain(self.native.values()) {
+            p.write_i32(v);
+        }
+        // `hasSwappedOutPss` before the other memory's swapped out PSS.
+        let other = self.other.values();
+        for v in &other[..8] {
+            p.write_i32(*v);
+        }
+        p.write_i32(self.has_swapped_out_pss as i32);
+        p.write_i32(other[8]);
+        let stats: Vec<i32> = self.other_stats.iter().flat_map(Stats::values).collect();
+        aim_service_aidl::write_int_array(p, Some(&stats));
+    }
+}
+
+/// Whether `getProcessMemoryInfo` measures a process of `target` (none
+/// for a pid of no app's process) for `uid`: its own uid's, else only with
+/// `all_uids` (`isGetTasksAllowed`), and another user's only with
+/// `all_users` (INTERACT_ACROSS_USERS_FULL).
+fn may_see(uid: i32, target: Option<i32>, all_uids: bool, all_users: bool) -> bool {
+    let user = |uid: i32| uid / PER_USER_RANGE as i32;
+    let target_user = target.map_or(-1, user);
+    target == Some(uid) || all_uids && (all_users || target_user == user(uid))
 }
 
 /// `updateOomLevels`: the minimum free memory of each OOM level, in KiB,
@@ -157,6 +230,25 @@ impl AppHost {
             foreground_app_threshold: mem_level(&min_free, FOREGROUND_APP_ADJ),
         })
     }
+
+    /// `getProcessMemoryInfo` of `uid` for `pids`: an empty
+    /// `Debug.MemoryInfo` for each process it may not see. Measuring one
+    /// it may see (`Debug.getMemoryInfo`) takes the guest's
+    /// `/proc/<pid>/smaps`, which nothing provides yet (#1543).
+    pub(super) fn process_memory_info(&self, uid: i32, pids: Option<Vec<i32>>) -> Result<Vec<Option<ProcessMemoryInfo>>, Exception> {
+        if super::is_isolated(uid) {
+            return Err(Exception::security("Isolated process not allowed to call getProcessMemoryInfo"));
+        }
+        let all_users = self.check_permission(Some("android.permission.INTERACT_ACROSS_USERS_FULL"), uid)? == 0;
+        let all_uids = self.get_tasks_allowed(uid)?;
+        let pids = pids.ok_or_else(|| Exception::new(EX_NULL_POINTER, "pids is null"))?;
+        let apps = self.apps.lock().unwrap();
+        let target = |pid: i32| apps.values().find(|a| a.pid == pid).map(|a| a.uid as i32);
+        if pids.iter().any(|&pid| may_see(uid, target(pid), all_uids, all_users)) {
+            return Err(self.unimplemented_named("activity", "getProcessMemoryInfo of a process its caller may see (#1543)"));
+        }
+        Ok(pids.iter().map(|_| Some(ProcessMemoryInfo::default())).collect())
+    }
 }
 
 #[cfg(test)]
@@ -175,6 +267,50 @@ mod tests {
         assert_eq!(small[0], 12288);
         let absolute = oom_min_free(16 * 1024, 1080, 1920, 0, 322560 * 2);
         assert_eq!(absolute[0], 73728 * 2);
+    }
+
+    /// `Debug.MemoryInfo.writeToParcel`: dalvik's, native's, the other
+    /// memory's (with `hasSwappedOutPss` before its swapped out PSS), then
+    /// `otherStats`, 32 kinds of 9.
+    #[test]
+    fn process_memory_info_is_written_as_the_original_writes_it() {
+        let stats = |base: i32| Stats {
+            pss: base,
+            swappable_pss: base + 1,
+            rss: base + 2,
+            private_dirty: base + 3,
+            shared_dirty: base + 4,
+            private_clean: base + 5,
+            shared_clean: base + 6,
+            swapped_out: base + 7,
+            swapped_out_pss: base + 8,
+        };
+        let mut info = ProcessMemoryInfo { dalvik: stats(10), native: stats(20), other: stats(30), has_swapped_out_pss: true, ..Default::default() };
+        info.other_stats[1] = stats(40);
+        let mut p = Parcel::new();
+        info.write_to(&mut p);
+        let mut r = p.reader();
+        let mut ints = |n: usize| (0..n).map(|_| r.read_i32().unwrap()).collect::<Vec<_>>();
+        assert_eq!(ints(18), (10..19).chain(20..29).collect::<Vec<_>>());
+        assert_eq!(ints(10), [30, 31, 32, 33, 34, 35, 36, 37, 1, 38]);
+        assert_eq!(ints(1), [288]);
+        let other = ints(288);
+        assert_eq!((&other[..9], &other[9..18]), (&[0; 9][..], &(40..49).collect::<Vec<_>>()[..]));
+        assert_eq!(r.remaining(), 0);
+    }
+
+    /// A caller sees its own uid's processes; another uid's of its user
+    /// with REAL_GET_TASKS, of another user (or a pid of no process) also
+    /// with INTERACT_ACROSS_USERS_FULL.
+    #[test]
+    fn callers_see_processes_as_the_original_lets_them() {
+        assert!(may_see(10100, Some(10100), false, false));
+        assert!(!may_see(10100, Some(10101), false, true));
+        assert!(may_see(10100, Some(10101), true, false));
+        assert!(!may_see(10100, Some(1010101), true, false));
+        assert!(may_see(10100, Some(1010101), true, true));
+        assert!(!may_see(10100, None, true, false));
+        assert!(may_see(10100, None, true, true));
     }
 
     #[test]
