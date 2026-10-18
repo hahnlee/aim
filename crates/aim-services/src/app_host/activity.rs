@@ -707,6 +707,14 @@ impl Service for ActivityTaskManager {
                     p
                 }))
             }
+            atm::GET_DEVICE_CONFIGURATION_INFO => {
+                atm::GetDeviceConfigurationInfo::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.device_configuration_info(call.sender_pid).map(|info| {
+                    let mut p = Parcel::new();
+                    atm::write_get_device_configuration_info_reply(&mut p, Some(&info));
+                    p
+                }))
+            }
             atm::GET_ACTIVITY_CLIENT_CONTROLLER => {
                 atm::GetActivityClientController::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let mut p = Parcel::new();
@@ -715,6 +723,83 @@ impl Service for ActivityTaskManager {
             }
             code => reply(Err(self.0.unimplemented("activity_task", code))),
         }
+    }
+}
+
+/// `android::base::ParseInt` of an `int` (`SystemProperties.getInt`):
+/// `strtoll` in base 0, after leading whitespace, with nothing after it.
+fn parse_int(s: &str) -> Option<i32> {
+    let s = s.trim_start_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
+    let (negative, s) = match s.as_bytes().first()? {
+        b'-' => (true, &s[1..]),
+        b'+' => (false, &s[1..]),
+        _ => (false, s),
+    };
+    let (radix, digits) = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        (16, hex)
+    } else if s.len() > 1 && s.starts_with('0') {
+        (8, &s[1..])
+    } else {
+        (10, s)
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+        return None;
+    }
+    let magnitude = i64::from_str_radix(digits, radix).ok()?;
+    i32::try_from(if negative { -magnitude } else { magnitude }).ok()
+}
+
+/// `ConfigurationInfo`.
+pub(super) struct ConfigurationInfo {
+    touch_screen: i32,
+    keyboard_type: i32,
+    navigation: i32,
+    input_features: i32,
+    gl_es_version: i32,
+}
+
+impl WriteParcelable for ConfigurationInfo {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i32(self.touch_screen);
+        p.write_i32(self.keyboard_type);
+        p.write_i32(self.navigation);
+        p.write_i32(self.input_features);
+        p.write_i32(self.gl_es_version);
+    }
+}
+
+impl AppHost {
+    /// `getDeviceConfigurationInfo`: of the calling process's configuration
+    /// (`getGlobalConfigurationForCallingPid`), and the GLES version
+    /// `ro.opengles.version` gives (`GL_ES_VERSION_UNDEFINED` without one).
+    fn device_configuration_info(&self, pid: i32) -> Result<ConfigurationInfo, Exception> {
+        /// `Configuration.KEYBOARD_*`, `NAVIGATION_*`;
+        /// `ConfigurationInfo.INPUT_FEATURE_*`.
+        const KEYBOARD_UNDEFINED: i32 = 0;
+        const KEYBOARD_NOKEYS: i32 = 1;
+        const NAVIGATION_DPAD: i32 = 2;
+        const NAVIGATION_TRACKBALL: i32 = 3;
+        const INPUT_FEATURE_HARD_KEYBOARD: i32 = 0x1;
+        const INPUT_FEATURE_FIVE_WAY_NAV: i32 = 0x2;
+        let bound = self.apps.lock().unwrap().values().find(|a| a.pid == pid && a.thread.is_some()).and_then(|a| a.config.clone());
+        let config = match bound {
+            Some(config) => config,
+            None => self.global_configuration()?,
+        };
+        let mut input_features = 0;
+        if matches!(config.navigation, NAVIGATION_DPAD | NAVIGATION_TRACKBALL) {
+            input_features |= INPUT_FEATURE_FIVE_WAY_NAV;
+        }
+        if !matches!(config.keyboard, KEYBOARD_UNDEFINED | KEYBOARD_NOKEYS) {
+            input_features |= INPUT_FEATURE_HARD_KEYBOARD;
+        }
+        Ok(ConfigurationInfo {
+            touch_screen: config.touchscreen,
+            keyboard_type: config.keyboard,
+            navigation: config.navigation,
+            input_features,
+            gl_es_version: self.property("ro.opengles.version").and_then(|v| parse_int(&v)).unwrap_or(0),
+        })
     }
 }
 
@@ -944,6 +1029,18 @@ impl Service for ActivityClientController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Integer properties parse as `ParseInt` does.
+    #[test]
+    fn int_properties_parse_as_parse_int() {
+        assert_eq!(parse_int("196610"), Some(196610));
+        assert_eq!(parse_int(" 0x30002"), Some(0x30002));
+        assert_eq!(parse_int("010"), Some(8));
+        assert_eq!(parse_int("-0"), Some(0));
+        assert_eq!(parse_int("196610 "), None);
+        assert_eq!(parse_int("3.2"), None);
+        assert_eq!(parse_int("4294967296"), None);
+    }
 
     #[test]
     fn a_configuration_change_is_the_configuration_then_the_default_device() {
