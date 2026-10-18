@@ -15,6 +15,7 @@ pub mod activity;
 pub mod activity_stack;
 pub mod activity_start;
 pub mod alarm_service;
+mod app_op_infos;
 pub mod appops_service;
 pub mod audio_focus;
 pub mod audio_permissions;
@@ -317,6 +318,8 @@ pub struct AppHost {
     broadcasts: broadcasts::Broadcasts,
     /// User 0's restrictions.
     user_restrictions: OnceLock<std::collections::BTreeSet<String>>,
+    /// What SensorPrivacyService persisted, read once.
+    sensor_privacy: OnceLock<sensor_privacy::Persisted>,
     /// audioserver, once it registered, and the stream volumes.
     audio_policy: OnceLock<audio_policy::AudioPolicy>,
     volumes: Mutex<Option<volume::Volumes>>,
@@ -370,6 +373,7 @@ impl AppHost {
             pending_intents: Default::default(),
             broadcasts: Default::default(),
             user_restrictions: OnceLock::new(),
+            sensor_privacy: OnceLock::new(),
             audio_policy: OnceLock::new(),
             volumes: Mutex::new(None),
             playback: Mutex::default(),
@@ -428,7 +432,7 @@ impl AppHost {
             ),
             ("window", Arc::new(window_manager::WindowManager(self.clone()))),
             ("user", Arc::new(user_service::UserManager::new(self.clone()))),
-            ("appops", Arc::new(appops_service::AppOps::new(self.clone()))),
+            ("appops", Arc::new(appops_service::AppOps::new(self.clone(), permission_manager.clone()))),
             ("trust", Arc::new(trust_service::TrustManager::new(self.clone()))),
             ("permission", Arc::new(permission_controller::PermissionController(self.clone()))),
             ("permissionmgr", permission_manager.clone()),

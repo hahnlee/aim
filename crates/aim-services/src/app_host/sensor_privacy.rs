@@ -3,16 +3,18 @@
 //! policy waits for at its start: whether the microphone and camera
 //! toggles are supported, and the all-sensor and toggle states the
 //! original last persisted (`/data/system/sensor_privacy.xml`,
-//! `sensor_privacy_impl.xml`). Listeners are kept; nothing changes the
-//! states (the Mac's microphone and camera privacy: #1476).
+//! `sensor_privacy_impl.xml`), and the ops the toggles restrict for
+//! `appops`. Listeners are kept; nothing changes the states (the Mac's
+//! microphone and camera privacy: #1476).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_ARGUMENT, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel};
 use aim_service_aidl::android_hardware_isensorprivacymanager as spm;
 
+use super::settings::Table;
 use super::{AppHost, reply};
 
 /// `SensorPrivacyManager.TOGGLE_TYPE_*`, `Sensors.*`, `StateTypes.*`.
@@ -23,11 +25,23 @@ const CAMERA: i32 = 2;
 const ENABLED: i32 = 1;
 const DISABLED: i32 = 2;
 const OBSERVE_SENSOR_PRIVACY: &str = "android.permission.OBSERVE_SENSOR_PRIVACY";
+/// The ops the toggles restrict: `AppOpsManager.OP_CAMERA`,
+/// `OP_RECORD_AUDIO`, `OP_PHONE_CALL_MICROPHONE`, `OP_PHONE_CALL_CAMERA`,
+/// `OP_RECEIVE_AMBIENT_TRIGGER_AUDIO`,
+/// `OP_RECEIVE_EXPLICIT_USER_INTERACTION_AUDIO`,
+/// `OP_RECEIVE_SANDBOX_TRIGGER_AUDIO`.
+const OP_CAMERA: i32 = 26;
+const OP_RECORD_AUDIO: i32 = 27;
+const OP_PHONE_CALL_MICROPHONE: i32 = 100;
+const OP_PHONE_CALL_CAMERA: i32 = 101;
+const OP_RECEIVE_AMBIENT_TRIGGER_AUDIO: i32 = 120;
+const OP_RECEIVE_EXPLICIT_USER_INTERACTION_AUDIO: i32 = 121;
+const OP_RECEIVE_SANDBOX_TRIGGER_AUDIO: i32 = 136;
 
 /// What the original persisted: the all-sensor state, and each toggle's
 /// (toggle type, user, sensor, state type).
 #[derive(Debug, Default, PartialEq)]
-struct Persisted {
+pub(super) struct Persisted {
     all_sensors: bool,
     toggles: Vec<(i32, i32, i32, i32)>,
 }
@@ -80,24 +94,52 @@ impl From<Exception> for Failure {
     }
 }
 
+/// What the original persisted, read once.
+fn persisted(host: &AppHost) -> Result<&Persisted, Exception> {
+    if let Some(p) = host.sensor_privacy.get() {
+        return Ok(p);
+    }
+    let persisted = Persisted::read(&host.data()?.join("system")).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+    Ok(host.sensor_privacy.get_or_init(|| persisted))
+}
+
+/// `isToggleSensorPrivacyEnabled` of the current user, user 0.
+fn toggle_enabled(host: &AppHost, toggle: i32, sensor: i32) -> Result<bool, Exception> {
+    Ok(persisted(host)?.state(toggle, 0, sensor) == ENABLED)
+}
+
+/// `isCombinedToggleSensorPrivacyEnabled`.
+fn combined_enabled(host: &AppHost, sensor: i32) -> Result<bool, Exception> {
+    Ok(toggle_enabled(host, TOGGLE_TYPE_SOFTWARE, sensor)? || toggle_enabled(host, TOGGLE_TYPE_HARDWARE, sensor)?)
+}
+
+/// `setGlobalRestriction` as the service sets it for the current user:
+/// whether its toggles restrict `op` for every app (an app ops global
+/// restriction), the explicit user interaction audio unless
+/// `receive_explicit_user_interaction_audio_enabled` (by default) allows it.
+pub(super) fn restricts(host: &AppHost, op: i32) -> Result<bool, Exception> {
+    Ok(match op {
+        OP_RECORD_AUDIO | OP_RECEIVE_SANDBOX_TRIGGER_AUDIO | OP_PHONE_CALL_MICROPHONE | OP_RECEIVE_AMBIENT_TRIGGER_AUDIO => {
+            combined_enabled(host, MICROPHONE)?
+        }
+        OP_RECEIVE_EXPLICIT_USER_INTERACTION_AUDIO if combined_enabled(host, MICROPHONE)? => {
+            let setting = host.inputs()?.settings.get(Table::Global, "receive_explicit_user_interaction_audio_enabled");
+            setting.and_then(|v| v.parse::<i32>().ok()).unwrap_or(1) != 1
+        }
+        OP_CAMERA | OP_PHONE_CALL_CAMERA => combined_enabled(host, CAMERA)?,
+        _ => false,
+    })
+}
+
 pub struct SensorPrivacy {
     host: Arc<AppHost>,
-    persisted: OnceLock<Persisted>,
     /// The listeners of the all-sensor state and of the toggles, held.
     listeners: Mutex<Vec<(bool, Strong)>>,
 }
 
 impl SensorPrivacy {
     pub fn new(host: Arc<AppHost>) -> Self {
-        SensorPrivacy { host, persisted: OnceLock::new(), listeners: Mutex::new(Vec::new()) }
-    }
-
-    fn persisted(&self) -> Result<&Persisted, Exception> {
-        if let Some(p) = self.persisted.get() {
-            return Ok(p);
-        }
-        let persisted = Persisted::read(&self.host.data()?.join("system")).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
-        Ok(self.persisted.get_or_init(|| persisted))
+        SensorPrivacy { host, listeners: Mutex::new(Vec::new()) }
     }
 
     /// `enforceObserveSensorPrivacyPermission`.
@@ -126,11 +168,6 @@ impl SensorPrivacy {
             listeners.retain(|(t, l)| !(*t == toggles && l.handle == handle));
         }
         Ok(())
-    }
-
-    /// `isToggleSensorPrivacyEnabled` of the current user, user 0.
-    fn toggle_enabled(&self, toggle: i32, sensor: i32) -> Result<bool, Exception> {
-        Ok(self.persisted()?.state(toggle, 0, sensor) == ENABLED)
     }
 }
 
@@ -179,23 +216,22 @@ impl Service for SensorPrivacy {
                 spm::IS_SENSOR_PRIVACY_ENABLED => {
                     spm::IsSensorPrivacyEnabled::read(&mut call.data).map_err(|_| Failure::Status(BAD_VALUE))?;
                     self.observe(uid)?;
-                    spm::write_is_sensor_privacy_enabled_reply(&mut p, self.persisted()?.all_sensors);
+                    spm::write_is_sensor_privacy_enabled_reply(&mut p, persisted(&self.host)?.all_sensors);
                 }
                 spm::IS_COMBINED_TOGGLE_SENSOR_PRIVACY_ENABLED => {
                     let a = spm::IsCombinedToggleSensorPrivacyEnabled::read(&mut call.data).map_err(|_| Failure::Status(BAD_VALUE))?;
                     self.observe(uid)?;
-                    let enabled = self.toggle_enabled(TOGGLE_TYPE_SOFTWARE, a.sensor)? || self.toggle_enabled(TOGGLE_TYPE_HARDWARE, a.sensor)?;
-                    spm::write_is_combined_toggle_sensor_privacy_enabled_reply(&mut p, enabled);
+                    spm::write_is_combined_toggle_sensor_privacy_enabled_reply(&mut p, combined_enabled(&self.host, a.sensor)?);
                 }
                 spm::IS_TOGGLE_SENSOR_PRIVACY_ENABLED => {
                     let a = spm::IsToggleSensorPrivacyEnabled::read(&mut call.data).map_err(|_| Failure::Status(BAD_VALUE))?;
                     self.observe(uid)?;
-                    spm::write_is_toggle_sensor_privacy_enabled_reply(&mut p, self.toggle_enabled(a.toggle_type, a.sensor)?);
+                    spm::write_is_toggle_sensor_privacy_enabled_reply(&mut p, toggle_enabled(&self.host, a.toggle_type, a.sensor)?);
                 }
                 spm::GET_TOGGLE_SENSOR_PRIVACY_STATE => {
                     let a = spm::GetToggleSensorPrivacyState::read(&mut call.data).map_err(|_| Failure::Status(BAD_VALUE))?;
                     self.observe(uid)?;
-                    spm::write_get_toggle_sensor_privacy_state_reply(&mut p, self.persisted()?.state(a.toggle_type, 0, a.sensor));
+                    spm::write_get_toggle_sensor_privacy_state_reply(&mut p, persisted(&self.host)?.state(a.toggle_type, 0, a.sensor));
                 }
                 code => return Err(self.host.unimplemented("sensor_privacy", code).into()),
             }
