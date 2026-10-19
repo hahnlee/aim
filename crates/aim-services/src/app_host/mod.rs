@@ -85,6 +85,7 @@ pub mod role_service;
 pub mod power_service;
 pub mod safety_center;
 pub mod safety_center_config;
+pub mod safety_center_data;
 pub mod sensor_privacy;
 pub mod sensor_service;
 pub mod services;

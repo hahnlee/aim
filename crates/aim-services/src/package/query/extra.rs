@@ -2816,7 +2816,8 @@ impl Query<'_> {
         }
     }
 
-    fn package_certificate(
+    /// `hasSigningCertificate`.
+    pub(crate) fn package_certificate(
         &self,
         name: &str,
         bytes: Option<&[u8]>,
