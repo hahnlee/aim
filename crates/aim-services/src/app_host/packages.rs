@@ -85,6 +85,7 @@ impl Packages {
         locale: &str,
         property: &dyn Fn(&str) -> Option<String>,
         enforce_native_dependencies: &dyn Fn(&str, i32) -> bool,
+        apex: &package::bootstrap::ApexInventory,
     ) -> Result<Self, String> {
         let persisted = package::State::read(data, &[0])?
             .ok_or("no package state: Android never booted on this data")?;
@@ -99,6 +100,29 @@ impl Packages {
         {
             platform.locale = (language, country);
         }
+        // `scanApexPackages`: the containers ApexManager reports, parsed
+        // with the system's parse flags (`mSystemParseFlags`) and
+        // registered before the APKs.
+        let apks = package::write::Apks {
+            signing_overrides: None,
+            files: {
+                let (root, data) = (root.to_owned(), data.to_owned());
+                Box::new(move |path| host_path(&root, &data, path).ok())
+            },
+            platform,
+        };
+        let config = system_config::SystemConfig::read(root, property);
+        let image = package::scan::ApexImage::load(&apks, apex, parse::PARSE_IS_SYSTEM_DIR)
+            .map_err(|e| format!("{}: {}", e.path, e.message))?;
+        let mut containers = Vec::new();
+        for code in &image.packages {
+            let (pkg, flags, private_flags, stopped) =
+                package::scan::registered_apex(code, &persisted.settings, &config, &apks)
+                    .map_err(|e| format!("{}: {e}", code.info.module_path))?;
+            let pkg = Arc::new(pkg);
+            containers.push((code, pkg.clone(), join_apex(code, pkg, flags, private_flags, stopped)?));
+        }
+        let platform = apks.platform;
         let restrictions = persisted
             .users
             .iter()
@@ -135,7 +159,12 @@ impl Packages {
             ps.users.get_mut(&0).unwrap().granted_permissions = granted;
             Ok::<_, String>((setting.name.clone(), ps))
         });
-        let packages = joined.into_iter().collect::<Result<BTreeMap<_, _>, _>>()?;
+        let mut packages = joined.into_iter().collect::<Result<BTreeMap<_, _>, _>>()?;
+        for (_, _, ps) in &containers {
+            if packages.insert(ps.name.clone(), ps.clone()).is_some() {
+                return Err(format!("{}: a container and an APK of one name", ps.name));
+            }
+        }
         // `SharedLibrariesImpl`: the system's libraries, then those the
         // packages declare in their scan's order, and each package's
         // dependencies resolved (`updateAllSharedLibrariesLPw`), native
@@ -204,16 +233,49 @@ impl Packages {
             .filter_map(|ps| ps.pkg.as_ref())
             .flat_map(|pkg| pkg.protected_broadcasts.iter().cloned())
             .collect();
+        let mut state = model::State {
+            packages,
+            shared_users,
+            users,
+            system,
+            shared_libraries: Some(shared_libraries),
+            protected_broadcasts: Some(protected_broadcasts),
+            apex_inventory: Some(apex.clone()),
+            ..Default::default()
+        };
+        // `ModuleInfoProvider.systemReady`: the modules of the metadata
+        // provider, over the containers and the APKs in them
+        // (`ApexManager`'s links, the APKs in their settings' order).
+        let results: Vec<_> = containers
+            .iter()
+            .map(|(code, pkg, _)| package::scan::ApexScanResult {
+                info: code.info.clone(),
+                package: (**pkg).clone(),
+                signing: code.signing.clone(),
+            })
+            .collect();
+        let registrations: Vec<AndroidPackage> = persisted
+            .settings
+            .packages
+            .iter()
+            .filter(|setting| setting.code_path.starts_with("/apex/"))
+            .filter_map(|setting| state.packages.get(&setting.name)?.pkg.as_deref().cloned())
+            .collect();
+        let links = package::module_metadata::ApexLinks::from_scan(&results, apex, &registrations)?;
+        // A provider the owner cannot represent leaves the module queries
+        // failing as not modelled.
+        match package::module_metadata::Owner::load(
+            &state,
+            &platform,
+            platform.config(),
+            &|path| host_path(root, data, path),
+            &links,
+        ) {
+            Ok(modules) => state.system.module_metadata = Some(Arc::new(modules)),
+            Err(e) => eprintln!("app host: module metadata: {e}"),
+        }
         Ok(Packages {
-            state: model::State {
-                packages,
-                shared_users,
-                users,
-                system,
-                shared_libraries: Some(shared_libraries),
-                protected_broadcasts: Some(protected_broadcasts),
-                ..Default::default()
-            },
+            state,
             platform,
             access: Some(access),
             permissions,
@@ -699,6 +761,46 @@ fn join(
     Ok(ps)
 }
 
+/// A container as `addForInitLI` leaves its setting: new each boot (apexd's
+/// packages are not persisted), of no app id, installed for user 0.
+fn join_apex(
+    code: &package::scan::ApexCode,
+    pkg: Arc<AndroidPackage>,
+    flags: i32,
+    private_flags: i32,
+    stopped: bool,
+) -> Result<PackageState, String> {
+    let signing = &code.signing;
+    let mut ps = PackageState {
+        name: pkg.package_name.clone(),
+        app_id: -1,
+        path: code.info.module_path.clone(),
+        version_code: (i64::from(pkg.version_code_major) << 32) | i64::from(pkg.version_code as u32),
+        target_sdk_version: pkg.target_sdk_version,
+        category_override: -1,
+        signatures: Some(settings::Signatures {
+            scheme_version: signing.scheme_version,
+            signatures: signing.signatures.clone(),
+            current_flags: signing.current_flags.clone(),
+            public_keys: signing.serialized_public_keys()?,
+            past_signatures: signing.past_signing_certificates.clone(),
+        }),
+        ..Default::default()
+    };
+    ps.is.system = flags & settings::FLAG_SYSTEM != 0;
+    ps.is.privileged = private_flags & settings::PRIVATE_FLAG_PRIVILEGED != 0;
+    ps.users.insert(
+        0,
+        PackageUserState {
+            installed: true,
+            stopped,
+            ..Default::default()
+        },
+    );
+    ps.pkg = Some(pkg);
+    Ok(ps)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,5 +826,110 @@ mod tests {
             Path::new("/img/system/app/X")
         );
         assert!(host_path(root, data, "app").is_err());
+    }
+
+    /// The derived image's tethering container registers as
+    /// `scanApexPackages` registers it, and the module metadata provider's
+    /// tethering module names its APEX and the APK in it.
+    #[test]
+    fn containers_register_and_name_their_modules() {
+        use crate::package::bootstrap::{ActiveApex, ApexInventory, ApexPackage};
+        let Some(root) = aim_paths::input(aim_paths::derived_image(), "derived-image") else { return };
+        let data = Path::new("/nonexistent");
+        let module_path = "/system/apex/com.google.android.tethering.capex";
+        let inventory = ApexInventory {
+            packages: Some(vec![ApexPackage {
+                module_name: Some("com.android.tethering".into()),
+                module_path: module_path.into(),
+                preinstalled_path: module_path.into(),
+                version_code: 0,
+                factory: true,
+                active: true,
+                active_changed: false,
+            }]),
+            active: vec![ActiveApex {
+                module_name: Some("com.android.tethering".into()),
+                mount_path: "/apex/com.android.tethering".into(),
+                preinstalled_path: module_path.into(),
+                factory: true,
+                module_path: module_path.into(),
+                active_changed: false,
+            }],
+        };
+        let apks = package::write::Apks {
+            signing_overrides: None,
+            files: {
+                let root = root.clone();
+                Box::new(move |path| host_path(&root, Path::new("/nonexistent"), path).ok())
+            },
+            platform: Platform::load(&root, Default::default()).unwrap(),
+        };
+        let config = system_config::SystemConfig::read(&root, &|_| None);
+        let image = package::scan::ApexImage::load(&apks, &inventory, parse::PARSE_IS_SYSTEM_DIR).unwrap();
+        let code = &image.packages[0];
+        let (pkg, flags, private_flags, stopped) =
+            package::scan::registered_apex(code, &Default::default(), &config, &apks).unwrap();
+        let pkg = Arc::new(pkg);
+        let container = join_apex(code, pkg.clone(), flags, private_flags, stopped).unwrap();
+        assert_eq!(container.name, "com.google.android.tethering");
+        assert_eq!((container.app_id, pkg.uid), (-1, -1));
+        assert!(pkg.is2(package::pkg::booleans2::APEX) && pkg.is(booleans::SYSTEM));
+        assert!(container.is.system && container.users[&0].installed);
+
+        let user = restrictions::UserState { installed: true, ..Default::default() };
+        let system_package = |name: &str, code_path: &str| {
+            let setting = settings::Package {
+                name: name.into(),
+                code_path: code_path.into(),
+                flags: settings::FLAG_SYSTEM,
+                app_id: 10_000,
+                ..Default::default()
+            };
+            let host = host_path(&root, data, code_path).unwrap();
+            join(&setting, None, Some(&user), &host, &apks.platform).unwrap()
+        };
+        let tethering = system_package(
+            "com.google.android.networkstack.tethering",
+            "/apex/com.android.tethering/priv-app/TetheringGoogle@BE2A.250530.026.F3",
+        );
+        let provider = system_package("com.google.android.modulemetadata", "/product/app/ModuleMetadataGoogle");
+        let mut users = BTreeMap::new();
+        users.insert(0, model::User { id: 0, unlocking_or_unlocked: true, ..Default::default() });
+        let state = model::State {
+            packages: [container, tethering.clone(), provider].into_iter().map(|ps| (ps.name.clone(), ps)).collect(),
+            users,
+            system: system_config::system(&root, &|_| None, &system_config::Framework::load(&root).unwrap()).unwrap(),
+            ..Default::default()
+        };
+        let results = [package::scan::ApexScanResult {
+            info: code.info.clone(),
+            package: (*pkg).clone(),
+            signing: code.signing.clone(),
+        }];
+        let links = package::module_metadata::ApexLinks::from_scan(
+            &results,
+            &inventory,
+            &[tethering.pkg.as_deref().unwrap().clone()],
+        )
+        .unwrap();
+        let modules = package::module_metadata::Owner::load(
+            &state,
+            &apks.platform,
+            apks.platform.config(),
+            &|path| host_path(&root, data, path),
+            &links,
+        )
+        .unwrap();
+        assert!(modules.loaded(), "{:?}", modules.diagnostic());
+        let module = modules
+            .modules()
+            .iter()
+            .find(|m| m.package.as_deref() == Some("com.google.android.tethering"))
+            .unwrap();
+        assert_eq!(module.apex.as_deref(), Some("com.android.tethering"));
+        assert_eq!(
+            module.apks.as_deref(),
+            Some(&[Some("com.google.android.networkstack.tethering".to_string())][..])
+        );
     }
 }
