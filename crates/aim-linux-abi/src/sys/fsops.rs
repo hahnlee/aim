@@ -920,8 +920,8 @@ fn fchown_fd_private(a: [u64; 6], id: &super::cred::Identity, allow_path: bool, 
         Err(error)=>return -(error as i64),
         Ok(true)=>return super::net::with_socket_inode(fd,|stat,attributes| {
             let change=chown_change(stat,a[1],a[2],id).map_err(|error|(-error) as crate::errno::Errno)?;
-            attributes.uid=change.uid.or(attributes.uid);attributes.gid=change.gid.or(attributes.gid);attributes.mode=change.mode.or(attributes.mode);Ok(())
-        }).map(|_|0).unwrap_or_else(|error|-(error as i64)),
+            attributes.uid=change.uid.or(attributes.uid);attributes.gid=change.gid.or(attributes.gid);attributes.mode=change.mode.or(attributes.mode);Ok(change.uid)
+        }).map(|uid|{if let Some(uid)=uid{super::net::socket_chowned(fd,uid);}0}).unwrap_or_else(|error|-(error as i64)),
         Ok(false)=>{},
     }
     let guest = fd_guest(fd).unwrap_or_default();

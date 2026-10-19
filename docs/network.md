@@ -180,8 +180,13 @@ LinkProperties; its UDP and TCP queries are host sockets. DNS-over-TLS
 validation against those servers runs and fails over to cleartext, as on
 a network whose resolver has no DoT.
 
-**Traffic statistics** come from the eBPF maps, which no program fills
-(#224); they read zero.
+**Traffic statistics** come from the eBPF maps. The socket layer counts
+each AF_INET/AF_INET6 send and receive into netd's per-uid maps
+(`stats_map_A`/`B`, `app_uid_stats_map`) as its cgroup skb programs
+would, with the socket's uid, tag, counter set and interface (`lo` for
+loopback addresses, `eth0` for the rest). One call counts as one packet
+behind its headers, split at the MTU as the programs split a GSO skb;
+TCP's control packets are not counted. The interface counters are #1720.
 
 ## Verified (2026-09-28)
 
