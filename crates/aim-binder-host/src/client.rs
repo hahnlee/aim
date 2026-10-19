@@ -66,7 +66,99 @@ struct ThreadState {
     reply: Port,
     /// Thread port by file port.
     threads: HashMap<Port, Port>,
-    reserved: Vec<i32>,
+    reserved: Placeholders,
+}
+
+/// A thread's state ends with it: its placeholders are numbers of the
+/// guest's fd table, which nothing would close otherwise (a process that
+/// calls binder from many short-lived threads would keep
+/// `RESERVED_FDS` sockets per thread), and its ports.
+impl Drop for ThreadState {
+    fn drop(&mut self) {
+        self.reserved.close();
+        for (_, port) in self.threads.drain() {
+            mach::release_send(port);
+        }
+        mach::destroy_receive(self.reply);
+    }
+}
+
+/// Placeholder fds for files a read may deliver: duplicates of one
+/// unconnected socket, whose identity tells them from a file the guest put
+/// at a number it closed behind the pool's back.
+#[derive(Default)]
+struct Placeholders {
+    fds: Vec<i32>,
+    socket: Option<(libc::dev_t, libc::ino_t)>,
+}
+
+/// `fd`'s device and inode, if it is open.
+fn identity(fd: i32) -> Option<(libc::dev_t, libc::ino_t)> {
+    // SAFETY: fstat into a local buffer.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    (unsafe { libc::fstat(fd, &mut st) } == 0).then_some((st.st_dev, st.st_ino))
+}
+
+impl Placeholders {
+    /// Whether `fd` still holds this pool's socket.
+    fn holds(&self, fd: i32) -> bool {
+        self.socket.is_some() && identity(fd) == self.socket
+    }
+
+    /// Top the pool up to `count` placeholders. A placeholder only holds
+    /// its number, so it is a socket that was never connected: installing
+    /// a file over it (dup2) closes a socket, where closing a vnode such as
+    /// /dev/null costs microseconds of host kernel time. New ones are
+    /// duplicates of one already held.
+    fn refill(&mut self, count: usize) {
+        while self.fds.len() < count {
+            // A number the guest closed, or reused for a file of its own,
+            // holds nothing of ours.
+            if let Some(&held) = self.fds.first()
+                && !self.holds(held)
+            {
+                self.fds.remove(0);
+                continue;
+            }
+            // SAFETY: duplicating a placeholder, or a new socket, upward.
+            let fd = unsafe {
+                match self.fds.first() {
+                    Some(&held) => libc::fcntl(held, libc::F_DUPFD_CLOEXEC, RESERVED_FD_BASE),
+                    None => {
+                        let s = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+                        if s < 0 {
+                            return;
+                        }
+                        let fd = libc::fcntl(s, libc::F_DUPFD_CLOEXEC, RESERVED_FD_BASE);
+                        libc::close(s);
+                        fd
+                    }
+                }
+            };
+            if fd < 0 {
+                return;
+            }
+            if self.fds.is_empty() {
+                self.socket = identity(fd);
+            }
+            self.fds.push(fd);
+        }
+    }
+
+    /// `fd` became a delivered file.
+    fn take(&mut self, fd: i32) {
+        self.fds.retain(|reserved| *reserved != fd);
+    }
+
+    /// Close the placeholders that still hold the pool's socket.
+    fn close(&mut self) {
+        for fd in self.fds.drain(..) {
+            if identity(fd) == self.socket {
+                // SAFETY: our placeholder, checked by its identity.
+                unsafe { libc::close(fd) };
+            }
+        }
+    }
 }
 
 thread_local! {
@@ -82,7 +174,7 @@ fn with_thread<R>(f: impl FnOnce(&mut ThreadState) -> R) -> Result<R, Errno> {
                 buf: Buffer::default(),
                 reply,
                 threads: HashMap::new(),
-                reserved: Vec::new(),
+                reserved: Placeholders::default(),
             });
         }
         Ok(f(t.as_mut().unwrap()))
@@ -95,7 +187,8 @@ fn with_thread<R>(f: impl FnOnce(&mut ThreadState) -> R) -> Result<R, Errno> {
 pub fn forget_thread() {
     THREAD.with(|t| {
         if let Some(t) = t.borrow_mut().as_mut() {
-            t.reserved.clear();
+            // Close-on-exec closed them with the old image.
+            t.reserved = Placeholders::default();
             for (_, port) in t.threads.drain() {
                 mach::release_send(port);
             }
@@ -500,10 +593,10 @@ impl BinderFile {
         if let Err(error) = io.validate() { for (port, _) in ports { mach::release_send(port); } return Err(error); }
         let (reply, writers) = with_thread(|t| -> Result<(IoctlReply, Vec<Option<crate::regular_file::WriterPort>>), Errno> {
             if reads {
-                refill_reserved(&mut t.reserved, reserve);
-                io.grow = t.reserved.len() >= reserve;
+                t.reserved.refill(reserve);
+                io.grow = t.reserved.fds.len() >= reserve;
             }
-            io.reserved = t.reserved.iter().map(|fd| *fd as u32).collect();
+            io.reserved = t.reserved.fds.iter().map(|fd| *fd as u32).collect();
             let port = self.thread_port(t, tid)?;
             let msg = Msg {
                 id: wire::IOCTL,
@@ -531,7 +624,7 @@ impl BinderFile {
                     for port in ports { mach::release_send(port); }
                     for fd in reply.installs.iter().chain(&reply.closes) {
                         if let Err(secondary) = mem.close_file(*fd as i32) { eprintln!("Binder import rollback close fd={fd}: errno {secondary}"); }
-                        t.reserved.retain(|reserved| *reserved != *fd as i32);
+                        t.reserved.take(*fd as i32);
                     }
                     reject_deliveries(t, port, &reply)?;
                     return Err(error);
@@ -539,7 +632,7 @@ impl BinderFile {
                 writers.push(if reply.regular[index].as_ref().is_some_and(|metadata| metadata.writer) {
                     Some(crate::regular_file::WriterPort::new(ports.next().unwrap()))
                 } else { None });
-                t.reserved.retain(|reserved| *reserved != *fd as i32);
+                t.reserved.take(*fd as i32);
             }
             if cmd == BINDER_THREAD_EXIT
                 && reply.status == 0
@@ -615,41 +708,6 @@ fn reject_deliveries(
         }
     }
     Ok(())
-}
-
-/// Top the pool up to `count` placeholders. A placeholder only holds its
-/// number, so it is a socket that was never connected: installing a file
-/// over it (dup2) closes a socket, where closing a vnode such as /dev/null
-/// costs microseconds of host kernel time. New ones are duplicates of one
-/// already held.
-fn refill_reserved(pool: &mut Vec<i32>, count: usize) {
-    while pool.len() < count {
-        // SAFETY: duplicating a placeholder, or a new socket, upward.
-        let fd = unsafe {
-            match pool.first() {
-                Some(&held) => libc::fcntl(held, libc::F_DUPFD_CLOEXEC, RESERVED_FD_BASE),
-                None => {
-                    let s = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
-                    if s < 0 {
-                        return;
-                    }
-                    let fd = libc::fcntl(s, libc::F_DUPFD_CLOEXEC, RESERVED_FD_BASE);
-                    libc::close(s);
-                    fd
-                }
-            }
-        };
-        if fd >= 0 {
-            pool.push(fd);
-        } else if !pool.is_empty()
-            && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF)
-        {
-            // The guest closed that number: it holds nothing of ours.
-            pool.remove(0);
-        } else {
-            return;
-        }
-    }
 }
 
 /// Put a received file at the reserved number `fd` (close-on-exec, as the
@@ -771,28 +829,61 @@ mod tests {
     /// number the process closed behind the pool's back is replaced.
     #[test]
     fn placeholders_are_sockets_and_survive_a_closed_one() {
-        let mut pool = Vec::new();
-        refill_reserved(&mut pool, RESERVED_FDS);
-        assert_eq!(pool.len(), RESERVED_FDS);
-        let mut sorted = pool.clone();
+        let mut pool = Placeholders::default();
+        pool.refill(RESERVED_FDS);
+        assert_eq!(pool.fds.len(), RESERVED_FDS);
+        let mut sorted = pool.fds.clone();
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), RESERVED_FDS);
-        for &fd in &pool {
+        for &fd in &pool.fds {
             assert!(fd >= RESERVED_FD_BASE && is_socket(fd));
             // SAFETY: plain fcntl on our fd.
             assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, libc::FD_CLOEXEC);
         }
-        let gone = pool[0];
+        let gone = pool.fds[0];
         // SAFETY: closing our own placeholder, as a guest might.
         unsafe { libc::close(gone) };
-        refill_reserved(&mut pool, RESERVED_FDS + 1);
-        assert_eq!(pool.len(), RESERVED_FDS + 1);
-        assert!(pool.iter().all(|&fd| is_socket(fd)));
-        for fd in pool {
-            // SAFETY: our placeholders.
-            unsafe { libc::close(fd) };
-        }
+        pool.refill(RESERVED_FDS + 1);
+        assert_eq!(pool.fds.len(), RESERVED_FDS + 1);
+        assert!(pool.fds.iter().all(|&fd| pool.holds(fd)));
+        pool.close();
+    }
+
+    /// Closing a pool leaves a number the process reused for a file of its
+    /// own open.
+    #[test]
+    fn closing_placeholders_spares_a_reused_number() {
+        use std::os::fd::AsRawFd;
+        let mut pool = Placeholders::default();
+        pool.refill(2);
+        let reused = pool.fds[1];
+        let file = std::fs::File::open("/dev/null").unwrap();
+        // SAFETY: the process puts a file of its own over a placeholder.
+        assert_eq!(unsafe { libc::dup2(file.as_raw_fd(), reused) }, reused);
+        pool.close();
+        assert_eq!(identity(reused), identity(file.as_raw_fd()));
+        // SAFETY: the duplicate the test made.
+        unsafe { libc::close(reused) };
+    }
+
+    /// A thread's placeholders close when it ends, as a guest thread's do
+    /// at its exit.
+    #[test]
+    fn placeholders_close_when_their_thread_ends() {
+        let (fds, socket) = std::thread::spawn(|| {
+            with_thread(|t| {
+                t.reserved.refill(RESERVED_FDS);
+                (t.reserved.fds.clone(), t.reserved.socket)
+            })
+            .unwrap()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(fds.len(), RESERVED_FDS);
+        // A test running alongside may take a number again, but not with
+        // this socket.
+        assert!(fds.iter().all(|&fd| identity(fd) != socket));
     }
     #[test]
     fn failed_host_descriptor_install_cannot_succeed_with_a_placeholder() {
