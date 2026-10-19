@@ -98,6 +98,8 @@ pub struct Activity {
     pub occludes_parent: bool,
     /// `isNoHistory`: finished rather than stopped.
     pub no_history: bool,
+    /// `taskAffinity`.
+    pub affinity: Option<String>,
 }
 
 impl Activity {
@@ -126,6 +128,7 @@ impl Activity {
             new_intents: Vec::new(),
             occludes_parent: true,
             no_history: false,
+            affinity: None,
         }
     }
 }
@@ -1113,6 +1116,33 @@ impl Stack {
         (true, out)
     }
 
+    /// `finishActivityAffinity` of `token`: from it down its task, each
+    /// activity of its affinity finishes (`finishIfSameAffinity`), until
+    /// one of another affinity.
+    pub fn finish_affinity(&mut self, token: u64) -> (bool, Vec<Command>) {
+        let mut out = Vec::new();
+        let Some(at) = self.activities.iter().position(|a| a.token == token) else {
+            return (false, out);
+        };
+        let (task, affinity) = (
+            self.activities[at].task,
+            self.activities[at].affinity.clone(),
+        );
+        let same: Vec<u64> = self.activities[..=at]
+            .iter()
+            .rev()
+            .filter(|a| a.task == task)
+            .take_while(|a| a.affinity == affinity)
+            .map(|a| a.token)
+            .collect();
+        for t in same {
+            self.finish_one(t, false, &mut out);
+        }
+        self.resume_focused(false, &mut out);
+        self.settle(&mut out);
+        (true, out)
+    }
+
     /// `removeActivities`: the task's activities finish, bottom first.
     pub fn remove(&mut self, task: i32) -> Vec<Command> {
         let mut out = Vec::new();
@@ -1269,6 +1299,29 @@ mod tests {
 
     fn activity(token: u64, task: i32, class: &str, mode: i32) -> Activity {
         Activity::new(token, task, 1, &format!("{APP}/{class}"), mode, 0, None)
+    }
+
+    /// `finishActivityAffinity` finishes the activity and those below it
+    /// of its affinity, up to one of another affinity, in its task only.
+    #[test]
+    fn finish_affinity_stops_at_another_affinity() {
+        let mut s = Stack::default();
+        s.tasks.push(*task(1, "A", Some(APP)));
+        s.tasks.push(*task(2, "D", Some(APP)));
+        for (token, task, affinity) in [(1, 1, "x"), (2, 1, "y"), (3, 2, "y"), (4, 1, "y")] {
+            let mut a = activity(token, task, "A", 0);
+            a.affinity = Some(affinity.into());
+            s.activities.push(a);
+        }
+        assert!(s.finish_affinity(4).0);
+        let kept: Vec<u64> = s
+            .activities
+            .iter()
+            .filter(|a| !a.finishing)
+            .map(|a| a.token)
+            .collect();
+        assert_eq!(kept, [1, 3]);
+        assert!(!s.finish_affinity(9).0);
     }
 
     /// `token` of `class` started as the first activity of a new task
