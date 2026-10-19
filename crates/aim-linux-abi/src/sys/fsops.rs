@@ -83,22 +83,25 @@ pub fn mknodat(a: [u64; 6]) -> i64 {
     let res = mknod_host(&r, mode);
     if res == 0 {
         if let Err(error) = attrs::created(Host::Path(&r.host), || r.guest.clone()) { return -(error as i64); }
+        if let Err(error) = super::fs::record_created_mode(Host::Path(&r.host), &r.guest, mode) { return -(error as i64); }
     }
     res
 }
 
 fn mknod_host(r: &Resolved, mode: u32) -> i64 {
+    // The owner keeps access on the host (see host_mode).
+    let host = host_mode(mode & 0o7777, libc::S_IFREG);
     // SAFETY: host path.
     unsafe {
         match mode & libc::S_IFMT as u32 {
             m if m == libc::S_IFIFO as u32 => {
-                errno::check(libc::mkfifo(r.host.as_ptr(), (mode & 0o7777) as u16) as i64)
+                errno::check(libc::mkfifo(r.host.as_ptr(), host) as i64)
             }
             0 | 0o100000 => {
                 let fd = libc::open(
                     r.host.as_ptr(),
                     libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY,
-                    mode & 0o7777,
+                    host as libc::c_uint,
                 );
                 if fd < 0 {
                     return -(errno::last() as i64);
