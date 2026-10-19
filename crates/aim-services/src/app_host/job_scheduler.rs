@@ -143,9 +143,6 @@ const EXECUTION_DURATION_STAMP_PERIOD_MILLIS: i64 = 5 * MINUTE;
 /// them: healthd's periodic chores (`DEFAULT_PERIODIC_CHORES_INTERVAL_FAST`)
 /// and DeviceStorageMonitorService's check (`DEFAULT_CHECK_INTERVAL`).
 const DEVICE_READ_INTERVAL: i64 = MINUTE;
-/// `StorageManager`'s low storage defaults.
-const DEFAULT_STORAGE_THRESHOLD_PERCENT_LOW: i64 = 5;
-const DEFAULT_THRESHOLD_MAX_BYTES: i64 = 500 << 20;
 /// `Context.BIND_*` a job's service is bound with; `Intent.FLAG_FROM_BACKGROUND`.
 const BIND_AUTO_CREATE: i64 = 0x1;
 const BIND_NOT_FOREGROUND: i64 = 0x4;
@@ -917,19 +914,7 @@ impl JobScheduler {
     /// `StorageManager.getStorageLowBytes` of the data volume against what
     /// it has free.
     fn storage_not_low(&self) -> bool {
-        let Ok(inputs) = self.host.inputs() else { return true };
-        let Ok(path) = std::ffi::CString::new(inputs.data.as_os_str().as_encoded_bytes()) else { return true };
-        // SAFETY: statvfs into a local struct.
-        let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
-        if unsafe { libc::statvfs(path.as_ptr(), &mut st) } != 0 {
-            return true;
-        }
-        let total = st.f_blocks as i64 * st.f_frsize as i64;
-        let usable = st.f_bavail as i64 * st.f_frsize as i64;
-        let setting = |name: &str| inputs.settings.get(super::settings::Table::Global, name).and_then(|v| v.parse::<i64>().ok());
-        let percent = setting("sys_storage_threshold_percentage").unwrap_or(DEFAULT_STORAGE_THRESHOLD_PERCENT_LOW);
-        let max = setting("sys_storage_threshold_max_bytes").unwrap_or(DEFAULT_THRESHOLD_MAX_BYTES);
-        usable > (total * percent / 100).min(max)
+        self.host.data_space().is_ok_and(|(total, usable)| usable > self.host.storage_low_bytes(total))
     }
 
     /// The JobStore read, once (`JobStore.initAndGet`).

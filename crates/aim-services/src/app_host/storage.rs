@@ -4,7 +4,7 @@
 //! mount user 0's emulated volume (`aim-app-host-agent`, which serves its
 //! FUSE connection in MediaProvider's place), follows the volume's state
 //! from vold's listener calls, answers apps' `getVolumeList`,
-//! `getVolumes` and `mkdirs`, and tells the listeners apps register of
+//! `getVolumes`, `mkdirs` and allocations, and tells the listeners apps register of
 //! the volume's state changes (`registerListener`).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -68,6 +68,15 @@ const WRITE_MEDIA_STORAGE: &str = "android.permission.WRITE_MEDIA_STORAGE";
 /// `ApplicationInfo.PRIVATE_FLAG_SIGNED_WITH_PLATFORM_KEY`.
 const PRIVATE_FLAG_SIGNED_WITH_PLATFORM_KEY: i32 = 1 << 20;
 /// `PackageManager.PROPERTY_NO_APP_DATA_STORAGE`.
+/// `StorageManager`'s storage threshold defaults.
+const DEFAULT_THRESHOLD_PERCENTAGE: i64 = 5;
+const DEFAULT_THRESHOLD_MAX_BYTES: i64 = 500 << 20;
+const DEFAULT_FULL_THRESHOLD_BYTES: i64 = 1 << 20;
+/// `StorageManager.FLAG_ALLOCATE_*`.
+const FLAG_ALLOCATE_AGGRESSIVE: i32 = 1 << 0;
+const FLAG_ALLOCATE_CACHE_ONLY: i32 = 1 << 4;
+const ALLOCATE_AGGRESSIVE: &str = "android.permission.ALLOCATE_AGGRESSIVE";
+
 const NO_APP_DATA_STORAGE: &str = "android.internal.PROPERTY_NO_APP_DATA_STORAGE";
 
 /// The emulated volume, as vold reports it (`None` until vold created
@@ -206,6 +215,96 @@ impl AppHost {
         let mut volumes = vec![VolumeInfo::internal()];
         volumes.extend(self.storage.volume.lock().unwrap().clone());
         crate::package::info::array_order(volumes, |v| v.id).into_iter().map(Some).collect()
+    }
+
+    /// The data volume's total and usable bytes (`File.getTotalSpace`,
+    /// `getUsableSpace` of `/data`).
+    pub(super) fn data_space(&self) -> Result<(i64, i64), Exception> {
+        let inputs = self.inputs()?;
+        let path = std::ffi::CString::new(inputs.data.as_os_str().as_encoded_bytes())
+            .map_err(|_| Exception::new(EX_ILLEGAL_STATE, "data directory"))?;
+        // SAFETY: statvfs into a local struct.
+        let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(path.as_ptr(), &mut st) } != 0 {
+            return Err(io_exception(&format!("statvfs: {}", std::io::Error::last_os_error())));
+        }
+        Ok((st.f_blocks as i64 * st.f_frsize as i64, st.f_bavail as i64 * st.f_frsize as i64))
+    }
+
+    fn global_setting(&self, name: &str) -> Option<i64> {
+        self.inputs().ok()?.settings.get(super::settings::Table::Global, name).and_then(|v| v.parse().ok())
+    }
+
+    /// `StorageManager.getStorageLowBytes` of a volume of `total` bytes.
+    pub(super) fn storage_low_bytes(&self, total: i64) -> i64 {
+        let percent = self.global_setting("sys_storage_threshold_percentage").unwrap_or(DEFAULT_THRESHOLD_PERCENTAGE);
+        let max = self.global_setting("sys_storage_threshold_max_bytes").unwrap_or(DEFAULT_THRESHOLD_MAX_BYTES);
+        (total * percent / 100).min(max)
+    }
+
+    /// `StorageManager.getStorageFullBytes`.
+    fn storage_full_bytes(&self) -> i64 {
+        self.global_setting("sys_storage_full_threshold_bytes").unwrap_or(DEFAULT_FULL_THRESHOLD_BYTES)
+    }
+
+    /// The reserve an allocation leaves: the full one when aggressive,
+    /// else the low one.
+    fn allocation_reserve(&self, flags: i32, total: i64) -> i64 {
+        if flags & FLAG_ALLOCATE_AGGRESSIVE != 0 { self.storage_full_bytes() } else { self.storage_low_bytes(total) }
+    }
+
+    /// `StorageManager.findPathForUuid`: internal storage only, the app
+    /// host's volumes having no other file system UUID.
+    fn find_path_for_uuid(uuid: Option<&str>) -> Result<(), Exception> {
+        match uuid {
+            None => Ok(()),
+            Some(uuid) => Err(parcelable_io(
+                "java.io.FileNotFoundException",
+                &format!("Failed to find a storage device for {uuid}"),
+            )),
+        }
+    }
+
+    /// `adjustAllocateFlags`: aggressive allocation needs its permission.
+    /// The reserved cache space it lets a camera user defy only counts
+    /// with quotas, which the data volume does not support.
+    fn adjust_allocate_flags(&self, flags: i32, uid: i32) -> Result<i32, Exception> {
+        if flags & FLAG_ALLOCATE_AGGRESSIVE != 0 && self.check_permission(Some(ALLOCATE_AGGRESSIVE), uid)? != 0 {
+            return Err(Exception::security(format!(
+                "StorageManagerService: Neither user {uid} nor current process has {ALLOCATE_AGGRESSIVE}."
+            )));
+        }
+        Ok(flags)
+    }
+
+    /// `getAllocatableBytes`: the usable space above the reserve.
+    /// installd's quotas are not supported on the data volume (the syscall
+    /// layer has no `quotactl`), so no cached data counts as clearable
+    /// (`isQuotaSupported`).
+    fn allocatable_bytes(&self, uuid: Option<&str>, flags: i32, uid: i32) -> Result<i64, Exception> {
+        let flags = self.adjust_allocate_flags(flags, uid)?;
+        Self::find_path_for_uuid(uuid)?;
+        if flags & FLAG_ALLOCATE_CACHE_ONLY != 0 {
+            return Ok(0);
+        }
+        let (total, usable) = self.data_space()?;
+        Ok((usable - self.allocation_reserve(flags, total)).max(0))
+    }
+
+    /// `allocateBytes`: `bytes` and the reserve made free
+    /// (`PackageManagerService.freeStorage`), which needs no clearing when
+    /// the volume has the space; clearing caches is not implemented
+    /// (#1819).
+    fn allocate_bytes(&self, uuid: Option<&str>, bytes: i64, flags: i32, uid: i32) -> Result<(), Exception> {
+        let allocatable = self.allocatable_bytes(uuid, flags, uid)?;
+        if bytes > allocatable {
+            return Err(io_exception(&format!("Failed to allocate {bytes} because only {allocatable} allocatable")));
+        }
+        let (total, usable) = self.data_space()?;
+        if usable >= bytes + self.allocation_reserve(flags, total) {
+            return Ok(());
+        }
+        Err(self.unimplemented_named("mount", "freeStorage's cache clearing (#1819)"))
     }
 
     /// Whether user 0's emulated volume is mounted
@@ -627,6 +726,19 @@ impl WriteParcelable for StorageVolume {
     }
 }
 
+/// A `ParcelableException` of `class` (`ParcelableException.writeToParcel`).
+fn parcelable_io(class: &str, message: &str) -> Exception {
+    let mut payload = Parcel::new();
+    payload.write_string16(Some("android.os.ParcelableException"));
+    payload.write_string16(Some(class));
+    payload.write_string16(Some(message));
+    Exception::parcelable(Some(&format!("{class}: {message}")), &payload).expect("an exception of strings")
+}
+
+fn io_exception(message: &str) -> Exception {
+    parcelable_io("java.io.IOException", message)
+}
+
 /// vold's listener: the emulated volume's creation and states.
 struct Listener(std::sync::Weak<AppHost>);
 
@@ -756,6 +868,23 @@ impl Service for StorageManager {
                     p
                 }))
             }
+            sm::GET_ALLOCATABLE_BYTES => {
+                let a = sm::GetAllocatableBytes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.allocatable_bytes(a.volume_uuid.as_deref(), a.flags, call.sender_euid as i32).map(|n| {
+                    let mut p = Parcel::new();
+                    sm::write_get_allocatable_bytes_reply(&mut p, n);
+                    p
+                }))
+            }
+            sm::ALLOCATE_BYTES => {
+                let a = sm::AllocateBytes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let uid = call.sender_euid as i32;
+                reply(self.0.allocate_bytes(a.volume_uuid.as_deref(), a.bytes, a.flags, uid).map(|()| {
+                    let mut p = Parcel::new();
+                    sm::write_allocate_bytes_reply(&mut p);
+                    p
+                }))
+            }
             code => reply(Err(self.0.unimplemented("mount", code))),
         }
     }
@@ -764,6 +893,18 @@ impl Service for StorageManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A volume of another UUID is not found, as `findPathForUuid`
+    /// throws, in the envelope `ParcelableException` writes.
+    #[test]
+    fn other_volumes_are_not_found() {
+        assert!(AppHost::find_path_for_uuid(None).is_ok());
+        let e = AppHost::find_path_for_uuid(Some("1234-5678")).unwrap_err();
+        assert_eq!(e.message, "java.io.FileNotFoundException: Failed to find a storage device for 1234-5678");
+        let mut p = Parcel::new();
+        p.write_exception(&e);
+        assert!(p.reader().read_exception().unwrap().is_err());
+    }
 
     #[test]
     fn known_app_dirs_name_their_package_and_user() {
