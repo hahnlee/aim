@@ -274,6 +274,9 @@ impl Packages {
             Ok(modules) => state.system.module_metadata = Some(Arc::new(modules)),
             Err(e) => eprintln!("app host: module metadata: {e}"),
         }
+        // `PackageManagerService`'s `mRequiredPermissionControllerPackage`.
+        state.system.permission_controller_package =
+            Some(package::scan_snapshot::query_state::select_permission_controller(&state)?);
         Ok(Packages {
             state,
             platform,

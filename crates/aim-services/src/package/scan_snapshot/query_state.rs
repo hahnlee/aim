@@ -1350,7 +1350,9 @@ fn user(
 }
 
 /// PMS selects this owner once from finalized native activity registration.
-fn select_permission_controller(state: &model::State) -> Result<Option<String>, String> {
+/// `getRequiredPermissionControllerLPr`: the one privileged system app
+/// that handles MANAGE_PERMISSIONS.
+pub(crate) fn select_permission_controller(state: &model::State) -> Result<Option<String>, String> {
     let state = Arc::new(state.clone());
     let resolution = crate::package::resolve::Resolution::new(
         state.clone(),
