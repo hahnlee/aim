@@ -13,7 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
-use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel};
+use aim_binder_host::parcel::{
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_SERVICE_SPECIFIC, Exception, Parcel,
+};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_os_storage_istoragemanager as sm;
 
@@ -89,6 +91,8 @@ pub struct Volumes {
     /// Each user's cloud media provider's authority, as MediaProvider set
     /// it (`mCloudMediaProviders`).
     cloud_media_providers: Mutex<HashMap<i32, Option<String>>>,
+    /// `mInternalStorageSize`, once read.
+    internal_storage_size: Mutex<i64>,
 }
 
 /// `VolumeInfo` of user 0's emulated volume, as StorageManagerService
@@ -348,6 +352,27 @@ impl AppHost {
             return Ok(());
         }
         Err(self.unimplemented_named("mount", "freeStorage's cache clearing (#1819)"))
+    }
+
+    /// `getInternalStorageBlockDeviceSize`: vold's `GetStorageSize`, read
+    /// once. vold follows `/data`'s block device through device-mapper to
+    /// its parent and reads the disk's size from `/sys/block`; here
+    /// `/data` is an APFS volume of the data image, and the disk it is on
+    /// is the outermost whole IOMedia under it: through the APFS container
+    /// to its physical store, the attached image. A disk it cannot find is
+    /// vold's EINVAL.
+    pub(super) fn internal_storage_block_device_size(&self) -> Result<i64, Exception> {
+        let mut size = self.storage.internal_storage_size.lock().unwrap();
+        if *size == 0 {
+            let data = &self.inputs()?.data;
+            *size = aim_storage::disk::block_device_size(data).ok_or_else(|| Exception {
+                code: EX_SERVICE_SPECIFIC,
+                message: String::new(),
+                service_specific: libc::EINVAL,
+                parcelable: None,
+            })? as i64;
+        }
+        Ok(*size)
     }
 
     /// Whether user 0's emulated volume is mounted
@@ -1107,6 +1132,15 @@ impl Service for StorageManager {
                             p
                         }),
                 )
+            }
+            sm::GET_INTERNAL_STORAGE_BLOCK_DEVICE_SIZE => {
+                sm::GetInternalStorageBlockDeviceSize::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                reply(self.0.internal_storage_block_device_size().map(|size| {
+                    let mut p = Parcel::new();
+                    sm::write_get_internal_storage_block_device_size_reply(&mut p, size);
+                    p
+                }))
             }
             code => reply(Err(self.0.unimplemented("mount", code))),
         }

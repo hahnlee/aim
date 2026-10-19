@@ -489,6 +489,15 @@ pub fn used(mount: &Path) -> Option<u64> {
     (status == 0).then_some(reply.used as u64)
 }
 
+/// The size of the disk the filesystem holding `path` is on: the
+/// outermost whole disk under its volume, through APFS containers and
+/// their physical stores (for a data image's volume, the attached image).
+pub fn block_device_size(path: &Path) -> Option<u64> {
+    let (_, device) = mount_of(path)?;
+    let name = std::ffi::CString::new(device.strip_prefix("/dev/")?).ok()?;
+    registry::Object::bsd_media(&name)?.whole_disk_size()
+}
+
 /// The size of the filesystem holding `path` (for APFS, its container's).
 pub fn capacity(path: &Path) -> Option<u64> {
     let fs = statfs(path)?;

@@ -9,6 +9,8 @@ type CFTypeRef = *const c_void;
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
     fn IOServiceMatching(name: *const c_char) -> CFTypeRef;
+    fn IOBSDNameMatching(main_port: u32, options: u32, name: *const c_char) -> CFTypeRef;
+    fn IOServiceGetMatchingService(main_port: u32, matching: CFTypeRef) -> u32;
     fn IOServiceGetMatchingServices(main_port: u32, matching: CFTypeRef, existing: *mut u32)
     -> i32;
     fn IOIteratorNext(iterator: u32) -> u32;
@@ -18,6 +20,7 @@ unsafe extern "C" {
     fn IOObjectConformsTo(object: u32, class: *const c_char) -> i32;
     fn IORegistryEntryGetChildIterator(entry: u32, plane: *const c_char, iterator: *mut u32)
     -> i32;
+    fn IORegistryEntryGetParentEntry(entry: u32, plane: *const c_char, parent: *mut u32) -> i32;
     fn IORegistryEntryCreateCFProperty(
         entry: u32,
         key: CFTypeRef,
@@ -32,6 +35,8 @@ unsafe extern "C" {
     fn CFRelease(cf: CFTypeRef);
     fn CFGetTypeID(cf: CFTypeRef) -> usize;
     fn CFStringGetTypeID() -> usize;
+    fn CFNumberGetTypeID() -> usize;
+    fn CFNumberGetValue(number: CFTypeRef, kind: isize, value: *mut c_void) -> bool;
     fn CFStringCreateWithCString(alloc: CFTypeRef, s: *const c_char, encoding: u32) -> CFTypeRef;
     fn CFStringGetCString(s: CFTypeRef, buf: *mut c_char, len: isize, encoding: u32) -> bool;
     fn CFURLCreateWithString(alloc: CFTypeRef, s: CFTypeRef, base: CFTypeRef) -> CFTypeRef;
@@ -44,6 +49,8 @@ unsafe extern "C" {
 }
 
 const UTF8: u32 = 0x0800_0100;
+/// `kCFNumberSInt64Type`.
+const SINT64: isize = 4;
 
 /// An owned (+1) CoreFoundation reference.
 struct Cf(CFTypeRef);
@@ -68,6 +75,23 @@ impl Cf {
             CFStringGetCString(self.0, buf.as_mut_ptr(), buf.len() as isize, UTF8)
                 .then(|| CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned())
         }
+    }
+}
+
+impl Cf {
+    fn to_i64(&self) -> Option<i64> {
+        let mut value = 0i64;
+        // SAFETY: a type-checked CFNumber read into a local.
+        unsafe {
+            (CFGetTypeID(self.0) == CFNumberGetTypeID()
+                && CFNumberGetValue(self.0, SINT64, (&raw mut value).cast()))
+            .then_some(value)
+        }
+    }
+
+    fn is_true(&self) -> bool {
+        // SAFETY: kCFBooleanTrue is a constant of CoreFoundation.
+        self.0 == unsafe { kCFBooleanTrue }
     }
 }
 
@@ -127,6 +151,45 @@ impl Object {
         }
     }
 
+    /// The IOMedia of the BSD device `name` (`disk3s5`).
+    pub fn bsd_media(name: &CStr) -> Option<Object> {
+        // SAFETY: the call consumes the matching dictionary.
+        let entry =
+            unsafe { IOServiceGetMatchingService(0, IOBSDNameMatching(0, 0, name.as_ptr())) };
+        (entry != 0).then(|| Object(entry))
+    }
+
+    fn parent(&self) -> Option<Object> {
+        let mut parent = 0;
+        // SAFETY: a valid entry and a NUL-terminated plane name.
+        let status =
+            unsafe { IORegistryEntryGetParentEntry(self.0, c"IOService".as_ptr(), &mut parent) };
+        (status == 0 && parent != 0).then(|| Object(parent))
+    }
+
+    fn is_media(&self) -> bool {
+        // SAFETY: a valid entry and a NUL-terminated class name.
+        unsafe { IOObjectConformsTo(self.0, c"IOMedia".as_ptr()) != 0 }
+    }
+
+    /// The size of the outermost whole disk this IOMedia is on: up the
+    /// service plane through partitions, APFS containers and their
+    /// physical stores, the last IOMedia that is a whole disk.
+    pub fn whole_disk_size(self) -> Option<u64> {
+        let mut size = None;
+        let mut entry = Some(self);
+        while let Some(e) = entry {
+            if e.is_media() && e.property(c"Whole").is_some_and(|w| w.is_true()) {
+                size = e
+                    .property(c"Size")
+                    .and_then(|s| s.to_i64())
+                    .map(|s| s as u64);
+            }
+            entry = e.parent();
+        }
+        size
+    }
+
     fn children(&self) -> Vec<Object> {
         let mut iterator = 0;
         // SAFETY: a valid entry and a NUL-terminated plane name.
@@ -170,10 +233,7 @@ impl Object {
         if unsafe { IOObjectConformsTo(self.0, c"IOMedia".as_ptr()) } != 0
             && let Some(name) = self.property(c"BSD Name").and_then(|n| n.to_string())
         {
-            // SAFETY: kCFBooleanTrue is a constant of CoreFoundation.
-            let writable = self
-                .property(c"Writable")
-                .is_some_and(|w| w.0 == unsafe { kCFBooleanTrue });
+            let writable = self.property(c"Writable").is_some_and(|w| w.is_true());
             out.push((format!("/dev/{name}"), writable));
         }
         for child in self.children() {
@@ -193,5 +253,14 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// The root volume is on a whole disk at least as large as its APFS
+    /// container.
+    #[test]
+    fn the_root_volume_is_on_a_whole_disk() {
+        let root = std::path::Path::new("/");
+        let size = crate::disk::block_device_size(root).unwrap();
+        assert!(size >= crate::disk::capacity(root).unwrap(), "{size}");
     }
 }
