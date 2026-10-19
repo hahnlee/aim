@@ -115,6 +115,7 @@ pub mod telephony_registry;
 pub mod trust_service;
 pub mod uid_observers;
 pub mod uri_grants;
+mod usage_events;
 pub mod usage_stats;
 pub mod usb_service;
 pub mod user_service;
@@ -484,6 +485,9 @@ pub struct AppHost {
     focus: Mutex<audio_focus::Focus<Strong, (Strong, u64)>>,
     /// AppOps' started ops, their watchers and the async-noted ops.
     app_ops: appops_service::State,
+    /// UsageStatsService's current intervals of user 0, made at the first
+    /// event or query.
+    usage: Mutex<Option<usage_events::UserStats>>,
     /// The attribution sources whose data delivery started
     /// (`PermissionCheckerService.sRunningAttributionSources`).
     running_attributions: Mutex<permission_checker::Running>,
@@ -554,6 +558,7 @@ impl AppHost {
             playback: Mutex::default(),
             focus: Mutex::default(),
             app_ops: Default::default(),
+            usage: Mutex::new(None),
             running_attributions: Mutex::default(),
         })
     }
@@ -2649,6 +2654,71 @@ impl AppHost {
         if let Some((package, uid)) = app {
             self.report_usage_event(&package, (uid / PER_USER_RANGE) as i32, event);
         }
+        self.activity_usage_stats(
+            token,
+            match event {
+                app_standby::Event::ActivityResumed => usage_events::ACTIVITY_RESUMED,
+                app_standby::Event::ActivityPaused => usage_events::ACTIVITY_PAUSED,
+            },
+        );
+    }
+
+    /// `ActivityTaskManagerService.updateActivityUsageStats`: the event of
+    /// the activity of `token`, with its task's root activity, to
+    /// UsageStatsService (`reportEvent`), its instance the token's.
+    fn activity_usage_stats(&self, token: u64, event_type: i32) {
+        let Some((package, class, uid, task)) = self
+            .activities
+            .records
+            .lock()
+            .unwrap()
+            .get(&token)
+            .map(|r| (r.package.clone(), r.class.clone(), r.uid, r.task))
+        else {
+            return;
+        };
+        let root = {
+            let stack = self.activities.stack.lock().unwrap();
+            stack
+                .root(task)
+                .or_else(|| stack.activities.iter().find(|a| a.task == task))
+                .map(|a| a.token)
+        };
+        let root = root.and_then(|t| {
+            self.activities
+                .records
+                .lock()
+                .unwrap()
+                .get(&t)
+                .map(|r| (r.package.clone(), r.class.clone()))
+        });
+        let user = (uid / PER_USER_RANGE) as i32;
+        let instant = self.packages().is_ok_and(|(state, _)| {
+            state
+                .packages
+                .get(&package)
+                .and_then(|ps| ps.users.get(&user))
+                .is_some_and(|u| u.instant_app)
+        });
+        let event = usage_events::Event {
+            package,
+            class: Some(class),
+            instance_id: token as i32,
+            task_root_package: root.as_ref().map(|r| r.0.clone()),
+            task_root_class: root.map(|r| r.1),
+            event_type,
+            time_stamp: usage_stats::now_millis(),
+            flags: if instant {
+                usage_events::FLAG_IS_PACKAGE_INSTANT_APP
+            } else {
+                0
+            },
+        };
+        self.usage
+            .lock()
+            .unwrap()
+            .get_or_insert_with(|| usage_events::UserStats::new(event.time_stamp))
+            .report(event);
     }
 
     /// What DevicePolicyManagerService persisted, read once.
