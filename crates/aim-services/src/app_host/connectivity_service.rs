@@ -671,6 +671,12 @@ impl ConnectivityService {
         self.shared.state.lock().unwrap().network.as_ref().map(|_| network_capabilities())
     }
 
+    /// Whether netd has registered and been given its interface
+    /// (`NetworkManagementService.prepareNativeDaemon` has run).
+    pub(super) fn netd_connected(&self) -> bool {
+        self.native.lock().unwrap().0.is_some()
+    }
+
     pub fn new(host: Arc<AppHost>) -> ConnectivityService {
         let shared = Arc::new(Shared {
             state: Mutex::new(State::new(mac_network())),
