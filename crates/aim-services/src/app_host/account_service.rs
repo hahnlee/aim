@@ -961,6 +961,61 @@ impl AccountManager {
         self.bind_session(&session, user)
     }
 
+    /// `hasFeatures`: the caller's package, its user's or with
+    /// INTERACT_ACROSS_USERS_FULL another's, an account of a type it may
+    /// read; the account's authenticator asked in a `TestFeaturesSession`.
+    fn has_features(&self, uid: i32, a: am::HasFeatures<Account>) -> Result<(), Exception> {
+        self.check_package(uid, a.op_package_name.as_deref())?;
+        let account = a
+            .account
+            .ok_or_else(|| Exception::illegal_argument("account cannot be null"))?;
+        let Some(aim_binder_host::parcel::Binder::Handle(response)) = a.response else {
+            return Err(Exception::illegal_argument("response cannot be null"));
+        };
+        let features: Vec<String> = a
+            .features
+            .ok_or_else(|| Exception::illegal_argument("features cannot be null"))?
+            .into_iter()
+            .flatten()
+            .collect();
+        let calling_user = user_of(uid);
+        if a.user_id != calling_user
+            && uid != 1000
+            && self
+                .host
+                .check_permission(Some("android.permission.INTERACT_ACROSS_USERS_FULL"), uid)?
+                != 0
+        {
+            return Err(Exception::security(format!(
+                "User {calling_user} trying to check account features for {}",
+                a.user_id
+            )));
+        }
+        // `checkReadAccountsPermitted`.
+        if !self
+            .types_for_caller(uid, a.user_id, true)?
+            .contains(&account.kind)
+        {
+            return Err(Exception::security(format!(
+                "caller uid {uid} cannot access {} accounts",
+                account.kind
+            )));
+        }
+        let kind = super::account_session::Kind {
+            account_type: account.kind.clone(),
+            user: a.user_id,
+            expect_activity_launch: false,
+            strip_auth_token: true,
+        };
+        let session = super::account_session::Session::new(
+            self.host.clone(),
+            self.host.process.strong(response),
+            kind,
+            super::account_session::Work::TestFeatures { account, features },
+        );
+        self.bind_session(&session, a.user_id)
+    }
+
     /// `bindToAuthenticator` of `session`'s type for `user`.
     fn bind_session(
         &self,
@@ -1365,6 +1420,14 @@ impl Service for AccountManager {
                 reply(self.add_account(uid, call.sender_pid, a).map(|()| {
                     let mut p = Parcel::new();
                     am::write_add_account_reply(&mut p);
+                    p
+                }))
+            }
+            am::HAS_FEATURES => {
+                let a = am::HasFeatures::<Account>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.has_features(uid, a).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_has_features_reply(&mut p);
                     p
                 }))
             }

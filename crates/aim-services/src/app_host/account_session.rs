@@ -7,7 +7,8 @@
 //! it, and kept as it resolves; a session that expects an activity launch
 //! stays open while the authenticator's activity runs. The sessions the
 //! app host runs are `GetAccountsByTypeAndFeatureSession` (each account of
-//! a type asked `hasFeatures`) and `addAccount`'s.
+//! a type asked `hasFeatures`), `TestFeaturesSession` (one account asked)
+//! and `addAccount`'s.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex, Weak};
@@ -60,6 +61,11 @@ pub(super) enum Work {
         accounts: Vec<Account>,
         current: usize,
         with_features: Vec<Account>,
+    },
+    /// `TestFeaturesSession`.
+    TestFeatures {
+        account: Account,
+        features: Vec<String>,
     },
     /// `addAccount`'s `run`: the options with the caller's uid and pid.
     AddAccount {
@@ -229,6 +235,27 @@ impl Session {
                 drop(state);
                 self.check_account();
             }
+            Work::TestFeatures { account, features } => {
+                let Some(binder) = *self.binder.lock().unwrap() else {
+                    return;
+                };
+                let mut p = Parcel::new();
+                authenticator::HasFeatures {
+                    response: Some(binder),
+                    account: Some(account.clone()),
+                    features: Some(features.iter().cloned().map(Some).collect()),
+                }
+                .write(&mut p);
+                drop(state);
+                if self
+                    .host
+                    .process
+                    .transact(handle, authenticator::HAS_FEATURES, &p, true)
+                    .is_err()
+                {
+                    self.respond_error(ERROR_CODE_REMOTE_EXCEPTION, "remote exception");
+                }
+            }
             Work::AddAccount {
                 auth_token_type,
                 required_features,
@@ -305,7 +332,7 @@ impl Session {
     fn send_features_result(&self) {
         let accounts = match &mut self.state.lock().unwrap().work {
             Work::Features { with_features, .. } => std::mem::take(with_features),
-            Work::AddAccount { .. } => return,
+            Work::TestFeatures { .. } | Work::AddAccount { .. } => return,
         };
         let Some(response) = self.response_and_close() else {
             return;
@@ -529,7 +556,41 @@ impl Service for Session {
             auth_response::ON_RESULT => {
                 let a = auth_response::OnResult::<RawBundle>::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
-                let features = matches!(self.state.lock().unwrap().work, Work::Features { .. });
+                let (features, test) = match self.state.lock().unwrap().work {
+                    Work::Features { .. } => (true, false),
+                    Work::TestFeatures { .. } => (false, true),
+                    Work::AddAccount { .. } => (false, false),
+                };
+                if test {
+                    // `TestFeaturesSession.onResult`: the answer alone.
+                    let Some(response) = self.response_and_close() else {
+                        return Ok(Parcel::new());
+                    };
+                    let Some(bundle) = a.value else {
+                        let mut p = Parcel::new();
+                        response::OnError {
+                            error_code: ERROR_CODE_INVALID_RESPONSE,
+                            error_message: Some("null bundle".into()),
+                        }
+                        .write(&mut p);
+                        let _ = response.transact(response::ON_ERROR, &p, true);
+                        return Ok(Parcel::new());
+                    };
+                    let mut raw = Parcel::new();
+                    bundle.write_to(&mut raw);
+                    let has = crate::bundle::read(&mut raw.reader())
+                        .ok()
+                        .flatten()
+                        .is_some_and(|m| {
+                            matches!(m.get(KEY_BOOLEAN_RESULT), Some(Value::Bool(true)))
+                        });
+                    let mut p = Parcel::new();
+                    p.write_interface_token(response::DESCRIPTOR);
+                    p.write_i32(1);
+                    crate::bundle::write(&mut p, &[(KEY_BOOLEAN_RESULT, Value::Bool(has))]);
+                    let _ = response.transact(response::ON_RESULT, &p, true);
+                    return Ok(Parcel::new());
+                }
                 if !features {
                     if let Err(e) = self.on_session_result(call.sender_euid as i32, a.value) {
                         eprintln!("app host: accounts: onResult: {}", e.message);

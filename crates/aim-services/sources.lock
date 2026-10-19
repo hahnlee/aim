@@ -294,7 +294,7 @@ INTERFACES=(
   "android.app.IUiModeManager|system/framework/framework.jar|*"
   "android.app.IUiModeManagerCallback|system/framework/framework.jar|*"
   "android.app.IOnProjectionStateChangedListener|system/framework/framework.jar|*"
-  "android.accounts.IAccountManager|system/framework/framework.jar|getPassword,getUserData,getAuthenticatorTypes,getAccountsForPackage,getAccountsByTypeForPackage,getAccountsAsUser,peekAuthToken,getPreviousName,someUserHasAccount,getPackagesAndVisibilityForAccount,getAccountVisibility,getAccountsAndVisibilityForPackage,registerAccountListener,unregisterAccountListener,hasAccountAccess,onAccountAccessed,getAccountsByFeatures,addAccount"
+  "android.accounts.IAccountManager|system/framework/framework.jar|getPassword,getUserData,getAuthenticatorTypes,getAccountsForPackage,getAccountsByTypeForPackage,getAccountsAsUser,peekAuthToken,getPreviousName,someUserHasAccount,getPackagesAndVisibilityForAccount,getAccountVisibility,getAccountsAndVisibilityForPackage,registerAccountListener,unregisterAccountListener,hasAccountAccess,onAccountAccessed,hasFeatures,getAccountsByFeatures,addAccount"
   "android.accounts.IAccountAuthenticator|system/framework/framework.jar|hasFeatures,addAccount"
   "android.accounts.IAccountAuthenticatorResponse|system/framework/framework.jar|onResult,onRequestContinued,onError"
   "android.accounts.IAccountManagerResponse|system/framework/framework.jar|onResult,onError"
