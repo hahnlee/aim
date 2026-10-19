@@ -316,7 +316,7 @@ fn call<T>(
 }
 
 /// `Parcel::readParcelable`'s non-null marker.
-fn present(r: &mut Reader<'_>) -> ParcelResult<()> {
+pub(super) fn present(r: &mut Reader<'_>) -> ParcelResult<()> {
     match r.read_i32()? {
         // `UNEXPECTED_NULL`.
         0 => Err(UNEXPECTED_NULL),
