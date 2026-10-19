@@ -8,7 +8,8 @@
 //! the front one has the focus and is told so (`publishFocusEvent`). What
 //! a window sends back (finished and timeline messages) is read and
 //! dropped: no input times out (no ANR). Only the touchscreen is read
-//! (#1434).
+//! (#1434). Motions the app host injects (`input tap`, `input swipe`) are
+//! dispatched as the touchscreen's are.
 
 use std::fs::File;
 use std::io::Read;
@@ -16,7 +17,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
 pub use aim_input_transport::Region;
-use aim_input_transport::{ABS_MT_POSITION_X, ABS_MT_POSITION_Y, Touch, focus, touched};
+use aim_input_transport::{ABS_MT_POSITION_X, ABS_MT_POSITION_Y, Motion, Touch, focus, touched};
 
 /// `IdGenerator::Source::INPUT_DISPATCHER`, in an event id's top bits.
 const ID_SOURCE_DISPATCHER: i32 = 1 << 30;
@@ -144,6 +145,38 @@ impl Dispatcher {
         }
     }
 
+    /// A motion injected into the display (`InputManager.injectInputEvent`),
+    /// dispatched as the touchscreen's are.
+    pub fn inject(&self, motion: &Motion) {
+        let mut windows = self.windows.lock().unwrap();
+        self.dispatch(&mut windows, motion);
+    }
+
+    /// A gesture goes to the front window that takes its start, if any; the
+    /// windows in front of it that watch outside touches are told
+    /// (`findTouchedWindowTargets`).
+    fn dispatch(&self, windows: &mut Windows, motion: &Motion) {
+        if let Some(start) = motion.gesture_start() {
+            let regions: Vec<Region> = windows.stack.iter().map(|t| t.region).collect();
+            let (at, outside) = touched(&regions, start);
+            windows.gesture = at.map(|at| windows.stack[at].index);
+            let owner = at.map(|at| regions[at].owner);
+            for t in outside.into_iter().map(|i| &windows.stack[i]) {
+                let (seq, id) = self.ids();
+                let own = Some(t.region.owner) == owner;
+                send(&t.channel, &motion.outside(own).message(seq, id, t.origin()));
+            }
+        }
+        let target = windows.gesture.and_then(|index| windows.stack.iter().find(|t| t.index == index));
+        if let Some(target) = target {
+            let (seq, id) = self.ids();
+            send(&target.channel, &motion.message(seq, id, target.origin()));
+        }
+        if motion.ends_gesture() {
+            windows.gesture = None;
+        }
+    }
+
     /// Reads the touchscreen, as long as the agent runs.
     fn read_touchscreen(&self) {
         let (mut device, x_axis, y_axis) = match open_touchscreen() {
@@ -173,29 +206,7 @@ impl Dispatcher {
                         let mut windows = self.windows.lock().unwrap();
                         let scale = (windows.display.0 / x_axis.1 as f32, windows.display.1 / y_axis.1 as f32);
                         for motion in touch.report(time, x_axis.0, y_axis.0, scale) {
-                            // A gesture goes to the front window that takes its
-                            // start, if any; the windows in front of it that
-                            // watch outside touches are told
-                            // (`findTouchedWindowTargets`).
-                            if let Some(start) = motion.gesture_start() {
-                                let regions: Vec<Region> = windows.stack.iter().map(|t| t.region).collect();
-                                let (at, outside) = touched(&regions, start);
-                                windows.gesture = at.map(|at| windows.stack[at].index);
-                                let owner = at.map(|at| regions[at].owner);
-                                for t in outside.into_iter().map(|i| &windows.stack[i]) {
-                                    let (seq, id) = self.ids();
-                                    let own = Some(t.region.owner) == owner;
-                                    send(&t.channel, &motion.outside(own).message(seq, id, t.origin()));
-                                }
-                            }
-                            let target = windows.gesture.and_then(|index| windows.stack.iter().find(|t| t.index == index));
-                            if let Some(target) = target {
-                                let (seq, id) = self.ids();
-                                send(&target.channel, &motion.message(seq, id, target.origin()));
-                            }
-                            if motion.ends_gesture() {
-                                windows.gesture = None;
-                            }
+                            self.dispatch(&mut windows, &motion);
                         }
                     }
                 }

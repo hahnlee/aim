@@ -20,16 +20,20 @@ const ACTION_OUTSIDE: i32 = 4;
 const ACTION_POINTER_DOWN: i32 = 5;
 const ACTION_POINTER_UP: i32 = 6;
 const POINTER_INDEX_SHIFT: i32 = 8;
-/// `AMOTION_EVENT_AXIS_X`, `_Y`, `_PRESSURE`.
+/// `AMOTION_EVENT_AXIS_X`, `_Y`, `_PRESSURE`, `_SIZE`.
 const AXIS_X: u32 = 0;
 const AXIS_Y: u32 = 1;
 const AXIS_PRESSURE: u32 = 2;
+const AXIS_SIZE: u32 = 3;
 /// `MAX_POINTERS`, `PointerCoords::MAX_AXES`, `MAX_POINTER_ID`.
 const MAX_POINTERS: usize = 16;
 const MAX_AXES: usize = 30;
 const MAX_POINTER_ID: u32 = 31;
 /// The first input device InputReader numbers (`END_RESERVED_ID`).
 const DEVICE_ID: i32 = 1;
+/// The device of an injected event that names none
+/// (`InputShellCommand.DEFAULT_DEVICE_ID`).
+const INJECTED_DEVICE_ID: i32 = 0;
 
 /// `<linux/input-event-codes.h>`: the multitouch axes.
 pub const ABS_MT_SLOT: u16 = 0x2f;
@@ -98,6 +102,10 @@ pub struct Motion {
     time: i64,
     down_time: i64,
     pointers: Vec<(u32, f32, f32)>,
+    device: i32,
+    /// Each pointer's pressure and size.
+    pressure: f32,
+    size: f32,
 }
 
 impl Touch {
@@ -154,7 +162,7 @@ impl Touch {
             }
             let index = state.iter().position(|p| p.0 == up.0).unwrap() as i32;
             let action = if state.len() == 1 { ACTION_UP } else { ACTION_POINTER_UP | (index << POINTER_INDEX_SHIFT) };
-            motions.push(Motion { action, time, down_time: self.down_time, pointers: coords(&state) });
+            motions.push(Motion::touched(action, time, self.down_time, coords(&state)));
             state.retain(|p| p.0 != up.0);
         }
         // A move of the pointers that stayed.
@@ -165,7 +173,7 @@ impl Touch {
             }
         }
         if moved {
-            motions.push(Motion { action: ACTION_MOVE, time, down_time: self.down_time, pointers: coords(&state) });
+            motions.push(Motion::touched(ACTION_MOVE, time, self.down_time, coords(&state)));
         }
         // Downs.
         for down in current.iter().filter(|c| !self.pointers.iter().any(|p| p.0 == c.0)) {
@@ -178,7 +186,7 @@ impl Touch {
                 let index = state.iter().position(|p| p.0 == down.0).unwrap() as i32;
                 ACTION_POINTER_DOWN | (index << POINTER_INDEX_SHIFT)
             };
-            motions.push(Motion { action, time, down_time: self.down_time, pointers: coords(&state) });
+            motions.push(Motion::touched(action, time, self.down_time, coords(&state)));
         }
         self.pointers = current;
         motions
@@ -186,6 +194,27 @@ impl Touch {
 }
 
 impl Motion {
+    /// A motion of the touchscreen, its pointers pressed.
+    fn touched(action: i32, time: i64, down_time: i64, pointers: Vec<(u32, f32, f32)>) -> Motion {
+        Motion { action, time, down_time, pointers, device: DEVICE_ID, pressure: 1.0, size: 0.0 }
+    }
+
+    /// A one-finger touchscreen motion injected as `InputShellCommand`
+    /// makes it (`injectMotionEvent`): `action` (down, move or up) at
+    /// `(x, y)` in the display's pixels, with `pressure` and the default
+    /// size, of no device; `None` for another action.
+    pub fn injected(action: i32, down_time: i64, time: i64, x: f32, y: f32, pressure: f32) -> Option<Motion> {
+        matches!(action, ACTION_DOWN | ACTION_MOVE | ACTION_UP).then(|| Motion {
+            action,
+            time,
+            down_time,
+            pointers: vec![(0, x, y)],
+            device: INJECTED_DEVICE_ID,
+            pressure,
+            size: 1.0,
+        })
+    }
+
     /// Where a gesture starts (the first pointer's down), in the display's
     /// pixels.
     pub fn gesture_start(&self) -> Option<(f32, f32)> {
@@ -198,7 +227,7 @@ impl Motion {
     pub fn outside(&self, visible: bool) -> Motion {
         let (id, x, y) = self.pointers[0];
         let (x, y) = if visible { (x, y) } else { (0.0, 0.0) };
-        Motion { action: ACTION_OUTSIDE, time: self.time, down_time: self.down_time, pointers: vec![(id, x, y)] }
+        Motion { action: ACTION_OUTSIDE, pointers: vec![(id, x, y)], ..*self }
     }
 
     /// Whether the gesture ends with it (the last pointer's up).
@@ -215,7 +244,7 @@ impl Motion {
         let f32s = |m: &mut Vec<u8>, v: &[f32]| v.iter().for_each(|v| m.extend_from_slice(&v.to_ne_bytes()));
         i32s(&mut m, &[id, self.pointers.len() as i32]);
         m.extend_from_slice(&self.time.to_ne_bytes());
-        i32s(&mut m, &[DEVICE_ID, SOURCE_TOUCHSCREEN, 0]); // display 0
+        i32s(&mut m, &[self.device, SOURCE_TOUCHSCREEN, 0]); // display 0
         m.extend_from_slice(&[0; 32]); // no HMAC
         i32s(&mut m, &[self.action, 0, 0, 0, 0]); // action, button, flags, meta, buttons
         m.extend_from_slice(&[0; 4]); // classification NONE
@@ -226,12 +255,17 @@ impl Motion {
         f32s(&mut m, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]); // the raw transform
         for &(pointer, x, y) in &self.pointers {
             i32s(&mut m, &[pointer as i32, TOOL_FINGER]);
-            // `PointerCoords`: the axes' bits (highest first), their values,
-            // not resampled.
-            let bits = [AXIS_X, AXIS_Y, AXIS_PRESSURE].iter().fold(0u64, |b, a| b | (1 << 63) >> a);
+            // `PointerCoords`: the bits of its axes that are not zero
+            // (`setAxisValue` clears an axis set to zero), highest first,
+            // their values in axis order, not resampled.
+            let axes = [(AXIS_X, x), (AXIS_Y, y), (AXIS_PRESSURE, self.pressure), (AXIS_SIZE, self.size)];
+            let set: Vec<_> = axes.iter().filter(|(_, v)| *v != 0.0).collect();
+            let bits = set.iter().fold(0u64, |b, (a, _)| b | (1 << 63) >> a);
             m.extend_from_slice(&bits.to_ne_bytes());
             let mut values = [0f32; MAX_AXES];
-            values[..3].copy_from_slice(&[x, y, 1.0]);
+            for (i, (_, v)) in set.iter().enumerate() {
+                values[i] = *v;
+            }
             f32s(&mut m, &values);
             m.extend_from_slice(&[0; 8]);
         }
@@ -319,7 +353,7 @@ mod tests {
 
     #[test]
     fn a_motion_has_the_published_layout() {
-        let m = Motion { action: ACTION_DOWN, time: 5, down_time: 5, pointers: vec![(0, 1.0, 2.0)] };
+        let m = Motion::touched(ACTION_DOWN, 5, 5, vec![(0, 1.0, 2.0)]);
         let bytes = m.message(1, 2, (30.0, 40.0));
         assert_eq!(focus(1, 2, true).len(), 16);
         assert_eq!(m.gesture_start(), Some((1.0, 2.0)));
@@ -330,5 +364,22 @@ mod tests {
         assert_eq!(bytes.len(), 8 + 160 + 144);
         assert_eq!(&bytes[8 + 160..8 + 168], &[0, 0, 0, 0, TOOL_FINGER as u8, 0, 0, 0]);
         assert_eq!(u64::from_ne_bytes(bytes[176..184].try_into().unwrap()), 0xe000_0000_0000_0000);
+    }
+
+    /// An injected tap's down and up: no device, the default size, and
+    /// pressure only while down (an axis set to zero has no bit).
+    #[test]
+    fn injected_motions_are_of_no_device() {
+        let down = Motion::injected(ACTION_DOWN, 7, 7, 1.0, 2.0, 1.0).unwrap();
+        let bytes = down.message(1, 2, (0.0, 0.0));
+        let int = |b: &[u8], at: usize| i32::from_ne_bytes(b[at..at + 4].try_into().unwrap());
+        assert_eq!(int(&bytes, 8 + 16), INJECTED_DEVICE_ID);
+        assert_eq!(u64::from_ne_bytes(bytes[176..184].try_into().unwrap()), 0xf000_0000_0000_0000);
+        let up = Motion::injected(ACTION_UP, 7, 7, 1.0, 2.0, 0.0).unwrap();
+        let bytes = up.message(1, 2, (0.0, 0.0));
+        assert_eq!(u64::from_ne_bytes(bytes[176..184].try_into().unwrap()), 0xd000_0000_0000_0000);
+        let float = |at: usize| f32::from_ne_bytes(bytes[at..at + 4].try_into().unwrap());
+        assert_eq!((float(184), float(188), float(192)), (1.0, 2.0, 1.0));
+        assert!(Motion::injected(ACTION_OUTSIDE, 7, 7, 1.0, 2.0, 1.0).is_none());
     }
 }
