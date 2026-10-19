@@ -691,19 +691,8 @@ impl Service for UserManager {
             um::GET_APPLICATION_RESTRICTIONS_FOR_USER => {
                 let args = um::GetApplicationRestrictionsForUser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let package = args.package_name.unwrap_or_default();
-                let uid = call.sender_euid as i32;
-                let same_app = self.host.owns_package(uid, &package).unwrap_or(false);
-                if (uid / 100_000 != args.user_id || !same_app) && !matches!(uid % 100_000, 0 | 1000) {
-                    return reply(Err(Exception::security(format!(
-                        "get application restrictions for other user/app {package} is only allowed for the system"
-                    ))));
-                }
-                let file = self.host.data().map(|d| d.join(format!("system/users/{}/res_{package}.xml", args.user_id)));
-                match file {
-                    Ok(f) if f.exists() => {
-                        return reply(Err(self.host.unimplemented_named("user", "an app's persisted restrictions (#1519)")));
-                    }
-                    Ok(_) => um::write_get_application_restrictions_for_user_reply(&mut p, Some(&super::bind::Bundle(Vec::new()))),
+                match application_restrictions(&self.host, call.sender_euid as i32, &package, args.user_id) {
+                    Ok(restrictions) => um::write_get_application_restrictions_for_user_reply(&mut p, Some(&restrictions)),
                     Err(e) => return reply(Err(e)),
                 }
             }
@@ -715,6 +704,20 @@ impl Service for UserManager {
         }
         Ok(p)
     }
+}
+
+/// `UserManagerService.getApplicationRestrictionsForUser`: the caller's
+/// own, or any for the system; those persisted (`res_<package>.xml`):
+/// #1519.
+pub(super) fn application_restrictions(host: &AppHost, uid: i32, package: &str, user: i32) -> Result<super::bind::Bundle, Exception> {
+    let same_app = host.owns_package(uid, package).unwrap_or(false);
+    if (uid / 100_000 != user || !same_app) && !matches!(uid % 100_000, 0 | 1000) {
+        return Err(Exception::security(format!("get application restrictions for other user/app {package} is only allowed for the system")));
+    }
+    if host.data()?.join(format!("system/users/{user}/res_{package}.xml")).exists() {
+        return Err(host.unimplemented_named("user", "an app's persisted restrictions (#1519)"));
+    }
+    Ok(super::bind::Bundle(Vec::new()))
 }
 
 #[cfg(test)]
