@@ -28,7 +28,7 @@
 //! (the app hears "not added", decision D8).
 
 mod auth;
-mod parcels;
+pub(crate) mod parcels;
 mod toasts;
 
 use std::collections::HashMap;

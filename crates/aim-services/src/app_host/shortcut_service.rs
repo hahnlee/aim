@@ -3,8 +3,8 @@
 //! persisted (`/data/system_ce/<user>/shortcut_service`: `shortcuts.xml`
 //! and `packages/<package>.xml`), the limits, and the throttling state
 //! (`/data/system/shortcut_service.xml`), each kept as the original keeps
-//! it; and the dynamic shortcut writes (set, add, remove), saved as
-//! `ShortcutPackage.saveToXml` saves them. A state that needs its packages
+//! it; and the dynamic shortcut writes (set, add, remove, disable and
+//! enable), saved as `ShortcutPackage.saveToXml` saves them. A state that needs its packages
 //! rescanned (a package gone, updated, or new with manifest shortcuts; a
 //! new OS build or locale), a package's first shortcuts, bitmap and URI
 //! icons, persons and capability bindings, the other writes and the
@@ -28,6 +28,7 @@ use crate::package::info::array_order;
 use crate::package::intent::ComponentName;
 use crate::package::intent_uri::FullIntent;
 use crate::package::list_slice::Slice;
+use crate::statusbar::parcels::Text;
 
 /// `RoleManager.ROLE_HOME`; `LauncherApps.PinItemRequest.REQUEST_TYPE_SHORTCUT`,
 /// `ACTION_CONFIRM_PIN_SHORTCUT`, `ACTION_CONFIRM_PIN_APPWIDGET`.
@@ -738,25 +739,49 @@ impl Package {
         }
     }
 
-    /// `deleteDynamicWithId(id, true)` (`deleteOrDisableWithId`).
-    fn delete_dynamic(&mut self, id: &str, dummy_main: impl Fn(&ComponentName) -> bool) -> Result<(), Exception> {
-        let Some(old) = self.find(id) else { return Ok(()) };
+    /// `deleteOrDisableWithId(id, disable, false, true, reason)`, the
+    /// disabled reason given to disable: the shortcut deleted, if it was
+    /// not kept pinned or cached.
+    fn delete_or_disable(&mut self, id: &str, disable: Option<i32>, dummy_main: impl Fn(&ComponentName) -> bool) -> Result<Option<Shortcut>, Exception> {
+        let Some(old) = self.find(id) else { return Ok(None) };
         if old.flags & FLAG_DISABLED != 0 && !old.is_visible_to_publisher() {
-            return Ok(());
+            return Ok(None);
         }
         self.ensure_not_immutable(id)?;
         if old.flags & (FLAG_PINNED | FLAG_CACHED_ALL) != 0 {
             let s = self.shortcuts.iter_mut().find(|s| s.id == id).unwrap();
             s.rank = 0;
             s.flags &= !(FLAG_DYNAMIC | FLAG_MANIFEST);
+            if let Some(reason) = disable {
+                s.flags |= FLAG_DISABLED;
+                if s.disabled_reason == 0 {
+                    s.disabled_reason = reason;
+                }
+            }
             s.timestamp = now_ms();
             // `ShortcutRequestPinProcessor.directPinShortcut`'s activity.
             if s.activity.as_ref().is_some_and(&dummy_main) {
                 s.activity = None;
             }
             s.touched();
+            Ok(None)
         } else {
-            self.force_delete(id);
+            Ok(self.force_delete(id))
+        }
+    }
+
+    /// `deleteDynamicWithId(id, true)`.
+    fn delete_dynamic(&mut self, id: &str, dummy_main: impl Fn(&ComponentName) -> bool) -> Result<(), Exception> {
+        self.delete_or_disable(id, None, dummy_main).map(|_| ())
+    }
+
+    /// `enableWithId`.
+    fn enable(&mut self, id: &str) -> Result<(), Exception> {
+        self.ensure_not_immutable(id)?;
+        if let Some(s) = self.shortcuts.iter_mut().find(|s| s.id == id) {
+            s.flags &= !FLAG_DISABLED;
+            s.disabled_reason = 0;
+            s.touched();
         }
         Ok(())
     }
@@ -1229,6 +1254,51 @@ impl ShortcutManager {
         })
     }
 
+    /// `disableShortcuts` (`message` some, or `message_res` given) and
+    /// `enableShortcuts` (neither) of the caller's shortcuts `ids`.
+    fn disable_or_enable(&self, uid: i32, package: Option<&str>, ids: Option<Vec<Option<String>>>, disable: Option<(Option<String>, i32)>, user: i32) -> Result<(), Exception> {
+        let package = self.verify_caller(uid, package, user)?;
+        let ids = ids.ok_or_else(|| Exception::new(EX_NULL_POINTER, "shortcutIds must be provided"))?;
+        self.with_user(|u| {
+            self.on_called_by_publisher(u, &package)?;
+            let p = u.packages.get_mut(&package).ok_or_else(|| not_modelled("a package's first shortcut state"))?;
+            for id in ids.iter().rev() {
+                p.ensure_not_immutable(id.as_deref().unwrap_or_default())?;
+            }
+            for id in ids.iter().rev() {
+                let id = id.as_deref().filter(|i| !i.is_empty()).ok_or_else(|| Exception::illegal_argument(""))?;
+                if !p.find(id).is_some_and(Shortcut::is_visible_to_publisher) {
+                    continue;
+                }
+                let Some((message, message_res)) = &disable else {
+                    p.enable(id)?;
+                    continue;
+                };
+                // `disableWithId`: a kept shortcut's disabled message.
+                p.delete_or_disable(id, Some(DISABLED_REASON_BY_APP), |a| a.class == DUMMY_MAIN_ACTIVITY)?;
+                if let Some(s) = p.shortcuts.iter_mut().find(|s| s.id == id) {
+                    if let Some(message) = message {
+                        s.disabled_message = Some(message.clone());
+                        s.disabled_message_res_id = 0;
+                        s.disabled_message_res_name = None;
+                    } else if *message_res != 0 {
+                        if s.disabled_message_res_id != *message_res {
+                            s.disabled_message_res_name = None;
+                        }
+                        s.disabled_message_res_id = *message_res;
+                        s.disabled_message = None;
+                        self.fix_up_resource_names_and_values(s, &package)?;
+                    }
+                    s.touched();
+                }
+            }
+            if disable.is_some() {
+                p.adjust_ranks();
+            }
+            p.save()
+        })
+    }
+
     /// `verifyCaller`.
     fn verify_caller(&self, uid: i32, package: Option<&str>, user: i32) -> Result<String, Exception> {
         let package = package.filter(|p| !p.is_empty()).ok_or_else(|| Exception::illegal_argument("packageName"))?;
@@ -1510,6 +1580,15 @@ impl ShortcutManager {
                 let a = ss::RemoveAllDynamicShortcuts::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.remove(uid, a.package_name.as_deref(), None, a.user_id, true).map(|()| p.write_no_exception())
             }
+            ss::DISABLE_SHORTCUTS => {
+                let a = ss::DisableShortcuts::<Text>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let disable = Some((a.disabled_message.and_then(|t| t.0), a.disabled_message_res_id));
+                self.disable_or_enable(uid, a.package_name.as_deref(), a.shortcut_ids, disable, a.user_id).map(|()| p.write_no_exception())
+            }
+            ss::ENABLE_SHORTCUTS => {
+                let a = ss::EnableShortcuts::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.disable_or_enable(uid, a.package_name.as_deref(), a.shortcut_ids, None, a.user_id).map(|()| p.write_no_exception())
+            }
             code => {
                 let name = ss::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
                 Err(self.host.unimplemented_named("shortcut", &format!("{name} (#1669)")))
@@ -1660,5 +1739,32 @@ mod tests {
         let mut ranks: Vec<(&str, i32)> = p.shortcuts.iter().map(|s| (s.id.as_str(), s.rank)).collect();
         ranks.sort();
         assert_eq!(ranks, [("a", 0), ("b", 2), ("last", 3), ("m", 0), ("new", 1)]);
+    }
+
+    /// `deleteOrDisableWithId(disable)` and `enableWithId`: a pinned
+    /// dynamic shortcut is kept disabled by the app, its first reason
+    /// kept; one only dynamic is deleted; enabling clears the reason.
+    #[test]
+    fn shortcuts_are_disabled_and_enabled_as_the_package_does() {
+        let root = aim_android_xml::read(br#"<package name="com.example"><package-info version="1" /></package>"#).unwrap();
+        let mut p = Package::load(PathBuf::from("p.xml"), root).unwrap();
+        let shortcut = |id: &str, flags, reason| {
+            let mut s = Shortcut::parse(&aim_android_xml::read(format!(r#"<shortcut id="{id}" />"#).as_bytes()).unwrap()).unwrap();
+            (s.rank, s.flags, s.disabled_reason, s.element) = (3, flags, reason, None);
+            s
+        };
+        p.put(shortcut("pinned", FLAG_DYNAMIC | FLAG_PINNED, 0));
+        p.put(shortcut("restored", FLAG_PINNED, DISABLED_REASON_RESTORE_ISSUE_START));
+        p.put(shortcut("dynamic", FLAG_DYNAMIC, 0));
+        let never = |_: &ComponentName| false;
+        assert!(p.delete_or_disable("pinned", Some(DISABLED_REASON_BY_APP), never).unwrap().is_none());
+        assert!(p.delete_or_disable("restored", Some(DISABLED_REASON_BY_APP), never).unwrap().is_none());
+        assert_eq!(p.delete_or_disable("dynamic", Some(DISABLED_REASON_BY_APP), never).unwrap().map(|s| s.id), Some("dynamic".into()));
+        let state = |p: &Package, id| p.find(id).map(|s| (s.flags, s.disabled_reason, s.rank));
+        assert_eq!(state(&p, "pinned"), Some((FLAG_PINNED | FLAG_DISABLED, DISABLED_REASON_BY_APP, 0)));
+        assert_eq!(state(&p, "restored"), Some((FLAG_PINNED | FLAG_DISABLED, DISABLED_REASON_RESTORE_ISSUE_START, 0)));
+        assert_eq!(state(&p, "dynamic"), None);
+        p.enable("pinned").unwrap();
+        assert_eq!(state(&p, "pinned"), Some((FLAG_PINNED, 0, 0)));
     }
 }
