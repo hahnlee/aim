@@ -27,6 +27,7 @@ const FLAG_DISABLED: i32 = 0x40;
 const FLAG_DEMO: i32 = 0x200;
 const FLAG_FULL: i32 = 0x400;
 const FLAG_MAIN: i32 = 0x4000;
+const FLAG_INITIALIZED: i32 = 0x10;
 /// `UserManager.USER_TYPE_FULL_GUEST`, `USER_TYPE_FULL_RESTRICTED`.
 const USER_TYPE_FULL_GUEST: &str = "android.os.usertype.full.GUEST";
 const USER_TYPE_FULL_RESTRICTED: &str = "android.os.usertype.full.RESTRICTED";
@@ -244,6 +245,21 @@ impl UserManager {
         read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)
     }
 
+    /// `getUserDataLU(id)`'s seed account (`seedAccountName`,
+    /// `seedAccountType`), and whether it has options; none of a user that
+    /// does not exist or is partial.
+    fn seed_account(&self, id: i32) -> Result<Option<(Option<String>, Option<String>, bool)>, Exception> {
+        if self.user(id)?.is_none() {
+            return Ok(None);
+        }
+        let path = self.host.data()?.join("system/users/0.xml");
+        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+        let bytes = std::fs::read(&path).map_err(|e| state(e.to_string()))?;
+        let root = aim_android_xml::read(&bytes).map_err(state)?;
+        let string = |name: &str| root.string(name).map(|s| s.into_owned());
+        Ok(Some((string("seedAccountName"), string("seedAccountType"), root.children().any(|e| e.name == "seedAccountOptions"))))
+    }
+
     /// `getUserInfoLU`: none of a user that does not exist or is partial.
     fn user(&self, id: i32) -> Result<Option<UserInfo>, Exception> {
         if id != SYSTEM_USER {
@@ -331,6 +347,38 @@ impl UserManager {
             Err(e) => Err(e),
         };
         Ok(match call.code {
+            um::GET_SEED_ACCOUNT_NAME => {
+                let a = um::GetSeedAccountName::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                require(self.manage_or(uid, None), "You need MANAGE_USERS permission to: Cannot get seed account information".into())
+                    .and_then(|_| self.seed_account(a.user_id))
+                    .map(|s| um::write_get_seed_account_name_reply(p, &s.and_then(|s| s.0)))
+            }
+            um::GET_SEED_ACCOUNT_TYPE => {
+                let a = um::GetSeedAccountType::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                require(self.manage_or(uid, None), "You need MANAGE_USERS permission to: Cannot get seed account information".into())
+                    .and_then(|_| self.seed_account(a.user_id))
+                    .map(|s| um::write_get_seed_account_type_reply(p, &s.and_then(|s| s.1)))
+            }
+            um::GET_SEED_ACCOUNT_OPTIONS => {
+                let a = um::GetSeedAccountOptions::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                require(self.manage_or(uid, None), "You need MANAGE_USERS permission to: Cannot get seed account information".into())
+                    .and_then(|_| self.seed_account(a.user_id))
+                    .and_then(|s| match s {
+                        Some((_, _, true)) => Err(self.host.unimplemented_named("user", "a seed account's options (#1520)")),
+                        _ => Ok(um::write_get_seed_account_options_reply::<super::bind::Bundle>(p, None)),
+                    })
+            }
+            // `someUserHasSeedAccountNoChecks`: only an uninitialized user
+            // keeps a seed account to check, and user 0 is initialized.
+            um::SOME_USER_HAS_SEED_ACCOUNT => {
+                um::SomeUserHasSeedAccount::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                require(self.manage_or(uid, None), "You need MANAGE_USERS permission to: check seed account information".into())
+                    .and_then(|_| self.user(SYSTEM_USER))
+                    .and_then(|u| match u {
+                        Some(u) if u.flags & FLAG_INITIALIZED == 0 => Err(self.host.unimplemented_named("user", "an uninitialized user's seed account (#1520)")),
+                        _ => Ok(um::write_some_user_has_seed_account_reply(p, false)),
+                    })
+            }
             um::GET_PRIMARY_USER => {
                 um::GetPrimaryUser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 require(self.manage_or(uid, None), "You need MANAGE_USERS permission to: query users".into())
