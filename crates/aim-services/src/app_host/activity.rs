@@ -25,6 +25,8 @@ use super::packages::WindowStyle;
 use super::{AppHost, reply};
 use crate::package::info::ActivityInfo;
 
+/// `ActivityManager.LOCK_TASK_MODE_NONE`.
+const LOCK_TASK_MODE_NONE: i32 = 0;
 /// `ActivityManager.PROCESS_STATE_UNKNOWN` and `PROCESS_STATE_CACHED_EMPTY`:
 /// the resume's process state, and the launch's before the process state
 /// is reported.
@@ -714,6 +716,14 @@ impl Service for ActivityTaskManager {
                     atm::write_get_device_configuration_info_reply(&mut p, Some(&info));
                     p
                 }))
+            }
+            // `LockTaskController.getLockTaskModeState`: the app host starts
+            // no lock task or screen pinning, so none is on.
+            atm::GET_LOCK_TASK_MODE_STATE => {
+                atm::GetLockTaskModeState::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                atm::write_get_lock_task_mode_state_reply(&mut p, LOCK_TASK_MODE_NONE);
+                Ok(p)
             }
             atm::GET_ACTIVITY_CLIENT_CONTROLLER => {
                 atm::GetActivityClientController::read(&mut call.data).map_err(|_| BAD_VALUE)?;

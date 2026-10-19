@@ -621,6 +621,25 @@ impl Service for UserManager {
                 };
                 um::write_has_base_user_restriction_reply(&mut p, restricted);
             }
+            // `getUserRestrictionSources`: none for a restriction not in
+            // effect; the sources of one in effect are #1709.
+            um::GET_USER_RESTRICTION_SOURCES => {
+                let args = um::GetUserRestrictionSources::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let uid = call.sender_euid as i32;
+                let held = |perm: &str| matches!(self.host.check_permission(Some(perm), uid), Ok(0));
+                if !matches!(uid % 100_000, 0 | 1000) && !held("android.permission.MANAGE_USERS") && !held("android.permission.QUERY_USERS") {
+                    return reply(Err(Exception::security("You either need MANAGE_USERS or QUERY_USERS permission to call getUserRestrictionSources.")));
+                }
+                let restricted = match self.host.user_restrictions() {
+                    Ok(r) => args.user_id == SYSTEM_USER && args.restriction_key.is_some_and(|k| r.contains(&k)),
+                    Err(e) => return reply(Err(e)),
+                };
+                if restricted {
+                    return reply(Err(self.host.unimplemented_named("user", "getUserRestrictionSources of a restriction in effect (#1709)")));
+                }
+                p.write_no_exception();
+                p.write_i32(0);
+            }
             um::IS_USER_UNLOCKED => {
                 let args = um::IsUserUnlocked::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 if let Err(e) = self.check_other_user(call, args.user_id, false, "isUserUnlocked") {
