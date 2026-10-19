@@ -319,5 +319,10 @@ impl AppHost {
         {
             o.dispatch(uid, change, seq);
         }
+        // HintManagerService's own observer (`MyUidObserver`): a uid's
+        // process state only ever is top, so only its going matters.
+        if let (Change::Gone, Some(hints)) = (change, self.hint_manager.get()) {
+            hints.uid_gone(uid);
+        }
     }
 }

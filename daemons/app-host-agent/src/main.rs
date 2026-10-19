@@ -22,6 +22,8 @@
 //! - It mounts a user's emulated storage through vold and serves its FUSE
 //!   connection (`storage`).
 //! - It plays the sound effects AudioService plays (`effects`).
+//! - It reads a thread's `/proc/<tid>/status` for the host, as
+//!   system_server reads it (`Process.readProcLines`).
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -71,6 +73,10 @@ const INJECT_MOTION: u32 = 7;
 /// `IAppHostAgent.readSmaps(int pid)`: the process's `/proc/<pid>/smaps`,
 /// null when it cannot be opened (the process is gone).
 const READ_SMAPS: u32 = 8;
+/// `IAppHostAgent.readProcStatus(int tid)`: the first 4095 bytes of
+/// `/proc/<tid>/status`, read once as `android_os_Process_readProcLines`
+/// reads it; null when it cannot be opened.
+const READ_PROC_STATUS: u32 = 9;
 /// `InputTransport.cpp`'s `SOCKET_BUFFER_SIZE`.
 const SOCKET_BUFFER_SIZE: libc::c_int = 32 * 1024;
 
@@ -387,6 +393,12 @@ fn on_transact(
             })?;
             Ok(())
         }
+        READ_PROC_STATUS => {
+            let tid: i32 = data.read()?;
+            reply.write(&Status::ok())?;
+            reply.write(&proc_status(tid))?;
+            Ok(())
+        }
         KILL_PROCESS => {
             let pid: i32 = data.read()?;
             // SAFETY: a signal to a process id.
@@ -413,6 +425,16 @@ fn on_transact(
         }
         _ => Err(StatusCode::UNKNOWN_TRANSACTION),
     }
+}
+
+/// `/proc/<tid>/status` as one `read` of up to 4095 bytes gets it: none
+/// when it cannot be opened, nothing when the read fails.
+fn proc_status(tid: i32) -> Option<Vec<u8>> {
+    let mut file = std::fs::File::open(format!("/proc/{tid}/status")).ok()?;
+    let mut buffer = vec![0; 4095];
+    let len = file.read(&mut buffer).unwrap_or(0);
+    buffer.truncate(len);
+    Some(buffer)
 }
 
 /// A rectangle's left, top, right and bottom.
