@@ -82,6 +82,8 @@ pub mod providers;
 pub mod restrictions_service;
 pub mod role_service;
 pub mod power_service;
+pub mod safety_center;
+pub mod safety_center_config;
 pub mod sensor_privacy;
 pub mod sensor_service;
 pub mod services;
@@ -591,6 +593,7 @@ impl AppHost {
             ("grammatical_inflection", Arc::new(grammatical_inflection::GrammaticalInflection::new(self.clone()))),
             ("domain_verification", Arc::new(domain_verification::DomainVerification::new(self.clone()))),
             ("usb", Arc::new(usb_service::UsbService::new(self.clone()))),
+            ("safety_center", Arc::new(safety_center::SafetyCenter::new(self.clone()))),
             ("restrictions", Arc::new(restrictions_service::RestrictionsManager::new(self.clone()))),
             ("legacy_permission", Arc::new(legacy_permission::LegacyPermissionManager::new(self.clone()))),
             ("device_identifiers", Arc::new(device_identifiers::DeviceIdentifiers::new(self.clone()))),
