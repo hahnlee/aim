@@ -10,7 +10,7 @@ use aim_binder_host::parcel::{BAD_TYPE, BAD_VALUE, Binder, Exception, Parcel, Re
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
 use super::kept::{KeptIntent, RawIntent};
-use super::network::{NetworkCapabilities, NetworkRequest, RequestType};
+use super::network::{Network, NetworkCapabilities, NetworkRequest, RequestType};
 use crate::clip::{self, Raw};
 use crate::package::uri::Uri;
 use crate::package::restrictions::persistable::Bundle;
@@ -770,6 +770,7 @@ pub struct JobParameters<'a> {
     pub stop_reason: i32,
     pub internal_stop_reason: i32,
     pub debug_stop_reason: Option<&'a str>,
+    pub network: Option<Network>,
 }
 
 impl WriteParcelable for JobParameters<'_> {
@@ -810,7 +811,13 @@ impl WriteParcelable for JobParameters<'_> {
             }
             None => p.write_i32(-1),
         }
-        p.write_i32(0); // no network
+        match self.network {
+            Some(n) => {
+                p.write_i32(1);
+                n.write_to(p);
+            }
+            None => p.write_i32(0),
+        }
         p.write_i32(self.stop_reason);
         p.write_i32(self.internal_stop_reason);
         p.write_string16(self.debug_stop_reason);
@@ -952,7 +959,7 @@ mod tests {
         assert_eq!(job.debug_tags, ["a"]);
     }
 
-    /// `JobParameters.writeToParcel` of a job just started.
+    /// `JobParameters.writeToParcel` of a job just started on network 101.
     #[test]
     fn parameters_are_written_as_the_original_writes_them() {
         let job = JobInfo::persisted_builder(4, "p".into(), "p.S".into());
@@ -968,6 +975,7 @@ mod tests {
             stop_reason: STOP_REASON_UNDEFINED,
             internal_stop_reason: INTERNAL_STOP_REASON_UNKNOWN,
             debug_stop_reason: None,
+            network: Some(Network(101)),
         };
         let mut p = Parcel::new();
         params.write_to(&mut p);
@@ -976,8 +984,8 @@ mod tests {
         assert_eq!(r.read_string16().unwrap().as_deref(), Some("ns"));
         assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap(), r.read_i32().unwrap()), (0, 0, 0));
         assert_eq!(r.read_binder().unwrap(), Some(Binder::Local(0x10)));
-        let ints: Vec<i32> = (0..8).map(|_| r.read_i32().unwrap()).collect();
-        assert_eq!(ints, [1, 0, 0, -1, -1, 0, 0, -1]);
+        let ints: Vec<i32> = (0..9).map(|_| r.read_i32().unwrap()).collect();
+        assert_eq!(ints, [1, 0, 0, -1, -1, 1, 101, 0, -1]);
         assert_eq!(r.read_string16().unwrap(), None);
         assert_eq!(r.remaining(), 0);
     }
@@ -1001,6 +1009,7 @@ mod tests {
             stop_reason: STOP_REASON_UNDEFINED,
             internal_stop_reason: INTERNAL_STOP_REASON_UNKNOWN,
             debug_stop_reason: None,
+            network: None,
         };
         let mut p = Parcel::new();
         params.write_to(&mut p);

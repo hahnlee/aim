@@ -49,7 +49,7 @@ use super::job_info::{
     PRIORITY_DEFAULT, PRIORITY_HIGH, PRIORITY_LOW, PRIORITY_MAX, PRIORITY_MIN, ReadWorkItem, STOP_REASON_UNDEFINED,
 };
 use super::job_store::{self, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, Stored};
-use super::network::{self, NetworkCapabilities};
+use super::network::{self, Network, NetworkCapabilities};
 use super::services::HostConnection;
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::package::uri::Uri;
@@ -180,8 +180,8 @@ struct Device {
     battery_not_low: bool,
     storage_not_low: bool,
     battery_saver: bool,
-    /// The default network's capabilities, if there is one.
-    network: Option<NetworkCapabilities>,
+    /// The default network and its capabilities, if there is one.
+    network: Option<(Network, NetworkCapabilities)>,
 }
 
 /// `JobServiceContext.VERB_*`.
@@ -384,7 +384,7 @@ impl JobStatus {
     /// match only differs on a metered network). The Mac's network is
     /// Ethernet, so signal strength never holds a job back.
     fn network_satisfied(&self, now: i64, device: &Device, top: bool) -> bool {
-        let (Some(request), Some(nc)) = (&self.job.network, &device.network) else { return false };
+        let (Some(request), Some((_, nc))) = (&self.job.network, &device.network) else { return false };
         if !nc.has(network::NOT_SUSPENDED) {
             return false;
         }
@@ -691,6 +691,9 @@ struct Context {
     max_execution: i64,
     timeout_at: i64,
     pending_stop: Option<StopReason>,
+    /// The network a job with a connectivity constraint runs on: the
+    /// default network when it started (`JobStatus.network`).
+    network: Option<Network>,
 }
 
 /// The handler's messages.
@@ -1482,6 +1485,10 @@ impl JobScheduler {
         if let Some(j) = state.jobs.get_mut(&key).filter(|j| j.has_content_trigger()) {
             state.content.prepare(&mut j.content);
         }
+        let network = match state.jobs[&key].job.network {
+            Some(_) => self.device(state, now).network.map(|(n, _)| n),
+            None => None,
+        };
         state.next_callback += 1;
         let id = state.next_callback;
         let callback = Arc::new(JobCallback { scheduler: self.me.clone(), id, stopped: Mutex::new(None) });
@@ -1512,6 +1519,7 @@ impl JobScheduler {
             max_execution: max.max(min_guarantee),
             timeout_at: now + OP_BIND_TIMEOUT_MILLIS,
             pending_stop: None,
+            network,
         };
         state.contexts.push(context);
         let bound = self.host.bind_service_from_host(None, &package, &class, FLAG_FROM_BACKGROUND, flags, user, conn.clone());
@@ -1576,6 +1584,7 @@ impl JobScheduler {
             stop_reason: c.stop.reason,
             internal_stop_reason: c.stop.internal,
             debug_stop_reason: c.stop.debug.as_deref(),
+            network: c.network,
         };
         let mut p = Parcel::new();
         if code == job_service::START_JOB {
@@ -2405,11 +2414,11 @@ mod tests {
         }
         caps.link_down_kbps = 100_000;
         caps.link_up_kbps = 100_000;
-        let online = Device { network: Some(caps.clone()), ..PLUGGED };
+        let online = Device { network: Some((Network(100), caps.clone())), ..PLUGGED };
         assert!(j.evaluate(0, &online, true));
         // Unmetered was asked for.
         caps.remove(network::NOT_METERED);
-        assert!(!j.evaluate(0, &Device { network: Some(caps), ..PLUGGED }, true));
+        assert!(!j.evaluate(0, &Device { network: Some((Network(100), caps)), ..PLUGGED }, true));
     }
 
     /// `isInsane`: transfers that cannot finish in the job's runtime.
@@ -2425,7 +2434,7 @@ mod tests {
             caps.add(c);
         }
         caps.link_down_kbps = 1_000;
-        assert!(!j.evaluate(0, &Device { network: Some(caps), charging: false, ..PLUGGED }, true));
+        assert!(!j.evaluate(0, &Device { network: Some((Network(100), caps)), charging: false, ..PLUGGED }, true));
     }
 
     /// `getRescheduleJobForFailureLocked`'s delays.
