@@ -19,6 +19,7 @@ pub mod alarm_service;
 pub mod apex_manager;
 pub mod app_widget;
 mod app_op_infos;
+pub mod appops_restrictions;
 pub mod appops_sampling;
 pub mod appops_service;
 pub mod audio_focus;
