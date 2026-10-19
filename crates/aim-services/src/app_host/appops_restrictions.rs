@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use aim_binder_host::parcel::{BAD_VALUE, EX_NULL_POINTER, Exception, Reader, Result as ParcelResult};
+use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_NULL_POINTER, Exception, Reader, Result as ParcelResult};
 use aim_service_aidl::ReadParcelable;
 
 use super::app_op_infos::{APP_OP_INFOS, OP_NONE};
@@ -220,7 +220,7 @@ struct ModeCallback<L> {
 /// that registered it.
 #[derive(Debug, PartialEq)]
 pub(super) struct ModeChange {
-    pub handle: u32,
+    pub binder: Binder,
     pub op: i32,
     pub calling_uid: i32,
     pub calling_pid: i32,
@@ -228,9 +228,9 @@ pub(super) struct ModeChange {
 
 /// `mModeWatchers`, `mOpModeWatchers` and `mPackageModeWatchers`.
 pub(super) struct ModeWatchers<L> {
-    callbacks: HashMap<u32, ModeCallback<L>>,
-    ops: BTreeMap<i32, BTreeSet<u32>>,
-    packages: BTreeMap<String, BTreeSet<u32>>,
+    callbacks: HashMap<Binder, ModeCallback<L>>,
+    ops: BTreeMap<i32, BTreeSet<Binder>>,
+    packages: BTreeMap<String, BTreeSet<Binder>>,
 }
 
 impl<L> Default for ModeWatchers<L> {
@@ -249,27 +249,27 @@ impl<L> ModeWatchers<L> {
     /// callback made once per binder, then added to the switch op's
     /// watchers and, where it may see `package`, the package's.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn watch(&mut self, handle: u32, op: i32, package: Option<&str>, flags: i32, calling_uid: i32, calling_pid: i32, link: impl FnOnce() -> L) {
+    pub(super) fn watch(&mut self, binder: Binder, op: i32, package: Option<&str>, flags: i32, calling_uid: i32, calling_pid: i32, link: impl FnOnce() -> L) {
         let switch_op = if op != OP_NONE { switch_of(op) } else { op };
         let notified = if flags & CALL_BACK_ON_SWITCHED_OP == 0 { if op == OP_NONE { ALL_OPS } else { op } } else { switch_op };
-        self.callbacks.entry(handle).or_insert_with(|| ModeCallback { link: link(), watching_uid: -1, watched_op: notified, calling_uid, calling_pid });
+        self.callbacks.entry(binder).or_insert_with(|| ModeCallback { link: link(), watching_uid: -1, watched_op: notified, calling_uid, calling_pid });
         if switch_op != OP_NONE {
-            self.ops.entry(switch_op).or_default().insert(handle);
+            self.ops.entry(switch_op).or_default().insert(binder);
         }
         if let Some(package) = package {
-            self.packages.entry(package.to_string()).or_default().insert(handle);
+            self.packages.entry(package.to_string()).or_default().insert(binder);
         }
     }
 
     /// `stopWatchingMode`: the callback's link, if it watched.
-    pub(super) fn unwatch(&mut self, handle: u32) -> Option<L> {
-        let callback = self.callbacks.remove(&handle)?;
+    pub(super) fn unwatch(&mut self, binder: Binder) -> Option<L> {
+        let callback = self.callbacks.remove(&binder)?;
         self.ops.retain(|_, watchers| {
-            watchers.remove(&handle);
+            watchers.remove(&binder);
             !watchers.is_empty()
         });
         self.packages.retain(|_, watchers| {
-            watchers.remove(&handle);
+            watchers.remove(&binder);
             !watchers.is_empty()
         });
         Some(callback.link)
@@ -281,8 +281,8 @@ impl<L> ModeWatchers<L> {
     /// `code` or its own op.
     pub(super) fn changes(&self, code: i32, uid: i32, uid_any: i32) -> Vec<ModeChange> {
         let mut changes = Vec::new();
-        for handle in self.ops.get(&code).into_iter().flatten() {
-            let callback = &self.callbacks[handle];
+        for binder in self.ops.get(&code).into_iter().flatten() {
+            let callback = &self.callbacks[binder];
             if uid != uid_any && callback.watching_uid >= 0 && callback.watching_uid != uid {
                 continue;
             }
@@ -291,7 +291,7 @@ impl<L> ModeWatchers<L> {
                 OP_NONE => vec![code],
                 op => vec![op],
             };
-            changes.extend(ops.into_iter().map(|op| ModeChange { handle: *handle, op, calling_uid: callback.calling_uid, calling_pid: callback.calling_pid }));
+            changes.extend(ops.into_iter().map(|op| ModeChange { binder: *binder, op, calling_uid: callback.calling_uid, calling_pid: callback.calling_pid }));
         }
         changes
     }
@@ -360,16 +360,17 @@ mod tests {
     fn mode_watchers_hear_the_ops_they_watch() {
         // OP_GPS (2) switches to OP_COARSE_LOCATION (0).
         let mut w = ModeWatchers::<()>::default();
-        w.watch(1, 2, None, 0, 10_100, 5, || ());
-        w.watch(2, 2, None, CALL_BACK_ON_SWITCHED_OP, 10_101, 6, || ());
-        w.watch(3, OP_NONE, Some("p"), 0, 10_102, 7, || ());
-        let mut heard: Vec<(u32, i32)> = w.changes(0, -2, -2).into_iter().map(|c| (c.handle, c.op)).collect();
+        let (a, b, c) = (Binder::Handle(1), Binder::Handle(2), Binder::Local(0x30));
+        w.watch(a, 2, None, 0, 10_100, 5, || ());
+        w.watch(b, 2, None, CALL_BACK_ON_SWITCHED_OP, 10_101, 6, || ());
+        w.watch(c, OP_NONE, Some("p"), 0, 1000, 7, || ());
+        let mut heard: Vec<(Binder, i32)> = w.changes(0, -2, -2).into_iter().map(|c| (c.binder, c.op)).collect();
         heard.sort();
-        assert_eq!(heard, [(1, 2), (2, 0)]);
+        assert_eq!(heard, [(a, 2), (b, 0)]);
         assert!(w.changes(2, -2, -2).is_empty());
-        assert!(w.unwatch(1).is_some() && w.unwatch(1).is_none());
+        assert!(w.unwatch(a).is_some() && w.unwatch(a).is_none());
         assert_eq!(w.changes(0, -2, -2).len(), 1);
-        assert!(w.unwatch(3).is_some());
+        assert!(w.unwatch(c).is_some());
         assert!(w.packages.is_empty());
     }
 }

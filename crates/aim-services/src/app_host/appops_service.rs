@@ -1632,7 +1632,13 @@ fn notify_mode_watchers(host: &AppHost, code: i32) {
         }
         .write(&mut p);
         // One-way; a watcher that died is not called.
-        let _ = host.process.transact(change.handle, mode_callback::OP_CHANGED, &p, true);
+        let _ = match change.binder {
+            Binder::Handle(handle) => host.process.transact(handle, mode_callback::OP_CHANGED, &p, true).map(drop),
+            Binder::Local(ptr) => match host.process.local_service(ptr) {
+                Some(service) => service.transact(mode_callback::OP_CHANGED, &p, true).map(drop),
+                None => Ok(()),
+            },
+        };
     }
 }
 
@@ -1984,17 +1990,15 @@ impl AppOps {
         names
     }
 
-    /// `startWatchingModeWithFlags`: a valid op or OP_NONE; a callback of
-    /// another process, kept until it dies; a package the caller may see.
+    /// `startWatchingModeWithFlags`: a valid op or OP_NONE; a callback,
+    /// kept until it dies if another process's; a package the caller may
+    /// see.
     fn start_watching_mode(&self, uid: i32, pid: i32, op: i32, package: Option<&str>, flags: i32, callback: Option<Binder>) -> Result<(), Exception> {
         if !(OP_NONE..NUM_OP).contains(&op) {
             let side = if op < OP_NONE { "too low" } else { "too high" };
             return Err(Exception::illegal_argument(format!("Invalid op code: {op} is out of range of [{OP_NONE}, {}] ({side})", NUM_OP - 1)));
         }
         let Some(callback) = callback else { return Ok(()) };
-        let Binder::Handle(handle) = callback else {
-            return Err(self.host.unimplemented_named("appops", "a mode watcher of the app host's own (#1594)"));
-        };
         // `filterAppAccessUnlocked`.
         let package = match package {
             Some(package) if !Host(&self.host).filtered(package, uid, uid.div_euclid(PER_USER_RANGE))? => Some(package),
@@ -2002,6 +2006,7 @@ impl AppOps {
         };
         let host = &self.host;
         let link = || {
+            let Binder::Handle(handle) = callback else { return None };
             let strong = host.process.strong(handle);
             let me = host.me.clone();
             let death = host.process.link_to_death(
@@ -2009,13 +2014,13 @@ impl AppOps {
                 Box::new(move || {
                     // `ModeCallback.binderDied`: `stopWatchingMode`.
                     let Some(host) = me.upgrade() else { return };
-                    let link = host.app_ops.mode_watchers.lock().unwrap().unwatch(handle);
+                    let link = host.app_ops.mode_watchers.lock().unwrap().unwatch(callback);
                     unlink(&host, link.into_iter().collect());
                 }),
             );
             Some((strong, death))
         };
-        host.app_ops.mode_watchers.lock().unwrap().watch(handle, op, package, flags, uid, pid, link);
+        host.app_ops.mode_watchers.lock().unwrap().watch(callback, op, package, flags, uid, pid, link);
         Ok(())
     }
 
@@ -2312,8 +2317,8 @@ impl Service for AppOps {
             }
             appops::STOP_WATCHING_MODE => {
                 let args = appops::StopWatchingMode::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                if let Some(Binder::Handle(handle)) = args.callback {
-                    let link = self.host.app_ops.mode_watchers.lock().unwrap().unwatch(handle);
+                if let Some(callback) = args.callback {
+                    let link = self.host.app_ops.mode_watchers.lock().unwrap().unwatch(callback);
                     unlink(&self.host, link.into_iter().collect());
                 }
                 appops::write_stop_watching_mode_reply(&mut p);

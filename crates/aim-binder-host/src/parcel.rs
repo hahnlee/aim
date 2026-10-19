@@ -56,7 +56,7 @@ pub const EX_PARCELABLE: i32 = -9;
 const EX_HAS_STRICTMODE_REPLY_HEADER: i32 = -128;
 
 /// A binder in a parcel.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Binder {
     /// A reference to another process's node.
     Handle(u32),

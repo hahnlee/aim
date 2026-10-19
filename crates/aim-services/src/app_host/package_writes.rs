@@ -16,8 +16,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use aim_binder_host::local::{Call, Strong};
-use aim_binder_host::parcel::{Binder, DEAD_OBJECT, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel};
+use aim_binder_host::local::{Call, LocalService, Strong};
+use aim_binder_host::parcel::{Binder, DEAD_OBJECT, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, StatusCode};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_os_iremotecallback as remote_callback;
 
@@ -66,11 +66,26 @@ type Decided = (BTreeMap<String, Enabled>, Vec<usize>);
 /// A registered `IRemoteCallback` of a package monitor, with its user and
 /// uid (`PackageMonitorCallbackHelper.RegisterUser`).
 struct Monitor {
-    handle: u32,
-    callback: Arc<Strong>,
-    death: u64,
+    binder: Binder,
+    callback: Arc<Callback>,
     user: i32,
     uid: i32,
+}
+
+/// A monitor's callback: an app's, linked to its death, or one of the app
+/// host's own services' (`RemoteCallbackList` takes either).
+enum Callback {
+    Remote(Arc<Strong>, u64),
+    Local(LocalService),
+}
+
+impl Callback {
+    fn transact(&self, code: u32, data: &Parcel) -> Result<(), StatusCode> {
+        match self {
+            Callback::Remote(strong, _) => strong.transact(code, data, true).map(drop),
+            Callback::Local(service) => service.transact(code, data, true).map(drop),
+        }
+    }
 }
 
 pub(super) struct Writes {
@@ -249,7 +264,7 @@ impl Writes {
     fn notify_monitors(&self, change: &Changed) {
         let mut request = Parcel::new();
         remote_callback::SendResult { data: Some(BundleOf(&change.monitor_result())) }.write(&mut request);
-        let targets: Vec<(u32, Arc<Strong>)> = self
+        let targets: Vec<(Binder, Arc<Callback>)> = self
             .monitors
             .lock()
             .unwrap()
@@ -258,11 +273,11 @@ impl Writes {
             .filter(|m| {
                 change.allow_list.as_ref().is_none_or(|allowed| app_id(m.uid) == SYSTEM_UID || allowed.contains(&m.uid))
             })
-            .map(|m| (m.handle, m.callback.clone()))
+            .map(|m| (m.binder, m.callback.clone()))
             .collect();
-        for (handle, callback) in targets {
-            if callback.transact(remote_callback::SEND_RESULT, &request, true).err() == Some(DEAD_OBJECT) {
-                self.unregister_monitor(Some(Binder::Handle(handle)));
+        for (binder, callback) in targets {
+            if callback.transact(remote_callback::SEND_RESULT, &request).err() == Some(DEAD_OBJECT) {
+                self.unregister_monitor(Some(binder));
             }
         }
     }
@@ -272,34 +287,44 @@ impl Writes {
     pub(super) fn register_monitor(self: &Arc<Self>, call: &Call<'_>, callback: Option<Binder>, user: i32) -> Result<(), Exception> {
         let uid = call.sender_euid as i32;
         let user = self.host.incoming_user(uid, user, false)?;
-        let Some(Binder::Handle(handle)) = callback else {
+        let Some(binder) = callback else {
             return Err(Exception::new(EX_NULL_POINTER, "callback"));
         };
         let mut monitors = self.monitors.lock().unwrap();
-        if monitors.iter().any(|m| m.handle == handle) {
+        if monitors.iter().any(|m| m.binder == binder) {
             return Ok(());
         }
-        let strong = Arc::new(self.host.process.strong(handle));
-        let me = Arc::downgrade(self);
-        let death = self.host.process.link_to_death(
-            &strong,
-            Box::new(move || {
-                if let Some(me) = me.upgrade() {
-                    me.monitors.lock().unwrap().retain(|m| m.handle != handle);
-                }
-            }),
-        );
-        monitors.push(Monitor { handle, callback: strong, death, user, uid });
+        let callback = match binder {
+            Binder::Handle(handle) => {
+                let strong = Arc::new(self.host.process.strong(handle));
+                let me = Arc::downgrade(self);
+                let death = self.host.process.link_to_death(
+                    &strong,
+                    Box::new(move || {
+                        if let Some(me) = me.upgrade() {
+                            me.monitors.lock().unwrap().retain(|m| m.binder != binder);
+                        }
+                    }),
+                );
+                Callback::Remote(strong, death)
+            }
+            Binder::Local(ptr) => match self.host.process.local_service(ptr) {
+                Some(service) => Callback::Local(service),
+                None => return Err(Exception::new(EX_NULL_POINTER, "callback")),
+            },
+        };
+        monitors.push(Monitor { binder, callback: Arc::new(callback), user, uid });
         Ok(())
     }
 
     /// `unregisterPackageMonitorCallback`.
     pub(super) fn unregister_monitor(&self, callback: Option<Binder>) {
-        let Some(Binder::Handle(handle)) = callback else { return };
+        let Some(binder) = callback else { return };
         let mut monitors = self.monitors.lock().unwrap();
-        if let Some(at) = monitors.iter().position(|m| m.handle == handle) {
-            let m = monitors.remove(at);
-            self.host.process.clear_death(&m.callback, m.death);
+        if let Some(at) = monitors.iter().position(|m| m.binder == binder)
+            && let Callback::Remote(strong, death) = &*monitors.remove(at).callback
+        {
+            self.host.process.clear_death(strong, *death);
         }
     }
 }

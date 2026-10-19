@@ -650,6 +650,9 @@ impl System {
         let service = self.service(name)?;
         let mut data = Parcel::new();
         write(&mut data);
+        // The service's own registration, made as the system whichever
+        // caller's decision first needed it (`clearCallingIdentity`).
+        let _system = aim_binder_host::local::clear_calling_identity();
         let reply = service
             .transact(code, &data, false)
             .map_err(|s| unreachable_service(name, s))?;
