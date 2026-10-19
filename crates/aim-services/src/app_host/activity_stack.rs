@@ -277,6 +277,15 @@ impl Stack {
         self.activities.iter().find(|a| a.token == token)
     }
 
+    /// The result target `token`'s activity gives up to an activity it
+    /// starts with a forwarded result (`sourceRecord.resultTo = null`),
+    /// if that target is still in a task, and its result.
+    pub fn forward_result(&mut self, token: u64) -> (Option<u64>, Option<Payload>) {
+        let Some(a) = self.get_mut(token) else { return (None, None) };
+        let (to, result) = (a.result_to.take(), a.result);
+        (to.filter(|t| self.get(*t).is_some()), result)
+    }
+
     fn get_mut(&mut self, token: u64) -> Option<&mut Activity> {
         self.activities.iter_mut().find(|a| a.token == token)
     }
