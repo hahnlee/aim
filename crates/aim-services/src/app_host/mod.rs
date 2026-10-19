@@ -2486,6 +2486,30 @@ impl AppHost {
         }
     }
 
+    /// `killUidForPermissionChange`: the processes of `uid`
+    /// (`killPackageProcessesLSP` of its app id and user), for a change of
+    /// its permissions.
+    fn kill_uid_for_permission_change(&self, uid: u32, reason: &str) {
+        let starts: Vec<i64> = self
+            .apps
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, a)| a.uid == uid)
+            .map(|(seq, _)| *seq)
+            .collect();
+        for seq in starts {
+            if let Err(e) = self.kill_process(
+                seq,
+                exit_info::REASON_PERMISSION_CHANGE,
+                exit_info::SUBREASON_UNKNOWN,
+                reason,
+            ) {
+                eprintln!("app host: killing uid {uid}'s process of start {seq}: {e}");
+            }
+        }
+    }
+
     /// `ActivityManagerService.checkPermission`: no permission is denied;
     /// else `ActivityManager.checkComponentPermission` of an exported
     /// component nobody owns, which ends in PermissionManagerService's
