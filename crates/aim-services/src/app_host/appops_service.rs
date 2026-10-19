@@ -16,8 +16,10 @@
 //! mode allows a uid while it has a process, as each of the app host's
 //! processes is top (`AppOpsUidStateTracker.evalMode`). Notes and starts go
 //! through SystemServer's `AppOpsPolicy`: without a hotword detection
-//! service RECORD_AUDIO_HOTWORD is RECORD_AUDIO; datasource attribution
-//! tags: #1561. A started op (`startOperation`, `startProxyOperation`)
+//! service RECORD_AUDIO_HOTWORD is RECORD_AUDIO, and activity recognition
+//! with a system activity recognizer's attribution tag is its source op
+//! (the location providers report no tags in the app host, #1748). A
+//! started op (`startOperation`, `startProxyOperation`)
 //! runs for its client binder until the client finishes each of its
 //! starts or dies (`AttributedOp`), paused instead while restricted; active
 //! watchers hear an op's first start and last finish, started watchers
@@ -88,7 +90,11 @@ const OP_RECORD_AUDIO_SANDBOXED: i32 = 135;
 const OPS_RESTRICTED_ON_SUSPEND: [i32; 4] = [28, OP_RECORD_AUDIO, OP_CAMERA, 3];
 /// The ops `AppOpsPolicy.resolveDatasourceOp` resolves by attribution tag:
 /// COARSE_LOCATION, FINE_LOCATION, ACTIVITY_RECOGNITION.
-const DATASOURCE_OPS: [i32; 3] = [0, 1, 79];
+/// `OP_COARSE_LOCATION`, `OP_FINE_LOCATION`, `OP_ACTIVITY_RECOGNITION`
+/// and their `*_SOURCE` ops (`AppOpsPolicy.resolveLocationOp`,
+/// `resolveArOp`).
+const DATASOURCE_OPS: [(i32, i32); 3] = [(0, 109), (1, 108), (79, 113)];
+const OP_ACTIVITY_RECOGNITION: i32 = 79;
 /// `AppOpsManager.OP_FLAG_SELF`, `OP_FLAG_TRUSTED_PROXY`,
 /// `OP_FLAG_UNTRUSTED_PROXY`, `OP_FLAG_TRUSTED_PROXIED`,
 /// `OP_FLAG_UNTRUSTED_PROXIED`.
@@ -180,6 +186,10 @@ trait System {
     fn package_mode(&self, package: &str, op: &str) -> Result<Option<i32>, Exception>;
     /// Whether `uid` has a process.
     fn running(&self, uid: i32) -> bool;
+    /// `AppOpsPolicy.mActivityRecognitionTags`: the system activity
+    /// recognizers' tags (`initializeActivityRecognizersTags`), by app id
+    /// and package.
+    fn activity_recognition_tags(&self) -> Result<Vec<(i32, String, Vec<String>)>, Exception>;
     fn unimplemented(&self, what: &str) -> Exception;
 }
 
@@ -478,8 +488,11 @@ fn check(sys: &dyn System, caller: i32, code: i32, uid: i32, package: Option<&st
 
 /// `AppOpsPolicy.resolveDatasourceOp`: RECORD_AUDIO_HOTWORD is
 /// RECORD_AUDIO where a hotword detection service is required, there being
-/// none; a datasource's attribution tags are not known (#1561).
-fn resolve_datasource_op(sys: &dyn System, code: i32, tag: Option<&str>) -> Result<i32, Exception> {
+/// none (nor a sandboxed one, `resolveSandboxedServiceOp`); a location or
+/// activity recognition op noted with a datasource's attribution tag is its
+/// `*_SOURCE` op. The location providers' tags (`mLocationTags`) are none:
+/// in the app host the location service reports none (#1748).
+fn resolve_datasource_op(sys: &dyn System, code: i32, uid: i32, package: Option<&str>, tag: Option<&str>) -> Result<i32, Exception> {
     // `isHotwordDetectionServiceRequired`.
     let hotword_required = || -> Result<bool, Exception> {
         Ok(!sys.feature(FEATURE_AUTOMOTIVE)?
@@ -487,10 +500,19 @@ fn resolve_datasource_op(sys: &dyn System, code: i32, tag: Option<&str>) -> Resu
             && super::system_boolean(sys.property("ro.hotword.detection_service_required").as_deref(), false))
     };
     let code = if code == OP_RECORD_AUDIO_HOTWORD && hotword_required()? { OP_RECORD_AUDIO } else { code };
-    if tag.is_some() && DATASOURCE_OPS.contains(&code) {
-        return Err(sys.unimplemented("a datasource's attribution tags (#1561)"));
+    let (Some(tag), Some(&(_, source))) = (tag, DATASOURCE_OPS.iter().find(|(c, _)| *c == code)) else {
+        return Ok(code);
+    };
+    if code != OP_ACTIVITY_RECOGNITION {
+        return Ok(code);
     }
-    Ok(code)
+    // `isDatasourceAttributionTag`.
+    let app_id = app_id(uid);
+    let datasource = sys
+        .activity_recognition_tags()?
+        .iter()
+        .any(|(a, p, tags)| *a == app_id && Some(p.as_str()) == package && tags.iter().any(|t| t == tag));
+    Ok(if datasource { source } else { code })
 }
 
 /// `validateOpRequest`, or the checks before it (by
@@ -901,7 +923,7 @@ struct Ops<'a, L> {
 impl<L> Ops<'_, L> {
     /// `noteOperationImpl` behind `AppOpsPolicy.noteOperation`.
     fn note(&mut self, op: &Unchecked<'_>, device: i32) -> Result<SyncNoted, Exception> {
-        let code = resolve_datasource_op(self.sys, op.code, op.tag)?;
+        let code = resolve_datasource_op(self.sys, op.code, op.uid, op.package, op.tag)?;
         let resolved = match validate_request(self.sys, self.caller, code, op.uid, op.package, device)? {
             Ok(resolved) => resolved,
             Err(mode) => return Ok(SyncNoted::new(mode, code, op.tag, op.package)),
@@ -948,7 +970,7 @@ impl<L> Ops<'_, L> {
         message: Option<&str>,
     ) -> Result<SyncNoted, Exception> {
         let (sys, caller) = (self.sys, self.caller);
-        let code = resolve_datasource_op(sys, code, source.tag.as_deref())?;
+        let code = resolve_datasource_op(sys, code, source.uid, source.package.as_deref(), source.tag.as_deref())?;
         let next = next_of(source)?;
         let proxied_uid = next.map_or(INVALID_UID, |n| n.uid);
         let (proxied_package, proxied_tag) = (next.and_then(|n| n.package.as_deref()), next.and_then(|n| n.tag.as_deref()));
@@ -1000,7 +1022,7 @@ impl<L> Ops<'_, L> {
     /// allowed, the sandboxed camera CAMERA; the package is started as
     /// given.
     fn start(&mut self, client: Option<Binder>, op: &Unchecked<'_>, attribution: Attribution) -> Result<SyncNoted, Exception> {
-        let code = resolve_datasource_op(self.sys, op.code, op.tag)?;
+        let code = resolve_datasource_op(self.sys, op.code, op.uid, op.package, op.tag)?;
         if let Err(mode) = validate_request(self.sys, self.caller, code, op.uid, op.package, DEVICE_ID_DEFAULT)? {
             return Ok(SyncNoted::new(mode, code, op.tag, op.package));
         }
@@ -1070,7 +1092,7 @@ impl<L> Ops<'_, L> {
         message: Option<&str>,
     ) -> Result<SyncNoted, Exception> {
         let (sys, caller) = (self.sys, self.caller);
-        let code = resolve_datasource_op(sys, code, source.tag.as_deref())?;
+        let code = resolve_datasource_op(sys, code, source.uid, source.package.as_deref(), source.tag.as_deref())?;
         let next = next_of(source)?;
         let (proxied_uid, proxied_device) = next.map_or((INVALID_UID, DEVICE_ID_DEFAULT), |n| (n.uid, n.device_id));
         let (proxied_package, proxied_tag) = (next.and_then(|n| n.package.as_deref()), next.and_then(|n| n.tag.as_deref()));
@@ -1132,7 +1154,7 @@ impl<L> Ops<'_, L> {
 
     /// `finishOperationImpl` behind `AppOpsPolicy.finishOperation`.
     fn finish(&mut self, client: Option<Binder>, code: i32, uid: i32, package: Option<&str>, tag: Option<&str>) -> Result<(), Exception> {
-        let code = resolve_datasource_op(self.sys, code, tag)?;
+        let code = resolve_datasource_op(self.sys, code, uid, package, tag)?;
         verify_incoming_uid(self.sys, self.caller, uid)?;
         verify_incoming_op(self.sys, self.caller, code)?;
         if !valid_package(self.sys, self.caller, package, uid.div_euclid(PER_USER_RANGE))? {
@@ -1168,7 +1190,7 @@ impl<L> Ops<'_, L> {
         skip_proxy: bool,
     ) -> Result<(), Exception> {
         let (sys, caller) = (self.sys, self.caller);
-        let code = resolve_datasource_op(sys, code, source.tag.as_deref())?;
+        let code = resolve_datasource_op(sys, code, source.uid, source.package.as_deref(), source.tag.as_deref())?;
         let next = next_of(source)?;
         let proxied_uid = next.map_or(INVALID_UID, |n| n.uid);
         let (proxied_package, proxied_tag) = (next.and_then(|n| n.package.as_deref()), next.and_then(|n| n.tag.as_deref()));
@@ -1339,6 +1361,39 @@ impl System for Host<'_> {
 
     fn running(&self, uid: i32) -> bool {
         self.0.uid_running(uid)
+    }
+
+    /// `updateActivityRecognizerTags` of each holder of
+    /// `ROLE_SYSTEM_ACTIVITY_RECOGNIZER`: the tags its
+    /// `ACTION_ACTIVITY_RECOGNIZER` service lists in its meta-data.
+    fn activity_recognition_tags(&self) -> Result<Vec<(i32, String, Vec<String>)>, Exception> {
+        const ROLE: &str = "android.app.role.SYSTEM_ACTIVITY_RECOGNIZER";
+        const ACTION: &str = "android.intent.action.ACTIVITY_RECOGNIZER";
+        const TAGS: &str = "android:activity_recognition_allow_listed_tags";
+        // GET_SERVICES, GET_META_DATA, MATCH_DISABLED_UNTIL_USED_COMPONENTS,
+        // MATCH_DIRECT_BOOT_AWARE and MATCH_DIRECT_BOOT_UNAWARE.
+        const FLAGS: i64 = 0x4 | 0x80 | 0x8000 | 0x80000 | 0x40000;
+        let roles = self.0.role_service.get().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "appops: no role service"))?;
+        let (_, resolution) = self.0.packages()?;
+        let mut tags = Vec::new();
+        for recognizer in roles.holders_of(ROLE)? {
+            let intent = crate::package::intent::Intent { action: Some(ACTION.into()), package: Some(recognizer.clone()), ..Default::default() };
+            let resolved = resolution
+                .resolve_service(&intent, None, FLAGS, 0, SYSTEM_UID)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("appops: resolveService: {e:?}")))?;
+            let Some(crate::package::component_resolver::Info::Service(si)) = resolved.map(|r| r.info) else {
+                eprintln!("app host: appops: Service recognizer doesn't handle {ACTION}, ignoring!");
+                continue;
+            };
+            let list = si.info.item.meta_data.as_ref().and_then(|m| m.0.iter().find(|(k, _)| k == TAGS)).and_then(|(_, v)| match v {
+                crate::package::pkg::Value::String(Some(s)) if !s.is_empty() => Some(s.split(';').map(str::to_owned).collect()),
+                _ => None,
+            });
+            if let Some(list) = list {
+                tags.push((app_id(si.info.application_info.uid), si.info.item.package_name.clone().unwrap_or_default(), list));
+            }
+        }
+        Ok(tags)
     }
 
     fn unimplemented(&self, what: &str) -> Exception {
@@ -2080,6 +2135,7 @@ mod tests {
         running: BTreeSet<i32>,
         attributions: BTreeMap<&'static str, Vec<&'static str>>,
         invalid_tags_rejected: bool,
+        recognizer_tags: Vec<(i32, String, Vec<String>)>,
     }
 
     impl System for Fake {
@@ -2142,6 +2198,10 @@ mod tests {
 
         fn running(&self, uid: i32) -> bool {
             self.running.contains(&uid)
+        }
+
+        fn activity_recognition_tags(&self) -> Result<Vec<(i32, String, Vec<String>)>, Exception> {
+            Ok(self.recognizer_tags.clone())
         }
 
         fn unimplemented(&self, what: &str) -> Exception {
@@ -2306,13 +2366,23 @@ mod tests {
         assert!(check(&f, APP, 96, APP, Some("app"), DEVICE_ID_DEFAULT, false).is_err());
     }
 
+    /// A datasource's tag makes an activity recognition note its source
+    /// op; any other tag, package or uid, and location (no provider tags in
+    /// the app host), leave it.
     #[test]
     fn datasource_ops_of_notes() {
-        let f = fake();
-        assert_eq!(resolve_datasource_op(&f, OP_RECORD_AUDIO_HOTWORD, None).unwrap(), OP_RECORD_AUDIO_HOTWORD);
-        assert_eq!(resolve_datasource_op(&f, OP_COARSE_LOCATION, None).unwrap(), OP_COARSE_LOCATION);
-        assert!(resolve_datasource_op(&f, OP_COARSE_LOCATION, Some("tag")).is_err());
-        assert_eq!(resolve_datasource_op(&f, OP_READ_CLIPBOARD, Some("tag")).unwrap(), OP_READ_CLIPBOARD);
+        let mut f = fake();
+        f.recognizer_tags = vec![(PRIV_APP, "priv".into(), vec!["ar".into(), "ar2".into()])];
+        let resolve = |f: &Fake, code, uid, package, tag| resolve_datasource_op(f, code, uid, Some(package), tag).unwrap();
+        assert_eq!(resolve(&f, OP_RECORD_AUDIO_HOTWORD, APP, "app", None), OP_RECORD_AUDIO_HOTWORD);
+        assert_eq!(resolve(&f, OP_COARSE_LOCATION, APP, "app", None), OP_COARSE_LOCATION);
+        assert_eq!(resolve(&f, OP_COARSE_LOCATION, PRIV_APP, "priv", Some("ar")), OP_COARSE_LOCATION);
+        assert_eq!(resolve(&f, OP_READ_CLIPBOARD, APP, "app", Some("tag")), OP_READ_CLIPBOARD);
+        assert_eq!(resolve(&f, OP_ACTIVITY_RECOGNITION, PRIV_APP, "priv", Some("ar2")), 113);
+        assert_eq!(resolve(&f, OP_ACTIVITY_RECOGNITION, PRIV_APP + PER_USER_RANGE, "priv", Some("ar")), 113);
+        assert_eq!(resolve(&f, OP_ACTIVITY_RECOGNITION, PRIV_APP, "priv", Some("other")), OP_ACTIVITY_RECOGNITION);
+        assert_eq!(resolve(&f, OP_ACTIVITY_RECOGNITION, APP, "app", Some("ar")), OP_ACTIVITY_RECOGNITION);
+        assert_eq!(resolve(&f, OP_ACTIVITY_RECOGNITION, PRIV_APP, "priv", None), OP_ACTIVITY_RECOGNITION);
     }
 
     #[test]
