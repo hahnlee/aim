@@ -97,6 +97,12 @@ fn copy_str(dst: &mut [u8], s: &str) {
     dst[..n].copy_from_slice(&s.as_bytes()[..n]);
 }
 
+/// Whether the Mac has a built-in camera, which the provider lists as a
+/// front one.
+pub fn has_built_in() -> bool {
+    avf::api().is_some_and(|api| avf::cameras(api).iter().any(|c| c.facing == aim_hostcall::camera::facing::FRONT))
+}
+
 fn devices() -> Devices {
     let Some(api) = avf::api() else {
         return Devices::default();

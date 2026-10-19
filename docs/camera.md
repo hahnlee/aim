@@ -128,7 +128,17 @@ its vintf fragment (`ICameraProvider/internal/0` V1, accepted by the target
 FCM level 8, `1-2`). The emulator's ranchu and Google camera providers were
 removed with #187. The emulator's feature files that claim what a Mac camera
 cannot do (`camera.full`, `camera.raw`, `camera.flash-autofocus`,
-`camera.concurrent`) are removed too; `camera.front` stays.
+`camera.concurrent`) are removed too. The camera features follow the Mac,
+as the sensors' do (docs/vendor-hals.md): no Mac has a rear camera, so
+`handheld_core_hardware.xml` declares no `android.hardware.camera`, and the
+emulator's `camera.front.prebuilt.xml` is removed. At boot guest-init asks
+the camera module whether the Mac has a built-in camera, the one the
+provider lists as front, and names it in the SKU (`front`, with the
+sensors' parts: `light_hinge_front` on a MacBook); that SKU's directory
+declares `android.hardware.camera.front` and `android.hardware.camera.any`.
+A Mac without one (a Mac mini or Studio) declares no camera, so apps that
+require one, like the AOSP Camera app, are not offered. Cameras attached
+later are listed by the provider as external, without a feature.
 
 ## Verified (2026-09-28, MacBook Pro M2 Pro, macOS 27, lid closed)
 
