@@ -4,11 +4,15 @@
 //! shared config store (`WifiConfigStore.xml`, `WifiSettingsConfigStore`)
 //! persisted; with the radio off there is no connection (`new WifiInfo()`)
 //! and no scan result (the Mac does not scan with its radio off), given to
-//! a caller `enforceCanAccessScanResults` lets read them. The rest is not
-//! implemented (#1686).
+//! a caller `enforceCanAccessScanResults` lets read them. The saved
+//! networks (`getConfiguredNetworks`) are the config stores' as
+//! `WifiConfigManager` loads them (`wifi_config`), with the Wi-Fi resources
+//! APK's MAC randomization and auto-upgrade settings; there is no carrier
+//! app without telephony. The rest is not implemented (#1686).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, EX_SECURITY, Exception, Parcel};
@@ -18,21 +22,43 @@ use aim_service_aidl::android_net_wifi_iwifimanager as wm;
 
 use super::appops_service::MODE_ALLOWED;
 use super::settings::Table;
+use super::wifi_config::{self, LoadError, SECURITY_TYPE_OWE, SECURITY_TYPE_SAE, SecurityParams, WifiConfiguration};
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::package::list_slice::Slice;
+use crate::package::parse::resources::{Selected, TYPE_FIRST_INT, TYPE_REFERENCE, Table as ResourceTable};
+use crate::package::query::Query;
 
 const ACCESS_WIFI_STATE: &str = "android.permission.ACCESS_WIFI_STATE";
 const NETWORK_SETTINGS: &str = "android.permission.NETWORK_SETTINGS";
+const NETWORK_SETUP_WIZARD: &str = "android.permission.NETWORK_SETUP_WIZARD";
+const NETWORK_MANAGED_PROVISIONING: &str = "android.permission.NETWORK_MANAGED_PROVISIONING";
+const NETWORK_STACK: &str = "android.permission.NETWORK_STACK";
 /// The permissions that read scan results without location access
 /// (`enforceCanAccessScanResults`).
 const SCAN_BYPASS: [&str; 6] = [
     NETWORK_SETTINGS,
-    "android.permission.NETWORK_SETUP_WIZARD",
-    "android.permission.NETWORK_MANAGED_PROVISIONING",
-    "android.permission.NETWORK_STACK",
+    NETWORK_SETUP_WIZARD,
+    NETWORK_MANAGED_PROVISIONING,
+    NETWORK_STACK,
     "android.permission.MAINLINE_NETWORK_STACK",
     "android.permission.RADIO_SCAN_WITHOUT_LOCATION",
 ];
+/// `Process.ROOT_UID`, `SYSTEM_UID`, `WIFI_UID`, `SHELL_UID`,
+/// `INVALID_UID`.
+const ROOT_UID: i32 = 0;
+const SYSTEM_UID: i32 = 1000;
+const WIFI_UID: i32 = 1010;
+const SHELL_UID: i32 = 2000;
+const INVALID_UID: i32 = -1;
+/// `PackageManager.SIGNATURE_MATCH`.
+const SIGNATURE_MATCH: i32 = 0;
+/// `ApplicationInfo.FLAG_SYSTEM`, `FLAG_UPDATED_SYSTEM_APP`.
+const FLAG_SYSTEM: i32 = 1 << 0;
+const FLAG_UPDATED_SYSTEM_APP: i32 = 1 << 7;
+/// `WifiContext`'s resources APK, of an app in the Wi-Fi APEX.
+const RESOURCES_APK_ACTION: &str = "com.android.server.wifi.intent.action.SERVICE_WIFI_RESOURCES_APK";
+const WIFI_APEX: &str = "/apex/com.android.wifi/";
+const WIFI_CONFIGURATION: &str = "android.net.wifi.WifiConfiguration";
 const ACCESS_FINE_LOCATION: &str = "android.permission.ACCESS_FINE_LOCATION";
 const ACCESS_COARSE_LOCATION: &str = "android.permission.ACCESS_COARSE_LOCATION";
 const PEERS_MAC_ADDRESS: &str = "android.permission.PEERS_MAC_ADDRESS";
@@ -65,6 +91,8 @@ const VERBOSE_LOGGING_LEVEL_DISABLED: i32 = 0;
 const VERBOSE_LOGGING_LEVEL_ENABLED: i32 = 1;
 /// The shared general store (`WifiConfigStore.STORE_FILE_SHARED_GENERAL`).
 const SHARED_STORE: &str = "misc/apexdata/com.android.wifi/WifiConfigStore.xml";
+/// The current user's store (`STORE_FILE_USER_GENERAL`).
+const USER_STORE: &str = "misc_ce/0/apexdata/com.android.wifi/WifiConfigStore.xml";
 
 /// `WifiInfo()`, the info of no connection, as `writeToParcel` writes it.
 struct NoConnection;
@@ -127,13 +155,27 @@ fn store_bool(root: &aim_android_xml::Element, key: &str, default: bool) -> Resu
     Ok(entry.bool("value")?.unwrap_or(default))
 }
 
+/// The Wi-Fi resources it reads (`WifiContext.getResources`).
+struct WifiResources {
+    /// `config_wifi_connected_mac_randomization_supported`.
+    mac_randomization_supported: bool,
+    /// `config_wifiOweUpgradeEnabled`, `config_wifiSaeUpgradeEnabled`.
+    owe_upgrade: bool,
+    sae_upgrade: bool,
+    /// `config_oemPrivilegedWifiAdminPackages`.
+    oem_admins: Vec<String>,
+}
+
 pub struct WifiService {
     host: Arc<AppHost>,
+    resources: OnceLock<WifiResources>,
+    /// `WifiConfigManager`'s networks once loaded from the stores.
+    networks: OnceLock<Vec<WifiConfiguration>>,
 }
 
 impl WifiService {
     pub fn new(host: Arc<AppHost>) -> Self {
-        WifiService { host }
+        WifiService { host, resources: OnceLock::new(), networks: OnceLock::new() }
     }
 
     /// `enforceAccessPermission`.
@@ -271,6 +313,205 @@ impl WifiService {
         Ok(Some(Slice::new(self.host.process.clone(), SCAN_RESULT, Vec::new())))
     }
 
+    /// The resources of `ServiceWifiResources`, the system's activity of
+    /// its action in the Wi-Fi APEX, over the framework's.
+    fn resources(&self) -> Result<&WifiResources, Exception> {
+        if let Some(resources) = self.resources.get() {
+            return Ok(resources);
+        }
+        let Some((package, apk)) = super::safety_center::resources_apk(&self.host, "wifi", RESOURCES_APK_ACTION, WIFI_APEX)? else {
+            return Err(Exception::new(EX_ILLEGAL_STATE, "wifi: Attempted to fetch resources before Wifi Resources APK is loaded!"));
+        };
+        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("wifi: {}: {e}", apk.display()));
+        let apk_file = aim_apps::apk::Apk::open(&apk).map_err(|e| state(e.to_string()))?;
+        let table = match apk_file.file_if_present("resources.arsc").map_err(|e| state(e.to_string()))? {
+            Some(bytes) => ResourceTable::parse(&bytes).map_err(|e| state(e.to_string()))?,
+            None => return Err(state("no resources.arsc".into())),
+        };
+        let inputs = self.host.inputs()?;
+        let resources = inputs.packages.package_resources(&table);
+        // `Resources.getBoolean`: any integer, nonzero is true.
+        let boolean = |name: &str| -> Result<bool, Exception> {
+            let id = resources.identifier(&package, "bool", name).ok_or_else(|| state(format!("no bool/{name}")))?;
+            let mut value = Selected { kind: TYPE_REFERENCE, data: id, table: None, resid: 0, flags: 0 };
+            resources.resolve(&mut value);
+            if value.kind < TYPE_FIRST_INT {
+                return Err(state(format!("bool/{name} is not an integer")));
+            }
+            Ok(value.data != 0)
+        };
+        let admins = "config_oemPrivilegedWifiAdminPackages";
+        let oem_admins = resources
+            .identifier(&package, "array", admins)
+            .and_then(|id| resources.string_array(id))
+            .ok_or_else(|| state(format!("no array/{admins}")))?;
+        let loaded = WifiResources {
+            mac_randomization_supported: boolean("config_wifi_connected_mac_randomization_supported")?,
+            owe_upgrade: boolean("config_wifiOweUpgradeEnabled")?,
+            sae_upgrade: boolean("config_wifiSaeUpgradeEnabled")?,
+            oem_admins: oem_admins.into_iter().flatten().collect(),
+        };
+        Ok(self.resources.get_or_init(|| loaded))
+    }
+
+    /// `WifiConfigManager.loadFromStore`: the shared then the user store's
+    /// networks; a store that does not parse loses them all.
+    fn networks(&self) -> Result<&[WifiConfiguration], Exception> {
+        if let Some(networks) = self.networks.get() {
+            return Ok(networks);
+        }
+        let unmodelled = |what: &str| self.host.unimplemented_named("wifi", &format!("{what} (#1686)"));
+        let (state, resolution) = self.host.packages()?;
+        let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
+        let creator = |uid: i32| query.name_for_uid(uid).map_err(|e| LoadError::Unmodelled(e.0));
+        let data = self.host.data()?;
+        let read = |store: &str| -> Result<Vec<WifiConfiguration>, LoadError> {
+            match std::fs::read(data.join(store)) {
+                Ok(bytes) => {
+                    let root = aim_android_xml::read(&bytes).map_err(LoadError::Corrupt)?;
+                    wifi_config::read_network_list(&root, &creator)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+                Err(e) => Err(LoadError::Corrupt(format!("{store}: {e}"))),
+            }
+        };
+        let networks = match read(SHARED_STORE).and_then(|shared| wifi_config::load(shared, read(USER_STORE)?)) {
+            Ok(networks) => networks,
+            Err(LoadError::Corrupt(e)) => {
+                eprintln!("app host: wifi: XML deserialization of store failed. All saved networks are lost!: {e}");
+                Vec::new()
+            }
+            Err(LoadError::Skip(e)) => return Err(Exception::new(EX_ILLEGAL_STATE, format!("wifi: {e}"))),
+            Err(LoadError::Unmodelled(what)) => return Err(unmodelled(what)),
+        };
+        Ok(self.networks.get_or_init(|| networks))
+    }
+
+    /// `isPrivileged`: a network settings, setup wizard, stack or managed
+    /// provisioning app, or one signed with the platform key.
+    fn privileged(&self, uid: i32) -> Result<bool, Exception> {
+        for permission in [NETWORK_SETTINGS, NETWORK_SETUP_WIZARD, NETWORK_STACK, NETWORK_MANAGED_PROVISIONING] {
+            if self.held(permission, uid)? {
+                return Ok(true);
+            }
+        }
+        self.signed_with_platform_key(uid)
+    }
+
+    /// `checkSignatures(uid, SYSTEM_UID) == SIGNATURE_MATCH`.
+    fn signed_with_platform_key(&self, uid: i32) -> Result<bool, Exception> {
+        let (state, resolution) = self.host.packages()?;
+        let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
+        let matched = query.check_uid_signatures_captured(uid, SYSTEM_UID, false).map_err(|e| self.host.unimplemented_named("wifi", e.0))??;
+        Ok(matched == SIGNATURE_MATCH)
+    }
+
+    /// `isDeviceOrProfileOwner`: the app host has no owner.
+    fn device_or_profile_owner(&self, package: Option<&str>) -> Result<bool, Exception> {
+        if package.is_some() && self.host.device_policies()?.owned() {
+            return Err(self.host.unimplemented_named("wifi", "a device or profile owner (#1686)"));
+        }
+        Ok(false)
+    }
+
+    /// `isAdmin`: a device or profile owner, or an OEM privileged admin.
+    fn admin(&self, uid: i32, package: Option<&str>) -> Result<bool, Exception> {
+        if package.is_none() {
+            return Ok(false);
+        }
+        if self.device_or_profile_owner(package)? {
+            return Ok(true);
+        }
+        let admins = &self.resources()?.oem_admins;
+        let (state, resolution) = self.host.packages()?;
+        let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
+        let packages = query.packages_for_uid(uid).map_err(|e| self.host.unimplemented_named("wifi", e.0))?;
+        if !packages.unwrap_or_default().iter().flatten().any(|p| admins.contains(p)) {
+            return Ok(false);
+        }
+        self.signed_with_platform_key(uid)
+    }
+
+    /// `isTargetSdkLessThanQOrPrivileged`: the app host's one user is not
+    /// a guest.
+    fn target_sdk_less_than_q_or_privileged(&self, package: Option<&str>, uid: i32) -> Result<bool, Exception> {
+        let inputs = self.host.inputs()?;
+        let info = package.and_then(|p| inputs.packages.application_info(p, 0));
+        if info.as_ref().is_some_and(|ai| ai.target_sdk_version < Q) || self.privileged(uid)? || self.admin(uid, package)? {
+            return Ok(true);
+        }
+        Ok(info.is_some_and(|ai| ai.flags & (FLAG_SYSTEM | FLAG_UPDATED_SYSTEM_APP) != 0))
+    }
+
+    /// `getConfiguredNetworks`: no carrier app without telephony.
+    fn configured_networks(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+        caller_networks_only: bool,
+    ) -> Result<Slice<WifiConfiguration>, Exception> {
+        self.enforce_access(uid)?;
+        let none = || Slice::new(self.host.process.clone(), WIFI_CONFIGURATION, Vec::new());
+        if uid != SHELL_UID && uid != ROOT_UID {
+            // `WifiPermissionsUtil.checkPackage`.
+            let name = package.ok_or_else(|| Exception::security(format!("Checking UID {uid} but Package Name is Null")))?;
+            if !self.host.owns_package(uid, name)? {
+                return Err(Exception::security(format!("Package {name} does not belong to {uid}")));
+            }
+            if !caller_networks_only {
+                let checked = {
+                    let _system = aim_binder_host::local::clear_calling_identity();
+                    self.enforce_can_access_scan_results(package, uid)
+                };
+                match checked {
+                    Ok(()) => {}
+                    Err(e) if e.code == EX_SECURITY => {
+                        eprintln!("app host: wifi: Permission violation - getConfiguredNetworks not allowed for uid={uid}, packageName={name}, reason={}", e.message);
+                        return Ok(none());
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        let owner = self.device_or_profile_owner(package)?;
+        let privileged = self.privileged(uid)?;
+        if caller_networks_only && !owner && !privileged {
+            return Err(Exception::security("Not a DO, PO, carrier or privileged app"));
+        }
+        let allowed = self.target_sdk_less_than_q_or_privileged(package, uid)?;
+        if !allowed {
+            eprintln!("app host: wifi: getConfiguredNetworks not allowed for uid={uid}");
+            return Ok(none());
+        }
+        // `getSavedNetworks(targetConfigUid)`: MAC addresses for the
+        // privileged, else for none.
+        let target = if privileged { WIFI_UID } else { INVALID_UID };
+        let resources = self.resources()?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+        let saved: Vec<WifiConfiguration> = self
+            .networks()?
+            .iter()
+            .filter(|c| !c.ephemeral)
+            .map(|c| c.external(target, resources.mac_randomization_supported, now))
+            .collect();
+        // `shouldOmitAutoUpgradeParams`.
+        let omit = |p: &SecurityParams| {
+            p.added_by_auto_upgrade
+                && match p.kind {
+                    SECURITY_TYPE_SAE => !resources.sae_upgrade,
+                    SECURITY_TYPE_OWE => !resources.owe_upgrade,
+                    _ => false,
+                }
+        };
+        let configs = if caller_networks_only {
+            let own: Vec<WifiConfiguration> = saved.into_iter().filter(|c| c.creator_uid == uid).collect();
+            wifi_config::legacy_configs(&own, true, &omit)
+        } else {
+            wifi_config::legacy_configs(&saved, false, &omit)
+        };
+        Ok(Slice::new(self.host.process.clone(), WIFI_CONFIGURATION, configs))
+    }
+
     /// `ActiveModeWarden.getWifiState`: the Mac's radio, on or off.
     fn wifi_state(&self) -> i32 {
         if aim_host_wifi::wifi().is_some_and(|w| w.powered) { WIFI_STATE_ENABLED } else { WIFI_STATE_DISABLED }
@@ -308,6 +549,11 @@ impl Service for WifiService {
             wm::GET_SCAN_RESULTS => {
                 let a = wm::GetScanResults::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.scan_results(uid, a.calling_package.as_deref()).map(|r| wm::write_get_scan_results_reply(&mut p, r.as_ref()))
+            }
+            wm::GET_CONFIGURED_NETWORKS => {
+                let a = wm::GetConfiguredNetworks::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.configured_networks(uid, a.package_name.as_deref(), a.caller_networks_only)
+                    .map(|r| wm::write_get_configured_networks_reply(&mut p, Some(&r)))
             }
             code => {
                 let name = wm::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
