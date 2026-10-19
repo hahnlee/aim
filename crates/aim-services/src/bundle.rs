@@ -1,10 +1,10 @@
 //! `Bundle` in its parcel form (`BaseBundle.writeToParcelInner`,
 //! `Parcel.writeArrayMapInternal` and `writeValue` at the pinned tag), for
 //! the few values native services exchange with the original ones: strings,
-//! string arrays and lists, ints, int and long arrays and booleans, a parcelable
-//! written by the caller and a `MemoryIntArray`; a length-prefixed value
-//! read (a parcelable, a map, a serializable) is kept as its bytes for the
-//! caller to read.
+//! string arrays and lists, ints, int and long arrays and booleans, a
+//! parcelable or a serializable written by the caller and a
+//! `MemoryIntArray`; a length-prefixed value read (a parcelable, a map, a
+//! serializable) is kept as its bytes for the caller to read.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -59,6 +59,10 @@ pub enum Value {
     /// A `Map<String, String>` (`writeMap`), length-prefixed as
     /// `Parcel.writeValue` writes maps.
     StringMap(Vec<(String, Option<String>)>),
+    /// A `Serializable` that is neither a `Map` nor a `List`
+    /// (`writeSerializable`), length-prefixed: its class's name and its
+    /// Object Serialization stream.
+    Serializable { class: String, data: Vec<u8> },
     /// A `MemoryIntArray` (`writeParcelable`): its shared memory, as the
     /// `ParcelFileDescriptor` its `writeToParcel` writes.
     MemoryIntArray(SharedFile),
@@ -154,6 +158,10 @@ impl Value {
                 p.write_i32(0); // no comm fd
                 p.write_file(file.0.clone());
             }),
+            Value::Serializable { class, data } => length_prefixed(p, VAL_SERIALIZABLE, |p| {
+                p.write_string16(Some(class));
+                aim_service_aidl::write_byte_array(p, Some(data));
+            }),
             Value::Lazy { .. } => unreachable!("lazy values are only read"),
         }
     }
@@ -205,6 +213,34 @@ pub fn write(p: &mut Parcel, entries: &[(&str, Value)]) {
     p.write_bool(entries.iter().any(|(_, v)| {
         matches!(v, Value::Parcelable { class, .. } if class == "android.content.Intent")
     }));
+}
+
+/// A `Map<String, String>` value of a bundle read from `parcel`
+/// (`readHashMap`): its entries in the order written, or none for a value
+/// that is no map. A key or value that is not a string is a bad value.
+pub fn string_map(value: &Value, parcel: &Reader<'_>) -> Result<Option<Vec<(String, Option<String>)>>> {
+    let Value::Lazy { kind: VAL_MAP, start, len } = *value else {
+        return Ok(None);
+    };
+    let mut r = parcel.clone();
+    r.set_position(start);
+    let mut entries = Vec::new();
+    for _ in 0..r.read_i32()?.max(0) {
+        if r.read_i32()? != VAL_STRING {
+            return Err(BAD_VALUE);
+        }
+        let key = r.read_string16()?.ok_or(BAD_VALUE)?;
+        let value = match r.read_i32()? {
+            VAL_STRING => r.read_string16()?,
+            VAL_NULL => None,
+            _ => return Err(BAD_VALUE),
+        };
+        entries.push((key, value));
+    }
+    if r.position() != start + len {
+        return Err(BAD_VALUE);
+    }
+    Ok(Some(entries))
 }
 
 /// `readBundle`: its entries, or none for a null bundle.
@@ -315,6 +351,19 @@ mod tests {
         assert_eq!((r.read_i32(), r.read_i32()), (Ok(1), Ok(VAL_STRING)));
         assert_eq!(r.read_string16().unwrap().as_deref(), Some("a=1"));
         assert_eq!(r.position(), start + len);
+    }
+
+    /// A `HashMap<String, String>` put as a serializable is written as a
+    /// map (`getValueType` finds a `Map` first) and read back as one.
+    #[test]
+    fn string_maps_read_as_written() {
+        let entries = vec![("a/b".to_string(), Some("1".to_string())), ("a/c".to_string(), None)];
+        let mut p = Parcel::new();
+        write(&mut p, &[("_flags", Value::StringMap(entries.clone())), ("v", Value::Int(1))]);
+        let parcel = Reader::new(p.data(), &[]);
+        let read = read(&mut parcel.clone()).unwrap().unwrap();
+        assert_eq!(string_map(&read["_flags"], &parcel), Ok(Some(entries)));
+        assert_eq!(string_map(&read["v"], &parcel), Ok(None));
     }
 
     #[test]

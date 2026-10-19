@@ -268,7 +268,7 @@ fn on_command(provider: &SettingsProvider, uid: i32, c: &mut ShellCommand) -> Re
     let table = command.table.clone().unwrap_or_default();
     let mut args: HashMap<String, Value> = HashMap::from([("_user".to_string(), Value::Int(command.user))]);
     let call = |method: &str, key: Option<&str>, args: &HashMap<String, Value>| {
-        provider.call(&caller, &format!("{method}_{table}"), key, args).map_err(|e| java_exception(&e))
+        provider.call(&caller, &format!("{method}_{table}"), key, args, None).map_err(|e| java_exception(&e))
     };
     match command.verb {
         Some(Verb::Get) => {

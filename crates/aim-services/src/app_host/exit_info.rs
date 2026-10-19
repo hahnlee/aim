@@ -535,14 +535,14 @@ fn now_ms() -> i64 {
 }
 
 /// A field's value as `ProtoInputStream` reads it.
-enum Value<'a> {
+pub(super) enum Value<'a> {
     Varint(u64),
     Bytes(&'a [u8]),
     Fixed,
 }
 
 impl Value<'_> {
-    fn int(&self) -> Result<i32, String> {
+    pub(super) fn int(&self) -> Result<i32, String> {
         self.long().map(|v| v as i32)
     }
 
@@ -553,14 +553,14 @@ impl Value<'_> {
         }
     }
 
-    fn bytes(&self) -> Result<&[u8], String> {
+    pub(super) fn bytes(&self) -> Result<&[u8], String> {
         match self {
             Value::Bytes(b) => Ok(b),
             _ => Err("wire type mismatch".into()),
         }
     }
 
-    fn string(&self) -> Result<String, String> {
+    pub(super) fn string(&self) -> Result<String, String> {
         self.bytes().map(|b| String::from_utf8_lossy(b).into_owned())
     }
 }
@@ -579,7 +579,7 @@ fn varint(data: &[u8], at: &mut usize) -> Result<u64, String> {
 }
 
 /// Calls `field(number, value)` for each field of a message.
-fn fields(data: &[u8], mut field: impl FnMut(u64, Value<'_>) -> Result<(), String>) -> Result<(), String> {
+pub(super) fn fields(data: &[u8], mut field: impl FnMut(u64, Value<'_>) -> Result<(), String>) -> Result<(), String> {
     let mut at = 0;
     while at < data.len() {
         let key = varint(data, &mut at)?;

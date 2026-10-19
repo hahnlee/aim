@@ -34,6 +34,7 @@ pub mod connectivity_service;
 pub mod content_service;
 pub mod cross_profile_apps;
 pub mod cursor;
+pub mod device_config;
 pub mod device_identifiers;
 pub mod device_policy;
 pub mod display;
@@ -698,7 +699,7 @@ impl AppHost {
             &apex_manager::inventory(&self.process).map_err(state)?,
         )
         .map_err(state)?;
-        let settings = settings::Settings::load(&configured.data).map_err(state)?;
+        let settings = settings::Settings::load(&configured.data, &configured.root).map_err(state)?;
         let shared_memory = bind::ApplicationSharedMemory::new()
             .map_err(|e| state(format!("application shared memory: {e}")))?;
         eprintln!(
@@ -2513,7 +2514,7 @@ impl AppHost {
 
 /// `SystemProperties.getBoolean` of `value`: `default` when unset, empty
 /// or neither true nor false.
-fn system_boolean(value: Option<&str>, default: bool) -> bool {
+pub(super) fn system_boolean(value: Option<&str>, default: bool) -> bool {
     match value {
         Some("1" | "y" | "yes" | "on" | "true") => true,
         Some("0" | "n" | "no" | "off" | "false") => false,
