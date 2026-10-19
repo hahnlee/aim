@@ -970,7 +970,7 @@ impl ShortcutManager {
     /// pinned shortcut or widget (`injectGetPinConfirmationActivity`).
     /// The system user's items are not restricted on its home screen
     /// (`areShortcutsSupportedOnHomeScreen`).
-    fn pin_confirmation_activity(&self, user: i32, request_type: i32) -> Result<Option<String>, Exception> {
+    pub(super) fn pin_confirmation_activity(&self, user: i32, request_type: i32) -> Result<Option<String>, Exception> {
         if user != 0 {
             return Err(not_modelled("a pin request of another user"));
         }
