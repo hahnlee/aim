@@ -704,6 +704,14 @@ impl Service for StorageManager {
                 let args = sm::GetVolumeList::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply(self.0.volume_list(call, args.user_id, args.calling_package.as_deref()))
             }
+            // `mCeUnlockedUsers`: the app host runs user 0, unlocked, as
+            // the user service reports it.
+            sm::IS_CE_STORAGE_UNLOCKED => {
+                let args = sm::IsCeStorageUnlocked::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                sm::write_is_ce_storage_unlocked_reply(&mut p, args.user_id == 0);
+                Ok(p)
+            }
             sm::GET_VOLUMES => {
                 sm::GetVolumes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let mut p = Parcel::new();
