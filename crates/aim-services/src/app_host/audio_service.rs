@@ -463,6 +463,21 @@ impl AppHost {
     }
 
     /// `trackPlayer`: the player's id from AudioFlinger, or
+    /// `getAvailableCommunicationDeviceIds`: the output devices
+    /// `AudioManager.getDevicesStatic` finds that are communication
+    /// devices; none if audioserver cannot list them, as `getDevicesStatic`
+    /// finds none then.
+    fn communication_device_ids(&self) -> Vec<i32> {
+        let Some(policy) = self.audio_policy.get() else { return Vec::new() };
+        match policy.output_device_ports() {
+            Ok(ports) => ports.iter().filter(|d| d.is_communication_device()).map(|d| d.id).collect(),
+            Err(e) => {
+                eprintln!("app host: audio: {e}");
+                Vec::new()
+            }
+        }
+    }
+
     /// `PLAYER_PIID_INVALID` before audioserver is there.
     fn track_player(&self, call: &Call<'_>, card: Option<PlayerIdCard>) -> Result<i32, Exception> {
         let uid = call.sender_euid as i32;
@@ -985,6 +1000,10 @@ impl Service for AudioService {
             }
             // `AudioDeviceBroker.mBluetoothA2dpEnabled`, which only a
             // Bluetooth A2DP connection sets; the app host has no Bluetooth.
+            audio::GET_AVAILABLE_COMMUNICATION_DEVICE_IDS => {
+                audio::GetAvailableCommunicationDeviceIds::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                audio::write_get_available_communication_device_ids_reply(&mut p, &Some(self.host.communication_device_ids()));
+            }
             audio::IS_BLUETOOTH_A2DP_ON => {
                 audio::IsBluetoothA2dpOn::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 audio::write_is_bluetooth_a2dp_on_reply(&mut p, false);

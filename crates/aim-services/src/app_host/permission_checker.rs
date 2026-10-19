@@ -920,6 +920,15 @@ pub(super) fn preflight(host: &AppHost, permission: &str, uid: i32, package: &st
     Ok(Checks(&system).check_permission(permission, &[&source], false, false, false, OP_NONE)? == GRANTED)
 }
 
+/// `PermissionManager.checkPermissionForDataDelivery` of `permission` for
+/// the chain of `source`, as the system asks it: granted?
+pub(super) fn data_delivery(host: &AppHost, permission: &str, source: &AttributionSourceState) -> Result<bool, Exception> {
+    let me = host.me.upgrade().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "app host gone"))?;
+    let permissions = PermissionManager::new(me.clone());
+    let system = Host { host: &me, permissions: &permissions, caller: SYSTEM_UID, message: None };
+    Ok(Checks(&system).check_permission(permission, &chain(source)?, true, false, false, OP_NONE)? == GRANTED)
+}
+
 /// `ForegroundServiceTypePolicy.RegularPermission.checkPermission` of
 /// `permission` for `package` of `uid`: its preflight check
 /// (`PermissionChecker.checkPermissionForPreflight`), then its op, raw,
