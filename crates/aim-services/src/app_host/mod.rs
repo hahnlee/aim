@@ -443,6 +443,7 @@ pub struct AppHost {
     bal_strict_mode_callbacks: strict_mode::BalCallbacks,
     connectivity_service: OnceLock<Arc<connectivity_service::ConnectivityService>>,
     job_scheduler: OnceLock<Arc<job_scheduler::JobScheduler>>,
+    hint_manager: OnceLock<Arc<hint_manager::HintManager>>,
     stats: OnceLock<Arc<stats_manager::Stats>>,
     bluetooth: OnceLock<Arc<bluetooth_manager::BluetoothManager>>,
     /// What DevicePolicyManagerService persisted, read once.
@@ -519,6 +520,7 @@ impl AppHost {
             bal_strict_mode_callbacks: Default::default(),
             connectivity_service: OnceLock::new(),
             job_scheduler: OnceLock::new(),
+            hint_manager: OnceLock::new(),
             stats: OnceLock::new(),
             bluetooth: OnceLock::new(),
             device_policies: OnceLock::new(),
@@ -688,7 +690,9 @@ impl AppHost {
             ),
             (
                 "performance_hint",
-                Arc::new(hint_manager::HintManager::new(self.clone())),
+                self.hint_manager
+                    .get_or_init(|| hint_manager::HintManager::new(self.clone()))
+                    .clone(),
             ),
             ("sensorservice", Arc::new(sensor_service::SensorService)),
             (
@@ -1726,6 +1730,20 @@ impl AppHost {
         // `onApplicationAttachedLocked`: the broadcasts waiting for it.
         self.broadcasts.process_attached(self, seq);
         Ok(())
+    }
+
+    /// `ProcessList.getIsolatedProcessesLocked`: the pids of the isolated
+    /// processes started for `uid`'s package, none when there are none.
+    pub(super) fn isolated_processes(&self, uid: i32) -> Option<Vec<i32>> {
+        let pids: Vec<i32> = self
+            .apps
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|a| a.isolated && a.package_uid as i32 == uid)
+            .map(|a| a.pid)
+            .collect();
+        (!pids.is_empty()).then_some(pids)
     }
 
     /// Whether `uid` has a process (each of which is top).
