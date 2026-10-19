@@ -81,9 +81,10 @@ past the services their main threads waited for (`performance_hint`,
 `sensorservice`; cameraserver now starts with the camera provider), and
 past `TrafficStats` (`netstats getUidStats` reads netd's per-uid map, which
 the Linux layer's socket accounting fills): Maps gets past its terms
-(WebView) to its sign-in page, whose Skip does not answer yet; Camera at
-a Mac without a camera (#646). Gmail stops at `getAccountsByFeatures`
-(#1504); Chrome draws its first-run screen with its renderer in an
+(WebView) and its sign-in page to its Explore screen, whose map draws no
+tiles (#1743); the AOSP Camera app fails on a Mac without a camera, which
+no longer declares one (#646). Gmail draws its welcome page and its
+add-an-address page; Chrome draws its first-run screen with its renderer in an
 isolated process, and past it starts its tabbed activity, which publishes
 its dynamic shortcut, draws its new tab page with its Discover feed,
 and opens and draws web pages (its renderers in isolated processes);

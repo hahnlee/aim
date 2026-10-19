@@ -47,6 +47,9 @@ pub enum Value {
     /// A parcelable of the class `class`, written to `data`
     /// (`writeParcelable`, length-prefixed).
     Parcelable { class: String, data: Vec<u8> },
+    /// A `Parcelable[]` (`putParcelableArray`, `writeParcelableArray`),
+    /// length-prefixed: each item's class and fields.
+    ParcelableArray(Vec<(String, Vec<u8>)>),
     /// An `ArrayList<String>` (`putStringArrayList`, `writeList`),
     /// length-prefixed as `Parcel.writeValue` writes lists.
     StringList(Vec<String>),
@@ -106,6 +109,13 @@ impl Value {
             Value::Parcelable { class, data } => length_prefixed(p, VAL_PARCELABLE, |p| {
                 p.write_string16(Some(class));
                 p.write_raw(data, &[]);
+            }),
+            Value::ParcelableArray(items) => length_prefixed(p, VAL_PARCELABLEARRAY, |p| {
+                p.write_i32(items.len() as i32);
+                for (class, data) in items {
+                    p.write_string16(Some(class));
+                    p.write_raw(data, &[]);
+                }
             }),
             Value::StringList(items) => length_prefixed(p, VAL_LIST, |p| {
                 p.write_i32(items.len() as i32);

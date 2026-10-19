@@ -1110,9 +1110,11 @@ impl AppHost {
 
     /// `bindServiceAsUser` of the system: the service `package`/`class`
     /// of `user` bound with `bind_flags` for `conn`, by an intent of
-    /// `flags`; whether there is one to bind.
+    /// `action` and `flags`; whether there is one to bind.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn bind_service_from_host(
         &self,
+        action: Option<&str>,
         package: &str,
         class: &str,
         flags: i32,
@@ -1120,7 +1122,7 @@ impl AppHost {
         user: i32,
         conn: Arc<dyn HostConnection>,
     ) -> Result<bool, Exception> {
-        let intent = RawIntent::of(None, flags, &[]).with_component(package, class);
+        let intent = RawIntent::of(action, flags, &[]).with_component(package, class);
         let info = match self.retrieve_service(&intent, None, 1000, user, None, None)? {
             Lookup::Found(info) => *info,
             Lookup::None | Lookup::Denied(_) => return Ok(false),
