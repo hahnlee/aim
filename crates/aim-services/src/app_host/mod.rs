@@ -32,6 +32,7 @@ pub mod connectivity_service;
 pub mod content_service;
 pub mod cross_profile_apps;
 pub mod cursor;
+pub mod device_identifiers;
 pub mod device_policy;
 pub mod display;
 pub mod display_service;
@@ -48,6 +49,7 @@ pub mod job_info;
 pub mod job_scheduler;
 pub mod job_store;
 pub mod keychars;
+pub mod legacy_permission;
 pub mod locale_manager;
 pub mod media_router;
 mod media_router2;
@@ -568,6 +570,8 @@ impl AppHost {
             ("webviewupdate", Arc::new(webview_update::WebViewUpdate::new(self.clone()))),
             ("locale", Arc::new(locale_manager::LocaleManager::new(self.clone()))),
             ("restrictions", Arc::new(restrictions_service::RestrictionsManager::new(self.clone()))),
+            ("legacy_permission", Arc::new(legacy_permission::LegacyPermissionManager::new(self.clone()))),
+            ("device_identifiers", Arc::new(device_identifiers::DeviceIdentifiers::new(self.clone()))),
             ("netpolicy", Arc::new(netpolicy_service::NetworkPolicy::new(self.clone()))),
             ("telephony.registry", Arc::new(telephony_registry::TelephonyRegistry::new(self.clone()))),
             ("network_management", Arc::new(network_management::NetworkManagement::new(self.clone()))),
