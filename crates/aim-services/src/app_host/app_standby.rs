@@ -37,6 +37,8 @@ const STANDBY_BUCKET_ACTIVE: i32 = 10;
 const STANDBY_BUCKET_WORKING_SET: i32 = 20;
 const STANDBY_BUCKET_FREQUENT: i32 = 30;
 const STANDBY_BUCKET_RARE: i32 = 40;
+/// `AppIdleHistory.IDLE_BUCKET_CUTOFF`.
+const IDLE_BUCKET_CUTOFF: i32 = STANDBY_BUCKET_RARE;
 const STANDBY_BUCKET_RESTRICTED: i32 = 45;
 const STANDBY_BUCKET_NEVER: i32 = 50;
 /// `AppIdleHistory.STANDBY_BUCKET_UNKNOWN`.
@@ -693,6 +695,25 @@ impl AppHost {
             return Ok(STANDBY_BUCKET_EXEMPTED);
         }
         self.with_standby(|_, c| Ok(c.history.bucket(package, user)))
+    }
+
+    /// `isAppIdleFiltered(package, getAppId(package), user, now)`: idle
+    /// while not charging when its bucket is rare or below and its
+    /// minimum bucket lets it be.
+    pub(super) fn app_idle_filtered(self: &Arc<Self>, package: &str, user: i32) -> Result<bool, Exception> {
+        let charging = self.battery_stats.get_or_init(|| Arc::new(super::battery_stats::BatteryStats::new(self))).charging();
+        if !self.app_idle_enabled()? || charging {
+            return Ok(false);
+        }
+        // `getAppId`: of any user's install, disabled or not.
+        let (state, _) = self.packages()?;
+        let app_id = state.packages.get(package).map_or(-1, |ps| ps.app_id);
+        self.with_standby(|host, c| {
+            if c.history.bucket(package, user) < IDLE_BUCKET_CUTOFF {
+                return Ok(false);
+            }
+            Ok(host.app_min_bucket(c, package, app_id, user)? >= IDLE_BUCKET_CUTOFF)
+        })
     }
 
     /// `onUsageEvent` of `package`'s `event` for `user`: an activity
