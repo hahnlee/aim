@@ -1000,6 +1000,15 @@ impl Service for AudioService {
             }
             // `AudioDeviceBroker.mBluetoothA2dpEnabled`, which only a
             // Bluetooth A2DP connection sets; the app host has no Bluetooth.
+            audio::IS_SPATIALIZER_ENABLED => {
+                audio::IsSpatializerEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                // `SpatializerHelper.isEnabled`: without the effect
+                // (`ro.audio.spatializer_enabled`) it is not supported.
+                if super::system_boolean(self.host.property("ro.audio.spatializer_enabled").as_deref(), false) {
+                    return reply(Err(self.host.unimplemented_named("audio", "a spatializer (#1779)")));
+                }
+                audio::write_is_spatializer_enabled_reply(&mut p, false);
+            }
             audio::GET_AVAILABLE_COMMUNICATION_DEVICE_IDS => {
                 audio::GetAvailableCommunicationDeviceIds::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 audio::write_get_available_communication_device_ids_reply(&mut p, &Some(self.host.communication_device_ids()));
