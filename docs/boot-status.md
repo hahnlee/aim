@@ -83,7 +83,8 @@ past `TrafficStats` (`netstats getUidStats` reads netd's per-uid map, which
 the Linux layer's socket accounting fills): Maps draws its welcome screen
 and, once its terms are accepted, stops at WebView (#1491); Camera at a
 Mac without a camera (#646). Gmail stops at `getAccountsByFeatures`
-(#1504); Chrome at isolated services (#1492); Messages at WebView
+(#1504); Chrome starts its renderer's isolated service, then stops at
+`usagestats` (no such service yet); Messages at WebView
 (#1491); the Google apps at Play services (#1673, #1623, #1504).
 
 ## Native system services (2026-09-29, ADR 0013)

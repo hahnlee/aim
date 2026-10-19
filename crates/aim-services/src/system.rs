@@ -188,6 +188,11 @@ impl ServiceOwner {
     }
 }
 
+/// The services whose originals are added with `allowIsolated` at
+/// `android-16.0.0_r1`: `activity` (`ActivityManagerService
+/// .setSystemProcess`), `display` (`DisplayManagerService.onStart`).
+const ALLOW_ISOLATED: &[&str] = &["activity", "display"];
+
 pub struct System {
     diagnostic_self: Weak<Self>,
     process: Arc<LocalProcess>,
@@ -664,13 +669,14 @@ impl System {
     }
 
     /// Registers `binder` with servicemanager as `name`, as
-    /// `SystemService.publishBinderService` does.
+    /// `SystemService.publishBinderService` does, reachable from isolated
+    /// processes if the original's is.
     pub fn add_service(&self, name: &str, binder: aim_binder_host::parcel::Binder) -> Result<()> {
         let mut data = Parcel::new();
         sm::AddService {
             name: Some(name.into()),
             service: Some(binder),
-            allow_isolated: false,
+            allow_isolated: ALLOW_ISOLATED.contains(&name),
             // IServiceManager.DUMP_FLAG_PRIORITY_DEFAULT
             dump_priority: 1 << 3,
         }

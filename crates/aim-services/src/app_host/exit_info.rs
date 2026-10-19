@@ -8,8 +8,8 @@
 //! (`AppErrors.crashApplicationInner`) and a death (`scheduleNoteProcessDied`),
 //! each kept per package and uid up to `config_app_exit_info_history_list_size`
 //! and written back 30 minutes after the first unwritten one, as
-//! `persistProcessExitInfo` writes it. The app host has no isolated or SDK
-//! sandbox processes, no ANR traces, no tombstones and no zygote or lmkd
+//! `persistProcessExitInfo` writes it. The app host has no SDK sandbox
+//! processes, no ANR traces, no tombstones and no zygote or lmkd
 //! reports of an exit's status (`handleZygoteSigChld`,
 //! `scheduleNoteLmkdProcKilled`), so a death without a kill stays
 //! `REASON_UNKNOWN` (#1540); packages and users are not removed from it.
@@ -92,14 +92,15 @@ pub(super) struct ExitInfo {
 }
 
 impl ExitInfo {
-    /// `obtainRawRecord` of a process of the app host, each of which is
-    /// top once it attached (`procStateToImportance` of its reported state).
-    pub(super) fn raw(package: &str, process: &str, uid: u32, pid: i32, attached: bool) -> ExitInfo {
+    /// `obtainRawRecord` of a process of the app host with `uid`, of a
+    /// package of `package_uid`, each of which is top once it attached
+    /// (`procStateToImportance` of its reported state).
+    pub(super) fn raw(package: &str, process: &str, uid: u32, package_uid: u32, pid: i32, attached: bool) -> ExitInfo {
         ExitInfo {
             pid,
             real_uid: uid as i32,
-            package_uid: uid as i32,
-            defining_uid: uid as i32,
+            package_uid: package_uid as i32,
+            defining_uid: package_uid as i32,
             process_name: Some(process.to_string()),
             package_name: Some(package.to_string()),
             reason: REASON_UNKNOWN,
@@ -305,12 +306,13 @@ impl History {
         container.latest(pid).map(|i| &mut container.infos[i])
     }
 
-    /// `addExitInfoLocked` of `raw` under its package and real uid: the
-    /// exits that fell out of the history.
+    /// `addExitInfoLocked` of `raw` under its package and real uid (an
+    /// isolated process's owner's): the exits that fell out of the history.
     fn add(&mut self, raw: &ExitInfo, retriever: Option<Binder>, capacity: usize) -> Option<ExitInfo> {
         let package = raw.package_name.as_deref()?;
+        let uid = if is_isolated(raw.real_uid) { raw.package_uid } else { raw.real_uid };
         let mut summaries = std::mem::take(&mut self.summaries);
-        let container = self.users_mut(package).entry(raw.real_uid).or_insert_with(|| Container { uid: raw.real_uid, infos: Vec::new() });
+        let container = self.users_mut(package).entry(uid).or_insert_with(|| Container { uid, infos: Vec::new() });
         let dropped = container.add(raw.clone(), &mut summaries, retriever, capacity);
         self.summaries = summaries;
         dropped
@@ -1019,7 +1021,7 @@ mod tests {
         std::fs::write(data.join("system/procexitstore/anr_orphan.gz"), b"x").unwrap();
         let tracker = Tracker::load(&data, 16, None);
         assert!(!data.join("system/procexitstore/anr_orphan.gz").exists());
-        tracker.note_process_died(&ExitInfo::raw("com.example", "com.example", 10_123, 77, true));
+        tracker.note_process_died(&ExitInfo::raw("com.example", "com.example", 10_123, 10_123, 77, true));
         tracker.persist();
         let loaded = Tracker::load(&data, 16, None);
         let infos = loaded.exit_info(Some("com.example"), 10_123, 0, 0);
