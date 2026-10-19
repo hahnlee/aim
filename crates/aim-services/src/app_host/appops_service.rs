@@ -7,7 +7,10 @@
 //! an attribution tag the package (or its proxy) does not declare is
 //! dropped where SECURITY_EXCEPTION_ON_INVALID_ATTRIBUTION_TAG_CHANGE is
 //! enabled. An op is ignored while a sensor privacy toggle restricts it, a
-//! user restriction it has is set and the app may not bypass it, or (for
+//! user restriction of it is set (UserManager's, or a client's from
+//! `setUserRestriction` past its excluded packages and tags, until the
+//! client's token dies: `appops_restrictions.rs`) and the app may not
+//! bypass it, or (for
 //! checks of the ops suspension restricts) the package is suspended; root
 //! and system have every op once `runtime_permission_appops_mapping_enabled`
 //! is on; else the op's switch decides: the uid's mode where it is not the
@@ -23,9 +26,10 @@
 //! runs for its client binder until the client finishes each of its
 //! starts or dies (`AttributedOp`), paused instead while restricted; active
 //! watchers hear an op's first start and last finish, started watchers
-//! each start. The modes and restrictions do not change while the app host
-//! runs, so mode watchers are kept and never called and no started op is
-//! paused or resumed later (#1594); foreground changes are not watched
+//! each start. A change of a client's user restriction tells the op's mode
+//! watchers (`startWatchingModeWithFlags`, kept until they die) and pauses
+//! or resumes its started ops; the modes and the other restrictions do not
+//! change while the app host runs (#1594); foreground changes are not watched
 //! (#1529); no access history is kept (#1593). An op noted or started for
 //! an app by another uid with `shouldCollectAsyncNotedOp`, or by a proxy
 //! without UPDATE_APP_OPS_STATS for itself, goes to the app's async-noted
@@ -43,10 +47,12 @@ use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::com_android_internal_app_iappopsactivecallback as active_callback;
+use aim_service_aidl::com_android_internal_app_iappopscallback as mode_callback;
 use aim_service_aidl::com_android_internal_app_iappopsservice as appops;
 use aim_service_aidl::com_android_internal_app_iappopsstartedcallback as started_callback;
 
 use super::app_op_infos::{APP_OP_INFOS, AppOpInfo, Bypass, DefaultMode, NUM_OP, OP_NONE, UNRESTRICTED};
+use super::appops_restrictions::{ModeWatchers, PackageTags, UserRestrictions};
 use super::permission_checker::AttributionSourceState;
 use super::permission_manager::PermissionManager;
 use super::{AppHost, reply};
@@ -109,6 +115,16 @@ pub(super) const ATTRIBUTION_CHAIN_ID_NONE: i32 = -1;
 /// `OnOpStartedListener.START_TYPE_FAILED`, `START_TYPE_STARTED`.
 const START_TYPE_FAILED: i32 = 0;
 const START_TYPE_STARTED: i32 = 1;
+/// `OnOpStartedListener.START_TYPE_RESUMED`.
+const START_TYPE_RESUMED: i32 = 2;
+/// `AppOpsService.UID_ANY`, `UserHandle.USER_ALL`.
+const UID_ANY: i32 = -2;
+const USER_ALL: i32 = -1;
+/// `VirtualDeviceManager.PERSISTENT_DEVICE_ID_DEFAULT`.
+const PERSISTENT_DEVICE_ID_DEFAULT: &str = "default:0";
+const MANAGE_APP_OPS_RESTRICTIONS: &str = "android.permission.MANAGE_APP_OPS_RESTRICTIONS";
+const INTERACT_ACROSS_USERS_FULL: &str = "android.permission.INTERACT_ACROSS_USERS_FULL";
+const INTERACT_ACROSS_USERS: &str = "android.permission.INTERACT_ACROSS_USERS";
 /// `Process.ROOT_UID`, `SYSTEM_UID`, `SHELL_UID`, `MEDIA_UID`,
 /// `AUDIOSERVER_UID`, `CAMERASERVER_UID`, `INVALID_UID`,
 /// `FIRST_APPLICATION_UID`, `FIRST_SDK_SANDBOX_UID`,
@@ -160,6 +176,9 @@ trait System {
     /// Whether user 0's restriction `name` is set, as UserManager gives
     /// its restrictions to appops (`setUserRestrictions`).
     fn user_restriction(&self, name: &str) -> Result<bool, Exception>;
+    /// Whether another client's user restriction (`setUserRestriction`)
+    /// restricts `code` for the package and tag of `user`.
+    fn client_restricted(&self, code: i32, user: i32, package: &str, tag: Option<&str>, is_check: bool) -> Result<bool, Exception>;
     /// Whether sensor privacy restricts `op` for every app (a global
     /// restriction).
     fn global_restriction(&self, op: i32) -> Result<bool, Exception>;
@@ -388,16 +407,31 @@ fn has_ops(sys: &dyn System, uid: i32) -> Result<bool, Exception> {
 }
 
 /// `isOpRestrictedLocked` of the default device: a global restriction, or
-/// the op's user restriction unless the app may bypass it.
-fn restricted(sys: &dyn System, uid: i32, info: &AppOpInfo, bypass: Option<Bypass>) -> Result<bool, Exception> {
+/// a client's user restriction of the op (UserManager's, of user 0, or one
+/// set with `setUserRestriction` past its excluded packages and tags)
+/// unless the app may bypass it.
+#[allow(clippy::too_many_arguments)]
+fn restricted(
+    sys: &dyn System,
+    uid: i32,
+    info: &AppOpInfo,
+    bypass: Option<Bypass>,
+    package: &str,
+    tag: Option<&str>,
+    is_check: bool,
+) -> Result<bool, Exception> {
     if sys.global_restriction(info.code)? {
         return Ok(true);
     }
     if info.code == OP_CAMERA && sys.feature(FEATURE_AUTOMOTIVE)? && sys.flag(CAMERA_PRIVACY_ALLOWLIST)? {
         return Err(sys.unimplemented("the camera privacy allowlist (#1563)"));
     }
-    let Some(restriction) = info.restriction else { return Ok(false) };
-    if uid.div_euclid(PER_USER_RANGE) != 0 || !sys.user_restriction(restriction)? {
+    let user = uid.div_euclid(PER_USER_RANGE);
+    let by_user_manager = match info.restriction {
+        Some(restriction) => user == 0 && sys.user_restriction(restriction)?,
+        None => false,
+    };
+    if !by_user_manager && !sys.client_restricted(info.code, user, package, tag, is_check)? {
         return Ok(false);
     }
     // `opAllowSystemBypassRestriction`.
@@ -476,7 +510,7 @@ fn check(sys: &dyn System, caller: i32, code: i32, uid: i32, package: Option<&st
     if OPS_RESTRICTED_ON_SUSPEND.contains(&code) && sys.package(&package, user)?.is_some_and(|p| p.suspended) {
         return Ok(MODE_IGNORED);
     }
-    if restricted(sys, uid, info, bypass)? {
+    if restricted(sys, uid, info, bypass, &package, None, true)? {
         return Ok(MODE_IGNORED);
     }
     if allowed_for_uid(sys, uid)? {
@@ -668,10 +702,11 @@ pub(super) struct Client {
 }
 
 /// A client's unfinished starts of an attributed op
-/// (`InProgressStartOpEvent`): their count, the first's attribution, and
-/// the link to the client's death.
+/// (`InProgressStartOpEvent`): their count, the first's `OP_FLAG_*` and
+/// attribution, and the link to the client's death.
 struct InProgress<L> {
     starts: u32,
+    flags: i32,
     attribution_flags: i32,
     chain_id: i32,
     link: L,
@@ -834,10 +869,12 @@ impl<L> Started<L> {
 
     /// `AttributedOp.started`, or `createPaused` for a restricted op: one
     /// more start of `client`, the op active from its first.
+    #[allow(clippy::too_many_arguments)]
     fn start(
         &mut self,
         client: &Client,
         restricted: bool,
+        flags: i32,
         attribution: Attribution,
         link: &mut dyn FnMut(&Client) -> L,
         effects: &mut Effects,
@@ -849,6 +886,7 @@ impl<L> Started<L> {
         let events = if restricted { &mut attributed.paused } else { &mut attributed.running };
         let event = events.entry(client.binder).or_insert_with(|| InProgress {
             starts: 0,
+            flags,
             attribution_flags: attribution.flags,
             chain_id: attribution.chain_id,
             link: link(client),
@@ -894,6 +932,39 @@ impl<L> Started<L> {
         ended
     }
 
+    /// `AttributedOp.pause`: its running events paused, the active
+    /// watchers told of each that it is inactive.
+    fn pause(&mut self, key: &OpKey, tag: &Option<String>, effects: &mut Effects) {
+        let attributed = self.ops.get_mut(key).and_then(|tags| tags.get_mut(tag)).expect("a started op");
+        let events: Vec<(Binder, InProgress<L>)> = attributed.running.drain().collect();
+        let notices: Vec<(Binder, i32, i32)> = events.iter().map(|(b, e)| (*b, e.attribution_flags, e.chain_id)).collect();
+        attributed.paused.extend(events);
+        for (binder, attribution_flags, chain_id) in notices {
+            let client = Client { key: key.clone(), tag: tag.clone(), binder };
+            self.notify_active(&client, false, attribution_flags, chain_id, effects);
+        }
+    }
+
+    /// `AttributedOp.resume`: its paused events running again, active once
+    /// more if none ran, and the started watchers told of each
+    /// (START_TYPE_RESUMED, always MODE_ALLOWED as the original).
+    fn resume(&mut self, key: &OpKey, tag: &Option<String>, effects: &mut Effects) {
+        let attributed = self.ops.get_mut(key).and_then(|tags| tags.get_mut(tag)).expect("a started op");
+        let send_active = !attributed.paused.is_empty() && attributed.running.is_empty();
+        let events: Vec<(Binder, InProgress<L>)> = attributed.paused.drain().collect();
+        let notices: Vec<(i32, i32, i32)> = events.iter().map(|(_, e)| (e.flags, e.attribution_flags, e.chain_id)).collect();
+        attributed.running.extend(events);
+        let (uid, package, op) = key;
+        for (flags, attribution_flags, chain_id) in notices {
+            if send_active {
+                let heard = Heard::Active(true);
+                self.notify(Watch::Active, *op, *uid, Some(package), tag.as_deref(), attribution_flags, chain_id, heard, effects);
+            }
+            let heard = Heard::Started { flags, mode: MODE_ALLOWED, start_type: START_TYPE_RESUMED };
+            self.notify(Watch::Started, *op, *uid, Some(package), tag.as_deref(), attribution_flags, chain_id, heard, effects);
+        }
+    }
+
     /// `AttributedOp.onClientDeath`: the client's starts all finished, of
     /// the paused events while any is paused.
     fn client_died(&mut self, client: &Client, effects: &mut Effects) -> Vec<L> {
@@ -921,6 +992,50 @@ struct Ops<'a, L> {
 }
 
 impl<L> Ops<'_, L> {
+    /// `updateStartedOpModeForUserForDefaultDevice`: the started ops of
+    /// `code` of the user (`USER_ALL`: of any) whose package mode allows
+    /// them, paused where now restricted, resumed where no restriction is
+    /// left.
+    fn update_started_mode(&mut self, code: i32, restricted_now: bool, user: i32) -> Result<(), Exception> {
+        let sys = self.sys;
+        let info = &APP_OP_INFOS[code as usize];
+        let mut keys: Vec<OpKey> = self
+            .started
+            .ops
+            .keys()
+            .filter(|(uid, _, op)| *op == code && (user == USER_ALL || uid.div_euclid(PER_USER_RANGE) == user))
+            .cloned()
+            .collect();
+        keys.sort();
+        for key in keys {
+            let (uid, package, _) = &key;
+            // `AppOpsCheckingService.getPackageMode`.
+            let mode = match sys.package_mode(package, info.name)? {
+                Some(mode) => mode,
+                None => default_mode(sys, info)?,
+            };
+            if mode != MODE_ALLOWED && mode != MODE_FOREGROUND {
+                continue;
+            }
+            let mut tags: Vec<Option<String>> = self.started.ops[&key].keys().cloned().collect();
+            tags.sort();
+            for tag in tags {
+                let attributed = &self.started.ops[&key][&tag];
+                if restricted_now && !attributed.running.is_empty() {
+                    self.started.pause(&key, &tag, &mut self.effects);
+                } else if !attributed.paused.is_empty() {
+                    let Verified::Bypass(bypass, _) = verify_and_get_bypass(sys, SYSTEM_UID, *uid, Some(package), tag.as_deref(), None)? else {
+                        return Err(Exception::security(format!("Specified package \"{package}\" under uid {uid} but it is not")));
+                    };
+                    if !restricted(sys, *uid, info, bypass, package, tag.as_deref(), false)? {
+                        self.started.resume(&key, &tag, &mut self.effects);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// `noteOperationImpl` behind `AppOpsPolicy.noteOperation`.
     fn note(&mut self, op: &Unchecked<'_>, device: i32) -> Result<SyncNoted, Exception> {
         let code = resolve_datasource_op(self.sys, op.code, op.uid, op.package, op.tag)?;
@@ -943,7 +1058,7 @@ impl<L> Ops<'_, L> {
             return Ok(SyncNoted::new(MODE_ERRORED, op.code, tag, op.package));
         }
         let package = op.package.ok_or_else(|| Exception::new(EX_NULL_POINTER, "packageName"))?;
-        let mode = if restricted(sys, op.uid, info, bypass)? { MODE_IGNORED } else { op_mode(sys, op.uid, package, info, true)? };
+        let mode = if restricted(sys, op.uid, info, bypass, package, tag, false)? { MODE_IGNORED } else { op_mode(sys, op.uid, package, info, true)? };
         if mode == MODE_ALLOWED {
             self.collect(op, package, tag);
         }
@@ -1059,7 +1174,7 @@ impl<L> Ops<'_, L> {
         }
         let binder = client.ok_or_else(|| Exception::new(EX_NULL_POINTER, "clientId"))?;
         let client = Client { key: (op.uid, package.to_string(), op.code), tag: tag.map(String::from), binder };
-        self.started.start(&client, restricted, attribution, self.link, &mut self.effects);
+        self.started.start(&client, restricted, op.flags, attribution, self.link, &mut self.effects);
         let (mode, start_type) = if restricted { (MODE_IGNORED, START_TYPE_FAILED) } else { (MODE_ALLOWED, START_TYPE_STARTED) };
         self.notify_started(op, tag, mode, start_type, attribution);
         if !restricted {
@@ -1245,7 +1360,7 @@ fn decide<'a>(sys: &dyn System, caller: i32, op: &Unchecked<'a>, allow_uid: bool
         return Ok(Decided::NoOps(tag));
     }
     let package = op.package.ok_or_else(|| Exception::new(EX_NULL_POINTER, "packageName"))?;
-    let restricted = restricted(sys, op.uid, info, bypass)?;
+    let restricted = restricted(sys, op.uid, info, bypass, package, tag, false)?;
     let mode = op_mode(sys, op.uid, package, info, allow_uid)?;
     Ok(Decided::Mode { tag, package, mode, restricted })
 }
@@ -1285,6 +1400,10 @@ impl System for Host<'_> {
 
     fn user_restriction(&self, name: &str) -> Result<bool, Exception> {
         Ok(self.0.user_restrictions()?.contains(name))
+    }
+
+    fn client_restricted(&self, code: i32, user: i32, package: &str, tag: Option<&str>, is_check: bool) -> Result<bool, Exception> {
+        self.0.app_ops.restrictions.lock().unwrap().0.any(code, user, package, tag, is_check)
     }
 
     fn global_restriction(&self, op: i32) -> Result<bool, Exception> {
@@ -1406,11 +1525,115 @@ impl System for Host<'_> {
 type Link = Option<(Strong, u64)>;
 
 /// AppOpsService's state in the app host: the started ops and their
-/// watchers, and the async-noted watchers and the ops none took.
+/// watchers, the async-noted watchers and the ops none took, the clients'
+/// user restrictions with the binders their tokens keep, and the mode
+/// watchers.
 #[derive(Default)]
 pub(super) struct State {
     started: Mutex<Started<Link>>,
     async_noted: Mutex<Async>,
+    restrictions: Mutex<(UserRestrictions<Link>, HashMap<u32, Strong>)>,
+    mode_watchers: Mutex<ModeWatchers<Link>>,
+}
+
+/// Holds a reference to each token the user restrictions key, and to no
+/// other (an `ArrayMap` key holds its binder).
+fn keep_tokens(host: &AppHost, (restrictions, kept): &mut (UserRestrictions<Link>, HashMap<u32, Strong>)) {
+    let tokens = restrictions.tokens();
+    kept.retain(|token, _| tokens.contains(token));
+    for token in tokens {
+        kept.entry(token).or_insert_with(|| host.process.strong(token));
+    }
+}
+
+/// `setUserRestrictionNoCheck`: the client made for the token (linked to
+/// its death) where it has none, the restriction set for the user (each
+/// user for `USER_ALL`, `resolveUserId`), the client dropped once it
+/// restricts nothing; a change tells the op's mode watchers and pauses or
+/// resumes its started ops.
+fn set_user_restriction(
+    host: &AppHost,
+    code: i32,
+    restricted: bool,
+    token: Binder,
+    user: i32,
+    excluded: Option<&PackageTags>,
+) -> Result<(), Exception> {
+    let Binder::Handle(token) = token else {
+        return Err(host.unimplemented_named("appops", "a user restriction token of the app host's own (#1594)"));
+    };
+    let users: Vec<i32> = if user == USER_ALL { host.packages()?.0.users.keys().copied().collect() } else { vec![user] };
+    let (changed, dropped) = {
+        let mut state = host.app_ops.restrictions.lock().unwrap();
+        if !state.0.has_client(token) {
+            state.0.add_client(token, link_restriction_client(host, token));
+        }
+        let changed = state.0.set(token, &users, code, restricted, excluded);
+        let dropped = if state.0.has_restrictions(token) { None } else { state.0.remove_client(token) };
+        keep_tokens(host, &mut state);
+        (changed, dropped)
+    };
+    unlink(host, dropped.into_iter().collect());
+    if changed {
+        notify_mode_watchers(host, code);
+        with_ops(host, SYSTEM_UID, |ops| ops.update_started_mode(code, restricted, user))?;
+    }
+    Ok(())
+}
+
+/// Links a restriction client's death to `ClientUserRestrictionState.binderDied`:
+/// its restrictions cleared, the mode watchers of each op it restricted
+/// told (`notifyAllUserRestrictions`).
+fn link_restriction_client(host: &AppHost, token: u32) -> Link {
+    let strong = host.process.strong(token);
+    let me = host.me.clone();
+    let death = host.process.link_to_death(
+        &strong,
+        Box::new(move || {
+            let Some(host) = me.upgrade() else { return };
+            let (codes, link) = {
+                let mut state = host.app_ops.restrictions.lock().unwrap();
+                let codes = state.0.clear(token);
+                let link = state.0.remove_client(token);
+                keep_tokens(&host, &mut state);
+                (codes, link)
+            };
+            unlink(&host, link.into_iter().collect());
+            for code in codes {
+                notify_mode_watchers(&host, code);
+            }
+        }),
+    );
+    Some((strong, death))
+}
+
+/// `notifyWatchersOnDefaultDevice(code, UID_ANY)`: `opChanged` to each
+/// mode watcher of the op (a restricted-read op's only with MANAGE_APPOPS,
+/// `shouldIgnoreCallback`), one-way.
+fn notify_mode_watchers(host: &AppHost, code: i32) {
+    let changes = host.app_ops.mode_watchers.lock().unwrap().changes(code, UID_ANY, UID_ANY);
+    for change in changes {
+        if APP_OP_INFOS[change.op as usize].restrict_read {
+            match host.check_permission(Some(MANAGE_APPOPS), change.calling_uid) {
+                Ok(0) => {}
+                Ok(_) => continue,
+                Err(e) => {
+                    eprintln!("app host: appops mode watcher of op {}: {e:?}", change.op);
+                    continue;
+                }
+            }
+        }
+        let mut p = Parcel::new();
+        mode_callback::OpChanged {
+            op: change.op,
+            uid: UID_ANY,
+            package_name: Some(String::new()),
+            persistent_device_id: Some(PERSISTENT_DEVICE_ID_DEFAULT.into()),
+        }
+        .write(&mut p);
+        // One-way; a watcher that died is not called.
+        let _ = host.process.transact(change.handle, mode_callback::OP_CHANGED, &p, true);
+    }
 }
 
 /// Runs `f` over the app host's appops as `caller`, then unlinks the
@@ -1733,13 +1956,12 @@ fn remove_watcher(state: &mut Async, key: &(String, i32), handle: u32) -> Option
 pub struct AppOps {
     host: Arc<AppHost>,
     permissions: Arc<PermissionManager>,
-    watchers: Mutex<Vec<(i32, Binder)>>,
     sampling: Mutex<super::appops_sampling::Sampling>,
 }
 
 impl AppOps {
     pub fn new(host: Arc<AppHost>, permissions: Arc<PermissionManager>) -> Self {
-        AppOps { host, permissions, watchers: Mutex::new(Vec::new()), sampling: Mutex::new(super::appops_sampling::Sampling::new()) }
+        AppOps { host, permissions, sampling: Mutex::new(super::appops_sampling::Sampling::new()) }
     }
 
     /// `getPackageNamesForSampling`: the packages of user 0 that request a
@@ -1760,6 +1982,60 @@ impl AppOps {
             .collect();
         names.sort();
         names
+    }
+
+    /// `startWatchingModeWithFlags`: a valid op or OP_NONE; a callback of
+    /// another process, kept until it dies; a package the caller may see.
+    fn start_watching_mode(&self, uid: i32, pid: i32, op: i32, package: Option<&str>, flags: i32, callback: Option<Binder>) -> Result<(), Exception> {
+        if !(OP_NONE..NUM_OP).contains(&op) {
+            let side = if op < OP_NONE { "too low" } else { "too high" };
+            return Err(Exception::illegal_argument(format!("Invalid op code: {op} is out of range of [{OP_NONE}, {}] ({side})", NUM_OP - 1)));
+        }
+        let Some(callback) = callback else { return Ok(()) };
+        let Binder::Handle(handle) = callback else {
+            return Err(self.host.unimplemented_named("appops", "a mode watcher of the app host's own (#1594)"));
+        };
+        // `filterAppAccessUnlocked`.
+        let package = match package {
+            Some(package) if !Host(&self.host).filtered(package, uid, uid.div_euclid(PER_USER_RANGE))? => Some(package),
+            _ => None,
+        };
+        let host = &self.host;
+        let link = || {
+            let strong = host.process.strong(handle);
+            let me = host.me.clone();
+            let death = host.process.link_to_death(
+                &strong,
+                Box::new(move || {
+                    // `ModeCallback.binderDied`: `stopWatchingMode`.
+                    let Some(host) = me.upgrade() else { return };
+                    let link = host.app_ops.mode_watchers.lock().unwrap().unwatch(handle);
+                    unlink(&host, link.into_iter().collect());
+                }),
+            );
+            Some((strong, death))
+        };
+        host.app_ops.mode_watchers.lock().unwrap().watch(handle, op, package, flags, uid, pid, link);
+        Ok(())
+    }
+
+    /// `setUserRestriction`: MANAGE_APP_OPS_RESTRICTIONS (the caller being
+    /// another process), INTERACT_ACROSS_USERS(_FULL) for another user, a
+    /// valid op the caller may read and a token.
+    fn set_user_restriction(&self, uid: i32, a: appops::SetUserRestriction<PackageTags>) -> Result<(), Exception> {
+        let host = &self.host;
+        if host.check_permission(Some(MANAGE_APP_OPS_RESTRICTIONS), uid)? != 0 {
+            return Err(Exception::security(format!("uid {uid} does not have {MANAGE_APP_OPS_RESTRICTIONS}.")));
+        }
+        if a.user_handle != uid.div_euclid(PER_USER_RANGE)
+            && host.check_permission(Some(INTERACT_ACROSS_USERS_FULL), uid)? != 0
+            && host.check_permission(Some(INTERACT_ACROSS_USERS), uid)? != 0
+        {
+            return Err(Exception::security("Need INTERACT_ACROSS_USERS_FULL or INTERACT_ACROSS_USERS to interact cross user "));
+        }
+        verify_incoming_op(&Host(host), uid, a.code)?;
+        let token = a.token.ok_or_else(|| Exception::new(EX_NULL_POINTER, "token"))?;
+        set_user_restriction(host, a.code, a.restricted, token, a.user_handle, a.excluded_package_tags.as_ref())
     }
 
     /// `startWatchingActive` and `startWatchingStarted`: the caller's own
@@ -2021,25 +2297,33 @@ impl Service for AppOps {
             }
             appops::START_WATCHING_MODE => {
                 let args = appops::StartWatchingMode::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                if let Some(callback) = args.callback {
-                    self.watchers.lock().unwrap().push((args.op, callback));
+                if let Err(e) = self.start_watching_mode(caller, call.sender_pid, args.op, args.package_name.as_deref(), 0, args.callback) {
+                    return reply(Err(e));
                 }
                 appops::write_start_watching_mode_reply(&mut p);
             }
             appops::START_WATCHING_MODE_WITH_FLAGS => {
                 let args = appops::StartWatchingModeWithFlags::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                if let Some(callback) = args.callback {
-                    self.watchers.lock().unwrap().push((args.op, callback));
+                let package = args.package_name.as_deref();
+                if let Err(e) = self.start_watching_mode(caller, call.sender_pid, args.op, package, args.flags, args.callback) {
+                    return reply(Err(e));
                 }
                 appops::write_start_watching_mode_with_flags_reply(&mut p);
             }
             appops::STOP_WATCHING_MODE => {
-                // `mModeWatchers.remove(callback.asBinder())`.
                 let args = appops::StopWatchingMode::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                if let Some(callback) = args.callback {
-                    self.watchers.lock().unwrap().retain(|(_, watcher)| *watcher != callback);
+                if let Some(Binder::Handle(handle)) = args.callback {
+                    let link = self.host.app_ops.mode_watchers.lock().unwrap().unwatch(handle);
+                    unlink(&self.host, link.into_iter().collect());
                 }
                 appops::write_stop_watching_mode_reply(&mut p);
+            }
+            appops::SET_USER_RESTRICTION => {
+                let args = appops::SetUserRestriction::<PackageTags>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.set_user_restriction(caller, args) {
+                    return reply(Err(e));
+                }
+                appops::write_set_user_restriction_reply(&mut p);
             }
             appops::START_WATCHING_ACTIVE => {
                 let args = appops::StartWatchingActive::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -2144,6 +2428,7 @@ mod tests {
         attributions: BTreeMap<&'static str, Vec<&'static str>>,
         invalid_tags_rejected: bool,
         recognizer_tags: Vec<(i32, String, Vec<String>)>,
+        clients: UserRestrictions<()>,
     }
 
     impl System for Fake {
@@ -2161,6 +2446,10 @@ mod tests {
 
         fn user_restriction(&self, name: &str) -> Result<bool, Exception> {
             Ok(self.restrictions.contains(name))
+        }
+
+        fn client_restricted(&self, code: i32, user: i32, package: &str, tag: Option<&str>, is_check: bool) -> Result<bool, Exception> {
+            self.clients.any(code, user, package, tag, is_check)
         }
 
         fn global_restriction(&self, op: i32) -> Result<bool, Exception> {
@@ -2559,6 +2848,39 @@ mod tests {
         assert_eq!(notices[0].heard, Heard::Started { flags: OP_FLAG_SELF, mode: MODE_IGNORED, start_type: START_TYPE_FAILED });
         assert!(!is_active(&f, &mut started, OP_CAMERA, APP, "app"));
         assert_eq!(finish(&f, &mut started, CLIENT, OP_CAMERA, APP, "app"), (vec![], vec![CLIENT]));
+    }
+
+    /// A client's user restriction (`setUserRestriction`) ignores the op;
+    /// `updateStartedOpModeForUserForDefaultDevice` pauses a running start
+    /// (inactive) and, once nothing restricts it, resumes it (active, and
+    /// START_TYPE_RESUMED to the started watchers).
+    #[test]
+    fn client_user_restrictions_pause_and_resume_started_ops() {
+        let mut f = fake();
+        let mut started = Started::default();
+        started.watch(Watch::Active, WATCHER, &[OP_CAMERA], INVALID_UID, SYSTEM_UID, || Binder::Handle(WATCHER));
+        started.watch(Watch::Started, OTHER_WATCHER, &[OP_CAMERA], INVALID_UID, SYSTEM_UID, || Binder::Handle(OTHER_WATCHER));
+        start(&f, &mut started, CLIENT, &own(OP_CAMERA, APP, "app"), NO_CHAIN);
+        f.clients.add_client(1, ());
+        assert!(f.clients.set(1, &[0], OP_CAMERA, true, None));
+        assert_eq!(check_mode(&f, OP_CAMERA, APP, "app"), MODE_IGNORED);
+        assert_eq!(check_mode(&f, OP_CAMERA, 1_010_100, "app"), MODE_ALLOWED);
+        let (paused, effects, _) = run(&f, SYSTEM_UID, &mut started, |ops| ops.update_started_mode(OP_CAMERA, true, 0));
+        paused.unwrap();
+        assert_eq!(effects.notices, [active(OP_CAMERA, APP, "app", false, vec![(WATCHER, SYSTEM_UID)])]);
+        assert!(!is_active(&f, &mut started, OP_CAMERA, APP, "app"));
+        assert!(f.clients.set(1, &[0], OP_CAMERA, false, None));
+        let (resumed, effects, _) = run(&f, SYSTEM_UID, &mut started, |ops| ops.update_started_mode(OP_CAMERA, false, 0));
+        resumed.unwrap();
+        let heard = Heard::Started { flags: OP_FLAG_SELF, mode: MODE_ALLOWED, start_type: START_TYPE_RESUMED };
+        assert_eq!(
+            effects.notices,
+            [
+                active(OP_CAMERA, APP, "app", true, vec![(WATCHER, SYSTEM_UID)]),
+                Notice { heard, ..active(OP_CAMERA, APP, "app", true, vec![(OTHER_WATCHER, SYSTEM_UID)]) },
+            ]
+        );
+        assert!(is_active(&f, &mut started, OP_CAMERA, APP, "app"));
     }
 
     /// A package not the uid's errs, a uid without packages has no ops,
