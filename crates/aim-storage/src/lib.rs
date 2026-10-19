@@ -41,3 +41,5 @@ pub mod constructor_capture;
 pub mod pty_owner;
 
 pub mod pipe_identity;
+
+pub mod bpf_object;

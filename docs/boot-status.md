@@ -78,12 +78,13 @@ real one in a new task, which now answers the launch, so the window's
 splash goes when it draws; Files' roots load once ExternalStorageProvider
 gets `getVolumes`. Settings, Clock and Safety draw. Maps and Camera got
 past the services their main threads waited for (`performance_hint`,
-`sensorservice`; cameraserver now starts with the camera provider): Maps
-then stops at `TrafficStats` (`netstats getUidStats`, which needs netd's
-BPF programs to run, #1671, #1691), Camera at a Mac without a camera
-(#646). Gmail stops at `TrafficStats` too; Chrome at isolated services
-(#1492); Messages at WebView (#1491); the Google apps at Play services
-(#1673, #1623, #1504).
+`sensorservice`; cameraserver now starts with the camera provider), and
+past `TrafficStats` (`netstats getUidStats` reads netd's per-uid map, which
+the Linux layer's socket accounting fills): Maps draws its welcome screen
+and, once its terms are accepted, stops at WebView (#1491); Camera at a
+Mac without a camera (#646). Gmail stops at `getAccountsByFeatures`
+(#1504); Chrome at isolated services (#1492); Messages at WebView
+(#1491); the Google apps at Play services (#1673, #1623, #1504).
 
 ## Native system services (2026-09-29, ADR 0013)
 

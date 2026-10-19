@@ -269,7 +269,7 @@ INTERFACES=(
   "android.os.INetworkManagementService|system/framework/framework.jar|setUidCleartextNetworkPolicy,isBandwidthControlEnabled"
   "android.content.pm.IShortcutService|system/framework/framework.jar|getMaxShortcutCountPerActivity,getShortcuts,getIconMaxDimensions,getRemainingCallCount,getRateLimitResetTime"
   "android.app.role.IRoleManager|apex/com.android.permission/javalib/framework-permission-s.jar|isRoleAvailableAsUser,isRoleHeldAsUser,getRoleHoldersAsUser,getDefaultApplicationAsUser,addOnRoleHoldersChangedListenerAsUser,removeOnRoleHoldersChangedListenerAsUser,isRoleFallbackEnabledAsUser,getHeldRolesFromControllerAsUser,isBypassingRoleQualification,getBrowserRoleHolder,getSmsRoleHolder,getEmergencyRoleHolder"
-  "android.net.INetworkStatsService|apex/com.android.tethering/javalib/framework-connectivity-t.jar|getRateLimitCacheConfig"
+  "android.net.INetworkStatsService|apex/com.android.tethering/javalib/framework-connectivity-t.jar|getRateLimitCacheConfig,getUidStats"
   "android.net.IConnectivityManager|apex/com.android.tethering/javalib/framework-connectivity.jar|getActiveNetwork,getActiveNetworkForUid,getActiveNetworkInfo,getActiveNetworkInfoForUid,getNetworkInfo,getNetworkInfoForUid,getAllNetworks,getLinkProperties,getNetworkCapabilities,isActiveNetworkMetered,getGlobalProxy,getProxyForNetwork,requestNetwork,listenForNetwork,releaseNetworkRequest,getMultipathPreference,getRestrictBackgroundStatusByCaller,getEnabledConnectivityManagerFeatures"
   "android.net.wifi.IWifiManager|apex/com.android.wifi/javalib/framework-wifi.jar|getWifiEnabledState,getVerboseLoggingLevel,isScanAlwaysAvailable,getConnectionInfo"
   "android.os.IMessenger|system/framework/framework.jar|*"

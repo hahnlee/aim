@@ -215,6 +215,7 @@ pub type SetProperty = Box<dyn Fn(&str, &str) + Send + Sync>;
 struct Configured {
     root: PathBuf,
     data: PathBuf,
+    bpf: PathBuf,
     properties: Properties,
     set_property: SetProperty,
     connect: Connect,
@@ -431,13 +432,15 @@ impl AppHost {
         *self.published.lock().unwrap() = services.to_vec();
     }
 
-    /// The image below `root`, the guest's `/data` at `data`, the
-    /// device's properties (read once the first process starts, when
-    /// init has set them), and how the zygote relay is reached.
+    /// The image below `root`, the guest's `/data` at `data` and its bpffs
+    /// at `bpf`, the device's properties (read once the first process
+    /// starts, when init has set them), and how the zygote relay is
+    /// reached.
     pub fn configure(
         &self,
         root: &Path,
         data: &Path,
+        bpf: &Path,
         properties: Properties,
         set_property: SetProperty,
         connect: Connect,
@@ -446,6 +449,7 @@ impl AppHost {
             .set(Configured {
                 root: root.to_path_buf(),
                 data: data.to_path_buf(),
+                bpf: bpf.to_path_buf(),
                 properties,
                 set_property,
                 connect,
@@ -1519,6 +1523,11 @@ impl AppHost {
     /// The guest's `/data`.
     fn data(&self) -> Result<&Path, Exception> {
         Ok(&self.configured.get().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host not configured"))?.data)
+    }
+
+    /// The guest's `/sys/fs/bpf`.
+    fn bpf(&self) -> Result<&Path, Exception> {
+        Ok(&self.configured.get().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host not configured"))?.bpf)
     }
 
     /// What DevicePolicyManagerService persisted, read once.

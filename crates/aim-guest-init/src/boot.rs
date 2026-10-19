@@ -799,7 +799,7 @@ impl Boot {
                 let properties_dir = layout.properties_dir();
                 let socket_dir = layout.socket_dir();
                 let sets = std::sync::Mutex::new(host_properties.clone());
-                services.configure_app_host(image.root(), &layout.data.join("data"),
+                services.configure_app_host(image.root(), &layout.data.join("data"), &layout.bpf_dir(),
                     Box::new(move |name| read_property(&properties_dir, name)),
                     Box::new(move |name, value| drop(sets.lock().unwrap().send((name.to_string(), value.to_string())))),
                     Box::new(move || crate::unixsock::connect_at(&socket_dir, APP_HOST_ZYGOTE_RELAY)),
