@@ -70,6 +70,7 @@ pub mod permission_controller;
 pub mod permission_manager;
 pub mod playback;
 pub mod providers;
+pub mod restrictions_service;
 pub mod role_service;
 pub mod power_service;
 pub mod sensor_privacy;
@@ -565,6 +566,7 @@ impl AppHost {
             ("usagestats", Arc::new(usage_stats::UsageStats::new(self.clone()))),
             ("webviewupdate", Arc::new(webview_update::WebViewUpdate::new(self.clone()))),
             ("locale", Arc::new(locale_manager::LocaleManager::new(self.clone()))),
+            ("restrictions", Arc::new(restrictions_service::RestrictionsManager::new(self.clone()))),
             ("netpolicy", Arc::new(netpolicy_service::NetworkPolicy::new(self.clone()))),
             ("telephony.registry", Arc::new(telephony_registry::TelephonyRegistry::new(self.clone()))),
             ("network_management", Arc::new(network_management::NetworkManagement::new(self.clone()))),
