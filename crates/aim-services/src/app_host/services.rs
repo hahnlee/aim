@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 
 use aim_binder_host::local::Strong;
 use aim_binder_host::parcel::{
-    Binder, EX_BAD_PARCELABLE, EX_ILLEGAL_STATE, Exception, Parcel, Reader, Result as ParcelResult,
+    Binder, EX_BAD_PARCELABLE, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader, Result as ParcelResult,
 };
 use aim_service_aidl::android_app_iapplicationthread as thread;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
@@ -1220,6 +1220,21 @@ impl AppHost {
             self.connection_removed(&mut state, c);
         }
         true
+    }
+
+    /// `updateServiceGroupLocked` of an app's connection. A group and
+    /// importance order cached isolated processes for OomAdjuster, which
+    /// the app host, whose processes are all top, does not have (#1738):
+    /// they change nothing.
+    pub(super) fn update_service_group(&self, connection: Option<Binder>) -> Result<(), Exception> {
+        let Some(Binder::Handle(conn)) = connection else {
+            return Err(Exception::new(EX_NULL_POINTER, "connection"));
+        };
+        let state = self.services.state.lock().unwrap();
+        if !state.connections.iter().any(|c| matches!(&c.conn, Conn::App(s) if s.handle == conn)) {
+            return Err(Exception::illegal_argument(format!("Could not find connection for android.os.BinderProxy@{conn:x}")));
+        }
+        Ok(())
     }
 
     /// `removeConnectionLocked`'s effects of `c`'s removal: the last
