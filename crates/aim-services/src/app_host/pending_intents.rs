@@ -26,6 +26,21 @@ use super::broadcasts::filter_equals;
 use super::kept::{By, KeptIntent, RawBundle, RawIntent};
 use super::{AppHost, PER_USER_RANGE};
 
+/// What a start of a sent activity record carries beside its intent
+/// (`sendInner`'s `resultTo`, `resultWho`, `requestCode`, `flagsMask` and
+/// `flagsValues`).
+#[derive(Default)]
+pub(super) struct Sent {
+    pub result_to: Option<Binder>,
+    pub result_who: Option<String>,
+    pub request_code: i32,
+    pub flags_mask: i32,
+    pub flags_values: i32,
+}
+
+/// `Intent.IMMUTABLE_FLAGS`: the grant flags.
+const IMMUTABLE_FLAGS: i32 = 0x1 | 0x2 | 0x40 | 0x80;
+
 /// `ActivityManager.INTENT_SENDER_*`.
 const INTENT_SENDER_BROADCAST: i32 = 1;
 const INTENT_SENDER_ACTIVITY: i32 = 2;
@@ -453,6 +468,7 @@ impl AppHost {
                 resolved_type,
                 finished,
                 required_permission,
+                Sent::default(),
             );
         };
         // Another implementation of IIntentSender: sent on, its result
@@ -478,7 +494,7 @@ impl AppHost {
 
     /// `PendingIntentRecord.sendInner`.
     #[allow(clippy::too_many_arguments)]
-    fn send_record(
+    pub(super) fn send_record(
         self: &Arc<Self>,
         caller: Option<Binder>,
         target: Binder,
@@ -487,6 +503,7 @@ impl AppHost {
         resolved_type: Option<String>,
         finished: Option<Strong>,
         required_permission: Option<String>,
+        sent: Sent,
     ) -> Result<i32, Exception> {
         let (kind, package, feature, uid, user, final_intent, resolved) = {
             let mut records = self.pending_intents.records.lock().unwrap();
@@ -515,6 +532,13 @@ impl AppHost {
                     resolved = resolved_type;
                 }
             }
+            if r.flags & FLAG_IMMUTABLE == 0 {
+                let mask = sent.flags_mask & !IMMUTABLE_FLAGS;
+                let values = sent.flags_values & mask;
+                let flags = (final_intent.intent.flags & !mask) | values;
+                let extended = final_intent.intent.extended_flags;
+                final_intent.set_flags(flags, extended);
+            }
             let (kind, package, feature, uid, user) =
                 (r.kind, r.package.clone(), r.feature.clone(), r.uid, r.user);
             if r.flags & FLAG_ONE_SHOT != 0 {
@@ -533,9 +557,9 @@ impl AppHost {
                     caller: None,
                     intent: Some(final_intent.clone()),
                     resolved_type: resolved,
-                    result_to: None,
-                    result_who: None,
-                    request_code: -1,
+                    result_to: sent.result_to,
+                    result_who: sent.result_who,
+                    request_code: sent.request_code,
                 };
                 res = match self.start_activity_in_package(uid, package.clone(), 0, args) {
                     Ok(r) => r,
