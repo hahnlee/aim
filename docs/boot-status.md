@@ -103,6 +103,10 @@ its other processes fail on AppSearch (#1761). The original Bluetooth app
 runs under the app host: the native `bluetooth_manager` binds its
 AdapterService, which brings the stack up over the Bluetooth HAL to
 STATE_ON (media sessions serve its AVRCP target and media browser).
+Telecom's `TelecomService` runs in the app host's system process (the
+`android` package's process `system`, started by zygote); its creation
+of the telecom service stops at appops `setUserRestriction` (#1594), so
+Phone still finds no `TelecomManager` (#1786).
 
 ## Native system services (2026-09-29, ADR 0013)
 

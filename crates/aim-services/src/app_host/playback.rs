@@ -510,6 +510,10 @@ pub struct Playback {
     port_ids: BTreeMap<i32, i32>,
     clients: Vec<Client>,
     recorders: BTreeMap<i32, Recorder>,
+    /// `RecordingActivityMonitor.mClients`: each dispatcher, its death
+    /// link and whether it is privileged. As the recording configurations
+    /// are not kept (#1480), none changes and none is told.
+    recording_clients: Vec<(Strong, u64, bool)>,
     /// `DuckingManager`: by uid, whether its duck is strong and the
     /// players ducked.
     duckers: BTreeMap<i32, (bool, Vec<i32>)>,
@@ -671,6 +675,18 @@ impl Playback {
     /// `registerPlaybackCallback`.
     pub fn add_client(&mut self, dispatcher: Strong, death: u64, privileged: bool) {
         self.clients.push(Client { dispatcher, death, privileged, errors: 0 });
+    }
+
+    /// `RecordingActivityMonitor.registerRecordingCallback`.
+    pub fn add_recording_client(&mut self, dispatcher: Strong, death: u64, privileged: bool) {
+        self.recording_clients.push((dispatcher, death, privileged));
+    }
+
+    /// `unregisterRecordingCallback`: the death links to clear.
+    pub fn remove_recording_client(&mut self, handle: u32) -> Vec<(Strong, u64)> {
+        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.recording_clients).into_iter().partition(|(d, _, _)| d.handle == handle);
+        self.recording_clients = kept;
+        gone.into_iter().map(|(d, death, _)| (d, death)).collect()
     }
 
     /// `unregisterPlaybackCallback`: the death links to clear.

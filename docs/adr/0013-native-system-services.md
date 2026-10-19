@@ -476,6 +476,21 @@ The migration's state and conformance results are in
   the agent as MediaProvider's uid): files keep the original's owners on
   `/data/media`. MediaStore's per-file ownership and database come later
   (#1455).
+- **The system process (2026-10-19).** Original code that runs only in
+  system_server runs in the app host in a process the app host starts for
+  it, until a native replacement takes its place (decision of 2026-10-19).
+  The system process is the `android` package's process `system` of the
+  system uid (`setSystemProcess`), and zygote starts it as it starts an
+  app's. Components that other system-uid packages declare in
+  `android:process="system"` run there: Telecom's `TelecomService`, which
+  the native TelecomLoaderService binds. Its providers are the system
+  apps' that `installSystemProviders` installs, less `settings`, which the
+  app host serves itself. The `android` package's own components are
+  system_server's code. They need its class path (`SYSTEMSERVERCLASSPATH`,
+  the system class loader that `LoadedApk` gives `android`), which a
+  process zygote starts as an app's does not have. They stay
+  unimplemented (#1518), and so does the AppSearch module's service
+  (#1761), which needs `services.jar`'s `SystemService` as well.
 
 ### CTS-derived conformance (2026-10-16)
 

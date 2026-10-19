@@ -107,6 +107,7 @@ mod strict_mode;
 pub mod surface;
 pub mod task_info;
 pub mod tasks;
+pub mod telecom_loader;
 pub mod telephony_registry;
 pub mod uid_observers;
 pub mod uri_grants;
@@ -328,6 +329,15 @@ struct App {
 
 /// `Process.SYSTEM_UID`.
 const SYSTEM_UID: u32 = 1000;
+/// The system process (`ActivityManagerService.setSystemProcess`): the
+/// `android` package's process.
+const SYSTEM_PROCESS: &str = "system";
+const SYSTEM_PACKAGE: &str = "android";
+/// `UserHandle.USER_ALL`.
+const USER_ALL: i32 = -1;
+const INTERACT_ACROSS_USERS_FULL: &str = "android.permission.INTERACT_ACROSS_USERS_FULL";
+/// `Settings.AUTHORITY`, the provider the app host serves itself.
+const SETTINGS_AUTHORITY: &str = "settings";
 /// `Process.FIRST_ISOLATED_UID`, `LAST_ISOLATED_UID`.
 const FIRST_ISOLATED_UID: u32 = 99_000;
 const LAST_ISOLATED_UID: u32 = 99_999;
@@ -429,6 +439,8 @@ pub struct AppHost {
     job_scheduler: OnceLock<Arc<job_scheduler::JobScheduler>>,
     stats: OnceLock<Arc<stats_manager::Stats>>,
     bluetooth: OnceLock<Arc<bluetooth_manager::BluetoothManager>>,
+    /// TelecomLoaderService.
+    telecom_loader: OnceLock<Arc<telecom_loader::TelecomLoader>>,
     /// What DevicePolicyManagerService persisted, read once.
     device_policies: OnceLock<device_policy::Policies>,
     services: services::Services,
@@ -502,6 +514,7 @@ impl AppHost {
             job_scheduler: OnceLock::new(),
             stats: OnceLock::new(),
             bluetooth: OnceLock::new(),
+            telecom_loader: OnceLock::new(),
             device_policies: OnceLock::new(),
             services: Default::default(),
             pending_intents: Default::default(),
@@ -958,9 +971,28 @@ impl AppHost {
     }
 
     fn start_app_process(&self, name: &str, process: &str, request: Option<activity_start::StartRequest>, from_background: bool, isolated: bool) -> Result<(i64, i32), Exception> {
-        if process == "system" {
-            return Err(self.unimplemented_named("activity", &format!("a component of {name} in system_server's process (#1518)")));
+        let inputs = self.inputs()?;
+        // The system process (`setSystemProcess`) is the `android`
+        // package's, `system` of the system uid: a component of another
+        // system package declared in it runs there. The `android`
+        // package's own components are system_server's code, which needs
+        // its class path (`SYSTEMSERVERCLASSPATH`, the system class loader
+        // `LoadedApk` gives `android`); a process zygote starts as an app
+        // does not have it (#1518).
+        if process == SYSTEM_PROCESS && !isolated {
+            let uid = inputs.packages.application_info(name, STOCK_PM_FLAGS).map(|ai| ai.uid as u32);
+            if uid == Some(SYSTEM_UID) {
+                if name == SYSTEM_PACKAGE {
+                    return Err(self.unimplemented_named("activity", "a component of system_server's own code (#1518)"));
+                }
+                return self.start_package_process(SYSTEM_PACKAGE, process, request, from_background, false);
+            }
         }
+        self.start_package_process(name, process, request, from_background, isolated)
+    }
+
+    /// `startProcessLocked` of the process `process` of package `name`.
+    fn start_package_process(&self, name: &str, process: &str, request: Option<activity_start::StartRequest>, from_background: bool, isolated: bool) -> Result<(i64, i32), Exception> {
         let inputs = self.inputs()?;
         let state = package::State::read(&inputs.data, &[0])
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("package state: {e}")))?
@@ -2105,7 +2137,7 @@ impl AppHost {
         let Some(name) = name else {
             return Ok(None);
         };
-        if name != "settings" {
+        if name != SETTINGS_AUTHORITY {
             let user = self.incoming_user(uid, user, false)?;
             let client = self
                 .apps
@@ -2126,7 +2158,7 @@ impl AppHost {
         let state_error = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
         let registered = resolution
             .components
-            .provider_by_authority("settings")
+            .provider_by_authority(SETTINGS_AUTHORITY)
             .ok_or_else(|| state_error("no settings provider".into()))?;
         let class = state
             .packages
@@ -2216,6 +2248,17 @@ impl AppHost {
             | MATCH_DISABLED_COMPONENTS
             | MATCH_DIRECT_BOOT_AWARE
             | MATCH_DIRECT_BOOT_UNAWARE;
+        // All users: the caller's own, with INTERACT_ACROSS_USERS_FULL.
+        let user = if user == USER_ALL {
+            if self.check_permission(Some(INTERACT_ACROSS_USERS_FULL), uid)? != 0 {
+                return Err(Exception::security(format!(
+                    "ContentProviderHelper: Neither user {uid} nor current process has {INTERACT_ACROSS_USERS_FULL}."
+                )));
+            }
+            uid / PER_USER_RANGE as i32
+        } else {
+            user
+        };
         let Some(cpi) = self.resolve_provider(authority, flags, user)? else {
             return Ok(Some(format!(
                 "Failed to find provider {authority} for user {user}; expected to find a valid ContentProvider for this authority"
@@ -3486,6 +3529,8 @@ impl Service for Control {
                     bluetooth.on_user_starting();
                     bluetooth.on_user_unlocking();
                 }
+                // TelecomLoaderService's `PHASE_ACTIVITY_MANAGER_READY`.
+                host.telecom_loader.get_or_init(|| telecom_loader::TelecomLoader::new(host.clone())).activity_manager_ready();
             });
             let mut p = Parcel::new();
             p.write_no_exception();
