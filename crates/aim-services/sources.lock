@@ -273,7 +273,7 @@ INTERFACES=(
   "android.media.IAudioDeviceVolumeDispatcher|system/framework/framework.jar|*"
   "android.media.IAudioFocusDispatcher|system/framework/framework.jar|*"
   "android.media.IPlayer|system/framework/framework.jar|setVolume,applyVolumeShaper"
-  "android.media.session.ISessionManager|system/framework/framework.jar|getMediaKeyEventSession,addOnMediaKeyEventSessionChangedListener"
+  "android.media.session.ISessionManager|system/framework/framework.jar|*"
   "android.media.session.IOnMediaKeyEventSessionChangedListener|system/framework/framework.jar|*"
   "android.media.session.ISessionController|system/framework/framework.jar|registerCallback,unregisterCallback,getPackageName,getMetadata,getPlaybackState,play,pause,stop,next,previous,seekTo"
   "android.media.session.ISessionControllerCallback|system/framework/framework.jar|onSessionDestroyed,onPlaybackStateChanged,onMetadataChanged"
