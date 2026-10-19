@@ -54,6 +54,7 @@ pub mod kept;
 pub mod netpolicy_service;
 pub mod netstats;
 pub mod network;
+pub mod network_management;
 mod network_native;
 pub mod notification_channels;
 pub mod notification_service;
@@ -83,6 +84,7 @@ pub mod storage;
 pub mod surface;
 pub mod task_info;
 pub mod tasks;
+pub mod telephony_registry;
 pub mod uid_observers;
 pub mod uri_grants;
 pub mod trust_service;
@@ -500,6 +502,8 @@ impl AppHost {
             ("sensorservice", Arc::new(sensor_service::SensorService)),
             ("wifi", Arc::new(wifi_service::WifiService::new(self.clone()))),
             ("netpolicy", Arc::new(netpolicy_service::NetworkPolicy::new(self.clone()))),
+            ("telephony.registry", Arc::new(telephony_registry::TelephonyRegistry::new(self.clone()))),
+            ("network_management", Arc::new(network_management::NetworkManagement::new(self.clone()))),
             ("role", self.role_service.get_or_init(|| Arc::new(role_service::RoleManager::new(self.clone()))).clone()),
             ("settings", Arc::new(settings_service::SettingsService::new(self.clone(), settings))),
             (
@@ -2962,6 +2966,7 @@ impl Service for Activity {
             // A Java proxy reads an empty reply as success with zero
             // results (a granted permission), so a method the app host
             // does not implement throws.
+            am::REGISTER_STRICT_MODE_CALLBACK => reply(Err(self.0.unimplemented_named("activity", "registerStrictModeCallback: unsafe intent launches (#1715)"))),
             code => reply(Err(self.0.unimplemented("activity", code))),
         }
     }

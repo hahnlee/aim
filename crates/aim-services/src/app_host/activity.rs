@@ -731,6 +731,9 @@ impl Service for ActivityTaskManager {
                 atm::write_get_activity_client_controller_reply(&mut p, Some(self.1));
                 Ok(p)
             }
+            atm::REGISTER_BACKGROUND_ACTIVITY_START_CALLBACK => {
+                reply(Err(self.0.unimplemented_named("activity_task", "registerBackgroundActivityStartCallback: BAL strict mode (#1715)")))
+            }
             code => reply(Err(self.0.unimplemented("activity_task", code))),
         }
     }
