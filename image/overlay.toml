@@ -708,6 +708,14 @@ path = "/vendor/etc/vintf/manifest/android.hardware.wifi.supplicant.xml"
 reason = "declares wpa_supplicant (a lazy service of the removed init.ranchu.rc) on wlan0; there is no Wi-Fi"
 
 [[remove]]
+path = "/vendor/etc/permissions/android.hardware.wifi.direct.xml"
+reason = "declares Wi-Fi Direct; the Mac's Wi-Fi offers no P2P to the guest, so the device has none (docs/network.md)"
+
+[[remove]]
+path = "/vendor/etc/permissions/android.hardware.wifi.passpoint.xml"
+reason = "declares Passpoint; the app host's wifi reports the Mac's Wi-Fi and provisions no Passpoint networks (docs/network.md)"
+
+[[remove]]
 path = "/vendor/etc/init/health-storage-default.rc"
 reason = "the default storage-health HAL runs f2fs/UFS maintenance through sysfs; the data store is an APFS directory"
 

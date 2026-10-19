@@ -672,7 +672,7 @@ isolated compilation, contextual search and system captions (no
 
 | Service | Start ms | Calls | How a device without it avoids it | CTS and app impact |
 | --- | --- | --- | --- | --- |
-| Wi-Fi: `wifi`, `wifiscanner`, `wifip2p` (WifiService, WifiScanningService, WifiP2pService) | 133 / 45 | 3 / 1 / 3 | features `android.hardware.wifi`, `.wifi.direct`, `.wifi.passpoint` (`/vendor/etc/permissions`); init's `wificond` has its own script | The guest's network is `eth0`; Android's Wi-Fi has no HAL here and never connects. The app host's `wifi` is B: it reports the Mac's Wi-Fi (CoreWLAN), its radio first (#1686); the original stack over a HAL is #265. |
+| Wi-Fi: `wifi`, `wifiscanner`, `wifip2p` (WifiService, WifiScanningService, WifiP2pService) | 133 / 45 | 3 / 1 / 3 | feature `android.hardware.wifi` (`/vendor/etc/permissions`; Direct and Passpoint are removed); init's `wificond` has its own script | The guest's network is `eth0`; Android's Wi-Fi has no HAL here and never connects. The app host's `wifi` is B: it reports the Mac's Wi-Fi (CoreWLAN), its radio first (#1686); the original stack over a HAL is #265. |
 | `usb` (UsbService) | 2 / 0 | 0 / 3 / 0 | feature `android.hardware.usb.host` (no accessory feature is declared) | No USB device reaches the guest. UsbManager has no service behind it; USB tests require the feature. Settings asks it 3 times at start. |
 | `network_time_update_service` (NetworkTimeUpdateService) | 0 / 0 | - | build property `config.disable_networktime=true` | The Mac owns the clock. Time detection keeps its other sources. |
 | `otadexopt` (OtaDexOptService) | 0 / 0 | - | build property `config.disable_otadexopt=true` | A/B OTA dexopt; the image is updated by `cargo aim`, never by OTA. |
