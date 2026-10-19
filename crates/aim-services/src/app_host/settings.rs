@@ -5,7 +5,11 @@
 //! written back as `doWriteState` writes them, in binary XML, a moment
 //! after the first unwritten change (`scheduleWriteIfNeededLocked`) or at
 //! once after a critical one (`persistSettingsLocked`). DeviceConfig's
-//! flags (`settings_config.xml`) are only read.
+//! flags (`settings_config.xml`) are written the same way, a write of an
+//! aconfig flag staged (`staged/namespace*flag`) for the next boot as the
+//! image's aconfig defaults (`super::device_config`) name them, and a
+//! namespace's flags set at once (`setSettingsLocked`) unless the reset
+//! that banned them is what they would be again (`isNewConfigBannedLocked`).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
@@ -17,6 +21,7 @@ use std::time::{Duration, Instant};
 use aim_android_xml::{Element, Node, Value};
 use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
 
+use super::device_config::{AconfigDefaults, map_hash};
 use crate::package::info::java_hash;
 
 /// `SettingsState.SETTINGS_VERSION_NEW_ENCODING`, `VERSION_UNDEFINED`,
@@ -464,6 +469,25 @@ impl State {
     }
 }
 
+impl State {
+    /// `mNamespaceBannedHashes.get(prefix)`.
+    fn banned_hash(&self, prefix: &str) -> Option<&str> {
+        self.namespace_hashes.iter().find(|(n, _)| n.as_deref() == Some(prefix)).and_then(|(_, h)| h.as_deref())
+    }
+
+    /// `banConfigurationLocked`'s `mNamespaceBannedHashes.put`, in its
+    /// `ArrayMap`'s order; written with the changes that follow.
+    fn ban(&mut self, prefix: &str, hash: String) {
+        if let Some(entry) = self.namespace_hashes.iter_mut().find(|(n, _)| n.as_deref() == Some(prefix)) {
+            entry.1 = Some(hash);
+            return;
+        }
+        let key = java_hash(prefix);
+        let at = self.namespace_hashes.partition_point(|(n, _)| n.as_deref().map_or(0, java_hash) <= key);
+        self.namespace_hashes.insert(at, (Some(prefix.to_string()), Some(hash)));
+    }
+}
+
 /// `isExemptFromMemoryUsageCap`.
 fn exempt(capped: bool, package: Option<&str>) -> bool {
     !capped || package == Some(SYSTEM_PACKAGE_NAME)
@@ -516,12 +540,15 @@ struct Shared {
 pub struct Settings {
     shared: Arc<Shared>,
     writer: OnceLock<()>,
+    /// The config table's aconfig defaults.
+    aconfig: AconfigDefaults,
 }
 
 impl Settings {
-    /// User 0's settings below the guest's `/data` at `data`; a table
-    /// never written has none.
-    pub fn load(data: &Path) -> Result<Settings, String> {
+    /// User 0's settings below the guest's `/data` at `data`, with the
+    /// aconfig defaults of the image at `root`; a table never written has
+    /// none.
+    pub fn load(data: &Path, root: &Path) -> Result<Settings, String> {
         let mut tables = HashMap::new();
         for table in Table::ALL {
             let path = data.join("system/users/0").join(table.file());
@@ -539,7 +566,167 @@ impl Settings {
                 scheduled: Condvar::new(),
             }),
             writer: OnceLock::new(),
+            aconfig: AconfigDefaults::load(root),
         })
+    }
+
+    /// `mAconfigDefaultFlags`' flag `package.flag`.
+    pub fn aconfig_flag(&self, name: &str) -> Option<&super::device_config::FlagInfo> {
+        self.aconfig.flags.get(name)
+    }
+
+    /// `insertSettingLocked`'s staging of an aconfig flag of the config
+    /// table: `staged/namespace*flag` for `namespace/flag` when the
+    /// namespace's defaults name it.
+    fn staged_name(&self, table: Table, name: &str) -> Option<String> {
+        let slash = name.find('/').filter(|&i| i != 0 && table == Table::Config)?;
+        let namespace = &name[..slash];
+        self.aconfig
+            .namespaces
+            .get(namespace)
+            .is_some_and(|defaults| defaults.contains_key(name))
+            .then(|| format!("{CONFIG_STAGED_PREFIX}{namespace}*{}", &name[slash + 1..]))
+    }
+
+    /// `SettingsProvider.getAllConfigFlags`: the aconfig defaults of the
+    /// prefix's namespace (all of them without one), then the config
+    /// settings it starts, but for read-only aconfig flags
+    /// (`ignoreXmlForReadOnlyFlags`). A prefix must end its namespace.
+    pub fn config_flags(&self, prefix: Option<&str>) -> Result<HashMap<String, Option<String>>, Exception> {
+        let mut flags = HashMap::new();
+        let defaults = |defaults: &HashMap<String, String>, flags: &mut HashMap<String, Option<String>>| {
+            flags.extend(defaults.iter().map(|(name, value)| (name.clone(), Some(value.clone()))));
+        };
+        match prefix {
+            Some(prefix) => {
+                // `prefix.substring(0, prefix.length() - 1)`.
+                let namespace = prefix
+                    .char_indices()
+                    .last()
+                    .map(|(i, _)| &prefix[..i])
+                    .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "StringIndexOutOfBoundsException: an empty prefix"))?;
+                if let Some(namespace) = self.aconfig.namespaces.get(namespace) {
+                    defaults(namespace, &mut flags);
+                }
+            }
+            None => self.aconfig.namespaces.values().for_each(|namespace| defaults(namespace, &mut flags)),
+        }
+        let tables = self.shared.tables.lock().unwrap();
+        for setting in tables.get(&Table::Config).into_iter().flat_map(|state| &state.settings) {
+            if prefix.is_some_and(|p| !setting.name.starts_with(p)) {
+                continue;
+            }
+            let flag = setting.name.find('/').filter(|&i| i != 0).map(|i| &setting.name[i + 1..]);
+            if flag.and_then(|f| self.aconfig.flags.get(f)).is_some_and(|info| !info.read_write) {
+                continue;
+            }
+            flags.insert(setting.name.clone(), setting.value.clone());
+        }
+        Ok(flags)
+    }
+
+    /// `getAllConfigPrefixesLocked`: each config setting's name up to its
+    /// first `/`, with it.
+    pub fn config_prefixes(&self) -> Vec<String> {
+        let tables = self.shared.tables.lock().unwrap();
+        let mut prefixes: Vec<String> = tables
+            .get(&Table::Config)
+            .into_iter()
+            .flat_map(|state| &state.settings)
+            .map(|s| format!("{}/", s.name.split('/').next().unwrap_or_default()))
+            .collect();
+        prefixes.sort();
+        prefixes.dedup();
+        prefixes
+    }
+
+    /// `banConfigurationLocked` of `prefix` with its flags `flags`: none
+    /// for no flags.
+    pub fn ban_config(&self, prefix: &str, flags: &HashMap<String, Option<String>>) {
+        if flags.is_empty() {
+            return;
+        }
+        let hash = map_hash(flags.iter().map(|(k, v)| (k.as_str(), v.as_deref())));
+        self.shared.tables.lock().unwrap().entry(Table::Config).or_insert_with(State::new).ban(prefix, hash.to_string());
+    }
+
+    /// `setConfigSettingsLocked` of `prefix`, `key_values` in their map's
+    /// order: false if the reset that banned the namespace's flags left
+    /// them as they would be again (`isNewConfigBannedLocked`, `"null"`
+    /// read as null, as it also does to the values set); else every
+    /// namespace is unbanned if this one was, and the flags are set
+    /// (`setSettingsLocked`). The names changed come with it; a value of
+    /// a flag there is is always a change unless both are null, as the
+    /// original compares them by reference. `caller_system` is a new
+    /// setting's (`Setting.update`'s).
+    pub fn set_config(
+        &self,
+        prefix: &str,
+        key_values: &mut [(String, Option<String>)],
+        package: Option<&str>,
+        caller_system: bool,
+    ) -> Option<Vec<String>> {
+        for (_, value) in key_values.iter_mut() {
+            if value.as_deref() == Some(NULL_VALUE_OLD_STYLE) {
+                *value = None;
+            }
+        }
+        let (changed, unbanned) = {
+            let mut tables = self.shared.tables.lock().unwrap();
+            let state = tables.entry(Table::Config).or_insert_with(State::new);
+            let hash = map_hash(key_values.iter().map(|(k, v)| (k.as_str(), v.as_deref())));
+            if state.banned_hash(prefix) == Some(hash.to_string().as_str()) {
+                return None;
+            }
+            // `unbanAllConfigIfBannedConfigUpdatedLocked`.
+            let unbanned = state.banned_hash(prefix).is_some();
+            if unbanned {
+                state.namespace_hashes.clear();
+                state.schedule_write();
+            }
+            let namespace = prefix.rfind('/').map_or("", |i| &prefix[..i]);
+            let trunk = self.aconfig.namespaces.get(namespace);
+            let mut changed = Vec::new();
+            // Old flags of the prefix not set again go, but aconfig ones.
+            state.settings.retain(|s| {
+                let gone = trunk.is_none_or(|t| !t.contains_key(&s.name))
+                    && s.name.starts_with(prefix)
+                    && !key_values.iter().any(|(k, _)| *k == s.name);
+                if gone {
+                    changed.push(s.name.clone());
+                }
+                !gone
+            });
+            for (key, value) in key_values.iter() {
+                let staged = key
+                    .find('/')
+                    .filter(|&i| i > 0 && trunk.is_some_and(|t| t.contains_key(key)))
+                    .map(|i| format!("{CONFIG_STAGED_PREFIX}{namespace}*{}", &key[i + 1..]));
+                let name = staged.unwrap_or_else(|| key.clone());
+                match state.index(&name) {
+                    Err(_) => {
+                        let mut setting = Setting { name: name.clone(), ..Default::default() };
+                        setting.update(value.as_deref(), false, package, None, caller_system, true, false, &mut state.next_id);
+                        state.put(setting);
+                    }
+                    Ok(i) => {
+                        if state.settings[i].value.is_none() && value.is_none() {
+                            continue;
+                        }
+                        state.settings[i].update(value.as_deref(), false, package, None, false, false, false, &mut state.next_id);
+                    }
+                }
+                changed.push(name);
+            }
+            if !changed.is_empty() {
+                state.schedule_write();
+            }
+            (changed, unbanned)
+        };
+        if unbanned || !changed.is_empty() {
+            self.writes_scheduled();
+        }
+        Some(changed)
     }
 
     #[cfg(test)]
@@ -593,6 +780,8 @@ impl Settings {
         if name.is_empty() {
             return Ok(false);
         }
+        let staged = self.staged_name(table, name);
+        let name = staged.as_deref().unwrap_or(name);
         let name_too_long = length(name) > MAX_LENGTH_PER_STRING;
         if name_too_long || change.value.is_some_and(|v| length(v) > MAX_LENGTH_PER_STRING) {
             let shown: String = name.chars().take(20).collect();
@@ -684,14 +873,16 @@ impl Settings {
     }
 
     /// `SettingsRegistry.resetSettingsLocked` of the settings of `table`
-    /// (system, secure or global) in `mode`, for `package`: the names
-    /// changed, in order. `system_package` is `SettingsState.isSystemPackage`.
+    /// in `mode`, for `package`, of those `prefix` starts if given: the
+    /// names changed, in order. `system_package` is
+    /// `SettingsState.isSystemPackage`.
     pub fn reset(
         &self,
         table: Table,
         mode: ResetMode,
         package: Option<&str>,
         tag: Option<&str>,
+        prefix: Option<&str>,
         system_package: &dyn Fn(Option<&str>) -> Result<bool, Exception>,
     ) -> Result<Vec<String>, Exception> {
         let capped = table.capped();
@@ -702,7 +893,8 @@ impl Settings {
             let settings = state.settings.clone();
             for setting in settings {
                 // `shouldExcludeSettingFromReset`.
-                let excluded = setting.name == SECURE_FRP_MODE;
+                let excluded =
+                    prefix.is_some_and(|p| !setting.name.starts_with(p)) || setting.name == SECURE_FRP_MODE;
                 let name = setting.name.as_str();
                 let reset = match mode {
                     ResetMode::PackageDefaults => {
@@ -845,6 +1037,127 @@ mod tests {
         assert_eq!(s.device_config("widget", "line_slop_ratio").as_deref(), Some("0.25"));
     }
 
+    /// Settings with the aconfig flag `ns/com.example.trunk` (read-write,
+    /// on) and `ns/com.example.fixed` (read-only), and the config flags
+    /// `ns/a`, `ns/b` and `other/c`.
+    fn config_settings() -> Settings {
+        let mut s = Settings::default();
+        s.aconfig.namespaces.insert(
+            "ns".into(),
+            HashMap::from([
+                ("ns/com.example.trunk".into(), "true".into()),
+                ("ns/com.example.fixed".into(), "false".into()),
+            ]),
+        );
+        for (flag, read_write) in [("com.example.trunk", true), ("com.example.fixed", false)] {
+            s.aconfig.flags.insert(flag.into(), super::super::device_config::FlagInfo { namespace: "ns".into(), read_write });
+        }
+        s.read_for_test(
+            Table::Config,
+            br#"<settings version="1">
+            <setting id="1" name="ns/a" value="1" package="gms" />
+            <setting id="2" name="ns/b" value="2" package="gms" />
+            <setting id="3" name="other/c" value="3" package="gms" />
+            <setting id="4" name="ns/com.example.fixed" value="true" package="gms" />
+        </settings>"#,
+        );
+        s
+    }
+
+    fn names(s: &Settings) -> Vec<String> {
+        s.list(Table::Config, "").into_iter().map(|(n, _)| n).collect()
+    }
+
+    /// `setSettingsLocked` (DeviceConfigApiTests `setProperties`): the
+    /// namespace's flags not set again go, the others are set, an aconfig
+    /// flag staged; a flag set to the value it has is a change all the
+    /// same, but none to null from null.
+    #[test]
+    fn a_namespace_is_set_as_a_whole() {
+        let s = config_settings();
+        let mut flags = vec![
+            ("ns/a".to_string(), Some("1".to_string())),
+            ("ns/new".to_string(), Some("null".to_string())),
+            ("ns/com.example.trunk".to_string(), Some("false".to_string())),
+        ];
+        let changed = s.set_config("ns/", &mut flags, Some("gms"), false).unwrap();
+        assert_eq!(changed, ["ns/b", "ns/a", "ns/new", "staged/ns*com.example.trunk"]);
+        assert_eq!(flags[1].1, None);
+        assert_eq!(names(&s), ["ns/a", "ns/com.example.fixed", "ns/new", "other/c", "staged/ns*com.example.trunk"]);
+        assert_eq!(s.get(Table::Config, "staged/ns*com.example.trunk").as_deref(), Some("false"));
+        let changed = s.set_config("ns/", &mut flags, Some("gms"), false).unwrap();
+        assert_eq!(changed, ["ns/a", "staged/ns*com.example.trunk"]);
+    }
+
+    /// `banConfigurationLocked` and `isNewConfigBannedLocked`
+    /// (DeviceConfigApiTests `resetToDefault` then `setProperties`): the
+    /// flags a reset banned cannot be set again as they were; others can,
+    /// and unban every namespace.
+    #[test]
+    fn a_reset_bans_its_flags() {
+        let s = config_settings();
+        let flags = s.config_flags(Some("ns/")).unwrap();
+        s.ban_config("ns/", &flags);
+        s.ban_config("other/", &s.config_flags(Some("other/")).unwrap());
+        let mut same: Vec<_> = flags.into_iter().collect();
+        assert_eq!(s.set_config("ns/", &mut same, Some("gms"), false), None);
+        let mut other = vec![("ns/a".to_string(), Some("9".to_string()))];
+        assert!(s.set_config("ns/", &mut other, Some("gms"), false).is_some());
+        let tables = s.shared.tables.lock().unwrap();
+        assert!(tables[&Table::Config].namespace_hashes.is_empty());
+    }
+
+    /// `getAllConfigFlags`: the namespace's aconfig defaults, then its
+    /// settings over them, but for a read-only aconfig flag's.
+    #[test]
+    fn config_flags_are_defaults_then_settings() {
+        let s = config_settings();
+        let flags = s.config_flags(Some("ns/")).unwrap();
+        let mut flags: Vec<_> = flags.into_iter().collect();
+        flags.sort();
+        let some = |v: &str| Some(v.to_string());
+        assert_eq!(
+            flags,
+            [
+                ("ns/a".to_string(), some("1")),
+                ("ns/b".to_string(), some("2")),
+                ("ns/com.example.fixed".to_string(), some("false")),
+                ("ns/com.example.trunk".to_string(), some("true")),
+            ]
+        );
+        assert_eq!(s.config_flags(None).unwrap().len(), 5);
+        assert!(s.config_flags(Some("")).is_err());
+        assert_eq!(s.config_prefixes(), ["ns/", "other/"]);
+    }
+
+    /// `insertSettingLocked` stages a write of an aconfig flag for the
+    /// next boot; any other flag is written as named.
+    #[test]
+    fn aconfig_flags_are_staged() {
+        let s = config_settings();
+        assert!(s.insert(Table::Config, "ns/com.example.trunk", &change(Some("false"), "gms"), false).unwrap());
+        assert!(s.insert(Table::Config, "ns/plain", &change(Some("x"), "gms"), false).unwrap());
+        assert_eq!(s.get(Table::Config, "staged/ns*com.example.trunk").as_deref(), Some("false"));
+        assert_eq!(s.get(Table::Config, "ns/com.example.trunk"), None);
+        assert_eq!(s.get(Table::Config, "ns/plain").as_deref(), Some("x"));
+    }
+
+    /// A banned namespace's hash is written with the settings, in its
+    /// `ArrayMap`'s order, and read back.
+    #[test]
+    fn banned_hashes_are_kept() {
+        let mut state = State::new();
+        state.version = 1;
+        state.ban("ns/", "5".into());
+        state.ban("a/", "6".into());
+        state.ban("ns/", "7".into());
+        let document = state.document(Table::Config);
+        let hashes: Vec<_> = document[1].children().map(|e| (e.string("namespace").unwrap().into_owned(), e.string("bannedHash").unwrap().into_owned())).collect();
+        assert_eq!(hashes, [("a/".to_string(), "6".to_string()), ("ns/".to_string(), "7".to_string())]);
+        let read = State::parse(Table::Config, &aim_android_xml::abx::write_sequence(&document).unwrap()).unwrap();
+        assert_eq!(read.banned_hash("ns/"), Some("7"));
+    }
+
     /// `SettingsStateTest.testUpgrade`-style values: before version 121,
     /// the string `null` is no value.
     #[test]
@@ -899,12 +1212,12 @@ mod tests {
         s.insert(Table::Secure, "a", &set("2", false), false).unwrap();
         s.insert(Table::Secure, "b", &change(Some("3"), "other"), false).unwrap();
         let none = |_: Option<&str>| Ok(false);
-        let changed = s.reset(Table::Secure, ResetMode::PackageDefaults, Some("app"), None, &none).unwrap();
+        let changed = s.reset(Table::Secure, ResetMode::PackageDefaults, Some("app"), None, None, &none).unwrap();
         assert_eq!(changed, ["a"]);
         assert_eq!(s.get(Table::Secure, "a").as_deref(), Some("1"));
         assert_eq!(s.get(Table::Secure, "b").as_deref(), Some("3"));
         // Untrusted changes without a system default are deleted.
-        let changed = s.reset(Table::Secure, ResetMode::UntrustedChanges, None, None, &none).unwrap();
+        let changed = s.reset(Table::Secure, ResetMode::UntrustedChanges, None, None, None, &none).unwrap();
         assert_eq!(changed.len(), 2);
         assert_eq!(s.setting(Table::Secure, "b"), None);
     }
@@ -921,7 +1234,7 @@ mod tests {
             br#"<settings version="226"><setting id="7" name="a" value="1" package="android" defaultValue="1" defaultSysSet="true" /></settings>"#,
         )
         .unwrap();
-        let s = Settings::load(&dir).unwrap();
+        let s = Settings::load(&dir, &dir).unwrap();
         let tagged = Change { tag: Some("t"), make_default: true, ..change(Some("x\u{1}"), "app") };
         assert!(s.insert(Table::Secure, "b", &tagged, false).unwrap());
         assert!(s.insert(Table::Secure, "clockwork_home_ready", &change(Some("1"), "app"), false).unwrap());
@@ -955,7 +1268,7 @@ mod tests {
             ]
         );
         assert!(!users.join("settings_secure.xml.new").exists());
-        let again = Settings::load(&dir).unwrap();
+        let again = Settings::load(&dir, &dir).unwrap();
         assert_eq!(again.get(Table::Secure, "b").as_deref(), Some("x\u{1}"));
         std::fs::remove_dir_all(&dir).unwrap();
     }

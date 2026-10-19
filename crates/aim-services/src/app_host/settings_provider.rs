@@ -4,8 +4,12 @@
 //! client asks for (`_track_generation`, `super::generations`), `PUT_*`,
 //! `DELETE_*` and `RESET_*` of the system, secure and global settings with
 //! the original's permission, app op, user restriction and validator
-//! checks (`super::settings_validators`), `LIST_config` and `LIST_*` of a
-//! table. A change bumps its generation, then is notified to the observers
+//! checks (`super::settings_validators`), `LIST_*` of a table, and
+//! DeviceConfig's calls: its flags listed with the aconfig defaults
+//! (`super::device_config`), written, deleted, reset (banning what the
+//! reset leaves) and set a namespace at a time by a WRITE_DEVICE_CONFIG
+//! holder, the sync disabled mode, and a monitor told of accesses and
+//! updates. A change bumps its generation, then is notified to the observers
 //! of `content://settings/<table>/<name>` (`super::content_service`); no
 //! backup is run, so none is told of it. Its table transactions: `query`
 //! of a setting or a table (a `MatrixCursor` sent as `super::cursor`
@@ -20,14 +24,19 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use aim_android_image::dex::{self, Dex};
-use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader, UNKNOWN_TRANSACTION};
+use aim_binder_host::local::{Call, Reply, Service, Strong};
+use aim_binder_host::parcel::{
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader, UNKNOWN_TRANSACTION,
+};
 use aim_service_aidl::android_content_icontentprovider as cp;
+use aim_service_aidl::android_os_iremotecallback as remote_callback;
 
 use super::appops_service::{self, MODE_DEFAULT, OP_WRITE_SETTINGS};
+use super::device_config::{self, PUBLIC_NAMESPACES};
 use super::cursor::{BulkCursor, Rows};
 use super::generations::{self, GenerationRegistry, TRACK_GENERATION};
 use super::settings::{Change, ResetMode, SYSTEM_PACKAGE_NAME, Setting, Table};
@@ -85,18 +94,41 @@ const PRIVATE_FLAG_SIGNED_WITH_PLATFORM_KEY: i32 = 1 << 20;
 /// `CRITICAL_GLOBAL_SETTINGS`, `CRITICAL_SECURE_SETTINGS`: written at once.
 const CRITICAL_GLOBAL_SETTINGS: &[&str] = &["device_provisioned"];
 const CRITICAL_SECURE_SETTINGS: &[&str] = &["user_setup_complete"];
-/// The DeviceConfig calls not taken (#1526).
-const NOT_TAKEN: &[&str] = &[
-    "PUT_config",
-    "DELETE_config",
-    "RESET_config",
-    "SET_ALL_config",
-    "SET_SYNC_DISABLED_MODE_config",
-    "GET_SYNC_DISABLED_MODE_config",
-    "LIST_namespaces_config",
-    "REGISTER_MONITOR_CALLBACK_config",
-    "UNREGISTER_MONITOR_CALLBACK_config",
-];
+/// The DeviceConfig calls' keys: `Settings.CALL_METHOD_FLAGS_KEY`,
+/// `CALL_METHOD_SYNC_DISABLED_MODE_KEY`, `CALL_METHOD_MONITOR_CALLBACK_KEY`,
+/// `KEY_CONFIG_SET_ALL_RETURN`, `KEY_CONFIG_GET_SYNC_DISABLED_MODE_RETURN`.
+const FLAGS: &str = "_flags";
+const SYNC_DISABLED_MODE: &str = "_disabled_mode";
+const MONITOR_CALLBACK: &str = "_monitor_callback_key";
+const SET_ALL_RETURN: &str = "config_set_all_return";
+const GET_SYNC_DISABLED_MODE_RETURN: &str = "config_get_sync_disabled_mode_return";
+/// `Settings.SET_ALL_RESULT_*`.
+const SET_ALL_RESULT_FAILURE: i32 = 0;
+const SET_ALL_RESULT_SUCCESS: i32 = 1;
+const SET_ALL_RESULT_DISABLED: i32 = 2;
+/// `Settings.Config.SYNC_DISABLED_MODE_*`.
+const SYNC_DISABLED_MODE_NONE: i32 = 0;
+const SYNC_DISABLED_MODE_PERSISTENT: i32 = 1;
+const SYNC_DISABLED_MODE_UNTIL_REBOOT: i32 = 2;
+/// `Settings.Global.DEVICE_CONFIG_SYNC_DISABLED`.
+const DEVICE_CONFIG_SYNC_DISABLED: &str = "device_config_sync_disabled";
+/// A monitor's results: `Settings.EXTRA_MONITOR_CALLBACK_TYPE`,
+/// `EXTRA_ACCESS_CALLBACK`, `EXTRA_NAMESPACE_UPDATED_CALLBACK`,
+/// `EXTRA_NAMESPACE`, `EXTRA_CALLING_PACKAGE`.
+const EXTRA_MONITOR_CALLBACK_TYPE: &str = "monitor_callback_type";
+const EXTRA_ACCESS_CALLBACK: &str = "access_callback";
+const EXTRA_NAMESPACE_UPDATED_CALLBACK: &str = "namespace_updated_callback";
+const EXTRA_NAMESPACE: &str = "namespace";
+const EXTRA_CALLING_PACKAGE: &str = "calling_package";
+/// The DeviceConfig permissions.
+const WRITE_DEVICE_CONFIG: &str = "android.permission.WRITE_DEVICE_CONFIG";
+const WRITE_ALLOWLISTED_DEVICE_CONFIG: &str = "android.permission.WRITE_ALLOWLISTED_DEVICE_CONFIG";
+const READ_WRITE_SYNC_DISABLED_MODE_CONFIG: &str = "android.permission.READ_WRITE_SYNC_DISABLED_MODE_CONFIG";
+const MONITOR_DEVICE_CONFIG_ACCESS: &str = "android.permission.MONITOR_DEVICE_CONFIG_ACCESS";
+/// `ActivityManager.isRunningInUserTestHarness`'s property.
+const TEST_HARNESS: &str = "persist.sys.test_harness";
+/// `RemoteCallback`'s class, as a bundle holds it.
+const REMOTE_CALLBACK: &str = "android.os.RemoteCallback";
 
 impl Table {
     /// Its `CONTENT_URI`'s path.
@@ -196,6 +228,10 @@ pub struct SettingsProvider {
     /// `PackageManager.getSetupWizardPackageName`, cached as
     /// `cacheSystemPackageNamesAndSystemSignature` caches it.
     setup_wizard: OnceLock<Option<String>>,
+    /// `mSyncConfigDisabledUntilReboot`.
+    sync_disabled_until_reboot: AtomicBool,
+    /// `mConfigMonitorCallback`.
+    monitor: Mutex<Option<Arc<Strong>>>,
 }
 
 impl Service for SettingsProvider {
@@ -230,7 +266,7 @@ impl Service for SettingsProvider {
         let arg = r.read_string16().map_err(|_| BAD_VALUE)?;
         let extras = bundle::read(r).map_err(|_| BAD_VALUE)?.unwrap_or_default();
         let caller = Caller { uid: call.sender_euid as i32, package };
-        reply(self.call(&caller, &method, arg.as_deref(), &extras).map(|result| {
+        reply(self.call(&caller, &method, arg.as_deref(), &extras, Some(&call.data)).map(|result| {
             let mut p = Parcel::new();
             p.write_no_exception();
             match result {
@@ -827,6 +863,45 @@ fn shell_or_root(package: &str) -> bool {
     matches!(package, "com.android.shell" | "root")
 }
 
+/// `String.split(separator)`: its trailing empty strings removed.
+fn java_split(s: &str, separator: char) -> Vec<&str> {
+    let mut parts: Vec<&str> = s.split(separator).collect();
+    while parts.len() > 1 && parts.last() == Some(&"") {
+        parts.pop();
+    }
+    if parts == [""] && !s.is_empty() {
+        parts.clear();
+    }
+    parts
+}
+
+/// The `RemoteCallback` a bundle's `value` holds, read from `parcel`: its
+/// `IRemoteCallback`'s handle, none for a null value or binder.
+fn remote_callback_of(value: &Value, parcel: &Reader<'_>) -> Result<Option<u32>, Exception> {
+    let Value::Lazy { kind: bundle::VAL_PARCELABLE, start, .. } = *value else {
+        return Ok(None);
+    };
+    let mut r = parcel.clone();
+    r.set_position(start);
+    let class = r.read_string16().map_err(|_| Exception::illegal_argument("a bad parcelable"))?;
+    if class.as_deref() != Some(REMOTE_CALLBACK) {
+        return Err(Exception::illegal_argument(format!("{} is not a {REMOTE_CALLBACK}", class.unwrap_or_default())));
+    }
+    match r.read_binder().map_err(|_| Exception::illegal_argument("a bad parcelable"))? {
+        Some(Binder::Handle(handle)) => Ok(Some(handle)),
+        _ => Ok(None),
+    }
+}
+
+/// A monitor's result bundle.
+struct Results<'a>(&'a [(&'a str, Value)]);
+
+impl aim_service_aidl::WriteParcelable for Results<'_> {
+    fn write_to(&self, p: &mut Parcel) {
+        bundle::write(p, self.0);
+    }
+}
+
 /// `Settings.System.getMovedToSecureSettings`,
 /// `System.getMovedToGlobalSettings` (`MOVED_TO_GLOBAL` and
 /// `MOVED_TO_SECURE_THEN_GLOBAL`), `Secure.getMovedToGlobalSettings`,
@@ -1069,16 +1144,25 @@ fn key_valid(key: &str) -> bool {
 
 impl SettingsProvider {
     pub fn new(host: Arc<AppHost>) -> SettingsProvider {
-        SettingsProvider { host, generations: OnceLock::new(), declared: OnceLock::new(), setup_wizard: OnceLock::new() }
+        SettingsProvider {
+            host,
+            generations: OnceLock::new(),
+            declared: OnceLock::new(),
+            setup_wizard: OnceLock::new(),
+            sync_disabled_until_reboot: AtomicBool::new(false),
+            monitor: Mutex::new(None),
+        }
     }
 
-    /// `SettingsProvider.call`.
+    /// `SettingsProvider.call`, its extras' length-prefixed values in
+    /// `parcel`.
     pub(super) fn call(
         &self,
         caller: &Caller,
         method: &str,
         name: Option<&str>,
         extras: &HashMap<String, Value>,
+        parcel: Option<&Reader<'_>>,
     ) -> Result<Option<Vec<(String, Value)>>, Exception> {
         // `getRequestingUserId`.
         let requesting = match extras.get(USER) {
@@ -1091,6 +1175,67 @@ impl SettingsProvider {
             _ => None,
         };
         let boolean = |key| matches!(extras.get(key), Some(Value::Bool(true)));
+        // The DeviceConfig calls of no table's verb.
+        match method {
+            "SET_ALL_config" => {
+                // `getSettingFlags`: the map `putSerializable` wrote as one.
+                let flags = match (extras.get(FLAGS), parcel) {
+                    (Some(value), Some(parcel)) => bundle::string_map(value, parcel)
+                        .map_err(|_| Exception::illegal_argument("_flags is not a Map<String, String>"))?,
+                    _ => None,
+                };
+                let result = self.set_all_config(caller, string(PREFIX), flags)?;
+                return Ok(Some(vec![(SET_ALL_RETURN.to_string(), Value::Int(result))]));
+            }
+            "SET_SYNC_DISABLED_MODE_config" => {
+                let mode = match extras.get(SYNC_DISABLED_MODE) {
+                    Some(Value::Int(mode)) => *mode,
+                    _ => -1,
+                };
+                if ![SYNC_DISABLED_MODE_NONE, SYNC_DISABLED_MODE_PERSISTENT, SYNC_DISABLED_MODE_UNTIL_REBOOT].contains(&mode) {
+                    return Err(Exception::illegal_argument(format!("Invalid sync disabled mode: {mode}")));
+                }
+                self.set_sync_disabled_mode(caller, mode)?;
+                return Ok(None);
+            }
+            "GET_SYNC_DISABLED_MODE_config" => {
+                self.enforce_sync_disabled_mode_access(caller)?;
+                let mode = self.sync_disabled_mode()?;
+                return Ok(Some(vec![(GET_SYNC_DISABLED_MODE_RETURN.to_string(), Value::Int(mode))]));
+            }
+            // `getAllConfigFlagNamespaces`, a `HashSet` put as a
+            // serializable.
+            "LIST_namespaces_config" => {
+                let flags = self.host.inputs()?.settings.config_flags(None)?;
+                let mut namespaces: Vec<String> =
+                    flags.keys().filter_map(|n| n.find('/').filter(|&i| i != 0).map(|i| n[..i].to_string())).collect();
+                namespaces.sort();
+                namespaces.dedup();
+                let set = Value::Serializable {
+                    class: "java.util.HashSet".into(),
+                    data: device_config::serialize_hash_set(&namespaces),
+                };
+                return Ok(Some(vec![(VALUE.to_string(), set)]));
+            }
+            "REGISTER_MONITOR_CALLBACK_config" => {
+                let callback = match (extras.get(MONITOR_CALLBACK), parcel) {
+                    (Some(value), Some(parcel)) => remote_callback_of(value, parcel)?,
+                    _ => None,
+                };
+                // `setMonitorCallback`: none is no change.
+                if let Some(handle) = callback {
+                    self.enforce_monitor(caller)?;
+                    *self.monitor.lock().unwrap() = Some(Arc::new(self.host.process.strong(handle)));
+                }
+                return Ok(None);
+            }
+            "UNREGISTER_MONITOR_CALLBACK_config" => {
+                self.enforce_monitor(caller)?;
+                *self.monitor.lock().unwrap() = None;
+                return Ok(None);
+            }
+            _ => {}
+        }
         let (verb, table) = match method.split_once('_') {
             Some((verb, "system")) => (verb, Some(Table::System)),
             Some((verb, "secure")) => (verb, Some(Table::Secure)),
@@ -1100,7 +1245,24 @@ impl SettingsProvider {
         };
         Ok(match (verb, table) {
             ("GET", Some(table)) => Some(self.get(caller, table, name, requesting, tracking)?),
-            ("PUT", Some(table)) if table != Table::Config => {
+            ("PUT", Some(Table::Config)) => {
+                self.insert_config(caller, name, string(VALUE), boolean(MAKE_DEFAULT))?;
+                None
+            }
+            ("DELETE", Some(Table::Config)) => {
+                let deleted = self.delete_config(caller, name)?;
+                Some(vec![(RESULT_ROWS_DELETED.to_string(), Value::Int(deleted as i32))])
+            }
+            ("RESET", Some(Table::Config)) => {
+                let mode = match extras.get(RESET_MODE) {
+                    Some(Value::Int(mode)) => *mode,
+                    _ => 0,
+                };
+                let mode = reset_mode(mode, self.trusted_for_reset(caller))?;
+                self.reset_config(caller, mode, string(PREFIX))?;
+                None
+            }
+            ("PUT", Some(table)) => {
                 // `insertSystemSetting` takes no tag and no default.
                 let system = table == Table::System;
                 let insert = Op::Insert {
@@ -1113,7 +1275,7 @@ impl SettingsProvider {
                 self.mutate(caller, table, name, insert, requesting)?;
                 None
             }
-            ("RESET", Some(table)) if table != Table::Config => {
+            ("RESET", Some(table)) => {
                 let mode = match extras.get(RESET_MODE) {
                     Some(Value::Int(mode)) => *mode,
                     _ => 0,
@@ -1122,16 +1284,28 @@ impl SettingsProvider {
                 self.mutate(caller, table, None, reset, requesting)?;
                 None
             }
-            ("DELETE", Some(table)) if table != Table::Config => {
+            ("DELETE", Some(table)) => {
                 let deleted = self.mutate(caller, table, name, Op::Delete, requesting)?;
                 Some(vec![(RESULT_ROWS_DELETED.to_string(), Value::Int(deleted as i32))])
             }
+            // `getAllConfigFlags`, a `HashMap` put as a serializable and
+            // so written as a map, then `reportDeviceConfigAccess`.
             ("LIST", Some(Table::Config)) => {
-                let prefix = string(PREFIX).unwrap_or_default();
-                let settings = &self.host.inputs()?.settings;
-                let mut result = vec![(VALUE.to_string(), Value::StringMap(settings.list(Table::Config, prefix)))];
+                let prefix = string(PREFIX);
+                let mut flags: Vec<_> = self.host.inputs()?.settings.config_flags(prefix)?.into_iter().collect();
+                flags.sort();
+                let mut result = vec![(VALUE.to_string(), Value::StringMap(flags))];
                 if tracking {
-                    result.extend(self.generations()?.generation_data(Table::Config, 0, prefix));
+                    result.extend(self.generations()?.generation_data(Table::Config, 0, prefix.unwrap_or_default()));
+                }
+                if let Some(prefix) = prefix {
+                    let package = self.resolve_calling_package(caller)?;
+                    self.report_to_monitor(&prefix.replace('/', ""), || {
+                        vec![
+                            (EXTRA_MONITOR_CALLBACK_TYPE, Value::String(Some(EXTRA_ACCESS_CALLBACK.into()))),
+                            (EXTRA_CALLING_PACKAGE, Value::String(package.clone())),
+                        ]
+                    });
                 }
                 Some(array_order(result, |(key, _)| key))
             }
@@ -1140,9 +1314,6 @@ impl SettingsProvider {
                 let lines = self.all(caller, table, requesting)?;
                 let lines = lines.iter().map(|s| format!("{}={}", s.name, s.value.as_deref().unwrap_or("null"))).collect();
                 Some(vec![(RESULT_SETTINGS_LIST.to_string(), Value::StringList(lines))])
-            }
-            _ if NOT_TAKEN.contains(&method) => {
-                return Err(self.host.unimplemented_named("settings provider", &format!("{method} (#1526)")));
             }
             _ => {
                 eprintln!("app host: settings: call() with invalid method: {method}");
@@ -1444,7 +1615,7 @@ impl SettingsProvider {
                 }
                 vec![name.to_string()]
             }
-            Op::Reset { mode, tag } => settings.reset(table, mode, package, tag, &|p| self.system_package(p))?,
+            Op::Reset { mode, tag } => settings.reset(table, mode, package, tag, None, &|p| self.system_package(p))?,
         };
         for name in &changed {
             self.notify(table, user, name)?;
@@ -1457,13 +1628,246 @@ impl SettingsProvider {
     /// the running users (the app host's one) of a global setting.
     fn notify(&self, table: Table, user: i32, name: &str) -> Result<(), Exception> {
         self.generations()?.increment(table, user, name);
-        let uri = Uri::parse(&format!("content://settings/{}/{name}", table.path()));
+        self.notify_uri(table, user, name);
+        Ok(())
+    }
+
+    /// `content://settings/<table>/<path>`'s observers told of a change.
+    fn notify_uri(&self, table: Table, user: i32, path: &str) {
+        let uri = Uri::parse(&format!("content://settings/{}/{path}", table.path()));
         if let Some(content) = self.host.content_service.get()
             && let Err(e) = content.notify_from_system(uri, user)
         {
-            eprintln!("app host: settings: failed to notify for {user}: {name}: {e:?}");
+            eprintln!("app host: settings: failed to notify for {user}: {path}: {e:?}");
+        }
+    }
+
+    /// `notifyForConfigSettingsChangeLocked`: the prefix's generation, then
+    /// one notification of the prefix and each changed flag's name past
+    /// its namespace (`split("/")[1]`).
+    fn notify_config_change(&self, prefix: &str, changed: &[String]) -> Result<(), Exception> {
+        self.generations()?.increment(Table::Config, 0, prefix);
+        let mut path = prefix.to_string();
+        for name in changed {
+            let flag = java_split(name, '/').get(1).copied().ok_or_else(|| {
+                Exception::new(EX_ILLEGAL_STATE, format!("ArrayIndexOutOfBoundsException: {name} has no flag name"))
+            })?;
+            path.push_str(flag);
+            path.push('/');
+        }
+        self.notify_uri(Table::Config, 0, &path);
+        Ok(())
+    }
+
+    /// `resolveCallingPackage`: root's and the shell's by their uids, else
+    /// the caller's (`getCallingPackage`).
+    fn resolve_calling_package(&self, caller: &Caller) -> Result<Option<String>, Exception> {
+        Ok(match caller.uid {
+            ROOT_UID => Some("root".into()),
+            SHELL_UID => Some("com.android.shell".into()),
+            _ => self.calling_package(caller)?.map(str::to_string),
+        })
+    }
+
+    /// `enforceDeviceConfigWritePermission`: WRITE_DEVICE_CONFIG, whose
+    /// background users' deny list (`assertCallingUserDenyList`) spares
+    /// the system user, the app host's one. A caller with only
+    /// WRITE_ALLOWLISTED_DEVICE_CONFIG is not implemented (#1776).
+    fn enforce_device_config_write(&self, caller: &Caller) -> Result<(), Exception> {
+        if self.has(caller, WRITE_DEVICE_CONFIG)? {
+            if caller.user() != 0 {
+                return Err(self.host.unimplemented_named("settings provider", "another user's DeviceConfig writes (#1523)"));
+            }
+            return Ok(());
+        }
+        if self.has(caller, WRITE_ALLOWLISTED_DEVICE_CONFIG)? {
+            return Err(self.host.unimplemented_named("settings provider", "allowlisted DeviceConfig writes (#1776)"));
+        }
+        Err(Exception::security(
+            "Permission denial to mutate flag, must have root, WRITE_DEVICE_CONFIG, or WRITE_ALLOWLISTED_DEVICE_CONFIG",
+        ))
+    }
+
+    /// `insertConfigSetting`, as `mutateConfigSetting` inserts it: the
+    /// caller's, as a package that is not the system's
+    /// (`forceNonSystemPackage`), its staged name notified too for an
+    /// aconfig flag (`notifyIndividualAconfigSyspropChanged`).
+    fn insert_config(&self, caller: &Caller, name: Option<&str>, value: Option<&str>, make_default: bool) -> Result<bool, Exception> {
+        let package = self.resolve_calling_package(caller)?;
+        self.enforce_device_config_write(caller)?;
+        let name = name.unwrap_or_default();
+        let settings = &self.host.inputs()?.settings;
+        let change = Change {
+            value,
+            tag: None,
+            make_default,
+            package: package.as_deref(),
+            caller_system: false,
+            overrideable_by_restore: false,
+        };
+        if !settings.insert(Table::Config, name, &change, false)? {
+            return Ok(false);
+        }
+        self.notify(Table::Config, 0, name)?;
+        if let Some(slash) = name.find('/').filter(|&i| i != 0)
+            && settings.aconfig_flag(&name[slash + 1..]).is_some()
+        {
+            self.notify(Table::Config, 0, &format!("staged/{}*{}", &name[..slash], &name[slash + 1..]))?;
+        }
+        Ok(true)
+    }
+
+    /// `deleteConfigSetting`.
+    fn delete_config(&self, caller: &Caller, name: Option<&str>) -> Result<bool, Exception> {
+        self.resolve_calling_package(caller)?;
+        self.enforce_device_config_write(caller)?;
+        let name = name.unwrap_or_default();
+        if !self.host.inputs()?.settings.delete(Table::Config, name, false) {
+            return Ok(false);
+        }
+        self.notify(Table::Config, 0, name)?;
+        Ok(true)
+    }
+
+    /// `resetConfigSetting`: the flags `prefix` starts (all without one)
+    /// in `mode`, those of a namespace banned first unless the shell
+    /// resets them (`banConfigurationIfNecessary`).
+    fn reset_config(&self, caller: &Caller, mode: ResetMode, prefix: Option<&str>) -> Result<(), Exception> {
+        let package = self.resolve_calling_package(caller)?;
+        let settings = &self.host.inputs()?.settings;
+        settings.config_flags(prefix)?;
+        self.enforce_device_config_write(caller)?;
+        if caller.app_id() != SHELL_UID {
+            match prefix {
+                Some(prefix) => settings.ban_config(prefix, &settings.config_flags(Some(prefix))?),
+                None => {
+                    for prefix in settings.config_prefixes() {
+                        settings.ban_config(&prefix, &settings.config_flags(Some(&prefix))?);
+                    }
+                }
+            }
+        }
+        let changed = settings.reset(Table::Config, mode, package.as_deref(), None, prefix, &|p| self.system_package(p))?;
+        for name in &changed {
+            self.notify(Table::Config, 0, name)?;
         }
         Ok(())
+    }
+
+    /// `setAllConfigSettings` of `prefix` to `flags` (`SET_ALL_RESULT_*`),
+    /// the map as `readHashMapInternal` made it, iterated in its order.
+    fn set_all_config(&self, caller: &Caller, prefix: Option<&str>, flags: Option<Vec<(String, Option<String>)>>) -> Result<i32, Exception> {
+        let Some(flags) = flags else {
+            return Err(Exception::new(
+                EX_NULL_POINTER,
+                "Attempt to invoke interface method 'java.util.Set java.util.Map.keySet()' on a null object reference",
+            ));
+        };
+        self.enforce_device_config_write(caller)?;
+        let package = self.resolve_calling_package(caller)?;
+        if self.sync_disabled_mode()? != SYNC_DISABLED_MODE_NONE {
+            eprintln!("app host: settings: did not write settings for prefix '{}' because sync is disabled", prefix.unwrap_or("null"));
+            return Ok(SET_ALL_RESULT_DISABLED);
+        }
+        let Some(prefix) = prefix else {
+            return Err(Exception::new(
+                EX_NULL_POINTER,
+                "Attempt to invoke virtual method 'int java.lang.String.lastIndexOf(int)' on a null object reference",
+            ));
+        };
+        let capacity = device_config::sized_capacity(flags.len());
+        let mut flags = device_config::hash_map_order(flags, capacity);
+        let caller_system = self.caller_system(caller, package.as_deref())?;
+        let settings = &self.host.inputs()?.settings;
+        let Some(changed) = settings.set_config(prefix, &mut flags, package.as_deref(), caller_system) else {
+            return Ok(SET_ALL_RESULT_FAILURE);
+        };
+        if !changed.is_empty() {
+            self.report_to_monitor(&prefix.replace('/', ""), || {
+                vec![(EXTRA_MONITOR_CALLBACK_TYPE, Value::String(Some(EXTRA_NAMESPACE_UPDATED_CALLBACK.into())))]
+            });
+            self.notify_config_change(prefix, &changed)?;
+        }
+        Ok(SET_ALL_RESULT_SUCCESS)
+    }
+
+    /// `enforceHasAtLeastOnePermission(WRITE_DEVICE_CONFIG,
+    /// READ_WRITE_SYNC_DISABLED_MODE_CONFIG)`.
+    fn enforce_sync_disabled_mode_access(&self, caller: &Caller) -> Result<(), Exception> {
+        if self.has(caller, WRITE_DEVICE_CONFIG)? || self.has(caller, READ_WRITE_SYNC_DISABLED_MODE_CONFIG)? {
+            return Ok(());
+        }
+        Err(Exception::security(format!(
+            "Permission denial, must have one of: [{WRITE_DEVICE_CONFIG}, {READ_WRITE_SYNC_DISABLED_MODE_CONFIG}]"
+        )))
+    }
+
+    /// `setSyncDisabledModeConfig`: until reboot in memory, persistent as
+    /// the global `DEVICE_CONFIG_SYNC_DISABLED`, set by the system.
+    fn set_sync_disabled_mode(&self, caller: &Caller, mode: i32) -> Result<(), Exception> {
+        self.enforce_sync_disabled_mode_access(caller)?;
+        self.sync_disabled_until_reboot.store(mode == SYNC_DISABLED_MODE_UNTIL_REBOOT, Ordering::Relaxed);
+        let value = if mode == SYNC_DISABLED_MODE_PERSISTENT { "1" } else { "0" };
+        let settings = &self.host.inputs()?.settings;
+        let unset = !self.predefined(Table::Global, DEVICE_CONFIG_SYNC_DISABLED)?
+            && settings.setting(Table::Global, DEVICE_CONFIG_SYNC_DISABLED).is_none();
+        let change = Change {
+            value: Some(value),
+            tag: None,
+            make_default: false,
+            package: Some(SYSTEM_PACKAGE_NAME),
+            caller_system: true,
+            overrideable_by_restore: false,
+        };
+        if settings.insert(Table::Global, DEVICE_CONFIG_SYNC_DISABLED, &change, false)? {
+            self.notify(Table::Global, 0, DEVICE_CONFIG_SYNC_DISABLED)?;
+            if unset {
+                self.generations()?.increment_unset(Table::Global, 0);
+            }
+        }
+        Ok(())
+    }
+
+    /// `getSyncDisabledModeConfigLocked`: until reboot, else as the global
+    /// setting says, persistent by default in a user test harness.
+    fn sync_disabled_mode(&self) -> Result<i32, Exception> {
+        if self.sync_disabled_until_reboot.load(Ordering::Relaxed) {
+            return Ok(SYNC_DISABLED_MODE_UNTIL_REBOOT);
+        }
+        Ok(match self.host.inputs()?.settings.get(Table::Global, DEVICE_CONFIG_SYNC_DISABLED) {
+            None if super::system_boolean(self.host.property(TEST_HARNESS).as_deref(), false) => SYNC_DISABLED_MODE_PERSISTENT,
+            None => SYNC_DISABLED_MODE_NONE,
+            Some(value) if value != "0" => SYNC_DISABLED_MODE_PERSISTENT,
+            Some(_) => SYNC_DISABLED_MODE_NONE,
+        })
+    }
+
+    /// `enforceCallingOrSelfPermission(MONITOR_DEVICE_CONFIG_ACCESS)`.
+    fn enforce_monitor(&self, caller: &Caller) -> Result<(), Exception> {
+        if self.has(caller, MONITOR_DEVICE_CONFIG_ACCESS)? {
+            return Ok(());
+        }
+        Err(Exception::security(format!(
+            "Permission denial: registering for config access requires: {MONITOR_DEVICE_CONFIG_ACCESS}: Neither user {} nor current process has {MONITOR_DEVICE_CONFIG_ACCESS}.",
+            caller.uid
+        )))
+    }
+
+    /// `reportDeviceConfigAccess` and `reportDeviceConfigUpdate`: the
+    /// monitor sent `extras` and the namespace, unless it is public; a
+    /// failed send is logged where `RemoteCallback.sendResult` ignores it.
+    fn report_to_monitor(&self, namespace: &str, extras: impl FnOnce() -> Vec<(&'static str, Value)>) {
+        if PUBLIC_NAMESPACES.contains(&namespace) {
+            return;
+        }
+        let Some(monitor) = self.monitor.lock().unwrap().clone() else { return };
+        let mut entries = extras();
+        entries.push((EXTRA_NAMESPACE, Value::String(Some(namespace.to_string()))));
+        let mut request = Parcel::new();
+        remote_callback::SendResult { data: Some(Results(&entries)) }.write(&mut request);
+        if let Err(e) = monitor.transact(remote_callback::SEND_RESULT, &request, true) {
+            eprintln!("app host: settings: the DeviceConfig monitor: {e}");
+        }
     }
 
     /// `resolveCallingUserIdEnforcingPermissions`.
@@ -1635,6 +2039,49 @@ impl SettingsProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `String.split("/")`, whose index 1 names a changed flag.
+    #[test]
+    fn names_split_as_java_splits_them() {
+        assert_eq!(java_split("ns/flag", '/'), ["ns", "flag"]);
+        assert_eq!(java_split("staged/ns*flag", '/'), ["staged", "ns*flag"]);
+        assert_eq!(java_split("ns/", '/'), ["ns"]);
+        assert_eq!(java_split("/", '/'), Vec::<&str>::new());
+        assert_eq!(java_split("", '/'), [""]);
+    }
+
+    /// `getParcelable(CALL_METHOD_MONITOR_CALLBACK_KEY)`: a
+    /// `RemoteCallback`'s binder; another parcelable is refused.
+    #[test]
+    fn monitor_callbacks_are_read_from_the_bundle() {
+        // `putParcelable`: the class, then `RemoteCallback.writeToParcel`'s
+        // binder, length-prefixed.
+        let callback = |class: &str| {
+            let mut p = Parcel::new();
+            p.write_i32(0);
+            p.write_i32(bundle::MAGIC);
+            p.write_i32(1);
+            p.write_string16(Some(MONITOR_CALLBACK));
+            p.write_i32(bundle::VAL_PARCELABLE);
+            let length_at = p.position();
+            p.write_i32(0);
+            p.write_string16(Some(class));
+            p.write_binder(Some(Binder::Handle(7)));
+            p.set_i32_at(length_at, (p.position() - length_at - 4) as i32);
+            p.set_i32_at(0, (p.position() - 8) as i32);
+            p.write_bool(false);
+            p
+        };
+        let p = callback(REMOTE_CALLBACK);
+        let parcel = Reader::new(p.data(), p.objects());
+        let extras = bundle::read(&mut parcel.clone()).unwrap().unwrap();
+        assert_eq!(remote_callback_of(&extras[MONITOR_CALLBACK], &parcel).unwrap(), Some(7));
+        let p = callback("android.os.Bundle");
+        let parcel = Reader::new(p.data(), p.objects());
+        let extras = bundle::read(&mut parcel.clone()).unwrap().unwrap();
+        assert!(remote_callback_of(&extras[MONITOR_CALLBACK], &parcel).is_err());
+        assert_eq!(remote_callback_of(&Value::Null, &parcel).unwrap(), None);
+    }
 
     #[test]
     fn mime_types_compare_as_clip_description_compares_them() {
