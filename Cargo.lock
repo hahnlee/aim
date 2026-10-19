@@ -130,6 +130,7 @@ dependencies = [
  "aim-android-image",
  "aim-android-init",
  "aim-binder-host",
+ "aim-host-camera",
  "aim-host-sensors",
  "aim-hostcall",
  "aim-paths",
