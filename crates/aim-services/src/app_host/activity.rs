@@ -761,7 +761,18 @@ impl Service for ActivityTaskManager {
                 Ok(p)
             }
             atm::REGISTER_BACKGROUND_ACTIVITY_START_CALLBACK => {
-                reply(Err(self.0.unimplemented_named("activity_task", "registerBackgroundActivityStartCallback: BAL strict mode (#1715)")))
+                let a = atm::RegisterBackgroundActivityStartCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let added = self.0.add_bal_strict_mode_callback(call.sender_euid as i32, a.binder);
+                let mut p = Parcel::new();
+                atm::write_register_background_activity_start_callback_reply(&mut p, added);
+                Ok(p)
+            }
+            atm::UNREGISTER_BACKGROUND_ACTIVITY_START_CALLBACK => {
+                let a = atm::UnregisterBackgroundActivityStartCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.0.remove_bal_strict_mode_callback(call.sender_euid as i32, a.binder);
+                let mut p = Parcel::new();
+                atm::write_unregister_background_activity_start_callback_reply(&mut p);
+                Ok(p)
             }
             code => reply(Err(self.0.unimplemented("activity_task", code))),
         }

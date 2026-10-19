@@ -406,6 +406,8 @@ pub struct AppHost {
     battery_stats: OnceLock<Arc<battery_stats::BatteryStats>>,
     /// `mStrictModeCallbacks`.
     strict_mode_callbacks: strict_mode::Callbacks,
+    /// `mStrictModeBalCallbacks`.
+    bal_strict_mode_callbacks: strict_mode::BalCallbacks,
     connectivity_service: OnceLock<Arc<connectivity_service::ConnectivityService>>,
     job_scheduler: OnceLock<Arc<job_scheduler::JobScheduler>>,
     /// What DevicePolicyManagerService persisted, read once.
@@ -476,6 +478,7 @@ impl AppHost {
             battery_service: OnceLock::new(),
             battery_stats: OnceLock::new(),
             strict_mode_callbacks: Default::default(),
+            bal_strict_mode_callbacks: Default::default(),
             connectivity_service: OnceLock::new(),
             job_scheduler: OnceLock::new(),
             device_policies: OnceLock::new(),

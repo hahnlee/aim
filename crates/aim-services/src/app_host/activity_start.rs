@@ -7,7 +7,7 @@
 //! the URI grants an intent or a result carries held by the activity it
 //! goes to ([`super::uri_grants`]), and what the activities' reports set
 //! moving, sent as client
-//! transactions. Not yet: forwarded results, documents, a task's reset,
+//! transactions, a forwarded result's target. Not yet: documents, a task's reset,
 //! launch options, and the resolver for an intent of several activities
 //! (#1485).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
@@ -34,6 +34,7 @@ use crate::package::intent::{ComponentName, Intent};
 pub const START_SUCCESS: i32 = stack::START_SUCCESS;
 const START_INTENT_NOT_RESOLVED: i32 = -1;
 const START_CLASS_NOT_FOUND: i32 = -2;
+const START_FORWARD_AND_REQUEST_CONFLICT: i32 = -93;
 /// `Intent.FLAG_ACTIVITY_FORWARD_RESULT`,
 /// `EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN`.
 const FLAG_ACTIVITY_FORWARD_RESULT: i32 = 0x0200_0000;
@@ -504,7 +505,7 @@ impl AppHost {
     /// `ActivityStarter`'s start of `args` by `uid` of `caller_package`
     /// (a PendingIntent's creator for one it sends,
     /// `startActivityInPackage`): the start's result code.
-    pub(super) fn start_activity_in_package(self: &Arc<Self>, uid: i32, caller_package: String, caller_pid: i32, args: StartArgs) -> Result<i32, Exception> {
+    pub(super) fn start_activity_in_package(self: &Arc<Self>, uid: i32, caller_package: String, caller_pid: i32, mut args: StartArgs) -> Result<i32, Exception> {
         let mut intent = args.intent.ok_or_else(|| Exception::illegal_argument("intent"))?;
         if intent.has_fds() {
             return Err(Exception::illegal_argument("File descriptors passed in Intent"));
@@ -542,12 +543,9 @@ impl AppHost {
                 format!("{what} not exported from uid {target_uid}")
             }));
         }
-        if intent.intent.flags & FLAG_ACTIVITY_FORWARD_RESULT != 0 {
-            return Err(self.unimplemented_named("activity_task", "a forwarded result (#1485)"));
-        }
         // `sourceRecord`, the caller's activity, and `resultRecord`, the
         // source when it asks for a result.
-        let (source, source_task, result_to) = {
+        let (source, source_task, mut result_to) = {
             let stack = self.activities.stack.lock().unwrap();
             let source = match args.result_to {
                 Some(Binder::Local(t)) => stack.get(t),
@@ -555,6 +553,25 @@ impl AppHost {
             };
             (source.map(|a| a.token), source.map(|a| a.task), source.filter(|a| args.request_code >= 0 && !a.finishing).map(|a| a.token))
         };
+        // `FLAG_ACTIVITY_FORWARD_RESULT`: the source's result target, who
+        // and request code move to the new activity. The source has not
+        // finished, so the target holds no result of it to remove
+        // (`removeResultsLocked`).
+        if intent.intent.flags & FLAG_ACTIVITY_FORWARD_RESULT != 0
+            && let Some(source) = source
+        {
+            if args.request_code >= 0 {
+                return Ok(START_FORWARD_AND_REQUEST_CONFLICT);
+            }
+            let (forwarded, payload) = self.activities.stack.lock().unwrap().forward_result(source);
+            result_to = forwarded;
+            if let Some(id) = payload
+                && let Some(Payload::Result { who, request_code, .. }) = self.activities.payloads.lock().unwrap().get(&id)
+            {
+                args.result_who = who.clone();
+                args.request_code = *request_code;
+            }
+        }
         intent = intent.with_component(&package, &class);
         let real = real_component(&info);
         let target_uid = target_uid as u32;
