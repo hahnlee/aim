@@ -51,15 +51,30 @@ struct Client {
     selected_route: Option<String>,
 }
 
+/// `MediaRouter2ServiceImpl.RouterRecord`.
+struct Router {
+    binder: Strong,
+    death: u64,
+    package: String,
+    /// `mDiscoveryPreference`.
+    preference: super::media_router2::Preference,
+}
+
+/// `IMediaRouter2`'s descriptor and `notifyRouterRegistered`.
+const IMEDIA_ROUTER2: &str = "android.media.IMediaRouter2";
+const NOTIFY_ROUTER_REGISTERED: u32 = 1;
+
 pub struct MediaRouter {
     host: Arc<AppHost>,
     /// `mAllClientRecords`, by handle.
     clients: Arc<Mutex<HashMap<u32, Client>>>,
+    /// `mAllRouterRecords`, by handle.
+    routers: Arc<Mutex<HashMap<u32, Router>>>,
 }
 
 impl MediaRouter {
     pub fn new(host: Arc<AppHost>) -> Self {
-        MediaRouter { host, clients: Arc::new(Mutex::new(HashMap::new())) }
+        MediaRouter { host, clients: Arc::new(Mutex::new(HashMap::new())), routers: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     /// `RemoteDisplayProviderWatcher.scanPackages`: the services of
@@ -126,6 +141,83 @@ impl MediaRouter {
             .unwrap()
             .insert(handle, Client { binder, death, uid, user, trusted, route_types: 0, active_scan: false, selected_route: None });
         Ok(())
+    }
+
+    /// `registerRouter2`: the router kept until it dies or unregisters, and
+    /// told what it may see (`notifyRouterRegistered`).
+    fn register_router(&self, uid: i32, router: Option<Binder>, package: Option<String>) -> Result<(), Exception> {
+        let Some(Binder::Handle(handle)) = router else {
+            return Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "router must not be null"));
+        };
+        if package.as_deref().is_none_or(str::is_empty) {
+            return Err(Exception::illegal_argument("packageName must not be empty"));
+        }
+        if self.routers.lock().unwrap().contains_key(&handle) {
+            eprintln!("app host: media_router: registerRouter2Locked: Same router already exists. packageName={}", package.unwrap_or_default());
+            return Ok(());
+        }
+        let (routes, session) = self.host.media_router2_registered_state(uid)?;
+        let binder = self.host.process.strong(handle);
+        let routers = Arc::downgrade(&self.routers);
+        let process = self.host.process.clone();
+        let death = self.host.process.link_to_death(
+            &binder,
+            Box::new(move || {
+                // `RouterRecord.binderDied`: `unregisterRouter2Locked`.
+                if let Some(routers) = routers.upgrade()
+                    && let Some(r) = routers.lock().unwrap().remove(&handle)
+                {
+                    process.clear_death(&r.binder, r.death);
+                }
+            }),
+        );
+        let mut p = Parcel::new();
+        p.write_interface_token(IMEDIA_ROUTER2);
+        p.write_i32(routes.len() as i32);
+        for route in &routes {
+            p.write_i32(1);
+            route.write_to(&mut p);
+        }
+        p.write_i32(1);
+        session.write_to(&mut p);
+        if let Err(e) = binder.transact(NOTIFY_ROUTER_REGISTERED, &p, true) {
+            eprintln!("app host: media_router: notifyRegistered: {e:?}");
+        }
+        let package = package.unwrap_or_default();
+        self.routers.lock().unwrap().insert(handle, Router { binder, death, package, preference: Default::default() });
+        Ok(())
+    }
+
+    /// `setDiscoveryRequestWithRouter2`: the router's preference, then the
+    /// composite one for the providers (`updateDiscoveryPreferenceOnHandler`).
+    fn set_router_discovery(&self, uid: i32, router: Option<Binder>, preference: Option<super::media_router2::Preference>) -> Result<(), Exception> {
+        let (Some(h), Some(preference)) = (handle(&router), preference) else {
+            return Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "router and preference must not be null"));
+        };
+        let mut routers = self.routers.lock().unwrap();
+        let Some(r) = routers.get_mut(&h) else {
+            eprintln!("app host: media_router: setDiscoveryRequestWithRouter2: Ignoring unknown router.");
+            return Ok(());
+        };
+        if r.preference == preference {
+            return Ok(());
+        }
+        let previous = std::mem::replace(&mut r.preference, preference);
+        let all: Vec<_> = routers.values().map(|r| (r.package.clone(), r.preference.clone())).collect();
+        let result = self.host.media_router2_discover(uid / PER_USER_RANGE as i32, &all);
+        if result.is_err()
+            && let Some(r) = routers.get_mut(&h)
+        {
+            r.preference = previous;
+        }
+        result
+    }
+
+    /// `unregisterRouter2`.
+    fn unregister_router(&self, handle: u32) {
+        if let Some(r) = self.routers.lock().unwrap().remove(&handle) {
+            self.host.process.clear_death(&r.binder, r.death);
+        }
     }
 
     fn unregister(&self, handle: u32) {
@@ -244,6 +336,50 @@ impl Service for MediaRouter {
                     p.write_no_exception();
                     Ok(())
                 })()
+            }
+            // `MediaRouterService.getSystemRoutes`: of the caller's own
+            // package (`validatePackageName`); a proxy router's is not
+            // implemented.
+            mr::GET_SYSTEM_ROUTES => {
+                let a = mr::GetSystemRoutes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let uid = call.sender_euid as i32;
+                (|| {
+                    let package = a.caller_package_name.as_deref().unwrap_or_default();
+                    if a.caller_package_name.is_none() || !self.host.owns_package(uid, package)? {
+                        return Err(Exception::security("callerPackageName does not match calling uid."));
+                    }
+                    if a.is_proxy_router {
+                        return Err(self.host.unimplemented_named("media_router", "a proxy router's system routes (#1663)"));
+                    }
+                    let routes: Vec<_> = self.host.media_router2_system_routes(uid)?.into_iter().map(Some).collect();
+                    mr::write_get_system_routes_reply(&mut p, Some(&routes[..]));
+                    Ok(())
+                })()
+            }
+            mr::REGISTER_ROUTER2 => {
+                let a = mr::RegisterRouter2::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.register_router(call.sender_euid as i32, a.router, a.package_name).map(|()| p.write_no_exception())
+            }
+            mr::SET_DISCOVERY_REQUEST_WITH_ROUTER2 => {
+                let a = mr::SetDiscoveryRequestWithRouter2::<super::media_router2::Preference>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.set_router_discovery(call.sender_euid as i32, a.router, a.preference).map(|()| p.write_no_exception())
+            }
+            mr::UNREGISTER_ROUTER2 => {
+                let a = mr::UnregisterRouter2::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match handle(&a.router) {
+                    Some(h) => {
+                        self.unregister_router(h);
+                        p.write_no_exception();
+                        Ok(())
+                    }
+                    None => Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "router must not be null")),
+                }
+            }
+            mr::GET_SYSTEM_SESSION_INFO => {
+                mr::GetSystemSessionInfo::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.host
+                    .media_router2_system_session(call.sender_euid as i32)
+                    .map(|s| mr::write_get_system_session_info_reply(&mut p, Some(&s)))
             }
             code => Err(self.host.unimplemented_named(
                 "media_router",

@@ -284,6 +284,18 @@ impl Service for AudioManagerNative {
 }
 
 impl AppHost {
+    /// `AudioManager.getStreamVolume` and `getStreamMaxVolume` of
+    /// `STREAM_MUSIC`, and `isVolumeFixed`, as the system server reads
+    /// them.
+    pub(super) fn music_volume(&self) -> Result<(i32, i32, bool), Exception> {
+        let guard = self.volumes()?;
+        let v = guard.as_ref().unwrap();
+        let stream = v.valid_stream(volume::STREAM_MUSIC)?;
+        let state = v.state(stream)?;
+        let index = if state.muted { 0 } else { (state.index(volume::device_for_stream(stream)) + 5) / 10 };
+        Ok((index, (state.max_index() + 5) / 10, v.is_volume_fixed()))
+    }
+
     /// The stream volumes, made at the first call from the image and the
     /// settings.
     fn volumes(&self) -> Result<MutexGuard<'_, Option<Volumes>>, Exception> {
