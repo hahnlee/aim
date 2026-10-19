@@ -21,9 +21,11 @@
 //! the op timeouts, the runtime limits, its work items, stops with their
 //! reasons, rescheduling with back-off and periodic rescheduling; at most
 //! the original's concurrency, an app's jobs `TOP` while its process runs.
+//! Content trigger jobs run as `ContentObserverController` triggers them
+//! (`app_host/job_content.rs`), on the app host's ContentService.
 //! Standby buckets, quotas beyond it, doze, flexibility (off by default),
-//! prefetch launch estimates, content triggers, user-initiated jobs and
-//! a job's wake lock are not run (#1490), nor URI grants (#1573).
+//! prefetch launch estimates, user-initiated jobs and a job's wake lock
+//! are not run (#1490), nor URI grants (#1573).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -37,6 +39,8 @@ use aim_service_aidl::android_app_job_ijobscheduler as js;
 use aim_service_aidl::android_app_job_ijobservice as job_service;
 
 use super::alarm_service::{elapsed_ms, wall_ms};
+use super::content_service::LocalObserver;
+use super::job_content::{self, JobContent, ObserverKey};
 use super::job_info::{
     self, BACKOFF_POLICY_EXPONENTIAL, BACKOFF_POLICY_LINEAR, BIAS_DEFAULT, CONSTRAINT_FLAG_BATTERY_NOT_LOW,
     CONSTRAINT_FLAG_CHARGING, CONSTRAINT_FLAG_DEVICE_IDLE, CONSTRAINT_FLAG_STORAGE_NOT_LOW, FLAG_EXEMPT_FROM_APP_STANDBY,
@@ -48,6 +52,7 @@ use super::job_store::{self, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, Stored};
 use super::network::{self, NetworkCapabilities};
 use super::services::HostConnection;
 use super::{AppHost, PER_USER_RANGE, reply};
+use crate::package::uri::Uri;
 
 /// `JobStatus.CONSTRAINT_*` (the first four are `JobInfo`'s).
 const CONSTRAINT_CHARGING: i32 = CONSTRAINT_FLAG_CHARGING;
@@ -224,6 +229,8 @@ struct JobStatus {
     reason_unready: i32,
     abandoned: bool,
     tracked: bool,
+    /// What `ContentObserverController` keeps of it.
+    content: JobContent,
     /// The binders among its parcelled extras and clip, held.
     _binders: Arc<Vec<Strong>>,
 }
@@ -297,6 +304,7 @@ impl JobStatus {
             reason_unready: STOP_REASON_UNDEFINED,
             abandoned: false,
             tracked: false,
+            content: JobContent::default(),
             _binders: binders,
         }
     }
@@ -332,6 +340,23 @@ impl JobStatus {
 
     fn has_deadline(&self) -> bool {
         self.latest != NO_LATEST_RUNTIME
+    }
+
+    /// `hasContentTriggerConstraint`.
+    fn has_content_trigger(&self) -> bool {
+        self.required & CONSTRAINT_CONTENT_TRIGGER != 0
+    }
+
+    /// Its triggers, as `JobInstance` reads them of `JobStatus`: the
+    /// trigger URIs (checked non-null when scheduled), the source user and
+    /// the delays.
+    fn content_spec(&self) -> (Vec<job_info::TriggerContentUri>, i32, i64, i64) {
+        (
+            self.job.triggers.iter().flatten().cloned().collect(),
+            self.source_user,
+            job_content::update_delay(self.job.trigger_content_update_delay),
+            job_content::max_delay(self.job.trigger_content_max_delay),
+        )
     }
 
     /// `getMaxJobExecutionTimeMs`: its guaranteed runtime.
@@ -457,6 +482,8 @@ impl JobStatus {
             (CONSTRAINT_TIMING_DELAY, now >= self.earliest),
             (CONSTRAINT_DEADLINE, now >= self.latest),
             (CONSTRAINT_CONNECTIVITY, self.network_satisfied(now, device, top)),
+            // `ContentObserverController`'s.
+            (CONSTRAINT_CONTENT_TRIGGER, self.content.satisfied),
         ] {
             if on {
                 satisfied |= constraint;
@@ -675,6 +702,9 @@ enum Message {
     /// The store's write scheduled (`postDelayed(mWriteRunnable)`): the
     /// handler times it.
     Persist,
+    /// A content trigger's observer's change (`ObserverInstance.onChange`,
+    /// on the handler).
+    ContentChanged { key: ObserverKey, uris: Vec<Uri> },
 }
 
 #[derive(Default)]
@@ -697,6 +727,8 @@ struct State {
     migrate: bool,
     /// The persisted schedules of each user's package in the last window.
     schedule_calls: HashMap<(i32, String), VecDeque<i64>>,
+    /// `ContentObserverController`.
+    content: job_content::Controller,
 }
 
 pub struct JobScheduler {
@@ -735,6 +767,39 @@ struct JobCallback {
     scheduler: Weak<JobScheduler>,
     id: u64,
     stopped: Mutex<Option<Stopped>>,
+}
+
+/// A content trigger's observer (`ObserverInstance`) as ContentService
+/// tells it: its changes posted to the handler.
+struct TriggerObserver {
+    scheduler: Weak<JobScheduler>,
+    key: ObserverKey,
+}
+
+impl LocalObserver for TriggerObserver {
+    fn on_change(&self, _self_change: bool, uris: &[Uri], _flags: i32, _user: i32) {
+        if let Some(s) = self.scheduler.upgrade() {
+            s.post(Message::ContentChanged { key: self.key.clone(), uris: uris.to_vec() });
+        }
+    }
+}
+
+/// `ContentObserverController`'s observers registered with the app host's
+/// ContentService.
+struct Registrar<'a>(&'a JobScheduler);
+
+impl job_content::Observe for Registrar<'_> {
+    fn register(&self, uri: &Uri, descendants: bool, key: &ObserverKey) -> Result<u64, Exception> {
+        let content = self.0.host.content_service.get().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "content"))?;
+        let observer = Arc::new(TriggerObserver { scheduler: self.0.me.clone(), key: key.clone() });
+        content.register_local(uri, descendants, key.user, observer)
+    }
+
+    fn unregister(&self, registration: u64) {
+        if let Some(content) = self.0.host.content_service.get() {
+            content.unregister_local(registration);
+        }
+    }
 }
 
 impl JobScheduler {
@@ -899,7 +964,7 @@ impl JobScheduler {
             if migrate {
                 state.dirty.insert(uid);
             }
-            self.track(state, j, now);
+            self.track(state, j, now)?;
         }
         if migrate {
             state.migrate = true;
@@ -909,8 +974,10 @@ impl JobScheduler {
         Ok(())
     }
 
-    /// `startTrackingJobLocked` (and `JobStore.add`).
-    fn track(&self, state: &mut State, mut j: JobStatus, now: i64) -> u64 {
+    /// `startTrackingJobLocked` (and `JobStore.add`), with
+    /// `ContentObserverController`'s tracking, which fails as registering
+    /// its observers does.
+    fn track(&self, state: &mut State, mut j: JobStatus, now: i64) -> Result<u64, Exception> {
         j.enqueue_time = now;
         j.tracked = true;
         // A user-initiated job (only read from the store: `schedule`
@@ -924,11 +991,21 @@ impl JobScheduler {
         let persisted = j.job.persisted.then_some(j.calling_uid);
         state.next_key += 1;
         let key = state.next_key;
+        let registrar = Registrar(self);
+        let started = if j.has_content_trigger() {
+            let (triggers, user, update_delay, max_delay) = j.content_spec();
+            let spec = job_content::Spec { triggers: &triggers, user, update_delay, max_delay };
+            state.content.start_tracking(key, &spec, &mut j.content, &registrar)
+        } else {
+            Ok(())
+        };
+        state.content.forget_last(&mut j.content, &registrar);
+        started?;
         state.jobs.insert(key, j);
         if let Some(uid) = persisted {
             self.persist(state, uid, now);
         }
-        key
+        Ok(key)
     }
 
     /// `stopTrackingJobLocked`: its work handed to `incoming`, removed from
@@ -936,16 +1013,19 @@ impl JobScheduler {
     fn stop_tracking(&self, state: &mut State, key: u64, incoming: Option<&mut JobStatus>, write: bool, now: i64) -> bool {
         let running = state.contexts.iter().any(|c| c.key == key);
         let Some(j) = state.jobs.get_mut(&key) else { return false };
-        // `JobStatus.stopTrackingJobLocked`.
+        let registrar = Registrar(self);
+        // `JobStatus.stopTrackingJobLocked`, and `ContentObserverController`'s.
         if let Some(incoming) = incoming {
             if !j.executing_work.is_empty() {
                 incoming.pending_work = std::mem::take(&mut j.executing_work);
             }
             incoming.pending_work.append(&mut j.pending_work);
             incoming.next_work_id = j.next_work_id;
+            state.content.stop_tracking(&mut j.content, Some(&mut incoming.content), &registrar);
         } else {
             j.pending_work.clear();
             j.executing_work.clear();
+            state.content.stop_tracking(&mut j.content, None, &registrar);
         }
         let was = std::mem::replace(&mut j.tracked, false);
         let persisted = j.job.persisted.then_some(j.calling_uid);
@@ -1105,9 +1185,6 @@ impl JobScheduler {
         {
             return Err(self.host.unimplemented_named("jobscheduler", "a job's URI grants (#1573)"));
         }
-        if job.trigger_content_uris.is_some() {
-            return Err(self.host.unimplemented_named("jobscheduler", "content trigger jobs (#1490)"));
-        }
         // `validateNamespace`.
         let namespace = match namespace.map(|n| n.trim().to_string()) {
             Some(n) if n.is_empty() => return Err(Exception::illegal_argument("namespace cannot be empty")),
@@ -1215,7 +1292,21 @@ impl JobScheduler {
         if let Some(work) = work {
             j.enqueue_work(work);
         }
-        let key = self.track(&mut state, j, now);
+        // What `JobInstance` and `registerContentObserver` refuse of the
+        // triggers; the instance of a job it replaced is let go then too.
+        let refused = j.job.triggers.iter().find_map(|trigger| match trigger {
+            None => Some(Exception::new(
+                EX_NULL_POINTER,
+                "Attempt to invoke virtual method 'int android.app.job.JobInfo$TriggerContentUri.getFlags()' on a null object reference",
+            )),
+            Some(t) if t.uri.is_none() => Some(Exception::illegal_argument("You must pass a valid uri and observer")),
+            Some(_) => None,
+        });
+        if let Some(e) = refused {
+            state.content.forget_last(&mut j.content, &Registrar(self));
+            return Err(e);
+        }
+        let key = self.track(&mut state, j, now)?;
         if self.ready_to_execute(&mut state, key, now) {
             state.pending.push(key);
             self.run_pending(&mut state, now);
@@ -1387,6 +1478,10 @@ impl JobScheduler {
 
     /// `JobServiceContext.executeRunnableJob`: the job's service bound.
     fn execute(&self, state: &mut State, key: u64, now: i64) -> bool {
+        // The controllers' `prepareForExecutionLocked`.
+        if let Some(j) = state.jobs.get_mut(&key).filter(|j| j.has_content_trigger()) {
+            state.content.prepare(&mut j.content);
+        }
         state.next_callback += 1;
         let id = state.next_callback;
         let callback = Arc::new(JobCallback { scheduler: self.me.clone(), id, stopped: Mutex::new(None) });
@@ -1431,6 +1526,10 @@ impl JobScheduler {
                 }
                 self.host.unbind_service_from_host(&conn);
                 state.contexts.retain(|c| c.key != key);
+                // `unprepareFromExecutionLocked`.
+                if let Some(j) = state.jobs.get_mut(&key).filter(|j| j.has_content_trigger()) {
+                    state.content.unprepare(&mut j.content);
+                }
                 false
             }
         }
@@ -1472,6 +1571,8 @@ impl JobScheduler {
             override_deadline_expired: c.override_deadline_expired,
             expedited: c.expedited,
             user_initiated: false,
+            triggered_uris: j.content.changes.uris.as_deref(),
+            triggered_authorities: j.content.changes.authorities.as_deref(),
             stop_reason: c.stop.reason,
             internal_stop_reason: c.stop.internal,
             debug_stop_reason: c.stop.debug.as_deref(),
@@ -1655,8 +1756,12 @@ impl JobScheduler {
             next = Some(n);
         }
         self.stop_tracking(state, key, next.as_mut(), !periodic, now);
-        if let Some(next) = next {
-            self.track(state, next, now);
+        // The rescheduled job's triggers are observed already, by the
+        // instance it replaces.
+        if let Some(next) = next
+            && let Err(e) = self.track(state, next, now)
+        {
+            eprintln!("app host: jobs: rescheduling job {key}: {}", e.message);
         }
         self.post(Message::Check);
     }
@@ -1694,6 +1799,10 @@ impl JobScheduler {
         }
         if j.job.periodic {
             n.original_latest = j.original_latest;
+        }
+        // The controllers' `rescheduleForFailureLocked`.
+        if j.has_content_trigger() && n.has_content_trigger() {
+            job_content::Controller::reschedule_for_failure(&mut n.content, &j.content);
         }
         n
     }
@@ -1844,6 +1953,11 @@ impl JobScheduler {
             Message::Connected { callback, service, dead } => self.connected(state, callback, service, dead, now),
             Message::Check => self.check(state, now),
             Message::Persist => {}
+            Message::ContentChanged { key, uris } => {
+                for uri in &uris {
+                    state.content.on_change(&key, uri, now);
+                }
+            }
         }
     }
 
@@ -1870,6 +1984,15 @@ impl JobScheduler {
                 && ((j.required & CONSTRAINT_TIMING_DELAY != 0 && j.satisfied & CONSTRAINT_TIMING_DELAY == 0 && now >= j.earliest)
                     || (j.required & CONSTRAINT_DEADLINE != 0 && j.satisfied & CONSTRAINT_DEADLINE == 0 && now >= j.latest))
         });
+        // `ContentObserverController`'s triggers come due
+        // (`setContentTriggerConstraintSatisfied`, reported if it changed).
+        for key in state.content.due(now) {
+            if let Some(j) = state.jobs.get_mut(&key)
+                && !std::mem::replace(&mut j.content.satisfied, true)
+            {
+                changed = true;
+            }
+        }
         if changed {
             self.check(state, now);
         }
@@ -1888,6 +2011,7 @@ impl JobScheduler {
         }
         let mut next: Vec<i64> = state.contexts.iter().map(|c| c.timeout_at).collect();
         next.extend(state.write_at);
+        next.extend(state.content.next_due());
         if state.running {
             for j in state.jobs.values().filter(|j| j.tracked) {
                 if j.required & CONSTRAINT_TIMING_DELAY != 0 && j.earliest > now {
@@ -2227,6 +2351,23 @@ mod tests {
             5000,
         );
         assert!(!periodic.evaluate(6000, &PLUGGED, false));
+    }
+
+    /// A content trigger job waits for `ContentObserverController` to
+    /// satisfy its trigger, unless its deadline passes.
+    #[test]
+    fn a_content_trigger_job_waits_for_its_trigger() {
+        let mut none = Parcel::new();
+        none.write_i32(0);
+        let triggered = || job(|j| j.trigger_content_uris = Some(crate::clip::Raw::of(&none)));
+        let mut j = status(triggered(), NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME);
+        assert!(!j.evaluate(0, &PLUGGED, true));
+        assert_eq!(j.pending_reasons(true), [PENDING_JOB_REASON_CONSTRAINT_CONTENT_TRIGGER]);
+        j.content.satisfied = true;
+        assert!(j.evaluate(0, &PLUGGED, true));
+        let mut deadline = status(triggered(), NO_EARLIEST_RUNTIME, 5000);
+        assert!(!deadline.evaluate(4999, &PLUGGED, true));
+        assert!(deadline.evaluate(5000, &PLUGGED, true));
     }
 
     /// `BatteryController`, the storage controller and battery saver.

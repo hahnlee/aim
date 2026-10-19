@@ -1,6 +1,8 @@
 //! `content`: ContentService for the app host (`ContentService` at
-//! `android-16.0.0_r1`): content observers by URI, the notification of
-//! their changes, and the content cache. Who may observe or notify a URI
+//! `android-16.0.0_r1`): content observers by URI (apps', and the app
+//! host's own services' as system_server's `ContentObserver`s, told once
+//! the service's locks are released), the notification of their changes,
+//! and the content cache. Who may observe or notify a URI
 //! is ActivityManager's `checkContentProviderAccess`. Sync adapters
 //! (SyncManager) are not run (#1460): of SyncStorageEngine there are the
 //! master sync settings it persisted (`/data/system/sync/accounts.xml`)
@@ -8,6 +10,7 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
@@ -28,6 +31,7 @@ const OBSERVER_DESCRIPTOR: &str = "android.database.IContentObserver";
 /// `UserHandle.USER_ALL`; `Build.VERSION_CODES.O`.
 const USER_ALL: i32 = -1;
 const O: i32 = 26;
+const SYSTEM_UID: i32 = 1000;
 /// `ContentResolver.NOTIFY_SYNC_TO_NETWORK`,
 /// `NOTIFY_SKIP_NOTIFY_FOR_DESCENDANTS`.
 const NOTIFY_SYNC_TO_NETWORK: i32 = 1;
@@ -58,9 +62,24 @@ impl ReadParcelable for ParcelUri {
     }
 }
 
-/// `ObserverNode.ObserverEntry`: the observer by its handle.
+/// An observer: an app's, by its binder's handle, or one of the app
+/// host's own services, by its registration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Observer {
+    Remote(u32),
+    Local(u64),
+}
+
+/// A content observer of the app host's own: a system service's
+/// `ContentObserver`.
+pub(super) trait LocalObserver: Send + Sync {
+    /// `onChange(selfChange, uris, flags, user)`.
+    fn on_change(&self, self_change: bool, uris: &[Uri], flags: i32, user: i32);
+}
+
+/// `ObserverNode.ObserverEntry`: the observer and what it watches.
 struct Entry {
-    binder: u32,
+    observer: Observer,
     notify_for_descendants: bool,
     user: i32,
 }
@@ -99,17 +118,17 @@ impl Node {
         }
     }
 
-    /// Whether `binder` is registered at this node or below.
-    fn has(&self, binder: u32) -> bool {
-        self.observers.iter().any(|e| e.binder == binder)
-            || self.children.iter().any(|c| c.has(binder))
+    /// Whether `observer` is registered at this node or below.
+    fn has(&self, observer: Observer) -> bool {
+        self.observers.iter().any(|e| e.observer == observer)
+            || self.children.iter().any(|c| c.has(observer))
     }
 
-    /// Removes one of `binder`'s registrations at each node: whether the
+    /// Removes one of `observer`'s registrations at each node: whether the
     /// node is empty.
-    fn remove(&mut self, binder: u32) -> bool {
-        self.children.retain_mut(|c| !c.remove(binder));
-        if let Some(at) = self.observers.iter().position(|e| e.binder == binder) {
+    fn remove(&mut self, observer: Observer) -> bool {
+        self.children.retain_mut(|c| !c.remove(observer));
+        if let Some(at) = self.observers.iter().position(|e| e.observer == observer) {
             self.observers.remove(at);
         }
         self.children.is_empty() && self.observers.is_empty()
@@ -122,11 +141,11 @@ impl Node {
         segments: &[String],
         index: usize,
         change: &Change,
-        out: &mut Vec<(u32, bool)>,
+        out: &mut Vec<(Observer, bool)>,
     ) {
         let leaf = index >= segments.len();
         for e in &self.observers {
-            let self_change = change.observer == Some(e.binder);
+            let self_change = change.observer == Some(e.observer);
             if self_change && !change.wants_self {
                 continue;
             }
@@ -142,7 +161,7 @@ impl Node {
             } else if !e.notify_for_descendants {
                 continue;
             }
-            out.push((e.binder, self_change));
+            out.push((e.observer, self_change));
         }
         let segment = segments.get(index);
         for child in &self.children {
@@ -158,7 +177,7 @@ impl Node {
 
 /// What changed, as `notifyChange` collects for it.
 struct Change {
-    observer: Option<u32>,
+    observer: Option<Observer>,
     wants_self: bool,
     flags: i32,
     user: i32,
@@ -166,7 +185,7 @@ struct Change {
 
 /// A notification to send: observer, `selfChange`, flags, user (the
 /// collector's key), and its URIs.
-type Notification = (u32, bool, i32, i32, Vec<Uri>);
+type Notification = (Observer, bool, i32, i32, Vec<Uri>);
 
 /// A cache entry's place: user and provider package; caller package and key.
 type CacheProvider = (i32, Option<String>);
@@ -178,6 +197,9 @@ pub struct ContentService {
     /// The observers' binders and death links, held while registered, by
     /// handle.
     observers: Mutex<HashMap<u32, (Strong, u64)>>,
+    /// The app host's own observers, by registration.
+    local: Mutex<HashMap<u64, Arc<dyn LocalObserver>>>,
+    next_local: AtomicU64,
     /// `mCache`.
     cache: Mutex<HashMap<CacheProvider, Vec<(CacheKey, KeptBundle)>>>,
     /// SyncStorageEngine's `mChangeListeners`: by handle, the binder and
@@ -191,6 +213,8 @@ impl ContentService {
             host,
             root: Mutex::new(Node::default()),
             observers: Mutex::new(HashMap::new()),
+            local: Mutex::new(HashMap::new()),
+            next_local: AtomicU64::new(1),
             cache: Mutex::new(HashMap::new()),
             status_listeners: Mutex::new(HashMap::new()),
         }
@@ -324,7 +348,7 @@ impl ContentService {
         self.root.lock().unwrap().add(
             &segments,
             Entry {
-                binder: observer,
+                observer: Observer::Remote(observer),
                 notify_for_descendants: args.notify_for_descendants,
                 user,
             },
@@ -332,12 +356,50 @@ impl ContentService {
         Ok(())
     }
 
+    /// `registerContentObserver` of a system service's `observer`, as
+    /// `ContentResolver.registerContentObserver(uri, descendants, observer,
+    /// user)` makes it from system_server: its registration, kept until
+    /// `unregister_local`.
+    pub(super) fn register_local(
+        &self,
+        uri: &Uri,
+        descendants: bool,
+        user: i32,
+        observer: Arc<dyn LocalObserver>,
+    ) -> Result<u64, Exception> {
+        let user = self.host.incoming_user(SYSTEM_UID, user, true)?;
+        // `checkContentProviderAccess`, which the system is held to as an
+        // app of the current SDK.
+        if let Some(msg) = self.host.provider_access(&uri.authority().unwrap_or_default(), SYSTEM_UID, user)? {
+            return Err(Exception::security(msg));
+        }
+        let segments = segments(uri).ok_or_else(|| {
+            Exception::illegal_argument(format!("Invalid Uri ({}) used for observer", uri.as_str()))
+        })?;
+        let id = self.next_local.fetch_add(1, Ordering::Relaxed);
+        self.local.lock().unwrap().insert(id, observer);
+        self.root.lock().unwrap().add(
+            &segments,
+            Entry { observer: Observer::Local(id), notify_for_descendants: descendants, user },
+        );
+        Ok(id)
+    }
+
+    /// `unregisterContentObserver` of a system service's observer.
+    pub(super) fn unregister_local(&self, id: u64) {
+        let mut root = self.root.lock().unwrap();
+        root.remove(Observer::Local(id));
+        if !root.has(Observer::Local(id)) {
+            self.local.lock().unwrap().remove(&id);
+        }
+    }
+
     /// An observer's registrations go (`removeObserverLocked`, which
     /// removes one at each node).
     fn remove(&self, observer: u32) {
         let mut root = self.root.lock().unwrap();
-        root.remove(observer);
-        if !root.has(observer)
+        root.remove(Observer::Remote(observer));
+        if !root.has(Observer::Remote(observer))
             && let Some((strong, cookie)) = self.observers.lock().unwrap().remove(&observer)
         {
             self.host.process.clear_death(&strong, cookie);
@@ -349,7 +411,7 @@ impl ContentService {
             .map_err(|_| Exception::illegal_argument("notifyChange"))?;
         let uid = call.sender_euid as i32;
         let observer = match args.observer {
-            Some(Binder::Handle(h)) => Some(h),
+            Some(Binder::Handle(h)) => Some(Observer::Remote(h)),
             _ => None,
         };
         let user = self.host.incoming_user(uid, args.user_handle, true)?;
@@ -412,9 +474,21 @@ impl ContentService {
             ));
         }
         // Foreground observers get theirs at once; the app host's processes
-        // are all top.
+        // are all top, and the system is persistent. The app host's own are
+        // told once the locks are released.
         let observers = self.observers.lock().unwrap();
-        for (binder, self_change, flags, user, uris) in collected {
+        let local = self.local.lock().unwrap();
+        let mut told_locally = Vec::new();
+        for (who, self_change, flags, user, uris) in collected {
+            let binder = match who {
+                Observer::Remote(binder) => binder,
+                Observer::Local(id) => {
+                    if let Some(observer) = local.get(&id) {
+                        told_locally.push((observer.clone(), self_change, flags, user, uris));
+                    }
+                    continue;
+                }
+            };
             let Some((observer, _)) = observers.get(&binder) else {
                 continue;
             };
@@ -430,7 +504,10 @@ impl ContentService {
             p.write_i32(user);
             let _ = observer.transact(ON_CHANGE_ETC, &p, true);
         }
-        drop(observers);
+        drop((observers, local));
+        for (observer, self_change, flags, user, uris) in told_locally {
+            observer.on_change(self_change, &uris, flags, user);
+        }
         // `invalidateCacheLocked` of the providers touched.
         let mut cache = self.cache.lock().unwrap();
         for (user, package, uri) in touched {
@@ -632,7 +709,7 @@ mod tests {
 
     fn entry(binder: u32, descendants: bool) -> Entry {
         Entry {
-            binder,
+            observer: Observer::Remote(binder),
             notify_for_descendants: descendants,
             user: 0,
         }
@@ -640,7 +717,7 @@ mod tests {
 
     fn change(observer: Option<u32>) -> Change {
         Change {
-            observer,
+            observer: observer.map(Observer::Remote),
             wants_self: false,
             flags: 0,
             user: 0,
@@ -659,7 +736,12 @@ mod tests {
         fn heard(root: &Node, path: &[&str], c: &Change) -> Vec<u32> {
             let mut out = Vec::new();
             root.collect(&s(path), 0, c, &mut out);
-            out.iter().map(|o| o.0).collect()
+            out.iter()
+                .map(|o| match o.0 {
+                    Observer::Remote(h) => h,
+                    Observer::Local(id) => id as u32 + 100,
+                })
+                .collect()
         }
         assert_eq!(heard(&root, &["a", "b"], &change(None)), [2, 1]);
         assert_eq!(heard(&root, &["a"], &change(None)), [2, 3, 1]);
@@ -684,7 +766,11 @@ mod tests {
             ),
             Vec::<u32>::new()
         );
-        assert!(!root.remove(2) && !root.has(2));
+        assert!(!root.remove(Observer::Remote(2)) && !root.has(Observer::Remote(2)));
+        // The app host's own observers are among them, apart from apps'.
+        root.add(&s(&["a"]), Entry { observer: Observer::Local(2), notify_for_descendants: true, user: 0 });
+        assert_eq!(heard(&root, &["a", "b"], &change(Some(2))), [102, 1]);
+        assert!(!root.remove(Observer::Local(2)) && !root.has(Observer::Local(2)));
         assert_eq!(heard(&root, &["a", "b"], &change(None)), [1]);
     }
 

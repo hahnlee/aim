@@ -12,6 +12,7 @@ use aim_service_aidl::{ReadParcelable, WriteParcelable};
 use super::kept::{KeptIntent, RawIntent};
 use super::network::{NetworkCapabilities, NetworkRequest, RequestType};
 use crate::clip::{self, Raw};
+use crate::package::uri::Uri;
 use crate::package::restrictions::persistable::Bundle;
 
 /// `JobInfo.NETWORK_BYTES_UNKNOWN`.
@@ -68,6 +69,14 @@ const REQUEST_ID_UNSET: i32 = 0;
 const COMPONENT_NAME: &str = "android.content.ComponentName";
 /// `Intent.FLAG_GRANT_READ_URI_PERMISSION`, `FLAG_GRANT_WRITE_URI_PERMISSION`.
 pub const FLAG_GRANT_URI_PERMISSIONS: i32 = 0x1 | 0x2;
+
+/// `JobInfo.TriggerContentUri`: its URI (none if parcelled as null) and
+/// flags.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TriggerContentUri {
+    pub uri: Option<Uri>,
+    pub flags: i32,
+}
 
 /// `readPersistableBundle` as `JobInfo` and `JobWorkItem` keep it: a null
 /// bundle as `PersistableBundle.EMPTY`.
@@ -144,10 +153,12 @@ pub struct JobInfo {
     pub clip: Option<(Raw, i32)>,
     pub service: (String, String),
     pub constraint_flags: i32,
-    /// `triggerContentUris` as parcelled, if any.
+    /// `triggerContentUris` as parcelled, if any, and as read (a null
+    /// element none).
     pub trigger_content_uris: Option<Raw>,
-    trigger_content_update_delay: i64,
-    trigger_content_max_delay: i64,
+    pub triggers: Vec<Option<TriggerContentUri>>,
+    pub trigger_content_update_delay: i64,
+    pub trigger_content_max_delay: i64,
     pub network: Option<NetworkRequest>,
     pub network_download_bytes: i64,
     pub network_upload_bytes: i64,
@@ -195,11 +206,14 @@ impl JobInfo {
         let constraint_flags = r.read_i32()?;
         let start = r.position();
         let n = r.read_i32()?;
+        let mut triggers = Vec::new();
         for _ in 0..n.max(0) {
-            if r.read_i32()? != 0 {
-                crate::package::uri::Uri::read(r, &mut crate::package::intent_filter::Plain)?;
-                r.read_i32()?; // flags
-            }
+            triggers.push(if r.read_i32()? != 0 {
+                let uri = Uri::read(r, &mut crate::package::intent_filter::Plain)?;
+                Some(TriggerContentUri { uri, flags: r.read_i32()? })
+            } else {
+                None
+            });
         }
         let trigger_content_uris = (n >= 0).then(|| Raw::capture(r, start));
         let trigger_content_update_delay = r.read_i64()?;
@@ -220,6 +234,7 @@ impl JobInfo {
             service,
             constraint_flags,
             trigger_content_uris,
+            triggers,
             trigger_content_update_delay,
             trigger_content_max_delay,
             network,
@@ -266,6 +281,7 @@ impl JobInfo {
             service: (package, class),
             constraint_flags: 0,
             trigger_content_uris: None,
+            triggers: Vec::new(),
             trigger_content_update_delay: -1,
             trigger_content_max_delay: -1,
             network: None,
@@ -747,6 +763,10 @@ pub struct JobParameters<'a> {
     pub override_deadline_expired: bool,
     pub expedited: bool,
     pub user_initiated: bool,
+    /// The changes that triggered it (`changedUris`,
+    /// `changedAuthorities`).
+    pub triggered_uris: Option<&'a [Uri]>,
+    pub triggered_authorities: Option<&'a [String]>,
     pub stop_reason: i32,
     pub internal_stop_reason: i32,
     pub debug_stop_reason: Option<&'a str>,
@@ -770,8 +790,26 @@ impl WriteParcelable for JobParameters<'_> {
         p.write_i32(self.override_deadline_expired as i32);
         p.write_bool(self.expedited);
         p.write_bool(self.user_initiated);
-        p.write_i32(-1); // no triggered content URIs
-        p.write_i32(-1); // nor authorities
+        // `writeTypedArray`, `writeStringArray`.
+        match self.triggered_uris {
+            Some(uris) => {
+                p.write_i32(uris.len() as i32);
+                for uri in uris {
+                    p.write_i32(1);
+                    uri.write(p);
+                }
+            }
+            None => p.write_i32(-1),
+        }
+        match self.triggered_authorities {
+            Some(authorities) => {
+                p.write_i32(authorities.len() as i32);
+                for a in authorities {
+                    p.write_string16(Some(a));
+                }
+            }
+            None => p.write_i32(-1),
+        }
         p.write_i32(0); // no network
         p.write_i32(self.stop_reason);
         p.write_i32(self.internal_stop_reason);
@@ -925,6 +963,8 @@ mod tests {
             override_deadline_expired: true,
             expedited: false,
             user_initiated: false,
+            triggered_uris: None,
+            triggered_authorities: None,
             stop_reason: STOP_REASON_UNDEFINED,
             internal_stop_reason: INTERNAL_STOP_REASON_UNKNOWN,
             debug_stop_reason: None,
@@ -940,6 +980,43 @@ mod tests {
         assert_eq!(ints, [1, 0, 0, -1, -1, 0, 0, -1]);
         assert_eq!(r.read_string16().unwrap(), None);
         assert_eq!(r.remaining(), 0);
+    }
+
+    /// The changes that triggered a content trigger job, as
+    /// `writeTypedArray` and `writeStringArray` write them.
+    #[test]
+    fn triggered_changes_are_written_with_the_parameters() {
+        let job = JobInfo::persisted_builder(4, "p".into(), "p.S".into());
+        let uris = [Uri::parse("content://com.android.contacts/contacts/7")];
+        let authorities = ["com.android.contacts".to_string()];
+        let params = JobParameters {
+            callback: Binder::Local(0x10),
+            namespace: None,
+            job: &job,
+            override_deadline_expired: false,
+            expedited: false,
+            user_initiated: false,
+            triggered_uris: Some(&uris),
+            triggered_authorities: Some(&authorities),
+            stop_reason: STOP_REASON_UNDEFINED,
+            internal_stop_reason: INTERNAL_STOP_REASON_UNKNOWN,
+            debug_stop_reason: None,
+        };
+        let mut p = Parcel::new();
+        params.write_to(&mut p);
+        let mut r = p.reader();
+        r.read_i32().unwrap();
+        r.read_string16().unwrap();
+        (0..3).for_each(|_| assert_eq!(r.read_i32().unwrap(), 0));
+        r.read_binder().unwrap();
+        (0..3).for_each(|_| {
+            r.read_i32().unwrap();
+        });
+        assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap()), (1, 1));
+        let uri = Uri::read(&mut r, &mut crate::package::intent_filter::Plain).unwrap().unwrap();
+        assert_eq!(uri.as_str(), "content://com.android.contacts/contacts/7");
+        assert_eq!(r.read_i32().unwrap(), 1);
+        assert_eq!(r.read_string16().unwrap().as_deref(), Some("com.android.contacts"));
     }
 
     #[test]
