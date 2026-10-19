@@ -1,0 +1,10 @@
+[package]
+license.workspace = true
+name = "aim-host-lock"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The Mac's lock as Android's trust service sees it: whether the Mac's user has a password, through LocalAuthentication"
+
+[dependencies]
+aim-hostcall.workspace = true

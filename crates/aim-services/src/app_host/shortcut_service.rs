@@ -26,6 +26,22 @@ use crate::package::intent::ComponentName;
 use crate::package::intent_uri::FullIntent;
 use crate::package::list_slice::Slice;
 
+/// `RoleManager.ROLE_HOME`; `LauncherApps.PinItemRequest.REQUEST_TYPE_SHORTCUT`,
+/// `ACTION_CONFIRM_PIN_SHORTCUT`, `ACTION_CONFIRM_PIN_APPWIDGET`.
+const ROLE_HOME: &str = "android.app.role.HOME";
+const REQUEST_TYPE_SHORTCUT: i32 = 1;
+const ACTION_CONFIRM_PIN_SHORTCUT: &str = "android.content.pm.action.CONFIRM_PIN_SHORTCUT";
+const ACTION_CONFIRM_PIN_APPWIDGET: &str = "android.content.pm.action.CONFIRM_PIN_APPWIDGET";
+/// `ShortcutService.PACKAGE_MATCH_FLAGS` (direct boot aware and unaware,
+/// uninstalled packages) and `MATCH_DISABLED_COMPONENTS`; `SYSTEM_APP_MASK`,
+/// `ApplicationInfo.FLAG_INSTALLED`; `COMPONENT_ENABLED_STATE_*`.
+const PACKAGE_MATCH_FLAGS: i64 = 0x0004_0000 | 0x0008_0000 | 0x2000;
+const MATCH_DISABLED_COMPONENTS: i64 = 0x200;
+const SYSTEM_APP_MASK: i32 = 0x1 | 0x80;
+const FLAG_INSTALLED: i32 = 0x0080_0000;
+const COMPONENT_ENABLED_STATE_DEFAULT: i32 = 0;
+const COMPONENT_ENABLED_STATE_ENABLED: i32 = 1;
+
 /// `ShortcutInfo.FLAG_*`.
 const FLAG_DYNAMIC: i32 = 1 << 0;
 const FLAG_PINNED: i32 = 1 << 1;
@@ -379,6 +395,47 @@ impl ShortcutManager {
             .unwrap_or(default))
     }
 
+    /// `ShortcutRequestPinProcessor.getRequestPinConfirmationActivity`: the
+    /// default launcher's (the home role holder's) activity confirming a
+    /// pinned shortcut or widget (`injectGetPinConfirmationActivity`).
+    /// The system user's items are not restricted on its home screen
+    /// (`areShortcutsSupportedOnHomeScreen`).
+    fn pin_confirmation_activity(&self, user: i32, request_type: i32) -> Result<Option<String>, Exception> {
+        if user != 0 {
+            return Err(not_modelled("a pin request of another user"));
+        }
+        let roles = self.host.role_service.get().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "shortcut: no role service"))?;
+        let Some(launcher) = roles.holders_of(ROLE_HOME)?.into_iter().next() else {
+            eprintln!("app host: shortcut: Default launcher not found. userId={user}");
+            return Ok(None);
+        };
+        let action = if request_type == REQUEST_TYPE_SHORTCUT { ACTION_CONFIRM_PIN_SHORTCUT } else { ACTION_CONFIRM_PIN_APPWIDGET };
+        let intent = crate::package::intent::Intent { action: Some(action.into()), package: Some(launcher), ..Default::default() };
+        let (state, resolution) = self.host.packages()?;
+        let found = resolution
+            .query_intent_activities(&intent, None, PACKAGE_MATCH_FLAGS | MATCH_DISABLED_COMPONENTS, user, 1000)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("shortcut: {e:?}")))?;
+        let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: 1000 };
+        for r in found {
+            let crate::package::component_resolver::Info::Activity(a) = r.info else { continue };
+            let app = &a.info.application_info;
+            // `isInstalled`, then `isSystem` or `isEnabled`.
+            if !app.enabled || app.flags & FLAG_INSTALLED == 0 {
+                continue;
+            }
+            let component = ComponentName { package: app.item.package_name.clone().unwrap_or_default(), class: a.info.item.name.clone().unwrap_or_default() };
+            let setting = query
+                .internal_component_enabled(Some(&component), 1000, user, true)
+                .map_err(|e| not_modelled(&e.0))??;
+            let enabled = (setting == COMPONENT_ENABLED_STATE_DEFAULT && a.info.enabled) || setting == COMPONENT_ENABLED_STATE_ENABLED;
+            if app.flags & SYSTEM_APP_MASK == 0 && !enabled {
+                continue;
+            }
+            return Ok(Some(component.class));
+        }
+        Ok(None)
+    }
+
     /// `verifyCaller`.
     fn verify_caller(&self, uid: i32, package: Option<&str>, user: i32) -> Result<String, Exception> {
         let package = package.filter(|p| !p.is_empty()).ok_or_else(|| Exception::illegal_argument("packageName"))?;
@@ -621,6 +678,18 @@ impl ShortcutManager {
                     self.verify_caller(uid, a.package_name.as_deref(), a.user_id)?;
                     let interval = self.constant("reset_interval_sec", DEFAULT_RESET_INTERVAL_SEC)?.max(1) * 1000;
                     ss::write_get_rate_limit_reset_time_reply(p, self.last_reset()? + interval);
+                    Ok(())
+                })()
+            }
+            ss::IS_REQUEST_PIN_ITEM_SUPPORTED => {
+                let a = ss::IsRequestPinItemSupported::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                (|| {
+                    // `verifyCallerUserId`.
+                    if uid.rem_euclid(PER_USER_RANGE as i32) != 1000 && uid / PER_USER_RANGE as i32 != a.user {
+                        return Err(Exception::security("Invalid userId"));
+                    }
+                    let supported = self.pin_confirmation_activity(a.user, a.request_type)?.is_some();
+                    ss::write_is_request_pin_item_supported_reply(p, supported);
                     Ok(())
                 })()
             }
