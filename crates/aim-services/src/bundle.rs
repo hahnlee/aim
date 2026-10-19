@@ -1,7 +1,7 @@
 //! `Bundle` in its parcel form (`BaseBundle.writeToParcelInner`,
 //! `Parcel.writeArrayMapInternal` and `writeValue` at the pinned tag), for
 //! the few values native services exchange with the original ones: strings,
-//! string arrays and lists, ints, int arrays and booleans, a parcelable
+//! string arrays and lists, ints, int and long arrays and booleans, a parcelable
 //! written by the caller and a `MemoryIntArray`; a length-prefixed value
 //! read (a parcelable, a map, a serializable) is kept as its bytes for the
 //! caller to read.
@@ -30,6 +30,7 @@ const VAL_STRINGARRAY: i32 = 14;
 const VAL_PARCELABLEARRAY: i32 = 16;
 const VAL_OBJECTARRAY: i32 = 17;
 const VAL_INTARRAY: i32 = 18;
+const VAL_LONGARRAY: i32 = 19;
 const VAL_SERIALIZABLE: i32 = 21;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -44,6 +45,8 @@ pub enum Value {
     StringArray(Vec<Option<String>>),
     /// An `int[]` (`writeIntArray`).
     IntArray(Vec<i32>),
+    /// A `long[]` (`writeLongArray`).
+    LongArray(Vec<i64>),
     /// A parcelable of the class `class`, written to `data`
     /// (`writeParcelable`, length-prefixed).
     Parcelable { class: String, data: Vec<u8> },
@@ -104,6 +107,13 @@ impl Value {
                 p.write_i32(items.len() as i32);
                 for item in items {
                     p.write_i32(*item);
+                }
+            }
+            Value::LongArray(items) => {
+                p.write_i32(VAL_LONGARRAY);
+                p.write_i32(items.len() as i32);
+                for item in items {
+                    p.write_i64(*item);
                 }
             }
             Value::Parcelable { class, data } => length_prefixed(p, VAL_PARCELABLE, |p| {
@@ -227,6 +237,10 @@ pub fn read(r: &mut Reader<'_>) -> Result<Option<HashMap<String, Value>>> {
             VAL_INTARRAY => {
                 let n = r.read_i32()?;
                 Value::IntArray((0..n.max(0)).map(|_| r.read_i32()).collect::<Result<_>>()?)
+            }
+            VAL_LONGARRAY => {
+                let n = r.read_i32()?;
+                Value::LongArray((0..n.max(0)).map(|_| r.read_i64()).collect::<Result<_>>()?)
             }
             kind @ (VAL_MAP | VAL_PARCELABLE | VAL_LIST | VAL_SPARSEARRAY | VAL_PARCELABLEARRAY
             | VAL_OBJECTARRAY | VAL_SERIALIZABLE) => {

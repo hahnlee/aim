@@ -89,6 +89,7 @@ pub mod settings;
 pub mod settings_provider;
 pub mod settings_service;
 pub mod settings_validators;
+pub mod stats_manager;
 pub mod status_bar;
 pub mod storage;
 mod strict_mode;
@@ -413,6 +414,7 @@ pub struct AppHost {
     bal_strict_mode_callbacks: strict_mode::BalCallbacks,
     connectivity_service: OnceLock<Arc<connectivity_service::ConnectivityService>>,
     job_scheduler: OnceLock<Arc<job_scheduler::JobScheduler>>,
+    stats: OnceLock<Arc<stats_manager::Stats>>,
     /// What DevicePolicyManagerService persisted, read once.
     device_policies: OnceLock<device_policy::Policies>,
     services: services::Services,
@@ -484,6 +486,7 @@ impl AppHost {
             bal_strict_mode_callbacks: Default::default(),
             connectivity_service: OnceLock::new(),
             job_scheduler: OnceLock::new(),
+            stats: OnceLock::new(),
             device_policies: OnceLock::new(),
             services: Default::default(),
             pending_intents: Default::default(),
@@ -538,6 +541,8 @@ impl AppHost {
             self.process.add_service(Arc::new(activity::Token)),
         ));
         let permission_manager = self.permission_manager.get_or_init(|| Arc::new(permission_manager::PermissionManager::new(self.clone()))).clone();
+        // Published together, as `StatsCompanion.Lifecycle` publishes them.
+        let stats = self.stats.get_or_init(|| stats_manager::Stats::new(self.clone())).clone();
         vec![
             (
                 "activity",
@@ -637,6 +642,8 @@ impl AppHost {
                     .clone(),
             ),
             ("statusbar", Arc::new(status_bar::StatusBar::new(self.clone()))),
+            ("statscompanion", Arc::new(stats_manager::StatsCompanionService(stats.clone()))),
+            ("statsmanager", Arc::new(stats_manager::StatsManagerService(stats))),
             (
                 "activity_task",
                 Arc::new(activity::ActivityTaskManager(
@@ -3443,6 +3450,13 @@ impl Service for Control {
                 // `PHASE_THIRD_PARTY_APPS_CAN_START`.
                 if let Some(jobs) = host.job_scheduler.get() {
                     jobs.start();
+                }
+                // StatsCompanionService's `PHASE_THIRD_PARTY_APPS_CAN_START`
+                // and `PHASE_BOOT_COMPLETED`: the app host's boot completes
+                // with its start.
+                if let Some(stats) = host.stats.get() {
+                    stats.system_ready();
+                    stats.boot_completed();
                 }
             });
             let mut p = Parcel::new();
