@@ -47,6 +47,7 @@ const ALLOW_LIBS: u32 = 0x2;
 const ALLOW_PERMISSIONS: u32 = 0x4;
 const ALLOW_APP_CONFIGS: u32 = 0x8;
 const ALLOW_HIDDENAPI_WHITELISTING: u32 = 0x40;
+const ALLOW_OVERRIDE_APP_RESTRICTIONS: u32 = 0x100;
 const ALLOW_IMPLICIT_BROADCASTS: u32 = 0x200;
 const ALLOW_ALL: u32 = !0;
 
@@ -67,6 +68,9 @@ pub struct SystemConfig {
     pub app_data_isolation_allowlist: Vec<String>,
     /// `mAllowImplicitBroadcasts`.
     pub allow_implicit_broadcasts: BTreeSet<String>,
+    /// `mAllowInPowerSaveExceptIdle`, `mAllowInPowerSave`.
+    pub allow_in_power_save_except_idle: BTreeSet<String>,
+    pub allow_in_power_save: BTreeSet<String>,
     /// Domain verification's linked apps, in original ArraySet order.
     pub linked_apps: Vec<String>,
     pub staged_installers: BTreeSet<String>,
@@ -137,14 +141,20 @@ impl SystemConfig {
         partition("vendor", vendor, prop("ro.boot.product.vendor.sku"));
         partition("odm", vendor, prop("ro.boot.product.hardware.sku"));
         partition("oem", ALLOW_FEATURES, None);
+        // A device first shipped with R or before may configure all of it.
         partition(
             "product",
-            ALLOW_FEATURES
-                | ALLOW_LIBS
-                | ALLOW_PERMISSIONS
-                | ALLOW_HIDDENAPI_WHITELISTING
-                | ALLOW_APP_CONFIGS
-                | ALLOW_IMPLICIT_BROADCASTS,
+            if first_sdk <= 30 {
+                ALLOW_ALL
+            } else {
+                ALLOW_FEATURES
+                    | ALLOW_LIBS
+                    | ALLOW_PERMISSIONS
+                    | ALLOW_HIDDENAPI_WHITELISTING
+                    | ALLOW_APP_CONFIGS
+                    | ALLOW_OVERRIDE_APP_RESTRICTIONS
+                    | ALLOW_IMPLICIT_BROADCASTS
+            },
             prop("ro.boot.hardware.sku"),
         );
         partition("system_ext", ALLOW_ALL, None);
@@ -379,6 +389,16 @@ impl SystemConfig {
                         self.app_data_isolation_allowlist.push(package.into_owned());
                     }
                 }
+                "allow-in-power-save-except-idle" if flags & ALLOW_OVERRIDE_APP_RESTRICTIONS != 0 => {
+                    if let Some(package) = e.string("package") {
+                        self.allow_in_power_save_except_idle.insert(package.into_owned());
+                    }
+                }
+                "allow-in-power-save" if flags & ALLOW_OVERRIDE_APP_RESTRICTIONS != 0 => {
+                    if let Some(package) = e.string("package") {
+                        self.allow_in_power_save.insert(package.into_owned());
+                    }
+                }
                 "allow-implicit-broadcast" if flags & ALLOW_IMPLICIT_BROADCASTS != 0 => {
                     if let Some(action) = e.string("action") {
                         self.allow_implicit_broadcasts.insert(action.into_owned());
@@ -603,6 +623,8 @@ pub fn system(
         hidden_api_allowlist: config.hidden_api_allowlist,
         app_data_isolation_allowlist: config.app_data_isolation_allowlist,
         allow_implicit_broadcasts: config.allow_implicit_broadcasts,
+        allow_in_power_save_except_idle: config.allow_in_power_save_except_idle,
+        allow_in_power_save: config.allow_in_power_save,
         named_actors: config.named_actors,
         use_round_icon: framework.use_round_icon,
         // Settings.Global.compatibility_mode's default; PackageManager reads

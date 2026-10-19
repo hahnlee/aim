@@ -901,6 +901,25 @@ pub(super) struct Running {
     next: u64,
 }
 
+/// `PermissionChecker.checkPermissionForPreflight` of `permission` for
+/// `package` of `uid`, as the system asks it: granted?
+pub(super) fn preflight(host: &AppHost, permission: &str, uid: i32, package: &str) -> Result<bool, Exception> {
+    let me = host.me.upgrade().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "app host gone"))?;
+    let permissions = PermissionManager::new(me.clone());
+    let system = Host { host: &me, permissions: &permissions, caller: SYSTEM_UID, message: None };
+    let source = AttributionSourceState {
+        pid: -1,
+        uid,
+        device_id: DEVICE_ID_DEFAULT,
+        package: Some(package.to_string()),
+        tag: None,
+        token: None,
+        renounced: None,
+        next: None,
+    };
+    Ok(Checks(&system).check_permission(permission, &[&source], false, false, false, OP_NONE)? == GRANTED)
+}
+
 /// `ForegroundServiceTypePolicy.RegularPermission.checkPermission` of
 /// `permission` for `package` of `uid`: its preflight check
 /// (`PermissionChecker.checkPermissionForPreflight`), then its op, raw,

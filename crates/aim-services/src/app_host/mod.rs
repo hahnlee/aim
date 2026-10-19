@@ -87,6 +87,8 @@ pub mod tasks;
 pub mod telephony_registry;
 pub mod uid_observers;
 pub mod uri_grants;
+pub mod usage_stats;
+mod app_standby;
 pub mod trust_service;
 pub mod user_service;
 pub mod volume;
@@ -368,6 +370,7 @@ pub struct AppHost {
     app_errors: Mutex<AppErrors>,
     /// `ProcessList.mGlobalIsolatedUids`.
     isolated_uids: Mutex<IsolatedUids>,
+    app_standby: app_standby::AppStandby,
     storage: storage::Volumes,
     text_input: input_method::TextInput,
     content_service: OnceLock<Arc<content_service::ContentService>>,
@@ -436,6 +439,7 @@ impl AppHost {
             tzdata: OnceLock::new(),
             app_errors: Default::default(),
             isolated_uids: Mutex::new(IsolatedUids { used: HashSet::new(), next: FIRST_ISOLATED_UID }),
+            app_standby: Default::default(),
             storage: Default::default(),
             text_input: Default::default(),
             content_service: OnceLock::new(),
@@ -542,6 +546,7 @@ impl AppHost {
             ("performance_hint", Arc::new(hint_manager::HintManager::new(self.clone()))),
             ("sensorservice", Arc::new(sensor_service::SensorService)),
             ("wifi", Arc::new(wifi_service::WifiService::new(self.clone()))),
+            ("usagestats", Arc::new(usage_stats::UsageStats::new(self.clone()))),
             ("netpolicy", Arc::new(netpolicy_service::NetworkPolicy::new(self.clone()))),
             ("telephony.registry", Arc::new(telephony_registry::TelephonyRegistry::new(self.clone()))),
             ("network_management", Arc::new(network_management::NetworkManagement::new(self.clone()))),
@@ -1629,6 +1634,15 @@ impl AppHost {
     /// The guest's `/sys/fs/bpf`.
     fn bpf(&self) -> Result<&Path, Exception> {
         Ok(&self.configured.get().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host not configured"))?.bpf)
+    }
+
+    /// `ActivityTaskManagerService.updateActivityUsageStats`: the usage
+    /// event of activity `token` for app standby.
+    fn activity_usage(self: &Arc<Self>, token: u64, event: app_standby::Event) {
+        let app = self.activities.records.lock().unwrap().get(&token).map(|r| (r.package.clone(), r.uid));
+        if let Some((package, uid)) = app {
+            self.report_usage_event(&package, (uid / PER_USER_RANGE) as i32, event);
+        }
     }
 
     /// What DevicePolicyManagerService persisted, read once.
