@@ -25,33 +25,33 @@ use super::{State, resilient, restrictions::Restrictions, sibling};
 pub mod app_ids;
 pub mod domains;
 mod global_permissions;
+mod initial_user;
 pub mod install_sources;
 pub mod key_sets;
 pub mod keystore;
+pub mod legacy_permissions;
+mod live_install;
+mod mutation;
 mod native_libraries;
 mod package_list;
 pub mod permission_gids;
-pub mod legacy_permissions;
+pub mod recovery;
 mod removal;
 pub mod resources;
+pub mod runtime_metadata;
+mod runtime_permissions;
+mod scan_settings;
 pub mod sdk_data;
 pub mod seinfo;
-pub mod shared_users;
 pub mod shared_processes;
+pub mod shared_users;
 mod signing;
-mod scan_settings;
+pub mod transient;
 mod unread;
-mod initial_user;
-mod live_install;
-mod mutation;
-mod users;
-mod runtime_permissions;
-pub mod runtime_metadata;
-pub mod recovery;
 pub mod update_ownership;
 pub mod usage;
-pub mod transient;
 pub mod user_runtime;
+mod users;
 
 /// A failed write may have committed the main file before the reserve
 /// copy failed. Callers must publish that state even when reporting it.
@@ -118,10 +118,14 @@ pub struct Store {
 /// Settings stores these keyed owners in maps; serialized iteration order
 /// does not change their fields or identities. Signature runtime-only values
 /// follow the same persisted comparison already used by Settings writers.
-pub(crate) fn canonical_persistent_settings(settings: super::settings::Settings) -> super::settings::Settings {
+pub(crate) fn canonical_persistent_settings(
+    settings: super::settings::Settings,
+) -> super::settings::Settings {
     let mut settings = signing::persisted(settings);
     settings.packages.sort_by(|a, b| a.name.cmp(&b.name));
-    settings.disabled_system_packages.sort_by(|a, b| a.name.cmp(&b.name));
+    settings
+        .disabled_system_packages
+        .sort_by(|a, b| a.name.cmp(&b.name));
     settings.shared_users.sort_by(|a, b| a.name.cmp(&b.name));
     settings
 }
@@ -161,18 +165,37 @@ impl Store {
         settings_document: Element,
         settings_present: bool,
     ) -> Result<Self, String> {
-        Self::from_state_mode(data, users, state, settings_document, settings_present, true)
+        Self::from_state_mode(
+            data,
+            users,
+            state,
+            settings_document,
+            settings_present,
+            true,
+        )
     }
 
-    fn from_state_mode(data: &Path, users: &[u32], state: State, settings_document: Element, settings_present: bool, restore_restrictions: bool) -> Result<Self, String> {
+    fn from_state_mode(
+        data: &Path,
+        users: &[u32],
+        state: State,
+        settings_document: Element,
+        settings_present: bool,
+        restore_restrictions: bool,
+    ) -> Result<Self, String> {
         let mut restrictions = BTreeMap::new();
         for &user in users {
             let dir = data.join("system/users").join(user.to_string());
-            let document = if restore_restrictions { resilient(
-                &dir.join("package-restrictions.xml"),
-                &dir.join("package-restrictions-backup.xml"),
-                |root| Ok(root.clone()),
-            )? } else { None }.unwrap_or_else(|| element("package-restrictions"));
+            let document = if restore_restrictions {
+                resilient(
+                    &dir.join("package-restrictions.xml"),
+                    &dir.join("package-restrictions-backup.xml"),
+                    |root| Ok(root.clone()),
+                )?
+            } else {
+                None
+            }
+            .unwrap_or_else(|| element("package-restrictions"));
             restrictions.insert(user, document);
         }
         let list_document = super::journaled(&data.join("system/packages.list"))?;
@@ -196,7 +219,11 @@ impl Store {
             state,
             durable_restrictions: restrictions.clone(),
             restrictions,
-            unread_restrictions: if restore_restrictions { BTreeSet::new() } else { users.iter().copied().collect() },
+            unread_restrictions: if restore_restrictions {
+                BTreeSet::new()
+            } else {
+                users.iter().copied().collect()
+            },
             unread_claims: BTreeMap::new(),
             runtime_claims: BTreeMap::new(),
             settings_document,
@@ -221,7 +248,9 @@ impl Store {
         package: Option<&str>,
     ) -> Result<bool, WriteError> {
         if self.unread_restrictions.contains(&user) {
-            return Err(WriteError::before("package restrictions were not restored by the settings continuation"));
+            return Err(WriteError::before(
+                "package restrictions were not restored by the settings continuation",
+            ));
         }
         let original = self
             .restrictions
@@ -380,7 +409,9 @@ impl Store {
     /// Build and validate both original transitions before one resilient write;
     /// readers never observe a live package with its domain owner withdrawn.
     pub(crate) fn commit_removed_package_all(
-        &mut self, scan: &super::scan::SigningScan, package: &str,
+        &mut self,
+        scan: &super::scan::SigningScan,
+        package: &str,
     ) -> Result<(), WriteError> {
         let mut metadata = self.state.settings.clone();
         metadata.domain_verification.clear_package(package);
@@ -389,12 +420,19 @@ impl Store {
             .map_err(WriteError::before)?;
         let projected = scan_settings::replace(&metadata_root, scan).map_err(WriteError::before)?;
         let desired = super::settings::Settings::parse(&projected).map_err(WriteError::before)?;
-        let root = removal::replace(&metadata_root, &canonical_persistent_settings(desired), package)
-            .map_err(WriteError::before)?;
-        let result = self.commit_package_document_with_key_sets(root, Some(scan.settings.key_sets.clone()));
+        let root = removal::replace(
+            &metadata_root,
+            &canonical_persistent_settings(desired),
+            package,
+        )
+        .map_err(WriteError::before)?;
+        let result =
+            self.commit_package_document_with_key_sets(root, Some(scan.settings.key_sets.clone()));
         if result.is_ok() || result.as_ref().is_err_and(|error| error.committed) {
             for (_, user) in &mut self.state.users {
-                user.restrictions.packages.retain(|(name, _)| name != package);
+                user.restrictions
+                    .packages
+                    .retain(|(name, _)| name != package);
             }
         }
         result
@@ -473,8 +511,8 @@ impl Store {
         &self,
         scan: &super::scan::SigningScan,
     ) -> Result<super::settings::Settings, WriteError> {
-        let document = scan_settings::replace(&self.settings_document, scan)
-            .map_err(WriteError::before)?;
+        let document =
+            scan_settings::replace(&self.settings_document, scan).map_err(WriteError::before)?;
         let settings = super::settings::Settings::parse(&document).map_err(WriteError::before)?;
         Ok(canonical_persistent_settings(settings))
     }
@@ -588,7 +626,7 @@ impl Store {
         key_sets: Option<super::settings::KeySets>,
         write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
     ) -> Result<(), WriteError> {
-        let root = verifier::replace(&root,self.state.settings.verifier.as_deref());
+        let root = verifier::replace(&root, self.state.settings.verifier.as_deref());
         let mut persisted = super::settings::Settings::parse(&root).map_err(WriteError::before)?;
         if let Some(key_sets) = key_sets {
             persisted.key_sets.reference_counts = key_sets.reference_counts;
@@ -678,14 +716,19 @@ impl Store {
         user: u32,
         enabled: &Enabled,
     ) -> Result<(), WriteError> {
-        self.commit_enabled_using(package,user,enabled,write_resilient)
+        self.commit_enabled_using(package, user, enabled, write_resilient)
     }
     fn commit_enabled_using(
-        &mut self, package:&str, user:u32, enabled:&Enabled,
-        write:impl FnOnce(&Path,&Path,&[u8])->Result<(),WriteError>,
-    )->Result<(),WriteError>{
+        &mut self,
+        package: &str,
+        user: u32,
+        enabled: &Enabled,
+        write: impl FnOnce(&Path, &Path, &[u8]) -> Result<(), WriteError>,
+    ) -> Result<(), WriteError> {
         if self.unread_restrictions.contains(&user) {
-            return Err(WriteError::before("package restrictions were not restored by the settings continuation"));
+            return Err(WriteError::before(
+                "package restrictions were not restored by the settings continuation",
+            ));
         }
         if !(0..=4).contains(&enabled.enabled)
             || !enabled

@@ -245,14 +245,20 @@ pub fn detach_until(device: &str, deadline: Instant) -> Result<(), String> {
                 {
                     return Err(format!("refusing to force detach {device}: {error}"));
                 }
-                std::thread::sleep(Duration::from_millis(500)
-                    .min(deadline.saturating_duration_since(Instant::now())));
+                std::thread::sleep(
+                    Duration::from_millis(500)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
             }
         }
     }
 }
 
-fn detach_with(device: &str, patience: Duration, eject: impl FnMut() -> Result<(), String>) -> Result<(), String> {
+fn detach_with(
+    device: &str,
+    patience: Duration,
+    eject: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
     detach_with_clock(device, patience, eject, Instant::now, std::thread::sleep)
 }
 
@@ -288,10 +294,20 @@ mod detach_tests {
         let mut calls = 0;
         let start = Instant::now();
         let elapsed = Cell::new(Duration::ZERO);
-        let result = detach_with_clock("fixture-device", Duration::from_secs(10), || {
-            calls += 1;
-            if calls == 1 { Err("Unmount was dissented by PID 42".into()) } else { Ok(()) }
-        }, || start + elapsed.get(), |delay| elapsed.set(elapsed.get() + delay));
+        let result = detach_with_clock(
+            "fixture-device",
+            Duration::from_secs(10),
+            || {
+                calls += 1;
+                if calls == 1 {
+                    Err("Unmount was dissented by PID 42".into())
+                } else {
+                    Ok(())
+                }
+            },
+            || start + elapsed.get(),
+            |delay| elapsed.set(elapsed.get() + delay),
+        );
         assert!(result.is_ok());
         assert_eq!(calls, 2);
         assert_eq!(elapsed.get(), Duration::from_millis(500));
@@ -302,10 +318,16 @@ mod detach_tests {
         let mut calls = 0;
         let start = Instant::now();
         let elapsed = Cell::new(Duration::ZERO);
-        let result = detach_with_clock("fixture-device", Duration::from_millis(750), || {
-            calls += 1;
-            Err(format!("Unmount was dissented by PID {}", 40 + calls))
-        }, || start + elapsed.get(), |delay| elapsed.set(elapsed.get() + delay));
+        let result = detach_with_clock(
+            "fixture-device",
+            Duration::from_millis(750),
+            || {
+                calls += 1;
+                Err(format!("Unmount was dissented by PID {}", 40 + calls))
+            },
+            || start + elapsed.get(),
+            |delay| elapsed.set(elapsed.get() + delay),
+        );
         assert_eq!(calls, 3);
         assert_eq!(elapsed.get(), Duration::from_millis(750));
         let error = result.unwrap_err();
@@ -327,10 +349,13 @@ mod detach_tests {
     #[test]
     fn unrelated_eject_error_is_not_retried_or_forced() {
         let mut calls = 0;
-        assert!(detach_with("fixture-device", Duration::from_secs(20), || {
-            calls += 1;
-            Err("permission denied".into())
-        }).is_err());
+        assert!(
+            detach_with("fixture-device", Duration::from_secs(20), || {
+                calls += 1;
+                Err("permission denied".into())
+            })
+            .is_err()
+        );
         assert_eq!(calls, 1);
     }
 }

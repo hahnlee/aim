@@ -30,7 +30,9 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
-use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel};
+use aim_binder_host::parcel::{
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel,
+};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_bluetooth_ibluetooth as bt;
 use aim_service_aidl::android_bluetooth_ibluetoothcallback as bt_callback;
@@ -118,14 +120,23 @@ fn name_for_state(state: i32) -> &'static str {
 
 /// `isBleState`.
 fn is_ble_state(state: i32) -> bool {
-    matches!(state, STATE_BLE_ON | STATE_BLE_TURNING_ON | STATE_BLE_TURNING_OFF)
+    matches!(
+        state,
+        STATE_BLE_ON | STATE_BLE_TURNING_ON | STATE_BLE_TURNING_OFF
+    )
 }
 
 /// `BluetoothAdapter.checkBluetoothAddress`: six upper case hex octets.
 fn valid_address(address: &str) -> bool {
     let b = address.as_bytes();
     b.len() == 17
-        && b.iter().enumerate().all(|(i, c)| if i % 3 == 2 { *c == b':' } else { c.is_ascii_digit() || (b'A'..=b'F').contains(c) })
+        && b.iter().enumerate().all(|(i, c)| {
+            if i % 3 == 2 {
+                *c == b':'
+            } else {
+                c.is_ascii_digit() || (b'A'..=b'F').contains(c)
+            }
+        })
 }
 
 /// `Settings.Global.getInt(name, default)`: the default when unset or not
@@ -143,7 +154,11 @@ fn radio_mode(radios: Option<&str>, mode: Option<String>) -> bool {
 /// The BLE state changes as their BR/EDR users see them
 /// (`bluetoothStateChangeHandler`): the BLE states are off.
 fn br_edr_state(state: i32) -> i32 {
-    if is_ble_state(state) { STATE_OFF } else { state }
+    if is_ble_state(state) {
+        STATE_OFF
+    } else {
+        state
+    }
 }
 
 /// The context's attribution source of the system server, as an
@@ -158,14 +173,22 @@ impl WriteParcelable for SystemSource {
 
 /// The handler's messages (`BluetoothHandler`), with what they carry.
 enum Message {
-    Enable { quiet: bool, ble: bool },
+    Enable {
+        quiet: bool,
+        ble: bool,
+    },
     Disable,
     HandleEnableDelayed,
-    HandleDisableDelayed { disabling: bool },
+    HandleDisableDelayed {
+        disabling: bool,
+    },
     ServiceConnected(u32),
     ServiceDisconnected,
     RestartService,
-    StateChange { prev: i32, new: i32 },
+    StateChange {
+        prev: i32,
+        new: i32,
+    },
     TimeoutBind,
     UserUnlocked,
     /// `mHandler.post`.
@@ -221,7 +244,12 @@ impl Queue {
 
     /// The next message due at `now`, else when the first comes.
     fn take(&mut self, now: Instant) -> Result<Message, Option<Instant>> {
-        let first = self.messages.iter().enumerate().min_by_key(|(_, (at, seq, _))| (*at, *seq)).map(|(i, (at, _, _))| (i, *at));
+        let first = self
+            .messages
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, (at, seq, _))| (*at, *seq))
+            .map(|(i, (at, _, _))| (i, *at));
         match first {
             Some((i, at)) if at <= now => Ok(self.messages.remove(i).2),
             Some((_, at)) => Err(Some(at)),
@@ -262,7 +290,12 @@ impl AdapterState {
     /// `waitForState`: whether one of `states` came within `timeout`.
     fn wait_for(&self, timeout: Duration, states: &[i32]) -> bool {
         let guard = self.state.lock().unwrap();
-        !self.changed.wait_timeout_while(guard, timeout, |s| !states.contains(s)).unwrap().1.timed_out()
+        !self
+            .changed
+            .wait_timeout_while(guard, timeout, |s| !states.contains(s))
+            .unwrap()
+            .1
+            .timed_out()
     }
 }
 
@@ -343,20 +376,32 @@ impl Service for AdapterCallback {
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
-        let Some(bm) = self.0.upgrade() else { return reply(Err(Exception::new(EX_ILLEGAL_STATE, "bluetooth manager gone"))) };
+        let Some(bm) = self.0.upgrade() else {
+            return reply(Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "bluetooth manager gone",
+            )));
+        };
         let mut p = Parcel::new();
         let result = match call.code {
             bt_callback::ON_BLUETOOTH_STATE_CHANGE => {
-                let a = bt_callback::OnBluetoothStateChange::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                bm.send(Message::StateChange { prev: a.prev_state, new: a.new_state });
+                let a = bt_callback::OnBluetoothStateChange::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                bm.send(Message::StateChange {
+                    prev: a.prev_state,
+                    new: a.new_state,
+                });
                 bt_callback::write_on_bluetooth_state_change_reply(&mut p);
                 Ok(())
             }
             bt_callback::ON_ADAPTER_NAME_CHANGE => {
-                let a = bt_callback::OnAdapterNameChange::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = bt_callback::OnAdapterNameChange::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 match a.name {
                     None => Err(Exception::new(EX_NULL_POINTER, "")),
-                    Some(name) if name.is_empty() => Err(Exception::illegal_argument("Invalid Empty name")),
+                    Some(name) if name.is_empty() => {
+                        Err(Exception::illegal_argument("Invalid Empty name"))
+                    }
                     Some(name) => {
                         bm.post(move |bm, _| bm.store_name(name));
                         bt_callback::write_on_adapter_name_change_reply(&mut p);
@@ -365,10 +410,13 @@ impl Service for AdapterCallback {
                 }
             }
             bt_callback::ON_ADAPTER_ADDRESS_CHANGE => {
-                let a = bt_callback::OnAdapterAddressChange::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = bt_callback::OnAdapterAddressChange::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 match a.address {
                     None => Err(Exception::new(EX_NULL_POINTER, "")),
-                    Some(address) if !valid_address(&address) => Err(Exception::illegal_argument("Invalid address")),
+                    Some(address) if !valid_address(&address) => {
+                        Err(Exception::illegal_argument("Invalid address"))
+                    }
                     Some(address) => {
                         bm.post(move |bm, _| bm.store_address(address));
                         bt_callback::write_on_adapter_address_change_reply(&mut p);
@@ -386,7 +434,10 @@ impl BluetoothManager {
     /// `BluetoothService`'s `BluetoothManagerService` and its handler
     /// thread: the persisted name, address and state read.
     pub fn new(host: Arc<AppHost>, settings: Arc<SettingsProvider>) -> Arc<Self> {
-        let multiplier = host.property("ro.hw_timeout_multiplier").and_then(|v| v.parse().ok()).unwrap_or(1);
+        let multiplier = host
+            .property("ro.hw_timeout_multiplier")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
         let bm = Arc::new_cyclic(|me: &Weak<BluetoothManager>| BluetoothManager {
             me: me.clone(),
             host: host.clone(),
@@ -394,7 +445,10 @@ impl BluetoothManager {
             queue: Mutex::new(Queue::default()),
             wake: Condvar::new(),
             core: Mutex::new(Core::default()),
-            state: AdapterState { state: Mutex::new(STATE_OFF), changed: Condvar::new() },
+            state: AdapterState {
+                state: Mutex::new(STATE_OFF),
+                changed: Condvar::new(),
+            },
             enable: AtomicBool::new(false),
             adapter: Mutex::new(None),
             name: Mutex::new(None),
@@ -405,25 +459,45 @@ impl BluetoothManager {
             adapter_callback: Mutex::new(None),
             connection: Arc::new(Connection(me.clone())),
             multiplier,
-            auto_on: super::system_boolean(host.property("bluetooth.server.automatic_turn_on").as_deref(), false),
+            auto_on: super::system_boolean(
+                host.property("bluetooth.server.automatic_turn_on")
+                    .as_deref(),
+                false,
+            ),
         });
-        *bm.adapter_callback.lock().unwrap() = Some(host.process.add_service(Arc::new(AdapterCallback(bm.me.clone()))));
+        *bm.adapter_callback.lock().unwrap() = Some(
+            host.process
+                .add_service(Arc::new(AdapterCallback(bm.me.clone()))),
+        );
         let weak = bm.me.clone();
-        let _ = std::thread::Builder::new().name("BluetoothManagerService".into()).spawn(move || loop {
-            let Some(bm) = weak.upgrade() else { return };
-            let next = {
-                let mut queue = bm.queue.lock().unwrap();
+        let _ = std::thread::Builder::new()
+            .name("BluetoothManagerService".into())
+            .spawn(move || {
                 loop {
-                    match queue.take(Instant::now()) {
-                        Ok(m) => break m,
-                        Err(Some(at)) => queue = bm.wake.wait_timeout(queue, at.saturating_duration_since(Instant::now())).unwrap().0,
-                        Err(None) => queue = bm.wake.wait(queue).unwrap(),
-                    }
+                    let Some(bm) = weak.upgrade() else { return };
+                    let next = {
+                        let mut queue = bm.queue.lock().unwrap();
+                        loop {
+                            match queue.take(Instant::now()) {
+                                Ok(m) => break m,
+                                Err(Some(at)) => {
+                                    queue = bm
+                                        .wake
+                                        .wait_timeout(
+                                            queue,
+                                            at.saturating_duration_since(Instant::now()),
+                                        )
+                                        .unwrap()
+                                        .0
+                                }
+                                Err(None) => queue = bm.wake.wait(queue).unwrap(),
+                            }
+                        }
+                    };
+                    let mut core = bm.core.lock().unwrap();
+                    bm.handle(&mut core, next);
                 }
-            };
-            let mut core = bm.core.lock().unwrap();
-            bm.handle(&mut core, next);
-        });
+            });
         bm
     }
 
@@ -453,21 +527,34 @@ impl BluetoothManager {
     }
 
     /// `postAndWait`: `f` run on the handler thread, waited for.
-    fn post_and_wait<T: Send + 'static>(&self, f: impl FnOnce(&BluetoothManager, &mut Core) -> T + Send + 'static) -> Result<T, Exception> {
+    fn post_and_wait<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&BluetoothManager, &mut Core) -> T + Send + 'static,
+    ) -> Result<T, Exception> {
         let (tx, rx) = mpsc::channel();
         self.post(move |bm, core| {
             let _ = tx.send(f(bm, core));
         });
-        rx.recv_timeout(POST_AND_WAIT).map_err(|_| Exception::new(EX_ILLEGAL_STATE, "bluetooth manager: the handler did not answer in 10 s"))
+        rx.recv_timeout(POST_AND_WAIT).map_err(|_| {
+            Exception::new(
+                EX_ILLEGAL_STATE,
+                "bluetooth manager: the handler did not answer in 10 s",
+            )
+        })
     }
 
     // Settings, as the system server's content resolver reads and writes
     // them.
 
     fn setting(&self, table: &str, name: &str) -> Result<Option<String>, Exception> {
-        let caller = Caller { uid: SYSTEM_APP_ID, package: Some("android".into()) };
+        let caller = Caller {
+            uid: SYSTEM_APP_ID,
+            package: Some("android".into()),
+        };
         let extras = HashMap::from([("_user".to_string(), Value::Int(0))]);
-        let got = self.settings.call(&caller, &format!("GET_{table}"), Some(name), &extras, None)?;
+        let got =
+            self.settings
+                .call(&caller, &format!("GET_{table}"), Some(name), &extras, None)?;
         Ok(match got.as_deref() {
             Some([(_, Value::String(value)), ..]) => value.clone(),
             _ => None,
@@ -475,9 +562,17 @@ impl BluetoothManager {
     }
 
     fn put_setting(&self, table: &str, name: &str, value: &str) -> Result<(), Exception> {
-        let caller = Caller { uid: SYSTEM_APP_ID, package: Some("android".into()) };
-        let extras = HashMap::from([("_user".to_string(), Value::Int(0)), ("value".to_string(), Value::String(Some(value.to_string())))]);
-        self.settings.call(&caller, &format!("PUT_{table}"), Some(name), &extras, None).map(|_| ())
+        let caller = Caller {
+            uid: SYSTEM_APP_ID,
+            package: Some("android".into()),
+        };
+        let extras = HashMap::from([
+            ("_user".to_string(), Value::Int(0)),
+            ("value".to_string(), Value::String(Some(value.to_string()))),
+        ]);
+        self.settings
+            .call(&caller, &format!("PUT_{table}"), Some(name), &extras, None)
+            .map(|_| ())
     }
 
     /// `getBluetoothPersistedState(BLUETOOTH_ON_BLUETOOTH)`.
@@ -522,7 +617,8 @@ impl BluetoothManager {
     fn load(&self, core: &mut Core) -> Result<(), Exception> {
         *self.name.lock().unwrap() = self.setting("secure", "bluetooth_name")?;
         *self.address.lock().unwrap() = self.setting("secure", "bluetooth_address")?;
-        self.modes.lock().unwrap().scan_allowed = int_or(self.setting("global", "ble_scan_always_enabled")?, 0) != 0;
+        self.modes.lock().unwrap().scan_allowed =
+            int_or(self.setting("global", "ble_scan_always_enabled")?, 0) != 0;
         if self.persisted_state() != BLUETOOTH_OFF {
             core.enable_external = true;
         }
@@ -536,7 +632,10 @@ impl BluetoothManager {
                 return;
             }
             core.initialized = true;
-            if let Err(e) = bm.load(core).and_then(|()| bm.internal_handle_on_boot_phase(core)) {
+            if let Err(e) = bm
+                .load(core)
+                .and_then(|()| bm.internal_handle_on_boot_phase(core))
+            {
                 eprintln!("app host: bluetooth: start: {e:?}");
             }
         });
@@ -553,12 +652,24 @@ impl BluetoothManager {
         // `AirplaneModeListener.initialize`: Wi-Fi learns that Bluetooth
         // has the airplane enhancement mode.
         let enhancement = int_or(self.setting("global", "apm_enhancement_enabled")?, 1);
-        self.put_setting("global", "apm_enhancement_enabled", &enhancement.to_string())?;
-        let airplane = radio_mode(self.setting("global", "airplane_mode_radios")?.as_deref(), self.setting("global", "airplane_mode_on")?);
+        self.put_setting(
+            "global",
+            "apm_enhancement_enabled",
+            &enhancement.to_string(),
+        )?;
+        let airplane = radio_mode(
+            self.setting("global", "airplane_mode_radios")?.as_deref(),
+            self.setting("global", "airplane_mode_on")?,
+        );
         if airplane {
-            return Err(self.host.unimplemented_named("bluetooth_manager", "airplane mode at the start (#1787)"));
+            return Err(self
+                .host
+                .unimplemented_named("bluetooth_manager", "airplane mode at the start (#1787)"));
         }
-        let satellite = radio_mode(self.setting("global", "satellite_mode_radios")?.as_deref(), self.setting("global", "satellite_mode_enabled")?);
+        let satellite = radio_mode(
+            self.setting("global", "satellite_mode_radios")?.as_deref(),
+            self.setting("global", "satellite_mode_enabled")?,
+        );
         let mut modes = self.modes.lock().unwrap();
         (modes.airplane, modes.airplane_overrode, modes.satellite) = (false, false, satellite);
         Ok(())
@@ -575,7 +686,9 @@ impl BluetoothManager {
             eprintln!("app host: bluetooth: internalHandleOnBootPhase: Auto-enabling Bluetooth.");
             self.send_enable_msg(core.quiet_enable_external, false);
         } else if self.auto_on {
-            return Err(self.host.unimplemented_named("bluetooth_manager", "Auto On (#1787)"));
+            return Err(self
+                .host
+                .unimplemented_named("bluetooth_manager", "Auto On (#1787)"));
         }
         Ok(())
     }
@@ -593,7 +706,9 @@ impl BluetoothManager {
             Message::Enable { quiet, ble } => self.handle_enable_message(core, quiet, ble),
             Message::Disable => self.handle_disable_message(core),
             Message::HandleEnableDelayed => self.handle_enable_delayed(core),
-            Message::HandleDisableDelayed { disabling } => self.handle_disable_delayed(core, disabling),
+            Message::HandleDisableDelayed { disabling } => {
+                self.handle_disable_delayed(core, disabling)
+            }
             Message::ServiceConnected(handle) => {
                 self.remove(What::TimeoutBind);
                 let adapter = self.host.process.strong(handle);
@@ -601,7 +716,11 @@ impl BluetoothManager {
                 self.propagate_foreground_user_id(0);
                 let callback = self.adapter_callback.lock().unwrap().clone();
                 self.adapter_call("registerCallback", bt::REGISTER_CALLBACK, |p| {
-                    bt::RegisterCallback { callback, attribution_source: Some(SystemSource) }.write(p)
+                    bt::RegisterCallback {
+                        callback,
+                        attribution_source: Some(SystemSource),
+                    }
+                    .write(p)
                 });
                 self.off_to_ble_on(core);
                 self.send_bluetooth_service_up_callback();
@@ -611,9 +730,15 @@ impl BluetoothManager {
                 }
             }
             Message::StateChange { prev, new } => {
-                eprintln!("app host: bluetooth: MESSAGE_BLUETOOTH_STATE_CHANGE: prevState={} newState={}", name_for_state(prev), name_for_state(new));
+                eprintln!(
+                    "app host: bluetooth: MESSAGE_BLUETOOTH_STATE_CHANGE: prevState={} newState={}",
+                    name_for_state(prev),
+                    name_for_state(new)
+                );
                 if self.adapter.lock().unwrap().is_none() {
-                    eprintln!("app host: bluetooth: State change received after bluetooth has crashed");
+                    eprintln!(
+                        "app host: bluetooth: State change received after bluetooth has crashed"
+                    );
                     return;
                 }
                 self.bluetooth_state_change_handler(core, prev, new);
@@ -627,12 +752,19 @@ impl BluetoothManager {
                 }
                 // Enabled while shutting down: wait for the process to go,
                 // then restart it.
-                if prev == STATE_BLE_TURNING_OFF && new == STATE_OFF && self.enable.load(Ordering::Relaxed) {
-                    eprintln!("app host: bluetooth: Entering STATE_OFF but mEnabled is true; restarting.");
+                if prev == STATE_BLE_TURNING_OFF
+                    && new == STATE_OFF
+                    && self.enable.load(Ordering::Relaxed)
+                {
+                    eprintln!(
+                        "app host: bluetooth: Entering STATE_OFF but mEnabled is true; restarting."
+                    );
                     self.wait_for_state(&[STATE_OFF]);
                     self.send_delayed(Message::RestartService, self.service_restart(core));
                 }
-                if (new == STATE_ON || new == STATE_BLE_ON) && core.error_recovery_retry_counter != 0 {
+                if (new == STATE_ON || new == STATE_BLE_ON)
+                    && core.error_recovery_retry_counter != 0
+                {
                     eprintln!("app host: bluetooth: bluetooth is recovered from error");
                     core.error_recovery_retry_counter = 0;
                 }
@@ -659,7 +791,10 @@ impl BluetoothManager {
             }
             Message::RestartService => {
                 core.error_recovery_retry_counter += 1;
-                eprintln!("app host: bluetooth: MESSAGE_RESTART_BLUETOOTH_SERVICE: retry count={}", core.error_recovery_retry_counter);
+                eprintln!(
+                    "app host: bluetooth: MESSAGE_RESTART_BLUETOOTH_SERVICE: retry count={}",
+                    core.error_recovery_retry_counter
+                );
                 if core.error_recovery_retry_counter < MAX_ERROR_RESTART_RETRIES {
                     // Enabled without persisting: the setting stays as it
                     // was across the service's restart.
@@ -672,7 +807,10 @@ impl BluetoothManager {
             }
             Message::TimeoutBind => eprintln!("app host: bluetooth: MESSAGE_TIMEOUT_BIND"),
             Message::UserUnlocked => {
-                if self.enable.load(Ordering::Relaxed) && !self.is_binding() && self.adapter.lock().unwrap().is_none() {
+                if self.enable.load(Ordering::Relaxed)
+                    && !self.is_binding()
+                    && self.adapter.lock().unwrap().is_none()
+                {
                     eprintln!("app host: bluetooth: Enabled but not bound; retrying after unlock");
                     self.handle_enable();
                 }
@@ -715,14 +853,21 @@ impl BluetoothManager {
     /// `propagateForegroundUserId`.
     fn propagate_foreground_user_id(&self, user: i32) {
         self.adapter_call("setForegroundUserId", bt::SET_FOREGROUND_USER_ID, |p| {
-            bt::SetForegroundUserId { user_id: user, attribution_source: Some(SystemSource) }.write(p)
+            bt::SetForegroundUserId {
+                user_id: user,
+                attribution_source: Some(SystemSource),
+            }
+            .write(p)
         });
     }
 
     fn handle_enable_message(&self, core: &mut Core, quiet: bool, ble: bool) {
         if self.has(What::HandleDisableDelayed) || self.has(What::HandleEnableDelayed) {
             // Enabling or disabling now: wait for it.
-            self.send_delayed(Message::Enable { quiet, ble }, self.ms(ENABLE_DISABLE_DELAY_MS));
+            self.send_delayed(
+                Message::Enable { quiet, ble },
+                self.ms(ENABLE_DISABLE_DELAY_MS),
+            );
             return;
         }
         self.remove(What::RestartService);
@@ -730,8 +875,14 @@ impl BluetoothManager {
         if !ble {
             self.set_persisted_state(BLUETOOTH_ON_BLUETOOTH);
         }
-        if self.state.one_of(&[STATE_BLE_TURNING_ON, STATE_TURNING_ON, STATE_ON]) {
-            eprintln!("app host: bluetooth: Already enabled. Current state={}", name_for_state(self.state.get()));
+        if self
+            .state
+            .one_of(&[STATE_BLE_TURNING_ON, STATE_TURNING_ON, STATE_ON])
+        {
+            eprintln!(
+                "app host: bluetooth: Already enabled. Current state={}",
+                name_for_state(self.state.get())
+            );
             return;
         }
         if self.state.one_of(&[STATE_BLE_ON]) && ble {
@@ -744,7 +895,10 @@ impl BluetoothManager {
         if self.adapter.lock().unwrap().is_some() {
             // Wait for STATE_OFF and the previous process's exit.
             core.wait_for_enable_retry = 0;
-            self.send_delayed(Message::HandleEnableDelayed, self.ms(ENABLE_DISABLE_DELAY_MS));
+            self.send_delayed(
+                Message::HandleEnableDelayed,
+                self.ms(ENABLE_DISABLE_DELAY_MS),
+            );
             return;
         }
         core.quiet_enable = quiet;
@@ -752,14 +906,20 @@ impl BluetoothManager {
     }
 
     fn handle_disable_message(&self, core: &mut Core) {
-        if self.has(What::HandleDisableDelayed) || self.is_binding() || self.has(What::HandleEnableDelayed) {
+        if self.has(What::HandleDisableDelayed)
+            || self.is_binding()
+            || self.has(What::HandleEnableDelayed)
+        {
             self.send_delayed(Message::Disable, self.ms(ENABLE_DISABLE_DELAY_MS));
             return;
         }
         self.remove(What::RestartService);
         if self.enable.load(Ordering::Relaxed) && self.adapter.lock().unwrap().is_some() {
             core.wait_for_disable_retry = 0;
-            self.send_delayed(Message::HandleDisableDelayed { disabling: false }, self.ms(ENABLE_DISABLE_DELAY_MS));
+            self.send_delayed(
+                Message::HandleDisableDelayed { disabling: false },
+                self.ms(ENABLE_DISABLE_DELAY_MS),
+            );
         } else {
             self.enable.store(false, Ordering::Relaxed);
             self.on_to_ble_on(core);
@@ -770,21 +930,40 @@ impl BluetoothManager {
     /// `action`.
     fn resolve_system_service(&self) -> Result<(String, String), Exception> {
         let (_, resolution) = self.host.packages()?;
-        let intent = Intent { action: Some(ACTION_IBLUETOOTH.into()), ..Default::default() };
+        let intent = Intent {
+            action: Some(ACTION_IBLUETOOTH.into()),
+            ..Default::default()
+        };
         let found = resolution
             .query_intent_services(&intent, None, 0, 0, SYSTEM_APP_ID)
-            .map_err(|e| self.host.unimplemented_named("bluetooth_manager", &format!("queryIntentServices: {e:?}")))?;
+            .map_err(|e| {
+                self.host.unimplemented_named(
+                    "bluetooth_manager",
+                    &format!("queryIntentServices: {e:?}"),
+                )
+            })?;
         let mut results = Vec::new();
         for r in found {
-            let crate::package::component_resolver::Info::Service(si) = r.info else { continue };
+            let crate::package::component_resolver::Info::Service(si) = r.info else {
+                continue;
+            };
             if si.info.application_info.flags & FLAG_SYSTEM != 0 {
-                results.push((si.info.item.package_name.clone().unwrap_or_default(), si.info.item.name.clone().unwrap_or_default()));
+                results.push((
+                    si.info.item.package_name.clone().unwrap_or_default(),
+                    si.info.item.name.clone().unwrap_or_default(),
+                ));
             }
         }
         match results.len() {
-            0 => Err(Exception::new(EX_ILLEGAL_STATE, format!("No services can handle intent {ACTION_IBLUETOOTH}"))),
+            0 => Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("No services can handle intent {ACTION_IBLUETOOTH}"),
+            )),
             1 => Ok(results.remove(0)),
-            _ => Err(Exception::new(EX_ILLEGAL_STATE, format!("Multiples services can handle intent {ACTION_IBLUETOOTH}: {results:?}"))),
+            _ => Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("Multiples services can handle intent {ACTION_IBLUETOOTH}: {results:?}"),
+            )),
         }
     }
 
@@ -796,7 +975,15 @@ impl BluetoothManager {
         };
         self.send_delayed(Message::TimeoutBind, self.ms(TIMEOUT_BIND_MS));
         eprintln!("app host: bluetooth: Start binding to the Bluetooth service {package}/{class}");
-        let bound = self.host.bind_service_from_host(Some(ACTION_IBLUETOOTH), &package, &class, 0, BIND_FLAGS, 0, self.connection.clone());
+        let bound = self.host.bind_service_from_host(
+            Some(ACTION_IBLUETOOTH),
+            &package,
+            &class,
+            0,
+            BIND_FLAGS,
+            0,
+            self.connection.clone(),
+        );
         if !matches!(bound, Ok(true)) {
             eprintln!("app host: bluetooth: Fail to bind to {package}/{class}: {bound:?}");
             self.host.unbind_service_from_host(&self.connection);
@@ -825,7 +1012,10 @@ impl BluetoothManager {
         if !self.state.one_of(&[STATE_OFF]) {
             if core.wait_for_enable_retry < MAX_WAIT_FOR_ENABLE_DISABLE_RETRIES {
                 core.wait_for_enable_retry += 1;
-                self.send_delayed(Message::HandleEnableDelayed, self.ms(ENABLE_DISABLE_DELAY_MS));
+                self.send_delayed(
+                    Message::HandleEnableDelayed,
+                    self.ms(ENABLE_DISABLE_DELAY_MS),
+                );
                 return;
             }
             eprintln!("app host: bluetooth: Wait for STATE_OFF timeout");
@@ -840,7 +1030,10 @@ impl BluetoothManager {
             if !self.state.one_of(&[STATE_ON]) {
                 if core.wait_for_disable_retry < MAX_WAIT_FOR_ENABLE_DISABLE_RETRIES {
                     core.wait_for_disable_retry += 1;
-                    self.send_delayed(Message::HandleDisableDelayed { disabling: false }, self.ms(ENABLE_DISABLE_DELAY_MS));
+                    self.send_delayed(
+                        Message::HandleDisableDelayed { disabling: false },
+                        self.ms(ENABLE_DISABLE_DELAY_MS),
+                    );
                     return;
                 }
                 eprintln!("app host: bluetooth: Wait for STATE_ON timeout");
@@ -848,12 +1041,18 @@ impl BluetoothManager {
             core.wait_for_disable_retry = 0;
             self.enable.store(false, Ordering::Relaxed);
             self.on_to_ble_on(core);
-            self.send_delayed(Message::HandleDisableDelayed { disabling: true }, self.ms(ENABLE_DISABLE_DELAY_MS));
+            self.send_delayed(
+                Message::HandleDisableDelayed { disabling: true },
+                self.ms(ENABLE_DISABLE_DELAY_MS),
+            );
         } else if self.state.one_of(&[STATE_ON]) {
             // Turning off: wait to leave STATE_ON.
             if core.wait_for_disable_retry < MAX_WAIT_FOR_ENABLE_DISABLE_RETRIES {
                 core.wait_for_disable_retry += 1;
-                self.send_delayed(Message::HandleDisableDelayed { disabling: true }, self.ms(ENABLE_DISABLE_DELAY_MS));
+                self.send_delayed(
+                    Message::HandleDisableDelayed { disabling: true },
+                    self.ms(ENABLE_DISABLE_DELAY_MS),
+                );
                 return;
             }
             eprintln!("app host: bluetooth: Wait for exiting STATE_ON timeout");
@@ -862,34 +1061,67 @@ impl BluetoothManager {
 
     fn off_to_ble_on(&self, core: &mut Core) {
         if !self.state.one_of(&[STATE_OFF]) {
-            return eprintln!("app host: bluetooth: offToBleOn: Impossible transition from {}", name_for_state(self.state.get()));
+            return eprintln!(
+                "app host: bluetooth: offToBleOn: Impossible transition from {}",
+                name_for_state(self.state.get())
+            );
         }
         let quiet = core.quiet_enable;
-        self.adapter_call("offToBleOn", bt::OFF_TO_BLE_ON, |p| bt::OffToBleOn { quiet_mode: quiet, attribution_source: Some(SystemSource) }.write(p));
+        self.adapter_call("offToBleOn", bt::OFF_TO_BLE_ON, |p| {
+            bt::OffToBleOn {
+                quiet_mode: quiet,
+                attribution_source: Some(SystemSource),
+            }
+            .write(p)
+        });
         self.bluetooth_state_change_handler(core, STATE_OFF, STATE_BLE_TURNING_ON);
     }
 
     fn on_to_ble_on(&self, core: &mut Core) {
         if !self.state.one_of(&[STATE_ON]) {
-            return eprintln!("app host: bluetooth: onToBleOn: Impossible transition from {}", name_for_state(self.state.get()));
+            return eprintln!(
+                "app host: bluetooth: onToBleOn: Impossible transition from {}",
+                name_for_state(self.state.get())
+            );
         }
-        self.adapter_call("onToBleOn", bt::ON_TO_BLE_ON, |p| bt::OnToBleOn { attribution_source: Some(SystemSource) }.write(p));
+        self.adapter_call("onToBleOn", bt::ON_TO_BLE_ON, |p| {
+            bt::OnToBleOn {
+                attribution_source: Some(SystemSource),
+            }
+            .write(p)
+        });
         self.bluetooth_state_change_handler(core, STATE_ON, STATE_TURNING_OFF);
     }
 
     fn ble_on_to_on(&self, core: &mut Core) {
         if !self.state.one_of(&[STATE_BLE_ON]) {
-            return eprintln!("app host: bluetooth: bleOnToOn: Impossible transition from {}", name_for_state(self.state.get()));
+            return eprintln!(
+                "app host: bluetooth: bleOnToOn: Impossible transition from {}",
+                name_for_state(self.state.get())
+            );
         }
-        self.adapter_call("bleOnToOn", bt::BLE_ON_TO_ON, |p| bt::BleOnToOn { attribution_source: Some(SystemSource) }.write(p));
+        self.adapter_call("bleOnToOn", bt::BLE_ON_TO_ON, |p| {
+            bt::BleOnToOn {
+                attribution_source: Some(SystemSource),
+            }
+            .write(p)
+        });
         self.bluetooth_state_change_handler(core, STATE_BLE_ON, STATE_TURNING_ON);
     }
 
     fn ble_on_to_off(&self, core: &mut Core) {
         if !self.state.one_of(&[STATE_BLE_ON]) {
-            return eprintln!("app host: bluetooth: bleOnToOff: Impossible transition from {}", name_for_state(self.state.get()));
+            return eprintln!(
+                "app host: bluetooth: bleOnToOff: Impossible transition from {}",
+                name_for_state(self.state.get())
+            );
         }
-        self.adapter_call("bleOnToOff", bt::BLE_ON_TO_OFF, |p| bt::BleOnToOff { attribution_source: Some(SystemSource) }.write(p));
+        self.adapter_call("bleOnToOff", bt::BLE_ON_TO_OFF, |p| {
+            bt::BleOnToOff {
+                attribution_source: Some(SystemSource),
+            }
+            .write(p)
+        });
         self.bluetooth_state_change_handler(core, STATE_BLE_ON, STATE_BLE_TURNING_OFF);
     }
 
@@ -898,7 +1130,10 @@ impl BluetoothManager {
         let intent = RawIntent::new(
             action,
             FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT,
-            &[(EXTRA_PREVIOUS_STATE, Value::Int(prev)), (EXTRA_STATE, Value::Int(new))],
+            &[
+                (EXTRA_PREVIOUS_STATE, Value::Int(prev)),
+                (EXTRA_STATE, Value::Int(new)),
+            ],
         );
         self.host.broadcasts.send_from_system(&self.host, intent);
     }
@@ -933,7 +1168,10 @@ impl BluetoothManager {
     /// `continueFromBleOnState`.
     fn continue_from_ble_on_state(&self, core: &mut Core) {
         if !self.state.one_of(&[STATE_BLE_ON]) {
-            return eprintln!("app host: bluetooth: continueFromBleOnState: Impossible transition from {}", name_for_state(self.state.get()));
+            return eprintln!(
+                "app host: bluetooth: continueFromBleOnState: Impossible transition from {}",
+                name_for_state(self.state.get())
+            );
         }
         if !core.enable_external && !self.ble_app_present() {
             self.enable.store(false, Ordering::Relaxed);
@@ -958,7 +1196,10 @@ impl BluetoothManager {
         if stay && self.ble_app_present() {
             // Stays in BLE_ON: the GATT clients go.
             self.adapter_call("unregAllGattClient", bt::UNREG_ALL_GATT_CLIENT, |p| {
-                bt::UnregAllGattClient { attribution_source: Some(SystemSource) }.write(p)
+                bt::UnregAllGattClient {
+                    attribution_source: Some(SystemSource),
+                }
+                .write(p)
             });
         } else {
             self.ble_on_to_off(core);
@@ -969,15 +1210,24 @@ impl BluetoothManager {
     /// go and the app's process killed and waited for.
     fn unbind_and_finish(&self) {
         self.remove(What::StateChange);
-        let Some(adapter) = self.adapter() else { return };
+        let Some(adapter) = self.adapter() else {
+            return;
+        };
         let callback = self.adapter_callback.lock().unwrap().clone();
         self.adapter_call("unregisterCallback", bt::UNREGISTER_CALLBACK, |p| {
-            bt::UnregisterCallback { callback, attribution_source: Some(SystemSource) }.write(p)
+            bt::UnregisterCallback {
+                callback,
+                attribution_source: Some(SystemSource),
+            }
+            .write(p)
         });
         let (died, death) = mpsc::channel();
-        let cookie = self.host.process.link_to_death(&adapter, Box::new(move || {
-            let _ = died.send(());
-        }));
+        let cookie = self.host.process.link_to_death(
+            &adapter,
+            Box::new(move || {
+                let _ = died.send(());
+            }),
+        );
         // Unbound first, so no `onServiceDisconnected` comes.
         self.host.unbind_service_from_host(&self.connection);
         // `killBluetoothProcess`.
@@ -987,7 +1237,9 @@ impl BluetoothManager {
             Err(s) => eprintln!("app host: bluetooth: killBluetoothProcess(): {s}"),
             Ok(_) => {
                 if death.recv_timeout(DEATH_WAIT).is_err() {
-                    eprintln!("app host: bluetooth: killBluetoothProcess(): Bluetooth death not received after > 2000ms");
+                    eprintln!(
+                        "app host: bluetooth: killBluetoothProcess(): Bluetooth death not received after > 2000ms"
+                    );
                 }
             }
         }
@@ -1003,7 +1255,11 @@ impl BluetoothManager {
         eprintln!("app host: bluetooth: recoverBluetoothServiceFromError");
         let callback = self.adapter_callback.lock().unwrap().clone();
         self.adapter_call("unregisterCallback", bt::UNREGISTER_CALLBACK, |p| {
-            bt::UnregisterCallback { callback, attribution_source: Some(SystemSource) }.write(p)
+            bt::UnregisterCallback {
+                callback,
+                attribution_source: Some(SystemSource),
+            }
+            .write(p)
         });
         std::thread::sleep(Duration::from_millis(500));
         self.on_to_ble_on(core);
@@ -1030,13 +1286,20 @@ impl BluetoothManager {
                 p.write_binder(service.clone());
             }
             if let Err(s) = callback.transact(code, &p, true) {
-                eprintln!("app host: bluetooth: RemoteException while calling the adapters' callback #{code}: {s}");
+                eprintln!(
+                    "app host: bluetooth: RemoteException while calling the adapters' callback #{code}: {s}"
+                );
             }
         }
     }
 
     fn send_bluetooth_service_up_callback(&self) {
-        let service = self.adapter.lock().unwrap().as_ref().map(|a| Binder::Handle(a.handle));
+        let service = self
+            .adapter
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|a| Binder::Handle(a.handle));
         self.broadcast_to_adapters(bm_callback::ON_BLUETOOTH_SERVICE_UP, service);
     }
 
@@ -1066,7 +1329,12 @@ impl BluetoothManager {
     }
 
     /// `updateBleAppCount`.
-    fn update_ble_app_count(&self, token: u32, enable: bool, package: &str) -> Result<usize, Exception> {
+    fn update_ble_app_count(
+        &self,
+        token: u32,
+        enable: bool,
+        package: &str,
+    ) -> Result<usize, Exception> {
         let mut apps = self.ble_apps.lock().unwrap();
         if enable && !apps.contains_key(&token) {
             let strong = self.host.process.strong(token);
@@ -1076,7 +1344,9 @@ impl BluetoothManager {
                 &strong,
                 Box::new(move || {
                     if let Some(bm) = weak.upgrade() {
-                        eprintln!("app host: bluetooth: Binder is dead - unregister {package_name}");
+                        eprintln!(
+                            "app host: bluetooth: Binder is dead - unregister {package_name}"
+                        );
                         let _ = bm.update_ble_app_count(token, false, &package_name);
                     }
                 }),
@@ -1092,12 +1362,21 @@ impl BluetoothManager {
 
     fn enable_ble(&self, package: &str, token: u32) -> Result<bool, Exception> {
         let modes = self.modes.lock().unwrap();
-        if (modes.airplane && !self.enable.load(Ordering::Relaxed)) || modes.satellite || !modes.scan_allowed {
+        if (modes.airplane && !self.enable.load(Ordering::Relaxed))
+            || modes.satellite
+            || !modes.scan_allowed
+        {
             return Ok(false);
         }
         drop(modes);
         self.update_ble_app_count(token, true, package)?;
-        if self.state.one_of(&[STATE_ON, STATE_BLE_ON, STATE_TURNING_ON, STATE_TURNING_OFF, STATE_BLE_TURNING_ON]) {
+        if self.state.one_of(&[
+            STATE_ON,
+            STATE_BLE_ON,
+            STATE_TURNING_ON,
+            STATE_TURNING_OFF,
+            STATE_BLE_TURNING_ON,
+        ]) {
             return Ok(true);
         }
         self.send_enable_msg(false, true);
@@ -1146,9 +1425,15 @@ impl BluetoothManager {
 
     /// `checkConnectPermissionForDataDelivery`.
     fn connect_permission(&self, source: &AttributionSourceState) -> Result<bool, Exception> {
-        match permission_checker::data_delivery_from_datasource(&self.host, BLUETOOTH_CONNECT, source)? {
+        match permission_checker::data_delivery_from_datasource(
+            &self.host,
+            BLUETOOTH_CONNECT,
+            source,
+        )? {
             permission_checker::GRANTED => Ok(true),
-            permission_checker::HARD_DENIED => Err(Exception::security(format!("Need {BLUETOOTH_CONNECT} permission"))),
+            permission_checker::HARD_DENIED => Err(Exception::security(format!(
+                "Need {BLUETOOTH_CONNECT} permission"
+            ))),
             _ => Ok(false),
         }
     }
@@ -1157,18 +1442,34 @@ impl BluetoothManager {
     /// SystemUI or the shell.
     fn caller_is_foreground_user(&self, uid: i32) -> Result<bool, Exception> {
         let app_id = uid.rem_euclid(PER_USER_RANGE as i32);
-        Ok(uid / PER_USER_RANGE as i32 == 0 || app_id == NFC_APP_ID || app_id == SHELL_APP_ID || self.system_ui_app_id()? == Some(app_id))
+        Ok(uid / PER_USER_RANGE as i32 == 0
+            || app_id == NFC_APP_ID
+            || app_id == SHELL_APP_ID
+            || self.system_ui_app_id()? == Some(app_id))
     }
 
     /// SystemUI's uid, when installed as a system package.
     fn system_ui_app_id(&self) -> Result<Option<i32>, Exception> {
         let (state, _) = self.host.packages()?;
-        let system = |ps: &&crate::package::model::PackageState| ps.pkg.as_deref().is_some_and(|p| p.is(crate::package::pkg::booleans::SYSTEM));
-        Ok(state.packages.get("com.android.systemui").filter(system).map(|ps| ps.app_id))
+        let system = |ps: &&crate::package::model::PackageState| {
+            ps.pkg
+                .as_deref()
+                .is_some_and(|p| p.is(crate::package::pkg::booleans::SYSTEM))
+        };
+        Ok(state
+            .packages
+            .get("com.android.systemui")
+            .filter(system)
+            .map(|ps| ps.app_id))
     }
 
     /// `callerCanToggle`: empty if allowed, else why not.
-    fn caller_can_toggle(&self, uid: i32, source: &AttributionSourceState, require_foreground: bool) -> Result<String, Exception> {
+    fn caller_can_toggle(
+        &self,
+        uid: i32,
+        source: &AttributionSourceState,
+        require_foreground: bool,
+    ) -> Result<String, Exception> {
         if self.bluetooth_disallowed()? {
             return Ok("Bluetooth is not allowed".into());
         }
@@ -1178,7 +1479,9 @@ impl BluetoothManager {
             if let Some(package) = source.package.as_deref()
                 && !self.host.owns_package(uid, package)?
             {
-                return Err(Exception::security(format!("Package {package} does not belong to {uid}")));
+                return Err(Exception::security(format!(
+                    "Package {package} does not belong to {uid}"
+                )));
             }
             if require_foreground && !self.caller_is_foreground_user(uid)? {
                 return Ok("Missing Bluetooth permission".into());
@@ -1195,25 +1498,44 @@ impl BluetoothManager {
 
     /// `checkCompatChangeRestriction`: an app targeting T or later toggles
     /// only privileged, a system app, or an owner (there is none).
-    fn compat_change_restriction(&self, uid: i32, package: Option<&str>) -> Result<bool, Exception> {
+    fn compat_change_restriction(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+    ) -> Result<bool, Exception> {
         if !self.host.change_enabled(RESTRICT_ENABLE_DISABLE, uid)? {
             return Ok(true);
         }
         let (state, resolution) = self.host.packages()?;
-        let privileged = self.host.check_permission(Some(BLUETOOTH_PRIVILEGED), uid)? == 0
-            || Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_APP_ID }
-                .check_uid_signatures_captured(uid, SYSTEM_APP_ID, false)
-                .map_err(|e| self.host.unimplemented_named("bluetooth_manager", e.0))??
+        let privileged = self
+            .host
+            .check_permission(Some(BLUETOOTH_PRIVILEGED), uid)?
+            == 0
+            || Query {
+                state: &state,
+                filter: &resolution.apps_filter,
+                calling_uid: SYSTEM_APP_ID,
+            }
+            .check_uid_signatures_captured(uid, SYSTEM_APP_ID, false)
+            .map_err(|e| self.host.unimplemented_named("bluetooth_manager", e.0))??
                 == SIGNATURE_MATCH;
-        let system = package.and_then(|p| self.host.inputs().ok()?.packages.application_info(p, 0)).is_some_and(|ai| ai.flags & FLAG_SYSTEM != 0);
+        let system = package
+            .and_then(|p| self.host.inputs().ok()?.packages.application_info(p, 0))
+            .is_some_and(|ai| ai.flags & FLAG_SYSTEM != 0);
         // No device or profile owner: device_policy keeps none.
         Ok(privileged || system)
     }
 
     /// `enforcePrivileged`.
     fn enforce_privileged(&self, uid: i32) -> Result<(), Exception> {
-        if self.host.check_permission(Some(BLUETOOTH_PRIVILEGED), uid)? != 0 {
-            return Err(Exception::security(format!("Neither user {uid} nor current process has {BLUETOOTH_PRIVILEGED}.")));
+        if self
+            .host
+            .check_permission(Some(BLUETOOTH_PRIVILEGED), uid)?
+            != 0
+        {
+            return Err(Exception::security(format!(
+                "Neither user {uid} nor current process has {BLUETOOTH_PRIVILEGED}."
+            )));
         }
         Ok(())
     }
@@ -1221,7 +1543,9 @@ impl BluetoothManager {
     /// `isBleScanAvailable`.
     fn ble_scan_available(&self) -> bool {
         let modes = self.modes.lock().unwrap();
-        !(modes.airplane && !self.enable.load(Ordering::Relaxed)) && !modes.satellite && modes.scan_allowed
+        !(modes.airplane && !self.enable.load(Ordering::Relaxed))
+            && !modes.satellite
+            && modes.scan_allowed
     }
 
     /// `registerAdapter`: the adapter's IBluetooth, if bound.
@@ -1234,7 +1558,8 @@ impl BluetoothManager {
                 &strong,
                 Box::new(move || {
                     if let Some(bm) = weak.upgrade()
-                        && let Some((strong, death)) = bm.callbacks.lock().unwrap().remove(&callback)
+                        && let Some((strong, death)) =
+                            bm.callbacks.lock().unwrap().remove(&callback)
                     {
                         bm.host.process.clear_death(&strong, death);
                     }
@@ -1243,7 +1568,11 @@ impl BluetoothManager {
             callbacks.insert(callback, (strong, death));
         }
         drop(callbacks);
-        self.adapter.lock().unwrap().as_ref().map(|a| Binder::Handle(a.handle))
+        self.adapter
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|a| Binder::Handle(a.handle))
     }
 
     fn unregister_adapter(&self, callback: u32) {
@@ -1254,7 +1583,12 @@ impl BluetoothManager {
 
     /// `getAddress` and `getName`: of the app host's user with
     /// BLUETOOTH_CONNECT; the address only with LOCAL_MAC_ADDRESS.
-    fn local(&self, uid: i32, source: &AttributionSourceState, address: bool) -> Result<Option<String>, Exception> {
+    fn local(
+        &self,
+        uid: i32,
+        source: &AttributionSourceState,
+        address: bool,
+    ) -> Result<Option<String>, Exception> {
         if !self.connect_permission(source)? {
             return Ok(None);
         }
@@ -1276,12 +1610,26 @@ impl BluetoothManager {
     /// watches and TVs.
     fn hearing_aid_supported(&self) -> Result<bool, Exception> {
         let (state, _) = self.host.packages()?;
-        let feature = |name: &str| state.system.features.iter().any(|(n, v)| n == name && *v >= 0);
+        let feature = |name: &str| {
+            state
+                .system
+                .features
+                .iter()
+                .any(|(n, v)| n == name && *v >= 0)
+        };
         if !feature(FEATURE_BLUETOOTH_LE) {
             return Ok(false);
         }
-        let by_default = !(feature(FEATURE_AUTOMOTIVE) || feature(FEATURE_WATCH) || feature(FEATURE_TELEVISION) || feature(FEATURE_LEANBACK));
-        Ok(super::system_boolean(self.host.property("bluetooth.profile.asha.central.enabled").as_deref(), by_default))
+        let by_default = !(feature(FEATURE_AUTOMOTIVE)
+            || feature(FEATURE_WATCH)
+            || feature(FEATURE_TELEVISION)
+            || feature(FEATURE_LEANBACK));
+        Ok(super::system_boolean(
+            self.host
+                .property("bluetooth.profile.asha.central.enabled")
+                .as_deref(),
+            by_default,
+        ))
     }
 }
 
@@ -1311,7 +1659,10 @@ impl Service for BluetoothManagerService {
                         bm::write_register_adapter_reply(&mut p, service);
                         Ok(())
                     }
-                    _ => Err(Exception::new(EX_NULL_POINTER, "Callback cannot be null in registerAdapter")),
+                    _ => Err(Exception::new(
+                        EX_NULL_POINTER,
+                        "Callback cannot be null in registerAdapter",
+                    )),
                 }
             }
             bm::UNREGISTER_ADAPTER => {
@@ -1322,15 +1673,22 @@ impl Service for BluetoothManagerService {
                         bm::write_unregister_adapter_reply(&mut p);
                         Ok(())
                     }
-                    _ => Err(Exception::new(EX_NULL_POINTER, "Callback cannot be null in unregisterAdapter")),
+                    _ => Err(Exception::new(
+                        EX_NULL_POINTER,
+                        "Callback cannot be null in unregisterAdapter",
+                    )),
                 }
             }
             bm::ENABLE | bm::ENABLE_NO_AUTO_CONNECT => {
                 let quiet = call.code == bm::ENABLE_NO_AUTO_CONNECT;
                 let source = if quiet {
-                    bm::EnableNoAutoConnect::<AttributionSourceState>::read(&mut call.data).map_err(|_| BAD_VALUE)?.attribution_source
+                    bm::EnableNoAutoConnect::<AttributionSourceState>::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?
+                        .attribution_source
                 } else {
-                    bm::Enable::<AttributionSourceState>::read(&mut call.data).map_err(|_| BAD_VALUE)?.attribution_source
+                    bm::Enable::<AttributionSourceState>::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?
+                        .attribution_source
                 };
                 (|| {
                     let source = required(source, "AttributionSource cannot be null in enable")?;
@@ -1340,7 +1698,9 @@ impl Service for BluetoothManagerService {
                         return Ok(false);
                     }
                     if quiet && uid.rem_euclid(PER_USER_RANGE as i32) != NFC_APP_ID {
-                        return Err(Exception::security("No permission to enable Bluetooth quietly"));
+                        return Err(Exception::security(
+                            "No permission to enable Bluetooth quietly",
+                        ));
                     }
                     bm.post_and_wait(move |bm, core| bm.enable_from_binder(core, quiet))
                 })()
@@ -1350,9 +1710,13 @@ impl Service for BluetoothManagerService {
                 })
             }
             bm::DISABLE => {
-                let a = bm::Disable::<AttributionSourceState>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = bm::Disable::<AttributionSourceState>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
-                    let source = required(a.attribution_source, "AttributionSource cannot be null in disable")?;
+                    let source = required(
+                        a.attribution_source,
+                        "AttributionSource cannot be null in disable",
+                    )?;
                     if !a.persist {
                         bm.enforce_privileged(uid)?;
                     }
@@ -1374,9 +1738,13 @@ impl Service for BluetoothManagerService {
             bm::GET_ADDRESS | bm::GET_NAME => {
                 let address = call.code == bm::GET_ADDRESS;
                 let source = if address {
-                    bm::GetAddress::<AttributionSourceState>::read(&mut call.data).map_err(|_| BAD_VALUE)?.attribution_source
+                    bm::GetAddress::<AttributionSourceState>::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?
+                        .attribution_source
                 } else {
-                    bm::GetName::<AttributionSourceState>::read(&mut call.data).map_err(|_| BAD_VALUE)?.attribution_source
+                    bm::GetName::<AttributionSourceState>::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?
+                        .attribution_source
                 };
                 required(source, "AttributionSource cannot be null in getAddress")
                     .and_then(|s| bm.local(uid, &s, address))
@@ -1393,16 +1761,21 @@ impl Service for BluetoothManagerService {
             bm::ENABLE_BLE | bm::DISABLE_BLE => {
                 let enable = call.code == bm::ENABLE_BLE;
                 let (source, token) = if enable {
-                    let a = bm::EnableBle::<AttributionSourceState>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                    let a = bm::EnableBle::<AttributionSourceState>::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
                     (a.attribution_source, a.b)
                 } else {
-                    let a = bm::DisableBle::<AttributionSourceState>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                    let a = bm::DisableBle::<AttributionSourceState>::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
                     (a.attribution_source, a.b)
                 };
                 (|| {
                     let source = required(source, "AttributionSource cannot be null in enableBle")?;
                     let Some(Binder::Handle(token)) = token else {
-                        return Err(Exception::new(EX_NULL_POINTER, "IBinder cannot be null in enableBle"));
+                        return Err(Exception::new(
+                            EX_NULL_POINTER,
+                            "IBinder cannot be null in enableBle",
+                        ));
                     };
                     let error = bm.caller_can_toggle(uid, &source, false)?;
                     if !error.is_empty() {
@@ -1411,7 +1784,11 @@ impl Service for BluetoothManagerService {
                     }
                     let package = source.package.clone().unwrap_or_default();
                     bm.post_and_wait(move |bm, core| {
-                        if enable { bm.enable_ble(&package, token) } else { bm.disable_ble(core, &package, token) }
+                        if enable {
+                            bm.enable_ble(&package, token)
+                        } else {
+                            bm.disable_ble(core, &package, token)
+                        }
                     })?
                 })()
                 .map(|ok| match enable {
@@ -1421,27 +1798,42 @@ impl Service for BluetoothManagerService {
             }
             bm::IS_HEARING_AID_PROFILE_SUPPORTED => {
                 bm::IsHearingAidProfileSupported::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                bm.hearing_aid_supported().map(|s| bm::write_is_hearing_aid_profile_supported_reply(&mut p, s))
+                bm.hearing_aid_supported()
+                    .map(|s| bm::write_is_hearing_aid_profile_supported_reply(&mut p, s))
             }
             bm::IS_AUTO_ON_SUPPORTED => {
                 bm::IsAutoOnSupported::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 bm.enforce_privileged(uid).and_then(|()| {
                     if bm.auto_on {
-                        return Err(bm.host.unimplemented_named("bluetooth_manager", "Auto On (#1787)"));
+                        return Err(bm
+                            .host
+                            .unimplemented_named("bluetooth_manager", "Auto On (#1787)"));
                     }
                     bm::write_is_auto_on_supported_reply(&mut p, false);
                     Ok(())
                 })
             }
-            bm::IS_AUTO_ON_ENABLED | bm::SET_AUTO_ON_ENABLED => bm.enforce_privileged(uid).and_then(|()| {
-                if bm.auto_on {
-                    return Err(bm.host.unimplemented_named("bluetooth_manager", "Auto On (#1787)"));
-                }
-                Err(Exception::new(EX_ILLEGAL_STATE, "AutoOnFeature is not supported in current config"))
-            }),
+            bm::IS_AUTO_ON_ENABLED | bm::SET_AUTO_ON_ENABLED => {
+                bm.enforce_privileged(uid).and_then(|()| {
+                    if bm.auto_on {
+                        return Err(bm
+                            .host
+                            .unimplemented_named("bluetooth_manager", "Auto On (#1787)"));
+                    }
+                    Err(Exception::new(
+                        EX_ILLEGAL_STATE,
+                        "AutoOnFeature is not supported in current config",
+                    ))
+                })
+            }
             code => {
-                let name = bm::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
-                Err(bm.host.unimplemented_named("bluetooth_manager", &format!("{name} (#1787)")))
+                let name = bm::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
+                Err(bm
+                    .host
+                    .unimplemented_named("bluetooth_manager", &format!("{name} (#1787)")))
             }
         };
         reply(result.map(|()| p))
@@ -1458,13 +1850,31 @@ mod tests {
     fn the_queue_runs_messages_as_a_looper_does() {
         let mut q = Queue::default();
         let now = Instant::now();
-        q.push(now + Duration::from_millis(300), Message::HandleEnableDelayed);
+        q.push(
+            now + Duration::from_millis(300),
+            Message::HandleEnableDelayed,
+        );
         q.push(now, Message::Disable);
-        q.push(now, Message::Enable { quiet: false, ble: true });
+        q.push(
+            now,
+            Message::Enable {
+                quiet: false,
+                ble: true,
+            },
+        );
         assert!(q.has(What::HandleEnableDelayed));
         assert!(matches!(q.take(now), Ok(Message::Disable)));
-        assert!(matches!(q.take(now), Ok(Message::Enable { quiet: false, ble: true })));
-        assert_eq!(q.take(now).err(), Some(Some(now + Duration::from_millis(300))));
+        assert!(matches!(
+            q.take(now),
+            Ok(Message::Enable {
+                quiet: false,
+                ble: true
+            })
+        ));
+        assert_eq!(
+            q.take(now).err(),
+            Some(Some(now + Duration::from_millis(300)))
+        );
         q.remove(What::HandleEnableDelayed);
         assert_eq!(q.take(now).err(), Some(None));
     }
@@ -1472,8 +1882,20 @@ mod tests {
     /// The BLE states are off to BR/EDR users; the state's waiters.
     #[test]
     fn states_are_seen_as_the_adapter_reports_them() {
-        assert_eq!([STATE_BLE_TURNING_ON, STATE_BLE_ON, STATE_BLE_TURNING_OFF, STATE_TURNING_ON].map(br_edr_state), [STATE_OFF, STATE_OFF, STATE_OFF, STATE_TURNING_ON]);
-        let state = AdapterState { state: Mutex::new(STATE_OFF), changed: Condvar::new() };
+        assert_eq!(
+            [
+                STATE_BLE_TURNING_ON,
+                STATE_BLE_ON,
+                STATE_BLE_TURNING_OFF,
+                STATE_TURNING_ON
+            ]
+            .map(br_edr_state),
+            [STATE_OFF, STATE_OFF, STATE_OFF, STATE_TURNING_ON]
+        );
+        let state = AdapterState {
+            state: Mutex::new(STATE_OFF),
+            changed: Condvar::new(),
+        };
         assert!(state.wait_for(Duration::ZERO, &[STATE_OFF]));
         assert!(!state.wait_for(Duration::from_millis(10), &[STATE_ON]));
         state.set(STATE_ON);

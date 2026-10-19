@@ -86,7 +86,6 @@ impl Store {
                                         | "harmful-app-warning"
                                         | "splash-screen-theme"
                                         | "suspended"
-
                                 ) {
                                     merged.attrs.push((key.clone(), value.clone()));
                                 }

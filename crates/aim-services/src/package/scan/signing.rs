@@ -57,7 +57,7 @@ pub struct SigningScan {
     pub(super) strict_signature_packages: BTreeSet<String>,
     first_api_level: i32,
     parsed: Vec<(String, i32, SigningDetails, bool)>,
-    pub(super) permission_admissions:Vec<super::permission_admissions::Admission>,
+    pub(super) permission_admissions: Vec<super::permission_admissions::Admission>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -103,79 +103,226 @@ impl SigningScan {
             return Ok(Some(code));
         }
         if setting.flags & crate::package::settings::FLAG_SYSTEM != 0 {
-            return Err(format!("system domain code owner unavailable: {}", setting.name));
+            return Err(format!(
+                "system domain code owner unavailable: {}",
+                setting.name
+            ));
         }
-        let users = self.scanned_users.get(&setting.name)
+        let users = self
+            .scanned_users
+            .get(&setting.name)
             .ok_or_else(|| format!("retired domain user owner unavailable: {}", setting.name))?;
         if users.values().any(|state| state.installed) {
-            return Err(format!("installed package domain code owner unavailable: {}", setting.name));
+            return Err(format!(
+                "installed package domain code owner unavailable: {}",
+                setting.name
+            ));
         }
         Ok(None)
     }
 
     /// Equal in every owner field except scanned and disabled user states.
     pub(crate) fn same_except_users(&self, other: &Self) -> bool {
-        let Self{settings,identities,libraries,package_registry,update_ownership,system_app_update_owners,installers,
-            disabled_users:_,scanned_users:_,loaded,disabled_loaded,pending_metadata,transferred_packages,
-            displaced_shared_settings,apex_origins,seinfo,legacy_permissions,library_dependencies,shared_processes,
-            replica_runtime,hidden_api_allowlist,strict_signature_packages,first_api_level,parsed,permission_admissions}=self;
-        let same=*settings==other.settings&&*identities==other.identities&&*libraries==other.libraries
-            &&*package_registry==other.package_registry&&*update_ownership==other.update_ownership
-            &&*system_app_update_owners==other.system_app_update_owners&&*installers==other.installers
-            &&*loaded==other.loaded&&*disabled_loaded==other.disabled_loaded&&*pending_metadata==other.pending_metadata
-            &&*transferred_packages==other.transferred_packages&&*displaced_shared_settings==other.displaced_shared_settings
-            &&*apex_origins==other.apex_origins&&*seinfo==other.seinfo&&*legacy_permissions==other.legacy_permissions
-            &&*library_dependencies==other.library_dependencies&&*shared_processes==other.shared_processes
-            &&*replica_runtime==other.replica_runtime&&*hidden_api_allowlist==other.hidden_api_allowlist
-            &&*strict_signature_packages==other.strict_signature_packages&&*first_api_level==other.first_api_level
-            &&*parsed==other.parsed&&*permission_admissions==other.permission_admissions;
+        let Self {
+            settings,
+            identities,
+            libraries,
+            package_registry,
+            update_ownership,
+            system_app_update_owners,
+            installers,
+            disabled_users: _,
+            scanned_users: _,
+            loaded,
+            disabled_loaded,
+            pending_metadata,
+            transferred_packages,
+            displaced_shared_settings,
+            apex_origins,
+            seinfo,
+            legacy_permissions,
+            library_dependencies,
+            shared_processes,
+            replica_runtime,
+            hidden_api_allowlist,
+            strict_signature_packages,
+            first_api_level,
+            parsed,
+            permission_admissions,
+        } = self;
+        let same = *settings == other.settings
+            && *identities == other.identities
+            && *libraries == other.libraries
+            && *package_registry == other.package_registry
+            && *update_ownership == other.update_ownership
+            && *system_app_update_owners == other.system_app_update_owners
+            && *installers == other.installers
+            && *loaded == other.loaded
+            && *disabled_loaded == other.disabled_loaded
+            && *pending_metadata == other.pending_metadata
+            && *transferred_packages == other.transferred_packages
+            && *displaced_shared_settings == other.displaced_shared_settings
+            && *apex_origins == other.apex_origins
+            && *seinfo == other.seinfo
+            && *legacy_permissions == other.legacy_permissions
+            && *library_dependencies == other.library_dependencies
+            && *shared_processes == other.shared_processes
+            && *replica_runtime == other.replica_runtime
+            && *hidden_api_allowlist == other.hidden_api_allowlist
+            && *strict_signature_packages == other.strict_signature_packages
+            && *first_api_level == other.first_api_level
+            && *parsed == other.parsed
+            && *permission_admissions == other.permission_admissions;
         same
     }
 
     /// Bounded ownership diagnostics; never print signer, key or owner values.
     pub(crate) fn metadata_difference_fields(&self, other: &Self) -> Vec<String> {
-        let mut fields=Vec::new();
+        let mut fields = Vec::new();
         macro_rules! changed {($($field:ident),*)=>{$(if self.$field!=other.$field {fields.push(stringify!($field).to_owned());})*};}
-        changed!(settings,identities,libraries,package_registry,update_ownership,installers,
-            disabled_users,scanned_users,loaded,disabled_loaded,pending_metadata,transferred_packages,
-            displaced_shared_settings,apex_origins,seinfo,legacy_permissions,library_dependencies,
-            shared_processes,replica_runtime,hidden_api_allowlist,strict_signature_packages,
-            first_api_level,parsed,permission_admissions);
-        for setting in self.settings.packages.iter().chain(&self.settings.disabled_system_packages).take(512) {
-            let factory=self.settings.disabled_system_packages.iter().any(|value|std::ptr::eq(value,setting));
-            let settings=if factory {&other.settings.disabled_system_packages}else{&other.settings.packages};
-            if let Some(after)=settings.iter().find(|value|value.name==setting.name) {
-                if setting==after {continue;}
-                let mut keys=Vec::new();
+        changed!(
+            settings,
+            identities,
+            libraries,
+            package_registry,
+            update_ownership,
+            installers,
+            disabled_users,
+            scanned_users,
+            loaded,
+            disabled_loaded,
+            pending_metadata,
+            transferred_packages,
+            displaced_shared_settings,
+            apex_origins,
+            seinfo,
+            legacy_permissions,
+            library_dependencies,
+            shared_processes,
+            replica_runtime,
+            hidden_api_allowlist,
+            strict_signature_packages,
+            first_api_level,
+            parsed,
+            permission_admissions
+        );
+        for setting in self
+            .settings
+            .packages
+            .iter()
+            .chain(&self.settings.disabled_system_packages)
+            .take(512)
+        {
+            let factory = self
+                .settings
+                .disabled_system_packages
+                .iter()
+                .any(|value| std::ptr::eq(value, setting));
+            let settings = if factory {
+                &other.settings.disabled_system_packages
+            } else {
+                &other.settings.packages
+            };
+            if let Some(after) = settings.iter().find(|value| value.name == setting.name) {
+                if setting == after {
+                    continue;
+                }
+                let mut keys = Vec::new();
                 macro_rules! key {($($field:ident),*)=>{$(if setting.$field!=after.$field {keys.push(stringify!($field));})*};}
-                key!(app_id,code_path,version_code,flags,private_flags,category_hint,last_update_time,
-                    install_source,key_set_data,signatures,page_size_compat,primary_cpu_abi,secondary_cpu_abi);
-                if keys.is_empty(){keys.push("other_setting_fields");}
-                fields.push(format!("package={} factory={} keys={}",setting.name.chars().take(96).collect::<String>(),factory,keys.join(",")));
-            }else{fields.push(format!("removed_package={} factory={}",setting.name.chars().take(96).collect::<String>(),factory));}
-            if fields.len()>40 {break;}
+                key!(
+                    app_id,
+                    code_path,
+                    version_code,
+                    flags,
+                    private_flags,
+                    category_hint,
+                    last_update_time,
+                    install_source,
+                    key_set_data,
+                    signatures,
+                    page_size_compat,
+                    primary_cpu_abi,
+                    secondary_cpu_abi
+                );
+                if keys.is_empty() {
+                    keys.push("other_setting_fields");
+                }
+                fields.push(format!(
+                    "package={} factory={} keys={}",
+                    setting.name.chars().take(96).collect::<String>(),
+                    factory,
+                    keys.join(",")
+                ));
+            } else {
+                fields.push(format!(
+                    "removed_package={} factory={}",
+                    setting.name.chars().take(96).collect::<String>(),
+                    factory
+                ));
+            }
+            if fields.len() > 40 {
+                break;
+            }
         }
         for (name, before) in &self.scanned_users {
-            let Some(after)=other.scanned_users.get(name) else {continue;};
+            let Some(after) = other.scanned_users.get(name) else {
+                continue;
+            };
             for (user, before) in before {
-                let Some(after)=after.get(user) else {continue;};
-                if before==after {continue;}
-                let mut keys=Vec::new();
+                let Some(after) = after.get(user) else {
+                    continue;
+                };
+                if before == after {
+                    continue;
+                }
+                let mut keys = Vec::new();
                 macro_rules! user_key {($($field:ident),*)=>{$(if before.$field!=after.$field {keys.push(stringify!($field));})*};}
-                user_key!(installed,enabled,stopped,not_launched,hidden,distraction_flags,ce_data_inode,de_data_inode,
-                    instant_app,first_install_time,enabled_components,disabled_components,runtime);
-                if keys.is_empty(){keys.push("other_user_fields");}
-                fields.push(format!("package={} user={} keys={}",name.chars().take(96).collect::<String>(),user,keys.join(",")));
-                if fields.len()>48 {break;}
+                user_key!(
+                    installed,
+                    enabled,
+                    stopped,
+                    not_launched,
+                    hidden,
+                    distraction_flags,
+                    ce_data_inode,
+                    de_data_inode,
+                    instant_app,
+                    first_install_time,
+                    enabled_components,
+                    disabled_components,
+                    runtime
+                );
+                if keys.is_empty() {
+                    keys.push("other_user_fields");
+                }
+                fields.push(format!(
+                    "package={} user={} keys={}",
+                    name.chars().take(96).collect::<String>(),
+                    user,
+                    keys.join(",")
+                ));
+                if fields.len() > 48 {
+                    break;
+                }
             }
-            if fields.len()>48 {break;}
+            if fields.len() > 48 {
+                break;
+            }
         }
-        fields.push(format!("package_counts={}/{}->{}/{}",self.settings.packages.len(),self.settings.disabled_system_packages.len(),other.settings.packages.len(),other.settings.disabled_system_packages.len()));
+        fields.push(format!(
+            "package_counts={}/{}->{}/{}",
+            self.settings.packages.len(),
+            self.settings.disabled_system_packages.len(),
+            other.settings.packages.len(),
+            other.settings.disabled_system_packages.len()
+        ));
         fields
     }
 
     pub fn disabled_user_aliases(&self, package: &str) -> Result<Vec<i32>, String> {
-        self.disabled_users.get(package).map(|owner| owner.aliases())
+        self.disabled_users
+            .get(package)
+            .map(|owner| owner.aliases())
             .ok_or_else(|| format!("disabled user alias owner absent: {package}"))
     }
     pub(in crate::package) fn capture_ready(&self) -> bool {
@@ -425,7 +572,9 @@ impl SigningScan {
     /// Settings.removeUserLPw visits active PackageSettings only. Disabled
     /// factory copies retain their user object, losing the active alias marker.
     pub fn remove_package_user_state(&mut self, user: i32) -> Result<(), String> {
-        if user < 0 { return Err("removed package user id is negative".into()); }
+        if user < 0 {
+            return Err("removed package user id is negative".into());
+        }
         let mut candidate = self.clone();
         let names: Vec<_> = candidate.scanned_users.keys().cloned().collect();
         for name in names {
@@ -972,7 +1121,7 @@ impl SigningScan {
                 .clone(),
             first_api_level,
             parsed: Vec::new(),
-            permission_admissions:Vec::new(),
+            permission_admissions: Vec::new(),
         })
     }
 
@@ -1107,13 +1256,20 @@ impl SigningScan {
         self.validate_legacy_permissions()?;
         let mut next = self.clone();
         let removed = next.identities.prune_unused(&next.settings);
-        let retired_ids = removed.iter().map(|name| self.identities.shared_users[name].app_id).collect::<BTreeSet<_>>();
+        let retired_ids = removed
+            .iter()
+            .map(|name| self.identities.shared_users[name].app_id)
+            .collect::<BTreeSet<_>>();
         for name in &removed {
             next.remove_legacy_shared(name)?;
         }
-        next.settings.shared_users.retain(|group| !removed.contains(&group.name));
+        next.settings
+            .shared_users
+            .retain(|group| !removed.contains(&group.name));
         if let Some(owners) = &mut next.legacy_permissions {
-            owners.installed_receipt.retain(|uid| !retired_ids.contains(uid));
+            owners
+                .installed_receipt
+                .retain(|uid| !retired_ids.contains(uid));
         }
         next.validate_legacy_permissions()?;
         *self = next;
@@ -1880,44 +2036,136 @@ mod tests {
         use super::*;
         use crate::package::owner::legacy_permissions::{Migration, Permission};
         let settings = Settings {
-            packages: [("system",1000),("phone",1001),("nfc",1027),("network",1073),("shell",2000)]
-                .into_iter().map(|(name,id)|crate::package::settings::Package {
-                    name:name.into(),app_id:id,shared_user:true,..Default::default()
-                }).collect(),
-            disabled_system_packages:vec![crate::package::settings::Package {
-                name:"disabled.bluetooth".into(),app_id:1002,shared_user:true,..Default::default()
+            packages: [
+                ("system", 1000),
+                ("phone", 1001),
+                ("nfc", 1027),
+                ("network", 1073),
+                ("shell", 2000),
+            ]
+            .into_iter()
+            .map(|(name, id)| crate::package::settings::Package {
+                name: name.into(),
+                app_id: id,
+                shared_user: true,
+                ..Default::default()
+            })
+            .collect(),
+            disabled_system_packages: vec![crate::package::settings::Package {
+                name: "disabled.bluetooth".into(),
+                app_id: 1002,
+                shared_user: true,
+                ..Default::default()
             }],
-            shared_users: Bootstrap::new(&Default::default()).ordered_shared_users().unwrap()
-                .into_iter().map(|(name, group)| SharedUser {name:name.into(),app_id:group.app_id,
-                    flags:group.flags,signatures:group.signatures.clone()}).collect(),
+            shared_users: Bootstrap::new(&Default::default())
+                .ordered_shared_users()
+                .unwrap()
+                .into_iter()
+                .map(|(name, group)| SharedUser {
+                    name: name.into(),
+                    app_id: group.app_id,
+                    flags: group.flags,
+                    signatures: group.signatures.clone(),
+                })
+                .collect(),
             ..Default::default()
         };
         let mut scan = SigningScan::new(&Default::default(), &settings, 36).unwrap();
-        let packages = settings.packages.iter().map(|p|((p.name.clone(),false),Migration::default()))
-            .chain(settings.disabled_system_packages.iter().map(|p|((p.name.clone(),true),Migration::default()))).collect();
+        let packages = settings
+            .packages
+            .iter()
+            .map(|p| ((p.name.clone(), false), Migration::default()))
+            .chain(
+                settings
+                    .disabled_system_packages
+                    .iter()
+                    .map(|p| ((p.name.clone(), true), Migration::default())),
+            )
+            .collect();
         let mut grants = Migration::default();
-        grants.put(0, Permission {name:Some("owned.permission".into()),runtime:true,granted:true,flags:4}).unwrap();
-        let groups = scan.identities.shared_users.keys().map(|name|(name.clone(),grants.clone())).collect();
-        scan.capture_legacy_permissions(&[0],packages,groups).unwrap();
-        scan.legacy_permissions.as_mut().unwrap().installed_receipt.extend([1000,1007]);
+        grants
+            .put(
+                0,
+                Permission {
+                    name: Some("owned.permission".into()),
+                    runtime: true,
+                    granted: true,
+                    flags: 4,
+                },
+            )
+            .unwrap();
+        let groups = scan
+            .identities
+            .shared_users
+            .keys()
+            .map(|name| (name.clone(), grants.clone()))
+            .collect();
+        scan.capture_legacy_permissions(&[0], packages, groups)
+            .unwrap();
+        scan.legacy_permissions
+            .as_mut()
+            .unwrap()
+            .installed_receipt
+            .extend([1000, 1007]);
         let previous = scan.clone();
-        let alive = ["android.uid.system","android.uid.phone","android.uid.bluetooth","android.uid.nfc","android.uid.networkstack","android.uid.shell"];
-        assert_eq!(scan.prune_system_shared_users().unwrap(),["android.uid.log","android.uid.se","android.uid.uwb"]);
-        assert_eq!(scan.settings.shared_users, previous.settings.shared_users.iter()
-            .filter(|group| !["android.uid.log","android.uid.se","android.uid.uwb"].contains(&group.name.as_str()))
-            .cloned().collect::<Vec<_>>());
-        assert_eq!(scan.settings.packages,previous.settings.packages);
-        assert_eq!(scan.settings.disabled_system_packages,previous.settings.disabled_system_packages);
+        let alive = [
+            "android.uid.system",
+            "android.uid.phone",
+            "android.uid.bluetooth",
+            "android.uid.nfc",
+            "android.uid.networkstack",
+            "android.uid.shell",
+        ];
+        assert_eq!(
+            scan.prune_system_shared_users().unwrap(),
+            ["android.uid.log", "android.uid.se", "android.uid.uwb"]
+        );
+        assert_eq!(
+            scan.settings.shared_users,
+            previous
+                .settings
+                .shared_users
+                .iter()
+                .filter(
+                    |group| !["android.uid.log", "android.uid.se", "android.uid.uwb"]
+                        .contains(&group.name.as_str())
+                )
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(scan.settings.packages, previous.settings.packages);
+        assert_eq!(
+            scan.settings.disabled_system_packages,
+            previous.settings.disabled_system_packages
+        );
         for name in alive {
-            assert_eq!(scan.identities.shared_users[name],previous.identities.shared_users[name]);
-            assert_eq!(scan.shared_legacy_permissions(name).unwrap(),previous.shared_legacy_permissions(name).unwrap());
+            assert_eq!(
+                scan.identities.shared_users[name],
+                previous.identities.shared_users[name]
+            );
+            assert_eq!(
+                scan.shared_legacy_permissions(name).unwrap(),
+                previous.shared_legacy_permissions(name).unwrap()
+            );
         }
         assert!(scan.identities.ids.get(1007).is_none());
         assert!(scan.identities.ids.get(1031).is_none());
         assert!(scan.identities.ids.get(1083).is_none());
-        assert_eq!(scan.installed_permission_receipt_uids().unwrap(),&BTreeSet::from([1000]));
-        assert!(previous.shared_legacy_permissions("android.uid.log").unwrap().is_some());
-        assert!(scan.shared_legacy_permissions("android.uid.log").unwrap().is_none());
+        assert_eq!(
+            scan.installed_permission_receipt_uids().unwrap(),
+            &BTreeSet::from([1000])
+        );
+        assert!(
+            previous
+                .shared_legacy_permissions("android.uid.log")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            scan.shared_legacy_permissions("android.uid.log")
+                .unwrap()
+                .is_none()
+        );
         assert!(scan.prune_system_shared_users().unwrap().is_empty());
     }
 
@@ -1975,57 +2223,191 @@ mod tests {
     #[test]
     fn persistent_projection_uses_real_writer_for_runtime_and_validated_apex() {
         use super::*;
+        use crate::package::{
+            owner,
+            pkg::{AndroidPackage, booleans2},
+            settings::{Package, Settings},
+        };
         use std::sync::Arc;
-        use crate::package::{owner,settings::{Package,Settings},pkg::{AndroidPackage,booleans2}};
-        let directory=std::env::temp_dir().join(format!("aim-settings-projection-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        struct Cleanup(std::path::PathBuf);impl Drop for Cleanup{fn drop(&mut self){std::fs::remove_dir_all(&self.0).unwrap();}}
-        std::fs::create_dir_all(directory.join("system/users/0")).unwrap();let _cleanup=Cleanup(directory.clone());
-        let mut disk=owner::Store::create(&directory,&[0]).unwrap();
-        let keep=Package{name:"keep".into(),app_id:10100,code_path:"/data/app/keep".into(),last_update_time:123,
-            domain_set_id:Some("00000000-0000-0000-0000-000000000001".into()),..Default::default()};
-        let drop=Package{name:"drop".into(),app_id:10101,code_path:"/data/app/drop".into(),domain_set_id:Some("00000000-0000-0000-0000-000000000002".into()),..Default::default()};
-        let mut settings=Settings{packages:vec![keep.clone(),drop],..Default::default()};
-        let mut native=SigningScan::new(&Default::default(),&settings,36).unwrap();
-        native.settings.packages[0].transient.apex_module_name=Some("container.owner".into());
-        native.settings.packages[0].shared_user_app_id=Some(1001); // Historical, no current shared membership.
-        let apex=Package{name:"container".into(),app_id:-1,code_path:"/system/apex/container.apex".into(),..Default::default()};
-        let parsed=AndroidPackage{package_name:apex.name.clone(),path:Some(apex.code_path.clone()),uid:-1,booleans2:booleans2::APEX,feature_flag_state:Some(vec![]),..Default::default()};
-        native.settings.packages.push(apex.clone());native.apex_origins.insert(apex.name.clone(),ScanOrigin::SystemDirectory);
-        native.loaded.insert(apex.name.clone(),Arc::new(super::super::LoadedPackage::new(parsed,SigningDetails::unknown()).unwrap()));
-        native.settings.key_sets.versioned=true;
-        settings=native.settings.clone();
-        let projection=disk.persistent_scan_settings(&native).unwrap();
-        assert!(!projection.packages.iter().any(|p|p.name==apex.name));
-        let projected=projection.packages.iter().find(|p|p.name==keep.name).unwrap();
-        assert_eq!(projected.last_update_time,123);assert_eq!(projected.transient,Default::default());assert_eq!(projected.shared_user_app_id,None);
-        assert!(projection.shared_users.iter().all(|group|group.flags==0));
+        let directory = std::env::temp_dir().join(format!(
+            "aim-settings-projection-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        std::fs::create_dir_all(directory.join("system/users/0")).unwrap();
+        let _cleanup = Cleanup(directory.clone());
+        let mut disk = owner::Store::create(&directory, &[0]).unwrap();
+        let keep = Package {
+            name: "keep".into(),
+            app_id: 10100,
+            code_path: "/data/app/keep".into(),
+            last_update_time: 123,
+            domain_set_id: Some("00000000-0000-0000-0000-000000000001".into()),
+            ..Default::default()
+        };
+        let drop = Package {
+            name: "drop".into(),
+            app_id: 10101,
+            code_path: "/data/app/drop".into(),
+            domain_set_id: Some("00000000-0000-0000-0000-000000000002".into()),
+            ..Default::default()
+        };
+        let mut settings = Settings {
+            packages: vec![keep.clone(), drop],
+            ..Default::default()
+        };
+        let mut native = SigningScan::new(&Default::default(), &settings, 36).unwrap();
+        native.settings.packages[0].transient.apex_module_name = Some("container.owner".into());
+        native.settings.packages[0].shared_user_app_id = Some(1001); // Historical, no current shared membership.
+        let apex = Package {
+            name: "container".into(),
+            app_id: -1,
+            code_path: "/system/apex/container.apex".into(),
+            ..Default::default()
+        };
+        let parsed = AndroidPackage {
+            package_name: apex.name.clone(),
+            path: Some(apex.code_path.clone()),
+            uid: -1,
+            booleans2: booleans2::APEX,
+            feature_flag_state: Some(vec![]),
+            ..Default::default()
+        };
+        native.settings.packages.push(apex.clone());
+        native
+            .apex_origins
+            .insert(apex.name.clone(), ScanOrigin::SystemDirectory);
+        native.loaded.insert(
+            apex.name.clone(),
+            Arc::new(super::super::LoadedPackage::new(parsed, SigningDetails::unknown()).unwrap()),
+        );
+        native.settings.key_sets.versioned = true;
+        settings = native.settings.clone();
+        let projection = disk.persistent_scan_settings(&native).unwrap();
+        assert!(!projection.packages.iter().any(|p| p.name == apex.name));
+        let projected = projection
+            .packages
+            .iter()
+            .find(|p| p.name == keep.name)
+            .unwrap();
+        assert_eq!(projected.last_update_time, 123);
+        assert_eq!(projected.transient, Default::default());
+        assert_eq!(projected.shared_user_app_id, None);
+        assert!(projection.shared_users.iter().all(|group| group.flags == 0));
         // Commit the real writer output, then use the projection during strict
         // removal. Persistent mutations to a different package remain errors.
-        let snapshot=crate::package::scan_snapshot::Store::new(SigningScan::new(&Default::default(),&Settings{packages:settings.packages.iter().filter(|p|p.name!=apex.name).cloned().collect(),..settings.clone()},36).unwrap(),owner::usage::Usage::new(["keep","drop"])).unwrap().capture();
+        let snapshot = crate::package::scan_snapshot::Store::new(
+            SigningScan::new(
+                &Default::default(),
+                &Settings {
+                    packages: settings
+                        .packages
+                        .iter()
+                        .filter(|p| p.name != apex.name)
+                        .cloned()
+                        .collect(),
+                    ..settings.clone()
+                },
+                36,
+            )
+            .unwrap(),
+            owner::usage::Usage::new(["keep", "drop"]),
+        )
+        .unwrap()
+        .capture();
         disk.commit_scan_settings(&snapshot).unwrap();
         // Reboot readers and component-state writers see the same persistent
         // owner despite native map order/runtime/APEX metadata.
         disk.validate_committed_scan(&native).unwrap();
-        let mut reordered=native.clone();reordered.settings.packages.reverse();reordered.settings.shared_users.reverse();
+        let mut reordered = native.clone();
+        reordered.settings.packages.reverse();
+        reordered.settings.shared_users.reverse();
         disk.validate_committed_scan(&reordered).unwrap();
-        let mut corrupt_code=native.clone();corrupt_code.settings.packages.iter_mut().find(|p|p.name=="keep").unwrap().code_path="/data/app/changed-code".into();
+        let mut corrupt_code = native.clone();
+        corrupt_code
+            .settings
+            .packages
+            .iter_mut()
+            .find(|p| p.name == "keep")
+            .unwrap()
+            .code_path = "/data/app/changed-code".into();
         assert!(disk.validate_committed_scan(&corrupt_code).is_err());
-        let mut corrupt_signer=native.clone();corrupt_signer.settings.packages.iter_mut().find(|p|p.name=="keep").unwrap().signatures=Some(crate::package::settings::Signatures{scheme_version:2,signatures:vec![vec![2]],..Default::default()});
+        let mut corrupt_signer = native.clone();
+        corrupt_signer
+            .settings
+            .packages
+            .iter_mut()
+            .find(|p| p.name == "keep")
+            .unwrap()
+            .signatures = Some(crate::package::settings::Signatures {
+            scheme_version: 2,
+            signatures: vec![vec![2]],
+            ..Default::default()
+        });
         assert!(disk.validate_committed_scan(&corrupt_signer).is_err());
-        native.settings.packages.retain(|p|p.name!="drop");
-        let desired=disk.persistent_scan_settings(&native).unwrap();
-        let mut timestamp=desired.clone();timestamp.packages.iter_mut().find(|p|p.name=="keep").unwrap().last_update_time=124;
-        let mut source=desired.clone();source.packages.iter_mut().find(|p|p.name=="keep").unwrap().install_source.installer=Some("changed.installer".into());
-        let mut signer=desired.clone();signer.packages.iter_mut().find(|p|p.name=="keep").unwrap().signatures=Some(crate::package::settings::Signatures{scheme_version:2,signatures:vec![vec![1]],..Default::default()});
-        let before=std::fs::read(directory.join("system/packages.xml")).unwrap();
-        for wrong in [timestamp,source,signer] {
-            assert!(!disk.commit_removed_package_setting(&wrong,"drop").unwrap_err().committed);
-            assert_eq!(std::fs::read(directory.join("system/packages.xml")).unwrap(),before);
+        native.settings.packages.retain(|p| p.name != "drop");
+        let desired = disk.persistent_scan_settings(&native).unwrap();
+        let mut timestamp = desired.clone();
+        timestamp
+            .packages
+            .iter_mut()
+            .find(|p| p.name == "keep")
+            .unwrap()
+            .last_update_time = 124;
+        let mut source = desired.clone();
+        source
+            .packages
+            .iter_mut()
+            .find(|p| p.name == "keep")
+            .unwrap()
+            .install_source
+            .installer = Some("changed.installer".into());
+        let mut signer = desired.clone();
+        signer
+            .packages
+            .iter_mut()
+            .find(|p| p.name == "keep")
+            .unwrap()
+            .signatures = Some(crate::package::settings::Signatures {
+            scheme_version: 2,
+            signatures: vec![vec![1]],
+            ..Default::default()
+        });
+        let before = std::fs::read(directory.join("system/packages.xml")).unwrap();
+        for wrong in [timestamp, source, signer] {
+            assert!(
+                !disk
+                    .commit_removed_package_setting(&wrong, "drop")
+                    .unwrap_err()
+                    .committed
+            );
+            assert_eq!(
+                std::fs::read(directory.join("system/packages.xml")).unwrap(),
+                before
+            );
         }
-        disk.commit_removed_package_setting(&desired,"drop").unwrap();
-        assert_eq!(owner::canonical_persistent_settings(disk.state().settings.clone()),desired);
+        disk.commit_removed_package_setting(&desired, "drop")
+            .unwrap();
+        assert_eq!(
+            owner::canonical_persistent_settings(disk.state().settings.clone()),
+            desired
+        );
         native.apex_origins.remove(&apex.name);
-        assert!(disk.persistent_scan_settings(&native).unwrap_err().message.contains("APEX"));
+        assert!(
+            disk.persistent_scan_settings(&native)
+                .unwrap_err()
+                .message
+                .contains("APEX")
+        );
     }
 
     #[test]

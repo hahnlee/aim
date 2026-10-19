@@ -37,7 +37,9 @@ impl Deferred {
         let mut kills = self.kills.lock().unwrap();
         loop {
             if !killed.is_empty()
-                && killed.iter().all(|name| kills.latest.get(name).is_some_and(|at| *at > since))
+                && killed
+                    .iter()
+                    .all(|name| kills.latest.get(name).is_some_and(|at| *at > since))
             {
                 break;
             }
@@ -70,7 +72,11 @@ mod tests {
         let waiter = deferred.clone();
         let started = Instant::now();
         let thread = std::thread::spawn(move || {
-            waiter.wait(since, &BTreeSet::from(["p".to_owned()]), Duration::from_secs(10))
+            waiter.wait(
+                since,
+                &BTreeSet::from(["p".to_owned()]),
+                Duration::from_secs(10),
+            )
         });
         deferred.killed("other");
         deferred.killed("p");
@@ -81,13 +87,21 @@ mod tests {
         let since = deferred.mark();
         deferred.killed("q");
         let started = Instant::now();
-        deferred.wait(since, &BTreeSet::from(["q".to_owned()]), Duration::from_secs(10));
+        deferred.wait(
+            since,
+            &BTreeSet::from(["q".to_owned()]),
+            Duration::from_secs(10),
+        );
         assert!(started.elapsed() < Duration::from_secs(5));
 
         // An earlier install's kill does not.
         let since = deferred.mark();
         let started = Instant::now();
-        deferred.wait(since, &BTreeSet::from(["q".to_owned()]), Duration::from_millis(50));
+        deferred.wait(
+            since,
+            &BTreeSet::from(["q".to_owned()]),
+            Duration::from_millis(50),
+        );
         assert!(started.elapsed() >= Duration::from_millis(50));
         let started = Instant::now();
         deferred.wait(since, &BTreeSet::new(), Duration::from_millis(50));

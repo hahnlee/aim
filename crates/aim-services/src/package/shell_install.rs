@@ -292,7 +292,9 @@ fn write(
 ) -> Result<i32, Exception> {
     with_session(ctx, owner, id, |ctx, target| {
         // openInFile: an unopened file fails the write with -1.
-        let Some(file) = ctx.install_input(path)? else { return Ok(-1) };
+        let Some(file) = ctx.install_input(path)? else {
+            return Ok(-1);
+        };
         if path.is_some_and(|p| p != "-") {
             let metadata = file
                 .metadata()
@@ -338,11 +340,18 @@ struct InstallResult {
 impl ResultState {
     /// Ends the wait with `DEAD_OBJECT` when the session owner dies, which
     /// then can no longer send the result.
-    fn follow_owner(self: &Arc<Self>, ctx: &Context<'_>) -> Result<super::shell::OwnerDeath, Exception> {
+    fn follow_owner(
+        self: &Arc<Self>,
+        ctx: &Context<'_>,
+    ) -> Result<super::shell::OwnerDeath, Exception> {
         let state = Arc::downgrade(self);
         ctx.link_package_owner_death(Box::new(move || {
             if let Some(state) = state.upgrade() {
-                state.result.lock().unwrap().push_back(Err(aim_binder_host::parcel::DEAD_OBJECT));
+                state
+                    .result
+                    .lock()
+                    .unwrap()
+                    .push_back(Err(aim_binder_host::parcel::DEAD_OBJECT));
                 state.changed.notify_all();
             }
         }))
@@ -811,7 +820,11 @@ fn uninstall(ctx: &mut Context<'_>, owner: Binder, args: &[String]) -> Result<i3
     result
 }
 /// `runInstallExisting` (AOSP android-16.0.0_r1 PackageManagerShellCommand).
-fn install_existing(ctx: &mut Context<'_>, owner: Binder, args: &[String]) -> Result<i32, Exception> {
+fn install_existing(
+    ctx: &mut Context<'_>,
+    owner: Binder,
+    args: &[String],
+) -> Result<i32, Exception> {
     // INSTALL_ALL_WHITELIST_RESTRICTED_PERMISSIONS, INSTALL_INSTANT_APP, INSTALL_FULL_APP.
     const ALL_RESTRICTED: i32 = 0x0040_0000;
     const INSTANT: i32 = 0x800;
@@ -826,7 +839,8 @@ fn install_existing(ctx: &mut Context<'_>, owner: Binder, args: &[String]) -> Re
             "--wait" => wait = true,
             "--restrict-permissions" => flags &= !ALL_RESTRICTED,
             _ => {
-                ctx.command.println(&format!("Error: Unknown option: {opt}"));
+                ctx.command
+                    .println(&format!("Error: Unknown option: {opt}"));
                 return Ok(1);
             }
         }
@@ -841,7 +855,9 @@ fn install_existing(ctx: &mut Context<'_>, owner: Binder, args: &[String]) -> Re
         let state = Arc::new(ResultState::default());
         let _owner = state.follow_owner(ctx)?;
         let binder = ctx.publish_receiver(Arc::new(Receiver(state.clone())))?;
-        ctx.command.println(&format!("Installing package {package} for user: {translated}"));
+        ctx.command.println(&format!(
+            "Installing package {package} for user: {translated}"
+        ));
         let result = (|| {
             let mut p = Parcel::new();
             installer::InstallExistingPackage {
@@ -871,7 +887,8 @@ fn install_existing(ctx: &mut Context<'_>, owner: Binder, args: &[String]) -> Re
     }
     .write(&mut p);
     let reply = ctx.invoke_public(pm::INSTALL_EXISTING_PACKAGE_AS_USER, p)?;
-    let status = pm::read_install_existing_package_as_user_reply(&mut reply.reader()).map_err(wire)??;
+    let status =
+        pm::read_install_existing_package_as_user_reply(&mut reply.reader()).map_err(wire)??;
     // INSTALL_FAILED_INVALID_URI throws NameNotFoundException, which the
     // command prints.
     if status == -3 {
@@ -880,12 +897,19 @@ fn install_existing(ctx: &mut Context<'_>, owner: Binder, args: &[String]) -> Re
         ));
         return Ok(1);
     }
-    ctx.command.println(&format!("Package {package} installed for user: {translated}"));
+    ctx.command.println(&format!(
+        "Package {package} installed for user: {translated}"
+    ));
     Ok(0)
 }
 /// `runBypassStagedInstallerCheck` and `runBypassAllowedApexUpdateCheck`:
 /// the next session skips that check, as `Boolean.parseBoolean` reads it.
-fn bypass(ctx: &mut Context<'_>, owner: Binder, command: &str, value: Option<&String>) -> Result<i32, Exception> {
+fn bypass(
+    ctx: &mut Context<'_>,
+    owner: Binder,
+    command: &str,
+    value: Option<&String>,
+) -> Result<i32, Exception> {
     let value = value.is_some_and(|value| value.eq_ignore_ascii_case("true"));
     let mut p = Parcel::new();
     let code = if command == "bypass-staged-installer-check" {
@@ -1124,28 +1148,45 @@ pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
 mod retained_install_file_tests {
     use super::*;
     use aim_binder_host::{local::LocalProcess, server, wire::RegularMetadata};
-    use std::{fs::OpenOptions, io::{Read, Seek, SeekFrom, Write}, os::fd::AsRawFd, sync::Weak};
+    use std::{
+        fs::OpenOptions,
+        io::{Read, Seek, SeekFrom, Write},
+        os::fd::AsRawFd,
+        sync::Weak,
+    };
     struct Incoming(u32);
     impl ReadParcelable for Incoming {
         fn read_from(reader: &mut Reader<'_>) -> aim_binder_host::parcel::Result<Self> {
-            if reader.read_i32()? != 0 { return Err(BAD_VALUE); }
+            if reader.read_i32()? != 0 {
+                return Err(BAD_VALUE);
+            }
             Ok(Self(reader.read_fd()?))
         }
     }
     struct SessionLeaf(Weak<LocalProcess>);
     impl Service for SessionLeaf {
-        fn descriptor(&self) -> &str { session::DESCRIPTOR }
-        fn accepts_fds(&self) -> bool { true }
+        fn descriptor(&self) -> &str {
+            session::DESCRIPTOR
+        }
+        fn accepts_fds(&self) -> bool {
+            true
+        }
         fn transact(&self, call: &mut Call<'_>) -> aim_binder_host::local::Reply {
             assert_eq!(call.code, session::WRITE);
             let input = session::Write::<Incoming>::read(&mut call.data)?;
             assert_eq!(call.data.remaining(), 0);
             let process = self.0.upgrade().unwrap();
             let file = process.file(input.fd.unwrap().0).unwrap();
-            assert_eq!(server::file_class(&file), Some(aim_binder_host::regular_file::CLASS));
+            assert_eq!(
+                server::file_class(&file),
+                Some(aim_binder_host::regular_file::CLASS)
+            );
             let retained = server::file_fd(&file).unwrap();
             // Production sizes the actual APK before consuming its retained owner.
-            assert_eq!(retained.metadata().unwrap().len() as i64, input.length_bytes);
+            assert_eq!(
+                retained.metadata().unwrap().len() as i64,
+                input.length_bytes
+            );
             let mut reply = Parcel::new();
             reply.write_file(retained.into_file_owner());
             Ok(reply)
@@ -1160,50 +1201,125 @@ mod retained_install_file_tests {
             .args(["--exact", "package::shell_install::retained_install_file_tests::real_install_leaf_reexport_fixture",
                 "--ignored", "--nocapture"])
             .output().unwrap();
-        assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr));
-        assert!(String::from_utf8_lossy(&output.stdout)
-            .contains("retained_install_file_tests::real_install_leaf_reexport_fixture ... ok"));
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("retained_install_file_tests::real_install_leaf_reexport_fixture ... ok")
+        );
     }
     #[test]
     #[ignore = "run alone by real_install_leaf_reexport_retains_regular_identity_and_writer"]
     fn real_install_leaf_reexport_fixture() {
-        let root=std::env::temp_dir().join(format!("aim-install-retained-file-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("aim-install-retained-file-{}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
-        let mut source=OpenOptions::new().read(true).write(true).create_new(true).open(root.join("apk")).unwrap();
+        let mut source = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(root.join("apk"))
+            .unwrap();
         source.write_all(b"real transfer payload").unwrap();
-        let writer=OpenOptions::new().read(true).write(true).create_new(true).open(root.join("writer")).unwrap();
-        let contender=OpenOptions::new().read(true).write(true).open(root.join("writer")).unwrap();
-        assert_eq!(unsafe {libc::flock(writer.as_raw_fd(),libc::LOCK_SH)},0);
-        let metadata=RegularMetadata { flags:2,uid:2000,gid:2000,
-            identity:aim_binder_host::regular_file::identity(source.as_fd()).unwrap(), writer:true };
-        let original=server::regular_file_from_fd(source.as_fd(),Some(writer.as_fd()),metadata).unwrap();
-        let retained=server::file_fd(&original).unwrap();
-        assert_eq!(retained.metadata().unwrap().len(), b"real transfer payload".len() as u64);
-        let downgraded=server::file_from_fd(retained.as_fd()).unwrap();
-        assert_ne!(server::file_class(&downgraded),Some(aim_binder_host::regular_file::CLASS));
+        let writer = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(root.join("writer"))
+            .unwrap();
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.join("writer"))
+            .unwrap();
+        assert_eq!(unsafe { libc::flock(writer.as_raw_fd(), libc::LOCK_SH) }, 0);
+        let metadata = RegularMetadata {
+            flags: 2,
+            uid: 2000,
+            gid: 2000,
+            identity: aim_binder_host::regular_file::identity(source.as_fd()).unwrap(),
+            writer: true,
+        };
+        let original =
+            server::regular_file_from_fd(source.as_fd(), Some(writer.as_fd()), metadata).unwrap();
+        let retained = server::file_fd(&original).unwrap();
+        assert_eq!(
+            retained.metadata().unwrap().len(),
+            b"real transfer payload".len() as u64
+        );
+        let downgraded = server::file_from_fd(retained.as_fd()).unwrap();
+        assert_ne!(
+            server::file_class(&downgraded),
+            Some(aim_binder_host::regular_file::CLASS)
+        );
         drop(downgraded);
-        let mut request=Parcel::new();
-        session::Write { name:Some("base.apk".into()),offset_bytes:0,length_bytes:b"real transfer payload".len() as i64,
-            fd:Some(Fd(retained.into_file_owner())) }.write(&mut request);
-        let driver=aim_binder_driver::Driver::new();
-        let process=LocalProcess::open(&driver,aim_binder_driver::Device::Binder,
-            aim_binder_driver::Credentials{pid:194123,euid:1000,security_context:None});
-        let Binder::Local(ptr)=process.add_service(Arc::new(SessionLeaf(Arc::downgrade(&process)))) else {panic!("local session")};
-        let reply=process.local_service(ptr).unwrap().transact(session::WRITE,&request,false).unwrap();
-        let file=process.file(reply.reader().read_fd().unwrap()).unwrap();
-        assert_eq!(server::file_class(&file),Some(aim_binder_host::regular_file::CLASS));
+        let mut request = Parcel::new();
+        session::Write {
+            name: Some("base.apk".into()),
+            offset_bytes: 0,
+            length_bytes: b"real transfer payload".len() as i64,
+            fd: Some(Fd(retained.into_file_owner())),
+        }
+        .write(&mut request);
+        let driver = aim_binder_driver::Driver::new();
+        let process = LocalProcess::open(
+            &driver,
+            aim_binder_driver::Device::Binder,
+            aim_binder_driver::Credentials {
+                pid: 194123,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let Binder::Local(ptr) =
+            process.add_service(Arc::new(SessionLeaf(Arc::downgrade(&process))))
+        else {
+            panic!("local session")
+        };
+        let reply = process
+            .local_service(ptr)
+            .unwrap()
+            .transact(session::WRITE, &request, false)
+            .unwrap();
+        let file = process.file(reply.reader().read_fd().unwrap()).unwrap();
+        assert_eq!(
+            server::file_class(&file),
+            Some(aim_binder_host::regular_file::CLASS)
+        );
         // The exact allocation capability carries its metadata and writer receipt.
-        assert!(Arc::ptr_eq(&file,&original));
-        let mut held=server::file_fd(&file).unwrap();
-        assert_eq!(aim_binder_host::regular_file::identity(held.as_fd()).unwrap(),aim_binder_host::regular_file::identity(source.as_fd()).unwrap());
-        drop(reply);drop(request);drop(original);drop(source);drop(writer);drop(file);
-        held.seek(SeekFrom::Start(0)).unwrap();let mut actual=Vec::new();held.read_to_end(&mut actual).unwrap();
-        assert_eq!(actual,b"real transfer payload");
-        assert_eq!(unsafe {libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},-1);
-        assert_eq!(std::io::Error::last_os_error().raw_os_error(),Some(libc::EWOULDBLOCK));
+        assert!(Arc::ptr_eq(&file, &original));
+        let mut held = server::file_fd(&file).unwrap();
+        assert_eq!(
+            aim_binder_host::regular_file::identity(held.as_fd()).unwrap(),
+            aim_binder_host::regular_file::identity(source.as_fd()).unwrap()
+        );
+        drop(reply);
+        drop(request);
+        drop(original);
+        drop(source);
+        drop(writer);
+        drop(file);
+        held.seek(SeekFrom::Start(0)).unwrap();
+        let mut actual = Vec::new();
+        held.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, b"real transfer payload");
+        assert_eq!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EWOULDBLOCK)
+        );
         drop(held);
-        assert_eq!(unsafe {libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},0);
+        assert_eq!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
         drop(contender);
         std::fs::remove_dir_all(root).unwrap();
     }

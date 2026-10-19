@@ -257,7 +257,10 @@ impl Entry {
                 let bytes = reader.since(start).0;
                 let mut value = Reader::new(&bytes[..length], &[]);
                 match read_serializable(&mut value)? {
-                    SerialValue::NullName => {groups.push(None); continue;}
+                    SerialValue::NullName => {
+                        groups.push(None);
+                        continue;
+                    }
                     _ => return Ok(None),
                 }
             }

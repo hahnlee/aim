@@ -17,7 +17,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aim_binder_host::local::{Call, LocalService, Strong};
-use aim_binder_host::parcel::{Binder, DEAD_OBJECT, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, StatusCode};
+use aim_binder_host::parcel::{
+    Binder, DEAD_OBJECT, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, StatusCode,
+};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_os_iremotecallback as remote_callback;
 
@@ -49,7 +51,8 @@ const EXTRA_DONT_KILL_APP: &str = "android.intent.extra.DONT_KILL_APP";
 const EXTRA_UID: &str = "android.intent.extra.UID";
 const EXTRA_USER_HANDLE: &str = "android.intent.extra.user_handle";
 const EXTRA_VISIBILITY_ALLOW_LIST: &str = "android.intent.extra.VISIBILITY_ALLOW_LIST";
-const EXTRA_PACKAGE_MONITOR_CALLBACK_RESULT: &str = "android.content.pm.extra.EXTRA_PACKAGE_MONITOR_CALLBACK_RESULT";
+const EXTRA_PACKAGE_MONITOR_CALLBACK_RESULT: &str =
+    "android.content.pm.extra.EXTRA_PACKAGE_MONITOR_CALLBACK_RESULT";
 const FLAG_RECEIVER_REGISTERED_ONLY: i32 = 0x4000_0000;
 const FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT: i32 = 0x0400_0000;
 const ACCESS_INSTANT_APPS: &str = "android.permission.ACCESS_INSTANT_APPS";
@@ -125,13 +128,25 @@ impl Writes {
     }
 
     /// `setEnabledSettings` of `settings` (of one user) by `call`'s caller.
-    pub(super) fn set_enabled(self: &Arc<Self>, call: &Call<'_>, settings: &[Setting]) -> Result<(), Exception> {
+    pub(super) fn set_enabled(
+        self: &Arc<Self>,
+        call: &Call<'_>,
+        settings: &[Setting],
+    ) -> Result<(), Exception> {
         let mut store = self.store.lock().unwrap();
         let (before, resolution) = self.host.packages()?;
-        let query = Query { state: &before, filter: &resolution.apps_filter, calling_uid: call.sender_euid as i32 };
-        let (after, changed) = match decide(&query, settings, call.sender_pid, &|package| self.protected(package)) {
+        let query = Query {
+            state: &before,
+            filter: &resolution.apps_filter,
+            calling_uid: call.sender_euid as i32,
+        };
+        let (after, changed) = match decide(&query, settings, call.sender_pid, &|package| {
+            self.protected(package)
+        }) {
             Err(NotModelled(reason)) => {
-                return Err(self.host.unimplemented_named("package", &format!("{reason} (#1425)")));
+                return Err(self
+                    .host
+                    .unimplemented_named("package", &format!("{reason} (#1425)")));
             }
             Ok(decided) => match decided? {
                 Some(decided) => decided,
@@ -144,11 +159,17 @@ impl Writes {
         }
         let user = settings[changed[0]].user;
         if store.is_none() {
-            let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("package restrictions: {e}"));
-            *store = Some(Store::open(self.host.data()?, &[user as u32]).map_err(state)?.ok_or_else(|| state("no package state".into()))?);
+            let state =
+                |e: String| Exception::new(EX_ILLEGAL_STATE, format!("package restrictions: {e}"));
+            *store = Some(
+                Store::open(self.host.data()?, &[user as u32])
+                    .map_err(state)?
+                    .ok_or_else(|| state("no package state".into()))?,
+            );
         }
         let (written, error) = persist(store.as_mut().expect("opened"), user, &after);
-        self.host.user_states_changed(&before, Arc::new(applied(&before, user, &written)))?;
+        self.host
+            .user_states_changed(&before, Arc::new(applied(&before, user, &written)))?;
         drop(store);
         if let Some(e) = error {
             return Err(e);
@@ -158,7 +179,11 @@ impl Writes {
             let (send_now, deferred) = partition(settings, &changed, &mut pending.0);
             if deferred && !pending.1 {
                 pending.1 = true;
-                let delay = if self.started.elapsed() > STARTUP { BROADCAST_DELAY } else { BROADCAST_DELAY_DURING_STARTUP };
+                let delay = if self.started.elapsed() > STARTUP {
+                    BROADCAST_DELAY
+                } else {
+                    BROADCAST_DELAY_DURING_STARTUP
+                };
                 let me = self.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(delay);
@@ -181,7 +206,11 @@ impl Writes {
         if self.host.device_policies()?.owned() {
             return Ok(None);
         }
-        let provisioning = self.host.inputs()?.packages.framework_string("config_deviceProvisioningPackage");
+        let provisioning = self
+            .host
+            .inputs()?
+            .packages
+            .framework_string("config_deviceProvisioningPackage");
         Ok(Some(provisioning.as_deref() == Some(package)))
     }
 
@@ -201,14 +230,22 @@ impl Writes {
             }
         };
         for ((user, package), components) in pending {
-            let Some(ps) = state.packages.get(&package) else { continue };
+            let Some(ps) = state.packages.get(&package) else {
+                continue;
+            };
             self.package_changed(&package, true, components, uid(user, ps.app_id));
         }
     }
 
     /// `BroadcastHelper.sendPackageChangedBroadcast`: to the receivers of
     /// the package's user, and its package monitors.
-    fn package_changed(self: &Arc<Self>, package: &str, dont_kill: bool, components: Vec<String>, package_uid: i32) {
+    fn package_changed(
+        self: &Arc<Self>,
+        package: &str,
+        dont_kill: bool,
+        components: Vec<String>,
+        package_uid: i32,
+    ) {
         let (state, resolution) = match self.host.packages() {
             Ok(packages) => packages,
             Err(e) => {
@@ -216,10 +253,18 @@ impl Writes {
                 return;
             }
         };
-        let Some(ps) = state.packages.get(package).filter(|ps| ps.pkg.is_some()) else { return };
+        let Some(ps) = state.packages.get(package).filter(|ps| ps.pkg.is_some()) else {
+            return;
+        };
         let user = user_id(package_uid);
         let instant = user_state(ps, user).instant_app;
-        let allow_list = if instant { None } else { resolution.apps_filter.visibility_allow_list(&state, ps, user) };
+        let allow_list = if instant {
+            None
+        } else {
+            resolution
+                .apps_filter
+                .visibility_allow_list(&state, ps, user)
+        };
         let shared: Vec<String> = ps
             .shared_user
             .as_ref()
@@ -227,14 +272,31 @@ impl Writes {
             .map(|su| {
                 su.packages
                     .iter()
-                    .filter(|p| state.packages.get(*p).is_some_and(|ps| user_state(ps, user).installed))
+                    .filter(|p| {
+                        state
+                            .packages
+                            .get(*p)
+                            .is_some_and(|ps| user_state(ps, user).installed)
+                    })
                     .cloned()
                     .collect()
             })
             .unwrap_or_default();
-        let reduce = state.system.flags.iter().any(|(n, on)| n == REDUCE_BROADCASTS && *on);
+        let reduce = state
+            .system
+            .flags
+            .iter()
+            .any(|(n, on)| n == REDUCE_BROADCASTS && *on);
         let not_exported = not_exported(ps, &components);
-        let change = Changed { package: package.into(), dont_kill, components, uid: package_uid, user, instant, allow_list };
+        let change = Changed {
+            package: package.into(),
+            dont_kill,
+            components,
+            uid: package_uid,
+            user,
+            instant,
+            allow_list,
+        };
         let me = self.clone();
         self.post(move || {
             for (components, target) in change.broadcasts(reduce, &not_exported, &shared) {
@@ -250,33 +312,63 @@ impl Writes {
     fn send(&self, change: &Changed, components: &[String], target: Option<&str>) {
         let (flags, extras) = change.broadcast(components, target);
         let data = Uri::preferred_opaque("package", &change.package);
-        let intent = RawIntent::with_data(Some(ACTION_PACKAGE_CHANGED), Some(&data), target, flags, &extras);
+        let intent = RawIntent::with_data(
+            Some(ACTION_PACKAGE_CHANGED),
+            Some(&data),
+            target,
+            flags,
+            &extras,
+        );
         if !change.dont_kill {
-            self.host.kill_package_processes(&change.package, change.uid as u32);
+            self.host
+                .kill_package_processes(&change.package, change.uid as u32);
         }
-        let required: Vec<String> = if change.instant { vec![ACCESS_INSTANT_APPS.into()] } else { Vec::new() };
-        let allow_list = if change.instant { None } else { change.allow_list.as_deref() };
-        self.host.broadcasts.send_from_package_manager(&self.host, intent, change.user, allow_list, &required);
+        let required: Vec<String> = if change.instant {
+            vec![ACCESS_INSTANT_APPS.into()]
+        } else {
+            Vec::new()
+        };
+        let allow_list = if change.instant {
+            None
+        } else {
+            change.allow_list.as_deref()
+        };
+        self.host.broadcasts.send_from_package_manager(
+            &self.host,
+            intent,
+            change.user,
+            allow_list,
+            &required,
+        );
     }
 
     /// `PackageMonitorCallbackHelper.notifyPackageChanged`: each monitor
     /// of the user that may see the package is sent the intent.
     fn notify_monitors(&self, change: &Changed) {
         let mut request = Parcel::new();
-        remote_callback::SendResult { data: Some(BundleOf(&change.monitor_result())) }.write(&mut request);
-        let targets: Vec<(Binder, Arc<Callback>)> = self
-            .monitors
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|m| m.user == -1 || m.user == change.user)
-            .filter(|m| {
-                change.allow_list.as_ref().is_none_or(|allowed| app_id(m.uid) == SYSTEM_UID || allowed.contains(&m.uid))
-            })
-            .map(|m| (m.binder, m.callback.clone()))
-            .collect();
+        remote_callback::SendResult {
+            data: Some(BundleOf(&change.monitor_result())),
+        }
+        .write(&mut request);
+        let targets: Vec<(Binder, Arc<Callback>)> =
+            self.monitors
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.user == -1 || m.user == change.user)
+                .filter(|m| {
+                    change.allow_list.as_ref().is_none_or(|allowed| {
+                        app_id(m.uid) == SYSTEM_UID || allowed.contains(&m.uid)
+                    })
+                })
+                .map(|m| (m.binder, m.callback.clone()))
+                .collect();
         for (binder, callback) in targets {
-            if callback.transact(remote_callback::SEND_RESULT, &request).err() == Some(DEAD_OBJECT) {
+            if callback
+                .transact(remote_callback::SEND_RESULT, &request)
+                .err()
+                == Some(DEAD_OBJECT)
+            {
                 self.unregister_monitor(Some(binder));
             }
         }
@@ -284,7 +376,12 @@ impl Writes {
 
     /// `registerPackageMonitorCallback`: the callback is kept for the
     /// user `handleIncomingUser` resolves, until it dies.
-    pub(super) fn register_monitor(self: &Arc<Self>, call: &Call<'_>, callback: Option<Binder>, user: i32) -> Result<(), Exception> {
+    pub(super) fn register_monitor(
+        self: &Arc<Self>,
+        call: &Call<'_>,
+        callback: Option<Binder>,
+        user: i32,
+    ) -> Result<(), Exception> {
         let uid = call.sender_euid as i32;
         let user = self.host.incoming_user(uid, user, false)?;
         let Some(binder) = callback else {
@@ -313,7 +410,12 @@ impl Writes {
                 None => return Err(Exception::new(EX_NULL_POINTER, "callback")),
             },
         };
-        monitors.push(Monitor { binder, callback: Arc::new(callback), user, uid });
+        monitors.push(Monitor {
+            binder,
+            callback: Arc::new(callback),
+            user,
+            uid,
+        });
         Ok(())
     }
 
@@ -352,9 +454,19 @@ fn decide(
             compressed_enabled: None,
             suspension_cleanup: false,
         };
-        let current = |ps: &PackageState, user: i32| after.get(&ps.name).cloned().unwrap_or_else(|| Enabled::of(ps, user));
-        let was = query.state.packages.get(&setting.package).map(|ps| current(ps, setting.user));
-        let enabled = match decide_with_policy(query, setting, calling_pid, &current, Some(policy))? {
+        let current = |ps: &PackageState, user: i32| {
+            after
+                .get(&ps.name)
+                .cloned()
+                .unwrap_or_else(|| Enabled::of(ps, user))
+        };
+        let was = query
+            .state
+            .packages
+            .get(&setting.package)
+            .map(|ps| current(ps, setting.user));
+        let enabled = match decide_with_policy(query, setting, calling_pid, &current, Some(policy))?
+        {
             Ok(Some(enabled)) => enabled,
             Ok(None) => return Ok(Ok(None)),
             Err(e) => return Ok(Err(e)),
@@ -371,14 +483,24 @@ fn decide(
 /// `package-restrictions.xml` as `Settings.writePackageRestrictionsLPr`
 /// writes them: the states written (a failed write may have written its
 /// file), and the error.
-fn persist(store: &mut Store, user: i32, after: &BTreeMap<String, Enabled>) -> (Vec<(String, Enabled)>, Option<Exception>) {
+fn persist(
+    store: &mut Store,
+    user: i32,
+    after: &BTreeMap<String, Enabled>,
+) -> (Vec<(String, Enabled)>, Option<Exception>) {
     let mut written = Vec::new();
     for (package, enabled) in after {
         if let Err(e) = store.commit_enabled(package, user as u32, enabled) {
             if e.committed {
                 written.push((package.clone(), enabled.clone()));
             }
-            return (written, Some(Exception::new(EX_ILLEGAL_STATE, format!("package restrictions: {}", e.message))));
+            return (
+                written,
+                Some(Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("package restrictions: {}", e.message),
+                )),
+            );
         }
         written.push((package.clone(), enabled.clone()));
     }
@@ -389,7 +511,12 @@ fn persist(store: &mut Store, user: i32, after: &BTreeMap<String, Enabled>) -> (
 fn applied(before: &State, user: i32, written: &[(String, Enabled)]) -> State {
     let mut state = before.clone();
     for (package, enabled) in written {
-        Plan { package: package.clone(), user: Some(user), change: Change::Enabled(enabled.clone()) }.apply(&mut state);
+        Plan {
+            package: package.clone(),
+            user: Some(user),
+            change: Change::Enabled(enabled.clone()),
+        }
+        .apply(&mut state);
     }
     state
 }
@@ -405,7 +532,10 @@ fn partition(
     let mut send_now: Vec<(String, Vec<String>)> = Vec::new();
     let mut deferred = false;
     for setting in changed.iter().map(|&i| &settings[i]) {
-        let name = setting.class.clone().unwrap_or_else(|| setting.package.clone());
+        let name = setting
+            .class
+            .clone()
+            .unwrap_or_else(|| setting.package.clone());
         let key = (setting.user, setting.package.clone());
         if setting.flags & DONT_KILL_APP == 0 {
             let at = match send_now.iter().position(|(p, _)| *p == setting.package) {
@@ -436,7 +566,9 @@ fn add(list: &mut Vec<String>, name: String) {
 /// `BroadcastHelper.getAllNotExportedComponents`: those of `components`
 /// that are receivers, providers, services or activities not exported.
 fn not_exported(ps: &PackageState, components: &[String]) -> Vec<String> {
-    let Some(pkg) = ps.pkg.as_deref() else { return Vec::new() };
+    let Some(pkg) = ps.pkg.as_deref() else {
+        return Vec::new();
+    };
     let mains = pkg
         .receivers
         .iter()
@@ -478,7 +610,12 @@ impl Changed {
     /// whole set to all, or, with `reduce` and only components changed,
     /// the not exported ones to the system, the package and its shared
     /// user's packages, the exported ones to all.
-    fn broadcasts(&self, reduce: bool, not_exported: &[String], shared: &[String]) -> Vec<(Vec<String>, Option<String>)> {
+    fn broadcasts(
+        &self,
+        reduce: bool,
+        not_exported: &[String],
+        shared: &[String],
+    ) -> Vec<(Vec<String>, Option<String>)> {
         if self.components.contains(&self.package) || !reduce {
             return vec![(self.components.clone(), None)];
         }
@@ -492,7 +629,12 @@ impl Changed {
                 out.push((not_exported.to_vec(), Some(p.clone())));
             }
         }
-        let exported: Vec<String> = self.components.iter().filter(|c| !not_exported.contains(c)).cloned().collect();
+        let exported: Vec<String> = self
+            .components
+            .iter()
+            .filter(|c| !not_exported.contains(c))
+            .cloned()
+            .collect();
         if !exported.is_empty() {
             out.push((exported, None));
         }
@@ -503,14 +645,21 @@ impl Changed {
     /// `target` (`sendPackageChangedBroadcastWithPermissions`, then
     /// `doSendBroadcast`): only registered receivers unless the package's
     /// own state changed.
-    fn broadcast(&self, components: &[String], target: Option<&str>) -> (i32, Vec<(&'static str, Value)>) {
+    fn broadcast(
+        &self,
+        components: &[String],
+        target: Option<&str>,
+    ) -> (i32, Vec<(&'static str, Value)>) {
         let mut flags = FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT;
         if !components.contains(&self.package) {
             flags |= FLAG_RECEIVER_REGISTERED_ONLY;
         }
         let mut extras = self.extras(components);
         if let (Some(allowed), Some(PLATFORM_PACKAGE)) = (&self.allow_list, target) {
-            extras.push((EXTRA_VISIBILITY_ALLOW_LIST, Value::IntArray(allowed.clone())));
+            extras.push((
+                EXTRA_VISIBILITY_ALLOW_LIST,
+                Value::IntArray(allowed.clone()),
+            ));
         }
         extras.push((EXTRA_USER_HANDLE, Value::Int(self.user)));
         (flags, extras)
@@ -522,20 +671,30 @@ impl Changed {
         let mut extras = self.extras(&self.components);
         extras.push((EXTRA_USER_HANDLE, Value::Int(self.user)));
         let data = Uri::preferred_opaque("package", &self.package);
-        let intent = RawIntent::with_data(Some(ACTION_PACKAGE_CHANGED), Some(&data), None, 0, &extras);
+        let intent =
+            RawIntent::with_data(Some(ACTION_PACKAGE_CHANGED), Some(&data), None, 0, &extras);
         let mut bytes = Parcel::new();
         intent.write_to(&mut bytes);
         [(
             EXTRA_PACKAGE_MONITOR_CALLBACK_RESULT,
-            Value::Parcelable { class: "android.content.Intent".into(), data: bytes.data().to_vec() },
+            Value::Parcelable {
+                class: "android.content.Intent".into(),
+                data: bytes.data().to_vec(),
+            },
         )]
     }
 
     /// The change's extras naming `components`.
     fn extras(&self, components: &[String]) -> Vec<(&'static str, Value)> {
         vec![
-            (EXTRA_CHANGED_COMPONENT_NAME, Value::String(components.first().cloned())),
-            (EXTRA_CHANGED_COMPONENT_NAME_LIST, Value::StringArray(components.iter().cloned().map(Some).collect())),
+            (
+                EXTRA_CHANGED_COMPONENT_NAME,
+                Value::String(components.first().cloned()),
+            ),
+            (
+                EXTRA_CHANGED_COMPONENT_NAME_LIST,
+                Value::StringArray(components.iter().cloned().map(Some).collect()),
+            ),
             (EXTRA_DONT_KILL_APP, Value::Bool(self.dont_kill)),
             (EXTRA_UID, Value::Int(self.uid)),
         ]
@@ -578,7 +737,12 @@ mod tests {
     }
 
     fn package(name: &str, app_id: i32) -> PackageState {
-        let mut ps = PackageState { name: name.into(), app_id, target_sdk_version: 35, ..PackageState::default() };
+        let mut ps = PackageState {
+            name: name.into(),
+            app_id,
+            target_sdk_version: 35,
+            ..PackageState::default()
+        };
         ps.pkg = Some(Arc::new(AndroidPackage {
             package_name: name.into(),
             target_sdk_version: 35,
@@ -586,14 +750,30 @@ mod tests {
             receivers: vec![component(RECEIVER, false)],
             ..AndroidPackage::default()
         }));
-        ps.users.insert(0, PackageUserState { installed: true, ..PackageUserState::default() });
+        ps.users.insert(
+            0,
+            PackageUserState {
+                installed: true,
+                ..PackageUserState::default()
+            },
+        );
         ps
     }
 
     fn state() -> State {
         State {
-            packages: [package(APP, 10100), package(OTHER, 10101)].into_iter().map(|p| (p.name.clone(), p)).collect(),
-            users: BTreeMap::from([(0, User { id: 0, unlocking_or_unlocked: true, ..User::default() })]),
+            packages: [package(APP, 10100), package(OTHER, 10101)]
+                .into_iter()
+                .map(|p| (p.name.clone(), p))
+                .collect(),
+            users: BTreeMap::from([(
+                0,
+                User {
+                    id: 0,
+                    unlocking_or_unlocked: true,
+                    ..User::default()
+                },
+            )]),
             ..State::default()
         }
     }
@@ -609,9 +789,18 @@ mod tests {
         }
     }
 
-    fn decided(state: &State, uid: i32, settings: &[Setting], protected: Option<bool>) -> Result<Result<Option<Decided>, Exception>, NotModelled> {
+    fn decided(
+        state: &State,
+        uid: i32,
+        settings: &[Setting],
+        protected: Option<bool>,
+    ) -> Result<Result<Option<Decided>, Exception>, NotModelled> {
         let filter = AppsFilter::new(state, &Config::default()).unwrap();
-        let query = Query { state, filter: &filter, calling_uid: uid };
+        let query = Query {
+            state,
+            filter: &filter,
+            calling_uid: uid,
+        };
         decide(&query, settings, 77, &|_| Ok(protected))
     }
 
@@ -621,16 +810,29 @@ mod tests {
     #[test]
     fn an_app_changes_its_own_components_only() {
         let state = state();
-        let settings = [setting(Some(RECEIVER), 2, DONT_KILL_APP), setting(Some(MAIN), 0, 0)];
-        let (after, changed) = decided(&state, 10100, &settings, None).unwrap().unwrap().unwrap();
+        let settings = [
+            setting(Some(RECEIVER), 2, DONT_KILL_APP),
+            setting(Some(MAIN), 0, 0),
+        ];
+        let (after, changed) = decided(&state, 10100, &settings, None)
+            .unwrap()
+            .unwrap()
+            .unwrap();
         // Restoring the default of a component in neither list changes nothing.
         assert_eq!(changed, [0]);
-        assert_eq!(after[APP].disabled_components, [RECEIVER.to_string()].into());
-        let e = decided(&state, 10101, &settings, Some(false)).unwrap().unwrap_err();
+        assert_eq!(
+            after[APP].disabled_components,
+            [RECEIVER.to_string()].into()
+        );
+        let e = decided(&state, 10101, &settings, Some(false))
+            .unwrap()
+            .unwrap_err();
         assert_eq!(e.code, EX_SECURITY);
         assert_eq!(
             e.message,
-            format!("Attempt to change component state; pid=77, uid=10101, component=ComponentInfo{{{APP}/{RECEIVER}}}")
+            format!(
+                "Attempt to change component state; pid=77, uid=10101, component=ComponentInfo{{{APP}/{RECEIVER}}}"
+            )
         );
         // One that holds the permission and sees the package (`<queries>`).
         let mut granted = state.clone();
@@ -638,14 +840,31 @@ mod tests {
         other.users.get_mut(&0).unwrap().granted_permissions =
             vec!["android.permission.CHANGE_COMPONENT_ENABLED_STATE".into()];
         Arc::make_mut(other.pkg.as_mut().unwrap()).queries_packages = vec![APP.into()];
-        let e = decided(&granted, 10101, &settings, Some(true)).unwrap().unwrap_err();
-        assert_eq!(e.message, format!("Cannot disable a protected package: {APP}"));
+        let e = decided(&granted, 10101, &settings, Some(true))
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            e.message,
+            format!("Cannot disable a protected package: {APP}")
+        );
         assert!(decided(&granted, 10101, &settings, None).is_err());
-        assert_eq!(decided(&granted, 10101, &settings, Some(false)).unwrap().unwrap().unwrap().1, [0]);
+        assert_eq!(
+            decided(&granted, 10101, &settings, Some(false))
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .1,
+            [0]
+        );
         // A user that does not exist: nothing to do.
         let mut absent = setting(Some(RECEIVER), 2, 0);
         absent.user = 10;
-        assert!(decided(&state, 10100, &[absent], None).unwrap().unwrap().is_none());
+        assert!(
+            decided(&state, 10100, &[absent], None)
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// A disposable `/data` with the package's settings and user 0's
@@ -687,20 +906,33 @@ mod tests {
     fn a_change_is_persisted_and_applied() {
         let data = Data::new();
         let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
-        let enabled = Enabled { disabled_components: [RECEIVER.to_string()].into(), ..Enabled::default() };
+        let enabled = Enabled {
+            disabled_components: [RECEIVER.to_string()].into(),
+            ..Enabled::default()
+        };
         let after = BTreeMap::from([(APP.to_string(), enabled.clone())]);
         let (written, error) = persist(&mut store, 0, &after);
         assert!(error.is_none());
         assert_eq!(written, [(APP.to_string(), enabled)]);
         let path = data.0.join("system/users/0/package-restrictions.xml");
-        assert!(std::fs::read(&path).unwrap().starts_with(aim_android_xml::abx::MAGIC));
+        assert!(
+            std::fs::read(&path)
+                .unwrap()
+                .starts_with(aim_android_xml::abx::MAGIC)
+        );
         let reread = crate::package::State::read(&data.0, &[0]).unwrap().unwrap();
         let user = &reread.users[0].1.restrictions.packages[0].1;
         assert!(user.stopped && user.installed);
-        assert_eq!(user.disabled_components.as_deref(), Some([RECEIVER.to_string()].as_slice()));
+        assert_eq!(
+            user.disabled_components.as_deref(),
+            Some([RECEIVER.to_string()].as_slice())
+        );
         let before = state();
         let applied = applied(&before, 0, &written);
-        assert_eq!(user_state(&applied.packages[APP], 0).disabled_components, [RECEIVER.to_string()]);
+        assert_eq!(
+            user_state(&applied.packages[APP], 0).disabled_components,
+            [RECEIVER.to_string()]
+        );
         assert_eq!(applied.packages[OTHER], before.packages[OTHER]);
     }
 
@@ -708,14 +940,21 @@ mod tests {
     /// purges the package's deferred one.
     #[test]
     fn dont_kill_app_defers_the_broadcast() {
-        let settings = [setting(Some(RECEIVER), 2, DONT_KILL_APP), setting(Some(MAIN), 2, 0), setting(None, 2, 0)];
+        let settings = [
+            setting(Some(RECEIVER), 2, DONT_KILL_APP),
+            setting(Some(MAIN), 2, 0),
+            setting(None, 2, 0),
+        ];
         let mut pending = BTreeMap::new();
         let (now, deferred) = partition(&settings, &[0], &mut pending);
         assert!(now.is_empty() && deferred);
         assert_eq!(pending[&(0, APP.to_string())], [RECEIVER]);
         let (now, deferred) = partition(&settings, &[1, 2], &mut pending);
         assert!(!deferred && pending.is_empty());
-        assert_eq!(now, [(APP.to_string(), vec![MAIN.to_string(), APP.to_string()])]);
+        assert_eq!(
+            now,
+            [(APP.to_string(), vec![MAIN.to_string(), APP.to_string()])]
+        );
     }
 
     fn changed(components: &[&str], allow_list: Option<Vec<i32>>) -> Changed {
@@ -739,7 +978,10 @@ mod tests {
         let not_exported = not_exported(&state().packages[APP], &c.components);
         assert_eq!(not_exported, [RECEIVER]);
         let shared = [APP.to_string(), "org.example.shared".to_string()];
-        assert_eq!(c.broadcasts(false, &not_exported, &shared), [(c.components.clone(), None)]);
+        assert_eq!(
+            c.broadcasts(false, &not_exported, &shared),
+            [(c.components.clone(), None)]
+        );
         let to = |p: &str| Some(p.to_string());
         assert_eq!(
             c.broadcasts(true, &not_exported, &shared),
@@ -751,7 +993,10 @@ mod tests {
             ]
         );
         let whole = changed(&[APP], None);
-        assert_eq!(whole.broadcasts(true, &[], &[]), [(vec![APP.to_string()], None)]);
+        assert_eq!(
+            whole.broadcasts(true, &[], &[]),
+            [(vec![APP.to_string()], None)]
+        );
     }
 
     /// `sendPackageChangedBroadcastWithPermissions`' extras, the visibility
@@ -760,12 +1005,21 @@ mod tests {
     fn a_change_carries_the_original_extras() {
         let c = changed(&[RECEIVER, MAIN], Some(vec![10100]));
         let (flags, extras) = c.broadcast(&c.components, Some("android"));
-        assert_eq!(flags, FLAG_RECEIVER_REGISTERED_ONLY | FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT);
+        assert_eq!(
+            flags,
+            FLAG_RECEIVER_REGISTERED_ONLY | FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT
+        );
         assert_eq!(
             extras,
             [
-                (EXTRA_CHANGED_COMPONENT_NAME, Value::String(Some(RECEIVER.into()))),
-                (EXTRA_CHANGED_COMPONENT_NAME_LIST, Value::StringArray(vec![Some(RECEIVER.into()), Some(MAIN.into())])),
+                (
+                    EXTRA_CHANGED_COMPONENT_NAME,
+                    Value::String(Some(RECEIVER.into()))
+                ),
+                (
+                    EXTRA_CHANGED_COMPONENT_NAME_LIST,
+                    Value::StringArray(vec![Some(RECEIVER.into()), Some(MAIN.into())])
+                ),
                 (EXTRA_DONT_KILL_APP, Value::Bool(true)),
                 (EXTRA_UID, Value::Int(10100)),
                 (EXTRA_VISIBILITY_ALLOW_LIST, Value::IntArray(vec![10100])),
@@ -773,9 +1027,16 @@ mod tests {
             ]
         );
         let (_, extras) = c.broadcast(&c.components, None);
-        assert!(!extras.iter().any(|(k, _)| *k == EXTRA_VISIBILITY_ALLOW_LIST));
+        assert!(
+            !extras
+                .iter()
+                .any(|(k, _)| *k == EXTRA_VISIBILITY_ALLOW_LIST)
+        );
         let whole = changed(&[APP], None);
-        assert_eq!(whole.broadcast(&whole.components, None).0, FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT);
+        assert_eq!(
+            whole.broadcast(&whole.components, None).0,
+            FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT
+        );
     }
 
     /// A package monitor is sent a bundle holding the change's intent.
@@ -784,15 +1045,30 @@ mod tests {
         let c = changed(&[MAIN], None);
         let mut p = Parcel::new();
         bundle::write(&mut p, &c.monitor_result());
-        let read = bundle::read(&mut Reader::new(p.data(), &[])).unwrap().unwrap();
-        let Some(Value::Lazy { kind: 4, start, len }) = read.get(EXTRA_PACKAGE_MONITOR_CALLBACK_RESULT).cloned() else {
+        let read = bundle::read(&mut Reader::new(p.data(), &[]))
+            .unwrap()
+            .unwrap();
+        let Some(Value::Lazy {
+            kind: 4,
+            start,
+            len,
+        }) = read.get(EXTRA_PACKAGE_MONITOR_CALLBACK_RESULT).cloned()
+        else {
             panic!("no parcelable");
         };
         let mut r = Reader::new(&p.data()[start..start + len], &[]);
-        assert_eq!(r.read_string16().unwrap().as_deref(), Some("android.content.Intent"));
-        let intent = crate::package::intent::Intent::read(&mut r, &mut crate::package::intent_filter::Plain).unwrap();
+        assert_eq!(
+            r.read_string16().unwrap().as_deref(),
+            Some("android.content.Intent")
+        );
+        let intent =
+            crate::package::intent::Intent::read(&mut r, &mut crate::package::intent_filter::Plain)
+                .unwrap();
         assert_eq!(intent.action.as_deref(), Some(ACTION_PACKAGE_CHANGED));
-        assert_eq!(intent.data.as_ref().map(|d| d.as_str()), Some("package:org.example.app"));
+        assert_eq!(
+            intent.data.as_ref().map(|d| d.as_str()),
+            Some("package:org.example.app")
+        );
         // The bundle says it holds an intent.
         assert_eq!(p.data()[p.data().len() - 4..], 1i32.to_le_bytes());
     }
@@ -802,6 +1078,9 @@ mod tests {
     fn the_allow_list_is_who_sees_the_package() {
         let state = state();
         let filter = AppsFilter::new(&state, &Config::default()).unwrap();
-        assert_eq!(filter.visibility_allow_list(&state, &state.packages[APP], 0), Some(vec![10100]));
+        assert_eq!(
+            filter.visibility_allow_list(&state, &state.packages[APP], 0),
+            Some(vec![10100])
+        );
     }
 }

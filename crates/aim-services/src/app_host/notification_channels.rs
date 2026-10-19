@@ -936,10 +936,20 @@ impl Preferences {
     }
 
     /// `setNotificationDelegate`: an enabled delegate of the package.
-    pub fn set_delegate(&mut self, name: &str, uid: i32, delegate: &str, delegate_uid: i32, defaults: &Defaults<'_>) {
+    pub fn set_delegate(
+        &mut self,
+        name: &str,
+        uid: i32,
+        delegate: &str,
+        delegate_uid: i32,
+        defaults: &Defaults<'_>,
+    ) {
         self.package_or_create(name, uid, defaults).delegate = Some(Element {
             name: "delegate".into(),
-            attrs: vec![("name".into(), Value::String(delegate.into())), ("uid".into(), Value::Int(delegate_uid))],
+            attrs: vec![
+                ("name".into(), Value::String(delegate.into())),
+                ("uid".into(), Value::Int(delegate_uid)),
+            ],
             content: Vec::new(),
         });
     }
@@ -947,7 +957,10 @@ impl Preferences {
     /// `revokeNotificationDelegate`: the package's delegate disabled
     /// (`writeXml` names `enabled` only when it is not the default).
     pub fn revoke_delegate(&mut self, name: &str, uid: i32) {
-        if let Some(d) = self.package_mut(name, uid).and_then(|p| p.delegate.as_mut()) {
+        if let Some(d) = self
+            .package_mut(name, uid)
+            .and_then(|p| p.delegate.as_mut())
+        {
             d.attrs.retain(|(n, _)| n != "enabled");
             d.attrs.push(("enabled".into(), Value::Bool(false)));
         }
@@ -1106,8 +1119,15 @@ impl Preferences {
     /// `channel` replaces the one of its id, its fields unlocked (but an
     /// importance a critical device function locked); a package with only
     /// the default channel takes its priority, visibility and badge.
-    pub fn update_channel(&mut self, name: &str, uid: i32, channel: &mut Channel) -> Result<(), String> {
-        let p = self.package_mut(name, uid).ok_or("IllegalArgumentException: Invalid package")?;
+    pub fn update_channel(
+        &mut self,
+        name: &str,
+        uid: i32,
+        channel: &mut Channel,
+    ) -> Result<(), String> {
+        let p = self
+            .package_mut(name, uid)
+            .ok_or("IllegalArgumentException: Invalid package")?;
         let Some(existing) = p.channel(&channel.id).filter(|c| !c.deleted) else {
             return Err("IllegalArgumentException: Channel does not exist".into());
         };
@@ -1115,14 +1135,19 @@ impl Preferences {
             channel.lockscreen_visibility = VISIBILITY_NO_OVERRIDE;
         }
         channel.user_locked_fields = 0;
-        if existing.importance_locked_default_app && !(existing.blockable_system || existing.importance == IMPORTANCE_NONE) {
+        if existing.importance_locked_default_app
+            && !(existing.blockable_system || existing.importance == IMPORTANCE_NONE)
+        {
             channel.importance = existing.importance;
         }
         if p.channels.len() == 1 && channel.id == DEFAULT_CHANNEL_ID {
             let priority = if channel.bypass_dnd { PRIORITY_MAX } else { 0 };
             p.set_attr("priority", (priority != 0).then_some(Value::Int(priority)));
             let visibility = channel.lockscreen_visibility;
-            p.set_attr("visibility", (visibility != VISIBILITY_NO_OVERRIDE).then_some(Value::Int(visibility)));
+            p.set_attr(
+                "visibility",
+                (visibility != VISIBILITY_NO_OVERRIDE).then_some(Value::Int(visibility)),
+            );
             p.set_attr("show_badge", Some(Value::Bool(channel.show_badge)));
         }
         *p.channel_mut(&channel.id).unwrap() = channel.clone();
@@ -1526,9 +1551,26 @@ mod tests {
         let ranking = aim_android_xml::read(br#"<ranking version="4" />"#).unwrap();
         let mut prefs = Preferences::read(&ranking, &defaults(), 0);
         prefs.set_delegate("app", 10001, "d", 10002, &defaults());
-        let delegate = |prefs: &Preferences| prefs.to_xml().children().next().unwrap().children().find(|c| c.name == "delegate").cloned().unwrap();
+        let delegate = |prefs: &Preferences| {
+            prefs
+                .to_xml()
+                .children()
+                .next()
+                .unwrap()
+                .children()
+                .find(|c| c.name == "delegate")
+                .cloned()
+                .unwrap()
+        };
         let d = delegate(&prefs);
-        assert_eq!((d.string("name").as_deref(), d.int("uid").unwrap(), d.attr("enabled").is_none()), (Some("d"), Some(10002), true));
+        assert_eq!(
+            (
+                d.string("name").as_deref(),
+                d.int("uid").unwrap(),
+                d.attr("enabled").is_none()
+            ),
+            (Some("d"), Some(10002), true)
+        );
         prefs.revoke_delegate("app", 10001);
         assert_eq!(delegate(&prefs).bool("enabled").unwrap(), Some(false));
     }

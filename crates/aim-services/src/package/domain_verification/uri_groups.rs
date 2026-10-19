@@ -3,7 +3,9 @@
 #[derive(Debug, PartialEq, Eq)]
 pub struct EmptyDomain;
 impl std::fmt::Display for EmptyDomain {
-    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {out.write_str("length=0; index=0")}
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str("length=0; index=0")
+    }
 }
 pub fn valid_domain(domain: &str) -> Result<bool, EmptyDomain> {
     if domain.encode_utf16().count() > 254 || domain == "*" {

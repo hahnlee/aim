@@ -1,7 +1,7 @@
 //! SELinuxMMAC policy and label composition, android-16.0.0_r1 (#838).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
-use crate::package::timsort;
 use crate::package::sign::SigningDetails;
+use crate::package::timsort;
 use aim_android_xml::Element;
 use std::{
     collections::{BTreeMap, BTreeSet},

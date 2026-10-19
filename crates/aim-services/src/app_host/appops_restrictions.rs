@@ -8,7 +8,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_NULL_POINTER, Exception, Reader, Result as ParcelResult};
+use aim_binder_host::parcel::{
+    BAD_VALUE, Binder, EX_NULL_POINTER, Exception, Reader, Result as ParcelResult,
+};
 use aim_service_aidl::ReadParcelable;
 
 use super::app_op_infos::{APP_OP_INFOS, OP_NONE};
@@ -35,7 +37,10 @@ impl PackageTags {
     }
 
     fn tags(&self, package: &str) -> Option<&Option<Vec<Option<String>>>> {
-        self.0.iter().find(|(p, _)| p.as_deref() == Some(package)).map(|(_, tags)| tags)
+        self.0
+            .iter()
+            .find(|(p, _)| p.as_deref() == Some(package))
+            .map(|(_, tags)| tags)
     }
 
     /// `includes`.
@@ -95,7 +100,11 @@ pub(super) struct UserRestrictions<L> {
 
 impl<L> Default for UserRestrictions<L> {
     fn default() -> Self {
-        UserRestrictions { clients: HashMap::new(), restricted: HashMap::new(), excluded: HashMap::new() }
+        UserRestrictions {
+            clients: HashMap::new(),
+            restricted: HashMap::new(),
+            excluded: HashMap::new(),
+        }
     }
 }
 
@@ -115,12 +124,24 @@ impl<L> UserRestrictions<L> {
     /// The tokens the restrictions keep (a key of either map holds its
     /// binder, as the original's `ArrayMap` keys do).
     pub(super) fn tokens(&self) -> BTreeSet<u32> {
-        self.clients.keys().chain(self.restricted.keys()).chain(self.excluded.keys()).copied().collect()
+        self.clients
+            .keys()
+            .chain(self.restricted.keys())
+            .chain(self.excluded.keys())
+            .copied()
+            .collect()
     }
 
     /// `setUserRestriction` of each of `users`: `putUserRestriction` and
     /// `putUserRestrictionExclusions`; whether anything changed.
-    pub(super) fn set(&mut self, token: u32, users: &[i32], code: i32, restricted: bool, excluded: Option<&PackageTags>) -> bool {
+    pub(super) fn set(
+        &mut self,
+        token: u32,
+        users: &[i32],
+        code: i32,
+        restricted: bool,
+        excluded: Option<&PackageTags>,
+    ) -> bool {
         let mut changed = false;
         for &user in users {
             changed |= self.put_restriction(token, user, code, restricted);
@@ -131,7 +152,13 @@ impl<L> UserRestrictions<L> {
 
     fn put_restriction(&mut self, token: u32, user: i32, code: i32, restricted: bool) -> bool {
         if restricted {
-            return self.restricted.entry(token).or_default().entry(user).or_default().insert(code);
+            return self
+                .restricted
+                .entry(token)
+                .or_default()
+                .entry(user)
+                .or_default()
+                .insert(code);
         }
         let Some(users) = self.restricted.get_mut(&token) else {
             return false;
@@ -151,7 +178,10 @@ impl<L> UserRestrictions<L> {
 
     fn put_exclusions(&mut self, token: u32, user: i32, excluded: Option<&PackageTags>) -> bool {
         if let Some(excluded) = excluded.filter(|e| !e.is_empty()) {
-            self.excluded.entry(token).or_default().insert(user, excluded.clone());
+            self.excluded
+                .entry(token)
+                .or_default()
+                .insert(user, excluded.clone());
             return true;
         }
         let Some(users) = self.excluded.get_mut(&token) else {
@@ -172,8 +202,21 @@ impl<L> UserRestrictions<L> {
 
     /// `getUserRestriction` of a token, past its user's exclusions (by
     /// package alone for a check).
-    fn restricts(&self, token: u32, user: i32, code: i32, package: &str, tag: Option<&str>, is_check: bool) -> Result<bool, Exception> {
-        if !self.restricted.get(&token).and_then(|users| users.get(&user)).is_some_and(|codes| codes.contains(&code)) {
+    fn restricts(
+        &self,
+        token: u32,
+        user: i32,
+        code: i32,
+        package: &str,
+        tag: Option<&str>,
+        is_check: bool,
+    ) -> Result<bool, Exception> {
+        if !self
+            .restricted
+            .get(&token)
+            .and_then(|users| users.get(&user))
+            .is_some_and(|codes| codes.contains(&code))
+        {
             return Ok(false);
         }
         let Some(excluded) = self.excluded.get(&token).and_then(|users| users.get(&user)) else {
@@ -187,7 +230,14 @@ impl<L> UserRestrictions<L> {
 
     /// Whether a client of `mOpUserRestrictions` restricts `code` for the
     /// package and tag of `user` (`isOpRestrictedLocked`'s loop).
-    pub(super) fn any(&self, code: i32, user: i32, package: &str, tag: Option<&str>, is_check: bool) -> Result<bool, Exception> {
+    pub(super) fn any(
+        &self,
+        code: i32,
+        user: i32,
+        package: &str,
+        tag: Option<&str>,
+        is_check: bool,
+    ) -> Result<bool, Exception> {
         for &token in self.clients.keys() {
             if self.restricts(token, user, code, package, tag, is_check)? {
                 return Ok(true);
@@ -199,7 +249,11 @@ impl<L> UserRestrictions<L> {
     /// `clearUserRestrictions(token)`: the ops it restricted for any user
     /// (`collectAllUserRestrictedCodes`).
     pub(super) fn clear(&mut self, token: u32) -> BTreeSet<i32> {
-        let codes = self.restricted.remove(&token).map(|users| users.into_values().flatten().collect()).unwrap_or_default();
+        let codes = self
+            .restricted
+            .remove(&token)
+            .map(|users| users.into_values().flatten().collect())
+            .unwrap_or_default();
         self.excluded.remove(&token);
         codes
     }
@@ -235,7 +289,11 @@ pub(super) struct ModeWatchers<L> {
 
 impl<L> Default for ModeWatchers<L> {
     fn default() -> Self {
-        ModeWatchers { callbacks: HashMap::new(), ops: BTreeMap::new(), packages: BTreeMap::new() }
+        ModeWatchers {
+            callbacks: HashMap::new(),
+            ops: BTreeMap::new(),
+            packages: BTreeMap::new(),
+        }
     }
 }
 
@@ -249,15 +307,39 @@ impl<L> ModeWatchers<L> {
     /// callback made once per binder, then added to the switch op's
     /// watchers and, where it may see `package`, the package's.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn watch(&mut self, binder: Binder, op: i32, package: Option<&str>, flags: i32, calling_uid: i32, calling_pid: i32, link: impl FnOnce() -> L) {
+    pub(super) fn watch(
+        &mut self,
+        binder: Binder,
+        op: i32,
+        package: Option<&str>,
+        flags: i32,
+        calling_uid: i32,
+        calling_pid: i32,
+        link: impl FnOnce() -> L,
+    ) {
         let switch_op = if op != OP_NONE { switch_of(op) } else { op };
-        let notified = if flags & CALL_BACK_ON_SWITCHED_OP == 0 { if op == OP_NONE { ALL_OPS } else { op } } else { switch_op };
-        self.callbacks.entry(binder).or_insert_with(|| ModeCallback { link: link(), watching_uid: -1, watched_op: notified, calling_uid, calling_pid });
+        let notified = if flags & CALL_BACK_ON_SWITCHED_OP == 0 {
+            if op == OP_NONE { ALL_OPS } else { op }
+        } else {
+            switch_op
+        };
+        self.callbacks
+            .entry(binder)
+            .or_insert_with(|| ModeCallback {
+                link: link(),
+                watching_uid: -1,
+                watched_op: notified,
+                calling_uid,
+                calling_pid,
+            });
         if switch_op != OP_NONE {
             self.ops.entry(switch_op).or_default().insert(binder);
         }
         if let Some(package) = package {
-            self.packages.entry(package.to_string()).or_default().insert(binder);
+            self.packages
+                .entry(package.to_string())
+                .or_default()
+                .insert(binder);
         }
     }
 
@@ -287,11 +369,20 @@ impl<L> ModeWatchers<L> {
                 continue;
             }
             let ops: Vec<i32> = match callback.watched_op {
-                ALL_OPS => APP_OP_INFOS.iter().filter(|i| i.switch_code == code).map(|i| i.code).collect(),
+                ALL_OPS => APP_OP_INFOS
+                    .iter()
+                    .filter(|i| i.switch_code == code)
+                    .map(|i| i.code)
+                    .collect(),
                 OP_NONE => vec![code],
                 op => vec![op],
             };
-            changes.extend(ops.into_iter().map(|op| ModeChange { binder: *binder, op, calling_uid: callback.calling_uid, calling_pid: callback.calling_pid }));
+            changes.extend(ops.into_iter().map(|op| ModeChange {
+                binder: *binder,
+                op,
+                calling_uid: callback.calling_uid,
+                calling_pid: callback.calling_pid,
+            }));
         }
         changes
     }
@@ -304,7 +395,17 @@ mod tests {
     use super::*;
 
     fn tags(packages: &[(&str, Option<&[&str]>)]) -> PackageTags {
-        PackageTags(packages.iter().map(|(p, t)| (Some(p.to_string()), t.map(|t| t.iter().map(|t| Some(t.to_string())).collect()))).collect())
+        PackageTags(
+            packages
+                .iter()
+                .map(|(p, t)| {
+                    (
+                        Some(p.to_string()),
+                        t.map(|t| t.iter().map(|t| Some(t.to_string())).collect()),
+                    )
+                })
+                .collect(),
+        )
     }
 
     /// `PackageTagsList.CREATOR` of what `writeToParcel` writes.
@@ -320,7 +421,13 @@ mod tests {
         p.write_string16(Some("t"));
         p.write_i32(VAL_NULL);
         let read = PackageTags::read_from(&mut p.reader()).unwrap();
-        assert_eq!(read, PackageTags(vec![(Some("a".into()), Some(vec![])), (Some("b".into()), Some(vec![Some("t".into()), None]))]));
+        assert_eq!(
+            read,
+            PackageTags(vec![
+                (Some("a".into()), Some(vec![])),
+                (Some("b".into()), Some(vec![Some("t".into()), None]))
+            ])
+        );
         assert!(read.includes("a") && !read.includes("c"));
         assert_eq!(read.contains("a", Some("any")), Ok(true));
         assert_eq!(read.contains("b", None), Ok(true));
@@ -333,7 +440,13 @@ mod tests {
     #[test]
     fn user_restrictions_follow_the_restrictions_impl() {
         let mut r = UserRestrictions::<()>::default();
-        assert!(r.set(7, &[0], 26, true, Some(&tags(&[("excluded", Some(&["tag"]))]))));
+        assert!(r.set(
+            7,
+            &[0],
+            26,
+            true,
+            Some(&tags(&[("excluded", Some(&["tag"]))]))
+        ));
         assert!(!r.any(26, 0, "app", None, false).unwrap());
         r.add_client(7, ());
         assert!(r.any(26, 0, "app", None, false).unwrap());
@@ -364,7 +477,11 @@ mod tests {
         w.watch(a, 2, None, 0, 10_100, 5, || ());
         w.watch(b, 2, None, CALL_BACK_ON_SWITCHED_OP, 10_101, 6, || ());
         w.watch(c, OP_NONE, Some("p"), 0, 1000, 7, || ());
-        let mut heard: Vec<(Binder, i32)> = w.changes(0, -2, -2).into_iter().map(|c| (c.binder, c.op)).collect();
+        let mut heard: Vec<(Binder, i32)> = w
+            .changes(0, -2, -2)
+            .into_iter()
+            .map(|c| (c.binder, c.op))
+            .collect();
         heard.sort();
         assert_eq!(heard, [(a, 2), (b, 0)]);
         assert!(w.changes(2, -2, -2).is_empty());

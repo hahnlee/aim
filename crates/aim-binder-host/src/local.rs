@@ -250,7 +250,11 @@ impl Received {
             .filter(|&&at| at >= start as u64)
             .map(|at| at - start as u64)
             .collect();
-        if self.objects.iter().any(|&at| at < start as u64 && at + 24 > start as u64) {
+        if self
+            .objects
+            .iter()
+            .any(|&at| at < start as u64 && at + 24 > start as u64)
+        {
             return Err(crate::parcel::BAD_VALUE);
         }
         parcel.write_raw(&self.data[start..], &objects);
@@ -453,8 +457,12 @@ impl LocalProcess {
 
     /// `ProcessState::setThreadPoolMaxThreadCount`.
     pub fn set_max_threads(&self, threads: u32) {
-        self.ioctl(self.tid(), BINDER_SET_MAX_THREADS, &mut threads.to_le_bytes())
-            .expect("BINDER_SET_MAX_THREADS");
+        self.ioctl(
+            self.tid(),
+            BINDER_SET_MAX_THREADS,
+            &mut threads.to_le_bytes(),
+        )
+        .expect("BINDER_SET_MAX_THREADS");
     }
 
     fn arc(&self) -> Arc<Self> {
@@ -864,7 +872,9 @@ impl LocalProcess {
             BR_DEAD_BINDER => {
                 let cookie = u64::from_le_bytes(payload.try_into().unwrap());
                 let on_death = { self.deaths.lock().unwrap().remove(&cookie) };
-                if let Some(on_death) = on_death { on_death(); }
+                if let Some(on_death) = on_death {
+                    on_death();
+                }
                 out.extend_from_slice(&BC_DEAD_BINDER_DONE.to_le_bytes());
                 out.extend_from_slice(&cookie.to_le_bytes());
             }
@@ -1109,7 +1119,9 @@ mod tests {
     struct FileKeeper(Arc<std::fs::File>);
 
     impl Service for FileKeeper {
-        fn descriptor(&self) -> &str { "test.IFileKeeper" }
+        fn descriptor(&self) -> &str {
+            "test.IFileKeeper"
+        }
         fn transact(&self, _: &mut Call<'_>) -> Reply {
             let _ = self.0.metadata().unwrap();
             Ok(Parcel::new())
@@ -1120,19 +1132,32 @@ mod tests {
     fn shutdown_releases_service_files_and_does_not_close_reused_fd() {
         // Isolate the numeric FD reuse from other tests opening files.
         let result = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "local::tests::shutdown_file_fixture", "--ignored", "--nocapture"])
-            .output().unwrap();
-        assert!(result.status.success(), "{}{}", String::from_utf8_lossy(&result.stdout),
-            String::from_utf8_lossy(&result.stderr));
-        assert!(String::from_utf8_lossy(&result.stdout)
-            .contains("local::tests::shutdown_file_fixture ... ok"));
+            .args([
+                "--exact",
+                "local::tests::shutdown_file_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stdout)
+                .contains("local::tests::shutdown_file_fixture ... ok")
+        );
     }
 
     #[test]
     #[ignore = "run by the isolated FD ownership test"]
     fn shutdown_file_fixture() {
         use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-        let path = std::env::temp_dir().join(format!("aim-native-binder-file-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("aim-native-binder-file-{}", std::process::id()));
         std::fs::write(&path, b"native service data").unwrap();
         let file = Arc::new(std::fs::File::open(&path).unwrap());
         let fd = file.as_raw_fd();
@@ -1145,13 +1170,20 @@ mod tests {
         let weak_process = Arc::downgrade(&process);
         drop(process);
         assert!(unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0);
-        let process = weak_process.upgrade().expect("the looper retains its process");
+        let process = weak_process
+            .upgrade()
+            .expect("the looper retains its process");
         process.shutdown().unwrap();
         assert!(weak_file.upgrade().is_none());
         assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
-        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EBADF)
+        );
         let replacement = std::fs::File::open(&path).unwrap();
-        let reused = if replacement.as_raw_fd() == fd { replacement } else {
+        let reused = if replacement.as_raw_fd() == fd {
+            replacement
+        } else {
             let reused = unsafe { libc::fcntl(replacement.as_raw_fd(), libc::F_DUPFD_CLOEXEC, fd) };
             assert_eq!(reused, fd);
             std::fs::File::from(unsafe { OwnedFd::from_raw_fd(reused) })
@@ -1169,7 +1201,9 @@ mod tests {
         resume: Mutex<mpsc::Receiver<()>>,
     }
     impl Service for BlockingFileCall {
-        fn descriptor(&self) -> &str { "test.IBlockingFileCall" }
+        fn descriptor(&self) -> &str {
+            "test.IBlockingFileCall"
+        }
         fn transact(&self, call: &mut Call<'_>) -> Reply {
             self.entered.send(()).unwrap();
             self.resume.lock().unwrap().recv().unwrap();
@@ -1181,7 +1215,8 @@ mod tests {
 
     #[test]
     fn shutdown_waits_for_inflight_calls_before_releasing_buffers_and_files() {
-        let path = std::env::temp_dir().join(format!("aim-native-binder-call-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("aim-native-binder-call-{}", std::process::id()));
         std::fs::write(&path, b"inflight data").unwrap();
         let file = Arc::new(std::fs::File::open(&path).unwrap());
         let weak_file = Arc::downgrade(&file);
@@ -1192,18 +1227,23 @@ mod tests {
         let (entered, waiting) = mpsc::channel();
         let (resume, resumed) = mpsc::channel();
         let service = server.add_service(Arc::new(BlockingFileCall {
-            file, entered, resume: Mutex::new(resumed),
+            file,
+            entered,
+            resume: Mutex::new(resumed),
         }));
         server.start();
         let handle = publish(&server, &client, "inflight", service);
         let caller = std::thread::spawn(move || {
-            let mut request = Parcel::new(); request.write_i32(1266);
+            let mut request = Parcel::new();
+            request.write_i32(1266);
             let _ = handle.transact(1, &request, false);
         });
         waiting.recv_timeout(Duration::from_secs(5)).unwrap();
         let owner = server.clone();
         let shutdown = std::thread::spawn(move || owner.shutdown());
-        while !server.stopping.load(Ordering::Acquire) { std::thread::yield_now(); }
+        while !server.stopping.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
         let owner = server.clone();
         let concurrent = std::thread::spawn(move || owner.shutdown());
         assert!(!shutdown.is_finished());
@@ -1214,16 +1254,20 @@ mod tests {
         concurrent.join().unwrap().unwrap();
         caller.join().unwrap();
         assert!(weak_file.upgrade().is_none());
-        client.shutdown().unwrap(); manager.shutdown().unwrap();
+        client.shutdown().unwrap();
+        manager.shutdown().unwrap();
         std::fs::remove_file(path).unwrap();
     }
 
     struct SelfShutdown(Weak<LocalProcess>);
     impl Service for SelfShutdown {
-        fn descriptor(&self) -> &str { "test.ISelfShutdown" }
+        fn descriptor(&self) -> &str {
+            "test.ISelfShutdown"
+        }
         fn transact(&self, _: &mut Call<'_>) -> Reply {
             let error = self.0.upgrade().unwrap().shutdown().unwrap_err();
-            let mut reply = Parcel::new(); reply.write_i32(error.raw_os_error().unwrap());
+            let mut reply = Parcel::new();
+            reply.write_i32(error.raw_os_error().unwrap());
             Ok(reply)
         }
     }
@@ -1235,13 +1279,25 @@ mod tests {
         let server = open(&driver, 413, 1000);
         let client = open(&driver, 414, 2000);
         let service = server.add_service(Arc::new(SelfShutdown(Arc::downgrade(&server))));
-        let local = server.local_service(match service { Binder::Local(ptr) => ptr, _ => unreachable!() }).unwrap();
+        let local = server
+            .local_service(match service {
+                Binder::Local(ptr) => ptr,
+                _ => unreachable!(),
+            })
+            .unwrap();
         server.start();
         let handle = publish(&server, &client, "self-stop", service);
         let reply = handle.transact(1, &Parcel::new(), false).unwrap();
         assert_eq!(reply.reader().read_i32(), Ok(libc::EDEADLK));
-        server.shutdown().unwrap(); client.shutdown().unwrap(); manager.shutdown().unwrap();
-        assert_eq!(local.transact(PING_TRANSACTION, &Parcel::new(), false).err(), Some(DEAD_OBJECT));
+        server.shutdown().unwrap();
+        client.shutdown().unwrap();
+        manager.shutdown().unwrap();
+        assert_eq!(
+            local
+                .transact(PING_TRANSACTION, &Parcel::new(), false)
+                .err(),
+            Some(DEAD_OBJECT)
+        );
         // A received reply still owns its mapped bytes after process retirement.
         assert_eq!(reply.reader().read_i32(), Ok(libc::EDEADLK));
     }
@@ -1292,35 +1348,79 @@ mod tests {
     fn native_namespace_init_identity_is_reported_on_real_driver_calls() {
         struct CallerIdentity;
         impl Service for CallerIdentity {
-            fn descriptor(&self)->&str{"test.INamespaceCallerIdentity"}
-            fn transact(&self,call:&mut Call<'_>)->Reply{
-                let mut reply=Parcel::new();reply.write_i32(call.sender_pid);reply.write_u32(call.sender_euid);Ok(reply)
+            fn descriptor(&self) -> &str {
+                "test.INamespaceCallerIdentity"
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                let mut reply = Parcel::new();
+                reply.write_i32(call.sender_pid);
+                reply.write_u32(call.sender_euid);
+                Ok(reply)
             }
         }
-        let driver=Driver::new();let _manager=start_registry(&driver);
-        let actual_host=unsafe{libc::getpid()};assert_ne!(actual_host,1);
-        let init=open(&driver,1,1000);init.start();
-        let guest=open(&driver,97001,10123);guest.start();
-        let guest_node=guest.add_service(Arc::new(CallerIdentity));
-        let target=publish(&guest,&init,"namespace-init-call-target",guest_node);
-        let reply=target.transact(1,&Parcel::new(),false).unwrap();
-        let mut reader=reply.reader();assert_eq!(reader.read_i32(),Ok(1));assert_eq!(reader.read_u32(),Ok(1000));assert_eq!(reader.remaining(),0);
-        let init_node=init.add_service(Arc::new(CallerIdentity));
-        let remote=publish(&init,&guest,"namespace-init-debug-owner",init_node);
-        let reply=remote.transact(DEBUG_PID_TRANSACTION,&Parcel::new(),false).unwrap();
-        assert_eq!(reply.reader().read_i32(),Ok(1));
-        assert_eq!(unsafe{libc::getpid()},actual_host,"guest credential must not alter actual host process identity");
-        let port=crate::mach::new_port(true).unwrap();
-        let receiver=std::thread::spawn(move||{
-            let mut buffer=crate::mach::Buffer::default();let request=crate::mach::receive(&mut buffer,port).unwrap();
-            assert_eq!(request.pid,actual_host,"Mach audit identity must remain the actual host process");
-            assert_eq!(request.data,1i32.to_le_bytes());
-            crate::mach::reply(&mut buffer,request.reply,&crate::mach::Msg{id:78,ports:Vec::new(),data:request.pid.to_le_bytes().to_vec()});
-            crate::mach::drop_own_send(port);crate::mach::destroy_receive(port);
+        let driver = Driver::new();
+        let _manager = start_registry(&driver);
+        let actual_host = unsafe { libc::getpid() };
+        assert_ne!(actual_host, 1);
+        let init = open(&driver, 1, 1000);
+        init.start();
+        let guest = open(&driver, 97001, 10123);
+        guest.start();
+        let guest_node = guest.add_service(Arc::new(CallerIdentity));
+        let target = publish(&guest, &init, "namespace-init-call-target", guest_node);
+        let reply = target.transact(1, &Parcel::new(), false).unwrap();
+        let mut reader = reply.reader();
+        assert_eq!(reader.read_i32(), Ok(1));
+        assert_eq!(reader.read_u32(), Ok(1000));
+        assert_eq!(reader.remaining(), 0);
+        let init_node = init.add_service(Arc::new(CallerIdentity));
+        let remote = publish(&init, &guest, "namespace-init-debug-owner", init_node);
+        let reply = remote
+            .transact(DEBUG_PID_TRANSACTION, &Parcel::new(), false)
+            .unwrap();
+        assert_eq!(reply.reader().read_i32(), Ok(1));
+        assert_eq!(
+            unsafe { libc::getpid() },
+            actual_host,
+            "guest credential must not alter actual host process identity"
+        );
+        let port = crate::mach::new_port(true).unwrap();
+        let receiver = std::thread::spawn(move || {
+            let mut buffer = crate::mach::Buffer::default();
+            let request = crate::mach::receive(&mut buffer, port).unwrap();
+            assert_eq!(
+                request.pid, actual_host,
+                "Mach audit identity must remain the actual host process"
+            );
+            assert_eq!(request.data, 1i32.to_le_bytes());
+            crate::mach::reply(
+                &mut buffer,
+                request.reply,
+                &crate::mach::Msg {
+                    id: 78,
+                    ports: Vec::new(),
+                    data: request.pid.to_le_bytes().to_vec(),
+                },
+            );
+            crate::mach::drop_own_send(port);
+            crate::mach::destroy_receive(port);
         });
-        let reply_port=crate::mach::new_port(false).unwrap();let mut buffer=crate::mach::Buffer::default();
-        let reply=crate::mach::call(&mut buffer,port,reply_port,&crate::mach::Msg{id:77,ports:Vec::new(),data:1i32.to_le_bytes().to_vec()}).unwrap();
-        assert_eq!(reply.data,actual_host.to_le_bytes());crate::mach::destroy_receive(reply_port);receiver.join().unwrap();
+        let reply_port = crate::mach::new_port(false).unwrap();
+        let mut buffer = crate::mach::Buffer::default();
+        let reply = crate::mach::call(
+            &mut buffer,
+            port,
+            reply_port,
+            &crate::mach::Msg {
+                id: 77,
+                ports: Vec::new(),
+                data: 1i32.to_le_bytes().to_vec(),
+            },
+        )
+        .unwrap();
+        assert_eq!(reply.data, actual_host.to_le_bytes());
+        crate::mach::destroy_receive(reply_port);
+        receiver.join().unwrap();
     }
 
     #[test]
@@ -1330,11 +1430,15 @@ mod tests {
         let owner = open(&driver, 231, 1000);
         let sink = Arc::new(Sink(AtomicI32::new(0)));
         let binder = owner.add_service(sink.clone());
-        let Binder::Local(ptr) = binder else { unreachable!() };
+        let Binder::Local(ptr) = binder else {
+            unreachable!()
+        };
         let local = owner.local_service(ptr).unwrap();
         {
             let _caller = CallingIdentity::enter(982, 10123);
-            let response = local.transact(DEBUG_PID_TRANSACTION, &Parcel::new(), false).unwrap();
+            let response = local
+                .transact(DEBUG_PID_TRANSACTION, &Parcel::new(), false)
+                .unwrap();
             let mut reader = response.reader();
             assert_eq!(reader.read_i32(), Ok(231));
             assert_eq!(reader.remaining(), 0);
@@ -1342,7 +1446,9 @@ mod tests {
         owner.start();
         let caller = open(&driver, 982, 10123);
         let remote = publish(&owner, &caller, "debug-pid-owner", binder);
-        let response = remote.transact(DEBUG_PID_TRANSACTION, &Parcel::new(), false).unwrap();
+        let response = remote
+            .transact(DEBUG_PID_TRANSACTION, &Parcel::new(), false)
+            .unwrap();
         let mut reader = response.reader();
         assert_eq!(reader.read_i32(), Ok(231));
         assert_eq!(reader.remaining(), 0);

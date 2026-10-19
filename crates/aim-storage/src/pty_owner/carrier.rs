@@ -137,16 +137,37 @@ impl Bridge {
     pub(super) fn watch_process(&self, pid: i32) -> io::Result<()> {
         self.healthy()?;
         let event = libc::kevent {
-            ident: pid as usize, filter: libc::EVFILT_PROC,
+            ident: pid as usize,
+            filter: libc::EVFILT_PROC,
             flags: libc::EV_ADD | libc::EV_ONESHOT | libc::EV_RECEIPT,
-            fflags: libc::NOTE_EXIT, data: 0, udata: std::ptr::null_mut(),
+            fflags: libc::NOTE_EXIT,
+            data: 0,
+            udata: std::ptr::null_mut(),
         };
         let mut receipt: libc::kevent = unsafe { std::mem::zeroed() };
-        let zero = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-        let count = unsafe { libc::kevent(self.shared.queue.as_raw_fd(), &event, 1, &mut receipt, 1, &zero) };
-        if count < 0 { return Err(io::Error::last_os_error()); }
-        if count != 1 || receipt.flags & libc::EV_ERROR == 0 { return Err(io::Error::from_raw_os_error(libc::EPROTO)); }
-        if receipt.data != 0 { return Err(io::Error::from_raw_os_error(receipt.data as i32)); }
+        let zero = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let count = unsafe {
+            libc::kevent(
+                self.shared.queue.as_raw_fd(),
+                &event,
+                1,
+                &mut receipt,
+                1,
+                &zero,
+            )
+        };
+        if count < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if count != 1 || receipt.flags & libc::EV_ERROR == 0 {
+            return Err(io::Error::from_raw_os_error(libc::EPROTO));
+        }
+        if receipt.data != 0 {
+            return Err(io::Error::from_raw_os_error(receipt.data as i32));
+        }
         Ok(())
     }
     pub(super) fn stop(&mut self) {
@@ -216,8 +237,11 @@ impl Shared {
                     id: EVENT,
                     tag: event.udata as u64,
                     fd: event.ident as i32,
-                    eof: u32::from(event.flags & libc::EV_EOF != 0
-                        || event.filter == libc::EVFILT_PROC && event.fflags & libc::NOTE_EXIT != 0),
+                    eof: u32::from(
+                        event.flags & libc::EV_EOF != 0
+                            || event.filter == libc::EVFILT_PROC
+                                && event.fflags & libc::NOTE_EXIT != 0,
+                    ),
                 };
                 if unsafe { mach_msg((&mut message as *mut Message).cast(), 1, 40, 0, 0, 0, 0) }
                     != 0

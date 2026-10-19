@@ -1,7 +1,9 @@
 //! FallbackCategoryProvider's newly created AssetManager includes the
 //! pinned image's system assets and their static overlays.
 
-mod common { pub mod runtime; }
+mod common {
+    pub mod runtime;
+}
 use aim_apps::apk::Apk;
 use aim_services::package::{parse::Platform, system_config};
 

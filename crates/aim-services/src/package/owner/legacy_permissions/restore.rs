@@ -41,14 +41,24 @@ pub(in crate::package) fn read(
     state: &State,
     config: &SystemConfig,
 ) -> Result<Restored, String> {
-    read_inner(data,state,config,None)
+    read_inner(data, state, config, None)
 }
 /// The completed frontend keeps the selected document before constructor
 /// normalization advances versions or resolves pending UID references.
-pub(in crate::package) fn read_owned(data:&Path,state:&State,config:&SystemConfig,document:&Element)->Result<Restored,String>{
-    read_inner(data,state,config,Some(document))
+pub(in crate::package) fn read_owned(
+    data: &Path,
+    state: &State,
+    config: &SystemConfig,
+    document: &Element,
+) -> Result<Restored, String> {
+    read_inner(data, state, config, Some(document))
 }
-fn read_inner(data:&Path,state:&State,config:&SystemConfig,document:Option<&Element>)->Result<Restored,String>{
+fn read_inner(
+    data: &Path,
+    state: &State,
+    config: &SystemConfig,
+    document: Option<&Element>,
+) -> Result<Restored, String> {
     let users = state
         .users
         .iter()
@@ -60,11 +70,13 @@ fn read_inner(data:&Path,state:&State,config:&SystemConfig,document:Option<&Elem
         &system.join("packages.xml"),
         &system.join("packages-backup.xml"),
         |root| {
-            let changed=match document{
-                Some(expected)=>root!=expected,
-                None=>Settings::parse_with_config(root,config)?!=state.settings,
+            let changed = match document {
+                Some(expected) => root != expected,
+                None => Settings::parse_with_config(root, config)? != state.settings,
             };
-            if changed{return Err("Settings changed before legacy restoration".into());}
+            if changed {
+                return Err("Settings changed before legacy restoration".into());
+            }
             Ok(root.clone())
         },
     )?

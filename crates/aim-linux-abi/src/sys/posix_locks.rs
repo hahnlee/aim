@@ -223,7 +223,7 @@ impl Client {
     }
 }
 #[cfg(test)]
-static CLOSE_INTERRUPTED:AtomicU64=AtomicU64::new(0);
+static CLOSE_INTERRUPTED: AtomicU64 = AtomicU64::new(0);
 static CURRENT: Mutex<Option<Arc<Client>>> = Mutex::new(None);
 /// Root configures an authenticated controller-produced owner at process start.
 pub fn install(client: Arc<Client>) -> Result<(), Errno> {
@@ -281,44 +281,55 @@ pub fn attach_fork() -> Result<(), Errno> {
 /// Attach to the native-admitted owner. Namespace init and the Mach reply
 /// authenticate the controller; a host PID alone is never a guest PID claim.
 pub fn start(locator: Option<&std::path::Path>) -> Result<(), Errno> {
-    attach(locator,Operation::Attach)
+    attach(locator, Operation::Attach)
 }
 pub(crate) fn start_external(locator: Option<&std::path::Path>) -> Result<(), Errno> {
-    attach(locator,Operation::ExternalAttach)
+    attach(locator, Operation::ExternalAttach)
 }
-fn attach(locator: Option<&std::path::Path>,operation:Operation) -> Result<(), Errno> {
+fn attach(locator: Option<&std::path::Path>, operation: Operation) -> Result<(), Errno> {
     let failure = |stage: &str, error: Errno| {
-        crate::diag!("POSIX admission pid={} stage={stage} errno={error}", unsafe { libc::getpid() });
+        crate::diag!(
+            "POSIX admission pid={} stage={stage} errno={error}",
+            unsafe { libc::getpid() }
+        );
         error
     };
     let owner_io = |stage: &str, error: std::io::Error| {
         let host_errno = error.raw_os_error();
         let message = error.to_string();
         let linux = io(error);
-        crate::diag!("POSIX admission pid={} stage={stage} errno={linux} host_errno={host_errno:?} error={message}", unsafe { libc::getpid() });
+        crate::diag!(
+            "POSIX admission pid={} stage={stage} errno={linux} host_errno={host_errno:?} error={message}",
+            unsafe { libc::getpid() }
+        );
         linux
     };
     let Some(locator) = locator else {
         return Ok(());
     };
-    let table = super::cred::by_pid_dir().ok_or_else(||failure("identity-table",errno::ESRCH))?;
-    let init = aim_storage::process_namespace::InitRegistration::read(table).map_err(|error|owner_io("init-record",error))?;
-    let config = aim_storage::posix_broker::OwnerConfig::read(locator, init.process).map_err(|error|owner_io("owner-config",error))?;
+    let table = super::cred::by_pid_dir().ok_or_else(|| failure("identity-table", errno::ESRCH))?;
+    let init = aim_storage::process_namespace::InitRegistration::read(table)
+        .map_err(|error| owner_io("init-record", error))?;
+    let config = aim_storage::posix_broker::OwnerConfig::read(locator, init.process)
+        .map_err(|error| owner_io("owner-config", error))?;
     if config.process != init.process {
-        return Err(failure("config-identity",errno::EPERM));
+        return Err(failure("config-identity", errno::EPERM));
     }
-    let process = ProcessIdentity::running(unsafe { libc::getpid() }).map_err(|error|owner_io("actor-birth",error))?;
-    let control = posix_control::Client::lookup(&config.endpoint).map_err(|error|owner_io("endpoint-lookup",error))?;
+    let process = ProcessIdentity::running(unsafe { libc::getpid() })
+        .map_err(|error| owner_io("actor-birth", error))?;
+    let control = posix_control::Client::lookup(&config.endpoint)
+        .map_err(|error| owner_io("endpoint-lookup", error))?;
     let frame = Frame::new(operation, 1);
     let reply = Client::reply(
         control
             .begin(frame, None)
-            .map_err(|error|owner_io("attach-send",error))?
+            .map_err(|error| owner_io("attach-send", error))?
             .wait_authenticated(Duration::from_secs(5), config.process)
-            .map_err(|error|owner_io("authenticated-reply",error))?,
-    ).map_err(|error|failure("broker-reply",error))?;
+            .map_err(|error| owner_io("authenticated-reply", error))?,
+    )
+    .map_err(|error| failure("broker-reply", error))?;
     if reply.guest_pid <= 0 {
-        return Err(failure("reply-guest-pid",errno::ESRCH));
+        return Err(failure("reply-guest-pid", errno::ESRCH));
     }
     let mut client = Client::new(
         control,
@@ -327,11 +338,12 @@ fn attach(locator: Option<&std::path::Path>,operation:Operation) -> Result<(), E
             guest_pid: reply.guest_pid,
         },
         config.process,
-    ).map_err(|error|failure("client-owner-live",error))?;
+    )
+    .map_err(|error| failure("client-owner-live", error))?;
     Arc::get_mut(&mut client).unwrap().inherited = reply.ticket != 0;
     // Attach consumed request1 in the same native owner incarnation.
     client.next.store(2, Ordering::Relaxed);
-    install(client).map_err(|error|failure("install-owner",error))
+    install(client).map_err(|error| failure("install-owner", error))
 }
 
 #[cfg(test)]
@@ -346,16 +358,29 @@ mod lifecycle_tests {
     impl Diagnostics {
         fn new(path: &std::path::Path) -> Self {
             use std::os::fd::FromRawFd;
-            let capture = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(path).unwrap();
-            let saved = (0..3).map(|fd| {
-                let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
-                assert!(copy >= 0);
-                unsafe { std::os::fd::OwnedFd::from_raw_fd(copy) }
-            }).collect();
+            let capture = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .unwrap();
+            let saved = (0..3)
+                .map(|fd| {
+                    let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+                    assert!(copy >= 0);
+                    unsafe { std::os::fd::OwnedFd::from_raw_fd(copy) }
+                })
+                .collect();
             assert_eq!(unsafe { libc::dup2(capture.as_raw_fd(), 2) }, 2);
             let previous = crate::diag::log_fd();
-            let hidden = unsafe { std::os::fd::OwnedFd::from_raw_fd(crate::diag::stdio_null().unwrap()) };
-            Self { capture, saved, hidden, previous }
+            let hidden =
+                unsafe { std::os::fd::OwnedFd::from_raw_fd(crate::diag::stdio_null().unwrap()) };
+            Self {
+                capture,
+                saved,
+                hidden,
+                previous,
+            }
         }
         fn text(&self) -> String {
             use std::os::unix::fs::FileExt;
@@ -366,10 +391,21 @@ mod lifecycle_tests {
         fn stage(&self, pid: i32, stage: &str, errno: Errno) {
             let text = self.text();
             let prefix = format!("POSIX admission pid={pid} stage={stage} errno={errno}");
-            let lines = text.lines().filter(|line| *line == prefix.as_str() || line.strip_prefix(prefix.as_str()).is_some_and(|tail| tail.starts_with(' '))).collect::<Vec<_>>();
+            let lines = text
+                .lines()
+                .filter(|line| {
+                    *line == prefix.as_str()
+                        || line
+                            .strip_prefix(prefix.as_str())
+                            .is_some_and(|tail| tail.starts_with(' '))
+                })
+                .collect::<Vec<_>>();
             assert_eq!(lines.len(), 1, "{text}");
             if stage != "broker-reply" {
-                assert!(lines[0].contains(&format!("host_errno=Some({})", libc::ENOENT)), "{text}");
+                assert!(
+                    lines[0].contains(&format!("host_errno=Some({})", libc::ENOENT)),
+                    "{text}"
+                );
             }
             assert!(!text.contains("GUEST_STDERR_SENTINEL"), "{text}");
         }
@@ -377,7 +413,10 @@ mod lifecycle_tests {
     impl Drop for Diagnostics {
         fn drop(&mut self) {
             for (fd, saved) in self.saved.iter().enumerate() {
-                assert_eq!(unsafe { libc::dup2(saved.as_raw_fd(), fd as i32) }, fd as i32);
+                assert_eq!(
+                    unsafe { libc::dup2(saved.as_raw_fd(), fd as i32) },
+                    fd as i32
+                );
             }
             crate::diag::log_to(self.previous);
             super::super::fdtab::unhide(self.hidden.as_raw_fd());
@@ -404,9 +443,10 @@ mod lifecycle_tests {
         let table = root.join("by-pid");
         std::fs::create_dir(&table).unwrap();
         super::super::cred::init(super::super::cred::Identity::default(), Some(table.clone()));
-        let Some(executable) =
-            aim_paths::input(aim_paths::host_bin("aim-lock-holder"), "host/aim-lock-holder")
-        else {
+        let Some(executable) = aim_paths::input(
+            aim_paths::host_bin("aim-lock-holder"),
+            "host/aim-lock-holder",
+        ) else {
             return;
         };
         let controller =
@@ -420,17 +460,25 @@ mod lifecycle_tests {
         controller.owner_config().unwrap().write(&locator).unwrap();
         let diagnostics = Diagnostics::new(&root.join("admission-diagnostics"));
         assert_eq!(crate::diag::log_fd(), diagnostics.hidden.as_raw_fd());
-        assert!(super::super::fdtab::is_hidden(diagnostics.hidden.as_raw_fd()));
+        assert!(super::super::fdtab::is_hidden(
+            diagnostics.hidden.as_raw_fd()
+        ));
         let stat = |fd| {
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
             assert_eq!(unsafe { libc::fstat(fd, &mut stat) }, 0);
             (stat.st_dev, stat.st_ino, stat.st_rdev, stat.st_mode)
         };
-        assert_eq!(stat(diagnostics.hidden.as_raw_fd()), stat(diagnostics.capture.as_raw_fd()));
+        assert_eq!(
+            stat(diagnostics.hidden.as_raw_fd()),
+            stat(diagnostics.capture.as_raw_fd())
+        );
         let null = std::fs::File::open("/dev/null").unwrap();
         assert_eq!(stat(2), stat(null.as_raw_fd()));
         let sentinel = b"GUEST_STDERR_SENTINEL\n";
-        assert_eq!(unsafe { libc::write(2, sentinel.as_ptr().cast(), sentinel.len()) }, sentinel.len() as isize);
+        assert_eq!(
+            unsafe { libc::write(2, sentinel.as_ptr().cast(), sentinel.len()) },
+            sentinel.len() as isize
+        );
         crate::diag!("HIDDEN_DIAGNOSTICS_SENTINEL");
         assert_eq!(diagnostics.text(), "HIDDEN_DIAGNOSTICS_SENTINEL\n");
         assert_eq!(start(Some(&locator)), Err(errno::ENOENT));
@@ -444,9 +492,14 @@ mod lifecycle_tests {
         .unwrap();
         let missing = root.join("missing-control-owner");
         aim_storage::posix_broker::OwnerConfig {
-            endpoint: format!("com.aim.posix-bootstrap-absent.{}.{}", actual.host_pid, actual.start_microseconds),
+            endpoint: format!(
+                "com.aim.posix-bootstrap-absent.{}.{}",
+                actual.host_pid, actual.start_microseconds
+            ),
             process: actual,
-        }.write(&missing).unwrap();
+        }
+        .write(&missing)
+        .unwrap();
         assert_eq!(start(Some(&missing)), Err(errno::ENOENT));
         assert!(current().is_err());
         diagnostics.stage(actual.host_pid, "endpoint-lookup", errno::ENOENT);
@@ -470,7 +523,14 @@ mod lifecycle_tests {
                 guest_pid: 1
             }
         );
-        assert_eq!(diagnostics.text().lines().filter(|line| line.starts_with("POSIX admission ")).count(), 3);
+        assert_eq!(
+            diagnostics
+                .text()
+                .lines()
+                .filter(|line| line.starts_with("POSIX admission "))
+                .count(),
+            3
+        );
         drop(diagnostics);
         use std::os::fd::AsFd;
         let file_path = root.join("actual-lock");
@@ -503,22 +563,65 @@ mod lifecycle_tests {
         );
         // The holder has a real file lock while a pipe's EOF reader closes its
         // guest descriptor. A successful host close must not fail postclose.
-        for flags in [0,0o2000000]{
-            let mut pipe=[-1i32;2];
-            assert_eq!(super::super::fs::pipe2([pipe.as_mut_ptr()as u64,flags,0,0,0,0]),0);
-            assert!(super::super::fdtab::visible(pipe[0])&&super::super::fdtab::visible(pipe[1]));
-            let reader=pipe[0];let worker=std::thread::spawn(move||{
-                let mut bytes=vec![];let mut buffer=[0u8;7];
-                loop{let count=super::super::fs::read([reader as u64,buffer.as_mut_ptr()as u64,buffer.len()as u64,0,0,0]);assert!(count>=0,"active-holder pipe read {count}");if count==0{break;}bytes.extend_from_slice(&buffer[..count as usize]);}
-                assert!(super::super::fdtab::visible(reader));let before=unsafe{libc::fcntl(reader,libc::F_GETFD)};assert!(before>=0);
-                let closed=super::super::fs::close([reader as u64,0,0,0,0,0]);let after=unsafe{libc::fcntl(reader,libc::F_GETFD)};
-                assert_eq!(closed,0,"active-holder EOF close fd={reader} before={before} after={after} visible={}",super::super::fdtab::visible(reader));
-                assert_eq!(after,-1);assert!(!super::super::fdtab::visible(reader));bytes
+        for flags in [0, 0o2000000] {
+            let mut pipe = [-1i32; 2];
+            assert_eq!(
+                super::super::fs::pipe2([pipe.as_mut_ptr() as u64, flags, 0, 0, 0, 0]),
+                0
+            );
+            assert!(super::super::fdtab::visible(pipe[0]) && super::super::fdtab::visible(pipe[1]));
+            let reader = pipe[0];
+            let worker = std::thread::spawn(move || {
+                let mut bytes = vec![];
+                let mut buffer = [0u8; 7];
+                loop {
+                    let count = super::super::fs::read([
+                        reader as u64,
+                        buffer.as_mut_ptr() as u64,
+                        buffer.len() as u64,
+                        0,
+                        0,
+                        0,
+                    ]);
+                    assert!(count >= 0, "active-holder pipe read {count}");
+                    if count == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&buffer[..count as usize]);
+                }
+                assert!(super::super::fdtab::visible(reader));
+                let before = unsafe { libc::fcntl(reader, libc::F_GETFD) };
+                assert!(before >= 0);
+                let closed = super::super::fs::close([reader as u64, 0, 0, 0, 0, 0]);
+                let after = unsafe { libc::fcntl(reader, libc::F_GETFD) };
+                assert_eq!(
+                    closed,
+                    0,
+                    "active-holder EOF close fd={reader} before={before} after={after} visible={}",
+                    super::super::fdtab::visible(reader)
+                );
+                assert_eq!(after, -1);
+                assert!(!super::super::fdtab::visible(reader));
+                bytes
             });
-            let bytes=b"original buffered pipe output";
-            assert_eq!(super::super::fs::write([pipe[1]as u64,bytes.as_ptr()as u64,bytes.len()as u64,0,0,0]),bytes.len()as i64);
-            assert_eq!(super::super::fs::close([pipe[1]as u64,0,0,0,0,0]),0,"active-holder pipe writer close");
-            assert_eq!(worker.join().unwrap(),bytes);
+            let bytes = b"original buffered pipe output";
+            assert_eq!(
+                super::super::fs::write([
+                    pipe[1] as u64,
+                    bytes.as_ptr() as u64,
+                    bytes.len() as u64,
+                    0,
+                    0,
+                    0
+                ]),
+                bytes.len() as i64
+            );
+            assert_eq!(
+                super::super::fs::close([pipe[1] as u64, 0, 0, 0, 0, 0]),
+                0,
+                "active-holder pipe writer close"
+            );
+            assert_eq!(worker.join().unwrap(), bytes);
         }
         current()
             .unwrap()
@@ -632,7 +735,9 @@ mod interrupted_close_tests {
         let identity = Identity::from_fd(file.as_fd()).unwrap();
         // A client that never locked the inode asks nothing at close.
         assert_eq!(client.close_inode(identity), Ok(()));
-        assert!(matches!(endpoint.receive(Duration::from_millis(25)),Err(error)if error.raw_os_error()==Some(libc::ETIMEDOUT)));
+        assert!(
+            matches!(endpoint.receive(Duration::from_millis(25)),Err(error)if error.raw_os_error()==Some(libc::ETIMEDOUT))
+        );
         let client = client.inheriting();
         let server = std::thread::spawn(move || {
             let request = endpoint.receive(Duration::from_secs(2)).unwrap();
@@ -657,9 +762,10 @@ mod interrupted_close_tests {
         }
         let (_view, directory) = crate::vfs::test_view();
         let actual = ProcessIdentity::running(unsafe { libc::getpid() }).unwrap();
-        let Some(holder) =
-            aim_paths::input(aim_paths::host_bin("aim-lock-holder"), "host/aim-lock-holder")
-        else {
+        let Some(holder) = aim_paths::input(
+            aim_paths::host_bin("aim-lock-holder"),
+            "host/aim-lock-holder",
+        ) else {
             return;
         };
         let endpoint = format!("dev.aim.interrupted-close.{}", actual.host_pid);
@@ -695,10 +801,16 @@ mod interrupted_close_tests {
         };
         locker.lock(file.as_fd(), 6, lock, || false).unwrap();
         let mut held = libc::flock {
-            l_start: 0, l_len: 1, l_pid: 0,
-            l_type: libc::F_WRLCK as i16, l_whence: libc::SEEK_SET as i16,
+            l_start: 0,
+            l_len: 1,
+            l_pid: 0,
+            l_type: libc::F_WRLCK as i16,
+            l_whence: libc::SEEK_SET as i16,
         };
-        assert_eq!(unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut held) }, 0);
+        assert_eq!(
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut held) },
+            0
+        );
         assert_eq!(held.l_type, libc::F_WRLCK as i16);
         assert!(held.l_pid > 0 && held.l_pid != actual.host_pid);
 

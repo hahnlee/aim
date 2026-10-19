@@ -66,27 +66,33 @@ impl CompletedAdmission {
         users: &[u32],
         cross_user: bool,
     ) -> Result<Publication, PublicationFailure> {
-        self.persist_with(snapshots,base,disk,Some(usage),users,cross_user)
+        self.persist_with(snapshots, base, disk, Some(usage), users, cross_user)
     }
     pub fn persist_publish_install(
-        self,snapshots:&crate::package::scan_snapshot::Store,
-        base:&std::sync::Arc<crate::package::scan_snapshot::Snapshot>,
-        disk:&mut crate::package::owner::Store,users:&[u32],cross_user:bool,
-    )->Result<Publication,PublicationFailure>{
-        self.persist_with(snapshots,base,disk,None,users,cross_user)
+        self,
+        snapshots: &crate::package::scan_snapshot::Store,
+        base: &std::sync::Arc<crate::package::scan_snapshot::Snapshot>,
+        disk: &mut crate::package::owner::Store,
+        users: &[u32],
+        cross_user: bool,
+    ) -> Result<Publication, PublicationFailure> {
+        self.persist_with(snapshots, base, disk, None, users, cross_user)
     }
     fn persist_with(
-        self,snapshots:&crate::package::scan_snapshot::Store,
-        base:&std::sync::Arc<crate::package::scan_snapshot::Snapshot>,
-        disk:&mut crate::package::owner::Store,usage:Option<crate::package::owner::usage::Usage>,
-        users:&[u32],cross_user:bool,
-    )->Result<Publication,PublicationFailure>{
+        self,
+        snapshots: &crate::package::scan_snapshot::Store,
+        base: &std::sync::Arc<crate::package::scan_snapshot::Snapshot>,
+        disk: &mut crate::package::owner::Store,
+        usage: Option<crate::package::owner::usage::Usage>,
+        users: &[u32],
+        cross_user: bool,
+    ) -> Result<Publication, PublicationFailure> {
         let packages: std::collections::BTreeSet<_> = self
             .completed
             .iter()
             .map(|metadata| metadata.candidate.record.settings.name.clone())
             .collect();
-        let persist = |snapshot:&std::sync::Arc<crate::package::scan_snapshot::Snapshot>| {
+        let persist = |snapshot: &std::sync::Arc<crate::package::scan_snapshot::Snapshot>| {
             disk.commit_scan_settings(snapshot)?;
             for user in users {
                 if let Err(mut error) = disk.commit_live_install_restrictions(
@@ -102,9 +108,9 @@ impl CompletedAdmission {
             }
             Ok(())
         };
-        let result=match usage{
-            Some(usage)=>snapshots.publish_after(base,self.owner,usage,persist),
-            None=>snapshots.publish_install_after(base,self.owner,persist),
+        let result = match usage {
+            Some(usage) => snapshots.publish_after(base, self.owner, usage, persist),
+            None => snapshots.publish_install_after(base, self.owner, persist),
         };
         match result {
             Ok(snapshot) => Ok(Publication {
@@ -206,8 +212,9 @@ impl SigningScan {
         files: &crate::package::write::Files,
     ) -> Result<NewPackageOutcome, Rejection> {
         let name = identity.internal_name.clone();
-        super::process_policy::validate(&request.code)
-            .map_err(|error| reject(error.status, format!("Scanning Failed.: {}", error.message)))?;
+        super::process_policy::validate(&request.code).map_err(|error| {
+            reject(error.status, format!("Scanning Failed.: {}", error.message))
+        })?;
         if !request.metadata.code_path.starts_with("/data/app/")
             || request
                 .metadata
@@ -296,7 +303,10 @@ impl SigningScan {
             authorize_update(&self.settings, old, &request.signing, request.rollback)?;
             if let Some(expected) = &old.restrict_update_hash {
                 if package_digest(files, &request.code)? != *expected {
-                    return Err(reject(-2, format!("New package fails restrict-update check: {name}")));
+                    return Err(reject(
+                        -2,
+                        format!("New package fails restrict-update check: {name}"),
+                    ));
                 }
             }
         }
@@ -353,9 +363,14 @@ impl SigningScan {
         } else {
             let app_id = if let Some(group) = &declared {
                 let (app_id, flags, signatures) = {
-                    let shared = self.identities.get_shared_user(group,0,0,true)
-                        .map_err(|error|reject(-4,format!("Cannot reserve shared UID: {error:?}")))?.unwrap();
-                    (shared.app_id,shared.flags,shared.signatures.clone())
+                    let shared = self
+                        .identities
+                        .get_shared_user(group, 0, 0, true)
+                        .map_err(|error| {
+                            reject(-4, format!("Cannot reserve shared UID: {error:?}"))
+                        })?
+                        .unwrap();
+                    (shared.app_id, shared.flags, shared.signatures.clone())
                 };
                 if !self
                     .settings
@@ -369,8 +384,10 @@ impl SigningScan {
                         flags,
                         signatures,
                     });
-                    self.legacy_shared_constructor(group,app_id)
-                        .map_err(|error|reject(-110,format!("Live shared setting constructor: {error}")))?;
+                    self.legacy_shared_constructor(group, app_id)
+                        .map_err(|error| {
+                            reject(-110, format!("Live shared setting constructor: {error}"))
+                        })?;
                 }
                 app_id
             } else {
@@ -444,14 +461,26 @@ impl SigningScan {
             self.settings.packages[at] = record.settings.clone();
         } else {
             let inherited = if self.legacy_permissions.is_some()
-                && self.settings.disabled_system_packages.iter().any(|factory|
-                    factory.name==name&&factory.app_id==record.settings.app_id) {
-                Some(self.disabled_legacy_for_replacement(&name)
-                    .map_err(|error|reject(-110,format!("Live disabled setting inheritance: {error}")))?)
-            } else {None};
+                && self
+                    .settings
+                    .disabled_system_packages
+                    .iter()
+                    .any(|factory| factory.name == name && factory.app_id == record.settings.app_id)
+            {
+                Some(
+                    self.disabled_legacy_for_replacement(&name)
+                        .map_err(|error| {
+                            reject(-110, format!("Live disabled setting inheritance: {error}"))
+                        })?,
+                )
+            } else {
+                None
+            };
             self.settings.packages.push(record.settings.clone());
-            self.legacy_setting_constructor(&name,false,inherited)
-                .map_err(|error|reject(-110,format!("Live package setting constructor: {error}")))?;
+            self.legacy_setting_constructor(&name, false, inherited)
+                .map_err(|error| {
+                    reject(-110, format!("Live package setting constructor: {error}"))
+                })?;
         }
         let disabled = self
             .settings
@@ -482,7 +511,7 @@ impl SigningScan {
             .reconcile_live_authorized(&record, disabled.as_ref())
             .map_err(|error| reject(-7, format!("Native live reconciliation: {error:?}")))?;
         self.rebind_legacy_setting(&name)
-            .map_err(|error|reject(-110,format!("Live package legacy identity: {error}")))?;
+            .map_err(|error| reject(-110, format!("Live package legacy identity: {error}")))?;
         self.libraries
             .refresh_live_provider(&record)
             .map_err(|error| reject(-110, error.0))?;
@@ -747,22 +776,59 @@ mod tests {
     #[test]
     fn new_live_settings_seed_constructor_permission_owners_before_original_prepare() {
         use crate::package::owner::legacy_permissions::Migration;
-        let mut owner=SigningScan::new(&SystemConfig::default(),&Settings::default(),36).unwrap();
-        let groups=owner.identities.shared_users.keys().map(|name|(name.clone(),Migration::default())).collect();
-        owner.capture_legacy_permissions(&[0],Default::default(),groups).unwrap();
-        owner.capture_install_permissions_fixed(Default::default()).unwrap();
-        let users=[super::super::User{id:0,pre_created:false,adb_install_disallowed:false}];
-        let files:crate::package::write::Files=Box::new(|_|panic!("constructor seeds do not read APK bytes"));
-        let admission=owner.prepare_live_installs(vec![request("org.example.new",1)],&users,false,&files).unwrap();
-        let state=admission.owner.legacy_permissions("org.example.new",false).unwrap().unwrap();
-        assert_eq!(state.app_id(),admission.owner.settings.packages[0].app_id);
-        assert_eq!(state.users().len(),1);assert_eq!(state.users()[0].id,0);assert!(!state.users()[0].missing);assert!(state.users()[0].permissions.is_empty());
-        assert_eq!(admission.owner.install_permissions_fixed("org.example.new",false).unwrap(),Some(false));
+        let mut owner =
+            SigningScan::new(&SystemConfig::default(), &Settings::default(), 36).unwrap();
+        let groups = owner
+            .identities
+            .shared_users
+            .keys()
+            .map(|name| (name.clone(), Migration::default()))
+            .collect();
+        owner
+            .capture_legacy_permissions(&[0], Default::default(), groups)
+            .unwrap();
+        owner
+            .capture_install_permissions_fixed(Default::default())
+            .unwrap();
+        let users = [super::super::User {
+            id: 0,
+            pre_created: false,
+            adb_install_disallowed: false,
+        }];
+        let files: crate::package::write::Files =
+            Box::new(|_| panic!("constructor seeds do not read APK bytes"));
+        let admission = owner
+            .prepare_live_installs(vec![request("org.example.new", 1)], &users, false, &files)
+            .unwrap();
+        let state = admission
+            .owner
+            .legacy_permissions("org.example.new", false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.app_id(), admission.owner.settings.packages[0].app_id);
+        assert_eq!(state.users().len(), 1);
+        assert_eq!(state.users()[0].id, 0);
+        assert!(!state.users()[0].missing);
+        assert!(state.users()[0].permissions.is_empty());
+        assert_eq!(
+            admission
+                .owner
+                .install_permissions_fixed("org.example.new", false)
+                .unwrap(),
+            Some(false)
+        );
         assert!(owner.settings.packages.is_empty());
-        let mut shared=request("org.example.shared",1);shared.code.shared_user_id=Some("org.example.group".into());
-        let admission=owner.prepare_live_installs(vec![shared],&users,false,&files).unwrap();
-        let group=admission.owner.shared_legacy_permissions("org.example.group").unwrap().unwrap();assert!(group.users()[0].permissions.is_empty());
-
+        let mut shared = request("org.example.shared", 1);
+        shared.code.shared_user_id = Some("org.example.group".into());
+        let admission = owner
+            .prepare_live_installs(vec![shared], &users, false, &files)
+            .unwrap();
+        let group = admission
+            .owner
+            .shared_legacy_permissions("org.example.group")
+            .unwrap()
+            .unwrap();
+        assert!(group.users()[0].permissions.is_empty());
     }
     #[test]
     fn force_queryable_install_is_retained_in_package_settings() {
@@ -797,24 +863,57 @@ mod tests {
         use crate::package::pkg::{Activity, MainComponent, Process};
         let owner = SigningScan::new(&SystemConfig::default(), &Settings::default(), 36).unwrap();
         let before = owner.clone();
-        let users = [super::super::User { id: 0, pre_created: false, adb_install_disallowed: false }];
-        let files: crate::package::write::Files = Box::new(|_| panic!("No restricted update reads"));
+        let users = [super::super::User {
+            id: 0,
+            pre_created: false,
+            adb_install_disallowed: false,
+        }];
+        let files: crate::package::write::Files =
+            Box::new(|_| panic!("No restricted update reads"));
         let mut invalid = request("org.example.invalid", 1);
-        invalid.code.processes = Some(vec![Process { map_key: Some("org.example.invalid".into()), name: Some("org.example.invalid".into()), ..Default::default() }]);
-        invalid.code.receivers.push(Activity { main: MainComponent { component: crate::package::pkg::Component { name: "org.example.invalid.Receiver".into(), ..Default::default() }, process_name: Some("org.example.invalid:missing".into()), ..Default::default() }, ..Default::default() });
-        let error = match owner.prepare_live_installs(vec![request("org.example.valid", 1), invalid], &users, false, &files) {
-            Ok(_) => panic!("undefined receiver process admitted"), Err(error) => error,
+        invalid.code.processes = Some(vec![Process {
+            map_key: Some("org.example.invalid".into()),
+            name: Some("org.example.invalid".into()),
+            ..Default::default()
+        }]);
+        invalid.code.receivers.push(Activity {
+            main: MainComponent {
+                component: crate::package::pkg::Component {
+                    name: "org.example.invalid.Receiver".into(),
+                    ..Default::default()
+                },
+                process_name: Some("org.example.invalid:missing".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let error = match owner.prepare_live_installs(
+            vec![request("org.example.valid", 1), invalid],
+            &users,
+            false,
+            &files,
+        ) {
+            Ok(_) => panic!("undefined receiver process admitted"),
+            Err(error) => error,
         };
         assert_eq!(error.status, super::super::process_policy::STATUS);
-        assert_eq!(error.message, "Scanning Failed.: Can't install because receiver org.example.invalid.Receiver's process attribute org.example.invalid:missing (in package org.example.invalid) is not included in the <processes> list");
+        assert_eq!(
+            error.message,
+            "Scanning Failed.: Can't install because receiver org.example.invalid.Receiver's process attribute org.example.invalid:missing (in package org.example.invalid) is not included in the <processes> list"
+        );
         assert_eq!(owner, before);
     }
 
     #[test]
     fn first_shared_install_and_matching_second_preserve_signer_atomicity() {
         let owner = SigningScan::new(&SystemConfig::default(), &Settings::default(), 36).unwrap();
-        let users = [super::super::User { id: 0, pre_created: false, adb_install_disallowed: false }];
-        let files: crate::package::write::Files = Box::new(|_| panic!("No restricted update reads"));
+        let users = [super::super::User {
+            id: 0,
+            pre_created: false,
+            adb_install_disallowed: false,
+        }];
+        let files: crate::package::write::Files =
+            Box::new(|_| panic!("No restricted update reads"));
         let shared = |name: &str, cert: u8| {
             let mut value = request(name, 1);
             value.code.shared_user_id = Some("new.group".into());
@@ -826,21 +925,50 @@ mod tests {
             value.signing.signatures = vec![bytes.to_vec()];
             value
         };
-        let first = owner.prepare_live_installs(vec![shared("org.example.first", 1)], &users, false, &files).unwrap();
+        let first = owner
+            .prepare_live_installs(vec![shared("org.example.first", 1)], &users, false, &files)
+            .unwrap();
         assert!(!owner.identities.shared_users.contains_key("new.group"));
         let id = first.owner.settings.packages[0].app_id;
         assert_eq!(first.owner.identities.shared_users["new.group"].app_id, id);
-        let second = owner.prepare_live_installs(vec![shared("org.example.first", 1), shared("org.example.second", 1)], &users, false, &files).unwrap();
+        let second = owner
+            .prepare_live_installs(
+                vec![
+                    shared("org.example.first", 1),
+                    shared("org.example.second", 1),
+                ],
+                &users,
+                false,
+                &files,
+            )
+            .unwrap();
         assert_eq!(second.owner.settings.packages[1].app_id, id);
-        assert_eq!(second.owner.identities.shared_users["new.group"].member_count(), 2);
+        assert_eq!(
+            second.owner.identities.shared_users["new.group"].member_count(),
+            2
+        );
         let before = owner.clone();
-        let error = match owner.prepare_live_installs(vec![shared("org.example.first", 1), shared("org.example.foreign", 9)], &users, false, &files) {
+        let error = match owner.prepare_live_installs(
+            vec![
+                shared("org.example.first", 1),
+                shared("org.example.foreign", 9),
+            ],
+            &users,
+            false,
+            &files,
+        ) {
             Ok(_) => panic!("foreign shared signer admitted"),
             Err(error) => error,
         };
         assert_eq!(error.status, -8);
         assert_eq!(owner, before);
-        assert!(!owner.settings.packages.iter().any(|p|p.name=="org.example.foreign"));
+        assert!(
+            !owner
+                .settings
+                .packages
+                .iter()
+                .any(|p| p.name == "org.example.foreign")
+        );
     }
 
     #[test]

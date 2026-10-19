@@ -4,22 +4,22 @@
 //! legacy per-user statuses, are separate from each package's domain set
 //! id and user restriction state.
 
-pub mod collector;
 pub mod agent;
 pub mod backup;
+pub mod collector;
 mod legacy_read;
 mod read;
-pub use read::ReadResult;
 pub use legacy_read::SectionError;
+pub use read::ReadResult;
 pub mod domain_set;
 pub mod enforcer;
-pub mod owner;
-pub mod original_bridge;
 pub mod names;
+pub mod original_bridge;
+pub mod owner;
 pub mod parcels;
 pub mod service;
-pub mod uri_groups;
 pub mod uri_bundle;
+pub mod uri_groups;
 pub mod uri_parcel;
 pub mod uuid;
 
@@ -66,11 +66,21 @@ impl State {
         let bytes = aim_android_xml::abx::write(root)?;
         let mut reader = aim_android_xml::pull::Reader::new(&bytes)?;
         reader.next()?;
-        let result = Self::read_events(&mut reader, |id| uuid::parse(id, true).map_err(crate::package::settings::ReadError::File))
-            .map_err(|error| error.to_string())?;
-        if let Some(error) = result.diagnostics.first() { return Err(error.message.clone()); }
-        for package in result.state.active { put(&mut self.active, package.name.clone(), package, |p| &p.name); }
-        for package in result.state.restored { put(&mut self.restored, package.name.clone(), package, |p| &p.name); }
+        let result = Self::read_events(&mut reader, |id| {
+            uuid::parse(id, true).map_err(crate::package::settings::ReadError::File)
+        })
+        .map_err(|error| error.to_string())?;
+        if let Some(error) = result.diagnostics.first() {
+            return Err(error.message.clone());
+        }
+        for package in result.state.active {
+            put(&mut self.active, package.name.clone(), package, |p| &p.name);
+        }
+        for package in result.state.restored {
+            put(&mut self.restored, package.name.clone(), package, |p| {
+                &p.name
+            });
+        }
         Ok(())
     }
 
@@ -80,7 +90,9 @@ impl State {
         let mut reader = aim_android_xml::pull::Reader::new(&bytes)?;
         reader.next()?;
         let errors = self.read_legacy_events(&mut reader);
-        if let Some(error) = errors.first() { return Err(error.message.clone()); }
+        if let Some(error) = errors.first() {
+            return Err(error.message.clone());
+        }
         Ok(())
     }
 }
@@ -107,14 +119,28 @@ mod nullable_filter_tests {
     #[test]
     fn domain_xml_skips_missing_filter_and_keeps_empty_filter() {
         let xml = b"<domain-verifications><active><package-state packageName='x' id='00000000-0000-0000-0000-000000000001'><uri-relative-filter-groups><domain name='x.example'><uri-relative-filter-group action='0'><uri-relative-filter uri-part='0' pattern-type='0'/><uri-relative-filter uri-part='0' pattern-type='0' filter=''/></uri-relative-filter-group></domain></uri-relative-filter-groups></package-state></active></domain-verifications>";
-        let mut state = super::State::default(); state.read(&aim_android_xml::read(xml).unwrap()).unwrap();
+        let mut state = super::State::default();
+        state.read(&aim_android_xml::read(xml).unwrap()).unwrap();
         let filters = &state.active[0].uri_relative_filter_groups[0].1[0].filters;
-        assert_eq!(filters.len(), 1); assert_eq!(filters[0].filter.as_deref(), Some(""));
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].filter.as_deref(), Some(""));
         state.active[0].uri_relative_filter_groups[0].1[0].add_nullable(0, 0, None);
         let document = aim_android_xml::read(b"<packages/>").unwrap();
         let written = crate::package::owner::domains::replace(&document, &state).unwrap();
-        let saved = crate::package::settings::Settings::parse(&written).unwrap().domain_verification;
-        assert_eq!(saved.active[0].uri_relative_filter_groups[0].1[0].filters.len(), 1);
-        assert_eq!(state.active[0].uri_relative_filter_groups[0].1[0].filters.len(), 2);
+        let saved = crate::package::settings::Settings::parse(&written)
+            .unwrap()
+            .domain_verification;
+        assert_eq!(
+            saved.active[0].uri_relative_filter_groups[0].1[0]
+                .filters
+                .len(),
+            1
+        );
+        assert_eq!(
+            state.active[0].uri_relative_filter_groups[0].1[0]
+                .filters
+                .len(),
+            2
+        );
     }
 }

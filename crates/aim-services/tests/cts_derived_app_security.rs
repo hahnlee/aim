@@ -7,13 +7,18 @@ fn apk(name: &str) -> std::path::PathBuf {
     let path = aim_paths::fetched()
         .join("cts-tradefed/android-cts/testcases/CtsAppSecurityHostTestCases/zip-aligned")
         .join(name);
-    assert!(path.is_file(), "pinned CTS input {} must be available", path.display());
+    assert!(
+        path.is_file(),
+        "pinned CTS input {} must be available",
+        path.display()
+    );
     path
 }
 
 fn parse(name: &str) -> Result<String, parse::Error> {
     let platform = Platform::load(&aim_paths::original_image(), Default::default()).unwrap();
-    parse::parse(&apk(name), "/data/app/~~test/base.apk", 0, &platform).map(|package| package.package_name)
+    parse::parse(&apk(name), "/data/app/~~test/base.apk", 0, &platform)
+        .map(|package| package.package_name)
 }
 
 /// AppSecurityTests#testInstallDuplicatePermission_differentProtectionLevel_fail and
@@ -28,7 +33,10 @@ fn duplicate_permissions_fail_only_with_different_attributes() {
     ] {
         match parse(name) {
             Err(parse::Error::Status(-108, message)) => {
-                assert_eq!(message, "Found duplicate permission with a different attribute value.")
+                assert_eq!(
+                    message,
+                    "Found duplicate permission with a different attribute value."
+                )
             }
             other => panic!("{name}: {other:?}"),
         }

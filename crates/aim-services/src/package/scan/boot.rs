@@ -203,7 +203,10 @@ fn scan_system_image<S>(
             signing: crate::package::sign::SigningDetails::unknown(),
         };
         if let Err(error) = super::process_policy::validate(&code.parsed) {
-            rejected.push(super::Rejected { location: code.location.clone(), reason: error.message });
+            rejected.push(super::Rejected {
+                location: code.location.clone(),
+                reason: error.message,
+            });
             continue;
         }
         owner.refresh_init_apex(&code);
@@ -377,7 +380,10 @@ fn scan_system_image<S>(
         users.stopped_system_app =
             initial_stopped(&code.parsed, config, should_stop_system_packages);
         let completion = ScanMetadataCompletion {
-            scan_as_instant_app:super::permission_admissions::boot_scan_as_instant(saved.as_ref().map(|saved|saved.users),&identity.internal_name),
+            scan_as_instant_app: super::permission_admissions::boot_scan_as_instant(
+                saved.as_ref().map(|saved| saved.users),
+                &identity.internal_name,
+            ),
             seinfo: inputs.seinfo,
             abi_policy: inputs.abi_policy,
             native_environment: &native_environment,
@@ -433,7 +439,10 @@ fn scan_system_image<S>(
                 completion,
             )?;
             let completion = ScanMetadataCompletion {
-                scan_as_instant_app:super::permission_admissions::boot_scan_as_instant(Some(saved.users),&identity.internal_name),
+                scan_as_instant_app: super::permission_admissions::boot_scan_as_instant(
+                    Some(saved.users),
+                    &identity.internal_name,
+                ),
                 seinfo: inputs.seinfo,
                 abi_policy: inputs.abi_policy,
                 native_environment: &native_environment,

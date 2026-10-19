@@ -144,8 +144,8 @@ pub fn verify(directory: &Path) {
         .arg(&stubs)
         .args(java::sources(&repo.join("java/device-services/stubs")))
         .arg(repo.join("crates/aim-services/tests/api/SELinuxMMAC.java")));
-    let production=java::production_classes(&root,&jdk,&stubs);
-    let classpath=std::env::join_paths([stubs.as_path(),production.as_path()]).unwrap();
+    let production = java::production_classes(&root, &jdk, &stubs);
+    let classpath = std::env::join_paths([stubs.as_path(), production.as_path()]).unwrap();
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-d"])
         .arg(&classes)
@@ -185,8 +185,12 @@ pub fn verify(directory: &Path) {
         .arg("--output")
         .arg(&dex)
         .args(class_files));
-    let system_jars = aim_android_image::classpath::jars(&super::runtime::cohort::original_image(),
-        "systemserverclasspath.pb", aim_android_image::classpath::SYSTEMSERVERCLASSPATH).unwrap();
+    let system_jars = aim_android_image::classpath::jars(
+        &super::runtime::cohort::original_image(),
+        "systemserverclasspath.pb",
+        aim_android_image::classpath::SYSTEMSERVERCLASSPATH,
+    )
+    .unwrap();
     let system_jars = system_jars.iter().map(String::as_str).collect::<Vec<_>>();
     java::check_linkage(&dex.join("classes.dex"), &system_jars).unwrap();
     let boot_data = Data(std::env::temp_dir().join(format!("ds-{}", std::process::id())));
@@ -238,10 +242,21 @@ pub fn verify(directory: &Path) {
         }
     }
     fs::copy(dex.join("classes.dex"), guest.join("oracle.dex")).unwrap();
-    let runtime_classpath = format!("-Djava.class.path=/data/local/tmp/displaced-snapshots/oracle.dex:{}", system_jars.join(":"));
-    let output = boot.client(1000).args(["/system/bin/app_process",
-        &runtime_classpath,
-        "/system/bin", "dev.aim.server.DisplacedSnapshotOracle", "/data/local/tmp/displaced-snapshots"]).output().unwrap();
+    let runtime_classpath = format!(
+        "-Djava.class.path=/data/local/tmp/displaced-snapshots/oracle.dex:{}",
+        system_jars.join(":")
+    );
+    let output = boot
+        .client(1000)
+        .args([
+            "/system/bin/app_process",
+            &runtime_classpath,
+            "/system/bin",
+            "dev.aim.server.DisplacedSnapshotOracle",
+            "/data/local/tmp/displaced-snapshots",
+        ])
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "displaced snapshot oracle: {}\n{}\n{}",

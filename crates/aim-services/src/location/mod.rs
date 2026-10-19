@@ -269,8 +269,8 @@ impl LocationManagerService {
             let mut inner = self.inner.lock().unwrap();
             let result = f(&mut inner, &self.env, &mut effects);
             self.settle(&mut inner, &mut effects);
-            let broadcasting = (!effects.broadcasts.is_empty())
-                .then(|| self.broadcasting.lock().unwrap());
+            let broadcasting =
+                (!effects.broadcasts.is_empty()).then(|| self.broadcasting.lock().unwrap());
             (result, broadcasting)
         };
         self.apply(effects);

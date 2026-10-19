@@ -31,10 +31,14 @@ impl CompanionDevice {
         let data = self.host.data()?;
         let files = [
             data.join(format!("system_de/{user}/companion_device_manager.xml")),
-            data.join(format!("system/users/{user}/companion_device_manager_associations.xml")),
+            data.join(format!(
+                "system/users/{user}/companion_device_manager_associations.xml"
+            )),
         ];
         if files.iter().any(|f| f.exists()) {
-            return Err(self.host.unimplemented_named("companiondevice", "persisted associations (#1790)"));
+            return Err(self
+                .host
+                .unimplemented_named("companiondevice", "persisted associations (#1790)"));
         }
         Ok(())
     }
@@ -52,11 +56,17 @@ impl Service for CompanionDevice {
                 let a = cdm::CanPairWithoutPrompt::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 // `getFirstAssociationByAddress`: none, so not without a
                 // prompt.
-                self.no_associations(a.user_id).map(|()| cdm::write_can_pair_without_prompt_reply(&mut p, false))
+                self.no_associations(a.user_id)
+                    .map(|()| cdm::write_can_pair_without_prompt_reply(&mut p, false))
             }
             code => {
-                let name = cdm::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
-                Err(self.host.unimplemented_named("companiondevice", &format!("{name} (#1790)")))
+                let name = cdm::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
+                Err(self
+                    .host
+                    .unimplemented_named("companiondevice", &format!("{name} (#1790)")))
             }
         };
         reply(result.map(|()| p))

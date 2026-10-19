@@ -23,7 +23,10 @@ pub struct TrustManager {
 
 impl TrustManager {
     pub fn new(host: Arc<AppHost>) -> Self {
-        TrustManager { host, listeners: Mutex::new(Vec::new()) }
+        TrustManager {
+            host,
+            listeners: Mutex::new(Vec::new()),
+        }
     }
 }
 
@@ -48,10 +51,19 @@ impl Service for TrustManager {
                         return Ok(false);
                     }
                     if a.user_id == USER_ALL {
-                        return Err(Exception::illegal_argument(format!("Call does not support special user #{}", a.user_id)));
+                        return Err(Exception::illegal_argument(format!(
+                            "Call does not support special user #{}",
+                            a.user_id
+                        )));
                     }
-                    self.host.incoming_user(call.sender_euid as i32, a.user_id, false)?;
-                    aim_host_lock::secure().map_err(|code| Exception::new(EX_ILLEGAL_STATE, format!("trust: the Mac's lock: LocalAuthentication error {code}")))
+                    self.host
+                        .incoming_user(call.sender_euid as i32, a.user_id, false)?;
+                    aim_host_lock::secure().map_err(|code| {
+                        Exception::new(
+                            EX_ILLEGAL_STATE,
+                            format!("trust: the Mac's lock: LocalAuthentication error {code}"),
+                        )
+                    })
                 })();
                 match secure {
                     Ok(secure) => trust::write_is_device_secure_reply(&mut p, secure),
@@ -59,7 +71,8 @@ impl Service for TrustManager {
                 }
             }
             trust::REGISTER_DEVICE_LOCKED_STATE_LISTENER => {
-                let args = trust::RegisterDeviceLockedStateListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args = trust::RegisterDeviceLockedStateListener::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 if let Some(listener) = args.listener {
                     self.listeners.lock().unwrap().push(listener);
                 }

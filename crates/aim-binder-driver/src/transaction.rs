@@ -410,10 +410,18 @@ impl State {
             head.clear();
         }
         let descriptor = crate::trace::descriptor(&head);
-        let data = self.trace.as_ref().unwrap().captures(&descriptor, tr.code).then(|| {
-            let mut data = vec![0u8; (tr.data_size as usize).min(CAPTURE_BYTES)];
-            guest.copy_from_user(tr.buffer, &mut data).map(|()| data).unwrap_or_default()
-        });
+        let data = self
+            .trace
+            .as_ref()
+            .unwrap()
+            .captures(&descriptor, tr.code)
+            .then(|| {
+                let mut data = vec![0u8; (tr.data_size as usize).min(CAPTURE_BYTES)];
+                guest
+                    .copy_from_user(tr.buffer, &mut data)
+                    .map(|()| data)
+                    .unwrap_or_default()
+            });
         let from = &self.procs[&proc];
         let to = &self.procs[&target_proc];
         let record = TraceRecord {

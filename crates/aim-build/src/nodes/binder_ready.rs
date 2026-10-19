@@ -3,8 +3,15 @@ use aim_binder_host::{mach, wire};
 use aim_storage::process_namespace::{InitRegistration, ProcessIdentity};
 use std::path::Path;
 
-pub(super) fn poll(runtime: &Path, init: ProcessIdentity, name: &str, timeout_ms: u32) -> Result<bool, String> {
-    if !init.is_live() { return Err("template init exited before Binder readiness".into()); }
+pub(super) fn poll(
+    runtime: &Path,
+    init: ProcessIdentity,
+    name: &str,
+    timeout_ms: u32,
+) -> Result<bool, String> {
+    if !init.is_live() {
+        return Err("template init exited before Binder readiness".into());
+    }
     let table = runtime.join("identity/by-pid");
     let registration = match InitRegistration::read(&table) {
         Ok(value) => value,
@@ -26,8 +33,18 @@ pub(super) fn poll(runtime: &Path, init: ProcessIdentity, name: &str, timeout_ms
             return Err(format!("template Binder reply port: {error:#x}"));
         }
     };
-    let request = mach::Msg { id: wire::FILES, ports: vec![], data: 0u32.to_le_bytes().to_vec() };
-    let result = mach::call_bounded(&mut mach::Buffer::default(), service, reply, &request, timeout_ms);
+    let request = mach::Msg {
+        id: wire::FILES,
+        ports: vec![],
+        data: 0u32.to_le_bytes().to_vec(),
+    };
+    let result = mach::call_bounded(
+        &mut mach::Buffer::default(),
+        service,
+        reply,
+        &request,
+        timeout_ms,
+    );
     mach::destroy_receive(reply);
     mach::release_send(service);
     let response = match result {
@@ -48,7 +65,9 @@ pub(super) fn poll(runtime: &Path, init: ProcessIdentity, name: &str, timeout_ms
             return Err("template Binder startup reply is malformed".into());
         }
         let status = i32::from_le_bytes(response.data[..4].try_into().unwrap());
-        if status != 0 { return Err(format!("template Binder startup status: {status}")); }
+        if status != 0 {
+            return Err(format!("template Binder startup status: {status}"));
+        }
         if response.data.len() < 8 {
             return Err("template Binder shared-file reply is truncated".into());
         }
@@ -58,22 +77,35 @@ pub(super) fn poll(runtime: &Path, init: ProcessIdentity, name: &str, timeout_ms
         }
         Ok(true)
     })();
-    for port in response.ports { mach::release_send(port); }
+    for port in response.ports {
+        mach::release_send(port);
+    }
     checked
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, process::{Child, Command}, time::Duration};
-    struct Fixture { root: std::path::PathBuf, child: Child }
+    use std::{
+        fs,
+        process::{Child, Command},
+        time::Duration,
+    };
+    struct Fixture {
+        root: std::path::PathBuf,
+        child: Child,
+    }
     impl Fixture {
         fn new() -> Self {
             // This file is compiled into several test modules, and its tests
             // run at once.
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let root = std::env::temp_dir().join(format!("aim-binder-startup-{}-{}-{}", std::process::id(),
-                module_path!().replace("::", "-"), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+            let root = std::env::temp_dir().join(format!(
+                "aim-binder-startup-{}-{}-{}",
+                std::process::id(),
+                module_path!().replace("::", "-"),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
             fs::create_dir(&root).unwrap();
             let child = Command::new("/bin/sleep").arg("20").spawn().unwrap();
             Self { root, child }
@@ -81,7 +113,9 @@ mod tests {
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
-            if self.child.try_wait().unwrap().is_none() { self.child.kill().unwrap(); }
+            if self.child.try_wait().unwrap().is_none() {
+                self.child.kill().unwrap();
+            }
             self.child.wait().unwrap();
             fs::remove_dir_all(&self.root).unwrap();
         }
@@ -91,30 +125,58 @@ mod tests {
         let mut fixture = Fixture::new();
         let child = ProcessIdentity::running(fixture.child.id() as i32).unwrap();
         fs::write(fixture.root.join("path-map"), b"early file only").unwrap();
-        let name = format!("dev.aim.template-startup.{}.{}", std::process::id(), child.host_pid);
+        let name = format!(
+            "dev.aim.template-startup.{}.{}",
+            std::process::id(),
+            child.host_pid
+        );
         assert!(!poll(&fixture.root, child, &name, 20).unwrap());
-        InitRegistration::register(&fixture.root.join("identity/by-pid"), child, "initial").unwrap();
+        InitRegistration::register(&fixture.root.join("identity/by-pid"), child, "initial")
+            .unwrap();
         assert!(!poll(&fixture.root, child, &name, 20).unwrap());
         let server = aim_binder_host::server::Server::start(&name).unwrap();
-        assert!(poll(&fixture.root, child, &name, 20).unwrap_err().contains("another process birth"));
+        assert!(
+            poll(&fixture.root, child, &name, 20)
+                .unwrap_err()
+                .contains("another process birth")
+        );
         let actual = ProcessIdentity::running(std::process::id() as i32).unwrap();
-        let registration = InitRegistration::register(&fixture.root.join("identity/by-pid"), actual, "initial").unwrap();
+        let registration =
+            InitRegistration::register(&fixture.root.join("identity/by-pid"), actual, "initial")
+                .unwrap();
         assert!(poll(&fixture.root, actual, &name, 20).unwrap());
-        registration.remove(&fixture.root.join("identity/by-pid")).unwrap();
+        registration
+            .remove(&fixture.root.join("identity/by-pid"))
+            .unwrap();
         // The same live native driver must not admit a boot that is retiring.
         assert!(!poll(&fixture.root, actual, &name, 20).unwrap());
-        InitRegistration::register(&fixture.root.join("identity/by-pid"), child, "initial").unwrap();
-        assert!(poll(&fixture.root, actual, &name, 20).unwrap_err().contains("another process birth"));
-        fixture.child.kill().unwrap(); fixture.child.wait().unwrap();
-        assert!(poll(&fixture.root, child, &name, 20).unwrap_err().contains("exited"));
+        InitRegistration::register(&fixture.root.join("identity/by-pid"), child, "initial")
+            .unwrap();
+        assert!(
+            poll(&fixture.root, actual, &name, 20)
+                .unwrap_err()
+                .contains("another process birth")
+        );
+        fixture.child.kill().unwrap();
+        fixture.child.wait().unwrap();
+        assert!(
+            poll(&fixture.root, child, &name, 20)
+                .unwrap_err()
+                .contains("exited")
+        );
         drop(server);
     }
     #[test]
     fn checked_in_port_without_serving_is_not_ready() {
         let fixture = Fixture::new();
         let actual = ProcessIdentity::running(std::process::id() as i32).unwrap();
-        InitRegistration::register(&fixture.root.join("identity/by-pid"), actual, "initial").unwrap();
-        let name = format!("dev.aim.template-not-serving.{}.{}", std::process::id(), fixture.child.id());
+        InitRegistration::register(&fixture.root.join("identity/by-pid"), actual, "initial")
+            .unwrap();
+        let name = format!(
+            "dev.aim.template-not-serving.{}.{}",
+            std::process::id(),
+            fixture.child.id()
+        );
         let port = mach::check_in(&name).unwrap();
         let start = std::time::Instant::now();
         assert!(!poll(&fixture.root, actual, &name, 20).unwrap());

@@ -140,5 +140,8 @@ impl System {
 
 struct LaunchComponent(crate::package::intent::ComponentName);
 impl aim_service_aidl::WriteParcelable for LaunchComponent {
-    fn write_to(&self,parcel:&mut Parcel){parcel.write_string16(Some(&self.0.package));parcel.write_string16(Some(&self.0.class));}
+    fn write_to(&self, parcel: &mut Parcel) {
+        parcel.write_string16(Some(&self.0.package));
+        parcel.write_string16(Some(&self.0.class));
+    }
 }

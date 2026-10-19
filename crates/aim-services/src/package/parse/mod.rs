@@ -80,7 +80,7 @@ pub struct Platform {
     pub codenames: Vec<String>,
     /// Activated original SdkExtensions properties, supplied by the runtime
     /// property owner separately from image build.props.
-    pub sdk_extensions: Option<HashMap<i32,i32>>,
+    pub sdk_extensions: Option<HashMap<i32, i32>>,
     /// The system features (`hasSystemFeature`).
     pub features: HashSet<String>,
     /// The aconfig flags' values, by `package.name`, and the packages that
@@ -110,20 +110,39 @@ pub struct Platform {
 }
 
 impl Platform {
-    pub fn set_sdk_extensions(&mut self,property:&dyn Fn(&str)->std::result::Result<Option<String>,String>)
-        ->std::result::Result<(),String> {
-        let mut versions=HashMap::new();
-        for (sdk,suffix) in [(30,"r"),(31,"s"),(33,"t"),(34,"u"),(35,"v"),(36,"b"),(1_000_000,"ad_services")] {
-            let value=property(&format!("build.version.extensions.{suffix}"))?;
-            let version=value.as_deref().and_then(|value|{
-                let value=value.trim();
-                if let Some(hex)=value.strip_prefix("0x").or_else(||value.strip_prefix("0X")) {
-                    i32::from_str_radix(hex,16).ok()
-                }else{value.parse::<i32>().ok()}
-            }).unwrap_or(0); // Original SystemProperties.getInt(..., 0).
-            versions.insert(sdk,version);
+    pub fn set_sdk_extensions(
+        &mut self,
+        property: &dyn Fn(&str) -> std::result::Result<Option<String>, String>,
+    ) -> std::result::Result<(), String> {
+        let mut versions = HashMap::new();
+        for (sdk, suffix) in [
+            (30, "r"),
+            (31, "s"),
+            (33, "t"),
+            (34, "u"),
+            (35, "v"),
+            (36, "b"),
+            (1_000_000, "ad_services"),
+        ] {
+            let value = property(&format!("build.version.extensions.{suffix}"))?;
+            let version = value
+                .as_deref()
+                .and_then(|value| {
+                    let value = value.trim();
+                    if let Some(hex) = value
+                        .strip_prefix("0x")
+                        .or_else(|| value.strip_prefix("0X"))
+                    {
+                        i32::from_str_radix(hex, 16).ok()
+                    } else {
+                        value.parse::<i32>().ok()
+                    }
+                })
+                .unwrap_or(0); // Original SystemProperties.getInt(..., 0).
+            versions.insert(sdk, version);
         }
-        self.sdk_extensions=Some(versions);Ok(())
+        self.sdk_extensions = Some(versions);
+        Ok(())
     }
     fn flag(&self, name: &str) -> bool {
         self.flags.get(name).copied().unwrap_or(false)
@@ -576,7 +595,10 @@ impl Parser<'_> {
                 && (p.protection_level != q.protection_level || p.group != q.group)
             {
                 // PackageManager.INSTALL_PARSE_FAILED_MANIFEST_MALFORMED
-                return Err(Error::Status(-108, "Found duplicate permission with a different attribute value.".into()));
+                return Err(Error::Status(
+                    -108,
+                    "Found duplicate permission with a different attribute value.".into(),
+                ));
             }
             seen.insert(&p.component.name, p);
         }
@@ -939,18 +961,33 @@ impl Parser<'_> {
         let mut min_extensions: Option<Vec<(i32, i32)>> = None;
         for c in &e.children {
             if c.name == "extension-sdk" {
-                let attrs=self.obtain(c);
-                let sdk=attrs.int("sdkVersion",-1);
-                let minimum=attrs.int("minExtensionVersion",-1);
-                if sdk<0{return fail("<extension-sdk> must specify an sdkVersion >= 0");}
-                if minimum<0{return fail("<extension-sdk> must specify minExtensionVersion >= 0");}
-                if sdk<30{return fail(format!("Specified sdkVersion {sdk} is not valid"));}
-                let versions=self.platform.sdk_extensions.as_ref().ok_or_else(||Error::Unsupported("extension SDK runtime property owner unavailable".into()))?;
-                let available=versions.get(&sdk).copied().unwrap_or(0);
-                if available<minimum{return Err(Error::OlderSdk(format!("Package requires {sdk} extension version {minimum} which exceeds device version {available}")));}
-                let versions=min_extensions.get_or_insert_with(Vec::new);
-                if let Some((_,version))=versions.iter_mut().find(|(key,_)|*key==sdk){*version=minimum;}
-                else{versions.push((sdk,minimum));}
+                let attrs = self.obtain(c);
+                let sdk = attrs.int("sdkVersion", -1);
+                let minimum = attrs.int("minExtensionVersion", -1);
+                if sdk < 0 {
+                    return fail("<extension-sdk> must specify an sdkVersion >= 0");
+                }
+                if minimum < 0 {
+                    return fail("<extension-sdk> must specify minExtensionVersion >= 0");
+                }
+                if sdk < 30 {
+                    return fail(format!("Specified sdkVersion {sdk} is not valid"));
+                }
+                let versions = self.platform.sdk_extensions.as_ref().ok_or_else(|| {
+                    Error::Unsupported("extension SDK runtime property owner unavailable".into())
+                })?;
+                let available = versions.get(&sdk).copied().unwrap_or(0);
+                if available < minimum {
+                    return Err(Error::OlderSdk(format!(
+                        "Package requires {sdk} extension version {minimum} which exceeds device version {available}"
+                    )));
+                }
+                let versions = min_extensions.get_or_insert_with(Vec::new);
+                if let Some((_, version)) = versions.iter_mut().find(|(key, _)| *key == sdk) {
+                    *version = minimum;
+                } else {
+                    versions.push((sdk, minimum));
+                }
             }
         }
         if let Some(v) = &mut min_extensions {

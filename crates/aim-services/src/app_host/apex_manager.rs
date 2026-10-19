@@ -57,7 +57,9 @@ fn read_info(r: &mut Reader<'_>) -> ParcelResult<ApexInfo> {
 fn packages(service: &Strong, code: u32, name: &str) -> Result<Vec<ApexInfo>, String> {
     let mut data = Parcel::new();
     data.write_interface_token(DESCRIPTOR);
-    let reply = service.transact(code, &data, false).map_err(|s| format!("{name}: {s}"))?;
+    let reply = service
+        .transact(code, &data, false)
+        .map_err(|s| format!("{name}: {s}"))?;
     let mut r = reply.reader();
     let read = |r: &mut Reader<'_>| -> ParcelResult<Vec<ApexInfo>> {
         (0..r.read_i32()?.max(0)).map(|_| read_info(r)).collect()
@@ -83,7 +85,9 @@ pub fn inventory(process: &LocalProcess) -> Result<ApexInventory, String> {
         }
         std::thread::sleep(Duration::from_millis(100));
     };
-    let path = |p: Option<String>, what: &str| p.ok_or_else(|| format!("{SERVICE}: an APEX without a {what}"));
+    let path = |p: Option<String>, what: &str| {
+        p.ok_or_else(|| format!("{SERVICE}: an APEX without a {what}"))
+    };
     let all = packages(&service, GET_ALL_PACKAGES, "getAllPackages")?
         .into_iter()
         .map(|i| {
@@ -111,5 +115,8 @@ pub fn inventory(process: &LocalProcess) -> Result<ApexInventory, String> {
             })
         })
         .collect::<Result<_, String>>()?;
-    Ok(ApexInventory { packages: Some(all), active })
+    Ok(ApexInventory {
+        packages: Some(all),
+        active,
+    })
 }

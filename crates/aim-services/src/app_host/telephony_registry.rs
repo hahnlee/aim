@@ -12,7 +12,9 @@
 use std::sync::{Arc, Mutex};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
-use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel};
+use aim_binder_host::parcel::{
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel,
+};
 use aim_service_aidl::com_android_internal_telephony_itelephonyregistry as tr;
 
 use super::{AppHost, PER_USER_RANGE, reply};
@@ -76,23 +78,37 @@ pub struct TelephonyRegistry {
 
 impl TelephonyRegistry {
     pub fn new(host: Arc<AppHost>) -> Self {
-        TelephonyRegistry { host, records: Arc::default() }
+        TelephonyRegistry {
+            host,
+            records: Arc::default(),
+        }
     }
 
     /// `addOnSubscriptionsChangedListener` and its opportunistic twin:
     /// the caller's package checked, the record added (no notification
     /// has occurred to repeat to it).
-    fn add_listener(&self, uid: i32, pid: i32, package: Option<&str>, callback: Option<Binder>) -> Result<(), Exception> {
+    fn add_listener(
+        &self,
+        uid: i32,
+        pid: i32,
+        package: Option<&str>,
+        callback: Option<Binder>,
+    ) -> Result<(), Exception> {
         // `AppOpsManager.checkPackage`.
         let package = package.unwrap_or_default();
         if !self.host.owns_package(uid, package)? {
-            return Err(Exception::security(format!("Package {package} does not belong to {uid}")));
+            return Err(Exception::security(format!(
+                "Package {package} does not belong to {uid}"
+            )));
         }
         let Some(Binder::Handle(handle)) = callback else {
             return Err(Exception::new(EX_NULL_POINTER, "callback"));
         };
         // `doesLimitApplyForListeners`: not the system's or the phone's.
-        let limited = !matches!(uid.rem_euclid(PER_USER_RANGE as i32), SYSTEM_UID | PHONE_UID);
+        let limited = !matches!(
+            uid.rem_euclid(PER_USER_RANGE as i32),
+            SYSTEM_UID | PHONE_UID
+        );
         self.add(handle, uid, pid, limited)
     }
 
@@ -112,10 +128,18 @@ impl TelephonyRegistry {
             return Ok(());
         }
         let for_pid = records.iter().filter(|r| r.pid == pid).count() as i32;
-        if limited && limit >= 1 && for_pid >= limit && self.host.change_enabled(PHONE_STATE_LISTENER_LIMIT_CHANGE_ID, uid)? {
+        if limited
+            && limit >= 1
+            && for_pid >= limit
+            && self
+                .host
+                .change_enabled(PHONE_STATE_LISTENER_LIMIT_CHANGE_ID, uid)?
+        {
             return Err(Exception::new(
                 EX_ILLEGAL_STATE,
-                format!("Pid {pid} has exceeded the number of permissible registered listeners. Ignoring request to add."),
+                format!(
+                    "Pid {pid} has exceeded the number of permissible registered listeners. Ignoring request to add."
+                ),
             ));
         }
         let binder = self.host.process.strong(handle);
@@ -124,7 +148,10 @@ impl TelephonyRegistry {
             &binder,
             Box::new(move || {
                 if let Some(records) = gone.upgrade() {
-                    records.lock().unwrap().retain(|r| r.binder.handle != handle);
+                    records
+                        .lock()
+                        .unwrap()
+                        .retain(|r| r.binder.handle != handle);
                 }
             }),
         );
@@ -142,10 +169,21 @@ impl TelephonyRegistry {
     /// (`checkListenerPermission`), then its record. No subscription
     /// manager without telephony, so its phone is
     /// `INVALID_SIM_SLOT_INDEX` and nothing is notified now.
-    fn listen(&self, uid: i32, pid: i32, sub_id: i32, package: Option<&str>, feature: Option<&str>, callback: Option<Binder>, events: &[i32]) -> Result<(), Exception> {
+    fn listen(
+        &self,
+        uid: i32,
+        pid: i32,
+        sub_id: i32,
+        package: Option<&str>,
+        feature: Option<&str>,
+        callback: Option<Binder>,
+        events: &[i32],
+    ) -> Result<(), Exception> {
         let package = package.unwrap_or_default();
         if !self.host.owns_package(uid, package)? {
-            return Err(Exception::security(format!("Package {package} does not belong to {uid}")));
+            return Err(Exception::security(format!(
+                "Package {package} does not belong to {uid}"
+            )));
         }
         if events.is_empty() {
             self.remove(callback);
@@ -157,38 +195,63 @@ impl TelephonyRegistry {
         let Some(Binder::Handle(handle)) = callback else {
             return Err(Exception::new(EX_NULL_POINTER, "callback"));
         };
-        let limited = !matches!(uid.rem_euclid(PER_USER_RANGE as i32), SYSTEM_UID | PHONE_UID);
+        let limited = !matches!(
+            uid.rem_euclid(PER_USER_RANGE as i32),
+            SYSTEM_UID | PHONE_UID
+        );
         self.add(handle, uid, pid, limited)
     }
 
     /// `checkListenerPermission`: false where a check fails softly (the
     /// listener is not added), a SecurityException where it fails hard.
-    fn check_listener_permission(&self, uid: i32, sub_id: i32, package: &str, feature: Option<&str>, events: &[i32]) -> Result<bool, Exception> {
+    fn check_listener_permission(
+        &self,
+        uid: i32,
+        sub_id: i32,
+        package: &str,
+        feature: Option<&str>,
+        events: &[i32],
+    ) -> Result<bool, Exception> {
         let has = |e: i32| events.contains(&e);
         let change = |id: i64| self.host.change_enabled(id, uid);
         let mut successful = true;
         // `isLocationPermissionRequired`.
         if has(EVENT_CELL_LOCATION_CHANGED) || has(EVENT_CELL_INFO_CHANGED) {
-            return Err(self.host.unimplemented_named("telephony.registry", "location events' permissions (#1713)"));
+            return Err(self.host.unimplemented_named(
+                "telephony.registry",
+                "location events' permissions (#1713)",
+            ));
         }
         // `isPhoneStatePermissionRequired`.
         let phone_state = has(EVENT_CALL_FORWARDING_INDICATOR_CHANGED)
             || has(EVENT_MESSAGE_WAITING_INDICATOR_CHANGED)
             || has(EVENT_EMERGENCY_NUMBER_LIST_CHANGED)
-            || (has(EVENT_LEGACY_CALL_STATE_CHANGED) || has(EVENT_CALL_STATE_CHANGED)) && change(ENABLE_GET_CALL_STATE_PERMISSION_PROTECTION)?
-            || has(EVENT_ACTIVE_DATA_SUBSCRIPTION_ID_CHANGED) && change(REQUIRE_READ_PHONE_STATE_PERMISSION_FOR_ACTIVE_DATA_SUB_ID)?
-            || has(EVENT_CELL_INFO_CHANGED) && change(REQUIRE_READ_PHONE_STATE_PERMISSION_FOR_CELL_INFO)?
-            || has(EVENT_DISPLAY_INFO_CHANGED) && !change(REQUIRE_READ_PHONE_STATE_PERMISSION_FOR_DISPLAY_INFO)?;
+            || (has(EVENT_LEGACY_CALL_STATE_CHANGED) || has(EVENT_CALL_STATE_CHANGED))
+                && change(ENABLE_GET_CALL_STATE_PERMISSION_PROTECTION)?
+            || has(EVENT_ACTIVE_DATA_SUBSCRIPTION_ID_CHANGED)
+                && change(REQUIRE_READ_PHONE_STATE_PERMISSION_FOR_ACTIVE_DATA_SUB_ID)?
+            || has(EVENT_CELL_INFO_CHANGED)
+                && change(REQUIRE_READ_PHONE_STATE_PERMISSION_FOR_CELL_INFO)?
+            || has(EVENT_DISPLAY_INFO_CHANGED)
+                && !change(REQUIRE_READ_PHONE_STATE_PERMISSION_FOR_DISPLAY_INFO)?;
         if phone_state && !self.check_read_phone_state(uid, sub_id, package, feature)? {
             successful = false;
         }
         // `isPrecisePhoneStatePermissionRequired`: else carrier privileges,
         // which no app has without subscriptions.
-        if events.iter().any(|e| PRECISE_PHONE_STATE_EVENTS.contains(e)) && !self.holds(uid, READ_PRECISE_PHONE_STATE)? {
+        if events
+            .iter()
+            .any(|e| PRECISE_PHONE_STATE_EVENTS.contains(e))
+            && !self.holds(uid, READ_PRECISE_PHONE_STATE)?
+        {
             return Err(Exception::security("listen"));
         }
-        if (has(EVENT_OUTGOING_EMERGENCY_CALL) || has(EVENT_OUTGOING_EMERGENCY_SMS)) && !self.holds(uid, READ_ACTIVE_EMERGENCY_SESSION)? {
-            return Err(Exception::security(format!("Neither user {uid} nor current process has {READ_ACTIVE_EMERGENCY_SESSION}.")));
+        if (has(EVENT_OUTGOING_EMERGENCY_CALL) || has(EVENT_OUTGOING_EMERGENCY_SMS))
+            && !self.holds(uid, READ_ACTIVE_EMERGENCY_SESSION)?
+        {
+            return Err(Exception::security(format!(
+                "Neither user {uid} nor current process has {READ_ACTIVE_EMERGENCY_SESSION}."
+            )));
         }
         let privileged = [
             EVENT_SRVCC_STATE_CHANGED,
@@ -201,7 +264,9 @@ impl TelephonyRegistry {
             EVENT_SECURITY_ALGORITHMS_CHANGED,
         ];
         if privileged.iter().any(|&e| has(e)) && !self.holds(uid, READ_PRIVILEGED_PHONE_STATE)? {
-            return Err(Exception::security(format!("Neither user {uid} nor current process has {READ_PRIVILEGED_PHONE_STATE}.")));
+            return Err(Exception::security(format!(
+                "Neither user {uid} nor current process has {READ_PRIVILEGED_PHONE_STATE}."
+            )));
         }
         Ok(successful)
     }
@@ -210,7 +275,13 @@ impl TelephonyRegistry {
     /// else READ_PHONE_STATE with its app op allowed; carrier privileges,
     /// the fallback for a valid subscription, no app has without
     /// subscriptions.
-    fn check_read_phone_state(&self, uid: i32, sub_id: i32, package: &str, feature: Option<&str>) -> Result<bool, Exception> {
+    fn check_read_phone_state(
+        &self,
+        uid: i32,
+        sub_id: i32,
+        package: &str,
+        feature: Option<&str>,
+    ) -> Result<bool, Exception> {
         if self.holds(uid, READ_PRIVILEGED_PHONE_STATE)? {
             return Ok(true);
         }
@@ -218,15 +289,26 @@ impl TelephonyRegistry {
             if sub_id >= 0 {
                 return Err(Exception::security("listen"));
             }
-            return Err(Exception::security(format!("listen: uid {uid} does not have {READ_PHONE_STATE}.")));
+            return Err(Exception::security(format!(
+                "listen: uid {uid} does not have {READ_PHONE_STATE}."
+            )));
         }
-        let mode = super::appops_service::note_from(&self.host, SYSTEM_UID, OP_READ_PHONE_STATE, uid, Some(package), feature)?;
+        let mode = super::appops_service::note_from(
+            &self.host,
+            SYSTEM_UID,
+            OP_READ_PHONE_STATE,
+            uid,
+            Some(package),
+            feature,
+        )?;
         Ok(mode == MODE_ALLOWED)
     }
 
     /// `remove`.
     fn remove(&self, callback: Option<Binder>) {
-        let Some(Binder::Handle(handle)) = callback else { return };
+        let Some(Binder::Handle(handle)) = callback else {
+            return;
+        };
         let mut records = self.records.lock().unwrap();
         if let Some(i) = records.iter().position(|r| r.binder.handle == handle) {
             let r = records.remove(i);
@@ -245,29 +327,48 @@ impl Service for TelephonyRegistry {
         let mut p = Parcel::new();
         let result = match call.code {
             tr::ADD_ON_SUBSCRIPTIONS_CHANGED_LISTENER => {
-                let a = tr::AddOnSubscriptionsChangedListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.add_listener(uid, pid, a.pkg.as_deref(), a.callback).map(|()| tr::write_add_on_subscriptions_changed_listener_reply(&mut p))
+                let a = tr::AddOnSubscriptionsChangedListener::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.add_listener(uid, pid, a.pkg.as_deref(), a.callback)
+                    .map(|()| tr::write_add_on_subscriptions_changed_listener_reply(&mut p))
             }
             tr::ADD_ON_OPPORTUNISTIC_SUBSCRIPTIONS_CHANGED_LISTENER => {
-                let a = tr::AddOnOpportunisticSubscriptionsChangedListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = tr::AddOnOpportunisticSubscriptionsChangedListener::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 self.add_listener(uid, pid, a.pkg.as_deref(), a.callback)
-                    .map(|()| tr::write_add_on_opportunistic_subscriptions_changed_listener_reply(&mut p))
+                    .map(|()| {
+                        tr::write_add_on_opportunistic_subscriptions_changed_listener_reply(&mut p)
+                    })
             }
             tr::LISTEN_WITH_EVENT_LIST => {
                 let a = tr::ListenWithEventList::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let events = a.events.unwrap_or_default();
-                self.listen(uid, pid, a.sub_id, a.pkg.as_deref(), a.feature_id.as_deref(), a.callback, &events)
-                    .map(|()| tr::write_listen_with_event_list_reply(&mut p))
+                self.listen(
+                    uid,
+                    pid,
+                    a.sub_id,
+                    a.pkg.as_deref(),
+                    a.feature_id.as_deref(),
+                    a.callback,
+                    &events,
+                )
+                .map(|()| tr::write_listen_with_event_list_reply(&mut p))
             }
             tr::REMOVE_ON_SUBSCRIPTIONS_CHANGED_LISTENER => {
-                let a = tr::RemoveOnSubscriptionsChangedListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = tr::RemoveOnSubscriptionsChangedListener::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 self.remove(a.callback);
                 tr::write_remove_on_subscriptions_changed_listener_reply(&mut p);
                 Ok(())
             }
             code => {
-                let name = tr::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
-                Err(self.host.unimplemented_named("telephony.registry", &format!("{name} (#1713)")))
+                let name = tr::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
+                Err(self
+                    .host
+                    .unimplemented_named("telephony.registry", &format!("{name} (#1713)")))
             }
         };
         reply(result.map(|()| p))

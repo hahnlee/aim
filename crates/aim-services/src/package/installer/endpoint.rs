@@ -99,7 +99,12 @@ pub trait Owners: Send + Sync {
         tag: Option<String>,
         user: i32,
     ) -> Result<(Record, bool), Exception>;
-    fn staged_status(&self,_id:i32)->Result<Option<super::staged_owner::Status>,Exception>{Err(Exception::new(EX_UNSUPPORTED_OPERATION,"staged owner unavailable"))}
+    fn staged_status(&self, _id: i32) -> Result<Option<super::staged_owner::Status>, Exception> {
+        Err(Exception::new(
+            EX_UNSUPPORTED_OPERATION,
+            "staged owner unavailable",
+        ))
+    }
     fn session_created(&self, id: i32, user: u32) -> Result<(), Exception>;
     fn prepare_stage(&self, session: &Session, record: &Record) -> Result<(), Exception>;
     fn session_operations(&self) -> Option<Arc<dyn super::SessionOperations>>;
@@ -139,9 +144,12 @@ impl Endpoint {
         }
         let mut info = record.info(session, icon, uid);
         if session.parameters.staged {
-            if let Some(status)=self.owners.staged_status(session.id)?{
-                info.session_ready=status.ready;info.session_applied=status.applied;info.session_failed=status.failed;
-                info.session_error_code=status.error_code;info.session_error_message=status.error_message;
+            if let Some(status) = self.owners.staged_status(session.id)? {
+                info.session_ready = status.ready;
+                info.session_applied = status.applied;
+                info.session_failed = status.failed;
+                info.session_error_code = status.error_code;
+                info.session_error_message = status.error_message;
             }
         }
         if uid != session.installer_uid
@@ -471,8 +479,10 @@ impl Service for Endpoint {
                     // endpoint. Refuse every such input before normalization can
                     // invoke policy or allocate a session, including Bitmap FDs.
                     if params.has_capabilities() {
-                        return Err(Exception::new(EX_UNSUPPORTED_OPERATION,
-                            "Native install parcel file capability owner is unavailable"));
+                        return Err(Exception::new(
+                            EX_UNSUPPORTED_OPERATION,
+                            "Native install parcel file capability owner is unavailable",
+                        ));
                     }
                     let (record, permission) = self.owners.normalize(
                         uid,
@@ -601,7 +611,10 @@ impl Service for Endpoint {
                     if session.parent == -1
                         && session.parameters.staged
                         && (matches!(uid, 0 | 1000) || session.installer_uid == uid)
-                        && self.owners.staged_status(id)?.is_some_and(|status| status.applied || status.failed)
+                        && self
+                            .owners
+                            .staged_status(id)?
+                            .is_some_and(|status| status.applied || status.failed)
                     {
                         aidl::write_abandon_session_reply(&mut reply);
                         return Ok(());
@@ -637,7 +650,10 @@ mod tests {
             receiver: Option<super::super::preapproval::IntentSender>,
         ) -> Result<(), Exception> {
             assert!(receiver.is_some());
-            self.uninstalled.lock().unwrap().push((request.package, request.version, request.user));
+            self.uninstalled
+                .lock()
+                .unwrap()
+                .push((request.package, request.version, request.user));
             Ok(())
         }
         fn archive(&self, _: u32, _: i32, _: ArchiveAction) -> Result<(), Exception> {
@@ -805,7 +821,10 @@ mod tests {
         data.write_binder(Some(aim_binder_host::parcel::Binder::Local(7)));
         data.write_i32(0);
         let owners = Arc::new(TestOwners::default());
-        let endpoint = Endpoint { sessions: Arc::new(Sessions::default()), owners: owners.clone() };
+        let endpoint = Endpoint {
+            sessions: Arc::new(Sessions::default()),
+            owners: owners.clone(),
+        };
         let reply = endpoint
             .transact(&mut Call {
                 code: aidl::UNINSTALL,
@@ -815,7 +834,12 @@ mod tests {
                 data: Reader::new(data.data(), data.objects()),
             })
             .unwrap();
-        aidl::read_uninstall_reply(&mut Reader::new(reply.data(), reply.objects())).unwrap().unwrap();
-        assert_eq!(*owners.uninstalled.lock().unwrap(), [("com.example.app".to_owned(), -1, 0)]);
+        aidl::read_uninstall_reply(&mut Reader::new(reply.data(), reply.objects()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            *owners.uninstalled.lock().unwrap(),
+            [("com.example.app".to_owned(), -1, 0)]
+        );
     }
 }

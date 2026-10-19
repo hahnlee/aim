@@ -88,7 +88,11 @@ impl Tokenizer<'_> {
         self.is_eof() || self.buffer[self.at] == b'\n'
     }
     fn peek_char(&self) -> u8 {
-        if self.is_eof() { 0 } else { self.buffer[self.at] }
+        if self.is_eof() {
+            0
+        } else {
+            self.buffer[self.at]
+        }
     }
     fn next_char(&mut self) -> u8 {
         let ch = self.peek_char();
@@ -131,7 +135,11 @@ impl KeyCharacterMap {
             keys_by_scan_code: BTreeMap::new(),
             keys_by_usage_code: BTreeMap::new(),
         };
-        let mut t = Tokenizer { buffer: contents, at: 0, line: 1 };
+        let mut t = Tokenizer {
+            buffer: contents,
+            at: 0,
+            line: 1,
+        };
         let mut key_code: Option<i32> = None;
         let err = |t: &Tokenizer<'_>, what: String| format!("{file_name}:{}: {what}", t.line);
         while !t.is_eof() {
@@ -144,12 +152,19 @@ impl KeyCharacterMap {
                         match keyword.as_str() {
                             "type" => map.parse_type(&mut t).map_err(|e| err(&t, e))?,
                             "map" => map.parse_map(&mut t).map_err(|e| err(&t, e))?,
-                            "key" => key_code = Some(map.parse_key(&mut t).map_err(|e| err(&t, e))?),
-                            other => return Err(err(&t, format!("Expected keyword, got '{other}'."))),
+                            "key" => {
+                                key_code = Some(map.parse_key(&mut t).map_err(|e| err(&t, e))?)
+                            }
+                            other => {
+                                return Err(err(&t, format!("Expected keyword, got '{other}'.")));
+                            }
                         }
                     }
                     Some(code) => {
-                        if map.parse_key_property(&mut t, code).map_err(|e| err(&t, e))? {
+                        if map
+                            .parse_key_property(&mut t, code)
+                            .map_err(|e| err(&t, e))?
+                        {
                             key_code = None;
                         }
                     }
@@ -162,11 +177,20 @@ impl KeyCharacterMap {
             t.next_line();
         }
         if key_code.is_some() {
-            return Err(err(&t, "Unterminated key description at end of file.".into()));
+            return Err(err(
+                &t,
+                "Unterminated key description at end of file.".into(),
+            ));
         }
         match map.kind {
-            KeyboardType::Unknown => Err(err(&t, "Keyboard layout missing required keyboard 'type' declaration.".into())),
-            KeyboardType::Overlay => Err(err(&t, "Base keyboard layout must specify a keyboard 'type' other than 'OVERLAY'.".into())),
+            KeyboardType::Unknown => Err(err(
+                &t,
+                "Keyboard layout missing required keyboard 'type' declaration.".into(),
+            )),
+            KeyboardType::Overlay => Err(err(
+                &t,
+                "Base keyboard layout must specify a keyboard 'type' other than 'OVERLAY'.".into(),
+            )),
             _ => Ok(map),
         }
     }
@@ -199,28 +223,37 @@ impl KeyCharacterMap {
             t.skip_delimiters(WHITESPACE);
             code_token = t.next_token(WHITESPACE);
         }
-        let code = strtol(&code_token).ok_or_else(|| format!("Expected key number, got '{code_token}'."))?;
-        let map = if usage { &mut self.keys_by_usage_code } else { &mut self.keys_by_scan_code };
+        let code = strtol(&code_token)
+            .ok_or_else(|| format!("Expected key number, got '{code_token}'."))?;
+        let map = if usage {
+            &mut self.keys_by_usage_code
+        } else {
+            &mut self.keys_by_scan_code
+        };
         if map.contains_key(&code) {
             return Err(format!("Duplicate entry for key '{code_token}'."));
         }
         t.skip_delimiters(WHITESPACE);
         let label = t.next_token(WHITESPACE);
-        let key_code = key_code_by_label(&label).ok_or_else(|| format!("Expected key code label, got '{label}'."))?;
+        let key_code = key_code_by_label(&label)
+            .ok_or_else(|| format!("Expected key code label, got '{label}'."))?;
         map.insert(code, key_code);
         Ok(())
     }
 
     fn parse_key(&mut self, t: &mut Tokenizer<'_>) -> Result<i32, String> {
         let label = t.next_token(WHITESPACE);
-        let key_code = key_code_by_label(&label).ok_or_else(|| format!("Expected key code label, got '{label}'."))?;
+        let key_code = key_code_by_label(&label)
+            .ok_or_else(|| format!("Expected key code label, got '{label}'."))?;
         if self.keys.contains_key(&key_code) {
             return Err(format!("Duplicate entry for key code '{label}'."));
         }
         t.skip_delimiters(WHITESPACE);
         let brace = t.next_token(WHITESPACE);
         if brace != "{" {
-            return Err(format!("Expected '{{' after key code label, got '{brace}'."));
+            return Err(format!(
+                "Expected '{{' after key code label, got '{brace}'."
+            ));
         }
         self.keys.insert(key_code, Key::default());
         Ok(key_code)
@@ -243,7 +276,9 @@ impl KeyCharacterMap {
             properties.push(match token.as_str() {
                 "label" => Property::Label,
                 "number" => Property::Number,
-                modifier => Property::Meta(parse_modifier(modifier).ok_or_else(|| format!("Expected a property name or modifier, got '{modifier}'."))?),
+                modifier => Property::Meta(parse_modifier(modifier).ok_or_else(|| {
+                    format!("Expected a property name or modifier, got '{modifier}'.")
+                })?),
             });
             t.skip_delimiters(WHITESPACE);
             if !t.is_eol() {
@@ -264,7 +299,9 @@ impl KeyCharacterMap {
         let (mut have_character, mut have_fallback, mut have_replacement) = (false, false, false);
         loop {
             if t.peek_char() == b'\'' {
-                let character = parse_character_literal(t).filter(|c| *c != 0).ok_or("Invalid character literal for key.")?;
+                let character = parse_character_literal(t)
+                    .filter(|c| *c != 0)
+                    .ok_or("Invalid character literal for key.")?;
                 if have_character {
                     return Err("Cannot combine multiple character literals or 'none'.".into());
                 }
@@ -278,7 +315,9 @@ impl KeyCharacterMap {
                 match token.as_str() {
                     "none" => {
                         if have_character || have_replacement {
-                            return Err("Cannot combine 'none' with a character or a replacement.".into());
+                            return Err(
+                                "Cannot combine 'none' with a character or a replacement.".into()
+                            );
                         }
                         have_character = true;
                     }
@@ -286,12 +325,17 @@ impl KeyCharacterMap {
                         let fallback = token == "fallback";
                         t.skip_delimiters(WHITESPACE);
                         let label = t.next_token(WHITESPACE);
-                        let code = key_code_by_label(&label).ok_or_else(|| format!("Invalid key code label, got '{label}'."))?;
+                        let code = key_code_by_label(&label)
+                            .ok_or_else(|| format!("Invalid key code label, got '{label}'."))?;
                         if !fallback && have_character {
-                            return Err("Cannot combine character literal with replace action.".into());
+                            return Err(
+                                "Cannot combine character literal with replace action.".into()
+                            );
                         }
                         if have_fallback || have_replacement {
-                            return Err("Cannot combine multiple fallback/replacement key codes.".into());
+                            return Err(
+                                "Cannot combine multiple fallback/replacement key codes.".into()
+                            );
                         }
                         if fallback {
                             behavior.fallback_key_code = code;
@@ -328,7 +372,13 @@ impl KeyCharacterMap {
                     if key.behaviors.iter().any(|b| b.meta_state == meta_state) {
                         return Err("Duplicate key behavior for modifier.".into());
                     }
-                    key.behaviors.insert(0, Behavior { meta_state, ..behavior });
+                    key.behaviors.insert(
+                        0,
+                        Behavior {
+                            meta_state,
+                            ..behavior
+                        },
+                    );
                 }
             }
         }
@@ -441,7 +491,10 @@ fn strtol(token: &str) -> Option<i32> {
         Some(rest) => (true, rest),
         None => (false, token.strip_prefix('+').unwrap_or(token)),
     };
-    let value = if let Some(hex) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+    let value = if let Some(hex) = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
         i64::from_str_radix(hex, 16).ok()?
     } else if digits.len() > 1 && digits.starts_with('0') {
         i64::from_str_radix(&digits[1..], 8).ok()?
@@ -453,7 +506,10 @@ fn strtol(token: &str) -> Option<i32> {
 
 /// `InputEventLookup::getKeyCodeByLabel`.
 pub fn key_code_by_label(label: &str) -> Option<i32> {
-    KEYCODES.iter().find(|(name, _)| *name == label).map(|(_, code)| *code)
+    KEYCODES
+        .iter()
+        .find(|(name, _)| *name == label)
+        .map(|(_, code)| *code)
 }
 
 /// `KEYCODES_SEQUENCE`: each `AKEYCODE_*`'s label and value.
@@ -798,7 +854,6 @@ const KEYCODES: &[(&str, i32)] = &[
     ("F24", 337),
 ];
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -817,7 +872,14 @@ mod tests {
         // A key's number defaults to its digit.
         assert_eq!(map.keys[&8].number, u16::from(b'1'));
         let space = &map.keys[&62];
-        assert_eq!(space.behaviors[0], Behavior { meta_state: 0x1000, fallback_key_code: 204, ..Default::default() });
+        assert_eq!(
+            space.behaviors[0],
+            Behavior {
+                meta_state: 0x1000,
+                fallback_key_code: 204,
+                ..Default::default()
+            }
+        );
         assert_eq!(map.keys[&31].behaviors[0].character, 0xe7);
         assert_eq!(map.keys_by_scan_code[&0x31], 62);
         let mut p = Parcel::new();
@@ -825,7 +887,10 @@ mod tests {
         // Name, type, overlay, 4 keys (each code, label, number, behaviors of
         // 5 ints, end), no remapping, one scan code, no usage.
         let behaviors = 4 + 2 + 4 + 1;
-        assert_eq!(p.data().len(), 4 + 8 + 4 + 4 + 4 + 4 * (4 * 4) + behaviors * 20 + 4 + 4 + 8 + 4);
+        assert_eq!(
+            p.data().len(),
+            4 + 8 + 4 + 4 + 4 + 4 * (4 * 4) + behaviors * 20 + 4 + 4 + 8 + 4
+        );
     }
 
     #[test]

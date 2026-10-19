@@ -4,17 +4,18 @@ use super::{
     owner::{app_ids::Owner, usage::Usage},
     scan::SigningScan,
 };
-pub(crate) mod computer;
-pub mod endpoint;
-pub mod library_record;
-pub mod query_state;
-mod components;
-mod preferred_selection;
-pub mod install_context;
-mod removal;
 pub mod boot_context;
+mod components;
+pub(crate) mod computer;
 mod diagnostics;
+pub mod endpoint;
+pub mod install_context;
+pub mod library_record;
+mod preferred_selection;
+pub mod query_state;
 mod readonly_query;
+mod removal;
+mod replica_records;
 mod retained_record;
 pub mod runtime_record;
 pub mod setting_record;
@@ -22,7 +23,6 @@ pub mod shared_record;
 mod uid_record;
 pub mod user_record;
 pub(crate) mod version_page;
-mod replica_records;
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},
@@ -59,35 +59,65 @@ pub fn uid_owner_registry(snapshot: &Snapshot) -> Result<Vec<u8>, String> {
 
 impl Snapshot {
     /// `SigningScan::library_dependencies`, validating the graph once.
-    pub(crate) fn library_dependencies(&self, name: &str)
-        -> Result<Option<(&[Option<String>], &[crate::package::model::SharedLibrary])>, String> {
-        self.libraries.get_or_init(|| self.owner.validate_library_dependencies()).clone()?;
+    pub(crate) fn library_dependencies(
+        &self,
+        name: &str,
+    ) -> Result<Option<(&[Option<String>], &[crate::package::model::SharedLibrary])>, String> {
+        self.libraries
+            .get_or_init(|| self.owner.validate_library_dependencies())
+            .clone()?;
         self.owner.validated_library_dependencies(name)
     }
     pub(crate) fn replica_records(&self) -> Result<&replica_records::Records, String> {
-        self.records.get_or_init(|| replica_records::Records::capture(self)).as_ref().map_err(Clone::clone)
+        self.records
+            .get_or_init(|| replica_records::Records::capture(self))
+            .as_ref()
+            .map_err(Clone::clone)
     }
-    pub(crate) fn same_lineage(&self, other: &Self) -> bool { Arc::ptr_eq(&self.lineage, &other.lineage) }
+    pub(crate) fn same_lineage(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.lineage, &other.lineage)
+    }
     pub(crate) fn same_metadata_generation(&self, other: &Self) -> bool {
         self.same_lineage(other) && self.metadata_revision == other.metadata_revision
     }
-    pub(in crate::package) fn replica_runtime(&self,name:&str,factory:bool)->Result<Option<&crate::package::scan::ReplicaRuntime>,String>{
+    pub(in crate::package) fn replica_runtime(
+        &self,
+        name: &str,
+        factory: bool,
+    ) -> Result<Option<&crate::package::scan::ReplicaRuntime>, String> {
         // Store::create/publish validate the complete runtime/seinfo/library
         // graph once before this owner becomes immutable. Check this record's
         // membership without rebuilding every package identity table.
-        let settings=if factory{&self.owner.settings.disabled_system_packages}else{&self.owner.settings.packages};
-        if !settings.iter().any(|setting|setting.name==name){return Ok(None);}
-        self.owner.snapshot_replica_runtime(name,factory)
+        let settings = if factory {
+            &self.owner.settings.disabled_system_packages
+        } else {
+            &self.owner.settings.packages
+        };
+        if !settings.iter().any(|setting| setting.name == name) {
+            return Ok(None);
+        }
+        self.owner.snapshot_replica_runtime(name, factory)
     }
     /// Snapshot creation/publication validates these complete owner graphs before
     /// any immutable record access. Mutable SigningScan getters keep their gates.
-    pub(in crate::package) fn install_permissions_fixed(&self, name: &str, factory: bool) -> Result<Option<bool>, String> {
-        self.owner.validated_install_permissions_fixed(name, factory)
+    pub(in crate::package) fn install_permissions_fixed(
+        &self,
+        name: &str,
+        factory: bool,
+    ) -> Result<Option<bool>, String> {
+        self.owner
+            .validated_install_permissions_fixed(name, factory)
     }
-    pub(in crate::package) fn legacy_permissions(&self, name: &str, factory: bool) -> Result<Option<crate::package::owner::legacy_permissions::State>, String> {
+    pub(in crate::package) fn legacy_permissions(
+        &self,
+        name: &str,
+        factory: bool,
+    ) -> Result<Option<crate::package::owner::legacy_permissions::State>, String> {
         self.owner.validated_legacy_permissions(name, factory)
     }
-    pub fn metadata_revision(&self) -> u64 { self.metadata_revision }
+    pub fn metadata_revision(&self) -> u64 {
+        self.metadata_revision
+    }
     pub fn version(&self) -> u64 {
         self.version
     }
@@ -102,7 +132,10 @@ impl Snapshot {
 #[derive(Debug)]
 pub enum CommitError {
     Snapshot(Error),
-    Disk { snapshot: Option<Arc<Snapshot>>, error: super::owner::WriteError },
+    Disk {
+        snapshot: Option<Arc<Snapshot>>,
+        error: super::owner::WriteError,
+    },
 }
 pub struct Store {
     current: Mutex<Arc<Snapshot>>,
@@ -112,39 +145,89 @@ pub struct Store {
 /// Called only after both immutable replica owners passed their full gates.
 /// A logical commit still advances its version and executes persistence once.
 fn derive_metadata_revision(before: &Snapshot, candidate: &Snapshot) -> Result<u64, Error> {
-    if !before.replica_validated || !candidate.replica_validated
+    if !before.replica_validated
+        || !candidate.replica_validated
         || before.usage().names().ne(candidate.usage().names())
-        || before.usage().historical_available()!=candidate.usage().historical_available() {
+        || before.usage().historical_available() != candidate.usage().historical_available()
+    {
         return Ok(candidate.version());
     }
-    if before.owner()==candidate.owner() && before.usage()==candidate.usage() {
+    if before.owner() == candidate.owner() && before.usage() == candidate.usage() {
         return Ok(before.metadata_revision());
     }
-    let mut normalized=before.owner().clone();
-    if before.usage()!=candidate.usage() {
-        normalized.update_validated_replica_usage(before.usage(),candidate.usage()).map_err(Error::Invalid)?;
+    let mut normalized = before.owner().clone();
+    if before.usage() != candidate.usage() {
+        normalized
+            .update_validated_replica_usage(before.usage(), candidate.usage())
+            .map_err(Error::Invalid)?;
     }
-    Ok(if &normalized==candidate.owner(){before.metadata_revision()}else{candidate.version()})
+    Ok(if &normalized == candidate.owner() {
+        before.metadata_revision()
+    } else {
+        candidate.version()
+    })
 }
 
 /// Bounded diagnostics shared by every metadata generation owner. No owner
 /// values, certificates or key material are printed.
 #[track_caller]
-pub(super) fn diagnose_metadata(kind: usize, before: Option<&Snapshot>, owner: &SigningScan, usage: &Usage, version: u64, metadata: u64) {
-    static COUNTS: [std::sync::atomic::AtomicUsize;7]=[const{std::sync::atomic::AtomicUsize::new(0)};7];
-    if before.is_some_and(|before|before.metadata_revision()==metadata){return;}
-    if COUNTS[kind].fetch_add(1,std::sync::atomic::Ordering::Relaxed)>=20{return;}
-    let labels=["create","base_aware","publish","publish_after","install","removal","replace_validated"];
-    let fields=if let Some(before)=before {
-        let mut normalized=before.owner().clone();
-        let normalization_failed=before.usage()!=usage && before.usage().names().eq(usage.names())
-            && normalized.update_validated_replica_usage(before.usage(),usage).is_err();
-        let mut fields=normalized.metadata_difference_fields(owner);
-        if normalization_failed{fields.push("usage_normalization_unavailable".into());}
+pub(super) fn diagnose_metadata(
+    kind: usize,
+    before: Option<&Snapshot>,
+    owner: &SigningScan,
+    usage: &Usage,
+    version: u64,
+    metadata: u64,
+) {
+    static COUNTS: [std::sync::atomic::AtomicUsize; 7] =
+        [const { std::sync::atomic::AtomicUsize::new(0) }; 7];
+    if before.is_some_and(|before| before.metadata_revision() == metadata) {
+        return;
+    }
+    if COUNTS[kind].fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 20 {
+        return;
+    }
+    let labels = [
+        "create",
+        "base_aware",
+        "publish",
+        "publish_after",
+        "install",
+        "removal",
+        "replace_validated",
+    ];
+    let fields = if let Some(before) = before {
+        let mut normalized = before.owner().clone();
+        let normalization_failed = before.usage() != usage
+            && before.usage().names().eq(usage.names())
+            && normalized
+                .update_validated_replica_usage(before.usage(), usage)
+                .is_err();
+        let mut fields = normalized.metadata_difference_fields(owner);
+        if normalization_failed {
+            fields.push("usage_normalization_unavailable".into());
+        }
         fields
-    }else{vec!["no_preceding_snapshot".into(),format!("package_counts={}/{}",owner.settings.packages.len(),owner.settings.disabled_system_packages.len())]};
-    eprintln!("Package metadata creator={} at {} version={:?}->{} metadata={:?}->{} fields={:?}",
-        labels[kind],std::panic::Location::caller(),before.map(Snapshot::version),version,before.map(Snapshot::metadata_revision),metadata,fields);
+    } else {
+        vec![
+            "no_preceding_snapshot".into(),
+            format!(
+                "package_counts={}/{}",
+                owner.settings.packages.len(),
+                owner.settings.disabled_system_packages.len()
+            ),
+        ]
+    };
+    eprintln!(
+        "Package metadata creator={} at {} version={:?}->{} metadata={:?}->{} fields={:?}",
+        labels[kind],
+        std::panic::Location::caller(),
+        before.map(Snapshot::version),
+        version,
+        before.map(Snapshot::metadata_revision),
+        metadata,
+        fields
+    );
 }
 
 impl Store {
@@ -153,35 +236,70 @@ impl Store {
     #[track_caller]
     pub(crate) fn publish_validated_store(&self, candidate: &Store) {
         let snapshot = candidate.capture();
-        let mut current=self.current.lock().unwrap();
-        diagnose_metadata(6,Some(&current),snapshot.owner(),snapshot.usage(),snapshot.version(),snapshot.metadata_revision());
+        let mut current = self.current.lock().unwrap();
+        diagnose_metadata(
+            6,
+            Some(&current),
+            snapshot.owner(),
+            snapshot.usage(),
+            snapshot.version(),
+            snapshot.metadata_revision(),
+        );
         *current = snapshot;
     }
     /// Publish a validated candidate only while its exact canonical base remains
     /// current. Query projections may lag a disk-committed installation.
     pub(crate) fn publish_validated_store_after(
-        &self, base: &Arc<Snapshot>, candidate: &Store,
+        &self,
+        base: &Arc<Snapshot>,
+        candidate: &Store,
     ) -> Result<Arc<Snapshot>, Error> {
         let snapshot = candidate.capture();
         let mut current = self.current.lock().unwrap();
-        if !Arc::ptr_eq(&current, base) { return Err(Error::Stale); }
+        if !Arc::ptr_eq(&current, base) {
+            return Err(Error::Stale);
+        }
         if snapshot.version != base.version.checked_add(1).ok_or(Error::VersionExhausted)? {
-            return Err(Error::Invalid("validated publication version differs".into()));
+            return Err(Error::Invalid(
+                "validated publication version differs".into(),
+            ));
         }
         *current = snapshot.clone();
         Ok(snapshot)
     }
 
     pub(crate) fn prepare_usage_store(base: &Arc<Snapshot>, usage: Usage) -> Result<Self, Error> {
-        if !base.replica_validated { return Err(Error::Invalid("usage base is not a validated replica".into())); }
+        if !base.replica_validated {
+            return Err(Error::Invalid(
+                "usage base is not a validated replica".into(),
+            ));
+        }
         let mut owner = base.owner().clone();
         if base.usage() != &usage {
-            owner.update_validated_replica_usage(base.usage(), &usage).map_err(Error::Invalid)?;
+            owner
+                .update_validated_replica_usage(base.usage(), &usage)
+                .map_err(Error::Invalid)?;
         }
-        let version = base.version.checked_add(1).filter(|version| *version <= i64::MAX as u64).ok_or(Error::VersionExhausted)?;
+        let version = base
+            .version
+            .checked_add(1)
+            .filter(|version| *version <= i64::MAX as u64)
+            .ok_or(Error::VersionExhausted)?;
         // Exact immutable validated owner plus a checked usage-only delta. Code,
         // settings, permissions and user inventories cannot have changed here.
-        Ok(Self { current: Mutex::new(Arc::new(Snapshot {version,owner,usage,replica_validated:true,metadata_revision:base.metadata_revision,lineage:base.lineage.clone(),libraries:Default::default(),records:Default::default()})), replica:true })
+        Ok(Self {
+            current: Mutex::new(Arc::new(Snapshot {
+                version,
+                owner,
+                usage,
+                replica_validated: true,
+                metadata_revision: base.metadata_revision,
+                lineage: base.lineage.clone(),
+                libraries: Default::default(),
+                records: Default::default(),
+            })),
+            replica: true,
+        })
     }
 
     /// A typed query-context delta may advance its Computer lease while the
@@ -213,26 +331,45 @@ impl Store {
     /// Compare every native owner field; normalize only the active usage rows
     /// which the facade captures separately against the latest Computer lease.
     #[track_caller]
-    pub(crate) fn new_replica_after(base: &Arc<Snapshot>, owner: SigningScan, usage: Usage, version: u64) -> Result<Self, Error> {
+    pub(crate) fn new_replica_after(
+        base: &Arc<Snapshot>,
+        owner: SigningScan,
+        usage: Usage,
+        version: u64,
+    ) -> Result<Self, Error> {
         if version != base.version.checked_add(1).ok_or(Error::VersionExhausted)? {
-            return Err(Error::Invalid("metadata publication base version differs".into()));
+            return Err(Error::Invalid(
+                "metadata publication base version differs".into(),
+            ));
         }
         if base.replica_validated && &owner == base.owner() && &usage == base.usage() {
             return Self::prepare_unchanged_metadata_store(base);
         }
         let mut metadata = version;
-        if base.replica_validated && base.usage().names().eq(usage.names())
-            && base.usage().historical_available() == usage.historical_available() {
+        if base.replica_validated
+            && base.usage().names().eq(usage.names())
+            && base.usage().historical_available() == usage.historical_available()
+        {
             let mut normalized = base.owner().clone();
             if base.usage() != &usage {
-                normalized.update_validated_replica_usage(base.usage(), &usage).map_err(Error::Invalid)?;
+                normalized
+                    .update_validated_replica_usage(base.usage(), &usage)
+                    .map_err(Error::Invalid)?;
             }
-            if normalized == owner { metadata = base.metadata_revision; }
-            else {
-                diagnose_metadata(1,Some(base),&owner,&usage,version,metadata);
+            if normalized == owner {
+                metadata = base.metadata_revision;
+            } else {
+                diagnose_metadata(1, Some(base), &owner, &usage, version, metadata);
             }
         }
-        Self::create_with_metadata_revision(owner, usage, true, version, metadata, base.lineage.clone())
+        Self::create_with_metadata_revision(
+            owner,
+            usage,
+            true,
+            version,
+            metadata,
+            base.lineage.clone(),
+        )
     }
 
     #[track_caller]
@@ -246,8 +383,19 @@ impl Store {
     }
 
     #[track_caller]
-    fn create_with_metadata_revision(owner: SigningScan, usage: Usage, replica: bool, version: u64, metadata_revision: u64, lineage: Arc<()>) -> Result<Self, Error> {
-        if version == 0 || version > i64::MAX as u64 || metadata_revision == 0 || metadata_revision > version {
+    fn create_with_metadata_revision(
+        owner: SigningScan,
+        usage: Usage,
+        replica: bool,
+        version: u64,
+        metadata_revision: u64,
+        lineage: Arc<()>,
+    ) -> Result<Self, Error> {
+        if version == 0
+            || version > i64::MAX as u64
+            || metadata_revision == 0
+            || metadata_revision > version
+        {
             return Err(Error::VersionExhausted);
         }
         validate(&owner, &usage)?;
@@ -264,7 +412,14 @@ impl Store {
         if replica {
             validate_replica(&snapshot)?;
         }
-        diagnose_metadata(0,None,snapshot.owner(),snapshot.usage(),version,metadata_revision);
+        diagnose_metadata(
+            0,
+            None,
+            snapshot.owner(),
+            snapshot.usage(),
+            version,
+            metadata_revision,
+        );
         Ok(Self {
             current: Mutex::new(snapshot),
             replica,
@@ -279,22 +434,62 @@ impl Store {
     /// work only; Binder calls and cache/broadcast effects happen after return.
     #[track_caller]
     pub fn publish_after(
-        &self, base:&Arc<Snapshot>, owner:SigningScan, usage:Usage,
-        persist:impl FnOnce(&Arc<Snapshot>)->Result<(),super::owner::WriteError>,
-    )->Result<Arc<Snapshot>,CommitError> {
-        let mut current=self.current.lock().unwrap();
-        if !Arc::ptr_eq(&current,base) {return Err(CommitError::Snapshot(Error::Stale));}
-        let version=current.version.checked_add(1).filter(|version|*version<=i64::MAX as u64).ok_or(CommitError::Snapshot(Error::VersionExhausted))?;
-        validate(&owner,&usage).map_err(CommitError::Snapshot)?;
-        let mut next=Snapshot {version,owner,usage,replica_validated:self.replica,metadata_revision:version,lineage:current.lineage.clone(),libraries:Default::default(),records:Default::default()};
-        if self.replica {validate_replica(&next).map_err(CommitError::Snapshot)?;}
-        next.metadata_revision=derive_metadata_revision(&current,&next).map_err(CommitError::Snapshot)?;
-        let next=Arc::new(next);
-        diagnose_metadata(3,Some(base),next.owner(),next.usage(),version,next.metadata_revision());
+        &self,
+        base: &Arc<Snapshot>,
+        owner: SigningScan,
+        usage: Usage,
+        persist: impl FnOnce(&Arc<Snapshot>) -> Result<(), super::owner::WriteError>,
+    ) -> Result<Arc<Snapshot>, CommitError> {
+        let mut current = self.current.lock().unwrap();
+        if !Arc::ptr_eq(&current, base) {
+            return Err(CommitError::Snapshot(Error::Stale));
+        }
+        let version = current
+            .version
+            .checked_add(1)
+            .filter(|version| *version <= i64::MAX as u64)
+            .ok_or(CommitError::Snapshot(Error::VersionExhausted))?;
+        validate(&owner, &usage).map_err(CommitError::Snapshot)?;
+        let mut next = Snapshot {
+            version,
+            owner,
+            usage,
+            replica_validated: self.replica,
+            metadata_revision: version,
+            lineage: current.lineage.clone(),
+            libraries: Default::default(),
+            records: Default::default(),
+        };
+        if self.replica {
+            validate_replica(&next).map_err(CommitError::Snapshot)?;
+        }
+        next.metadata_revision =
+            derive_metadata_revision(&current, &next).map_err(CommitError::Snapshot)?;
+        let next = Arc::new(next);
+        diagnose_metadata(
+            3,
+            Some(base),
+            next.owner(),
+            next.usage(),
+            version,
+            next.metadata_revision(),
+        );
         match persist(&next) {
-            Ok(())=>{*current=next.clone();Ok(next)},
-            Err(error) if error.committed=>{*current=next.clone();Err(CommitError::Disk {snapshot:Some(next),error})},
-            Err(error)=>Err(CommitError::Disk {snapshot:None,error}),
+            Ok(()) => {
+                *current = next.clone();
+                Ok(next)
+            }
+            Err(error) if error.committed => {
+                *current = next.clone();
+                Err(CommitError::Disk {
+                    snapshot: Some(next),
+                    error,
+                })
+            }
+            Err(error) => Err(CommitError::Disk {
+                snapshot: None,
+                error,
+            }),
         }
     }
 
@@ -331,9 +526,16 @@ impl Store {
         if self.replica {
             validate_replica(&next)?;
         }
-        next.metadata_revision=derive_metadata_revision(&current,&next)?;
-        let next=Arc::new(next);
-        diagnose_metadata(2,Some(base),next.owner(),next.usage(),version,next.metadata_revision());
+        next.metadata_revision = derive_metadata_revision(&current, &next)?;
+        let next = Arc::new(next);
+        diagnose_metadata(
+            2,
+            Some(base),
+            next.owner(),
+            next.usage(),
+            version,
+            next.metadata_revision(),
+        );
         *current = next.clone();
         Ok(next)
     }
@@ -572,62 +774,147 @@ mod tests {
 
     #[test]
     fn validated_empty_metadata_does_not_require_a_runtime_usage_owner() {
-        let mut owner=SigningScan::new(&Default::default(),&Settings::default(),36).unwrap();
-        let shared=owner.identities.shared_users.keys().map(|name|(name.clone(),Default::default())).collect();
-        owner.capture_legacy_permissions(&[0],Default::default(),shared).unwrap();
-        owner.capture_install_permissions_fixed(Default::default()).unwrap();
-        owner.rebuild_shared_processes_from_native_members().unwrap();
-        let store=Store::new_replica(owner,Usage::new([])).unwrap();let base=store.capture();
+        let mut owner = SigningScan::new(&Default::default(), &Settings::default(), 36).unwrap();
+        let shared = owner
+            .identities
+            .shared_users
+            .keys()
+            .map(|name| (name.clone(), Default::default()))
+            .collect();
+        owner
+            .capture_legacy_permissions(&[0], Default::default(), shared)
+            .unwrap();
+        owner
+            .capture_install_permissions_fixed(Default::default())
+            .unwrap();
+        owner
+            .rebuild_shared_processes_from_native_members()
+            .unwrap();
+        let store = Store::new_replica(owner, Usage::new([])).unwrap();
+        let base = store.capture();
         assert!(!base.owner().has_replica_runtime());
-        let same=Store::prepare_unchanged_metadata_store(&base).unwrap().capture();
-        assert_eq!(same.owner(),base.owner());assert_eq!(same.metadata_revision(),base.metadata_revision());
+        let same = Store::prepare_unchanged_metadata_store(&base)
+            .unwrap()
+            .capture();
+        assert_eq!(same.owner(), base.owner());
+        assert_eq!(same.metadata_revision(), base.metadata_revision());
         assert!(same.same_metadata_generation(&base));
-        let mut changed=base.owner().clone();
-        changed.settings.versions.push(crate::package::settings::Version{sdk_version:36,..Default::default()});
-        let changed=Store::new_replica_after(&base,changed,base.usage().clone(),base.version()+1).unwrap().capture();
-        assert_eq!(changed.metadata_revision(),changed.version());
-        assert_eq!(changed.usage(),base.usage());
+        let mut changed = base.owner().clone();
+        changed
+            .settings
+            .versions
+            .push(crate::package::settings::Version {
+                sdk_version: 36,
+                ..Default::default()
+            });
+        let changed =
+            Store::new_replica_after(&base, changed, base.usage().clone(), base.version() + 1)
+                .unwrap()
+                .capture();
+        assert_eq!(changed.metadata_revision(), changed.version());
+        assert_eq!(changed.usage(), base.usage());
         assert!(!changed.same_metadata_generation(&base));
-        let foreign=Store::new_replica(base.owner().clone(),base.usage().clone()).unwrap().capture();
-        assert_eq!(foreign.metadata_revision(),base.metadata_revision());
+        let foreign = Store::new_replica(base.owner().clone(), base.usage().clone())
+            .unwrap()
+            .capture();
+        assert_eq!(foreign.metadata_revision(), base.metadata_revision());
         assert!(!foreign.same_metadata_generation(&base));
     }
 
     #[test]
     fn raw_metadata_lease_preserves_source_and_rejects_live_queries_until_retirement() {
-        use aim_binder_host::{local::{Call,Service},parcel::{Parcel,Reader,EX_ILLEGAL_STATE}};
-        use aim_service_aidl::dev_aim_server_ipackagescansnapshot as api;
-        let store=Store::new(owner(),Usage::new(["fixture"])).unwrap();
-        let initial=store.capture();let raw=endpoint::Endpoint::raw_metadata(initial.clone());
-        let call=|endpoint:&endpoint::Endpoint,code:u32,request:&Parcel|{
-            endpoint.transact(&mut Call{code,flags:0,sender_pid:10,sender_euid:1000,data:Reader::new(request.data(),request.objects())}).unwrap()
+        use aim_binder_host::{
+            local::{Call, Service},
+            parcel::{EX_ILLEGAL_STATE, Parcel, Reader},
         };
-        let mut names=Parcel::new();api::GetPackageNames{disabled:false}.write(&mut names);
-        let reply=call(&raw,api::GET_PACKAGE_NAMES,&names);
-        assert_eq!(api::read_get_package_names_reply(&mut Reader::new(reply.data(),reply.objects())).unwrap().unwrap(),Some(vec![Some("fixture".into())]));
-        let mut version=Parcel::new();api::GetVersion{}.write(&mut version);
-        let reply=call(&raw,api::GET_VERSION,&version);
-        assert_eq!(api::read_get_version_reply(&mut Reader::new(reply.data(),reply.objects())).unwrap().unwrap(),initial.version() as i64);
-        let mut candidate=initial.owner().clone();candidate.settings.packages[0].version_code=37;
-        let full=store.publish(&initial,candidate,initial.usage().clone()).unwrap();
-        assert!(full.version()>initial.version());assert_eq!(initial.owner().settings.packages[0].version_code,0);
-        let reply=call(&raw,api::GET_VERSION,&version);
-        assert_eq!(api::read_get_version_reply(&mut Reader::new(reply.data(),reply.objects())).unwrap().unwrap(),initial.version() as i64);
-        let mut query=Parcel::new();api::GetComputer{}.write(&mut query);
-        let reply=call(&raw,api::GET_COMPUTER,&query);
-        let error=Reader::new(reply.data(),reply.objects()).read_exception().unwrap().unwrap_err();
-        assert_eq!(error.code,EX_ILLEGAL_STATE);assert_eq!(error.message,"live permission query capture is not initialized");
+        use aim_service_aidl::dev_aim_server_ipackagescansnapshot as api;
+        let store = Store::new(owner(), Usage::new(["fixture"])).unwrap();
+        let initial = store.capture();
+        let raw = endpoint::Endpoint::raw_metadata(initial.clone());
+        let call = |endpoint: &endpoint::Endpoint, code: u32, request: &Parcel| {
+            endpoint
+                .transact(&mut Call {
+                    code,
+                    flags: 0,
+                    sender_pid: 10,
+                    sender_euid: 1000,
+                    data: Reader::new(request.data(), request.objects()),
+                })
+                .unwrap()
+        };
+        let mut names = Parcel::new();
+        api::GetPackageNames { disabled: false }.write(&mut names);
+        let reply = call(&raw, api::GET_PACKAGE_NAMES, &names);
+        assert_eq!(
+            api::read_get_package_names_reply(&mut Reader::new(reply.data(), reply.objects()))
+                .unwrap()
+                .unwrap(),
+            Some(vec![Some("fixture".into())])
+        );
+        let mut version = Parcel::new();
+        api::GetVersion {}.write(&mut version);
+        let reply = call(&raw, api::GET_VERSION, &version);
+        assert_eq!(
+            api::read_get_version_reply(&mut Reader::new(reply.data(), reply.objects()))
+                .unwrap()
+                .unwrap(),
+            initial.version() as i64
+        );
+        let mut candidate = initial.owner().clone();
+        candidate.settings.packages[0].version_code = 37;
+        let full = store
+            .publish(&initial, candidate, initial.usage().clone())
+            .unwrap();
+        assert!(full.version() > initial.version());
+        assert_eq!(initial.owner().settings.packages[0].version_code, 0);
+        let reply = call(&raw, api::GET_VERSION, &version);
+        assert_eq!(
+            api::read_get_version_reply(&mut Reader::new(reply.data(), reply.objects()))
+                .unwrap()
+                .unwrap(),
+            initial.version() as i64
+        );
+        let mut query = Parcel::new();
+        api::GetComputer {}.write(&mut query);
+        let reply = call(&raw, api::GET_COMPUTER, &query);
+        let error = Reader::new(reply.data(), reply.objects())
+            .read_exception()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, EX_ILLEGAL_STATE);
+        assert_eq!(
+            error.message,
+            "live permission query capture is not initialized"
+        );
         // Session abort/death calls this same retirement boundary.
         raw.close_lease();
-        let reply=call(&raw,api::GET_PACKAGE_NAMES,&names);
-        assert_eq!(Reader::new(reply.data(),reply.objects()).read_exception().unwrap().unwrap_err().message,"package scan snapshot is closed");
-        assert_eq!(full.owner().settings.packages[0].version_code,37);
-        let second=endpoint::Endpoint::raw_metadata(initial.clone());
-        let mut close=Parcel::new();api::Close{}.write(&mut close);
-        let reply=call(&second,api::CLOSE,&close);
-        Reader::new(reply.data(),reply.objects()).read_exception().unwrap().unwrap();
-        let reply=call(&second,api::GET_VERSION,&version);
-        assert_eq!(Reader::new(reply.data(),reply.objects()).read_exception().unwrap().unwrap_err().message,"package scan snapshot is closed");
+        let reply = call(&raw, api::GET_PACKAGE_NAMES, &names);
+        assert_eq!(
+            Reader::new(reply.data(), reply.objects())
+                .read_exception()
+                .unwrap()
+                .unwrap_err()
+                .message,
+            "package scan snapshot is closed"
+        );
+        assert_eq!(full.owner().settings.packages[0].version_code, 37);
+        let second = endpoint::Endpoint::raw_metadata(initial.clone());
+        let mut close = Parcel::new();
+        api::Close {}.write(&mut close);
+        let reply = call(&second, api::CLOSE, &close);
+        Reader::new(reply.data(), reply.objects())
+            .read_exception()
+            .unwrap()
+            .unwrap();
+        let reply = call(&second, api::GET_VERSION, &version);
+        assert_eq!(
+            Reader::new(reply.data(), reply.objects())
+                .read_exception()
+                .unwrap()
+                .unwrap_err()
+                .message,
+            "package scan snapshot is closed"
+        );
     }
 
     #[test]

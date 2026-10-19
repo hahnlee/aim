@@ -16,8 +16,12 @@ use super::exit_info::fields;
 use crate::package::info::java_hash;
 
 /// `SettingsState.sAconfigTextProtoFilesOnDevice`.
-const PROTO_FILES: [&str; 4] =
-    ["system/etc/aconfig_flags.pb", "system_ext/etc/aconfig_flags.pb", "product/etc/aconfig_flags.pb", "vendor/etc/aconfig_flags.pb"];
+const PROTO_FILES: [&str; 4] = [
+    "system/etc/aconfig_flags.pb",
+    "system_ext/etc/aconfig_flags.pb",
+    "product/etc/aconfig_flags.pb",
+    "vendor/etc/aconfig_flags.pb",
+];
 /// `SettingsState.APEX_DIR`, `APEX_ACONFIG_PATH_SUFFIX`.
 const APEX_DIR: &str = "apex";
 const APEX_ACONFIG_PATH_SUFFIX: &str = "etc/aconfig_flags.pb";
@@ -75,9 +79,14 @@ impl AconfigDefaults {
             paths.extend(apexes);
         }
         for path in paths {
-            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
             if let Err(e) = defaults.add(&bytes) {
-                eprintln!("app host: settings: failed to parse protobuf {}: {e}", path.display());
+                eprintln!(
+                    "app host: settings: failed to parse protobuf {}: {e}",
+                    path.display()
+                );
             }
         }
         defaults
@@ -109,8 +118,14 @@ impl AconfigDefaults {
         for (package, name, namespace, state, permission) in parsed {
             let full = format!("{package}.{name}");
             let value = if state == ENABLED { "true" } else { "false" };
-            self.namespaces.entry(namespace.clone()).or_default().insert(format!("{namespace}/{full}"), value.into());
-            self.flags.entry(full).or_insert(FlagInfo { namespace, read_write: permission == READ_WRITE });
+            self.namespaces
+                .entry(namespace.clone())
+                .or_default()
+                .insert(format!("{namespace}/{full}"), value.into());
+            self.flags.entry(full).or_insert(FlagInfo {
+                namespace,
+                read_write: permission == READ_WRITE,
+            });
         }
         Ok(())
     }
@@ -155,7 +170,9 @@ pub fn sized_capacity(n: usize) -> usize {
 /// `AbstractMap.hashCode`: the sum of its entries' `key ^ value` hashes,
 /// a null value's 0.
 pub fn map_hash<'a>(entries: impl IntoIterator<Item = (&'a str, Option<&'a str>)>) -> i32 {
-    entries.into_iter().fold(0i32, |sum, (key, value)| sum.wrapping_add(java_hash(key) ^ value.map_or(0, java_hash)))
+    entries.into_iter().fold(0i32, |sum, (key, value)| {
+        sum.wrapping_add(java_hash(key) ^ value.map_or(0, java_hash))
+    })
 }
 
 /// `DataOutputStream.writeUTF`'s modified UTF-8 of `s`.
@@ -165,7 +182,11 @@ fn modified_utf8(s: &str) -> Vec<u8> {
         match c {
             1..=0x7f => out.push(c as u8),
             0 | 0x80..=0x7ff => out.extend([0xc0 | (c >> 6) as u8, 0x80 | (c & 0x3f) as u8]),
-            _ => out.extend([0xe0 | (c >> 12) as u8, 0x80 | ((c >> 6) & 0x3f) as u8, 0x80 | (c & 0x3f) as u8]),
+            _ => out.extend([
+                0xe0 | (c >> 12) as u8,
+                0x80 | ((c >> 6) & 0x3f) as u8,
+                0x80 | (c & 0x3f) as u8,
+            ]),
         }
     }
     out
@@ -177,7 +198,10 @@ fn modified_utf8(s: &str) -> Vec<u8> {
 /// each element in the set's order (`TC_STRING`, or `TC_LONGSTRING`).
 pub fn serialize_hash_set(names: &[String]) -> Vec<u8> {
     let capacity = table_size(DEFAULT_INITIAL_CAPACITY, names.len());
-    let ordered = hash_map_order(names.iter().map(|n| (n.clone(), ())).collect(), DEFAULT_INITIAL_CAPACITY);
+    let ordered = hash_map_order(
+        names.iter().map(|n| (n.clone(), ())).collect(),
+        DEFAULT_INITIAL_CAPACITY,
+    );
     let mut out = vec![0xac, 0xed, 0x00, 0x05, 0x73, 0x72];
     let class = b"java.util.HashSet";
     out.extend((class.len() as u16).to_be_bytes());
@@ -229,12 +253,20 @@ mod tests {
             field(1, &f)
         };
         let mut defaults = AconfigDefaults::default();
-        defaults.add(&[flag("on", 1, 2), flag("off", 2, 1)].concat()).unwrap();
+        defaults
+            .add(&[flag("on", 1, 2), flag("off", 2, 1)].concat())
+            .unwrap();
         defaults.add(&flag("on", 2, 1)).unwrap();
         let ns = &defaults.namespaces["ns"];
         assert_eq!(ns["ns/com.example.on"], "false");
         assert_eq!(ns["ns/com.example.off"], "false");
-        assert_eq!(defaults.flags["com.example.on"], FlagInfo { namespace: "ns".into(), read_write: true });
+        assert_eq!(
+            defaults.flags["com.example.on"],
+            FlagInfo {
+                namespace: "ns".into(),
+                read_write: true
+            }
+        );
         assert!(!defaults.flags["com.example.off"].read_write);
     }
 
@@ -242,8 +274,16 @@ mod tests {
     /// keep the order they were put in; the table doubles past 3/4 full.
     #[test]
     fn hash_maps_iterate_by_bucket() {
-        let keys = |names: &[&str]| names.iter().map(|n| (n.to_string(), ())).collect::<Vec<_>>();
-        let order: Vec<_> = hash_map_order(keys(&["c", "BB", "a", "Aa"]), 16).into_iter().map(|(k, _)| k).collect();
+        let keys = |names: &[&str]| {
+            names
+                .iter()
+                .map(|n| (n.to_string(), ()))
+                .collect::<Vec<_>>()
+        };
+        let order: Vec<_> = hash_map_order(keys(&["c", "BB", "a", "Aa"]), 16)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
         assert_eq!(order, ["BB", "Aa", "a", "c"]);
         assert_eq!(table_size(1, 1), 2);
         assert_eq!(table_size(16, 13), 32);
@@ -262,8 +302,12 @@ mod tests {
     fn hash_sets_serialize_as_object_output_stream_writes_them() {
         let mut expected = vec![0xac, 0xed, 0, 5, 0x73, 0x72, 0, 17];
         expected.extend(b"java.util.HashSet");
-        expected.extend([0xba, 0x44, 0x85, 0x95, 0x96, 0xb8, 0xb7, 0x34, 3, 0, 0, 0x78, 0x70, 0x77, 12]);
-        expected.extend([0, 0, 0, 16, 0x3f, 0x40, 0, 0, 0, 0, 0, 1, 0x74, 0, 2, b'n', b's', 0x78]);
+        expected.extend([
+            0xba, 0x44, 0x85, 0x95, 0x96, 0xb8, 0xb7, 0x34, 3, 0, 0, 0x78, 0x70, 0x77, 12,
+        ]);
+        expected.extend([
+            0, 0, 0, 16, 0x3f, 0x40, 0, 0, 0, 0, 0, 1, 0x74, 0, 2, b'n', b's', 0x78,
+        ]);
         assert_eq!(serialize_hash_set(&["ns".into()]), expected);
     }
 }

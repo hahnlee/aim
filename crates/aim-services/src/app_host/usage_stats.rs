@@ -29,7 +29,8 @@ impl UsageStats {
     }
 
     fn unimplemented(&self, what: &str) -> Exception {
-        self.host.unimplemented_named("usagestats", &format!("{what} (#1723)"))
+        self.host
+            .unimplemented_named("usagestats", &format!("{what} (#1723)"))
     }
 
     /// `hasQueryPermission`: the system, or a caller allowed
@@ -40,8 +41,12 @@ impl UsageStats {
             return Ok(true);
         }
         match super::appops_service::note(&self.host, OP_GET_USAGE_STATS, uid, Some(package))? {
-            super::appops_service::MODE_ERRORED => Err(Exception::security(format!("{package} from uid {uid} not allowed to perform GET_USAGE_STATS"))),
-            super::appops_service::MODE_DEFAULT => Ok(self.host.check_permission(Some(PACKAGE_USAGE_STATS), uid)? == 0),
+            super::appops_service::MODE_ERRORED => Err(Exception::security(format!(
+                "{package} from uid {uid} not allowed to perform GET_USAGE_STATS"
+            ))),
+            super::appops_service::MODE_DEFAULT => {
+                Ok(self.host.check_permission(Some(PACKAGE_USAGE_STATS), uid)? == 0)
+            }
             mode => Ok(mode == super::appops_service::MODE_ALLOWED),
         }
     }
@@ -49,12 +54,24 @@ impl UsageStats {
     /// `isAppInactive`: of the caller's own package, or any for a caller
     /// that may query usage; an instant app, which only some callers may
     /// see, is not implemented.
-    fn app_inactive(&self, uid: i32, package: &str, user: i32, calling_package: &str) -> Result<bool, Exception> {
+    fn app_inactive(
+        &self,
+        uid: i32,
+        package: &str,
+        user: i32,
+        calling_package: &str,
+    ) -> Result<bool, Exception> {
         let user = self.host.incoming_user(uid, user, false)?;
         if package == calling_package {
             let (state, resolution) = self.host.packages()?;
-            let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
-            let actual = query.package_uid(calling_package, 0, user).map_err(|e| self.unimplemented(&format!("isAppInactive: {}", e.0)))??;
+            let query = Query {
+                state: &state,
+                filter: &resolution.apps_filter,
+                calling_uid: SYSTEM_UID,
+            };
+            let actual = query
+                .package_uid(calling_package, 0, user)
+                .map_err(|e| self.unimplemented(&format!("isAppInactive: {}", e.0)))??;
             if actual != uid {
                 return Ok(false);
             }
@@ -62,7 +79,12 @@ impl UsageStats {
             return Ok(false);
         }
         let (state, _) = self.host.packages()?;
-        if state.packages.get(package).and_then(|ps| ps.users.get(&user)).is_some_and(|u| u.instant_app) {
+        if state
+            .packages
+            .get(package)
+            .and_then(|ps| ps.users.get(&user))
+            .is_some_and(|u| u.instant_app)
+        {
             return Err(self.unimplemented("isAppInactive of an instant app"));
         }
         self.host.app_idle_filtered(package, user)
@@ -73,7 +95,11 @@ impl UsageStats {
     fn app_standby_bucket(&self, uid: i32, package: &str, user: i32) -> Result<i32, Exception> {
         let user = self.host.incoming_user(uid, user, false)?;
         let (state, resolution) = self.host.packages()?;
-        let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
+        let query = Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: SYSTEM_UID,
+        };
         let package_uid = query
             .package_uid(package, 0, user)
             .map_err(|e| self.unimplemented(&format!("getAppStandbyBucket: {}", e.0)))??;
@@ -110,20 +136,32 @@ impl Service for UsageStats {
                 let Some(package) = a.package_name.as_deref() else {
                     return reply(Err(Exception::new(EX_NULL_POINTER, "packageName")));
                 };
-                match self.app_inactive(uid, package, a.user_id, a.calling_package.as_deref().unwrap_or_default()) {
+                match self.app_inactive(
+                    uid,
+                    package,
+                    a.user_id,
+                    a.calling_package.as_deref().unwrap_or_default(),
+                ) {
                     Ok(inactive) => us::write_is_app_inactive_reply(&mut p, inactive),
                     Err(e) => return reply(Err(e)),
                 }
             }
             us::GET_APP_STANDBY_BUCKET => {
                 let a = us::GetAppStandbyBucket::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                match self.app_standby_bucket(uid, a.package_name.as_deref().unwrap_or_default(), a.user_id) {
+                match self.app_standby_bucket(
+                    uid,
+                    a.package_name.as_deref().unwrap_or_default(),
+                    a.user_id,
+                ) {
                     Ok(bucket) => us::write_get_app_standby_bucket_reply(&mut p, bucket),
                     Err(e) => return reply(Err(e)),
                 }
             }
             code => {
-                let name = us::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
+                let name = us::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
                 return reply(Err(self.unimplemented(name)));
             }
         }

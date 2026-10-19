@@ -109,8 +109,13 @@ impl SystemConfig {
     /// SystemConfig.getOverlayConfigSignaturePackage, including fatal duplicate
     /// declaration semantics of readPermissionsFromXml.
     pub fn overlay_config_signature_package(&self) -> Result<Option<&str>, String> {
-        if let Some(error) = &self.overlay_signature_error { return Err(error.clone()); }
-        Ok(self.overlay_config_signature_package.as_deref().filter(|name| !name.is_empty()))
+        if let Some(error) = &self.overlay_signature_error {
+            return Err(error.clone());
+        }
+        Ok(self
+            .overlay_config_signature_package
+            .as_deref()
+            .filter(|name| !name.is_empty()))
     }
 
     pub fn read(root: &Path, prop: &dyn Fn(&str) -> Option<String>) -> SystemConfig {
@@ -259,14 +264,23 @@ impl SystemConfig {
             let name = e.string("name").map(|s| s.into_owned());
             match e.name.as_str() {
                 "assign-permission" if flags & ALLOW_PERMISSIONS != 0 => {
-                    if let (Some(permission),Some(uid)) = (name,e.string("uid")) {
-                        if let Some(uid) = permission_uid(image,prop,&uid) {
-                            self.system_permissions.entry(uid).or_default().insert(permission);
+                    if let (Some(permission), Some(uid)) = (name, e.string("uid")) {
+                        if let Some(uid) = permission_uid(image, prop, &uid) {
+                            self.system_permissions
+                                .entry(uid)
+                                .or_default()
+                                .insert(permission);
                         } else {
-                            eprintln!("package SystemConfig: unknown assigned uid {uid} in {}",file.display());
+                            eprintln!(
+                                "package SystemConfig: unknown assigned uid {uid} in {}",
+                                file.display()
+                            );
                         }
                     } else {
-                        eprintln!("package SystemConfig: assign-permission missing name/uid in {}",file.display());
+                        eprintln!(
+                            "package SystemConfig: assign-permission missing name/uid in {}",
+                            file.display()
+                        );
                     }
                 }
                 "app-link" if flags & ALLOW_APP_CONFIGS != 0 => {
@@ -278,20 +292,34 @@ impl SystemConfig {
                     }
                 }
                 "whitelisted-staged-installer" if flags & ALLOW_APP_CONFIGS != 0 => {
-                    let package=e.string("package").map(|value|value.into_owned());
-                    if let Some(package)=&package {self.staged_installers.insert(package.clone());}
-                    if e.string("isModulesInstaller").is_some_and(|value|value == "true") {
-                        if self.modules_installer.is_some() {self.installer_policy_error=Some("Multiple modules installers".into());}
-                        else {self.modules_installer=package;}
+                    let package = e.string("package").map(|value| value.into_owned());
+                    if let Some(package) = &package {
+                        self.staged_installers.insert(package.clone());
+                    }
+                    if e.string("isModulesInstaller")
+                        .is_some_and(|value| value == "true")
+                    {
+                        if self.modules_installer.is_some() {
+                            self.installer_policy_error =
+                                Some("Multiple modules installers".into());
+                        } else {
+                            self.modules_installer = package;
+                        }
                     }
                 }
                 "overlay-config-signature" if flags == ALLOW_ALL => {
                     if let Some(package) = e.string("package") {
-                        if self.overlay_config_signature_package.as_ref().is_some_and(|value| !value.is_empty()) {
+                        if self
+                            .overlay_config_signature_package
+                            .as_ref()
+                            .is_some_and(|value| !value.is_empty())
+                        {
                             if self.overlay_signature_error.is_none() {
                                 self.overlay_signature_error = Some(format!(
                                     "Reference signature package defined as both {} and {}",
-                                    self.overlay_config_signature_package.as_deref().unwrap(), package));
+                                    self.overlay_config_signature_package.as_deref().unwrap(),
+                                    package
+                                ));
                             }
                         } else {
                             self.overlay_config_signature_package = Some(package.into_owned());
@@ -384,14 +412,20 @@ impl SystemConfig {
                 }
                 "app-data-isolation-whitelisted-app" => {
                     if let Some(package) = e.string("package")
-                        && !self.app_data_isolation_allowlist.iter().any(|p| *p == package)
+                        && !self
+                            .app_data_isolation_allowlist
+                            .iter()
+                            .any(|p| *p == package)
                     {
                         self.app_data_isolation_allowlist.push(package.into_owned());
                     }
                 }
-                "allow-in-power-save-except-idle" if flags & ALLOW_OVERRIDE_APP_RESTRICTIONS != 0 => {
+                "allow-in-power-save-except-idle"
+                    if flags & ALLOW_OVERRIDE_APP_RESTRICTIONS != 0 =>
+                {
                     if let Some(package) = e.string("package") {
-                        self.allow_in_power_save_except_idle.insert(package.into_owned());
+                        self.allow_in_power_save_except_idle
+                            .insert(package.into_owned());
                     }
                 }
                 "allow-in-power-save" if flags & ALLOW_OVERRIDE_APP_RESTRICTIONS != 0 => {
@@ -484,19 +518,26 @@ fn int(s: Option<String>) -> Option<i32> {
 /// Integer.parseInt's decimal syntax: no whitespace, optional ASCII
 /// sign, Character.digit(char, 10) for BMP digits, checked signed range.
 fn permission_uid(image: &Path, prop: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<i32> {
-    if name.is_empty() { return None; }
+    if name.is_empty() {
+        return None;
+    }
     let uid = if name.bytes().all(|b| b.is_ascii_digit()) {
         // Process JNI uses atoi after verifying every character is a digit.
         name.parse::<i64>().unwrap_or(i64::MAX) as i32
     } else {
         struct Properties<'a>(&'a dyn Fn(&str) -> Option<String>);
         impl aim_android_init::PropertyLookup for Properties<'_> {
-            fn property(&self,name:&str) -> Option<String> { (self.0)(name) }
+            fn property(&self, name: &str) -> Option<String> {
+                (self.0)(name)
+            }
         }
-        let ids = aim_android_init::rc::IdResolver::from_image(&aim_android_init::ImageRoot::new(image),&Properties(prop));
+        let ids = aim_android_init::rc::IdResolver::from_image(
+            &aim_android_init::ImageRoot::new(image),
+            &Properties(prop),
+        );
         ids.getpwnam(name)? as i32
     };
-    (uid>=0).then_some(uid)
+    (uid >= 0).then_some(uid)
 }
 
 pub(crate) fn decimal_uid(s: &str) -> Option<i32> {
@@ -617,7 +658,14 @@ pub fn system(
     Ok(System {
         features: config.features,
         system_permissions: Some(config.system_permissions),
-        initial_non_stopped_system_packages: Some({let mut names:Vec<_>=config.initial_non_stopped_system_packages.into_iter().collect();names.sort_by_key(|name|super::info::java_hash(name));names}),
+        initial_non_stopped_system_packages: Some({
+            let mut names: Vec<_> = config
+                .initial_non_stopped_system_packages
+                .into_iter()
+                .collect();
+            names.sort_by_key(|name| super::info::java_hash(name));
+            names
+        }),
         // `FeatureInfo.GL_ES_VERSION_UNDEFINED` without the property.
         gl_es_version: int(prop("ro.opengles.version")).unwrap_or(0),
         hidden_api_allowlist: config.hidden_api_allowlist,
@@ -642,18 +690,40 @@ mod tests {
 
     #[test]
     fn assigns_permissions_with_partition_gates_and_bionic_uid_names() {
-        let root = std::env::temp_dir().join(format!("aim-system-permissions-{}",std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("aim-system-permissions-{}", std::process::id()));
         std::fs::create_dir_all(root.join("vendor/etc")).unwrap();
-        std::fs::write(root.join("vendor/etc/passwd"),"vendor_camera:x:2900:2900::/:/system/bin/sh\n").unwrap();
+        std::fs::write(
+            root.join("vendor/etc/passwd"),
+            "vendor_camera:x:2900:2900::/:/system/bin/sh\n",
+        )
+        .unwrap();
         let document = aim_android_xml::read(b"<permissions><assign-permission name='p.shell' uid='shell'/><assign-permission name='p.numeric' uid='1001000'/><assign-permission name='p.vendor' uid='vendor_camera'/><assign-permission name='p.unknown' uid='unknown_name'/><assign-permission uid='root'/></permissions>").unwrap();
         let props = |_: &str| None;
         let mut config = SystemConfig::default();
-        config.read_root(&document,ALLOW_FEATURES,false,&root,&props,Path::new("test.xml"));
+        config.read_root(
+            &document,
+            ALLOW_FEATURES,
+            false,
+            &root,
+            &props,
+            Path::new("test.xml"),
+        );
         assert!(config.system_permissions.is_empty());
-        config.read_root(&document,ALLOW_PERMISSIONS,false,&root,&props,Path::new("test.xml"));
-        assert_eq!(config.system_permissions[&2000],["p.shell".into()].into());
-        assert_eq!(config.system_permissions[&1001000],["p.numeric".into()].into());
-        assert_eq!(config.system_permissions[&2900],["p.vendor".into()].into());
+        config.read_root(
+            &document,
+            ALLOW_PERMISSIONS,
+            false,
+            &root,
+            &props,
+            Path::new("test.xml"),
+        );
+        assert_eq!(config.system_permissions[&2000], ["p.shell".into()].into());
+        assert_eq!(
+            config.system_permissions[&1001000],
+            ["p.numeric".into()].into()
+        );
+        assert_eq!(config.system_permissions[&2900], ["p.vendor".into()].into());
         assert!(!config.system_permissions.contains_key(&0));
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -707,20 +777,50 @@ mod tests {
 
     #[test]
     fn overlay_signature_requires_allow_all_and_preserves_empty_getter_semantics() {
-        let declarations = aim_android_xml::read(br#"<permissions>
+        let declarations = aim_android_xml::read(
+            br#"<permissions>
             <overlay-config-signature/>
             <overlay-config-signature package=""/>
             <overlay-config-signature package="reference"/>
-        </permissions>"#).unwrap();
+        </permissions>"#,
+        )
+        .unwrap();
         let mut denied = SystemConfig::default();
-        denied.read_root(&declarations, ALLOW_APP_CONFIGS, false, Path::new(""), &|_| None, Path::new("permissions.xml"));
+        denied.read_root(
+            &declarations,
+            ALLOW_APP_CONFIGS,
+            false,
+            Path::new(""),
+            &|_| None,
+            Path::new("permissions.xml"),
+        );
         assert_eq!(denied.overlay_config_signature_package().unwrap(), None);
         let mut accepted = SystemConfig::default();
-        accepted.read_root(&declarations, ALLOW_ALL, false, Path::new(""), &|_| None, Path::new("permissions.xml"));
-        assert_eq!(accepted.overlay_config_signature_package().unwrap(), Some("reference"));
-        let empty = aim_android_xml::read(br#"<permissions><overlay-config-signature package=""/></permissions>"#).unwrap();
+        accepted.read_root(
+            &declarations,
+            ALLOW_ALL,
+            false,
+            Path::new(""),
+            &|_| None,
+            Path::new("permissions.xml"),
+        );
+        assert_eq!(
+            accepted.overlay_config_signature_package().unwrap(),
+            Some("reference")
+        );
+        let empty = aim_android_xml::read(
+            br#"<permissions><overlay-config-signature package=""/></permissions>"#,
+        )
+        .unwrap();
         let mut config = SystemConfig::default();
-        config.read_root(&empty, ALLOW_ALL, false, Path::new(""), &|_| None, Path::new("permissions.xml"));
+        config.read_root(
+            &empty,
+            ALLOW_ALL,
+            false,
+            Path::new(""),
+            &|_| None,
+            Path::new("permissions.xml"),
+        );
         assert_eq!(config.overlay_config_signature_package, Some(String::new()));
         assert_eq!(config.overlay_config_signature_package().unwrap(), None);
     }
@@ -732,9 +832,18 @@ mod tests {
                 "<permissions><overlay-config-signature package=\"reference\"/><overlay-config-signature package=\"{second}\"/></permissions>"
             ).as_bytes()).unwrap();
             let mut config = SystemConfig::default();
-            config.read_root(&declarations, ALLOW_ALL, false, Path::new(""), &|_| None, Path::new("permissions.xml"));
-            assert_eq!(config.overlay_config_signature_package().unwrap_err(),
-                format!("Reference signature package defined as both reference and {second}"));
+            config.read_root(
+                &declarations,
+                ALLOW_ALL,
+                false,
+                Path::new(""),
+                &|_| None,
+                Path::new("permissions.xml"),
+            );
+            assert_eq!(
+                config.overlay_config_signature_package().unwrap_err(),
+                format!("Reference signature package defined as both reference and {second}")
+            );
         }
     }
 

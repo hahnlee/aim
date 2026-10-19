@@ -38,7 +38,10 @@ fn link(dir: &Path, name: &str, manifest: &str) -> PathBuf {
             .args(["link", "--manifest"])
             .arg(xml)
             .arg("-I")
-            .arg(common::runtime::cohort::original_image().join("system/framework/framework-res.apk"))
+            .arg(
+                common::runtime::cohort::original_image()
+                    .join("system/framework/framework-res.apk"),
+            )
             .arg("-o")
             .arg(&apk)
             .output()
@@ -119,7 +122,8 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
         String::from_utf8_lossy(&result.stderr)
     );
     let manifest = data.0.join("manifest.xml");
-    let framework_path = common::runtime::cohort::original_image().join("system/framework/framework-res.apk");
+    let framework_path =
+        common::runtime::cohort::original_image().join("system/framework/framework-res.apk");
     let mut apks = Vec::new();
     let cluster = data.0.join("split-cluster");
     fs::create_dir(&cluster).unwrap();
@@ -288,7 +292,11 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
             }
             Some(image_root.join(path.trim_start_matches('/')))
         }),
-        platform: Platform::load(&common::runtime::cohort::original_image(), Default::default()).unwrap(),
+        platform: Platform::load(
+            &common::runtime::cohort::original_image(),
+            Default::default(),
+        )
+        .unwrap(),
     };
     let parsed = apks_reader.parsed_path("/data/app/provider", 0).unwrap();
     let provider = Package {
@@ -306,7 +314,11 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
     let mut bad_reader = Apks {
         signing_overrides: None,
         files: Box::new(|_| None),
-        platform: Platform::load(&common::runtime::cohort::original_image(), Default::default()).unwrap(),
+        platform: Platform::load(
+            &common::runtime::cohort::original_image(),
+            Default::default(),
+        )
+        .unwrap(),
     };
     let before = (owner.clone(), settings.clone());
     assert!(
@@ -435,9 +447,13 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
         &["/system/framework/services.jar"],
     )
     .unwrap();
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
+    let boot = Boot::new(
+        aim_paths::root().join("target/release/aimctl"),
+        data.0.join("g"),
+    );
     run(boot.start_command().args(["start", "--windows"]));
-    boot.wait_ready(Duration::from_secs(300)).expect("split_parser oracle boot readiness");
+    boot.wait_ready(Duration::from_secs(300))
+        .expect("split_parser oracle boot readiness");
     let guest = boot.data.join("data/local/tmp/update-ownership");
     fs::create_dir(&guest).unwrap();
     let policy_root = data.0.join("policy");
@@ -537,7 +553,11 @@ fn compiled_split_cluster_merges_and_validates_manifests() {
     link(&cluster, "middle", &base(false));
     let feature = link(&cluster, "a-feature", FEATURE);
     link(&cluster, "z-config", CONFIG);
-    let platform = Platform::load(&common::runtime::cohort::original_image(), Default::default()).unwrap();
+    let platform = Platform::load(
+        &common::runtime::cohort::original_image(),
+        Default::default(),
+    )
+    .unwrap();
     let pkg = parse(&cluster, "/data/app/example", 0, &platform).unwrap();
     assert_eq!(pkg.split_names.as_ref().unwrap(), &["config.en", "feature"]);
     assert_eq!(
@@ -691,7 +711,11 @@ fn compiled_manifest_keysets_parse_and_roundtrip() {
     use aim_services::package::sign::deserialize_public_key;
     use p256::elliptic_curve::sec1::ToEncodedPoint;
     let data = Data::new();
-    let platform = Platform::load(&common::runtime::cohort::original_image(), Default::default()).unwrap();
+    let platform = Platform::load(
+        &common::runtime::cohort::original_image(),
+        Default::default(),
+    )
+    .unwrap();
     let mut der = vec![
         0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 2, 1, 0x06, 8, 0x2a,
         0x86, 0x48, 0xce, 0x3d, 3, 1, 7, 3, 0x42, 0,
@@ -772,9 +796,9 @@ fn compiled_manifest_keysets_parse_and_roundtrip() {
 }
 
 mod common {
-    pub mod zip;
     pub mod java;
     pub mod runtime;
+    pub mod zip;
 }
 
 #[test]
@@ -887,7 +911,11 @@ fn manifest_keysets_match_original_parser() {
         ("base64-skip", format!(r#"<key-set android:name="a"><public-key android:name="one" android:value=" !{one} !"/></key-set>"#)),
         ("multiple", format!(r#"<key-set android:name="a"><public-key android:name="two" android:value="{two}"/><public-key android:name="one" android:value="{one}"/></key-set><upgrade-key-set android:name="a"/>"#)),
     ];
-    let platform = Platform::load(&common::runtime::cohort::original_image(), Default::default()).unwrap();
+    let platform = Platform::load(
+        &common::runtime::cohort::original_image(),
+        Default::default(),
+    )
+    .unwrap();
     let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
     let mut expected = String::new();
     let mut apks = Vec::new();
@@ -992,9 +1020,13 @@ fn manifest_keysets_match_original_parser() {
         writeln!(&mut expected, "CASE {name}.apk {original_result}").unwrap();
         apks.push(apk);
     }
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
+    let boot = Boot::new(
+        aim_paths::root().join("target/release/aimctl"),
+        data.0.join("g"),
+    );
     run(boot.start_command().args(["start", "--windows"]));
-    boot.wait_ready(Duration::from_secs(300)).expect("split_parser oracle boot readiness");
+    boot.wait_ready(Duration::from_secs(300))
+        .expect("split_parser oracle boot readiness");
     let guest = boot.data.join("data/local/tmp/manifest-keysets");
     fs::create_dir(&guest).unwrap();
     fs::copy(dex.join("classes.dex"), guest.join("oracle.dex")).unwrap();
@@ -1578,8 +1610,13 @@ fn java_oracles_link_against_original_image() {
     let data = Data::new();
     let java = aim_paths::fetched().join("java");
     let jdk = java.join("temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
-    let android = aim_paths::sdk().expect("NOT RUN: pinned SDK missing").join("platforms/android-36/android.jar");
-    assert!(android.is_file(), "NOT RUN: pinned API36 android.jar missing");
+    let android = aim_paths::sdk()
+        .expect("NOT RUN: pinned SDK missing")
+        .join("platforms/android-36/android.jar");
+    assert!(
+        android.is_file(),
+        "NOT RUN: pinned API36 android.jar missing"
+    );
     let classes = data.0.join("classes");
     let stubs = data.0.join("stubs");
     let dex = data.0.join("dex");
@@ -1597,13 +1634,24 @@ fn java_oracles_link_against_original_image() {
     let oracle_api = data.0.join("oracle-api");
     fs::create_dir(&oracle_api).unwrap();
     let api = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/api");
-    let api_classpath = std::env::join_paths([production.as_path(), stubs.as_path(), android.as_path()]).unwrap();
+    let api_classpath =
+        std::env::join_paths([production.as_path(), stubs.as_path(), android.as_path()]).unwrap();
     run(Command::new(jdk.join("bin/javac"))
-        .args(["--release", "17", "-d"]).arg(&oracle_api)
-        .arg("-classpath").arg(&api_classpath)
+        .args(["--release", "17", "-d"])
+        .arg(&oracle_api)
+        .arg("-classpath")
+        .arg(&api_classpath)
         .args(common::java::sources(&api.join("installer")))
-        .args(common::java::sources(&api.join("com/android/permission/persistence"))));
-    let classpath = std::env::join_paths([oracle_api.as_path(), production.as_path(), stubs.as_path(), android.as_path()]).unwrap();
+        .args(common::java::sources(
+            &api.join("com/android/permission/persistence"),
+        )));
+    let classpath = std::env::join_paths([
+        oracle_api.as_path(),
+        production.as_path(),
+        stubs.as_path(),
+        android.as_path(),
+    ])
+    .unwrap();
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-Xmaxerrs", "1000", "-d"])
         .arg(&classes)
@@ -1637,17 +1685,23 @@ fn java_oracles_link_against_original_image() {
             "--lib",
         ])
         .arg(&jdk)
-        .arg("--lib").arg(&android)
-        .arg("--classpath").arg(&oracle_api)
-        .arg("--classpath").arg(&production)
-        .arg("--classpath").arg(&stubs)
+        .arg("--lib")
+        .arg(&android)
+        .arg("--classpath")
+        .arg(&oracle_api)
+        .arg("--classpath")
+        .arg(&production)
+        .arg("--classpath")
+        .arg(&stubs)
         .arg("--output")
         .arg(&dex)
         .args(files));
     let mut server_jars = aim_android_image::classpath::jars(
-        &common::runtime::cohort::original_image(), "systemserverclasspath.pb",
+        &common::runtime::cohort::original_image(),
+        "systemserverclasspath.pb",
         aim_android_image::classpath::SYSTEMSERVERCLASSPATH,
-    ).unwrap();
+    )
+    .unwrap();
     server_jars.push("/system/framework/aim-services.jar".into());
     let server_jars: Vec<&str> = server_jars.iter().map(String::as_str).collect();
     common::java::check_linkage(&dex.join("classes.dex"), &server_jars).unwrap();

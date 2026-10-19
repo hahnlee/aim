@@ -9,10 +9,10 @@
 //! executable (see `xrt`), and a BoringSSL FIPS module in it gets its
 //! integrity hash recomputed (see `xlate::fips`).
 
+use crate::sys::verified_source::VerifiedSource;
 use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::os::fd::AsRawFd;
-use crate::sys::verified_source::VerifiedSource;
 use std::path::Path;
 
 use crate::elf::{self, PF_R, PF_W, PF_X, PT_INTERP, PT_LOAD, PT_PHDR};
@@ -56,10 +56,18 @@ fn prot_of(flags: u32) -> i32 {
 }
 
 trait KernelRead {
-    fn read_exact_at(&self,bytes:&mut[u8],offset:u64)->Result<(),crate::errno::Errno>;
+    fn read_exact_at(&self, bytes: &mut [u8], offset: u64) -> Result<(), crate::errno::Errno>;
 }
-impl KernelRead for VerifiedSource {fn read_exact_at(&self,bytes:&mut[u8],offset:u64)->Result<(),crate::errno::Errno>{self.read_exact_at(bytes,offset)}}
-impl KernelRead for xrt::VerifiedArtifact {fn read_exact_at(&self,bytes:&mut[u8],offset:u64)->Result<(),crate::errno::Errno>{self.read_exact_at(bytes,offset)}}
+impl KernelRead for VerifiedSource {
+    fn read_exact_at(&self, bytes: &mut [u8], offset: u64) -> Result<(), crate::errno::Errno> {
+        self.read_exact_at(bytes, offset)
+    }
+}
+impl KernelRead for xrt::VerifiedArtifact {
+    fn read_exact_at(&self, bytes: &mut [u8], offset: u64) -> Result<(), crate::errno::Errno> {
+        self.read_exact_at(bytes, offset)
+    }
+}
 struct Headers {
     hdr: elf::Header,
     phdrs: Vec<elf::Phdr>,
@@ -79,7 +87,7 @@ fn read_headers(file: &dyn KernelRead, name: &str) -> Result<Headers, String> {
     file.read_exact_at(&mut buf, 0)
         .map_err(|e| format!("{name}: {e}"))?;
     let phdrs = elf::parse_phdrs(&buf, &hdr)?;
-    validate_kernel_loads(&phdrs).map_err(|error|format!("{name}: Linux errno {error}"))?;
+    validate_kernel_loads(&phdrs).map_err(|error| format!("{name}: Linux errno {error}"))?;
     let loads: Vec<_> = phdrs
         .iter()
         .filter(|p| p.p_type == PT_LOAD)
@@ -160,41 +168,112 @@ fn file_mappable(h: &Headers) -> bool {
 /// Map an ELF file from the host path `host`; `name` labels it in diagnostics.
 pub fn load_elf(host: &CStr, name: &str) -> Result<Image, String> {
     let path = host.to_str().map_err(|e| e.to_string())?;
-    let original=VerifiedSource::open(host,true).map_err(|error|format!("{name}: Linux errno {error}"))?;
+    let original =
+        VerifiedSource::open(host, true).map_err(|error| format!("{name}: Linux errno {error}"))?;
     if original.protected() {
-        let original=std::sync::Arc::new(original);
-        let length=original.len().map_err(|error|format!("{name}: Linux errno {error}"))?;
-        let plan=xrt::prepare_verified_exec(original.clone(),Path::new(path),0,length).map_err(|error|format!("{name}: Linux errno {error}"))?;
+        let original = std::sync::Arc::new(original);
+        let length = original
+            .len()
+            .map_err(|error| format!("{name}: Linux errno {error}"))?;
+        let plan = xrt::prepare_verified_exec(original.clone(), Path::new(path), 0, length)
+            .map_err(|error| format!("{name}: Linux errno {error}"))?;
         match plan {
-            xrt::VerifiedExecPlan::Translated(artifact)=>{
-                let h=read_headers(artifact.as_ref(),name)?;
-                if !file_mappable(&h){return Err(format!("{name}: authenticated derivative segments cannot be mapped"));}
-                let bias=reserve(&h,name)?;map_verified_segments(&original,&h,bias,name,Some(crate::sys::VerityDerivative::Artifact(artifact.clone())))?;
-                return finish(artifact.as_ref(),h,bias,name,"authenticated derivative demand pages".into(),patch::PatchStats::default());
-            }
-            xrt::VerifiedExecPlan::Identity(_)=>{
-                let h=read_headers(original.as_ref(),name)?;
-                if file_mappable(&h){let bias=reserve(&h,name)?;map_verified_segments(&original,&h,bias,name,None)?;return finish(original.as_ref(),h,bias,name,"authenticated original demand pages".into(),patch::PatchStats::default());}
-            }
-            xrt::VerifiedExecPlan::Rewrite(plan)=>{
-                let h=read_headers(original.as_ref(),name)?;
-                let bias=reserve(&h,name)?;
-                let(pages,stats)=crate::sys::VerityRewritePages::prepare(plan,bias,bias+h.lo,bias+h.hi).map_err(|error|format!("{name}: authenticated rewrite plan: {error}"))?;
-                if file_mappable(&h){map_verified_segments(&original,&h,bias,name,Some(crate::sys::VerityDerivative::Rewrite(pages)))?;}else{
-                    let pages=crate::sys::VerityComposedPages::new(pages).map_err(|error|format!("{name}: composed rewrite layout: {error}"))?;
-                    let source=original.mapping_source(Some((0,h.hi-h.lo))).map_err(|error|format!("{name}: Linux errno {error}"))?.ok_or_else(||format!("{name}: composed source missing"))?;
-                    let source=std::sync::Arc::try_unwrap(source).map_err(|_|format!("{name}: composed source aliased"))?;
-                    crate::sys::verity_composed(bias+h.lo,source,pages).map_err(|error|format!("{name}: composed rewrite map: {error}"))?;
+            xrt::VerifiedExecPlan::Translated(artifact) => {
+                let h = read_headers(artifact.as_ref(), name)?;
+                if !file_mappable(&h) {
+                    return Err(format!(
+                        "{name}: authenticated derivative segments cannot be mapped"
+                    ));
                 }
-                return finish(original.as_ref(),h,bias,name,"authenticated rewrite demand pages".into(),stats);
-            },
+                let bias = reserve(&h, name)?;
+                map_verified_segments(
+                    &original,
+                    &h,
+                    bias,
+                    name,
+                    Some(crate::sys::VerityDerivative::Artifact(artifact.clone())),
+                )?;
+                return finish(
+                    artifact.as_ref(),
+                    h,
+                    bias,
+                    name,
+                    "authenticated derivative demand pages".into(),
+                    patch::PatchStats::default(),
+                );
+            }
+            xrt::VerifiedExecPlan::Identity(_) => {
+                let h = read_headers(original.as_ref(), name)?;
+                if file_mappable(&h) {
+                    let bias = reserve(&h, name)?;
+                    map_verified_segments(&original, &h, bias, name, None)?;
+                    return finish(
+                        original.as_ref(),
+                        h,
+                        bias,
+                        name,
+                        "authenticated original demand pages".into(),
+                        patch::PatchStats::default(),
+                    );
+                }
+            }
+            xrt::VerifiedExecPlan::Rewrite(plan) => {
+                let h = read_headers(original.as_ref(), name)?;
+                let bias = reserve(&h, name)?;
+                let (pages, stats) =
+                    crate::sys::VerityRewritePages::prepare(plan, bias, bias + h.lo, bias + h.hi)
+                        .map_err(|error| format!("{name}: authenticated rewrite plan: {error}"))?;
+                if file_mappable(&h) {
+                    map_verified_segments(
+                        &original,
+                        &h,
+                        bias,
+                        name,
+                        Some(crate::sys::VerityDerivative::Rewrite(pages)),
+                    )?;
+                } else {
+                    let pages = crate::sys::VerityComposedPages::new(pages)
+                        .map_err(|error| format!("{name}: composed rewrite layout: {error}"))?;
+                    let source = original
+                        .mapping_source(Some((0, h.hi - h.lo)))
+                        .map_err(|error| format!("{name}: Linux errno {error}"))?
+                        .ok_or_else(|| format!("{name}: composed source missing"))?;
+                    let source = std::sync::Arc::try_unwrap(source)
+                        .map_err(|_| format!("{name}: composed source aliased"))?;
+                    crate::sys::verity_composed(bias + h.lo, source, pages)
+                        .map_err(|error| format!("{name}: composed rewrite map: {error}"))?;
+                }
+                return finish(
+                    original.as_ref(),
+                    h,
+                    bias,
+                    name,
+                    "authenticated rewrite demand pages".into(),
+                    stats,
+                );
+            }
         }
-        let h=read_headers(original.as_ref(),name)?;let bias=reserve(&h,name)?;
-        let stats=map_copied(&original,&h,bias,name)?;
-        return finish(original.as_ref(),h,bias,name,"authenticated load-time rewrite".into(),stats);
+        let h = read_headers(original.as_ref(), name)?;
+        let bias = reserve(&h, name)?;
+        let stats = map_copied(&original, &h, bias, name)?;
+        return finish(
+            original.as_ref(),
+            h,
+            bias,
+            name,
+            "authenticated load-time rewrite".into(),
+            stats,
+        );
     }
-    if !original.protected() && let xrt::LoaderSource::File(mapped, what) = xrt::loader_source(Path::new(path)) {
-        let file = VerifiedSource::open(&std::ffi::CString::new(mapped.as_os_str().as_encoded_bytes()).map_err(|e|e.to_string())?, false).map_err(|e|format!("{name}: Linux errno {e}"))?;
+    if !original.protected()
+        && let xrt::LoaderSource::File(mapped, what) = xrt::loader_source(Path::new(path))
+    {
+        let file = VerifiedSource::open(
+            &std::ffi::CString::new(mapped.as_os_str().as_encoded_bytes())
+                .map_err(|e| e.to_string())?,
+            false,
+        )
+        .map_err(|e| format!("{name}: Linux errno {e}"))?;
         let h = read_headers(&file, name)?;
         if file_mappable(&h) {
             let bias = reserve(&h, name)?;
@@ -216,33 +295,86 @@ pub fn load_elf(host: &CStr, name: &str) -> Result<Image, String> {
     finish(&file, h, bias, name, "load-time rewrite".into(), stats)
 }
 
-fn map_verified_segments(original:&VerifiedSource,h:&Headers,bias:u64,name:&str,derivative:Option<crate::sys::VerityDerivative>)->Result<(),String>{
+fn map_verified_segments(
+    original: &VerifiedSource,
+    h: &Headers,
+    bias: u64,
+    name: &str,
+    derivative: Option<crate::sys::VerityDerivative>,
+) -> Result<(), String> {
     for segment in &h.loads {
-        let start=page_down(bias+segment.p_vaddr);let file_end=bias+segment.p_vaddr+segment.p_filesz;
-        let mem_end=page_up(bias+segment.p_vaddr+segment.p_memsz);let protection=prot_of(segment.p_flags);
-        if segment.p_filesz>0 {
-            let length=page_up(file_end)-start;let offset=page_down(segment.p_offset);
-            let file_bytes=segment.p_offset-offset+segment.p_filesz;
-            let source=original.mapping_source(Some((offset,offset+file_bytes))).map_err(|error|format!("{name}: Linux errno {error}"))?.ok_or_else(||format!("{name}: verified mapping owner missing"))?;
-            let source=std::sync::Arc::try_unwrap(source).map_err(|_|format!("{name}: mapping owner aliased before admission"))?;
-            let source=match &derivative{
-                Some(crate::sys::VerityDerivative::Artifact(artifact))=>source.with_derivative(artifact.clone()),
-                Some(crate::sys::VerityDerivative::Rewrite(pages))=>source.with_rewrite(pages.clone()),
-                Some(crate::sys::VerityDerivative::Composed(_))=>return Err(format!("{name}: composed image requires its whole-image mapping owner")),
-                None=>Ok(source),
-            }.map_err(|error|format!("{name}: derivative owner: {error}"))?;
-            crate::sys::verity_segment(start,length,offset,file_bytes,protection,std::sync::Arc::new(source)).map_err(|error|format!("{name}: verified segment: {error}"))?;
+        let start = page_down(bias + segment.p_vaddr);
+        let file_end = bias + segment.p_vaddr + segment.p_filesz;
+        let mem_end = page_up(bias + segment.p_vaddr + segment.p_memsz);
+        let protection = prot_of(segment.p_flags);
+        if segment.p_filesz > 0 {
+            let length = page_up(file_end) - start;
+            let offset = page_down(segment.p_offset);
+            let file_bytes = segment.p_offset - offset + segment.p_filesz;
+            let source = original
+                .mapping_source(Some((offset, offset + file_bytes)))
+                .map_err(|error| format!("{name}: Linux errno {error}"))?
+                .ok_or_else(|| format!("{name}: verified mapping owner missing"))?;
+            let source = std::sync::Arc::try_unwrap(source)
+                .map_err(|_| format!("{name}: mapping owner aliased before admission"))?;
+            let source = match &derivative {
+                Some(crate::sys::VerityDerivative::Artifact(artifact)) => {
+                    source.with_derivative(artifact.clone())
+                }
+                Some(crate::sys::VerityDerivative::Rewrite(pages)) => {
+                    source.with_rewrite(pages.clone())
+                }
+                Some(crate::sys::VerityDerivative::Composed(_)) => {
+                    return Err(format!(
+                        "{name}: composed image requires its whole-image mapping owner"
+                    ));
+                }
+                None => Ok(source),
+            }
+            .map_err(|error| format!("{name}: derivative owner: {error}"))?;
+            crate::sys::verity_segment(
+                start,
+                length,
+                offset,
+                file_bytes,
+                protection,
+                std::sync::Arc::new(source),
+            )
+            .map_err(|error| format!("{name}: verified segment: {error}"))?;
         }
-        let bss=if segment.p_filesz>0{page_up(file_end)}else{start};
-        if mem_end>bss {
-            let result=unsafe{libc::mmap(bss as*mut _,(mem_end-bss)as usize,protection,libc::MAP_PRIVATE|libc::MAP_ANON|libc::MAP_FIXED,-1,0)};
-            if result==libc::MAP_FAILED{return Err(format!("{name}: cannot map anonymous bss: {}",std::io::Error::last_os_error()));}
+        let bss = if segment.p_filesz > 0 {
+            page_up(file_end)
+        } else {
+            start
+        };
+        if mem_end > bss {
+            let result = unsafe {
+                libc::mmap(
+                    bss as *mut _,
+                    (mem_end - bss) as usize,
+                    protection,
+                    libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_FIXED,
+                    -1,
+                    0,
+                )
+            };
+            if result == libc::MAP_FAILED {
+                return Err(format!(
+                    "{name}: cannot map anonymous bss: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
         }
     }
     Ok(())
 }
 
-fn map_file_backed(file: &VerifiedSource, h: &Headers, bias: u64, name: &str) -> Result<(), String> {
+fn map_file_backed(
+    file: &VerifiedSource,
+    h: &Headers,
+    bias: u64,
+    name: &str,
+) -> Result<(), String> {
     let fd = file.as_raw_fd();
     for p in &h.loads {
         let start = page_down(bias + p.p_vaddr);
@@ -360,12 +492,16 @@ fn map_copied(
     }
     // Sites from the translator's code/data identification; a blind scan of
     // the executable segments only if the file cannot be analyzed.
-    let len = file.len().map_err(|error|format!("{name}: Linux errno {error}"))?;
+    let len = file
+        .len()
+        .map_err(|error| format!("{name}: Linux errno {error}"))?;
     let mut whole = vec![0u8; len as usize];
-    file.read_exact_at(&mut whole,0).map_err(|error|format!("{name}: Linux errno {error}"))?;
-    let analysis = xlate::elf::parse(&whole).ok()
-        .map(|e| xlate::analyze(&e));
-    let fips_hash=analysis.as_ref().and_then(|analysis|analysis.fips.as_ref().map(|module|module.hash_vaddr));
+    file.read_exact_at(&mut whole, 0)
+        .map_err(|error| format!("{name}: Linux errno {error}"))?;
+    let analysis = xlate::elf::parse(&whole).ok().map(|e| xlate::analyze(&e));
+    let fips_hash = analysis
+        .as_ref()
+        .and_then(|analysis| analysis.fips.as_ref().map(|module| module.hash_vaddr));
     let stats = match analysis {
         Some(a) => {
             let sites: Vec<_> = a
@@ -412,13 +548,43 @@ fn map_copied(
         pg += PAGE;
     }
     if file.protected() && file_mappable(h) {
-        for segment in h.loads.iter().filter(|segment|segment.p_flags&PF_X==0&&segment.p_filesz>0
-            && !fips_hash.is_some_and(|hash|hash>=segment.p_vaddr&&hash<segment.p_vaddr+segment.p_memsz)) {
-            let start=page_down(bias+segment.p_vaddr);let length=page_up(bias+segment.p_vaddr+segment.p_filesz)-start;
-            let offset=page_down(segment.p_offset);let file_bytes=segment.p_offset-offset+segment.p_filesz;
-            let source=file.mapping_source(Some((offset,offset+file_bytes))).map_err(|error|format!("{name}: Linux errno {error}"))?.ok_or_else(||format!("{name}: protected source owner missing"))?;
-            if unsafe{libc::mmap(start as*mut _,length as usize,libc::PROT_NONE,libc::MAP_PRIVATE|libc::MAP_ANON|libc::MAP_FIXED,-1,0)}==libc::MAP_FAILED{return Err(format!("{name}: cannot reserve verified data segment"));}
-            crate::sys::verity_segment(start,length,offset,file_bytes,prot_of(segment.p_flags),source).map_err(|error|format!("{name}: verified data segment: {error}"))?;
+        for segment in h.loads.iter().filter(|segment| {
+            segment.p_flags & PF_X == 0
+                && segment.p_filesz > 0
+                && !fips_hash.is_some_and(|hash| {
+                    hash >= segment.p_vaddr && hash < segment.p_vaddr + segment.p_memsz
+                })
+        }) {
+            let start = page_down(bias + segment.p_vaddr);
+            let length = page_up(bias + segment.p_vaddr + segment.p_filesz) - start;
+            let offset = page_down(segment.p_offset);
+            let file_bytes = segment.p_offset - offset + segment.p_filesz;
+            let source = file
+                .mapping_source(Some((offset, offset + file_bytes)))
+                .map_err(|error| format!("{name}: Linux errno {error}"))?
+                .ok_or_else(|| format!("{name}: protected source owner missing"))?;
+            if unsafe {
+                libc::mmap(
+                    start as *mut _,
+                    length as usize,
+                    libc::PROT_NONE,
+                    libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_FIXED,
+                    -1,
+                    0,
+                )
+            } == libc::MAP_FAILED
+            {
+                return Err(format!("{name}: cannot reserve verified data segment"));
+            }
+            crate::sys::verity_segment(
+                start,
+                length,
+                offset,
+                file_bytes,
+                prot_of(segment.p_flags),
+                source,
+            )
+            .map_err(|error| format!("{name}: verified data segment: {error}"))?;
         }
     }
     Ok(stats)
@@ -439,28 +605,52 @@ fn read_interp(file: &dyn KernelRead, h: &Headers, name: &str) -> Result<Option<
 /// [`load_elf`] reads it: what `execve` checks before the old image goes.
 // Linux binfmt_elf passes p_offset - ELF_PAGEOFFSET(p_vaddr) to mmap.
 // An incongruent offset is EINVAL at the actual kernel page size.
-fn validate_kernel_loads(phdrs:&[elf::Phdr])->Result<(),crate::errno::Errno>{
-    if phdrs.iter().any(|segment|segment.p_type==PT_LOAD&&segment.p_offset%PAGE!=segment.p_vaddr%PAGE){return Err(crate::errno::EINVAL);}
+fn validate_kernel_loads(phdrs: &[elf::Phdr]) -> Result<(), crate::errno::Errno> {
+    if phdrs.iter().any(|segment| {
+        segment.p_type == PT_LOAD && segment.p_offset % PAGE != segment.p_vaddr % PAGE
+    }) {
+        return Err(crate::errno::EINVAL);
+    }
     Ok(())
 }
-pub(crate) fn interpreter_errno(host:&CStr)->Result<Option<String>,crate::errno::Errno>{
-    let source=VerifiedSource::open(host,true)?;
-    let mut header=[0u8;64];source.read_exact_at(&mut header,0)?;
-    let parsed=elf::parse_header(&header).map_err(|_|crate::errno::ENOEXEC)?;
-    let end=parsed.e_phoff.checked_add(parsed.e_phnum as u64*56).ok_or(crate::errno::ENOEXEC)?;
-    if end>source.len()?{return Err(crate::errno::ENOEXEC);}
-    let mut bytes=vec![0;usize::try_from(end).map_err(|_|crate::errno::ENOEXEC)?];source.read_exact_at(&mut bytes,0)?;
-    let phdrs=elf::parse_phdrs(&bytes,&parsed).map_err(|_|crate::errno::ENOEXEC)?;
+pub(crate) fn interpreter_errno(host: &CStr) -> Result<Option<String>, crate::errno::Errno> {
+    let source = VerifiedSource::open(host, true)?;
+    let mut header = [0u8; 64];
+    source.read_exact_at(&mut header, 0)?;
+    let parsed = elf::parse_header(&header).map_err(|_| crate::errno::ENOEXEC)?;
+    let end = parsed
+        .e_phoff
+        .checked_add(parsed.e_phnum as u64 * 56)
+        .ok_or(crate::errno::ENOEXEC)?;
+    if end > source.len()? {
+        return Err(crate::errno::ENOEXEC);
+    }
+    let mut bytes = vec![0; usize::try_from(end).map_err(|_| crate::errno::ENOEXEC)?];
+    source.read_exact_at(&mut bytes, 0)?;
+    let phdrs = elf::parse_phdrs(&bytes, &parsed).map_err(|_| crate::errno::ENOEXEC)?;
     validate_kernel_loads(&phdrs)?;
-    let Some(interp)=phdrs.iter().find(|p|p.p_type==PT_INTERP)else{return Ok(None);};
-    let size=source.len()?;
-    if interp.p_offset.checked_add(interp.p_filesz).is_none_or(|end|end>size){return Err(crate::errno::ENOEXEC);}
-    let mut bytes=vec![0;interp.p_filesz as usize];source.read_exact_at(&mut bytes,interp.p_offset)?;
-    let end=bytes.iter().position(|byte|*byte==0).unwrap_or(bytes.len());Ok(Some(String::from_utf8_lossy(&bytes[..end]).into_owned()))
+    let Some(interp) = phdrs.iter().find(|p| p.p_type == PT_INTERP) else {
+        return Ok(None);
+    };
+    let size = source.len()?;
+    if interp
+        .p_offset
+        .checked_add(interp.p_filesz)
+        .is_none_or(|end| end > size)
+    {
+        return Err(crate::errno::ENOEXEC);
+    }
+    let mut bytes = vec![0; interp.p_filesz as usize];
+    source.read_exact_at(&mut bytes, interp.p_offset)?;
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    Ok(Some(String::from_utf8_lossy(&bytes[..end]).into_owned()))
 }
 pub fn interpreter(host: &CStr) -> Result<Option<String>, String> {
     let path = host.to_str().map_err(|e| e.to_string())?;
-    let file = VerifiedSource::open(host, true).map_err(|e|format!("{path}: Linux errno {e}"))?;
+    let file = VerifiedSource::open(host, true).map_err(|e| format!("{path}: Linux errno {e}"))?;
     read_interp(&file, &read_headers(&file, path)?, path)
 }
 

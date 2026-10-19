@@ -32,12 +32,20 @@ const MIN_TRIGGER_MAX_DELAY: i64 = 1000;
 
 /// `JobStatus.getTriggerContentUpdateDelay` of the job's own.
 pub(super) fn update_delay(time: i64) -> i64 {
-    if time < 0 { DEFAULT_TRIGGER_UPDATE_DELAY } else { time.max(MIN_TRIGGER_UPDATE_DELAY) }
+    if time < 0 {
+        DEFAULT_TRIGGER_UPDATE_DELAY
+    } else {
+        time.max(MIN_TRIGGER_UPDATE_DELAY)
+    }
 }
 
 /// `JobStatus.getTriggerContentMaxDelay` of the job's own.
 pub(super) fn max_delay(time: i64) -> i64 {
-    if time < 0 { DEFAULT_TRIGGER_MAX_DELAY } else { time.max(MIN_TRIGGER_MAX_DELAY) }
+    if time < 0 {
+        DEFAULT_TRIGGER_MAX_DELAY
+    } else {
+        time.max(MIN_TRIGGER_MAX_DELAY)
+    }
 }
 
 /// `ArraySet.add`: once, in the order of its hash (`hashCode` of the
@@ -47,7 +55,10 @@ fn add<T>(set: &mut Vec<T>, item: T, key: impl Fn(&T) -> &str) {
         return;
     }
     let hash = java_hash(key(&item));
-    let at = set.iter().position(|i| java_hash(key(i)) > hash).unwrap_or(set.len());
+    let at = set
+        .iter()
+        .position(|i| java_hash(key(i)) > hash)
+        .unwrap_or(set.len());
     set.insert(at, item);
 }
 
@@ -158,13 +169,27 @@ impl Controller {
     fn new_instance(&mut self, spec: &Spec<'_>, observe: &dyn Observe) -> Result<u64, Exception> {
         self.next += 1;
         let id = self.next;
-        let mut instance =
-            Instance { update_delay: spec.update_delay, max_delay: spec.max_delay, ..Default::default() };
+        let mut instance = Instance {
+            update_delay: spec.update_delay,
+            max_delay: spec.max_delay,
+            ..Default::default()
+        };
         for trigger in spec.triggers {
-            let uri = trigger.uri.as_ref().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "uri"))?;
-            let key = ObserverKey { user: spec.user, uri: uri.as_str().to_string(), flags: trigger.flags };
+            let uri = trigger
+                .uri
+                .as_ref()
+                .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "uri"))?;
+            let key = ObserverKey {
+                user: spec.user,
+                uri: uri.as_str().to_string(),
+                flags: trigger.flags,
+            };
             if !self.observers.contains_key(&key) {
-                let registration = match observe.register(uri, trigger.flags & FLAG_NOTIFY_FOR_DESCENDANTS != 0, &key) {
+                let registration = match observe.register(
+                    uri,
+                    trigger.flags & FLAG_NOTIFY_FOR_DESCENDANTS != 0,
+                    &key,
+                ) {
                     Ok(r) => r,
                     Err(e) => {
                         self.instances.insert(id, instance);
@@ -172,7 +197,13 @@ impl Controller {
                         return Err(e);
                     }
                 };
-                self.observers.insert(key.clone(), Observer { registration, instances: Vec::new() });
+                self.observers.insert(
+                    key.clone(),
+                    Observer {
+                        registration,
+                        instances: Vec::new(),
+                    },
+                );
             }
             self.observers.get_mut(&key).unwrap().instances.push(id);
             instance.observers.push(key);
@@ -185,7 +216,13 @@ impl Controller {
     /// (`spec`): its instance, the changes its last run did not take or the
     /// job it replaces had pending, and its constraint satisfied if there
     /// are any.
-    pub fn start_tracking(&mut self, key: u64, spec: &Spec<'_>, c: &mut JobContent, observe: &dyn Observe) -> Result<(), Exception> {
+    pub fn start_tracking(
+        &mut self,
+        key: u64,
+        spec: &Spec<'_>,
+        c: &mut JobContent,
+        observe: &dyn Observe,
+    ) -> Result<(), Exception> {
         let id = match c.instance {
             Some(id) => id,
             None => self.new_instance(spec, observe)?,
@@ -237,7 +274,9 @@ impl Controller {
             }
             match (&mut instance.changes.authorities, changes.authorities) {
                 (None, authorities) => instance.changes.authorities = authorities,
-                (Some(_), Some(authorities)) => add_all(&mut instance.changes.authorities, authorities, str_key),
+                (Some(_), Some(authorities)) => {
+                    add_all(&mut instance.changes.authorities, authorities, str_key)
+                }
                 (Some(_), None) => {}
             }
         }
@@ -246,7 +285,12 @@ impl Controller {
     /// `maybeStopTrackingJobLocked`: its trigger unscheduled; replaced by
     /// `incoming`, its pending changes given over and its observers kept
     /// until `incoming` is tracked; else its instance detached.
-    pub fn stop_tracking(&mut self, c: &mut JobContent, incoming: Option<&mut JobContent>, observe: &dyn Observe) {
+    pub fn stop_tracking(
+        &mut self,
+        c: &mut JobContent,
+        incoming: Option<&mut JobContent>,
+        observe: &dyn Observe,
+    ) {
         if !std::mem::take(&mut c.tracked) {
             return;
         }
@@ -277,23 +321,39 @@ impl Controller {
     /// the change recorded in each of its jobs, whose trigger is
     /// scheduled.
     pub fn on_change(&mut self, key: &ObserverKey, uri: &Uri, now: i64) {
-        let Some(observer) = self.observers.get(key) else { return };
+        let Some(observer) = self.observers.get(key) else {
+            return;
+        };
         for id in observer.instances.clone() {
-            let Some(instance) = self.instances.get_mut(&id) else { continue };
+            let Some(instance) = self.instances.get_mut(&id) else {
+                continue;
+            };
             let uris = instance.changes.uris.get_or_insert_with(Vec::new);
             if uris.len() < MAX_URIS_REPORTED {
                 add(uris, uri.clone(), uri_key);
             }
             if let Some(authority) = uri.authority() {
-                add(instance.changes.authorities.get_or_insert_with(Vec::new), authority, str_key);
+                add(
+                    instance.changes.authorities.get_or_insert_with(Vec::new),
+                    authority,
+                    str_key,
+                );
             }
             // `scheduleLocked`.
             if !instance.trigger_pending {
                 instance.trigger_pending = true;
                 instance.timeout_at = Some(now + instance.max_delay);
             }
-            let urgent = instance.changes.uris.as_ref().is_some_and(|u| u.len() >= URIS_URGENT_THRESHOLD);
-            instance.execute_at = Some(if urgent { now } else { now + instance.update_delay });
+            let urgent = instance
+                .changes
+                .uris
+                .as_ref()
+                .is_some_and(|u| u.len() >= URIS_URGENT_THRESHOLD);
+            instance.execute_at = Some(if urgent {
+                now
+            } else {
+                now + instance.update_delay
+            });
         }
     }
 
@@ -314,7 +374,12 @@ impl Controller {
         let due: Vec<u64> = self
             .instances
             .iter()
-            .filter(|(_, i)| i.execute_at.into_iter().chain(i.timeout_at).any(|t| t <= now))
+            .filter(|(_, i)| {
+                i.execute_at
+                    .into_iter()
+                    .chain(i.timeout_at)
+                    .any(|t| t <= now)
+            })
             .map(|(id, _)| *id)
             .collect();
         let mut jobs = Vec::new();
@@ -330,15 +395,22 @@ impl Controller {
 
     /// When the next runner is due.
     pub fn next_due(&self) -> Option<i64> {
-        self.instances.values().flat_map(|i| i.execute_at.into_iter().chain(i.timeout_at)).min()
+        self.instances
+            .values()
+            .flat_map(|i| i.execute_at.into_iter().chain(i.timeout_at))
+            .min()
     }
 
     /// `detachLocked`: off its observers, those left without jobs
     /// unregistered.
     fn detach(&mut self, id: u64, observe: &dyn Observe) {
-        let Some(instance) = self.instances.remove(&id) else { return };
+        let Some(instance) = self.instances.remove(&id) else {
+            return;
+        };
         for key in instance.observers {
-            let Some(observer) = self.observers.get_mut(&key) else { continue };
+            let Some(observer) = self.observers.get_mut(&key) else {
+                continue;
+            };
             if let Some(at) = observer.instances.iter().position(|i| *i == id) {
                 observer.instances.remove(at);
             }
@@ -364,9 +436,17 @@ mod tests {
     }
 
     impl Observe for Registrar {
-        fn register(&self, uri: &Uri, descendants: bool, key: &ObserverKey) -> Result<u64, Exception> {
+        fn register(
+            &self,
+            uri: &Uri,
+            descendants: bool,
+            key: &ObserverKey,
+        ) -> Result<u64, Exception> {
             if uri.authority().is_none() {
-                return Err(Exception::illegal_argument(format!("Invalid Uri ({}) used for observer", uri.as_str())));
+                return Err(Exception::illegal_argument(format!(
+                    "Invalid Uri ({}) used for observer",
+                    uri.as_str()
+                )));
             }
             let mut r = self.registered.borrow_mut();
             r.push((uri.as_str().to_string(), descendants, key.user));
@@ -379,15 +459,27 @@ mod tests {
     }
 
     fn trigger(uri: &str, flags: i32) -> TriggerContentUri {
-        TriggerContentUri { uri: Some(Uri::parse(uri)), flags }
+        TriggerContentUri {
+            uri: Some(Uri::parse(uri)),
+            flags,
+        }
     }
 
     fn spec(triggers: &[TriggerContentUri]) -> Spec<'_> {
-        Spec { triggers, user: 0, update_delay: update_delay(-1), max_delay: max_delay(-1) }
+        Spec {
+            triggers,
+            user: 0,
+            update_delay: update_delay(-1),
+            max_delay: max_delay(-1),
+        }
     }
 
     fn key(uri: &str, flags: i32) -> ObserverKey {
-        ObserverKey { user: 0, uri: uri.into(), flags }
+        ObserverKey {
+            user: 0,
+            uri: uri.into(),
+            flags,
+        }
     }
 
     const CONTACTS: &str = "content://com.android.contacts/contacts";
@@ -413,7 +505,13 @@ mod tests {
         let other = [trigger(CONTACTS, 0)];
         let mut d = JobContent::default();
         c.start_tracking(3, &spec(&other), &mut d, &r).unwrap();
-        assert_eq!(*r.registered.borrow(), [(CONTACTS.to_string(), true, 0), (CONTACTS.to_string(), false, 0)]);
+        assert_eq!(
+            *r.registered.borrow(),
+            [
+                (CONTACTS.to_string(), true, 0),
+                (CONTACTS.to_string(), false, 0)
+            ]
+        );
         assert!(!a.satisfied);
         c.stop_tracking(&mut a, None, &r);
         assert!(r.unregistered.borrow().is_empty());
@@ -436,11 +534,19 @@ mod tests {
         let mut j = JobContent::default();
         c.start_tracking(7, &spec(&triggers), &mut j, &r).unwrap();
         let k = key(CONTACTS, FLAG_NOTIFY_FOR_DESCENDANTS);
-        c.on_change(&k, &Uri::parse("content://com.android.contacts/contacts/1"), 0);
+        c.on_change(
+            &k,
+            &Uri::parse("content://com.android.contacts/contacts/1"),
+            0,
+        );
         assert_eq!(c.next_due(), Some(10_000));
         assert!(c.due(9_999).is_empty());
         for t in (5_000..=115_000).step_by(5_000) {
-            c.on_change(&k, &Uri::parse("content://com.android.contacts/contacts/1"), t);
+            c.on_change(
+                &k,
+                &Uri::parse("content://com.android.contacts/contacts/1"),
+                t,
+            );
             assert!(c.due(t).is_empty());
         }
         assert_eq!(c.due(120_000), [7]);
@@ -448,7 +554,10 @@ mod tests {
         // The job takes the changes when it runs.
         c.prepare(&mut j);
         assert_eq!(j.changes.uris.as_ref().unwrap().len(), 1);
-        assert_eq!(j.changes.authorities.as_deref(), Some(&["com.android.contacts".to_string()][..]));
+        assert_eq!(
+            j.changes.authorities.as_deref(),
+            Some(&["com.android.contacts".to_string()][..])
+        );
     }
 
     /// At most `MAX_URIS_REPORTED` URIs, kept as an `ArraySet` keeps them;
@@ -516,11 +625,19 @@ mod tests {
         let mut next = JobContent::default();
         Controller::reschedule_for_failure(&mut next, &run);
         c.stop_tracking(&mut run, Some(&mut next), &r);
-        c.start_tracking(2, &spec(&triggers), &mut next, &r).unwrap();
+        c.start_tracking(2, &spec(&triggers), &mut next, &r)
+            .unwrap();
         c.forget_last(&mut next, &r);
         assert!(next.satisfied);
         c.prepare(&mut next);
-        let mut uris: Vec<&str> = next.changes.uris.as_ref().unwrap().iter().map(Uri::as_str).collect();
+        let mut uris: Vec<&str> = next
+            .changes
+            .uris
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(Uri::as_str)
+            .collect();
         uris.sort();
         assert_eq!(uris, [format!("{CONTACTS}/1"), format!("{CONTACTS}/2")]);
         // A run that could not start gives its changes back.

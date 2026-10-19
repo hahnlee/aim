@@ -12,13 +12,13 @@ use aim_android_xml::Element;
 use super::domain_verification;
 use super::{children, string};
 
-mod signatures;
 mod key_sets;
-mod verifier;
-mod read;
 pub mod native_read;
-pub use read::ReadOwners;
+mod read;
+mod signatures;
+mod verifier;
 pub use super::owner::recovery::ReadError;
+pub use read::ReadOwners;
 pub use signatures::SignatureReader;
 pub(in crate::package) use signatures::skip;
 
@@ -729,7 +729,10 @@ impl Settings {
                     "verifier" => self.read_verifier(&start)?,
                     "domain-verifications-legacy" => {
                         for error in self.domain_verification.read_legacy_events(reader) {
-                            eprintln!("legacy domain SettingsXml depth {}: {}", error.depth, error.message);
+                            eprintln!(
+                                "legacy domain SettingsXml depth {}: {}",
+                                error.depth, error.message
+                            );
                         }
                     }
                     "preferred-packages" | "read-external-storage" => {}
@@ -778,12 +781,16 @@ impl Settings {
             &Element,
         ) -> Result<bool, ReadError>,
     ) -> Result<PackageReadOutcome, ReadError> {
-        self.read_package_with_ids(reader, start, ids, attempt, |package, reader, child, _, _| {
-            match child {
+        self.read_package_with_ids(
+            reader,
+            start,
+            ids,
+            attempt,
+            |package, reader, child, _, _| match child {
                 Some(child) => read_owner(package, reader, child),
                 None => Ok(false),
-            }
-        })
+            },
+        )
     }
 
     /// None reports registration before body parsing; Some reports a child.
@@ -806,7 +813,8 @@ impl Settings {
             signatures::skip(reader)?;
             return Ok(PackageReadOutcome::InvalidHeader);
         };
-        let created = incoming.shared_user || !self.packages.iter().any(|p| p.name == incoming.name);
+        let created =
+            incoming.shared_user || !self.packages.iter().any(|p| p.name == incoming.name);
         let first_install_time = incoming.legacy_first_install_time;
         incoming.legacy_first_install_time = 0;
         let (target, outcome) = if incoming.shared_user {
@@ -984,7 +992,10 @@ impl Settings {
     pub fn force_current_boot_versions(&mut self, current: &Version) {
         for uuid in [None, Some("primary_physical".into())] {
             let version = self.find_or_create_version(uuid.clone());
-            *version = Version { volume_uuid: uuid, ..current.clone() };
+            *version = Version {
+                volume_uuid: uuid,
+                ..current.clone()
+            };
         }
     }
 
@@ -992,8 +1003,15 @@ impl Settings {
     /// after no-start-tag or an uncaught input/owner error.
     pub fn ensure_boot_versions(&mut self, current: &Version) {
         for uuid in [None, Some("primary_physical".into())] {
-            if !self.versions.iter().any(|version| version.volume_uuid == uuid) {
-                self.versions.push(Version { volume_uuid: uuid, ..current.clone() });
+            if !self
+                .versions
+                .iter()
+                .any(|version| version.volume_uuid == uuid)
+            {
+                self.versions.push(Version {
+                    volume_uuid: uuid,
+                    ..current.clone()
+                });
             }
         }
     }
@@ -1120,7 +1138,9 @@ impl Settings {
                         s.packages.push(p);
                     }
                 }
-                "updated-package" => { s.put_factory(updated_package(e)?); }
+                "updated-package" => {
+                    s.put_factory(updated_package(e)?);
+                }
                 "shared-user" => {
                     if let Some(u) = shared_user(e, &mut certificates)? {
                         s.shared_users.push(u);

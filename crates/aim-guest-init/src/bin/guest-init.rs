@@ -42,9 +42,15 @@ extern "C" fn stop(_: libc::c_int) {
 
 /// Remove only option/value pairs identified by the initial CLI parser.
 fn reboot_arguments(args: impl IntoIterator<Item = OsString>, captures: &[usize]) -> Vec<OsString> {
-    args.into_iter().enumerate()
-        .filter(|(index, _)| !captures.iter().any(|&capture| *index == capture || *index == capture + 1))
-        .map(|(_, argument)| argument).collect()
+    args.into_iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            !captures
+                .iter()
+                .any(|&capture| *index == capture || *index == capture + 1)
+        })
+        .map(|(_, argument)| argument)
+        .collect()
 }
 
 fn main() {
@@ -109,7 +115,10 @@ fn main() {
             "--binder-capture" => {
                 for entry in value().split(',').filter(|s| !s.is_empty()) {
                     let (descriptor, code) = entry.rsplit_once('#').unwrap_or_else(|| usage());
-                    binder_capture.push((descriptor.to_string(), code.parse().unwrap_or_else(|_| usage())));
+                    binder_capture.push((
+                        descriptor.to_string(),
+                        code.parse().unwrap_or_else(|_| usage()),
+                    ));
                 }
             }
             "--binder-shadow" => {
@@ -228,7 +237,7 @@ fn main() {
     }
     println!("triggers: {}", report.triggers.join(" "));
     println!("{}", report.summary());
-    if let Some(fatal)=report.fatal.as_deref() {
+    if let Some(fatal) = report.fatal.as_deref() {
         eprintln!("guest-init: native boot fatal: {fatal}");
         std::process::exit(1);
     }
@@ -242,7 +251,10 @@ fn main() {
             .as_deref()
             .is_some_and(|command| command.starts_with("reboot"))
     {
-        eprintln!("guest-init: native reboot requested: {}",report.shutdown.as_deref().unwrap());
+        eprintln!(
+            "guest-init: native reboot requested: {}",
+            report.shutdown.as_deref().unwrap()
+        );
         let _ = std::io::stdout().flush();
         let args = reboot_arguments(std::env::args_os().skip(1), &capture_arguments);
         let error = std::env::current_exe()
@@ -256,18 +268,80 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn args(values: &[&str]) -> Vec<OsString> { values.iter().map(OsString::from).collect() }
+    fn args(values: &[&str]) -> Vec<OsString> {
+        values.iter().map(OsString::from).collect()
+    }
     #[test]
     fn automatic_reboot_consumes_only_parser_recorded_capture_pairs() {
-        let original = args(&["--image", "derived image", "--package-constructor-capture", "first capture", "--display", "--package-constructor-capture", "--androidboot", "literal='$(shell)' \"words\" --package-constructor-capture", "--package-constructor-capture", "last capture", "--data", "data path", "--runtime", "runtime dir", "--run", "--binder-trace", "trace file", "--quiet"]);
-        let expected = args(&["--image", "derived image", "--display", "--package-constructor-capture", "--androidboot", "literal='$(shell)' \"words\" --package-constructor-capture", "--data", "data path", "--runtime", "runtime dir", "--run", "--binder-trace", "trace file", "--quiet"]);
+        let original = args(&[
+            "--image",
+            "derived image",
+            "--package-constructor-capture",
+            "first capture",
+            "--display",
+            "--package-constructor-capture",
+            "--androidboot",
+            "literal='$(shell)' \"words\" --package-constructor-capture",
+            "--package-constructor-capture",
+            "last capture",
+            "--data",
+            "data path",
+            "--runtime",
+            "runtime dir",
+            "--run",
+            "--binder-trace",
+            "trace file",
+            "--quiet",
+        ]);
+        let expected = args(&[
+            "--image",
+            "derived image",
+            "--display",
+            "--package-constructor-capture",
+            "--androidboot",
+            "literal='$(shell)' \"words\" --package-constructor-capture",
+            "--data",
+            "data path",
+            "--runtime",
+            "runtime dir",
+            "--run",
+            "--binder-trace",
+            "trace file",
+            "--quiet",
+        ]);
         assert_eq!(reboot_arguments(original, &[2, 8]), expected);
     }
     #[test]
     fn behavior_args_and_raw_values_are_unchanged_without_capture_positions() {
         use std::os::unix::ffi::OsStringExt;
-        let mut original = args(&["--future-option", "--package-constructor-capture", "--userdata", "template path", "--linux-run", "loader path", "--gpu", "gpu path", "--vulkan", "vulkan path", "--binder-shadow", "package,permission", "--binder-shadow-log", "shadow file", "--timeout", "120", "--only", "zygote,vold", "--exclude", "audio", "--trace", "--run"]);
-        original.extend([OsString::from("--opaque-path"), OsString::from_vec(vec![b'd', 0xff])]);
+        let mut original = args(&[
+            "--future-option",
+            "--package-constructor-capture",
+            "--userdata",
+            "template path",
+            "--linux-run",
+            "loader path",
+            "--gpu",
+            "gpu path",
+            "--vulkan",
+            "vulkan path",
+            "--binder-shadow",
+            "package,permission",
+            "--binder-shadow-log",
+            "shadow file",
+            "--timeout",
+            "120",
+            "--only",
+            "zygote,vold",
+            "--exclude",
+            "audio",
+            "--trace",
+            "--run",
+        ]);
+        original.extend([
+            OsString::from("--opaque-path"),
+            OsString::from_vec(vec![b'd', 0xff]),
+        ]);
         assert_eq!(reboot_arguments(original.clone(), &[]), original);
     }
 }

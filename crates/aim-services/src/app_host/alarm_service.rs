@@ -28,7 +28,9 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
-use aim_binder_host::parcel::{BAD_VALUE, Binder, Exception, Parcel, Reader, Result as ParcelResult};
+use aim_binder_host::parcel::{
+    BAD_VALUE, Binder, Exception, Parcel, Reader, Result as ParcelResult,
+};
 use aim_service_aidl::android_app_ialarmlistener as listener;
 use aim_service_aidl::android_app_ialarmmanager as alarm;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
@@ -107,7 +109,11 @@ impl ReadParcelable for ClockInfo {
     fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
         let trigger = r.read_i64()?;
         // readParcelable: the class, then the PendingIntent.
-        let show = if r.read_string16()?.is_some() { r.read_binder()? } else { None };
+        let show = if r.read_string16()?.is_some() {
+            r.read_binder()?
+        } else {
+            None
+        };
         Ok(ClockInfo { trigger, show })
     }
 }
@@ -193,7 +199,11 @@ pub(super) fn wall_ms() -> i64 {
 
 /// `convertToElapsed`: a wall time to the elapsed clock.
 fn to_elapsed(when: i64, kind: i32) -> i64 {
-    if kind == RTC || kind == RTC_WAKEUP { when - wall_ms() + elapsed_ms() } else { when }
+    if kind == RTC || kind == RTC_WAKEUP {
+        when - wall_ms() + elapsed_ms()
+    } else {
+        when
+    }
 }
 
 /// The elapsed time of the next minute boundary of the wall clock, and of
@@ -205,7 +215,9 @@ fn next_tick_and_date(now_elapsed: i64) -> (i64, i64) {
     // SAFETY: localtime_r into a local struct.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe { libc::localtime_r(&secs, &mut tm) };
-    let since_midnight = (tm.tm_hour as i64 * 3600 + tm.tm_min as i64 * 60 + tm.tm_sec as i64) * 1000 + wall.rem_euclid(1000);
+    let since_midnight = (tm.tm_hour as i64 * 3600 + tm.tm_min as i64 * 60 + tm.tm_sec as i64)
+        * 1000
+        + wall.rem_euclid(1000);
     (tick, now_elapsed + INTERVAL_DAY - since_midnight)
 }
 
@@ -214,12 +226,19 @@ impl AlarmManager {
         let now = elapsed_ms();
         let (next_tick, next_date) = next_tick_and_date(now);
         let shared = Arc::new(Shared {
-            state: Mutex::new(State { next_tick, next_date, last_clock: (wall_ms(), now), ..Default::default() }),
+            state: Mutex::new(State {
+                next_tick,
+                next_date,
+                last_clock: (wall_ms(), now),
+                ..Default::default()
+            }),
             changed: Condvar::new(),
         });
         let weak = Arc::downgrade(&host);
         let s = shared.clone();
-        let _ = std::thread::Builder::new().name("alarms".into()).spawn(move || run(weak, s));
+        let _ = std::thread::Builder::new()
+            .name("alarms".into())
+            .spawn(move || run(weak, s));
         AlarmManager { host, shared }
     }
 
@@ -228,7 +247,13 @@ impl AlarmManager {
     fn exact_alarm_change_enabled(&self, package: &str) -> Result<bool, Exception> {
         let (state, _) = self.host.packages()?;
         let compat = &self.host.inputs()?.compat;
-        Ok(state.packages.get(package).is_some_and(|ps| compat.is_enabled(REQUIRE_EXACT_ALARM_PERMISSION, Some(package), ps.target_sdk_version)))
+        Ok(state.packages.get(package).is_some_and(|ps| {
+            compat.is_enabled(
+                REQUIRE_EXACT_ALARM_PERMISSION,
+                Some(package),
+                ps.target_sdk_version,
+            )
+        }))
     }
 
     /// `isExactAlarmChangeEnabled`, `hasUseExactAlarmInternal`,
@@ -241,19 +266,39 @@ impl AlarmManager {
         };
         let compat = &self.host.inputs()?.compat;
         let target = ps.target_sdk_version;
-        if !compat.is_enabled(REQUIRE_EXACT_ALARM_PERMISSION, Some(package), target) || uid.rem_euclid(PER_USER_RANGE as i32) < 10_000 {
+        if !compat.is_enabled(REQUIRE_EXACT_ALARM_PERMISSION, Some(package), target)
+            || uid.rem_euclid(PER_USER_RANGE as i32) < 10_000
+        {
             return Ok(true);
         }
-        let requested = |p: &str| ps.pkg.as_ref().is_some_and(|pkg| pkg.requested_permissions.iter().any(|r| r == p));
-        if compat.is_enabled(ENABLE_USE_EXACT_ALARM, Some(package), target) && self.host.check_permission(Some("android.permission.USE_EXACT_ALARM"), uid)? == 0 {
+        let requested = |p: &str| {
+            ps.pkg
+                .as_ref()
+                .is_some_and(|pkg| pkg.requested_permissions.iter().any(|r| r == p))
+        };
+        if compat.is_enabled(ENABLE_USE_EXACT_ALARM, Some(package), target)
+            && self
+                .host
+                .check_permission(Some("android.permission.USE_EXACT_ALARM"), uid)?
+                == 0
+        {
             return Ok(true);
         }
-        let mode = super::appops_service::mode(&self.host, super::appops_service::OP_SCHEDULE_EXACT_ALARM, uid, Some(package))?;
+        let mode = super::appops_service::mode(
+            &self.host,
+            super::appops_service::OP_SCHEDULE_EXACT_ALARM,
+            uid,
+            Some(package),
+        )?;
         Ok(match mode {
             0 => true,
             super::appops_service::MODE_DEFAULT => {
                 requested("android.permission.SCHEDULE_EXACT_ALARM")
-                    && !compat.is_enabled(SCHEDULE_EXACT_ALARM_DENIED_BY_DEFAULT, Some(package), target)
+                    && !compat.is_enabled(
+                        SCHEDULE_EXACT_ALARM_DENIED_BY_DEFAULT,
+                        Some(package),
+                        target,
+                    )
             }
             _ => false,
         })
@@ -278,13 +323,24 @@ impl AlarmManager {
         let uid = call.sender_euid as i32;
         let package = package.unwrap_or_default();
         if !self.host.owns_package(uid, &package)? {
-            return Err(Exception::security(format!("Package {package} does not belong to the calling uid {uid}")));
+            return Err(Exception::security(format!(
+                "Package {package} does not belong to the calling uid {uid}"
+            )));
         }
         if interval != 0 && listener.is_some() {
-            return Err(Exception::illegal_argument("Repeating alarms cannot use AlarmReceivers"));
+            return Err(Exception::illegal_argument(
+                "Repeating alarms cannot use AlarmReceivers",
+            ));
         }
-        if work_source.is_some_and(|w| !w.is_empty()) && self.host.check_permission(Some("android.permission.UPDATE_DEVICE_STATS"), uid)? != 0 {
-            return Err(Exception::security("AlarmManager.set requires android.permission.UPDATE_DEVICE_STATS"));
+        if work_source.is_some_and(|w| !w.is_empty())
+            && self
+                .host
+                .check_permission(Some("android.permission.UPDATE_DEVICE_STATS"), uid)?
+                != 0
+        {
+            return Err(Exception::security(
+                "AlarmManager.set requires android.permission.UPDATE_DEVICE_STATS",
+            ));
         }
         if flags & FLAG_IDLE_UNTIL != 0 {
             if uid != 1000 {
@@ -293,7 +349,9 @@ impl AlarmManager {
                 window = 0;
             }
         }
-        flags &= !(FLAG_WAKE_FROM_IDLE | FLAG_ALLOW_WHILE_IDLE_UNRESTRICTED | FLAG_ALLOW_WHILE_IDLE_COMPAT);
+        flags &= !(FLAG_WAKE_FROM_IDLE
+            | FLAG_ALLOW_WHILE_IDLE_UNRESTRICTED
+            | FLAG_ALLOW_WHILE_IDLE_COMPAT);
         let core = uid.rem_euclid(PER_USER_RANGE as i32) < 10_000;
         if clock.is_some() {
             flags |= FLAG_WAKE_FROM_IDLE;
@@ -316,11 +374,18 @@ impl AlarmManager {
                 super::services::REASON_ALARM_MANAGER_WHILE_IDLE
             })
         } else {
-            (flags & FLAG_ALLOW_WHILE_IDLE != 0 || clock.is_some()).then_some(super::services::REASON_ALARM_MANAGER_WHILE_IDLE)
+            (flags & FLAG_ALLOW_WHILE_IDLE != 0 || clock.is_some())
+                .then_some(super::services::REASON_ALARM_MANAGER_WHILE_IDLE)
         };
         if flags & FLAG_PRIORITIZE != 0 {
-            if self.host.check_permission(Some("android.permission.SCHEDULE_PRIORITIZED_ALARM"), uid)? != 0 {
-                return Err(Exception::security("AlarmManager.setPrioritized requires android.permission.SCHEDULE_PRIORITIZED_ALARM"));
+            if self
+                .host
+                .check_permission(Some("android.permission.SCHEDULE_PRIORITIZED_ALARM"), uid)?
+                != 0
+            {
+                return Err(Exception::security(
+                    "AlarmManager.setPrioritized requires android.permission.SCHEDULE_PRIORITIZED_ALARM",
+                ));
             }
             flags &= !FLAG_ALLOW_WHILE_IDLE;
         // A listener's exact alarm needs no permission.
@@ -334,7 +399,9 @@ impl AlarmManager {
         }
         // `setImpl`, which drops (and logs) an alarm of neither or both.
         if operation.is_none() == listener.is_none() {
-            eprintln!("app host: alarm of {package}: needs either a PendingIntent or an AlarmReceiver");
+            eprintln!(
+                "app host: alarm of {package}: needs either a PendingIntent or an AlarmReceiver"
+            );
             return Ok(());
         }
         if interval > 0 && interval < MIN_INTERVAL {
@@ -343,7 +410,9 @@ impl AlarmManager {
             interval = MAX_INTERVAL;
         }
         if !(RTC_WAKEUP..=ELAPSED_REALTIME).contains(&kind) {
-            return Err(Exception::illegal_argument(format!("Invalid alarm type {kind}")));
+            return Err(Exception::illegal_argument(format!(
+                "Invalid alarm type {kind}"
+            )));
         }
         let when = when.max(0);
         let now = elapsed_ms();
@@ -352,29 +421,51 @@ impl AlarmManager {
             Some(Binder::Handle(h)) => {
                 let strong = self.host.process.strong(h);
                 let shared = Arc::downgrade(&self.shared);
-                let death = self.host.process.link_to_death(
-                    &strong,
-                    Box::new(move || {
-                        if let Some(s) = shared.upgrade() {
-                            s.state.lock().unwrap().alarms.retain(|a| a.listener.as_ref().is_none_or(|(l, _)| l.handle != h));
-                        }
-                    }),
-                );
+                let death =
+                    self.host.process.link_to_death(
+                        &strong,
+                        Box::new(move || {
+                            if let Some(s) = shared.upgrade() {
+                                s.state.lock().unwrap().alarms.retain(|a| {
+                                    a.listener.as_ref().is_none_or(|(l, _)| l.handle != h)
+                                });
+                            }
+                        }),
+                    );
                 Some((strong, death))
             }
             _ => None,
         };
         let mut state = self.shared.state.lock().unwrap();
-        if state.alarms.iter().filter(|a| a.uid == uid).count() >= MAX_ALARMS_PER_UID && uid != 1000 {
+        if state.alarms.iter().filter(|a| a.uid == uid).count() >= MAX_ALARMS_PER_UID && uid != 1000
+        {
             return Err(Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                format!("Maximum limit of concurrent alarms {MAX_ALARMS_PER_UID} reached for uid: {uid}, callingPackage: {package}"),
+                format!(
+                    "Maximum limit of concurrent alarms {MAX_ALARMS_PER_UID} reached for uid: {uid}, callingPackage: {package}"
+                ),
             ));
         }
         // An alarm of the same operation or listener is replaced.
-        remove_matching(&self.host, &mut state, operation, listener.as_ref().map(|(l, _)| l.handle));
+        remove_matching(
+            &self.host,
+            &mut state,
+            operation,
+            listener.as_ref().map(|(l, _)| l.handle),
+        );
         let rtc_when = matches!(kind, RTC | RTC_WAKEUP).then_some(when);
-        state.alarms.push(Alarm { requested, rtc_when, interval, flags, operation, listener, clock, uid, package, fgs_allowlist });
+        state.alarms.push(Alarm {
+            requested,
+            rtc_when,
+            interval,
+            flags,
+            operation,
+            listener,
+            clock,
+            uid,
+            package,
+            fgs_allowlist,
+        });
         self.alarm_clocks_changed(&mut state);
         self.shared.changed.notify_all();
         Ok(())
@@ -393,16 +484,29 @@ impl AlarmManager {
     /// `updateNextAlarmClockLocked`: users whose next alarm clock changed
     /// hear `ACTION_NEXT_ALARM_CLOCK_CHANGED`.
     fn alarm_clocks_changed(&self, state: &mut State) {
-        let mut users: Vec<i32> = state.alarms.iter().map(Alarm::user).chain(state.next_clocks.iter().map(|(u, _)| *u)).collect();
+        let mut users: Vec<i32> = state
+            .alarms
+            .iter()
+            .map(Alarm::user)
+            .chain(state.next_clocks.iter().map(|(u, _)| *u))
+            .collect();
         users.sort_unstable();
         users.dedup();
         for user in users {
             let next = Self::next_alarm_clock(state, user).map(|c| c.trigger);
-            let last = state.next_clocks.iter().find(|(u, _)| *u == user).map(|(_, t)| *t);
+            let last = state
+                .next_clocks
+                .iter()
+                .find(|(u, _)| *u == user)
+                .map(|(_, t)| *t);
             if last.flatten() != next || last.is_none() && next.is_some() {
                 state.next_clocks.retain(|(u, _)| *u != user);
                 state.next_clocks.push((user, next));
-                let intent = RawIntent::of(Some(ACTION_NEXT_ALARM_CLOCK_CHANGED), FLAG_RECEIVER_REPLACE_PENDING | FLAG_RECEIVER_FOREGROUND, &[]);
+                let intent = RawIntent::of(
+                    Some(ACTION_NEXT_ALARM_CLOCK_CHANGED),
+                    FLAG_RECEIVER_REPLACE_PENDING | FLAG_RECEIVER_FOREGROUND,
+                    &[],
+                );
                 self.host.broadcasts.send_from_system(&self.host, intent);
             }
         }
@@ -410,7 +514,12 @@ impl AlarmManager {
 }
 
 /// Removes the alarms of `operation` or of the listener `listener`.
-fn remove_matching(host: &AppHost, state: &mut State, operation: Option<Binder>, listener: Option<u32>) {
+fn remove_matching(
+    host: &AppHost,
+    state: &mut State,
+    operation: Option<Binder>,
+    listener: Option<u32>,
+) {
     state.alarms.retain(|a| {
         let gone = (operation.is_some() && a.operation == operation)
             || (listener.is_some() && a.listener.as_ref().map(|(l, _)| l.handle) == listener);
@@ -444,7 +553,13 @@ fn run(host: Weak<AppHost>, shared: Arc<Shared>) {
         let Some(host) = host.upgrade() else { return };
         follow_mac_zone(&host, &mut state, now);
         let time_changed = clock_changed(&mut state, now);
-        let next = state.alarms.iter().map(|a| a.requested).chain([state.next_tick, state.next_date]).min().unwrap_or(now);
+        let next = state
+            .alarms
+            .iter()
+            .map(|a| a.requested)
+            .chain([state.next_tick, state.next_date])
+            .min()
+            .unwrap_or(now);
         if next > now && !time_changed {
             drop(host);
             let wait = Duration::from_millis((next - now).min(POLL_MS) as u64);
@@ -494,35 +609,63 @@ fn run(host: Weak<AppHost>, shared: Arc<Shared>) {
                 // Sent with its options' temporary allowlist, for the
                 // PendingIntent's creator (`tempAllowlistForPendingIntent`).
                 if let (Some(reason), Some(uid)) = (fgs_allowlist, host.intent_sender_uid(op)) {
-                    host.temp_allowlist_for_fgs(uid, super::services::ALLOW_WHILE_IDLE_ALLOWLIST_DURATION, reason);
+                    host.temp_allowlist_for_fgs(
+                        uid,
+                        super::services::ALLOW_WHILE_IDLE_ALLOWLIST_DURATION,
+                        reason,
+                    );
                 }
-                let fill = RawIntent::of(None, 0, &[(EXTRA_ALARM_COUNT, crate::bundle::Value::Int(count as i32))]);
-                if let Err(e) = host.send_intent_sender(1000, None, Some(op), 0, Some(fill), None, None, None, None) {
+                let fill = RawIntent::of(
+                    None,
+                    0,
+                    &[(EXTRA_ALARM_COUNT, crate::bundle::Value::Int(count as i32))],
+                );
+                if let Err(e) = host.send_intent_sender(
+                    1000,
+                    None,
+                    Some(op),
+                    0,
+                    Some(fill),
+                    None,
+                    None,
+                    None,
+                    None,
+                ) {
                     eprintln!("app host: alarm of {package}: {}", e.message);
                 }
             }
             if let Some(l) = listener {
                 let mut p = Parcel::new();
-                listener::DoAlarm { callback: Some(host.process.add_service(Arc::new(Complete))) }.write(&mut p);
+                listener::DoAlarm {
+                    callback: Some(host.process.add_service(Arc::new(Complete))),
+                }
+                .write(&mut p);
                 if let Err(s) = l.transact(listener::DO_ALARM, &p, true) {
                     eprintln!("app host: alarm of {package}: doAlarm: status {s}");
                 }
             }
         }
         if tick {
-            let flags = FLAG_RECEIVER_REGISTERED_ONLY | FLAG_RECEIVER_FOREGROUND | FLAG_RECEIVER_INCLUDE_BACKGROUND;
-            host.broadcasts.send_from_system(&host, RawIntent::of(Some(ACTION_TIME_TICK), flags, &[]));
+            let flags = FLAG_RECEIVER_REGISTERED_ONLY
+                | FLAG_RECEIVER_FOREGROUND
+                | FLAG_RECEIVER_INCLUDE_BACKGROUND;
+            host.broadcasts
+                .send_from_system(&host, RawIntent::of(Some(ACTION_TIME_TICK), flags, &[]));
         }
         if date {
-            let flags = FLAG_RECEIVER_REPLACE_PENDING | FLAG_RECEIVER_INCLUDE_BACKGROUND | FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS;
-            host.broadcasts.send_from_system(&host, RawIntent::of(Some(ACTION_DATE_CHANGED), flags, &[]));
+            let flags = FLAG_RECEIVER_REPLACE_PENDING
+                | FLAG_RECEIVER_INCLUDE_BACKGROUND
+                | FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS;
+            host.broadcasts
+                .send_from_system(&host, RawIntent::of(Some(ACTION_DATE_CHANGED), flags, &[]));
         }
         if time_changed {
             let flags = FLAG_RECEIVER_REPLACE_PENDING
                 | FLAG_RECEIVER_FOREGROUND
                 | FLAG_RECEIVER_INCLUDE_BACKGROUND
                 | FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS;
-            host.broadcasts.send_from_system(&host, RawIntent::of(Some(ACTION_TIME_CHANGED), flags, &[]));
+            host.broadcasts
+                .send_from_system(&host, RawIntent::of(Some(ACTION_TIME_CHANGED), flags, &[]));
         }
     }
 }
@@ -570,7 +713,11 @@ fn set_time_zone(host: &AppHost, state: &mut State, now: i64, zone: &str) {
     if changed {
         host.set_property(TIME_ZONE, zone);
     }
-    if host.property(TIME_ZONE_CONFIDENCE).and_then(|c| c.parse().ok()) != Some(TIME_ZONE_CONFIDENCE_HIGH) {
+    if host
+        .property(TIME_ZONE_CONFIDENCE)
+        .and_then(|c| c.parse().ok())
+        != Some(TIME_ZONE_CONFIDENCE_HIGH)
+    {
         host.set_property(TIME_ZONE_CONFIDENCE, &TIME_ZONE_CONFIDENCE_HIGH.to_string());
     }
     if !changed {
@@ -584,8 +731,14 @@ fn set_time_zone(host: &AppHost, state: &mut State, now: i64, zone: &str) {
         | FLAG_RECEIVER_INCLUDE_BACKGROUND
         | FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT
         | FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS;
-    let extras = [(EXTRA_TIMEZONE, crate::bundle::Value::String(Some(zone.to_string())))];
-    host.broadcasts.send_from_system(host, RawIntent::of(Some(ACTION_TIMEZONE_CHANGED), flags, &extras));
+    let extras = [(
+        EXTRA_TIMEZONE,
+        crate::bundle::Value::String(Some(zone.to_string())),
+    )];
+    host.broadcasts.send_from_system(
+        host,
+        RawIntent::of(Some(ACTION_TIMEZONE_CHANGED), flags, &extras),
+    );
 }
 
 impl Service for AlarmManager {
@@ -597,7 +750,8 @@ impl Service for AlarmManager {
         let uid = call.sender_euid as i32;
         match call.code {
             alarm::SET => {
-                let a = alarm::Set::<PendingIntentRef, WorkSource, ClockInfo>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = alarm::Set::<PendingIntentRef, WorkSource, ClockInfo>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 reply(
                     self.set(
                         call,
@@ -620,7 +774,8 @@ impl Service for AlarmManager {
                 )
             }
             alarm::REMOVE => {
-                let a = alarm::Remove::<PendingIntentRef>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = alarm::Remove::<PendingIntentRef>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 let operation = a.operation.and_then(|o| o.0);
                 let listener = match a.listener {
                     Some(Binder::Handle(h)) => Some(h),
@@ -640,7 +795,9 @@ impl Service for AlarmManager {
                 reply((|| {
                     let package = a.package_name.unwrap_or_default();
                     if !self.host.owns_package(uid, &package)? {
-                        return Err(Exception::security(format!("Package {package} does not belong to the calling uid {uid}")));
+                        return Err(Exception::security(format!(
+                            "Package {package} does not belong to the calling uid {uid}"
+                        )));
                     }
                     let mut state = self.shared.state.lock().unwrap();
                     let host = &self.host;
@@ -671,17 +828,26 @@ impl Service for AlarmManager {
             alarm::GET_NEXT_WAKE_FROM_IDLE_TIME => {
                 alarm::GetNextWakeFromIdleTime::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let state = self.shared.state.lock().unwrap();
-                let next = state.alarms.iter().filter(|a| a.flags & FLAG_WAKE_FROM_IDLE != 0).map(|a| a.requested).min().unwrap_or(i64::MAX);
+                let next = state
+                    .alarms
+                    .iter()
+                    .filter(|a| a.flags & FLAG_WAKE_FROM_IDLE != 0)
+                    .map(|a| a.requested)
+                    .min()
+                    .unwrap_or(i64::MAX);
                 let mut p = Parcel::new();
                 alarm::write_get_next_wake_from_idle_time_reply(&mut p, next);
                 Ok(p)
             }
             alarm::CAN_SCHEDULE_EXACT_ALARMS => {
-                let a = alarm::CanScheduleExactAlarms::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    alarm::CanScheduleExactAlarms::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply((|| {
                     let package = a.package_name.unwrap_or_default();
                     if !self.host.owns_package(uid, &package)? {
-                        return Err(Exception::security(format!("Uid {uid} cannot query canScheduleExactAlarms for package {package}")));
+                        return Err(Exception::security(format!(
+                            "Uid {uid} cannot query canScheduleExactAlarms for package {package}"
+                        )));
                     }
                     let allowed = self.exact_allowed(&package, uid)?;
                     let mut p = Parcel::new();
@@ -690,21 +856,40 @@ impl Service for AlarmManager {
                 })())
             }
             alarm::HAS_SCHEDULE_EXACT_ALARM => {
-                let a = alarm::HasScheduleExactAlarm::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    alarm::HasScheduleExactAlarm::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply((|| {
                     let user = self.host.incoming_user(uid, a.user_id, false)?;
                     let package = a.package_name.unwrap_or_default();
                     let (state, _) = self.host.packages()?;
                     let Some(ps) = state.packages.get(&package) else {
-                        return Err(Exception::illegal_argument(format!("Unknown package {package}")));
+                        return Err(Exception::illegal_argument(format!(
+                            "Unknown package {package}"
+                        )));
                     };
                     let target_uid = user * PER_USER_RANGE as i32 + ps.app_id;
-                    let mode = super::appops_service::mode(&self.host, super::appops_service::OP_SCHEDULE_EXACT_ALARM, target_uid, Some(&package))?;
-                    let requested = ps.pkg.as_ref().is_some_and(|pkg| pkg.requested_permissions.iter().any(|r| r == "android.permission.SCHEDULE_EXACT_ALARM"));
+                    let mode = super::appops_service::mode(
+                        &self.host,
+                        super::appops_service::OP_SCHEDULE_EXACT_ALARM,
+                        target_uid,
+                        Some(&package),
+                    )?;
+                    let requested = ps.pkg.as_ref().is_some_and(|pkg| {
+                        pkg.requested_permissions
+                            .iter()
+                            .any(|r| r == "android.permission.SCHEDULE_EXACT_ALARM")
+                    });
                     let compat = &self.host.inputs()?.compat;
                     let has = match mode {
                         0 => true,
-                        super::appops_service::MODE_DEFAULT => requested && !compat.is_enabled(SCHEDULE_EXACT_ALARM_DENIED_BY_DEFAULT, Some(&package), ps.target_sdk_version),
+                        super::appops_service::MODE_DEFAULT => {
+                            requested
+                                && !compat.is_enabled(
+                                    SCHEDULE_EXACT_ALARM_DENIED_BY_DEFAULT,
+                                    Some(&package),
+                                    ps.target_sdk_version,
+                                )
+                        }
                         _ => false,
                     };
                     let mut p = Parcel::new();
@@ -714,10 +899,22 @@ impl Service for AlarmManager {
             }
             alarm::SET_TIME_ZONE => {
                 let a = alarm::SetTimeZone::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                if self.host.check_permission(Some("android.permission.SET_TIME_ZONE"), uid).map_err(|_| BAD_VALUE)? != 0 {
-                    return reply(Err(Exception::security(format!("setTimeZone: Neither user {uid} nor current process has android.permission.SET_TIME_ZONE."))));
+                if self
+                    .host
+                    .check_permission(Some("android.permission.SET_TIME_ZONE"), uid)
+                    .map_err(|_| BAD_VALUE)?
+                    != 0
+                {
+                    return reply(Err(Exception::security(format!(
+                        "setTimeZone: Neither user {uid} nor current process has android.permission.SET_TIME_ZONE."
+                    ))));
                 }
-                set_time_zone(&self.host, &mut self.shared.state.lock().unwrap(), elapsed_ms(), a.zone.as_deref().unwrap_or_default());
+                set_time_zone(
+                    &self.host,
+                    &mut self.shared.state.lock().unwrap(),
+                    elapsed_ms(),
+                    a.zone.as_deref().unwrap_or_default(),
+                );
                 let mut p = Parcel::new();
                 alarm::write_set_time_zone_reply(&mut p);
                 Ok(p)
@@ -742,7 +939,10 @@ mod tests {
 
     #[test]
     fn alarm_clock_info_round_trips() {
-        let info = ClockInfo { trigger: 1234, show: None };
+        let info = ClockInfo {
+            trigger: 1234,
+            show: None,
+        };
         let mut p = Parcel::new();
         info.write_to(&mut p);
         let back = ClockInfo::read_from(&mut p.reader()).unwrap();

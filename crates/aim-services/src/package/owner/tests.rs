@@ -42,30 +42,65 @@ fn duplicate_factory_import_opens_one_owner_without_rewriting_the_source() {
 
 #[test]
 fn boot_frontend_completion_precedes_related_files_and_preserves_input_on_failure() {
-    use crate::package::{settings::{Settings, Version, PackageReadAttempt}, owner::app_ids::AppIds};
-    use recovery::{ReadStage, ReadError, Event};
-    let data = Data::new(); let restrictions = data.settings();
+    use crate::package::{
+        owner::app_ids::AppIds,
+        settings::{PackageReadAttempt, Settings, Version},
+    };
+    use recovery::{Event, ReadError, ReadStage};
+    let data = Data::new();
+    let restrictions = data.settings();
     let path = data.0.join("system/packages.xml");
     let bytes = b"<packages><package name='pending' codePath='/pending' sharedUserId='10100' domainSetId='00000000-0000-0000-0000-000000000001'/><shared-user name='group' userId='10100'/></packages>";
-    fs::write(&path, bytes).unwrap(); fs::write(&restrictions, b"bad related input").unwrap();
-    let mut settings = Settings::default(); let mut ids = AppIds::default(); let mut attempt = PackageReadAttempt::default();
-    let current = Version { sdk_version: 36, database_version: 3, ..Default::default() };
-    let error = recovery::Plan::inspect(&data.0).unwrap().recover_boot_frontend(&[0], &mut settings, &current, |stage, state| match stage {
-        ReadStage::File(bytes) => state.read_document(bytes, |state, reader, start| {
-            match start.name.as_str() {
-                "package" => { state.read_package(reader,start,&mut ids,&mut attempt,|_,_,_|Ok(false))?; }
-                "shared-user" => { state.read_shared_user(reader,start,&mut ids,&mut attempt,|_,_,_|Ok(false))?; }
-                _ => return Ok(false),
-            } Ok(true)
-        }),
-        ReadStage::Complete => {
-            assert_eq!(state.versions.len(), 2);
-            attempt.resolve_pending(state, &mut ids, |_,_,_,_| Err("binding owner unavailable".into())).map_err(ReadError::Owner)?;
-            Ok(None)
-        }
-    }).err().unwrap();
-    assert!(matches!(error.events.last(), Some(Event::CompletionFailed(message)) if message == "binding owner unavailable"));
-    assert!(settings.packages.is_empty()); assert_eq!(attempt.pending.len(), 1);
+    fs::write(&path, bytes).unwrap();
+    fs::write(&restrictions, b"bad related input").unwrap();
+    let mut settings = Settings::default();
+    let mut ids = AppIds::default();
+    let mut attempt = PackageReadAttempt::default();
+    let current = Version {
+        sdk_version: 36,
+        database_version: 3,
+        ..Default::default()
+    };
+    let error = recovery::Plan::inspect(&data.0)
+        .unwrap()
+        .recover_boot_frontend(&[0], &mut settings, &current, |stage, state| match stage {
+            ReadStage::File(bytes) => state.read_document(bytes, |state, reader, start| {
+                match start.name.as_str() {
+                    "package" => {
+                        state.read_package(reader, start, &mut ids, &mut attempt, |_, _, _| {
+                            Ok(false)
+                        })?;
+                    }
+                    "shared-user" => {
+                        state.read_shared_user(
+                            reader,
+                            start,
+                            &mut ids,
+                            &mut attempt,
+                            |_, _, _| Ok(false),
+                        )?;
+                    }
+                    _ => return Ok(false),
+                }
+                Ok(true)
+            }),
+            ReadStage::Complete => {
+                assert_eq!(state.versions.len(), 2);
+                attempt
+                    .resolve_pending(state, &mut ids, |_, _, _, _| {
+                        Err("binding owner unavailable".into())
+                    })
+                    .map_err(ReadError::Owner)?;
+                Ok(None)
+            }
+        })
+        .err()
+        .unwrap();
+    assert!(
+        matches!(error.events.last(), Some(Event::CompletionFailed(message)) if message == "binding owner unavailable")
+    );
+    assert!(settings.packages.is_empty());
+    assert_eq!(attempt.pending.len(), 1);
     assert_eq!(fs::read(&path).unwrap(), bytes);
     let (store, _) = recovery::Plan::inspect(&data.0).unwrap().recover_boot_frontend(&[0], &mut settings, &current, |stage, state| match stage {
         ReadStage::File(bytes) => state.read_document(bytes, |_,reader,_| { crate::package::settings::skip(reader)?; Ok(true) }),
@@ -76,122 +111,305 @@ fn boot_frontend_completion_precedes_related_files_and_preserves_input_on_failur
         }
     }).unwrap();
     assert_eq!(store.state().settings.packages[0].name, "pending");
-    assert!(!store.state().users[0].1.restrictions.packages[0].1.installed);
+    assert!(
+        !store.state().users[0].1.restrictions.packages[0]
+            .1
+            .installed
+    );
     assert_eq!(fs::read(&path).unwrap(), bytes);
 }
 
 #[test]
 fn false_boot_continuation_skips_package_user_files_but_retry_continues_them() {
     use crate::package::settings::{Settings, Version};
-    let data = Data::new(); let restrictions = data.settings();
+    let data = Data::new();
+    let restrictions = data.settings();
     let path = data.0.join("system/packages.xml");
     fs::write(&restrictions, b"malformed package user file").unwrap();
-    let runtime = data.0.join("misc_de/0").join(crate::package::PERMISSION_DIR);
+    let runtime = data
+        .0
+        .join("misc_de/0")
+        .join(crate::package::PERMISSION_DIR);
     fs::create_dir_all(&runtime).unwrap();
-    fs::write(runtime.join("runtime-permissions.xml"), b"malformed runtime user file").unwrap();
-    let current = Version { sdk_version: 36, database_version: 3, ..Default::default() };
+    fs::write(
+        runtime.join("runtime-permissions.xml"),
+        b"malformed runtime user file",
+    )
+    .unwrap();
+    let current = Version {
+        sdk_version: 36,
+        database_version: 3,
+        ..Default::default()
+    };
     for input in [None, Some(b" ".as_slice())] {
         let mut state = Settings::default();
-        if let Some(bytes) = input { fs::write(&path, bytes).unwrap(); } else { fs::remove_file(&path).ok(); }
-        let (mut store, report) = recovery::Plan::inspect(&data.0).unwrap().recover_boot_frontend(&[0], &mut state, &current, |stage, state| match stage {
-            recovery::ReadStage::File(bytes) => state.read_document(bytes, |_,_,_| Ok(false)),
-            recovery::ReadStage::Complete => panic!("false continuation finalized"),
-        }).unwrap();
-        assert!(report.first_boot); assert_eq!(state.versions.len(), 2);
+        if let Some(bytes) = input {
+            fs::write(&path, bytes).unwrap();
+        } else {
+            fs::remove_file(&path).ok();
+        }
+        let (mut store, report) = recovery::Plan::inspect(&data.0)
+            .unwrap()
+            .recover_boot_frontend(&[0], &mut state, &current, |stage, state| match stage {
+                recovery::ReadStage::File(bytes) => state.read_document(bytes, |_, _, _| Ok(false)),
+                recovery::ReadStage::Complete => panic!("false continuation finalized"),
+            })
+            .unwrap();
+        assert!(report.first_boot);
+        assert_eq!(state.versions.len(), 2);
         assert!(store.state().users[0].1.runtime_permissions.is_none());
         assert!(store.state().users[0].1.restrictions.packages.is_empty());
-        let error = store.clear_package_preferred_activities(0, None).unwrap_err();
-        assert!(!error.committed); assert!(error.message.contains("not restored"));
-        assert_eq!(fs::read(&restrictions).unwrap(), b"malformed package user file");
+        let error = store
+            .clear_package_preferred_activities(0, None)
+            .unwrap_err();
+        assert!(!error.committed);
+        assert!(error.message.contains("not restored"));
+        assert_eq!(
+            fs::read(&restrictions).unwrap(),
+            b"malformed package user file"
+        );
     }
-    fs::write(&path, b"<packages><version sdkVersion='33' databaseVersion='bad'/></packages>").unwrap();
-    let mut state = Settings::default(); let mut completed = false;
-    let error = recovery::Plan::inspect(&data.0).unwrap().recover_boot_frontend(&[0], &mut state, &current, |stage, state| match stage {
-        recovery::ReadStage::File(bytes) => state.read_document(bytes, |_,_,_| Ok(false)),
-        recovery::ReadStage::Complete => { completed = true; Ok(None) }
-    }).err().unwrap();
-    assert!(completed); assert!(!path.exists());
-    assert!(error.message.contains("XML") || error.message.contains("start") || error.message.contains("root"), "{}", error.message);
-    assert_eq!(fs::read(&restrictions).unwrap(), b"malformed package user file");
+    fs::write(
+        &path,
+        b"<packages><version sdkVersion='33' databaseVersion='bad'/></packages>",
+    )
+    .unwrap();
+    let mut state = Settings::default();
+    let mut completed = false;
+    let error = recovery::Plan::inspect(&data.0)
+        .unwrap()
+        .recover_boot_frontend(&[0], &mut state, &current, |stage, state| match stage {
+            recovery::ReadStage::File(bytes) => state.read_document(bytes, |_, _, _| Ok(false)),
+            recovery::ReadStage::Complete => {
+                completed = true;
+                Ok(None)
+            }
+        })
+        .err()
+        .unwrap();
+    assert!(completed);
+    assert!(!path.exists());
+    assert!(
+        error.message.contains("XML")
+            || error.message.contains("start")
+            || error.message.contains("root"),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        fs::read(&restrictions).unwrap(),
+        b"malformed package user file"
+    );
 }
 
 #[test]
 fn unread_restriction_claim_detects_external_changes_and_survives_failed_first_write() {
-    use crate::package::settings::{Settings,Version};
-    let data = Data::new(); let path = data.settings(); fs::remove_file(data.0.join("system/packages.xml")).unwrap();
+    use crate::package::settings::{Settings, Version};
+    let data = Data::new();
+    let path = data.settings();
+    fs::remove_file(data.0.join("system/packages.xml")).unwrap();
     fs::write(&path, b"unparsed malformed main").unwrap();
-    let backup = path.with_file_name("package-restrictions-backup.xml"); let reserve = sibling(&path, ".reservecopy");
+    let backup = path.with_file_name("package-restrictions-backup.xml");
+    let reserve = sibling(&path, ".reservecopy");
     fs::write(&reserve, b"unparsed malformed reserve").unwrap();
-    let current = Version {sdk_version:36,database_version:3,..Default::default()}; let mut settings=Settings::default();
-    let (mut store,_) = recovery::Plan::inspect(&data.0).unwrap().recover_boot(&[0],&mut settings,&current,|_,_|panic!("absent input read")).unwrap();
+    let current = Version {
+        sdk_version: 36,
+        database_version: 3,
+        ..Default::default()
+    };
+    let mut settings = Settings::default();
+    let (mut store, _) = recovery::Plan::inspect(&data.0)
+        .unwrap()
+        .recover_boot(&[0], &mut settings, &current, |_, _| {
+            panic!("absent input read")
+        })
+        .unwrap();
     store.claim_unread_restrictions(0).unwrap();
-    let root=aim_android_xml::read(b"<package-restrictions/>").unwrap();
-    let error=store.commit_initial_restrictions_using(0,root.clone(),|file,_|{file.write_all(b"partial")?;Err(io::Error::other("injected first write"))}).unwrap_err();
-    assert!(!error.committed); assert!(!path.exists());
-    assert_eq!(fs::read(&backup).unwrap(),b"unparsed malformed main");
-    store.commit_initial_restrictions(0,root.clone()).unwrap();
-    assert!(!backup.exists()); assert_eq!(fs::read(&path).unwrap(),fs::read(&reserve).unwrap());
-    assert_eq!(aim_android_xml::read(&fs::read(&path).unwrap()).unwrap(),root);
+    let root = aim_android_xml::read(b"<package-restrictions/>").unwrap();
+    let error = store
+        .commit_initial_restrictions_using(0, root.clone(), |file, _| {
+            file.write_all(b"partial")?;
+            Err(io::Error::other("injected first write"))
+        })
+        .unwrap_err();
+    assert!(!error.committed);
+    assert!(!path.exists());
+    assert_eq!(fs::read(&backup).unwrap(), b"unparsed malformed main");
+    store.commit_initial_restrictions(0, root.clone()).unwrap();
+    assert!(!backup.exists());
+    assert_eq!(fs::read(&path).unwrap(), fs::read(&reserve).unwrap());
+    assert_eq!(
+        aim_android_xml::read(&fs::read(&path).unwrap()).unwrap(),
+        root
+    );
     assert!(!store.unread_restrictions.contains(&0));
 
-    let committed=Data::new();let target=committed.settings();fs::remove_file(committed.0.join("system/packages.xml")).unwrap();
-    let (mut owner,_) = recovery::Plan::inspect(&committed.0).unwrap().recover_boot(&[0],&mut Settings::default(),&current,|_,_|panic!()).unwrap();
-    owner.claim_unread_restrictions(0).unwrap();let copy=sibling(&target,".reservecopy");
-    let error=owner.commit_initial_restrictions_using(0,root.clone(),|file,bytes| { file.write_all(bytes)?;fs::remove_file(&copy)?;Ok(()) }).unwrap_err();
-    assert!(error.committed);assert!(!owner.unread_restrictions.contains(&0));
-    assert_eq!(aim_android_xml::read(&fs::read(&target).unwrap()).unwrap(),root);
+    let committed = Data::new();
+    let target = committed.settings();
+    fs::remove_file(committed.0.join("system/packages.xml")).unwrap();
+    let (mut owner, _) = recovery::Plan::inspect(&committed.0)
+        .unwrap()
+        .recover_boot(&[0], &mut Settings::default(), &current, |_, _| panic!())
+        .unwrap();
+    owner.claim_unread_restrictions(0).unwrap();
+    let copy = sibling(&target, ".reservecopy");
+    let error = owner
+        .commit_initial_restrictions_using(0, root.clone(), |file, bytes| {
+            file.write_all(bytes)?;
+            fs::remove_file(&copy)?;
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(error.committed);
+    assert!(!owner.unread_restrictions.contains(&0));
+    assert_eq!(
+        aim_android_xml::read(&fs::read(&target).unwrap()).unwrap(),
+        root
+    );
 
-    let other=Data::new();let target=other.settings();fs::remove_file(other.0.join("system/packages.xml")).unwrap();fs::write(&target,b"before").unwrap();
-    let (mut store,_) = recovery::Plan::inspect(&other.0).unwrap().recover_boot(&[0],&mut Settings::default(),&current,|_,_|panic!()).unwrap();
-    store.claim_unread_restrictions(0).unwrap(); fs::write(&target,b"outside writer").unwrap();
-    assert!(!store.commit_initial_restrictions(0,root).unwrap_err().committed);
-    assert_eq!(fs::read(&target).unwrap(),b"outside writer");
+    let other = Data::new();
+    let target = other.settings();
+    fs::remove_file(other.0.join("system/packages.xml")).unwrap();
+    fs::write(&target, b"before").unwrap();
+    let (mut store, _) = recovery::Plan::inspect(&other.0)
+        .unwrap()
+        .recover_boot(&[0], &mut Settings::default(), &current, |_, _| panic!())
+        .unwrap();
+    store.claim_unread_restrictions(0).unwrap();
+    fs::write(&target, b"outside writer").unwrap();
+    assert!(
+        !store
+            .commit_initial_restrictions(0, root)
+            .unwrap_err()
+            .committed
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"outside writer");
 }
 
 #[test]
 fn initial_restrictions_serialize_the_supplied_scan_user_owner() {
-    use crate::package::{settings::{Settings,Version},scan::SigningScan,system_config::SystemConfig,restrictions::UserState};
-    let data=Data::new();let path=data.settings();fs::remove_file(data.0.join("system/packages.xml")).unwrap();
+    use crate::package::{
+        restrictions::UserState,
+        scan::SigningScan,
+        settings::{Settings, Version},
+        system_config::SystemConfig,
+    };
+    let data = Data::new();
+    let path = data.settings();
+    fs::remove_file(data.0.join("system/packages.xml")).unwrap();
     let mut settings=Settings::parse(&aim_android_xml::read(b"<packages><package name='p' codePath='/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'/></packages>").unwrap()).unwrap();
-    let current=Version{sdk_version:36,database_version:3,..Default::default()};
-    let(mut store,_)=recovery::Plan::inspect(&data.0).unwrap().recover_boot(&[0],&mut settings,&current,|_,_|panic!()).unwrap();
-    let mut scan=SigningScan::new(&SystemConfig::default(),&settings,36).unwrap();
-    let snapshot = crate::package::scan_snapshot::Store::new(scan.clone(), super::usage::Usage::new(["p"])).unwrap().capture();
+    let current = Version {
+        sdk_version: 36,
+        database_version: 3,
+        ..Default::default()
+    };
+    let (mut store, _) = recovery::Plan::inspect(&data.0)
+        .unwrap()
+        .recover_boot(&[0], &mut settings, &current, |_, _| panic!())
+        .unwrap();
+    let mut scan = SigningScan::new(&SystemConfig::default(), &settings, 36).unwrap();
+    let snapshot =
+        crate::package::scan_snapshot::Store::new(scan.clone(), super::usage::Usage::new(["p"]))
+            .unwrap()
+            .capture();
     store.commit_scan_settings(&snapshot).unwrap();
-    let root=element("package-restrictions");
-    assert!(store.commit_initial_scan_restrictions(&scan,0,false,root.clone()).unwrap_err().message.contains("absent"));
-    let state=UserState{ installed:false,stopped:true,enabled:2,ce_data_inode:11,first_install_time:77,enabled_components:Some(vec!["p.Enabled".into()]),min_aspect_ratio:3,..Default::default()};
-    scan.capture_user_states(BTreeMap::from([(("p".into(),false),crate::package::scan::CapturedUsers { states:BTreeMap::from([(0,state.clone())]),active_aliases:Default::default() })])).unwrap();
-    fs::write(&path,b"unread old bytes").unwrap();store.claim_unread_restrictions(0).unwrap();
-    store.commit_initial_scan_restrictions(&scan,0,false,root).unwrap();
-    assert_eq!(store.state().users[0].1.restrictions.packages[0].1,state);
-    let bytes=fs::read(&path).unwrap();let parsed=Restrictions::parse(&aim_android_xml::read(&bytes).unwrap()).unwrap();
-    assert_eq!(parsed.packages[0].1.min_aspect_ratio,3);
-    assert_eq!(parsed.packages[0].1.enabled_components,Some(vec!["p.Enabled".into()]));
+    let root = element("package-restrictions");
+    assert!(
+        store
+            .commit_initial_scan_restrictions(&scan, 0, false, root.clone())
+            .unwrap_err()
+            .message
+            .contains("absent")
+    );
+    let state = UserState {
+        installed: false,
+        stopped: true,
+        enabled: 2,
+        ce_data_inode: 11,
+        first_install_time: 77,
+        enabled_components: Some(vec!["p.Enabled".into()]),
+        min_aspect_ratio: 3,
+        ..Default::default()
+    };
+    scan.capture_user_states(BTreeMap::from([(
+        ("p".into(), false),
+        crate::package::scan::CapturedUsers {
+            states: BTreeMap::from([(0, state.clone())]),
+            active_aliases: Default::default(),
+        },
+    )]))
+    .unwrap();
+    fs::write(&path, b"unread old bytes").unwrap();
+    store.claim_unread_restrictions(0).unwrap();
+    store
+        .commit_initial_scan_restrictions(&scan, 0, false, root)
+        .unwrap();
+    assert_eq!(store.state().users[0].1.restrictions.packages[0].1, state);
+    let bytes = fs::read(&path).unwrap();
+    let parsed = Restrictions::parse(&aim_android_xml::read(&bytes).unwrap()).unwrap();
+    assert_eq!(parsed.packages[0].1.min_aspect_ratio, 3);
+    assert_eq!(
+        parsed.packages[0].1.enabled_components,
+        Some(vec!["p.Enabled".into()])
+    );
 }
 
 #[test]
 fn initialized_users_follow_committed_scan_normalization_and_reject_new_metadata() {
-    use crate::package::{settings::{Settings, Version}, scan::{SigningScan, CapturedUsers}, restrictions::UserState};
-    let data = Data::new(); data.settings();
+    use crate::package::{
+        restrictions::UserState,
+        scan::{CapturedUsers, SigningScan},
+        settings::{Settings, Version},
+    };
+    let data = Data::new();
+    data.settings();
     fs::remove_file(data.0.join("system/packages.xml")).unwrap();
     let mut settings = Settings::parse(&aim_android_xml::read(b"<packages><package name='p' codePath='/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'/></packages>").unwrap()).unwrap();
-    let current = Version { sdk_version: 36, database_version: 3, ..Default::default() };
-    let (mut store, _) = recovery::Plan::inspect(&data.0).unwrap().recover_boot(&[0], &mut settings, &current, |_,_| panic!()).unwrap();
+    let current = Version {
+        sdk_version: 36,
+        database_version: 3,
+        ..Default::default()
+    };
+    let (mut store, _) = recovery::Plan::inspect(&data.0)
+        .unwrap()
+        .recover_boot(&[0], &mut settings, &current, |_, _| panic!())
+        .unwrap();
     let mut scan = SigningScan::new(&Default::default(), &settings, 36).unwrap();
     scan.settings.packages[0].old_paths = Some(vec![Some("/old".into())]);
     scan.settings.packages[0].legacy_first_install_time = 123;
-    scan.capture_user_states(BTreeMap::from([(("p".into(), false), CapturedUsers {
-        states: BTreeMap::from([(0, UserState::initialized())]), active_aliases: Default::default(),
-    })])).unwrap();
-    let snapshot = crate::package::scan_snapshot::Store::new(scan.clone(), super::usage::Usage::new(["p"])).unwrap().capture();
+    scan.capture_user_states(BTreeMap::from([(
+        ("p".into(), false),
+        CapturedUsers {
+            states: BTreeMap::from([(0, UserState::initialized())]),
+            active_aliases: Default::default(),
+        },
+    )]))
+    .unwrap();
+    let snapshot =
+        crate::package::scan_snapshot::Store::new(scan.clone(), super::usage::Usage::new(["p"]))
+            .unwrap()
+            .capture();
     store.commit_scan_settings(&snapshot).unwrap();
-    assert_ne!(signing::persisted(store.state.settings.clone()), signing::persisted(scan.settings.clone()));
+    assert_ne!(
+        signing::persisted(store.state.settings.clone()),
+        signing::persisted(scan.settings.clone())
+    );
     store.claim_unread_restrictions(0).unwrap();
-    let mut changed = scan.clone(); changed.settings.packages[0].version_code = 7;
-    assert!(!store.commit_initial_scan_restrictions(&changed, 0, false, element("package-restrictions")).unwrap_err().committed);
-    store.commit_initial_scan_restrictions(&scan, 0, false, element("package-restrictions")).unwrap();
-    assert_eq!(store.state.users[0].1.restrictions.packages[0].1, UserState::initialized());
+    let mut changed = scan.clone();
+    changed.settings.packages[0].version_code = 7;
+    assert!(
+        !store
+            .commit_initial_scan_restrictions(&changed, 0, false, element("package-restrictions"))
+            .unwrap_err()
+            .committed
+    );
+    store
+        .commit_initial_scan_restrictions(&scan, 0, false, element("package-restrictions"))
+        .unwrap();
+    assert_eq!(
+        store.state.users[0].1.restrictions.packages[0].1,
+        UserState::initialized()
+    );
 }
 
 pub(super) struct Data(pub(super) PathBuf);
@@ -589,23 +807,20 @@ fn removed_setting_cleanup_defers_an_unread_new_user_to_its_complete_initial_wri
         .commit_removed_package_setting(&desired, "store")
         .unwrap();
 
-    assert!(!store
-        .commit_removed_package_restrictions("store", 10)
-        .unwrap());
-    let path = data
-        .0
-        .join("system/users/10/package-restrictions.xml");
+    assert!(
+        !store
+            .commit_removed_package_restrictions("store", 10)
+            .unwrap()
+    );
+    let path = data.0.join("system/users/10/package-restrictions.xml");
     assert!(!path.exists());
 
-    let initial = aim_android_xml::read(
-        b"<package-restrictions><pkg name='app'/></package-restrictions>",
-    )
-    .unwrap();
+    let initial =
+        aim_android_xml::read(b"<package-restrictions><pkg name='app'/></package-restrictions>")
+            .unwrap();
     store.commit_initial_restrictions(10, initial).unwrap();
-    let restored = Restrictions::parse(
-        &aim_android_xml::read(&fs::read(path).unwrap()).unwrap(),
-    )
-    .unwrap();
+    let restored =
+        Restrictions::parse(&aim_android_xml::read(&fs::read(path).unwrap()).unwrap()).unwrap();
     assert_eq!(
         restored
             .packages
@@ -2378,49 +2593,135 @@ fn domain_write_failures_publish_only_committed_disk_state() {
 fn exclusive_recovery_matches_directory_open_selection_and_cleanup() {
     use recovery::{Event, Plan, Source};
     let parse = |bytes: &[u8], settings: &mut crate::package::settings::Settings| {
-        let root = aim_android_xml::read(bytes)?; *settings = crate::package::settings::Settings::parse(&root)?; Ok(Some(root))
+        let root = aim_android_xml::read(bytes)?;
+        *settings = crate::package::settings::Settings::parse(&root)?;
+        Ok(Some(root))
     };
     for nonempty in [false, true] {
-        let data = Data::new(); fs::create_dir_all(data.0.join("system")).unwrap(); let paths = settings_paths(&data.0);
-        fs::create_dir(&paths[0]).unwrap(); if nonempty {fs::write(paths[0].join("keep"), b"owned fixture").unwrap();}
-        fs::write(&paths[1], b"<packages/>").unwrap(); fs::create_dir(&paths[2]).unwrap();
-        let (_, report) = Plan::inspect(&data.0).unwrap().recover(&[0], &mut Default::default(), parse).unwrap();
-        assert_eq!(report.events, vec![Event::Selected(Source::Backup), if nonempty {Event::RemoveFailed(Source::Main)} else {Event::Removed(Source::Main)}, Event::Removed(Source::Reserve)]);
-        assert_eq!(paths[0].exists(), nonempty); assert!(paths[1].is_file()); assert!(!paths[2].exists());
+        let data = Data::new();
+        fs::create_dir_all(data.0.join("system")).unwrap();
+        let paths = settings_paths(&data.0);
+        fs::create_dir(&paths[0]).unwrap();
+        if nonempty {
+            fs::write(paths[0].join("keep"), b"owned fixture").unwrap();
+        }
+        fs::write(&paths[1], b"<packages/>").unwrap();
+        fs::create_dir(&paths[2]).unwrap();
+        let (_, report) = Plan::inspect(&data.0)
+            .unwrap()
+            .recover(&[0], &mut Default::default(), parse)
+            .unwrap();
+        assert_eq!(
+            report.events,
+            vec![
+                Event::Selected(Source::Backup),
+                if nonempty {
+                    Event::RemoveFailed(Source::Main)
+                } else {
+                    Event::Removed(Source::Main)
+                },
+                Event::Removed(Source::Reserve)
+            ]
+        );
+        assert_eq!(paths[0].exists(), nonempty);
+        assert!(paths[1].is_file());
+        assert!(!paths[2].exists());
     }
-    let data = Data::new(); fs::create_dir_all(data.0.join("system")).unwrap(); let paths = settings_paths(&data.0);
-    fs::write(&paths[0], b"<packages/>").unwrap(); fs::create_dir(&paths[1]).unwrap(); fs::create_dir(&paths[2]).unwrap();
-    let (_, report) = Plan::inspect(&data.0).unwrap().recover(&[0], &mut Default::default(), parse).unwrap();
-    assert_eq!(report.events, vec![Event::OpenFailed(Source::Backup), Event::Selected(Source::Main)]); assert!(paths[1].is_dir() && paths[2].is_dir());
-    fs::remove_file(&paths[0]).unwrap(); fs::create_dir(&paths[0]).unwrap();
-    let error = Plan::inspect(&data.0).unwrap().recover(&[0], &mut Default::default(), parse).err().unwrap();
-    assert_eq!(error.events, vec![Event::OpenFailed(Source::Backup), Event::OpenFailed(Source::Main)]);
-    let plan = Plan::inspect(&data.0).unwrap(); fs::write(paths[1].join("foreign"), b"changed").unwrap();
-    assert!(plan.recover(&[0], &mut Default::default(), parse).is_err()); assert!(paths[1].join("foreign").is_file());
+    let data = Data::new();
+    fs::create_dir_all(data.0.join("system")).unwrap();
+    let paths = settings_paths(&data.0);
+    fs::write(&paths[0], b"<packages/>").unwrap();
+    fs::create_dir(&paths[1]).unwrap();
+    fs::create_dir(&paths[2]).unwrap();
+    let (_, report) = Plan::inspect(&data.0)
+        .unwrap()
+        .recover(&[0], &mut Default::default(), parse)
+        .unwrap();
+    assert_eq!(
+        report.events,
+        vec![
+            Event::OpenFailed(Source::Backup),
+            Event::Selected(Source::Main)
+        ]
+    );
+    assert!(paths[1].is_dir() && paths[2].is_dir());
+    fs::remove_file(&paths[0]).unwrap();
+    fs::create_dir(&paths[0]).unwrap();
+    let error = Plan::inspect(&data.0)
+        .unwrap()
+        .recover(&[0], &mut Default::default(), parse)
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.events,
+        vec![
+            Event::OpenFailed(Source::Backup),
+            Event::OpenFailed(Source::Main)
+        ]
+    );
+    let plan = Plan::inspect(&data.0).unwrap();
+    fs::write(paths[1].join("foreign"), b"changed").unwrap();
+    assert!(plan.recover(&[0], &mut Default::default(), parse).is_err());
+    assert!(paths[1].join("foreign").is_file());
 }
 
 #[test]
 fn backup_cleanup_permission_failure_is_reported_without_aborting_the_read() {
     use recovery::{Event, Plan, Source};
-    let data = Data::new(); let parent = data.0.join("system"); fs::create_dir_all(&parent).unwrap();
+    let data = Data::new();
+    let parent = data.0.join("system");
+    fs::create_dir_all(&parent).unwrap();
     let paths = settings_paths(&data.0);
-    for path in &paths {fs::write(path, b"<packages/>").unwrap();}
+    for path in &paths {
+        fs::write(path, b"<packages/>").unwrap();
+    }
     let plan = Plan::inspect(&data.0).unwrap();
     struct RestorePermissions(std::path::PathBuf);
-    impl Drop for RestorePermissions {fn drop(&mut self) {fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755)).unwrap();}}
-    let restore = RestorePermissions(parent.clone()); fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
-    let (_, report) = plan.recover(&[0], &mut Default::default(), |bytes, state| {
-        let root = aim_android_xml::read(bytes)?; *state = crate::package::settings::Settings::parse(&root)?; Ok(Some(root))
-    }).unwrap();
-    assert_eq!(report.events, vec![Event::Selected(Source::Backup), Event::RemoveFailed(Source::Main), Event::RemoveFailed(Source::Reserve)]);
-    assert!(paths.iter().all(|path| path.is_file())); drop(restore);
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let restore = RestorePermissions(parent.clone());
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+    let (_, report) = plan
+        .recover(&[0], &mut Default::default(), |bytes, state| {
+            let root = aim_android_xml::read(bytes)?;
+            *state = crate::package::settings::Settings::parse(&root)?;
+            Ok(Some(root))
+        })
+        .unwrap();
+    assert_eq!(
+        report.events,
+        vec![
+            Event::Selected(Source::Backup),
+            Event::RemoveFailed(Source::Main),
+            Event::RemoveFailed(Source::Reserve)
+        ]
+    );
+    assert!(paths.iter().all(|path| path.is_file()));
+    drop(restore);
     // failRead still owns a required deletion; it must expose permission failure.
-    fs::write(&paths[1], b"broken").unwrap(); let plan = Plan::inspect(&data.0).unwrap();
-    let restore = RestorePermissions(parent.clone()); fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
-    let error = plan.recover(&[0], &mut Default::default(), |_, _| Err("controlled parse failure".into())).err().unwrap();
-    assert!(matches!(error.events.last(), Some(Event::Failed {source: Source::Backup, ..}))); assert!(paths.iter().all(|path| path.is_file())); drop(restore);
+    fs::write(&paths[1], b"broken").unwrap();
+    let plan = Plan::inspect(&data.0).unwrap();
+    let restore = RestorePermissions(parent.clone());
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+    let error = plan
+        .recover(&[0], &mut Default::default(), |_, _| {
+            Err("controlled parse failure".into())
+        })
+        .err()
+        .unwrap();
+    assert!(matches!(
+        error.events.last(),
+        Some(Event::Failed {
+            source: Source::Backup,
+            ..
+        })
+    ));
+    assert!(paths.iter().all(|path| path.is_file()));
+    drop(restore);
 }
-
 
 #[test]
 fn native_frontend_owner_failure_preserves_selected_input_and_prior_effects() {
@@ -2430,58 +2731,97 @@ fn native_frontend_owner_failure_preserves_selected_input_and_prior_effects() {
         let paths = settings_paths(&data.0);
         fs::create_dir_all(data.0.join("system")).unwrap();
         let bytes = b"<packages><package name='p' codePath='/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'><perms/></package></packages>";
-        for path in &paths { fs::write(path, bytes).unwrap(); }
-        if !backup { fs::remove_file(&paths[1]).unwrap(); }
+        for path in &paths {
+            fs::write(path, bytes).unwrap();
+        }
+        if !backup {
+            fs::remove_file(&paths[1]).unwrap();
+        }
         let plan = Plan::inspect(&data.0).unwrap();
         let mut settings = crate::package::settings::Settings::default();
         let mut calls = 0;
         let mut ids = crate::package::owner::app_ids::AppIds::default();
         let mut attempt = crate::package::settings::PackageReadAttempt::default();
-        let error = plan.recover_with_owner(&[0], &mut settings, |bytes, state| {
-            use aim_android_xml::pull::Reader;
-            calls += 1;
-            state.find_or_create_version(None).sdk_version = 36;
-            let mut reader = Reader::new(bytes).map_err(ReadError::File)?;
-            state.read_events(&mut reader, |state, reader, start| {
-                state.read_package(reader, start, &mut ids, &mut attempt, |_, _, _| {
-                    Err(ReadError::Owner("package policy bridge unavailable".into()))
+        let error = plan
+            .recover_with_owner(&[0], &mut settings, |bytes, state| {
+                use aim_android_xml::pull::Reader;
+                calls += 1;
+                state.find_or_create_version(None).sdk_version = 36;
+                let mut reader = Reader::new(bytes).map_err(ReadError::File)?;
+                state.read_events(&mut reader, |state, reader, start| {
+                    state.read_package(reader, start, &mut ids, &mut attempt, |_, _, _| {
+                        Err(ReadError::Owner("package policy bridge unavailable".into()))
+                    })?;
+                    Ok(true)
                 })?;
-                Ok(true)
-            })?;
-            Ok(Some(element("packages")))
-        }).err().unwrap();
+                Ok(Some(element("packages")))
+            })
+            .err()
+            .unwrap();
         let source = if backup { Source::Backup } else { Source::Main };
         assert_eq!(calls, 1);
         assert_eq!(settings.versions[0].sdk_version, 36);
         assert_eq!(settings.packages[0].name, "p");
         assert!(ids.get(10001).is_some());
         assert_eq!(error.message, "package policy bridge unavailable");
-        assert_eq!(error.events.last(), Some(&Event::OwnerFailed { source, message: error.message.clone() }));
-        assert!(!error.events.iter().any(|event| matches!(event, Event::Failed { .. })));
-        assert_eq!(fs::read(&paths[if backup {1} else {0}]).unwrap(), bytes);
+        assert_eq!(
+            error.events.last(),
+            Some(&Event::OwnerFailed {
+                source,
+                message: error.message.clone()
+            })
+        );
+        assert!(
+            !error
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::Failed { .. }))
+        );
+        assert_eq!(fs::read(&paths[if backup { 1 } else { 0 }]).unwrap(), bytes);
         if backup {
             // Backup openRead cleanup precedes the frontend, as in the original.
-            assert!(!paths[0].exists()); assert!(!paths[2].exists());
-        } else { assert!(paths[2].is_file()); }
+            assert!(!paths[0].exists());
+            assert!(!paths[2].exists());
+        } else {
+            assert!(paths[2].is_file());
+        }
     }
 }
 
 #[test]
 fn classified_file_failure_still_removes_corrupt_input_and_retries_reserve() {
     use recovery::{Event, Plan, ReadError, Source};
-    let data = Data::new(); let paths = settings_paths(&data.0);
+    let data = Data::new();
+    let paths = settings_paths(&data.0);
     fs::create_dir_all(data.0.join("system")).unwrap();
     fs::write(&paths[0], b"<packages><").unwrap();
     fs::write(&paths[2], b"<packages/>").unwrap();
     let mut settings = crate::package::settings::Settings::default();
-    let (_, report) = Plan::inspect(&data.0).unwrap().recover_with_owner(&[0], &mut settings, |bytes, state| {
-        let root = aim_android_xml::read_next_optional(bytes).map_err(ReadError::File)?;
-        if let Some(root) = &root { *state = crate::package::settings::Settings::parse(root).map_err(ReadError::File)?; }
-        Ok(root)
-    }).unwrap();
-    assert!(!report.first_boot); assert!(!paths[0].exists()); assert!(paths[2].is_file());
-    assert!(report.events.iter().any(|event| matches!(event, Event::Failed { source: Source::Main, .. })));
-    assert_eq!(report.events.last(), Some(&Event::Selected(Source::Reserve)));
+    let (_, report) = Plan::inspect(&data.0)
+        .unwrap()
+        .recover_with_owner(&[0], &mut settings, |bytes, state| {
+            let root = aim_android_xml::read_next_optional(bytes).map_err(ReadError::File)?;
+            if let Some(root) = &root {
+                *state =
+                    crate::package::settings::Settings::parse(root).map_err(ReadError::File)?;
+            }
+            Ok(root)
+        })
+        .unwrap();
+    assert!(!report.first_boot);
+    assert!(!paths[0].exists());
+    assert!(paths[2].is_file());
+    assert!(report.events.iter().any(|event| matches!(
+        event,
+        Event::Failed {
+            source: Source::Main,
+            ..
+        }
+    )));
+    assert_eq!(
+        report.events.last(),
+        Some(&Event::Selected(Source::Reserve))
+    );
 }
 
 #[test]
@@ -2492,134 +2832,352 @@ fn captured_settings_document_reopens_after_owned_commit_with_extensions() {
     let bytes = b"<packages custom='keep'><!--note--><version sdkVersion='36' databaseVersion='3'/><permissions><item name='perm' package='p' protection='2'/></permissions><?native capture?><extension value='keep'><nested/></extension></packages>";
     fs::write(&path, bytes).unwrap();
     let mut settings = crate::package::settings::Settings::default();
-    let (mut store, report) = recovery::Plan::inspect(&data.0).unwrap()
-        .recover_with_owner(&[0], &mut settings, |bytes, state| state.read_document(bytes, |_, _, _| Ok(false))).unwrap();
+    let (mut store, report) = recovery::Plan::inspect(&data.0)
+        .unwrap()
+        .recover_with_owner(&[0], &mut settings, |bytes, state| {
+            state.read_document(bytes, |_, _, _| Ok(false))
+        })
+        .unwrap();
     assert!(!report.first_boot);
     let document = aim_android_xml::read_next(bytes).unwrap();
     assert_eq!(store.settings_document, document);
-    store.commit_package_document_using(document.clone(), None, |file, bytes| file.write_all(bytes)).unwrap();
-    assert_eq!(Store::open(&data.0, &[0]).unwrap().unwrap().settings_document, document);
-    assert_eq!(aim_android_xml::read_next(&fs::read(path).unwrap()).unwrap(), document);
+    store
+        .commit_package_document_using(document.clone(), None, |file, bytes| file.write_all(bytes))
+        .unwrap();
+    assert_eq!(
+        Store::open(&data.0, &[0])
+            .unwrap()
+            .unwrap()
+            .settings_document,
+        document
+    );
+    assert_eq!(
+        aim_android_xml::read_next(&fs::read(path).unwrap()).unwrap(),
+        document
+    );
 }
 
 #[test]
 fn uncaught_keyset_input_failure_preserves_the_selected_file() {
     use recovery::{Event, Plan, Source};
-    let data = Data::new(); fs::create_dir_all(data.0.join("system")).unwrap();
+    let data = Data::new();
+    fs::create_dir_all(data.0.join("system")).unwrap();
     let path = data.0.join("system/packages.xml");
     let bytes = b"<packages><keyset-settings version='1'><lastIssuedKeyId value='9'/><keysets><key-id identifier='1'/></keysets></keyset-settings></packages>";
     fs::write(&path, bytes).unwrap();
     let mut settings = crate::package::settings::Settings::default();
-    let error = Plan::inspect(&data.0).unwrap().recover_with_owner(&[0], &mut settings, |bytes, state| {
-        state.read_document(bytes, |state, reader, start| {
-            state.read_key_sets(reader, start, &Default::default(), |_| panic!("unexpected key"), |_,_| panic!("invalid mapping finalized"))?;
-            Ok(true)
+    let error = Plan::inspect(&data.0)
+        .unwrap()
+        .recover_with_owner(&[0], &mut settings, |bytes, state| {
+            state.read_document(bytes, |state, reader, start| {
+                state.read_key_sets(
+                    reader,
+                    start,
+                    &Default::default(),
+                    |_| panic!("unexpected key"),
+                    |_, _| panic!("invalid mapping finalized"),
+                )?;
+                Ok(true)
+            })
         })
-    }).err().unwrap();
+        .err()
+        .unwrap();
     assert_eq!(settings.key_sets.last_issued_key_id, 9);
-    assert!(matches!(error.events.last(), Some(Event::FatalInput { source: Source::Main, .. })));
-    assert!(!error.events.iter().any(|event| matches!(event, Event::Removed(_))));
+    assert!(matches!(
+        error.events.last(),
+        Some(Event::FatalInput {
+            source: Source::Main,
+            ..
+        })
+    ));
+    assert!(
+        !error
+            .events
+            .iter()
+            .any(|event| matches!(event, Event::Removed(_)))
+    );
     assert_eq!(fs::read(path).unwrap(), bytes);
 }
 
 #[test]
 fn boot_versions_distinguish_absence_no_start_and_uncaught_failure() {
     use crate::package::settings::{Settings, Version};
-    let current = Version {sdk_version:36,database_version:3,build_fingerprint:Some("build".into()),fingerprint:Some("partitions".into()),..Default::default()};
+    let current = Version {
+        sdk_version: 36,
+        database_version: 3,
+        build_fingerprint: Some("build".into()),
+        fingerprint: Some("partitions".into()),
+        ..Default::default()
+    };
     for input in [None, Some(b" ".as_slice()), Some(b"<packages/>".as_slice())] {
-        let data = Data::new(); fs::create_dir_all(data.0.join("system")).unwrap();
-        if let Some(input) = input { fs::write(data.0.join("system/packages.xml"), input).unwrap(); }
-        let mut settings = Settings::default(); settings.find_or_create_version(None).sdk_version = 30;
-        let (store, report) = recovery::Plan::inspect(&data.0).unwrap().recover_boot(&[], &mut settings, &current, |bytes, state| state.read_document(bytes, |_,_,_| Ok(false))).unwrap();
-        assert_eq!(settings.versions[0].sdk_version, if input.is_none() {36} else {30});
-        assert_eq!(settings.versions[1].volume_uuid.as_deref(), Some("primary_physical"));
-        assert_eq!(settings.versions[1].sdk_version,36);
+        let data = Data::new();
+        fs::create_dir_all(data.0.join("system")).unwrap();
+        if let Some(input) = input {
+            fs::write(data.0.join("system/packages.xml"), input).unwrap();
+        }
+        let mut settings = Settings::default();
+        settings.find_or_create_version(None).sdk_version = 30;
+        let (store, report) = recovery::Plan::inspect(&data.0)
+            .unwrap()
+            .recover_boot(&[], &mut settings, &current, |bytes, state| {
+                state.read_document(bytes, |_, _, _| Ok(false))
+            })
+            .unwrap();
+        assert_eq!(
+            settings.versions[0].sdk_version,
+            if input.is_none() { 36 } else { 30 }
+        );
+        assert_eq!(
+            settings.versions[1].volume_uuid.as_deref(),
+            Some("primary_physical")
+        );
+        assert_eq!(settings.versions[1].sdk_version, 36);
         assert_eq!(store.state().settings, settings);
-        assert_eq!(report.first_boot, input.is_none() || input == Some(b" ".as_slice()));
+        assert_eq!(
+            report.first_boot,
+            input.is_none() || input == Some(b" ".as_slice())
+        );
     }
-    let data = Data::new(); fs::create_dir_all(data.0.join("system")).unwrap();
-    let bytes = b"<packages><verifier/></packages>"; fs::write(data.0.join("system/packages.xml"), bytes).unwrap();
+    let data = Data::new();
+    fs::create_dir_all(data.0.join("system")).unwrap();
+    let bytes = b"<packages><verifier/></packages>";
+    fs::write(data.0.join("system/packages.xml"), bytes).unwrap();
     let mut settings = Settings::default();
-    assert!(recovery::Plan::inspect(&data.0).unwrap().recover_boot(&[], &mut settings, &current, |bytes, state| state.read_document(bytes, |_,_,_| Ok(false))).is_err());
-    assert_eq!(settings.versions.len(),2); assert_eq!(settings.versions[0].sdk_version,36);
-    assert_eq!(fs::read(data.0.join("system/packages.xml")).unwrap(),bytes);
+    assert!(
+        recovery::Plan::inspect(&data.0)
+            .unwrap()
+            .recover_boot(&[], &mut settings, &current, |bytes, state| state
+                .read_document(bytes, |_, _, _| Ok(false)))
+            .is_err()
+    );
+    assert_eq!(settings.versions.len(), 2);
+    assert_eq!(settings.versions[0].sdk_version, 36);
+    assert_eq!(fs::read(data.0.join("system/packages.xml")).unwrap(), bytes);
 }
 
 #[test]
 fn scan_restrictions_use_full_live_inventory_separately_from_settings_projection() {
-    let data=Data::new();data.settings();
-    let mut store=Store::open(&data.0,&[0]).unwrap().unwrap();
+    let data = Data::new();
+    data.settings();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
     // APEX settings are reconstructed from the verified APEX inventory and
     // omitted by writeLPr; writePackageRestrictions still writes their users.
-    let persisted=store.state.settings.packages.iter().map(|package|package.name.clone()).collect::<BTreeSet<_>>();
-    let mut live=persisted.clone();live.insert("fixture.apex".into());
-    store.unread_restrictions.insert(0);store.claim_unread_restrictions(0).unwrap();
-    let document=|names:&BTreeSet<String>|{
-        let mut root=element("package-restrictions");
-        for name in names {let mut node=element("pkg");attribute(&mut node,"name",Some(aim_android_xml::Value::String(name.clone())));root.content.push(aim_android_xml::Node::Element(node));}
+    let persisted = store
+        .state
+        .settings
+        .packages
+        .iter()
+        .map(|package| package.name.clone())
+        .collect::<BTreeSet<_>>();
+    let mut live = persisted.clone();
+    live.insert("fixture.apex".into());
+    store.unread_restrictions.insert(0);
+    store.claim_unread_restrictions(0).unwrap();
+    let document = |names: &BTreeSet<String>| {
+        let mut root = element("package-restrictions");
+        for name in names {
+            let mut node = element("pkg");
+            attribute(
+                &mut node,
+                "name",
+                Some(aim_android_xml::Value::String(name.clone())),
+            );
+            root.content.push(aim_android_xml::Node::Element(node));
+        }
         root
     };
-    let mut unknown=live.clone();unknown.insert("outside.scan".into());
-    let error=store.commit_initial_restrictions_inventory_using(0,document(&unknown),&live,|file,bytes|file.write_all(bytes)).unwrap_err();
-    assert!(!error.committed);assert!(store.unread_restrictions.contains(&0));
-    assert!(store.commit_initial_restrictions(0,document(&live)).is_err());
-    store.commit_initial_restrictions_inventory_using(0,document(&live),&live,|file,bytes|file.write_all(bytes)).unwrap();
-    assert_eq!(store.state.settings.packages.iter().map(|package|package.name.clone()).collect::<BTreeSet<_>>(),persisted);
-    assert_eq!(store.state.users[0].1.restrictions.packages.iter().map(|(name,_)|name.clone()).collect::<BTreeSet<_>>(),live);
-    let root=aim_android_xml::read(&fs::read(data.0.join("system/users/0/package-restrictions.xml")).unwrap()).unwrap();
-    assert_eq!(Restrictions::parse(&root).unwrap().packages.iter().map(|(name,_)|name.clone()).collect::<BTreeSet<_>>(),live);
+    let mut unknown = live.clone();
+    unknown.insert("outside.scan".into());
+    let error = store
+        .commit_initial_restrictions_inventory_using(0, document(&unknown), &live, |file, bytes| {
+            file.write_all(bytes)
+        })
+        .unwrap_err();
+    assert!(!error.committed);
+    assert!(store.unread_restrictions.contains(&0));
+    assert!(
+        store
+            .commit_initial_restrictions(0, document(&live))
+            .is_err()
+    );
+    store
+        .commit_initial_restrictions_inventory_using(0, document(&live), &live, |file, bytes| {
+            file.write_all(bytes)
+        })
+        .unwrap();
+    assert_eq!(
+        store
+            .state
+            .settings
+            .packages
+            .iter()
+            .map(|package| package.name.clone())
+            .collect::<BTreeSet<_>>(),
+        persisted
+    );
+    assert_eq!(
+        store.state.users[0]
+            .1
+            .restrictions
+            .packages
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<BTreeSet<_>>(),
+        live
+    );
+    let root = aim_android_xml::read(
+        &fs::read(data.0.join("system/users/0/package-restrictions.xml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        Restrictions::parse(&root)
+            .unwrap()
+            .packages
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<BTreeSet<_>>(),
+        live
+    );
 }
 
 #[test]
 fn restored_boot_commit_reconciles_global_scan_and_preserves_user_side_owners() {
-    use crate::package::{scan::{SigningScan,CapturedUsers},owner::usage::Usage,restrictions::UserState};
-    let data=Data::new();let restrictions=data.settings();
+    use crate::package::{
+        owner::usage::Usage,
+        restrictions::UserState,
+        scan::{CapturedUsers, SigningScan},
+    };
+    let data = Data::new();
+    let restrictions = data.settings();
     fs::write(data.0.join("system/packages.xml"),b"<packages><package name='example.app' codePath='/data/app/example' userId='10100' version='1' domainSetId='00000000-0000-0000-0000-000000000001'/></packages>").unwrap();
     fs::write(&restrictions,b"<package-restrictions><pkg name='example.app' stopped='true'/><default-apps><default-browser packageName='example.browser'/></default-apps><preferred-activities/></package-restrictions>").unwrap();
-    let mut store=Store::open(&data.0,&[0]).unwrap().unwrap();
-    let side_owners=store.restrictions[&0].children().filter(|element|element.name!="pkg").cloned().collect::<Vec<_>>();
-    let mut owner=SigningScan::new(&Default::default(),&store.state.settings,36).unwrap();
-    owner.settings.packages[0].version_code=2;
-    owner.settings.packages[0].last_update_time=777;
-    owner.capture_user_states(BTreeMap::from([(("example.app".into(),false),CapturedUsers{states:BTreeMap::from([(0,UserState{stopped:false,ce_data_inode:99,..Default::default()})]),active_aliases:Default::default()})])).unwrap();
-    let snapshot=crate::package::scan_snapshot::Store::new(owner,Usage::new(["example.app"])).unwrap().capture();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    let side_owners = store.restrictions[&0]
+        .children()
+        .filter(|element| element.name != "pkg")
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut owner = SigningScan::new(&Default::default(), &store.state.settings, 36).unwrap();
+    owner.settings.packages[0].version_code = 2;
+    owner.settings.packages[0].last_update_time = 777;
+    owner
+        .capture_user_states(BTreeMap::from([(
+            ("example.app".into(), false),
+            CapturedUsers {
+                states: BTreeMap::from([(
+                    0,
+                    UserState {
+                        stopped: false,
+                        ce_data_inode: 99,
+                        ..Default::default()
+                    },
+                )]),
+                active_aliases: Default::default(),
+            },
+        )]))
+        .unwrap();
+    let snapshot = crate::package::scan_snapshot::Store::new(owner, Usage::new(["example.app"]))
+        .unwrap()
+        .capture();
     assert!(store.validate_committed_scan(snapshot.owner()).is_err());
-    store.commit_completed_boot_scan(&snapshot,false).unwrap();
+    store.commit_completed_boot_scan(&snapshot, false).unwrap();
     store.validate_committed_scan(snapshot.owner()).unwrap();
-    assert_eq!(store.restrictions[&0].children().filter(|element|element.name!="pkg").cloned().collect::<Vec<_>>(),side_owners);
-    let reopened=Store::open(&data.0,&[0]).unwrap().unwrap();
+    assert_eq!(
+        store.restrictions[&0]
+            .children()
+            .filter(|element| element.name != "pkg")
+            .cloned()
+            .collect::<Vec<_>>(),
+        side_owners
+    );
+    let reopened = Store::open(&data.0, &[0]).unwrap().unwrap();
     reopened.validate_committed_scan(snapshot.owner()).unwrap();
-    assert_eq!(reopened.state.settings.packages[0].version_code,2);
-    assert_eq!(reopened.state.users[0].1.restrictions.packages.iter().find(|(name,_)|name=="example.app").unwrap().1.ce_data_inode,99);
-    assert!(!reopened.state.users[0].1.restrictions.packages.iter().find(|(name,_)|name=="example.app").unwrap().1.stopped);
+    assert_eq!(reopened.state.settings.packages[0].version_code, 2);
+    assert_eq!(
+        reopened.state.users[0]
+            .1
+            .restrictions
+            .packages
+            .iter()
+            .find(|(name, _)| name == "example.app")
+            .unwrap()
+            .1
+            .ce_data_inode,
+        99
+    );
+    assert!(
+        !reopened.state.users[0]
+            .1
+            .restrictions
+            .packages
+            .iter()
+            .find(|(name, _)| name == "example.app")
+            .unwrap()
+            .1
+            .stopped
+    );
 }
 
 #[test]
-fn metadata_mutation_retains_real_durable_keyset_allocation_owner_and_rejects_roles(){
-    let data=Data::new();let path=data.settings();
+fn metadata_mutation_retains_real_durable_keyset_allocation_owner_and_rejects_roles() {
+    let data = Data::new();
+    let path = data.settings();
     fs::write(data.0.join("system/packages.xml"),b"<packages><package name='example.app' codePath='/data/app/example' userId='10100' domainSetId='00000000-0000-0000-0000-000000000001'/><keyset-settings version='1'><keys/><keysets/><lastIssuedKeyId value='0'/><lastIssuedKeySetId value='0'/></keyset-settings></packages>").unwrap();
-    fs::write(path,b"<package-restrictions><pkg name='example.app'/></package-restrictions>").unwrap();
-    let mut store=Store::open(&data.0,&[0]).unwrap().unwrap();let baseline=store.state.settings.clone();
-    let mut allocated=baseline.clone();
+    fs::write(
+        path,
+        b"<package-restrictions><pkg name='example.app'/></package-restrictions>",
+    )
+    .unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    let baseline = store.state.settings.clone();
+    let mut allocated = baseline.clone();
     use p256::elliptic_curve::sec1::ToEncodedPoint;
-    let mut scalar=[0u8;32];scalar[31]=1;
-    let mut encoded=vec![0x30,0x59,0x30,0x13,0x06,0x07,0x2a,0x86,0x48,0xce,0x3d,0x02,0x01,0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,0x03,0x42,0x00];
-    encoded.extend_from_slice(p256::SecretKey::from_slice(&scalar).unwrap().public_key().to_encoded_point(false).as_bytes());
-    key_sets::register(&mut allocated,"example.app",&[encoded],None,&[]).unwrap();
-    key_sets::clear_package(&mut allocated,"example.app").unwrap();
-    assert!(allocated.key_sets.last_issued_key_id>baseline.key_sets.last_issued_key_id);
-    assert!(allocated.key_sets.last_issued_key_set_id>baseline.key_sets.last_issued_key_set_id);
-    assert_eq!(allocated.key_sets.public_keys,baseline.key_sets.public_keys);
-    assert_eq!(allocated.key_sets.key_sets,baseline.key_sets.key_sets);
+    let mut scalar = [0u8; 32];
+    scalar[31] = 1;
+    let mut encoded = vec![
+        0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
+        0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+    ];
+    encoded.extend_from_slice(
+        p256::SecretKey::from_slice(&scalar)
+            .unwrap()
+            .public_key()
+            .to_encoded_point(false)
+            .as_bytes(),
+    );
+    key_sets::register(&mut allocated, "example.app", &[encoded], None, &[]).unwrap();
+    key_sets::clear_package(&mut allocated, "example.app").unwrap();
+    assert!(allocated.key_sets.last_issued_key_id > baseline.key_sets.last_issued_key_id);
+    assert!(allocated.key_sets.last_issued_key_set_id > baseline.key_sets.last_issued_key_set_id);
+    assert_eq!(
+        allocated.key_sets.public_keys,
+        baseline.key_sets.public_keys
+    );
+    assert_eq!(allocated.key_sets.key_sets, baseline.key_sets.key_sets);
     store.commit_key_sets(&allocated).unwrap();
-    let mut candidate=baseline.clone();candidate.packages[0].category_hint=4;
-    assert!(store.rebase_unchanged_key_set_metadata(&baseline,&mut candidate).unwrap());
-    assert_eq!(candidate.key_sets,store.state.settings.key_sets);
-    assert_eq!(candidate.packages[0].category_hint,4);
-    assert_eq!(baseline.key_sets.last_issued_key_id,0);
-    let mut changed=baseline.clone();changed.packages[0].key_set_data.proper_signing_key_set=12;
-    assert!(store.rebase_unchanged_key_set_metadata(&baseline,&mut changed).is_err());
-    let mut producer=baseline.clone();producer.key_sets.last_issued_key_id=1;
-    assert!(store.rebase_unchanged_key_set_metadata(&baseline,&mut producer).is_err());
-    assert_eq!(store.state.settings.key_sets,allocated.key_sets);
+    let mut candidate = baseline.clone();
+    candidate.packages[0].category_hint = 4;
+    assert!(
+        store
+            .rebase_unchanged_key_set_metadata(&baseline, &mut candidate)
+            .unwrap()
+    );
+    assert_eq!(candidate.key_sets, store.state.settings.key_sets);
+    assert_eq!(candidate.packages[0].category_hint, 4);
+    assert_eq!(baseline.key_sets.last_issued_key_id, 0);
+    let mut changed = baseline.clone();
+    changed.packages[0].key_set_data.proper_signing_key_set = 12;
+    assert!(
+        store
+            .rebase_unchanged_key_set_metadata(&baseline, &mut changed)
+            .is_err()
+    );
+    let mut producer = baseline.clone();
+    producer.key_sets.last_issued_key_id = 1;
+    assert!(
+        store
+            .rebase_unchanged_key_set_metadata(&baseline, &mut producer)
+            .is_err()
+    );
+    assert_eq!(store.state.settings.key_sets, allocated.key_sets);
 }

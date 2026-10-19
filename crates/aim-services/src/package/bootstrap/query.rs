@@ -157,9 +157,17 @@ impl Bridge {
         &self,
         owner: &SigningScan,
     ) -> Result<BTreeMap<String, bool>, QueryContextError> {
-        let calls = owner.settings.packages.iter()
+        let calls = owner
+            .settings
+            .packages
+            .iter()
             .filter_map(|setting| owner.domain_code_owner(setting).ok().flatten())
-            .map(|code| domain_verification_restricted_call(&code.package.package_name, code.package.target_sdk_version))
+            .map(|code| {
+                domain_verification_restricted_call(
+                    &code.package.package_name,
+                    code.package.target_sdk_version,
+                )
+            })
             .collect();
         self.read_ahead(calls, || self.read_domain_policies(owner))
     }
@@ -170,7 +178,12 @@ impl Bridge {
     ) -> Result<BTreeMap<String, bool>, QueryContextError> {
         let mut inputs = Vec::new();
         for setting in &owner.settings.packages {
-            let Some(code) = owner.domain_code_owner(setting).map_err(QueryContextError::Input)? else { continue; };
+            let Some(code) = owner
+                .domain_code_owner(setting)
+                .map_err(QueryContextError::Input)?
+            else {
+                continue;
+            };
             if code.package.package_name != setting.name || code.package.target_sdk_version < 0 {
                 return Err(QueryContextError::Input(
                     "invalid domain policy code identity".into(),
@@ -293,11 +306,22 @@ impl Bridge {
         validate(&packages, &context.packages, &context.users)?;
         validate(&retained, &context.retained_packages, &context.users)?;
         let mut calls = Vec::new();
-        for (setting, stored, extra) in context.packages.iter().map(|(key, extra)| (packages[key].0, packages[key].1, extra))
-            .chain(context.retained_packages.iter().map(|(key, extra)| (retained[key].0, retained[key].1, extra)))
+        for (setting, stored, extra) in context
+            .packages
+            .iter()
+            .map(|(key, extra)| (packages[key].0, packages[key].1, extra))
+            .chain(
+                context
+                    .retained_packages
+                    .iter()
+                    .map(|(key, extra)| (retained[key].0, retained[key].1, extra)),
+            )
         {
             calls.push(installed_permissions_call(&setting.name));
-            calls.push(application_query_filtering_call(&setting.name, setting.target_sdk_version));
+            calls.push(application_query_filtering_call(
+                &setting.name,
+                setting.target_sdk_version,
+            ));
             for id in extra.users.keys() {
                 if stored.get(id).is_none_or(|state| state.installed) {
                     calls.push(granted_permissions_call(&setting.name, setting.app_id, *id));
@@ -349,25 +373,41 @@ impl Bridge {
 
 pub fn application_query_filtering_call(name: &str, target_sdk: i32) -> (u32, Parcel) {
     let mut data = Parcel::new();
-    bridge::IsApplicationQueryFilteringEnabled { package_name: Some(name.into()), target_sdk }.write(&mut data);
+    bridge::IsApplicationQueryFilteringEnabled {
+        package_name: Some(name.into()),
+        target_sdk,
+    }
+    .write(&mut data);
     (bridge::IS_APPLICATION_QUERY_FILTERING_ENABLED, data)
 }
 
 pub fn domain_verification_restricted_call(name: &str, target_sdk: i32) -> (u32, Parcel) {
     let mut data = Parcel::new();
-    bridge::IsDomainVerificationRestricted { package_name: Some(name.into()), target_sdk }.write(&mut data);
+    bridge::IsDomainVerificationRestricted {
+        package_name: Some(name.into()),
+        target_sdk,
+    }
+    .write(&mut data);
     (bridge::IS_DOMAIN_VERIFICATION_RESTRICTED, data)
 }
 
 pub fn installed_permissions_call(name: &str) -> (u32, Parcel) {
     let mut data = Parcel::new();
-    bridge::GetPackageInstalledPermissions { package_name: Some(name.into()) }.write(&mut data);
+    bridge::GetPackageInstalledPermissions {
+        package_name: Some(name.into()),
+    }
+    .write(&mut data);
     (bridge::GET_PACKAGE_INSTALLED_PERMISSIONS, data)
 }
 
 pub fn granted_permissions_call(name: &str, app_id: i32, user_id: i32) -> (u32, Parcel) {
     let mut data = Parcel::new();
-    bridge::GetPackageGrantedPermissions { package_name: Some(name.into()), app_id, user_id }.write(&mut data);
+    bridge::GetPackageGrantedPermissions {
+        package_name: Some(name.into()),
+        app_id,
+        user_id,
+    }
+    .write(&mut data);
     (bridge::GET_PACKAGE_GRANTED_PERMISSIONS, data)
 }
 

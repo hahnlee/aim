@@ -284,7 +284,10 @@ fn play(module: &Strong<dyn IModule>, ports: &[AudioPort], ms: i64) {
 /// Records `ms` from the microphone, or reports that the HAL declares no
 /// input, as it does on a Mac with no input device.
 fn record(module: &Strong<dyn IModule>, ports: &[AudioPort], ms: i64) {
-    if !ports.iter().any(|p| matches!(p.flags, AudioIoFlags::Input(_))) {
+    if !ports
+        .iter()
+        .any(|p| matches!(p.flags, AudioIoFlags::Input(_)))
+    {
         println!("input ports none");
         return;
     }

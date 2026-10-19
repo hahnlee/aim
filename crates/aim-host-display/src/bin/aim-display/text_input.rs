@@ -20,7 +20,10 @@ struct State {
     editor: Option<(Message, bool)>,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { link: None, editor: None });
+static STATE: Mutex<State> = Mutex::new(State {
+    link: None,
+    editor: None,
+});
 
 /// Serve the app host's connection until it closes; in window mode
 /// (`windows`) the window host showing the editor's task takes its keys.
@@ -37,7 +40,12 @@ pub fn serve_bridge(sock: UnixStream, windows: bool) {
     s.link = None;
     if let Some((Message::Editor { task, .. }, _)) = s.editor.take() {
         drop(s);
-        let none = Message::Editor { task, active: false, input_type: 0, ime_options: 0 };
+        let none = Message::Editor {
+            task,
+            active: false,
+            input_type: 0,
+            ime_options: 0,
+        };
         if let Some(h) = crate::hosts::showing(task) {
             h.send_text_input(&none);
         }
@@ -52,13 +60,20 @@ fn route(m: Message, host: Option<std::sync::Arc<crate::hosts::Host>>) {
     if let Some((previous, hosted)) = s.editor.take()
         && let Message::Editor { task, .. } = previous
     {
-        let end = Message::Editor { task, active: false, input_type: 0, ime_options: 0 };
+        let end = Message::Editor {
+            task,
+            active: false,
+            input_type: 0,
+            ime_options: 0,
+        };
         match crate::hosts::showing(task).filter(|_| hosted) {
             Some(h) => h.send_text_input(&end),
             None => on_main(move || crate::input::editor(&end)),
         }
     }
-    let Message::Editor { active, .. } = m else { return };
+    let Message::Editor { active, .. } = m else {
+        return;
+    };
     if active {
         s.editor = Some((m.clone(), host.is_some()));
     }

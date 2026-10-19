@@ -30,18 +30,34 @@ impl GameManager {
 
     /// `isPackageGame`: its category, with any package.
     fn is_game(&self, package: Option<&str>) -> Result<bool, Exception> {
-        let Some(package) = package else { return Ok(false) };
-        Ok(self.host.inputs()?.packages.application_info(package, MATCH_ALL).is_some_and(|ai| ai.category == CATEGORY_GAME))
+        let Some(package) = package else {
+            return Ok(false);
+        };
+        Ok(self
+            .host
+            .inputs()?
+            .packages
+            .application_info(package, MATCH_ALL)
+            .is_some_and(|ai| ai.category == CATEGORY_GAME))
     }
 
     /// `getGameMode`'s answer for a package that is no game; a game's is
     /// not implemented.
-    fn game_mode(&self, uid: i32, package: Option<&str>, user: i32, name: &str) -> Result<i32, Exception> {
-        self.host.handle_incoming_user(uid, user, false, true, Some(name))?;
+    fn game_mode(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+        user: i32,
+        name: &str,
+    ) -> Result<i32, Exception> {
+        self.host
+            .handle_incoming_user(uid, user, false, true, Some(name))?;
         if !self.is_game(package)? {
             return Ok(GAME_MODE_UNSUPPORTED);
         }
-        Err(self.host.unimplemented_named("game", "a game's mode (#1672)"))
+        Err(self
+            .host
+            .unimplemented_named("game", "a game's mode (#1672)"))
     }
 }
 
@@ -64,16 +80,30 @@ impl Service for GameManager {
             // Nothing for another package than the caller's
             // (`isValidPackageName`) or one that is no game.
             gm::NOTIFY_GRAPHICS_ENVIRONMENT_SETUP => {
-                let a = gm::NotifyGraphicsEnvironmentSetup::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = gm::NotifyGraphicsEnvironmentSetup::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 let result = (|| {
-                    self.host.handle_incoming_user(uid, a.user_id, false, true, Some("notifyGraphicsEnvironmentSetup"))?;
+                    self.host.handle_incoming_user(
+                        uid,
+                        a.user_id,
+                        false,
+                        true,
+                        Some("notifyGraphicsEnvironmentSetup"),
+                    )?;
                     let package = a.package_name.as_deref().unwrap_or_default();
                     if !self.host.owns_package(uid, package)? {
                         return Ok(());
                     }
-                    match self.game_mode(uid, a.package_name.as_deref(), a.user_id, "notifyGraphicsEnvironmentSetup")? {
+                    match self.game_mode(
+                        uid,
+                        a.package_name.as_deref(),
+                        a.user_id,
+                        "notifyGraphicsEnvironmentSetup",
+                    )? {
                         GAME_MODE_UNSUPPORTED => Ok(()),
-                        _ => Err(self.host.unimplemented_named("game", "a game's loading boost (#1672)")),
+                        _ => Err(self
+                            .host
+                            .unimplemented_named("game", "a game's loading boost (#1672)")),
                     }
                 })();
                 if let Err(e) = result {
@@ -82,8 +112,13 @@ impl Service for GameManager {
                 gm::write_notify_graphics_environment_setup_reply(&mut p);
             }
             code => {
-                let name = gm::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
-                return reply(Err(self.host.unimplemented_named("game", &format!("{name} (#1672)"))));
+                let name = gm::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
+                return reply(Err(self
+                    .host
+                    .unimplemented_named("game", &format!("{name} (#1672)"))));
             }
         }
         Ok(p)

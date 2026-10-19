@@ -118,7 +118,10 @@ impl PatternMatcher {
     pub fn new(pattern: &str, kind: i32) -> std::result::Result<PatternMatcher, String> {
         Self::new_checked(pattern, kind).map_err(|error| error.to_string())
     }
-    pub fn new_checked(pattern: &str, kind: i32) -> std::result::Result<PatternMatcher, PatternError> {
+    pub fn new_checked(
+        pattern: &str,
+        kind: i32,
+    ) -> std::result::Result<PatternMatcher, PatternError> {
         let parsed = if kind == PATTERN_ADVANCED_GLOB {
             Some(parse_advanced(&utf16(pattern))?)
         } else {
@@ -723,7 +726,6 @@ impl UriRelativeFilterGroup {
         }
         Ok(false)
     }
-
 }
 
 /// `android.content.IntentFilter`. A list the original keeps null is
@@ -989,7 +991,10 @@ impl IntentFilter {
     }
 
     /// `matchRelRefGroups`: the first group that matches decides.
-    fn match_rel_ref_groups(&self, data: &Uri) -> std::result::Result<bool, super::domain_verification::uri_parcel::MatchError> {
+    fn match_rel_ref_groups(
+        &self,
+        data: &Uri,
+    ) -> std::result::Result<bool, super::domain_verification::uri_parcel::MatchError> {
         let groups = self
             .uri_relative_filter_groups
             .as_deref()

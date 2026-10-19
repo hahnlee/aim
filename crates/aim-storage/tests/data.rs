@@ -16,10 +16,14 @@ struct Fixture {
 
 impl std::ops::Deref for Fixture {
     type Target = std::path::Path;
-    fn deref(&self) -> &Self::Target { &self.dir }
+    fn deref(&self) -> &Self::Target {
+        &self.dir
+    }
 }
 impl AsRef<std::path::Path> for Fixture {
-    fn as_ref(&self) -> &std::path::Path { &self.dir }
+    fn as_ref(&self) -> &std::path::Path {
+        &self.dir
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -27,13 +31,19 @@ impl Drop for Fixture {
         let result = (|| {
             let metadata = fs::symlink_metadata(&self.root).map_err(|error| error.to_string())?;
             if !metadata.is_dir() || (metadata.dev(), metadata.ino()) != self.identity {
-                return Err(format!("{}: fixture ownership changed", self.root.display()));
+                return Err(format!(
+                    "{}: fixture ownership changed",
+                    self.root.display()
+                ));
             }
             if disk::is_mount_point(&self.dir) {
                 let mount = fs::canonicalize(&self.dir).map_err(|error| error.to_string())?;
                 let attached = disk::attachments_of(&data::image_of(&self.dir))?;
                 if !attached.iter().any(|image| image.mounts.contains(&mount)) {
-                    return Err(format!("{}: mount is not the fixture image", self.dir.display()));
+                    return Err(format!(
+                        "{}: mount is not the fixture image",
+                        self.dir.display()
+                    ));
                 }
             }
             // File and DataImage locals declared after this guard drop first.
@@ -43,9 +53,15 @@ impl Drop for Fixture {
         })();
         if let Err(error) = result {
             if std::thread::panicking() {
-                eprintln!("storage fixture cleanup failed; retained {}: {error}", self.root.display());
+                eprintln!(
+                    "storage fixture cleanup failed; retained {}: {error}",
+                    self.root.display()
+                );
             } else {
-                panic!("storage fixture cleanup failed; retained {}: {error}", self.root.display());
+                panic!(
+                    "storage fixture cleanup failed; retained {}: {error}",
+                    self.root.display()
+                );
             }
         }
     }
@@ -63,7 +79,11 @@ fn dir(name: &str) -> Fixture {
             Err(error) => panic!("{}: {error}", root.display()),
             Ok(()) => {
                 let metadata = fs::symlink_metadata(&root).unwrap();
-                return Fixture { dir: root.join("data"), root, identity: (metadata.dev(), metadata.ino()) };
+                return Fixture {
+                    dir: root.join("data"),
+                    root,
+                    identity: (metadata.dev(), metadata.ino()),
+                };
             }
         }
     }
@@ -83,11 +103,19 @@ fn a_failed_test_detaches_and_removes_only_its_fixture() {
         injected = true;
         panic!("injected assertion before fixture removal");
     }));
-    assert!(injected, "fixture must reach the intended failure after actual attach/write");
+    assert!(
+        injected,
+        "fixture must reach the intended failure after actual attach/write"
+    );
     assert!(failed.is_err());
     let (root, mount, image) = owned.unwrap();
     assert!(!disk::is_mount_point(&mount));
-    assert!(!disk::attached().unwrap().iter().any(|attachment| attachment.image == image));
+    assert!(
+        !disk::attached()
+            .unwrap()
+            .iter()
+            .any(|attachment| attachment.image == image)
+    );
     assert!(!image.exists());
     assert!(!mount.exists());
     assert!(!root.exists());

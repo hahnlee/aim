@@ -118,23 +118,39 @@ impl System {
     ) -> Result<()> {
         self.check_package_bootstrap(bridge)?;
         let registry = self.package_preferred_registry(bridge)?;
-        let users = registry.user_ids().map_err(|error| {
-            Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error)
-        })?;
+        let users = registry
+            .user_ids()
+            .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
         for user in users {
             let capture = self.capture_package_queries_for(bridge)?;
             let components = capture.state().package_registry.as_ref().ok_or_else(|| {
-                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                    "systemReady component registration owner unavailable")
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "systemReady component registration owner unavailable",
+                )
             })?;
-            let snapshot = registry.snapshot(user)
-                .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.0))?
-                .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                    "systemReady preferred user owner unavailable"))?;
-            let selection = snapshot.state.dangling_selection(|component| components.contains_activity(component));
+            let snapshot = registry
+                .snapshot(user)
+                .map_err(|error| {
+                    Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.0)
+                })?
+                .ok_or_else(|| {
+                    Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        "systemReady preferred user owner unavailable",
+                    )
+                })?;
+            let selection = snapshot
+                .state
+                .dangling_selection(|component| components.contains_activity(component));
             if !selection.edits.is_empty() {
-                self.commit_package_preferred_selection(bridge, &registry, user,
-                    snapshot.generation, &selection)?;
+                self.commit_package_preferred_selection(
+                    bridge,
+                    &registry,
+                    user,
+                    snapshot.generation,
+                    &selection,
+                )?;
             }
         }
         self.check_package_bootstrap(bridge)
@@ -151,25 +167,41 @@ impl System {
     ) -> Result<preferred::RemovalEffects> {
         self.check_package_bootstrap(bridge)?;
         if target_user < -1 {
-            return Err(Exception::illegal_argument("invalid preferred removal user"));
+            return Err(Exception::illegal_argument(
+                "invalid preferred removal user",
+            ));
         }
         let mut effects = preferred::RemovalEffects {
-            changed_users: Vec::new(), broadcast_user: target_user,
+            changed_users: Vec::new(),
+            broadcast_user: target_user,
         };
-        if keep_data { return Ok(effects); }
+        if keep_data {
+            return Ok(effects);
+        }
         let registry = self.package_preferred_registry(bridge)?;
         let stages = if target_user == -1 {
-            registry.prepare_clear_all(Some(package)).map_err(|error| {
-                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error)
-            })?
+            registry
+                .prepare_clear_all(Some(package))
+                .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?
         } else {
             let Some(snapshot) = registry.snapshot(target_user).map_err(|error| {
                 Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.0)
-            })? else { return Ok(effects); };
-            registry.prepare_mutation(target_user, snapshot.generation,
-                &Mutation::Clear { package: Some(package.into()) }).map_err(|error| {
-                    Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error)
-                })?.stage.into_iter().collect()
+            })?
+            else {
+                return Ok(effects);
+            };
+            registry
+                .prepare_mutation(
+                    target_user,
+                    snapshot.generation,
+                    &Mutation::Clear {
+                        package: Some(package.into()),
+                    },
+                )
+                .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?
+                .stage
+                .into_iter()
+                .collect()
         };
         for stage in stages {
             let user = stage.user;
@@ -185,21 +217,37 @@ impl System {
         effects: preferred::RemovalEffects,
     ) -> Result<()> {
         self.check_package_bootstrap(bridge)?;
-        if effects.changed_users.is_empty() { return Ok(()); }
+        if effects.changed_users.is_empty() {
+            return Ok(());
+        }
         // Original helper visits changed users in descending SparseBooleanArray
         // order, then sends one notification for the requested removal scope.
         for user in effects.changed_users.into_iter().rev() {
             let capture = self.capture_package_queries_for(bridge)?;
-            let handle = capture.state().system.preferred_owner.as_ref().ok_or_else(|| {
-                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                    "removed preferred home owner unavailable")
-            })?;
-            handle.actions.reconcile_home(user, 1000).map_err(preferred_failure)?;
+            let handle = capture
+                .state()
+                .system
+                .preferred_owner
+                .as_ref()
+                .ok_or_else(|| {
+                    Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        "removed preferred home owner unavailable",
+                    )
+                })?;
+            handle
+                .actions
+                .reconcile_home(user, 1000)
+                .map_err(preferred_failure)?;
         }
-        bridge.preferred_changed(effects.broadcast_user).map_err(|error| {
-            Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                format!("removed preferred broadcast owner: {error:?}"))
-        })?;
+        bridge
+            .preferred_changed(effects.broadcast_user)
+            .map_err(|error| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    format!("removed preferred broadcast owner: {error:?}"),
+                )
+            })?;
         self.check_package_bootstrap(bridge)
     }
 

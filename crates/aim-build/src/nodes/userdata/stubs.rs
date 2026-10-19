@@ -34,7 +34,7 @@ impl Admission {
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default())
+                return Ok(Self::default());
             }
             Err(error) => return Err(format!("{}: {error}", path.display())),
         };
@@ -477,7 +477,9 @@ mod tests {
         fs::write(&gzip, &gzip_bytes).unwrap();
         let user = capture.join("data/system/users/0/package-restrictions.xml");
         fs::write(&user, "<package-restrictions><pkg name=\"test.payload\" enabled=\"2\"/></package-restrictions>").unwrap();
-        let failed = xml("<packages><package name=\"test.payload\" codePath=\"/product/app/Payload-Stub\" version=\"7\"/></packages>");
+        let failed = xml(
+            "<packages><package name=\"test.payload\" codePath=\"/product/app/Payload-Stub\" version=\"7\"/></packages>",
+        );
         assert!(
             validate(&image, &volume, &capture, &failed, &Admission::default())
                 .unwrap_err()
@@ -485,7 +487,9 @@ mod tests {
         );
         fs::write(&user, "<package-restrictions><pkg name=\"test.payload\" enabled=\"3\"/></package-restrictions>").unwrap();
         validate(&image, &volume, &capture, &failed, &Admission::default()).unwrap();
-        let installed = xml("<packages><package name=\"test.payload\" codePath=\"/data/app/unique/Payload\" version=\"7\"/><updated-package name=\"test.payload\" codePath=\"/product/app/Payload-Stub\" version=\"7\"/></packages>");
+        let installed = xml(
+            "<packages><package name=\"test.payload\" codePath=\"/data/app/unique/Payload\" version=\"7\"/><updated-package name=\"test.payload\" codePath=\"/product/app/Payload-Stub\" version=\"7\"/></packages>",
+        );
         assert!(
             validate(&image, &volume, &capture, &installed, &Admission::default())
                 .unwrap_err()
@@ -543,13 +547,15 @@ mod tests {
         assert!(Admission::read(&volume).unwrap().saved_updates.is_empty());
         fs::create_dir(volume.join("data/system/packages.xml")).unwrap();
         assert!(Admission::read(&volume).is_err());
-        assert!(validate(
-            &image,
-            &volume,
-            &capture,
-            &xml("<packages/>"),
-            &Admission::default()
-        )
-        .is_err());
+        assert!(
+            validate(
+                &image,
+                &volume,
+                &capture,
+                &xml("<packages/>"),
+                &Admission::default()
+            )
+            .is_err()
+        );
     }
 }

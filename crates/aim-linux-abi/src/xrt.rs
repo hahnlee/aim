@@ -18,7 +18,10 @@
 
 #[path = "xrt_verified.rs"]
 pub mod verified;
-pub use verified::{DerivationBinding, SitesRewritePlan, VerifiedArtifact, VerifiedExecPlan, prepare_verified_exec, prepare_verified_member};
+pub use verified::{
+    DerivationBinding, SitesRewritePlan, VerifiedArtifact, VerifiedExecPlan, prepare_verified_exec,
+    prepare_verified_member,
+};
 
 use std::collections::HashMap;
 use std::ffi::CStr;
@@ -184,7 +187,12 @@ pub fn open_translated(host: &CStr, guest: &str, host_flags: i32) -> Option<i32>
         return None;
     };
     let fd = open_published(&path, guest, host_flags & libc::O_CLOEXEC)?;
-    if let Err(error)=crate::sys::fdtab::publish_guest(fd){unsafe{libc::close(fd);}return Some(-error);}
+    if let Err(error) = crate::sys::fdtab::publish_guest(fd) {
+        unsafe {
+            libc::close(fd);
+        }
+        return Some(-error);
+    }
     Some(fd)
 }
 

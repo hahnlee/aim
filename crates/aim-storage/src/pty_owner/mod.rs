@@ -110,7 +110,7 @@ struct State {
     slave_opened: bool,
     slave_closed: bool,
     termios: libc::termios,
-    slave_locked:bool,
+    slave_locked: bool,
 }
 pub struct Pair {
     state: Mutex<State>,
@@ -123,7 +123,9 @@ pub struct Readiness {
     pub hangup: bool,
 }
 impl Pair {
-    pub fn slave_path(&self)->&[u8]{&self.slave_name[..self.slave_name.len()-1]}
+    pub fn slave_path(&self) -> &[u8] {
+        &self.slave_name[..self.slave_name.len() - 1]
+    }
     pub fn allocate(runtime: &Path) -> io::Result<Self> {
         let mut nonce = [0u8; 16];
         if unsafe { libc::getentropy(nonce.as_mut_ptr().cast(), nonce.len()) } < 0 {
@@ -233,7 +235,7 @@ impl Pair {
                 slave_opened: false,
                 slave_closed: false,
                 termios,
-                slave_locked:false,
+                slave_locked: false,
             }),
         })
     }
@@ -264,7 +266,9 @@ impl Pair {
         if state.master.is_none() {
             return Err(failure(libc::EIO));
         }
-        if side==Side::Slave&&state.slave_locked{return Err(failure(libc::EIO));}
+        if side == Side::Slave && state.slave_locked {
+            return Err(failure(libc::EIO));
+        }
         let lease = self.lease_file(side)?;
         if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } < 0 {
             return Err(io::Error::last_os_error());
@@ -341,8 +345,12 @@ impl Pair {
             Side::Slave => state.master.is_none(),
         })
     }
-    pub fn slave_lock(&self)->bool{self.state.lock().unwrap().slave_locked}
-    pub fn set_slave_lock(&self,locked:bool){self.state.lock().unwrap().slave_locked=locked;}
+    pub fn slave_lock(&self) -> bool {
+        self.state.lock().unwrap().slave_locked
+    }
+    pub fn set_slave_lock(&self, locked: bool) {
+        self.state.lock().unwrap().slave_locked = locked;
+    }
     pub fn master_readiness(&self) -> io::Result<Readiness> {
         let mut state = self.state.lock().unwrap();
         self.refresh_locked(&mut state)?;

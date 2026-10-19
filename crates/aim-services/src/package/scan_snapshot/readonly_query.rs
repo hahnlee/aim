@@ -1,9 +1,6 @@
 //! Read-only public query protocol bound to one immutable Computer capture and trusted caller.
 use super::query_state::Capture;
-use crate::package::{
-    query::Query,
-    resolve::QueryError,
-};
+use crate::package::{query::Query, resolve::QueryError};
 use aim_binder_host::{
     local::{Call, Reply, Service},
     parcel::{EX_ILLEGAL_STATE, EX_UNSUPPORTED_OPERATION, Exception, Parcel, UNKNOWN_TRANSACTION},
@@ -167,12 +164,17 @@ impl Service for ReadOnlyQuery {
         call.sender_euid = self.uid as u32;
         call.sender_pid = self.pid;
         if let Some(result) =
-            capture.resolver()
+            capture
+                .resolver()
                 .query(capture.state(), call.code, self.uid, &mut call.data)
         {
             return match result {
                 Ok(reply) => Ok(reply),
-                Err(QueryError::Original(error)) => { let mut reply = Parcel::new(); reply.write_exception(&error); Ok(reply) },
+                Err(QueryError::Original(error)) => {
+                    let mut reply = Parcel::new();
+                    reply.write_exception(&error);
+                    Ok(reply)
+                }
                 Err(QueryError::Transport(status)) => Err(status),
                 Err(QueryError::NotModelled(error)) => {
                     reply.write_exception(&Exception::new(EX_UNSUPPORTED_OPERATION, error.0));
@@ -219,13 +221,25 @@ mod tests {
         assert!(allowed(pm::GET_KEY_SET_BY_ALIAS));
         assert!(allowed(pm::HAS_SIGNING_CERTIFICATE));
         assert!(allowed(pm::QUERY_INTENT_ACTIVITIES));
-        for code in [pm::GET_BLOCK_UNINSTALL_FOR_USER, pm::CAN_PACKAGE_QUERY,
-            pm::GET_INSTANT_APP_RESOLVER_COMPONENT, pm::GET_INSTANT_APP_INSTALLER_COMPONENT,
-            pm::GET_INSTANT_APP_RESOLVER_SETTINGS_COMPONENT, pm::IS_PAGE_SIZE_COMPAT_ENABLED,
-            pm::GET_PAGE_SIZE_COMPAT_WARNING_MESSAGE, pm::ACTIVITY_SUPPORTS_INTENT_AS_USER,
-            pm::FIND_PERSISTENT_PREFERRED_ACTIVITY, pm::RESOLVE_CONTENT_PROVIDER_FOR_UID, pm::IS_FIRST_BOOT, pm::IS_DEVICE_UPGRADING,
-            pm::IS_SAFE_MODE, pm::GET_PERSISTENT_APPLICATIONS, pm::CHECK_PACKAGE_STARTABLE,
-            pm::QUERY_INTENT_ACTIVITY_OPTIONS, pm::GET_PERMISSION_GROUP_INFO] {
+        for code in [
+            pm::GET_BLOCK_UNINSTALL_FOR_USER,
+            pm::CAN_PACKAGE_QUERY,
+            pm::GET_INSTANT_APP_RESOLVER_COMPONENT,
+            pm::GET_INSTANT_APP_INSTALLER_COMPONENT,
+            pm::GET_INSTANT_APP_RESOLVER_SETTINGS_COMPONENT,
+            pm::IS_PAGE_SIZE_COMPAT_ENABLED,
+            pm::GET_PAGE_SIZE_COMPAT_WARNING_MESSAGE,
+            pm::ACTIVITY_SUPPORTS_INTENT_AS_USER,
+            pm::FIND_PERSISTENT_PREFERRED_ACTIVITY,
+            pm::RESOLVE_CONTENT_PROVIDER_FOR_UID,
+            pm::IS_FIRST_BOOT,
+            pm::IS_DEVICE_UPGRADING,
+            pm::IS_SAFE_MODE,
+            pm::GET_PERSISTENT_APPLICATIONS,
+            pm::CHECK_PACKAGE_STARTABLE,
+            pm::QUERY_INTENT_ACTIVITY_OPTIONS,
+            pm::GET_PERMISSION_GROUP_INFO,
+        ] {
             assert!(allowed(code));
         }
     }

@@ -143,16 +143,29 @@ type Result<T> = std::result::Result<T, i32>;
 impl Daemon {
     /// The daemon of the volume whose lower path is `lower`.
     pub fn new(lower: impl Into<PathBuf>) -> Daemon {
-        let mut nodes = Nodes { by_id: HashMap::new(), by_path: HashMap::new(), next: 2 };
+        let mut nodes = Nodes {
+            by_id: HashMap::new(),
+            by_path: HashMap::new(),
+            next: 2,
+        };
         nodes.by_id.insert(1, (PathBuf::new(), 1));
         nodes.by_path.insert(PathBuf::new(), 1);
-        Daemon { lower: lower.into(), nodes: Mutex::new(nodes), handles: Mutex::new(Handles { open: HashMap::new(), next: 1 }) }
+        Daemon {
+            lower: lower.into(),
+            nodes: Mutex::new(nodes),
+            handles: Mutex::new(Handles {
+                open: HashMap::new(),
+                next: 1,
+            }),
+        }
     }
 
     /// The reply to the request `message` (header and body), or `None` for
     /// a request that takes none.
     pub fn handle(&self, message: &[u8]) -> Option<Vec<u8>> {
-        let Some(header) = header(message) else { return None };
+        let Some(header) = header(message) else {
+            return None;
+        };
         let body = &message[40..message.len().min(u32_at(message, 0)? as usize)];
         match header.opcode {
             op::FORGET => {
@@ -162,7 +175,9 @@ impl Daemon {
             op::BATCH_FORGET => {
                 let count = u32_at(body, 0).unwrap_or(0) as usize;
                 for i in 0..count {
-                    if let (Some(node), Some(n)) = (u64_at(body, 8 + 16 * i), u64_at(body, 16 + 16 * i)) {
+                    if let (Some(node), Some(n)) =
+                        (u64_at(body, 8 + 16 * i), u64_at(body, 16 + 16 * i))
+                    {
                         self.forget(node, n);
                     }
                 }
@@ -194,17 +209,24 @@ impl Daemon {
             }
             op::GETATTR => {
                 let path = self.path(h)?;
-                Ok(attr_out(&fs::symlink_metadata(self.lower(&path)).map_err(error)?))
+                Ok(attr_out(
+                    &fs::symlink_metadata(self.lower(&path)).map_err(error)?,
+                ))
             }
             op::SETATTR => self.setattr(h, body),
             op::READLINK => {
                 let path = self.path(h)?;
-                Ok(fs::read_link(self.lower(&path)).map_err(error)?.as_os_str().as_bytes().to_vec())
+                Ok(fs::read_link(self.lower(&path))
+                    .map_err(error)?
+                    .as_os_str()
+                    .as_bytes()
+                    .to_vec())
             }
             op::SYMLINK => {
                 let (name, target) = two_names(body)?;
                 let path = self.named(h, name)?;
-                std::os::unix::fs::symlink(OsStr::from_bytes(target), self.lower(&path)).map_err(error)?;
+                std::os::unix::fs::symlink(OsStr::from_bytes(target), self.lower(&path))
+                    .map_err(error)?;
                 self.entry(&path)
             }
             op::MKNOD => {
@@ -215,34 +237,57 @@ impl Daemon {
                     return Err(errno::EPERM);
                 }
                 let path = self.named(h, name(&body[16..])?)?;
-                OpenOptions::new().write(true).create_new(true).mode(mode & !umask & 0o7777).open(self.lower(&path)).map_err(error)?;
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(mode & !umask & 0o7777)
+                    .open(self.lower(&path))
+                    .map_err(error)?;
                 self.entry(&path)
             }
             op::MKDIR => {
                 let mode = u32_at(body, 0).ok_or(errno::EINVAL)?;
                 let umask = u32_at(body, 4).ok_or(errno::EINVAL)?;
                 let path = self.named(h, name(&body[8..])?)?;
-                fs::DirBuilder::new().mode(mode & !umask & 0o7777).create(self.lower(&path)).map_err(error)?;
+                fs::DirBuilder::new()
+                    .mode(mode & !umask & 0o7777)
+                    .create(self.lower(&path))
+                    .map_err(error)?;
                 self.entry(&path)
             }
             op::UNLINK | op::RMDIR => {
                 let path = self.child(h, body)?;
                 let lower = self.lower(&path);
-                if h.opcode == op::UNLINK { fs::remove_file(lower) } else { fs::remove_dir(lower) }.map_err(error)?;
+                if h.opcode == op::UNLINK {
+                    fs::remove_file(lower)
+                } else {
+                    fs::remove_dir(lower)
+                }
+                .map_err(error)?;
                 Ok(Vec::new())
             }
             op::RENAME | op::RENAME2 => {
                 let (new_dir, flags, names) = if h.opcode == op::RENAME {
                     (u64_at(body, 0).ok_or(errno::EINVAL)?, 0, &body[8..])
                 } else {
-                    (u64_at(body, 0).ok_or(errno::EINVAL)?, u32_at(body, 8).ok_or(errno::EINVAL)?, &body[16..])
+                    (
+                        u64_at(body, 0).ok_or(errno::EINVAL)?,
+                        u32_at(body, 8).ok_or(errno::EINVAL)?,
+                        &body[16..],
+                    )
                 };
                 if flags & !RENAME_NOREPLACE != 0 {
                     return Err(errno::EINVAL);
                 }
                 let (old, new) = two_names(names)?;
                 let from = self.named(h, old)?;
-                let to = self.named(&Header { node: new_dir, ..*h }, new)?;
+                let to = self.named(
+                    &Header {
+                        node: new_dir,
+                        ..*h
+                    },
+                    new,
+                )?;
                 if flags & RENAME_NOREPLACE != 0 && fs::symlink_metadata(self.lower(&to)).is_ok() {
                     return Err(errno::EEXIST);
                 }
@@ -251,7 +296,10 @@ impl Daemon {
                 Ok(Vec::new())
             }
             op::LINK => {
-                let old = self.path(&Header { node: u64_at(body, 0).ok_or(errno::EINVAL)?, ..*h })?;
+                let old = self.path(&Header {
+                    node: u64_at(body, 0).ok_or(errno::EINVAL)?,
+                    ..*h
+                })?;
                 let path = self.named(h, name(&body[8..])?)?;
                 fs::hard_link(self.lower(&old), self.lower(&path)).map_err(error)?;
                 self.entry(&path)
@@ -267,20 +315,31 @@ impl Daemon {
                 let mode = u32_at(body, 4).ok_or(errno::EINVAL)?;
                 let umask = u32_at(body, 8).ok_or(errno::EINVAL)?;
                 let path = self.named(h, name(&body[16..])?)?;
-                let file = options(flags | O_CREAT).mode(mode & !umask & 0o7777).open(self.lower(&path)).map_err(error)?;
+                let file = options(flags | O_CREAT)
+                    .mode(mode & !umask & 0o7777)
+                    .open(self.lower(&path))
+                    .map_err(error)?;
                 let mut out = self.entry(&path)?;
                 out.extend(open_out(self.keep(Handle::File(file))));
                 Ok(out)
             }
             op::READ => {
-                let (fh, offset, size) = (u64_at(body, 0).ok_or(errno::EINVAL)?, u64_at(body, 8).ok_or(errno::EINVAL)?, u32_at(body, 16).ok_or(errno::EINVAL)?);
+                let (fh, offset, size) = (
+                    u64_at(body, 0).ok_or(errno::EINVAL)?,
+                    u64_at(body, 8).ok_or(errno::EINVAL)?,
+                    u32_at(body, 16).ok_or(errno::EINVAL)?,
+                );
                 let mut data = vec![0; size.min(MAX_WRITE) as usize];
                 let n = self.with_file(fh, |f| read_at(f, &mut data, offset))?;
                 data.truncate(n);
                 Ok(data)
             }
             op::WRITE => {
-                let (fh, offset, size) = (u64_at(body, 0).ok_or(errno::EINVAL)?, u64_at(body, 8).ok_or(errno::EINVAL)?, u32_at(body, 16).ok_or(errno::EINVAL)? as usize);
+                let (fh, offset, size) = (
+                    u64_at(body, 0).ok_or(errno::EINVAL)?,
+                    u64_at(body, 8).ok_or(errno::EINVAL)?,
+                    u32_at(body, 16).ok_or(errno::EINVAL)? as usize,
+                );
                 let data = body.get(40..40 + size).ok_or(errno::EINVAL)?;
                 self.with_file(fh, |f| f.write_all_at(data, offset).map_err(error))?;
                 let mut out = (size as u32).to_le_bytes().to_vec();
@@ -303,9 +362,15 @@ impl Daemon {
                 Ok(open_out(self.keep(Handle::Dir(self.entries(h, &path)?))))
             }
             op::READDIR => {
-                let (fh, offset, size) = (u64_at(body, 0).ok_or(errno::EINVAL)?, u64_at(body, 8).ok_or(errno::EINVAL)?, u32_at(body, 16).ok_or(errno::EINVAL)? as usize);
+                let (fh, offset, size) = (
+                    u64_at(body, 0).ok_or(errno::EINVAL)?,
+                    u64_at(body, 8).ok_or(errno::EINVAL)?,
+                    u32_at(body, 16).ok_or(errno::EINVAL)? as usize,
+                );
                 let handles = self.handles.lock().unwrap();
-                let Some(Handle::Dir(entries)) = handles.open.get(&fh) else { return Err(errno::EINVAL) };
+                let Some(Handle::Dir(entries)) = handles.open.get(&fh) else {
+                    return Err(errno::EINVAL);
+                };
                 Ok(dirents(entries, offset as usize, size))
             }
             op::FSYNCDIR => Ok(Vec::new()),
@@ -325,7 +390,14 @@ impl Daemon {
 
     /// The path of the request's node, if its caller may reach it.
     fn path(&self, h: &Header) -> Result<PathBuf> {
-        let path = self.nodes.lock().unwrap().by_id.get(&h.node).map(|(p, _)| p.clone()).ok_or(errno::ENOENT)?;
+        let path = self
+            .nodes
+            .lock()
+            .unwrap()
+            .by_id
+            .get(&h.node)
+            .map(|(p, _)| p.clone())
+            .ok_or(errno::ENOENT)?;
         permit(h.uid, &path)?;
         Ok(path)
     }
@@ -405,7 +477,12 @@ impl Daemon {
                 entry.0 = PathBuf::from("\0replaced");
             }
         }
-        let moved: Vec<(PathBuf, u64)> = nodes.by_path.iter().filter(|(p, _)| p.starts_with(from)).map(|(p, id)| (p.clone(), *id)).collect();
+        let moved: Vec<(PathBuf, u64)> = nodes
+            .by_path
+            .iter()
+            .filter(|(p, _)| p.starts_with(from))
+            .map(|(p, id)| (p.clone(), *id))
+            .collect();
         for (path, id) in moved {
             let new = to.join(path.strip_prefix(from).unwrap());
             nodes.by_path.remove(&path);
@@ -437,14 +514,21 @@ impl Daemon {
     fn entries(&self, h: &Header, path: &Path) -> Result<Vec<(Vec<u8>, u64, u32)>> {
         let lower = self.lower(path);
         let meta = fs::metadata(&lower).map_err(error)?;
-        let mut entries = vec![(b".".to_vec(), meta.ino(), 4), (b"..".to_vec(), meta.ino(), 4)];
+        let mut entries = vec![
+            (b".".to_vec(), meta.ino(), 4),
+            (b"..".to_vec(), meta.ino(), 4),
+        ];
         for entry in fs::read_dir(&lower).map_err(error)? {
             let entry = entry.map_err(error)?;
             if permit(h.uid, &path.join(entry.file_name())).is_err() {
                 continue;
             }
             let Ok(meta) = entry.metadata() else { continue };
-            entries.push((entry.file_name().as_bytes().to_vec(), meta.ino(), dirent_type(meta.mode())));
+            entries.push((
+                entry.file_name().as_bytes().to_vec(),
+                meta.ino(),
+                dirent_type(meta.mode()),
+            ));
         }
         Ok(entries)
     }
@@ -460,30 +544,54 @@ impl Daemon {
             let size = u64_at(body, 16).ok_or(errno::EINVAL)?;
             match (valid & FATTR_FH != 0).then(|| u64_at(body, 8)).flatten() {
                 Some(fh) => self.with_file(fh, |f| f.set_len(size).map_err(error))?,
-                None => OpenOptions::new().write(true).open(&lower).and_then(|f| f.set_len(size)).map_err(error)?,
+                None => OpenOptions::new()
+                    .write(true)
+                    .open(&lower)
+                    .and_then(|f| f.set_len(size))
+                    .map_err(error)?,
             }
         }
         if valid & FATTR_MODE != 0 {
             let mode = u32_at(body, 68).ok_or(errno::EINVAL)?;
-            fs::set_permissions(&lower, fs::Permissions::from_mode(mode & 0o7777)).map_err(error)?;
+            fs::set_permissions(&lower, fs::Permissions::from_mode(mode & 0o7777))
+                .map_err(error)?;
         }
         if valid & (FATTR_ATIME | FATTR_MTIME) != 0 {
-            let time = |set: u32, now: u32, seconds: usize, nanos: usize| -> Result<libc::timespec> {
-                Ok(if valid & set == 0 {
-                    libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT }
-                } else if valid & now != 0 {
-                    libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_NOW }
-                } else {
-                    libc::timespec {
-                        tv_sec: u64_at(body, seconds).ok_or(errno::EINVAL)? as libc::time_t,
-                        tv_nsec: u32_at(body, nanos).ok_or(errno::EINVAL)? as _,
-                    }
-                })
-            };
-            let times = [time(FATTR_ATIME, FATTR_ATIME_NOW, 32, 56)?, time(FATTR_MTIME, FATTR_MTIME_NOW, 40, 60)?];
-            let c = std::ffi::CString::new(lower.as_os_str().as_bytes()).map_err(|_| errno::EINVAL)?;
+            let time =
+                |set: u32, now: u32, seconds: usize, nanos: usize| -> Result<libc::timespec> {
+                    Ok(if valid & set == 0 {
+                        libc::timespec {
+                            tv_sec: 0,
+                            tv_nsec: libc::UTIME_OMIT,
+                        }
+                    } else if valid & now != 0 {
+                        libc::timespec {
+                            tv_sec: 0,
+                            tv_nsec: libc::UTIME_NOW,
+                        }
+                    } else {
+                        libc::timespec {
+                            tv_sec: u64_at(body, seconds).ok_or(errno::EINVAL)? as libc::time_t,
+                            tv_nsec: u32_at(body, nanos).ok_or(errno::EINVAL)? as _,
+                        }
+                    })
+                };
+            let times = [
+                time(FATTR_ATIME, FATTR_ATIME_NOW, 32, 56)?,
+                time(FATTR_MTIME, FATTR_MTIME_NOW, 40, 60)?,
+            ];
+            let c =
+                std::ffi::CString::new(lower.as_os_str().as_bytes()).map_err(|_| errno::EINVAL)?;
             // SAFETY: a path and two times, read during the call.
-            if unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+            if unsafe {
+                libc::utimensat(
+                    libc::AT_FDCWD,
+                    c.as_ptr(),
+                    times.as_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } != 0
+            {
                 return Err(error(io::Error::last_os_error()));
             }
         }
@@ -506,7 +614,12 @@ fn permit(uid: u32, path: &Path) -> Result<()> {
 
 /// `fuse_in_header`.
 pub fn header(message: &[u8]) -> Option<Header> {
-    Some(Header { opcode: u32_at(message, 4)?, unique: u64_at(message, 8)?, node: u64_at(message, 16)?, uid: u32_at(message, 24)? })
+    Some(Header {
+        opcode: u32_at(message, 4)?,
+        unique: u64_at(message, 8)?,
+        node: u64_at(message, 16)?,
+        uid: u32_at(message, 24)?,
+    })
 }
 
 /// `INIT`'s reply (`fuse_init_out`): this protocol's version at most, the
@@ -532,10 +645,28 @@ fn init(body: &[u8]) -> Vec<u8> {
 /// `fuse_attr` of `meta`.
 fn attr(meta: &fs::Metadata) -> Vec<u8> {
     let mut out = Vec::with_capacity(88);
-    for v in [meta.ino(), meta.size(), meta.blocks(), meta.atime() as u64, meta.mtime() as u64, meta.ctime() as u64] {
+    for v in [
+        meta.ino(),
+        meta.size(),
+        meta.blocks(),
+        meta.atime() as u64,
+        meta.mtime() as u64,
+        meta.ctime() as u64,
+    ] {
         out.extend(v.to_le_bytes());
     }
-    for v in [meta.atime_nsec() as u32, meta.mtime_nsec() as u32, meta.ctime_nsec() as u32, meta.mode(), meta.nlink() as u32, meta.uid(), meta.gid(), meta.rdev() as u32, meta.blksize() as u32, 0] {
+    for v in [
+        meta.atime_nsec() as u32,
+        meta.mtime_nsec() as u32,
+        meta.ctime_nsec() as u32,
+        meta.mode(),
+        meta.nlink() as u32,
+        meta.uid(),
+        meta.gid(),
+        meta.rdev() as u32,
+        meta.blksize() as u32,
+        0,
+    ] {
         out.extend(v.to_le_bytes());
     }
     out
@@ -590,7 +721,13 @@ fn statfs(path: &Path) -> Result<Vec<u8>> {
         return Err(error(io::Error::last_os_error()));
     }
     let mut out = Vec::with_capacity(80);
-    for v in [s.f_blocks as u64, s.f_bfree as u64, s.f_bavail as u64, s.f_files as u64, s.f_ffree as u64] {
+    for v in [
+        s.f_blocks as u64,
+        s.f_bfree as u64,
+        s.f_bavail as u64,
+        s.f_files as u64,
+        s.f_ffree as u64,
+    ] {
         out.extend(v.to_le_bytes());
     }
     for v in [s.f_bsize as u32, s.f_namemax as u32, s.f_frsize as u32, 0] {
@@ -609,7 +746,11 @@ fn options(flags: u32) -> OpenOptions {
         _ => o.read(true),
     };
     if flags & O_CREAT != 0 {
-        if flags & O_EXCL != 0 { o.create_new(true) } else { o.create(true) };
+        if flags & O_EXCL != 0 {
+            o.create_new(true)
+        } else {
+            o.create(true)
+        };
         o.write(true);
     }
     if flags & O_TRUNC != 0 {
@@ -636,7 +777,10 @@ fn read_at(file: &File, data: &mut [u8], offset: u64) -> Result<usize> {
 
 /// A name ending at its NUL.
 fn name(body: &[u8]) -> Result<&[u8]> {
-    body.iter().position(|&b| b == 0).map(|end| &body[..end]).ok_or(errno::EINVAL)
+    body.iter()
+        .position(|&b| b == 0)
+        .map(|end| &body[..end])
+        .ok_or(errno::EINVAL)
 }
 
 /// Two NUL-ended names, one after the other.

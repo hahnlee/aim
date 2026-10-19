@@ -84,15 +84,22 @@ pub fn open(dir: &Resolved, excl: bool, hflags: i32, mode: u64) -> i64 {
         return -(errno::last() as i64);
     }
     if let Err(error) = attrs::created(Host::Fd(fd), || format!("{}/{name}", dir.guest)) {
-        unsafe { libc::close(fd); libc::unlink(host.as_ptr()); }
+        unsafe {
+            libc::close(fd);
+            libc::unlink(host.as_ptr());
+        }
         return -(error as i64);
     }
     if excl {
         // SAFETY: the name just made.
         unsafe { libc::unlink(host.as_ptr()) };
     }
-    if let Err(error)=super::fdtab::publish_guest(fd){
-        unsafe{libc::close(fd);libc::unlink(host.as_ptr());}return -(error as i64);
+    if let Err(error) = super::fdtab::publish_guest(fd) {
+        unsafe {
+            libc::close(fd);
+            libc::unlink(host.as_ptr());
+        }
+        return -(error as i64);
     }
     fd as i64
 }

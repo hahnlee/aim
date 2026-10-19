@@ -106,7 +106,9 @@ pub struct Change<'a> {
 
 /// `Setting.internValue`: the string `null` is no value.
 fn intern(value: Option<&str>) -> Option<String> {
-    value.filter(|v| *v != NULL_VALUE_OLD_STYLE).map(str::to_string)
+    value
+        .filter(|v| *v != NULL_VALUE_OLD_STYLE)
+        .map(str::to_string)
 }
 
 impl Setting {
@@ -142,7 +144,9 @@ impl Setting {
         }
         // `shouldPreserveSetting`: once preserved, always preserved.
         let preserved = if reset_to_default
-            || value.is_some() && value == self.value.as_deref() && package == Some(SYSTEM_PACKAGE_NAME)
+            || value.is_some()
+                && value == self.value.as_deref()
+                && package == Some(SYSTEM_PACKAGE_NAME)
         {
             false
         } else {
@@ -185,7 +189,8 @@ struct State {
 
 /// `isBinary`: a string KXmlSerializer cannot write, kept in Base64.
 fn is_binary(s: &str) -> bool {
-    !s.chars().all(|c| matches!(c as u32, 0x20..=0xd7ff | 0xe000..=0xfffd))
+    !s.chars()
+        .all(|c| matches!(c as u32, 0x20..=0xd7ff | 0xe000..=0xfffd))
 }
 
 /// `String.length()`.
@@ -244,7 +249,12 @@ impl State {
                 "namespaceHashes" => state.namespace_hashes.extend(
                     root.children()
                         .filter(|e| e.name == "namespaceHash")
-                        .map(|e| (e.string("namespace").map(Into::into), e.string("bannedHash").map(Into::into))),
+                        .map(|e| {
+                            (
+                                e.string("namespace").map(Into::into),
+                                e.string("bannedHash").map(Into::into),
+                            )
+                        }),
                 ),
                 _ => {}
             }
@@ -261,7 +271,10 @@ impl State {
                 .string("id")
                 .and_then(|id| id.parse::<i64>().ok())
                 .ok_or("setting without an id")?;
-            let mut name = setting.string("name").ok_or("setting without a name")?.into_owned();
+            let mut name = setting
+                .string("name")
+                .ok_or("setting without a name")?
+                .into_owned();
             let value = self.value_attribute(setting, "value", "valueBase64");
             let package = setting.string("package").map(Into::into);
             let default_value = self.value_attribute(setting, "defaultValue", "defaultValueBase64");
@@ -303,7 +316,9 @@ impl State {
             }
             return e.string(base64).map(|b| base64_decode(&b));
         }
-        e.string(attr).filter(|v| v != NULL_VALUE_OLD_STYLE).map(Into::into)
+        e.string(attr)
+            .filter(|v| v != NULL_VALUE_OLD_STYLE)
+            .map(Into::into)
     }
 
     /// The documents `doWriteState` writes: the settings, then the
@@ -317,7 +332,10 @@ impl State {
             }
             // `writeSingleSetting` leaves out what it cannot write.
             let id = s.id.to_string();
-            let Some(package) = s.package.as_deref().filter(|p| !is_binary(&id) && !is_binary(&s.name) && !is_binary(p))
+            let Some(package) = s
+                .package
+                .as_deref()
+                .filter(|p| !is_binary(&id) && !is_binary(&s.name) && !is_binary(p))
             else {
                 continue;
             };
@@ -325,7 +343,12 @@ impl State {
             self.value_attribute_of(&mut attrs, "value", "valueBase64", s.value.as_deref());
             attrs.push(string("package", package));
             if let Some(default_value) = &s.default_value {
-                self.value_attribute_of(&mut attrs, "defaultValue", "defaultValueBase64", Some(default_value));
+                self.value_attribute_of(
+                    &mut attrs,
+                    "defaultValue",
+                    "defaultValueBase64",
+                    Some(default_value),
+                );
                 attrs.push(("defaultSysSet".into(), Value::Bool(s.default_from_system)));
                 self.value_attribute_of(&mut attrs, "tag", "tagBase64", s.tag.as_deref());
             }
@@ -340,19 +363,32 @@ impl State {
             .filter_map(|(namespace, hash)| {
                 Some(Node::Element(element(
                     "namespaceHash",
-                    vec![string("namespace", namespace.as_deref()?), string("bannedHash", hash.as_deref()?)],
+                    vec![
+                        string("namespace", namespace.as_deref()?),
+                        string("bannedHash", hash.as_deref()?),
+                    ],
                     Vec::new(),
                 )))
             })
             .collect();
         vec![
-            element("settings", vec![("version".into(), Value::Int(self.version))], settings),
+            element(
+                "settings",
+                vec![("version".into(), Value::Int(self.version))],
+                settings,
+            ),
             element("namespaceHashes", Vec::new(), hashes),
         ]
     }
 
     /// `setValueAttribute`.
-    fn value_attribute_of(&self, attrs: &mut Vec<(String, Value)>, attr: &str, base64: &str, value: Option<&str>) {
+    fn value_attribute_of(
+        &self,
+        attrs: &mut Vec<(String, Value)>,
+        attr: &str,
+        base64: &str,
+        value: Option<&str>,
+    ) {
         if self.version >= SETTINGS_VERSION_NEW_ENCODING {
             match value {
                 None => {}
@@ -379,7 +415,11 @@ impl State {
         if exempt(capped, package) {
             return 0;
         }
-        let current = self.memory.get(&package.map(str::to_string)).copied().unwrap_or(0);
+        let current = self
+            .memory
+            .get(&package.map(str::to_string))
+            .copied()
+            .unwrap_or(0);
         let delta = (delta_key_length + option_length(new_value) + option_length(new_default)
             - option_length(old_value)
             - option_length(old_default))
@@ -440,7 +480,16 @@ impl State {
         State::check_memory_usage(capped, package.as_deref(), size)?;
         let s = &mut self.settings[i];
         let default_value = s.default_value.clone();
-        if !s.update(default_value.as_deref(), false, package.as_deref(), None, false, true, true, &mut self.next_id) {
+        if !s.update(
+            default_value.as_deref(),
+            false,
+            package.as_deref(),
+            None,
+            false,
+            true,
+            true,
+            &mut self.next_id,
+        ) {
             return Ok(false);
         }
         self.set_memory_usage(capped, package.as_deref(), size);
@@ -472,19 +521,29 @@ impl State {
 impl State {
     /// `mNamespaceBannedHashes.get(prefix)`.
     fn banned_hash(&self, prefix: &str) -> Option<&str> {
-        self.namespace_hashes.iter().find(|(n, _)| n.as_deref() == Some(prefix)).and_then(|(_, h)| h.as_deref())
+        self.namespace_hashes
+            .iter()
+            .find(|(n, _)| n.as_deref() == Some(prefix))
+            .and_then(|(_, h)| h.as_deref())
     }
 
     /// `banConfigurationLocked`'s `mNamespaceBannedHashes.put`, in its
     /// `ArrayMap`'s order; written with the changes that follow.
     fn ban(&mut self, prefix: &str, hash: String) {
-        if let Some(entry) = self.namespace_hashes.iter_mut().find(|(n, _)| n.as_deref() == Some(prefix)) {
+        if let Some(entry) = self
+            .namespace_hashes
+            .iter_mut()
+            .find(|(n, _)| n.as_deref() == Some(prefix))
+        {
             entry.1 = Some(hash);
             return;
         }
         let key = java_hash(prefix);
-        let at = self.namespace_hashes.partition_point(|(n, _)| n.as_deref().map_or(0, java_hash) <= key);
-        self.namespace_hashes.insert(at, (Some(prefix.to_string()), Some(hash)));
+        let at = self
+            .namespace_hashes
+            .partition_point(|(n, _)| n.as_deref().map_or(0, java_hash) <= key);
+        self.namespace_hashes
+            .insert(at, (Some(prefix.to_string()), Some(hash)));
     }
 }
 
@@ -523,7 +582,10 @@ fn base64_encode(s: &str) -> String {
 /// `base64Decode`.
 fn base64_decode(s: &str) -> String {
     let bytes = aim_android_xml::base64::decode(s).unwrap_or_default();
-    let units: Vec<u16> = bytes.chunks_exact(2).map(|b| u16::from_be_bytes([b[0], b[1]])).collect();
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|b| u16::from_be_bytes([b[0], b[1]]))
+        .collect();
     String::from_utf16_lossy(&units)
 }
 
@@ -557,7 +619,10 @@ impl Settings {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => return Err(format!("{}: {e}", path.display())),
             };
-            tables.insert(table, State::parse(table, &bytes).map_err(|e| format!("{}: {e}", path.display()))?);
+            tables.insert(
+                table,
+                State::parse(table, &bytes).map_err(|e| format!("{}: {e}", path.display()))?,
+            );
         }
         Ok(Settings {
             shared: Arc::new(Shared {
@@ -579,7 +644,9 @@ impl Settings {
     /// table: `staged/namespace*flag` for `namespace/flag` when the
     /// namespace's defaults name it.
     fn staged_name(&self, table: Table, name: &str) -> Option<String> {
-        let slash = name.find('/').filter(|&i| i != 0 && table == Table::Config)?;
+        let slash = name
+            .find('/')
+            .filter(|&i| i != 0 && table == Table::Config)?;
         let namespace = &name[..slash];
         self.aconfig
             .namespaces
@@ -592,10 +659,18 @@ impl Settings {
     /// prefix's namespace (all of them without one), then the config
     /// settings it starts, but for read-only aconfig flags
     /// (`ignoreXmlForReadOnlyFlags`). A prefix must end its namespace.
-    pub fn config_flags(&self, prefix: Option<&str>) -> Result<HashMap<String, Option<String>>, Exception> {
+    pub fn config_flags(
+        &self,
+        prefix: Option<&str>,
+    ) -> Result<HashMap<String, Option<String>>, Exception> {
         let mut flags = HashMap::new();
-        let defaults = |defaults: &HashMap<String, String>, flags: &mut HashMap<String, Option<String>>| {
-            flags.extend(defaults.iter().map(|(name, value)| (name.clone(), Some(value.clone()))));
+        let defaults = |defaults: &HashMap<String, String>,
+                        flags: &mut HashMap<String, Option<String>>| {
+            flags.extend(
+                defaults
+                    .iter()
+                    .map(|(name, value)| (name.clone(), Some(value.clone()))),
+            );
         };
         match prefix {
             Some(prefix) => {
@@ -604,20 +679,40 @@ impl Settings {
                     .char_indices()
                     .last()
                     .map(|(i, _)| &prefix[..i])
-                    .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "StringIndexOutOfBoundsException: an empty prefix"))?;
+                    .ok_or_else(|| {
+                        Exception::new(
+                            EX_ILLEGAL_STATE,
+                            "StringIndexOutOfBoundsException: an empty prefix",
+                        )
+                    })?;
                 if let Some(namespace) = self.aconfig.namespaces.get(namespace) {
                     defaults(namespace, &mut flags);
                 }
             }
-            None => self.aconfig.namespaces.values().for_each(|namespace| defaults(namespace, &mut flags)),
+            None => self
+                .aconfig
+                .namespaces
+                .values()
+                .for_each(|namespace| defaults(namespace, &mut flags)),
         }
         let tables = self.shared.tables.lock().unwrap();
-        for setting in tables.get(&Table::Config).into_iter().flat_map(|state| &state.settings) {
+        for setting in tables
+            .get(&Table::Config)
+            .into_iter()
+            .flat_map(|state| &state.settings)
+        {
             if prefix.is_some_and(|p| !setting.name.starts_with(p)) {
                 continue;
             }
-            let flag = setting.name.find('/').filter(|&i| i != 0).map(|i| &setting.name[i + 1..]);
-            if flag.and_then(|f| self.aconfig.flags.get(f)).is_some_and(|info| !info.read_write) {
+            let flag = setting
+                .name
+                .find('/')
+                .filter(|&i| i != 0)
+                .map(|i| &setting.name[i + 1..]);
+            if flag
+                .and_then(|f| self.aconfig.flags.get(f))
+                .is_some_and(|info| !info.read_write)
+            {
                 continue;
             }
             flags.insert(setting.name.clone(), setting.value.clone());
@@ -647,7 +742,13 @@ impl Settings {
             return;
         }
         let hash = map_hash(flags.iter().map(|(k, v)| (k.as_str(), v.as_deref())));
-        self.shared.tables.lock().unwrap().entry(Table::Config).or_insert_with(State::new).ban(prefix, hash.to_string());
+        self.shared
+            .tables
+            .lock()
+            .unwrap()
+            .entry(Table::Config)
+            .or_insert_with(State::new)
+            .ban(prefix, hash.to_string());
     }
 
     /// `setConfigSettingsLocked` of `prefix`, `key_values` in their map's
@@ -705,15 +806,36 @@ impl Settings {
                 let name = staged.unwrap_or_else(|| key.clone());
                 match state.index(&name) {
                     Err(_) => {
-                        let mut setting = Setting { name: name.clone(), ..Default::default() };
-                        setting.update(value.as_deref(), false, package, None, caller_system, true, false, &mut state.next_id);
+                        let mut setting = Setting {
+                            name: name.clone(),
+                            ..Default::default()
+                        };
+                        setting.update(
+                            value.as_deref(),
+                            false,
+                            package,
+                            None,
+                            caller_system,
+                            true,
+                            false,
+                            &mut state.next_id,
+                        );
                         state.put(setting);
                     }
                     Ok(i) => {
                         if state.settings[i].value.is_none() && value.is_none() {
                             continue;
                         }
-                        state.settings[i].update(value.as_deref(), false, package, None, false, false, false, &mut state.next_id);
+                        state.settings[i].update(
+                            value.as_deref(),
+                            false,
+                            package,
+                            None,
+                            false,
+                            false,
+                            false,
+                            &mut state.next_id,
+                        );
                     }
                 }
                 changed.push(name);
@@ -731,12 +853,22 @@ impl Settings {
 
     #[cfg(test)]
     pub(super) fn read_for_test(&mut self, table: Table, bytes: &[u8]) {
-        self.shared.tables.lock().unwrap().insert(table, State::parse(table, bytes).unwrap());
+        self.shared
+            .tables
+            .lock()
+            .unwrap()
+            .insert(table, State::parse(table, bytes).unwrap());
     }
 
     /// `getSettingLocked`: none for a setting that is absent.
     pub fn setting(&self, table: Table, name: &str) -> Option<Setting> {
-        self.shared.tables.lock().unwrap().get(&table)?.get(name).cloned()
+        self.shared
+            .tables
+            .lock()
+            .unwrap()
+            .get(&table)?
+            .get(name)
+            .cloned()
     }
 
     /// `Settings.*.getStringForUser`: `None` for a setting that is absent
@@ -765,7 +897,10 @@ impl Settings {
     /// `ArrayMap`'s).
     pub fn all(&self, table: Table) -> Vec<Setting> {
         let tables = self.shared.tables.lock().unwrap();
-        let settings = tables.get(&table).map(|state| state.settings.clone()).unwrap_or_default();
+        let settings = tables
+            .get(&table)
+            .map(|state| state.settings.clone())
+            .unwrap_or_default();
         crate::package::info::array_order(settings, |s| &s.name)
     }
 
@@ -776,14 +911,24 @@ impl Settings {
 
     /// `SettingsState.insertSettingLocked`, and `persistSettingsLocked`
     /// after a change of a `critical` setting: whether it changed.
-    pub fn insert(&self, table: Table, name: &str, change: &Change, critical: bool) -> Result<bool, Exception> {
+    pub fn insert(
+        &self,
+        table: Table,
+        name: &str,
+        change: &Change,
+        critical: bool,
+    ) -> Result<bool, Exception> {
         if name.is_empty() {
             return Ok(false);
         }
         let staged = self.staged_name(table, name);
         let name = staged.as_deref().unwrap_or(name);
         let name_too_long = length(name) > MAX_LENGTH_PER_STRING;
-        if name_too_long || change.value.is_some_and(|v| length(v) > MAX_LENGTH_PER_STRING) {
+        if name_too_long
+            || change
+                .value
+                .is_some_and(|v| length(v) > MAX_LENGTH_PER_STRING)
+        {
             let shown: String = name.chars().take(20).collect();
             return Err(Exception::illegal_argument(format!(
                 "The {} of your setting [{}{}] is too long. The max length allowed for the string is {MAX_LENGTH_PER_STRING}.",
@@ -798,21 +943,41 @@ impl Settings {
             let state = tables.entry(table).or_insert_with(State::new);
             let old = state.get(name).cloned();
             let previous_owner = old.as_ref().and_then(|s| s.package.clone());
-            let owner_changed = previous_owner.is_some() && previous_owner.as_deref() != change.package;
+            let owner_changed =
+                previous_owner.is_some() && previous_owner.as_deref() != change.package;
             let old_value = old.as_ref().and_then(|s| s.value.clone());
             let old_default = old.as_ref().and_then(|s| s.default_value.clone());
-            let new_default = if change.make_default { change.value.map(str::to_string) } else { old_default.clone() };
+            let new_default = if change.make_default {
+                change.value.map(str::to_string)
+            } else {
+                old_default.clone()
+            };
             let size = state.memory_usage(
                 capped,
                 change.package,
-                if old.is_none() || owner_changed { length(name) as i32 } else { 0 },
-                if owner_changed { None } else { old_value.as_deref() },
+                if old.is_none() || owner_changed {
+                    length(name) as i32
+                } else {
+                    0
+                },
+                if owner_changed {
+                    None
+                } else {
+                    old_value.as_deref()
+                },
                 change.value,
-                if owner_changed { None } else { old_default.as_deref() },
+                if owner_changed {
+                    None
+                } else {
+                    old_default.as_deref()
+                },
                 new_default.as_deref(),
             );
             State::check_memory_usage(capped, change.package, size)?;
-            let mut setting = old.unwrap_or_else(|| Setting { name: name.to_string(), ..Default::default() });
+            let mut setting = old.unwrap_or_else(|| Setting {
+                name: name.to_string(),
+                ..Default::default()
+            });
             let updated = setting.update(
                 change.value,
                 change.make_default,
@@ -893,8 +1058,8 @@ impl Settings {
             let settings = state.settings.clone();
             for setting in settings {
                 // `shouldExcludeSettingFromReset`.
-                let excluded =
-                    prefix.is_some_and(|p| !setting.name.starts_with(p)) || setting.name == SECURE_FRP_MODE;
+                let excluded = prefix.is_some_and(|p| !setting.name.starts_with(p))
+                    || setting.name == SECURE_FRP_MODE;
                 let name = setting.name.as_str();
                 let reset = match mode {
                     ResetMode::PackageDefaults => {
@@ -913,7 +1078,8 @@ impl Settings {
                         state.reset(capped, name)?
                     }
                     ResetMode::UntrustedChanges | ResetMode::TrustedDefaults => {
-                        if mode == ResetMode::UntrustedChanges && system_package(setting.package.as_deref())?
+                        if mode == ResetMode::UntrustedChanges
+                            && system_package(setting.package.as_deref())?
                             || excluded
                         {
                             continue;
@@ -994,12 +1160,21 @@ fn write(data: &Path, table: Table, document: &[Element]) -> std::io::Result<()>
     let dir = data.join("system/users/0");
     let path = dir.join(table.file());
     let new = dir.join(format!("{}.new", table.file()));
-    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&new)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&new)?;
     std::io::Write::write_all(&mut file, &bytes)?;
     crate::fsync(&file)?;
     aim_storage::guest_inode::record(
         &new,
-        aim_storage::guest_inode::GuestInode { uid: Some(1000), gid: Some(1000), mode: Some(0o600) },
+        aim_storage::guest_inode::GuestInode {
+            uid: Some(1000),
+            gid: Some(1000),
+            mode: Some(0o600),
+        },
     )?;
     std::fs::rename(&new, path)
 }
@@ -1031,10 +1206,16 @@ mod tests {
         </settings>"#,
         );
         s.read_for_test(Table::Config, br#"<settings version="1"><setting id="3" name="widget/line_slop_ratio" value="0.25" /></settings>"#);
-        assert_eq!(s.get(Table::Secure, "long_press_timeout").as_deref(), Some("400"));
+        assert_eq!(
+            s.get(Table::Secure, "long_press_timeout").as_deref(),
+            Some("400")
+        );
         assert_eq!(s.get(Table::Secure, "nothing"), None);
         assert_eq!(s.get(Table::Secure, "binary").as_deref(), Some("\ta"));
-        assert_eq!(s.device_config("widget", "line_slop_ratio").as_deref(), Some("0.25"));
+        assert_eq!(
+            s.device_config("widget", "line_slop_ratio").as_deref(),
+            Some("0.25")
+        );
     }
 
     /// Settings with the aconfig flag `ns/com.example.trunk` (read-write,
@@ -1050,7 +1231,13 @@ mod tests {
             ]),
         );
         for (flag, read_write) in [("com.example.trunk", true), ("com.example.fixed", false)] {
-            s.aconfig.flags.insert(flag.into(), super::super::device_config::FlagInfo { namespace: "ns".into(), read_write });
+            s.aconfig.flags.insert(
+                flag.into(),
+                super::super::device_config::FlagInfo {
+                    namespace: "ns".into(),
+                    read_write,
+                },
+            );
         }
         s.read_for_test(
             Table::Config,
@@ -1065,7 +1252,10 @@ mod tests {
     }
 
     fn names(s: &Settings) -> Vec<String> {
-        s.list(Table::Config, "").into_iter().map(|(n, _)| n).collect()
+        s.list(Table::Config, "")
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect()
     }
 
     /// `setSettingsLocked` (DeviceConfigApiTests `setProperties`): the
@@ -1078,13 +1268,32 @@ mod tests {
         let mut flags = vec![
             ("ns/a".to_string(), Some("1".to_string())),
             ("ns/new".to_string(), Some("null".to_string())),
-            ("ns/com.example.trunk".to_string(), Some("false".to_string())),
+            (
+                "ns/com.example.trunk".to_string(),
+                Some("false".to_string()),
+            ),
         ];
         let changed = s.set_config("ns/", &mut flags, Some("gms"), false).unwrap();
-        assert_eq!(changed, ["ns/b", "ns/a", "ns/new", "staged/ns*com.example.trunk"]);
+        assert_eq!(
+            changed,
+            ["ns/b", "ns/a", "ns/new", "staged/ns*com.example.trunk"]
+        );
         assert_eq!(flags[1].1, None);
-        assert_eq!(names(&s), ["ns/a", "ns/com.example.fixed", "ns/new", "other/c", "staged/ns*com.example.trunk"]);
-        assert_eq!(s.get(Table::Config, "staged/ns*com.example.trunk").as_deref(), Some("false"));
+        assert_eq!(
+            names(&s),
+            [
+                "ns/a",
+                "ns/com.example.fixed",
+                "ns/new",
+                "other/c",
+                "staged/ns*com.example.trunk"
+            ]
+        );
+        assert_eq!(
+            s.get(Table::Config, "staged/ns*com.example.trunk")
+                .as_deref(),
+            Some("false")
+        );
         let changed = s.set_config("ns/", &mut flags, Some("gms"), false).unwrap();
         assert_eq!(changed, ["ns/a", "staged/ns*com.example.trunk"]);
     }
@@ -1102,7 +1311,10 @@ mod tests {
         let mut same: Vec<_> = flags.into_iter().collect();
         assert_eq!(s.set_config("ns/", &mut same, Some("gms"), false), None);
         let mut other = vec![("ns/a".to_string(), Some("9".to_string()))];
-        assert!(s.set_config("ns/", &mut other, Some("gms"), false).is_some());
+        assert!(
+            s.set_config("ns/", &mut other, Some("gms"), false)
+                .is_some()
+        );
         let tables = s.shared.tables.lock().unwrap();
         assert!(tables[&Table::Config].namespace_hashes.is_empty());
     }
@@ -1135,9 +1347,24 @@ mod tests {
     #[test]
     fn aconfig_flags_are_staged() {
         let s = config_settings();
-        assert!(s.insert(Table::Config, "ns/com.example.trunk", &change(Some("false"), "gms"), false).unwrap());
-        assert!(s.insert(Table::Config, "ns/plain", &change(Some("x"), "gms"), false).unwrap());
-        assert_eq!(s.get(Table::Config, "staged/ns*com.example.trunk").as_deref(), Some("false"));
+        assert!(
+            s.insert(
+                Table::Config,
+                "ns/com.example.trunk",
+                &change(Some("false"), "gms"),
+                false
+            )
+            .unwrap()
+        );
+        assert!(
+            s.insert(Table::Config, "ns/plain", &change(Some("x"), "gms"), false)
+                .unwrap()
+        );
+        assert_eq!(
+            s.get(Table::Config, "staged/ns*com.example.trunk")
+                .as_deref(),
+            Some("false")
+        );
         assert_eq!(s.get(Table::Config, "ns/com.example.trunk"), None);
         assert_eq!(s.get(Table::Config, "ns/plain").as_deref(), Some("x"));
     }
@@ -1152,9 +1379,27 @@ mod tests {
         state.ban("a/", "6".into());
         state.ban("ns/", "7".into());
         let document = state.document(Table::Config);
-        let hashes: Vec<_> = document[1].children().map(|e| (e.string("namespace").unwrap().into_owned(), e.string("bannedHash").unwrap().into_owned())).collect();
-        assert_eq!(hashes, [("a/".to_string(), "6".to_string()), ("ns/".to_string(), "7".to_string())]);
-        let read = State::parse(Table::Config, &aim_android_xml::abx::write_sequence(&document).unwrap()).unwrap();
+        let hashes: Vec<_> = document[1]
+            .children()
+            .map(|e| {
+                (
+                    e.string("namespace").unwrap().into_owned(),
+                    e.string("bannedHash").unwrap().into_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            hashes,
+            [
+                ("a/".to_string(), "6".to_string()),
+                ("ns/".to_string(), "7".to_string())
+            ]
+        );
+        let read = State::parse(
+            Table::Config,
+            &aim_android_xml::abx::write_sequence(&document).unwrap(),
+        )
+        .unwrap();
         assert_eq!(read.banned_hash("ns/"), Some("7"));
     }
 
@@ -1176,14 +1421,26 @@ mod tests {
     #[test]
     fn defaults_follow_the_system() {
         let s = Settings::default();
-        let system = Change { caller_system: true, ..change(Some("1"), "android") };
+        let system = Change {
+            caller_system: true,
+            ..change(Some("1"), "android")
+        };
         assert!(s.insert(Table::Secure, "x", &system, false).unwrap());
         let x = s.setting(Table::Secure, "x").unwrap();
-        assert_eq!((x.default_value.as_deref(), x.default_from_system), (Some("1"), true));
-        let app = Change { make_default: true, ..change(Some("2"), "app") };
+        assert_eq!(
+            (x.default_value.as_deref(), x.default_from_system),
+            (Some("1"), true)
+        );
+        let app = Change {
+            make_default: true,
+            ..change(Some("2"), "app")
+        };
         assert!(s.insert(Table::Secure, "x", &app, false).unwrap());
         let x = s.setting(Table::Secure, "x").unwrap();
-        assert_eq!((x.value.as_deref(), x.default_value.as_deref()), (Some("2"), Some("1")));
+        assert_eq!(
+            (x.value.as_deref(), x.default_value.as_deref()),
+            (Some("2"), Some("1"))
+        );
         // The same again changes nothing.
         assert!(!s.insert(Table::Secure, "x", &app, false).unwrap());
     }
@@ -1192,32 +1449,70 @@ mod tests {
     fn apps_system_settings_are_capped() {
         let s = Settings::default();
         let big = "v".repeat(10_000);
-        assert!(s.insert(Table::System, "a", &change(Some(&big), "app"), false).unwrap());
-        let e = s.insert(Table::System, "b", &change(Some(&big), "app"), false).unwrap_err();
+        assert!(
+            s.insert(Table::System, "a", &change(Some(&big), "app"), false)
+                .unwrap()
+        );
+        let e = s
+            .insert(Table::System, "b", &change(Some(&big), "app"), false)
+            .unwrap_err();
         assert_eq!(e.code, EX_ILLEGAL_STATE);
         // The system and other tables are not capped.
-        assert!(s.insert(Table::System, "b", &change(Some(&big), "android"), false).unwrap());
-        assert!(s.insert(Table::Secure, "b", &change(Some(&big), "app"), false).unwrap());
+        assert!(
+            s.insert(Table::System, "b", &change(Some(&big), "android"), false)
+                .unwrap()
+        );
+        assert!(
+            s.insert(Table::Secure, "b", &change(Some(&big), "app"), false)
+                .unwrap()
+        );
         // A deletion frees the app's bytes.
         assert!(s.delete(Table::System, "a", false));
-        assert!(s.insert(Table::System, "c", &change(Some(&big), "app"), false).unwrap());
+        assert!(
+            s.insert(Table::System, "c", &change(Some(&big), "app"), false)
+                .unwrap()
+        );
     }
 
     /// `SettingsProviderTest.testResetModePackageDefaults*`.
     #[test]
     fn reset_to_package_defaults() {
         let s = Settings::default();
-        let set = |value, make_default| Change { make_default, ..change(Some(value), "app") };
-        s.insert(Table::Secure, "a", &set("1", true), false).unwrap();
-        s.insert(Table::Secure, "a", &set("2", false), false).unwrap();
-        s.insert(Table::Secure, "b", &change(Some("3"), "other"), false).unwrap();
+        let set = |value, make_default| Change {
+            make_default,
+            ..change(Some(value), "app")
+        };
+        s.insert(Table::Secure, "a", &set("1", true), false)
+            .unwrap();
+        s.insert(Table::Secure, "a", &set("2", false), false)
+            .unwrap();
+        s.insert(Table::Secure, "b", &change(Some("3"), "other"), false)
+            .unwrap();
         let none = |_: Option<&str>| Ok(false);
-        let changed = s.reset(Table::Secure, ResetMode::PackageDefaults, Some("app"), None, None, &none).unwrap();
+        let changed = s
+            .reset(
+                Table::Secure,
+                ResetMode::PackageDefaults,
+                Some("app"),
+                None,
+                None,
+                &none,
+            )
+            .unwrap();
         assert_eq!(changed, ["a"]);
         assert_eq!(s.get(Table::Secure, "a").as_deref(), Some("1"));
         assert_eq!(s.get(Table::Secure, "b").as_deref(), Some("3"));
         // Untrusted changes without a system default are deleted.
-        let changed = s.reset(Table::Secure, ResetMode::UntrustedChanges, None, None, None, &none).unwrap();
+        let changed = s
+            .reset(
+                Table::Secure,
+                ResetMode::UntrustedChanges,
+                None,
+                None,
+                None,
+                &none,
+            )
+            .unwrap();
         assert_eq!(changed.len(), 2);
         assert_eq!(s.setting(Table::Secure, "b"), None);
     }
@@ -1235,25 +1530,45 @@ mod tests {
         )
         .unwrap();
         let s = Settings::load(&dir, &dir).unwrap();
-        let tagged = Change { tag: Some("t"), make_default: true, ..change(Some("x\u{1}"), "app") };
+        let tagged = Change {
+            tag: Some("t"),
+            make_default: true,
+            ..change(Some("x\u{1}"), "app")
+        };
         assert!(s.insert(Table::Secure, "b", &tagged, false).unwrap());
-        assert!(s.insert(Table::Secure, "clockwork_home_ready", &change(Some("1"), "app"), false).unwrap());
+        assert!(
+            s.insert(
+                Table::Secure,
+                "clockwork_home_ready",
+                &change(Some("1"), "app"),
+                false
+            )
+            .unwrap()
+        );
         let started = Instant::now();
         let bytes = loop {
             let bytes = std::fs::read(users.join("settings_secure.xml")).unwrap();
-            if bytes.starts_with(aim_android_xml::abx::MAGIC) || started.elapsed() > Duration::from_secs(5) {
+            if bytes.starts_with(aim_android_xml::abx::MAGIC)
+                || started.elapsed() > Duration::from_secs(5)
+            {
                 break bytes;
             }
             std::thread::sleep(Duration::from_millis(20));
         };
         assert!(started.elapsed() >= WRITE_SETTINGS_DELAY - Duration::from_millis(20));
         let roots = aim_android_xml::abx::read_sequence(&bytes).unwrap();
-        assert_eq!(roots.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["settings", "namespaceHashes"]);
+        assert_eq!(
+            roots.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["settings", "namespaceHashes"]
+        );
         assert_eq!(roots[0].attr("version"), Some(&Value::Int(226)));
         let settings: Vec<_> = roots[0].children().collect();
         // The transient setting is a secure one here, so it is kept.
         assert_eq!(settings.len(), 3);
-        let b = settings.iter().find(|e| e.string("name").as_deref() == Some("b")).unwrap();
+        let b = settings
+            .iter()
+            .find(|e| e.string("name").as_deref() == Some("b"))
+            .unwrap();
         assert_eq!(
             b.attrs,
             [
@@ -1277,8 +1592,16 @@ mod tests {
     fn transient_global_settings_are_not_written() {
         let mut state = State::new();
         state.version = 226;
-        state.put(Setting { name: "clockwork_home_ready".into(), package: Some("android".into()), ..Default::default() });
-        state.put(Setting { name: "a".into(), package: None, ..Default::default() });
+        state.put(Setting {
+            name: "clockwork_home_ready".into(),
+            package: Some("android".into()),
+            ..Default::default()
+        });
+        state.put(Setting {
+            name: "a".into(),
+            package: None,
+            ..Default::default()
+        });
         assert_eq!(state.document(Table::Global)[0].children().count(), 0);
         assert_eq!(state.document(Table::Secure)[0].children().count(), 1);
     }
@@ -1287,7 +1610,10 @@ mod tests {
     fn settings_keep_array_map_order() {
         let mut state = State::new();
         for name in ["b", "a", "Aa", "BB", "c"] {
-            state.put(Setting { name: name.into(), ..Default::default() });
+            state.put(Setting {
+                name: name.into(),
+                ..Default::default()
+            });
         }
         // "Aa" and "BB" share a hash: kept as added.
         let names: Vec<_> = state.settings.iter().map(|s| s.name.as_str()).collect();

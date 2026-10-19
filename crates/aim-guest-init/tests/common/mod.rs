@@ -79,7 +79,12 @@ pub fn fixture_image(root: &Path) -> PathBuf {
     }
     // The APEXes apexd mounts in the bootstrap namespace, each with a
     // manifest naming it (field 1).
-    for name in ["com.android.runtime", "com.android.i18n", "com.android.tzdata", "com.android.virt"] {
+    for name in [
+        "com.android.runtime",
+        "com.android.i18n",
+        "com.android.tzdata",
+        "com.android.virt",
+    ] {
         let dir = image.join("apex").join(name);
         fs::create_dir_all(&dir).unwrap();
         let mut manifest = vec![0x0a, name.len() as u8];
@@ -89,7 +94,13 @@ pub fn fixture_image(root: &Path) -> PathBuf {
     // The overlay's init namespace policy, which the derived image ships.
     let policy = "vendor/etc/aim/init-mount-namespace-policy.conf";
     fs::create_dir_all(image.join(policy).parent().unwrap()).unwrap();
-    fs::copy(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../image").join(policy), image.join(policy)).unwrap();
+    fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../image")
+            .join(policy),
+        image.join(policy),
+    )
+    .unwrap();
     image
 }
 
@@ -128,7 +139,13 @@ exec /bin/sleep 20
     .unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     // guest-init runs the POSIX lock holder beside linux-run.
-    let holder = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().join("aim-lock-holder");
+    let holder = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("aim-lock-holder");
     std::os::unix::fs::symlink(holder, root.join("aim-lock-holder")).unwrap();
     path
 }

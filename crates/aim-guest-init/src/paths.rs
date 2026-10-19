@@ -107,8 +107,8 @@ pub struct Resolved {
 pub struct PathMap {
     image: PathBuf,
     entries: Vec<MapEntry>,
-    bind_sources:std::collections::BTreeMap<String,String>,
-    propagation:std::collections::BTreeMap<String,String>,
+    bind_sources: std::collections::BTreeMap<String, String>,
+    propagation: std::collections::BTreeMap<String, String>,
 }
 
 impl PathMap {
@@ -122,16 +122,24 @@ impl PathMap {
         Self {
             image: image.into(),
             entries,
-            bind_sources:Default::default(),
-            propagation:Default::default(),
+            bind_sources: Default::default(),
+            propagation: Default::default(),
         }
     }
 
-    pub fn bind_source_of(&self,target:&str)->Option<&str>{self.bind_sources.get(target).map(String::as_str)}
-    pub fn bind_source(&mut self,target:&str,source:&str){self.bind_sources.insert(target.into(),source.into());}
-    pub fn propagation(&mut self,target:&str,kind:&str,recursive:bool){
-        if recursive{let prefix=format!("{}/",target.trim_end_matches('/'));self.propagation.retain(|root,_|root!=target&&!(target=="/"||root.starts_with(&prefix)));}
-        self.propagation.insert(target.into(),kind.into());
+    pub fn bind_source_of(&self, target: &str) -> Option<&str> {
+        self.bind_sources.get(target).map(String::as_str)
+    }
+    pub fn bind_source(&mut self, target: &str, source: &str) {
+        self.bind_sources.insert(target.into(), source.into());
+    }
+    pub fn propagation(&mut self, target: &str, kind: &str, recursive: bool) {
+        if recursive {
+            let prefix = format!("{}/", target.trim_end_matches('/'));
+            self.propagation
+                .retain(|root, _| root != target && !(target == "/" || root.starts_with(&prefix)));
+        }
+        self.propagation.insert(target.into(), kind.into());
     }
     pub fn image(&self) -> &Path {
         &self.image
@@ -143,15 +151,17 @@ impl PathMap {
         self.entries.retain(|e| e.guest != entry.guest);
         let mut entries = std::mem::take(&mut self.entries);
         entries.push(entry);
-        let bind_sources=std::mem::take(&mut self.bind_sources);
-        let propagation=std::mem::take(&mut self.propagation);
+        let bind_sources = std::mem::take(&mut self.bind_sources);
+        let propagation = std::mem::take(&mut self.propagation);
         *self = Self::new(std::mem::take(&mut self.image), entries);
-        self.bind_sources=bind_sources;self.propagation=propagation;
+        self.bind_sources = bind_sources;
+        self.propagation = propagation;
     }
 
-    pub fn retain_entries(&mut self,mut keep:impl FnMut(&MapEntry)->bool){
-        self.entries.retain(|entry|keep(entry));
-        self.bind_sources.retain(|target,_|self.entries.iter().any(|entry|entry.guest==*target));
+    pub fn retain_entries(&mut self, mut keep: impl FnMut(&MapEntry) -> bool) {
+        self.entries.retain(|entry| keep(entry));
+        self.bind_sources
+            .retain(|target, _| self.entries.iter().any(|entry| entry.guest == *target));
     }
 
     pub fn entries(&self) -> &[MapEntry] {
@@ -299,9 +309,13 @@ impl PathMap {
                 entry.guest,
                 entry.host.display()
             ));
-            if let Some(source)=self.bind_sources.get(&entry.guest){out.push_str(&format!("bind-source\t{}\t{}\n",entry.guest,source));}
+            if let Some(source) = self.bind_sources.get(&entry.guest) {
+                out.push_str(&format!("bind-source\t{}\t{}\n", entry.guest, source));
+            }
         }
-        for(target,kind)in &self.propagation{out.push_str(&format!("propagation\t{target}\t{kind}\n"));}
+        for (target, kind) in &self.propagation {
+            out.push_str(&format!("propagation\t{target}\t{kind}\n"));
+        }
         out
     }
 
@@ -309,14 +323,24 @@ impl PathMap {
     pub fn parse_file_text(text: &str) -> Result<Self, String> {
         let mut image = None;
         let mut entries = Vec::new();
-        let mut binds=std::collections::BTreeMap::new();let mut propagation=std::collections::BTreeMap::new();
+        let mut binds = std::collections::BTreeMap::new();
+        let mut propagation = std::collections::BTreeMap::new();
         for (number, line) in text.lines().enumerate() {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
             let fields: Vec<&str> = line.split('\t').collect();
-            if let ["bind-source",guest,source]=fields.as_slice(){binds.insert((*guest).into(),(*source).into());continue;}
-            if let ["propagation",guest,kind]=fields.as_slice(){if !matches!(*kind,"shared"|"slave"|"private"){return Err("invalid mount propagation".into());}propagation.insert((*guest).into(),(*kind).into());continue;}
+            if let ["bind-source", guest, source] = fields.as_slice() {
+                binds.insert((*guest).into(), (*source).into());
+                continue;
+            }
+            if let ["propagation", guest, kind] = fields.as_slice() {
+                if !matches!(*kind, "shared" | "slave" | "private") {
+                    return Err("invalid mount propagation".into());
+                }
+                propagation.insert((*guest).into(), (*kind).into());
+                continue;
+            }
             let [kind, guest, host] = fields[..] else {
                 return Err(format!(
                     "line {}: expected 3 tab-separated fields",
@@ -340,7 +364,10 @@ impl PathMap {
             }
         }
         let image = image.ok_or("missing root line")?;
-        let mut map=Self::new(image,entries);map.bind_sources=binds;map.propagation=propagation;Ok(map)
+        let mut map = Self::new(image, entries);
+        map.bind_sources = binds;
+        map.propagation = propagation;
+        Ok(map)
     }
 }
 
@@ -658,7 +685,11 @@ mod tests {
         use std::os::unix::{ffi::OsStrExt, fs::symlink};
         let dir = std::env::temp_dir().join(format!("aim-verity-layout-{}", std::process::id()));
         fs::create_dir(&dir).unwrap();
-        let layout = Layout::new(dir.join("image"), dir.join("data"), Some(dir.join("custom-runtime")));
+        let layout = Layout::new(
+            dir.join("image"),
+            dir.join("data"),
+            Some(dir.join("custom-runtime")),
+        );
         layout.prepare().unwrap();
         let store = fs::canonicalize(layout.data.join("fs-verity")).unwrap();
         fs::write(store.join("retained-proof"), b"proof").unwrap();
@@ -668,11 +699,18 @@ mod tests {
         assert_ne!(layout.path_map().lookup("/data/fs-verity").0, store);
         layout.prepare().unwrap();
         assert_eq!(fs::read(store.join("retained-proof")).unwrap(), b"proof");
-        assert_eq!(fs::read(layout.runtime.join("fs-verity-root")).unwrap(), locator);
+        assert_eq!(
+            fs::read(layout.runtime.join("fs-verity-root")).unwrap(),
+            locator
+        );
         fs::remove_dir_all(&store).unwrap();
-        let foreign = dir.join("foreign"); fs::create_dir(&foreign).unwrap();
+        let foreign = dir.join("foreign");
+        fs::create_dir(&foreign).unwrap();
         symlink(&foreign, layout.data.join("fs-verity")).unwrap();
-        assert_eq!(layout.prepare_data().err().unwrap().raw_os_error(), Some(libc::ELOOP));
+        assert_eq!(
+            layout.prepare_data().err().unwrap().raw_os_error(),
+            Some(libc::ELOOP)
+        );
         assert!(fs::read_dir(foreign).unwrap().next().is_none());
         fs::remove_dir_all(dir).unwrap();
     }
@@ -680,7 +718,11 @@ mod tests {
     #[test]
     fn prepared_runtime_contains_the_actual_pty_namespace_directory() {
         let dir = std::env::temp_dir().join(format!("aim-runtime-pts-{}", std::process::id()));
-        let layout = Layout::new(dir.join("image"), dir.join("data"), Some(dir.join("runtime")));
+        let layout = Layout::new(
+            dir.join("image"),
+            dir.join("data"),
+            Some(dir.join("runtime")),
+        );
         layout.prepare_runtime().unwrap();
         let pts = layout.dev_dir().join("pts");
         assert!(fs::metadata(&pts).unwrap().is_dir());

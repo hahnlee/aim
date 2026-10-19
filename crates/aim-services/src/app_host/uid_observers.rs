@@ -86,7 +86,9 @@ impl Observer {
                     report = true;
                     if self.cutpoint >= MIN_PROCESS_STATE {
                         report = match self.last.get(&uid) {
-                            Some(&last) => (last <= self.cutpoint) != (PROCESS_STATE_TOP <= self.cutpoint),
+                            Some(&last) => {
+                                (last <= self.cutpoint) != (PROCESS_STATE_TOP <= self.cutpoint)
+                            }
                             None => true,
                         };
                     }
@@ -121,7 +123,12 @@ impl Observer {
 impl AppHost {
     /// `hasUsageStatsPermission`, else `PACKAGE_USAGE_STATS`, which uid
     /// queries need.
-    fn enforce_usage_stats(&self, call: &Call<'_>, package: Option<&str>, method: &str) -> Result<(), Exception> {
+    fn enforce_usage_stats(
+        &self,
+        call: &Call<'_>,
+        package: Option<&str>,
+        method: &str,
+    ) -> Result<(), Exception> {
         let uid = call.sender_euid as i32;
         // The op allows it, or (by default, else enforced) the permission.
         if appops_service::note(self, OP_GET_USAGE_STATS, uid, package)? == 0
@@ -137,16 +144,33 @@ impl AppHost {
 
     /// `registerUidObserver`: `observer` hears the changes `which` names,
     /// state changes only across `cutpoint` when it is one.
-    pub(super) fn register_uid_observer(&self, call: &Call<'_>, observer: Option<Binder>, which: i32, cutpoint: i32, package: Option<&str>) -> Result<(), Exception> {
+    pub(super) fn register_uid_observer(
+        &self,
+        call: &Call<'_>,
+        observer: Option<Binder>,
+        which: i32,
+        cutpoint: i32,
+        package: Option<&str>,
+    ) -> Result<(), Exception> {
         self.enforce_usage_stats(call, package, "registerUidObserver")?;
         self.add_uid_observer(observer, which, cutpoint, None, None)
     }
 
     /// `registerUidObserverForUids`: as `registerUidObserver`, of `uids`
     /// only (every uid for none); its token, to add and remove uids with.
-    pub(super) fn register_uid_observer_for_uids(&self, call: &Call<'_>, observer: Option<Binder>, which: i32, cutpoint: i32, package: Option<&str>, uids: Option<Vec<i32>>) -> Result<Binder, Exception> {
+    pub(super) fn register_uid_observer_for_uids(
+        &self,
+        call: &Call<'_>,
+        observer: Option<Binder>,
+        which: i32,
+        cutpoint: i32,
+        package: Option<&str>,
+        uids: Option<Vec<i32>>,
+    ) -> Result<Binder, Exception> {
         self.enforce_usage_stats(call, package, "registerUidObserver")?;
-        let token = self.process.add_service(std::sync::Arc::new(super::activity::Token));
+        let token = self
+            .process
+            .add_service(std::sync::Arc::new(super::activity::Token));
         let uids = uids.map(|mut u| {
             u.sort_unstable();
             u
@@ -159,10 +183,21 @@ impl AppHost {
     /// observer of `token` watches, kept ascending (`UidObserverRegistration
     /// .addUid`, `removeUid`). An unknown token or an observer of every uid
     /// is left as it is.
-    pub(super) fn change_observer_uids(&self, call: &Call<'_>, token: Option<Binder>, package: Option<&str>, uid: i32, add: bool) -> Result<(), Exception> {
+    pub(super) fn change_observer_uids(
+        &self,
+        call: &Call<'_>,
+        token: Option<Binder>,
+        package: Option<&str>,
+        uid: i32,
+        add: bool,
+    ) -> Result<(), Exception> {
         self.enforce_usage_stats(call, package, "registerUidObserver")?;
         let mut observers = self.uid_observers.observers.lock().unwrap();
-        let Some(uids) = observers.iter_mut().find(|o| token.is_some() && o.token == token).and_then(|o| o.uids.as_mut()) else {
+        let Some(uids) = observers
+            .iter_mut()
+            .find(|o| token.is_some() && o.token == token)
+            .and_then(|o| o.uids.as_mut())
+        else {
             return Ok(());
         };
         match (uids.binary_search(&uid), add) {
@@ -175,9 +210,18 @@ impl AppHost {
         Ok(())
     }
 
-    fn add_uid_observer(&self, observer: Option<Binder>, which: i32, cutpoint: i32, uids: Option<Vec<i32>>, token: Option<Binder>) -> Result<(), Exception> {
+    fn add_uid_observer(
+        &self,
+        observer: Option<Binder>,
+        which: i32,
+        cutpoint: i32,
+        uids: Option<Vec<i32>>,
+        token: Option<Binder>,
+    ) -> Result<(), Exception> {
         let Some(Binder::Handle(handle)) = observer else {
-            return Err(Exception::illegal_argument("registerUidObserver: no observer"));
+            return Err(Exception::illegal_argument(
+                "registerUidObserver: no observer",
+            ));
         };
         let observer = self.process.strong(handle);
         let host = self.me.clone();
@@ -185,17 +229,31 @@ impl AppHost {
             &observer,
             Box::new(move || {
                 if let Some(host) = host.upgrade() {
-                    host.uid_observers.observers.lock().unwrap().retain(|o| o.observer.handle != handle);
+                    host.uid_observers
+                        .observers
+                        .lock()
+                        .unwrap()
+                        .retain(|o| o.observer.handle != handle);
                 }
             }),
         );
-        self.uid_observers.observers.lock().unwrap().push(Observer { observer, death, which, cutpoint, last: HashMap::new(), uids, token });
+        self.uid_observers.observers.lock().unwrap().push(Observer {
+            observer,
+            death,
+            which,
+            cutpoint,
+            last: HashMap::new(),
+            uids,
+            token,
+        });
         Ok(())
     }
 
     /// `unregisterUidObserver`.
     pub(super) fn unregister_uid_observer(&self, observer: Option<Binder>) {
-        let Some(Binder::Handle(handle)) = observer else { return };
+        let Some(Binder::Handle(handle)) = observer else {
+            return;
+        };
         let mut observers = self.uid_observers.observers.lock().unwrap();
         if let Some(i) = observers.iter().position(|o| o.observer.handle == handle) {
             let o = observers.remove(i);
@@ -205,20 +263,38 @@ impl AppHost {
 
     /// Whether a process of `uid` runs (its `UidRecord`, never idle here).
     fn uid_runs(&self, uid: i32) -> bool {
-        self.apps.lock().unwrap().values().any(|a| a.uid as i32 == uid)
+        self.apps
+            .lock()
+            .unwrap()
+            .values()
+            .any(|a| a.uid as i32 == uid)
     }
 
     /// `isUidActive`.
-    pub(super) fn is_uid_active(&self, call: &Call<'_>, uid: i32, package: Option<&str>) -> Result<bool, Exception> {
+    pub(super) fn is_uid_active(
+        &self,
+        call: &Call<'_>,
+        uid: i32,
+        package: Option<&str>,
+    ) -> Result<bool, Exception> {
         self.enforce_usage_stats(call, package, "isUidActive")?;
         Ok(self.uid_runs(uid))
     }
 
     /// `getUidProcessState`.
-    pub(super) fn uid_process_state(&self, call: &Call<'_>, uid: i32, package: Option<&str>) -> Result<i32, Exception> {
+    pub(super) fn uid_process_state(
+        &self,
+        call: &Call<'_>,
+        uid: i32,
+        package: Option<&str>,
+    ) -> Result<i32, Exception> {
         self.enforce_usage_stats(call, package, "getUidProcessState")?;
         self.incoming_user(call.sender_euid as i32, uid / PER_USER_RANGE as i32, false)?;
-        Ok(if self.uid_runs(uid) { PROCESS_STATE_TOP } else { PROCESS_STATE_NONEXISTENT })
+        Ok(if self.uid_runs(uid) {
+            PROCESS_STATE_TOP
+        } else {
+            PROCESS_STATE_NONEXISTENT
+        })
     }
 
     /// `uid` changed: its observers are told.
@@ -229,7 +305,18 @@ impl AppHost {
             *seq
         };
         // `isWatchingUid`.
-        for o in self.uid_observers.observers.lock().unwrap().iter_mut().filter(|o| o.uids.as_ref().is_none_or(|u| u.binary_search(&uid).is_ok())) {
+        for o in self
+            .uid_observers
+            .observers
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .filter(|o| {
+                o.uids
+                    .as_ref()
+                    .is_none_or(|u| u.binary_search(&uid).is_ok())
+            })
+        {
             o.dispatch(uid, change, seq);
         }
     }

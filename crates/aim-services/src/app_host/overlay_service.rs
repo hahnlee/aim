@@ -78,7 +78,10 @@ fn restore(bytes: &[u8]) -> Result<Vec<OverlayInfo>, String> {
     let mut items = Vec::new();
     for item in root.children().filter(|e| e.name == "item") {
         let string = |name: &str| item.string(name).map(|s| s.into_owned());
-        let int = |name: &str| item.int(name).and_then(|v| v.ok_or_else(|| format!("overlays.xml: no {name}")));
+        let int = |name: &str| {
+            item.int(name)
+                .and_then(|v| v.ok_or_else(|| format!("overlays.xml: no {name}")))
+        };
         let constraints = item
             .children()
             .filter(|e| e.name == "constraint")
@@ -109,16 +112,23 @@ pub struct OverlayManager {
 
 impl OverlayManager {
     pub fn new(host: Arc<AppHost>) -> Self {
-        OverlayManager { host, settings: OnceLock::new() }
+        OverlayManager {
+            host,
+            settings: OnceLock::new(),
+        }
     }
 
     fn settings(&self) -> Result<&[OverlayInfo], Exception> {
         let data = self.host.inputs()?.data.clone();
         let settings = self.settings.get_or_init(|| {
             let path = data.join("system/overlays.xml");
-            std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display())).and_then(|b| restore(&b))
+            std::fs::read(&path)
+                .map_err(|e| format!("{}: {e}", path.display()))
+                .and_then(|b| restore(&b))
         });
-        settings.as_deref().map_err(|e| Exception::new(EX_ILLEGAL_STATE, e.clone()))
+        settings
+            .as_deref()
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e.clone()))
     }
 }
 
@@ -131,25 +141,35 @@ impl Service for OverlayManager {
         let mut p = Parcel::new();
         match call.code {
             om::GET_OVERLAY_INFOS_FOR_TARGET => {
-                let a = om::GetOverlayInfosForTarget::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    om::GetOverlayInfosForTarget::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let Some(target) = a.target_package_name else {
                     om::write_get_overlay_infos_for_target_reply::<OverlayInfo>(&mut p, Some(&[]));
                     return Ok(p);
                 };
-                let user = self
-                    .host
-                    .handle_incoming_user(call.sender_euid as i32, a.user_id, false, true, Some("getOverlayInfosForTarget"));
+                let user = self.host.handle_incoming_user(
+                    call.sender_euid as i32,
+                    a.user_id,
+                    false,
+                    true,
+                    Some("getOverlayInfosForTarget"),
+                );
                 let overlays = user.and_then(|user| {
                     Ok(self
                         .settings()?
                         .iter()
-                        .filter(|o| o.user_id == user && o.target_package_name.as_deref() == Some(target.as_str()))
+                        .filter(|o| {
+                            o.user_id == user
+                                && o.target_package_name.as_deref() == Some(target.as_str())
+                        })
                         .cloned()
                         .map(Some)
                         .collect::<Vec<_>>())
                 });
                 match overlays {
-                    Ok(overlays) => om::write_get_overlay_infos_for_target_reply(&mut p, Some(&overlays)),
+                    Ok(overlays) => {
+                        om::write_get_overlay_infos_for_target_reply(&mut p, Some(&overlays))
+                    }
                     Err(e) => return reply(Err(e)),
                 }
             }
@@ -174,8 +194,18 @@ mod tests {
 </overlays>"#;
         let items = restore(xml).unwrap();
         assert_eq!(items.len(), 2);
-        assert_eq!((items[0].state, items[0].is_mutable, items[0].priority), (6, false, 1));
-        assert_eq!((items[1].is_mutable, items[1].is_fabricated, items[1].constraints.clone()), (true, true, vec![(0, 2)]));
+        assert_eq!(
+            (items[0].state, items[0].is_mutable, items[0].priority),
+            (6, false, 1)
+        );
+        assert_eq!(
+            (
+                items[1].is_mutable,
+                items[1].is_fabricated,
+                items[1].constraints.clone()
+            ),
+            (true, true, vec![(0, 2)])
+        );
         assert_eq!(items[1].overlay_name, None);
     }
 }

@@ -186,14 +186,26 @@ impl WriteParcelable for ZenRule {
             Some(id) => write_uri(p, id),
             None => p.write_string16(None),
         }
-        parcelable(p, "android.service.notification.Condition", self.condition.as_ref());
+        parcelable(
+            p,
+            "android.service.notification.Condition",
+            self.condition.as_ref(),
+        );
         write_component(p, self.component.as_ref(), false);
         write_component(p, self.configuration_activity.as_ref(), false);
         optional(p, &self.id);
         p.write_i64(self.creation_time);
         optional(p, &self.enabler);
-        parcelable(p, "android.service.notification.ZenPolicy", self.policy.as_ref());
-        parcelable(p, "android.service.notification.ZenDeviceEffects", self.effects.as_ref());
+        parcelable(
+            p,
+            "android.service.notification.ZenPolicy",
+            self.policy.as_ref(),
+        );
+        parcelable(
+            p,
+            "android.service.notification.ZenDeviceEffects",
+            self.effects.as_ref(),
+        );
         p.write_string8(self.pkg.as_deref());
         p.write_bool(self.allow_manual_invocation);
         p.write_string8(self.icon_res_name.as_deref());
@@ -242,7 +254,13 @@ fn write_component(p: &mut Parcel, component: Option<&(String, String)>, trim: b
     match component {
         Some((package, class)) => {
             p.write_string16(Some("android.content.ComponentName"));
-            let name = |s: &str| if trim { trimmed(s, MAX_STRING_LENGTH) } else { s.to_owned() };
+            let name = |s: &str| {
+                if trim {
+                    trimmed(s, MAX_STRING_LENGTH)
+                } else {
+                    s.to_owned()
+                }
+            };
             p.write_string16(Some(&name(package)));
             p.write_string16(Some(&name(class)));
         }
@@ -269,7 +287,11 @@ impl WriteParcelable for ConfigParcel {
         let ConfigParcel(config, process) = self;
         p.write_i32(config.user);
         parcelable(p, ZEN_RULE_CLASS, Some(&config.manual));
-        let automatic: Vec<_> = config.automatic.iter().map(|r| (r.id.clone().unwrap_or_default(), r.clone())).collect();
+        let automatic: Vec<_> = config
+            .automatic
+            .iter()
+            .map(|r| (r.id.clone().unwrap_or_default(), r.clone()))
+            .collect();
         for rules in [automatic, config.deleted.clone()] {
             // `writeRulesToParcel`.
             p.write_i32(rules.len() as i32);
@@ -281,7 +303,12 @@ impl WriteParcelable for ConfigParcel {
                 p.write_string8(Some(key));
             }
             p.write_string16(Some("android.content.pm.ParceledListSlice"));
-            Slice::new(process.clone(), ZEN_RULE_CLASS, rules.into_iter().map(|(_, r)| r).collect()).write_to(p);
+            Slice::new(
+                process.clone(),
+                ZEN_RULE_CLASS,
+                rules.into_iter().map(|(_, r)| r).collect(),
+            )
+            .write_to(p);
         }
         p.write_i32(i32::from(config.has_priority_channels));
     }
@@ -299,7 +326,12 @@ impl WriteParcelable for AzrWithId {
         // The constructor's trimmed name, a `Uri.parse` of the trimmed
         // condition id, and trimmed components.
         p.write_i32(1);
-        p.write_string8(rule.name.as_deref().map(|n| trimmed(n, MAX_STRING_LENGTH)).as_deref());
+        p.write_string8(
+            rule.name
+                .as_deref()
+                .map(|n| trimmed(n, MAX_STRING_LENGTH))
+                .as_deref(),
+        );
         p.write_i32(match rule.zen_mode {
             0 => 1,
             1 => 2,
@@ -307,14 +339,25 @@ impl WriteParcelable for AzrWithId {
             3 => 3,
             _ => 0,
         });
-        let condition = trimmed(rule.condition_id.as_deref().unwrap_or_default(), MAX_STRING_LENGTH);
+        let condition = trimmed(
+            rule.condition_id.as_deref().unwrap_or_default(),
+            MAX_STRING_LENGTH,
+        );
         write_uri(p, &condition);
         write_component(p, rule.component.as_ref(), true);
         write_component(p, rule.configuration_activity.as_ref(), true);
         p.write_i64(rule.creation_time);
-        parcelable(p, "android.service.notification.ZenPolicy", rule.policy.as_ref());
+        parcelable(
+            p,
+            "android.service.notification.ZenPolicy",
+            rule.policy.as_ref(),
+        );
         p.write_string8(rule.pkg.as_deref());
-        parcelable(p, "android.service.notification.ZenDeviceEffects", rule.effects.as_ref());
+        parcelable(
+            p,
+            "android.service.notification.ZenDeviceEffects",
+            rule.effects.as_ref(),
+        );
         p.write_bool(rule.allow_manual_invocation);
         // `drawableResNameToResId`: none without a name.
         p.write_i32(0);
@@ -355,7 +398,11 @@ fn read_policy(e: &Element) -> Option<ZenPolicy> {
     let state = |allow: bool| if allow { STATE_ALLOW } else { STATE_DISALLOW };
     let channels = int(e, "priorityChannelsAllowed", STATE_UNSET);
     if channels != STATE_UNSET {
-        policy.channels = if channels == STATE_ALLOW { CHANNEL_POLICY_PRIORITY } else { CHANNEL_POLICY_NONE };
+        policy.channels = if channels == STATE_ALLOW {
+            CHANNEL_POLICY_PRIORITY
+        } else {
+            CHANNEL_POLICY_NONE
+        };
         set = true;
     }
     // `allowCalls`, `allowMessages`: a known audience sets the category.
@@ -365,9 +412,15 @@ fn read_policy(e: &Element) -> Option<ZenPolicy> {
             continue;
         }
         set = true;
-        if audience == PEOPLE_TYPE_NONE || (PEOPLE_TYPE_ANYONE..=PEOPLE_TYPE_STARRED).contains(&audience) {
+        if audience == PEOPLE_TYPE_NONE
+            || (PEOPLE_TYPE_ANYONE..=PEOPLE_TYPE_STARRED).contains(&audience)
+        {
             policy.categories[category] = state(audience != PEOPLE_TYPE_NONE);
-            *if category == CALLS { &mut policy.calls } else { &mut policy.messages } = audience;
+            *if category == CALLS {
+                &mut policy.calls
+            } else {
+                &mut policy.messages
+            } = audience;
         }
     }
     let repeat_callers = int(e, "repeatCallers", STATE_UNSET);
@@ -378,12 +431,23 @@ fn read_policy(e: &Element) -> Option<ZenPolicy> {
     let conversations = int(e, "convosFrom", 0);
     if conversations != 0 {
         set = true;
-        if matches!(conversations, CONVERSATION_SENDERS_ANYONE | CONVERSATION_SENDERS_IMPORTANT | CONVERSATION_SENDERS_NONE) {
+        if matches!(
+            conversations,
+            CONVERSATION_SENDERS_ANYONE
+                | CONVERSATION_SENDERS_IMPORTANT
+                | CONVERSATION_SENDERS_NONE
+        ) {
             policy.categories[CONVERSATIONS] = state(conversations != CONVERSATION_SENDERS_NONE);
             policy.conversations = conversations;
         }
     }
-    for (attr, category) in [("alarms", ALARMS), ("media", MEDIA), ("system", SYSTEM), ("events", EVENTS), ("reminders", REMINDERS)] {
+    for (attr, category) in [
+        ("alarms", ALARMS),
+        ("media", MEDIA),
+        ("system", SYSTEM),
+        ("events", EVENTS),
+        ("reminders", REMINDERS),
+    ] {
         let v = int(e, attr, STATE_UNSET);
         if v != STATE_UNSET {
             policy.categories[category] = state(v == STATE_ALLOW);
@@ -391,7 +455,15 @@ fn read_policy(e: &Element) -> Option<ZenPolicy> {
         }
     }
     // `VISUAL_EFFECT_*` in order.
-    let effects = ["showFullScreenIntent", "showLights", "shoePeek", "showStatusBarIcons", "showBadges", "showAmbient", "showNotificationList"];
+    let effects = [
+        "showFullScreenIntent",
+        "showLights",
+        "shoePeek",
+        "showStatusBarIcons",
+        "showBadges",
+        "showAmbient",
+        "showNotificationList",
+    ];
     for (i, attr) in effects.iter().enumerate() {
         let v = int(e, attr, STATE_UNSET);
         if v != STATE_UNSET {
@@ -419,7 +491,8 @@ fn read_effects(e: &Element) -> Option<ZenDeviceEffects> {
     ];
     let effects = EFFECTS.map(|name| boolean(e, name, false));
     let extras = string_set(e.string("zdeExtraEffects").as_deref().unwrap_or_default());
-    (effects.iter().any(|e| *e) || !extras.is_empty()).then_some(ZenDeviceEffects { effects, extras })
+    (effects.iter().any(|e| *e) || !extras.is_empty())
+        .then_some(ZenDeviceEffects { effects, extras })
 }
 
 /// `safeStringSet`: the items split on each `,` no `\` escapes, unescaped,
@@ -475,7 +548,10 @@ fn read_condition(e: &Element) -> Option<Condition> {
     if !(0..=3).contains(&state) || !(0..=3).contains(&source) {
         return None;
     }
-    let text = |name: &str| e.string(name).map(|s| trimmed(&s, CONDITION_MAX_STRING_LENGTH));
+    let text = |name: &str| {
+        e.string(name)
+            .map(|s| trimmed(&s, CONDITION_MAX_STRING_LENGTH))
+    };
     Some(Condition {
         id: trimmed(&id, CONDITION_MAX_STRING_LENGTH),
         summary: trimmed(&summary, CONDITION_MAX_STRING_LENGTH),
@@ -500,7 +576,11 @@ fn read_rule(e: &Element) -> ZenRule {
         id: None,
         enabled: boolean(e, "enabled", true),
         name: string("name"),
-        zen_mode: if (0..=ZEN_MODE_NO_INTERRUPTIONS).contains(&zen) { zen } else { ZEN_MODE_IMPORTANT_INTERRUPTIONS },
+        zen_mode: if (0..=ZEN_MODE_NO_INTERRUPTIONS).contains(&zen) {
+            zen
+        } else {
+            ZEN_MODE_IMPORTANT_INTERRUPTIONS
+        },
         condition_id: string("conditionId"),
         condition: read_condition(e),
         pkg: string("pkg").or_else(|| owner.as_ref().map(|c| c.0.clone())),
@@ -530,8 +610,16 @@ fn read_rule(e: &Element) -> ZenRule {
 /// `ArrayMap`s. Only the `modes_ui` form, with a manual rule that has a
 /// policy, is read (#1647).
 pub fn read(policy: &Element) -> Result<ZenModeConfig, Exception> {
-    let unsupported = |what: &str| Exception::new(EX_UNSUPPORTED_OPERATION, format!("notification: {what} (#1647)"));
-    let zen = policy.children().find(|e| e.name == "zen").ok_or_else(|| unsupported("the default zen config"))?;
+    let unsupported = |what: &str| {
+        Exception::new(
+            EX_UNSUPPORTED_OPERATION,
+            format!("notification: {what} (#1647)"),
+        )
+    };
+    let zen = policy
+        .children()
+        .find(|e| e.name == "zen")
+        .ok_or_else(|| unsupported("the default zen config"))?;
     let mut manual = None;
     let (mut automatic, mut deleted) = (Vec::new(), Vec::new());
     let mut has_priority_channels = false;
@@ -543,8 +631,13 @@ pub fn read(policy: &Element) -> Result<ZenModeConfig, Exception> {
                 manual = Some(rule);
             }
             "automatic" | "deleted" => {
-                let Some(id) = e.string("ruleId") else { continue };
-                let rule = ZenRule { id: Some(id.into_owned()), ..read_rule(e) };
+                let Some(id) = e.string("ruleId") else {
+                    continue;
+                };
+                let rule = ZenRule {
+                    id: Some(id.into_owned()),
+                    ..read_rule(e)
+                };
                 if e.name == "automatic" {
                     automatic.push(rule);
                 } else if let (Some(pkg), Some(condition)) = (&rule.pkg, &rule.condition_id) {
@@ -556,12 +649,18 @@ pub fn read(policy: &Element) -> Result<ZenModeConfig, Exception> {
             _ => {}
         }
     }
-    let manual = manual.filter(|m| m.policy.is_some()).ok_or_else(|| unsupported("a zen config before modes_ui"))?;
+    let manual = manual
+        .filter(|m| m.policy.is_some())
+        .ok_or_else(|| unsupported("a zen config before modes_ui"))?;
     Ok(ZenModeConfig {
         user: int(zen, "user", 0),
         manual,
-        automatic: crate::package::info::array_order(automatic, |r: &ZenRule| r.id.as_deref().unwrap_or_default()),
-        deleted: crate::package::info::array_order(deleted, |(k, _): &(String, ZenRule)| k.as_str()),
+        automatic: crate::package::info::array_order(automatic, |r: &ZenRule| {
+            r.id.as_deref().unwrap_or_default()
+        }),
+        deleted: crate::package::info::array_order(deleted, |(k, _): &(String, ZenRule)| {
+            k.as_str()
+        }),
         has_priority_channels,
     })
 }
@@ -583,10 +682,16 @@ pub fn automatic_zen_rules(rules: Vec<ZenRule>) -> Result<Vec<AzrWithId>, Except
             return Err(Exception::new(EX_NULL_POINTER, "AutomaticZenRule.Builder"));
         }
         if rule.icon_res_name.as_deref().is_some_and(|n| !n.is_empty()) {
-            return Err(Exception::new(EX_UNSUPPORTED_OPERATION, "notification: a zen rule's icon by name (#1646)"));
+            return Err(Exception::new(
+                EX_UNSUPPORTED_OPERATION,
+                "notification: a zen rule's icon by name (#1646)",
+            ));
         }
     }
-    Ok(hash_order(rules, |r| r.id.as_deref().unwrap_or_default()).into_iter().map(AzrWithId).collect())
+    Ok(hash_order(rules, |r| r.id.as_deref().unwrap_or_default())
+        .into_iter()
+        .map(AzrWithId)
+        .collect())
 }
 
 /// `ConditionProviders.isPackageOrComponentAllowed`: whether `<dnd_apps>`
@@ -597,7 +702,10 @@ pub fn policy_access_approved(policy: &Element, package: &str, user: i32) -> boo
         .filter(|e| e.name == "dnd_apps")
         .flat_map(|e| e.children())
         .filter(|l| l.name == "service_listing" && int(l, "user", 0) == user)
-        .any(|l| l.string("approved").is_some_and(|a| a.split(':').any(|p| p == package)))
+        .any(|l| {
+            l.string("approved")
+                .is_some_and(|a| a.split(':').any(|p| p == package))
+        })
 }
 
 #[cfg(test)]
@@ -618,25 +726,73 @@ mod tests {
 </zen><dnd_apps version="4"><service_listing approved="a:p" user="0" primary="true" /></dnd_apps></notification-policy>"#;
         let root = aim_android_xml::read(xml).unwrap();
         let config = read(&root).unwrap();
-        assert!(config.manual.enabled && config.manual.policy.is_some() && config.manual.id.is_none());
+        assert!(
+            config.manual.enabled && config.manual.policy.is_some() && config.manual.id.is_none()
+        );
         assert_eq!(config.deleted.len(), 1);
-        assert_eq!((config.deleted[0].0.as_str(), config.deleted[0].1.deletion_instant), ("q|condition://q/x", Some(5)));
+        assert_eq!(
+            (
+                config.deleted[0].0.as_str(),
+                config.deleted[0].1.deletion_instant
+            ),
+            ("q|condition://q/x", Some(5))
+        );
         assert!(config.has_priority_channels);
         let rules = config.rules();
         assert_eq!(rules.len(), 2);
-        let r1 = rules.iter().find(|r| r.id.as_deref() == Some("r1")).unwrap();
+        let r1 = rules
+            .iter()
+            .find(|r| r.id.as_deref() == Some("r1"))
+            .unwrap();
         assert!(!r1.enabled && r1.allow_manual_invocation);
-        assert_eq!((r1.disabled_origin, r1.condition.as_ref().map(|c| (c.flags, c.line1.clone(), c.line2.clone()))), (4, Some((2, Some(String::new()), None))));
+        assert_eq!(
+            (
+                r1.disabled_origin,
+                r1.condition
+                    .as_ref()
+                    .map(|c| (c.flags, c.line1.clone(), c.line2.clone()))
+            ),
+            (4, Some((2, Some(String::new()), None)))
+        );
         assert_eq!(r1.configuration_activity, Some(("p".into(), "p.A".into())));
         let policy = r1.policy.as_ref().unwrap();
-        assert_eq!(policy.categories, [0, 0, STATE_DISALLOW, STATE_ALLOW, STATE_ALLOW, STATE_ALLOW, 0, STATE_DISALLOW, STATE_DISALLOW]);
-        assert_eq!((policy.messages, policy.calls, policy.conversations, policy.channels), (4, 3, 3, CHANNEL_POLICY_PRIORITY));
+        assert_eq!(
+            policy.categories,
+            [
+                0,
+                0,
+                STATE_DISALLOW,
+                STATE_ALLOW,
+                STATE_ALLOW,
+                STATE_ALLOW,
+                0,
+                STATE_DISALLOW,
+                STATE_DISALLOW
+            ]
+        );
+        assert_eq!(
+            (
+                policy.messages,
+                policy.calls,
+                policy.conversations,
+                policy.channels
+            ),
+            (4, 3, 3, CHANNEL_POLICY_PRIORITY)
+        );
         assert_eq!(policy.effects, [0, 0, 0, STATE_DISALLOW, 0, 0, 0]);
         assert!(r1.effects.as_ref().unwrap().effects[2]);
-        let r2 = rules.iter().find(|r| r.id.as_deref() == Some("r2")).unwrap();
+        let r2 = rules
+            .iter()
+            .find(|r| r.id.as_deref() == Some("r2"))
+            .unwrap();
         // A condition with an invalid state is none.
-        assert!(r2.enabled && r2.policy.is_none() && r2.effects.is_none() && r2.condition.is_none());
-        assert_eq!((r2.zen_mode, r2.kind), (ZEN_MODE_IMPORTANT_INTERRUPTIONS, TYPE_UNKNOWN));
+        assert!(
+            r2.enabled && r2.policy.is_none() && r2.effects.is_none() && r2.condition.is_none()
+        );
+        assert_eq!(
+            (r2.zen_mode, r2.kind),
+            (ZEN_MODE_IMPORTANT_INTERRUPTIONS, TYPE_UNKNOWN)
+        );
         assert!(policy_access_approved(&root, "p", 0) && !policy_access_approved(&root, "q", 0));
     }
 

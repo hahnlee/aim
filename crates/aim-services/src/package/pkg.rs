@@ -538,9 +538,17 @@ impl AndroidPackage {
     /// `PackageImpl.setPackageName`: the package's name and its
     /// components'.
     pub fn set_package_name(&mut self, name: String) {
-        let components = self.permissions.iter_mut().map(|p| &mut p.component)
+        let components = self
+            .permissions
+            .iter_mut()
+            .map(|p| &mut p.component)
             .chain(self.permission_groups.iter_mut().map(|g| &mut g.component))
-            .chain(self.activities.iter_mut().chain(self.receivers.iter_mut()).map(|a| &mut a.main.component))
+            .chain(
+                self.activities
+                    .iter_mut()
+                    .chain(self.receivers.iter_mut())
+                    .map(|a| &mut a.main.component),
+            )
             .chain(self.providers.iter_mut().map(|p| &mut p.main.component))
             .chain(self.services.iter_mut().map(|s| &mut s.main.component))
             .chain(self.instrumentations.iter_mut().map(|i| &mut i.component));
@@ -1215,8 +1223,13 @@ fn signing_details(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<Sig
     read_signing_details_payload(r, s)
 }
 
-pub(crate) fn read_signing_details_payload(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<SigningDetails>> {
-    if r.read_bool()? { return Ok(None); }
+pub(crate) fn read_signing_details_payload(
+    r: &mut Reader<'_>,
+    s: &mut dyn Strings,
+) -> Result<Option<SigningDetails>> {
+    if r.read_bool()? {
+        return Ok(None);
+    }
     Ok(Some(SigningDetails {
         signatures: typed_array(r, |r| byte_array(r)?.ok_or(BAD_VALUE))?,
         scheme_version: r.read_i32()?,

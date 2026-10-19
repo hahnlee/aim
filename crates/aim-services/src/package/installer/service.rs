@@ -428,11 +428,14 @@ impl Service for SessionNode {
                         (self.notify)(event);
                     }
                 }),
-            Action::Close => self.sessions.close_bound(self.id, call.sender_euid, &self.bound).map(|event| {
-                if let Some(event) = event {
-                    (self.notify)(event);
-                }
-            }),
+            Action::Close => self
+                .sessions
+                .close_bound(self.id, call.sender_euid, &self.bound)
+                .map(|event| {
+                    if let Some(event) = event {
+                        (self.notify)(event);
+                    }
+                }),
             Action::AddChild(id) => self
                 .sessions
                 .add_child(self.id, id, call.sender_euid)

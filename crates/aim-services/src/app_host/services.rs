@@ -39,7 +39,8 @@ use std::time::{Duration, Instant};
 
 use aim_binder_host::local::Strong;
 use aim_binder_host::parcel::{
-    Binder, EX_BAD_PARCELABLE, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader, Result as ParcelResult,
+    Binder, EX_BAD_PARCELABLE, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader,
+    Result as ParcelResult,
 };
 use aim_service_aidl::android_app_iapplicationthread as thread;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
@@ -125,7 +126,8 @@ const FGS_INTRODUCE_TIME_LIMITS: i64 = 317_799_821;
 const FGS_SAW_RESTRICTIONS: i64 = 319_471_980;
 /// The aconfig flags of the time-limited types' callback and of the
 /// overlay restriction.
-const INTRODUCE_NEW_SERVICE_ONTIMEOUT_CALLBACK: &str = "android.app.introduce_new_service_ontimeout_callback";
+const INTRODUCE_NEW_SERVICE_ONTIMEOUT_CALLBACK: &str =
+    "android.app.introduce_new_service_ontimeout_callback";
 const FGS_DISABLE_SAW: &str = "com.android.server.am.fgs_disable_saw";
 /// `PowerExemptionManager.REASON_*`.
 const REASON_DENIED: i32 = -1;
@@ -340,7 +342,9 @@ impl Foreground {
         } else {
             Stopped::Keep
         };
-        if flags & STOP_FOREGROUND_REMOVE != 0 || (target_sdk >= LOLLIPOP && flags & STOP_FOREGROUND_DETACH != 0) {
+        if flags & STOP_FOREGROUND_REMOVE != 0
+            || (target_sdk >= LOLLIPOP && flags & STOP_FOREGROUND_DETACH != 0)
+        {
             self.id = 0;
             self.notification = None;
         }
@@ -352,7 +356,13 @@ impl Foreground {
 
     /// `shouldShowFgsNotificationLocked` at `now`, the app's notifications
     /// not deferred until `eligible` (`withinFgsDeferRateLimit`).
-    fn show_now(&self, now: Instant, eligible: Option<Instant>, force_deferred: bool, immediately: bool) -> bool {
+    fn show_now(
+        &self,
+        now: Instant,
+        eligible: Option<Instant>,
+        force_deferred: bool,
+        immediately: bool,
+    ) -> bool {
         if self.deferred && self.display_time.is_some_and(|t| now >= t) {
             return true;
         }
@@ -371,14 +381,20 @@ impl Foreground {
 /// the manifest's for `FOREGROUND_SERVICE_TYPE_MANIFEST`, which it must be
 /// a subset of, and short-service dropped when combined with another.
 fn effective_type(requested: i32, manifest: i32) -> Result<i32, Exception> {
-    let mut ty = if requested == fgs_types::TYPE_MANIFEST { manifest } else { requested };
+    let mut ty = if requested == fgs_types::TYPE_MANIFEST {
+        manifest
+    } else {
+        requested
+    };
     if ty & manifest != ty {
         return Err(Exception::illegal_argument(format!(
             "foregroundServiceType 0x{ty:08X} is not a subset of foregroundServiceType attribute 0x{manifest:08X} in service element of manifest file"
         )));
     }
     if ty & fgs_types::TYPE_SHORT_SERVICE != 0 && ty != fgs_types::TYPE_SHORT_SERVICE {
-        eprintln!("app host: startForeground(): FOREGROUND_SERVICE_TYPE_SHORT_SERVICE is combined with other types. SHORT_SERVICE will be ignored.");
+        eprintln!(
+            "app host: startForeground(): FOREGROUND_SERVICE_TYPE_SHORT_SERVICE is combined with other types. SHORT_SERVICE will be ignored."
+        );
         ty &= !fgs_types::TYPE_SHORT_SERVICE;
     }
     Ok(ty)
@@ -395,7 +411,10 @@ fn parcelable_exception(class: &str, message: String) -> Exception {
 
 /// `ComponentName.flattenToShortString`.
 fn short_name(package: &str, class: &str) -> String {
-    match class.strip_prefix(package).filter(|rest| rest.starts_with('.')) {
+    match class
+        .strip_prefix(package)
+        .filter(|rest| rest.starts_with('.'))
+    {
         Some(rest) => format!("{package}/{rest}"),
         None => format!("{package}/{class}"),
     }
@@ -562,7 +581,13 @@ struct Running {
 /// process of its uid, or all of its user's when `allowed`; then those of
 /// `services` restarting, in their order and picked alike, again with when
 /// they restart.
-fn pick(services: &[Running], max: i32, uid: i32, allowed: bool, across_users: bool) -> Vec<RunningServiceInfo> {
+fn pick(
+    services: &[Running],
+    max: i32,
+    uid: i32,
+    allowed: bool,
+    across_users: bool,
+) -> Vec<RunningServiceInfo> {
     let user = uid / super::PER_USER_RANGE as i32;
     let visible = |s: &Running| allowed || s.app_uid == Some(uid);
     let hash = |s: &&Running| java_hash(&s.info.package).wrapping_add(java_hash(&s.info.class));
@@ -570,11 +595,22 @@ fn pick(services: &[Running], max: i32, uid: i32, allowed: bool, across_users: b
     map.sort_by_key(hash);
     let listed = map
         .into_iter()
-        .filter(|s| if across_users { s.user == 0 } else { s.user == user && visible(s) })
+        .filter(|s| {
+            if across_users {
+                s.user == 0
+            } else {
+                s.user == user && visible(s)
+            }
+        })
         .map(|s| s.info.clone());
     let restarting = services.iter().filter_map(|s| {
-        let at = s.restarting.filter(|_| across_users || s.user == user && visible(s))?;
-        Some(RunningServiceInfo { restarting: at, ..s.info.clone() })
+        let at = s
+            .restarting
+            .filter(|_| across_users || s.user == user && visible(s))?;
+        Some(RunningServiceInfo {
+            restarting: at,
+            ..s.info.clone()
+        })
     });
     listed.chain(restarting).take(max.max(0) as usize).collect()
 }
@@ -595,11 +631,20 @@ fn back_off(
     if delay.is_zero() {
         (count + 1, min)
     } else if crashes > 1 {
-        (count, BOUND_SERVICE_CRASH_RESTART_DURATION * (crashes - 1) as u32)
+        (
+            count,
+            BOUND_SERVICE_CRASH_RESTART_DURATION * (crashes - 1) as u32,
+        )
     } else if started.is_none_or(|t| now > t + reset) {
         (1, min)
     } else {
-        (count, delay.checked_mul(SERVICE_RESTART_DURATION_FACTOR).unwrap_or(Duration::MAX).max(min))
+        (
+            count,
+            delay
+                .checked_mul(SERVICE_RESTART_DURATION_FACTOR)
+                .unwrap_or(Duration::MAX)
+                .max(min),
+        )
     }
 }
 
@@ -618,24 +663,37 @@ impl Record {
             if s.intent.is_none() {
                 continue;
             }
-            if s.delivery_count < MAX_DELIVERY_COUNT && s.done_executing_count < MAX_DONE_EXECUTING_COUNT {
+            if s.delivery_count < MAX_DELIVERY_COUNT
+                && s.done_executing_count < MAX_DONE_EXECUTING_COUNT
+            {
                 let dur = s.delivered_time.map_or(Duration::ZERO, |t| now - t) * 2;
                 min = min.max(dur);
                 reset = reset.max(dur);
                 again.push(s);
             } else {
-                eprintln!("app host: canceling start item {} in service {}/{}", s.id, self.package, self.class);
+                eprintln!(
+                    "app host: canceling start item {} in service {}/{}",
+                    s.id, self.package, self.class
+                );
                 canceled = true;
             }
         }
         self.pending.splice(0..0, again);
         // `canStopIfKilled`.
-        let stop = self.start_requested && (self.stop_if_killed || canceled) && self.pending.is_empty();
+        let stop =
+            self.start_requested && (self.stop_if_killed || canceled) && self.pending.is_empty();
         if stop && !auto {
             return None;
         }
-        (self.restart_count, self.restart_delay) =
-            back_off(self.restart_count, self.restart_delay, self.crash_count, self.restart_time, min, reset, now);
+        (self.restart_count, self.restart_delay) = back_off(
+            self.restart_count,
+            self.restart_delay,
+            self.crash_count,
+            self.restart_time,
+            min,
+            reset,
+            now,
+        );
         if self.start_requested && self.stop_if_killed && self.pending.is_empty() {
             self.start_requested = false;
         }
@@ -679,10 +737,17 @@ impl State {
     /// closer than `SERVICE_MIN_RESTART_TIME_BETWEEN`.
     fn stagger(&self, token: Binder, mut at: Instant) -> Instant {
         loop {
-            let near = self.records.iter().filter(|r| r.token != token).filter_map(|r| r.next_restart_time.filter(|_| r.app.is_none())).find(|t| {
-                at.checked_add(SERVICE_MIN_RESTART_TIME_BETWEEN).is_none_or(|a| a > *t)
-                    && t.checked_add(SERVICE_MIN_RESTART_TIME_BETWEEN).is_none_or(|b| at < b)
-            });
+            let near = self
+                .records
+                .iter()
+                .filter(|r| r.token != token)
+                .filter_map(|r| r.next_restart_time.filter(|_| r.app.is_none()))
+                .find(|t| {
+                    at.checked_add(SERVICE_MIN_RESTART_TIME_BETWEEN)
+                        .is_none_or(|a| a > *t)
+                        && t.checked_add(SERVICE_MIN_RESTART_TIME_BETWEEN)
+                            .is_none_or(|b| at < b)
+                });
             match near.and_then(|t| t.checked_add(SERVICE_MIN_RESTART_TIME_BETWEEN)) {
                 Some(later) => at = later,
                 None => return at,
@@ -757,30 +822,54 @@ impl AppHost {
         let (_, resolution) = self.packages()?;
         let report = std::cell::RefCell::new(Vec::new());
         let found = resolution
-            .resolve_service_for_start(&intent.intent, resolved_type, STOCK_PM_FLAGS, user, uid, &report)
+            .resolve_service_for_start(
+                &intent.intent,
+                resolved_type,
+                STOCK_PM_FLAGS,
+                user,
+                uid,
+                &report,
+            )
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("resolveService: {e:?}")))?;
         self.report_unsafe_intent(pid, intent, report.into_inner());
-        let Some(crate::package::component_resolver::Info::Service(mut info)) = found.map(|r| r.info)
+        let Some(crate::package::component_resolver::Info::Service(mut info)) =
+            found.map(|r| r.info)
         else {
             return Ok(Lookup::None);
         };
-        let name = || format!("ComponentInfo{{{}/{}}}", info.info.item.package_name.as_deref().unwrap_or_default(), info.info.item.name.as_deref().unwrap_or_default());
+        let name = || {
+            format!(
+                "ComponentInfo{{{}/{}}}",
+                info.info.item.package_name.as_deref().unwrap_or_default(),
+                info.info.item.name.as_deref().unwrap_or_default()
+            )
+        };
         // An external service runs under its client's application: its
         // package name and uid (with the defining package's code).
         match (info.flags & FLAG_EXTERNAL_SERVICE != 0, external) {
             (true, Some(calling_package)) => {
                 let class = info.info.item.name.clone().unwrap_or_default();
                 if !info.info.exported {
-                    return Err(Exception::security(format!("BIND_EXTERNAL_SERVICE failed, {class} is not exported")));
+                    return Err(Exception::security(format!(
+                        "BIND_EXTERNAL_SERVICE failed, {class} is not exported"
+                    )));
                 }
                 if info.flags & FLAG_ISOLATED_PROCESS == 0 {
-                    return Err(Exception::security(format!("BIND_EXTERNAL_SERVICE failed, {class} is not an isolatedProcess")));
+                    return Err(Exception::security(format!(
+                        "BIND_EXTERNAL_SERVICE failed, {class} is not an isolatedProcess"
+                    )));
                 }
                 if !self.owns_package(uid, calling_package)? {
-                    return Err(Exception::security("BIND_EXTERNAL_SERVICE failed, calling package not owned by calling UID "));
+                    return Err(Exception::security(
+                        "BIND_EXTERNAL_SERVICE failed, calling package not owned by calling UID ",
+                    ));
                 }
                 let (state, _) = self.packages()?;
-                let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: 1000 };
+                let query = crate::package::query::Query {
+                    state: &state,
+                    filter: &resolution.apps_filter,
+                    calling_uid: 1000,
+                };
                 let client = query
                     .application_info(calling_package, STOCK_PM_FLAGS, user)
                     .map_err(|e| self.unimplemented_named("activity", &format!("an external service's client: {} (#1492)", e.0)))??
@@ -790,8 +879,18 @@ impl AppHost {
                 app.uid = client.uid;
                 info.info.application_info = Arc::new(app);
             }
-            (true, None) => return Err(Exception::security(format!("BIND_EXTERNAL_SERVICE required for {}", name()))),
-            (false, Some(_)) => return Err(Exception::security(format!("BIND_EXTERNAL_SERVICE failed, {} is not an externalService", name()))),
+            (true, None) => {
+                return Err(Exception::security(format!(
+                    "BIND_EXTERNAL_SERVICE required for {}",
+                    name()
+                )));
+            }
+            (false, Some(_)) => {
+                return Err(Exception::security(format!(
+                    "BIND_EXTERNAL_SERVICE failed, {} is not an externalService",
+                    name()
+                )));
+            }
             (false, None) => {}
         }
         if instance.is_some() && info.flags & FLAG_ISOLATED_PROCESS == 0 {
@@ -895,32 +994,50 @@ impl AppHost {
             ));
         }
         let user = self.incoming_user(uid, user, false)?;
-        let info =
-            match self.retrieve_service(&intent, resolved_type.as_deref(), uid, pid, user, None, None)? {
-                Lookup::None => return Ok(None),
-                Lookup::Denied(why) => {
-                    return Ok(Some((
-                        "!".into(),
-                        if why.is_empty() {
-                            "private to package".into()
-                        } else {
-                            why
-                        },
-                    )));
-                }
-                Lookup::Found(info) => *info,
-            };
+        let info = match self.retrieve_service(
+            &intent,
+            resolved_type.as_deref(),
+            uid,
+            pid,
+            user,
+            None,
+            None,
+        )? {
+            Lookup::None => return Ok(None),
+            Lookup::Denied(why) => {
+                return Ok(Some((
+                    "!".into(),
+                    if why.is_empty() {
+                        "private to package".into()
+                    } else {
+                        why
+                    },
+                )));
+            }
+            Lookup::Found(info) => *info,
+        };
         // `startServiceInnerLocked`: the intent's grants, checked for the
         // caller (before the services are locked: a provider may be asked).
-        let package = info.info.application_info.item.package_name.as_deref().unwrap_or_default();
-        let grants = self.check_grant_from_intent(&intent, uid, package, user)?.map(|n| (n, self.new_start_owner()));
+        let package = info
+            .info
+            .application_info
+            .item
+            .package_name
+            .as_deref()
+            .unwrap_or_default();
+        let grants = self
+            .check_grant_from_intent(&intent, uid, package, user)?
+            .map(|n| (n, self.new_start_owner()));
         let kept = KeptIntent::new(intent, &self.process);
         let mut state = self.services.state.lock().unwrap();
         let token = Self::service_record(&mut state, info, None, &self.process);
         self.set_fgs_restriction(&mut state, token, calling_package, uid, false)?;
         let r = state.record(token).unwrap();
-        let (app_uid, package, target_sdk) =
-            (r.info.info.application_info.uid, r.package.clone(), r.info.info.application_info.target_sdk_version);
+        let (app_uid, package, target_sdk) = (
+            r.info.info.application_info.uid,
+            r.package.clone(),
+            r.info.info.application_info.target_sdk_version,
+        );
         if fg_required {
             if !r.fg.allowed_start() && self.bg_fgs_restricted(app_uid, uid)? {
                 if r.fg.owner_unknown {
@@ -932,7 +1049,10 @@ impl AppHost {
                 );
                 eprintln!("app host: {message}");
                 if self.change_enabled(FGS_START_EXCEPTION_CHANGE_ID, uid)? {
-                    return Err(parcelable_exception("android.app.ForegroundServiceStartNotAllowedException", message));
+                    return Err(parcelable_exception(
+                        "android.app.ForegroundServiceStartNotAllowedException",
+                        message,
+                    ));
                 }
                 return Ok(None);
             }
@@ -941,10 +1061,17 @@ impl AppHost {
                 // Started as a service that is not foreground; the app
                 // host's apps are all allowed to start those.
                 appops::MODE_IGNORED => {
-                    eprintln!("app host: startForegroundService not allowed due to app op: service {package}");
+                    eprintln!(
+                        "app host: startForegroundService not allowed due to app op: service {package}"
+                    );
                     fg_required = false;
                 }
-                _ => return Ok(Some(("!!".into(), "foreground not allowed as per app op".into()))),
+                _ => {
+                    return Ok(Some((
+                        "!!".into(),
+                        "foreground not allowed as per app op".into(),
+                    )));
+                }
             }
             // Only an app targeting O or later must call startForeground.
             fg_required &= target_sdk >= O;
@@ -983,16 +1110,23 @@ impl AppHost {
             ));
         }
         let user = self.incoming_user(uid, user, false)?;
-        let info =
-            match self.retrieve_service(&intent, resolved_type.as_deref(), uid, Some(pid), user, None, None)? {
-                Lookup::Found(info) => info,
-                Lookup::Denied(why) => {
-                    return Err(Exception::security(format!(
-                        "Not allowed to stop service: {why}"
-                    )));
-                }
-                Lookup::None => return Ok(-1),
-            };
+        let info = match self.retrieve_service(
+            &intent,
+            resolved_type.as_deref(),
+            uid,
+            Some(pid),
+            user,
+            None,
+            None,
+        )? {
+            Lookup::Found(info) => info,
+            Lookup::Denied(why) => {
+                return Err(Exception::security(format!(
+                    "Not allowed to stop service: {why}"
+                )));
+            }
+            Lookup::None => return Ok(-1),
+        };
         let class = info.info.item.name.clone().unwrap_or_default();
         let package = info
             .info
@@ -1092,13 +1226,22 @@ impl AppHost {
         // A system client may say what the binding is for, its intent then
         // only its filter.
         let bad = |e| Exception::new(EX_BAD_PARCELABLE, format!("bindService: intent: {e:?}"));
-        let client_label = if client_uid == SYSTEM_UID { intent.client_label().map_err(bad)? } else { 0 };
-        let intent = if client_label != 0 { intent.clone_filter().map_err(bad)? } else { intent };
+        let client_label = if client_uid == SYSTEM_UID {
+            intent.client_label().map_err(bad)?
+        } else {
+            0
+        };
+        let intent = if client_label != 0 {
+            intent.clone_filter().map_err(bad)?
+        } else {
+            intent
+        };
         let external = flags & (BIND_EXTERNAL_SERVICE | BIND_EXTERNAL_SERVICE_LONG) != 0;
         if flags & (BIND_SHARED_ISOLATED_PROCESS | BIND_PACKAGE_ISOLATED_PROCESS) != 0 {
-            return Err(
-                self.unimplemented_named("activity", "a binding into a shared isolated process (#1492)")
-            );
+            return Err(self.unimplemented_named(
+                "activity",
+                "a binding into a shared isolated process (#1492)",
+            ));
         }
         let user = self.incoming_user(uid, user, false)?;
         let info = match self.retrieve_service(
@@ -1115,7 +1258,16 @@ impl AppHost {
             Lookup::Found(info) => *info,
         };
         let conn = Conn::App(self.process.strong(conn));
-        self.bind_found(intent, info, instance, conn, Some(client), activity, flags, client_label)?;
+        self.bind_found(
+            intent,
+            info,
+            instance,
+            conn,
+            Some(client),
+            activity,
+            flags,
+            client_label,
+        )?;
         Ok(1)
     }
 
@@ -1138,7 +1290,16 @@ impl AppHost {
             Lookup::Found(info) => *info,
             Lookup::None | Lookup::Denied(_) => return Ok(false),
         };
-        self.bind_found(intent, info, None, Conn::Host(conn), None, None, bind_flags, 0)?;
+        self.bind_found(
+            intent,
+            info,
+            None,
+            Conn::Host(conn),
+            None,
+            None,
+            bind_flags,
+            0,
+        )?;
         Ok(true)
     }
 
@@ -1244,8 +1405,14 @@ impl AppHost {
             return Err(Exception::new(EX_NULL_POINTER, "connection"));
         };
         let state = self.services.state.lock().unwrap();
-        if !state.connections.iter().any(|c| matches!(&c.conn, Conn::App(s) if s.handle == conn)) {
-            return Err(Exception::illegal_argument(format!("Could not find connection for android.os.BinderProxy@{conn:x}")));
+        if !state
+            .connections
+            .iter()
+            .any(|c| matches!(&c.conn, Conn::App(s) if s.handle == conn))
+        {
+            return Err(Exception::illegal_argument(format!(
+                "Could not find connection for android.os.BinderProxy@{conn:x}"
+            )));
         }
         Ok(())
     }
@@ -1400,7 +1567,8 @@ impl AppHost {
         // The `android` package's services are system_server's own code,
         // which no process the app host starts can load (#1518).
         if package == super::SYSTEM_PACKAGE {
-            return Err(self.unimplemented_named("activity", "a service of system_server's own code (#1518)"));
+            return Err(self
+                .unimplemented_named("activity", "a service of system_server's own code (#1518)"));
         }
         let process = super::providers::process_name(&r.info.info);
         // `getProcessNameForService`: an isolated service runs alone in a
@@ -1410,7 +1578,9 @@ impl AppHost {
             // The WebView provider's services start by the WebView zygote
             // (`HostingRecord.byWebviewZygote`).
             let defining = r.info.info.item.package_name.as_deref();
-            let (seq, _) = if defining.is_some() && self.webview_zygote_package().as_deref() == defining {
+            let (seq, _) = if defining.is_some()
+                && self.webview_zygote_package().as_deref() == defining
+            {
                 self.start_webview_service_process(r.info.info.application_info.clone(), &process)?
             } else {
                 self.start_isolated_process(&package, &process)?
@@ -1441,7 +1611,12 @@ impl AppHost {
                 // `fg-service-launch`: its app may make it foreground.
                 if r.fg.required {
                     let uid = r.info.info.application_info.uid;
-                    Self::temp_allowlist(state, uid, SERVICE_START_FOREGROUND_TIMEOUT, REASON_SERVICE_LAUNCH);
+                    Self::temp_allowlist(
+                        state,
+                        uid,
+                        SERVICE_START_FOREGROUND_TIMEOUT,
+                        REASON_SERVICE_LAUNCH,
+                    );
                 }
             }
         }
@@ -1462,7 +1637,11 @@ impl AppHost {
         let Some(config) = config else { return };
         r.restart_time = Some(Instant::now());
         let Ok(inputs) = self.inputs() else { return };
-        let compat = super::config::CompatibilityInfo::of(&r.info.info.application_info, &config, inputs.device_density);
+        let compat = super::config::CompatibilityInfo::of(
+            &r.info.info.application_info,
+            &config,
+            inputs.device_density,
+        );
         let mut p = Parcel::new();
         thread::ScheduleCreateService {
             token: Some(r.token),
@@ -1564,7 +1743,10 @@ impl AppHost {
             if let Some((needed, owner)) = &s.grants
                 && let Err(e) = self.grant_from_intent(Some(needed), Some(*owner))
             {
-                eprintln!("app host: service {}/{}: URI grants: {}", r.package, r.class, e.message);
+                eprintln!(
+                    "app host: service {}/{}: URI grants: {}",
+                    r.package, r.class, e.message
+                );
             }
             // A service started with `startForegroundService` must call
             // `startForeground` in time
@@ -1655,14 +1837,27 @@ impl AppHost {
         if r.fg.required
             && let Some(seq) = r.app
         {
-            eprintln!("app host: bringing down service while still waiting for start foreground: {}", short_name(&r.package, &r.class));
+            eprintln!(
+                "app host: bringing down service while still waiting for start foreground: {}",
+                short_name(&r.package, &r.class)
+            );
             let message = format!(
                 "Context.startForegroundService() did not then call Service.startForeground(): ServiceRecord{{u{} {}}}",
                 r.info.info.application_info.uid / PER_USER_RANGE as i32,
                 short_name(&r.package, &r.class)
             );
-            let extras = vec![("serviceclassname".to_string(), Value::String(Some(r.class.clone())))];
-            self.post_job(move |host| host.crash_application(seq, &message, FOREGROUND_SERVICE_DID_NOT_START_IN_TIME, extras));
+            let extras = vec![(
+                "serviceclassname".to_string(),
+                Value::String(Some(r.class.clone())),
+            )];
+            self.post_job(move |host| {
+                host.crash_application(
+                    seq,
+                    &message,
+                    FOREGROUND_SERVICE_DID_NOT_START_IN_TIME,
+                    extras,
+                )
+            });
         }
         if let Some(shown) = r.fgs_notification() {
             self.cancel_foreground_notification(state, token, &shown);
@@ -1714,7 +1909,11 @@ impl AppHost {
         let now = Instant::now();
         let mut state = self.services.state.lock().unwrap();
         let mut try_again = false;
-        for r in state.records.iter_mut().filter(|r| r.app == Some(start_seq) && r.created) {
+        for r in state
+            .records
+            .iter_mut()
+            .filter(|r| r.app == Some(start_seq) && r.created)
+        {
             if r.restart_time.is_none_or(|t| now > t + MIN_CRASH_INTERVAL) {
                 r.crash_count = 1;
             } else {
@@ -1756,7 +1955,9 @@ impl AppHost {
         for token in tokens {
             let auto = state.auto_created(token);
             // Brought down with its last connection.
-            let Some(r) = state.record(token) else { continue };
+            let Some(r) = state.record(token) else {
+                continue;
+            };
             for b in &mut r.bindings {
                 b.binder = None;
                 b.requested = false;
@@ -1772,7 +1973,10 @@ impl AppHost {
             let delay = if !allow_restart {
                 None
             } else if r.crash_count >= BOUND_SERVICE_MAX_CRASH_RETRY {
-                eprintln!("app host: service {package}/{class} crashed {} times, stopping", r.crash_count);
+                eprintln!(
+                    "app host: service {package}/{class} crashed {} times, stopping",
+                    r.crash_count
+                );
                 None
             } else {
                 r.schedule_restart(auto, now)
@@ -1793,14 +1997,19 @@ impl AppHost {
                     let r = state.record(token).unwrap();
                     r.restart_delay = delay;
                     r.next_restart_time = None;
-                    eprintln!("app host: not restarting crashed service {package}/{class}: its back-off is {delay:?}");
+                    eprintln!(
+                        "app host: not restarting crashed service {package}/{class}: its back-off is {delay:?}"
+                    );
                 }
                 Some((_, Some(at))) => {
                     let at = state.stagger(token, at);
                     let r = state.record(token).unwrap();
                     r.restart_delay = at - now;
                     r.next_restart_time = Some(at);
-                    eprintln!("app host: scheduling restart of crashed service {package}/{class} in {:?}", r.restart_delay);
+                    eprintln!(
+                        "app host: scheduling restart of crashed service {package}/{class} in {:?}",
+                        r.restart_delay
+                    );
                     restart.push((token, at));
                 }
                 None => state.records.retain(|r| r.token != token),
@@ -1814,7 +2023,9 @@ impl AppHost {
                 let Some(host) = me.upgrade() else { return };
                 let mut state = host.services.state.lock().unwrap();
                 // `performServiceRestartLocked`, unless it started since.
-                if state.record(token).is_some_and(|r| r.app.is_none() && r.next_restart_time == Some(at))
+                if state
+                    .record(token)
+                    .is_some_and(|r| r.app.is_none() && r.next_restart_time == Some(at))
                     && let Err(e) = host.bring_up(&mut state, token)
                 {
                     eprintln!("app host: restarting a service: {}", e.message);
@@ -1826,11 +2037,18 @@ impl AppHost {
     /// `getServices` (`ActivityManager.getRunningServices`) of `uid`: the
     /// services it may see, at most `max`. The call's flags are unused, as
     /// in the original.
-    pub(super) fn running_services(&self, uid: i32, max: i32) -> Result<Vec<Option<RunningServiceInfo>>, Exception> {
+    pub(super) fn running_services(
+        &self,
+        uid: i32,
+        max: i32,
+    ) -> Result<Vec<Option<RunningServiceInfo>>, Exception> {
         if super::is_isolated(uid) {
-            return Err(Exception::security("Isolated process not allowed to call getServices"));
+            return Err(Exception::security(
+                "Isolated process not allowed to call getServices",
+            ));
         }
-        let across_users = self.check_permission(Some("android.permission.INTERACT_ACROSS_USERS_FULL"), uid)? == 0;
+        let across_users =
+            self.check_permission(Some("android.permission.INTERACT_ACROSS_USERS_FULL"), uid)? == 0;
         let allowed = self.get_tasks_allowed(uid)?;
         let (now, uptime) = (Instant::now(), super::clock_ms(libc::CLOCK_UPTIME_RAW));
         let state = self.services.state.lock().unwrap();
@@ -1840,9 +2058,17 @@ impl AppHost {
             .iter()
             .map(|r| {
                 let app = r.app.filter(|_| r.created).and_then(|seq| apps.get(&seq));
-                let clients: Vec<&Connection> = state.connections.iter().filter(|c| c.service == r.token).collect();
+                let clients: Vec<&Connection> = state
+                    .connections
+                    .iter()
+                    .filter(|c| c.service == r.token)
+                    .collect();
                 // Its connections, by their `IServiceConnection`.
-                let client_count = clients.iter().enumerate().filter(|(i, c)| !clients[..*i].iter().any(|d| d.conn.same(&c.conn))).count();
+                let client_count = clients
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, c)| !clients[..*i].iter().any(|d| d.conn.same(&c.conn)))
+                    .count();
                 let labelled = clients.iter().rev().find(|c| c.client_label != 0);
                 let mut flags = if r.start_requested { FLAG_STARTED } else { 0 };
                 if r.fg.is_foreground {
@@ -1867,16 +2093,23 @@ impl AppHost {
                         last_activity_time: r.last_activity,
                         restarting: 0,
                         flags,
-                        client_package: labelled.and_then(|c| apps.get(&c.client?)).map(|a| a.package.clone()),
+                        client_package: labelled
+                            .and_then(|c| apps.get(&c.client?))
+                            .map(|a| a.package.clone()),
                         client_label: labelled.map_or(0, |c| c.client_label),
                     },
                     user: uid / super::PER_USER_RANGE as i32,
                     app_uid: app.map(|a| a.uid as i32),
-                    restarting: r.next_restart_time.map(|at| uptime + at.saturating_duration_since(now).as_millis() as i64),
+                    restarting: r
+                        .next_restart_time
+                        .map(|at| uptime + at.saturating_duration_since(now).as_millis() as i64),
                 }
             })
             .collect();
-        Ok(pick(&services, max, uid, allowed, across_users).into_iter().map(Some).collect())
+        Ok(pick(&services, max, uid, allowed, across_users)
+            .into_iter()
+            .map(Some)
+            .collect())
     }
 
     /// The connections made from activity `token` go with it
@@ -1911,7 +2144,13 @@ impl fgs_types::Checker for TypeChecker<'_> {
     }
 
     fn regular(&self, permission: &str, allow_while_in_use: bool) -> Result<bool, Exception> {
-        super::permission_checker::fgs_type_permission(self.host, permission, self.uid, self.package, allow_while_in_use)
+        super::permission_checker::fgs_type_permission(
+            self.host,
+            permission,
+            self.uid,
+            self.package,
+            allow_while_in_use,
+        )
     }
 
     /// The app host's ops answer a foreground mode as the uid's state
@@ -1921,7 +2160,8 @@ impl fgs_types::Checker for TypeChecker<'_> {
     }
 
     fn unimplemented(&self, what: &str) -> Exception {
-        self.host.unimplemented_named("activity", &format!("{what} (#1552)"))
+        self.host
+            .unimplemented_named("activity", &format!("{what} (#1552)"))
     }
 }
 
@@ -1954,7 +2194,10 @@ impl AppHost {
     /// them for `duration` (or longer, if it already may), for `reason`.
     fn temp_allowlist(state: &mut State, uid: i32, duration: Duration, reason: i32) {
         let until = Instant::now() + duration;
-        let entry = state.fgs_temp_allowlist.entry(uid).or_insert((until, reason));
+        let entry = state
+            .fgs_temp_allowlist
+            .entry(uid)
+            .or_insert((until, reason));
         if entry.0 < until {
             *entry = (until, reason);
         }
@@ -1964,13 +2207,22 @@ impl AppHost {
     /// options that allow its creator `uid` foreground services (an
     /// alarm's).
     pub(super) fn temp_allowlist_for_fgs(&self, uid: i32, duration: Duration, reason: i32) {
-        Self::temp_allowlist(&mut self.services.state.lock().unwrap(), uid, duration, reason);
+        Self::temp_allowlist(
+            &mut self.services.state.lock().unwrap(),
+            uid,
+            duration,
+            reason,
+        );
     }
 
     /// `isAllowlistedForFgsStartLOSP`: why `uid` may start foreground
     /// services now, if it is temporarily allowed.
     fn temp_allowlisted(state: &State, uid: i32) -> Option<i32> {
-        state.fgs_temp_allowlist.get(&uid).filter(|(until, _)| Instant::now() < *until).map(|(_, reason)| *reason)
+        state
+            .fgs_temp_allowlist
+            .get(&uid)
+            .filter(|(until, _)| Instant::now() < *until)
+            .map(|(_, reason)| *reason)
     }
 
     /// `isBgFgsRestrictionEnabled`: whether a service of `service_uid`,
@@ -1980,14 +2232,18 @@ impl AppHost {
         if !self.change_enabled(FGS_BG_START_RESTRICTION_CHANGE_ID, service_uid)? {
             return Ok(false);
         }
-        Ok(calling_uid == SYSTEM_UID || self.change_enabled(FGS_BG_START_RESTRICTION_CHANGE_ID, calling_uid)?)
+        Ok(calling_uid == SYSTEM_UID
+            || self.change_enabled(FGS_BG_START_RESTRICTION_CHANGE_ID, calling_uid)?)
     }
 
     /// A device or profile owner's exemption (`isDeviceOwner`,
     /// `isProfileOwner`), which the app host does not answer, when it
     /// would decide.
     fn owner_exemption(&self) -> Exception {
-        self.unimplemented_named("activity", "a device or profile owner's foreground service exemption (#1553)")
+        self.unimplemented_named(
+            "activity",
+            "a device or profile owner's foreground service exemption (#1553)",
+        )
     }
 
     /// `shouldAllowFgsWhileInUsePermissionLocked` for `calling_uid`. A uid
@@ -2001,10 +2257,17 @@ impl AppHost {
             return Ok(REASON_PROC_STATE_TOP);
         }
         // Root, the system, NFC and the shell.
-        if matches!(calling_uid.rem_euclid(PER_USER_RANGE as i32), 0 | 1000 | 1027 | 2000) {
+        if matches!(
+            calling_uid.rem_euclid(PER_USER_RANGE as i32),
+            0 | 1000 | 1027 | 2000
+        ) {
             return Ok(REASON_SYSTEM_UID);
         }
-        if self.check_permission(Some("android.permission.START_ACTIVITIES_FROM_BACKGROUND"), calling_uid)? == 0 {
+        if self.check_permission(
+            Some("android.permission.START_ACTIVITIES_FROM_BACKGROUND"),
+            calling_uid,
+        )? == 0
+        {
             return Ok(REASON_BACKGROUND_ACTIVITY_PERMISSION);
         }
         // A device owner's comes last (`set_fgs_restriction`).
@@ -2018,7 +2281,13 @@ impl AppHost {
     /// bound by one (`canBindingClientStartFgsLocked`) or shows an overlay;
     /// no companion device is associated (no CompanionDeviceManager runs),
     /// and `mFgsAllowOptOut` is off.
-    fn fgs_start_reason(&self, wiu: i32, calling_package: Option<&str>, calling_uid: i32, allowlisted: Option<i32>) -> Result<i32, Exception> {
+    fn fgs_start_reason(
+        &self,
+        wiu: i32,
+        calling_package: Option<&str>,
+        calling_uid: i32,
+        allowlisted: Option<i32>,
+    ) -> Result<i32, Exception> {
         if wiu != REASON_DENIED {
             return Ok(wiu);
         }
@@ -2028,11 +2297,19 @@ impl AppHost {
         }
         // `hasSystemAlertWindowPermission`; from V an overlay must show.
         if let Some(package) = calling_package {
-            let saw = match appops::note(self, appops::OP_SYSTEM_ALERT_WINDOW, calling_uid, Some(package))? {
+            let saw = match appops::note(
+                self,
+                appops::OP_SYSTEM_ALERT_WINDOW,
+                calling_uid,
+                Some(package),
+            )? {
                 MODE_DEFAULT => held("android.permission.SYSTEM_ALERT_WINDOW")?,
                 mode => mode == MODE_ALLOWED,
             };
-            if saw && !(self.flag(FGS_DISABLE_SAW)? && self.change_enabled(FGS_SAW_RESTRICTIONS, calling_uid)?) {
+            if saw
+                && !(self.flag(FGS_DISABLE_SAW)?
+                    && self.change_enabled(FGS_SAW_RESTRICTIONS, calling_uid)?)
+            {
                 return Ok(REASON_SYSTEM_ALERT_WINDOW_PERMISSION);
             }
         }
@@ -2040,12 +2317,19 @@ impl AppHost {
             return Ok(reason);
         }
         let settings = &self.inputs()?.settings;
-        if settings.get(super::settings::Table::Global, "device_demo_mode").and_then(|v| v.parse::<i32>().ok()).is_some_and(|v| v > 0) {
+        if settings
+            .get(super::settings::Table::Global, "device_demo_mode")
+            .and_then(|v| v.parse::<i32>().ok())
+            .is_some_and(|v| v > 0)
+        {
             return Ok(REASON_DEVICE_DEMO_MODE);
         }
         // A profile owner's comes last (`set_fgs_restriction`).
-        let Some(package) = calling_package else { return Ok(REASON_DENIED) };
-        let allowed = |op: i32| appops::mode(self, op, calling_uid, Some(package)).map(|m| m == MODE_ALLOWED);
+        let Some(package) = calling_package else {
+            return Ok(REASON_DENIED);
+        };
+        let allowed =
+            |op: i32| appops::mode(self, op, calling_uid, Some(package)).map(|m| m == MODE_ALLOWED);
         if allowed(appops::OP_SYSTEM_EXEMPT_FROM_POWER_RESTRICTIONS)? {
             return Ok(REASON_SYSTEM_EXEMPT_APP_OP);
         }
@@ -2056,7 +2340,11 @@ impl AppHost {
             return Ok(REASON_OP_ACTIVATE_PLATFORM_VPN);
         }
         let input_method = settings.get(super::settings::Table::Secure, "default_input_method");
-        if input_method.as_deref().and_then(|m| m.split_once('/')).is_some_and(|(p, _)| p == package) {
+        if input_method
+            .as_deref()
+            .and_then(|m| m.split_once('/'))
+            .is_some_and(|(p, _)| p == package)
+        {
             return Ok(REASON_CURRENT_INPUT_METHOD);
         }
         Ok(REASON_DENIED)
@@ -2087,7 +2375,8 @@ impl AppHost {
             let s = self.fgs_start_reason(w, calling_package, calling_uid, allowlisted)?;
             (wiu, start) = (reason_or(wiu, w), reason_or(start, s));
         }
-        let owner_unknown = (wiu == REASON_DENIED || start == REASON_DENIED) && self.device_policies()?.owned();
+        let owner_unknown =
+            (wiu == REASON_DENIED || start == REASON_DENIED) && self.device_policies()?.owned();
         let fg = &mut state.record(token).unwrap().fg;
         fg.owner_unknown = owner_unknown;
         if for_bound {
@@ -2118,15 +2407,24 @@ impl AppHost {
         let mut state = self.services.state.lock().unwrap();
         let user = calling_uid / PER_USER_RANGE as i32;
         let found = token.and_then(|t| state.record(t)).filter(|r| {
-            name.as_ref().is_some_and(|n| n.package == r.package && n.class == r.class)
+            name.as_ref()
+                .is_some_and(|n| n.package == r.package && n.class == r.class)
                 && r.info.info.application_info.uid / PER_USER_RANGE as i32 == user
         });
         let Some(token) = found.map(|r| r.token) else {
             return Ok(());
         };
         if id != 0 {
-            let notification = notification.ok_or_else(|| Exception::illegal_argument("null notification"))?;
-            self.start_foreground(&mut state, token, id, notification, service_type, calling_uid)
+            let notification =
+                notification.ok_or_else(|| Exception::illegal_argument("null notification"))?;
+            self.start_foreground(
+                &mut state,
+                token,
+                id,
+                notification,
+                service_type,
+                calling_uid,
+            )
         } else {
             self.stop_foreground(&mut state, token, flags);
             Ok(())
@@ -2134,13 +2432,19 @@ impl AppHost {
     }
 
     /// `getForegroundServiceTypeLocked`.
-    pub(super) fn foreground_service_type(&self, calling_uid: i32, name: Option<Name>, token: Option<Binder>) -> i32 {
+    pub(super) fn foreground_service_type(
+        &self,
+        calling_uid: i32,
+        name: Option<Name>,
+        token: Option<Binder>,
+    ) -> i32 {
         let mut state = self.services.state.lock().unwrap();
         let user = calling_uid / PER_USER_RANGE as i32;
         token
             .and_then(|t| state.record(t))
             .filter(|r| {
-                name.as_ref().is_some_and(|n| n.package == r.package && n.class == r.class)
+                name.as_ref()
+                    .is_some_and(|n| n.package == r.package && n.class == r.class)
                     && r.info.info.application_info.uid / PER_USER_RANGE as i32 == user
             })
             .map_or(fgs_types::TYPE_NONE, |r| r.fg.service_type)
@@ -2159,27 +2463,52 @@ impl AppHost {
     ) -> Result<(), Exception> {
         let r = state.record(token).unwrap();
         let app_info = &r.info.info.application_info;
-        let (uid, target_sdk, package, class) = (app_info.uid, app_info.target_sdk_version, r.package.clone(), r.class.clone());
+        let (uid, target_sdk, package, class) = (
+            app_info.uid,
+            app_info.target_sdk_version,
+            r.package.clone(),
+            r.class.clone(),
+        );
         let instant = app_info.private_flags & PRIVATE_FLAG_INSTANT != 0;
         let Some(seq) = r.app else {
-            return Err(Exception::new(EX_ILLEGAL_STATE, format!("startForeground of {package}/{class}, which does not run")));
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("startForeground of {package}/{class}, which does not run"),
+            ));
         };
-        let (pid, process) = self.apps.lock().unwrap().get(&seq).map(|a| (a.pid, a.process.clone())).unwrap_or_default();
+        let (pid, process) = self
+            .apps
+            .lock()
+            .unwrap()
+            .get(&seq)
+            .map(|a| (a.pid, a.process.clone()))
+            .unwrap_or_default();
         let short = short_name(&package, &class);
         if instant {
-            return Err(self.unimplemented_named("activity", "an instant app's foreground service (#1552)"));
+            return Err(
+                self.unimplemented_named("activity", "an instant app's foreground service (#1552)")
+            );
         }
-        if target_sdk >= P && self.check_permission(Some("android.permission.FOREGROUND_SERVICE"), uid)? != 0 {
+        if target_sdk >= P
+            && self.check_permission(Some("android.permission.FOREGROUND_SERVICE"), uid)? != 0
+        {
             return Err(Exception::security(format!(
                 "Permission Denial: startForeground from pid={pid}, uid={uid} requires android.permission.FOREGROUND_SERVICE"
             )));
         }
         if !notification.has_small_icon() {
             // `postNotification` makes one naming the app.
-            return Err(self.unimplemented_named("activity", "a foreground service's notification without an icon (#1552)"));
+            return Err(self.unimplemented_named(
+                "activity",
+                "a foreground service's notification without an icon (#1552)",
+            ));
         }
         let manifest_type = r.info.foreground_service_type;
-        let skip_check = super::system_boolean(self.property("debug.skip_fgs_manifest_type_check").as_deref(), false);
+        let skip_check = super::system_boolean(
+            self.property("debug.skip_fgs_manifest_type_check")
+                .as_deref(),
+            false,
+        );
         let mut service_type = match effective_type(requested_type, manifest_type) {
             Err(_) if skip_check => requested_type,
             result => result?,
@@ -2196,7 +2525,9 @@ impl AppHost {
         match appops::mode(self, appops::OP_START_FOREGROUND, uid, Some(&package))? {
             MODE_ALLOWED | MODE_DEFAULT => {}
             appops::MODE_IGNORED => {
-                eprintln!("app host: Service.startForeground() not allowed due to app op: service {short}");
+                eprintln!(
+                    "app host: Service.startForeground() not allowed due to app op: service {short}"
+                );
                 ignore = true;
             }
             _ => return Err(Exception::security("Foreground not allowed as per app op")),
@@ -2207,14 +2538,18 @@ impl AppHost {
         let restricted = self.bg_fgs_restricted(uid, calling_uid)?;
         if !ignore {
             if service_type == fgs_types::TYPE_SHORT_SERVICE {
-                return Err(self.unimplemented_named("activity", "a short foreground service (#1551)"));
+                return Err(
+                    self.unimplemented_named("activity", "a short foreground service (#1551)")
+                );
             }
             let r = state.record(token).unwrap();
             let elapsed = super::clock_ms(libc::CLOCK_MONOTONIC_RAW) - r.create_real_time;
-            let (start_count, fg_required, start_requested) = (r.fg.start_count, r.fg.required, r.start_requested);
-            let time_limited = service_type & (fgs_types::TYPE_DATA_SYNC | fgs_types::TYPE_MEDIA_PROCESSING) != 0
-                && self.change_enabled(FGS_INTRODUCE_TIME_LIMITS, uid)?
-                && self.flag(INTRODUCE_NEW_SERVICE_ONTIMEOUT_CALLBACK)?;
+            let (start_count, fg_required, start_requested) =
+                (r.fg.start_count, r.fg.required, r.start_requested);
+            let time_limited =
+                service_type & (fgs_types::TYPE_DATA_SYNC | fgs_types::TYPE_MEDIA_PROCESSING) != 0
+                    && self.change_enabled(FGS_INTRODUCE_TIME_LIMITS, uid)?
+                    && self.flag(INTRODUCE_NEW_SERVICE_ONTIMEOUT_CALLBACK)?;
             // Whether its app may still start a foreground service is asked
             // again: for a time-limited type (whose limits are not run,
             // #1551), a first start long after its creation, and any later.
@@ -2238,11 +2573,16 @@ impl AppHost {
                 if r.fg.owner_unknown {
                     return Err(self.owner_exemption());
                 }
-                let message = format!("Service.startForeground() not allowed due to mAllowStartForeground false: service {short}");
+                let message = format!(
+                    "Service.startForeground() not allowed due to mAllowStartForeground false: service {short}"
+                );
                 eprintln!("app host: {message}");
                 ignore = true;
                 if self.change_enabled(FGS_START_EXCEPTION_CHANGE_ID, uid)? {
-                    return Err(parcelable_exception("android.app.ForegroundServiceStartNotAllowedException", message));
+                    return Err(parcelable_exception(
+                        "android.app.ForegroundServiceStartNotAllowedException",
+                        message,
+                    ));
                 }
             }
         }
@@ -2252,7 +2592,16 @@ impl AppHost {
             if !wiu && fg.owner_unknown {
                 return Err(self.owner_exemption());
             }
-            self.validate_types(service_type, requested_type, wiu, uid, pid, &process, &package, target_sdk)?;
+            self.validate_types(
+                service_type,
+                requested_type,
+                wiu,
+                uid,
+                pid,
+                &process,
+                &package,
+                target_sdk,
+            )?;
         }
         if ignore {
             return Ok(());
@@ -2267,7 +2616,10 @@ impl AppHost {
         r.fg.id = id;
         r.fg.notification = Some(notification.foreground_service());
         if r.fg.is_foreground && r.fg.service_type != service_type {
-            eprintln!("app host: FGS type change for {short} from {} to {service_type}", r.fg.service_type);
+            eprintln!(
+                "app host: FGS type change for {short} from {} to {service_type}",
+                r.fg.service_type
+            );
         }
         r.fg.service_type = service_type;
         if !r.fg.is_foreground {
@@ -2294,12 +2646,24 @@ impl AppHost {
         package: &str,
         target_sdk: i32,
     ) -> Result<(), Exception> {
-        let checker = TypeChecker { host: self, uid, package };
-        let default_to = if service_type & fgs_types::TYPE_SPECIAL_USE != 0 { fgs_types::TYPE_SPECIAL_USE } else { fgs_types::TYPE_NONE };
+        let checker = TypeChecker {
+            host: self,
+            uid,
+            package,
+        };
+        let default_to = if service_type & fgs_types::TYPE_SPECIAL_USE != 0 {
+            fgs_types::TYPE_SPECIAL_USE
+        } else {
+            fgs_types::TYPE_NONE
+        };
         let types: Vec<i32> = if service_type == fgs_types::TYPE_NONE {
             vec![fgs_types::TYPE_NONE]
         } else {
-            (0..32).rev().map(|bit| 1i32 << bit).filter(|t| service_type & t != 0).collect()
+            (0..32)
+                .rev()
+                .map(|bit| 1i32 << bit)
+                .filter(|t| service_type & t != 0)
+                .collect()
         };
         let app = process_record(pid, process, uid);
         for ty in types {
@@ -2312,21 +2676,29 @@ impl AppHost {
             };
             match fgs_types::check(policy, &checker, wiu)? {
                 Check::Ok => {}
-                Check::Deprecated => eprintln!("app host: Starting FGS with type {label} callerApp={app} targetSDK={target_sdk}"),
+                Check::Deprecated => eprintln!(
+                    "app host: Starting FGS with type {label} callerApp={app} targetSDK={target_sdk}"
+                ),
                 Check::PermissionDeniedPermissive => eprintln!(
                     "app host: Starting FGS with type {label} callerApp={app} targetSDK={target_sdk} requiredPermissions={}{foreground_only}",
                     policy.permission_string()
                 ),
-                Check::Disabled if requested_type == fgs_types::TYPE_MANIFEST && ty == fgs_types::TYPE_NONE => {
+                Check::Disabled
+                    if requested_type == fgs_types::TYPE_MANIFEST && ty == fgs_types::TYPE_NONE =>
+                {
                     return Err(parcelable_exception(
                         "android.app.MissingForegroundServiceTypeException",
-                        format!("Starting FGS without a type  callerApp={app} targetSDK={target_sdk}"),
+                        format!(
+                            "Starting FGS without a type  callerApp={app} targetSDK={target_sdk}"
+                        ),
                     ));
                 }
                 Check::Disabled => {
                     return Err(parcelable_exception(
                         "android.app.InvalidForegroundServiceTypeException",
-                        format!("Starting FGS with type {label} callerApp={app} targetSDK={target_sdk} has been prohibited"),
+                        format!(
+                            "Starting FGS with type {label} callerApp={app} targetSDK={target_sdk} has been prohibited"
+                        ),
                     ));
                 }
                 Check::PermissionDeniedEnforced => {
@@ -2379,10 +2751,9 @@ impl AppHost {
     /// Whether a foreground service of the app other than `token` shows
     /// the notification `n`.
     fn shared(state: &State, token: Binder, n: &FgsNotification) -> bool {
-        state
-            .records
-            .iter()
-            .any(|o| o.token != token && o.fg.is_foreground && o.fg.id == n.id && o.package == n.package)
+        state.records.iter().any(|o| {
+            o.token != token && o.fg.is_foreground && o.fg.id == n.id && o.package == n.package
+        })
     }
 
     /// `cancelForegroundNotificationLocked` of the notification `n` of the
@@ -2394,18 +2765,30 @@ impl AppHost {
         }
         let FgsNotification { package, uid, id } = n.clone();
         self.post_job(move |host| {
-            let Some(nms) = host.notification_service.get() else { return };
-            if let Err(e) = nms.cancel_foreground_service_notification(&package, id, uid / PER_USER_RANGE as i32) {
-                eprintln!("app host: canceling the notification of a service of {package}: {}", e.message);
+            let Some(nms) = host.notification_service.get() else {
+                return;
+            };
+            if let Err(e) = nms.cancel_foreground_service_notification(
+                &package,
+                id,
+                uid / PER_USER_RANGE as i32,
+            ) {
+                eprintln!(
+                    "app host: canceling the notification of a service of {package}: {}",
+                    e.message
+                );
             }
         });
     }
 
     /// `ServiceRecord.postNotification` of a foreground service `r`.
     fn post_foreground_notification(&self, r: &Record) {
-        if let (true, Some(shown), Some(seq), Some(notification)) =
-            (r.fg.is_foreground, r.fgs_notification(), r.app, r.fg.notification.clone())
-        {
+        if let (true, Some(shown), Some(seq), Some(notification)) = (
+            r.fg.is_foreground,
+            r.fgs_notification(),
+            r.app,
+            r.fg.notification.clone(),
+        ) {
             self.post_notification(r.token, &shown, seq, notification);
         }
     }
@@ -2414,20 +2797,45 @@ impl AppHost {
     /// service `token` in the process of `seq`: as its app's, which must
     /// have its channel; one that cannot be posted stops the service and
     /// crashes its app (`killMisbehavingService`).
-    fn post_notification(&self, token: Binder, n: &FgsNotification, seq: i64, notification: Incoming) {
+    fn post_notification(
+        &self,
+        token: Binder,
+        n: &FgsNotification,
+        seq: i64,
+        notification: Incoming,
+    ) {
         let pid = self.apps.lock().unwrap().get(&seq).map_or(0, |a| a.pid);
         let FgsNotification { package, uid, id } = n.clone();
         self.post_job(move |host| {
-            let Some(nms) = host.notification_service.get() else { return };
+            let Some(nms) = host.notification_service.get() else {
+                return;
+            };
             if !notification.has_small_icon() {
                 // The original posts one naming the app.
-                eprintln!("app host: {}", host.unimplemented_named("activity", "a foreground service's notification without an icon (#1552)").message);
+                eprintln!(
+                    "app host: {}",
+                    host.unimplemented_named(
+                        "activity",
+                        "a foreground service's notification without an icon (#1552)"
+                    )
+                    .message
+                );
                 return;
             }
             let posted = (|| {
-                let target_sdk = host.packages()?.0.packages.get(&package).map_or(O_MR1, |p| p.target_sdk_version);
-                if !nms.has_channel(&package, uid, notification.channel_id())? && target_sdk >= O_MR1 {
-                    return Err(Exception::new(EX_ILLEGAL_STATE, "invalid channel for service notification"));
+                let target_sdk = host
+                    .packages()?
+                    .0
+                    .packages
+                    .get(&package)
+                    .map_or(O_MR1, |p| p.target_sdk_version);
+                if !nms.has_channel(&package, uid, notification.channel_id())?
+                    && target_sdk >= O_MR1
+                {
+                    return Err(Exception::new(
+                        EX_ILLEGAL_STATE,
+                        "invalid channel for service notification",
+                    ));
                 }
                 nms.enqueue_internal(Enqueue {
                     package: package.clone(),
@@ -2441,7 +2849,10 @@ impl AppHost {
                 })
             })();
             if let Err(e) = posted {
-                eprintln!("app host: error showing notification for service of {package}: {}", e.message);
+                eprintln!(
+                    "app host: error showing notification for service of {package}: {}",
+                    e.message
+                );
                 host.kill_misbehaving_service(token, seq);
             }
         });
@@ -2457,13 +2868,24 @@ impl AppHost {
                 self.bring_down_if_needed(&mut state, token);
             }
         }
-        self.crash_application(seq, "Bad notification for startForeground", CANNOT_POST_FOREGROUND_SERVICE_NOTIFICATION, Vec::new());
+        self.crash_application(
+            seq,
+            "Bad notification for startForeground",
+            CANNOT_POST_FOREGROUND_SERVICE_NOTIFICATION,
+            Vec::new(),
+        );
     }
 
     /// `AppErrors.scheduleAppCrashLocked` of the process of `seq`: it is
     /// asked to crash (`scheduleCrash`) with `message`, its
     /// `RemoteServiceException`'s type and `extras`.
-    fn crash_application(&self, seq: i64, message: &str, type_id: i32, extras: Vec<(String, Value)>) {
+    fn crash_application(
+        &self,
+        seq: i64,
+        message: &str,
+        type_id: i32,
+        extras: Vec<(String, Value)>,
+    ) {
         let mut p = Parcel::new();
         thread::ScheduleCrash {
             msg: Some(message.to_string()),
@@ -2481,10 +2903,16 @@ impl AppHost {
     /// wait `generation`) is stopped, which crashes its app.
     fn service_foreground_timeout(&self, token: Binder, generation: u64) {
         let mut state = self.services.state.lock().unwrap();
-        let Some(r) = state.record(token).filter(|r| r.fg.required && r.fg.waiting == Some(generation)) else {
+        let Some(r) = state
+            .record(token)
+            .filter(|r| r.fg.required && r.fg.waiting == Some(generation))
+        else {
             return;
         };
-        eprintln!("app host: service foreground-required timeout for {}", short_name(&r.package, &r.class));
+        eprintln!(
+            "app host: service foreground-required timeout for {}",
+            short_name(&r.package, &r.class)
+        );
         r.fg.waiting = None;
         r.start_requested = false;
         self.bring_down_if_needed(&mut state, token);
@@ -2519,7 +2947,12 @@ impl AppHost {
         let eligible = state.deferral_eligible.get(&uid).copied();
         let r = state.record(token).unwrap();
         r.fg.notification = Some(notification.foreground_service());
-        if r.fg.show_now(now, eligible, notification.force_deferred(), notification.show_foreground_immediately()) {
+        if r.fg.show_now(
+            now,
+            eligible,
+            notification.force_deferred(),
+            notification.show_foreground_immediately(),
+        ) {
             r.fg.deferred = false;
             return FgsPolicy::ShowImmediately;
         }
@@ -2542,7 +2975,9 @@ impl AppHost {
             .filter(|o| o.fg.pending && o.info.info.application_info.uid == uid)
             .filter_map(|o| o.fg.display_time)
             .fold(now + FGS_NOTIFICATION_DEFERRAL_INTERVAL, Instant::min);
-        state.deferral_eligible.insert(uid, when + FGS_NOTIFICATION_DEFERRAL_EXCLUSION_TIME);
+        state
+            .deferral_eligible
+            .insert(uid, when + FGS_NOTIFICATION_DEFERRAL_EXCLUSION_TIME);
         let r = state.record(token).unwrap();
         r.fg.display_time = Some(when);
         r.fg.deferred = true;
@@ -2581,13 +3016,22 @@ impl AppHost {
     /// `onForegroundServiceNotificationUpdateLocked`: a notification of
     /// `package` with `id` in `user` was posted (`shown`) or kept back; a
     /// deferred one shown is no longer pending.
-    pub(super) fn foreground_service_notification_updated(&self, shown: bool, id: i32, package: &str, user: i32) {
+    pub(super) fn foreground_service_notification_updated(
+        &self,
+        shown: bool,
+        id: i32,
+        package: &str,
+        user: i32,
+    ) {
         if !shown {
             return;
         }
         let mut state = self.services.state.lock().unwrap();
         for r in state.records.iter_mut().filter(|r| {
-            r.fg.pending && r.fg.id == id && r.package == package && r.info.info.application_info.uid / PER_USER_RANGE as i32 == user
+            r.fg.pending
+                && r.fg.id == id
+                && r.package == package
+                && r.info.info.application_info.uid / PER_USER_RANGE as i32 == user
         }) {
             r.fg.shown = true;
             r.fg.deferred = false;
@@ -2613,14 +3057,29 @@ mod tests {
         let now = Instant::now();
         let (min, reset) = (SERVICE_RESTART_DURATION, SERVICE_RESET_RUN_DURATION);
         let soon = Some(now - Duration::from_secs(2));
-        assert_eq!(back_off(0, Duration::ZERO, 0, None, min, reset, now), (1, min));
+        assert_eq!(
+            back_off(0, Duration::ZERO, 0, None, min, reset, now),
+            (1, min)
+        );
         assert_eq!(back_off(1, min, 0, soon, min, reset, now), (1, min * 4));
-        assert_eq!(back_off(1, min * 4, 0, soon, min, reset, now), (1, min * 16));
-        assert_eq!(back_off(3, min * 16, 0, Some(now - reset * 2), min, reset, now), (1, min));
-        assert_eq!(back_off(1, min, 3, soon, min, reset, now), (1, BOUND_SERVICE_CRASH_RESTART_DURATION * 2));
+        assert_eq!(
+            back_off(1, min * 4, 0, soon, min, reset, now),
+            (1, min * 16)
+        );
+        assert_eq!(
+            back_off(3, min * 16, 0, Some(now - reset * 2), min, reset, now),
+            (1, min)
+        );
+        assert_eq!(
+            back_off(1, min, 3, soon, min, reset, now),
+            (1, BOUND_SERVICE_CRASH_RESTART_DURATION * 2)
+        );
         // A service that keeps crashing soon after its start backs off
         // without overflowing.
-        assert_eq!(back_off(30, Duration::MAX / 2, 1, soon, min, reset, now), (30, Duration::MAX));
+        assert_eq!(
+            back_off(30, Duration::MAX / 2, 1, soon, min, reset, now),
+            (30, Duration::MAX)
+        );
     }
 
     /// `RunningServiceInfo.writeToParcel`.
@@ -2646,12 +3105,22 @@ mod tests {
         let mut p = Parcel::new();
         info.write_to(&mut p);
         let mut r = p.reader();
-        assert_eq!((r.read_string16().unwrap(), r.read_string16().unwrap()), (Some("p".into()), Some("p.S".into())));
+        assert_eq!(
+            (r.read_string16().unwrap(), r.read_string16().unwrap()),
+            (Some("p".into()), Some("p.S".into()))
+        );
         assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap()), (42, 10100));
         assert_eq!(r.read_string16().unwrap().as_deref(), Some("p:remote"));
         assert_eq!(r.read_i32().unwrap(), 1); // foreground
         assert_eq!(r.read_i64().unwrap(), 5);
-        assert_eq!([r.read_i32().unwrap(), r.read_i32().unwrap(), r.read_i32().unwrap()], [1, 2, 1]);
+        assert_eq!(
+            [
+                r.read_i32().unwrap(),
+                r.read_i32().unwrap(),
+                r.read_i32().unwrap()
+            ],
+            [1, 2, 1]
+        );
         assert_eq!([r.read_i64().unwrap(), r.read_i64().unwrap()], [6, 7]);
         assert_eq!(r.read_i32().unwrap(), FLAG_STARTED);
         assert_eq!(r.read_string16().unwrap().as_deref(), Some("android"));
@@ -2664,12 +3133,18 @@ mod tests {
     /// map's order and then the restarting ones again, at most `max`.
     #[test]
     fn running_services_are_picked_as_the_original_picks_them() {
-        let service = |class: &str, uid: i32, app_uid: Option<i32>, restarting: Option<i64>| Running {
-            info: RunningServiceInfo { package: "p".into(), class: class.into(), uid, ..Default::default() },
-            user: uid / 100000,
-            app_uid,
-            restarting,
-        };
+        let service =
+            |class: &str, uid: i32, app_uid: Option<i32>, restarting: Option<i64>| Running {
+                info: RunningServiceInfo {
+                    package: "p".into(),
+                    class: class.into(),
+                    uid,
+                    ..Default::default()
+                },
+                user: uid / 100000,
+                app_uid,
+                restarting,
+            };
         // By hash, "p.B" comes before "p.C".
         let services = [
             service("p.C", 10100, Some(10100), None),
@@ -2677,12 +3152,28 @@ mod tests {
             service("p.R", 10100, None, Some(99)),
             service("p.U", 1010100, Some(1010100), None),
         ];
-        let names = |list: Vec<RunningServiceInfo>| list.into_iter().map(|i| (i.class, i.restarting)).collect::<Vec<_>>();
+        let names = |list: Vec<RunningServiceInfo>| {
+            list.into_iter()
+                .map(|i| (i.class, i.restarting))
+                .collect::<Vec<_>>()
+        };
         let n = |s: &str, at: i64| (s.to_string(), at);
-        assert_eq!(names(pick(&services, 10, 10100, false, false)), [n("p.C", 0)]);
-        assert_eq!(names(pick(&services, 10, 10100, true, false)), [n("p.B", 0), n("p.C", 0), n("p.R", 0), n("p.R", 99)]);
-        assert_eq!(names(pick(&services, 10, 10100, false, true)), [n("p.B", 0), n("p.C", 0), n("p.R", 0), n("p.R", 99)]);
-        assert_eq!(names(pick(&services, 2, 10100, true, false)), [n("p.B", 0), n("p.C", 0)]);
+        assert_eq!(
+            names(pick(&services, 10, 10100, false, false)),
+            [n("p.C", 0)]
+        );
+        assert_eq!(
+            names(pick(&services, 10, 10100, true, false)),
+            [n("p.B", 0), n("p.C", 0), n("p.R", 0), n("p.R", 99)]
+        );
+        assert_eq!(
+            names(pick(&services, 10, 10100, false, true)),
+            [n("p.B", 0), n("p.C", 0), n("p.R", 0), n("p.R", 99)]
+        );
+        assert_eq!(
+            names(pick(&services, 2, 10100, true, false)),
+            [n("p.B", 0), n("p.C", 0)]
+        );
         assert!(pick(&services, -1, 10100, true, true).is_empty());
     }
 
@@ -2693,11 +3184,23 @@ mod tests {
     fn a_foreground_type_must_be_the_manifests() {
         use fgs_types::*;
         let manifest = TYPE_SPECIAL_USE | TYPE_SHORT_SERVICE | TYPE_DATA_SYNC;
-        assert_eq!(effective_type(TYPE_MANIFEST, TYPE_SPECIAL_USE).unwrap(), TYPE_SPECIAL_USE);
-        assert_eq!(effective_type(TYPE_DATA_SYNC, manifest).unwrap(), TYPE_DATA_SYNC);
+        assert_eq!(
+            effective_type(TYPE_MANIFEST, TYPE_SPECIAL_USE).unwrap(),
+            TYPE_SPECIAL_USE
+        );
+        assert_eq!(
+            effective_type(TYPE_DATA_SYNC, manifest).unwrap(),
+            TYPE_DATA_SYNC
+        );
         assert_eq!(effective_type(TYPE_NONE, TYPE_NONE).unwrap(), TYPE_NONE);
-        assert_eq!(effective_type(TYPE_MANIFEST, manifest).unwrap(), TYPE_SPECIAL_USE | TYPE_DATA_SYNC);
-        assert_eq!(effective_type(TYPE_SHORT_SERVICE, manifest).unwrap(), TYPE_SHORT_SERVICE);
+        assert_eq!(
+            effective_type(TYPE_MANIFEST, manifest).unwrap(),
+            TYPE_SPECIAL_USE | TYPE_DATA_SYNC
+        );
+        assert_eq!(
+            effective_type(TYPE_SHORT_SERVICE, manifest).unwrap(),
+            TYPE_SHORT_SERVICE
+        );
         let e = effective_type(TYPE_MEDIA_PLAYBACK, TYPE_SPECIAL_USE).unwrap_err();
         assert_eq!(
             e.message,
@@ -2722,10 +3225,16 @@ mod tests {
         };
         let mut fg = foreground(true);
         assert_eq!(fg.stop(STOP_FOREGROUND_REMOVE, 34), Stopped::Cancel);
-        assert_eq!((fg.is_foreground, fg.id, fg.service_type), (false, 0, fgs_types::TYPE_NONE));
+        assert_eq!(
+            (fg.is_foreground, fg.id, fg.service_type),
+            (false, 0, fgs_types::TYPE_NONE)
+        );
         assert!(!fg.allowed_start() && !fg.allowed_wiu());
         let mut fg = foreground(false);
-        assert_eq!(fg.stop(STOP_FOREGROUND_DETACH, 34), Stopped::Unflag { post: true });
+        assert_eq!(
+            fg.stop(STOP_FOREGROUND_DETACH, 34),
+            Stopped::Unflag { post: true }
+        );
         assert_eq!(fg.id, 0);
         let mut fg = foreground(true);
         assert_eq!(fg.stop(0, 34), Stopped::Unflag { post: false });
@@ -2743,17 +3252,31 @@ mod tests {
     #[test]
     fn foreground_notifications_are_deferred_as_the_original_defers_them() {
         let now = Instant::now();
-        let fg = Foreground { is_foreground: true, service_type: fgs_types::TYPE_SPECIAL_USE, ..Default::default() };
+        let fg = Foreground {
+            is_foreground: true,
+            service_type: fgs_types::TYPE_SPECIAL_USE,
+            ..Default::default()
+        };
         assert!(!fg.show_now(now, None, false, false));
         assert!(fg.show_now(now, None, false, true));
         assert!(!fg.show_now(now, None, true, true));
         assert!(fg.show_now(now, Some(now + Duration::from_secs(1)), true, false));
-        let media = Foreground { service_type: fgs_types::TYPE_MEDIA_PLAYBACK, ..Default::default() };
+        let media = Foreground {
+            service_type: fgs_types::TYPE_MEDIA_PLAYBACK,
+            ..Default::default()
+        };
         assert!(media.show_now(now, None, false, false));
-        let shown = Foreground { shown: true, ..Default::default() };
+        let shown = Foreground {
+            shown: true,
+            ..Default::default()
+        };
         assert!(shown.show_now(now, None, true, false));
         // Within its own deferral, the app's exclusion does not show it.
-        let deferred = Foreground { deferred: true, display_time: Some(now + Duration::from_secs(5)), ..Default::default() };
+        let deferred = Foreground {
+            deferred: true,
+            display_time: Some(now + Duration::from_secs(5)),
+            ..Default::default()
+        };
         assert!(!deferred.show_now(now, Some(now + Duration::from_secs(60)), false, false));
         assert!(deferred.show_now(now + Duration::from_secs(5), None, false, false));
     }
@@ -2765,18 +3288,42 @@ mod tests {
         assert!(!fg.allowed_start());
         fg.allow_start.1 = REASON_SYSTEM_UID;
         assert!(fg.allowed_start());
-        assert_eq!(reason_or(REASON_PROC_STATE_TOP, REASON_SYSTEM_UID), REASON_PROC_STATE_TOP);
-        assert_eq!(reason_or(REASON_DENIED, REASON_SYSTEM_UID), REASON_SYSTEM_UID);
+        assert_eq!(
+            reason_or(REASON_PROC_STATE_TOP, REASON_SYSTEM_UID),
+            REASON_PROC_STATE_TOP
+        );
+        assert_eq!(
+            reason_or(REASON_DENIED, REASON_SYSTEM_UID),
+            REASON_SYSTEM_UID
+        );
     }
 
     #[test]
     fn names_are_written_as_the_original_writes_them() {
-        assert_eq!(short_name("com.android.deskclock", "com.android.deskclock.timer.TimerService"), "com.android.deskclock/.timer.TimerService");
+        assert_eq!(
+            short_name(
+                "com.android.deskclock",
+                "com.android.deskclock.timer.TimerService"
+            ),
+            "com.android.deskclock/.timer.TimerService"
+        );
         assert_eq!(short_name("p", "q.S"), "p/q.S");
-        assert_eq!(process_record(42, "p", 10_123), "ProcessRecord{42:p/u0a123}");
-        assert_eq!(process_record(42, "system", 1000), "ProcessRecord{42:system/1000}");
-        let e = parcelable_exception("android.app.ForegroundServiceStartNotAllowedException", "m".into());
-        assert_eq!((e.code, e.message.as_str()), (aim_binder_host::parcel::EX_PARCELABLE, "m"));
+        assert_eq!(
+            process_record(42, "p", 10_123),
+            "ProcessRecord{42:p/u0a123}"
+        );
+        assert_eq!(
+            process_record(42, "system", 1000),
+            "ProcessRecord{42:system/1000}"
+        );
+        let e = parcelable_exception(
+            "android.app.ForegroundServiceStartNotAllowedException",
+            "m".into(),
+        );
+        assert_eq!(
+            (e.code, e.message.as_str()),
+            (aim_binder_host::parcel::EX_PARCELABLE, "m")
+        );
     }
 
     #[test]

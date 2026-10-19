@@ -23,7 +23,9 @@ enum Kind {
 pub fn recovered_bitmap(bytes: &[u8]) -> Result<Option<Object>> {
     let mut reader = Reader::new(bytes, &[]);
     let value = object(&mut reader, Kind::Bitmap)?;
-    if reader.remaining() != 0 { return Err(BAD_VALUE) }
+    if reader.remaining() != 0 {
+        return Err(BAD_VALUE);
+    }
     Ok(value)
 }
 fn object(r: &mut Reader<'_>, kind: Kind) -> Result<Option<Object>> {

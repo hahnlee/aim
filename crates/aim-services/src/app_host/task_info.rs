@@ -20,7 +20,10 @@ use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Pa
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_app_iapptask as iat;
 
-use super::activity::{ACTIVITY_TYPE_STANDARD, DEFAULT_DISPLAY, EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN, INVALID_DISPLAY, Token, USER_CURRENT};
+use super::activity::{
+    ACTIVITY_TYPE_STANDARD, DEFAULT_DISPLAY, EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN,
+    INVALID_DISPLAY, Token, USER_CURRENT,
+};
 use super::activity_stack::{Stack, Visibility};
 use super::activity_start::{Component, LaunchIntent};
 use super::config::{Configuration, Rect};
@@ -57,12 +60,25 @@ const CHECK_MIN_WIDTH_HEIGHT_FOR_MULTI_WINDOW: i64 = 197654537;
 /// `filterOnlyVisibleRecents` keeps them all: they are standard tasks,
 /// neither pinned nor locked, on a display that shows its tasks in
 /// recents (`RecentTasks.isVisibleRecentTask`).
-pub fn running_tasks(stack: &Stack, max: i32, caller: u32, allowed: bool, cross_user: bool, now: i64) -> Vec<(i32, i64)> {
+pub fn running_tasks(
+    stack: &Stack,
+    max: i32,
+    caller: u32,
+    allowed: bool,
+    cross_user: bool,
+    now: i64,
+) -> Vec<(i32, i64)> {
     let user = caller / PER_USER_RANGE;
     let seen = |t: &&super::activity_stack::Task| {
-        stack.top(t.id).is_some() && (t.uid == caller || ((t.user == user || cross_user) && allowed))
+        stack.top(t.id).is_some()
+            && (t.uid == caller || ((t.user == user || cross_user) && allowed))
     };
-    let (mut visible, invisible): (Vec<_>, Vec<_>) = stack.tasks.iter().rev().filter(seen).partition(|t| stack.visibility(t.id) != Visibility::Invisible);
+    let (mut visible, invisible): (Vec<_>, Vec<_>) = stack
+        .tasks
+        .iter()
+        .rev()
+        .filter(seen)
+        .partition(|t| stack.visibility(t.id) != Visibility::Invisible);
     if let Some(at) = visible.iter().position(|t| Some(t.id) == stack.focused()) {
         let focused = visible.remove(at);
         visible.insert(0, focused);
@@ -74,7 +90,16 @@ pub fn running_tasks(stack: &Stack, max: i32, caller: u32, allowed: bool, cross_
         .chain(invisible)
         .take(size)
         .enumerate()
-        .map(|(i, t)| (t.id, if i < visible_count { now + (size - i) as i64 } else { t.last_active }))
+        .map(|(i, t)| {
+            (
+                t.id,
+                if i < visible_count {
+                    now + (size - i) as i64
+                } else {
+                    t.last_active
+                },
+            )
+        })
         .collect()
 }
 
@@ -115,7 +140,11 @@ pub struct RunningTaskInfo {
 /// filter with its flags (`cloneFilter`) unless the extras are kept.
 pub enum BaseIntent {
     /// The launcher's intent of a component, with its flags.
-    Component { component: (String, String), flags: i32, strip: bool },
+    Component {
+        component: (String, String),
+        flags: i32,
+        strip: bool,
+    },
     Raw(Box<super::kept::RawIntent>),
 }
 
@@ -124,8 +153,17 @@ impl BaseIntent {
     fn of(task: &super::activity_stack::Task, strip: bool) -> Result<BaseIntent, String> {
         Ok(match &task.base {
             LaunchIntent::Component => {
-                let component = task.intent.component.as_ref().map(|c| (c.package.clone(), c.class.clone())).ok_or("no component")?;
-                BaseIntent::Component { component, flags: task.intent.flags, strip }
+                let component = task
+                    .intent
+                    .component
+                    .as_ref()
+                    .map(|c| (c.package.clone(), c.class.clone()))
+                    .ok_or("no component")?;
+                BaseIntent::Component {
+                    component,
+                    flags: task.intent.flags,
+                    strip,
+                }
             }
             LaunchIntent::Raw(kept) => {
                 let intent = &kept.intent;
@@ -144,10 +182,18 @@ impl BaseIntent {
 impl WriteParcelable for BaseIntent {
     fn write_to(&self, p: &mut Parcel) {
         match self {
-            BaseIntent::Component { component, flags, strip } => super::activity::Intent {
+            BaseIntent::Component {
+                component,
+                flags,
+                strip,
+            } => super::activity::Intent {
                 component: component.clone(),
                 flags: *flags,
-                extended_flags: if *strip { 0 } else { EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN },
+                extended_flags: if *strip {
+                    0
+                } else {
+                    EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN
+                },
                 content_user_hint: USER_CURRENT,
             }
             .write_to(p),
@@ -169,7 +215,9 @@ fn write_rect(p: &mut Parcel, r: Option<&Rect>) {
     match r {
         Some(r) => {
             p.write_i32(1);
-            [r.left, r.top, r.right, r.bottom].iter().for_each(|v| p.write_i32(*v));
+            [r.left, r.top, r.right, r.bottom]
+                .iter()
+                .for_each(|v| p.write_i32(*v));
         }
         None => p.write_i32(0),
     }
@@ -204,7 +252,12 @@ impl RunningTaskInfo {
         p.write_bool(true); // isRunning: it has a running activity
         p.write_i32(1);
         self.base_intent.write_to(p);
-        for c in [&self.base_activity, &self.top_activity, &self.orig_activity, &self.real_activity] {
+        for c in [
+            &self.base_activity,
+            &self.top_activity,
+            &self.orig_activity,
+            &self.real_activity,
+        ] {
             write_component(p, c);
         }
         p.write_i32(self.num_activities);
@@ -265,7 +318,9 @@ impl RunningTaskInfo {
         // `AppCompatTaskInfo`: no letterboxing, size compat or override.
         p.write_i32(1);
         p.write_i32(0); // top activity flags
-        [PROPERTY_VALUE_UNSET; 4].iter().for_each(|v| p.write_i32(*v));
+        [PROPERTY_VALUE_UNSET; 4]
+            .iter()
+            .for_each(|v| p.write_i32(*v));
         write_rect(p, Some(&self.top_activity_app_bounds));
         write_rect(p, None); // no letterbox bounds
         p.write_i32(1);
@@ -290,13 +345,25 @@ impl MultiWindow {
     /// `Task.supportsMultiWindowInDisplayArea` of a task (`resizeable`, of
     /// a minimal size `min`, its root activity's `checks_min_size`) on a
     /// display of `display`.
-    fn supports(&self, resizeable: bool, min: (i32, i32), checks_min_size: bool, display: &Configuration) -> bool {
+    fn supports(
+        &self,
+        resizeable: bool,
+        min: (i32, i32),
+        checks_min_size: bool,
+        display: &Configuration,
+    ) -> bool {
         let large = display.smallest_screen_width_dp >= LARGE_SCREEN_SMALLEST_SCREEN_WIDTH_DP;
-        let non_resizable = self.dev_non_resizable || self.non_resizable == 1 || (self.non_resizable != -1 && large);
+        let non_resizable = self.dev_non_resizable
+            || self.non_resizable == 1
+            || (self.non_resizable != -1 && large);
         if !self.supported || (!resizeable && !non_resizable) {
             return false;
         }
-        if !checks_min_size || (min.0 <= 0 && min.1 <= 0) || self.respects_min_size == -1 || (self.respects_min_size == 0 && large) {
+        if !checks_min_size
+            || (min.0 <= 0 && min.1 <= 0)
+            || self.respects_min_size == -1
+            || (self.respects_min_size == 0 && large)
+        {
             return true;
         }
         let density = display.density_dpi as f32 / 160.0;
@@ -312,26 +379,56 @@ impl AppHost {
     /// `getTasks` by `uid` of at most `max` tasks on display `display_id`
     /// (`INVALID_DISPLAY` for all), their base intents' extras kept if
     /// `keep_intent_extra`.
-    pub(super) fn get_tasks(&self, uid: i32, max: i32, keep_intent_extra: bool, display_id: i32) -> Result<Vec<Option<RunningTaskInfo>>, Exception> {
+    pub(super) fn get_tasks(
+        &self,
+        uid: i32,
+        max: i32,
+        keep_intent_extra: bool,
+        display_id: i32,
+    ) -> Result<Vec<Option<RunningTaskInfo>>, Exception> {
         let has = |p: &str| self.check_permission(Some(p), uid).map(|r| r == 0);
-        let cross_user = has("android.permission.INTERACT_ACROSS_USERS")? || has("android.permission.INTERACT_ACROSS_USERS_FULL")?;
+        let cross_user = has("android.permission.INTERACT_ACROSS_USERS")?
+            || has("android.permission.INTERACT_ACROSS_USERS_FULL")?;
         let allowed = self.get_tasks_allowed(uid)?;
         // `getRunningTasks`: the app host has one display.
         if display_id != INVALID_DISPLAY && display_id != DEFAULT_DISPLAY {
             return Ok(Vec::new());
         }
-        let chosen = running_tasks(&self.activities.stack.lock().unwrap(), max, uid as u32, allowed, cross_user, super::alarm_service::elapsed_ms());
+        let chosen = running_tasks(
+            &self.activities.stack.lock().unwrap(),
+            max,
+            uid as u32,
+            allowed,
+            cross_user,
+            super::alarm_service::elapsed_ms(),
+        );
         if chosen.is_empty() {
             return Ok(Vec::new());
         }
         let multi_window = self.multi_window()?;
-        chosen.into_iter().map(|(task, last_active)| self.task_info(task, last_active, !keep_intent_extra, allowed, &multi_window).map(Some)).collect()
+        chosen
+            .into_iter()
+            .map(|(task, last_active)| {
+                self.task_info(
+                    task,
+                    last_active,
+                    !keep_intent_extra,
+                    allowed,
+                    &multi_window,
+                )
+                .map(Some)
+            })
+            .collect()
     }
 
     /// `getAppTasks` by `uid` for `package`: the tasks of `RecentTasks
     /// .getAppTasksList`, the most recently active first, each the caller's
     /// `IAppTask`.
-    pub(super) fn app_tasks(&self, uid: i32, package: Option<&str>) -> Result<Vec<Binder>, Exception> {
+    pub(super) fn app_tasks(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+    ) -> Result<Vec<Binder>, Exception> {
         // `assertPackageMatchesCallingUid`: `isSameApp`, the system's for
         // no package.
         let same = match package {
@@ -350,42 +447,82 @@ impl AppHost {
             stack
                 .tasks
                 .iter()
-                .filter(|t| t.uid as i32 == uid && t.real_activity.split('/').next() == Some(package))
+                .filter(|t| {
+                    t.uid as i32 == uid && t.real_activity.split('/').next() == Some(package)
+                })
                 .map(|t| (t.last_active, t.id))
                 .collect()
         };
         tasks.sort_by(|a, b| b.0.cmp(&a.0));
-        let me = self.me.upgrade().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host gone"))?;
-        Ok(tasks.into_iter().map(|(_, task)| self.process.add_service(Arc::new(AppTask { host: me.clone(), task, uid }))).collect())
+        let me = self
+            .me
+            .upgrade()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host gone"))?;
+        Ok(tasks
+            .into_iter()
+            .map(|(_, task)| {
+                self.process.add_service(Arc::new(AppTask {
+                    host: me.clone(),
+                    task,
+                    uid,
+                }))
+            })
+            .collect())
     }
 
     /// `retrieveSettings`' multi-window support.
     fn multi_window(&self) -> Result<MultiWindow, Exception> {
         let inputs = self.inputs()?;
         let packages = &inputs.packages;
-        let global = |name: &str| inputs.settings.get(Table::Global, name).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0) != 0;
+        let global = |name: &str| {
+            inputs
+                .settings
+                .get(Table::Global, name)
+                .and_then(|v| v.parse::<i32>().ok())
+                .unwrap_or(0)
+                != 0
+        };
         let (state, _) = self.packages()?;
         let feature = |name: &str| state.system.features.iter().any(|(f, _)| f == name);
         let property = |name: &str| super::system_boolean(self.property(name).as_deref(), false);
         // `ActivityManager.isLowRamDeviceStatic`.
-        let low_ram = property("ro.config.low_ram") || (property("ro.debuggable") && property("debug.force_low_ram"));
-        let config = |name: &str| packages.framework_bool(name).ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("no framework bool {name}")));
-        let integer = |name: &str| packages.framework_integer(name).ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("no framework integer {name}")));
-        let float = |name: &str| packages.framework_float(name).ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("no framework float {name}")));
+        let low_ram = property("ro.config.low_ram")
+            || (property("ro.debuggable") && property("debug.force_low_ram"));
+        let config = |name: &str| {
+            packages.framework_bool(name).ok_or_else(|| {
+                Exception::new(EX_ILLEGAL_STATE, format!("no framework bool {name}"))
+            })
+        };
+        let integer = |name: &str| {
+            packages.framework_integer(name).ok_or_else(|| {
+                Exception::new(EX_ILLEGAL_STATE, format!("no framework integer {name}"))
+            })
+        };
+        let float = |name: &str| {
+            packages.framework_float(name).ok_or_else(|| {
+                Exception::new(EX_ILLEGAL_STATE, format!("no framework float {name}"))
+            })
+        };
         // `ActivityTaskManager.supportsMultiWindow`, `supportsSplitScreenMultiWindow`.
-        let supports = (!low_ram || feature("android.hardware.type.watch")) && config("config_supportsMultiWindow")?;
+        let supports = (!low_ram || feature("android.hardware.type.watch"))
+            && config("config_supportsMultiWindow")?;
         let split_screen = supports && config("config_supportsSplitScreenMultiWindow")?;
-        let freeform = feature("android.software.freeform_window_management") || global("enable_freeform_support");
+        let freeform = feature("android.software.freeform_window_management")
+            || global("enable_freeform_support");
         let pip = supports && feature("android.software.picture_in_picture");
         let multi_display = feature("android.software.activities_on_secondary_displays");
         let force_resizable = global("force_resizable_activities");
         Ok(MultiWindow {
-            supported: (supports || force_resizable) && (freeform || split_screen || pip || multi_display),
+            supported: (supports || force_resizable)
+                && (freeform || split_screen || pip || multi_display),
             force_resizable,
             dev_non_resizable: global("enable_non_resizable_multi_window"),
             non_resizable: integer("config_supportsNonResizableMultiWindow")?,
             respects_min_size: integer("config_respectsActivityMinWidthHeightMultiWindow")?,
-            min_percentage: (float("config_minPercentageMultiWindowSupportHeight")?, float("config_minPercentageMultiWindowSupportWidth")?),
+            min_percentage: (
+                float("config_minPercentageMultiWindowSupportHeight")?,
+                float("config_minPercentageMultiWindowSupportWidth")?,
+            ),
         })
     }
 
@@ -393,26 +530,63 @@ impl AppHost {
     /// its last active time `last_active`, its base intent's extras
     /// stripped if `strip`, what a caller not `allowed` may not see of
     /// another uid's activities trimmed (`trimIneffectiveInfo`).
-    fn task_info(&self, task: i32, last_active: i64, strip: bool, allowed: bool, multi_window: &MultiWindow) -> Result<RunningTaskInfo, Exception> {
+    fn task_info(
+        &self,
+        task: i32,
+        last_active: i64,
+        strip: bool,
+        allowed: bool,
+        multi_window: &MultiWindow,
+    ) -> Result<RunningTaskInfo, Exception> {
         let gone = || Exception::new(EX_ILLEGAL_STATE, format!("no task {task}"));
-        let split = |c: &str| c.split_once('/').map(|(p, c)| (p.to_string(), c.to_string()));
+        let split = |c: &str| {
+            c.split_once('/')
+                .map(|(p, c)| (p.to_string(), c.to_string()))
+        };
         let (t, running, top, focused, visibility, translucent, top_occludes) = {
             let stack = self.activities.stack.lock().unwrap();
             let t = stack.task(task).ok_or_else(gone)?.clone();
-            let running: Vec<u64> = stack.activities.iter().filter(|a| a.task == task && !a.finishing).map(|a| a.token).collect();
+            let running: Vec<u64> = stack
+                .activities
+                .iter()
+                .filter(|a| a.task == task && !a.finishing)
+                .map(|a| a.token)
+                .collect();
             let top = stack.top(task).ok_or_else(gone)?;
-            (t, running, top.token, stack.focused() == Some(task), stack.visibility(task), stack.translucent(task), top.occludes_parent)
+            (
+                t,
+                running,
+                top.token,
+                stack.focused() == Some(task),
+                stack.visibility(task),
+                stack.translucent(task),
+                top.occludes_parent,
+            )
         };
         let base_token = *running.first().ok_or_else(gone)?;
         let (top_info, top_uid, top_no_display, base_uid, root_info) = {
             let records = self.activities.records.lock().unwrap();
             let record = |token: u64| records.get(&token).ok_or_else(gone);
             let (top, base) = (record(top)?, record(base_token)?);
-            (top.info.clone(), top.uid, top.style.no_display, base.uid, base.info.clone())
+            (
+                top.info.clone(),
+                top.uid,
+                top.style.no_display,
+                base.uid,
+                base.info.clone(),
+            )
         };
         let top_component = super::activity_start::real_component(&top_info);
         let base_activity = super::activity_start::real_component(&root_info);
-        let global = self.global_config(top_uid).or_else(|| self.global_config(base_uid)).ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("task {task} of no running process")))?;
+        let global = self
+            .global_config(top_uid)
+            .or_else(|| self.global_config(base_uid))
+            .ok_or_else(|| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("task {task} of no running process"),
+                )
+            })?;
         let bounds = self.tasks.freeform_bounds(task);
         let mut configuration = match bounds {
             Some(bounds) => global.of_freeform_task(bounds),
@@ -422,12 +596,33 @@ impl AppHost {
         let resize_mode = root_info.resize_mode;
         let min_size = self.tasks.min_size(task).ok_or_else(gone)?;
         let force_resizable = multi_window.force_resizable;
-        let is_resizeable = force_resizable || RESIZEABLE_MODES.contains(&resize_mode) || root_info.flags & FLAG_SUPPORTS_PICTURE_IN_PICTURE != 0;
+        let is_resizeable = force_resizable
+            || RESIZEABLE_MODES.contains(&resize_mode)
+            || root_info.flags & FLAG_SUPPORTS_PICTURE_IN_PICTURE != 0;
         let package = root_info.info.application_info.item.package_name.as_deref();
-        let checks_min_size = self.inputs()?.compat.is_enabled(CHECK_MIN_WIDTH_HEIGHT_FOR_MULTI_WINDOW, package, root_info.info.application_info.target_sdk_version);
-        let default_min_size = self.inputs()?.packages.framework_dimension_dp("default_minimal_size_resizable_task").ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no default_minimal_size_resizable_task"))? as i32;
-        let base_intent = BaseIntent::of(&t, strip).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("the base intent of task {task}: {e}")))?;
-        let intent_component = t.intent.component.as_ref().map(|c| format!("{}/{}", c.package, c.class));
+        let checks_min_size = self.inputs()?.compat.is_enabled(
+            CHECK_MIN_WIDTH_HEIGHT_FOR_MULTI_WINDOW,
+            package,
+            root_info.info.application_info.target_sdk_version,
+        );
+        let default_min_size = self
+            .inputs()?
+            .packages
+            .framework_dimension_dp("default_minimal_size_resizable_task")
+            .ok_or_else(|| {
+                Exception::new(EX_ILLEGAL_STATE, "no default_minimal_size_resizable_task")
+            })? as i32;
+        let base_intent = BaseIntent::of(&t, strip).map_err(|e| {
+            Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("the base intent of task {task}: {e}"),
+            )
+        })?;
+        let intent_component = t
+            .intent
+            .component
+            .as_ref()
+            .map(|c| format!("{}/{}", c.package, c.class));
         let mut info = RunningTaskInfo {
             user_id: t.user as i32,
             task_id: task,
@@ -435,11 +630,19 @@ impl AppHost {
             base_intent,
             base_activity: split(&base_activity),
             top_activity: split(&top_component),
-            orig_activity: intent_component.filter(|c| *c != t.real_activity).as_deref().and_then(split),
+            orig_activity: intent_component
+                .filter(|c| *c != t.real_activity)
+                .as_deref()
+                .and_then(split),
             real_activity: split(&t.real_activity),
             num_activities: running.len() as i32,
             last_active_time: last_active,
-            supports_multi_window: multi_window.supports(is_resizeable, min_size, checks_min_size, &global),
+            supports_multi_window: multi_window.supports(
+                is_resizeable,
+                min_size,
+                checks_min_size,
+                &global,
+            ),
             resize_mode,
             configuration,
             token: self.task_token(task),
@@ -465,7 +668,13 @@ impl AppHost {
 
     /// The `WindowContainerToken` of `task`, made at its first use.
     fn task_token(&self, task: i32) -> Binder {
-        *self.activities.task_tokens.lock().unwrap().entry(task).or_insert_with(|| self.process.add_service(Arc::new(Token)))
+        *self
+            .activities
+            .task_tokens
+            .lock()
+            .unwrap()
+            .entry(task)
+            .or_insert_with(|| self.process.add_service(Arc::new(Token)))
     }
 }
 
@@ -530,8 +739,18 @@ mod tests {
         s.freeform = freeform;
         for (id, uid, token) in [(7, 10_100, 1), (8, 10_200, 2)] {
             let intent = Intent::default();
-            s.tasks.push(Task { id, affinity: None, real_activity: format!("p{id}/A"), intent, base: LaunchIntent::Component, uid, user: 0, last_active: id as i64 * 10 });
-            s.activities.push(Activity::new(token, id, 1, "p/A", 0, 0, None));
+            s.tasks.push(Task {
+                id,
+                affinity: None,
+                real_activity: format!("p{id}/A"),
+                intent,
+                base: LaunchIntent::Component,
+                uid,
+                user: 0,
+                last_active: id as i64 * 10,
+            });
+            s.activities
+                .push(Activity::new(token, id, 1, "p/A", 0, 0, None));
         }
         s
     }
@@ -542,11 +761,17 @@ mod tests {
         // Its own, hidden behind the other: its own last active time.
         assert_eq!(running_tasks(&s, 10, 10_100, false, false, 1000), [(7, 70)]);
         // All: the visible one's time after now.
-        assert_eq!(running_tasks(&s, 10, 10_100, true, false, 1000), [(8, 1002), (7, 70)]);
+        assert_eq!(
+            running_tasks(&s, 10, 10_100, true, false, 1000),
+            [(8, 1002), (7, 70)]
+        );
         assert_eq!(running_tasks(&s, 1, 10_100, true, false, 1000), [(8, 1001)]);
         assert_eq!(running_tasks(&s, 0, 10_100, true, false, 1000), []);
         // In window mode both are visible, the focused one first.
-        assert_eq!(running_tasks(&stack(true), 10, 10_100, true, false, 1000), [(8, 1002), (7, 1001)]);
+        assert_eq!(
+            running_tasks(&stack(true), 10, 10_100, true, false, 1000),
+            [(8, 1002), (7, 1001)]
+        );
         // Another user's tasks need INTERACT_ACROSS_USERS.
         let other = 10 * PER_USER_RANGE + 10_100;
         assert_eq!(running_tasks(&s, 10, other, true, false, 1000), []);
@@ -554,20 +779,43 @@ mod tests {
         // A task without a running activity is not running.
         let mut s = stack(false);
         s.activities[1].finishing = true;
-        assert_eq!(running_tasks(&s, 10, 10_100, true, false, 1000), [(7, 1001)]);
+        assert_eq!(
+            running_tasks(&s, 10, 10_100, true, false, 1000),
+            [(7, 1001)]
+        );
     }
 
     /// The parcel, read back in `TaskInfo.readTaskFromParcel`'s order.
     #[test]
     fn a_running_task_info_is_written_as_the_original_reads_it() {
-        let device = Device { locales: "en-US", right_to_left: false, night: false, font_scale: 1.0, font_weight_adjustment: 0, seq: 1 };
-        let bounds = Rect { left: 10, top: 20, right: 830, bottom: 1480 };
-        let configuration = Configuration::of(&Display::phone_for_test(), &device).of_freeform_task(bounds);
+        let device = Device {
+            locales: "en-US",
+            right_to_left: false,
+            night: false,
+            font_scale: 1.0,
+            font_weight_adjustment: 0,
+            seq: 1,
+        };
+        let bounds = Rect {
+            left: 10,
+            top: 20,
+            right: 830,
+            bottom: 1480,
+        };
+        let configuration =
+            Configuration::of(&Display::phone_for_test(), &device).of_freeform_task(bounds);
         let task = Task {
             id: 9,
             affinity: None,
             real_activity: "p/p.Main".into(),
-            intent: Intent { flags: 0x1000_0000, component: Some(ComponentName { package: "p".into(), class: "p.Main".into() }), ..Default::default() },
+            intent: Intent {
+                flags: 0x1000_0000,
+                component: Some(ComponentName {
+                    package: "p".into(),
+                    class: "p.Main".into(),
+                }),
+                ..Default::default()
+            },
             base: LaunchIntent::Component,
             uid: 10_100,
             user: 0,
@@ -605,15 +853,30 @@ mod tests {
         let mut p = Parcel::new();
         info.write_to(&mut p);
         let mut r = Reader::new(p.data(), p.objects());
-        let ints = |r: &mut Reader<'_>, n: usize| (0..n).map(|_| r.read_i32().unwrap()).collect::<Vec<_>>();
-        let rect = |r: &mut Reader<'_>| (r.read_i32().unwrap() != 0).then(|| [0; 4].map(|_| r.read_i32().unwrap()));
-        let component = |r: &mut Reader<'_>| r.read_string16().unwrap().map(|p| (p, r.read_string16().unwrap().unwrap()));
+        let ints = |r: &mut Reader<'_>, n: usize| {
+            (0..n).map(|_| r.read_i32().unwrap()).collect::<Vec<_>>()
+        };
+        let rect = |r: &mut Reader<'_>| {
+            (r.read_i32().unwrap() != 0).then(|| [0; 4].map(|_| r.read_i32().unwrap()))
+        };
+        let component = |r: &mut Reader<'_>| {
+            r.read_string16()
+                .unwrap()
+                .map(|p| (p, r.read_string16().unwrap().unwrap()))
+        };
         // RunningTaskInfo.id, userId, taskId, effectiveUid, displayId,
         // isRunning, a base intent.
         assert_eq!(ints(&mut r, 7), [9, 0, 9, 10_100, 0, 1, 1]);
         let base = crate::app_host::kept::RawIntent::read_from(&mut r).unwrap();
         // The filter of the launcher's intent, with its flags.
-        assert_eq!((base.intent.flags, base.intent.extended_flags, base.intent.component.map(|c| c.class)), (0x1000_0000, 0, Some("p.Main".into())));
+        assert_eq!(
+            (
+                base.intent.flags,
+                base.intent.extended_flags,
+                base.intent.component.map(|c| c.class)
+            ),
+            (0x1000_0000, 0, Some("p.Main".into()))
+        );
         assert_eq!(component(&mut r), Some(("p".into(), "p.Main".into())));
         assert_eq!(component(&mut r), Some(("p".into(), "p.Top".into())));
         assert_eq!(component(&mut r), None);
@@ -628,7 +891,10 @@ mod tests {
         assert_eq!(ints(&mut r, 2), [1, 2]);
         let mut config = Parcel::new();
         configuration.write_to(&mut config);
-        assert_eq!(&p.data()[r.position()..r.position() + config.data().len()], config.data());
+        assert_eq!(
+            &p.data()[r.position()..r.position() + config.data().len()],
+            config.data()
+        );
         r.skip(config.data().len()).unwrap();
         assert_eq!(r.read_binder().unwrap(), Some(Binder::Local(0x40)));
         // topActivityType, no PiP params, no big overlays, no PiP tasks,
@@ -640,12 +906,26 @@ mod tests {
         assert_eq!(r.read_i32().unwrap(), -1);
         // isFocused, isVisible, isVisibleRequested, no display, sleeping;
         // no LocusId, the feature, the transparencies, the bounds.
-        assert_eq!(ints(&mut r, 9), [1, 1, 1, 0, 0, 0, FEATURE_DEFAULT_TASK_CONTAINER, 1, 0]);
+        assert_eq!(
+            ints(&mut r, 9),
+            [1, 1, 1, 0, 0, 0, FEATURE_DEFAULT_TASK_CONTAINER, 1, 0]
+        );
         assert_eq!(rect(&mut r), Some([10, 20, 830, 1480]));
-        assert_eq!((r.read_i32().unwrap(), r.read_i64().unwrap(), r.read_i32().unwrap(), r.read_i64().unwrap()), (0, 0, !8, 0));
+        assert_eq!(
+            (
+                r.read_i32().unwrap(),
+                r.read_i64().unwrap(),
+                r.read_i32().unwrap(),
+                r.read_i64().unwrap()
+            ),
+            (0, 0, !8, 0)
+        );
         // AppCompatTaskInfo.
         assert_eq!(ints(&mut r, 6), [1, 0, -1, -1, -1, -1]);
-        assert_eq!((rect(&mut r), rect(&mut r)), (Some([10, 20, 830, 1480]), None));
+        assert_eq!(
+            (rect(&mut r), rect(&mut r)),
+            (Some([10, 20, 830, 1480]), None)
+        );
         assert_eq!(ints(&mut r, 2), [1, 0]);
         assert_eq!(rect(&mut r), None); // topActivityMainWindowFrame
         assert_eq!(r.remaining(), 0);
@@ -684,7 +964,9 @@ impl Service for AppTask {
                         let stack = host.activities.stack.lock().unwrap();
                         stack.task(self.task).map(|t| t.last_active)
                     };
-                    let last_active = last_active.ok_or_else(|| Exception::illegal_argument(format!("Unable to find task ID {}", self.task)))?;
+                    let last_active = last_active.ok_or_else(|| {
+                        Exception::illegal_argument(format!("Unable to find task ID {}", self.task))
+                    })?;
                     host.task_info(self.task, last_active, false, true, &host.multi_window()?)
                 })();
                 super::reply(info.map(|info| {

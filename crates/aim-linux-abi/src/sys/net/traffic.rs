@@ -122,10 +122,17 @@ fn u32_at(b: &[u8], at: usize) -> Option<u32> {
 
 /// `bpf_traffic_account` for one packet.
 fn account_packet(maps: &Maps, p: &Packet) {
-    let sock_uid = if p.sock_uid == OVERFLOW_UID { 0 } else { p.sock_uid };
+    let sock_uid = if p.sock_uid == OVERFLOW_UID {
+        0
+    } else {
+        p.sock_uid
+    };
     // UidTagValue: uid, tag.
     let (mut uid, tag) = match maps.cookie_tag.lookup(&p.cookie.to_ne_bytes()) {
-        Some(v) => (u32_at(&v, 0).unwrap_or(sock_uid), u32_at(&v, 4).unwrap_or(0)),
+        Some(v) => (
+            u32_at(&v, 0).unwrap_or(sock_uid),
+            u32_at(&v, 4).unwrap_or(0),
+        ),
         None => (sock_uid, 0),
     };
     if p.egress && uid == AID_CLAT {
@@ -134,7 +141,10 @@ fn account_packet(maps: &Maps, p: &Packet) {
     if tag == TAG_SYSTEM_DNS && uid == AID_DNS {
         uid = sock_uid;
     }
-    let counter_set = maps.uid_counterset.lookup(&uid.to_ne_bytes()).map_or(0, |v| v[0] as u32);
+    let counter_set = maps
+        .uid_counterset
+        .lookup(&uid.to_ne_bytes())
+        .map_or(0, |v| v[0] as u32);
     let Some(selected) = maps
         .configuration
         .lookup(&CURRENT_STATS_MAP_CONFIGURATION_KEY.to_ne_bytes())
@@ -147,10 +157,15 @@ fn account_packet(maps: &Maps, p: &Packet) {
     for (i, v) in [uid, tag, counter_set, p.ifindex].into_iter().enumerate() {
         key[i * 4..i * 4 + 4].copy_from_slice(&v.to_ne_bytes());
     }
-    let stats = if selected == SELECT_MAP_A { &maps.stats_a } else { &maps.stats_b };
+    let stats = if selected == SELECT_MAP_A {
+        &maps.stats_a
+    } else {
+        &maps.stats_b
+    };
     let counts = p.counts();
     stats.update(&key, |v| add(v, p.egress, counts));
-    maps.app_uid_stats.update(&uid.to_ne_bytes(), |v| add(v, p.egress, counts));
+    maps.app_uid_stats
+        .update(&uid.to_ne_bytes(), |v| add(v, p.egress, counts));
 }
 
 /// The interface and IP version of a packet to or from `addr` (a Linux
@@ -168,7 +183,11 @@ fn route(fd: i32, addr: Option<&[u8]>) -> Option<(u32, bool)> {
         } else {
             (sa.get(4..8)?, false)
         };
-        let lo = if v6 { ip[..15].iter().all(|&b| b == 0) && ip[15] == 1 } else { ip[0] == 127 };
+        let lo = if v6 {
+            ip[..15].iter().all(|&b| b == 0) && ip[15] == 1
+        } else {
+            ip[0] == 127
+        };
         Some((if lo { netif::LO } else { netif::ETH0 }, v6))
     };
     if let Some(sa) = addr {
@@ -184,13 +203,21 @@ fn route(fd: i32, addr: Option<&[u8]>) -> Option<(u32, bool)> {
         let mut len = std::mem::size_of::<libc::sockaddr_storage>() as u32;
         let p = (ss as *mut libc::sockaddr_storage).cast();
         // SAFETY: the name into local storage of its size.
-        (unsafe { if peer { libc::getpeername(fd, p, &mut len) } else { libc::getsockname(fd, p, &mut len) } }) == 0
+        (unsafe {
+            if peer {
+                libc::getpeername(fd, p, &mut len)
+            } else {
+                libc::getsockname(fd, p, &mut len)
+            }
+        }) == 0
     };
     if !name(true, &mut ss) && !name(false, &mut ss) {
         return None;
     }
     // SAFETY: the host sockaddr's bytes.
-    let sa = unsafe { std::slice::from_raw_parts((&raw const ss).cast::<u8>(), std::mem::size_of_val(&ss)) };
+    let sa = unsafe {
+        std::slice::from_raw_parts((&raw const ss).cast::<u8>(), std::mem::size_of_val(&ss))
+    };
     match ss.ss_family as i32 {
         libc::AF_INET => classify(false, sa),
         libc::AF_INET6 => classify(true, sa),
@@ -224,7 +251,15 @@ pub(super) fn account(s: &Sock, fd: i32, egress: bool, n: i64, addr: Option<&[u8
     };
     account_packet(
         &maps,
-        &Packet { sock_uid: owner.uid, cookie: owner.cookie, ifindex, ipv6, transport, egress, payload: n as u64 },
+        &Packet {
+            sock_uid: owner.uid,
+            cookie: owner.cookie,
+            ifindex,
+            ipv6,
+            transport,
+            egress,
+            payload: n as u64,
+        },
     );
 }
 
@@ -256,56 +291,142 @@ mod tests {
     }
 
     fn key(uid: u32, tag: u32, set: u32, ifindex: u32) -> Vec<u8> {
-        [uid, tag, set, ifindex].iter().flat_map(|v| v.to_ne_bytes()).collect()
+        [uid, tag, set, ifindex]
+            .iter()
+            .flat_map(|v| v.to_ne_bytes())
+            .collect()
     }
 
-    const TCP: Packet =
-        Packet { sock_uid: 10100, cookie: 7, ifindex: 2, ipv6: false, transport: 32, egress: true, payload: 100 };
+    const TCP: Packet = Packet {
+        sock_uid: 10100,
+        cookie: 7,
+        ifindex: 2,
+        ipv6: false,
+        transport: 32,
+        egress: true,
+        payload: 100,
+    };
 
     #[test]
     fn packets_count_their_headers_and_split_as_gso() {
         assert_eq!(TCP.counts(), (1, 152));
         assert_eq!(Packet { ipv6: true, ..TCP }.counts(), (1, 172));
         // 1448 bytes of payload per 1500-byte segment.
-        assert_eq!(Packet { payload: 1448, ..TCP }.counts(), (1, 1500));
-        assert_eq!(Packet { payload: 1449, ..TCP }.counts(), (2, 1449 + 2 * 52));
-        assert_eq!(Packet { payload: 1_000_000, ..TCP }.counts(), (691, 1_000_000 + 691 * 52));
-        assert_eq!(Packet { transport: 8, payload: 1472, ..TCP }.counts(), (1, 1500));
+        assert_eq!(
+            Packet {
+                payload: 1448,
+                ..TCP
+            }
+            .counts(),
+            (1, 1500)
+        );
+        assert_eq!(
+            Packet {
+                payload: 1449,
+                ..TCP
+            }
+            .counts(),
+            (2, 1449 + 2 * 52)
+        );
+        assert_eq!(
+            Packet {
+                payload: 1_000_000,
+                ..TCP
+            }
+            .counts(),
+            (691, 1_000_000 + 691 * 52)
+        );
+        assert_eq!(
+            Packet {
+                transport: 8,
+                payload: 1472,
+                ..TCP
+            }
+            .counts(),
+            (1, 1500)
+        );
     }
 
     #[test]
     fn traffic_counts_for_the_uid_in_the_selected_map() {
         let m = maps();
         account_packet(&m, &TCP);
-        account_packet(&m, &Packet { egress: false, payload: 1000, ..TCP });
-        assert_eq!(stats(m.app_uid_stats.lookup(&10100u32.to_ne_bytes())), [1, 1052, 1, 152]);
-        assert_eq!(stats(m.stats_a.lookup(&key(10100, 0, 0, 2))), [1, 1052, 1, 152]);
+        account_packet(
+            &m,
+            &Packet {
+                egress: false,
+                payload: 1000,
+                ..TCP
+            },
+        );
+        assert_eq!(
+            stats(m.app_uid_stats.lookup(&10100u32.to_ne_bytes())),
+            [1, 1052, 1, 152]
+        );
+        assert_eq!(
+            stats(m.stats_a.lookup(&key(10100, 0, 0, 2))),
+            [1, 1052, 1, 152]
+        );
         assert_eq!(m.stats_b.lookup(&key(10100, 0, 0, 2)), None);
         // The overflow uid counts as root's.
-        account_packet(&m, &Packet { sock_uid: OVERFLOW_UID, ..TCP });
-        assert_eq!(stats(m.app_uid_stats.lookup(&0u32.to_ne_bytes())), [0, 0, 1, 152]);
+        account_packet(
+            &m,
+            &Packet {
+                sock_uid: OVERFLOW_UID,
+                ..TCP
+            },
+        );
+        assert_eq!(
+            stats(m.app_uid_stats.lookup(&0u32.to_ne_bytes())),
+            [0, 0, 1, 152]
+        );
     }
 
     #[test]
     fn a_tag_counter_set_and_map_selection_steer_the_counters() {
         let m = maps();
-        assert!(m.configuration.update(&CURRENT_STATS_MAP_CONFIGURATION_KEY.to_ne_bytes(), |v| v.copy_from_slice(&1u32.to_ne_bytes())));
+        assert!(
+            m.configuration
+                .update(&CURRENT_STATS_MAP_CONFIGURATION_KEY.to_ne_bytes(), |v| v
+                    .copy_from_slice(&1u32.to_ne_bytes()))
+        );
         // Tagged for another uid, which is in the foreground set.
         let tag = [10200u32.to_ne_bytes(), 42u32.to_ne_bytes()].concat();
-        assert!(m.cookie_tag.update(&7u64.to_ne_bytes(), |v| v.copy_from_slice(&tag)));
-        assert!(m.uid_counterset.update(&10200u32.to_ne_bytes(), |v| v[0] = 1));
+        assert!(
+            m.cookie_tag
+                .update(&7u64.to_ne_bytes(), |v| v.copy_from_slice(&tag))
+        );
+        assert!(
+            m.uid_counterset
+                .update(&10200u32.to_ne_bytes(), |v| v[0] = 1)
+        );
         account_packet(&m, &TCP);
-        assert_eq!(stats(m.stats_b.lookup(&key(10200, 42, 1, 2))), [0, 0, 1, 152]);
-        assert_eq!(stats(m.app_uid_stats.lookup(&10200u32.to_ne_bytes())), [0, 0, 1, 152]);
+        assert_eq!(
+            stats(m.stats_b.lookup(&key(10200, 42, 1, 2))),
+            [0, 0, 1, 152]
+        );
+        assert_eq!(
+            stats(m.app_uid_stats.lookup(&10200u32.to_ne_bytes())),
+            [0, 0, 1, 152]
+        );
         assert_eq!(m.app_uid_stats.lookup(&10100u32.to_ne_bytes()), None);
         // DNS on an app's behalf counts for the socket's uid; clat's own
         // sends not at all.
         let dns = [AID_DNS.to_ne_bytes(), TAG_SYSTEM_DNS.to_ne_bytes()].concat();
-        assert!(m.cookie_tag.update(&8u64.to_ne_bytes(), |v| v.copy_from_slice(&dns)));
+        assert!(
+            m.cookie_tag
+                .update(&8u64.to_ne_bytes(), |v| v.copy_from_slice(&dns))
+        );
         account_packet(&m, &Packet { cookie: 8, ..TCP });
-        assert_eq!(stats(m.app_uid_stats.lookup(&10100u32.to_ne_bytes())), [0, 0, 1, 152]);
+        assert_eq!(
+            stats(m.app_uid_stats.lookup(&10100u32.to_ne_bytes())),
+            [0, 0, 1, 152]
+        );
         let clat = [AID_CLAT.to_ne_bytes(), 0u32.to_ne_bytes()].concat();
-        assert!(m.cookie_tag.update(&9u64.to_ne_bytes(), |v| v.copy_from_slice(&clat)));
+        assert!(
+            m.cookie_tag
+                .update(&9u64.to_ne_bytes(), |v| v.copy_from_slice(&clat))
+        );
         account_packet(&m, &Packet { cookie: 9, ..TCP });
         assert_eq!(m.app_uid_stats.lookup(&AID_CLAT.to_ne_bytes()), None);
     }
@@ -314,8 +435,14 @@ mod tests {
     fn loopback_addresses_route_to_lo() {
         let v4 = |a: [u8; 4]| [&2u16.to_ne_bytes()[..], &[0, 80], &a].concat();
         let v6 = |a: [u8; 16]| [&10u16.to_ne_bytes()[..], &[0; 6], &a].concat();
-        assert_eq!(route(-1, Some(&v4([127, 0, 0, 1]))), Some((netif::LO, false)));
-        assert_eq!(route(-1, Some(&v4([93, 184, 216, 34]))), Some((netif::ETH0, false)));
+        assert_eq!(
+            route(-1, Some(&v4([127, 0, 0, 1]))),
+            Some((netif::LO, false))
+        );
+        assert_eq!(
+            route(-1, Some(&v4([93, 184, 216, 34]))),
+            Some((netif::ETH0, false))
+        );
         let mut lo6 = [0u8; 16];
         lo6[15] = 1;
         assert_eq!(route(-1, Some(&v6(lo6))), Some((netif::LO, true)));
@@ -324,6 +451,14 @@ mod tests {
         assert_eq!(route(-1, Some(&v6(mapped))), Some((netif::LO, false)));
         mapped[12] = 10;
         assert_eq!(route(-1, Some(&v6(mapped))), Some((netif::ETH0, false)));
-        assert_eq!(route(-1, Some(&v6([0x20, 1, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]))), Some((netif::ETH0, true)));
+        assert_eq!(
+            route(
+                -1,
+                Some(&v6([
+                    0x20, 1, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
+                ]))
+            ),
+            Some((netif::ETH0, true))
+        );
     }
 }

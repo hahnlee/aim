@@ -49,8 +49,11 @@ pub fn export(directory: &Path) {
         )]))
         .unwrap();
         let snapshot = aim_services::package::scan_snapshot::Store::new(
-            scan.clone(), aim_services::package::owner::usage::Usage::new(["p"]),
-        ).unwrap().capture();
+            scan.clone(),
+            aim_services::package::owner::usage::Usage::new(["p"]),
+        )
+        .unwrap()
+        .capture();
         store.commit_scan_settings(&snapshot).unwrap();
         store.claim_unread_restrictions(0).unwrap();
         store

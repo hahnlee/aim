@@ -14,7 +14,8 @@ use aim_android_xml::{Element, Node, Value};
 
 use super::job_info::{
     self, CONSTRAINT_FLAG_BATTERY_NOT_LOW, CONSTRAINT_FLAG_CHARGING, CONSTRAINT_FLAG_DEVICE_IDLE,
-    CONSTRAINT_FLAG_STORAGE_NOT_LOW, JobInfo, JobWorkItem, MAX_NUM_DEBUG_TAGS, NETWORK_BYTES_UNKNOWN,
+    CONSTRAINT_FLAG_STORAGE_NOT_LOW, JobInfo, JobWorkItem, MAX_NUM_DEBUG_TAGS,
+    NETWORK_BYTES_UNKNOWN,
 };
 use crate::package::restrictions::persistable::{self, Bundle};
 
@@ -49,7 +50,9 @@ pub struct Stored {
 
 /// Each job file's name in `dir`, and whether it is a split file.
 fn job_files(dir: &Path) -> Vec<(std::path::PathBuf, bool)> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
     let mut files: Vec<_> = entries
         .flatten()
         .filter_map(|e| {
@@ -80,7 +83,9 @@ pub fn read(dir: &Path, now_elapsed: i64, now_wall: i64) -> (Vec<Stored>, bool) 
         match read {
             Ok(found) => {
                 for job in found {
-                    let same = |j: &Stored| j.uid == job.uid && j.namespace == job.namespace && j.job.id == job.job.id;
+                    let same = |j: &Stored| {
+                        j.uid == job.uid && j.namespace == job.namespace && j.job.id == job.job.id
+                    };
                     if !jobs.iter().any(same) {
                         jobs.push(job);
                     }
@@ -123,11 +128,18 @@ fn int_list(s: &str) -> Result<Vec<i32>, String> {
     if s.is_empty() {
         return Ok(Vec::new());
     }
-    s.split(',').map(|v| v.parse().map_err(|_| format!("not a number: {v}"))).collect()
+    s.split(',')
+        .map(|v| v.parse().map_err(|_| format!("not a number: {v}")))
+        .collect()
 }
 
 /// `restoreJobFromXml`.
-fn restore_job(e: &Element, version: i32, now_elapsed: i64, now_wall: i64) -> Result<Stored, String> {
+fn restore_job(
+    e: &Element,
+    version: i32,
+    now_elapsed: i64,
+    now_wall: i64,
+) -> Result<Stored, String> {
     let id = required(e.int("jobid"), "jobid")?;
     let package = e.string("package").ok_or("no package")?.into_owned();
     let class = e.string("class").ok_or("no class")?.into_owned();
@@ -150,7 +162,10 @@ fn restore_job(e: &Element, version: i32, now_elapsed: i64, now_wall: i64) -> Re
     let source_tag = e.string("sourceTag").map(|s| s.into_owned());
 
     let mut children = e.children();
-    let constraints = children.next().filter(|c| c.name == "constraints").ok_or("no constraints")?;
+    let constraints = children
+        .next()
+        .filter(|c| c.name == "constraints")
+        .ok_or("no constraints")?;
     read_constraints(&mut job, constraints)?;
     let criteria = children.next().ok_or("no execution criteria")?;
     // `buildRtcExecutionTimesFromXml`, then `convertRtcBoundsToElapsed`.
@@ -192,12 +207,18 @@ fn restore_job(e: &Element, version: i32, now_elapsed: i64, now_wall: i64) -> Re
     // `maybeBuildBackoffPolicyFromXml`.
     let backoff_set = match criteria.long("initial-backoff")? {
         Some(initial) => {
-            job.set_backoff(initial, required(criteria.int("backoff-policy"), "backoff-policy")?);
+            job.set_backoff(
+                initial,
+                required(criteria.int("backoff-policy"), "backoff-policy")?,
+            );
             true
         }
         None => false,
     };
-    let extras = children.next().filter(|c| c.name == "extras").ok_or("no extras")?;
+    let extras = children
+        .next()
+        .filter(|c| c.name == "extras")
+        .ok_or("no extras")?;
     job.extras = Bundle::restore(extras).map_err(|e| e.to_string())?;
     let mut work = Vec::new();
     let mut next = children.next();
@@ -225,12 +246,21 @@ fn restore_job(e: &Element, version: i32, now_elapsed: i64, now_wall: i64) -> Re
     if backoff_set && job.constraint_flags & CONSTRAINT_FLAG_DEVICE_IDLE != 0 {
         return Err("An idle mode job will not respect any back-off policy".into());
     }
-    job.enforce_validity(false, false, false, false).map_err(|e| e.message)?;
+    job.enforce_validity(false, false, false, false)
+        .map_err(|e| e.message)?;
     // Sync jobs of an earlier, incomplete representation.
     if source_package.as_deref() == Some("android") {
-        let entry = |k: &str| job.extras.entries.iter().find(|(n, _)| n.as_deref() == Some(k)).map(|(_, v)| v);
-        if matches!(entry("SyncManagerJob"), Some(persistable::Value::Bool(true)))
-            && let Some(persistable::Value::String(owner)) = entry("owningPackage")
+        let entry = |k: &str| {
+            job.extras
+                .entries
+                .iter()
+                .find(|(n, _)| n.as_deref() == Some(k))
+                .map(|(_, v)| v)
+        };
+        if matches!(
+            entry("SyncManagerJob"),
+            Some(persistable::Value::Bool(true))
+        ) && let Some(persistable::Value::String(owner)) = entry("owningPackage")
         {
             source_package = Some(owner.clone());
         }
@@ -257,18 +287,36 @@ fn read_constraints(job: &mut JobInfo, e: &Element) -> Result<(), String> {
     let caps = e.string("net-capabilities-csv");
     let transports = e.string("net-transport-types-csv");
     if let (Some(caps), Some(transports)) = (&caps, &transports) {
-        let forbidden = e.string("net-forbidden-capabilities-csv").unwrap_or_default();
-        job.network = Some(job_info::restored_request(&int_list(caps)?, &int_list(&forbidden)?, &int_list(transports)?));
-        job.network_download_bytes = e.long("estimated-download-bytes")?.unwrap_or(NETWORK_BYTES_UNKNOWN);
-        job.network_upload_bytes = e.long("estimated-upload-bytes")?.unwrap_or(NETWORK_BYTES_UNKNOWN);
-        let chunk = e.long("minimum-network-chunk-bytes")?.unwrap_or(NETWORK_BYTES_UNKNOWN);
+        let forbidden = e
+            .string("net-forbidden-capabilities-csv")
+            .unwrap_or_default();
+        job.network = Some(job_info::restored_request(
+            &int_list(caps)?,
+            &int_list(&forbidden)?,
+            &int_list(transports)?,
+        ));
+        job.network_download_bytes = e
+            .long("estimated-download-bytes")?
+            .unwrap_or(NETWORK_BYTES_UNKNOWN);
+        job.network_upload_bytes = e
+            .long("estimated-upload-bytes")?
+            .unwrap_or(NETWORK_BYTES_UNKNOWN);
+        let chunk = e
+            .long("minimum-network-chunk-bytes")?
+            .unwrap_or(NETWORK_BYTES_UNKNOWN);
         if chunk != NETWORK_BYTES_UNKNOWN && chunk <= 0 {
             return Err("Minimum chunk size must be positive".into());
         }
         job.minimum_network_chunk_bytes = chunk;
-    } else if ["net-capabilities", "connectivity", "metered", "unmetered", "not-roaming"]
-        .iter()
-        .any(|a| e.attr(a).is_some())
+    } else if [
+        "net-capabilities",
+        "connectivity",
+        "metered",
+        "unmetered",
+        "not-roaming",
+    ]
+    .iter()
+    .any(|a| e.attr(a).is_some())
     {
         // Written by R and before; this image's JobStore wrote S's form.
         return Err("a network constraint of R or before".into());
@@ -290,8 +338,11 @@ fn read_constraints(job: &mut JobInfo, e: &Element) -> Result<(), String> {
 fn read_work_item(e: &Element) -> Result<JobWorkItem, String> {
     let delivery_count = required(e.int("delivery-count"), "delivery-count")?;
     let long = |name: &str| e.long(name).map(|v| v.unwrap_or(NETWORK_BYTES_UNKNOWN));
-    let (down, up, chunk) =
-        (long("estimated-download-bytes")?, long("estimated-upload-bytes")?, long("minimum-network-chunk-bytes")?);
+    let (down, up, chunk) = (
+        long("estimated-download-bytes")?,
+        long("estimated-upload-bytes")?,
+        long("minimum-network-chunk-bytes")?,
+    );
     let extras = match e.children().next() {
         Some(extras) => Bundle::restore(extras).map_err(|e| e.to_string())?,
         None => Bundle::default(),
@@ -306,19 +357,29 @@ fn string(name: &str, value: impl ToString) -> (String, Value) {
 }
 
 fn element(name: &str, attrs: Vec<(String, Value)>, content: Vec<Node>) -> Node {
-    Node::Element(Element { name: name.into(), attrs, content })
+    Node::Element(Element {
+        name: name.into(),
+        attrs,
+        content,
+    })
 }
 
 /// `writeBundleToXml`.
 fn extras(b: &Bundle) -> Result<Node, String> {
-    b.save("extras").map(Node::Element).map_err(|e| e.to_string())
+    b.save("extras")
+        .map(Node::Element)
+        .map_err(|e| e.to_string())
 }
 
 /// `writeJobsMapImpl`'s `<job>` of `s`, at `now_elapsed` and `now_wall`.
 fn job_element(s: &Stored, now_elapsed: i64, now_wall: i64) -> Result<Node, String> {
     let job = &s.job;
     // `addAttributesToJobTag`.
-    let mut attrs = vec![string("jobid", job.id), string("package", &job.service.0), string("class", &job.service.1)];
+    let mut attrs = vec![
+        string("jobid", job.id),
+        string("package", &job.service.0),
+        string("class", &job.service.1),
+    ];
     if let Some(p) = &s.source_package {
         attrs.push(string("sourcePackageName", p));
     }
@@ -341,12 +402,21 @@ fn job_element(s: &Stored, now_elapsed: i64, now_wall: i64) -> Result<Node, Stri
     attrs.extend([
         string("lastSuccessfulRunTime", s.last_successful_run),
         string("lastFailedRunTime", s.last_failed_run),
-        ("cumulativeExecutionTime".into(), Value::Long(s.cumulative_execution)),
+        (
+            "cumulativeExecutionTime".into(),
+            Value::Long(s.cumulative_execution),
+        ),
     ]);
     // `writeConstraintsToXml`.
     let mut constraints = Vec::new();
     if let Some(n) = &job.network {
-        let csv = |bits: u64| job_info::unpack_bits(bits).iter().map(i32::to_string).collect::<Vec<_>>().join(",");
+        let csv = |bits: u64| {
+            job_info::unpack_bits(bits)
+                .iter()
+                .map(i32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        };
         constraints.extend([
             string("net-capabilities-csv", csv(n.caps.capabilities)),
             string("net-forbidden-capabilities-csv", csv(n.caps.forbidden)),
@@ -355,7 +425,10 @@ fn job_element(s: &Stored, now_elapsed: i64, now_wall: i64) -> Result<Node, Stri
         for (name, v) in [
             ("estimated-download-bytes", job.network_download_bytes),
             ("estimated-upload-bytes", job.network_upload_bytes),
-            ("minimum-network-chunk-bytes", job.minimum_network_chunk_bytes),
+            (
+                "minimum-network-chunk-bytes",
+                job.minimum_network_chunk_bytes,
+            ),
         ] {
             if v != NETWORK_BYTES_UNKNOWN {
                 constraints.push((name.into(), Value::Long(v)));
@@ -387,11 +460,18 @@ fn job_element(s: &Stored, now_elapsed: i64, now_wall: i64) -> Result<Node, Stri
     if job.initial_backoff != job_info::DEFAULT_INITIAL_BACKOFF_MILLIS
         || job.backoff_policy != job_info::BACKOFF_POLICY_EXPONENTIAL
     {
-        criteria.extend([string("backoff-policy", job.backoff_policy), string("initial-backoff", job.initial_backoff)]);
+        criteria.extend([
+            string("backoff-policy", job.backoff_policy),
+            string("initial-backoff", job.initial_backoff),
+        ]);
     }
     let mut content = vec![
         element("constraints", constraints, Vec::new()),
-        element(if job.periodic { "periodic" } else { "one-off" }, criteria, Vec::new()),
+        element(
+            if job.periodic { "periodic" } else { "one-off" },
+            criteria,
+            Vec::new(),
+        ),
         extras(&job.extras)?,
     ];
     // `writeJobWorkItemsToXml`: items with an intent are not persisted.
@@ -410,8 +490,16 @@ fn job_element(s: &Stored, now_elapsed: i64, now_wall: i64) -> Result<Node, Stri
     }
     // `writeDebugInfoToXml`.
     if job.trace_tag.is_some() || !job.debug_tags.is_empty() {
-        let attrs = job.trace_tag.iter().map(|t| string("trace-tag", t)).collect();
-        let tags = job.debug_tags.iter().map(|t| element("debug-tag", vec![string("tag", t)], Vec::new())).collect();
+        let attrs = job
+            .trace_tag
+            .iter()
+            .map(|t| string("trace-tag", t))
+            .collect();
+        let tags = job
+            .debug_tags
+            .iter()
+            .map(|t| element("debug-tag", vec![string("tag", t)], Vec::new()))
+            .collect();
         content.push(element("debug-info", attrs, tags));
     }
     Ok(element("job", attrs, content))
@@ -422,30 +510,54 @@ fn document(jobs: &[&Stored], now_elapsed: i64, now_wall: i64) -> Result<Element
     Ok(Element {
         name: "job-info".into(),
         attrs: vec![string("version", JOBS_FILE_VERSION)],
-        content: jobs.iter().map(|s| job_element(s, now_elapsed, now_wall)).collect::<Result<_, _>>()?,
+        content: jobs
+            .iter()
+            .map(|s| job_element(s, now_elapsed, now_wall))
+            .collect::<Result<_, _>>()?,
     })
 }
 
 /// `mWriteRunnable` for `uid`: its persisted jobs written to its split
 /// file, as `AtomicFile` writes it.
-pub fn write(dir: &Path, uid: i32, jobs: &[&Stored], now_elapsed: i64, now_wall: i64) -> std::io::Result<()> {
-    let bytes = aim_android_xml::abx::write(&document(jobs, now_elapsed, now_wall).map_err(std::io::Error::other)?)
-        .map_err(std::io::Error::other)?;
+pub fn write(
+    dir: &Path,
+    uid: i32,
+    jobs: &[&Stored],
+    now_elapsed: i64,
+    now_wall: i64,
+) -> std::io::Result<()> {
+    let bytes = aim_android_xml::abx::write(
+        &document(jobs, now_elapsed, now_wall).map_err(std::io::Error::other)?,
+    )
+    .map_err(std::io::Error::other)?;
     if !dir.is_dir() {
         std::fs::create_dir_all(dir)?;
         aim_storage::guest_inode::record(
             dir,
-            aim_storage::guest_inode::GuestInode { uid: Some(1000), gid: Some(1000), mode: Some(0o700) },
+            aim_storage::guest_inode::GuestInode {
+                uid: Some(1000),
+                gid: Some(1000),
+                mode: Some(0o700),
+            },
         )?;
     }
     let path = dir.join(format!("{SPLIT_PREFIX}{uid}.xml"));
     let new = dir.join(format!("{SPLIT_PREFIX}{uid}.xml.new"));
-    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&new)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&new)?;
     std::io::Write::write_all(&mut file, &bytes)?;
     crate::fsync(&file)?;
     aim_storage::guest_inode::record(
         &new,
-        aim_storage::guest_inode::GuestInode { uid: Some(1000), gid: Some(1000), mode: Some(0o600) },
+        aim_storage::guest_inode::GuestInode {
+            uid: Some(1000),
+            gid: Some(1000),
+            mode: Some(0o600),
+        },
     )?;
     std::fs::rename(&new, path)
 }
@@ -499,20 +611,57 @@ mod tests {
         let jobs = read_file(JOBS.as_bytes(), NOW_ELAPSED, NOW_WALL).unwrap();
         assert_eq!(jobs.len(), 2);
         let sync = &jobs[0];
-        assert_eq!((sync.uid, sync.job.id, sync.job.periodic, sync.job.persisted), (10123, 42, true, true));
-        assert_eq!((sync.earliest, sync.latest), (NOW_ELAPSED, NOW_ELAPSED + 3_600_000));
+        assert_eq!(
+            (sync.uid, sync.job.id, sync.job.periodic, sync.job.persisted),
+            (10123, 42, true, true)
+        );
+        assert_eq!(
+            (sync.earliest, sync.latest),
+            (NOW_ELAPSED, NOW_ELAPSED + 3_600_000)
+        );
         assert_eq!(sync.job.constraint_flags, CONSTRAINT_FLAG_CHARGING);
-        assert_eq!(job_info::unpack_bits(sync.job.network.as_ref().unwrap().caps.capabilities), [12, 16]);
-        assert_eq!(sync.job.extras.entries, vec![(Some("count".into()), P::Int(3))]);
+        assert_eq!(
+            job_info::unpack_bits(sync.job.network.as_ref().unwrap().caps.capabilities),
+            [12, 16]
+        );
+        assert_eq!(
+            sync.job.extras.entries,
+            vec![(Some("count".into()), P::Int(3))]
+        );
         let index = &jobs[1];
         assert_eq!(index.namespace.as_deref(), Some("index"));
-        assert_eq!((index.earliest, index.latest), (NOW_ELAPSED + 60_000, NO_LATEST_RUNTIME));
-        assert_eq!((index.job.min_latency, index.job.has_early_constraint), (60_000, true));
-        assert_eq!((index.job.backoff_policy, index.job.initial_backoff), (job_info::BACKOFF_POLICY_LINEAR, 20_000));
-        assert_eq!((index.last_successful_run, index.last_failed_run, index.cumulative_execution), (5, 6, 7));
+        assert_eq!(
+            (index.earliest, index.latest),
+            (NOW_ELAPSED + 60_000, NO_LATEST_RUNTIME)
+        );
+        assert_eq!(
+            (index.job.min_latency, index.job.has_early_constraint),
+            (60_000, true)
+        );
+        assert_eq!(
+            (index.job.backoff_policy, index.job.initial_backoff),
+            (job_info::BACKOFF_POLICY_LINEAR, 20_000)
+        );
+        assert_eq!(
+            (
+                index.last_successful_run,
+                index.last_failed_run,
+                index.cumulative_execution
+            ),
+            (5, 6, 7)
+        );
         assert_eq!(index.work.len(), 1);
-        assert_eq!(index.work[0].extras.entries, vec![(Some("what".into()), P::String("all".into()))]);
-        assert_eq!((index.job.trace_tag.as_deref(), index.job.debug_tags.as_slice()), (Some("index"), &["a".to_string()][..]));
+        assert_eq!(
+            index.work[0].extras.entries,
+            vec![(Some("what".into()), P::String("all".into()))]
+        );
+        assert_eq!(
+            (
+                index.job.trace_tag.as_deref(),
+                index.job.debug_tags.as_slice()
+            ),
+            (Some("index"), &["a".to_string()][..])
+        );
     }
 
     /// What is written reads back the same, in binary XML, and its job
@@ -527,26 +676,50 @@ mod tests {
         assert_eq!(
             names,
             [
-                "jobid", "package", "class", "sourcePackageName", "sourceUserId", "uid", "bias", "priority", "flags",
-                "lastSuccessfulRunTime", "lastFailedRunTime", "cumulativeExecutionTime"
+                "jobid",
+                "package",
+                "class",
+                "sourcePackageName",
+                "sourceUserId",
+                "uid",
+                "bias",
+                "priority",
+                "flags",
+                "lastSuccessfulRunTime",
+                "lastFailedRunTime",
+                "cumulativeExecutionTime"
             ]
         );
         let criteria = first.children().nth(1).unwrap();
-        assert_eq!(criteria.string("deadline").as_deref(), Some("1760003600000"));
+        assert_eq!(
+            criteria.string("deadline").as_deref(),
+            Some("1760003600000")
+        );
         let bytes = aim_android_xml::abx::write(&doc).unwrap();
         let back = read_file(&bytes, NOW_ELAPSED, NOW_WALL).unwrap();
         assert_eq!(back.len(), 2);
         for (a, b) in jobs.iter().zip(&back) {
             assert!(a.job.same_as(&b.job));
-            assert_eq!((a.earliest, a.latest, a.work.len()), (b.earliest, b.latest, b.work.len()));
+            assert_eq!(
+                (a.earliest, a.latest, a.work.len()),
+                (b.earliest, b.latest, b.work.len())
+            );
         }
     }
 
     #[test]
     fn a_job_of_an_unreadable_constraint_is_dropped() {
         let xml = r#"<job-info version="1"><job jobid="1" package="p" class="p.S" uid="10001"><constraints connectivity="true" /><one-off /><extras /></job></job-info>"#;
-        assert!(read_file(xml.as_bytes(), NOW_ELAPSED, NOW_WALL).unwrap().is_empty());
+        assert!(
+            read_file(xml.as_bytes(), NOW_ELAPSED, NOW_WALL)
+                .unwrap()
+                .is_empty()
+        );
         let newer = r#"<job-info version="2" />"#;
-        assert!(read_file(newer.as_bytes(), NOW_ELAPSED, NOW_WALL).unwrap().is_empty());
+        assert!(
+            read_file(newer.as_bytes(), NOW_ELAPSED, NOW_WALL)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

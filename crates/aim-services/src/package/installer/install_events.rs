@@ -13,31 +13,90 @@ struct Publication {
 /// Delivery follows the retained committed target, while unrelated published
 /// state may advance. Never accept a newer replacement of that target's code.
 pub(crate) fn validate_monitor_publication(
-    committed:&Snapshot,current:&Snapshot,receipt:&PublishedInstall,
-)->Result<(),String>{
-    if receipt.generation!=committed.version()||current.version()<receipt.generation{
-        return Err(format!("install monitor generation differs: receipt={}, committed={}, current={}",receipt.generation,committed.version(),current.version()));
+    committed: &Snapshot,
+    current: &Snapshot,
+    receipt: &PublishedInstall,
+) -> Result<(), String> {
+    if receipt.generation != committed.version() || current.version() < receipt.generation {
+        return Err(format!(
+            "install monitor generation differs: receipt={}, committed={}, current={}",
+            receipt.generation,
+            committed.version(),
+            current.version()
+        ));
     }
-    for target in &receipt.packages{
-        let original=committed.owner().settings.packages.iter().find(|package|package.name==target.name)
-            .ok_or_else(||format!("install monitor committed target unavailable: {}",target.name))?;
-        let latest=current.owner().settings.packages.iter().find(|package|package.name==target.name)
-            .ok_or_else(||format!("install monitor current target unavailable: {}",target.name))?;
-        if original.app_id!=latest.app_id||original.shared_user!=latest.shared_user||original.code_path!=latest.code_path
-            ||original.version_code!=target.version_code||latest.version_code!=target.version_code
-            ||original.signatures!=latest.signatures {
-            return Err(format!("install monitor target identity differs: {} committed={:?} current={:?}",target.name,
-                (original.app_id,&original.code_path,original.version_code),(latest.app_id,&latest.code_path,latest.version_code)));
+    for target in &receipt.packages {
+        let original = committed
+            .owner()
+            .settings
+            .packages
+            .iter()
+            .find(|package| package.name == target.name)
+            .ok_or_else(|| {
+                format!(
+                    "install monitor committed target unavailable: {}",
+                    target.name
+                )
+            })?;
+        let latest = current
+            .owner()
+            .settings
+            .packages
+            .iter()
+            .find(|package| package.name == target.name)
+            .ok_or_else(|| {
+                format!(
+                    "install monitor current target unavailable: {}",
+                    target.name
+                )
+            })?;
+        if original.app_id != latest.app_id
+            || original.shared_user != latest.shared_user
+            || original.code_path != latest.code_path
+            || original.version_code != target.version_code
+            || latest.version_code != target.version_code
+            || original.signatures != latest.signatures
+        {
+            return Err(format!(
+                "install monitor target identity differs: {} committed={:?} current={:?}",
+                target.name,
+                (original.app_id, &original.code_path, original.version_code),
+                (latest.app_id, &latest.code_path, latest.version_code)
+            ));
         }
-        let code=committed.owner().loaded_packages().get(&target.name).ok_or("install monitor committed code unavailable")?;
-        let live=current.owner().loaded_packages().get(&target.name).ok_or("install monitor current code unavailable")?;
-        if code.package!=live.package||code.collected_signing!=live.collected_signing{
-            return Err(format!("install monitor current parsed code differs: {}",target.name));
+        let code = committed
+            .owner()
+            .loaded_packages()
+            .get(&target.name)
+            .ok_or("install monitor committed code unavailable")?;
+        let live = current
+            .owner()
+            .loaded_packages()
+            .get(&target.name)
+            .ok_or("install monitor current code unavailable")?;
+        if code.package != live.package || code.collected_signing != live.collected_signing {
+            return Err(format!(
+                "install monitor current parsed code differs: {}",
+                target.name
+            ));
         }
-        let user=i32::try_from(target.user).map_err(|_|"install monitor user exceeds Android range")?;
-        if !committed.owner().scanned_user_states(&target.name).and_then(|users|users.get(&user)).is_some_and(|state|state.installed)
-            ||!current.owner().scanned_user_states(&target.name).and_then(|users|users.get(&user)).is_some_and(|state|state.installed){
-            return Err(format!("install monitor target user is not installed: {} user={user}",target.name));
+        let user =
+            i32::try_from(target.user).map_err(|_| "install monitor user exceeds Android range")?;
+        if !committed
+            .owner()
+            .scanned_user_states(&target.name)
+            .and_then(|users| users.get(&user))
+            .is_some_and(|state| state.installed)
+            || !current
+                .owner()
+                .scanned_user_states(&target.name)
+                .and_then(|users| users.get(&user))
+                .is_some_and(|state| state.installed)
+        {
+            return Err(format!(
+                "install monitor target user is not installed: {} user={user}",
+                target.name
+            ));
         }
     }
     Ok(())
@@ -144,17 +203,25 @@ impl Environment for WithEvents {
                 "install event system owner unavailable",
             )
         })?;
-        system.package_install_monitor_events(
-            &self.bridge,
-            &publication.before,
-            &publication.after,
-            &receipt,
-        ).map_err(|mut error| {
-            error.message = format!("Package monitor delivery (exception {}): {}", error.code, error.message);
-            error
-        })?;
+        system
+            .package_install_monitor_events(
+                &self.bridge,
+                &publication.before,
+                &publication.after,
+                &receipt,
+            )
+            .map_err(|mut error| {
+                error.message = format!(
+                    "Package monitor delivery (exception {}): {}",
+                    error.code, error.message
+                );
+                error
+            })?;
         self.inner.finish(receipt).map_err(|mut error| {
-            error.message = format!("Installed package completion (exception {}): {}", error.code, error.message);
+            error.message = format!(
+                "Installed package completion (exception {}): {}",
+                error.code, error.message
+            );
             error
         })
     }

@@ -131,7 +131,9 @@ fn run() -> Result<(), String> {
             (Ok(bytes), Ok(())) => bytes,
             (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),
             (Err(error), Err(cleanup)) => {
-                return Err(format!("{error}; owned redirect workspace cleanup: {cleanup}"));
+                return Err(format!(
+                    "{error}; owned redirect workspace cleanup: {cleanup}"
+                ));
             }
         };
     }

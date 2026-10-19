@@ -177,19 +177,25 @@ impl AppHost {
             }
             std::thread::sleep(Duration::from_millis(100));
         };
-        let listener = self.process.add_service(Arc::new(Listener(self.me.clone())));
+        let listener = self
+            .process
+            .add_service(Arc::new(Listener(self.me.clone())));
         let call = |code: u32, name: &str, write: &dyn Fn(&mut Parcel)| -> Result<(), String> {
             let mut data = Parcel::new();
             data.write_interface_token(VOLD_DESCRIPTOR);
             write(&mut data);
-            let reply = vold.transact(code, &data, false).map_err(|s| format!("vold {name}: {s}"))?;
+            let reply = vold
+                .transact(code, &data, false)
+                .map_err(|s| format!("vold {name}: {s}"))?;
             match reply.reader().read_exception() {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(e)) => Err(format!("vold {name}: {e:?}")),
                 Err(s) => Err(format!("vold {name}: {s}")),
             }
         };
-        call(SET_LISTENER, "setListener", &|p| p.write_binder(Some(listener)))?;
+        call(SET_LISTENER, "setListener", &|p| {
+            p.write_binder(Some(listener))
+        })?;
         call(RESET, "reset", &|_| {})?;
         call(ON_USER_ADDED, "onUserAdded", &|p| {
             p.write_i32(USER);
@@ -214,7 +220,10 @@ impl AppHost {
     fn volume_infos(&self) -> Vec<Option<VolumeInfo>> {
         let mut volumes = vec![VolumeInfo::internal()];
         volumes.extend(self.storage.volume.lock().unwrap().clone());
-        crate::package::info::array_order(volumes, |v| v.id).into_iter().map(Some).collect()
+        crate::package::info::array_order(volumes, |v| v.id)
+            .into_iter()
+            .map(Some)
+            .collect()
     }
 
     /// The data volume's total and usable bytes (`File.getTotalSpace`,
@@ -226,31 +235,50 @@ impl AppHost {
         // SAFETY: statvfs into a local struct.
         let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
         if unsafe { libc::statvfs(path.as_ptr(), &mut st) } != 0 {
-            return Err(io_exception(&format!("statvfs: {}", std::io::Error::last_os_error())));
+            return Err(io_exception(&format!(
+                "statvfs: {}",
+                std::io::Error::last_os_error()
+            )));
         }
-        Ok((st.f_blocks as i64 * st.f_frsize as i64, st.f_bavail as i64 * st.f_frsize as i64))
+        Ok((
+            st.f_blocks as i64 * st.f_frsize as i64,
+            st.f_bavail as i64 * st.f_frsize as i64,
+        ))
     }
 
     fn global_setting(&self, name: &str) -> Option<i64> {
-        self.inputs().ok()?.settings.get(super::settings::Table::Global, name).and_then(|v| v.parse().ok())
+        self.inputs()
+            .ok()?
+            .settings
+            .get(super::settings::Table::Global, name)
+            .and_then(|v| v.parse().ok())
     }
 
     /// `StorageManager.getStorageLowBytes` of a volume of `total` bytes.
     pub(super) fn storage_low_bytes(&self, total: i64) -> i64 {
-        let percent = self.global_setting("sys_storage_threshold_percentage").unwrap_or(DEFAULT_THRESHOLD_PERCENTAGE);
-        let max = self.global_setting("sys_storage_threshold_max_bytes").unwrap_or(DEFAULT_THRESHOLD_MAX_BYTES);
+        let percent = self
+            .global_setting("sys_storage_threshold_percentage")
+            .unwrap_or(DEFAULT_THRESHOLD_PERCENTAGE);
+        let max = self
+            .global_setting("sys_storage_threshold_max_bytes")
+            .unwrap_or(DEFAULT_THRESHOLD_MAX_BYTES);
         (total * percent / 100).min(max)
     }
 
     /// `StorageManager.getStorageFullBytes`.
     fn storage_full_bytes(&self) -> i64 {
-        self.global_setting("sys_storage_full_threshold_bytes").unwrap_or(DEFAULT_FULL_THRESHOLD_BYTES)
+        self.global_setting("sys_storage_full_threshold_bytes")
+            .unwrap_or(DEFAULT_FULL_THRESHOLD_BYTES)
     }
 
     /// The reserve an allocation leaves: the full one when aggressive,
     /// else the low one.
     fn allocation_reserve(&self, flags: i32, total: i64) -> i64 {
-        if flags & FLAG_ALLOCATE_AGGRESSIVE != 0 { self.storage_full_bytes() } else { self.storage_low_bytes(total) }
+        if flags & FLAG_ALLOCATE_AGGRESSIVE != 0 {
+            self.storage_full_bytes()
+        } else {
+            self.storage_low_bytes(total)
+        }
     }
 
     /// `StorageManager.findPathForUuid`: internal storage only, the app
@@ -269,7 +297,9 @@ impl AppHost {
     /// The reserved cache space it lets a camera user defy only counts
     /// with quotas, which the data volume does not support.
     fn adjust_allocate_flags(&self, flags: i32, uid: i32) -> Result<i32, Exception> {
-        if flags & FLAG_ALLOCATE_AGGRESSIVE != 0 && self.check_permission(Some(ALLOCATE_AGGRESSIVE), uid)? != 0 {
+        if flags & FLAG_ALLOCATE_AGGRESSIVE != 0
+            && self.check_permission(Some(ALLOCATE_AGGRESSIVE), uid)? != 0
+        {
             return Err(Exception::security(format!(
                 "StorageManagerService: Neither user {uid} nor current process has {ALLOCATE_AGGRESSIVE}."
             )));
@@ -281,7 +311,12 @@ impl AppHost {
     /// installd's quotas are not supported on the data volume (the syscall
     /// layer has no `quotactl`), so no cached data counts as clearable
     /// (`isQuotaSupported`).
-    fn allocatable_bytes(&self, uuid: Option<&str>, flags: i32, uid: i32) -> Result<i64, Exception> {
+    fn allocatable_bytes(
+        &self,
+        uuid: Option<&str>,
+        flags: i32,
+        uid: i32,
+    ) -> Result<i64, Exception> {
         let flags = self.adjust_allocate_flags(flags, uid)?;
         Self::find_path_for_uuid(uuid)?;
         if flags & FLAG_ALLOCATE_CACHE_ONLY != 0 {
@@ -295,10 +330,18 @@ impl AppHost {
     /// (`PackageManagerService.freeStorage`), which needs no clearing when
     /// the volume has the space; clearing caches is not implemented
     /// (#1819).
-    fn allocate_bytes(&self, uuid: Option<&str>, bytes: i64, flags: i32, uid: i32) -> Result<(), Exception> {
+    fn allocate_bytes(
+        &self,
+        uuid: Option<&str>,
+        bytes: i64,
+        flags: i32,
+        uid: i32,
+    ) -> Result<(), Exception> {
         let allocatable = self.allocatable_bytes(uuid, flags, uid)?;
         if bytes > allocatable {
-            return Err(io_exception(&format!("Failed to allocate {bytes} because only {allocatable} allocatable")));
+            return Err(io_exception(&format!(
+                "Failed to allocate {bytes} because only {allocatable} allocatable"
+            )));
         }
         let (total, usable) = self.data_space()?;
         if usable >= bytes + self.allocation_reserve(flags, total) {
@@ -310,7 +353,12 @@ impl AppHost {
     /// Whether user 0's emulated volume is mounted
     /// (`StorageManagerInternal.isFuseMounted`).
     pub(super) fn storage_mounted(&self) -> bool {
-        self.storage.volume.lock().unwrap().as_ref().is_some_and(|v| v.state == STATE_MOUNTED)
+        self.storage
+            .volume
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|v| v.state == STATE_MOUNTED)
     }
 
     /// `StorageManagerInternal.getExternalStorageMountMode`
@@ -321,49 +369,85 @@ impl AppHost {
         let (state, resolution) = self.packages()?;
         let user = uid / 100_000;
         let app_id = uid % 100_000;
-        let packages: Vec<&str> = state.packages.values().filter(|ps| ps.app_id == app_id).map(|ps| ps.name.as_str()).collect();
+        let packages: Vec<&str> = state
+            .packages
+            .values()
+            .filter(|ps| ps.app_id == app_id)
+            .map(|ps| ps.name.as_str())
+            .collect();
         if packages.is_empty() {
             return Ok(MountExternal::None);
         }
-        if state.packages.get(package).and_then(|ps| ps.users.get(&user)).is_some_and(|u| u.instant_app) {
+        if state
+            .packages
+            .get(package)
+            .and_then(|ps| ps.users.get(&user))
+            .is_some_and(|u| u.instant_app)
+        {
             return Ok(MountExternal::None);
         }
         let authority_app_id = |authority: &str| {
-            resolution.components.provider_by_authority(authority).and_then(|p| state.packages.get(&p.package)).map(|ps| ps.app_id)
+            resolution
+                .components
+                .provider_by_authority(authority)
+                .and_then(|p| state.packages.get(&p.package))
+                .map(|ps| ps.app_id)
         };
         // `isExternalStorageService`: the media store's.
         if authority_app_id("media") == Some(app_id) {
             return Ok(MountExternal::PassThrough);
         }
-        if authority_app_id("downloads") == Some(app_id) || authority_app_id("com.android.externalstorage.documents") == Some(app_id) {
+        if authority_app_id("downloads") == Some(app_id)
+            || authority_app_id("com.android.externalstorage.documents") == Some(app_id)
+        {
             return Ok(MountExternal::AndroidWritable);
         }
         if self.check_permission(Some("android.permission.ACCESS_MTP"), uid)? == 0
-            && self.inputs()?.packages.application_info(package, 0).is_some_and(|ai| ai.private_flags & PRIVATE_FLAG_SIGNED_WITH_PLATFORM_KEY != 0)
+            && self
+                .inputs()?
+                .packages
+                .application_info(package, 0)
+                .is_some_and(|ai| ai.private_flags & PRIVATE_FLAG_SIGNED_WITH_PLATFORM_KEY != 0)
         {
             return Ok(MountExternal::AndroidWritable);
         }
         let install = self.check_permission(Some("android.permission.INSTALL_PACKAGES"), uid)? == 0;
         let mut install_op = false;
         for name in packages {
-            if super::appops_service::mode(self, OP_REQUEST_INSTALL_PACKAGES, uid, Some(name))? == super::appops_service::MODE_ALLOWED {
+            if super::appops_service::mode(self, OP_REQUEST_INSTALL_PACKAGES, uid, Some(name))?
+                == super::appops_service::MODE_ALLOWED
+            {
                 install_op = true;
                 break;
             }
         }
-        Ok(if install || install_op { MountExternal::Installer } else { MountExternal::Default })
+        Ok(if install || install_op {
+            MountExternal::Installer
+        } else {
+            MountExternal::Default
+        })
     }
 
     /// `StorageManagerInternal.hasExternalStorageAccess`: the
     /// MANAGE_EXTERNAL_STORAGE op allowed, or at its default the
     /// permission held.
-    pub(super) fn has_external_storage_access(&self, uid: i32, package: &str) -> Result<bool, Exception> {
+    pub(super) fn has_external_storage_access(
+        &self,
+        uid: i32,
+        package: &str,
+    ) -> Result<bool, Exception> {
         /// `AppOpsManager.OP_MANAGE_EXTERNAL_STORAGE`.
         const OP_MANAGE_EXTERNAL_STORAGE: i32 = 92;
-        Ok(match super::appops_service::mode(self, OP_MANAGE_EXTERNAL_STORAGE, uid, Some(package))? {
-            super::appops_service::MODE_DEFAULT => self.check_permission(Some("android.permission.MANAGE_EXTERNAL_STORAGE"), uid)? == 0,
-            mode => mode == super::appops_service::MODE_ALLOWED,
-        })
+        Ok(
+            match super::appops_service::mode(self, OP_MANAGE_EXTERNAL_STORAGE, uid, Some(package))?
+            {
+                super::appops_service::MODE_DEFAULT => {
+                    self.check_permission(Some("android.permission.MANAGE_EXTERNAL_STORAGE"), uid)?
+                        == 0
+                }
+                mode => mode == super::appops_service::MODE_ALLOWED,
+            },
+        )
     }
 
     /// The uid the FUSE daemon runs as: user 0's of the app holding the
@@ -375,21 +459,40 @@ impl AppHost {
             .provider_by_authority("media")
             .map(|p| p.package.clone())
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no media provider"))?;
-        let ps = state.packages.get(&package).ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("no {package}")))?;
+        let ps = state
+            .packages
+            .get(&package)
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("no {package}")))?;
         Ok(USER * 100_000 + ps.app_id as i32)
     }
 
     /// `getVolumeList`: user 0's primary emulated volume, or the stub
     /// StorageManagerService makes before vold created it.
-    fn volume_list(&self, call: &Call<'_>, user: i32, package: Option<&str>) -> Result<Parcel, Exception> {
+    fn volume_list(
+        &self,
+        call: &Call<'_>,
+        user: i32,
+        package: Option<&str>,
+    ) -> Result<Parcel, Exception> {
         let uid = call.sender_euid as i32;
         self.check_package(uid, package)?;
         if uid / 100_000 != user {
-            return Err(Exception::security("Need INTERACT_ACROSS_USERS to get volumes for another user"));
+            return Err(Exception::security(
+                "Need INTERACT_ACROSS_USERS to get volumes for another user",
+            ));
         }
-        let state = self.storage.volume.lock().unwrap().as_ref().map(|v| v.state);
+        let state = self
+            .storage
+            .volume
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|v| v.state);
         let inputs = self.inputs()?;
-        let unknown = inputs.packages.framework_string("unknownName").ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no unknownName"))?;
+        let unknown = inputs
+            .packages
+            .framework_string("unknownName")
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no unknownName"))?;
         let volume = match state.filter(|_| user == USER) {
             // Mounted visible for writing by user 0, so listed for writing
             // or reading alike (`isVisibleForWrite`, `isVisibleForUser`).
@@ -415,7 +518,12 @@ impl AppHost {
 
     /// `mkdirs`: an app's own directory of `Android/data`, `media`, `obb`
     /// or `sandbox`, made by vold (`setupAppDir`).
-    fn mkdirs(&self, call: &Call<'_>, package: Option<&str>, path: Option<&str>) -> Result<Parcel, Exception> {
+    fn mkdirs(
+        &self,
+        call: &Call<'_>,
+        package: Option<&str>,
+        path: Option<&str>,
+    ) -> Result<Parcel, Exception> {
         let uid = call.sender_euid as i32;
         let user = uid / 100_000;
         let package = package.ok_or_else(|| Exception::illegal_argument("no package"))?;
@@ -428,33 +536,53 @@ impl AppHost {
             .and_then(|ps| ps.pkg.as_ref())
             .and_then(|pkg| pkg.properties.as_ref())
             .is_some_and(|props| {
-                props.iter().any(|(name, p)| name == NO_APP_DATA_STORAGE && p.value == crate::package::pkg::PropertyValue::Bool(true))
+                props.iter().any(|(name, p)| {
+                    name == NO_APP_DATA_STORAGE
+                        && p.value == crate::package::pkg::PropertyValue::Bool(true)
+                })
             });
         if no_storage {
-            return Err(Exception::security(format!("{package} should not have {path}")));
+            return Err(Exception::security(format!(
+                "{package} should not have {path}"
+            )));
         }
         let mut app_path = normalize(path);
         if !app_path.ends_with('/') {
             app_path.push('/');
         }
         let Some((user_part, owner)) = known_app_dir(&app_path) else {
-            return Err(Exception::security(format!("Invalid mkdirs path: {path} is not a known app path.")));
+            return Err(Exception::security(format!(
+                "Invalid mkdirs path: {path} is not a known app path."
+            )));
         };
         if owner != package {
-            return Err(Exception::security(format!("Invalid mkdirs path: {path} does not contain calling package {package}")));
+            return Err(Exception::security(format!(
+                "Invalid mkdirs path: {path} does not contain calling package {package}"
+            )));
         }
-        if user_part.as_ref().is_some_and(|u| *u != user.to_string()) || (user_part.is_none() && user != USER) {
-            return Err(Exception::security(format!("Invalid mkdirs path: {path} does not match calling user id {user}")));
+        if user_part.as_ref().is_some_and(|u| *u != user.to_string())
+            || (user_part.is_none() && user != USER)
+        {
+            return Err(Exception::security(format!(
+                "Invalid mkdirs path: {path} does not match calling user id {user}"
+            )));
         }
         let vold = self.storage.vold.lock().unwrap();
-        let vold = vold.as_ref().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("Failed to prepare {path}")))?;
+        let vold = vold
+            .as_ref()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("Failed to prepare {path}")))?;
         let mut data = Parcel::new();
         data.write_interface_token(VOLD_DESCRIPTOR);
         data.write_string16(Some(&app_path));
         data.write_i32(uid);
-        let reply = vold.transact(SETUP_APP_DIR, &data, false).map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("Failed to prepare {path}: {s}")))?;
+        let reply = vold.transact(SETUP_APP_DIR, &data, false).map_err(|s| {
+            Exception::new(EX_ILLEGAL_STATE, format!("Failed to prepare {path}: {s}"))
+        })?;
         if let Ok(Err(e)) = reply.reader().read_exception() {
-            return Err(Exception::new(EX_ILLEGAL_STATE, format!("Failed to prepare {path}: {e:?}")));
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("Failed to prepare {path}: {e:?}"),
+            ));
         }
         let mut p = Parcel::new();
         sm::write_mkdirs_reply(&mut p);
@@ -467,8 +595,14 @@ impl AppHost {
             return Ok(());
         }
         let (state, _) = self.packages()?;
-        let owns = package.and_then(|p| state.packages.get(p)).is_some_and(|ps| ps.app_id as i32 == uid % 100_000);
-        if owns { Ok(()) } else { Err(Exception::security("callingPackage does not match UID")) }
+        let owns = package
+            .and_then(|p| state.packages.get(p))
+            .is_some_and(|ps| ps.app_id as i32 == uid % 100_000);
+        if owns {
+            Ok(())
+        } else {
+            Err(Exception::security("callingPackage does not match UID"))
+        }
     }
 }
 
@@ -526,18 +660,33 @@ impl AppHost {
     /// broadcast of its environment's state, if it has one
     /// (`VolumeInfo.getBroadcastForEnvironment`), with the volume.
     fn volume_broadcast(&self, user: i32, state: i32) -> Result<(), Exception> {
-        let Some(action) = broadcast_for_environment(environment(state)) else { return Ok(()) };
+        let Some(action) = broadcast_for_environment(environment(state)) else {
+            return Ok(());
+        };
         let volume = self.storage_volume(user, state)?;
-        eprintln!("app host: Volume {VOLUME} broadcasting {} to UserHandle{{{user}}}", volume.state);
+        eprintln!(
+            "app host: Volume {VOLUME} broadcasting {} to UserHandle{{{user}}}",
+            volume.state
+        );
         let mut data = Parcel::new();
         volume.write_to(&mut data);
         let path = volume.path.clone();
         let intent = super::kept::RawIntent::with_data(
             Some(action),
-            Some(&crate::package::uri::Uri::preferred_hierarchical("file", Some(""), Some(&path))),
+            Some(&crate::package::uri::Uri::preferred_hierarchical(
+                "file",
+                Some(""),
+                Some(&path),
+            )),
             None,
             FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT | FLAG_RECEIVER_INCLUDE_BACKGROUND,
-            &[(EXTRA_STORAGE_VOLUME, crate::bundle::Value::Parcelable { class: "android.os.storage.StorageVolume".into(), data: data.data().to_vec() })],
+            &[(
+                EXTRA_STORAGE_VOLUME,
+                crate::bundle::Value::Parcelable {
+                    class: "android.os.storage.StorageVolume".into(),
+                    data: data.data().to_vec(),
+                },
+            )],
         );
         self.broadcasts.send_from_system_as_user(self, intent, user);
         Ok(())
@@ -546,7 +695,11 @@ impl AppHost {
     /// `setCloudMediaProvider`, which only the external storage service
     /// (MediaProvider) may call. No system service of the app host listens
     /// for the change (`CloudProviderChangeListener`).
-    fn set_cloud_media_provider(&self, call: &Call<'_>, authority: Option<String>) -> Result<(), Exception> {
+    fn set_cloud_media_provider(
+        &self,
+        call: &Call<'_>,
+        authority: Option<String>,
+    ) -> Result<(), Exception> {
         let uid = call.sender_euid as i32;
         if self.check_permission(Some(WRITE_MEDIA_STORAGE), uid)? != 0 {
             return Err(Exception::security(format!(
@@ -554,9 +707,15 @@ impl AppHost {
             )));
         }
         if uid % 100_000 != self.media_provider_uid()? % 100_000 {
-            return Err(Exception::security("Only the ExternalStorageService is permitted"));
+            return Err(Exception::security(
+                "Only the ExternalStorageService is permitted",
+            ));
         }
-        self.storage.cloud_media_providers.lock().unwrap().insert(uid / 100_000, authority);
+        self.storage
+            .cloud_media_providers
+            .lock()
+            .unwrap()
+            .insert(uid / 100_000, authority);
         Ok(())
     }
 
@@ -565,16 +724,34 @@ impl AppHost {
     fn cloud_media_provider(&self, call: &Call<'_>) -> Result<Option<String>, Exception> {
         let uid = call.sender_euid as i32;
         let user = uid / 100_000;
-        let Some(authority) = self.storage.cloud_media_providers.lock().unwrap().get(&user).cloned().flatten() else {
+        let Some(authority) = self
+            .storage
+            .cloud_media_providers
+            .lock()
+            .unwrap()
+            .get(&user)
+            .cloned()
+            .flatten()
+        else {
             return Ok(None);
         };
-        let Some(package) = self.provider_package(&authority, user)? else { return Ok(None) };
+        let Some(package) = self.provider_package(&authority, user)? else {
+            return Ok(None);
+        };
         let (state, resolution) = self.packages()?;
         // `PackageManagerInternal.filterAppAccess`.
         let ps = state.packages.get(&package);
         let filtered = ps.is_none()
-            || crate::package::apps_filter::should_filter_application(&state, &resolution.apps_filter, ps, uid, user, true, true)
-                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("filterAppAccess: {}", e.0)))?;
+            || crate::package::apps_filter::should_filter_application(
+                &state,
+                &resolution.apps_filter,
+                ps,
+                uid,
+                user,
+                true,
+                true,
+            )
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("filterAppAccess: {}", e.0)))?;
         Ok((!filtered).then_some(authority))
     }
 
@@ -582,7 +759,14 @@ impl AppHost {
     /// new state, then, when its environment changed, the storage state of
     /// each user it is visible to (user 0's, unlocked).
     fn volume_state_changed(&self, info: &VolumeInfo, old: i32) {
-        let listeners: Vec<u32> = self.storage.listeners.lock().unwrap().keys().copied().collect();
+        let listeners: Vec<u32> = self
+            .storage
+            .listeners
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
         // `RemoteCallbackList.broadcast`: a listener that failed is left
         // to its death notice.
         let send = |handle: u32, code: u32, data: &Parcel| {
@@ -600,13 +784,16 @@ impl AppHost {
             send(listener, ON_VOLUME_STATE_CHANGED_EVENT, &data);
         }
         let (old_env, new_env) = (environment(old), environment(info.state));
-        let visible = info.mount_user == USER && info.mount_flags & MOUNT_FLAG_VISIBLE_FOR_WRITE != 0;
+        let visible =
+            info.mount_user == USER && info.mount_flags & MOUNT_FLAG_VISIBLE_FOR_WRITE != 0;
         if old_env == new_env || !visible {
             return;
         }
         // `buildStorageVolume(user).getPath()`: the emulated volume's path
         // for the user.
-        let Some(path) = info.path.as_deref().map(|p| format!("{p}/{USER}")) else { return };
+        let Some(path) = info.path.as_deref().map(|p| format!("{p}/{USER}")) else {
+            return;
+        };
         // User 0 is unlocked while the app host runs (`mSystemUnlockedUsers`).
         if let Err(e) = self.volume_broadcast(USER, info.state) {
             eprintln!("app host: a volume broadcast: {e:?}");
@@ -672,14 +859,22 @@ fn known_app_dir(path: &str) -> Option<(Option<String>, String)> {
     let rest = path.strip_prefix("/storage/")?;
     let (_, rest) = rest.split_once('/')?;
     let (user, rest) = match rest.split_once('/') {
-        Some((user, rest)) if !user.is_empty() && user.bytes().all(|b| b.is_ascii_digit()) && rest.to_ascii_lowercase().starts_with("android/") => {
+        Some((user, rest))
+            if !user.is_empty()
+                && user.bytes().all(|b| b.is_ascii_digit())
+                && rest.to_ascii_lowercase().starts_with("android/") =>
+        {
             (Some(user.to_string()), rest)
         }
         _ => (None, rest),
     };
     let (android, rest) = rest.split_once('/')?;
     let (kind, rest) = rest.split_once('/')?;
-    if !android.eq_ignore_ascii_case("android") || !["data", "media", "obb", "sandbox"].iter().any(|k| kind.eq_ignore_ascii_case(k)) {
+    if !android.eq_ignore_ascii_case("android")
+        || !["data", "media", "obb", "sandbox"]
+            .iter()
+            .any(|k| kind.eq_ignore_ascii_case(k))
+    {
         return None;
     }
     let package = rest.split('/').next().filter(|p| !p.is_empty())?;
@@ -732,7 +927,8 @@ fn parcelable_io(class: &str, message: &str) -> Exception {
     payload.write_string16(Some("android.os.ParcelableException"));
     payload.write_string16(Some(class));
     payload.write_string16(Some(message));
-    Exception::parcelable(Some(&format!("{class}: {message}")), &payload).expect("an exception of strings")
+    Exception::parcelable(Some(&format!("{class}: {message}")), &payload)
+        .expect("an exception of strings")
 }
 
 fn io_exception(message: &str) -> Exception {
@@ -748,8 +944,12 @@ impl Service for Listener {
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
-        let Some(host) = self.0.upgrade() else { return Ok(Parcel::new()) };
-        call.data.enforce_interface(LISTENER_DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+        let Some(host) = self.0.upgrade() else {
+            return Ok(Parcel::new());
+        };
+        call.data
+            .enforce_interface(LISTENER_DESCRIPTOR)
+            .map_err(|_| BAD_VALUE)?;
         let id = call.data.read_string16().map_err(|_| BAD_VALUE)?;
         if id.as_deref() != Some(VOLUME) {
             return Ok(Parcel::new());
@@ -814,7 +1014,10 @@ impl Service for StorageManager {
         match call.code {
             sm::GET_VOLUME_LIST => {
                 let args = sm::GetVolumeList::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(self.0.volume_list(call, args.user_id, args.calling_package.as_deref()))
+                reply(
+                    self.0
+                        .volume_list(call, args.user_id, args.calling_package.as_deref()),
+                )
             }
             // `mCeUnlockedUsers`: the app host runs user 0, unlocked, as
             // the user service reports it.
@@ -832,7 +1035,10 @@ impl Service for StorageManager {
             }
             sm::MKDIRS => {
                 let args = sm::Mkdirs::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(self.0.mkdirs(call, args.calling_pkg.as_deref(), args.path.as_deref()))
+                reply(
+                    self.0
+                        .mkdirs(call, args.calling_pkg.as_deref(), args.path.as_deref()),
+                )
             }
             sm::REGISTER_LISTENER => {
                 let args = sm::RegisterListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -853,12 +1059,17 @@ impl Service for StorageManager {
                 Ok(p)
             }
             sm::SET_CLOUD_MEDIA_PROVIDER => {
-                let args = sm::SetCloudMediaProvider::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(self.0.set_cloud_media_provider(call, args.authority).map(|()| {
-                    let mut p = Parcel::new();
-                    sm::write_set_cloud_media_provider_reply(&mut p);
-                    p
-                }))
+                let args =
+                    sm::SetCloudMediaProvider::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(
+                    self.0
+                        .set_cloud_media_provider(call, args.authority)
+                        .map(|()| {
+                            let mut p = Parcel::new();
+                            sm::write_set_cloud_media_provider_reply(&mut p);
+                            p
+                        }),
+                )
             }
             sm::GET_CLOUD_MEDIA_PROVIDER => {
                 sm::GetCloudMediaProvider::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -870,20 +1081,32 @@ impl Service for StorageManager {
             }
             sm::GET_ALLOCATABLE_BYTES => {
                 let a = sm::GetAllocatableBytes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(self.0.allocatable_bytes(a.volume_uuid.as_deref(), a.flags, call.sender_euid as i32).map(|n| {
-                    let mut p = Parcel::new();
-                    sm::write_get_allocatable_bytes_reply(&mut p, n);
-                    p
-                }))
+                reply(
+                    self.0
+                        .allocatable_bytes(
+                            a.volume_uuid.as_deref(),
+                            a.flags,
+                            call.sender_euid as i32,
+                        )
+                        .map(|n| {
+                            let mut p = Parcel::new();
+                            sm::write_get_allocatable_bytes_reply(&mut p, n);
+                            p
+                        }),
+                )
             }
             sm::ALLOCATE_BYTES => {
                 let a = sm::AllocateBytes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let uid = call.sender_euid as i32;
-                reply(self.0.allocate_bytes(a.volume_uuid.as_deref(), a.bytes, a.flags, uid).map(|()| {
-                    let mut p = Parcel::new();
-                    sm::write_allocate_bytes_reply(&mut p);
-                    p
-                }))
+                reply(
+                    self.0
+                        .allocate_bytes(a.volume_uuid.as_deref(), a.bytes, a.flags, uid)
+                        .map(|()| {
+                            let mut p = Parcel::new();
+                            sm::write_allocate_bytes_reply(&mut p);
+                            p
+                        }),
+                )
             }
             code => reply(Err(self.0.unimplemented("mount", code))),
         }
@@ -900,7 +1123,10 @@ mod tests {
     fn other_volumes_are_not_found() {
         assert!(AppHost::find_path_for_uuid(None).is_ok());
         let e = AppHost::find_path_for_uuid(Some("1234-5678")).unwrap_err();
-        assert_eq!(e.message, "java.io.FileNotFoundException: Failed to find a storage device for 1234-5678");
+        assert_eq!(
+            e.message,
+            "java.io.FileNotFoundException: Failed to find a storage device for 1234-5678"
+        );
         let mut p = Parcel::new();
         p.write_exception(&e);
         assert!(p.reader().read_exception().unwrap().is_err());
@@ -912,9 +1138,15 @@ mod tests {
             known_app_dir("/storage/emulated/0/Android/data/com.example/files/"),
             Some((Some("0".into()), "com.example".into()))
         );
-        assert_eq!(known_app_dir("/storage/1234-ABCD/android/OBB/com.example/"), Some((None, "com.example".into())));
+        assert_eq!(
+            known_app_dir("/storage/1234-ABCD/android/OBB/com.example/"),
+            Some((None, "com.example".into()))
+        );
         assert_eq!(known_app_dir("/storage/emulated/0/Download/"), None);
-        assert_eq!(normalize("/storage/emulated/0/Android/data/x/../com.example/./files"), "/storage/emulated/0/Android/data/com.example/files");
+        assert_eq!(
+            normalize("/storage/emulated/0/Android/data/x/../com.example/./files"),
+            "/storage/emulated/0/Android/data/com.example/files"
+        );
     }
 
     #[test]
@@ -929,13 +1161,19 @@ mod tests {
         assert_eq!(r.read_i32().unwrap(), 2); // `TYPE_EMULATED`
         assert_eq!(r.read_i32().unwrap(), 0); // no disk
         assert_eq!(r.read_string8().unwrap(), None);
-        assert_eq!(r.read_i32().unwrap(), MOUNT_FLAG_PRIMARY | MOUNT_FLAG_VISIBLE_FOR_WRITE);
+        assert_eq!(
+            r.read_i32().unwrap(),
+            MOUNT_FLAG_PRIMARY | MOUNT_FLAG_VISIBLE_FOR_WRITE
+        );
         assert_eq!(r.read_i32().unwrap(), 0);
         assert_eq!(r.read_i32().unwrap(), STATE_MOUNTED);
         for _ in 0..3 {
             assert_eq!(r.read_string8().unwrap(), None);
         }
-        assert_eq!(r.read_string8().unwrap().as_deref(), Some("/storage/emulated"));
+        assert_eq!(
+            r.read_string8().unwrap().as_deref(),
+            Some("/storage/emulated")
+        );
         assert_eq!(r.read_string8().unwrap(), None);
     }
 
@@ -943,7 +1181,13 @@ mod tests {
     /// and sorts first.
     #[test]
     fn volumes_keep_their_array_map_order() {
-        let ids = crate::package::info::array_order(vec![VolumeInfo::created(2, None, 0), VolumeInfo::internal()], |v| v.id);
-        assert_eq!(ids.iter().map(|v| v.id).collect::<Vec<_>>(), ["private", VOLUME]);
+        let ids = crate::package::info::array_order(
+            vec![VolumeInfo::created(2, None, 0), VolumeInfo::internal()],
+            |v| v.id,
+        );
+        assert_eq!(
+            ids.iter().map(|v| v.id).collect::<Vec<_>>(),
+            ["private", VOLUME]
+        );
     }
 }

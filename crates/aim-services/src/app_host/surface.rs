@@ -82,10 +82,15 @@ impl Composer {
         let sf = super::display::check_service(process, super::display::SERVICE)?;
         let mut data = Parcel::new();
         data.write_interface_token(COMPOSER);
-        let reply = sf.transact(CREATE_CONNECTION, &data, false).map_err(|s| format!("createConnection: {s}"))?;
+        let reply = sf
+            .transact(CREATE_CONNECTION, &data, false)
+            .map_err(|s| format!("createConnection: {s}"))?;
         let mut r = reply.reader();
         status(&mut r, "createConnection")?;
-        let Some(Binder::Handle(handle)) = r.read_binder().map_err(|s| format!("createConnection reply: {s}"))? else {
+        let Some(Binder::Handle(handle)) = r
+            .read_binder()
+            .map_err(|s| format!("createConnection reply: {s}"))?
+        else {
             return Err("createConnection: no client".into());
         };
         Ok(Composer {
@@ -126,7 +131,10 @@ impl Composer {
             data.write_i32(4);
             data.write_i32(*value);
         }
-        let reply = self.client.transact(CREATE_SURFACE, &data, false).map_err(|s| format!("createSurface: {s}"))?;
+        let reply = self
+            .client
+            .transact(CREATE_SURFACE, &data, false)
+            .map_err(|s| format!("createSurface: {s}"))?;
         let mut r = reply.reader();
         status(&mut r, "createSurface")?;
         let layer = (|| -> ParcelResult<Layer> {
@@ -138,8 +146,16 @@ impl Composer {
             let id = r.read_i32()?;
             let name = r.read_string16()?.unwrap_or_default();
             let transform_hint = r.read_i32()?;
-            let Binder::Handle(h) = handle else { return Err(aim_binder_host::parcel::BAD_VALUE) };
-            Ok(Layer { handle, id, name, transform_hint, _held: process.strong(h) })
+            let Binder::Handle(h) = handle else {
+                return Err(aim_binder_host::parcel::BAD_VALUE);
+            };
+            Ok(Layer {
+                handle,
+                id,
+                name,
+                transform_hint,
+                _held: process.strong(h),
+            })
         })()
         .map_err(|s| format!("createSurface reply: {s}"))?;
         Ok(layer)
@@ -147,8 +163,12 @@ impl Composer {
 
     /// Applies `changes` in one transaction, synchronously.
     pub fn apply(&self, changes: &[(&Layer, Change)]) -> Result<(), String> {
-        let id = u64::from(std::process::id()) << 32 | u64::from(self.next_id.fetch_add(1, Ordering::Relaxed));
-        let changes: Vec<_> = changes.iter().map(|(layer, change)| (layer.handle, layer.id, *change)).collect();
+        let id = u64::from(std::process::id()) << 32
+            | u64::from(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let changes: Vec<_> = changes
+            .iter()
+            .map(|(layer, change)| (layer.handle, layer.id, *change))
+            .collect();
         let data = transaction(id, self.apply_token, &changes);
         let reply = self
             .transactions
@@ -201,10 +221,16 @@ fn transaction(id: u64, apply_token: Binder, changes: &[(Binder, i32, Change)]) 
 /// it does not change keeps `layer_state_t`'s defaults.
 fn write_layer_state(p: &mut Parcel, handle: Binder, id: i32, change: &Change) {
     let mut what = 0;
-    let (x, y) = change.position.inspect(|_| what |= POSITION_CHANGED).unwrap_or((0.0, 0.0));
+    let (x, y) = change
+        .position
+        .inspect(|_| what |= POSITION_CHANGED)
+        .unwrap_or((0.0, 0.0));
     let z = change.z.inspect(|_| what |= LAYER_CHANGED).unwrap_or(0);
     // `Rect::INVALID_RECT`, else the crop; written top, left, bottom, right.
-    let [left, top, right, bottom] = change.crop.inspect(|_| what |= CROP_CHANGED).unwrap_or([0.0, 0.0, -1.0, -1.0]);
+    let [left, top, right, bottom] = change
+        .crop
+        .inspect(|_| what |= CROP_CHANGED)
+        .unwrap_or([0.0, 0.0, -1.0, -1.0]);
     if change.remove {
         what |= REPARENT;
     }
@@ -218,7 +244,9 @@ fn write_layer_state(p: &mut Parcel, handle: Binder, id: i32, change: &Change) {
     p.write_i32(0); // flags
     p.write_i32(0); // mask
     [1.0, 0.0, 1.0, 0.0].iter().for_each(|v| p.write_f32(*v)); // matrix: dsdx, dtdx, dtdy, dsdy
-    [top, left, bottom, right].iter().for_each(|v| p.write_f32(*v));
+    [top, left, bottom, right]
+        .iter()
+        .for_each(|v| p.write_f32(*v));
     p.write_bool(false); // no relative layer
     p.write_bool(false); // no parent for a child
     (0..4).for_each(|_| p.write_f32(0.0)); // color
@@ -345,19 +373,37 @@ mod tests {
 
     #[test]
     fn a_transaction_places_layers() {
-        let change = Change { position: Some((100.0, 50.0)), z: Some(3), crop: Some([0.0, 0.0, 640.0, 480.0]), remove: false };
+        let change = Change {
+            position: Some((100.0, 50.0)),
+            z: Some(3),
+            crop: Some([0.0, 0.0, 640.0, 480.0]),
+            remove: false,
+        };
         let p = transaction(5, Binder::Local(1), &[(Binder::Handle(9), 7, change)]);
         let data = p.data();
         let after_token = 4 * 3 + 4 + 2 * ("android.ui.ISurfaceComposer".len() + 1);
         assert_eq!(&data[after_token..after_token + 8], &5u64.to_le_bytes());
-        assert_eq!(hex(&data[after_token + 8..after_token + 8 + 64]), ORIGINAL_TRANSACTION_HEAD);
+        assert_eq!(
+            hex(&data[after_token + 8..after_token + 8 + 64]),
+            ORIGINAL_TRANSACTION_HEAD
+        );
         let state = after_token + 8 + 64 + 28 + 4 * 4;
         assert_eq!(&data[state - 4..state], &1i32.to_le_bytes());
         let fields = &data[state + 28..];
         let word = |i: usize| <[u8; 4]>::try_from(&fields[4 * i..4 * i + 4]).unwrap();
         assert_eq!(i32::from_le_bytes(word(0)), 7);
-        assert_eq!(u64::from_le_bytes(fields[4..12].try_into().unwrap()), POSITION_CHANGED | LAYER_CHANGED | CROP_CHANGED);
-        assert_eq!((f32::from_le_bytes(word(3)), f32::from_le_bytes(word(4)), i32::from_le_bytes(word(5))), (100.0, 50.0, 3));
+        assert_eq!(
+            u64::from_le_bytes(fields[4..12].try_into().unwrap()),
+            POSITION_CHANGED | LAYER_CHANGED | CROP_CHANGED
+        );
+        assert_eq!(
+            (
+                f32::from_le_bytes(word(3)),
+                f32::from_le_bytes(word(4)),
+                i32::from_le_bytes(word(5))
+            ),
+            (100.0, 50.0, 3)
+        );
         // The crop: top, left, bottom, right.
         let crop: Vec<f32> = (13..17).map(|i| f32::from_le_bytes(word(i))).collect();
         assert_eq!(crop, [0.0, 0.0, 480.0, 640.0]);
@@ -370,9 +416,20 @@ mod tests {
     #[test]
     fn a_removed_layer_is_reparented_to_none() {
         let mut p = Parcel::new();
-        write_layer_state(&mut p, Binder::Handle(9), 7, &Change { remove: true, ..Default::default() });
+        write_layer_state(
+            &mut p,
+            Binder::Handle(9),
+            7,
+            &Change {
+                remove: true,
+                ..Default::default()
+            },
+        );
         let data = p.data();
         // The handle (its object's 28 bytes), the id, then `what`.
-        assert_eq!(u64::from_le_bytes(data[32..40].try_into().unwrap()), REPARENT);
+        assert_eq!(
+            u64::from_le_bytes(data[32..40].try_into().unwrap()),
+            REPARENT
+        );
     }
 }

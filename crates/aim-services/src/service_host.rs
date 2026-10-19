@@ -28,19 +28,31 @@ pub struct ServiceHost {
 impl ServiceHost {
     fn begin_package_manager_boot(&self, call: &mut Call<'_>) -> Reply {
         let args = host::BeginPackageManagerBoot::read(&mut call.data)?;
-        if call.data.remaining() != 0 { return Err(aim_binder_host::parcel::BAD_VALUE); }
-        let result = self.system.upgrade().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native package system unavailable"))
+        if call.data.remaining() != 0 {
+            return Err(aim_binder_host::parcel::BAD_VALUE);
+        }
+        let result = self
+            .system
+            .upgrade()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native package system unavailable"))
             .and_then(|system| system.begin_package_manager_boot(args.factory_test));
         let mut reply = Parcel::new();
-        match result { Ok(binder) => host::write_begin_package_manager_boot_reply(&mut reply, Some(binder)),
-            Err(error) => reply.write_exception(&error) }
+        match result {
+            Ok(binder) => host::write_begin_package_manager_boot_reply(&mut reply, Some(binder)),
+            Err(error) => reply.write_exception(&error),
+        }
         Ok(reply)
     }
     fn package_internal_host(&self, call: &mut Call<'_>) -> Reply {
         host::GetPackageInternalHost::read(&mut call.data)?;
-        if call.data.remaining() != 0 { return Err(aim_binder_host::parcel::BAD_VALUE); }
+        if call.data.remaining() != 0 {
+            return Err(aim_binder_host::parcel::BAD_VALUE);
+        }
         let mut reply = Parcel::new();
-        let result = self.system.upgrade().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native system unavailable"))
+        let result = self
+            .system
+            .upgrade()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native system unavailable"))
             .and_then(|system| system.package_internal_host());
         match result {
             Ok(binder) => host::write_get_package_internal_host_reply(&mut reply, Some(binder)),
@@ -75,18 +87,25 @@ impl ServiceHost {
         Ok(reply)
     }
 
-    fn package_state_version_page(&self,call:&mut Call<'_>)->Reply {
+    fn package_state_version_page(&self, call: &mut Call<'_>) -> Reply {
         host::GetPackageStateVersionPage::read(&mut call.data)?;
-        if call.data.remaining()!=0 {return Err(aim_binder_host::parcel::BAD_VALUE);}
-        let result=self.system.upgrade().ok_or_else(||Exception::new(EX_ILLEGAL_STATE,"native system unavailable"))
-            .and_then(|system|system.package_state_version_page());
-        let mut reply=Parcel::new();
+        if call.data.remaining() != 0 {
+            return Err(aim_binder_host::parcel::BAD_VALUE);
+        }
+        let result = self
+            .system
+            .upgrade()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native system unavailable"))
+            .and_then(|system| system.package_state_version_page());
+        let mut reply = Parcel::new();
         match result {
-            Ok(file)=> {
-                reply.write_no_exception();reply.write_i32(1);
-                reply.write_i32(0);reply.write_file(file);
-            },
-            Err(error)=>reply.write_exception(&error),
+            Ok(file) => {
+                reply.write_no_exception();
+                reply.write_i32(1);
+                reply.write_i32(0);
+                reply.write_file(file);
+            }
+            Err(error) => reply.write_exception(&error),
         }
         Ok(reply)
     }
@@ -103,10 +122,16 @@ impl ServiceHost {
             .and_then(|system| system.capture_package_scan_and_queries());
         let mut reply = Parcel::new();
         match result {
-            Ok((snapshot,queries)) => {
-                let endpoint=if let Some(queries)=queries {
-                    crate::package::scan_snapshot::endpoint::Endpoint::with_computer(snapshot,queries,&self.process)
-                } else {crate::package::scan_snapshot::endpoint::Endpoint::new(snapshot)};
+            Ok((snapshot, queries)) => {
+                let endpoint = if let Some(queries) = queries {
+                    crate::package::scan_snapshot::endpoint::Endpoint::with_computer(
+                        snapshot,
+                        queries,
+                        &self.process,
+                    )
+                } else {
+                    crate::package::scan_snapshot::endpoint::Endpoint::new(snapshot)
+                };
                 let binder = self.process.add_service(Arc::new(endpoint));
                 host::write_capture_package_scan_reply(&mut reply, Some(binder));
             }

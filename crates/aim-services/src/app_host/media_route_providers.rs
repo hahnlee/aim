@@ -28,7 +28,8 @@ use std::sync::{Arc, Mutex, Weak, mpsc};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
-    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader, Result as ParcelResult,
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader,
+    Result as ParcelResult,
 };
 use aim_service_aidl::android_media_imediaroute2providerservice as provider_service;
 use aim_service_aidl::android_media_imediaroute2providerservicecallback as provider_callback;
@@ -66,7 +67,10 @@ type Job = Box<dyn FnOnce() + Send>;
 
 /// `ComponentName.flattenToShortString`.
 fn short_name(package: &str, class: &str) -> String {
-    match class.strip_prefix(package).filter(|rest| rest.starts_with('.')) {
+    match class
+        .strip_prefix(package)
+        .filter(|rest| rest.starts_with('.'))
+    {
         Some(rest) => format!("{package}/{rest}"),
         None => format!("{package}/{class}"),
     }
@@ -101,7 +105,10 @@ pub(super) struct ProviderRoute {
 }
 
 /// `readStringArray`, not null, as a set.
-fn string_set<'a>(r: &mut Reader<'a>, read: impl Fn(&mut Reader<'a>) -> ParcelResult<Option<String>>) -> ParcelResult<Vec<String>> {
+fn string_set<'a>(
+    r: &mut Reader<'a>,
+    read: impl Fn(&mut Reader<'a>) -> ParcelResult<Option<String>>,
+) -> ParcelResult<Vec<String>> {
     let n = r.read_i32()?;
     if n < 0 {
         return Err(BAD_VALUE);
@@ -113,7 +120,10 @@ impl ReadParcelable for ProviderRoute {
     /// `MediaRoute2Info(Parcel)`.
     fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
         let start = r.position();
-        let id = r.read_string16()?.filter(|id| !id.is_empty()).ok_or(BAD_VALUE)?;
+        let id = r
+            .read_string16()?
+            .filter(|id| !id.is_empty())
+            .ok_or(BAD_VALUE)?;
         let has_name = clip::char_sequence(r)?.is_some_and(|n| !n.is_empty());
         aim_service_aidl::read_string_list(r)?; // features
         let kind = r.read_i32()?;
@@ -181,7 +191,10 @@ impl ProviderRoute {
     fn with_provider(&self, package: &str, unique_id: &str) -> ProviderRoute {
         let (package_bytes, id_bytes) = (string16(package), string16(unique_id));
         let (pa, ia) = (self.provider_package_at, self.provider_id_at);
-        let raw = self.raw.splice(ia.0, ia.1, &id_bytes).splice(pa.0, pa.1, &package_bytes);
+        let raw = self
+            .raw
+            .splice(ia.0, ia.1, &id_bytes)
+            .splice(pa.0, pa.1, &package_bytes);
         let id_start = ia.0 + package_bytes.len() - (pa.1 - pa.0);
         ProviderRoute {
             raw,
@@ -208,7 +221,9 @@ impl ProviderRoute {
 
     /// `isVisibleTo`.
     fn is_visible_to(&self, package: &str) -> bool {
-        !self.visibility_restricted || self.provider_package.as_deref() == Some(package) || self.allowed_packages.iter().any(|p| p == package)
+        !self.visibility_restricted
+            || self.provider_package.as_deref() == Some(package)
+            || self.allowed_packages.iter().any(|p| p == package)
     }
 
     /// `ServiceCallbackStub.notifyProviderUpdated`'s checks of a route,
@@ -225,7 +240,10 @@ impl ProviderRoute {
         } else {
             return Ok(());
         };
-        Err(Exception::security(format!("{refused} Disallowed route: {}", self.id)))
+        Err(Exception::security(format!(
+            "{refused} Disallowed route: {}",
+            self.id
+        )))
     }
 }
 
@@ -248,7 +266,12 @@ impl ReadParcelable for ProviderInfo {
                 None => routes.push((key, route)),
             }
         }
-        Ok(ProviderInfo(crate::package::info::array_order(routes, |(k, _)| k).into_iter().map(|(_, r)| r).collect()))
+        Ok(ProviderInfo(
+            crate::package::info::array_order(routes, |(k, _)| k)
+                .into_iter()
+                .map(|(_, r)| r)
+                .collect(),
+        ))
     }
 }
 
@@ -285,12 +308,23 @@ fn composite(routers: &[(String, Preference)]) -> (Composite, Vec<String>) {
                 features.push((f.clone(), ()));
             }
         }
-        if preference.active_scan && !preference.features.is_empty() && !actively.contains(package) {
+        if preference.active_scan && !preference.features.is_empty() && !actively.contains(package)
+        {
             actively.push(package.clone());
         }
     }
-    let features = super::device_config::hash_map_order(features, 16).into_iter().map(|(f, ())| f).filter(|f| !f.is_empty()).collect();
-    (Composite { features, active_scan: !actively.is_empty() }, actively)
+    let features = super::device_config::hash_map_order(features, 16)
+        .into_iter()
+        .map(|(f, ())| f)
+        .filter(|f| !f.is_empty())
+        .collect();
+    (
+        Composite {
+            features,
+            active_scan: !actively.is_empty(),
+        },
+        actively,
+    )
 }
 
 /// A route a router is told of: the system provider's or a provider's.
@@ -309,7 +343,10 @@ impl WriteParcelable for Told<'_> {
 }
 
 /// `RouterRecord.getVisibleRoutes` of `routes` for `package`.
-pub(super) fn visible<'a>(routes: impl IntoIterator<Item = Told<'a>>, package: &str) -> Vec<Option<Told<'a>>> {
+pub(super) fn visible<'a>(
+    routes: impl IntoIterator<Item = Told<'a>>,
+    package: &str,
+) -> Vec<Option<Told<'a>>> {
     routes
         .into_iter()
         .filter(|t| match t {
@@ -362,7 +399,9 @@ struct ProxyConnection {
 impl HostConnection for ProxyConnection {
     fn connected(&self, service: Option<Binder>, dead: bool) {
         let proxy = self.proxy.clone();
-        let Some(providers) = self.providers.upgrade() else { return };
+        let Some(providers) = self.providers.upgrade() else {
+            return;
+        };
         providers.post_with(move |p| {
             let Some(proxy) = proxy.upgrade() else { return };
             match service {
@@ -448,7 +487,15 @@ impl Providers {
     /// `mLastProviderInfos` order.
     pub(super) fn registered_routes(&self, user: i32) -> Vec<ProviderRoute> {
         let users = self.users.lock().unwrap();
-        users.get(&user).map(|u| u.infos.iter().flat_map(|(_, r)| r.iter().cloned()).collect()).unwrap_or_default()
+        users
+            .get(&user)
+            .map(|u| {
+                u.infos
+                    .iter()
+                    .flat_map(|(_, r)| r.iter().cloned())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn start_on_handler(&self, user: i32) {
@@ -470,18 +517,35 @@ impl Providers {
     /// preference).
     fn scan(&self, user: i32) -> Result<(), Exception> {
         let (_, resolution) = self.host.packages()?;
-        let intent = Intent { action: Some(SERVICE_INTERFACE.into()), ..Default::default() };
+        let intent = Intent {
+            action: Some(SERVICE_INTERFACE.into()),
+            ..Default::default()
+        };
         let found = resolution
             .query_intent_services(&intent, None, GET_RESOLVED_FILTER, user, 1000)
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("media_router: queryIntentServices: {e:?}")))?;
+            .map_err(|e| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("media_router: queryIntentServices: {e:?}"),
+                )
+            })?;
         for r in found {
             let Info::Service(si) = &r.info else { continue };
             let package = si.info.item.package_name.clone().unwrap_or_default();
             let class = si.info.item.name.clone().unwrap_or_default();
-            let self_scan_only =
-                r.filter.as_ref().and_then(|f| f.categories.as_ref()).is_some_and(|c| c.iter().any(|c| c == CATEGORY_SELF_SCAN_ONLY));
+            let self_scan_only = r
+                .filter
+                .as_ref()
+                .and_then(|f| f.categories.as_ref())
+                .is_some_and(|c| c.iter().any(|c| c == CATEGORY_SELF_SCAN_ONLY));
             let unique_id = short_name(&package, &class);
-            if self.users.lock().unwrap().get(&user).is_some_and(|u| u.proxies.iter().any(|p| p.unique_id == unique_id)) {
+            if self
+                .users
+                .lock()
+                .unwrap()
+                .get(&user)
+                .is_some_and(|u| u.proxies.iter().any(|p| p.unique_id == unique_id))
+            {
                 continue;
             }
             let providers = self.me.clone();
@@ -491,8 +555,14 @@ impl Providers {
                 class,
                 self_scan_only,
                 user,
-                connection: Arc::new(ProxyConnection { providers, proxy: proxy.clone() }),
-                state: Mutex::new(ProxyState { running: true, ..Default::default() }),
+                connection: Arc::new(ProxyConnection {
+                    providers,
+                    proxy: proxy.clone(),
+                }),
+                state: Mutex::new(ProxyState {
+                    running: true,
+                    ..Default::default()
+                }),
             });
             let (actively, composite) = {
                 let mut users = self.users.lock().unwrap();
@@ -507,7 +577,14 @@ impl Providers {
 
     /// The routers of `user`, in their registration order.
     fn routers_of(&self, user: i32) -> Vec<Router> {
-        let mut routers: Vec<Router> = self.routers.lock().unwrap().values().filter(|r| r.user == user).cloned().collect();
+        let mut routers: Vec<Router> = self
+            .routers
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|r| r.user == user)
+            .cloned()
+            .collect();
         routers.sort_by_key(|r| r.seq);
         routers
     }
@@ -515,12 +592,17 @@ impl Providers {
     /// Every router is active: the app host's processes are all top
     /// (#1738), and no manager scans.
     fn update_discovery_on_handler(&self, user: i32) {
-        let routers: Vec<(String, Preference)> = self.routers_of(user).into_iter().map(|r| (r.package, r.preference)).collect();
+        let routers: Vec<(String, Preference)> = self
+            .routers_of(user)
+            .into_iter()
+            .map(|r| (r.package, r.preference))
+            .collect();
         let (composite, actively) = composite(&routers);
         let proxies = {
             let mut users = self.users.lock().unwrap();
             let u = users.entry(user).or_default();
-            let same_set = u.actively.len() == actively.len() && u.actively.iter().all(|p| actively.contains(p));
+            let same_set = u.actively.len() == actively.len()
+                && u.actively.iter().all(|p| actively.contains(p));
             if u.composite == composite && same_set {
                 return;
             }
@@ -529,17 +611,29 @@ impl Providers {
             u.proxies.clone()
         };
         for proxy in proxies {
-            self.proxy_update_discovery(&proxy, actively.contains(&proxy.package), composite.clone());
+            self.proxy_update_discovery(
+                &proxy,
+                actively.contains(&proxy.package),
+                composite.clone(),
+            );
         }
     }
 
     /// `MediaRoute2ProviderServiceProxy.updateDiscoveryPreference`.
-    fn proxy_update_discovery(&self, proxy: &Arc<Proxy>, includes_package: bool, preference: Composite) {
+    fn proxy_update_discovery(
+        &self,
+        proxy: &Arc<Proxy>,
+        includes_package: bool,
+        preference: Composite,
+    ) {
         let service = {
             let mut s = proxy.state.lock().unwrap();
             s.last = Some(preference.clone());
             s.includes_package = includes_package;
-            s.active.as_ref().filter(|_| s.ready).map(|c| c.service.clone())
+            s.active
+                .as_ref()
+                .filter(|_| s.ready)
+                .map(|c| c.service.clone())
         };
         if let Some(service) = service {
             self.send_preference(proxy, &service, preference);
@@ -550,9 +644,18 @@ impl Providers {
     /// `Connection.updateDiscoveryPreference`.
     fn send_preference(&self, proxy: &Proxy, service: &Strong, preference: Composite) {
         let mut p = Parcel::new();
-        provider_service::UpdateDiscoveryPreference { discovery_preference: Some(preference) }.write(&mut p);
-        if service.transact(provider_service::UPDATE_DISCOVERY_PREFERENCE, &p, true).is_err() {
-            eprintln!("app host: media_router: {}: updateDiscoveryPreference: Failed to deliver request.", proxy.unique_id);
+        provider_service::UpdateDiscoveryPreference {
+            discovery_preference: Some(preference),
+        }
+        .write(&mut p);
+        if service
+            .transact(provider_service::UPDATE_DISCOVERY_PREFERENCE, &p, true)
+            .is_err()
+        {
+            eprintln!(
+                "app host: media_router: {}: updateDiscoveryPreference: Failed to deliver request.",
+                proxy.unique_id
+            );
         }
     }
 
@@ -565,7 +668,11 @@ impl Providers {
 
     fn update_binding(&self, proxy: &Arc<Proxy>) {
         let bind = Self::should_bind(proxy, &proxy.state.lock().unwrap());
-        if bind { self.bind(proxy) } else { self.unbind(proxy) }
+        if bind {
+            self.bind(proxy)
+        } else {
+            self.unbind(proxy)
+        }
     }
 
     fn bind(&self, proxy: &Arc<Proxy>) {
@@ -583,7 +690,10 @@ impl Providers {
         );
         // A `SecurityException` leaves it unbound, as any failure here.
         let bound = bound.unwrap_or_else(|e| {
-            eprintln!("app host: media_router: {}: Bind failed: {e:?}", proxy.unique_id);
+            eprintln!(
+                "app host: media_router: {}: Bind failed: {e:?}",
+                proxy.unique_id
+            );
             false
         });
         proxy.state.lock().unwrap().bound = bound;
@@ -626,14 +736,26 @@ impl Providers {
                 }
             }),
         );
-        let callback =
-            self.host.process.add_service(Arc::new(ProviderCallback { providers: self.me.clone(), proxy: Arc::downgrade(proxy), connection: id }));
+        let callback = self.host.process.add_service(Arc::new(ProviderCallback {
+            providers: self.me.clone(),
+            proxy: Arc::downgrade(proxy),
+            connection: id,
+        }));
         let mut p = Parcel::new();
-        provider_service::SetCallback { callback: Some(callback) }.write(&mut p);
-        if service.transact(provider_service::SET_CALLBACK, &p, true).is_err() {
+        provider_service::SetCallback {
+            callback: Some(callback),
+        }
+        .write(&mut p);
+        if service
+            .transact(provider_service::SET_CALLBACK, &p, true)
+            .is_err()
+        {
             // `register` failing is `binderDied`.
             self.host.process.clear_death(&service, death);
-            eprintln!("app host: media_router: {}: Registration failed", proxy.unique_id);
+            eprintln!(
+                "app host: media_router: {}: Registration failed",
+                proxy.unique_id
+            );
             return;
         }
         proxy.state.lock().unwrap().active = Some(Connection { id, service, death });
@@ -661,7 +783,14 @@ impl Providers {
     }
 
     fn connection_died(&self, proxy: &Arc<Proxy>, id: u64) {
-        if proxy.state.lock().unwrap().active.as_ref().is_some_and(|c| c.id == id) {
+        if proxy
+            .state
+            .lock()
+            .unwrap()
+            .active
+            .as_ref()
+            .is_some_and(|c| c.id == id)
+        {
             self.disconnect(proxy);
         }
     }
@@ -670,7 +799,10 @@ impl Providers {
     /// prevention flag not bound again.
     fn binding_died(&self, proxy: &Arc<Proxy>) {
         self.unbind(proxy);
-        eprintln!("app host: media_router: Route provider service ({}) binding died, but we did not rebind.", proxy.unique_id);
+        eprintln!(
+            "app host: media_router: Route provider service ({}) binding died, but we did not rebind.",
+            proxy.unique_id
+        );
     }
 
     /// `disconnect`: the connection disposed and the provider's state gone.
@@ -694,13 +826,24 @@ impl Providers {
     /// `onProviderUpdated` of the connection `id`: `setProviderState`
     /// (`setUniqueId(package, uniqueId)`, not the system provider), then
     /// the change handled.
-    fn provider_updated(&self, proxy: &Arc<Proxy>, id: u64, routes: Vec<ProviderRoute>, held: Vec<Strong>) {
+    fn provider_updated(
+        &self,
+        proxy: &Arc<Proxy>,
+        id: u64,
+        routes: Vec<ProviderRoute>,
+        held: Vec<Strong>,
+    ) {
         {
             let mut s = proxy.state.lock().unwrap();
             if !s.active.as_ref().is_some_and(|c| c.id == id) {
                 return;
             }
-            s.info = Some(routes.iter().map(|r| r.with_provider(&proxy.package, &proxy.unique_id)).collect());
+            s.info = Some(
+                routes
+                    .iter()
+                    .map(|r| r.with_provider(&proxy.package, &proxy.unique_id))
+                    .collect(),
+            );
             s.held = held;
         }
         self.provider_state_changed(proxy);
@@ -728,14 +871,26 @@ impl Providers {
             Ok(forms) => forms,
             Err(e) => return eprintln!("app host: media_router: the system routes: {e:?}"),
         };
-        let routes: Vec<ProviderRoute> =
-            self.users.lock().unwrap().get(&user).map(|u| u.routes.iter().map(|(_, r)| r.clone()).collect()).unwrap_or_default();
+        let routes: Vec<ProviderRoute> = self
+            .users
+            .lock()
+            .unwrap()
+            .get(&user)
+            .map(|u| u.routes.iter().map(|(_, r)| r.clone()).collect())
+            .unwrap_or_default();
         for router in self.routers_of(user) {
-            let system = if router.system_routing { &privileged } else { &default };
+            let system = if router.system_routing {
+                &privileged
+            } else {
+                &default
+            };
             let told = visible(notified(system, &routes), &router.package);
             let mut p = Parcel::new();
             router2::NotifyRoutesUpdated { routes: Some(told) }.write(&mut p);
-            if let Err(e) = router.binder.transact(router2::NOTIFY_ROUTES_UPDATED, &p, true) {
+            if let Err(e) = router
+                .binder
+                .transact(router2::NOTIFY_ROUTES_UPDATED, &p, true)
+            {
                 eprintln!("app host: media_router: notifyRoutesUpdated: {e:?}");
             }
         }
@@ -747,7 +902,10 @@ impl Providers {
 fn notified<'a>(system: &'a Route, routes: &'a [ProviderRoute]) -> Vec<Told<'a>> {
     let mut all: Vec<(String, Told<'a>)> = vec![(system.unique_id(), Told::System(system))];
     all.extend(routes.iter().map(|r| (r.unique_id(), Told::Provider(r))));
-    crate::package::info::array_order(all, |(id, _)| id).into_iter().map(|(_, t)| t).collect()
+    crate::package::info::array_order(all, |(id, _)| id)
+        .into_iter()
+        .map(|(_, t)| t)
+        .collect()
 }
 
 /// `onProviderStateChangedOnHandler`'s bookkeeping of the provider
@@ -768,7 +926,10 @@ fn update_routes(u: &mut User, unique_id: &str, new: Option<Vec<ProviderRoute>>)
     let mut changed = false;
     for route in &new {
         if !route.is_valid() {
-            eprintln!("app host: media_router: onProviderStateChangedOnHandler: Ignoring invalid route : {}", route.unique_id());
+            eprintln!(
+                "app host: media_router: onProviderStateChangedOnHandler: Ignoring invalid route : {}",
+                route.unique_id()
+            );
             continue;
         }
         let id = route.unique_id();
@@ -804,16 +965,28 @@ struct ProviderCallback {
 impl ProviderCallback {
     /// `notifyProviderUpdated`: the routes checked, kept past the call (its
     /// binders held, its files taken) and posted.
-    fn provider_updated(&self, providers: &Providers, info: Option<ProviderInfo>) -> Result<(), Exception> {
-        let ProviderInfo(mut routes) = info.ok_or_else(|| Exception::new(EX_NULL_POINTER, "providerInfo must not be null"))?;
+    fn provider_updated(
+        &self,
+        providers: &Providers,
+        info: Option<ProviderInfo>,
+    ) -> Result<(), Exception> {
+        let ProviderInfo(mut routes) =
+            info.ok_or_else(|| Exception::new(EX_NULL_POINTER, "providerInfo must not be null"))?;
         for route in &routes {
             route.check_published()?;
         }
         let process = &providers.host.process;
         for route in &mut routes {
-            route.raw.keep_files(&|fd| process.file(fd)).map_err(|_| Exception::illegal_argument("a route's file descriptor"))?;
+            route
+                .raw
+                .keep_files(&|fd| process.file(fd))
+                .map_err(|_| Exception::illegal_argument("a route's file descriptor"))?;
         }
-        let held: Vec<Strong> = routes.iter().flat_map(|r| r.raw.handles().collect::<Vec<_>>()).map(|h| process.strong(h)).collect();
+        let held: Vec<Strong> = routes
+            .iter()
+            .flat_map(|r| r.raw.handles().collect::<Vec<_>>())
+            .map(|h| process.strong(h))
+            .collect();
         let (proxy, id) = (self.proxy.clone(), self.connection);
         providers.post_with(move |p| {
             if let Some(proxy) = proxy.upgrade() {
@@ -826,7 +999,14 @@ impl ProviderCallback {
     /// The proxy, while this is its active connection's callback (the
     /// stub not disposed).
     fn active(&self) -> Option<Arc<Proxy>> {
-        self.proxy.upgrade().filter(|p| p.state.lock().unwrap().active.as_ref().is_some_and(|c| c.id == self.connection))
+        self.proxy.upgrade().filter(|p| {
+            p.state
+                .lock()
+                .unwrap()
+                .active
+                .as_ref()
+                .is_some_and(|c| c.id == self.connection)
+        })
     }
 }
 
@@ -852,19 +1032,27 @@ impl Service for ProviderCallback {
         let host = &providers.host;
         let result: Result<(), Exception> = match call.code {
             provider_callback::NOTIFY_PROVIDER_UPDATED => {
-                let a = provider_callback::NotifyProviderUpdated::<ProviderInfo>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    provider_callback::NotifyProviderUpdated::<ProviderInfo>::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
                 self.provider_updated(&providers, a.provider_info)
             }
             // `onSessionCreated`: a null session is ignored; one of its own
             // is not kept (#1663).
             provider_callback::NOTIFY_SESSION_CREATED => {
-                call.data.enforce_interface(provider_callback::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                call.data
+                    .enforce_interface(provider_callback::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
                 call.data.read_i64().map_err(|_| BAD_VALUE)?;
                 let session = call.data.read_i32().map_err(|_| BAD_VALUE)? != 0;
                 match self.active() {
-                    Some(_) if session => Err(host.unimplemented_named("media_router", "a route provider's session (#1663)")),
+                    Some(_) if session => Err(host
+                        .unimplemented_named("media_router", "a route provider's session (#1663)")),
                     Some(proxy) => {
-                        eprintln!("app host: media_router: onSessionCreated: Ignoring null session sent from {}", proxy.unique_id);
+                        eprintln!(
+                            "app host: media_router: onSessionCreated: Ignoring null session sent from {}",
+                            proxy.unique_id
+                        );
                         Ok(())
                     }
                     None => Ok(()),
@@ -873,21 +1061,31 @@ impl Service for ProviderCallback {
             // `onSessionsUpdated`: with no session kept, a list of none
             // changes nothing.
             provider_callback::NOTIFY_SESSIONS_UPDATED => {
-                call.data.enforce_interface(provider_callback::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                call.data
+                    .enforce_interface(provider_callback::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
                 let sessions = any_typed(&mut call.data).map_err(|_| BAD_VALUE)?;
                 if sessions && self.active().is_some() {
-                    Err(host.unimplemented_named("media_router", "a route provider's sessions (#1663)"))
+                    Err(host
+                        .unimplemented_named("media_router", "a route provider's sessions (#1663)"))
                 } else {
                     Ok(())
                 }
             }
             // `onSessionReleased`: no session was kept, so none matches.
             provider_callback::NOTIFY_SESSION_RELEASED => {
-                call.data.enforce_interface(provider_callback::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                call.data
+                    .enforce_interface(provider_callback::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
                 let session = call.data.read_i32().map_err(|_| BAD_VALUE)? != 0;
                 match self.active() {
-                    Some(_) if session => eprintln!("app host: media_router: onSessionReleased: Matching session info not found"),
-                    Some(proxy) => eprintln!("app host: media_router: onSessionReleased: Ignoring null session sent from {}", proxy.unique_id),
+                    Some(_) if session => eprintln!(
+                        "app host: media_router: onSessionReleased: Matching session info not found"
+                    ),
+                    Some(proxy) => eprintln!(
+                        "app host: media_router: onSessionReleased: Ignoring null session sent from {}",
+                        proxy.unique_id
+                    ),
                     None => {}
                 }
                 Ok(())
@@ -896,10 +1094,13 @@ impl Service for ProviderCallback {
             // session creation request is pending and no manager is
             // registered, so none is told.
             provider_callback::NOTIFY_REQUEST_FAILED => {
-                let a = provider_callback::NotifyRequestFailed::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = provider_callback::NotifyRequestFailed::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 match self.active() {
                     Some(_) if a.request_id == REQUEST_ID_NONE => {
-                        eprintln!("app host: media_router: onRequestFailed: Ignoring requestId REQUEST_ID_NONE")
+                        eprintln!(
+                            "app host: media_router: onRequestFailed: Ignoring requestId REQUEST_ID_NONE"
+                        )
                     }
                     Some(proxy) => eprintln!(
                         "app host: media_router: handleSessionCreationRequestFailed | No matching request found for provider: {}, uniqueRequestId: {}, reason: {}",
@@ -909,7 +1110,8 @@ impl Service for ProviderCallback {
                 }
                 Ok(())
             }
-            code => Err(host.unimplemented_named("media_router", &format!("route provider callback #{code}"))),
+            code => Err(host
+                .unimplemented_named("media_router", &format!("route provider callback #{code}"))),
         };
         reply(result.map(|()| Parcel::new()))
     }
@@ -971,13 +1173,19 @@ mod tests {
         let given = read.with_provider(GMS.0, GMS.1);
         let mut p = Parcel::new();
         given.write_to(&mut p);
-        assert_eq!(p.data(), route("tv", TYPE_REMOTE_TV, Some(GMS), false).data());
+        assert_eq!(
+            p.data(),
+            route("tv", TYPE_REMOTE_TV, Some(GMS), false).data()
+        );
         assert!(given.is_valid());
         assert_eq!(given.unique_id(), "com.google.android.gms/.Provider:tv");
         let again = given.with_provider("p", "p/.Q");
         let mut q = Parcel::new();
         again.write_to(&mut q);
-        assert_eq!(q.data(), route("tv", TYPE_REMOTE_TV, Some(("p", "p/.Q")), false).data());
+        assert_eq!(
+            q.data(),
+            route("tv", TYPE_REMOTE_TV, Some(("p", "p/.Q")), false).data()
+        );
     }
 
     /// `ServiceCallbackStub`'s checks: a system route type is refused.
@@ -1004,9 +1212,17 @@ mod tests {
         let mut u = User::default();
         let tv = read(&route("tv", TYPE_REMOTE_TV, Some(GMS), false));
         let unnamed = read(&route("x", TYPE_REMOTE_TV, None, false));
-        assert!(update_routes(&mut u, GMS.1, Some(vec![tv.clone(), unnamed.clone()])));
+        assert!(update_routes(
+            &mut u,
+            GMS.1,
+            Some(vec![tv.clone(), unnamed.clone()])
+        ));
         assert_eq!(u.routes.len(), 1);
-        assert!(!update_routes(&mut u, GMS.1, Some(vec![tv.clone(), unnamed])));
+        assert!(!update_routes(
+            &mut u,
+            GMS.1,
+            Some(vec![tv.clone(), unnamed])
+        ));
         assert!(update_routes(&mut u, GMS.1, Some(vec![tv.clone()])));
         assert!(!update_routes(&mut u, GMS.1, Some(vec![tv])));
         assert!(update_routes(&mut u, GMS.1, None));
@@ -1019,9 +1235,15 @@ mod tests {
     /// features, written as `RouteDiscoveryPreference.writeToParcel` does.
     #[test]
     fn the_composite_preference_is_built_as_the_service_builds_it() {
-        let pref = |features: &[&str], active_scan| Preference { features: features.iter().map(|f| f.to_string()).collect(), active_scan };
-        let (c, actively) =
-            composite(&[("a".into(), pref(&["x", "y", ""], false)), ("b".into(), pref(&["y", "z"], true)), ("c".into(), pref(&[], true))]);
+        let pref = |features: &[&str], active_scan| Preference {
+            features: features.iter().map(|f| f.to_string()).collect(),
+            active_scan,
+        };
+        let (c, actively) = composite(&[
+            ("a".into(), pref(&["x", "y", ""], false)),
+            ("b".into(), pref(&["y", "z"], true)),
+            ("c".into(), pref(&[], true)),
+        ]);
         assert!(c.active_scan);
         assert_eq!(actively, ["b"]);
         assert_eq!(c.features, ["x", "y", "z"]);
@@ -1029,7 +1251,13 @@ mod tests {
         let mut p = Parcel::new();
         c.write_to(&mut p);
         let read = <Preference as ReadParcelable>::read_from(&mut p.reader()).unwrap();
-        assert_eq!(read, Preference { features: c.features.clone(), active_scan: true });
+        assert_eq!(
+            read,
+            Preference {
+                features: c.features.clone(),
+                active_scan: true
+            }
+        );
     }
 
     #[test]

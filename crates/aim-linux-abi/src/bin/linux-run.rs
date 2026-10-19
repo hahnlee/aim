@@ -113,9 +113,16 @@ fn main() {
     // inherits every descriptor not closed on exec.
     let inherited_fds = aim_linux_abi::sys::open_fds();
     let internal_args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if internal_args.first().is_some_and(|arg| arg == "--fuse-broker") {
-        if internal_args.len() != 2 { usage(); }
-        if let Err(error) = aim_linux_abi::sys::fuse::serve_broker(&PathBuf::from(&internal_args[1])) {
+    if internal_args
+        .first()
+        .is_some_and(|arg| arg == "--fuse-broker")
+    {
+        if internal_args.len() != 2 {
+            usage();
+        }
+        if let Err(error) =
+            aim_linux_abi::sys::fuse::serve_broker(&PathBuf::from(&internal_args[1]))
+        {
             eprintln!("linux-run: FUSE broker: {error}");
             std::process::exit(1);
         }
@@ -138,7 +145,7 @@ fn main() {
     let mut vulkan: Option<PathBuf> = None;
     let mut display: Option<PathBuf> = None;
     let mut path_map: Option<PathBuf> = None;
-    let mut mount_namespace_from_init=false;
+    let mut mount_namespace_from_init = false;
     let mut seclabel = None;
     let mut identity = Identity::default();
     let mut by_pid = None;
@@ -147,15 +154,20 @@ fn main() {
     let mut execfn = None;
     let mut runtime_args = Vec::new();
     let mut diag_fd = None;
-    let mut posix_control=None;
-    let mut socket_receipts=Vec::new();let mut guest_fds=inherited_fds;let mut explicit_guest_fds=false;
+    let mut posix_control = None;
+    let mut socket_receipts = Vec::new();
+    let mut guest_fds = inherited_fds;
+    let mut explicit_guest_fds = false;
     let program = loop {
         let Some(a) = args.next() else { usage() };
         if a == "--fork-child" {
             // The child of a guest fork (`sys::fork`), after the runtime
             // options; the value lists the fds to hold for it.
             let kqueues = args.next().unwrap_or_else(|| usage());
-            if let Err(error)=aim_linux_abi::sys::reserve_fork_fds(&kqueues.to_string_lossy()){eprintln!("linux-run: fork descriptor reservation: errno {error}");std::process::exit(127);}
+            if let Err(error) = aim_linux_abi::sys::reserve_fork_fds(&kqueues.to_string_lossy()) {
+                eprintln!("linux-run: fork descriptor reservation: errno {error}");
+                std::process::exit(127);
+            }
             break None;
         }
         let mut value = || args.next().unwrap_or_else(|| usage());
@@ -165,14 +177,37 @@ fn main() {
             "--root" => root = PathBuf::from(value()),
             "--cache" => cache = Some(Some(PathBuf::from(value()))),
             "--no-cache" => cache = Some(None),
-            "--socket-receipts"=>socket_receipts=aim_linux_abi::sys::parse_socket_receipts(&value().to_string_lossy()).unwrap_or_else(|error|{eprintln!("linux-run: invalid socket receipt: errno {error}");std::process::exit(2)}),
-            "--regular-fds"=>state.regular_fds=value().to_string_lossy().into_owned(),
-            "--exec-close-receipt"=>{let fd=value().to_string_lossy().parse::<i32>().unwrap_or_else(|_|usage());if fd<0{usage();}state.close_receipt=Some(fd);},
-            "--guest-fds"=>{explicit_guest_fds=true;guest_fds=aim_linux_abi::sys::parse_guest_fds(&value().to_string_lossy()).unwrap_or_else(|error|{eprintln!("linux-run: invalid guest descriptor inventory: errno {error}");std::process::exit(2)});},
+            "--socket-receipts" => {
+                socket_receipts =
+                    aim_linux_abi::sys::parse_socket_receipts(&value().to_string_lossy())
+                        .unwrap_or_else(|error| {
+                            eprintln!("linux-run: invalid socket receipt: errno {error}");
+                            std::process::exit(2)
+                        })
+            }
+            "--regular-fds" => state.regular_fds = value().to_string_lossy().into_owned(),
+            "--exec-close-receipt" => {
+                let fd = value()
+                    .to_string_lossy()
+                    .parse::<i32>()
+                    .unwrap_or_else(|_| usage());
+                if fd < 0 {
+                    usage();
+                }
+                state.close_receipt = Some(fd);
+            }
+            "--guest-fds" => {
+                explicit_guest_fds = true;
+                guest_fds = aim_linux_abi::sys::parse_guest_fds(&value().to_string_lossy())
+                    .unwrap_or_else(|error| {
+                        eprintln!("linux-run: invalid guest descriptor inventory: errno {error}");
+                        std::process::exit(2)
+                    });
+            }
             "--path-map" => path_map = Some(PathBuf::from(value())),
             "--runtime" => aim_linux_abi::vfs::use_runtime(PathBuf::from(value())),
-            "--mount-namespace-from-init"=>mount_namespace_from_init=true,
-            "--posix-control"=>posix_control=Some(PathBuf::from(value())),
+            "--mount-namespace-from-init" => mount_namespace_from_init = true,
+            "--posix-control" => posix_control = Some(PathBuf::from(value())),
             "--binder" => binder = Some(value().to_string_lossy().into_owned()),
             "--gpu" => gpu = Some(PathBuf::from(value())),
             "--vulkan" => vulkan = Some(PathBuf::from(value())),
@@ -230,7 +265,12 @@ fn main() {
     };
     let cache = cache.unwrap_or_else(aim_linux_abi::cache::Cache::default_dir);
     runtime_args.extend([cstring("--root"), cstring(root.as_os_str().as_bytes())]);
-    if let Some(path)=&posix_control{runtime_args.extend([cstring("--posix-control"),cstring(path.as_os_str().as_bytes())]);}
+    if let Some(path) = &posix_control {
+        runtime_args.extend([
+            cstring("--posix-control"),
+            cstring(path.as_os_str().as_bytes()),
+        ]);
+    }
     match &cache {
         Some(c) => runtime_args.extend([cstring("--cache"), cstring(c.as_os_str().as_bytes())]),
         None => runtime_args.push(cstring("--no-cache")),
@@ -262,7 +302,10 @@ fn main() {
     if let Some(fd) = diag_fd {
         runtime_args.extend([cstring("--diag-fd"), cstring(fd.to_string())]);
     }
-    if !explicit_guest_fds{guest_fds.retain(|fd|Some(*fd)!=diag_fd&&unsafe{libc::fcntl(*fd,libc::F_GETFD)}>=0);}
+    if !explicit_guest_fds {
+        guest_fds
+            .retain(|fd| Some(*fd) != diag_fd && unsafe { libc::fcntl(*fd, libc::F_GETFD) } >= 0);
+    }
     if let Some(label) = seclabel {
         identity.seclabel = label;
     }
@@ -279,7 +322,7 @@ fn main() {
             binder,
             identity,
             by_pid,
-        mount_namespace_from_init,
+            mount_namespace_from_init,
             state,
             runtime_args,
             guest_fds,

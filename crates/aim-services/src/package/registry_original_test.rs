@@ -1,10 +1,16 @@
 //! Original ComponentResolver declaration mutation versus native accepted registry.
 use super::*;
 #[allow(dead_code)]
-#[path = "../../tests/common/java.rs"] mod java;
-#[path = "../../tests/common/runtime.rs"] mod runtime;
-use runtime::{Boot,Data,run};
-use std::{fs,process::Command,time::{Duration,Instant}};
+#[path = "../../tests/common/java.rs"]
+mod java;
+#[path = "../../tests/common/runtime.rs"]
+mod runtime;
+use runtime::{Boot, Data, run};
+use std::{
+    fs,
+    process::Command,
+    time::{Duration, Instant},
+};
 #[test]
 #[ignore = "requires pinned image, built host/image, JDK and d8; run explicitly"]
 fn original_provider_registration_matches_native_runtime_views() {
@@ -46,8 +52,15 @@ fn original_provider_registration_matches_native_runtime_views() {
                     .filter(|path| path.extension().is_some_and(|ext| ext == "class")),
             ),
     );
-    java::check_linkage(&dex.join("classes.dex"), &["/system/framework/services.jar"]).unwrap();
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
+    java::check_linkage(
+        &dex.join("classes.dex"),
+        &["/system/framework/services.jar"],
+    )
+    .unwrap();
+    let boot = Boot::new(
+        aim_paths::root().join("target/release/aimctl"),
+        data.0.join("g"),
+    );
     run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
@@ -68,28 +81,96 @@ fn original_provider_registration_matches_native_runtime_views() {
     let directory = boot.data.join("data/local/tmp/provider-registration");
     fs::create_dir(&directory).unwrap();
     fs::copy(dex.join("classes.dex"), directory.join("oracle.dex")).unwrap();
-    use crate::package::{pkg::{AndroidPackage,Provider,MainComponent,Component},sign::SigningDetails};
-    let provider=|package:&str,name:&str,authorities:&str,syncable:bool| Provider {
-        main:MainComponent {component:Component {name:name.into(),package_name:package.into(),properties:Some(vec![]),..Default::default()},..Default::default()},authority:Some(authorities.into()),syncable,uri_permission_patterns:Some(vec![]),path_permissions:Some(vec![]),..Default::default()
+    use crate::package::{
+        pkg::{AndroidPackage, Component, MainComponent, Provider},
+        sign::SigningDetails,
     };
-    let packages=[
-        AndroidPackage {feature_flag_state:Some(vec![]),package_name:"fixture.first".into(),providers:vec![provider("fixture.first","BB","one",false)],..Default::default()},
-        AndroidPackage {feature_flag_state:Some(vec![]),package_name:"fixture.sync".into(),providers:vec![provider("fixture.sync","BB","one;two;three;",true),provider("fixture.sync","Aa","four;five",false)],..Default::default()},
-        AndroidPackage {feature_flag_state:Some(vec![]),package_name:"fixture.sync".into(),providers:vec![provider("fixture.sync","Aa","two;six;seven",true),provider("fixture.sync","BB","one;four",false)],..Default::default()},
-        AndroidPackage {feature_flag_state:Some(vec![]),package_name:"fixture.sync".into(),providers:vec![provider("fixture.sync","BB","one;two;three",false),provider("fixture.sync","Aa","eight;nine",true)],..Default::default()},
+    let provider = |package: &str, name: &str, authorities: &str, syncable: bool| Provider {
+        main: MainComponent {
+            component: Component {
+                name: name.into(),
+                package_name: package.into(),
+                properties: Some(vec![]),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        authority: Some(authorities.into()),
+        syncable,
+        uri_permission_patterns: Some(vec![]),
+        path_permissions: Some(vec![]),
+        ..Default::default()
+    };
+    let packages = [
+        AndroidPackage {
+            feature_flag_state: Some(vec![]),
+            package_name: "fixture.first".into(),
+            providers: vec![provider("fixture.first", "BB", "one", false)],
+            ..Default::default()
+        },
+        AndroidPackage {
+            feature_flag_state: Some(vec![]),
+            package_name: "fixture.sync".into(),
+            providers: vec![
+                provider("fixture.sync", "BB", "one;two;three;", true),
+                provider("fixture.sync", "Aa", "four;five", false),
+            ],
+            ..Default::default()
+        },
+        AndroidPackage {
+            feature_flag_state: Some(vec![]),
+            package_name: "fixture.sync".into(),
+            providers: vec![
+                provider("fixture.sync", "Aa", "two;six;seven", true),
+                provider("fixture.sync", "BB", "one;four", false),
+            ],
+            ..Default::default()
+        },
+        AndroidPackage {
+            feature_flag_state: Some(vec![]),
+            package_name: "fixture.sync".into(),
+            providers: vec![
+                provider("fixture.sync", "BB", "one;two;three", false),
+                provider("fixture.sync", "Aa", "eight;nine", true),
+            ],
+            ..Default::default()
+        },
     ];
-    let mut registry=Registry::default();let mut expected=Vec::new();
-    for (i,package) in packages.iter().enumerate() {
-        let raw=package.to_cache_entry().unwrap().bytes;fs::write(directory.join(format!("raw-{i}")),&raw).unwrap();
-        registry.register(Arc::new(LoadedPackage::new(package.clone(),SigningDetails::unknown()).unwrap())).unwrap();
-        let runtime=registry.package_view(&package.package_name,package).unwrap();
-        assert_eq!(package.to_cache_entry().unwrap().bytes,raw,"native registration mutated raw code");
+    let mut registry = Registry::default();
+    let mut expected = Vec::new();
+    for (i, package) in packages.iter().enumerate() {
+        let raw = package.to_cache_entry().unwrap().bytes;
+        fs::write(directory.join(format!("raw-{i}")), &raw).unwrap();
+        registry
+            .register(Arc::new(
+                LoadedPackage::new(package.clone(), SigningDetails::unknown()).unwrap(),
+            ))
+            .unwrap();
+        let runtime = registry
+            .package_view(&package.package_name, package)
+            .unwrap();
+        assert_eq!(
+            package.to_cache_entry().unwrap().bytes,
+            raw,
+            "native registration mutated raw code"
+        );
         expected.push(runtime);
     }
     let output=boot.client(1000).args(["/system/bin/app_process","-Djava.class.path=/data/local/tmp/provider-registration/oracle.dex:/system/framework/services.jar","/system/bin","ProviderRegistrationOracle","/data/local/tmp/provider-registration"]).output().unwrap();
-    assert!(output.status.success(),"original provider registration: {} {}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
-    for (i,native) in expected.iter().enumerate() {
-        let original=AndroidPackage::read_cache_entry(&fs::read(directory.join(format!("original-{i}"))).unwrap()).unwrap();
-        assert_eq!(original.providers,native.providers,"original registered declaration provider {i}");
+    assert!(
+        output.status.success(),
+        "original provider registration: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for (i, native) in expected.iter().enumerate() {
+        let original = AndroidPackage::read_cache_entry(
+            &fs::read(directory.join(format!("original-{i}"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            original.providers, native.providers,
+            "original registered declaration provider {i}"
+        );
     }
 }

@@ -87,7 +87,8 @@ fn write_byte_array(p: &mut Parcel, bytes: &[u8]) {
 /// The providers of `config_webview_packages`, as `SystemImpl` reads
 /// them, or why it cannot.
 fn providers(xml: &[u8]) -> Result<Vec<Provider>, String> {
-    let root = aim_apps::res::xml(xml).map_err(|e| format!("Error when parsing WebView config {e:?}"))?;
+    let root =
+        aim_apps::res::xml(xml).map_err(|e| format!("Error when parsing WebView config {e:?}"))?;
     // `getAttributeValue`: a compiled boolean as `true` or `false`.
     let attr = |e: &aim_apps::res::Element, name: &str| match e.named(name) {
         Some(aim_apps::res::Value::String(s)) => Some(s.clone()),
@@ -96,8 +97,10 @@ fn providers(xml: &[u8]) -> Result<Vec<Provider>, String> {
     };
     let mut providers = Vec::new();
     for e in root.children.iter().filter(|e| e.name == "webviewprovider") {
-        let package = attr(e, "packageName").ok_or("WebView provider in framework resources missing package name")?;
-        let description = attr(e, "description").ok_or("WebView provider in framework resources missing description")?;
+        let package = attr(e, "packageName")
+            .ok_or("WebView provider in framework resources missing package name")?;
+        let description = attr(e, "description")
+            .ok_or("WebView provider in framework resources missing description")?;
         let mut signatures = Vec::new();
         for s in e.children.iter().filter(|s| s.name == "signature") {
             let text: String = s.text.chars().filter(|c| !c.is_whitespace()).collect();
@@ -121,7 +124,9 @@ fn providers(xml: &[u8]) -> Result<Vec<Provider>, String> {
         providers.push(provider);
     }
     if !providers.iter().any(|p| p.available_by_default) {
-        return Err("There must be at least one WebView package that is available by default".into());
+        return Err(
+            "There must be at least one WebView package that is available by default".into(),
+        );
     }
     Ok(providers)
 }
@@ -150,7 +155,11 @@ pub struct WebViewUpdate {
 
 impl WebViewUpdate {
     pub fn new(host: Arc<AppHost>) -> Self {
-        WebViewUpdate { host, providers: std::sync::OnceLock::new(), shared: Arc::new((Mutex::new(None), Condvar::new())) }
+        WebViewUpdate {
+            host,
+            providers: std::sync::OnceLock::new(),
+            shared: Arc::new((Mutex::new(None), Condvar::new())),
+        }
     }
 
     fn providers(&self) -> Result<&[Provider], Exception> {
@@ -162,23 +171,38 @@ impl WebViewUpdate {
             .inputs()?
             .packages
             .framework_file(self.host.root()?, "xml", "config_webview_packages")
-            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "webviewupdate: no config_webview_packages"))?;
-        let parsed = providers(&xml).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("webviewupdate: {e}")))?;
+            .ok_or_else(|| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    "webviewupdate: no config_webview_packages",
+                )
+            })?;
+        let parsed = providers(&xml)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("webviewupdate: {e}")))?;
         Ok(self.providers.get_or_init(|| parsed))
     }
 
     fn default_provider(&self) -> Result<&Provider, Exception> {
         // The constructor's: the first available by default.
-        Ok(self.providers()?.iter().find(|p| p.available_by_default).unwrap())
+        Ok(self
+            .providers()?
+            .iter()
+            .find(|p| p.available_by_default)
+            .unwrap())
     }
 
     /// `pm.getPackageInfo(package, flags)` as the system asks it.
     fn package_info(&self, package: &str, flags: i64) -> Result<Option<PackageInfo>, Exception> {
         let (state, resolution) = self.host.packages()?;
-        let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
-        query
-            .package_info(package, -1, flags, 0)
-            .map_err(|e| self.host.unimplemented_named("webviewupdate", &format!("getPackageInfo: {} (#1491)", e.0)))?
+        let query = Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: SYSTEM_UID,
+        };
+        query.package_info(package, -1, flags, 0).map_err(|e| {
+            self.host
+                .unimplemented_named("webviewupdate", &format!("getPackageInfo: {} (#1491)", e.0))
+        })?
     }
 
     fn property(&self, name: &str) -> Option<String> {
@@ -187,7 +211,12 @@ impl WebViewUpdate {
 
     /// `validityResult(...) == VALIDITY_OK`.
     fn valid(&self, provider: &Provider, info: &PackageInfo) -> Result<bool, Exception> {
-        let app = info.application_info.as_ref().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "webviewupdate: a package without application info"))?;
+        let app = info.application_info.as_ref().ok_or_else(|| {
+            Exception::new(
+                EX_ILLEGAL_STATE,
+                "webviewupdate: a package without application info",
+            )
+        })?;
         // `WebViewFactoryProvider.isCompatibleImplementationPackage`: with
         // the B entry point, a version from `MINIMUM_SUPPORTED_VERSION_CODE`,
         // else one targeting Tiramisu or after.
@@ -200,7 +229,9 @@ impl WebViewUpdate {
             return Ok(false);
         }
         let debuggable = self.property("ro.debuggable").as_deref() == Some("1");
-        let version = |i: &PackageInfo| (i64::from(i.version_code_major) << 32) | i64::from(i.version_code as u32);
+        let version = |i: &PackageInfo| {
+            (i64::from(i.version_code_major) << 32) | i64::from(i.version_code as u32)
+        };
         if !debuggable && version(info) / 100_000 < self.minimum_version_code()? / 100_000 {
             return Ok(false);
         }
@@ -220,7 +251,8 @@ impl WebViewUpdate {
         let mut minimum = -1;
         for p in self.providers()?.iter().filter(|p| p.available_by_default) {
             if let Some(info) = self.package_info(&p.package, MATCH_FACTORY_ONLY)? {
-                let v = (i64::from(info.version_code_major) << 32) | i64::from(info.version_code as u32);
+                let v = (i64::from(info.version_code_major) << 32)
+                    | i64::from(info.version_code as u32);
                 if minimum < 0 || v < minimum {
                     minimum = v;
                 }
@@ -233,11 +265,23 @@ impl WebViewUpdate {
     /// installed and enabled for every user (here, user 0), else the
     /// default if valid.
     fn preferred(&self) -> Result<Option<PackageInfo>, Exception> {
-        let chosen = self.host.inputs()?.settings.get(Table::Global, "webview_provider");
-        if let Some(provider) = chosen.and_then(|c| self.providers().ok()?.iter().find(|p| p.package == c).cloned())
-            && let Some(info) = self.package_info(&provider.package, PACKAGE_FLAGS)?
+        let chosen = self
+            .host
+            .inputs()?
+            .settings
+            .get(Table::Global, "webview_provider");
+        if let Some(provider) = chosen.and_then(|c| {
+            self.providers()
+                .ok()?
+                .iter()
+                .find(|p| p.package == c)
+                .cloned()
+        }) && let Some(info) = self.package_info(&provider.package, PACKAGE_FLAGS)?
             && self.valid(&provider, &info)?
-            && info.application_info.as_ref().is_some_and(|a| a.flags & FLAG_INSTALLED != 0 && a.enabled)
+            && info
+                .application_info
+                .as_ref()
+                .is_some_and(|a| a.flags & FLAG_INSTALLED != 0 && a.enabled)
         {
             return Ok(Some(info));
         }
@@ -273,7 +317,9 @@ impl WebViewUpdate {
                     });
                     state.current = Some(info);
                 }
-                None => eprintln!("app host: webviewupdate: Could not find a loadable WebView package"),
+                None => {
+                    eprintln!("app host: webviewupdate: Could not find a loadable WebView package")
+                }
             }
             *guard = Some(state);
         }
@@ -290,12 +336,24 @@ impl WebViewUpdate {
         let package = info.package_name.clone().unwrap_or_default();
         let (mut started, mut finished) = (0, 0);
         for list in ["ro.product.cpu.abilist32", "ro.product.cpu.abilist64"] {
-            let Some(abi) = self.property(list).and_then(|l| l.split(',').find(|a| !a.is_empty()).map(str::to_string)) else {
+            let Some(abi) = self
+                .property(list)
+                .and_then(|l| l.split(',').find(|a| !a.is_empty()).map(str::to_string))
+            else {
                 continue;
             };
             started += 1;
-            if let Err(e) = self.host.start_isolated_entry_point(RELRO_FILE_CREATOR, &[package.clone(), library.clone()], &format!("WebViewLoader-{abi}"), &abi, SHARED_RELRO_UID) {
-                eprintln!("app host: webviewupdate: error starting relro file creator for abi {abi}: {}", e.message);
+            if let Err(e) = self.host.start_isolated_entry_point(
+                RELRO_FILE_CREATOR,
+                &[package.clone(), library.clone()],
+                &format!("WebViewLoader-{abi}"),
+                &abi,
+                SHARED_RELRO_UID,
+            ) {
+                eprintln!(
+                    "app host: webviewupdate: error starting relro file creator for abi {abi}: {}",
+                    e.message
+                );
                 finished += 1;
             }
         }
@@ -304,7 +362,10 @@ impl WebViewUpdate {
 
     /// `waitForAndGetProvider`: the provider once its RELRO files are made,
     /// waiting at most `WAIT_TIMEOUT`.
-    fn wait_for_and_get_provider(&self, caller: i32) -> Result<(Option<PackageInfo>, i32), Exception> {
+    fn wait_for_and_get_provider(
+        &self,
+        caller: i32,
+    ) -> Result<(Option<PackageInfo>, i32), Exception> {
         drop(self.state()?);
         let guard = wait_ready(&self.shared);
         let s = guard.as_ref().unwrap();
@@ -348,7 +409,9 @@ fn ready(s: &State) -> bool {
 
 /// The state once the provider is ready, waiting for it at most
 /// `WAIT_TIMEOUT` (`waitForAndGetProvider`'s wait).
-fn wait_ready(shared: &(Mutex<Option<State>>, Condvar)) -> std::sync::MutexGuard<'_, Option<State>> {
+fn wait_ready(
+    shared: &(Mutex<Option<State>>, Condvar),
+) -> std::sync::MutexGuard<'_, Option<State>> {
     let deadline = Instant::now() + WAIT_TIMEOUT;
     let mut guard = shared.0.lock().unwrap();
     while guard.as_ref().is_some_and(|s| !ready(s)) {
@@ -403,12 +466,17 @@ impl Service for WebViewUpdate {
             wv::WAIT_FOR_AND_GET_PROVIDER => {
                 wv::WaitForAndGetProvider::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 match self.wait_for_and_get_provider(uid) {
-                    Ok((info, status)) => wv::write_wait_for_and_get_provider_reply(&mut p, Some(&Response(info, status))),
+                    Ok((info, status)) => wv::write_wait_for_and_get_provider_reply(
+                        &mut p,
+                        Some(&Response(info, status)),
+                    ),
                     Err(e) => return reply(Err(e)),
                 }
             }
             wv::GET_CURRENT_WEB_VIEW_PACKAGE | wv::GET_CURRENT_WEB_VIEW_PACKAGE_NAME => {
-                call.data.enforce_interface(wv::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                call.data
+                    .enforce_interface(wv::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
                 let current = match self.state() {
                     Ok(s) => s.as_ref().unwrap().current.clone(),
                     Err(e) => return reply(Err(e)),
@@ -432,7 +500,9 @@ impl Service for WebViewUpdate {
                 }
             }
             wv::GET_ALL_WEB_VIEW_PACKAGES | wv::GET_VALID_WEB_VIEW_PACKAGES => {
-                call.data.enforce_interface(wv::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                call.data
+                    .enforce_interface(wv::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
                 let providers = (|| {
                     let all = self.providers()?.to_vec();
                     if call.code == wv::GET_ALL_WEB_VIEW_PACKAGES {
@@ -461,7 +531,9 @@ impl Service for WebViewUpdate {
                 }
             }
             wv::GET_DEFAULT_WEB_VIEW_PACKAGE => {
-                call.data.enforce_interface(wv::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                call.data
+                    .enforce_interface(wv::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
                 match self.default_provider() {
                     Ok(provider) => {
                         p.write_no_exception();
@@ -472,8 +544,13 @@ impl Service for WebViewUpdate {
                 }
             }
             code => {
-                let name = wv::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
-                return reply(Err(self.host.unimplemented_named("webviewupdate", &format!("{name} (#1491)"))));
+                let name = wv::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
+                return reply(Err(self
+                    .host
+                    .unimplemented_named("webviewupdate", &format!("{name} (#1491)"))));
             }
         }
         Ok(p)
@@ -487,7 +564,14 @@ mod tests {
     #[test]
     fn providers_are_parcelled_as_webview_provider_info() {
         let mut p = Parcel::new();
-        Provider { package: "a.b".into(), description: "B".into(), available_by_default: true, is_fallback: false, signatures: vec![vec![1, 2]] }.write_to(&mut p);
+        Provider {
+            package: "a.b".into(),
+            description: "B".into(),
+            available_by_default: true,
+            is_fallback: false,
+            signatures: vec![vec![1, 2]],
+        }
+        .write_to(&mut p);
         let mut expected = Parcel::new();
         expected.write_string16(Some("a.b"));
         expected.write_string16(Some("B"));

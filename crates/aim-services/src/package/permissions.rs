@@ -76,8 +76,10 @@ impl RuntimePermissions {
                 list.push((name, permissions));
             }
         }
-        r.packages.sort_by_key(|(name, _)| name.as_deref().map(super::info::java_hash).unwrap_or(0));
-        r.shared_users.sort_by_key(|(name, _)| name.as_deref().map(super::info::java_hash).unwrap_or(0));
+        r.packages
+            .sort_by_key(|(name, _)| name.as_deref().map(super::info::java_hash).unwrap_or(0));
+        r.shared_users
+            .sort_by_key(|(name, _)| name.as_deref().map(super::info::java_hash).unwrap_or(0));
         Ok(r)
     }
 }

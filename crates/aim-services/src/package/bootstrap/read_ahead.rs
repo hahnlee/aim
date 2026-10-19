@@ -60,7 +60,8 @@ impl Bridge {
         if let Ok(replies) = self.transact_batch(&calls) {
             ahead.extend(calls.into_iter().zip(replies));
         }
-        let _scope = Scope(AHEAD.with(|current| std::mem::replace(&mut *current.borrow_mut(), ahead)));
+        let _scope =
+            Scope(AHEAD.with(|current| std::mem::replace(&mut *current.borrow_mut(), ahead)));
         pass()
     }
 
@@ -76,25 +77,35 @@ impl Bridge {
 
     fn transact_part(&self, calls: &[(u32, Vec<u8>)]) -> Result<Vec<Vec<u8>>, StatusCode> {
         let mut batch = Parcel::new();
-        batch.write_i32(i32::try_from(calls.len()).map_err(|_| aim_binder_host::parcel::BAD_VALUE)?);
+        batch
+            .write_i32(i32::try_from(calls.len()).map_err(|_| aim_binder_host::parcel::BAD_VALUE)?);
         for (code, request) in calls {
             batch.write_i32(*code as i32);
             aim_service_aidl::write_byte_array(&mut batch, Some(request));
         }
         let mut request = Parcel::new();
-        bridge::TransactBatch { calls: Some(batch.data().to_vec()) }.write(&mut request);
-        let reply = self.owner.transact(bridge::TRANSACT_BATCH, &request, false)?;
+        bridge::TransactBatch {
+            calls: Some(batch.data().to_vec()),
+        }
+        .write(&mut request);
+        let reply = self
+            .owner
+            .transact(bridge::TRANSACT_BATCH, &request, false)?;
         let mut reader = reply.reader();
         let bytes = bridge::read_transact_batch_reply(&mut reader)?
             .map_err(|_| aim_binder_host::parcel::BAD_VALUE)?
             .ok_or(aim_binder_host::parcel::BAD_VALUE)?;
         let mut replies = Reader::new(&bytes, &[]);
-        let answered = usize::try_from(replies.read_i32()?).map_err(|_| aim_binder_host::parcel::BAD_VALUE)?;
+        let answered =
+            usize::try_from(replies.read_i32()?).map_err(|_| aim_binder_host::parcel::BAD_VALUE)?;
         if reader.remaining() != 0 || answered == 0 || answered > calls.len() {
             return Err(aim_binder_host::parcel::BAD_VALUE);
         }
         let replies = (0..answered)
-            .map(|_| aim_service_aidl::read_byte_array(&mut replies)?.ok_or(aim_binder_host::parcel::BAD_VALUE))
+            .map(|_| {
+                aim_service_aidl::read_byte_array(&mut replies)?
+                    .ok_or(aim_binder_host::parcel::BAD_VALUE)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(replies)
     }

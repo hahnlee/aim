@@ -860,10 +860,18 @@ impl Parser<'_> {
         let sa = self.obtain(e);
         let unsupported = |what: &str| Error::Unsupported(format!("<layout android:{what}>"));
         let density = |attribute: &str| {
-            if !sa.dimension_requires_density(attribute) { return Ok(1.0); }
-            self.platform.density_dpi.filter(|density| *density > 0)
+            if !sa.dimension_requires_density(attribute) {
+                return Ok(1.0);
+            }
+            self.platform
+                .density_dpi
+                .filter(|density| *density > 0)
                 .map(|density| density as f32 * (1.0 / 160.0))
-                .ok_or_else(|| unsupported(&format!("{attribute}: DIP/SP dimension requires actual DisplayMetrics.densityDpi")))
+                .ok_or_else(|| {
+                    unsupported(&format!(
+                        "{attribute}: DIP/SP dimension requires actual DisplayMetrics.densityDpi"
+                    ))
+                })
         };
         let mut l = WindowLayout {
             width: -1,

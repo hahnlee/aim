@@ -84,7 +84,13 @@ impl LevelStepTracker {
         if self.durations.is_empty() {
             return None;
         }
-        Some(self.durations.iter().map(|d| d & STEP_LEVEL_TIME_MASK).sum::<i64>() / self.durations.len() as i64)
+        Some(
+            self.durations
+                .iter()
+                .map(|d| d & STEP_LEVEL_TIME_MASK)
+                .sum::<i64>()
+                / self.durations.len() as i64,
+        )
     }
 }
 
@@ -126,7 +132,15 @@ struct Config {
 impl Stats {
     /// `setBatteryStateLocked` at elapsed `now`: whether the charging
     /// state changed.
-    fn set_battery_state(&mut self, c: &Config, status: i32, plug_type: i32, level: i32, time_to_full: i64, now: i64) -> bool {
+    fn set_battery_state(
+        &mut self,
+        c: &Config,
+        status: i32,
+        plug_type: i32,
+        level: i32,
+        time_to_full: i64,
+        now: i64,
+    ) -> bool {
         let on_battery = plug_type == PLUGGED_NONE && status != STATUS_UNKNOWN;
         let mut changed = false;
         if !self.have_level {
@@ -155,8 +169,13 @@ impl Stats {
                 | ((level & 0xff) as i64) << STEP_LEVEL_LEVEL_SHIFT;
             if on_battery {
                 changed |= self.set_charging(false);
-                if self.last_discharge_step_level != level && self.min_discharge_step_level > level {
-                    self.discharge_steps.add_level_steps(self.last_discharge_step_level - level, mode_bits, now);
+                if self.last_discharge_step_level != level && self.min_discharge_step_level > level
+                {
+                    self.discharge_steps.add_level_steps(
+                        self.last_discharge_step_level - level,
+                        mode_bits,
+                        now,
+                    );
                     self.last_discharge_step_level = level;
                     self.min_discharge_step_level = level;
                     (self.init_step_mode, self.mod_step_mode) = (STEP_MODE_SCREEN_ON, 0);
@@ -174,7 +193,11 @@ impl Stats {
                     changed |= self.set_charging(false);
                 }
                 if self.last_charge_step_level != level && self.max_charge_step_level < level {
-                    self.charge_steps.add_level_steps(level - self.last_charge_step_level, mode_bits, now);
+                    self.charge_steps.add_level_steps(
+                        level - self.last_charge_step_level,
+                        mode_bits,
+                        now,
+                    );
                     self.max_charge_step_level = level;
                     (self.init_step_mode, self.mod_step_mode) = (STEP_MODE_SCREEN_ON, 0);
                 }
@@ -186,7 +209,13 @@ impl Stats {
     }
 
     /// `setOnBatteryLocked`'s charging and step trackers.
-    fn set_on_battery(&mut self, c: &Config, on_battery: bool, old_status: i32, level: i32) -> bool {
+    fn set_on_battery(
+        &mut self,
+        c: &Config,
+        on_battery: bool,
+        old_status: i32,
+        level: i32,
+    ) -> bool {
         let mut changed = false;
         if on_battery {
             // `shouldResetOnUnplugLocked`.
@@ -260,8 +289,16 @@ pub struct BatteryStats {
 
 impl BatteryStats {
     pub fn new(host: &Arc<AppHost>) -> Self {
-        let stats = Stats { discharge_plug_level: -1, time_to_full_seconds: -1, ..Stats::default() };
-        BatteryStats { host: Arc::downgrade(host), stats: Mutex::new(stats), config: OnceLock::new() }
+        let stats = Stats {
+            discharge_plug_level: -1,
+            time_to_full_seconds: -1,
+            ..Stats::default()
+        };
+        BatteryStats {
+            host: Arc::downgrade(host),
+            stats: Mutex::new(stats),
+            config: OnceLock::new(),
+        }
     }
 
     /// The constants (`Constants.updateConstants`: the
@@ -272,7 +309,9 @@ impl BatteryStats {
             return Some(*c);
         }
         let inputs = host.inputs().ok()?;
-        let setting = inputs.settings.get(super::settings::Table::Global, "battery_stats_constants");
+        let setting = inputs
+            .settings
+            .get(super::settings::Table::Global, "battery_stats_constants");
         let constant = |key: &str| {
             setting
                 .as_deref()?
@@ -283,10 +322,14 @@ impl BatteryStats {
         };
         let resource = |name: &str| inputs.packages.framework_bool(name).unwrap_or(false);
         let config = Config {
-            charged_delay_ms: constant("battery_charged_delay_ms").unwrap_or(DEFAULT_BATTERY_CHARGED_DELAY_MS),
-            charging_enforce_level: constant("battery_charging_enforce_level").map_or(DEFAULT_BATTERY_CHARGING_ENFORCE_LEVEL, |v| v as i32),
+            charged_delay_ms: constant("battery_charged_delay_ms")
+                .unwrap_or(DEFAULT_BATTERY_CHARGED_DELAY_MS),
+            charging_enforce_level: constant("battery_charging_enforce_level")
+                .map_or(DEFAULT_BATTERY_CHARGING_ENFORCE_LEVEL, |v| v as i32),
             reset_high_level: resource("config_batteryStatsResetOnUnplugHighBatteryLevel"),
-            reset_significant_charge: resource("config_batteryStatsResetOnUnplugAfterSignificantCharge"),
+            reset_significant_charge: resource(
+                "config_batteryStatsResetOnUnplugAfterSignificantCharge",
+            ),
         };
         Some(*self.config.get_or_init(|| config))
     }
@@ -298,12 +341,26 @@ impl BatteryStats {
         self.stats.lock().unwrap().charging
     }
 
-    pub(super) fn set_battery_state(self: &Arc<Self>, status: i32, plug_type: i32, level: i32, time_to_full: i64, now: i64) {
-        let Some(host) = self.host.upgrade() else { return };
-        let Some(config) = self.config(&host) else { return eprintln!("app host: batterystats: no configuration yet") };
+    pub(super) fn set_battery_state(
+        self: &Arc<Self>,
+        status: i32,
+        plug_type: i32,
+        level: i32,
+        time_to_full: i64,
+        now: i64,
+    ) {
+        let Some(host) = self.host.upgrade() else {
+            return;
+        };
+        let Some(config) = self.config(&host) else {
+            return eprintln!("app host: batterystats: no configuration yet");
+        };
         let (changed, due) = {
             let mut s = self.stats.lock().unwrap();
-            (s.set_battery_state(&config, status, plug_type, level, time_to_full, now), s.charging_due)
+            (
+                s.set_battery_state(&config, status, plug_type, level, time_to_full, now),
+                s.charging_due,
+            )
         };
         if changed {
             self.report_charging();
@@ -332,9 +389,18 @@ impl BatteryStats {
 
     /// `MSG_REPORT_CHARGING`.
     fn report_charging(&self) {
-        let Some(host) = self.host.upgrade() else { return };
-        let action = if self.stats.lock().unwrap().charging { ACTION_CHARGING } else { ACTION_DISCHARGING };
-        host.broadcasts.send_from_system(&host, RawIntent::new(action, FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT, &[]));
+        let Some(host) = self.host.upgrade() else {
+            return;
+        };
+        let action = if self.stats.lock().unwrap().charging {
+            ACTION_CHARGING
+        } else {
+            ACTION_DISCHARGING
+        };
+        host.broadcasts.send_from_system(
+            &host,
+            RawIntent::new(action, FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT, &[]),
+        );
     }
 }
 
@@ -355,11 +421,17 @@ impl Service for BatteryStats {
             }
             bs::COMPUTE_BATTERY_TIME_REMAINING => {
                 bs::ComputeBatteryTimeRemaining::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                bs::write_compute_battery_time_remaining_reply(&mut p, ms(s.battery_time_remaining()));
+                bs::write_compute_battery_time_remaining_reply(
+                    &mut p,
+                    ms(s.battery_time_remaining()),
+                );
             }
             bs::COMPUTE_CHARGE_TIME_REMAINING => {
                 bs::ComputeChargeTimeRemaining::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                bs::write_compute_charge_time_remaining_reply(&mut p, ms(s.charge_time_remaining()));
+                bs::write_compute_charge_time_remaining_reply(
+                    &mut p,
+                    ms(s.charge_time_remaining()),
+                );
             }
             // `noteResetBluetoothScanLocked` stops the BLE scan timers that
             // run. None does: their starts (`noteBleScanStarted` and the
@@ -367,20 +439,33 @@ impl Service for BatteryStats {
             bs::NOTE_BLE_SCAN_RESET => {
                 bs::NoteBleScanReset::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 drop(s);
-                let Some(host) = self.host.upgrade() else { return Err(BAD_VALUE) };
-                let permitted = host.check_permission(Some(UPDATE_DEVICE_STATS), call.sender_euid as i32);
-                return reply(permitted.and_then(|held| match held {
-                    0 => Ok(p),
-                    _ => Err(Exception::security(format!("Access denied, requires: {UPDATE_DEVICE_STATS}"))),
-                }).map(|mut p| {
-                    bs::write_note_ble_scan_reset_reply(&mut p);
-                    p
-                }));
+                let Some(host) = self.host.upgrade() else {
+                    return Err(BAD_VALUE);
+                };
+                let permitted =
+                    host.check_permission(Some(UPDATE_DEVICE_STATS), call.sender_euid as i32);
+                return reply(
+                    permitted
+                        .and_then(|held| match held {
+                            0 => Ok(p),
+                            _ => Err(Exception::security(format!(
+                                "Access denied, requires: {UPDATE_DEVICE_STATS}"
+                            ))),
+                        })
+                        .map(|mut p| {
+                            bs::write_note_ble_scan_reset_reply(&mut p);
+                            p
+                        }),
+                );
             }
             code => {
                 drop(s);
-                let Some(host) = self.host.upgrade() else { return Err(BAD_VALUE) };
-                return reply(Err(host.unimplemented_named("batterystats", &format!("#{code} (#1513)"))));
+                let Some(host) = self.host.upgrade() else {
+                    return Err(BAD_VALUE);
+                };
+                return reply(Err(
+                    host.unimplemented_named("batterystats", &format!("#{code} (#1513)"))
+                ));
             }
         }
         Ok(p)
@@ -391,10 +476,19 @@ impl Service for BatteryStats {
 mod tests {
     use super::*;
 
-    const C: Config = Config { charged_delay_ms: 900_000, charging_enforce_level: 90, reset_high_level: true, reset_significant_charge: true };
+    const C: Config = Config {
+        charged_delay_ms: 900_000,
+        charging_enforce_level: 90,
+        reset_high_level: true,
+        reset_significant_charge: true,
+    };
 
     fn stats() -> Stats {
-        Stats { discharge_plug_level: -1, time_to_full_seconds: -1, ..Stats::default() }
+        Stats {
+            discharge_plug_level: -1,
+            time_to_full_seconds: -1,
+            ..Stats::default()
+        }
     }
 
     #[test]
@@ -403,7 +497,10 @@ mod tests {
         s.set_battery_state(&C, 3, PLUGGED_NONE, 50, -1, 0);
         assert!(s.on_battery && !s.charging);
         s.set_battery_state(&C, 2, 1, 91, -1, 1000);
-        assert!(!s.charging, "the plug change itself only resets the trackers");
+        assert!(
+            !s.charging,
+            "the plug change itself only resets the trackers"
+        );
         assert!(s.set_battery_state(&C, 2, 1, 92, -1, 2000));
         assert!(s.charging);
         assert!(s.set_battery_state(&C, 3, PLUGGED_NONE, 92, -1, 3000));
@@ -427,11 +524,19 @@ mod tests {
         let mut s = stats();
         s.set_battery_state(&C, 2, 1, 50, -1, 0);
         s.set_battery_state(&C, 2, 1, 51, -1, 60_000);
-        assert_eq!(s.charge_time_remaining(), -1, "the first step only starts timing");
+        assert_eq!(
+            s.charge_time_remaining(),
+            -1,
+            "the first step only starts timing"
+        );
         s.set_battery_state(&C, 2, 1, 53, -1, 180_000);
         // 120 s over two levels: 60 s a level, 47 levels to go.
         assert_eq!(s.charge_time_remaining(), 60_000 * 47 * 1000);
         s.set_battery_state(&C, 2, 1, 53, 600, 190_000);
-        assert_eq!(s.charge_time_remaining(), 600_000_000, "the HAL's time to full wins");
+        assert_eq!(
+            s.charge_time_remaining(),
+            600_000_000,
+            "the HAL's time to full wins"
+        );
     }
 }

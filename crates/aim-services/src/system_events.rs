@@ -242,8 +242,12 @@ impl System {
     ) -> Result<()> {
         self.check_package_bootstrap(bridge)?;
         let capture = self.capture_package_queries_for(bridge)?;
-        crate::package::installer::install_events::validate_monitor_publication(after,capture.scan(),receipt)
-            .map_err(|error|Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error))?;
+        crate::package::installer::install_events::validate_monitor_publication(
+            after,
+            capture.scan(),
+            receipt,
+        )
+        .map_err(|error| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
         let resolver = crate::package::resolve::Resolver::default();
         let resolution = resolver.resolution(capture.state()).map_err(|error| {
             Exception::new(
@@ -284,14 +288,37 @@ impl System {
         let observers = self.package_observer_owner(bridge)?;
         for (name, users) in changed_users {
             changes.update(&name, &users);
-            let setting = after.owner().settings.packages.iter().find(|setting| setting.name == name)
-                .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "install observer package unavailable"))?;
-            let update = before.owner().settings.packages.iter().any(|setting| setting.name == name);
-            let all_new = before.owner().scanned_user_states(&name)
-                .is_none_or(|states| users.iter().all(|user| states.get(user).is_some_and(|state| !state.installed)));
+            let setting = after
+                .owner()
+                .settings
+                .packages
+                .iter()
+                .find(|setting| setting.name == name)
+                .ok_or_else(|| {
+                    Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        "install observer package unavailable",
+                    )
+                })?;
+            let update = before
+                .owner()
+                .settings
+                .packages
+                .iter()
+                .any(|setting| setting.name == name);
+            let all_new = before
+                .owner()
+                .scanned_user_states(&name)
+                .is_none_or(|states| {
+                    users
+                        .iter()
+                        .all(|user| states.get(user).is_some_and(|state| !state.installed))
+                });
             if update || !all_new {
                 observers.changed(&name, setting.app_id)?;
-            } else { observers.added(&name, setting.app_id)?; }
+            } else {
+                observers.added(&name, setting.app_id)?;
+            }
         }
         for package in &receipt.packages {
             let user = i32::try_from(package.user)

@@ -211,15 +211,38 @@ impl Request {
     pub fn decide(&self, q: &Query<'_>, pid: i32) -> Result<Result<Plan, Exception>, NotModelled> {
         self.decide_with_shell(q, pid, None)
     }
-    pub fn decide_with_enabled_policy(&self, q: &Query<'_>, pid: i32, restricted: Option<bool>, policy: enabled::Policy)
-        -> Result<Result<Plan, Exception>, NotModelled> {
+    pub fn decide_with_enabled_policy(
+        &self,
+        q: &Query<'_>,
+        pid: i32,
+        restricted: Option<bool>,
+        policy: enabled::Policy,
+    ) -> Result<Result<Plan, Exception>, NotModelled> {
         if let Self::Enabled(setting) = self {
-            return Ok(enabled::decide_with_policy(q, setting, pid, &|ps, user| Enabled::of(ps, user), Some(policy))?.map(|value| {
+            return Ok(enabled::decide_with_policy(
+                q,
+                setting,
+                pid,
+                &|ps, user| Enabled::of(ps, user),
+                Some(policy),
+            )?
+            .map(|value| {
                 let change = match value {
-                    Some(value) if q.state.packages.get(&setting.package).is_some_and(|ps| value != Enabled::of(ps, setting.user)) => Change::Enabled(value),
+                    Some(value)
+                        if q.state
+                            .packages
+                            .get(&setting.package)
+                            .is_some_and(|ps| value != Enabled::of(ps, setting.user)) =>
+                    {
+                        Change::Enabled(value)
+                    }
                     _ => Change::None,
                 };
-                Plan { package: setting.package.clone(), user: Some(setting.user), change }
+                Plan {
+                    package: setting.package.clone(),
+                    user: Some(setting.user),
+                    change,
+                }
             }));
         }
         self.decide_with_shell(q, pid, restricted)
@@ -389,7 +412,11 @@ impl Request {
                         q.calling_uid
                     ))));
                 }
-                let cross_user = if q.calling_uid == 2000 { q.full_cross_user_with_shell(*user, true, restricted)? } else { q.enforce_cross_user(*user, true, true, "stop package")? };
+                let cross_user = if q.calling_uid == 2000 {
+                    q.full_cross_user_with_shell(*user, true, restricted)?
+                } else {
+                    q.enforce_cross_user(*user, true, true, "stop package")?
+                };
                 if let Err(e) = cross_user {
                     return Ok(Err(e));
                 }

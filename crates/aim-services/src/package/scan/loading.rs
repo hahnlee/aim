@@ -105,16 +105,21 @@ mod tests {
     }
 
     #[test]
-    fn system_admission_completes_factory_before_disable_copy_and_preserves_live_incremental_progress() {
+    fn system_admission_completes_factory_before_disable_copy_and_preserves_live_incremental_progress()
+     {
         let admitted = admitted(&[("factory", 0.0), ("incremental", 0.375)]);
         // Constructor-retained, verified code; no unfinished scan candidate.
         let mut owner = SigningScan::new(&Default::default(), &admitted.settings, 36).unwrap();
         owner.loaded = admitted.loaded;
-        Arc::make_mut(owner.loaded.get_mut("factory").unwrap()).package.booleans2 |= crate::package::pkg::booleans2::STUB;
+        Arc::make_mut(owner.loaded.get_mut("factory").unwrap())
+            .package
+            .booleans2 |= crate::package::pkg::booleans2::STUB;
         assert_eq!(Package::default().loading_progress, 0.0);
         let before = owner.clone();
         let incremental = owner.settings.packages[1].code_path.clone();
-        owner.scanned_users.insert("factory".into(), [(0, Default::default())].into());
+        owner
+            .scanned_users
+            .insert("factory".into(), [(0, Default::default())].into());
         let backing = |path: &str| Ok(path == incremental);
         owner.complete_boot_loading(&backing).unwrap();
         assert_eq!(owner.settings.packages[0].loading_progress, 1.0);

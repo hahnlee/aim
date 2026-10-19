@@ -209,7 +209,11 @@ impl SigningScan {
             signing: code.signing.clone(),
         };
         let completion = ScanMetadataCompletion {
-            scan_as_instant_app:inputs.completion.scan_as_instant_app||super::permission_admissions::boot_scan_as_instant(Some(saved_users),&factory.settings.name),
+            scan_as_instant_app: inputs.completion.scan_as_instant_app
+                || super::permission_admissions::boot_scan_as_instant(
+                    Some(saved_users),
+                    &factory.settings.name,
+                ),
             context: AbiScanContext {
                 mode: AbiScanMode::Existing {
                     first_boot_or_upgrade,

@@ -281,7 +281,9 @@ pub fn grouped_owners(directory: &Path, verify: bool) {
         users.write_string16(Some(&id));
         users.write_i32(*level);
         users.write_i64(*time);
-        if !verify { fs::write(directory.join(format!("domain-selection-{suffix}.id")), &id).unwrap(); }
+        if !verify {
+            fs::write(directory.join(format!("domain-selection-{suffix}.id")), &id).unwrap();
+        }
 
         xml.push_str(&format!(
             "<package-state packageName='{name}' id='{id}' hasAutoVerifyDomains='true'><state>"
@@ -290,11 +292,15 @@ pub fn grouped_owners(directory: &Path, verify: bool) {
             xml.push_str("<domain name='h0.example' state='1'/>");
         }
         xml.push_str("</state><user-states>");
-        if *level != 0 { xml.push_str("<user-state userId='0' allowLinkHandling='true'>"); }
+        if *level != 0 {
+            xml.push_str("<user-state userId='0' allowLinkHandling='true'>");
+        }
         if *level == 3 {
             xml.push_str("<enabled-hosts><host name='h0.example'/></enabled-hosts>");
         }
-        if *level != 0 { xml.push_str("</user-state>"); }
+        if *level != 0 {
+            xml.push_str("</user-state>");
+        }
         xml.push_str("</user-states></package-state>");
         if matches!(level, 1 | 2) {
             legacy.push_str(&format!("<user-states packageName='{name}'><user-state userId='0' state='{level}'/></user-states>"));
@@ -385,29 +391,88 @@ pub fn grouped_owners(directory: &Path, verify: bool) {
     let mut index = 0;
     for phase in 0..3 {
         let v2 = phase != 2;
-        if phase == 1 { for suffix in ["Aa", "BB", "a", "A", "İ", "ı", "instant"] {
-            owner.set_link_handling_internal(Some(&format!("fixture.owner.{suffix}")), false, 0, &[]).unwrap();
-        }}
-        for user_id in [0, 10] { for suffix in ["disabled", "selected", "always", "Aa", "instant"] {
-            for enabled in [true, false] { for multiple in [false, true] {
-                let mut hosts = std::collections::BTreeSet::from(["h0.example".to_string()]); if multiple { hosts.insert("h1.example".into()); }
-                let status = owner.set_user_selection(&format!("fixture.owner.{suffix}"), user_id, &hosts, enabled, |name| {
-                    let (code, _, level, user) = codes.iter().find(|(code, ..)| code.package_name == name).unwrap();
-                    Ok((*level != 6).then_some(ApprovalInput {code, user: (user_id == 0).then_some(user), settings_v2: v2, policy: Policy {restrict_domains: true, linked_app: false}}))
-                }).unwrap();
-                assert_eq!(status, reader.read_i32().unwrap(), "original selection status case={index}");
-                let root = aim_android_xml::read(&fs::read(directory.join(format!("domain-selection-{index}.original"))).unwrap()).unwrap();
-                let mut original = State::default();
-                original.read(root.children().find(|e| e.name == "domain-verifications").unwrap()).unwrap();
-                original.read_legacy(root.children().find(|e| e.name == "domain-verifications-legacy").unwrap()).unwrap();
-                assert_eq!(canonical(owner.persisted()), canonical(original), "original selection state case={index}");
-                index += 1;
-            }}
-        }}
+        if phase == 1 {
+            for suffix in ["Aa", "BB", "a", "A", "İ", "ı", "instant"] {
+                owner
+                    .set_link_handling_internal(
+                        Some(&format!("fixture.owner.{suffix}")),
+                        false,
+                        0,
+                        &[],
+                    )
+                    .unwrap();
+            }
+        }
+        for user_id in [0, 10] {
+            for suffix in ["disabled", "selected", "always", "Aa", "instant"] {
+                for enabled in [true, false] {
+                    for multiple in [false, true] {
+                        let mut hosts =
+                            std::collections::BTreeSet::from(["h0.example".to_string()]);
+                        if multiple {
+                            hosts.insert("h1.example".into());
+                        }
+                        let status = owner
+                            .set_user_selection(
+                                &format!("fixture.owner.{suffix}"),
+                                user_id,
+                                &hosts,
+                                enabled,
+                                |name| {
+                                    let (code, _, level, user) = codes
+                                        .iter()
+                                        .find(|(code, ..)| code.package_name == name)
+                                        .unwrap();
+                                    Ok((*level != 6).then_some(ApprovalInput {
+                                        code,
+                                        user: (user_id == 0).then_some(user),
+                                        settings_v2: v2,
+                                        policy: Policy {
+                                            restrict_domains: true,
+                                            linked_app: false,
+                                        },
+                                    }))
+                                },
+                            )
+                            .unwrap();
+                        assert_eq!(
+                            status,
+                            reader.read_i32().unwrap(),
+                            "original selection status case={index}"
+                        );
+                        let root = aim_android_xml::read(
+                            &fs::read(directory.join(format!("domain-selection-{index}.original")))
+                                .unwrap(),
+                        )
+                        .unwrap();
+                        let mut original = State::default();
+                        original
+                            .read(
+                                root.children()
+                                    .find(|e| e.name == "domain-verifications")
+                                    .unwrap(),
+                            )
+                            .unwrap();
+                        original
+                            .read_legacy(
+                                root.children()
+                                    .find(|e| e.name == "domain-verifications-legacy")
+                                    .unwrap(),
+                            )
+                            .unwrap();
+                        assert_eq!(
+                            canonical(owner.persisted()),
+                            canonical(original),
+                            "original selection state case={index}"
+                        );
+                        index += 1;
+                    }
+                }
+            }
+        }
     }
     assert_eq!(reader.remaining(), 0);
     eprintln!("Original user selection: {index} status/state transitions");
-
 }
 
 fn attachment_inputs(directory: &Path) {
@@ -524,12 +589,19 @@ pub fn verify_uri_dto(directory: &Path) {
     }
     assert_eq!(reader.remaining(), 0);
     let bytes = fs::read(directory.join("uri-input-bundles.original")).unwrap();
-    let mut reader = Reader::new(&bytes, &[]); let cases = reader.read_i32().unwrap();
+    let mut reader = Reader::new(&bytes, &[]);
+    let cases = reader.read_i32().unwrap();
     for _ in 0..cases {
-        let mode = reader.read_i32().unwrap(); let data = aim_service_aidl::read_byte_array(&mut reader).unwrap().unwrap();
-        let bundle = aim_services::package::domain_verification::uri_bundle::Bundle::read_from(&mut Reader::new(&data, &[])).unwrap();
+        let mode = reader.read_i32().unwrap();
+        let data = aim_service_aidl::read_byte_array(&mut reader)
+            .unwrap()
+            .unwrap();
+        let bundle = aim_services::package::domain_verification::uri_bundle::Bundle::read_from(
+            &mut Reader::new(&data, &[]),
+        )
+        .unwrap();
         let entries = bundle.entries().unwrap();
-        assert_eq!(entries.len(), if mode == 0 {0} else {1});
+        assert_eq!(entries.len(), if mode == 0 { 0 } else { 1 });
         if mode != 0 {
             assert_eq!(entries[0].key.as_deref(), Some("x.example"));
             let groups = entries[0].groups().unwrap();
@@ -537,58 +609,159 @@ pub fn verify_uri_dto(directory: &Path) {
                 1 | 2 | 6..=9 => assert!(groups.is_none()),
                 3 => assert!(groups.unwrap().is_empty()),
                 4 => assert!(groups.unwrap()[0].is_none()),
-                5 => {let groups = groups.unwrap(); assert_eq!(groups[0].as_ref().unwrap().action, 99); assert_eq!(groups[0].as_ref().unwrap().filters.as_ref().unwrap()[0].as_ref().unwrap().filter, None);}
+                5 => {
+                    let groups = groups.unwrap();
+                    assert_eq!(groups[0].as_ref().unwrap().action, 99);
+                    assert_eq!(
+                        groups[0].as_ref().unwrap().filters.as_ref().unwrap()[0]
+                            .as_ref()
+                            .unwrap()
+                            .filter,
+                        None
+                    );
+                }
                 10 | 11 => {
                     let groups = groups.unwrap();
                     assert_eq!(groups.len(), (mode - 9) as usize);
                     assert!(groups[0].is_none());
-                    if mode == 11 {assert_eq!(groups[1].as_ref().unwrap().action, 99);}
+                    if mode == 11 {
+                        assert_eq!(groups[1].as_ref().unwrap().action, 99);
+                    }
                 }
                 _ => unreachable!(),
             }
         }
     }
     assert_eq!(reader.remaining(), 0);
-    let jars = aim_android_image::classpath::jars(&super::runtime::cohort::original_image(), "bootclasspath.pb", aim_android_image::classpath::BOOTCLASSPATH).unwrap();
-    let classes = aim_android_image::linkage::ClassPath::read(&super::runtime::cohort::original_image(), &jars).unwrap().hierarchy().unwrap();
-    let bytes = fs::read(directory.join("uri-class-bundles.original")).unwrap(); let mut reader = Reader::new(&bytes, &[]);
+    let jars = aim_android_image::classpath::jars(
+        &super::runtime::cohort::original_image(),
+        "bootclasspath.pb",
+        aim_android_image::classpath::BOOTCLASSPATH,
+    )
+    .unwrap();
+    let classes = aim_android_image::linkage::ClassPath::read(
+        &super::runtime::cohort::original_image(),
+        &jars,
+    )
+    .unwrap()
+    .hierarchy()
+    .unwrap();
+    let bytes = fs::read(directory.join("uri-class-bundles.original")).unwrap();
+    let mut reader = Reader::new(&bytes, &[]);
     let count = reader.read_i32().unwrap();
     for _ in 0..count {
-        let name = reader.read_string16().unwrap().unwrap(); let root = reader.read_bool().unwrap(); let data = aim_service_aidl::read_byte_array(&mut reader).unwrap().unwrap();
-        let expected = reader.read_i32().unwrap(); let class = reader.read_string16().unwrap(); let message = reader.read_string16().unwrap();
-        let bundle = aim_services::package::domain_verification::uri_bundle::Bundle::read_from(&mut Reader::new(&data, &[])).unwrap();
+        let name = reader.read_string16().unwrap().unwrap();
+        let root = reader.read_bool().unwrap();
+        let data = aim_service_aidl::read_byte_array(&mut reader)
+            .unwrap()
+            .unwrap();
+        let expected = reader.read_i32().unwrap();
+        let class = reader.read_string16().unwrap();
+        let message = reader.read_string16().unwrap();
+        let bundle = aim_services::package::domain_verification::uri_bundle::Bundle::read_from(
+            &mut Reader::new(&data, &[]),
+        )
+        .unwrap();
         let result = bundle.entries().unwrap()[0].groups_with_classes(Some(&classes));
         match result {
-            Ok(groups) => assert_eq!(i32::from(groups.is_some()), expected, "URI class {name} root={root}"),
-            Err(aim_services::package::domain_verification::uri_bundle::GroupError::BadParcelable(actual)) => {
-                assert_eq!(expected, -1, "URI class {name} root={root}"); assert_eq!(class.as_deref(), Some("android.os.BadParcelableException")); assert_eq!(message.as_deref(), Some(actual.as_str()), "URI class {name} root={root}");
+            Ok(groups) => assert_eq!(
+                i32::from(groups.is_some()),
+                expected,
+                "URI class {name} root={root}"
+            ),
+            Err(
+                aim_services::package::domain_verification::uri_bundle::GroupError::BadParcelable(
+                    actual,
+                ),
+            ) => {
+                assert_eq!(expected, -1, "URI class {name} root={root}");
+                assert_eq!(class.as_deref(), Some("android.os.BadParcelableException"));
+                assert_eq!(
+                    message.as_deref(),
+                    Some(actual.as_str()),
+                    "URI class {name} root={root}"
+                );
             }
             Err(error) => panic!("URI class {name}: {error:?}"),
         }
     }
     assert_eq!(reader.remaining(), 0);
-    let bytes = fs::read(directory.join("uri-serial-bundles.original")).unwrap(); let mut reader = Reader::new(&bytes, &[]);
+    let bytes = fs::read(directory.join("uri-serial-bundles.original")).unwrap();
+    let mut reader = Reader::new(&bytes, &[]);
     let count = reader.read_i32().unwrap();
     for _ in 0..count {
-        let name = reader.read_string16().unwrap(); let root = reader.read_bool().unwrap(); let data = aim_service_aidl::read_byte_array(&mut reader).unwrap().unwrap();
-        let expected = reader.read_i32().unwrap(); let class = reader.read_string16().unwrap(); let message = reader.read_string16().unwrap();
-        let bundle = aim_services::package::domain_verification::uri_bundle::Bundle::read_from(&mut Reader::new(&data, &[])).unwrap();
+        let name = reader.read_string16().unwrap();
+        let root = reader.read_bool().unwrap();
+        let data = aim_service_aidl::read_byte_array(&mut reader)
+            .unwrap()
+            .unwrap();
+        let expected = reader.read_i32().unwrap();
+        let class = reader.read_string16().unwrap();
+        let message = reader.read_string16().unwrap();
+        let bundle = aim_services::package::domain_verification::uri_bundle::Bundle::read_from(
+            &mut Reader::new(&data, &[]),
+        )
+        .unwrap();
         match bundle.entries().unwrap()[0].groups_with_classes(Some(&classes)) {
-            Ok(groups) => {assert_eq!(i32::from(groups.is_some()), expected, "Serializable {name:?} root={root}"); if name.is_none() && !root {assert!(groups.unwrap()[0].is_none());}}
-            Err(aim_services::package::domain_verification::uri_bundle::GroupError::BadParcelable(actual)) => {assert_eq!(expected, -1); assert_eq!(class.as_deref(), Some("android.os.BadParcelableException")); assert_eq!(message.as_deref(), Some(actual.as_str()), "Serializable {name:?} root={root}");}
+            Ok(groups) => {
+                assert_eq!(
+                    i32::from(groups.is_some()),
+                    expected,
+                    "Serializable {name:?} root={root}"
+                );
+                if name.is_none() && !root {
+                    assert!(groups.unwrap()[0].is_none());
+                }
+            }
+            Err(
+                aim_services::package::domain_verification::uri_bundle::GroupError::BadParcelable(
+                    actual,
+                ),
+            ) => {
+                assert_eq!(expected, -1);
+                assert_eq!(class.as_deref(), Some("android.os.BadParcelableException"));
+                assert_eq!(
+                    message.as_deref(),
+                    Some(actual.as_str()),
+                    "Serializable {name:?} root={root}"
+                );
+            }
             Err(error) => panic!("Serializable {name:?} root={root}: {error:?}"),
         }
     }
     assert_eq!(reader.remaining(), 0);
     {
-        let bytes = fs::read(directory.join("uri-valid-serial.original")).unwrap(); let mut reader = Reader::new(&bytes, &[]); let count = reader.read_i32().unwrap();
+        let bytes = fs::read(directory.join("uri-valid-serial.original")).unwrap();
+        let mut reader = Reader::new(&bytes, &[]);
+        let count = reader.read_i32().unwrap();
         for _ in 0..count {
-            let mode = reader.read_i32().unwrap(); let root = reader.read_bool().unwrap(); let data = aim_service_aidl::read_byte_array(&mut reader).unwrap().unwrap(); let _stream = aim_service_aidl::read_byte_array(&mut reader).unwrap();
-            let expected = reader.read_i32().unwrap(); assert!(reader.read_string16().unwrap().is_none()); assert!(reader.read_string16().unwrap().is_none());
-            let bundle = aim_services::package::domain_verification::uri_bundle::Bundle::read_from(&mut Reader::new(&data, &[])).unwrap();
+            let mode = reader.read_i32().unwrap();
+            let root = reader.read_bool().unwrap();
+            let data = aim_service_aidl::read_byte_array(&mut reader)
+                .unwrap()
+                .unwrap();
+            let _stream = aim_service_aidl::read_byte_array(&mut reader).unwrap();
+            let expected = reader.read_i32().unwrap();
+            assert!(reader.read_string16().unwrap().is_none());
+            assert!(reader.read_string16().unwrap().is_none());
+            let bundle = aim_services::package::domain_verification::uri_bundle::Bundle::read_from(
+                &mut Reader::new(&data, &[]),
+            )
+            .unwrap();
             let result = bundle.entries().unwrap()[0].groups_with_classes(Some(&classes));
-            if mode == 3 && root {assert!(matches!(result, Err(aim_services::package::domain_verification::uri_bundle::GroupError::Transport(aim_binder_host::parcel::UNKNOWN_TRANSACTION)))); assert_eq!(expected, 1);}
-            else {let groups = result.unwrap(); assert_eq!(groups.as_ref().map_or(-2, |groups| groups.len() as i32), expected); if mode == 2 && root {assert!(groups.unwrap()[0].is_none());}}
+            if mode == 3 && root {
+                assert!(matches!(result, Err(aim_services::package::domain_verification::uri_bundle::GroupError::Transport(aim_binder_host::parcel::UNKNOWN_TRANSACTION))));
+                assert_eq!(expected, 1);
+            } else {
+                let groups = result.unwrap();
+                assert_eq!(
+                    groups.as_ref().map_or(-2, |groups| groups.len() as i32),
+                    expected
+                );
+                if mode == 2 && root {
+                    assert!(groups.unwrap()[0].is_none());
+                }
+            }
         }
         assert_eq!(reader.remaining(), 0);
     }
@@ -600,29 +773,70 @@ pub fn verify_uri_dto(directory: &Path) {
         let expected = reader.read_string16().unwrap().unwrap();
         let parcel = match mode {
             0 => None,
-            1 => Some(Group {action: 0, filters: None}),
-            _ => Some(Group {action: 0, filters: Some(vec![None])}),
+            1 => Some(Group {
+                action: 0,
+                filters: None,
+            }),
+            _ => Some(Group {
+                action: 0,
+                filters: Some(vec![None]),
+            }),
         };
-        assert_eq!(aim_services::package::domain_verification::uri_parcel::groups_to_model(Some(vec![parcel])).unwrap_err(), expected);
+        assert_eq!(
+            aim_services::package::domain_verification::uri_parcel::groups_to_model(Some(vec![
+                parcel
+            ]))
+            .unwrap_err(),
+            expected
+        );
     }
     assert_eq!(reader.remaining(), 0);
     let bytes = fs::read(directory.join("uri-null-match.original")).unwrap();
-    let mut reader = Reader::new(&bytes, &[]); let cases = reader.read_i32().unwrap();
+    let mut reader = Reader::new(&bytes, &[]);
+    let cases = reader.read_i32().unwrap();
     for case in 0..cases {
-        let filter = Filter {uri_part: reader.read_i32().unwrap(), pattern_type: reader.read_i32().unwrap(), filter: reader.read_string16().unwrap()};
-        let uri = reader.read_string16().unwrap().unwrap(); let expected = reader.read_i32().unwrap();
-        let error_class = reader.read_string16().unwrap(); let error_message = reader.read_string16().unwrap();
+        let filter = Filter {
+            uri_part: reader.read_i32().unwrap(),
+            pattern_type: reader.read_i32().unwrap(),
+            filter: reader.read_string16().unwrap(),
+        };
+        let uri = reader.read_string16().unwrap().unwrap();
+        let expected = reader.read_i32().unwrap();
+        let error_class = reader.read_string16().unwrap();
+        let error_message = reader.read_string16().unwrap();
         let result = filter.match_data(&aim_services::package::uri::Uri::parse(&uri));
         if let Err(error) = &result {
-            assert_eq!(Some(error.java_class()), error_class.as_deref(), "URI exception class case={case}");
-            assert_eq!(Some(error.message()), error_message, "URI exception message case={case}");
-            let reply = aim_services::package::component_resolver::MimeGroupError::UriMatching(error.clone()).reply();
+            assert_eq!(
+                Some(error.java_class()),
+                error_class.as_deref(),
+                "URI exception class case={case}"
+            );
+            assert_eq!(
+                Some(error.message()),
+                error_message,
+                "URI exception message case={case}"
+            );
+            let reply = aim_services::package::component_resolver::MimeGroupError::UriMatching(
+                error.clone(),
+            )
+            .reply();
             if let Some(expected) = error.binder_exception() {
                 let reply = reply.unwrap();
-                let exception = aim_binder_host::parcel::Reader::new(reply.data(), reply.objects()).read_exception().unwrap().unwrap_err();
-                assert_eq!(exception.code, expected.code); assert_eq!(exception.message, expected.message);
-            } else {assert!(matches!(reply, Err(aim_binder_host::parcel::UNKNOWN_TRANSACTION)));}
-        } else {assert!(error_class.is_none() && error_message.is_none());}
+                let exception = aim_binder_host::parcel::Reader::new(reply.data(), reply.objects())
+                    .read_exception()
+                    .unwrap()
+                    .unwrap_err();
+                assert_eq!(exception.code, expected.code);
+                assert_eq!(exception.message, expected.message);
+            } else {
+                assert!(matches!(
+                    reply,
+                    Err(aim_binder_host::parcel::UNKNOWN_TRANSACTION)
+                ));
+            }
+        } else {
+            assert!(error_class.is_none() && error_message.is_none());
+        }
         let actual = match result {
             Ok(value) => i32::from(value),
             Err(aim_services::package::domain_verification::uri_parcel::MatchError::NullPattern(_)) => -1,
@@ -630,20 +844,34 @@ pub fn verify_uri_dto(directory: &Path) {
             Err(aim_services::package::domain_verification::uri_parcel::MatchError::IndexOutOfBounds {..}) => -3,
         };
         let mut model = aim_services::package::intent_filter::UriRelativeFilterGroup::new(0);
-        model.add_nullable(filter.uri_part, filter.pattern_type, filter.filter.as_deref());
+        model.add_nullable(
+            filter.uri_part,
+            filter.pattern_type,
+            filter.filter.as_deref(),
+        );
         assert_eq!(model.filters[0].filter, filter.filter);
-        let model_result = aim_services::package::intent_filter::UriRelativeFilterGroup::match_groups(&[model], &aim_services::package::uri::Uri::parse(&uri));
+        let model_result =
+            aim_services::package::intent_filter::UriRelativeFilterGroup::match_groups(
+                &[model],
+                &aim_services::package::uri::Uri::parse(&uri),
+            );
         let model_actual = match model_result {
             Ok(value) => i32::from(value),
             Err(aim_services::package::domain_verification::uri_parcel::MatchError::NullPattern(_)) => -1,
             Err(aim_services::package::domain_verification::uri_parcel::MatchError::InvalidPattern(_)) => -2,
             Err(aim_services::package::domain_verification::uri_parcel::MatchError::IndexOutOfBounds {..}) => -3,
         };
-        assert_eq!(model_actual, expected, "original model URI match case={case}");
-        assert_eq!(actual, expected, "original nullable URI match case={case} filter={filter:?} uri={uri}");
+        assert_eq!(
+            model_actual, expected,
+            "original model URI match case={case}"
+        );
+        assert_eq!(
+            actual, expected,
+            "original nullable URI match case={case} filter={filter:?} uri={uri}"
+        );
     }
-    assert_eq!(reader.remaining(), 0); eprintln!("Original nullable URI matching: {cases} cases");
-
+    assert_eq!(reader.remaining(), 0);
+    eprintln!("Original nullable URI matching: {cases} cases");
 }
 
 pub fn verify_uuid(directory: &Path) {
@@ -683,8 +911,11 @@ pub fn verify_owner_sort(directory: &Path) {
     let fold_bytes = fs::read(directory.join("domain-name-fold.original")).unwrap();
     let mut fold_reader = Reader::new(&fold_bytes, &[]);
     for unit in 0..=u16::MAX {
-        assert_eq!(aim_services::package::domain_verification::names::fold(unit) as i32,
-            fold_reader.read_i32().unwrap(), "original char fold U+{unit:04X}");
+        assert_eq!(
+            aim_services::package::domain_verification::names::fold(unit) as i32,
+            fold_reader.read_i32().unwrap(),
+            "original char fold U+{unit:04X}"
+        );
     }
     assert_eq!(fold_reader.remaining(), 0);
     let bytes = fs::read(directory.join("domain-owner-sort.original")).unwrap();
@@ -746,8 +977,19 @@ pub fn verify_attachment(directory: &Path) {
         assert_eq!(reader.read_i32().unwrap(), 2);
         for _ in 0..2 {
             let key = reader.read_string16().unwrap();
-            let class = reader.read_string16().unwrap().unwrap(); let message = reader.read_string16().unwrap().unwrap();
-            let expected = if key.is_none() {("java.lang.NullPointerException", "Attempt to invoke virtual method 'int java.lang.String.length()' on a null object reference")} else {("java.lang.StringIndexOutOfBoundsException", "length=0; index=0")};
+            let class = reader.read_string16().unwrap().unwrap();
+            let message = reader.read_string16().unwrap().unwrap();
+            let expected = if key.is_none() {
+                (
+                    "java.lang.NullPointerException",
+                    "Attempt to invoke virtual method 'int java.lang.String.length()' on a null object reference",
+                )
+            } else {
+                (
+                    "java.lang.StringIndexOutOfBoundsException",
+                    "length=0; index=0",
+                )
+            };
             assert_eq!((class.as_str(), message.as_str()), expected);
         }
         assert_eq!(reader.remaining(), 0);
@@ -833,12 +1075,20 @@ pub fn verify_attachment(directory: &Path) {
                 .unwrap();
             let info = values.verification.as_ref().map(|(id, states)| {
                 aim_services::package::domain_verification::parcels::Info::prepare(
-                    8, id, "fixture.domains", states,
-                ).unwrap()
+                    8,
+                    id,
+                    "fixture.domains",
+                    states,
+                )
+                .unwrap()
             });
             let mut reply = Parcel::new();
             aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::write_get_domain_verification_info_reply(&mut reply, info.as_ref());
-            assert_eq!(reply.data(), fs::read(directory.join(format!("domain-owner-{case}-{stage}.info"))).unwrap(), "original domain info parcel case={case} stage={stage}");
+            assert_eq!(
+                reply.data(),
+                fs::read(directory.join(format!("domain-owner-{case}-{stage}.info"))).unwrap(),
+                "original domain info parcel case={case} stage={stage}"
+            );
             let mut expected = Parcel::new();
             expected.write_i32(i32::from(values.verification.is_some()));
             let write_states = |out: &mut Parcel, states: &[(String, i32)]| {
@@ -856,10 +1106,24 @@ pub fn verify_attachment(directory: &Path) {
             }
             for (user, (allowed, states)) in values.users {
                 let id = &owner.package("fixture.domains").unwrap().id;
-                let prepared = aim_services::package::domain_verification::parcels::UserState::prepare(8, id, "fixture.domains", user, allowed, &states).unwrap();
+                let prepared =
+                    aim_services::package::domain_verification::parcels::UserState::prepare(
+                        8,
+                        id,
+                        "fixture.domains",
+                        user,
+                        allowed,
+                        &states,
+                    )
+                    .unwrap();
                 let mut reply = Parcel::new();
                 aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::write_get_domain_verification_user_state_reply(&mut reply, Some(&prepared));
-                assert_eq!(reply.data(), fs::read(directory.join(format!("domain-owner-{case}-{stage}.user-{user}"))).unwrap(), "original user-state parcel case={case} stage={stage} user={user}");
+                assert_eq!(
+                    reply.data(),
+                    fs::read(directory.join(format!("domain-owner-{case}-{stage}.user-{user}")))
+                        .unwrap(),
+                    "original user-state parcel case={case} stage={stage} user={user}"
+                );
                 expected.write_i32(i32::from(allowed));
                 write_states(&mut expected, &states);
             }
@@ -874,7 +1138,7 @@ pub fn verify_attachment(directory: &Path) {
                 "public domain queries case={case} stage={stage}"
             );
             {
-                use aim_services::package::restrictions::{UserState, Suspension, SuspendingUser};
+                use aim_services::package::restrictions::{SuspendingUser, Suspension, UserState};
                 let mut expected = Parcel::new();
                 let mut owners_reply = Parcel::new();
                 for v2 in [false, true] {
@@ -883,10 +1147,41 @@ pub fn verify_attachment(directory: &Path) {
                         user.installed = mode != 6;
                         user.enabled = if (0..=5).contains(&mode) { mode } else { 1 };
                         user.instant_app = mode == 7;
-                        if mode == 8 { user.suspensions = Some(vec![Suspension { package: "suspender".into(), user: SuspendingUser::Resolved(0), params: None }]); }
-                        for host in ["h0.example", "h1.example", "h4.example", "h7.example", "h8.example", "h1024.example", "example", "sub.example", "notexample", "unknown.invalid"] {
-                            expected.write_i32(owner.approval("fixture.domains", &code, (mode != -1).then_some(&user), 0, v2,
-                                Policy { restrict_domains: true, linked_app: case == 1 }, host).unwrap());
+                        if mode == 8 {
+                            user.suspensions = Some(vec![Suspension {
+                                package: "suspender".into(),
+                                user: SuspendingUser::Resolved(0),
+                                params: None,
+                            }]);
+                        }
+                        for host in [
+                            "h0.example",
+                            "h1.example",
+                            "h4.example",
+                            "h7.example",
+                            "h8.example",
+                            "h1024.example",
+                            "example",
+                            "sub.example",
+                            "notexample",
+                            "unknown.invalid",
+                        ] {
+                            expected.write_i32(
+                                owner
+                                    .approval(
+                                        "fixture.domains",
+                                        &code,
+                                        (mode != -1).then_some(&user),
+                                        0,
+                                        v2,
+                                        Policy {
+                                            restrict_domains: true,
+                                            linked_app: case == 1,
+                                        },
+                                        host,
+                                    )
+                                    .unwrap(),
+                            );
                             let owners = owner.owners(host, 0, |_| Ok(Some(aim_services::package::domain_verification::owner::ApprovalInput {
                                 code: &code, user: (mode != -1).then_some(&user), settings_v2: v2,
                                 policy: Policy { restrict_domains: true, linked_app: case == 1 },
@@ -895,8 +1190,18 @@ pub fn verify_attachment(directory: &Path) {
                         }
                     }
                 }
-                assert_eq!(owners_reply.data(), fs::read(directory.join(format!("domain-owner-{case}-{stage}.owners"))).unwrap(), "original Owners replies case={case} stage={stage}");
-                assert_eq!(expected.data(), fs::read(directory.join(format!("domain-owner-{case}-{stage}.approvals"))).unwrap(), "original approval levels case={case} stage={stage}");
+                assert_eq!(
+                    owners_reply.data(),
+                    fs::read(directory.join(format!("domain-owner-{case}-{stage}.owners")))
+                        .unwrap(),
+                    "original Owners replies case={case} stage={stage}"
+                );
+                assert_eq!(
+                    expected.data(),
+                    fs::read(directory.join(format!("domain-owner-{case}-{stage}.approvals")))
+                        .unwrap(),
+                    "original approval levels case={case} stage={stage}"
+                );
             }
             assert_eq!(
                 canonical(owner.persisted()),
@@ -924,8 +1229,11 @@ pub fn verify_attachment(directory: &Path) {
         let group = |action, path: &str| {
             let mut g = UriRelativeFilterGroup::new(action);
             g.add(0, 0, path);
-            g.add(1, 0, "q=1"); g.add(2, 1, "fragment"); g.add(0, 1, "😀");
-            g.add(0, 0, "Aa"); g.add(0, 0, "BB");
+            g.add(1, 0, "q=1");
+            g.add(2, 1, "fragment");
+            g.add(0, 1, "😀");
+            g.add(0, 0, "Aa");
+            g.add(0, 0, "BB");
             g
         };
         let hosts = [
@@ -983,61 +1291,138 @@ pub fn verify_attachment(directory: &Path) {
                 "URI group update case={case} stage={stage}"
             );
         }
-        let root = aim_android_xml::read(&fs::read(directory.join(format!("domain-owner-{case}-uri-null-write.original"))).unwrap()).unwrap();
-        let mut saved = State::default(); saved.read(root.children().find(|e| e.name == "domain-verifications").unwrap()).unwrap();
-        let group = &saved.active.iter().find(|p| p.name == "fixture.domains").unwrap().uri_relative_filter_groups.iter().find(|(name, _)| name.as_deref() == Some("h0.example")).unwrap().1[0];
-        assert_eq!(group.filters.len(), 2, "original nullable URI persistence case={case}");
-        assert_eq!(group.filters[0].filter.as_deref(), Some("")); assert_eq!(group.filters[1].filter.as_deref(), Some("ordinary"));
-        let restored_root = aim_android_xml::read(&fs::read(directory.join(format!("domain-owner-{case}-uri-null-restore.original"))).unwrap()).unwrap();
-        let mut restored = State::default(); restored.read(restored_root.children().find(|e| e.name == "domain-verifications").unwrap()).unwrap();
-        assert_eq!(canonical(saved.clone()), canonical(restored), "original nullable XML restore case={case}");
+        let root = aim_android_xml::read(
+            &fs::read(directory.join(format!("domain-owner-{case}-uri-null-write.original")))
+                .unwrap(),
+        )
+        .unwrap();
+        let mut saved = State::default();
+        saved
+            .read(
+                root.children()
+                    .find(|e| e.name == "domain-verifications")
+                    .unwrap(),
+            )
+            .unwrap();
+        let group = &saved
+            .active
+            .iter()
+            .find(|p| p.name == "fixture.domains")
+            .unwrap()
+            .uri_relative_filter_groups
+            .iter()
+            .find(|(name, _)| name.as_deref() == Some("h0.example"))
+            .unwrap()
+            .1[0];
+        assert_eq!(
+            group.filters.len(),
+            2,
+            "original nullable URI persistence case={case}"
+        );
+        assert_eq!(group.filters[0].filter.as_deref(), Some(""));
+        assert_eq!(group.filters[1].filter.as_deref(), Some("ordinary"));
+        let restored_root = aim_android_xml::read(
+            &fs::read(directory.join(format!("domain-owner-{case}-uri-null-restore.original")))
+                .unwrap(),
+        )
+        .unwrap();
+        let mut restored = State::default();
+        restored
+            .read(
+                restored_root
+                    .children()
+                    .find(|e| e.name == "domain-verifications")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            canonical(saved.clone()),
+            canonical(restored),
+            "original nullable XML restore case={case}"
+        );
         let mut desired = saved;
-        let mut nullable = UriRelativeFilterGroup::new(0); nullable.add_nullable(0, 0, None); nullable.add(0, 0, ""); nullable.add(0, 0, "ordinary");
-        desired.active.iter_mut().find(|p| p.name == "fixture.domains").unwrap().uri_relative_filter_groups.iter_mut().find(|(name, _)| name.as_deref() == Some("h0.example")).unwrap().1 = vec![nullable];
+        let mut nullable = UriRelativeFilterGroup::new(0);
+        nullable.add_nullable(0, 0, None);
+        nullable.add(0, 0, "");
+        nullable.add(0, 0, "ordinary");
+        desired
+            .active
+            .iter_mut()
+            .find(|p| p.name == "fixture.domains")
+            .unwrap()
+            .uri_relative_filter_groups
+            .iter_mut()
+            .find(|(name, _)| name.as_deref() == Some("h0.example"))
+            .unwrap()
+            .1 = vec![nullable];
         let written = aim_services::package::owner::domains::replace(&root, &desired).unwrap();
-        let parsed = aim_services::package::settings::Settings::parse(&written).unwrap().domain_verification;
-        let projection = aim_services::package::domain_verification::owner::Owner::new(desired.clone(), Default::default()).xml_projection();
-        assert_eq!(canonical(parsed), canonical(projection), "native nullable XML projection case={case}");
-        assert_eq!(desired.active.iter().find(|p| p.name == "fixture.domains").unwrap().uri_relative_filter_groups.iter().find(|(name, _)| name.as_deref() == Some("h0.example")).unwrap().1[0].filters.len(), 3);
+        let parsed = aim_services::package::settings::Settings::parse(&written)
+            .unwrap()
+            .domain_verification;
+        let projection = aim_services::package::domain_verification::owner::Owner::new(
+            desired.clone(),
+            Default::default(),
+        )
+        .xml_projection();
+        assert_eq!(
+            canonical(parsed),
+            canonical(projection),
+            "native nullable XML projection case={case}"
+        );
+        assert_eq!(
+            desired
+                .active
+                .iter()
+                .find(|p| p.name == "fixture.domains")
+                .unwrap()
+                .uri_relative_filter_groups
+                .iter()
+                .find(|(name, _)| name.as_deref() == Some("h0.example"))
+                .unwrap()
+                .1[0]
+                .filters
+                .len(),
+            3
+        );
 
         let previous = owner.persisted();
         owner.set_uri_groups("missing", &[]).unwrap();
         assert!(owner.set_uri_groups("missing", &updates).is_err());
         assert_eq!(owner.persisted(), previous);
-    let mut requests = hosts.iter().cloned().map(Some).collect::<Vec<_>>();
-    requests.push(None);
-    requests.push(Some(hosts[0].clone()));
-    let bytes = fs::read(directory.join(format!("domain-uri-{case}.reply"))).unwrap();
-    let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
-    for name in [Some("fixture.domains"), Some("missing"), None] {
-        for list in [Some(requests.as_slice()), Some(&[][..]), None] {
-            match owner.uri_groups_query(name, list) {
-                Ok(groups) => {
-                    let value =
+        let mut requests = hosts.iter().cloned().map(Some).collect::<Vec<_>>();
+        requests.push(None);
+        requests.push(Some(hosts[0].clone()));
+        let bytes = fs::read(directory.join(format!("domain-uri-{case}.reply"))).unwrap();
+        let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+        for name in [Some("fixture.domains"), Some("missing"), None] {
+            for list in [Some(requests.as_slice()), Some(&[][..]), None] {
+                match owner.uri_groups_query(name, list) {
+                    Ok(groups) => {
+                        let value =
                         aim_services::package::domain_verification::parcels::UriGroups::prepare(
                             &groups,
                         )
                         .unwrap();
-                    let mut reply = Parcel::new();
-                    aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::write_get_uri_relative_filter_groups_reply(&mut reply, Some(&value));
-                    let start = reader.position();
-                    reader.set_position(start + reply.data().len());
-                    assert_eq!(
-                        &bytes[start..reader.position()],
-                        reply.data(),
-                        "original URI Bundle case={case} name={name:?} null-list={}",
-                        list.is_none()
-                    );
-                }
-                Err(expected) => {
-                    let error = reader.read_exception().unwrap().unwrap_err();
-                    assert_eq!(error.code, -4);
-                    assert_eq!(error.message, expected);
+                        let mut reply = Parcel::new();
+                        aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::write_get_uri_relative_filter_groups_reply(&mut reply, Some(&value));
+                        let start = reader.position();
+                        reader.set_position(start + reply.data().len());
+                        assert_eq!(
+                            &bytes[start..reader.position()],
+                            reply.data(),
+                            "original URI Bundle case={case} name={name:?} null-list={}",
+                            list.is_none()
+                        );
+                    }
+                    Err(expected) => {
+                        let error = reader.read_exception().unwrap().unwrap_err();
+                        assert_eq!(error.code, -4);
+                        assert_eq!(error.message, expected);
+                    }
                 }
             }
         }
-    }
-    assert_eq!(reader.remaining(), 0);
+        assert_eq!(reader.remaining(), 0);
 
         let mut values = owner.uri_groups("fixture.domains", &hosts);
         values.sort_by(|a, b| a.0.cmp(&b.0));

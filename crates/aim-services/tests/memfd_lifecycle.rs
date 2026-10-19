@@ -3,15 +3,12 @@ mod common {
     pub mod runtime;
 }
 use common::runtime::{Boot, Data, run};
-use std::{
-    fs,
-    process::Command,
-    time::Duration,
-};
+use std::{fs, process::Command, time::Duration};
 
 fn ready(boot: &Boot) {
     run(boot.start_command().args(["start", "--windows"]));
-    boot.wait_ready(Duration::from_secs(300)).expect("memfd_lifecycle oracle boot readiness");
+    boot.wait_ready(Duration::from_secs(300))
+        .expect("memfd_lifecycle oracle boot readiness");
 }
 
 #[test]
@@ -31,7 +28,10 @@ fn stop_and_crash_start_reclaim_memfd_backings() {
         .args(["-O1", "-Wall", "-Werror", "-o"])
         .arg(&program)
         .arg(&source));
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
+    let boot = Boot::new(
+        aim_paths::root().join("target/release/aimctl"),
+        data.0.join("g"),
+    );
     ready(&boot);
     fs::copy(&program, boot.data.join("data/local/tmp/memfd-probe")).unwrap();
     struct ChildGuard(std::process::Child);

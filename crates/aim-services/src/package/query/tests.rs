@@ -132,12 +132,14 @@ fn install_source_state(managed: bool) -> State {
     source.installer = Some(OTHER.into());
     source.update_owner = Some(OTHER.into());
     source.package_source = 3;
-    state.system.user_policy = Some(Arc::new(crate::package::user_policy::Owner::new(
-        Box::new(|_| Ok(false)),
-    ).with_organization_managed(Box::new(move |user| {
-        assert_eq!(user, 0);
-        Ok(managed)
-    }))));
+    state.system.user_policy = Some(Arc::new(
+        crate::package::user_policy::Owner::new(Box::new(|_| Ok(false))).with_organization_managed(
+            Box::new(move |user| {
+                assert_eq!(user, 0);
+                Ok(managed)
+            }),
+        ),
+    ));
     state
 }
 
@@ -151,7 +153,11 @@ fn install_source_update_owner_respects_organization_management() {
     ] {
         let state = install_source_state(managed);
         let reply = call(&state, uid, false, pm::GET_INSTALL_SOURCE_INFO, |p| {
-            pm::GetInstallSourceInfo { package_name: Some(APP.into()), user_id: 0 }.write(p);
+            pm::GetInstallSourceInfo {
+                package_name: Some(APP.into()),
+                user_id: 0,
+            }
+            .write(p);
         });
         let mut reader = Reader::new(reply.data(), reply.objects());
         reader.read_exception().unwrap().unwrap();
@@ -169,39 +175,88 @@ fn install_source_update_owner_respects_organization_management() {
 #[test]
 fn install_source_update_owner_preserves_policy_failure_and_exemptions() {
     let mut state = install_source_state(false);
-    state.system.user_policy = Some(Arc::new(crate::package::user_policy::Owner::new(
-        Box::new(|_| Ok(false)),
-    ).with_organization_managed(Box::new(|_| {
-        Err(Exception::security("actual device policy failure"))
-    }))));
+    state.system.user_policy = Some(Arc::new(
+        crate::package::user_policy::Owner::new(Box::new(|_| Ok(false))).with_organization_managed(
+            Box::new(|_| Err(Exception::security("actual device policy failure"))),
+        ),
+    ));
     let filter = AppsFilter::new(&state, &crate::package::apps_filter::Config::default()).unwrap();
-    let query = Query { state: &state, filter: &filter, calling_uid: 10100 };
+    let query = Query {
+        state: &state,
+        filter: &filter,
+        calling_uid: 10100,
+    };
     let error = query.install_source_info(APP, 0).unwrap().unwrap_err();
     assert_eq!(error.code, EX_SECURITY);
     assert_eq!(error.message, "actual device policy failure");
     for uid in [SYSTEM_UID, 10101] {
-        let query = Query { state: &state, filter: &filter, calling_uid: uid };
-        assert_eq!(query.install_source_info(APP, 0).unwrap().unwrap().unwrap()
-            .update_owner_package_name.as_deref(), Some(OTHER));
+        let query = Query {
+            state: &state,
+            filter: &filter,
+            calling_uid: uid,
+        };
+        assert_eq!(
+            query
+                .install_source_info(APP, 0)
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .update_owner_package_name
+                .as_deref(),
+            Some(OTHER)
+        );
     }
     state.system.user_policy = None;
     let filter = AppsFilter::new(&state, &crate::package::apps_filter::Config::default()).unwrap();
-    let query = Query { state: &state, filter: &filter, calling_uid: 10100 };
+    let query = Query {
+        state: &state,
+        filter: &filter,
+        calling_uid: 10100,
+    };
     assert!(query.install_source_info(APP, 0).is_err());
-    state.packages.get_mut(APP).unwrap().install_source.update_owner = Some("missing.owner".into());
+    state
+        .packages
+        .get_mut(APP)
+        .unwrap()
+        .install_source
+        .update_owner = Some("missing.owner".into());
     let filter = AppsFilter::new(&state, &crate::package::apps_filter::Config::default()).unwrap();
-    let query = Query { state: &state, filter: &filter, calling_uid: 10100 };
-    assert_eq!(query.install_source_info(APP, 0).unwrap().unwrap().unwrap().update_owner_package_name, None);
+    let query = Query {
+        state: &state,
+        filter: &filter,
+        calling_uid: 10100,
+    };
+    assert_eq!(
+        query
+            .install_source_info(APP, 0)
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .update_owner_package_name,
+        None
+    );
 }
 
 #[test]
 fn install_source_update_owner_keeps_package_visibility_filtering() {
     let mut state = install_source_state(false);
-    state.packages.insert("org.example.reader".into(), package("org.example.reader", 10102, |_, _| {}));
-    state.packages.get_mut(OTHER).unwrap().is.force_queryable_override = false;
+    state.packages.insert(
+        "org.example.reader".into(),
+        package("org.example.reader", 10102, |_, _| {}),
+    );
+    state
+        .packages
+        .get_mut(OTHER)
+        .unwrap()
+        .is
+        .force_queryable_override = false;
     state.system.user_policy = None;
     let filter = AppsFilter::new(&state, &crate::package::apps_filter::Config::default()).unwrap();
-    let query = Query { state: &state, filter: &filter, calling_uid: 10102 };
+    let query = Query {
+        state: &state,
+        filter: &filter,
+        calling_uid: 10102,
+    };
     let source = query.install_source_info(APP, 0).unwrap().unwrap().unwrap();
     assert_eq!(source.update_owner_package_name, None);
     assert_eq!(source.installing_package_name, None);
@@ -344,21 +399,47 @@ fn code_retired_setting_supplies_minimal_package_and_application_info() {
         ..Default::default()
     });
     for user in [0, 10] {
-        ps.users.insert(user, PackageUserState {
-            installed: false,
-            data_exists: true,
-            first_install_time: 0x1234 + i64::from(user),
-            ..PackageUserState::default()
-        });
+        ps.users.insert(
+            user,
+            PackageUserState {
+                installed: false,
+                data_exists: true,
+                first_install_time: 0x1234 + i64::from(user),
+                ..PackageUserState::default()
+            },
+        );
     }
     let filter = AppsFilter::new(&state, &Default::default()).unwrap();
-    let query = Query { state: &state, filter: &filter, calling_uid: 1000 };
+    let query = Query {
+        state: &state,
+        filter: &filter,
+        calling_uid: 1000,
+    };
 
-    assert!(query.package_info(APP, -1, 0, 10).unwrap().unwrap().is_none());
-    assert!(query.application_info(APP, MATCH_ANY_USER, 10).unwrap().unwrap().is_none());
-    let pi = query.package_info(
-        APP, -1, MATCH_UNINSTALLED_PACKAGES | GET_SIGNATURES | GET_SIGNING_CERTIFICATES, 10)
-        .unwrap().unwrap().unwrap();
+    assert!(
+        query
+            .package_info(APP, -1, 0, 10)
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        query
+            .application_info(APP, MATCH_ANY_USER, 10)
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    let pi = query
+        .package_info(
+            APP,
+            -1,
+            MATCH_UNINSTALLED_PACKAGES | GET_SIGNATURES | GET_SIGNING_CERTIFICATES,
+            10,
+        )
+        .unwrap()
+        .unwrap()
+        .unwrap();
     assert_eq!(pi.package_name.as_deref(), Some(APP));
     assert_eq!((pi.version_code_major, pi.version_code), (3, 7));
     assert_eq!(pi.first_install_time, 0x123e);
@@ -371,16 +452,31 @@ fn code_retired_setting_supplies_minimal_package_and_application_info() {
     assert_eq!(ai.long_version_code, (3_i64 << 32) | 7);
     assert_eq!(ai.target_sdk_version, 35);
     assert_eq!(ai.primary_cpu_abi.as_deref(), Some("arm64-v8a"));
-    assert_eq!(ai.data_dir.as_deref(), Some("/data/user/10/org.example.app"));
-    assert_eq!(ai.device_protected_data_dir.as_deref(),
-        Some("/data/user_de/10/org.example.app"));
+    assert_eq!(
+        ai.data_dir.as_deref(),
+        Some("/data/user/10/org.example.app")
+    );
+    assert_eq!(
+        ai.device_protected_data_dir.as_deref(),
+        Some("/data/user_de/10/org.example.app")
+    );
 
-    let direct = query.application_info(APP, MATCH_UNINSTALLED_PACKAGES, 10)
-        .unwrap().unwrap().unwrap();
+    let direct = query
+        .application_info(APP, MATCH_UNINSTALLED_PACKAGES, 10)
+        .unwrap()
+        .unwrap()
+        .unwrap();
     assert_eq!(direct, *ai);
-    let listed = query.internal_installed_applications(
-        MATCH_UNINSTALLED_PACKAGES, 10, 1000, false).unwrap().unwrap();
-    assert_eq!(listed.iter().find(|ai| ai.item.package_name.as_deref() == Some(APP)), Some(ai));
+    let listed = query
+        .internal_installed_applications(MATCH_UNINSTALLED_PACKAGES, 10, 1000, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .find(|ai| ai.item.package_name.as_deref() == Some(APP)),
+        Some(ai)
+    );
 }
 
 #[test]
@@ -555,21 +651,47 @@ fn features_and_cross_user_calls() {
     // snapshot. A live denial must override an older captured grant, and a
     // live grant must override an older captured denial.
     let mut granted = state.clone();
-    granted.packages.get_mut(APP).unwrap().users.get_mut(&0).unwrap()
-        .granted_permissions.push(INTERACT_ACROSS_USERS.into());
+    granted
+        .packages
+        .get_mut(APP)
+        .unwrap()
+        .users
+        .get_mut(&0)
+        .unwrap()
+        .granted_permissions
+        .push(INTERACT_ACROSS_USERS.into());
     let filter = AppsFilter::new(&granted, &Default::default()).unwrap();
-    let query = Query { state: &granted, filter: &filter, calling_uid: 10100 };
+    let query = Query {
+        state: &granted,
+        filter: &filter,
+        calling_uid: 10100,
+    };
     assert_eq!(
-        query.packages_for_uid_checked_with_grants(1010100, Some((false, false)))
-            .unwrap().unwrap_err().code,
+        query
+            .packages_for_uid_checked_with_grants(1010100, Some((false, false)))
+            .unwrap()
+            .unwrap_err()
+            .code,
         EX_SECURITY
     );
-    assert!(query.packages_for_uid_checked_with_grants(1010100, Some((false, true)))
-        .unwrap().is_ok());
+    assert!(
+        query
+            .packages_for_uid_checked_with_grants(1010100, Some((false, true)))
+            .unwrap()
+            .is_ok()
+    );
     let filter = AppsFilter::new(&state, &Default::default()).unwrap();
-    let query = Query { state: &state, filter: &filter, calling_uid: 10100 };
-    assert!(query.packages_for_uid_checked_with_grants(1010100, Some((false, true)))
-        .unwrap().is_ok());
+    let query = Query {
+        state: &state,
+        filter: &filter,
+        calling_uid: 10100,
+    };
+    assert!(
+        query
+            .packages_for_uid_checked_with_grants(1010100, Some((false, true)))
+            .unwrap()
+            .is_ok()
+    );
     let reply = call(&state, 101000, false, pm::GET_PACKAGES_FOR_UID, |p| {
         pm::GetPackagesForUid { uid: 1010100 }.write(p)
     });
@@ -623,117 +745,212 @@ fn installed_packages_in_the_original_order() {
 #[test]
 fn installed_lists_use_live_cross_user_grants() {
     let mut captured_grant = state();
-    captured_grant.packages.get_mut(APP).unwrap().users.get_mut(&0).unwrap()
-        .granted_permissions.push(INTERACT_ACROSS_USERS.into());
+    captured_grant
+        .packages
+        .get_mut(APP)
+        .unwrap()
+        .users
+        .get_mut(&0)
+        .unwrap()
+        .granted_permissions
+        .push(INTERACT_ACROSS_USERS.into());
     let filter = AppsFilter::new(&captured_grant, &Default::default()).unwrap();
-    let query = Query { state: &captured_grant, filter: &filter, calling_uid: 10100 };
+    let query = Query {
+        state: &captured_grant,
+        filter: &filter,
+        calling_uid: 10100,
+    };
     assert_eq!(
-        query.installed_packages_with_grants(0, 10, Some((false, false)))
-            .unwrap().unwrap_err().code,
+        query
+            .installed_packages_with_grants(0, 10, Some((false, false)))
+            .unwrap()
+            .unwrap_err()
+            .code,
         EX_SECURITY
     );
     assert_eq!(
-        query.internal_installed_applications_with_grants(
-            0, 10, 10100, false, Some((false, false)))
-            .unwrap().unwrap_err().code,
+        query
+            .internal_installed_applications_with_grants(0, 10, 10100, false, Some((false, false)))
+            .unwrap()
+            .unwrap_err()
+            .code,
         EX_SECURITY
     );
 
     let captured_denial = state();
     let filter = AppsFilter::new(&captured_denial, &Default::default()).unwrap();
-    let query = Query { state: &captured_denial, filter: &filter, calling_uid: 10100 };
-    assert!(query.installed_packages_with_grants(0, 10, Some((false, true)))
-        .unwrap().is_ok());
-    assert!(query.internal_installed_applications_with_grants(
-        0, 10, 10100, false, Some((false, true))).unwrap().is_ok());
+    let query = Query {
+        state: &captured_denial,
+        filter: &filter,
+        calling_uid: 10100,
+    };
+    assert!(
+        query
+            .installed_packages_with_grants(0, 10, Some((false, true)))
+            .unwrap()
+            .is_ok()
+    );
+    assert!(
+        query
+            .internal_installed_applications_with_grants(0, 10, 10100, false, Some((false, true)))
+            .unwrap()
+            .is_ok()
+    );
     for flags in [MATCH_ANY_USER, MATCH_KNOWN_PACKAGES] {
         assert_eq!(
-            query.installed_packages_with_grants(flags, 10, Some((false, false)))
-                .unwrap().unwrap_err().code,
+            query
+                .installed_packages_with_grants(flags, 10, Some((false, false)))
+                .unwrap()
+                .unwrap_err()
+                .code,
             EX_SECURITY
         );
         assert_eq!(
-            query.internal_installed_applications_with_grants(
-                flags, 10, 10100, false, Some((false, false)))
-                .unwrap().unwrap_err().code,
+            query
+                .internal_installed_applications_with_grants(
+                    flags,
+                    10,
+                    10100,
+                    false,
+                    Some((false, false))
+                )
+                .unwrap()
+                .unwrap_err()
+                .code,
             EX_SECURITY
         );
         assert_eq!(
-            query.installed_packages_with_grants(flags, 0, Some((false, false)))
-                .unwrap().unwrap_err().code,
+            query
+                .installed_packages_with_grants(flags, 0, Some((false, false)))
+                .unwrap()
+                .unwrap_err()
+                .code,
             EX_SECURITY
         );
     }
-    assert!(query.installed_packages_with_grants(0, 0, Some((false, false)))
-        .unwrap().is_ok());
+    assert!(
+        query
+            .installed_packages_with_grants(0, 0, Some((false, false)))
+            .unwrap()
+            .is_ok()
+    );
 
-    let system = Query { state: &captured_denial, filter: &filter, calling_uid: 1000 };
-    assert!(system.installed_packages_with_grants(0, 10, Some((false, false)))
-        .unwrap().is_ok());
+    let system = Query {
+        state: &captured_denial,
+        filter: &filter,
+        calling_uid: 1000,
+    };
+    assert!(
+        system
+            .installed_packages_with_grants(0, 10, Some((false, false)))
+            .unwrap()
+            .is_ok()
+    );
 }
 
 #[test]
 fn package_uid_and_gids_use_live_cross_user_grants() {
     let mut captured_grant = state();
-    captured_grant.packages.get_mut(APP).unwrap().users.get_mut(&0).unwrap()
-        .granted_permissions.push(INTERACT_ACROSS_USERS.into());
+    captured_grant
+        .packages
+        .get_mut(APP)
+        .unwrap()
+        .users
+        .get_mut(&0)
+        .unwrap()
+        .granted_permissions
+        .push(INTERACT_ACROSS_USERS.into());
     let filter = AppsFilter::new(&captured_grant, &Default::default()).unwrap();
-    let query = Query { state: &captured_grant, filter: &filter, calling_uid: 10100 };
+    let query = Query {
+        state: &captured_grant,
+        filter: &filter,
+        calling_uid: 10100,
+    };
     assert_eq!(
-        query.package_uid_with_grants(APP, 0, 10, Some((false, false)))
-            .unwrap().unwrap_err().code,
+        query
+            .package_uid_with_grants(APP, 0, 10, Some((false, false)))
+            .unwrap()
+            .unwrap_err()
+            .code,
         EX_SECURITY
     );
     assert_eq!(
-        query.package_gids_with_grants(APP, 0, 10, Some((false, false)))
-            .unwrap().unwrap_err().code,
+        query
+            .package_gids_with_grants(APP, 0, 10, Some((false, false)))
+            .unwrap()
+            .unwrap_err()
+            .code,
         EX_SECURITY
     );
     for flags in [MATCH_ANY_USER, MATCH_KNOWN_PACKAGES] {
         assert_eq!(
-            query.package_uid_with_grants(APP, flags, 10, Some((false, false)))
-                .unwrap().unwrap_err().code,
+            query
+                .package_uid_with_grants(APP, flags, 10, Some((false, false)))
+                .unwrap()
+                .unwrap_err()
+                .code,
             EX_SECURITY
         );
         assert_eq!(
-            query.package_gids_with_grants(APP, flags, 10, Some((false, false)))
-                .unwrap().unwrap_err().code,
+            query
+                .package_gids_with_grants(APP, flags, 10, Some((false, false)))
+                .unwrap()
+                .unwrap_err()
+                .code,
             EX_SECURITY
         );
         assert_eq!(
-            query.package_uid_with_grants(APP, flags, 0, Some((false, false)))
-                .unwrap().unwrap_err().code,
+            query
+                .package_uid_with_grants(APP, flags, 0, Some((false, false)))
+                .unwrap()
+                .unwrap_err()
+                .code,
             EX_SECURITY
         );
         assert_eq!(
-            query.package_gids_with_grants(APP, flags, 0, Some((false, false)))
-                .unwrap().unwrap_err().code,
+            query
+                .package_gids_with_grants(APP, flags, 0, Some((false, false)))
+                .unwrap()
+                .unwrap_err()
+                .code,
             EX_SECURITY
         );
     }
 
     let captured_denial = state();
     let filter = AppsFilter::new(&captured_denial, &Default::default()).unwrap();
-    let query = Query { state: &captured_denial, filter: &filter, calling_uid: 10100 };
+    let query = Query {
+        state: &captured_denial,
+        filter: &filter,
+        calling_uid: 10100,
+    };
     assert_eq!(
-        query.package_uid_with_grants(APP, 0, 10, Some((false, true)))
-            .unwrap().unwrap(),
+        query
+            .package_uid_with_grants(APP, 0, 10, Some((false, true)))
+            .unwrap()
+            .unwrap(),
         1010100
     );
     assert_eq!(
-        query.package_gids_with_grants(APP, 0, 10, Some((false, true)))
-            .unwrap().unwrap(),
+        query
+            .package_gids_with_grants(APP, 0, 10, Some((false, true)))
+            .unwrap()
+            .unwrap(),
         Some(Vec::new())
     );
     for flags in [MATCH_ANY_USER, MATCH_KNOWN_PACKAGES] {
         assert_eq!(
-            query.package_uid_with_grants(APP, flags, 10, Some((false, true)))
-                .unwrap().unwrap(),
+            query
+                .package_uid_with_grants(APP, flags, 10, Some((false, true)))
+                .unwrap()
+                .unwrap(),
             1010100
         );
         assert_eq!(
-            query.package_gids_with_grants(APP, flags, 10, Some((false, true)))
-                .unwrap().unwrap(),
+            query
+                .package_gids_with_grants(APP, flags, 10, Some((false, true)))
+                .unwrap()
+                .unwrap(),
             Some(Vec::new())
         );
     }
@@ -742,22 +959,44 @@ fn package_uid_and_gids_use_live_cross_user_grants() {
 #[test]
 fn installed_applications_expose_force_queryable_package_across_users() {
     let mut state = state();
-    state.packages.get_mut(APP).unwrap().users.get_mut(&0).unwrap()
-        .granted_permissions.push(INTERACT_ACROSS_USERS.into());
-    state.packages.get_mut(OTHER).unwrap().users.insert(
-        10,
-        PackageUserState::default(),
-    );
-    state.packages.get_mut(OTHER).unwrap().is.force_queryable_override = true;
+    state
+        .packages
+        .get_mut(APP)
+        .unwrap()
+        .users
+        .get_mut(&0)
+        .unwrap()
+        .granted_permissions
+        .push(INTERACT_ACROSS_USERS.into());
+    state
+        .packages
+        .get_mut(OTHER)
+        .unwrap()
+        .users
+        .insert(10, PackageUserState::default());
+    state
+        .packages
+        .get_mut(OTHER)
+        .unwrap()
+        .is
+        .force_queryable_override = true;
 
     let reply = call(&state, 10100, false, pm::GET_INSTALLED_APPLICATIONS, |p| {
-        pm::GetInstalledApplications { flags: 0, user_id: 10 }.write(p)
+        pm::GetInstalledApplications {
+            flags: 0,
+            user_id: 10,
+        }
+        .write(p)
     });
     let list = decoded(pm::GET_INSTALLED_APPLICATIONS, &reply);
     let Value::List(items) = field(&list, "items") else {
         panic!()
     };
-    assert!(items.iter().any(|item| field(item, "packageName") == &Value::Str(OTHER.into())));
+    assert!(
+        items
+            .iter()
+            .any(|item| field(item, "packageName") == &Value::Str(OTHER.into()))
+    );
 }
 
 #[test]
@@ -2410,7 +2649,8 @@ fn native_block_uninstall_reads_global_user_set_without_cross_user_gate() {
     let mut state = state();
     state.platform.query_filtering_disabled = true;
     state.system.uninstall_blocks = Some(Arc::new(crate::package::mutations::UninstallBlocks(
-        [(10, vec![Some(APP.into())])].into())));
+        [(10, vec![Some(APP.into())])].into(),
+    )));
     let parcel = call(
         &state,
         10100,
@@ -2553,242 +2793,712 @@ fn can_package_query_uses_source_visibility_and_original_missing_package_excepti
 
 #[test]
 fn activity_supports_intent_matches_registered_filters_without_enabled_state_check() {
-    use crate::package::{intent::Intent, intent_filter::{IntentFilter, ParsedIntentInfo}};
+    use crate::package::{
+        intent::Intent,
+        intent_filter::{IntentFilter, ParsedIntentInfo},
+    };
     let mut state = state();
     let app = state.packages.get_mut(APP).unwrap();
     let package = Arc::make_mut(app.pkg.as_mut().unwrap());
-    package.activities[1].main.component.intents.push(ParsedIntentInfo {
-        filter: IntentFilter { actions: vec!["p.action".into()], ..Default::default() }, ..Default::default() });
+    package.activities[1]
+        .main
+        .component
+        .intents
+        .push(ParsedIntentInfo {
+            filter: IntentFilter {
+                actions: vec!["p.action".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
     let filter = AppsFilter::new(&state, &Default::default()).unwrap();
-    let query = Query { state: &state, filter: &filter, calling_uid: 1000 };
-    assert!(query.activity_supports_intent(Some(&ComponentName {
-        package: APP.into(), class: "org.example.app.B".into() }),
-        Some(&Intent { action: Some("p.action".into()), ..Default::default() }), None, 0).unwrap().unwrap());
-    assert!(query.activity_supports_intent(Some(&ComponentName {
-        package: "android".into(), class: "com.android.internal.app.ResolverActivity".into() }),
-        None, None, 0).unwrap().unwrap());
+    let query = Query {
+        state: &state,
+        filter: &filter,
+        calling_uid: 1000,
+    };
+    assert!(
+        query
+            .activity_supports_intent(
+                Some(&ComponentName {
+                    package: APP.into(),
+                    class: "org.example.app.B".into()
+                }),
+                Some(&Intent {
+                    action: Some("p.action".into()),
+                    ..Default::default()
+                }),
+                None,
+                0
+            )
+            .unwrap()
+            .unwrap()
+    );
+    assert!(
+        query
+            .activity_supports_intent(
+                Some(&ComponentName {
+                    package: "android".into(),
+                    class: "com.android.internal.app.ResolverActivity".into()
+                }),
+                None,
+                None,
+                0
+            )
+            .unwrap()
+            .unwrap()
+    );
 }
 
 #[test]
 fn lifecycle_queries_use_real_safe_mode_ce_storage_and_counted_freeze_owners() {
-    use crate::package::{lifecycle::Owner, settings::{Settings, Version}};
+    use crate::package::{
+        lifecycle::Owner,
+        settings::{Settings, Version},
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
     let ce_calls = Arc::new(AtomicUsize::new(0));
     let calls = ce_calls.clone();
-    let owner = Owner::from_settings(&Settings { versions: vec![Version {
-        fingerprint: Some("current".into()), ..Default::default() }], ..Default::default() },
-        true, "current", Box::new(|_| None), Box::new(move |_| { calls.fetch_add(1, Ordering::SeqCst); Ok(false) })).unwrap();
-    let published = Arc::new(std::sync::Mutex::new((0, std::collections::BTreeMap::new())));
+    let owner = Owner::from_settings(
+        &Settings {
+            versions: vec![Version {
+                fingerprint: Some("current".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        true,
+        "current",
+        Box::new(|_| None),
+        Box::new(move |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(false)
+        }),
+    )
+    .unwrap();
+    let published = Arc::new(std::sync::Mutex::new((
+        0,
+        std::collections::BTreeMap::new(),
+    )));
     let publication = published.clone();
-    owner.install_frozen_publisher(Arc::new(move |revision, frozen| {
-        *publication.lock().unwrap() = (revision, frozen);
-        Ok(())
-    })).unwrap();
+    owner
+        .install_frozen_publisher(Arc::new(move |revision, frozen| {
+            *publication.lock().unwrap() = (revision, frozen);
+            Ok(())
+        }))
+        .unwrap();
     let mut state = state();
     state.system.lifecycle = Some(owner.clone());
     let pkg = Arc::make_mut(state.packages.get_mut(APP).unwrap().pkg.as_mut().unwrap());
     pkg.booleans |= booleans::PERSISTENT;
     let filter = AppsFilter::new(&state, &Default::default()).unwrap();
-    let query = Query { state: &state, filter: &filter, calling_uid: 1000 };
-    assert!(query.check_startable(Some(APP), 0).unwrap().unwrap_err().message.contains("not encryption aware"));
+    let query = Query {
+        state: &state,
+        filter: &filter,
+        calling_uid: 1000,
+    };
+    assert!(
+        query
+            .check_startable(Some(APP), 0)
+            .unwrap()
+            .unwrap_err()
+            .message
+            .contains("not encryption aware")
+    );
     assert_eq!(ce_calls.load(Ordering::SeqCst), 1);
-    assert!(query.check_startable(Some("missing"), 0).unwrap().unwrap_err().message.contains("was not found"));
+    assert!(
+        query
+            .check_startable(Some("missing"), 0)
+            .unwrap()
+            .unwrap_err()
+            .message
+            .contains("was not found")
+    );
     assert_eq!(ce_calls.load(Ordering::SeqCst), 2);
     let frozen = owner.freeze(APP.into()).unwrap();
     assert_eq!(published.lock().unwrap().1.get(APP), Some(&1));
-    assert!(query.check_startable(Some(APP), 0).unwrap().unwrap_err().message.contains("currently frozen"));
+    assert!(
+        query
+            .check_startable(Some(APP), 0)
+            .unwrap()
+            .unwrap_err()
+            .message
+            .contains("currently frozen")
+    );
     frozen.close().unwrap();
     assert!(published.lock().unwrap().1.is_empty());
     assert_eq!(published.lock().unwrap().0, 2);
-    assert_eq!(query.persistent_applications(MATCH_DIRECT_BOOT_UNAWARE as i32).unwrap().len(), 1);
-    assert!(query.persistent_applications(MATCH_DIRECT_BOOT_AWARE as i32).unwrap().is_empty());
-    assert_eq!(query.package_startability_captured(false, Some(APP), 10101, 0).unwrap(), 1);
-    assert_eq!(query.package_startability_captured(false, Some(APP), 10100, 0).unwrap(), 4);
+    assert_eq!(
+        query
+            .persistent_applications(MATCH_DIRECT_BOOT_UNAWARE as i32)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        query
+            .persistent_applications(MATCH_DIRECT_BOOT_AWARE as i32)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        query
+            .package_startability_captured(false, Some(APP), 10101, 0)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        query
+            .package_startability_captured(false, Some(APP), 10100, 0)
+            .unwrap(),
+        4
+    );
     owner.enter_safe_mode(1000).unwrap();
-    assert_eq!(query.persistent_applications_captured(false, MATCH_DIRECT_BOOT_UNAWARE as i32).unwrap().len(), 1);
-    assert_eq!(query.package_startability_captured(false, Some(APP), 10100, 0).unwrap(), 4);
-    assert_eq!(query.package_startability_captured(true, Some(APP), 10100, 0).unwrap(), 2);
-    assert!(query.persistent_applications(MATCH_DIRECT_BOOT_UNAWARE as i32).unwrap().is_empty());
-    assert!(query.check_startable(Some(APP), 0).unwrap().unwrap_err().message.contains("not a system app"));
+    assert_eq!(
+        query
+            .persistent_applications_captured(false, MATCH_DIRECT_BOOT_UNAWARE as i32)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        query
+            .package_startability_captured(false, Some(APP), 10100, 0)
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        query
+            .package_startability_captured(true, Some(APP), 10100, 0)
+            .unwrap(),
+        2
+    );
+    assert!(
+        query
+            .persistent_applications(MATCH_DIRECT_BOOT_UNAWARE as i32)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        query
+            .check_startable(Some(APP), 0)
+            .unwrap()
+            .unwrap_err()
+            .message
+            .contains("not a system app")
+    );
 }
 
 #[test]
 fn provider_info_uses_live_user_unlock_state_after_initial_locked_capture() {
-    use aim_binder_driver::{Driver,Device,Credentials,GuestProcess,Errno,File,errno,uapi::*};
-    use aim_binder_host::local::{LocalProcess,Service,Call,Reply};
-    use aim_binder_host::parcel::{Binder,UNKNOWN_TRANSACTION,EX_ILLEGAL_STATE};
+    use aim_binder_driver::{
+        Credentials, Device, Driver, Errno, File, GuestProcess, errno, uapi::*,
+    };
+    use aim_binder_host::local::{Call, LocalProcess, Reply, Service};
+    use aim_binder_host::parcel::{Binder, EX_ILLEGAL_STATE, UNKNOWN_TRANSACTION};
     use aim_service_aidl::dev_aim_server_ipackagebootcontextleaf as leaf;
-    use std::sync::atomic::{AtomicI32,AtomicUsize,Ordering};
+    use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
     struct NoMemory;
     impl GuestProcess for NoMemory {
-        fn copy_from_user(&mut self,_:u64,_:&mut[u8])->Result<(),Errno>{Err(errno::EFAULT)}
-        fn copy_to_user(&mut self,_:u64,_:&[u8])->Result<(),Errno>{Err(errno::EFAULT)}
-        fn get_file(&mut self,_:u32)->Result<File,Errno>{Err(errno::EBADF)}
-        fn install_file(&mut self,_:File)->Result<u32,Errno>{Err(errno::EBADF)}
-        fn close_fd(&mut self,_:u32){panic!("unexpected fd")}
+        fn copy_from_user(&mut self, _: u64, _: &mut [u8]) -> Result<(), Errno> {
+            Err(errno::EFAULT)
+        }
+        fn copy_to_user(&mut self, _: u64, _: &[u8]) -> Result<(), Errno> {
+            Err(errno::EFAULT)
+        }
+        fn get_file(&mut self, _: u32) -> Result<File, Errno> {
+            Err(errno::EBADF)
+        }
+        fn install_file(&mut self, _: File) -> Result<u32, Errno> {
+            Err(errno::EBADF)
+        }
+        fn close_fd(&mut self, _: u32) {
+            panic!("unexpected fd")
+        }
     }
-    struct UserState {phase:Arc<AtomicI32>,reads:Arc<AtomicUsize>}
+    struct UserState {
+        phase: Arc<AtomicI32>,
+        reads: Arc<AtomicUsize>,
+    }
     impl Service for UserState {
-        fn descriptor(&self)->&str{leaf::DESCRIPTOR}
-        fn transact(&self,call:&mut Call<'_>)->Reply {
-            if call.code!=leaf::USER_UNLOCKING_OR_UNLOCKED{return Err(UNKNOWN_TRANSACTION)}
-            assert_eq!(call.sender_euid,1000);
-            let args=leaf::UserUnlockingOrUnlocked::read(&mut call.data)?;
-            assert_eq!(args.user_id,0);assert_eq!(call.data.remaining(),0);
-            self.reads.fetch_add(1,Ordering::AcqRel);
-            let mut reply=Parcel::new();
-            if self.phase.load(Ordering::Acquire)==2{reply.write_exception(&aim_binder_host::parcel::Exception::new(EX_ILLEGAL_STATE,"UM owner read failed"));}
-            else{leaf::write_user_unlocking_or_unlocked_reply(&mut reply,self.phase.load(Ordering::Acquire)==1);}
+        fn descriptor(&self) -> &str {
+            leaf::DESCRIPTOR
+        }
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            if call.code != leaf::USER_UNLOCKING_OR_UNLOCKED {
+                return Err(UNKNOWN_TRANSACTION);
+            }
+            assert_eq!(call.sender_euid, 1000);
+            let args = leaf::UserUnlockingOrUnlocked::read(&mut call.data)?;
+            assert_eq!(args.user_id, 0);
+            assert_eq!(call.data.remaining(), 0);
+            self.reads.fetch_add(1, Ordering::AcqRel);
+            let mut reply = Parcel::new();
+            if self.phase.load(Ordering::Acquire) == 2 {
+                reply.write_exception(&aim_binder_host::parcel::Exception::new(
+                    EX_ILLEGAL_STATE,
+                    "UM owner read failed",
+                ));
+            } else {
+                leaf::write_user_unlocking_or_unlocked_reply(
+                    &mut reply,
+                    self.phase.load(Ordering::Acquire) == 1,
+                );
+            }
             Ok(reply)
         }
     }
-    struct Processes {driver:Arc<Driver>,server:Arc<LocalProcess>,client:Arc<LocalProcess>}
-    impl Drop for Processes {fn drop(&mut self){self.driver.release(self.client.proc_handle());self.driver.release(self.server.proc_handle());}}
-    let driver=Driver::new();
-    let open=|pid|LocalProcess::open(&driver,Device::Binder,Credentials{pid,euid:1000,security_context:None});
-    let server=open(99101);let client=open(99102);
-    let _processes=Processes{driver:driver.clone(),server:server.clone(),client:client.clone()};
-    let phase=Arc::new(AtomicI32::new(0));let reads=Arc::new(AtomicUsize::new(0));
-    let Binder::Local(ptr)=server.add_service(Arc::new(UserState{phase:phase.clone(),reads:reads.clone()}))else{unreachable!()};
-    let mut object=FlatBinderObject{kind:BINDER_TYPE_BINDER,flags:0,binder:ptr,cookie:ptr}.encode();
-    driver.ioctl(server.proc_handle(),99103,BINDER_SET_CONTEXT_MGR_EXT,&mut object,&mut NoMemory).unwrap();
-    server.start();client.start();
-    let mut state=state();state.users.get_mut(&0).unwrap().unlocking_or_unlocked=false;
-    state.platform.settings_owner=Some(crate::package::resolve::settings::Owner::new(Arc::new(client.strong(0)),false));
-    let code=Arc::make_mut(state.packages.get_mut(APP).unwrap().pkg.as_mut().unwrap());
-    let mut provider=crate::package::pkg::Provider::default();
-    provider.main.component.name="fixture.StartupProvider".into();provider.main.component.package_name=APP.into();
-    provider.main.enabled=true;provider.main.direct_boot_aware=false;provider.main.exported=false;
-    provider.main.component.meta_data=Some(MetaData(vec![("fixture.initializer".into(),Meta::Bool(true))]));
-    provider.authority=Some("fixture.startup".into());code.providers.push(provider);
-    let component=ComponentName{package:APP.into(),class:"fixture.StartupProvider".into()};
-    let filter=AppsFilter::new(&state,&Default::default()).unwrap();
-    let query=Query{state:&state,filter:&filter,calling_uid:10100};
-    assert!(query.provider_info(&component,GET_META_DATA,0).unwrap().unwrap().is_none());
-    phase.store(1,Ordering::Release);
-    let info=query.provider_info(&component,GET_META_DATA,0).unwrap().unwrap().unwrap();
-    assert_eq!(info.info.item.meta_data.as_ref().unwrap().0[0].0,"fixture.initializer");
+    struct Processes {
+        driver: Arc<Driver>,
+        server: Arc<LocalProcess>,
+        client: Arc<LocalProcess>,
+    }
+    impl Drop for Processes {
+        fn drop(&mut self) {
+            self.driver.release(self.client.proc_handle());
+            self.driver.release(self.server.proc_handle());
+        }
+    }
+    let driver = Driver::new();
+    let open = |pid| {
+        LocalProcess::open(
+            &driver,
+            Device::Binder,
+            Credentials {
+                pid,
+                euid: 1000,
+                security_context: None,
+            },
+        )
+    };
+    let server = open(99101);
+    let client = open(99102);
+    let _processes = Processes {
+        driver: driver.clone(),
+        server: server.clone(),
+        client: client.clone(),
+    };
+    let phase = Arc::new(AtomicI32::new(0));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let Binder::Local(ptr) = server.add_service(Arc::new(UserState {
+        phase: phase.clone(),
+        reads: reads.clone(),
+    })) else {
+        unreachable!()
+    };
+    let mut object = FlatBinderObject {
+        kind: BINDER_TYPE_BINDER,
+        flags: 0,
+        binder: ptr,
+        cookie: ptr,
+    }
+    .encode();
+    driver
+        .ioctl(
+            server.proc_handle(),
+            99103,
+            BINDER_SET_CONTEXT_MGR_EXT,
+            &mut object,
+            &mut NoMemory,
+        )
+        .unwrap();
+    server.start();
+    client.start();
+    let mut state = state();
+    state.users.get_mut(&0).unwrap().unlocking_or_unlocked = false;
+    state.platform.settings_owner = Some(crate::package::resolve::settings::Owner::new(
+        Arc::new(client.strong(0)),
+        false,
+    ));
+    let code = Arc::make_mut(state.packages.get_mut(APP).unwrap().pkg.as_mut().unwrap());
+    let mut provider = crate::package::pkg::Provider::default();
+    provider.main.component.name = "fixture.StartupProvider".into();
+    provider.main.component.package_name = APP.into();
+    provider.main.enabled = true;
+    provider.main.direct_boot_aware = false;
+    provider.main.exported = false;
+    provider.main.component.meta_data = Some(MetaData(vec![(
+        "fixture.initializer".into(),
+        Meta::Bool(true),
+    )]));
+    provider.authority = Some("fixture.startup".into());
+    code.providers.push(provider);
+    let component = ComponentName {
+        package: APP.into(),
+        class: "fixture.StartupProvider".into(),
+    };
+    let filter = AppsFilter::new(&state, &Default::default()).unwrap();
+    let query = Query {
+        state: &state,
+        filter: &filter,
+        calling_uid: 10100,
+    };
+    assert!(
+        query
+            .provider_info(&component, GET_META_DATA, 0)
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    phase.store(1, Ordering::Release);
+    let info = query
+        .provider_info(&component, GET_META_DATA, 0)
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        info.info.item.meta_data.as_ref().unwrap().0[0].0,
+        "fixture.initializer"
+    );
     assert!(!state.users[&0].unlocking_or_unlocked);
-    assert_eq!(reads.load(Ordering::Acquire),2);
-    assert!(query.provider_info(&component,GET_META_DATA|MATCH_DIRECT_BOOT_AWARE,0).unwrap().unwrap().is_none());
-    phase.store(0,Ordering::Release);
-    assert!(query.provider_info(&component,GET_META_DATA|MATCH_DIRECT_BOOT_UNAWARE,0).unwrap().unwrap().is_some());
-    assert_eq!(reads.load(Ordering::Acquire),2);
-    phase.store(2,Ordering::Release);
-    assert!(query.provider_info(&component,GET_META_DATA,0).is_err());
-    assert_eq!(reads.load(Ordering::Acquire),3);
+    assert_eq!(reads.load(Ordering::Acquire), 2);
+    assert!(
+        query
+            .provider_info(&component, GET_META_DATA | MATCH_DIRECT_BOOT_AWARE, 0)
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    phase.store(0, Ordering::Release);
+    assert!(
+        query
+            .provider_info(&component, GET_META_DATA | MATCH_DIRECT_BOOT_UNAWARE, 0)
+            .unwrap()
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(reads.load(Ordering::Acquire), 2);
+    phase.store(2, Ordering::Release);
+    assert!(query.provider_info(&component, GET_META_DATA, 0).is_err());
+    assert_eq!(reads.load(Ordering::Acquire), 3);
 }
 
 #[test]
 fn metadata_provider_query_skips_absent_empty_and_unrelated_bundles() {
-    let mut state=state();
-    let code=Arc::make_mut(state.packages.get_mut(APP).unwrap().pkg.as_mut().unwrap());
-    code.providers=[("fixture.Absent",None),("fixture.Empty",Some(MetaData(vec![]))),
-        ("fixture.Unrelated",Some(MetaData(vec![("another-key".into(),Meta::Bool(true))]))),
-        ("fixture.Directory",Some(MetaData(vec![("directory-key".into(),Meta::Bool(true))])))]
-        .into_iter().map(|(name,metadata)|{
-            let mut provider=crate::package::pkg::Provider::default();
-            provider.main.component.package_name=APP.into();provider.main.component.name=name.into();
-            provider.main.component.meta_data=metadata;provider.main.enabled=true;
-            provider.main.direct_boot_aware=true;provider.authority=Some(format!("{APP}.{name}"));provider
-        }).collect();
-    let filter=AppsFilter::new(&state,&Default::default()).unwrap();
-    let query=Query{state:&state,filter:&filter,calling_uid:10100};
-    let result=query.content_providers(None,0,GET_META_DATA,Some("directory-key")).unwrap().unwrap();
-    assert_eq!(result.len(),1);
-    assert_eq!(result[0].info.item.name.as_deref(),Some("fixture.Directory"));
-    assert_eq!(result[0].info.item.meta_data.as_ref().unwrap().0,vec![("directory-key".into(),Meta::Bool(true))]);
-    assert_eq!(query.content_providers(None,0,0,None).unwrap().unwrap().len(),4);
-    let without_metadata=query.content_providers(None,0,0,Some("directory-key")).unwrap().unwrap();
-    assert_eq!(without_metadata.len(),1);assert!(without_metadata[0].info.item.meta_data.is_none());
-    let reply=call(&state,10100,false,pm::QUERY_CONTENT_PROVIDERS,|parcel|{
-        pm::QueryContentProviders{process_name:None,uid:0,flags:GET_META_DATA,meta_data_key:Some("directory-key".into())}.write(parcel);
-    });
-    let mut reader=reply.reader();reader.read_exception().unwrap().unwrap();
-    assert_eq!(reader.read_i32().unwrap(),1);assert_eq!(reader.read_i32().unwrap(),1);
-    assert_eq!(reader.read_string16().unwrap().as_deref(),Some("android.content.pm.ProviderInfo"));
+    let mut state = state();
+    let code = Arc::make_mut(state.packages.get_mut(APP).unwrap().pkg.as_mut().unwrap());
+    code.providers = [
+        ("fixture.Absent", None),
+        ("fixture.Empty", Some(MetaData(vec![]))),
+        (
+            "fixture.Unrelated",
+            Some(MetaData(vec![("another-key".into(), Meta::Bool(true))])),
+        ),
+        (
+            "fixture.Directory",
+            Some(MetaData(vec![("directory-key".into(), Meta::Bool(true))])),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, metadata)| {
+        let mut provider = crate::package::pkg::Provider::default();
+        provider.main.component.package_name = APP.into();
+        provider.main.component.name = name.into();
+        provider.main.component.meta_data = metadata;
+        provider.main.enabled = true;
+        provider.main.direct_boot_aware = true;
+        provider.authority = Some(format!("{APP}.{name}"));
+        provider
+    })
+    .collect();
+    let filter = AppsFilter::new(&state, &Default::default()).unwrap();
+    let query = Query {
+        state: &state,
+        filter: &filter,
+        calling_uid: 10100,
+    };
+    let result = query
+        .content_providers(None, 0, GET_META_DATA, Some("directory-key"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(
+        result[0].info.item.name.as_deref(),
+        Some("fixture.Directory")
+    );
+    assert_eq!(
+        result[0].info.item.meta_data.as_ref().unwrap().0,
+        vec![("directory-key".into(), Meta::Bool(true))]
+    );
+    assert_eq!(
+        query
+            .content_providers(None, 0, 0, None)
+            .unwrap()
+            .unwrap()
+            .len(),
+        4
+    );
+    let without_metadata = query
+        .content_providers(None, 0, 0, Some("directory-key"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(without_metadata.len(), 1);
+    assert!(without_metadata[0].info.item.meta_data.is_none());
+    let reply = call(
+        &state,
+        10100,
+        false,
+        pm::QUERY_CONTENT_PROVIDERS,
+        |parcel| {
+            pm::QueryContentProviders {
+                process_name: None,
+                uid: 0,
+                flags: GET_META_DATA,
+                meta_data_key: Some("directory-key".into()),
+            }
+            .write(parcel);
+        },
+    );
+    let mut reader = reply.reader();
+    reader.read_exception().unwrap().unwrap();
+    assert_eq!(reader.read_i32().unwrap(), 1);
+    assert_eq!(reader.read_i32().unwrap(), 1);
+    assert_eq!(
+        reader.read_string16().unwrap().as_deref(),
+        Some("android.content.pm.ProviderInfo")
+    );
 }
 
 #[test]
 fn uid_package_queries_distinguish_regular_isolated_compute_and_sdk_sandbox() {
-    use aim_binder_driver::{Driver,Device,Credentials,GuestProcess,Errno,File,errno,uapi::*};
-    use aim_binder_host::local::{LocalProcess,Service,Call,Reply};
-    use aim_binder_host::parcel::{Binder,UNKNOWN_TRANSACTION,EX_ILLEGAL_STATE};
+    use aim_binder_driver::{
+        Credentials, Device, Driver, Errno, File, GuestProcess, errno, uapi::*,
+    };
+    use aim_binder_host::local::{Call, LocalProcess, Reply, Service};
+    use aim_binder_host::parcel::{Binder, EX_ILLEGAL_STATE, UNKNOWN_TRANSACTION};
     use aim_service_aidl::dev_aim_server_ipackageresolutionpolicy as leaf;
     struct NoMemory;
     impl GuestProcess for NoMemory {
-        fn copy_from_user(&mut self,_:u64,_:&mut[u8])->Result<(),Errno>{Err(errno::EFAULT)}
-        fn copy_to_user(&mut self,_:u64,_:&[u8])->Result<(),Errno>{Err(errno::EFAULT)}
-        fn get_file(&mut self,_:u32)->Result<File,Errno>{Err(errno::EBADF)}
-        fn install_file(&mut self,_:File)->Result<u32,Errno>{Err(errno::EBADF)}
-        fn close_fd(&mut self,_:u32){panic!("unexpected fd")}
+        fn copy_from_user(&mut self, _: u64, _: &mut [u8]) -> Result<(), Errno> {
+            Err(errno::EFAULT)
+        }
+        fn copy_to_user(&mut self, _: u64, _: &[u8]) -> Result<(), Errno> {
+            Err(errno::EFAULT)
+        }
+        fn get_file(&mut self, _: u32) -> Result<File, Errno> {
+            Err(errno::EBADF)
+        }
+        fn install_file(&mut self, _: File) -> Result<u32, Errno> {
+            Err(errno::EBADF)
+        }
+        fn close_fd(&mut self, _: u32) {
+            panic!("unexpected fd")
+        }
     }
     struct Classification;
     impl Service for Classification {
-        fn descriptor(&self)->&str{leaf::DESCRIPTOR}
-        fn transact(&self,call:&mut Call<'_>)->Reply {
-            if call.code!=leaf::IS_KNOWN_ISOLATED_COMPUTE_APP{return Err(UNKNOWN_TRANSACTION)}
-            assert_eq!(call.sender_euid,1000);
-            let args=leaf::IsKnownIsolatedComputeApp::read(&mut call.data)?;
-            assert_eq!(call.data.remaining(),0);
-            let mut reply=Parcel::new();leaf::write_is_known_isolated_compute_app_reply(&mut reply,args.uid==99002);Ok(reply)
+        fn descriptor(&self) -> &str {
+            leaf::DESCRIPTOR
+        }
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            if call.code != leaf::IS_KNOWN_ISOLATED_COMPUTE_APP {
+                return Err(UNKNOWN_TRANSACTION);
+            }
+            assert_eq!(call.sender_euid, 1000);
+            let args = leaf::IsKnownIsolatedComputeApp::read(&mut call.data)?;
+            assert_eq!(call.data.remaining(), 0);
+            let mut reply = Parcel::new();
+            leaf::write_is_known_isolated_compute_app_reply(&mut reply, args.uid == 99002);
+            Ok(reply)
         }
     }
-    struct Processes {driver:Arc<Driver>,server:Arc<LocalProcess>,client:Arc<LocalProcess>}
-    impl Drop for Processes {fn drop(&mut self){self.driver.release(self.client.proc_handle());self.driver.release(self.server.proc_handle());}}
-    let driver=Driver::new();let open=|pid|LocalProcess::open(&driver,Device::Binder,Credentials{pid,euid:1000,security_context:None});
-    let server=open(99301);let client=open(99302);
-    let _guard=Processes{driver:driver.clone(),server:server.clone(),client:client.clone()};
-    let Binder::Local(ptr)=server.add_service(Arc::new(Classification))else{unreachable!()};
-    let mut object=FlatBinderObject{kind:BINDER_TYPE_BINDER,flags:0,binder:ptr,cookie:ptr}.encode();
-    driver.ioctl(server.proc_handle(),99303,BINDER_SET_CONTEXT_MGR_EXT,&mut object,&mut NoMemory).unwrap();server.start();client.start();
-    let mut state=state();state.system.resolution_policy=Some(crate::package::resolve::policy::Owner::new(client.strong(0)));
-    state.system.isolated_owners=vec![(99000,10100),(99002,10100)];
-    state.packages.insert("fixture.sdk".into(),package("fixture.sdk",10300,|ps,_|{
-        ps.users.insert(1,PackageUserState{installed:false,..Default::default()});
-    }));
-    state.system.sdk_sandbox_package=Some(Some("fixture.sdk".into()));
-    state.users.insert(1,User{id:1,..Default::default()});
-    let filter=AppsFilter::new(&state,&Default::default()).unwrap();
-    let query=Query{state:&state,filter:&filter,calling_uid:1000};
-    assert_eq!(query.packages_for_uid(99000).unwrap(),None); // AM owner alone is not compute classification.
-    assert_eq!(query.packages_for_uid(99001).unwrap(),None); // Unregistered isolated UID is an ordinary lookup miss.
-    assert_eq!(query.packages_for_uid(99002).unwrap(),Some(vec![Some(APP.into())]));
-    assert_eq!(query.packages_for_uid(20017).unwrap(),Some(vec![Some("fixture.sdk".into())]));
-    assert_eq!(query.packages_for_uid(120017).unwrap(),None); // Keep target user before base SDK UID substitution.
-    assert_eq!(query.name_for_uid(20017).unwrap().as_deref(),Some("fixture.sdk"));
-    assert_eq!(query.name_for_uid(99000).unwrap(),None);
-    assert_eq!(query.names_for_uids(Some(&[20017,99000,99002])).unwrap(),Some(vec![Some("fixture.sdk".into()),None,Some(APP.into())]));
-    let isolated=Query{state:&state,filter:&filter,calling_uid:99000};
-    assert_eq!(isolated.packages_for_uid(99000).unwrap(),None);
-    let reply=call(&state,1000,false,pm::GET_PACKAGES_FOR_UID,|parcel|pm::GetPackagesForUid{uid:99000}.write(parcel));
-    assert_eq!(pm::read_get_packages_for_uid_reply(&mut reply.reader()).unwrap().unwrap(),None);
-    state.system.isolated_owners.retain(|(uid,_)|*uid!=99002);
-    let filter=AppsFilter::new(&state,&Default::default()).unwrap();
-    let query=Query{state:&state,filter:&filter,calling_uid:1000};
-    assert_eq!(query.name_for_uid(99002).unwrap(),None); // Original name getter catches missing compute owner.
-    let reply=call(&state,1000,false,pm::GET_PACKAGES_FOR_UID,|parcel|pm::GetPackagesForUid{uid:99002}.write(parcel));
-    let error=reply.reader().read_exception().unwrap().unwrap_err();
-    assert_eq!(error.code,EX_ILLEGAL_STATE);assert_eq!(error.message,"No owner UID found for isolated UID 99002");
+    struct Processes {
+        driver: Arc<Driver>,
+        server: Arc<LocalProcess>,
+        client: Arc<LocalProcess>,
+    }
+    impl Drop for Processes {
+        fn drop(&mut self) {
+            self.driver.release(self.client.proc_handle());
+            self.driver.release(self.server.proc_handle());
+        }
+    }
+    let driver = Driver::new();
+    let open = |pid| {
+        LocalProcess::open(
+            &driver,
+            Device::Binder,
+            Credentials {
+                pid,
+                euid: 1000,
+                security_context: None,
+            },
+        )
+    };
+    let server = open(99301);
+    let client = open(99302);
+    let _guard = Processes {
+        driver: driver.clone(),
+        server: server.clone(),
+        client: client.clone(),
+    };
+    let Binder::Local(ptr) = server.add_service(Arc::new(Classification)) else {
+        unreachable!()
+    };
+    let mut object = FlatBinderObject {
+        kind: BINDER_TYPE_BINDER,
+        flags: 0,
+        binder: ptr,
+        cookie: ptr,
+    }
+    .encode();
+    driver
+        .ioctl(
+            server.proc_handle(),
+            99303,
+            BINDER_SET_CONTEXT_MGR_EXT,
+            &mut object,
+            &mut NoMemory,
+        )
+        .unwrap();
+    server.start();
+    client.start();
+    let mut state = state();
+    state.system.resolution_policy = Some(crate::package::resolve::policy::Owner::new(
+        client.strong(0),
+    ));
+    state.system.isolated_owners = vec![(99000, 10100), (99002, 10100)];
+    state.packages.insert(
+        "fixture.sdk".into(),
+        package("fixture.sdk", 10300, |ps, _| {
+            ps.users.insert(
+                1,
+                PackageUserState {
+                    installed: false,
+                    ..Default::default()
+                },
+            );
+        }),
+    );
+    state.system.sdk_sandbox_package = Some(Some("fixture.sdk".into()));
+    state.users.insert(
+        1,
+        User {
+            id: 1,
+            ..Default::default()
+        },
+    );
+    let filter = AppsFilter::new(&state, &Default::default()).unwrap();
+    let query = Query {
+        state: &state,
+        filter: &filter,
+        calling_uid: 1000,
+    };
+    assert_eq!(query.packages_for_uid(99000).unwrap(), None); // AM owner alone is not compute classification.
+    assert_eq!(query.packages_for_uid(99001).unwrap(), None); // Unregistered isolated UID is an ordinary lookup miss.
+    assert_eq!(
+        query.packages_for_uid(99002).unwrap(),
+        Some(vec![Some(APP.into())])
+    );
+    assert_eq!(
+        query.packages_for_uid(20017).unwrap(),
+        Some(vec![Some("fixture.sdk".into())])
+    );
+    assert_eq!(query.packages_for_uid(120017).unwrap(), None); // Keep target user before base SDK UID substitution.
+    assert_eq!(
+        query.name_for_uid(20017).unwrap().as_deref(),
+        Some("fixture.sdk")
+    );
+    assert_eq!(query.name_for_uid(99000).unwrap(), None);
+    assert_eq!(
+        query.names_for_uids(Some(&[20017, 99000, 99002])).unwrap(),
+        Some(vec![Some("fixture.sdk".into()), None, Some(APP.into())])
+    );
+    let isolated = Query {
+        state: &state,
+        filter: &filter,
+        calling_uid: 99000,
+    };
+    assert_eq!(isolated.packages_for_uid(99000).unwrap(), None);
+    let reply = call(&state, 1000, false, pm::GET_PACKAGES_FOR_UID, |parcel| {
+        pm::GetPackagesForUid { uid: 99000 }.write(parcel)
+    });
+    assert_eq!(
+        pm::read_get_packages_for_uid_reply(&mut reply.reader())
+            .unwrap()
+            .unwrap(),
+        None
+    );
+    state
+        .system
+        .isolated_owners
+        .retain(|(uid, _)| *uid != 99002);
+    let filter = AppsFilter::new(&state, &Default::default()).unwrap();
+    let query = Query {
+        state: &state,
+        filter: &filter,
+        calling_uid: 1000,
+    };
+    assert_eq!(query.name_for_uid(99002).unwrap(), None); // Original name getter catches missing compute owner.
+    let reply = call(&state, 1000, false, pm::GET_PACKAGES_FOR_UID, |parcel| {
+        pm::GetPackagesForUid { uid: 99002 }.write(parcel)
+    });
+    let error = reply.reader().read_exception().unwrap().unwrap_err();
+    assert_eq!(error.code, EX_ILLEGAL_STATE);
+    assert_eq!(error.message, "No owner UID found for isolated UID 99002");
 }
 
 #[test]
 fn am_default_only_resolution_differs_from_unfiltered_launcher_query() {
-    use crate::package::{intent::{Intent,ComponentName},intent_filter::{IntentFilter,ParsedIntentInfo},resolve::Resolution};
-    let mut state=state();state.users.retain(|user,_|*user==0);
-    let package=state.packages.get_mut(APP).unwrap();package.users.get_mut(&0).unwrap().stopped=true;
-    let code=Arc::make_mut(package.pkg.as_mut().unwrap());code.target_sdk_version=28;
-    let mut filter=IntentFilter::default();filter.add_action("android.intent.action.MAIN");filter.add_category("android.intent.category.LAUNCHER");
-    let mut activity=crate::package::pkg::Activity::default();activity.main.component.name="fixture.Launcher".into();
-    activity.main.component.package_name=APP.into();activity.main.component.intents=vec![ParsedIntentInfo{filter,has_default:false,..Default::default()}];
-    activity.main.enabled=true;activity.main.exported=true;activity.main.direct_boot_aware=true;code.activities=vec![activity];
-    let resolution=Resolution::new(Arc::new(state),&Default::default()).unwrap();
-    let intent=Intent{action:Some("android.intent.action.MAIN".into()),categories:Some(vec!["android.intent.category.LAUNCHER".into()]),package:Some(APP.into()),flags:0x10000000,..Default::default()};
-    let ordinary=resolution.resolve_intent(&intent,None,0,0,0).unwrap().unwrap();
-    assert_eq!(ordinary.component().1,"fixture.Launcher");assert!(!ordinary.is_default);
+    use crate::package::{
+        intent::{ComponentName, Intent},
+        intent_filter::{IntentFilter, ParsedIntentInfo},
+        resolve::Resolution,
+    };
+    let mut state = state();
+    state.users.retain(|user, _| *user == 0);
+    let package = state.packages.get_mut(APP).unwrap();
+    package.users.get_mut(&0).unwrap().stopped = true;
+    let code = Arc::make_mut(package.pkg.as_mut().unwrap());
+    code.target_sdk_version = 28;
+    let mut filter = IntentFilter::default();
+    filter.add_action("android.intent.action.MAIN");
+    filter.add_category("android.intent.category.LAUNCHER");
+    let mut activity = crate::package::pkg::Activity::default();
+    activity.main.component.name = "fixture.Launcher".into();
+    activity.main.component.package_name = APP.into();
+    activity.main.component.intents = vec![ParsedIntentInfo {
+        filter,
+        has_default: false,
+        ..Default::default()
+    }];
+    activity.main.enabled = true;
+    activity.main.exported = true;
+    activity.main.direct_boot_aware = true;
+    code.activities = vec![activity];
+    let resolution = Resolution::new(Arc::new(state), &Default::default()).unwrap();
+    let intent = Intent {
+        action: Some("android.intent.action.MAIN".into()),
+        categories: Some(vec!["android.intent.category.LAUNCHER".into()]),
+        package: Some(APP.into()),
+        flags: 0x10000000,
+        ..Default::default()
+    };
+    let ordinary = resolution
+        .resolve_intent(&intent, None, 0, 0, 0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ordinary.component().1, "fixture.Launcher");
+    assert!(!ordinary.is_default);
     // Actual ActivityTaskSupervisor image uses MATCH_DEFAULT_ONLY | GET_SHARED_LIBRARY_FILES.
-    let flags=0x10400;
-    assert!(resolution.resolve_intent_internal_record(Some(&intent),None,flags,0,0,true,0,1,1000,1).unwrap().is_none());
-    let explicit=Intent{component:Some(ComponentName{package:APP.into(),class:"fixture.Launcher".into()}),..intent.clone()};
-    assert!(resolution.resolve_intent_internal_record(Some(&explicit),None,flags,0,0,true,0,1,1000,1).unwrap().is_some());
+    let flags = 0x10400;
+    assert!(
+        resolution
+            .resolve_intent_internal_record(Some(&intent), None, flags, 0, 0, true, 0, 1, 1000, 1)
+            .unwrap()
+            .is_none()
+    );
+    let explicit = Intent {
+        component: Some(ComponentName {
+            package: APP.into(),
+            class: "fixture.Launcher".into(),
+        }),
+        ..intent.clone()
+    };
+    assert!(
+        resolution
+            .resolve_intent_internal_record(Some(&explicit), None, flags, 0, 0, true, 0, 1, 1000, 1)
+            .unwrap()
+            .is_some()
+    );
 }

@@ -1,9 +1,5 @@
 //! Facade snapshot scopes using real original PackageSetting objects/interfaces.
-use std::{
-    fs,
-    process::Command,
-    time::Duration,
-};
+use std::{fs, process::Command, time::Duration};
 mod common {
     pub mod java;
     pub mod runtime;
@@ -37,12 +33,19 @@ fn facade_package_snapshots_use_original_interfaces_and_preserve_capture_scope()
         .arg(&classes)
         .arg("-classpath")
         .arg(&classpath)
-        .args([
-            "PackageSnapshotsOracle.java",
-            "PackageUsageOracle.java",
-            "SharedSeInfoOracle.java",
-            "SharedProcessesOracle.java",
-        ].map(|name| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name))));
+        .args(
+            [
+                "PackageSnapshotsOracle.java",
+                "PackageUsageOracle.java",
+                "SharedSeInfoOracle.java",
+                "SharedProcessesOracle.java",
+            ]
+            .map(|name| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures")
+                    .join(name)
+            }),
+        ));
     let mut pending = vec![classes.clone(), production];
     let mut class_files = Vec::new();
     while let Some(dir) = pending.pop() {
@@ -76,14 +79,21 @@ fn facade_package_snapshots_use_original_interfaces_and_preserve_capture_scope()
         &common::runtime::cohort::original_image(),
         "systemserverclasspath.pb",
         aim_android_image::classpath::SYSTEMSERVERCLASSPATH,
-    ).unwrap();
+    )
+    .unwrap();
     let jars = system_jars.iter().map(String::as_str).collect::<Vec<_>>();
     common::java::check_linkage(&dex.join("classes.dex"), &jars).unwrap();
-    let guest_classpath = format!("-Djava.class.path=/data/local/tmp/package-snapshots.dex:{}",
-        system_jars.join(":"));
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
+    let guest_classpath = format!(
+        "-Djava.class.path=/data/local/tmp/package-snapshots.dex:{}",
+        system_jars.join(":")
+    );
+    let boot = Boot::new(
+        aim_paths::root().join("target/release/aimctl"),
+        data.0.join("g"),
+    );
     run(boot.start_command().args(["start", "--windows"]));
-    boot.wait_ready(Duration::from_secs(300)).expect("package_snapshots oracle boot readiness");
+    boot.wait_ready(Duration::from_secs(300))
+        .expect("package_snapshots oracle boot readiness");
 
     fs::copy(
         dex.join("classes.dex"),

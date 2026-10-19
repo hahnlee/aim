@@ -62,83 +62,116 @@ impl System {
                     "archive system stopped",
                 )
             })?;
-            Ok(system.capture_package_queries_for(&retained)?.state().clone())
+            Ok(system
+                .capture_package_queries_for(&retained)?
+                .state()
+                .clone())
         });
         let keep = self.package_customization()?;
         let policy_external = external.clone();
         let policy_installer = Arc::downgrade(&installer);
         let retained_keep = keep.clone();
-        let admission = Arc::new(move |query: &crate::package::query::Query<'_>, request: &removal::Request| {
-            let device = policy_installer.upgrade().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "native archive installer owner closed"))?.archiver_device_policy(request.uid, request.user)?;
-            let roles = query.state.system.roles.as_ref().ok_or_else(|| {
-                Exception::new(
-                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                    "native removal known-package owner unavailable",
-                )
-            })?;
-            let verifiers = roles
-                .known_packages(query, 4, request.user)
-                .map_err(crate::package::installer::policy::unknown)?
-                .into_iter()
-                .flatten()
-                .collect();
-            let uninstaller = roles
-                .known_packages(query, 3, request.user)
-                .map_err(crate::package::installer::policy::unknown)?
-                .into_iter()
-                .flatten()
-                .next();
-            let um = query.state.system.user_policy.as_ref().ok_or_else(|| {
-                Exception::new(
-                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                    "native removal role owner unavailable",
-                )
-            })?;
-            let caller = query
-                .packages_for_uid(request.uid as i32)
-                .map_err(crate::package::installer::policy::unknown)?
-                .unwrap_or_default();
-            let has_role = |role: &str| -> Result<bool> {
-                let holders = um.role_holders(role, request.user)?;
-                Ok(caller.iter().flatten().any(|name| holders.contains(name)))
-            };
-            let privileged_identity = matches!(request.uid, 0 | 2000)
-                || crate::package::apps_filter::app_id(request.uid as i32) == 1000;
-            Ok(removal::AdmissionPolicy {
-                device,
-                can_silently_install: !privileged_identity && policy_external
-                    .silent(request.uid, request.caller_package.as_deref())?,
-                emergency_installer: has_role("android.app.role.EMERGENCY")?,
-                system_protection_role: has_role("android.app.role.SYSTEM_PROTECTION")?,
-                pinned: !request.package.is_empty() && policy_external.pinned(&request.package)?,
-                verifier_packages: verifiers,
-                uninstaller_package: uninstaller,
-                storage_manager_package: storage_manager_package.clone(),
-                keep_uninstalled: retained_keep.should_keep(Some(&request.package)),
-            })
-        });
+        let admission = Arc::new(
+            move |query: &crate::package::query::Query<'_>, request: &removal::Request| {
+                let device = policy_installer
+                    .upgrade()
+                    .ok_or_else(|| {
+                        Exception::new(
+                            aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                            "native archive installer owner closed",
+                        )
+                    })?
+                    .archiver_device_policy(request.uid, request.user)?;
+                let roles = query.state.system.roles.as_ref().ok_or_else(|| {
+                    Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        "native removal known-package owner unavailable",
+                    )
+                })?;
+                let verifiers = roles
+                    .known_packages(query, 4, request.user)
+                    .map_err(crate::package::installer::policy::unknown)?
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                let uninstaller = roles
+                    .known_packages(query, 3, request.user)
+                    .map_err(crate::package::installer::policy::unknown)?
+                    .into_iter()
+                    .flatten()
+                    .next();
+                let um = query.state.system.user_policy.as_ref().ok_or_else(|| {
+                    Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        "native removal role owner unavailable",
+                    )
+                })?;
+                let caller = query
+                    .packages_for_uid(request.uid as i32)
+                    .map_err(crate::package::installer::policy::unknown)?
+                    .unwrap_or_default();
+                let has_role = |role: &str| -> Result<bool> {
+                    let holders = um.role_holders(role, request.user)?;
+                    Ok(caller.iter().flatten().any(|name| holders.contains(name)))
+                };
+                let privileged_identity = matches!(request.uid, 0 | 2000)
+                    || crate::package::apps_filter::app_id(request.uid as i32) == 1000;
+                Ok(removal::AdmissionPolicy {
+                    device,
+                    can_silently_install: !privileged_identity
+                        && policy_external
+                            .silent(request.uid, request.caller_package.as_deref())?,
+                    emergency_installer: has_role("android.app.role.EMERGENCY")?,
+                    system_protection_role: has_role("android.app.role.SYSTEM_PROTECTION")?,
+                    pinned: !request.package.is_empty()
+                        && policy_external.pinned(&request.package)?,
+                    verifier_packages: verifiers,
+                    uninstaller_package: uninstaller,
+                    storage_manager_package: storage_manager_package.clone(),
+                    keep_uninstalled: retained_keep.should_keep(Some(&request.package)),
+                })
+            },
+        );
         let policy_external = external.clone();
-        let removal_policy = Arc::new(move |query: &crate::package::query::Query<'_>, request: &removal::Request| {
-            let users = policy_external.users()?;
-            let mut admins = BTreeSet::new();
-            let mut protected = BTreeSet::new();
-            let mut restricted = BTreeSet::new();
-            let mut children = BTreeMap::new();
-            let security = query.state.system.security_policy.as_ref().ok_or_else(|| {
-                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                    "native removal protection owner unavailable")
-            })?;
-            for &user in &users {
-                if policy_external.active_admin(&request.package, user)? { admins.insert(user); }
-                if security.protected(user, Some(&request.package)) { protected.insert(user); }
-                if policy_external.restricted(user)? { restricted.insert(user); }
-                children.insert(user, policy_external.children(user)?);
-            }
-            Ok(removal::RemovalPolicy { admins, protected, uninstall_restricted: restricted,
-                users, child_users: children,
-                sdk_library_independence: policy_external.sdk_library_independence()? })
-        });
-        let policy = removal::PolicySource { admission, removal: removal_policy };
+        let removal_policy = Arc::new(
+            move |query: &crate::package::query::Query<'_>, request: &removal::Request| {
+                let users = policy_external.users()?;
+                let mut admins = BTreeSet::new();
+                let mut protected = BTreeSet::new();
+                let mut restricted = BTreeSet::new();
+                let mut children = BTreeMap::new();
+                let security = query.state.system.security_policy.as_ref().ok_or_else(|| {
+                    Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        "native removal protection owner unavailable",
+                    )
+                })?;
+                for &user in &users {
+                    if policy_external.active_admin(&request.package, user)? {
+                        admins.insert(user);
+                    }
+                    if security.protected(user, Some(&request.package)) {
+                        protected.insert(user);
+                    }
+                    if policy_external.restricted(user)? {
+                        restricted.insert(user);
+                    }
+                    children.insert(user, policy_external.children(user)?);
+                }
+                Ok(removal::RemovalPolicy {
+                    admins,
+                    protected,
+                    uninstall_restricted: restricted,
+                    users,
+                    child_users: children,
+                    sdk_library_independence: policy_external.sdk_library_independence()?,
+                })
+            },
+        );
+        let policy = removal::PolicySource {
+            admission,
+            removal: removal_policy,
+        };
         let system = Arc::downgrade(self);
         let retained = bridge.clone();
         let factory_restore = Arc::new(move |plan: &removal::Plan| {
@@ -152,18 +185,28 @@ impl System {
         });
         let weak = Arc::downgrade(self);
         let retained = bridge.clone();
-        let preferred_removal: removal::PreferredRemoval = Arc::new(move |name, user, keep_data| {
-            let system = weak.upgrade().ok_or_else(|| Exception::new(
-                aim_binder_host::parcel::EX_ILLEGAL_STATE, "removed preferred system stopped"))?;
-            let effects = system.clear_removed_package_preferred(&retained, name, user, keep_data)?;
-            let weak = Arc::downgrade(&system);
-            let retained = retained.clone();
-            Ok(removal::PostCommitEffect::Deferred(Arc::new(move || {
-                let system = weak.upgrade().ok_or_else(|| Exception::new(
-                    aim_binder_host::parcel::EX_ILLEGAL_STATE, "removed preferred completion stopped"))?;
-                system.finish_removed_package_preferred(&retained, effects.clone())
-            })))
-        });
+        let preferred_removal: removal::PreferredRemoval =
+            Arc::new(move |name, user, keep_data| {
+                let system = weak.upgrade().ok_or_else(|| {
+                    Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        "removed preferred system stopped",
+                    )
+                })?;
+                let effects =
+                    system.clear_removed_package_preferred(&retained, name, user, keep_data)?;
+                let weak = Arc::downgrade(&system);
+                let retained = retained.clone();
+                Ok(removal::PostCommitEffect::Deferred(Arc::new(move || {
+                    let system = weak.upgrade().ok_or_else(|| {
+                        Exception::new(
+                            aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                            "removed preferred completion stopped",
+                        )
+                    })?;
+                    system.finish_removed_package_preferred(&retained, effects.clone())
+                })))
+            });
         let removal = Arc::new(removal::Controller {
             store: native_store.clone(),
             source: source.clone(),
@@ -234,22 +277,62 @@ impl System {
                     objects: parcel.objects().to_vec(),
                 });
             }
-            draft_installer.upgrade().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "native archive installer owner closed"))?.archiver_record(params, store, user)
+            draft_installer
+                .upgrade()
+                .ok_or_else(|| {
+                    Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        "native archive installer owner closed",
+                    )
+                })?
+                .archiver_record(params, store, user)
         });
         let save_installer = Arc::downgrade(&installer);
-        let save = Arc::new(move || save_installer.upgrade().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "native archive installer owner closed"))?.archiver_save_sessions());
-        let drafts =
-            archiver::Drafts::new(installer.sessions.clone(), create, save, Arc::downgrade(&(installer.clone() as Arc<dyn crate::package::installer::SessionOperations>)));
+        let save = Arc::new(move || {
+            save_installer
+                .upgrade()
+                .ok_or_else(|| {
+                    Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        "native archive installer owner closed",
+                    )
+                })?
+                .archiver_save_sessions()
+        });
+        let drafts = archiver::Drafts::new(
+            installer.sessions.clone(),
+            create,
+            save,
+            Arc::downgrade(
+                &(installer.clone() as Arc<dyn crate::package::installer::SessionOperations>),
+            ),
+        );
         let record_installer = Arc::downgrade(&installer);
         let archived_record = Arc::new(move |params, store: &str, user, uid| {
-            record_installer.upgrade().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "native archive installer owner closed"))?.archived_install_record(params, store, user, uid)
+            record_installer
+                .upgrade()
+                .ok_or_else(|| {
+                    Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        "native archive installer owner closed",
+                    )
+                })?
+                .archived_install_record(params, store, user, uid)
         });
         let stage_installer = Arc::downgrade(&installer);
         let prepare = Arc::new(
             move |session: &crate::package::installer::Session,
                   record: &crate::package::installer::Record,
                   _archived: &archiver::ArchivedPackage| {
-                stage_installer.upgrade().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "native archive installer owner closed"))?.archiver_prepare_stage(session, record)
+                stage_installer
+                    .upgrade()
+                    .ok_or_else(|| {
+                        Exception::new(
+                            aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                            "native archive installer owner closed",
+                        )
+                    })?
+                    .archiver_prepare_stage(session, record)
             },
         );
         let archiver = Arc::new(archiver::Owner {

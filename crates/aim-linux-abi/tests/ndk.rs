@@ -209,10 +209,16 @@ fn pseudo_terminals() {
     };
     let guest = Guest::new(&image, "t_pty");
     let program = guest.build(&clang, "t_pty");
-    for args in [vec![program.as_str()], vec![program.as_str(), "--allocate-close"]] {
+    for args in [
+        vec![program.as_str()],
+        vec![program.as_str(), "--allocate-close"],
+    ] {
         let (ok, output) = guest.run(&args);
         println!("{output}");
-        assert!(ok && output.contains("PASS"), "PTY owner process lifecycle failed: {output}");
+        assert!(
+            ok && output.contains("PASS"),
+            "PTY owner process lifecycle failed: {output}"
+        );
     }
 }
 

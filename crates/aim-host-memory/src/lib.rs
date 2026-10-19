@@ -129,11 +129,20 @@ pub fn available() -> u64 {
     // SAFETY: HOST_VM_INFO64 into a vm_statistics64 of `count` words.
     #[allow(deprecated)]
     let ok = unsafe {
-        libc::host_statistics64(libc::mach_host_self(), libc::HOST_VM_INFO64, (&raw mut vm).cast(), &mut count)
+        libc::host_statistics64(
+            libc::mach_host_self(),
+            libc::HOST_VM_INFO64,
+            (&raw mut vm).cast(),
+            &mut count,
+        )
     } == 0;
     // SAFETY: plain sysconf.
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
-    if ok { (vm.free_count as u64 + vm.inactive_count as u64) * page } else { 0 }
+    if ok {
+        (vm.free_count as u64 + vm.inactive_count as u64) * page
+    } else {
+        0
+    }
 }
 
 /// The Mac's physical memory, in bytes (`MemTotal`, `totalram`).

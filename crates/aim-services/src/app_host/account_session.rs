@@ -17,7 +17,8 @@ use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, Exception, Parcel};
 use aim_service_aidl::{
     WriteParcelable, android_accounts_iaccountauthenticator as authenticator,
-    android_accounts_iaccountauthenticatorresponse as auth_response, android_accounts_iaccountmanagerresponse as response,
+    android_accounts_iaccountauthenticatorresponse as auth_response,
+    android_accounts_iaccountmanagerresponse as response,
 };
 
 use super::AppHost;
@@ -53,14 +54,30 @@ pub(super) type AccountsOfType = Box<dyn FnOnce() -> Result<Vec<Account>, String
 /// What a session asks of its authenticator.
 pub(super) enum Work {
     /// `GetAccountsByTypeAndFeatureSession`.
-    Features { features: Vec<String>, accounts_of_type: Option<AccountsOfType>, accounts: Vec<Account>, current: usize, with_features: Vec<Account> },
+    Features {
+        features: Vec<String>,
+        accounts_of_type: Option<AccountsOfType>,
+        accounts: Vec<Account>,
+        current: usize,
+        with_features: Vec<Account>,
+    },
     /// `addAccount`'s `run`: the options with the caller's uid and pid.
-    AddAccount { auth_token_type: Option<String>, required_features: Option<Vec<Option<String>>>, options: RawBundle },
+    AddAccount {
+        auth_token_type: Option<String>,
+        required_features: Option<Vec<Option<String>>>,
+        options: RawBundle,
+    },
 }
 
 impl Work {
     pub(super) fn features(features: Vec<String>, accounts_of_type: AccountsOfType) -> Work {
-        Work::Features { features, accounts_of_type: Some(accounts_of_type), accounts: Vec::new(), current: 0, with_features: Vec::new() }
+        Work::Features {
+            features,
+            accounts_of_type: Some(accounts_of_type),
+            accounts: Vec::new(),
+            current: 0,
+            with_features: Vec::new(),
+        }
     }
 }
 
@@ -124,7 +141,11 @@ impl Session {
             kind,
             binder: Mutex::new(None),
             connection: Arc::new(Connection(me.clone())),
-            state: Mutex::new(State { response: None, authenticator: None, work }),
+            state: Mutex::new(State {
+                response: None,
+                authenticator: None,
+                work,
+            }),
         });
         *session.binder.lock().unwrap() = Some(host.process.add_service(session.clone()));
         let weak = Arc::downgrade(&session);
@@ -158,7 +179,15 @@ impl Session {
     /// cannot be.
     pub(super) fn bind(&self, component: Option<(&str, &str)>) {
         let bound = component.map(|(package, class)| {
-            self.host.bind_service_from_host(Some(ACTION_AUTHENTICATOR_INTENT), package, class, 0, BIND_AUTO_CREATE, self.kind.user, self.connection.clone())
+            self.host.bind_service_from_host(
+                Some(ACTION_AUTHENTICATOR_INTENT),
+                package,
+                class,
+                0,
+                BIND_AUTO_CREATE,
+                self.kind.user,
+                self.connection.clone(),
+            )
         });
         match bound {
             Some(Ok(true)) => {}
@@ -175,8 +204,16 @@ impl Session {
         let mut state = self.state.lock().unwrap();
         state.authenticator = Some(self.host.process.strong(handle));
         match &mut state.work {
-            Work::Features { accounts_of_type, accounts, current, with_features, .. } => {
-                let Some(read) = accounts_of_type.take() else { return };
+            Work::Features {
+                accounts_of_type,
+                accounts,
+                current,
+                with_features,
+                ..
+            } => {
+                let Some(read) = accounts_of_type.take() else {
+                    return;
+                };
                 match read() {
                     Ok(read) => {
                         *accounts = read;
@@ -192,8 +229,14 @@ impl Session {
                 drop(state);
                 self.check_account();
             }
-            Work::AddAccount { auth_token_type, required_features, options } => {
-                let Some(binder) = *self.binder.lock().unwrap() else { return };
+            Work::AddAccount {
+                auth_token_type,
+                required_features,
+                options,
+            } => {
+                let Some(binder) = *self.binder.lock().unwrap() else {
+                    return;
+                };
                 let mut p = Parcel::new();
                 authenticator::AddAccount {
                     response: Some(binder),
@@ -204,7 +247,12 @@ impl Session {
                 }
                 .write(&mut p);
                 drop(state);
-                if self.host.process.transact(handle, authenticator::ADD_ACCOUNT, &p, true).is_err() {
+                if self
+                    .host
+                    .process
+                    .transact(handle, authenticator::ADD_ACCOUNT, &p, true)
+                    .is_err()
+                {
                     self.respond_error(ERROR_CODE_REMOTE_EXCEPTION, "remote exception");
                 }
             }
@@ -215,18 +263,40 @@ impl Session {
     fn check_account(&self) {
         let (authenticator, account, features) = {
             let state = self.state.lock().unwrap();
-            let Work::Features { features, accounts, current, .. } = &state.work else { return };
+            let Work::Features {
+                features,
+                accounts,
+                current,
+                ..
+            } = &state.work
+            else {
+                return;
+            };
             if *current >= accounts.len() {
                 drop(state);
                 return self.send_features_result();
             }
-            let Some(authenticator) = state.authenticator.as_ref().map(|a| a.handle) else { return };
+            let Some(authenticator) = state.authenticator.as_ref().map(|a| a.handle) else {
+                return;
+            };
             (authenticator, accounts[*current].clone(), features.clone())
         };
-        let Some(binder) = *self.binder.lock().unwrap() else { return };
+        let Some(binder) = *self.binder.lock().unwrap() else {
+            return;
+        };
         let mut p = Parcel::new();
-        authenticator::HasFeatures { response: Some(binder), account: Some(account), features: Some(features.into_iter().map(Some).collect()) }.write(&mut p);
-        if self.host.process.transact(authenticator, authenticator::HAS_FEATURES, &p, true).is_err() {
+        authenticator::HasFeatures {
+            response: Some(binder),
+            account: Some(account),
+            features: Some(features.into_iter().map(Some).collect()),
+        }
+        .write(&mut p);
+        if self
+            .host
+            .process
+            .transact(authenticator, authenticator::HAS_FEATURES, &p, true)
+            .is_err()
+        {
             self.respond_error(ERROR_CODE_REMOTE_EXCEPTION, "remote exception");
         }
     }
@@ -237,7 +307,9 @@ impl Session {
             Work::Features { with_features, .. } => std::mem::take(with_features),
             Work::AddAccount { .. } => return,
         };
-        let Some(response) = self.response_and_close() else { return };
+        let Some(response) = self.response_and_close() else {
+            return;
+        };
         let items = accounts
             .iter()
             .map(|a| {
@@ -256,9 +328,20 @@ impl Session {
     /// `checkKeyIntent` of the authenticator `auth_uid`'s `bundle`: the
     /// bundle with its `KEY_INTENT` resolved to its activity and given
     /// clip data, or none if the intent may not be launched.
-    fn check_key_intent(&self, auth_uid: i32, bundle: RawBundle) -> Result<Option<RawBundle>, Exception> {
-        let invalid = |e| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, format!("accounts: {e:?}"));
-        let Some((class, intent)) = bundle.intent(KEY_INTENT).map_err(invalid)? else { return Ok(Some(bundle)) };
+    fn check_key_intent(
+        &self,
+        auth_uid: i32,
+        bundle: RawBundle,
+    ) -> Result<Option<RawBundle>, Exception> {
+        let invalid = |e| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                format!("accounts: {e:?}"),
+            )
+        };
+        let Some((class, intent)) = bundle.intent(KEY_INTENT).map_err(invalid)? else {
+            return Ok(Some(bundle));
+        };
         // `checkKeyIntentParceledCorrectly`.
         if class != "android.content.Intent" || intent.intent.flags & PROHIBITED_FLAGS != 0 {
             return Ok(None);
@@ -267,22 +350,47 @@ impl Session {
         let (state, resolution) = self.host.packages()?;
         let resolved = resolution
             .resolve_intent(&intent.intent, None, 0, self.kind.user, 1000)
-            .map_err(|e| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, format!("accounts: resolveActivity: {e:?}")))?;
-        let Some(crate::package::component_resolver::Info::Activity(target)) = resolved.map(|r| r.info) else { return Ok(None) };
+            .map_err(|e| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    format!("accounts: resolveActivity: {e:?}"),
+                )
+            })?;
+        let Some(crate::package::component_resolver::Info::Activity(target)) =
+            resolved.map(|r| r.info)
+        else {
+            return Ok(None);
+        };
         if intent.intent.scheme() == Some("content") {
             return Ok(None);
         }
-        let package = target.info.application_info.item.package_name.clone().unwrap_or_default();
+        let package = target
+            .info
+            .application_info
+            .item
+            .package_name
+            .clone()
+            .unwrap_or_default();
         let name = target.info.item.name.clone().unwrap_or_default();
         let system_activity = package == "android" && name == CANT_ADD_ACCOUNT_ACTIVITY;
-        if !system_activity && !super::account_service::has_auth_capability(&state, target.info.application_info.uid, auth_uid) {
+        if !system_activity
+            && !super::account_service::has_auth_capability(
+                &state,
+                target.info.application_info.uid,
+                auth_uid,
+            )
+        {
             eprintln!(
                 "app host: accounts: KEY_INTENT resolved to an Activity ({name}) in a package ({package}) that does not share a signature with the supplying authenticator ({}).",
                 self.kind.account_type
             );
             return Ok(None);
         }
-        Ok(Some(bundle.with_intent(KEY_INTENT, &intent.with_component(&package, &name)).map_err(invalid)?))
+        Ok(Some(
+            bundle
+                .with_intent(KEY_INTENT, &intent.with_component(&package, &name))
+                .map_err(invalid)?,
+        ))
     }
 
     /// `Session.onResult` of the authenticator `auth_uid`'s `bundle`.
@@ -290,30 +398,52 @@ impl Session {
         let Some(bundle) = bundle else {
             if let Some(response) = self.response_and_close() {
                 let mut p = Parcel::new();
-                response::OnError { error_code: ERROR_CODE_INVALID_RESPONSE, error_message: Some("null bundle returned".into()) }.write(&mut p);
+                response::OnError {
+                    error_code: ERROR_CODE_INVALID_RESPONSE,
+                    error_message: Some("null bundle returned".into()),
+                }
+                .write(&mut p);
                 let _ = response.transact(response::ON_ERROR, &p, true);
             }
             return Ok(());
         };
         let Some(bundle) = self.check_key_intent(auth_uid, bundle)? else {
-            self.respond_error(ERROR_CODE_INVALID_RESPONSE, "invalid intent in bundle returned");
+            self.respond_error(
+                ERROR_CODE_INVALID_RESPONSE,
+                "invalid intent in bundle returned",
+            );
             return Ok(());
         };
         // A sign-in notification of the account would be cancelled here
         // for a result with an auth token; the app host posts none.
-        let launches = self.kind.expect_activity_launch && bundle.intent(KEY_INTENT).ok().flatten().is_some();
+        let launches =
+            self.kind.expect_activity_launch && bundle.intent(KEY_INTENT).ok().flatten().is_some();
         let response = if launches {
-            self.state.lock().unwrap().response.as_ref().map(|(s, _)| self.host.process.strong(s.handle))
+            self.state
+                .lock()
+                .unwrap()
+                .response
+                .as_ref()
+                .map(|(s, _)| self.host.process.strong(s.handle))
         } else {
             self.response_and_close()
         };
-        let Some(response) = response else { return Ok(()) };
+        let Some(response) = response else {
+            return Ok(());
+        };
         let bundle = if self.kind.strip_auth_token {
-            match bundle.without(KEY_AUTHTOKEN).ok().map(|b| self.check_key_intent(auth_uid, b)) {
+            match bundle
+                .without(KEY_AUTHTOKEN)
+                .ok()
+                .map(|b| self.check_key_intent(auth_uid, b))
+            {
                 Some(Ok(Some(b))) => b,
                 Some(Err(e)) => return Err(e),
                 _ => {
-                    self.respond_error(ERROR_CODE_INVALID_RESPONSE, "invalid intent in bundle returned");
+                    self.respond_error(
+                        ERROR_CODE_INVALID_RESPONSE,
+                        "invalid intent in bundle returned",
+                    );
                     return Ok(());
                 }
             }
@@ -322,7 +452,10 @@ impl Session {
         };
         let mut raw = Parcel::new();
         bundle.write_to(&mut raw);
-        let entries = crate::bundle::read(&mut raw.reader()).ok().flatten().unwrap_or_default();
+        let entries = crate::bundle::read(&mut raw.reader())
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         match (entries.get(KEY_ERROR_CODE), entries.get(KEY_ERROR_MESSAGE)) {
             (Some(Value::Int(code)), message) if *code > 0 => {
                 let message = match message {
@@ -330,7 +463,11 @@ impl Session {
                     _ => None,
                 };
                 let mut p = Parcel::new();
-                response::OnError { error_code: *code, error_message: message }.write(&mut p);
+                response::OnError {
+                    error_code: *code,
+                    error_message: message,
+                }
+                .write(&mut p);
                 let _ = response.transact(response::ON_ERROR, &p, true);
             }
             _ => on_result(&response, &bundle),
@@ -341,9 +478,15 @@ impl Session {
     /// The caller told `code` and `message` (`onError`, `onTimedOut`,
     /// `onServiceDisconnected`), the session closed.
     fn respond_error(&self, code: i32, message: &str) {
-        let Some(response) = self.response_and_close() else { return };
+        let Some(response) = self.response_and_close() else {
+            return;
+        };
         let mut p = Parcel::new();
-        response::OnError { error_code: code, error_message: Some(message.into()) }.write(&mut p);
+        response::OnError {
+            error_code: code,
+            error_message: Some(message.into()),
+        }
+        .write(&mut p);
         let _ = response.transact(response::ON_ERROR, &p, true);
     }
 
@@ -361,7 +504,10 @@ impl Session {
     fn close(&self) {
         let bound = {
             let mut state = self.state.lock().unwrap();
-            if let Work::Features { accounts_of_type, .. } = &mut state.work {
+            if let Work::Features {
+                accounts_of_type, ..
+            } = &mut state.work
+            {
                 *accounts_of_type = None;
             }
             state.authenticator.take().is_some()
@@ -381,12 +527,16 @@ impl Service for Session {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         match call.code {
             auth_response::ON_RESULT => {
-                let a = auth_response::OnResult::<RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = auth_response::OnResult::<RawBundle>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 let features = matches!(self.state.lock().unwrap().work, Work::Features { .. });
                 if !features {
                     if let Err(e) = self.on_session_result(call.sender_euid as i32, a.value) {
                         eprintln!("app host: accounts: onResult: {}", e.message);
-                        self.respond_error(ERROR_CODE_INVALID_RESPONSE, "invalid intent in bundle returned");
+                        self.respond_error(
+                            ERROR_CODE_INVALID_RESPONSE,
+                            "invalid intent in bundle returned",
+                        );
                     }
                     return Ok(Parcel::new());
                 }
@@ -399,8 +549,16 @@ impl Service for Session {
                         let has = crate::bundle::read(&mut raw.reader())
                             .ok()
                             .flatten()
-                            .is_some_and(|m| matches!(m.get(KEY_BOOLEAN_RESULT), Some(Value::Bool(true))));
-                        if let Work::Features { accounts, current, with_features, .. } = &mut self.state.lock().unwrap().work {
+                            .is_some_and(|m| {
+                                matches!(m.get(KEY_BOOLEAN_RESULT), Some(Value::Bool(true)))
+                            });
+                        if let Work::Features {
+                            accounts,
+                            current,
+                            with_features,
+                            ..
+                        } = &mut self.state.lock().unwrap().work
+                        {
                             if has && let Some(account) = accounts.get(*current).cloned() {
                                 with_features.push(account);
                             }

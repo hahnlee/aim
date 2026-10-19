@@ -265,7 +265,9 @@ impl ClassPath {
             // Interface invocation has a different ART contract from a class
             // invocation even when the member descriptors are identical.
             if class.access & 0x4200 != stub.access & 0x4200 {
-                out.push(format!("{name} class/interface/enum kind differs from the image"));
+                out.push(format!(
+                    "{name} class/interface/enum kind differs from the image"
+                ));
             }
             if class.superclass != stub.superclass {
                 out.push(format!(

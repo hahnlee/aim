@@ -30,8 +30,8 @@ use aim_binder_host::parcel::{
     BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_SERVICE_SPECIFIC, EX_UNSUPPORTED_OPERATION, Exception,
     Parcel, Reader, Result as ParcelResult,
 };
-use aim_service_aidl::android_os_ibatterypropertiesregistrar as registrar;
 use aim_service_aidl::WriteParcelable;
+use aim_service_aidl::android_os_ibatterypropertiesregistrar as registrar;
 
 use super::display::parcelable;
 use super::kept::RawIntent;
@@ -98,7 +98,8 @@ const FLAG_RECEIVER_REGISTERED_ONLY: i32 = 0x4000_0000;
 const FLAG_RECEIVER_REPLACE_PENDING: i32 = 0x2000_0000;
 const FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT: i32 = 0x0400_0000;
 /// The aconfig flags it follows.
-const RATE_LIMIT_BATTERY_CHANGED: &str = "com.android.server.flags.rate_limit_battery_changed_broadcast";
+const RATE_LIMIT_BATTERY_CHANGED: &str =
+    "com.android.server.flags.rate_limit_battery_changed_broadcast";
 const STATE_OF_HEALTH_PUBLIC: &str = "android.os.state_of_health_public";
 const BATTERY_PART_STATUS_API: &str = "android.os.battery_part_status_api";
 const BATTERY_STATS: &str = "android.permission.BATTERY_STATS";
@@ -129,7 +130,10 @@ struct HealthInfo {
 
 /// A nullable structured parcelable as the HAL's backend writes it: 1,
 /// then its size and fields.
-fn nullable<T>(r: &mut Reader<'_>, read: impl FnOnce(&mut Reader<'_>) -> ParcelResult<T>) -> ParcelResult<Option<T>> {
+fn nullable<T>(
+    r: &mut Reader<'_>,
+    read: impl FnOnce(&mut Reader<'_>) -> ParcelResult<T>,
+) -> ParcelResult<Option<T>> {
     match r.read_i32()? {
         0 => Ok(None),
         _ => parcelable(r, read).map(Some),
@@ -303,7 +307,10 @@ impl Default for State {
             sent_low: false,
             sequence: 1,
             // The first run, which no plug type was sent before.
-            last: Sent { plug_type: -1, ..Sent::default() },
+            last: Sent {
+                plug_type: -1,
+                ..Sent::default()
+            },
             first_update: true,
             voltage_update_time: 0,
         }
@@ -318,7 +325,8 @@ impl State {
         };
         let c = &self.config;
         self.plug_type = info.plug_type();
-        let include_charge_counter = !c.rate_limit && info.charge_counter != self.last.charge_counter;
+        let include_charge_counter =
+            !c.rate_limit && info.charge_counter != self.last.charge_counter;
         let changed = force
             || info.status != self.last.status
             || info.health != self.last.health
@@ -338,7 +346,8 @@ impl State {
         }
         let unplugged = self.plug_type == PLUGGED_NONE;
         if !self.level_low {
-            self.level_low = unplugged && info.status != STATUS_UNKNOWN && info.level <= c.low_level;
+            self.level_low =
+                unplugged && info.status != STATUS_UNKNOWN && info.level <= c.low_level;
         } else if !unplugged || info.level >= c.close_level || force && info.level >= c.low_level {
             self.level_low = false;
         }
@@ -360,7 +369,9 @@ impl State {
         let send_low = unplugged
             && info.status != STATUS_UNKNOWN
             && info.level <= c.low_level
-            && (self.last.plug_type != PLUGGED_NONE || self.last.level > c.low_level || info.level > c.last_low_level);
+            && (self.last.plug_type != PLUGGED_NONE
+                || self.last.level > c.low_level
+                || info.level > c.last_low_level);
         if send_low {
             self.sent_low = true;
             out.push(status(ACTION_BATTERY_LOW));
@@ -425,7 +436,8 @@ impl State {
                 && base_point_diff.abs() >= BASE_POINT_DIFF_FOR_VOLTAGE_UPDATE
                 && now - self.voltage_update_time >= TIME_DIFF_FOR_VOLTAGE_UPDATE_MS
             || temperature_updated
-                && (last.temperature - info.temperature).abs() >= ABSOLUTE_DECI_CELSIUS_DIFF_FOR_TEMP_UPDATE;
+                && (last.temperature - info.temperature).abs()
+                    >= ABSOLUTE_DECI_CELSIUS_DIFF_FOR_TEMP_UPDATE;
         if send && voltage_updated {
             self.voltage_update_time = now;
         }
@@ -438,7 +450,11 @@ impl State {
         match info.status {
             STATUS_CHARGING => charge,
             STATUS_DISCHARGING => discharge,
-            STATUS_NOT_CHARGING | STATUS_FULL if info.is_powered(PLUGGED_ANY) && info.level >= 100 => charge,
+            STATUS_NOT_CHARGING | STATUS_FULL
+                if info.is_powered(PLUGGED_ANY) && info.level >= 100 =>
+            {
+                charge
+            }
             STATUS_NOT_CHARGING | STATUS_FULL => discharge,
             _ => unknown,
         }
@@ -461,12 +477,24 @@ impl State {
             ("technology", Value::String(info.technology.clone())),
             // The Mac has no invalid charger switch.
             ("invalid_charger", Value::Int(0)),
-            ("max_charging_current", Value::Int(info.max_charging_current)),
-            ("max_charging_voltage", Value::Int(info.max_charging_voltage)),
+            (
+                "max_charging_current",
+                Value::Int(info.max_charging_current),
+            ),
+            (
+                "max_charging_voltage",
+                Value::Int(info.max_charging_voltage),
+            ),
             ("charge_counter", Value::Int(info.charge_counter)),
             ("android.os.extra.CYCLE_COUNT", Value::Int(info.cycle_count)),
-            ("android.os.extra.CHARGING_STATUS", Value::Int(info.charging_state)),
-            ("android.os.extra.CAPACITY_LEVEL", Value::Int(info.capacity_level)),
+            (
+                "android.os.extra.CHARGING_STATUS",
+                Value::Int(info.charging_state),
+            ),
+            (
+                "android.os.extra.CAPACITY_LEVEL",
+                Value::Int(info.capacity_level),
+            ),
         ]
     }
 }
@@ -495,7 +523,12 @@ fn hal_call<T>(
     write: impl FnOnce(&mut Parcel),
     read: impl FnOnce(&mut Reader<'_>) -> ParcelResult<T>,
 ) -> Result<T, HalError> {
-    let failed = |s| HalError::Other(Exception::new(EX_ILLEGAL_STATE, format!("health HAL#{code}: status {s}")));
+    let failed = |s| {
+        HalError::Other(Exception::new(
+            EX_ILLEGAL_STATE,
+            format!("health HAL#{code}: status {s}"),
+        ))
+    };
     let mut data = Parcel::new();
     data.write_interface_token(HEALTH_DESCRIPTOR);
     write(&mut data);
@@ -519,7 +552,12 @@ pub struct BatteryService {
 
 impl BatteryService {
     pub fn new(host: Arc<AppHost>) -> BatteryService {
-        BatteryService { host, state: Mutex::default(), health: Mutex::new(None), callback: OnceLock::new() }
+        BatteryService {
+            host,
+            state: Mutex::default(),
+            health: Mutex::new(None),
+            callback: OnceLock::new(),
+        }
     }
 
     /// `BatteryManagerInternal.isPowered(BATTERY_PLUGGED_ANY)` and
@@ -527,7 +565,10 @@ impl BatteryService {
     /// first reports.
     pub(super) fn powered_and_low(&self) -> (bool, bool) {
         let s = self.state.lock().unwrap();
-        (s.info.as_ref().is_some_and(|i| i.is_powered(PLUGGED_ANY)), s.level_low)
+        (
+            s.info.as_ref().is_some_and(|i| i.is_powered(PLUGGED_ANY)),
+            s.level_low,
+        )
     }
 
     /// The constructor's and `updateBatteryWarningLevelLocked`'s levels,
@@ -536,12 +577,26 @@ impl BatteryService {
         let inputs = self.host.inputs().map_err(|e| e.message)?;
         let (model, _) = self.host.packages().map_err(|e| e.message)?;
         let flag = |name: &str| model.system.flags.iter().any(|(n, on)| n == name && *on);
-        let integer = |name: &str| inputs.packages.framework_integer(name).ok_or(format!("no integer {name}"));
-        let icon = |name: &str| inputs.packages.framework_id("drawable", name).map(|id| id as i32).ok_or(format!("no drawable {name}"));
+        let integer = |name: &str| {
+            inputs
+                .packages
+                .framework_integer(name)
+                .ok_or(format!("no integer {name}"))
+        };
+        let icon = |name: &str| {
+            inputs
+                .packages
+                .framework_id("drawable", name)
+                .map(|id| id as i32)
+                .ok_or(format!("no drawable {name}"))
+        };
         let critical_level = integer("config_criticalBatteryWarningLevel")?;
         let default_low = integer("config_lowBatteryWarningLevel")?;
         let bump = integer("config_lowBatteryCloseWarningBump")?;
-        let setting = inputs.settings.get(Table::Global, "low_power_trigger_level").and_then(|v| v.parse().ok());
+        let setting = inputs
+            .settings
+            .get(Table::Global, "low_power_trigger_level")
+            .and_then(|v| v.parse().ok());
         let low_level = match setting.unwrap_or(default_low) {
             0 => default_low,
             level => level,
@@ -554,7 +609,11 @@ impl BatteryService {
             rate_limit: flag(RATE_LIMIT_BATTERY_CHANGED),
             state_of_health_public: flag(STATE_OF_HEALTH_PUBLIC),
             part_status_api: flag(BATTERY_PART_STATUS_API),
-            icons: [icon("stat_sys_battery_charge")?, icon("stat_sys_battery")?, icon("stat_sys_battery_unknown")?],
+            icons: [
+                icon("stat_sys_battery_charge")?,
+                icon("stat_sys_battery")?,
+                icon("stat_sys_battery_unknown")?,
+            ],
         };
         self.connect()
     }
@@ -587,13 +646,21 @@ impl BatteryService {
                 });
             }),
         );
-        let callback = *self
-            .callback
-            .get_or_init(|| self.host.process.add_service(Arc::new(HealthInfoCallback(Arc::downgrade(self)))));
-        hal_call(&hal, REGISTER_CALLBACK, |p| p.write_vintf_binder(callback), |_| Ok(()))
-            .map_err(|e| format!("health: cannot register callback: {}", e.message()))?;
+        let callback = *self.callback.get_or_init(|| {
+            self.host
+                .process
+                .add_service(Arc::new(HealthInfoCallback(Arc::downgrade(self))))
+        });
+        hal_call(
+            &hal,
+            REGISTER_CALLBACK,
+            |p| p.write_vintf_binder(callback),
+            |_| Ok(()),
+        )
+        .map_err(|e| format!("health: cannot register callback: {}", e.message()))?;
         // `registerCallback` does not promise a first callback.
-        hal_call(&hal, UPDATE, |_| {}, |_| Ok(())).map_err(|e| format!("health: cannot update: {}", e.message()))
+        hal_call(&hal, UPDATE, |_| {}, |_| Ok(()))
+            .map_err(|e| format!("health: cannot update: {}", e.message()))
     }
 
     /// `update`: the HAL's new health info, processed, and its
@@ -603,14 +670,22 @@ impl BatteryService {
         // `processValuesLocked` first lets the battery stats keep track of
         // the level (`IBatteryStats.setBatteryState`).
         if let Some(stats) = self.host.battery_stats.get() {
-            stats.set_battery_state(info.status, info.plug_type(), info.level, info.charge_time_to_full, now);
+            stats.set_battery_state(
+                info.status,
+                info.plug_type(),
+                info.level,
+                info.charge_time_to_full,
+                now,
+            );
         }
         let mut state = self.state.lock().unwrap();
         state.info = Some(info);
         for o in state.process(false, now) {
             let intent = RawIntent::new(o.action, o.flags, &o.extras);
             if o.sticky {
-                self.host.broadcasts.send_sticky_from_system(&self.host, intent);
+                self.host
+                    .broadcasts
+                    .send_sticky_from_system(&self.host, intent);
             } else {
                 self.host.broadcasts.send_from_system(&self.host, intent);
             }
@@ -627,29 +702,57 @@ impl BatteryService {
         };
         let restricted = match id {
             PROPERTY_STATE_OF_HEALTH => !state_of_health_public,
-            PROPERTY_MANUFACTURING_DATE | PROPERTY_FIRST_USAGE_DATE | PROPERTY_CHARGING_POLICY | PROPERTY_SERIAL_NUMBER | PROPERTY_PART_STATUS => true,
+            PROPERTY_MANUFACTURING_DATE
+            | PROPERTY_FIRST_USAGE_DATE
+            | PROPERTY_CHARGING_POLICY
+            | PROPERTY_SERIAL_NUMBER
+            | PROPERTY_PART_STATUS => true,
             _ => false,
         };
         if restricted && self.host.check_permission(Some(BATTERY_STATS), uid)? != 0 {
-            return Err(Exception::security(format!("uid {uid} does not have {BATTERY_STATS}.")));
+            return Err(Exception::security(format!(
+                "uid {uid} does not have {BATTERY_STATS}."
+            )));
         }
-        let hal = self.health.lock().unwrap().clone().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no health service"))?;
-        let mut prop = BatteryProperty { long: i64::MIN, string: None };
+        let hal = self
+            .health
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no health service"))?;
+        let mut prop = BatteryProperty {
+            long: i64::MIN,
+            string: None,
+        };
         let int = |code| hal_call(&hal, code, |_| {}, |r| r.read_i32().map(i64::from));
-        let data = || hal_call(&hal, GET_BATTERY_HEALTH_DATA, |_| {}, |r| nullable(r, HealthData::read)?.ok_or(BAD_VALUE));
+        let data = || {
+            hal_call(
+                &hal,
+                GET_BATTERY_HEALTH_DATA,
+                |_| {},
+                |r| nullable(r, HealthData::read)?.ok_or(BAD_VALUE),
+            )
+        };
         let read = match id {
             PROPERTY_CHARGE_COUNTER => int(GET_CHARGE_COUNTER_UAH).map(|v| prop.long = v),
             PROPERTY_CURRENT_NOW => int(GET_CURRENT_NOW_MICROAMPS).map(|v| prop.long = v),
             PROPERTY_CURRENT_AVERAGE => int(GET_CURRENT_AVERAGE_MICROAMPS).map(|v| prop.long = v),
             PROPERTY_CAPACITY => int(GET_CAPACITY).map(|v| prop.long = v),
             PROPERTY_STATUS => int(GET_CHARGE_STATUS).map(|v| prop.long = v),
-            PROPERTY_ENERGY_COUNTER => hal_call(&hal, GET_ENERGY_COUNTER_NWH, |_| {}, |r| r.read_i64()).map(|v| prop.long = v),
+            PROPERTY_ENERGY_COUNTER => {
+                hal_call(&hal, GET_ENERGY_COUNTER_NWH, |_| {}, |r| r.read_i64())
+                    .map(|v| prop.long = v)
+            }
             PROPERTY_MANUFACTURING_DATE => data().map(|d| prop.long = d.manufacturing_date),
             PROPERTY_FIRST_USAGE_DATE => data().map(|d| prop.long = d.first_usage),
             PROPERTY_CHARGING_POLICY => int(GET_CHARGING_POLICY).map(|v| prop.long = v),
             PROPERTY_STATE_OF_HEALTH => data().map(|d| prop.long = d.state_of_health),
-            PROPERTY_SERIAL_NUMBER if part_status_api => data().map(|d| prop.string = d.serial_number),
-            PROPERTY_PART_STATUS if part_status_api => data().map(|d| prop.long = i64::from(d.part_status)),
+            PROPERTY_SERIAL_NUMBER if part_status_api => {
+                data().map(|d| prop.string = d.serial_number)
+            }
+            PROPERTY_PART_STATUS if part_status_api => {
+                data().map(|d| prop.long = i64::from(d.part_status))
+            }
             _ => Ok(()),
         };
         match read {
@@ -674,10 +777,16 @@ impl Service for HealthInfoCallback {
             return Ok(Parcel::new());
         };
         if call.code != HEALTH_INFO_CHANGED {
-            return reply(Err(battery.host.unimplemented("health callback", call.code)));
+            return reply(Err(battery
+                .host
+                .unimplemented("health callback", call.code)));
         }
-        call.data.enforce_interface(CALLBACK_DESCRIPTOR).map_err(|_| BAD_VALUE)?;
-        let info = nullable(&mut call.data, HealthInfo::read).map_err(|_| BAD_VALUE)?.ok_or(BAD_VALUE)?;
+        call.data
+            .enforce_interface(CALLBACK_DESCRIPTOR)
+            .map_err(|_| BAD_VALUE)?;
+        let info = nullable(&mut call.data, HealthInfo::read)
+            .map_err(|_| BAD_VALUE)?
+            .ok_or(BAD_VALUE)?;
         battery.update(info);
         Ok(Parcel::new())
     }
@@ -695,18 +804,31 @@ impl Service for BatteryProperties {
         match call.code {
             registrar::GET_PROPERTY => {
                 let a = registrar::GetProperty::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(self.0.get_property(call.sender_euid as i32, a.id).map(|(result, prop)| {
-                    let mut p = Parcel::new();
-                    registrar::write_get_property_reply(&mut p, &registrar::GetPropertyReply { result, prop: Some(prop) });
-                    p
-                }))
+                reply(
+                    self.0
+                        .get_property(call.sender_euid as i32, a.id)
+                        .map(|(result, prop)| {
+                            let mut p = Parcel::new();
+                            registrar::write_get_property_reply(
+                                &mut p,
+                                &registrar::GetPropertyReply {
+                                    result,
+                                    prop: Some(prop),
+                                },
+                            );
+                            p
+                        }),
+                )
             }
             registrar::SCHEDULE_UPDATE => {
                 registrar::ScheduleUpdate::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let hal = self.0.health.lock().unwrap().clone();
                 match hal.map(|hal| hal_call(&hal, UPDATE, |_| {}, |_| Ok(()))) {
                     None => eprintln!("app host: battery: no health service"),
-                    Some(Err(e)) => eprintln!("app host: battery: cannot call update on health AIDL HAL: {}", e.message()),
+                    Some(Err(e)) => eprintln!(
+                        "app host: battery: cannot call update on health AIDL HAL: {}",
+                        e.message()
+                    ),
                     Some(Ok(())) => {}
                 }
                 Ok(Parcel::new())
@@ -740,7 +862,11 @@ mod tests {
             p.write_bool(false); // dock
             p.write_i32(0); // max charging current
             p.write_i32(0); // max charging voltage
-            p.write_i32(if ac { STATUS_CHARGING } else { STATUS_DISCHARGING });
+            p.write_i32(if ac {
+                STATUS_CHARGING
+            } else {
+                STATUS_DISCHARGING
+            });
             p.write_i32(2); // good
             p.write_bool(true);
             p.write_i32(level);
@@ -772,7 +898,9 @@ mod tests {
 
     fn info(level: i32, ac: bool) -> HealthInfo {
         let p = written(level, ac);
-        nullable(&mut p.reader(), HealthInfo::read).unwrap().unwrap()
+        nullable(&mut p.reader(), HealthInfo::read)
+            .unwrap()
+            .unwrap()
     }
 
     fn state() -> State {
@@ -791,7 +919,11 @@ mod tests {
     /// The actions `info` makes `state` send.
     fn actions(state: &mut State, info: HealthInfo) -> Vec<&'static str> {
         state.info = Some(info);
-        state.process(false, 0).into_iter().map(|o| o.action).collect()
+        state
+            .process(false, 0)
+            .into_iter()
+            .map(|o| o.action)
+            .collect()
     }
 
     #[test]
@@ -824,13 +956,31 @@ mod tests {
 
     #[test]
     fn plug_types_go_by_the_first_charger_online() {
-        let usb_and_dock = HealthInfo { charger_usb_online: true, charger_dock_online: true, status: STATUS_CHARGING, ..HealthInfo::default() };
+        let usb_and_dock = HealthInfo {
+            charger_usb_online: true,
+            charger_dock_online: true,
+            status: STATUS_CHARGING,
+            ..HealthInfo::default()
+        };
         assert_eq!(usb_and_dock.plug_type(), PLUGGED_USB);
         assert!(usb_and_dock.is_powered(PLUGGED_DOCK));
         assert!(!usb_and_dock.is_powered(PLUGGED_AC));
-        assert_eq!(HealthInfo { status: STATUS_DISCHARGING, ..HealthInfo::default() }.plug_type(), PLUGGED_NONE);
+        assert_eq!(
+            HealthInfo {
+                status: STATUS_DISCHARGING,
+                ..HealthInfo::default()
+            }
+            .plug_type(),
+            PLUGGED_NONE
+        );
         // An unknown state counts as powered.
-        assert!(HealthInfo { status: STATUS_UNKNOWN, ..HealthInfo::default() }.is_powered(PLUGGED_AC));
+        assert!(
+            HealthInfo {
+                status: STATUS_UNKNOWN,
+                ..HealthInfo::default()
+            }
+            .is_powered(PLUGGED_AC)
+        );
     }
 
     /// Unplugging, falling to the warning level, plugging in and rising
@@ -841,15 +991,27 @@ mod tests {
         // The first run on the charger: no plug type was sent before.
         assert_eq!(actions(&mut s, info(30, true)), [ACTION_BATTERY_CHANGED]);
         assert_eq!(actions(&mut s, info(30, true)), Vec::<&str>::new());
-        assert_eq!(actions(&mut s, info(16, false)), [ACTION_POWER_DISCONNECTED, ACTION_BATTERY_CHANGED]);
-        assert_eq!(actions(&mut s, info(15, false)), [ACTION_BATTERY_LOW, ACTION_BATTERY_CHANGED]);
+        assert_eq!(
+            actions(&mut s, info(16, false)),
+            [ACTION_POWER_DISCONNECTED, ACTION_BATTERY_CHANGED]
+        );
+        assert_eq!(
+            actions(&mut s, info(15, false)),
+            [ACTION_BATTERY_LOW, ACTION_BATTERY_CHANGED]
+        );
         assert!(s.level_low && s.sent_low);
         // Still low: no second warning.
         assert_eq!(actions(&mut s, info(14, false)), [ACTION_BATTERY_CHANGED]);
-        assert_eq!(actions(&mut s, info(14, true)), [ACTION_POWER_CONNECTED, ACTION_BATTERY_CHANGED]);
+        assert_eq!(
+            actions(&mut s, info(14, true)),
+            [ACTION_POWER_CONNECTED, ACTION_BATTERY_CHANGED]
+        );
         assert!(!s.level_low && s.sent_low);
         assert_eq!(actions(&mut s, info(19, true)), [ACTION_BATTERY_CHANGED]);
-        assert_eq!(actions(&mut s, info(20, true)), [ACTION_BATTERY_OKAY, ACTION_BATTERY_CHANGED]);
+        assert_eq!(
+            actions(&mut s, info(20, true)),
+            [ACTION_BATTERY_OKAY, ACTION_BATTERY_CHANGED]
+        );
         assert!(!s.sent_low);
     }
 
@@ -857,7 +1019,14 @@ mod tests {
     #[test]
     fn a_first_run_on_a_low_battery_warns() {
         let mut s = state();
-        assert_eq!(actions(&mut s, info(10, false)), [ACTION_POWER_DISCONNECTED, ACTION_BATTERY_LOW, ACTION_BATTERY_CHANGED]);
+        assert_eq!(
+            actions(&mut s, info(10, false)),
+            [
+                ACTION_POWER_DISCONNECTED,
+                ACTION_BATTERY_LOW,
+                ACTION_BATTERY_CHANGED
+            ]
+        );
     }
 
     #[test]
@@ -867,7 +1036,10 @@ mod tests {
         let out = s.process(false, 0);
         let changed = out.last().unwrap();
         assert!(changed.sticky);
-        assert_eq!(changed.flags, FLAG_RECEIVER_REGISTERED_ONLY | FLAG_RECEIVER_REPLACE_PENDING);
+        assert_eq!(
+            changed.flags,
+            FLAG_RECEIVER_REGISTERED_ONLY | FLAG_RECEIVER_REPLACE_PENDING
+        );
         assert_eq!(
             changed.extras,
             [
@@ -900,10 +1072,28 @@ mod tests {
         assert_eq!(out[0].flags, FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT);
         assert_eq!(out[1].extras[0], ("seq", Value::Int(3)));
         // Full on the charger shows the charging icon.
-        let full = HealthInfo { status: STATUS_FULL, level: 100, charger_ac_online: true, ..HealthInfo::default() };
+        let full = HealthInfo {
+            status: STATUS_FULL,
+            level: 100,
+            charger_ac_online: true,
+            ..HealthInfo::default()
+        };
         assert_eq!(s.icon(&full), 11);
-        assert_eq!(s.icon(&HealthInfo { status: STATUS_FULL, level: 100, ..HealthInfo::default() }), 12);
-        assert_eq!(s.icon(&HealthInfo { status: STATUS_UNKNOWN, ..HealthInfo::default() }), 13);
+        assert_eq!(
+            s.icon(&HealthInfo {
+                status: STATUS_FULL,
+                level: 100,
+                ..HealthInfo::default()
+            }),
+            12
+        );
+        assert_eq!(
+            s.icon(&HealthInfo {
+                status: STATUS_UNKNOWN,
+                ..HealthInfo::default()
+            }),
+            13
+        );
     }
 
     /// With the rate limit, a small voltage or temperature change waits.
@@ -911,12 +1101,24 @@ mod tests {
     fn small_voltage_and_temperature_changes_are_rate_limited() {
         let mut s = state();
         s.config.rate_limit = true;
-        assert_eq!(actions(&mut s, info(80, true)).last(), Some(&ACTION_BATTERY_CHANGED));
-        let warmer = HealthInfo { temperature: 305, ..info(80, true) };
+        assert_eq!(
+            actions(&mut s, info(80, true)).last(),
+            Some(&ACTION_BATTERY_CHANGED)
+        );
+        let warmer = HealthInfo {
+            temperature: 305,
+            ..info(80, true)
+        };
         assert_eq!(actions(&mut s, warmer.clone()), Vec::<&str>::new());
-        let hot = HealthInfo { temperature: 311, ..warmer };
+        let hot = HealthInfo {
+            temperature: 311,
+            ..warmer
+        };
         assert_eq!(actions(&mut s, hot.clone()), [ACTION_BATTERY_CHANGED]);
-        let lower = HealthInfo { voltage: 12_000, ..hot };
+        let lower = HealthInfo {
+            voltage: 12_000,
+            ..hot
+        };
         s.info = Some(lower.clone());
         assert!(s.process(false, 1_000).is_empty());
         assert_eq!(s.process(false, TIME_DIFF_FOR_VOLTAGE_UPDATE_MS).len(), 1);
@@ -927,7 +1129,16 @@ mod tests {
     #[test]
     fn battery_property_is_written_as_java_reads_it() {
         let mut p = Parcel::new();
-        registrar::write_get_property_reply(&mut p, &registrar::GetPropertyReply { result: -1, prop: Some(BatteryProperty { long: i64::MIN, string: None }) });
+        registrar::write_get_property_reply(
+            &mut p,
+            &registrar::GetPropertyReply {
+                result: -1,
+                prop: Some(BatteryProperty {
+                    long: i64::MIN,
+                    string: None,
+                }),
+            },
+        );
         let mut r = p.reader();
         assert_eq!(r.read_exception(), Ok(Ok(())));
         assert_eq!(r.read_i32(), Ok(-1));

@@ -123,16 +123,20 @@ fn state() -> Arc<State> {
                 ..Provider::default()
             }];
         }),
-        {let mut high=package("c.high", 10003, true, |p| {
-            p.activities = vec![Activity {
-                main: main(
-                    "c.high",
-                    "c.high.Open",
-                    vec![filter(VIEW, Some("image/png"), None, 5)],
-                ),
-                ..Activity::default()
-            }];
-        });high.is.privileged=true;high},
+        {
+            let mut high = package("c.high", 10003, true, |p| {
+                p.activities = vec![Activity {
+                    main: main(
+                        "c.high",
+                        "c.high.Open",
+                        vec![filter(VIEW, Some("image/png"), None, 5)],
+                    ),
+                    ..Activity::default()
+                }];
+            });
+            high.is.privileged = true;
+            high
+        },
         package("d.caller", 10004, false, |_| {}),
         package("android", 1000, true, |_| {}),
         package("f.jpeg", 10006, true, |p| {
@@ -454,10 +458,13 @@ fn independent_secondary_user_queries_stay_local() {
 #[test]
 fn matching_cross_profile_route_stays_explicitly_unmodelled() {
     let mut state = (*state()).clone();
-    state.users.get_mut(&0).unwrap().restrictions = Some(br#"<package-restrictions><crossProfile-intent-filters>
+    state.users.get_mut(&0).unwrap().restrictions = Some(
+        br#"<package-restrictions><crossProfile-intent-filters>
         <item targetUserId="10"><filter><action name="android.intent.action.VIEW" />
         <cat name="android.intent.category.DEFAULT" /><type name="image/*" /></filter></item>
-        </crossProfile-intent-filters></package-restrictions>"#.to_vec());
+        </crossProfile-intent-filters></package-restrictions>"#
+            .to_vec(),
+    );
     state.users.insert(
         10,
         User {
@@ -1083,12 +1090,21 @@ fn persistent_preferred_route_rejects_non_system_and_returns_null_for_missing_us
         args.write_interface_token(pm::DESCRIPTOR);
         args.write_i32(0);
         args.write_i32(user);
-        let reply = resolver.query(&state, pm::FIND_PERSISTENT_PREFERRED_ACTIVITY, uid,
-            &mut Reader::new(args.data(), args.objects())).unwrap().unwrap();
+        let reply = resolver
+            .query(
+                &state,
+                pm::FIND_PERSISTENT_PREFERRED_ACTIVITY,
+                uid,
+                &mut Reader::new(args.data(), args.objects()),
+            )
+            .unwrap()
+            .unwrap();
         let mut reader = Reader::new(reply.data(), reply.objects());
         if security {
-            assert_eq!(reader.read_exception().unwrap().unwrap_err().code,
-                aim_binder_host::parcel::EX_SECURITY);
+            assert_eq!(
+                reader.read_exception().unwrap().unwrap_err().code,
+                aim_binder_host::parcel::EX_SECURITY
+            );
         } else {
             assert!(reader.read_exception().unwrap().is_ok());
             assert_eq!(reader.read_i32().unwrap(), 0);
@@ -1101,26 +1117,52 @@ fn persistent_preferred_route_rejects_non_system_and_returns_null_for_missing_us
 fn provider_for_uid_requires_permission_and_both_callers_visibility() {
     let resolver = Resolver::default();
     let state = state();
-    let request = pm::ResolveContentProviderForUid { authority: Some("b.media".into()),
-        flags: 0, user_id: 0, calling_uid: 10002 };
+    let request = pm::ResolveContentProviderForUid {
+        authority: Some("b.media".into()),
+        flags: 0,
+        user_id: 0,
+        calling_uid: 10002,
+    };
     for (uid, security) in [(10001, true), (1000, false)] {
         let mut args = Parcel::new();
         request.write(&mut args);
-        let reply = resolver.query(&state, pm::RESOLVE_CONTENT_PROVIDER_FOR_UID, uid,
-            &mut Reader::new(args.data(), args.objects())).unwrap().unwrap();
+        let reply = resolver
+            .query(
+                &state,
+                pm::RESOLVE_CONTENT_PROVIDER_FOR_UID,
+                uid,
+                &mut Reader::new(args.data(), args.objects()),
+            )
+            .unwrap()
+            .unwrap();
         let mut reader = Reader::new(reply.data(), reply.objects());
         if security {
-            assert_eq!(reader.read_exception().unwrap().unwrap_err().code, aim_binder_host::parcel::EX_SECURITY);
+            assert_eq!(
+                reader.read_exception().unwrap().unwrap_err().code,
+                aim_binder_host::parcel::EX_SECURITY
+            );
         } else {
             assert!(reader.read_exception().unwrap().is_ok());
             assert_eq!(reader.read_i32().unwrap(), 1);
         }
     }
     let mut args = Parcel::new();
-    pm::ResolveContentProviderForUid { authority: Some("b.media".into()), flags: 0,
-        user_id: 0, calling_uid: 10999 }.write(&mut args);
-    let reply = resolver.query(&state, pm::RESOLVE_CONTENT_PROVIDER_FOR_UID, 1000,
-        &mut Reader::new(args.data(), args.objects())).unwrap().unwrap();
+    pm::ResolveContentProviderForUid {
+        authority: Some("b.media".into()),
+        flags: 0,
+        user_id: 0,
+        calling_uid: 10999,
+    }
+    .write(&mut args);
+    let reply = resolver
+        .query(
+            &state,
+            pm::RESOLVE_CONTENT_PROVIDER_FOR_UID,
+            1000,
+            &mut Reader::new(args.data(), args.objects()),
+        )
+        .unwrap()
+        .unwrap();
     let mut reader = Reader::new(reply.data(), reply.objects());
     assert!(reader.read_exception().unwrap().is_ok());
     assert_eq!(reader.read_i32().unwrap(), 0);
@@ -1130,104 +1172,299 @@ fn provider_for_uid_requires_permission_and_both_callers_visibility() {
 #[test]
 fn activity_options_prepend_specifics_remove_caller_and_drop_filters() {
     let resolution = Resolution::new(state(), &Default::default()).unwrap();
-    let intent = Intent { action: Some(VIEW.into()), ..Default::default() };
-    let specific = Intent { component: Some(ComponentName {
-        package: "b.gallery".into(), class: "b.gallery.Open".into() }), ..Default::default() };
-    let results = resolution.query_activity_options(None, Some(&[None, Some(specific.clone())]),
-        None, &intent, Some("image/png"), 0, 0, 1000).unwrap();
+    let intent = Intent {
+        action: Some(VIEW.into()),
+        ..Default::default()
+    };
+    let specific = Intent {
+        component: Some(ComponentName {
+            package: "b.gallery".into(),
+            class: "b.gallery.Open".into(),
+        }),
+        ..Default::default()
+    };
+    let results = resolution
+        .query_activity_options(
+            None,
+            Some(&[None, Some(specific.clone())]),
+            None,
+            &intent,
+            Some("image/png"),
+            0,
+            0,
+            1000,
+        )
+        .unwrap();
     assert_eq!(results[0].component(), ("b.gallery", "b.gallery.Open"));
     assert_eq!(results[0].specific_index, 1);
     assert!(results.iter().all(|entry| entry.filter.is_none()));
-    assert_eq!(results.iter().filter(|entry| entry.component() == ("b.gallery", "b.gallery.Open")).count(), 1);
-    let results = resolution.query_activity_options(specific.component.as_ref(), Some(&[Some(specific.clone())]),
-        None, &intent, Some("image/png"), 0, 0, 1000).unwrap();
-    assert!(results.iter().all(|entry| entry.component() != ("b.gallery", "b.gallery.Open")));
+    assert_eq!(
+        results
+            .iter()
+            .filter(|entry| entry.component() == ("b.gallery", "b.gallery.Open"))
+            .count(),
+        1
+    );
+    let results = resolution
+        .query_activity_options(
+            specific.component.as_ref(),
+            Some(&[Some(specific.clone())]),
+            None,
+            &intent,
+            Some("image/png"),
+            0,
+            0,
+            1000,
+        )
+        .unwrap();
+    assert!(
+        results
+            .iter()
+            .all(|entry| entry.component() != ("b.gallery", "b.gallery.Open"))
+    );
 }
 
 #[test]
 fn implicit_access_rebound_resolution_keeps_static_policy_and_old_visibility() {
-    let mut initial=(*state()).clone();initial.system.isolated_owners.push((99001,10004));
-    let before=Arc::new(initial);let resolver=Resolver::default();let old=resolver.resolution(&before).unwrap();
-    let target=&before.packages["b.gallery"];
-    assert!(old.apps_filter.should_filter(&before,10004,target,0));
-    let send=Intent{action:Some(SEND.into()),..Default::default()};
-    assert!(old.query_intent_services(&send,None,0,0,10004).unwrap().is_empty());
-    let mut after=(*before).clone();after.generation=before.generation+1;
-    assert!(after.system.implicit_access.grant(10004,10002,true));
-    let after=Arc::new(after);
-    let rebound=resolver.implicit_access_view(&before,after.clone()).unwrap();
-    let next=rebound.resolution(&after).unwrap();
-    let fresh=Resolver::default().resolution(&after).unwrap();
-    assert!(!next.apps_filter.should_filter(&after,10004,&after.packages["b.gallery"],0));
-    assert!(old.apps_filter.should_filter(&before,10004,target,0));
-    assert!(Arc::ptr_eq(&resolver.resolution(&before).unwrap(),&old));
-    assert!(Arc::ptr_eq(&rebound.resolution(&after).unwrap(),&next));
-    assert_eq!(before.packages,after.packages);
-    for caller in [10004,10001,10005,1000,20004] {
-        for flags in [0,0x80,0x200,0x0004_0000] {
-            let actual=next.query_intent_services(&send,None,flags,0,caller).unwrap();
-            let expected=fresh.query_intent_services(&send,None,flags,0,caller).unwrap();
-            assert_eq!(actual,expected,"static component/caller flag parity must match fresh resolution");
+    let mut initial = (*state()).clone();
+    initial.system.isolated_owners.push((99001, 10004));
+    let before = Arc::new(initial);
+    let resolver = Resolver::default();
+    let old = resolver.resolution(&before).unwrap();
+    let target = &before.packages["b.gallery"];
+    assert!(old.apps_filter.should_filter(&before, 10004, target, 0));
+    let send = Intent {
+        action: Some(SEND.into()),
+        ..Default::default()
+    };
+    assert!(
+        old.query_intent_services(&send, None, 0, 0, 10004)
+            .unwrap()
+            .is_empty()
+    );
+    let mut after = (*before).clone();
+    after.generation = before.generation + 1;
+    assert!(after.system.implicit_access.grant(10004, 10002, true));
+    let after = Arc::new(after);
+    let rebound = resolver
+        .implicit_access_view(&before, after.clone())
+        .unwrap();
+    let next = rebound.resolution(&after).unwrap();
+    let fresh = Resolver::default().resolution(&after).unwrap();
+    assert!(
+        !next
+            .apps_filter
+            .should_filter(&after, 10004, &after.packages["b.gallery"], 0)
+    );
+    assert!(old.apps_filter.should_filter(&before, 10004, target, 0));
+    assert!(Arc::ptr_eq(&resolver.resolution(&before).unwrap(), &old));
+    assert!(Arc::ptr_eq(&rebound.resolution(&after).unwrap(), &next));
+    assert_eq!(before.packages, after.packages);
+    for caller in [10004, 10001, 10005, 1000, 20004] {
+        for flags in [0, 0x80, 0x200, 0x0004_0000] {
+            let actual = next
+                .query_intent_services(&send, None, flags, 0, caller)
+                .unwrap();
+            let expected = fresh
+                .query_intent_services(&send, None, flags, 0, caller)
+                .unwrap();
+            assert_eq!(
+                actual, expected,
+                "static component/caller flag parity must match fresh resolution"
+            );
         }
     }
-    assert_eq!(names(&next.query_intent_services(&send,None,0,0,10004).unwrap()),["b.gallery.Sync"]);
-    assert!(next.apps_filter.should_filter(&after,20004,&after.packages["b.gallery"],0),"client grant must not grant SDK sandbox visibility");
-    assert!(next.apps_filter.should_filter(&after,110004,&after.packages["b.gallery"],1),"user-0 grant must not grant user-1 visibility");
-    assert_eq!(next.resolve_content_provider("b.media2",0,0,10004).unwrap(),fresh.resolve_content_provider("b.media2",0,0,10004).unwrap());
     assert_eq!(
-        apps_filter::should_filter_application(&after,&next.apps_filter,Some(&after.packages["b.gallery"]),99001,0,false,true).unwrap(),
-        apps_filter::should_filter_application(&after,&fresh.apps_filter,Some(&after.packages["b.gallery"]),99001,0,false,true).unwrap(),
-        "isolated caller alias remains bound to actual owner policy");
+        names(
+            &next
+                .query_intent_services(&send, None, 0, 0, 10004)
+                .unwrap()
+        ),
+        ["b.gallery.Sync"]
+    );
+    assert!(
+        next.apps_filter
+            .should_filter(&after, 20004, &after.packages["b.gallery"], 0),
+        "client grant must not grant SDK sandbox visibility"
+    );
+    assert!(
+        next.apps_filter
+            .should_filter(&after, 110004, &after.packages["b.gallery"], 1),
+        "user-0 grant must not grant user-1 visibility"
+    );
+    assert_eq!(
+        next.resolve_content_provider("b.media2", 0, 0, 10004)
+            .unwrap(),
+        fresh
+            .resolve_content_provider("b.media2", 0, 0, 10004)
+            .unwrap()
+    );
+    assert_eq!(
+        apps_filter::should_filter_application(
+            &after,
+            &next.apps_filter,
+            Some(&after.packages["b.gallery"]),
+            99001,
+            0,
+            false,
+            true
+        )
+        .unwrap(),
+        apps_filter::should_filter_application(
+            &after,
+            &fresh.apps_filter,
+            Some(&after.packages["b.gallery"]),
+            99001,
+            0,
+            false,
+            true
+        )
+        .unwrap(),
+        "isolated caller alias remains bound to actual owner policy"
+    );
 }
 
 #[test]
 fn resolve_instant_match_uses_caller_permission_and_requested_user() {
     let mut owned = (*state()).clone();
-    owned.users.insert(10, User { id: 10, unlocking_or_unlocked: false, ..Default::default() });
+    owned.users.insert(
+        10,
+        User {
+            id: 10,
+            unlocking_or_unlocked: false,
+            ..Default::default()
+        },
+    );
     for package in owned.packages.values_mut() {
         package.users.insert(10, PackageUserState::default());
     }
-    owned.packages.get_mut("d.caller").unwrap().users.get_mut(&0).unwrap()
-        .granted_permissions.push("android.permission.ACCESS_INSTANT_APPS".into());
+    owned
+        .packages
+        .get_mut("d.caller")
+        .unwrap()
+        .users
+        .get_mut(&0)
+        .unwrap()
+        .granted_permissions
+        .push("android.permission.ACCESS_INSTANT_APPS".into());
     let resolution = Resolution::new(Arc::new(owned), &Default::default()).unwrap();
-    let match_flags = MATCH_INSTANT | MATCH_VISIBLE_TO_INSTANT_APP_ONLY | MATCH_EXPLICITLY_VISIBLE_ONLY;
+    let match_flags =
+        MATCH_INSTANT | MATCH_VISIBLE_TO_INSTANT_APP_ONLY | MATCH_EXPLICITLY_VISIBLE_ONLY;
     for (caller, user, want, allowed) in [
-        (10004, 0, false, true), (1010004, 10, false, false),
-        (10002, 0, false, false), (10002, 0, true, true),
-        (1000, 0, false, true), (1000, 10, false, true),
+        (10004, 0, false, true),
+        (1010004, 10, false, false),
+        (10002, 0, false, false),
+        (10002, 0, true, true),
+        (1000, 0, false, true),
+        (1000, 10, false, true),
     ] {
-        let actual = resolution.update_flags_for_resolve(match_flags, user, caller, want, false, false).unwrap();
-        assert_eq!(actual & MATCH_INSTANT != 0, allowed, "caller={caller} user={user} want={want}");
-        assert_eq!(actual & (MATCH_VISIBLE_TO_INSTANT_APP_ONLY | MATCH_EXPLICITLY_VISIBLE_ONLY), 0);
+        let actual = resolution
+            .update_flags_for_resolve(match_flags, user, caller, want, false, false)
+            .unwrap();
+        assert_eq!(
+            actual & MATCH_INSTANT != 0,
+            allowed,
+            "caller={caller} user={user} want={want}"
+        );
+        assert_eq!(
+            actual & (MATCH_VISIBLE_TO_INSTANT_APP_ONLY | MATCH_EXPLICITLY_VISIBLE_ONLY),
+            0
+        );
         assert_eq!(actual & MATCH_DIRECT_BOOT_AWARE != 0, true);
         assert_eq!(actual & MATCH_DIRECT_BOOT_UNAWARE != 0, user == 0);
     }
-    assert_eq!(resolution.update_flags_for_resolve(0, 0, 10004, false, false, false).unwrap() & MATCH_INSTANT, 0);
+    assert_eq!(
+        resolution
+            .update_flags_for_resolve(0, 0, 10004, false, false, false)
+            .unwrap()
+            & MATCH_INSTANT,
+        0
+    );
 }
-
 
 #[test]
 fn registered_activity_priorities_use_native_privilege_and_selected_wizard() {
-    let mut source=(*state()).clone();
-    let privileged=source.packages.get_mut("b.gallery").unwrap();privileged.is.privileged=true;
-    let pkg=Arc::make_mut(privileged.pkg.as_mut().unwrap());
-    pkg.activities[0].main.component.intents[0].filter.priority=100;
-    source.system.roles=Some(crate::package::roles::Owner::priority_fixture(None));
-    let original=source.packages["b.gallery"].pkg.as_ref().unwrap().activities[0].main.component.intents[0].filter.clone();
-    let resolver=Resolution::new(Arc::new(source.clone()),&Default::default()).unwrap();
-    let intent=Intent{action:Some("android.intent.action.VIEW".into()),package:Some("b.gallery".into()),..Default::default()};
-    let records=resolver.query_intent_activities(&intent,Some("image/png"),crate::package::component_resolver::GET_RESOLVED_FILTER,0,SYSTEM_UID).unwrap();
-    assert_eq!(records.len(),1);assert_eq!(records[0].priority,0);assert_eq!(records[0].filter.as_ref().unwrap().priority,0);
-    assert_eq!(source.packages["b.gallery"].pkg.as_ref().unwrap().activities[0].main.component.intents[0].filter,original,"supplied parsed APK remains unchanged");
-    source.system.roles=Some(crate::package::roles::Owner::priority_fixture(Some("b.gallery".into())));
-    let wizard=Resolution::new(Arc::new(source.clone()),&Default::default()).unwrap();
-    assert_eq!(wizard.query_intent_activities(&intent,Some("image/png"),0,0,SYSTEM_UID).unwrap()[0].priority,100);
-    let system=source.packages.get_mut("b.gallery").unwrap();system.is.system=true;system.is.privileged=false;
-    let pkg=Arc::make_mut(system.pkg.as_mut().unwrap());pkg.activities[0].main.component.intents[0].filter.actions=vec!["android.intent.action.SEARCH".into()];
-    let ordinary=Resolution::new(Arc::new(source),&Default::default()).unwrap();
-    let search=Intent{action:Some("android.intent.action.SEARCH".into()),package:Some("b.gallery".into()),..Default::default()};
-    let records=ordinary.query_intent_activities(&search,Some("image/png"),crate::package::component_resolver::GET_RESOLVED_FILTER,0,SYSTEM_UID).unwrap();
-    assert_eq!(records[0].priority,0);assert_eq!(records[0].filter.as_ref().unwrap().priority,0);
+    let mut source = (*state()).clone();
+    let privileged = source.packages.get_mut("b.gallery").unwrap();
+    privileged.is.privileged = true;
+    let pkg = Arc::make_mut(privileged.pkg.as_mut().unwrap());
+    pkg.activities[0].main.component.intents[0].filter.priority = 100;
+    source.system.roles = Some(crate::package::roles::Owner::priority_fixture(None));
+    let original = source.packages["b.gallery"]
+        .pkg
+        .as_ref()
+        .unwrap()
+        .activities[0]
+        .main
+        .component
+        .intents[0]
+        .filter
+        .clone();
+    let resolver = Resolution::new(Arc::new(source.clone()), &Default::default()).unwrap();
+    let intent = Intent {
+        action: Some("android.intent.action.VIEW".into()),
+        package: Some("b.gallery".into()),
+        ..Default::default()
+    };
+    let records = resolver
+        .query_intent_activities(
+            &intent,
+            Some("image/png"),
+            crate::package::component_resolver::GET_RESOLVED_FILTER,
+            0,
+            SYSTEM_UID,
+        )
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].priority, 0);
+    assert_eq!(records[0].filter.as_ref().unwrap().priority, 0);
+    assert_eq!(
+        source.packages["b.gallery"]
+            .pkg
+            .as_ref()
+            .unwrap()
+            .activities[0]
+            .main
+            .component
+            .intents[0]
+            .filter,
+        original,
+        "supplied parsed APK remains unchanged"
+    );
+    source.system.roles = Some(crate::package::roles::Owner::priority_fixture(Some(
+        "b.gallery".into(),
+    )));
+    let wizard = Resolution::new(Arc::new(source.clone()), &Default::default()).unwrap();
+    assert_eq!(
+        wizard
+            .query_intent_activities(&intent, Some("image/png"), 0, 0, SYSTEM_UID)
+            .unwrap()[0]
+            .priority,
+        100
+    );
+    let system = source.packages.get_mut("b.gallery").unwrap();
+    system.is.system = true;
+    system.is.privileged = false;
+    let pkg = Arc::make_mut(system.pkg.as_mut().unwrap());
+    pkg.activities[0].main.component.intents[0].filter.actions =
+        vec!["android.intent.action.SEARCH".into()];
+    let ordinary = Resolution::new(Arc::new(source), &Default::default()).unwrap();
+    let search = Intent {
+        action: Some("android.intent.action.SEARCH".into()),
+        package: Some("b.gallery".into()),
+        ..Default::default()
+    };
+    let records = ordinary
+        .query_intent_activities(
+            &search,
+            Some("image/png"),
+            crate::package::component_resolver::GET_RESOLVED_FILTER,
+            0,
+            SYSTEM_UID,
+        )
+        .unwrap();
+    assert_eq!(records[0].priority, 0);
+    assert_eq!(records[0].filter.as_ref().unwrap().priority, 0);
 }
 
 fn dynamic_split_state(installer: bool) -> Arc<State> {
@@ -1235,65 +1472,197 @@ fn dynamic_split_state(installer: bool) -> Arc<State> {
     let target = value.packages.get_mut("a.viewer").unwrap();
     let parsed = Arc::make_mut(target.pkg.as_mut().unwrap());
     parsed.version_code = 100;
-    let mut missing = main("a.viewer", "a.viewer.Feature", vec![filter("SPLIT_TEST", None, None, 0)]);
+    let mut missing = main(
+        "a.viewer",
+        "a.viewer.Feature",
+        vec![filter("SPLIT_TEST", None, None, 0)],
+    );
     missing.split_name = Some("feature_warm".into());
-    let mut failed_split = main("a.viewer", "a.viewer.FailureSplit", vec![filter("android.intent.action.INSTALL_FAILURE", None, None, 10)]);
+    let mut failed_split = main(
+        "a.viewer",
+        "a.viewer.FailureSplit",
+        vec![filter(
+            "android.intent.action.INSTALL_FAILURE",
+            None,
+            None,
+            10,
+        )],
+    );
     failed_split.split_name = Some("other_feature".into());
-    parsed.activities = vec![Activity { main: missing, ..Default::default() },
-        Activity { main: failed_split, ..Default::default() },
-        Activity { main: main("a.viewer", "a.viewer.FailureBase", vec![filter("android.intent.action.INSTALL_FAILURE", None, None, 0)]), ..Default::default() }];
+    parsed.activities = vec![
+        Activity {
+            main: missing,
+            ..Default::default()
+        },
+        Activity {
+            main: failed_split,
+            ..Default::default()
+        },
+        Activity {
+            main: main(
+                "a.viewer",
+                "a.viewer.FailureBase",
+                vec![filter(
+                    "android.intent.action.INSTALL_FAILURE",
+                    None,
+                    None,
+                    0,
+                )],
+            ),
+            ..Default::default()
+        },
+    ];
     let template = installer.then(|| {
         let initial = Resolution::new(Arc::new(value.clone()), &Default::default()).unwrap();
         let mut info = missing_split_info(&initial);
-        let Info::Activity(activity) = &mut info.info else { unreachable!() };
+        let Info::Activity(activity) = &mut info.info else {
+            unreachable!()
+        };
         activity.info.item.package_name = Some("installer.owner".into());
         activity.info.item.name = Some("InstallerActivity".into());
-        info.priority=1; info.icon=999; info.label_res=998; info
+        info.priority = 1;
+        info.icon = 999;
+        info.label_res = 998;
+        info
     });
-    value.system.instant_components = Some(Arc::new(super::super::instant_components::Owner::for_resolution_test(template)));
+    value.system.instant_components = Some(Arc::new(
+        super::super::instant_components::Owner::for_resolution_test(template),
+    ));
     Arc::new(value)
 }
 
 fn missing_split_info(resolution: &Resolution) -> ResolveInfo {
-    resolution.query_activities_with_splits(&Intent {action:Some("SPLIT_TEST".into()),package:Some("a.viewer".into()),..Default::default()},None,0,0,10001,false,None).unwrap().remove(0)
+    resolution
+        .query_activities_with_splits(
+            &Intent {
+                action: Some("SPLIT_TEST".into()),
+                package: Some("a.viewer".into()),
+                ..Default::default()
+            },
+            None,
+            0,
+            0,
+            10001,
+            false,
+            None,
+        )
+        .unwrap()
+        .remove(0)
 }
 
 #[test]
 fn dynamic_split_declared_on_base_drops_only_when_captured_installer_absent() {
-    let state=dynamic_split_state(false); let resolution=Resolution::new(state.clone(),&Default::default()).unwrap();
-    let list=resolution.query_intent_activities(&Intent {action:Some("SPLIT_TEST".into()),package:Some("a.viewer".into()),..Default::default()},None,0,0,10001).unwrap();
+    let state = dynamic_split_state(false);
+    let resolution = Resolution::new(state.clone(), &Default::default()).unwrap();
+    let list = resolution
+        .query_intent_activities(
+            &Intent {
+                action: Some("SPLIT_TEST".into()),
+                package: Some("a.viewer".into()),
+                ..Default::default()
+            },
+            None,
+            0,
+            0,
+            10001,
+        )
+        .unwrap();
     assert!(list.is_empty());
-    let mut unknown=(*state).clone();unknown.system.instant_components=None;
-    let unknown=Resolution::new(Arc::new(unknown),&Default::default()).unwrap();
-    assert!(matches!(unknown.query_intent_activities(&Intent {action:Some("SPLIT_TEST".into()),package:Some("a.viewer".into()),..Default::default()},None,0,0,10001),Err(ResolutionError::NotModelled(NotModelled("captured instant installer owner unavailable")))));
+    let mut unknown = (*state).clone();
+    unknown.system.instant_components = None;
+    let unknown = Resolution::new(Arc::new(unknown), &Default::default()).unwrap();
+    assert!(matches!(
+        unknown.query_intent_activities(
+            &Intent {
+                action: Some("SPLIT_TEST".into()),
+                package: Some("a.viewer".into()),
+                ..Default::default()
+            },
+            None,
+            0,
+            0,
+            10001
+        ),
+        Err(ResolutionError::NotModelled(NotModelled(
+            "captured instant installer owner unavailable"
+        )))
+    ));
 }
 
 #[test]
 fn dynamic_split_replaces_with_installer_auxiliary_before_visibility_and_skips_split_failure() {
-    let resolution=Resolution::new(dynamic_split_state(true),&Default::default()).unwrap();
-    let mut info=missing_split_info(&resolution);
-    let Info::Activity(activity)=&mut info.info else{unreachable!()};
-    activity.info.item.label_res=44;activity.info.item.icon=77;
-    let list=resolution.apply_post_resolution_filter(vec![info],None,true,10001,0,&Intent::default()).unwrap();
-    assert_eq!(list.len(),1);let result=&list[0];
-    assert_eq!(result.component(),("installer.owner","InstallerActivity")); // Installer is deliberately outside AppsFilter inventory.
-    assert_eq!((result.label_res,result.icon),(44,77));assert_eq!(result.priority,1);
-    assert_eq!(result.resolve_package_name.as_deref(),Some("a.viewer"));assert!(result.is_instant_app_available);
-    assert_eq!(result.filter.as_ref(),Some(&IntentFilter::default()));
-    let auxiliary=result.auxiliary.as_ref().unwrap();assert_eq!((auxiliary.package.as_str(),auxiliary.version,auxiliary.split.as_str()),("a.viewer",100,"feature_warm"));
-    assert_eq!(auxiliary.failure,Some(ComponentName{package:"a.viewer".into(),class:"a.viewer.FailureBase".into()}));
+    let resolution = Resolution::new(dynamic_split_state(true), &Default::default()).unwrap();
+    let mut info = missing_split_info(&resolution);
+    let Info::Activity(activity) = &mut info.info else {
+        unreachable!()
+    };
+    activity.info.item.label_res = 44;
+    activity.info.item.icon = 77;
+    let list = resolution
+        .apply_post_resolution_filter(vec![info], None, true, 10001, 0, &Intent::default())
+        .unwrap();
+    assert_eq!(list.len(), 1);
+    let result = &list[0];
+    assert_eq!(result.component(), ("installer.owner", "InstallerActivity")); // Installer is deliberately outside AppsFilter inventory.
+    assert_eq!((result.label_res, result.icon), (44, 77));
+    assert_eq!(result.priority, 1);
+    assert_eq!(result.resolve_package_name.as_deref(), Some("a.viewer"));
+    assert!(result.is_instant_app_available);
+    assert_eq!(result.filter.as_ref(), Some(&IntentFilter::default()));
+    let auxiliary = result.auxiliary.as_ref().unwrap();
+    assert_eq!(
+        (
+            auxiliary.package.as_str(),
+            auxiliary.version,
+            auxiliary.split.as_str()
+        ),
+        ("a.viewer", 100, "feature_warm")
+    );
+    assert_eq!(
+        auxiliary.failure,
+        Some(ComponentName {
+            package: "a.viewer".into(),
+            class: "a.viewer.FailureBase".into()
+        })
+    );
 }
 
 #[test]
 fn dynamic_split_web_block_drops_instant_target_but_keeps_full_target() {
-    let mut state=(*dynamic_split_state(true)).clone();
-    state.system.web_instant_policy=Some(Arc::new(super::super::web_instant_state::Snapshot{epoch:1,disabled:std::collections::BTreeMap::from([(0,true)])}));
-    let resolution=Resolution::new(Arc::new(state.clone()),&Default::default()).unwrap();let info=missing_split_info(&resolution);
-    let web=Intent{action:Some(VIEW.into()),data:Some(Uri::parse("https://example.test/")),..Default::default()};
-    assert_eq!(resolution.apply_post_resolution_filter(vec![info.clone()],None,true,SYSTEM_UID,0,&web).unwrap().len(),1);
-    state.packages.get_mut("a.viewer").unwrap().users.get_mut(&0).unwrap().instant_app=true;
-    let instant=Resolution::new(Arc::new(state),&Default::default()).unwrap();
-    assert!(instant.apply_post_resolution_filter(vec![info],None,true,SYSTEM_UID,0,&web).unwrap().is_empty());
+    let mut state = (*dynamic_split_state(true)).clone();
+    state.system.web_instant_policy = Some(Arc::new(super::super::web_instant_state::Snapshot {
+        epoch: 1,
+        disabled: std::collections::BTreeMap::from([(0, true)]),
+    }));
+    let resolution = Resolution::new(Arc::new(state.clone()), &Default::default()).unwrap();
+    let info = missing_split_info(&resolution);
+    let web = Intent {
+        action: Some(VIEW.into()),
+        data: Some(Uri::parse("https://example.test/")),
+        ..Default::default()
+    };
+    assert_eq!(
+        resolution
+            .apply_post_resolution_filter(vec![info.clone()], None, true, SYSTEM_UID, 0, &web)
+            .unwrap()
+            .len(),
+        1
+    );
+    state
+        .packages
+        .get_mut("a.viewer")
+        .unwrap()
+        .users
+        .get_mut(&0)
+        .unwrap()
+        .instant_app = true;
+    let instant = Resolution::new(Arc::new(state), &Default::default()).unwrap();
+    assert!(
+        instant
+            .apply_post_resolution_filter(vec![info], None, true, SYSTEM_UID, 0, &web)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 const INSTANT_ACTION: &str = "fixture.intent.INSTANT_QUERY";
@@ -1308,42 +1677,112 @@ fn instant_resolution_state() -> Arc<State> {
                 2 => FLAG_VISIBLE_TO_INSTANT_APP | FLAG_IMPLICITLY_VISIBLE_TO_INSTANT_APP,
                 _ => 0,
             };
-            pkg.activities.push(Activity { main: activity, ..Default::default() });
+            pkg.activities.push(Activity {
+                main: activity,
+                ..Default::default()
+            });
         });
         ps.users.get_mut(&0).unwrap().instant_app = instant;
         ps
     };
-    let packages = [make("caller.instant", 10100, true, 0, 0), make("exposed.full", 10101, false, 1, 0),
-        make("implicit.full", 10102, false, 2, 0), make("hidden.full", 10103, false, 0, 0),
-        make("other.instant", 10104, true, 1, 0)];
-    let packages = packages.into_iter().map(|p| (p.name.clone(), p)).collect::<BTreeMap<_, _>>();
+    let packages = [
+        make("caller.instant", 10100, true, 0, 0),
+        make("exposed.full", 10101, false, 1, 0),
+        make("implicit.full", 10102, false, 2, 0),
+        make("hidden.full", 10103, false, 0, 0),
+        make("other.instant", 10104, true, 1, 0),
+    ];
+    let packages = packages
+        .into_iter()
+        .map(|p| (p.name.clone(), p))
+        .collect::<BTreeMap<_, _>>();
     let mut registry = super::super::registry::Registry::default();
     for package in packages.values() {
-        registry.register(Arc::new(super::super::scan::LoadedPackage::new(
-            package.pkg.as_deref().unwrap().clone(), super::super::sign::SigningDetails::unknown()).unwrap())).unwrap();
+        registry
+            .register(Arc::new(
+                super::super::scan::LoadedPackage::new(
+                    package.pkg.as_deref().unwrap().clone(),
+                    super::super::sign::SigningDetails::unknown(),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
     }
-    Arc::new(State { generation: 17, packages, package_registry: Some(Arc::new(registry)),
-        users: [(0, User { id: 0, unlocking_or_unlocked: true, ..Default::default() })].into(), ..Default::default() })
+    Arc::new(State {
+        generation: 17,
+        packages,
+        package_registry: Some(Arc::new(registry)),
+        users: [(
+            0,
+            User {
+                id: 0,
+                unlocking_or_unlocked: true,
+                ..Default::default()
+            },
+        )]
+        .into(),
+        ..Default::default()
+    })
 }
 fn instant_query_intent(package: Option<&str>, component: Option<&str>) -> Intent {
-    Intent { action: Some(INSTANT_ACTION.into()), package: package.map(str::to_owned),
-        component: component.map(|class| ComponentName { package: package.unwrap().into(), class: class.into() }), ..Default::default() }
+    Intent {
+        action: Some(INSTANT_ACTION.into()),
+        package: package.map(str::to_owned),
+        component: component.map(|class| ComponentName {
+            package: package.unwrap().into(),
+            class: class.into(),
+        }),
+        ..Default::default()
+    }
 }
 #[test]
 fn instant_post_resolution_retains_own_and_exposed_full_activities_in_source_order() {
     let state = instant_resolution_state();
     let resolution = Resolution::new(state.clone(), &Default::default()).unwrap();
     let intent = instant_query_intent(None, None);
-    let raw = resolution.find(Kind::Activity, &intent, None, MATCH_INSTANT | MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE, 0, None).unwrap().unwrap();
-    let infos = raw.into_iter().map(|info| (info.component().0.to_owned(), info)).collect::<BTreeMap<_, _>>();
-    let order = ["hidden.full", "exposed.full", "other.instant", "caller.instant", "implicit.full"];
+    let raw = resolution
+        .find(
+            Kind::Activity,
+            &intent,
+            None,
+            MATCH_INSTANT | MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE,
+            0,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+    let infos = raw
+        .into_iter()
+        .map(|info| (info.component().0.to_owned(), info))
+        .collect::<BTreeMap<_, _>>();
+    let order = [
+        "hidden.full",
+        "exposed.full",
+        "other.instant",
+        "caller.instant",
+        "implicit.full",
+    ];
     let list = order.iter().map(|name| infos[*name].clone()).collect();
-    let result = resolution.apply_post_resolution_filter(list, Some("caller.instant"), false, 10100, 0, &intent).unwrap();
-    assert_eq!(names(&result), ["exposed.full.Activity", "caller.instant.Activity", "implicit.full.Activity"]);
+    let result = resolution
+        .apply_post_resolution_filter(list, Some("caller.instant"), false, 10100, 0, &intent)
+        .unwrap();
+    assert_eq!(
+        names(&result),
+        [
+            "exposed.full.Activity",
+            "caller.instant.Activity",
+            "implicit.full.Activity"
+        ]
+    );
     assert!(Arc::ptr_eq(&resolution.state, &state));
     assert!(resolution.state.packages["caller.instant"].users[&0].instant_app);
 }
-fn instant_public_request(package: Option<&str>, component: Option<&str>, flags: i64, user: i32) -> Parcel {
+fn instant_public_request(
+    package: Option<&str>,
+    component: Option<&str>,
+    flags: i64,
+    user: i32,
+) -> Parcel {
     let mut request = Parcel::new();
     request.write_interface_token(pm::DESCRIPTOR);
     request.write_i32(1);
@@ -1355,8 +1794,12 @@ fn instant_public_request(package: Option<&str>, component: Option<&str>, flags:
     request.write_i32(0);
     request.write_string8(package);
     request.write_string16(component.map(|_| package.unwrap()));
-    if let Some(component) = component { request.write_string16(Some(component)); }
-    for value in [0, 0, 0, 0, -2, -1, 0, 0] { request.write_i32(value); }
+    if let Some(component) = component {
+        request.write_string16(Some(component));
+    }
+    for value in [0, 0, 0, 0, -2, -1, 0, 0] {
+        request.write_i32(value);
+    }
     request.write_string16(None); // resolved type
     request.write_i64(flags);
     request.write_i32(user);
@@ -1368,32 +1811,89 @@ fn instant_public_resolve_queries_preserve_explicit_visibility_and_caller_identi
     let resolution = Resolution::new(state.clone(), &Default::default()).unwrap();
     let resolver = Resolver::default();
     let implicit = instant_query_intent(None, None);
-    let list = resolution.query_intent_activities(&implicit, None, 0, 0, 10100).unwrap();
-    assert_eq!(names(&list).into_iter().collect::<BTreeSet<_>>(), ["caller.instant.Activity".into(), "exposed.full.Activity".into(), "implicit.full.Activity".into()].into());
+    let list = resolution
+        .query_intent_activities(&implicit, None, 0, 0, 10100)
+        .unwrap();
+    assert_eq!(
+        names(&list).into_iter().collect::<BTreeSet<_>>(),
+        [
+            "caller.instant.Activity".into(),
+            "exposed.full.Activity".into(),
+            "implicit.full.Activity".into()
+        ]
+        .into()
+    );
     let request = instant_public_request(None, None, 0, 0);
-    let actual = resolver.query(&state, pm::QUERY_INTENT_ACTIVITIES, 10100, &mut request.reader()).unwrap().unwrap();
+    let actual = resolver
+        .query(
+            &state,
+            pm::QUERY_INTENT_ACTIVITIES,
+            10100,
+            &mut request.reader(),
+        )
+        .unwrap()
+        .unwrap();
     let mut expected_reply = Parcel::new();
-    let slice = ListSlice { creator: "android.content.pm.ResolveInfo".into(), items: list };
+    let slice = ListSlice {
+        creator: "android.content.pm.ResolveInfo".into(),
+        items: list,
+    };
     pm::write_query_intent_activities_reply(&mut expected_reply, Some(&slice));
     let mut actual_reader = actual.reader();
-    assert_eq!(resolver.decode_reply(pm::QUERY_INTENT_ACTIVITIES, &mut actual_reader).unwrap().unwrap(),
-        resolver.decode_reply(pm::QUERY_INTENT_ACTIVITIES, &mut expected_reply.reader()).unwrap().unwrap());
+    assert_eq!(
+        resolver
+            .decode_reply(pm::QUERY_INTENT_ACTIVITIES, &mut actual_reader)
+            .unwrap()
+            .unwrap(),
+        resolver
+            .decode_reply(pm::QUERY_INTENT_ACTIVITIES, &mut expected_reply.reader())
+            .unwrap()
+            .unwrap()
+    );
     assert_eq!(actual_reader.remaining(), 0);
-    for (package, component, expected) in [("caller.instant", "caller.instant.Activity", true),
-        ("exposed.full", "exposed.full.Activity", true), ("implicit.full", "implicit.full.Activity", false),
-        ("hidden.full", "hidden.full.Activity", false), ("other.instant", "other.instant.Activity", false)] {
+    for (package, component, expected) in [
+        ("caller.instant", "caller.instant.Activity", true),
+        ("exposed.full", "exposed.full.Activity", true),
+        ("implicit.full", "implicit.full.Activity", false),
+        ("hidden.full", "hidden.full.Activity", false),
+        ("other.instant", "other.instant.Activity", false),
+    ] {
         let intent = instant_query_intent(Some(package), Some(component));
-        let value = resolution.resolve_intent(&intent, None, 0, 0, 10100).unwrap();
-        assert_eq!(value.as_ref().map(|info| info.component().1), expected.then_some(component));
+        let value = resolution
+            .resolve_intent(&intent, None, 0, 0, 10100)
+            .unwrap();
+        assert_eq!(
+            value.as_ref().map(|info| info.component().1),
+            expected.then_some(component)
+        );
         for code in [pm::RESOLVE_INTENT, pm::QUERY_INTENT_ACTIVITIES] {
             let request = instant_public_request(Some(package), Some(component), 0, 0);
-            let actual = resolver.query(&state, code, 10100, &mut request.reader()).unwrap().unwrap();
+            let actual = resolver
+                .query(&state, code, 10100, &mut request.reader())
+                .unwrap()
+                .unwrap();
             let mut expected_reply = Parcel::new();
-            if code == pm::RESOLVE_INTENT { pm::write_resolve_intent_reply(&mut expected_reply, value.as_ref()); }
-            else { let slice = ListSlice { creator: "android.content.pm.ResolveInfo".into(), items: value.clone().into_iter().collect() }; pm::write_query_intent_activities_reply(&mut expected_reply, Some(&slice)); }
+            if code == pm::RESOLVE_INTENT {
+                pm::write_resolve_intent_reply(&mut expected_reply, value.as_ref());
+            } else {
+                let slice = ListSlice {
+                    creator: "android.content.pm.ResolveInfo".into(),
+                    items: value.clone().into_iter().collect(),
+                };
+                pm::write_query_intent_activities_reply(&mut expected_reply, Some(&slice));
+            }
             let mut actual_reader = actual.reader();
             let mut expected_reader = expected_reply.reader();
-            assert_eq!(resolver.decode_reply(code, &mut actual_reader).unwrap().unwrap(), resolver.decode_reply(code, &mut expected_reader).unwrap().unwrap());
+            assert_eq!(
+                resolver
+                    .decode_reply(code, &mut actual_reader)
+                    .unwrap()
+                    .unwrap(),
+                resolver
+                    .decode_reply(code, &mut expected_reader)
+                    .unwrap()
+                    .unwrap()
+            );
             assert_eq!(actual_reader.remaining(), 0);
         }
     }
@@ -1406,20 +1906,45 @@ fn instant_resolution_keeps_isolated_owner_user_and_captured_generation_boundari
     let mut next = (*before).clone();
     next.generation += 1;
     next.system.isolated_owners.push((99001, 10100));
-    next.packages.get_mut("exposed.full").unwrap().users.get_mut(&0).unwrap().enabled = 2;
+    next.packages
+        .get_mut("exposed.full")
+        .unwrap()
+        .users
+        .get_mut(&0)
+        .unwrap()
+        .enabled = 2;
     let next = Arc::new(next);
     let latest = resolver.resolution(&next).unwrap();
     let intent = instant_query_intent(Some("exposed.full"), Some("exposed.full.Activity"));
-    assert!(old.resolve_intent(&intent, None, 0, 0, 10100).unwrap().is_some());
-    assert!(latest.resolve_intent(&intent, None, 0, 0, 10100).unwrap().is_none());
+    assert!(
+        old.resolve_intent(&intent, None, 0, 0, 10100)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        latest
+            .resolve_intent(&intent, None, 0, 0, 10100)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!((old.state.generation, latest.state.generation), (17, 18));
     assert!(Arc::ptr_eq(&old.state, &before));
     assert!(Arc::ptr_eq(&latest.state, &next));
     let own = instant_query_intent(Some("caller.instant"), Some("caller.instant.Activity"));
-    assert!(latest.resolve_intent(&own, None, 0, 0, 99001).unwrap().is_some());
+    assert!(
+        latest
+            .resolve_intent(&own, None, 0, 0, 99001)
+            .unwrap()
+            .is_some()
+    );
     assert!(latest.resolve_intent(&own, None, 0, 0, 99002).is_err());
     assert!(latest.resolve_intent(&own, None, 0, 0, 110100).is_err());
-    assert!(latest.resolve_intent(&own, None, 0, 99, 10100).unwrap().is_none());
+    assert!(
+        latest
+            .resolve_intent(&own, None, 0, 99, 10100)
+            .unwrap()
+            .is_none()
+    );
 }
 #[test]
 fn instant_missing_split_replacement_still_precedes_caller_post_filter() {
@@ -1427,9 +1952,14 @@ fn instant_missing_split_replacement_still_precedes_caller_post_filter() {
     let resolution = Resolution::new(state, &Default::default()).unwrap();
     let info = missing_split_info(&resolution);
     let intent = view(None, None);
-    let results = resolution.apply_post_resolution_filter(vec![info], Some("a.viewer"), true, 10001, 0, &intent).unwrap();
+    let results = resolution
+        .apply_post_resolution_filter(vec![info], Some("a.viewer"), true, 10001, 0, &intent)
+        .unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].component(), ("installer.owner", "InstallerActivity"));
+    assert_eq!(
+        results[0].component(),
+        ("installer.owner", "InstallerActivity")
+    );
     assert_eq!(results[0].auxiliary.as_ref().unwrap().package, "a.viewer");
 }
 
@@ -1443,25 +1973,74 @@ fn starts_report_unsafe_intents() {
     let r = Resolution::new(state(), &Default::default()).unwrap();
     let explicit = |action: Option<&str>, package: &str, class: &str| Intent {
         action: action.map(Into::into),
-        component: Some(ComponentName { package: package.into(), class: class.into() }),
+        component: Some(ComponentName {
+            package: package.into(),
+            class: class.into(),
+        }),
         ..Intent::default()
     };
     let report = std::cell::RefCell::new(Vec::new());
     let found = r
-        .resolve_intent_for_start(&explicit(Some(SEND), "c.high", "c.high.Open"), None, 0, 0, 10004, true, &report)
+        .resolve_intent_for_start(
+            &explicit(Some(SEND), "c.high", "c.high.Open"),
+            None,
+            0,
+            0,
+            10004,
+            true,
+            &report,
+        )
         .unwrap();
-    assert_eq!(found.map(|f| f.component().1.to_owned()).as_deref(), Some("c.high.Open"));
-    assert_eq!(report.take(), [(UNSAFE_INTENT_EXPLICIT_INTENT_FILTER_UNMATCH, false)]);
-    r.resolve_intent_for_start(&explicit(None, "c.high", "c.high.Open"), None, 0, 0, 10004, true, &report).unwrap();
+    assert_eq!(
+        found.map(|f| f.component().1.to_owned()).as_deref(),
+        Some("c.high.Open")
+    );
+    assert_eq!(
+        report.take(),
+        [(UNSAFE_INTENT_EXPLICIT_INTENT_FILTER_UNMATCH, false)]
+    );
+    r.resolve_intent_for_start(
+        &explicit(None, "c.high", "c.high.Open"),
+        None,
+        0,
+        0,
+        10004,
+        true,
+        &report,
+    )
+    .unwrap();
     assert_eq!(report.take(), [(UNSAFE_INTENT_NULL_ACTION_MATCH, false)]);
     // The caller's own component and the system's starts report nothing.
-    r.resolve_intent_for_start(&explicit(Some(SEND), "c.high", "c.high.Open"), None, 0, 0, SYSTEM_UID, true, &report).unwrap();
+    r.resolve_intent_for_start(
+        &explicit(Some(SEND), "c.high", "c.high.Open"),
+        None,
+        0,
+        0,
+        SYSTEM_UID,
+        true,
+        &report,
+    )
+    .unwrap();
     assert!(report.take().is_empty());
     let service = r
-        .resolve_service_for_start(&explicit(None, "b.gallery", "b.gallery.Sync"), None, 0, 0, 10005, &report)
+        .resolve_service_for_start(
+            &explicit(None, "b.gallery", "b.gallery.Sync"),
+            None,
+            0,
+            0,
+            10005,
+            &report,
+        )
         .unwrap();
     assert!(service.is_some());
     assert_eq!(report.take(), [(UNSAFE_INTENT_NULL_ACTION_MATCH, false)]);
-    r.resolve_service(&explicit(None, "b.gallery", "b.gallery.Sync"), None, 0, 0, 10005).unwrap();
+    r.resolve_service(
+        &explicit(None, "b.gallery", "b.gallery.Sync"),
+        None,
+        0,
+        0,
+        10005,
+    )
+    .unwrap();
     assert!(report.take().is_empty());
 }

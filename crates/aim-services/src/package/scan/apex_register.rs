@@ -401,7 +401,7 @@ impl SigningScan {
                 code_is_directory: false,
                 canonical_source: None,
             };
-            let scan_as_instant_app=setting.users.get(&0).is_some_and(|user|user.instant_app);
+            let scan_as_instant_app = setting.users.get(&0).is_some_and(|user| user.instant_app);
             let completed = staged.finish_scan_metadata(
                 NewPackageOutcome {
                     record,
@@ -607,7 +607,8 @@ pub fn registered_apex(
     let stopped = super::boot::initial_stopped(
         &parsed,
         config,
-        apks.platform.framework_boolean("config_stopSystemPackagesByDefault")?,
+        apks.platform
+            .framework_boolean("config_stopSystemPackagesByDefault")?,
     );
     Ok((parsed, flags, private_flags, stopped))
 }

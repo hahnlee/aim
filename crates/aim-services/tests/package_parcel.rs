@@ -1,10 +1,6 @@
 //! Original PackageImpl read/write oracle for native scan parcel output.
 use aim_services::package::pkg::AndroidPackage;
-use std::{
-    fs,
-    process::Command,
-    time::Duration,
-};
+use std::{fs, process::Command, time::Duration};
 mod common {
     pub mod boot_version_events;
     pub mod domain_collector;
@@ -48,7 +44,11 @@ fn assert_guest_success(boot: &Boot, output: &std::process::Output, stage: &str)
         String::from_utf8_lossy(&logs.stdout)
     );
 }
-fn compile_original_parcel_oracle(dir: &std::path::Path, jdk: &std::path::Path, java: &std::path::Path) -> std::path::PathBuf {
+fn compile_original_parcel_oracle(
+    dir: &std::path::Path,
+    jdk: &std::path::Path,
+    java: &std::path::Path,
+) -> std::path::PathBuf {
     let classes = dir.join("classes");
     let stubs = dir.join("stubs");
     let dex = dir.join("dex");
@@ -276,7 +276,10 @@ fn compile_original_parcel_oracle(dir: &std::path::Path, jdk: &std::path::Path, 
             aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageUserScopeFeed.java"),
         )
-        .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/NativePackageCapabilities.java"))
+        .arg(
+            aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/NativePackageCapabilities.java"),
+        )
         .arg(
             aim_paths::root().join("java/device-services/src/dev/aim/server/PackageSnapshots.java"),
         )
@@ -293,10 +296,22 @@ fn compile_original_parcel_oracle(dir: &std::path::Path, jdk: &std::path::Path, 
                 .join("java/device-services/src/dev/aim/server/PackageSdkSandbox.java"),
         )
         .arg(aim_paths::root().join("crates/aim-services/tests/fixtures/SdkDataOracle.java"))
-        .arg(aim_paths::root().join("crates/aim-services/tests/fixtures/PackageSnapshotConcurrencyOracle.java"))
-        .arg(aim_paths::root().join("crates/aim-services/tests/fixtures/PackageServiceQueryOracle.java"))
-        .arg(aim_paths::root().join("crates/aim-services/tests/fixtures/PackageReceiverQueryOracle.java"))
-        .arg(aim_paths::root().join("crates/aim-services/tests/fixtures/PackagePureQueryOracle.java"))
+        .arg(
+            aim_paths::root()
+                .join("crates/aim-services/tests/fixtures/PackageSnapshotConcurrencyOracle.java"),
+        )
+        .arg(
+            aim_paths::root()
+                .join("crates/aim-services/tests/fixtures/PackageServiceQueryOracle.java"),
+        )
+        .arg(
+            aim_paths::root()
+                .join("crates/aim-services/tests/fixtures/PackageReceiverQueryOracle.java"),
+        )
+        .arg(
+            aim_paths::root()
+                .join("crates/aim-services/tests/fixtures/PackagePureQueryOracle.java"),
+        )
         .args(common::java::private_aidl_sources(&dir)));
     let mut pending = vec![classes.clone()];
     let mut class_files = Vec::new();
@@ -362,9 +377,13 @@ fn native_package_parcels_match_original_read_write() {
     let java = aim_paths::fetched().join("java");
     let jdk = java.join("temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
     let dex = compile_original_parcel_oracle(&data.0, &jdk, &java);
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
+    let boot = Boot::new(
+        aim_paths::root().join("target/release/aimctl"),
+        data.0.join("g"),
+    );
     run(boot.start_command().args(["start", "--windows"]));
-    boot.wait_ready(Duration::from_secs(300)).expect("package_parcel oracle boot readiness");
+    boot.wait_ready(Duration::from_secs(300))
+        .expect("package_parcel oracle boot readiness");
 
     let directory = boot.data.join("data/local/tmp/package-parcels");
     fs::create_dir(&directory).unwrap();
@@ -461,8 +480,10 @@ fn native_package_parcels_match_original_read_write() {
             .unwrap();
         }
     }
-    let framework =
-        aim_services::package::system_config::Framework::load(&common::runtime::cohort::original_image()).unwrap();
+    let framework = aim_services::package::system_config::Framework::load(
+        &common::runtime::cohort::original_image(),
+    )
+    .unwrap();
     let system = aim_services::package::system_config::system(
         &common::runtime::cohort::original_image(),
         &|_| None,
@@ -6481,7 +6502,11 @@ fn verify_page_size_compat(directory: &std::path::Path) {
         page_size_compat::{Owner, enabled},
         parse::{Platform, resources::Config},
     };
-    let platform = Platform::load(&common::runtime::cohort::original_image(), Default::default()).unwrap();
+    let platform = Platform::load(
+        &common::runtime::cohort::original_image(),
+        Default::default(),
+    )
+    .unwrap();
     let owner = Owner::load(
         &platform,
         Config {

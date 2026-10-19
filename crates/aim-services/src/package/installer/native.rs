@@ -12,10 +12,10 @@ use aim_binder_host::{
     parcel::{Binder, EX_ILLEGAL_STATE, Exception},
 };
 use std::sync::{Arc, Mutex};
-#[path = "native_verification.rs"]
-mod native_verification;
 #[path = "native_dump.rs"]
 mod native_dump;
+#[path = "native_verification.rs"]
+mod native_verification;
 pub type StagedExecutor = Arc<
     dyn Fn(
             i32,
@@ -302,8 +302,15 @@ impl NativeOwners {
         if uid < 0 {
             return Err(super::archiver::name_error("Installer package unavailable"));
         }
-        self.normalize(uid as u32, -1, params, Some(installer.to_owned()), None, user)
-            .map(|(record, _)| record)
+        self.normalize(
+            uid as u32,
+            -1,
+            params,
+            Some(installer.to_owned()),
+            None,
+            user,
+        )
+        .map(|(record, _)| record)
     }
     pub fn archived_install_record(
         &self,
@@ -312,8 +319,15 @@ impl NativeOwners {
         user: i32,
         calling_uid: u32,
     ) -> Result<Record, Exception> {
-        self.normalize(calling_uid, -1, params, Some(installer.to_owned()), None, user)
-            .map(|(record, _)| record)
+        self.normalize(
+            calling_uid,
+            -1,
+            params,
+            Some(installer.to_owned()),
+            None,
+            user,
+        )
+        .map(|(record, _)| record)
     }
     pub fn archiver_save_sessions(&self) -> Result<(), Exception> {
         self.persist()
@@ -478,7 +492,8 @@ impl NativeOwners {
             })?(&session, &record)?;
         // Original checkUidPermission evaluates the immutable installer UID at
         // this decision, independently of the committing Binder caller.
-        let permissions = (self.policy_source)(session.installer_uid, -1, session.user as i32)?.permissions;
+        let permissions =
+            (self.policy_source)(session.installer_uid, -1, session.user as i32)?.permissions;
         self.query(session.installer_uid, |query| {
             let permission = |name| permissions.check(name, -1, session.installer_uid as i32);
             let package = session
@@ -627,14 +642,29 @@ impl NativeOwners {
         }
         Ok(())
     }
-    pub(crate) fn install_warning_ticket(&self,session:i32)->Result<super::install_warnings::Ticket,Exception> {
+    pub(crate) fn install_warning_ticket(
+        &self,
+        session: i32,
+    ) -> Result<super::install_warnings::Ticket, Exception> {
         self.install_warnings.ticket(session)
     }
-    pub(crate) fn record_install_profile_errors(&self,ticket:super::install_warnings::Ticket,generation:u64,adb:bool,errors:&[String])->Result<(),Exception> {
-        self.install_warnings.record(ticket,generation,adb,errors)
+    pub(crate) fn record_install_profile_errors(
+        &self,
+        ticket: super::install_warnings::Ticket,
+        generation: u64,
+        adb: bool,
+        errors: &[String],
+    ) -> Result<(), Exception> {
+        self.install_warnings
+            .record(ticket, generation, adb, errors)
     }
-    pub(crate) fn record_install_without_dexopt_result(&self,ticket:super::install_warnings::Ticket,generation:u64)->Result<(),Exception> {
-        self.install_warnings.record_without_result(ticket,generation)
+    pub(crate) fn record_install_without_dexopt_result(
+        &self,
+        ticket: super::install_warnings::Ticket,
+        generation: u64,
+    ) -> Result<(), Exception> {
+        self.install_warnings
+            .record_without_result(ticket, generation)
     }
     fn deliver_install(
         &self,
@@ -642,9 +672,15 @@ impl NativeOwners {
         legacy: i32,
         message: Option<String>,
     ) -> Result<(), Exception> {
-        self.deliver_install_with_warnings(id,legacy,message,&[])
+        self.deliver_install_with_warnings(id, legacy, message, &[])
     }
-    fn deliver_install_with_warnings(&self,id:i32,legacy:i32,message:Option<String>,warnings:&[String])->Result<(),Exception> {
+    fn deliver_install_with_warnings(
+        &self,
+        id: i32,
+        legacy: i32,
+        message: Option<String>,
+        warnings: &[String],
+    ) -> Result<(), Exception> {
         let sender = self
             .receivers
             .lock()
@@ -661,15 +697,18 @@ impl NativeOwners {
             let external = self.external.lock().unwrap().clone().ok_or_else(|| {
                 Exception::new(EX_ILLEGAL_STATE, "Installer status owner unavailable")
             })?;
-            external.deliver_with_warnings(&super::preapproval::Status {
-                receiver,
-                session_id: id,
-                package,
-                legacy_status: legacy,
-                message,
-                preapproval: false,
-                pending_installer: None,
-            },warnings)?;
+            external.deliver_with_warnings(
+                &super::preapproval::Status {
+                    receiver,
+                    session_id: id,
+                    package,
+                    legacy_status: legacy,
+                    message,
+                    preapproval: false,
+                    pending_installer: None,
+                },
+                warnings,
+            )?;
         }
         Ok(())
     }
@@ -704,33 +743,52 @@ impl NativeOwners {
         Ok(())
     }
     fn run_install(&self, id: i32) -> Result<(), Exception> {
-        let root=self.sessions.snapshot(id)?;
-        let ordered=std::iter::once(id).chain(root.children.iter().copied()).collect();
-        let warning_attempt=self.install_warnings.begin(id,ordered)?;
-        let before=(self.source)()?;
-        let since=self.deferred.mark();
+        let root = self.sessions.snapshot(id)?;
+        let ordered = std::iter::once(id)
+            .chain(root.children.iter().copied())
+            .collect();
+        let warning_attempt = self.install_warnings.begin(id, ordered)?;
+        let before = (self.source)()?;
+        let since = self.deferred.mark();
         let result = self.install_staged_batch(id);
         match result {
             Err(super::pipeline::Error::Pending) => Ok(()),
             Ok(()) => {
-                let warnings=warning_attempt.take()?;
+                let warnings = warning_attempt.take()?;
                 // handlePackagePostInstall defers an update's observer until
                 // its old processes are killed, or a delay passes.
-                let mut updated=false;let mut killed=std::collections::BTreeSet::new();
+                let mut updated = false;
+                let mut killed = std::collections::BTreeSet::new();
                 for member in std::iter::once(id).chain(root.children.iter().copied()) {
-                    let (name,flags)=self.sessions.with_record(member,|session,record|
-                        Ok((session.resolved_package.clone(),record.params.install_flags)))?;
-                    let Some(name)=name.filter(|name|before.packages.contains_key(name)) else {continue};
-                    updated=true;
-                    if flags&0x1000==0 {killed.insert(name);}
+                    let (name, flags) = self.sessions.with_record(member, |session, record| {
+                        Ok((
+                            session.resolved_package.clone(),
+                            record.params.install_flags,
+                        ))
+                    })?;
+                    let Some(name) = name.filter(|name| before.packages.contains_key(name)) else {
+                        continue;
+                    };
+                    updated = true;
+                    if flags & 0x1000 == 0 {
+                        killed.insert(name);
+                    }
                 }
-                if !updated {return self.complete_install(id,&warnings);}
-                let delay=if killed.is_empty(){super::deferred_observer::NO_KILL}else{super::deferred_observer::PENDING_KILL};
-                let this=self.this.clone();
-                std::thread::spawn(move||{
-                    let Some(owner)=this.upgrade() else {return};
-                    owner.deferred.wait(since,&killed,delay);
-                    if let Err(error)=owner.complete_install(id,&warnings) {owner.errors.lock().unwrap().push(error.message);}
+                if !updated {
+                    return self.complete_install(id, &warnings);
+                }
+                let delay = if killed.is_empty() {
+                    super::deferred_observer::NO_KILL
+                } else {
+                    super::deferred_observer::PENDING_KILL
+                };
+                let this = self.this.clone();
+                std::thread::spawn(move || {
+                    let Some(owner) = this.upgrade() else { return };
+                    owner.deferred.wait(since, &killed, delay);
+                    if let Err(error) = owner.complete_install(id, &warnings) {
+                        owner.errors.lock().unwrap().push(error.message);
+                    }
                 });
                 Ok(())
             }
@@ -743,8 +801,14 @@ impl NativeOwners {
                 self.receivers.lock().unwrap().remove(&id);
                 Err(Exception::new(EX_ILLEGAL_STATE, failure.message))
             }
-            Err(super::pipeline::Error::Owner { committed, mut error }) => {
-                error.message = format!("Native installer session {id} owner failure (committed={committed}, exception {}): {}", error.code, error.message);
+            Err(super::pipeline::Error::Owner {
+                committed,
+                mut error,
+            }) => {
+                error.message = format!(
+                    "Native installer session {id} owner failure (committed={committed}, exception {}): {}",
+                    error.code, error.message
+                );
                 self.deliver_install(id, -110, Some(error.message.clone()))?;
                 if !committed {
                     let ids = self.sessions.abandon(id, 1000)?;
@@ -1180,7 +1244,10 @@ impl NativeOwners {
         for member in std::iter::once(id).chain(root.children.iter().copied()) {
             if let Some(installer) =
                 action(member, approvals.manually_accepted(member)).map_err(|mut error| {
-                    error.message = format!("Install user-action policy session {member} (exception {}): {}", error.code, error.message);
+                    error.message = format!(
+                        "Install user-action policy session {member} (exception {}): {}",
+                        error.code, error.message
+                    );
                     super::pipeline::Error::Owner {
                         committed: false,
                         error,
@@ -1233,10 +1300,17 @@ impl NativeOwners {
         loop {
             attempts -= 1;
             let base = (self.source)().map(|state| state.generation).ok();
-            let result = super::pipeline::install(config.owners.as_ref(), code.clone(), &self.source);
+            let result =
+                super::pipeline::install(config.owners.as_ref(), code.clone(), &self.source);
             match result {
-                Err(super::pipeline::Error::Install(ref failure)) if attempts > 0 && !failure.committed
-                    && base.is_some() && (self.source)().map(|state| state.generation).ok() != base => continue,
+                Err(super::pipeline::Error::Install(ref failure))
+                    if attempts > 0
+                        && !failure.committed
+                        && base.is_some()
+                        && (self.source)().map(|state| state.generation).ok() != base =>
+                {
+                    continue;
+                }
                 result => return result,
             }
         }
@@ -1924,7 +1998,11 @@ mod tests {
     #[test]
     fn install_storage_failures_preserve_public_parse_and_missing_split_status() {
         for status in [-108, -28, -110] {
-            let error = storage_install_failure(storage::Error { legacy_status: status, committed: false, message: "owner rejection".into() });
+            let error = storage_install_failure(storage::Error {
+                legacy_status: status,
+                committed: false,
+                message: "owner rejection".into(),
+            });
             match error {
                 super::super::pipeline::Error::Install(failure) => {
                     assert_eq!(failure.legacy_status, status);
@@ -2022,7 +2100,9 @@ mod tests {
     fn device() -> DevicePolicy {
         DevicePolicy {
             permissions: policy::CallingPermissions::new(Arc::new(|name, _pid, uid| {
-                Ok(matches!(uid, 0 | 1000) || uid == 10100 && name == "android.permission.INTERACT_ACROSS_USERS" || uid == 10101 && name == "android.permission.INSTALL_PACKAGES")
+                Ok(matches!(uid, 0 | 1000)
+                    || uid == 10100 && name == "android.permission.INTERACT_ACROSS_USERS"
+                    || uid == 10101 && name == "android.permission.INSTALL_PACKAGES")
             })),
             debuggable: false,
             apex_supported: false,
@@ -2099,7 +2179,13 @@ mod tests {
         nodes: Arc<Mutex<Vec<Arc<dyn Service>>>>,
         events: Arc<Mutex<Vec<Event>>>,
     ) -> Arc<NativeOwners> {
-        make_owner_with_policy(data, sessions, nodes, events, Arc::new(|_, _, _| Ok(device())))
+        make_owner_with_policy(
+            data,
+            sessions,
+            nodes,
+            events,
+            Arc::new(|_, _, _| Ok(device())),
+        )
     }
     fn make_owner_with_policy(
         data: &Data,
@@ -2151,92 +2237,352 @@ mod tests {
     }
     #[test]
     fn archive_graph_backreferences_release_actual_store_and_reject_retired_installer() {
-        use crate::package::{owner::Store, owner::usage::Usage, scan::SigningScan, installer::{archiver, removal}};
+        use crate::package::{
+            installer::{archiver, removal},
+            owner::Store,
+            owner::usage::Usage,
+            scan::SigningScan,
+        };
         use std::{fs, os::unix::fs::MetadataExt};
-        fn illegal(message:&str)->Exception { Exception::new(EX_ILLEGAL_STATE,message) }
+        fn illegal(message: &str) -> Exception {
+            Exception::new(EX_ILLEGAL_STATE, message)
+        }
         struct NoMemory;
         impl aim_binder_driver::GuestProcess for NoMemory {
-            fn copy_from_user(&mut self,_:u64,_:&mut[u8])->Result<(),aim_binder_driver::Errno>{Err(aim_binder_driver::errno::EFAULT)}
-            fn copy_to_user(&mut self,_:u64,_:&[u8])->Result<(),aim_binder_driver::Errno>{Err(aim_binder_driver::errno::EFAULT)}
-            fn get_file(&mut self,_:u32)->Result<aim_binder_driver::File,aim_binder_driver::Errno>{Err(aim_binder_driver::errno::EBADF)}
-            fn install_file(&mut self,_:aim_binder_driver::File)->Result<u32,aim_binder_driver::Errno>{Err(aim_binder_driver::errno::EBADF)}
-            fn close_fd(&mut self,_:u32){panic!("descriptor-only fixture exchanges no files")}
+            fn copy_from_user(
+                &mut self,
+                _: u64,
+                _: &mut [u8],
+            ) -> Result<(), aim_binder_driver::Errno> {
+                Err(aim_binder_driver::errno::EFAULT)
+            }
+            fn copy_to_user(&mut self, _: u64, _: &[u8]) -> Result<(), aim_binder_driver::Errno> {
+                Err(aim_binder_driver::errno::EFAULT)
+            }
+            fn get_file(
+                &mut self,
+                _: u32,
+            ) -> Result<aim_binder_driver::File, aim_binder_driver::Errno> {
+                Err(aim_binder_driver::errno::EBADF)
+            }
+            fn install_file(
+                &mut self,
+                _: aim_binder_driver::File,
+            ) -> Result<u32, aim_binder_driver::Errno> {
+                Err(aim_binder_driver::errno::EBADF)
+            }
+            fn close_fd(&mut self, _: u32) {
+                panic!("descriptor-only fixture exchanges no files")
+            }
         }
         struct Effects;
         impl Service for Effects {
-            fn descriptor(&self)->&str {aim_service_aidl::dev_aim_server_ipackagemutationbridge::DESCRIPTOR}
-            fn transact(&self,call:&mut Call<'_>)->aim_binder_host::local::Reply {
-                if call.code != u32::from_be_bytes(*b"_NTF") { return Err(aim_binder_host::parcel::UNKNOWN_TRANSACTION); }
-                assert_eq!(call.data.remaining(),0);
-                let mut reply=Parcel::new();reply.write_string16(Some(self.descriptor()));Ok(reply)
+            fn descriptor(&self) -> &str {
+                aim_service_aidl::dev_aim_server_ipackagemutationbridge::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> aim_binder_host::local::Reply {
+                if call.code != u32::from_be_bytes(*b"_NTF") {
+                    return Err(aim_binder_host::parcel::UNKNOWN_TRANSACTION);
+                }
+                assert_eq!(call.data.remaining(), 0);
+                let mut reply = Parcel::new();
+                reply.write_string16(Some(self.descriptor()));
+                Ok(reply)
             }
         }
         struct UnconfiguredInstall;
         impl super::super::pipeline::Owners for UnconfiguredInstall {
-            fn prepare(&self,_:Vec<super::super::pipeline::VerifiedCode>)->Result<Box<dyn super::super::pipeline::PreparedInstall>,super::super::pipeline::Failure>{Err(super::super::pipeline::Failure{legacy_status:-110,committed:false,message:"fixture has no install pipeline".into()})}
-            fn confirm_publication(&self,_:&super::super::pipeline::PublishedInstall)->Result<(),super::super::pipeline::Failure>{Err(super::super::pipeline::Failure{legacy_status:-110,committed:false,message:"fixture has no install pipeline".into()})}
-            fn finish(&self,_:super::super::pipeline::PublishedInstall)->Result<(),Exception>{Err(illegal("fixture has no install pipeline"))}
+            fn prepare(
+                &self,
+                _: Vec<super::super::pipeline::VerifiedCode>,
+            ) -> Result<
+                Box<dyn super::super::pipeline::PreparedInstall>,
+                super::super::pipeline::Failure,
+            > {
+                Err(super::super::pipeline::Failure {
+                    legacy_status: -110,
+                    committed: false,
+                    message: "fixture has no install pipeline".into(),
+                })
+            }
+            fn confirm_publication(
+                &self,
+                _: &super::super::pipeline::PublishedInstall,
+            ) -> Result<(), super::super::pipeline::Failure> {
+                Err(super::super::pipeline::Failure {
+                    legacy_status: -110,
+                    committed: false,
+                    message: "fixture has no install pipeline".into(),
+                })
+            }
+            fn finish(&self, _: super::super::pipeline::PublishedInstall) -> Result<(), Exception> {
+                Err(illegal("fixture has no install pipeline"))
+            }
         }
-        let data=Data::new();fs::write(data.0.join("system/packages.xml"),b"<packages/>").unwrap();
+        let data = Data::new();
+        fs::write(data.0.join("system/packages.xml"), b"<packages/>").unwrap();
         fs::create_dir_all(data.0.join("system/users/0")).unwrap();
-        fs::write(data.0.join("system/users/0/package-restrictions.xml"),b"<package-restrictions/>").unwrap();
-        let mut store=Store::open(&data.0,&[0]).unwrap().unwrap();store.claim_runtime_permission_inventory(&[0]).unwrap();
-        store.commit_runtime_permissions(0,&crate::package::permissions::RuntimePermissions::default(),aim_storage::guest_inode::GuestInode{uid:Some(1000),gid:Some(1000),mode:Some(0o600)}).unwrap();
-        let paths=[data.0.join("misc_de/0/apexdata/com.android.permission"),data.0.join("misc_de/0/apexdata/com.android.permission/runtime-permissions.xml"),data.0.join("misc_de/0/apexdata/com.android.permission/runtime-permissions.xml.reservecopy")];
-        let identities=paths.map(|path|{let meta=fs::metadata(path).unwrap();(meta.dev(),meta.ino())});
-        let held=|identity:(u64,u64)|fs::read_dir("/dev/fd").unwrap().filter_map(|e|e.ok()).filter_map(|e|e.file_name().to_str().and_then(|n|n.parse::<i32>().ok())).filter(|fd|{let mut stat=std::mem::MaybeUninit::<libc::stat>::uninit();unsafe{libc::fstat(*fd,stat.as_mut_ptr())==0&&{let stat=stat.assume_init();(stat.st_dev as u64,stat.st_ino as u64)==identity}}}).count();
-        for id in identities {assert_eq!(held(id),1);}
-        let scan=SigningScan::new(&Default::default(),&store.state().settings,36).unwrap();
-        let disk=Arc::new(Mutex::new(store));let weak_disk=Arc::downgrade(&disk);
-        let native_store=Arc::new(removal::NativeStore{snapshots:Arc::new(crate::package::scan_snapshot::Store::new(scan,Usage::new(std::iter::empty::<&str>())).unwrap()),disk,publish:Arc::new(|_,_|Err(illegal("fixture has no publication"))),invalidate:Arc::new(||Err(illegal("fixture has no cache owner")))});
-        let owner=make_owner(&data,Arc::new(Sessions::default()),Arc::new(Mutex::new(Vec::new())),Arc::new(Mutex::new(Vec::new())));
-        let weak_owner=Arc::downgrade(&owner);
-        let driver=aim_binder_driver::Driver::new();
-        let process=LocalProcess::open(&driver,aim_binder_driver::Device::Binder,aim_binder_driver::Credentials{pid:77750,euid:1000,security_context:None});
-        struct Shutdown(Arc<LocalProcess>);
-        impl Drop for Shutdown { fn drop(&mut self) { self.0.shutdown().unwrap(); } }
-        let _shutdown=Shutdown(process.clone());
-        let Binder::Local(pointer)=process.add_service(Arc::new(Effects)) else {panic!("local effects")};
-        use aim_binder_driver::uapi::*;
-        let mut object=FlatBinderObject{kind:BINDER_TYPE_BINDER,flags:0,binder:pointer,cookie:pointer}.encode();
-        driver.ioctl(process.proc_handle(),77751,BINDER_SET_CONTEXT_MGR_EXT,&mut object,&mut NoMemory).unwrap();process.start();
-        let client=LocalProcess::open(&driver,aim_binder_driver::Device::Binder,aim_binder_driver::Credentials{pid:77752,euid:1000,security_context:None});client.start();
-        let _client_shutdown=Shutdown(client.clone());
-        let external=removal::External::new(client.strong(0),process.clone());
-        let policy_owner=Arc::downgrade(&owner);
-        let admission=Arc::new(move|_:&crate::package::query::Query<'_>,request:&removal::Request|{
-            let device=policy_owner.upgrade().ok_or_else(||illegal("native archive installer owner closed"))?.archiver_device_policy(request.uid,request.user)?;
-            Ok(removal::AdmissionPolicy{device,can_silently_install:false,emergency_installer:false,system_protection_role:false,pinned:false,verifier_packages:vec![],uninstaller_package:None,storage_manager_package:None,keep_uninstalled:false})
+        fs::write(
+            data.0.join("system/users/0/package-restrictions.xml"),
+            b"<package-restrictions/>",
+        )
+        .unwrap();
+        let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+        store.claim_runtime_permission_inventory(&[0]).unwrap();
+        store
+            .commit_runtime_permissions(
+                0,
+                &crate::package::permissions::RuntimePermissions::default(),
+                aim_storage::guest_inode::GuestInode {
+                    uid: Some(1000),
+                    gid: Some(1000),
+                    mode: Some(0o600),
+                },
+            )
+            .unwrap();
+        let paths = [
+            data.0.join("misc_de/0/apexdata/com.android.permission"),
+            data.0
+                .join("misc_de/0/apexdata/com.android.permission/runtime-permissions.xml"),
+            data.0.join(
+                "misc_de/0/apexdata/com.android.permission/runtime-permissions.xml.reservecopy",
+            ),
+        ];
+        let identities = paths.map(|path| {
+            let meta = fs::metadata(path).unwrap();
+            (meta.dev(), meta.ino())
         });
-        let policy=removal::PolicySource{admission,removal:Arc::new(|_,_|Ok(removal::RemovalPolicy{admins:Default::default(),protected:Default::default(),uninstall_restricted:Default::default(),users:vec![0],child_users:Default::default(),sdk_library_independence:false}))};
-        let controller=Arc::new(removal::Controller{store:native_store.clone(),source:owner.source.clone(),resolver:Default::default(),effects:crate::package::effects::Owner::new(client.strong(0)).unwrap(),external:external.clone(),policy,publisher:owner.publisher.clone(),factory_restore:Arc::new(|_|Err(illegal("fixture has no factory"))),preferred_removal:Arc::new(|_,_,_|Err(illegal("fixture has no preferred owner"))),gate:Arc::new(Mutex::new(())),keystore:Arc::new(crate::package::owner::keystore::KeystoreCleanup::new(process.clone()))});
-        let save_owner=Arc::downgrade(&owner);
-        let drafts=archiver::Drafts::new(owner.sessions.clone(),Arc::new(|_,_,_,_|Err(illegal("fixture has no draft params"))),Arc::new(move||save_owner.upgrade().ok_or_else(||illegal("native archive installer owner closed"))?.archiver_save_sessions()),Arc::downgrade(&(owner.clone() as Arc<dyn super::super::SessionOperations>)));
-        let archive=Arc::new(archiver::Owner{store:native_store.clone(),external,removal:controller.clone(),drafts,install:Arc::new(UnconfiguredInstall),archived_record:Arc::new(|_,_,_,_|Err(illegal("fixture has no archive record"))),prepare_archived_session:Arc::new(|_,_,_|Err(illegal("fixture has no archive stage")))});
-        let retained_drafts=archive.drafts.clone();
+        let held = |identity: (u64, u64)| {
+            fs::read_dir("/dev/fd")
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().to_str().and_then(|n| n.parse::<i32>().ok()))
+                .filter(|fd| {
+                    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+                    unsafe {
+                        libc::fstat(*fd, stat.as_mut_ptr()) == 0 && {
+                            let stat = stat.assume_init();
+                            (stat.st_dev as u64, stat.st_ino as u64) == identity
+                        }
+                    }
+                })
+                .count()
+        };
+        for id in identities {
+            assert_eq!(held(id), 1);
+        }
+        let scan = SigningScan::new(&Default::default(), &store.state().settings, 36).unwrap();
+        let disk = Arc::new(Mutex::new(store));
+        let weak_disk = Arc::downgrade(&disk);
+        let native_store = Arc::new(removal::NativeStore {
+            snapshots: Arc::new(
+                crate::package::scan_snapshot::Store::new(
+                    scan,
+                    Usage::new(std::iter::empty::<&str>()),
+                )
+                .unwrap(),
+            ),
+            disk,
+            publish: Arc::new(|_, _| Err(illegal("fixture has no publication"))),
+            invalidate: Arc::new(|| Err(illegal("fixture has no cache owner"))),
+        });
+        let owner = make_owner(
+            &data,
+            Arc::new(Sessions::default()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        let weak_owner = Arc::downgrade(&owner);
+        let driver = aim_binder_driver::Driver::new();
+        let process = LocalProcess::open(
+            &driver,
+            aim_binder_driver::Device::Binder,
+            aim_binder_driver::Credentials {
+                pid: 77750,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        struct Shutdown(Arc<LocalProcess>);
+        impl Drop for Shutdown {
+            fn drop(&mut self) {
+                self.0.shutdown().unwrap();
+            }
+        }
+        let _shutdown = Shutdown(process.clone());
+        let Binder::Local(pointer) = process.add_service(Arc::new(Effects)) else {
+            panic!("local effects")
+        };
+        use aim_binder_driver::uapi::*;
+        let mut object = FlatBinderObject {
+            kind: BINDER_TYPE_BINDER,
+            flags: 0,
+            binder: pointer,
+            cookie: pointer,
+        }
+        .encode();
+        driver
+            .ioctl(
+                process.proc_handle(),
+                77751,
+                BINDER_SET_CONTEXT_MGR_EXT,
+                &mut object,
+                &mut NoMemory,
+            )
+            .unwrap();
+        process.start();
+        let client = LocalProcess::open(
+            &driver,
+            aim_binder_driver::Device::Binder,
+            aim_binder_driver::Credentials {
+                pid: 77752,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        client.start();
+        let _client_shutdown = Shutdown(client.clone());
+        let external = removal::External::new(client.strong(0), process.clone());
+        let policy_owner = Arc::downgrade(&owner);
+        let admission = Arc::new(
+            move |_: &crate::package::query::Query<'_>, request: &removal::Request| {
+                let device = policy_owner
+                    .upgrade()
+                    .ok_or_else(|| illegal("native archive installer owner closed"))?
+                    .archiver_device_policy(request.uid, request.user)?;
+                Ok(removal::AdmissionPolicy {
+                    device,
+                    can_silently_install: false,
+                    emergency_installer: false,
+                    system_protection_role: false,
+                    pinned: false,
+                    verifier_packages: vec![],
+                    uninstaller_package: None,
+                    storage_manager_package: None,
+                    keep_uninstalled: false,
+                })
+            },
+        );
+        let policy = removal::PolicySource {
+            admission,
+            removal: Arc::new(|_, _| {
+                Ok(removal::RemovalPolicy {
+                    admins: Default::default(),
+                    protected: Default::default(),
+                    uninstall_restricted: Default::default(),
+                    users: vec![0],
+                    child_users: Default::default(),
+                    sdk_library_independence: false,
+                })
+            }),
+        };
+        let controller = Arc::new(removal::Controller {
+            store: native_store.clone(),
+            source: owner.source.clone(),
+            resolver: Default::default(),
+            effects: crate::package::effects::Owner::new(client.strong(0)).unwrap(),
+            external: external.clone(),
+            policy,
+            publisher: owner.publisher.clone(),
+            factory_restore: Arc::new(|_| Err(illegal("fixture has no factory"))),
+            preferred_removal: Arc::new(|_, _, _| Err(illegal("fixture has no preferred owner"))),
+            gate: Arc::new(Mutex::new(())),
+            keystore: Arc::new(crate::package::owner::keystore::KeystoreCleanup::new(
+                process.clone(),
+            )),
+        });
+        let save_owner = Arc::downgrade(&owner);
+        let drafts = archiver::Drafts::new(
+            owner.sessions.clone(),
+            Arc::new(|_, _, _, _| Err(illegal("fixture has no draft params"))),
+            Arc::new(move || {
+                save_owner
+                    .upgrade()
+                    .ok_or_else(|| illegal("native archive installer owner closed"))?
+                    .archiver_save_sessions()
+            }),
+            Arc::downgrade(&(owner.clone() as Arc<dyn super::super::SessionOperations>)),
+        );
+        let archive = Arc::new(archiver::Owner {
+            store: native_store.clone(),
+            external,
+            removal: controller.clone(),
+            drafts,
+            install: Arc::new(UnconfiguredInstall),
+            archived_record: Arc::new(|_, _, _, _| Err(illegal("fixture has no archive record"))),
+            prepare_archived_session: Arc::new(|_, _, _| {
+                Err(illegal("fixture has no archive stage"))
+            }),
+        });
+        let retained_drafts = archive.drafts.clone();
         // Supply complete internal draft records, including their history owner.
         // Public normalization strips the reserved bit; this fixture covers the
         // internal operations lease rather than public session admission.
-        let (mut record,permission)=owner.normalize(0,77,request(),Some("fixture".into()),None,0).unwrap();
-        record.params.install_flags|=archiver::DRAFT|archiver::UNARCHIVE;
-        let live_draft=owner.sessions.create_record(record.clone(),permission).unwrap();
-        let draft_id=owner.sessions.create_record(record,permission).unwrap();
+        let (mut record, permission) = owner
+            .normalize(0, 77, request(), Some("fixture".into()), None, 0)
+            .unwrap();
+        record.params.install_flags |= archiver::DRAFT | archiver::UNARCHIVE;
+        let live_draft = owner
+            .sessions
+            .create_record(record.clone(), permission)
+            .unwrap();
+        let draft_id = owner.sessions.create_record(record, permission).unwrap();
         retained_drafts.expire(live_draft).unwrap();
-        assert!(owner.sessions.snapshot(live_draft).unwrap().destroyed,"live operations must delegate actual native abandonment");
-        let retired_policy=controller.policy.clone();
+        assert!(
+            owner.sessions.snapshot(live_draft).unwrap().destroyed,
+            "live operations must delegate actual native abandonment"
+        );
+        let retired_policy = controller.policy.clone();
         owner.configure_archiver(archive).unwrap();
-        let state=state();let resolver=crate::package::resolve::Resolver::default();let resolution=resolver.resolution(&state).unwrap();
-        let query=crate::package::query::Query{state:&state,filter:&resolution.apps_filter,calling_uid:1000};
-        let request=removal::Request{package:"fixture".into(),version:-1,caller_package:None,user:0,flags:0,uid:1000,pid:77,existing_only:false};
-        assert!((controller.policy.admission)(&query,&request).is_ok(),"live weak policy must reach actual NativeOwners");
-        let retained_system=crate::system::System::new(process.clone(),&[]);
-        drop(native_store);drop(controller);drop(owner);
-        assert!(weak_owner.upgrade().is_none(),"real NativeOwners/Archiver/Drafts graph must be acyclic");
-        assert_eq!((retired_policy.admission)(&query,&request).err().unwrap().code,EX_ILLEGAL_STATE);
-        assert_eq!(retained_drafts.expire(draft_id).unwrap_err().code,EX_ILLEGAL_STATE);
+        let state = state();
+        let resolver = crate::package::resolve::Resolver::default();
+        let resolution = resolver.resolution(&state).unwrap();
+        let query = crate::package::query::Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: 1000,
+        };
+        let request = removal::Request {
+            package: "fixture".into(),
+            version: -1,
+            caller_package: None,
+            user: 0,
+            flags: 0,
+            uid: 1000,
+            pid: 77,
+            existing_only: false,
+        };
+        assert!(
+            (controller.policy.admission)(&query, &request).is_ok(),
+            "live weak policy must reach actual NativeOwners"
+        );
+        let retained_system = crate::system::System::new(process.clone(), &[]);
+        drop(native_store);
+        drop(controller);
+        drop(owner);
+        assert!(
+            weak_owner.upgrade().is_none(),
+            "real NativeOwners/Archiver/Drafts graph must be acyclic"
+        );
+        assert_eq!(
+            (retired_policy.admission)(&query, &request)
+                .err()
+                .unwrap()
+                .code,
+            EX_ILLEGAL_STATE
+        );
+        assert_eq!(
+            retained_drafts.expire(draft_id).unwrap_err().code,
+            EX_ILLEGAL_STATE
+        );
         drop(retained_drafts);
-        assert!(weak_disk.upgrade().is_none(),"native archive graph must release the actual Settings Store");
-        for id in identities {assert_eq!(held(id),0);}
+        assert!(
+            weak_disk.upgrade().is_none(),
+            "native archive graph must release the actual Settings Store"
+        );
+        for id in identities {
+            assert_eq!(held(id), 0);
+        }
         assert!(retained_system.process().shutdown().is_ok());
     }
     fn request() -> SessionParams {
@@ -2267,7 +2613,12 @@ mod tests {
     fn apex_admission_reads_adopted_permissions_again_for_same_actual_caller() {
         use std::sync::atomic::{AtomicBool, Ordering};
         let data = Data::new();
-        let owner = make_owner(&data, Arc::new(Sessions::default()), Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())));
+        let owner = make_owner(
+            &data,
+            Arc::new(Sessions::default()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(Vec::new())),
+        );
         let delegated = Arc::new(AtomicBool::new(false));
         let reads = Arc::new(Mutex::new(Vec::new()));
         let flag = delegated.clone();
@@ -2276,25 +2627,58 @@ mod tests {
         policy.apex_supported = true;
         policy.permissions = policy::CallingPermissions::new(Arc::new(move |name, pid, uid| {
             observed.lock().unwrap().push((name.to_owned(), pid, uid));
-            Ok(pid == 77 && uid == 10100 && name == "android.permission.INSTALL_PACKAGES" && flag.load(Ordering::SeqCst))
+            Ok(pid == 77
+                && uid == 10100
+                && name == "android.permission.INSTALL_PACKAGES"
+                && flag.load(Ordering::SeqCst))
         }));
         let mut config = SystemConfig::default();
         config.staged_installers.insert("fixture".into());
-        let run = |pid| owner.query(10100, |query| {
-            let mut params = request();
-            params.install_flags |= 0x20000;
-            params.staged = true;
-            policy::normalize(query, pid, &policy, &mut policy::ServicePolicy::default(), &config, params, Some("fixture".into()), None, 0, 1)
-        });
+        let run = |pid| {
+            owner.query(10100, |query| {
+                let mut params = request();
+                params.install_flags |= 0x20000;
+                params.staged = true;
+                policy::normalize(
+                    query,
+                    pid,
+                    &policy,
+                    &mut policy::ServicePolicy::default(),
+                    &config,
+                    params,
+                    Some("fixture".into()),
+                    None,
+                    0,
+                    1,
+                )
+            })
+        };
         let rejected = run(77).unwrap_err();
         assert_eq!(rejected.message, "Not allowed to perform APEX updates");
         delegated.store(true, Ordering::SeqCst);
         assert!(run(77).is_ok());
-        assert_eq!(run(78).unwrap_err().message, "Not allowed to perform APEX updates");
+        assert_eq!(
+            run(78).unwrap_err().message,
+            "Not allowed to perform APEX updates"
+        );
         delegated.store(false, Ordering::SeqCst);
-        assert_eq!(run(77).unwrap_err().message, "Not allowed to perform APEX updates");
-        assert!(reads.lock().unwrap().iter().all(|(_, _, uid)| *uid == 10100));
-        assert!(state().packages["fixture"].users[&0].granted_permissions.iter().all(|name| name != "android.permission.INSTALL_PACKAGES"));
+        assert_eq!(
+            run(77).unwrap_err().message,
+            "Not allowed to perform APEX updates"
+        );
+        assert!(
+            reads
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(_, _, uid)| *uid == 10100)
+        );
+        assert!(
+            state().packages["fixture"].users[&0]
+                .granted_permissions
+                .iter()
+                .all(|name| name != "android.permission.INSTALL_PACKAGES")
+        );
         owner.shutdown_callbacks();
     }
     #[test]
@@ -2308,41 +2692,98 @@ mod tests {
         let observed = reads.clone();
         let permissions = policy::CallingPermissions::new(Arc::new(move |name, pid, uid| {
             observed.lock().unwrap().push((name.to_owned(), pid, uid));
-            Ok(uid == 10100 && matches!(pid, 77 | -1) && flag.load(Ordering::SeqCst) && matches!(name, "android.permission.INSTALL_PACKAGES" | "android.permission.TEST_MANAGE_ROLLBACKS"))
+            Ok(uid == 10100
+                && matches!(pid, 77 | -1)
+                && flag.load(Ordering::SeqCst)
+                && matches!(
+                    name,
+                    "android.permission.INSTALL_PACKAGES"
+                        | "android.permission.TEST_MANAGE_ROLLBACKS"
+                ))
         }));
         let source_permissions = permissions.clone();
-        let owner = make_owner_with_policy(&data, sessions.clone(), Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())), Arc::new(move |uid, pid, user| {
-            assert_eq!((uid, user), (10100, 0));
-            assert!(matches!(pid, 77 | -1));
-            let mut policy = device();
-            policy.permissions = source_permissions.clone();
-            Ok(policy)
-        }));
-        owner.configure_confirmation(Arc::new(|_, _| Ok(super::super::commit::ConfirmationPolicy {
-            installer_package: "installer.ui".into(), device_owner_or_affiliated: false,
-            emergency_install: false, install_disabled: false, dependency_installer_enabled: false,
-            update_ownership_enabled: false, silent_target_allowed: false,
-            has_device_admin_receiver: false, is_sdk_or_static_library: false, uptime_millis: 1,
-        }))).unwrap();
-        let endpoint = super::super::endpoint::Endpoint { sessions: sessions.clone(), owners: owner.clone() };
+        let owner = make_owner_with_policy(
+            &data,
+            sessions.clone(),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(move |uid, pid, user| {
+                assert_eq!((uid, user), (10100, 0));
+                assert!(matches!(pid, 77 | -1));
+                let mut policy = device();
+                policy.permissions = source_permissions.clone();
+                Ok(policy)
+            }),
+        );
+        owner
+            .configure_confirmation(Arc::new(|_, _| {
+                Ok(super::super::commit::ConfirmationPolicy {
+                    installer_package: "installer.ui".into(),
+                    device_owner_or_affiliated: false,
+                    emergency_install: false,
+                    install_disabled: false,
+                    dependency_installer_enabled: false,
+                    update_ownership_enabled: false,
+                    silent_target_allowed: false,
+                    has_device_admin_receiver: false,
+                    is_sdk_or_static_library: false,
+                    uptime_millis: 1,
+                })
+            }))
+            .unwrap();
+        let endpoint = super::super::endpoint::Endpoint {
+            sessions: sessions.clone(),
+            owners: owner.clone(),
+        };
         let mut params = request();
         params.install_reason = 5;
         let mut parcel = Parcel::new();
-        aidl::CreateSession { params: Some(params), installer_package_name: Some("fixture".into()), installer_attribution_tag: None, user_id: 0 }.write(&mut parcel);
+        aidl::CreateSession {
+            params: Some(params),
+            installer_package_name: Some("fixture".into()),
+            installer_attribution_tag: None,
+            user_id: 0,
+        }
+        .write(&mut parcel);
         let reply = call(&endpoint, aidl::CREATE_SESSION, 10100, &parcel);
-        let id = aidl::read_create_session_reply(&mut reply.reader()).unwrap().unwrap();
+        let id = aidl::read_create_session_reply(&mut reply.reader())
+            .unwrap()
+            .unwrap();
         assert_eq!(owner.confirmation(id, false).unwrap(), None);
         delegated.store(false, Ordering::SeqCst);
-        assert_eq!(owner.confirmation(id, false).unwrap().as_deref(), Some("installer.ui"));
+        assert_eq!(
+            owner.confirmation(id, false).unwrap().as_deref(),
+            Some("installer.ui")
+        );
         let reply = call(&endpoint, aidl::CREATE_SESSION, 10100, &parcel);
-        assert!(aidl::read_create_session_reply(&mut reply.reader()).unwrap().is_err());
+        assert!(
+            aidl::read_create_session_reply(&mut reply.reader())
+                .unwrap()
+                .is_err()
+        );
         assert_eq!(sessions.records().len(), 1);
         delegated.store(true, Ordering::SeqCst);
         assert_eq!(owner.confirmation(id, false).unwrap(), None);
         let reads = reads.lock().unwrap();
-        assert!(reads.iter().any(|(name, pid, uid)| name == "android.permission.INSTALL_PACKAGES" && (*pid, *uid) == (77, 10100)));
-        assert!(reads.iter().filter(|(_, pid, _)| *pid == -1).all(|(_, _, uid)| *uid == 10100));
-        assert!(reads.iter().filter(|(name, pid, _)| name == "android.permission.INSTALL_PACKAGES" && *pid == -1).count() >= 3);
+        assert!(reads.iter().any(
+            |(name, pid, uid)| name == "android.permission.INSTALL_PACKAGES"
+                && (*pid, *uid) == (77, 10100)
+        ));
+        assert!(
+            reads
+                .iter()
+                .filter(|(_, pid, _)| *pid == -1)
+                .all(|(_, _, uid)| *uid == 10100)
+        );
+        assert!(
+            reads
+                .iter()
+                .filter(
+                    |(name, pid, _)| name == "android.permission.INSTALL_PACKAGES" && *pid == -1
+                )
+                .count()
+                >= 3
+        );
         drop(reads);
         owner.shutdown_callbacks();
     }
@@ -2808,14 +3249,22 @@ mod tests {
             installer_package_name: Some("fixture".into()),
             installer_attribution_tag: None,
             user_id: 0,
-        }.write(&mut parcel);
+        }
+        .write(&mut parcel);
         let reply = call(&endpoint, aidl::CREATE_SESSION, 10100, &parcel);
-        let id = aidl::read_create_session_reply(&mut reply.reader()).unwrap().unwrap();
+        let id = aidl::read_create_session_reply(&mut reply.reader())
+            .unwrap()
+            .unwrap();
         assert_eq!(sessions.snapshot(id).unwrap().installer_uid, 10100);
         assert!(!current.lock().unwrap().packages.contains_key("fixture"));
         let reply = call(&endpoint, aidl::CREATE_SESSION, 10100, &parcel);
-        assert_eq!(aidl::read_create_session_reply(&mut reply.reader()).unwrap().unwrap_err().code,
-            aim_binder_host::parcel::EX_SECURITY);
+        assert_eq!(
+            aidl::read_create_session_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap_err()
+                .code,
+            aim_binder_host::parcel::EX_SECURITY
+        );
         assert_eq!(sessions.records().len(), 1);
         owner.shutdown_callbacks();
         drop(endpoint);
@@ -2839,7 +3288,9 @@ mod tests {
         let owner = NativeOwners::open(
             sessions.clone(),
             Arc::new(|| Ok(state())),
-            Arc::new(|_, _, _| panic!("callback registration must not capture install device policy")),
+            Arc::new(|_, _, _| {
+                panic!("callback registration must not capture install device policy")
+            }),
             SystemConfig::default(),
             disk(&data),
             Arc::new(|_| panic!("registration does not publish a session")),
@@ -3975,8 +4426,7 @@ mod tests {
             Some(0o640)
         );
         let reply = call(node.as_ref(), session_api::GET_APP_METADATA_FD, 10100, &get);
-        let mut file =
-            aim_binder_host::server::file_fd(&reply.files()[0].1).unwrap();
+        let mut file = aim_binder_host::server::file_fd(&reply.files()[0].1).unwrap();
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
         assert_eq!(contents, "JSONred");

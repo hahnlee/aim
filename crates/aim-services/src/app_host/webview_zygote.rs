@@ -42,7 +42,14 @@ fn random_uuid() -> std::io::Result<String> {
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     let h: Vec<String> = b.iter().map(|x| format!("{x:02x}")).collect();
-    Ok(format!("{}-{}-{}-{}-{}", h[..4].concat(), h[4..6].concat(), h[6..8].concat(), h[8..10].concat(), h[10..].concat()))
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        h[..4].concat(),
+        h[4..6].concat(),
+        h[6..8].concat(),
+        h[8..10].concat(),
+        h[10..].concat()
+    ))
 }
 
 impl AppHost {
@@ -51,16 +58,26 @@ impl AppHost {
     pub(super) fn webview_provider_changed(&self, info: Arc<ApplicationInfo>) {
         *self.webview_zygote.package.lock().unwrap() = Some(info);
         if let Some(child) = self.webview_zygote.child.lock().unwrap().take()
-            && let Err(e) = self.call_agent(super::KILL_PROCESS, "killProcess", |data| data.write_i32(child.pid))
+            && let Err(e) = self.call_agent(super::KILL_PROCESS, "killProcess", |data| {
+                data.write_i32(child.pid)
+            })
         {
-            eprintln!("app host: webview_zygote: stop {}: {}", child.pid, e.message);
+            eprintln!(
+                "app host: webview_zygote: stop {}: {}",
+                child.pid, e.message
+            );
         }
     }
 
     /// `WebViewZygote.getPackageName` when multiprocess is on
     /// (`isMultiprocessEnabled`).
     pub(super) fn webview_zygote_package(&self) -> Option<String> {
-        self.webview_zygote.package.lock().unwrap().as_ref().and_then(|i| i.item.package_name.clone())
+        self.webview_zygote
+            .package
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|i| i.item.package_name.clone())
     }
 
     /// `ensureZygoteStarted` (`WebViewZygote.getProcess`): the zygote
@@ -70,7 +87,10 @@ impl AppHost {
         if child.is_none() {
             match self.start_webview_zygote() {
                 Ok(c) => *child = Some(c),
-                Err(e) => eprintln!("app host: webview_zygote: Error connecting to webview zygote: {}", e.message),
+                Err(e) => eprintln!(
+                    "app host: webview_zygote: Error connecting to webview zygote: {}",
+                    e.message
+                ),
             }
         }
     }
@@ -96,19 +116,36 @@ impl AppHost {
     /// the primary one, waited for and the provider preloaded.
     fn start_webview_zygote(&self) -> Result<Child, Exception> {
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("webview_zygote: {e}"));
-        let info = self.webview_zygote.package.lock().unwrap().clone().ok_or_else(|| state("Cannot connect to zygote, no package specified".into()))?;
+        let info = self
+            .webview_zygote
+            .package
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| state("Cannot connect to zygote, no package specified".into()))?;
         let inputs = self.inputs()?;
-        let configured = self.configured.get().ok_or_else(|| state("app host not configured".into()))?;
+        let configured = self
+            .configured
+            .get()
+            .ok_or_else(|| state("app host not configured".into()))?;
         let package = info.item.package_name.clone().unwrap_or_default();
         let app_id = info.uid as u32 % PER_USER_RANGE;
-        let socket = format!("{WEBVIEW_ZYGOTE_INIT}/{}", random_uuid().map_err(|e| state(e.to_string()))?);
+        let socket = format!(
+            "{WEBVIEW_ZYGOTE_INIT}/{}",
+            random_uuid().map_err(|e| state(e.to_string()))?
+        );
         let abis = (configured.properties)("ro.product.cpu.abilist").unwrap_or_default();
         let start = zygote::Start {
             uid: WEBVIEW_ZYGOTE_UID,
             // `UserHandle.getSharedAppGid`: access to the shared app GID for
             // ART profiles.
             gids: vec![50_000 + app_id - 10_000],
-            runtime_flags: super::memory_safety(&inputs.compat, &package, info.flags, info.target_sdk_version),
+            runtime_flags: super::memory_safety(
+                &inputs.compat,
+                &package,
+                info.flags,
+                info.target_sdk_version,
+            ),
             mount_external: zygote::MountExternal::None,
             target_sdk_version: 0,
             nice_name: "webview_zygote".into(),
@@ -134,23 +171,29 @@ impl AppHost {
         let pid = {
             let mut primary = self.zygote.lock().unwrap();
             if primary.is_none() {
-                let stream = (configured.connect)().map_err(|e| state(format!("zygote relay: {e}")))?;
+                let stream =
+                    (configured.connect)().map_err(|e| state(format!("zygote relay: {e}")))?;
                 *primary = Some(zygote::Session::new(stream));
             }
             match primary.as_mut().unwrap().start(&start) {
                 Ok(pid) => pid,
                 Err(e) => {
                     *primary = None;
-                    return Err(state(format!("Starting child-zygote through Zygote failed: {e}")));
+                    return Err(state(format!(
+                        "Starting child-zygote through Zygote failed: {e}"
+                    )));
                 }
             }
         };
         eprintln!("app host: Start proc {pid}:webview_zygote/{WEBVIEW_ZYGOTE_UID} for {package}");
         let stream = (configured.connect)().map_err(|e| state(format!("zygote relay: {e}")))?;
-        let mut session = zygote::Session::child(stream, &socket).map_err(|e| state(e.to_string()))?;
+        let mut session =
+            zygote::Session::child(stream, &socket).map_err(|e| state(e.to_string()))?;
         let mut parcel = Parcel::new();
         info.write_to(&mut parcel);
-        let preloaded = session.preload_app(parcel.data()).map_err(|e| state(format!("preloadApp: {e}")))?;
+        let preloaded = session
+            .preload_app(parcel.data())
+            .map_err(|e| state(format!("preloadApp: {e}")))?;
         if preloaded != 1 {
             eprintln!("app host: webview_zygote: preloadApp of {package} answered {preloaded}");
         }

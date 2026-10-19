@@ -25,8 +25,8 @@ use std::sync::{Arc, Mutex};
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{
-    BAD_VALUE, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception, Parcel, Reader,
-    Result as ParcelResult,
+    BAD_VALUE, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception, Parcel,
+    Reader, Result as ParcelResult,
 };
 use aim_service_aidl::android_accounts_iaccountmanager as am;
 use aim_service_aidl::{ParcelValue, ReadParcelable, WriteParcelable};
@@ -81,7 +81,11 @@ pub struct Account {
 
 impl Account {
     pub fn new(name: String, kind: String) -> Account {
-        Account { name, kind, access_id: None }
+        Account {
+            name,
+            kind,
+            access_id: None,
+        }
     }
 }
 
@@ -109,9 +113,19 @@ impl fmt::Display for Account {
 impl ReadParcelable for Account {
     /// `Account(Parcel)`, which refuses an empty name or type.
     fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
-        let name = r.read_string16()?.filter(|n| !n.is_empty()).ok_or(BAD_VALUE)?;
-        let kind = r.read_string16()?.filter(|t| !t.is_empty()).ok_or(BAD_VALUE)?;
-        Ok(Account { name, kind, access_id: r.read_string16()? })
+        let name = r
+            .read_string16()?
+            .filter(|n| !n.is_empty())
+            .ok_or(BAD_VALUE)?;
+        let kind = r
+            .read_string16()?
+            .filter(|t| !t.is_empty())
+            .ok_or(BAD_VALUE)?;
+        Ok(Account {
+            name,
+            kind,
+            access_id: r.read_string16()?,
+        })
     }
 }
 
@@ -139,7 +153,10 @@ fn account_value(account: &Account) -> ParcelValue {
     let mut p = Parcel::new();
     p.write_string16(Some("android.accounts.Account"));
     account.write_to(&mut p);
-    ParcelValue::Custom { kind: VAL_PARCELABLE, bytes: p.data().to_vec() }
+    ParcelValue::Custom {
+        kind: VAL_PARCELABLE,
+        bytes: p.data().to_vec(),
+    }
 }
 
 /// `UUID.randomUUID().toString()`.
@@ -150,7 +167,14 @@ fn random_uuid() -> String {
     b[6] = b[6] & 0x0f | 0x40;
     b[8] = b[8] & 0x3f | 0x80;
     let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
 }
 
 /// What a call fails with: an exception, or the databases' failure, which
@@ -229,7 +253,8 @@ fn signatures_match_exactly(a: &Signatures, b: &Signatures) -> bool {
 /// `PackageManagerInternal.hasSignatureCapability(server, client, AUTH)`:
 /// `checkCapability` or `hasAncestorOrSelf`.
 pub(super) fn has_auth_capability(state: &State, server_uid: i32, client_uid: i32) -> bool {
-    let (Some(server), Some(client)) = (signing(state, server_uid), signing(state, client_uid)) else {
+    let (Some(server), Some(client)) = (signing(state, server_uid), signing(state, client_uid))
+    else {
         return false;
     };
     let check_capability = if client.signatures.len() > 1 {
@@ -293,7 +318,8 @@ fn resolve_visibility(
     let pre_o = inputs.pre_o(package)?;
     let legacy_visible = signature != SIGNATURE_CHECK_MISMATCH
         || pre_o && inputs.permitted(package, &[GET_ACCOUNTS, GET_ACCOUNTS_PRIVILEGED])?
-        || inputs.permitted(package, &[READ_CONTACTS])? && inputs.manages_contacts(&account.kind)?
+        || inputs.permitted(package, &[READ_CONTACTS])?
+            && inputs.manages_contacts(&account.kind)?
         || privileged;
     let (key, default) = if legacy_visible {
         (LEGACY_VISIBLE, VISIBILITY_USER_MANAGED_VISIBLE)
@@ -322,7 +348,8 @@ impl VisibilityInputs for UserPackages<'_> {
     }
 
     fn permitted(&self, package: &str, permissions: &[&str]) -> Result<bool, Exception> {
-        self.manager.permitted_for_package(package, self.user, permissions)
+        self.manager
+            .permitted_for_package(package, self.user, permissions)
     }
 
     fn profile_owner(&self, _uid: i32) -> Result<bool, Exception> {
@@ -330,7 +357,10 @@ impl VisibilityInputs for UserPackages<'_> {
     }
 
     fn pre_o(&self, package: &str) -> Result<bool, Exception> {
-        Ok(self.manager.target_sdk(package)?.is_none_or(|target| target < O))
+        Ok(self
+            .manager
+            .target_sdk(package)?
+            .is_none_or(|target| target < O))
     }
 
     fn manages_contacts(&self, kind: &str) -> Result<bool, Exception> {
@@ -364,12 +394,21 @@ impl Accounts {
 
     /// The accounts of `kind`, or of every type.
     fn of(&self, kind: Option<&str>) -> Vec<Account> {
-        self.accounts.iter().filter(|(t, _)| kind.is_none_or(|k| k == t)).flat_map(|(_, list)| list.iter().cloned()).collect()
+        self.accounts
+            .iter()
+            .filter(|(t, _)| kind.is_none_or(|k| k == t))
+            .flat_map(|(_, list)| list.iter().cloned())
+            .collect()
     }
 
     /// `getAccountVisibilityFromCache`.
     fn stored_visibility(&mut self, account: &Account, package: &str) -> i32 {
-        *self.visibility.entry(account.clone()).or_default().get(package).unwrap_or(&VISIBILITY_UNDEFINED)
+        *self
+            .visibility
+            .entry(account.clone())
+            .or_default()
+            .get(package)
+            .unwrap_or(&VISIBILITY_UNDEFINED)
     }
 }
 
@@ -383,7 +422,12 @@ pub struct AccountManager {
 
 impl AccountManager {
     pub fn new(host: Arc<AppHost>) -> Arc<AccountManager> {
-        Arc::new_cyclic(|me| AccountManager { me: me.clone(), host, authenticators: Mutex::default(), users: Mutex::default() })
+        Arc::new_cyclic(|me| AccountManager {
+            me: me.clone(),
+            host,
+            authenticators: Mutex::default(),
+            users: Mutex::default(),
+        })
     }
 
     /// `mAuthenticatorCache.getAllServices(user)`.
@@ -398,9 +442,17 @@ impl AccountManager {
     }
 
     /// `f` of the package model, asked as the system.
-    fn system_query<T>(&self, f: impl FnOnce(&Query<'_>) -> Result<T, NotModelled>) -> Result<T, Exception> {
+    fn system_query<T>(
+        &self,
+        f: impl FnOnce(&Query<'_>) -> Result<T, NotModelled>,
+    ) -> Result<T, Exception> {
         let (state, resolution) = self.host.packages()?;
-        f(&Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID }).map_err(not_modelled)
+        f(&Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: SYSTEM_UID,
+        })
+        .map_err(not_modelled)
     }
 
     /// `getPackageUidAsUser`: none for a package not installed.
@@ -411,19 +463,36 @@ impl AccountManager {
 
     /// `getPackagesForUid`.
     fn packages_for_uid(&self, uid: i32) -> Result<Vec<String>, Exception> {
-        Ok(self.system_query(|q| q.packages_for_uid(uid))?.into_iter().flatten().flatten().collect())
+        Ok(self
+            .system_query(|q| q.packages_for_uid(uid))?
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect())
     }
 
     /// Whether a package of `uid` has the system's `flag`
     /// (`isSystemUid`, `isPrivileged`).
-    fn uid_package_is(&self, uid: i32, flag: impl Fn(&crate::package::model::PackageState) -> bool) -> Result<bool, Exception> {
+    fn uid_package_is(
+        &self,
+        uid: i32,
+        flag: impl Fn(&crate::package::model::PackageState) -> bool,
+    ) -> Result<bool, Exception> {
         let (state, _) = self.host.packages()?;
-        Ok(self.packages_for_uid(uid)?.iter().any(|name| state.packages.get(name).is_some_and(&flag)))
+        Ok(self
+            .packages_for_uid(uid)?
+            .iter()
+            .any(|name| state.packages.get(name).is_some_and(&flag)))
     }
 
     /// `ApplicationInfo.targetSdkVersion` of `name`, if installed.
     fn target_sdk(&self, name: &str) -> Result<Option<i32>, Exception> {
-        Ok(self.host.inputs()?.packages.application_info(name, 0).map(|ai| ai.target_sdk_version))
+        Ok(self
+            .host
+            .inputs()?
+            .packages
+            .application_info(name, 0)
+            .map(|ai| ai.target_sdk_version))
     }
 
     /// `getPackageNameForUid`: the uid's package with the oldest target.
@@ -444,10 +513,22 @@ impl AccountManager {
     }
 
     /// `canCallerAccessPackage`.
-    fn can_access_package(&self, package: Option<&str>, uid: i32, user: i32) -> Result<bool, Exception> {
-        let Some(package) = package else { return Ok(false) };
-        if !self.host.change_enabled(ENFORCE_PACKAGE_VISIBILITY_FILTERING, uid)? {
-            return Ok(self.system_query(|q| q.package_uid_internal(package, 0, user, SYSTEM_UID))? != -1);
+    fn can_access_package(
+        &self,
+        package: Option<&str>,
+        uid: i32,
+        user: i32,
+    ) -> Result<bool, Exception> {
+        let Some(package) = package else {
+            return Ok(false);
+        };
+        if !self
+            .host
+            .change_enabled(ENFORCE_PACKAGE_VISIBILITY_FILTERING, uid)?
+        {
+            return Ok(self
+                .system_query(|q| q.package_uid_internal(package, 0, user, SYSTEM_UID))?
+                != -1);
         }
         let (state, resolution) = self.host.packages()?;
         let filtered = apps_filter::should_filter_application(
@@ -465,10 +546,20 @@ impl AccountManager {
 
     /// `isPermittedForPackage`: the package holds one of `permissions`,
     /// and its app op allows it.
-    fn permitted_for_package(&self, package: &str, user: i32, permissions: &[&str]) -> Result<bool, Exception> {
-        let Some(uid) = self.package_uid(package, user)? else { return Ok(false) };
+    fn permitted_for_package(
+        &self,
+        package: &str,
+        user: i32,
+        permissions: &[&str],
+    ) -> Result<bool, Exception> {
+        let Some(uid) = self.package_uid(package, user)? else {
+            return Ok(false);
+        };
         for permission in permissions {
-            if self.system_query(|q| q.check_package_permission(Some(package), Some(permission), user))? != 0 {
+            if self.system_query(|q| {
+                q.check_package_permission(Some(package), Some(permission), user)
+            })? != 0
+            {
                 continue;
             }
             let op = match *permission {
@@ -479,7 +570,11 @@ impl AccountManager {
             };
             match op {
                 None => return Ok(true),
-                Some(op) if super::appops_service::mode(&self.host, op, uid, Some(package))? == 0 => return Ok(true),
+                Some(op)
+                    if super::appops_service::mode(&self.host, op, uid, Some(package))? == 0 =>
+                {
+                    return Ok(true);
+                }
                 Some(_) => {}
             }
         }
@@ -491,14 +586,21 @@ impl AccountManager {
     /// none is.
     fn is_profile_owner(&self) -> Result<bool, Exception> {
         if self.host.device_policies()?.owned() {
-            return Err(self.host.unimplemented_named("account", "a device or profile owner (#1504)"));
+            return Err(self
+                .host
+                .unimplemented_named("account", "a device or profile owner (#1504)"));
         }
         Ok(false)
     }
 
     /// `getTypesForCaller`: the authenticators' types, all of them or
     /// those `uid` is signed for.
-    fn types_for_caller(&self, uid: i32, user: i32, otherwise_permitted: bool) -> Result<Vec<String>, Exception> {
+    fn types_for_caller(
+        &self,
+        uid: i32,
+        user: i32,
+        otherwise_permitted: bool,
+    ) -> Result<Vec<String>, Exception> {
         let (state, _) = self.host.packages()?;
         Ok(self
             .authenticators(user)?
@@ -509,9 +611,17 @@ impl AccountManager {
     }
 
     /// `isAccountManagedByCaller`.
-    fn managed_by_caller(&self, kind: Option<&str>, uid: i32, user: i32) -> Result<bool, Exception> {
+    fn managed_by_caller(
+        &self,
+        kind: Option<&str>,
+        uid: i32,
+        user: i32,
+    ) -> Result<bool, Exception> {
         Ok(match kind {
-            Some(kind) => self.types_for_caller(uid, user, false)?.iter().any(|t| t == kind),
+            Some(kind) => self
+                .types_for_caller(uid, user, false)?
+                .iter()
+                .any(|t| t == kind),
             None => false,
         })
     }
@@ -519,7 +629,11 @@ impl AccountManager {
     /// `checkPackageSignature`.
     fn check_package_signature(&self, kind: &str, uid: i32, user: i32) -> Result<i32, Exception> {
         let (state, _) = self.host.packages()?;
-        for a in self.authenticators(user)?.iter().filter(|a| a.description.kind == kind) {
+        for a in self
+            .authenticators(user)?
+            .iter()
+            .filter(|a| a.description.kind == kind)
+        {
             if a.uid == uid {
                 return Ok(SIGNATURE_CHECK_UID_MATCH);
             }
@@ -532,7 +646,11 @@ impl AccountManager {
 
     /// `accountTypeManagesContacts`: its authenticator may write contacts.
     fn manages_contacts(&self, kind: &str, user: i32) -> Result<bool, Exception> {
-        match self.authenticators(user)?.iter().find(|a| a.description.kind == kind) {
+        match self
+            .authenticators(user)?
+            .iter()
+            .find(|a| a.description.kind == kind)
+        {
             Some(a) => self.permitted_for_package(&a.description.package, user, &[WRITE_CONTACTS]),
             None => Ok(false),
         }
@@ -541,7 +659,10 @@ impl AccountManager {
     /// `isLocalUnlockedUser`.
     fn unlocked(&self, user: i32) -> Result<bool, Exception> {
         let (state, _) = self.host.packages()?;
-        Ok(state.users.get(&user).is_some_and(|u| u.unlocking_or_unlocked))
+        Ok(state
+            .users
+            .get(&user)
+            .is_some_and(|u| u.unlocking_or_unlocked))
     }
 
     /// `getUserAccounts`: `user`'s accounts, opened the first time.
@@ -557,9 +678,10 @@ impl AccountManager {
             db.attach_ce(&data.join(format!("system_ce/{user}/accounts_ce.db")))?;
             // `syncDeCeAccountsLocked`.
             if !db.find_ce_accounts_not_in_de()?.is_empty() {
-                return Err(Failure::Thrown(
-                    self.host.unimplemented_named("account", "removing accounts deleted while the user was locked (#1504)"),
-                ));
+                return Err(Failure::Thrown(self.host.unimplemented_named(
+                    "account",
+                    "removing accounts deleted while the user was locked (#1504)",
+                )));
             }
         }
         let mut accounts = Accounts {
@@ -571,7 +693,10 @@ impl AccountManager {
             previous_names: HashMap::new(),
         };
         self.validate(&mut accounts, user)?;
-        let accounts = Arc::new(UserAccounts { state: Mutex::new(accounts), receivers: Mutex::default() });
+        let accounts = Arc::new(UserAccounts {
+            state: Mutex::new(accounts),
+            receivers: Mutex::default(),
+        });
         users.insert(user, accounts.clone());
         Ok(accounts)
     }
@@ -591,7 +716,11 @@ impl AccountManager {
             }
         };
         for uid in uids {
-            if self.system_query(|q| q.packages_for_uid(uid)).map_err(Failure::Thrown)?.is_none() {
+            if self
+                .system_query(|q| q.packages_for_uid(uid))
+                .map_err(Failure::Thrown)?
+                .is_none()
+            {
                 db.delete_grants_by_uid(uid)?;
             }
         }
@@ -603,8 +732,12 @@ impl AccountManager {
     /// gone would be deleted, which is not implemented (#1504); the check
     /// comes before any write.
     fn validate(&self, accounts: &mut Accounts, user: i32) -> Result<(), Failure> {
-        let mut known: Vec<(String, i32)> =
-            self.authenticators(user).map_err(Failure::Thrown)?.iter().map(|a| (a.description.kind.clone(), a.uid)).collect();
+        let mut known: Vec<(String, i32)> = self
+            .authenticators(user)
+            .map_err(Failure::Thrown)?
+            .iter()
+            .map(|a| (a.description.kind.clone(), a.uid))
+            .collect();
         let meta = accounts.db.find_meta_auth_uid()?;
         let mut obsolete = Vec::new();
         let mut installed: Option<HashSet<i32>> = None;
@@ -634,36 +767,71 @@ impl AccountManager {
             }
         }
         let all = accounts.db.find_all_de_accounts()?;
-        if all.iter().any(|(_, a)| obsolete.iter().any(|(kind, _)| *kind == a.kind)) {
-            return Err(Failure::Thrown(
-                self.host.unimplemented_named("account", "deleting the accounts of a removed authenticator (#1504)"),
-            ));
+        if all
+            .iter()
+            .any(|(_, a)| obsolete.iter().any(|(kind, _)| *kind == a.kind))
+        {
+            return Err(Failure::Thrown(self.host.unimplemented_named(
+                "account",
+                "deleting the accounts of a removed authenticator (#1504)",
+            )));
         }
         for (kind, uid) in &obsolete {
             accounts.db.delete_meta_by_auth_type_and_uid(kind, *uid)?;
         }
         for (kind, uid) in &known {
-            accounts.db.insert_or_replace_meta_auth_type_and_uid(kind, *uid)?;
+            accounts
+                .db
+                .insert_or_replace_meta_auth_type_and_uid(kind, *uid)?;
         }
         accounts.accounts.clear();
         for (_, account) in all {
-            let entry = match accounts.accounts.iter().position(|(t, _)| *t == account.kind) {
+            let entry = match accounts
+                .accounts
+                .iter()
+                .position(|(t, _)| *t == account.kind)
+            {
                 Some(i) => &mut accounts.accounts[i].1,
                 None => {
                     accounts.accounts.push((account.kind.clone(), Vec::new()));
                     &mut accounts.accounts.last_mut().unwrap().1
                 }
             };
-            entry.push(Account { access_id: Some(random_uuid()), ..account });
+            entry.push(Account {
+                access_id: Some(random_uuid()),
+                ..account
+            });
         }
-        accounts.visibility.extend(accounts.db.find_all_visibility_values()?);
+        accounts
+            .visibility
+            .extend(accounts.db.find_all_visibility_values()?);
         Ok(())
     }
 
     /// `resolveAccountVisibility` of `account` to `package` in `user`.
-    fn resolve_visibility(&self, accounts: &UserAccounts, account: &Account, package: &str, user: i32) -> Result<i32, Exception> {
-        let mut stored = |key: &str| accounts.state.lock().unwrap().stored_visibility(account, key);
-        resolve_visibility(&UserPackages { manager: self, user }, &mut stored, account, package)
+    fn resolve_visibility(
+        &self,
+        accounts: &UserAccounts,
+        account: &Account,
+        package: &str,
+        user: i32,
+    ) -> Result<i32, Exception> {
+        let mut stored = |key: &str| {
+            accounts
+                .state
+                .lock()
+                .unwrap()
+                .stored_visibility(account, key)
+        };
+        resolve_visibility(
+            &UserPackages {
+                manager: self,
+                user,
+            },
+            &mut stored,
+            account,
+            package,
+        )
     }
 
     /// `getAccountsFromCache` and `filterAccounts`: the accounts of `kind`
@@ -684,7 +852,9 @@ impl AccountManager {
         }
         let package = match package {
             Some(package) => package.to_string(),
-            None => self.package_name_for_uid(uid)?.ok_or_else(|| null("packageName"))?,
+            None => self
+                .package_name_for_uid(uid)?
+                .ok_or_else(|| null("packageName"))?,
         };
         let mut visible = Vec::new();
         for account in unfiltered {
@@ -703,12 +873,18 @@ impl AccountManager {
     /// a type it may see that have the features, as the type's
     /// authenticator answers for each (`GetAccountsByTypeAndFeatureSession`);
     /// none for a type it may not see.
-    fn accounts_by_features(&self, uid: i32, a: am::GetAccountsByFeatures) -> Result<(), Exception> {
+    fn accounts_by_features(
+        &self,
+        uid: i32,
+        a: am::GetAccountsByFeatures,
+    ) -> Result<(), Exception> {
         self.check_package(uid, a.op_package_name.as_deref())?;
         let Some(aim_binder_host::parcel::Binder::Handle(response)) = a.response else {
             return Err(Exception::illegal_argument("response is null"));
         };
-        let kind = a.account_type.ok_or_else(|| Exception::illegal_argument("accountType is null"))?;
+        let kind = a
+            .account_type
+            .ok_or_else(|| Exception::illegal_argument("accountType is null"))?;
         let kind_name = kind.clone();
         let user = user_of(uid);
         let response = self.host.process.strong(response);
@@ -722,10 +898,19 @@ impl AccountManager {
                 })
                 .collect();
             let mut p = Parcel::new();
-            p.write_interface_token(aim_service_aidl::android_accounts_iaccountmanagerresponse::DESCRIPTOR);
+            p.write_interface_token(
+                aim_service_aidl::android_accounts_iaccountmanagerresponse::DESCRIPTOR,
+            );
             p.write_i32(1);
-            crate::bundle::write(&mut p, &[("accounts", crate::bundle::Value::ParcelableArray(items))]);
-            if let Err(e) = response.transact(aim_service_aidl::android_accounts_iaccountmanagerresponse::ON_RESULT, &p, true) {
+            crate::bundle::write(
+                &mut p,
+                &[("accounts", crate::bundle::Value::ParcelableArray(items))],
+            );
+            if let Err(e) = response.transact(
+                aim_service_aidl::android_accounts_iaccountmanagerresponse::ON_RESULT,
+                &p,
+                true,
+            ) {
                 eprintln!("app host: accounts: Cannot respond to caller do to exception. {e:?}");
             }
         };
@@ -733,30 +918,65 @@ impl AccountManager {
             respond(Vec::new());
             return Ok(());
         }
-        let features: Vec<String> = a.features.unwrap_or_default().into_iter().flatten().collect();
+        let features: Vec<String> = a
+            .features
+            .unwrap_or_default()
+            .into_iter()
+            .flatten()
+            .collect();
         let package = a.op_package_name.clone();
         if features.is_empty() {
             let accounts = self.user_accounts(user).map_err(Failure::exception)?;
-            respond(self.accounts_from_cache(&accounts, user, Some(&kind), uid, package.as_deref(), false)?);
+            respond(self.accounts_from_cache(
+                &accounts,
+                user,
+                Some(&kind),
+                uid,
+                package.as_deref(),
+                false,
+            )?);
             return Ok(());
         }
         let me = self.me.clone();
         let accounts_of_type: super::account_session::AccountsOfType = Box::new(move || {
             let me = me.upgrade().ok_or("account service gone")?;
-            let accounts = me.user_accounts(user).map_err(|e| Failure::exception(e).message)?;
-            me.accounts_from_cache(&accounts, user, Some(&kind), uid, package.as_deref(), false).map_err(|e| e.message)
+            let accounts = me
+                .user_accounts(user)
+                .map_err(|e| Failure::exception(e).message)?;
+            me.accounts_from_cache(&accounts, user, Some(&kind), uid, package.as_deref(), false)
+                .map_err(|e| e.message)
         });
-        let kind = super::account_session::Kind { account_type: kind_name, user, expect_activity_launch: false, strip_auth_token: true };
-        let session = super::account_session::Session::new(self.host.clone(), response, kind, super::account_session::Work::features(features, accounts_of_type));
+        let kind = super::account_session::Kind {
+            account_type: kind_name,
+            user,
+            expect_activity_launch: false,
+            strip_auth_token: true,
+        };
+        let session = super::account_session::Session::new(
+            self.host.clone(),
+            response,
+            kind,
+            super::account_session::Work::features(features, accounts_of_type),
+        );
         self.bind_session(&session, user)
     }
 
     /// `bindToAuthenticator` of `session`'s type for `user`.
-    fn bind_session(&self, session: &super::account_session::Session, user: i32) -> Result<(), Exception> {
+    fn bind_session(
+        &self,
+        session: &super::account_session::Session,
+        user: i32,
+    ) -> Result<(), Exception> {
         let authenticators = self.authenticators(user)?;
-        let component = authenticators.iter().find(|au| au.description.kind == session.account_type()).map(|au| (au.description.package.clone(), au.class.clone()));
+        let component = authenticators
+            .iter()
+            .find(|au| au.description.kind == session.account_type())
+            .map(|au| (au.description.package.clone(), au.class.clone()));
         if component.is_none() {
-            eprintln!("app host: accounts: there is no authenticator for {}, bailing out", session.account_type());
+            eprintln!(
+                "app host: accounts: there is no authenticator for {}, bailing out",
+                session.account_type()
+            );
         }
         session.bind(component.as_ref().map(|(p, c)| (p.as_str(), c.as_str())));
         Ok(())
@@ -766,32 +986,72 @@ impl AccountManager {
     /// type, then a session asking the type's authenticator to add one
     /// (`addAccountAndLogMetrics`), with the caller's uid and pid in the
     /// options.
-    fn add_account(&self, uid: i32, pid: i32, a: am::AddAccount<super::kept::RawBundle>) -> Result<(), Exception> {
+    fn add_account(
+        &self,
+        uid: i32,
+        pid: i32,
+        a: am::AddAccount<super::kept::RawBundle>,
+    ) -> Result<(), Exception> {
         let Some(aim_binder_host::parcel::Binder::Handle(response)) = a.response else {
             return Err(Exception::illegal_argument("response is null"));
         };
-        let kind = a.account_type.ok_or_else(|| Exception::illegal_argument("accountType is null"))?;
+        let kind = a
+            .account_type
+            .ok_or_else(|| Exception::illegal_argument("accountType is null"))?;
         let user = user_of(uid);
         let response = self.host.process.strong(response);
         let error = |code: i32, message: &str| {
             let mut p = Parcel::new();
-            aim_service_aidl::android_accounts_iaccountmanagerresponse::OnError { error_code: code, error_message: Some(message.into()) }.write(&mut p);
-            let _ = response.transact(aim_service_aidl::android_accounts_iaccountmanagerresponse::ON_ERROR, &p, true);
+            aim_service_aidl::android_accounts_iaccountmanagerresponse::OnError {
+                error_code: code,
+                error_message: Some(message.into()),
+            }
+            .write(&mut p);
+            let _ = response.transact(
+                aim_service_aidl::android_accounts_iaccountmanagerresponse::ON_ERROR,
+                &p,
+                true,
+            );
         };
         // `canUserModifyAccounts`, `canUserModifyAccountsForType` (no device
         // policy disables a type without admins); `showCantAddAccount`
         // starts an activity the app host does not run.
-        if !self.is_profile_owner()? && self.host.user_restrictions()?.contains(DISALLOW_MODIFY_ACCOUNTS) {
-            error(ERROR_CODE_USER_RESTRICTED, "User is not allowed to add an account!");
-            return Err(self.host.unimplemented_named("account", "showCantAddAccount (#1504)"));
+        if !self.is_profile_owner()?
+            && self
+                .host
+                .user_restrictions()?
+                .contains(DISALLOW_MODIFY_ACCOUNTS)
+        {
+            error(
+                ERROR_CODE_USER_RESTRICTED,
+                "User is not allowed to add an account!",
+            );
+            return Err(self
+                .host
+                .unimplemented_named("account", "showCantAddAccount (#1504)"));
         }
         let options = a.options.unwrap_or_else(super::kept::RawBundle::empty);
         let options = options
             .with_ints(&[("callerUid", uid), ("callerPid", pid)])
-            .map_err(|e| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, format!("accounts: options: {e:?}")))?;
-        let session_kind = super::account_session::Kind { account_type: kind, user, expect_activity_launch: a.expect_activity_launch, strip_auth_token: true };
-        let work = super::account_session::Work::AddAccount { auth_token_type: a.auth_token_type, required_features: a.required_features, options };
-        let session = super::account_session::Session::new(self.host.clone(), response, session_kind, work);
+            .map_err(|e| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    format!("accounts: options: {e:?}"),
+                )
+            })?;
+        let session_kind = super::account_session::Kind {
+            account_type: kind,
+            user,
+            expect_activity_launch: a.expect_activity_launch,
+            strip_auth_token: true,
+        };
+        let work = super::account_session::Work::AddAccount {
+            auth_token_type: a.auth_token_type,
+            required_features: a.required_features,
+            options,
+        };
+        let session =
+            super::account_session::Session::new(self.host.clone(), response, session_kind, work);
         self.bind_session(&session, user)
     }
 
@@ -809,7 +1069,10 @@ impl AccountManager {
     ) -> Result<Vec<Account>, Exception> {
         if user != user_of(calling_uid)
             && calling_uid != SYSTEM_UID
-            && self.host.check_permission(Some(INTERACT_ACROSS_USERS_FULL), calling_uid)? != 0
+            && self
+                .host
+                .check_permission(Some(INTERACT_ACROSS_USERS_FULL), calling_uid)?
+                != 0
         {
             return Err(Exception::security(format!(
                 "User {} trying to get account for {user}",
@@ -819,7 +1082,8 @@ impl AccountManager {
         let managed = self.types_for_caller(calling_uid, user_of(calling_uid), false)?;
         let (mut uid, mut package) = (calling_uid, op_package);
         if package_uid != -1
-            && (is_same_app(calling_uid, SYSTEM_UID) || kind.is_some_and(|k| managed.iter().any(|t| t == k)))
+            && (is_same_app(calling_uid, SYSTEM_UID)
+                || kind.is_some_and(|k| managed.iter().any(|t| t == k)))
         {
             (uid, package) = (package_uid, calling_package);
         }
@@ -834,14 +1098,24 @@ impl AccountManager {
             let accounts = self.user_accounts(user)?;
             let mut found = Vec::new();
             for kind in &visible {
-                let of_kind = self.accounts_from_cache(&accounts, user, Some(kind), uid, package, include_managed_not_visible);
+                let of_kind = self.accounts_from_cache(
+                    &accounts,
+                    user,
+                    Some(kind),
+                    uid,
+                    package,
+                    include_managed_not_visible,
+                );
                 found.extend(of_kind.map_err(Failure::Thrown)?);
             }
             Ok(found)
         })();
         match found {
             Err(Failure::Db(e)) => {
-                eprintln!("app host: accounts: could not get accounts for user {user}: {}", e.0);
+                eprintln!(
+                    "app host: accounts: could not get accounts for user {user}: {}",
+                    e.0
+                );
                 Ok(Vec::new())
             }
             found => found.map_err(Failure::exception),
@@ -852,7 +1126,9 @@ impl AccountManager {
     fn check_package(&self, uid: i32, package: Option<&str>) -> Result<(), Exception> {
         let package = package.unwrap_or_default();
         if !self.host.owns_package(uid, package)? {
-            return Err(Exception::security(format!("Package {package} does not belong to {uid}")));
+            return Err(Exception::security(format!(
+                "Package {package} does not belong to {uid}"
+            )));
         }
         Ok(())
     }
@@ -863,17 +1139,33 @@ impl AccountManager {
             return Ok(true);
         }
         let accounts = self.accounts(user_of(uid))?;
-        let count = accounts.state.lock().unwrap().db.find_matching_grants_count_any_token(uid, account).map_err(db_failed)?;
+        let count = accounts
+            .state
+            .lock()
+            .unwrap()
+            .db
+            .find_matching_grants_count_any_token(uid, account)
+            .map_err(db_failed)?;
         if count > 0 {
             return Ok(true);
         }
         // `ActivityManager.isRunningInTestHarness`.
-        let configured = self.host.configured.get().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host not configured"))?;
-        Ok((configured.properties)("ro.test_harness").is_some_and(|v| matches!(v.as_str(), "1" | "y" | "yes" | "on" | "true")))
+        let configured = self
+            .host
+            .configured
+            .get()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host not configured"))?;
+        Ok((configured.properties)("ro.test_harness")
+            .is_some_and(|v| matches!(v.as_str(), "1" | "y" | "yes" | "on" | "true")))
     }
 
     /// `hasAccountAccess(account, package, uid)`.
-    fn has_account_access(&self, account: &Account, package: Option<&str>, uid: i32) -> Result<bool, Exception> {
+    fn has_account_access(
+        &self,
+        account: &Account,
+        package: Option<&str>,
+        uid: i32,
+    ) -> Result<bool, Exception> {
         let package = match package {
             Some(package) => package.to_string(),
             None => match self.package_name_for_uid(uid)? {
@@ -899,7 +1191,8 @@ impl AccountManager {
     /// `getAccountVisibility`: the caller manages the type, or is the
     /// system's.
     fn may_read_visibility(&self, kind: &str, uid: i32) -> Result<bool, Exception> {
-        Ok(self.managed_by_caller(Some(kind), uid, user_of(uid))? || self.uid_package_is(uid, |ps| ps.is.system)?)
+        Ok(self.managed_by_caller(Some(kind), uid, user_of(uid))?
+            || self.uid_package_is(uid, |ps| ps.is.system)?)
     }
 }
 
@@ -916,7 +1209,9 @@ impl Service for AccountManager {
                 let a = am::GetPassword::<Account>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply((|| {
                     let mut p = Parcel::new();
-                    let account = a.account.ok_or_else(|| Exception::illegal_argument("account is null"))?;
+                    let account = a
+                        .account
+                        .ok_or_else(|| Exception::illegal_argument("account is null"))?;
                     if !self.managed_by_caller(Some(&account.kind), uid, user)? {
                         return Err(Exception::security(format!(
                             "uid {uid} cannot get secrets for accounts of type: {}",
@@ -958,7 +1253,10 @@ impl Service for AccountManager {
                         // `readUserDataInternal`.
                         if state.exists(&account) {
                             if !state.user_data.contains_key(&account) {
-                                let extras = state.db.find_user_extras_for_account(&account).map_err(db_failed)?;
+                                let extras = state
+                                    .db
+                                    .find_user_extras_for_account(&account)
+                                    .map_err(db_failed)?;
                                 state.user_data.insert(account.clone(), extras);
                             }
                             value = state.user_data[&account].get(&key).cloned().flatten();
@@ -975,7 +1273,10 @@ impl Service for AccountManager {
                     // `isCrossUser`.
                     if a.user_id != user
                         && uid != SYSTEM_UID
-                        && self.host.check_permission(Some(INTERACT_ACROSS_USERS_FULL), uid)? != 0
+                        && self
+                            .host
+                            .check_permission(Some(INTERACT_ACROSS_USERS_FULL), uid)?
+                            != 0
                     {
                         return Err(Exception::security(format!(
                             "User {user} tying to get authenticator types for {}",
@@ -984,7 +1285,11 @@ impl Service for AccountManager {
                     }
                     let mut types: Vec<Option<AuthenticatorDescription>> = Vec::new();
                     for authenticator in self.authenticators(a.user_id)?.iter() {
-                        if self.can_access_package(Some(&authenticator.description.package), uid, a.user_id)? {
+                        if self.can_access_package(
+                            Some(&authenticator.description.package),
+                            uid,
+                            a.user_id,
+                        )? {
                             types.push(Some(authenticator.description.clone()));
                         }
                     }
@@ -1011,21 +1316,32 @@ impl Service for AccountManager {
                         a.op_package_name.as_deref(),
                         true,
                     )?;
-                    am::write_get_accounts_for_package_reply(&mut p, Some(&found.into_iter().map(Some).collect::<Vec<_>>()));
+                    am::write_get_accounts_for_package_reply(
+                        &mut p,
+                        Some(&found.into_iter().map(Some).collect::<Vec<_>>()),
+                    );
                     Ok(p)
                 })())
             }
             am::GET_ACCOUNTS_BY_TYPE_FOR_PACKAGE => {
-                let a = am::GetAccountsByTypeForPackage::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    am::GetAccountsByTypeForPackage::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply((|| {
                     let mut p = Parcel::new();
                     self.check_package(uid, a.op_package_name.as_deref())?;
                     let kind = a.r#type.as_deref();
-                    let package_uid = self.package_uid(a.package_name.as_deref().unwrap_or_default(), user)?;
+                    let package_uid =
+                        self.package_uid(a.package_name.as_deref().unwrap_or_default(), user)?;
                     let system = is_same_app(uid, SYSTEM_UID);
                     let found = match package_uid {
                         None => Vec::new(),
-                        Some(_) if !system && kind.is_some() && !self.managed_by_caller(kind, uid, user)? => Vec::new(),
+                        Some(_)
+                            if !system
+                                && kind.is_some()
+                                && !self.managed_by_caller(kind, uid, user)? =>
+                        {
+                            Vec::new()
+                        }
                         Some(package_uid) => self.accounts_as_user_for_package(
                             uid,
                             kind,
@@ -1044,7 +1360,8 @@ impl Service for AccountManager {
                 })())
             }
             am::ADD_ACCOUNT => {
-                let a = am::AddAccount::<super::kept::RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = am::AddAccount::<super::kept::RawBundle>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 reply(self.add_account(uid, call.sender_pid, a).map(|()| {
                     let mut p = Parcel::new();
                     am::write_add_account_reply(&mut p);
@@ -1065,13 +1382,25 @@ impl Service for AccountManager {
                     let mut p = Parcel::new();
                     self.check_package(uid, a.op_package_name.as_deref())?;
                     let op = a.op_package_name.as_deref();
-                    let found = self.accounts_as_user_for_package(uid, a.account_type.as_deref(), a.user_id, op, -1, op, false)?;
-                    am::write_get_accounts_as_user_reply(&mut p, Some(&found.into_iter().map(Some).collect::<Vec<_>>()));
+                    let found = self.accounts_as_user_for_package(
+                        uid,
+                        a.account_type.as_deref(),
+                        a.user_id,
+                        op,
+                        -1,
+                        op,
+                        false,
+                    )?;
+                    am::write_get_accounts_as_user_reply(
+                        &mut p,
+                        Some(&found.into_iter().map(Some).collect::<Vec<_>>()),
+                    );
                     Ok(p)
                 })())
             }
             am::PEEK_AUTH_TOKEN => {
-                let a = am::PeekAuthToken::<Account>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    am::PeekAuthToken::<Account>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply((|| {
                     let mut p = Parcel::new();
                     let account = a.account.ok_or_else(|| null("account"))?;
@@ -1088,7 +1417,10 @@ impl Service for AccountManager {
                         let mut state = accounts.state.lock().unwrap();
                         // `readAuthTokenInternal`.
                         if !state.auth_tokens.contains_key(&account) {
-                            let tokens = state.db.find_auth_tokens_by_account(&account).map_err(db_failed)?;
+                            let tokens = state
+                                .db
+                                .find_auth_tokens_by_account(&account)
+                                .map_err(db_failed)?;
                             state.auth_tokens.insert(account.clone(), tokens);
                         }
                         token = state.auth_tokens[&account].get(&kind).cloned().flatten();
@@ -1098,7 +1430,8 @@ impl Service for AccountManager {
                 })())
             }
             am::GET_PREVIOUS_NAME => {
-                let a = am::GetPreviousName::<Account>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    am::GetPreviousName::<Account>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply((|| {
                     let mut p = Parcel::new();
                     let account = a.account.ok_or_else(|| null("account"))?;
@@ -1108,7 +1441,10 @@ impl Service for AccountManager {
                     let name = match state.previous_names.get(&account) {
                         Some(name) => name.clone(),
                         None => {
-                            let name = state.db.find_de_account_previous_name(&account).map_err(db_failed)?;
+                            let name = state
+                                .db
+                                .find_de_account_previous_name(&account)
+                                .map_err(db_failed)?;
                             state.previous_names.insert(account, name.clone());
                             name
                         }
@@ -1118,11 +1454,14 @@ impl Service for AccountManager {
                 })())
             }
             am::SOME_USER_HAS_ACCOUNT => {
-                let a = am::SomeUserHasAccount::<Account>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = am::SomeUserHasAccount::<Account>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 reply((|| {
                     let mut p = Parcel::new();
                     if !is_same_app(SYSTEM_UID, uid) {
-                        return Err(Exception::security("Only system can check for accounts across users"));
+                        return Err(Exception::security(
+                            "Only system can check for accounts across users",
+                        ));
                     }
                     // `getAllAccountsForSystemProcess`: every alive user's.
                     let (state, _) = self.host.packages()?;
@@ -1130,7 +1469,14 @@ impl Service for AccountManager {
                     if let Some(account) = &a.account {
                         for &user in state.users.keys() {
                             let accounts = self.accounts(user)?;
-                            let all = self.accounts_from_cache(&accounts, user, None, SYSTEM_UID, Some("android"), false)?;
+                            let all = self.accounts_from_cache(
+                                &accounts,
+                                user,
+                                None,
+                                SYSTEM_UID,
+                                Some("android"),
+                                false,
+                            )?;
                             has |= all.contains(account);
                         }
                     }
@@ -1139,12 +1485,15 @@ impl Service for AccountManager {
                 })())
             }
             am::GET_PACKAGES_AND_VISIBILITY_FOR_ACCOUNT => {
-                let a = am::GetPackagesAndVisibilityForAccount::<Account>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = am::GetPackagesAndVisibilityForAccount::<Account>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 reply((|| {
                     let mut p = Parcel::new();
                     let account = a.account.ok_or_else(|| null("account"))?;
                     if !self.may_read_visibility(&account.kind, uid)? {
-                        return Err(Exception::security(format!("uid {uid} cannot get secrets for account {account}")));
+                        return Err(Exception::security(format!(
+                            "uid {uid} cannot get secrets for account {account}"
+                        )));
                     }
                     let accounts = self.accounts(user)?;
                     let mut state = accounts.state.lock().unwrap();
@@ -1153,14 +1502,20 @@ impl Service for AccountManager {
                         .entry(account)
                         .or_default()
                         .iter()
-                        .map(|(package, v)| (ParcelValue::String(Some(package.clone())), ParcelValue::Integer(*v)))
+                        .map(|(package, v)| {
+                            (
+                                ParcelValue::String(Some(package.clone())),
+                                ParcelValue::Integer(*v),
+                            )
+                        })
                         .collect();
                     am::write_get_packages_and_visibility_for_account_reply(&mut p, &Some(map));
                     Ok(p)
                 })())
             }
             am::GET_ACCOUNT_VISIBILITY => {
-                let a = am::GetAccountVisibility::<Account>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = am::GetAccountVisibility::<Account>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 reply((|| {
                     let mut p = Parcel::new();
                     let account = a.a.ok_or_else(|| null("account"))?;
@@ -1172,13 +1527,23 @@ impl Service for AccountManager {
                         )));
                     }
                     let accounts = self.accounts(user)?;
-                    let legacy = [(LEGACY_VISIBLE, VISIBILITY_USER_MANAGED_VISIBLE), (LEGACY_NOT_VISIBLE, VISIBILITY_USER_MANAGED_NOT_VISIBLE)];
+                    let legacy = [
+                        (LEGACY_VISIBLE, VISIBILITY_USER_MANAGED_VISIBLE),
+                        (LEGACY_NOT_VISIBLE, VISIBILITY_USER_MANAGED_NOT_VISIBLE),
+                    ];
                     let visibility = match legacy.iter().find(|(key, _)| *key == package) {
-                        Some((key, default)) => match accounts.state.lock().unwrap().stored_visibility(&account, key) {
+                        Some((key, default)) => match accounts
+                            .state
+                            .lock()
+                            .unwrap()
+                            .stored_visibility(&account, key)
+                        {
                             VISIBILITY_UNDEFINED => *default,
                             visibility => visibility,
                         },
-                        None if !self.can_access_package(Some(&package), uid, user)? => VISIBILITY_NOT_VISIBLE,
+                        None if !self.can_access_package(Some(&package), uid, user)? => {
+                            VISIBILITY_NOT_VISIBLE
+                        }
                         None => self.resolve_visibility(&accounts, &account, &package, user)?,
                     };
                     am::write_get_account_visibility_reply(&mut p, visibility);
@@ -1186,13 +1551,16 @@ impl Service for AccountManager {
                 })())
             }
             am::GET_ACCOUNTS_AND_VISIBILITY_FOR_PACKAGE => {
-                let a = am::GetAccountsAndVisibilityForPackage::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = am::GetAccountsAndVisibilityForPackage::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 reply((|| {
                     let mut p = Parcel::new();
                     let system = is_same_app(uid, SYSTEM_UID);
                     let managed = self.types_for_caller(uid, user, system)?;
                     let kind = a.account_type;
-                    if kind.as_ref().is_some_and(|k| !managed.contains(k)) || kind.is_none() && !system {
+                    if kind.as_ref().is_some_and(|k| !managed.contains(k))
+                        || kind.is_none() && !system
+                    {
                         return Err(Exception::security(format!(
                             "getAccountsAndVisibilityForPackage() called from unauthorized uid {uid} with packageName={}",
                             a.package_name.as_deref().unwrap_or("null")
@@ -1209,8 +1577,16 @@ impl Service for AccountManager {
                         for kind in &types {
                             let of_type = accounts.state.lock().unwrap().of(Some(kind));
                             for account in of_type {
-                                let visibility = self.resolve_visibility(&accounts, &account, package.unwrap_or_default(), user)?;
-                                map.push((account_value(&account), ParcelValue::Integer(visibility)));
+                                let visibility = self.resolve_visibility(
+                                    &accounts,
+                                    &account,
+                                    package.unwrap_or_default(),
+                                    user,
+                                )?;
+                                map.push((
+                                    account_value(&account),
+                                    ParcelValue::Integer(visibility),
+                                ));
                             }
                         }
                     }
@@ -1221,10 +1597,12 @@ impl Service for AccountManager {
             am::REGISTER_ACCOUNT_LISTENER | am::UNREGISTER_ACCOUNT_LISTENER => {
                 let register = call.code == am::REGISTER_ACCOUNT_LISTENER;
                 let (types, package) = if register {
-                    let a = am::RegisterAccountListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                    let a =
+                        am::RegisterAccountListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                     (a.account_types, a.op_package_name)
                 } else {
-                    let a = am::UnregisterAccountListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                    let a = am::UnregisterAccountListener::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
                     (a.account_types, a.op_package_name)
                 };
                 reply((|| {
@@ -1236,7 +1614,11 @@ impl Service for AccountManager {
                     let mut p = Parcel::new();
                     if register {
                         for kind in types {
-                            *receivers.entry(kind).or_default().entry(package.clone()).or_default() += 1;
+                            *receivers
+                                .entry(kind)
+                                .or_default()
+                                .entry(package.clone())
+                                .or_default() += 1;
                         }
                         am::write_register_account_listener_reply(&mut p);
                     } else {
@@ -1244,7 +1626,11 @@ impl Service for AccountManager {
                             let counts = receivers
                                 .get_mut(&kind)
                                 .filter(|r| r.contains_key(&package))
-                                .ok_or_else(|| Exception::illegal_argument("attempt to unregister wrong receiver"))?;
+                                .ok_or_else(|| {
+                                    Exception::illegal_argument(
+                                        "attempt to unregister wrong receiver",
+                                    )
+                                })?;
                             let count = counts.get_mut(&package).unwrap();
                             *count -= 1;
                             if *count == 0 {
@@ -1257,7 +1643,8 @@ impl Service for AccountManager {
                 })())
             }
             am::HAS_ACCOUNT_ACCESS => {
-                let a = am::HasAccountAccess::<Account, UserHandle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = am::HasAccountAccess::<Account, UserHandle>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 reply((|| {
                     let mut p = Parcel::new();
                     if apps_filter::app_id(uid) != SYSTEM_UID {
@@ -1273,7 +1660,9 @@ impl Service for AccountManager {
                         )));
                     }
                     let access = match self.package_uid(&package, target)? {
-                        Some(package_uid) => self.has_account_access(&account, Some(&package), package_uid)?,
+                        Some(package_uid) => {
+                            self.has_account_access(&account, Some(&package), package_uid)?
+                        }
                         None => false,
                     };
                     am::write_has_account_access_reply(&mut p, access);
@@ -1287,9 +1676,16 @@ impl Service for AccountManager {
                     if apps_filter::app_id(uid) != SYSTEM_UID {
                         // `getAccounts(user, "android")`, as the system.
                         let android = Some("android");
-                        for account in self.accounts_as_user_for_package(SYSTEM_UID, None, user, android, -1, android, false)? {
-                            if account.access_id == a.token && !self.has_account_access(&account, None, uid)? {
-                                return Err(self.host.unimplemented_named("account", "granting an app access to an account (#1504)"));
+                        for account in self.accounts_as_user_for_package(
+                            SYSTEM_UID, None, user, android, -1, android, false,
+                        )? {
+                            if account.access_id == a.token
+                                && !self.has_account_access(&account, None, uid)?
+                            {
+                                return Err(self.host.unimplemented_named(
+                                    "account",
+                                    "granting an app access to an account (#1504)",
+                                ));
                             }
                         }
                     }
@@ -1298,8 +1694,13 @@ impl Service for AccountManager {
                 })())
             }
             code => {
-                let name = am::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
-                reply(Err(self.host.unimplemented_named("account", &format!("{name} (#1504)"))))
+                let name = am::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
+                reply(Err(self
+                    .host
+                    .unimplemented_named("account", &format!("{name} (#1504)"))))
             }
         }
     }
@@ -1336,7 +1737,10 @@ mod tests {
         assert!(!has_certificate(&no_auth, b"A", CERT_AUTH));
         assert!(has_certificate(&no_auth, b"A", PAST_CERT_EXISTS));
         let multiple = signatures(&[b"A", b"B"], None);
-        assert!(signatures_match_exactly(&multiple, &signatures(&[b"B", b"A"], None)));
+        assert!(signatures_match_exactly(
+            &multiple,
+            &signatures(&[b"B", b"A"], None)
+        ));
         assert!(!signatures_match_exactly(&multiple, &a));
     }
 
@@ -1346,7 +1750,11 @@ mod tests {
     fn the_authenticators_signers_manage_its_accounts() {
         use crate::package::model::{PackageState, SharedUser};
         let mut state = State::default();
-        for (name, app_id, signer) in [("auth", 10100, b"A"), ("same", 10101, b"A"), ("other", 10102, b"B")] {
+        for (name, app_id, signer) in [
+            ("auth", 10100, b"A"),
+            ("same", 10101, b"A"),
+            ("other", 10102, b"B"),
+        ] {
             let ps = PackageState {
                 name: name.into(),
                 app_id,
@@ -1393,7 +1801,10 @@ mod tests {
         }
 
         fn permitted(&self, package: &str, permissions: &[&str]) -> Result<bool, Exception> {
-            Ok(self.packages[package].2.iter().any(|p| permissions.contains(p)))
+            Ok(self.packages[package]
+                .2
+                .iter()
+                .any(|p| permissions.contains(p)))
         }
 
         fn profile_owner(&self, _uid: i32) -> Result<bool, Exception> {
@@ -1436,43 +1847,106 @@ mod tests {
         let none = &mut |_: &str| VISIBILITY_UNDEFINED;
         assert_eq!(resolve(&inputs, none, "missing"), VISIBILITY_NOT_VISIBLE);
         assert_eq!(resolve(&inputs, none, "android"), VISIBILITY_VISIBLE);
-        assert_eq!(resolve(&inputs, &mut |_| VISIBILITY_NOT_VISIBLE, "auth"), VISIBILITY_VISIBLE);
-        assert_eq!(resolve(&inputs, none, "signed"), VISIBILITY_USER_MANAGED_VISIBLE);
-        assert_eq!(resolve(&inputs, none, "plain"), VISIBILITY_USER_MANAGED_NOT_VISIBLE);
-        assert_eq!(resolve(&inputs, none, "old"), VISIBILITY_USER_MANAGED_VISIBLE);
-        assert_eq!(resolve(&inputs, none, "new"), VISIBILITY_USER_MANAGED_NOT_VISIBLE);
-        assert_eq!(resolve(&inputs, none, "contacts"), VISIBILITY_USER_MANAGED_NOT_VISIBLE);
-        assert_eq!(resolve(&inputs, none, "privileged"), VISIBILITY_USER_MANAGED_VISIBLE);
-        inputs.contacts_authenticator = true;
-        assert_eq!(resolve(&inputs, none, "contacts"), VISIBILITY_USER_MANAGED_VISIBLE);
-        let stored_for = |key: &'static str, value: i32| move |k: &str| if k == key { value } else { VISIBILITY_UNDEFINED };
-        assert_eq!(resolve(&inputs, &mut stored_for("plain", VISIBILITY_VISIBLE), "plain"), VISIBILITY_VISIBLE);
         assert_eq!(
-            resolve(&inputs, &mut stored_for(LEGACY_NOT_VISIBLE, VISIBILITY_NOT_VISIBLE), "plain"),
+            resolve(&inputs, &mut |_| VISIBILITY_NOT_VISIBLE, "auth"),
+            VISIBILITY_VISIBLE
+        );
+        assert_eq!(
+            resolve(&inputs, none, "signed"),
+            VISIBILITY_USER_MANAGED_VISIBLE
+        );
+        assert_eq!(
+            resolve(&inputs, none, "plain"),
+            VISIBILITY_USER_MANAGED_NOT_VISIBLE
+        );
+        assert_eq!(
+            resolve(&inputs, none, "old"),
+            VISIBILITY_USER_MANAGED_VISIBLE
+        );
+        assert_eq!(
+            resolve(&inputs, none, "new"),
+            VISIBILITY_USER_MANAGED_NOT_VISIBLE
+        );
+        assert_eq!(
+            resolve(&inputs, none, "contacts"),
+            VISIBILITY_USER_MANAGED_NOT_VISIBLE
+        );
+        assert_eq!(
+            resolve(&inputs, none, "privileged"),
+            VISIBILITY_USER_MANAGED_VISIBLE
+        );
+        inputs.contacts_authenticator = true;
+        assert_eq!(
+            resolve(&inputs, none, "contacts"),
+            VISIBILITY_USER_MANAGED_VISIBLE
+        );
+        let stored_for = |key: &'static str, value: i32| {
+            move |k: &str| {
+                if k == key {
+                    value
+                } else {
+                    VISIBILITY_UNDEFINED
+                }
+            }
+        };
+        assert_eq!(
+            resolve(
+                &inputs,
+                &mut stored_for("plain", VISIBILITY_VISIBLE),
+                "plain"
+            ),
+            VISIBILITY_VISIBLE
+        );
+        assert_eq!(
+            resolve(
+                &inputs,
+                &mut stored_for(LEGACY_NOT_VISIBLE, VISIBILITY_NOT_VISIBLE),
+                "plain"
+            ),
             VISIBILITY_NOT_VISIBLE
         );
-        assert_eq!(resolve(&inputs, &mut stored_for(LEGACY_VISIBLE, VISIBILITY_VISIBLE), "signed"), VISIBILITY_VISIBLE);
+        assert_eq!(
+            resolve(
+                &inputs,
+                &mut stored_for(LEGACY_VISIBLE, VISIBILITY_VISIBLE),
+                "signed"
+            ),
+            VISIBILITY_VISIBLE
+        );
     }
 
     #[test]
     fn accounts_are_equal_by_name_and_type() {
         let mut a = Account::new("a@example.com".into(), "com.example".into());
-        let b = Account { access_id: Some(random_uuid()), ..a.clone() };
+        let b = Account {
+            access_id: Some(random_uuid()),
+            ..a.clone()
+        };
         assert_eq!(a, b);
         a.kind = "org.other".into();
         assert_ne!(a, b);
-        assert_eq!(a.to_string(), "Account {name=a@example.com, type=org.other}");
+        assert_eq!(
+            a.to_string(),
+            "Account {name=a@example.com, type=org.other}"
+        );
     }
 
     /// `Account.writeToParcel` and `Account(Parcel)`, which refuses an
     /// empty name; as a `Map` key, `writeValue`'s parcelable.
     #[test]
     fn account_parcels_as_the_original() {
-        let a = Account { name: "a".into(), kind: "t".into(), access_id: Some("id".into()) };
+        let a = Account {
+            name: "a".into(),
+            kind: "t".into(),
+            access_id: Some("id".into()),
+        };
         let mut p = Parcel::new();
         a.write_to(&mut p);
         let back = Account::read_from(&mut p.reader()).unwrap();
-        assert_eq!((back.name, back.kind, back.access_id.as_deref()), ("a".into(), "t".into(), Some("id")));
+        assert_eq!(
+            (back.name, back.kind, back.access_id.as_deref()),
+            ("a".into(), "t".into(), Some("id"))
+        );
         let mut empty = Parcel::new();
         empty.write_string16(Some(""));
         empty.write_string16(Some("t"));
@@ -1484,7 +1958,10 @@ mod tests {
         assert_eq!(r.read_i32().unwrap(), 4);
         let length = r.read_i32().unwrap() as usize;
         assert_eq!(length, r.remaining());
-        assert_eq!(r.read_string16().unwrap().as_deref(), Some("android.accounts.Account"));
+        assert_eq!(
+            r.read_string16().unwrap().as_deref(),
+            Some("android.accounts.Account")
+        );
         assert_eq!(Account::read_from(&mut r).unwrap(), a);
     }
 

@@ -14,7 +14,9 @@ use std::sync::Arc;
 
 use aim_emulated_storage::{BUFFER_SIZE, Daemon, op};
 use android_os_vold::aidl::android::os::IVold::IVold;
-use android_os_vold::aidl::android::os::IVoldMountCallback::{BnVoldMountCallback, IVoldMountCallback};
+use android_os_vold::aidl::android::os::IVoldMountCallback::{
+    BnVoldMountCallback, IVoldMountCallback,
+};
 use binder::{BinderFeatures, Interface};
 
 /// `IVold.MOUNT_FLAG_PRIMARY`, `MOUNT_FLAG_VISIBLE_FOR_WRITE`.
@@ -39,10 +41,22 @@ const PER_USER_RANGE: u32 = 100_000;
 /// Mounts `user`'s emulated volume through vold, served as `daemon_uid`
 /// (MediaProvider's).
 pub fn mount(user: i32, daemon_uid: u32) -> Result<(), String> {
-    let vold: binder::Strong<dyn IVold> = binder::wait_for_interface("vold").map_err(|e| format!("vold: {e}"))?;
-    let callback = BnVoldMountCallback::new_binder(Callback { user: user as u32, uid: daemon_uid }, BinderFeatures::default());
-    vold.mount(&format!("emulated;{user}"), MOUNT_FLAG_PRIMARY | MOUNT_FLAG_VISIBLE_FOR_WRITE, user, Some(&callback))
-        .map_err(|e| format!("mount emulated;{user}: {e}"))
+    let vold: binder::Strong<dyn IVold> =
+        binder::wait_for_interface("vold").map_err(|e| format!("vold: {e}"))?;
+    let callback = BnVoldMountCallback::new_binder(
+        Callback {
+            user: user as u32,
+            uid: daemon_uid,
+        },
+        BinderFeatures::default(),
+    );
+    vold.mount(
+        &format!("emulated;{user}"),
+        MOUNT_FLAG_PRIMARY | MOUNT_FLAG_VISIBLE_FOR_WRITE,
+        user,
+        Some(&callback),
+    )
+    .map_err(|e| format!("mount emulated;{user}: {e}"))
 }
 
 struct Callback {
@@ -55,11 +69,18 @@ impl Interface for Callback {}
 impl IVoldMountCallback for Callback {
     /// The volume's FUSE connection: served from `internal_path`, its
     /// lower path, by a process of its own as the daemon's uid.
-    fn onVolumeChecking(&self, fd: &android_os_vold::RawFileDescriptor, path: &str, internal_path: &str) -> binder::Result<bool> {
+    fn onVolumeChecking(
+        &self,
+        fd: &android_os_vold::RawFileDescriptor,
+        path: &str,
+        internal_path: &str,
+    ) -> binder::Result<bool> {
         let fd = fd.as_raw_fd();
         let (uid, sdcard_rw) = (self.uid, SDCARD_RW + self.user * PER_USER_RANGE);
         // The agent's own program, as init started it.
-        let program = std::env::args_os().next().ok_or(binder::StatusCode::UNKNOWN_ERROR)?;
+        let program = std::env::args_os()
+            .next()
+            .ok_or(binder::StatusCode::UNKNOWN_ERROR)?;
         let mut command = std::process::Command::new(program);
         command.arg(SERVE).arg(internal_path);
         // SAFETY: only async-signal-safe calls between fork and exec.
@@ -78,7 +99,10 @@ impl IVoldMountCallback for Callback {
         }
         match command.spawn() {
             Ok(child) => {
-                log::info!("serving {path} from {internal_path} as {uid} (pid {})", child.id());
+                log::info!(
+                    "serving {path} from {internal_path} as {uid} (pid {})",
+                    child.id()
+                );
                 // init reaps it with the agent's other orphans once the
                 // agent goes; until then it serves.
                 std::mem::forget(child);
@@ -125,7 +149,8 @@ fn serve(fd: &OwnedFd, daemon: &Daemon) {
             return log::info!("emulated storage connection: {error}");
         }
         let request = &buffer[..n as usize];
-        let destroy = aim_emulated_storage::header(request).is_some_and(|h| h.opcode == op::DESTROY);
+        let destroy =
+            aim_emulated_storage::header(request).is_some_and(|h| h.opcode == op::DESTROY);
         if let Some(reply) = daemon.handle(request) {
             // SAFETY: a write of a whole reply.
             if unsafe { libc::write(fd.as_raw_fd(), reply.as_ptr().cast(), reply.len()) } < 0 {

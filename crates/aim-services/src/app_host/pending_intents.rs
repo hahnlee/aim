@@ -246,10 +246,11 @@ impl AppHost {
                 && req.flags & FLAG_MUTABLE != 0
                 && implicit
                 && req.flags & FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT == 0
-                && self
-                    .inputs()?
-                    .compat
-                    .is_enabled(BLOCK_MUTABLE_IMPLICIT_PENDING_INTENT, Some(&package), target_sdk(&package)?)
+                && self.inputs()?.compat.is_enabled(
+                    BLOCK_MUTABLE_IMPLICIT_PENDING_INTENT,
+                    Some(&package),
+                    target_sdk(&package)?,
+                )
             {
                 return Err(Exception::illegal_argument(format!(
                     "{package}: Targeting U+ (version 34 and above) disallows creating or retrieving a PendingIntent with FLAG_MUTABLE, an implicit Intent within and without FLAG_NO_CREATE and FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT for security reasons. To retrieve an already existing PendingIntent, use FLAG_NO_CREATE, however, to create a new PendingIntent with an implicit Intent use FLAG_IMMUTABLE."
@@ -363,7 +364,13 @@ impl AppHost {
     /// The uid that made the PendingIntent `target`, if it is the app
     /// host's (`PendingIntentRecord.uid`).
     pub(super) fn intent_sender_uid(&self, target: Binder) -> Option<i32> {
-        self.pending_intents.records.lock().unwrap().iter().find(|r| r.binder == target).map(|r| r.uid)
+        self.pending_intents
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.binder == target)
+            .map(|r| r.uid)
     }
 
     /// `getInfoForIntentSender`.
@@ -389,7 +396,12 @@ impl AppHost {
     /// `target`: unknown and none if it is not the app host's.
     pub(super) fn intent_sender_kind(&self, target: Binder) -> (i32, Option<String>) {
         let records = self.pending_intents.records.lock().unwrap();
-        records.iter().find(|r| r.binder == target).map_or((INTENT_SENDER_UNKNOWN, None), |r| (r.kind, Some(r.package.clone())))
+        records
+            .iter()
+            .find(|r| r.binder == target)
+            .map_or((INTENT_SENDER_UNKNOWN, None), |r| {
+                (r.kind, Some(r.package.clone()))
+            })
     }
 
     /// `queryIntentComponentsForIntentSender`: the components the request
@@ -402,21 +414,56 @@ impl AppHost {
     ) -> Result<Option<Vec<ResolveInfo>>, Exception> {
         let (kind, intent, resolved_type, uid, user) = {
             let records = self.pending_intents.records.lock().unwrap();
-            let Some(r) = records.iter().find(|r| r.binder == target) else { return Ok(None) };
-            let Some(intent) = r.intents.last() else { return Ok(None) };
-            let resolved_type = r.resolved_types.as_ref().and_then(|t| t.last().cloned().flatten());
-            (r.kind, intent.intent.intent.clone(), resolved_type, r.uid, r.user)
+            let Some(r) = records.iter().find(|r| r.binder == target) else {
+                return Ok(None);
+            };
+            let Some(intent) = r.intents.last() else {
+                return Ok(None);
+            };
+            let resolved_type = r
+                .resolved_types
+                .as_ref()
+                .and_then(|t| t.last().cloned().flatten());
+            (
+                r.kind,
+                intent.intent.intent.clone(),
+                resolved_type,
+                r.uid,
+                r.user,
+            )
         };
         let (_, resolution) = self.packages()?;
         let found = match kind {
-            INTENT_SENDER_ACTIVITY => resolution.query_intent_activities(&intent, resolved_type.as_deref(), flags, user, uid),
+            INTENT_SENDER_ACTIVITY => resolution.query_intent_activities(
+                &intent,
+                resolved_type.as_deref(),
+                flags,
+                user,
+                uid,
+            ),
             INTENT_SENDER_SERVICE | INTENT_SENDER_FOREGROUND_SERVICE => {
                 resolution.query_intent_services(&intent, None, flags, user, uid)
             }
-            INTENT_SENDER_BROADCAST => resolution.query_intent_receivers(&intent, resolved_type.as_deref(), flags, user, uid),
-            kind => return Err(Exception::new(EX_ILLEGAL_STATE, format!("Unsupported intent sender type: {kind}"))),
+            INTENT_SENDER_BROADCAST => resolution.query_intent_receivers(
+                &intent,
+                resolved_type.as_deref(),
+                flags,
+                user,
+                uid,
+            ),
+            kind => {
+                return Err(Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("Unsupported intent sender type: {kind}"),
+                ));
+            }
         };
-        found.map(Some).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("queryIntentComponentsForIntentSender: {e:?}")))
+        found.map(Some).map_err(|e| {
+            Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("queryIntentComponentsForIntentSender: {e:?}"),
+            )
+        })
     }
 
     /// `registerIntentSenderCancelListenerEx`: false if it is cancelled.
@@ -560,7 +607,10 @@ impl AppHost {
                 && let Some(fill) = &intent
             {
                 let (filled, changes) = final_intent.fill_in(fill, r.flags).map_err(|_| {
-                    self.unimplemented_named("activity", "a fill-in intent this host cannot merge (#1493)")
+                    self.unimplemented_named(
+                        "activity",
+                        "a fill-in intent this host cannot merge (#1493)",
+                    )
                 })?;
                 final_intent = filled;
                 if changes & super::kept::FILL_IN_DATA != 0 {
@@ -643,7 +693,16 @@ impl AppHost {
             }
             INTENT_SENDER_SERVICE | INTENT_SENDER_FOREGROUND_SERVICE => {
                 let foreground = kind == INTENT_SENDER_FOREGROUND_SERVICE;
-                if let Err(e) = self.start_service(None, uid, None, final_intent.clone(), resolved, foreground, Some(&package), user) {
+                if let Err(e) = self.start_service(
+                    None,
+                    uid,
+                    None,
+                    final_intent.clone(),
+                    resolved,
+                    foreground,
+                    Some(&package),
+                    user,
+                ) {
                     eprintln!(
                         "app host: a PendingIntent's service of {package}: {}",
                         e.message

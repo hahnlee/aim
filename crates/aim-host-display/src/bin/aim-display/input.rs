@@ -320,7 +320,9 @@ fn key(view: Id, event: Id, down: bool) {
         // The view's input context is made at its first use: it is the
         // current one before the input method sees the key.
         let context = send!(view, c"inputContext" => Id);
-        if !context.is_null() && send!(class(c"NSTextInputContext"), c"currentInputContext" => Id) != context {
+        if !context.is_null()
+            && send!(class(c"NSTextInputContext"), c"currentInputContext" => Id) != context
+        {
             send!(context, c"activate" => ());
         }
         let events = send!(class(c"NSArray"), c"arrayWithObject:" => Id, Id = event);
@@ -383,7 +385,15 @@ static PRESSED: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 
 /// The app host's editor, or its end (`text_input::Message::Editor`).
 pub fn editor(m: &Text) {
-    let Text::Editor { task, active, ime_options, .. } = *m else { return };
+    let Text::Editor {
+        task,
+        active,
+        ime_options,
+        ..
+    } = *m
+    else {
+        return;
+    };
     let mut editor = EDITOR.lock().unwrap();
     // A restart of the same task's input keeps what the input method is
     // composing; another editor, or none, ends it.
@@ -423,7 +433,10 @@ fn replace(range: NsRange) {
     let units: Vec<u16> = typed.encode_utf16().collect();
     let from = range.location.min(units.len());
     if from < units.len() {
-        give(Text::Delete { before: (units.len() - from) as i32, after: 0 });
+        give(Text::Delete {
+            before: (units.len() - from) as i32,
+            after: 0,
+        });
         *typed = String::from_utf16_lossy(&units[..from]);
     }
 }
@@ -493,19 +506,32 @@ extern "C" fn has_marked_text(_: Id, _: Sel) -> bool {
 extern "C" fn marked_range(_: Id, _: Sel) -> NsRange {
     let length = MARKED.lock().unwrap().encode_utf16().count();
     let location = TYPED.lock().unwrap().encode_utf16().count();
-    if length == 0 { NsRange { location: NOT_FOUND, length: 0 } } else { NsRange { location, length } }
+    if length == 0 {
+        NsRange {
+            location: NOT_FOUND,
+            length: 0,
+        }
+    } else {
+        NsRange { location, length }
+    }
 }
 
 /// The caret: after the typed and the marked text.
 extern "C" fn selected_range(_: Id, _: Sel) -> NsRange {
-    NsRange { location: document().len(), length: 0 }
+    NsRange {
+        location: document().len(),
+        length: 0,
+    }
 }
 
 /// The marked text's attributes the app shows: its underline and
 /// clauses (`NSUnderlineStyleAttributeName`,
 /// `NSMarkedClauseSegmentAttributeName`), as the composing span does.
 extern "C" fn valid_attributes(_: Id, _: Sel) -> Id {
-    let names = [crate::objc::nsstring("NSUnderline"), crate::objc::nsstring("NSMarkedClauseSegment")];
+    let names = [
+        crate::objc::nsstring("NSUnderline"),
+        crate::objc::nsstring("NSMarkedClauseSegment"),
+    ];
     send!(class(c"NSArray"), c"arrayWithObjects:count:" => Id, *const Id = names.as_ptr(), usize = names.len())
 }
 
@@ -514,13 +540,21 @@ extern "C" fn valid_attributes(_: Id, _: Sel) -> Id {
 extern "C" fn attributed_substring(_: Id, _: Sel, range: NsRange, actual: *mut NsRange) -> Id {
     let marked = document();
     let start = range.location.min(marked.len());
-    let end = range.location.saturating_add(range.length).min(marked.len());
+    let end = range
+        .location
+        .saturating_add(range.length)
+        .min(marked.len());
     if range.location == NOT_FOUND || start >= end {
         return std::ptr::null_mut();
     }
     if !actual.is_null() {
         // SAFETY: AppKit's out parameter for the range given.
-        unsafe { *actual = NsRange { location: start, length: end - start } };
+        unsafe {
+            *actual = NsRange {
+                location: start,
+                length: end - start,
+            }
+        };
     }
     let text = String::from_utf16_lossy(&marked[start..end]);
     let s = send!(class(c"NSAttributedString"), c"alloc" => Id);
@@ -537,9 +571,17 @@ extern "C" fn first_rect(view: Id, _: Sel, _: NsRange, _: *mut NsRange) -> CGRec
         return CGRect::default();
     }
     let bounds = send!(view, c"bounds" => CGRect);
-    let in_window = send!(view, c"convertRect:toView:" => CGRect, CGRect = bounds, Id = std::ptr::null_mut());
+    let in_window =
+        send!(view, c"convertRect:toView:" => CGRect, CGRect = bounds, Id = std::ptr::null_mut());
     let on_screen = send!(window, c"convertRectToScreen:" => CGRect, CGRect = in_window);
-    CGRect { x: on_screen.x, y: on_screen.y, size: crate::objc::CGSize { width: 0.0, height: 20.0 } }
+    CGRect {
+        x: on_screen.x,
+        y: on_screen.y,
+        size: crate::objc::CGSize {
+            width: 0.0,
+            height: 20.0,
+        },
+    }
 }
 
 extern "C" fn character_index(_: Id, _: Sel, _: CGPoint) -> usize {
@@ -559,23 +601,41 @@ extern "C" fn do_command(view: Id, _: Sel, command: Sel) {
             let mut units: Vec<u16> = typed.encode_utf16().collect();
             units.pop();
             *typed = String::from_utf16_lossy(&units);
-            Text::Delete { before: 1, after: 0 }
+            Text::Delete {
+                before: 1,
+                after: 0,
+            }
         }
-        b"deleteForward:" => Text::Delete { before: 0, after: 1 },
+        b"deleteForward:" => Text::Delete {
+            before: 0,
+            after: 1,
+        },
         b"insertNewline:" | b"insertLineBreak:" => {
             let action = options & IME_MASK_ACTION;
             if options & IME_FLAG_NO_ENTER_ACTION == 0 && action != IME_ACTION_NONE {
                 Text::Action { code: action }
             } else {
-                Text::Key { code: KEYCODE_ENTER }
+                Text::Key {
+                    code: KEYCODE_ENTER,
+                }
             }
         }
         b"insertTab:" => Text::Key { code: KEYCODE_TAB },
-        b"cancelOperation:" => Text::Key { code: KEYCODE_ESCAPE },
-        b"moveUp:" => Text::Key { code: KEYCODE_DPAD_UP },
-        b"moveDown:" => Text::Key { code: KEYCODE_DPAD_DOWN },
-        b"moveLeft:" => Text::Key { code: KEYCODE_DPAD_LEFT },
-        b"moveRight:" => Text::Key { code: KEYCODE_DPAD_RIGHT },
+        b"cancelOperation:" => Text::Key {
+            code: KEYCODE_ESCAPE,
+        },
+        b"moveUp:" => Text::Key {
+            code: KEYCODE_DPAD_UP,
+        },
+        b"moveDown:" => Text::Key {
+            code: KEYCODE_DPAD_DOWN,
+        },
+        b"moveLeft:" => Text::Key {
+            code: KEYCODE_DPAD_LEFT,
+        },
+        b"moveRight:" => Text::Key {
+            code: KEYCODE_DPAD_RIGHT,
+        },
         _ => return,
     };
     if !matches!(m, Text::Delete { .. }) {
@@ -731,22 +791,65 @@ fn view_class() -> Id {
             let range = "{_NSRange=QQ}";
             let rect = "{CGRect={CGPoint=dd}{CGSize=dd}}";
             for (name, imp, types) in [
-                (c"insertText:replacementRange:", insert_text as *const c_void, format!("v@:@{range}")),
-                (c"setMarkedText:selectedRange:replacementRange:", set_marked_text as *const c_void, format!("v@:@{range}{range}")),
+                (
+                    c"insertText:replacementRange:",
+                    insert_text as *const c_void,
+                    format!("v@:@{range}"),
+                ),
+                (
+                    c"setMarkedText:selectedRange:replacementRange:",
+                    set_marked_text as *const c_void,
+                    format!("v@:@{range}{range}"),
+                ),
                 (c"unmarkText", unmark_text as *const c_void, "v@:".into()),
-                (c"hasMarkedText", has_marked_text as *const c_void, "B@:".into()),
-                (c"markedRange", marked_range as *const c_void, format!("{range}@:")),
-                (c"selectedRange", selected_range as *const c_void, format!("{range}@:")),
-                (c"validAttributesForMarkedText", valid_attributes as *const c_void, "@@:".into()),
-                (c"attributedSubstringForProposedRange:actualRange:", attributed_substring as *const c_void, format!("@@:{range}^{range}")),
-                (c"firstRectForCharacterRange:actualRange:", first_rect as *const c_void, format!("{rect}@:{range}^{range}")),
-                (c"characterIndexForPoint:", character_index as *const c_void, "Q@:{CGPoint=dd}".into()),
-                (c"doCommandBySelector:", do_command as *const c_void, "v@::".into()),
+                (
+                    c"hasMarkedText",
+                    has_marked_text as *const c_void,
+                    "B@:".into(),
+                ),
+                (
+                    c"markedRange",
+                    marked_range as *const c_void,
+                    format!("{range}@:"),
+                ),
+                (
+                    c"selectedRange",
+                    selected_range as *const c_void,
+                    format!("{range}@:"),
+                ),
+                (
+                    c"validAttributesForMarkedText",
+                    valid_attributes as *const c_void,
+                    "@@:".into(),
+                ),
+                (
+                    c"attributedSubstringForProposedRange:actualRange:",
+                    attributed_substring as *const c_void,
+                    format!("@@:{range}^{range}"),
+                ),
+                (
+                    c"firstRectForCharacterRange:actualRange:",
+                    first_rect as *const c_void,
+                    format!("{rect}@:{range}^{range}"),
+                ),
+                (
+                    c"characterIndexForPoint:",
+                    character_index as *const c_void,
+                    "Q@:{CGPoint=dd}".into(),
+                ),
+                (
+                    c"doCommandBySelector:",
+                    do_command as *const c_void,
+                    "v@::".into(),
+                ),
             ] {
                 let types = std::ffi::CString::new(types).unwrap();
                 class_addMethod(cls, sel(name), imp, types.as_ptr());
             }
-            crate::objc::class_addProtocol(cls, crate::objc::objc_getProtocol(c"NSTextInputClient".as_ptr()));
+            crate::objc::class_addProtocol(
+                cls,
+                crate::objc::objc_getProtocol(c"NSTextInputClient".as_ptr()),
+            );
             class_addMethod(
                 cls,
                 sel(c"acceptsFirstResponder"),

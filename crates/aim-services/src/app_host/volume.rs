@@ -20,9 +20,9 @@ use aim_binder_host::local::Strong;
 use aim_binder_host::parcel::{Exception, Parcel, Reader, Result as ParcelResult};
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
+use super::AppHost;
 use super::audio_policy::{AudioPolicy, DEVICE_OUT_DEFAULT, DEVICE_OUT_SPEAKER};
 use super::settings::Table;
-use super::AppHost;
 use crate::clip::Raw;
 
 /// `AudioSystem.STREAM_*`.
@@ -172,7 +172,10 @@ impl ReadParcelable for DeviceAttributes {
                 return Err(aim_binder_host::parcel::BAD_VALUE);
             }
         }
-        Ok(DeviceAttributes { internal_type, raw: Raw::capture(r, start) })
+        Ok(DeviceAttributes {
+            internal_type,
+            raw: Raw::capture(r, start),
+        })
     }
 }
 
@@ -197,7 +200,9 @@ impl Absolute {
 
     /// `dispatchAbsoluteVolumeChanged` or `…Adjusted`.
     fn dispatch(&self, stream: i32, index: i32, src: &Stream, adjusted: Option<i32>) {
-        let Some(info) = self.matching(stream) else { return };
+        let Some(info) = self.matching(stream) else {
+            return;
+        };
         let index = if info.min == INDEX_NOT_SET || info.max == INDEX_NOT_SET {
             index
         } else {
@@ -208,7 +213,11 @@ impl Absolute {
         p.write_i32(1);
         self.device.write_to(&mut p);
         p.write_i32(1);
-        VolumeInfo { index, ..info.clone() }.write_to(&mut p);
+        VolumeInfo {
+            index,
+            ..info.clone()
+        }
+        .write_to(&mut p);
         let code = match adjusted {
             Some(direction) => {
                 p.write_i32(direction);
@@ -241,7 +250,11 @@ pub struct Stream {
 
 impl Stream {
     pub fn index(&self, device: i32) -> i32 {
-        self.indexes.get(&device).or_else(|| self.indexes.get(&DEVICE_OUT_DEFAULT)).copied().unwrap_or(0)
+        self.indexes
+            .get(&device)
+            .or_else(|| self.indexes.get(&DEVICE_OUT_DEFAULT))
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn max_index(&self) -> i32 {
@@ -249,12 +262,20 @@ impl Stream {
     }
 
     pub fn min_index(&self, privileged: bool) -> i32 {
-        if privileged { self.min } else { self.min_no_perm }
+        if privileged {
+            self.min
+        } else {
+            self.min_no_perm
+        }
     }
 
     /// `getValidIndex`.
     fn valid(&self, index: i32, fixed: bool, has_modify_audio_settings: bool) -> i32 {
-        let min = if has_modify_audio_settings { self.min } else { self.min_no_perm };
+        let min = if has_modify_audio_settings {
+            self.min
+        } else {
+            self.min_no_perm
+        };
         if index < min {
             min
         } else if fixed || index > self.max {
@@ -316,7 +337,9 @@ impl Volumes {
         if let Some(v) = prop("ro.config.vc_call_vol_steps") {
             max[0] = v;
         }
-        default[0] = prop("ro.config.vc_call_vol_default").filter(|&d| d <= max[0] && d >= min[0]).unwrap_or(max[0] * 3 / 4);
+        default[0] = prop("ro.config.vc_call_vol_default")
+            .filter(|&d| d <= max[0] && d >= min[0])
+            .unwrap_or(max[0] * 3 / 4);
         if let Some(v) = prop("ro.config.media_vol_steps") {
             max[3] = v;
         }
@@ -330,11 +353,15 @@ impl Volumes {
         if let Some(v) = c.alarm_min.filter(|&m| m <= max[4]) {
             min[4] = v;
         }
-        default[4] = prop("ro.config.alarm_vol_default").filter(|&d| d <= max[4]).unwrap_or(6 * max[4] / 7);
+        default[4] = prop("ro.config.alarm_vol_default")
+            .filter(|&d| d <= max[4])
+            .unwrap_or(6 * max[4] / 7);
         if let Some(v) = prop("ro.config.system_vol_steps") {
             max[1] = v;
         }
-        default[1] = prop("ro.config.system_vol_default").filter(|&d| d <= max[1]).unwrap_or(max[1]);
+        default[1] = prop("ro.config.system_vol_default")
+            .filter(|&d| d <= max[1])
+            .unwrap_or(max[1]);
         if let Some(v) = prop("ro.config.assistant_vol_min") {
             min[11] = v;
         }
@@ -359,12 +386,20 @@ impl Volumes {
         if !c.single_volume {
             // `mNotifAliasRing` is off: notifications have their own volume.
             alias[STREAM_NOTIFICATION as usize] = STREAM_NOTIFICATION;
-            alias[STREAM_DTMF as usize] = if c.voice_capable { STREAM_RING } else { STREAM_MUSIC };
+            alias[STREAM_DTMF as usize] = if c.voice_capable {
+                STREAM_RING
+            } else {
+                STREAM_MUSIC
+            };
         } else {
             alias[STREAM_DTMF as usize] = STREAM_MUSIC;
         }
         alias[STREAM_ACCESSIBILITY as usize] = STREAM_MUSIC;
-        alias[STREAM_ASSISTANT as usize] = if c.assistant_volume { STREAM_ASSISTANT } else { STREAM_MUSIC };
+        alias[STREAM_ASSISTANT as usize] = if c.assistant_volume {
+            STREAM_ASSISTANT
+        } else {
+            STREAM_MUSIC
+        };
         if c.replace_bt_sco {
             alias[STREAM_BLUETOOTH_SCO as usize] = -1;
         }
@@ -400,7 +435,8 @@ impl Volumes {
         // `readSettings`.
         for s in streams.iter_mut().flatten() {
             if s.stream == STREAM_SYSTEM || s.stream == STREAM_SYSTEM_ENFORCED {
-                s.indexes.insert(DEVICE_OUT_DEFAULT, 10 * default[s.stream as usize]);
+                s.indexes
+                    .insert(DEVICE_OUT_DEFAULT, 10 * default[s.stream as usize]);
                 continue;
             }
             for device in [DEVICE_OUT_SPEAKER, DEVICE_OUT_DEFAULT] {
@@ -408,7 +444,11 @@ impl Volumes {
                 let index = if s.setting.is_empty() {
                     fallback
                 } else {
-                    let name = if device == DEVICE_OUT_SPEAKER { format!("{}_speaker", s.setting) } else { s.setting.to_string() };
+                    let name = if device == DEVICE_OUT_SPEAKER {
+                        format!("{}_speaker", s.setting)
+                    } else {
+                        s.setting.to_string()
+                    };
                     (c.setting)(Table::System, &name).or(fallback)
                 };
                 if let Some(index) = index.filter(|&i| i != -1) {
@@ -417,7 +457,8 @@ impl Volumes {
                 }
             }
         }
-        let mut mute_affected = (c.setting)(Table::System, "mute_streams_affected").unwrap_or(DEFAULT_MUTE_STREAMS_AFFECTED);
+        let mut mute_affected = (c.setting)(Table::System, "mute_streams_affected")
+            .unwrap_or(DEFAULT_MUTE_STREAMS_AFFECTED);
         // `checkMuteAffectedStreams`: a stream that cannot go to 0 is not
         // mutable, but for calls.
         for s in streams.iter().flatten() {
@@ -425,7 +466,8 @@ impl Volumes {
                 mute_affected &= !(1 << s.stream);
             }
         }
-        let ringer_affected = (c.setting)(Table::System, "mode_ringer_streams_affected").unwrap_or(DEFAULT_RINGER_STREAMS_AFFECTED);
+        let ringer_affected = (c.setting)(Table::System, "mode_ringer_streams_affected")
+            .unwrap_or(DEFAULT_RINGER_STREAMS_AFFECTED);
         let ringer = (c.setting)(Table::Global, "mode_ringer").unwrap_or(RINGER_MODE_NORMAL);
         let zen = (c.setting)(Table::Global, "zen_mode").unwrap_or(ZEN_MODE_OFF);
         let mut v = Volumes {
@@ -460,26 +502,44 @@ impl Volumes {
 
     /// `replaceBtScoStreamWithVoiceCall`, `ensureValidStreamType`.
     pub fn valid_stream(&self, stream: i32) -> Result<usize, Exception> {
-        let stream = if self.replace_bt_sco && stream == STREAM_BLUETOOTH_SCO { STREAM_VOICE_CALL } else { stream };
+        let stream = if self.replace_bt_sco && stream == STREAM_BLUETOOTH_SCO {
+            STREAM_VOICE_CALL
+        } else {
+            stream
+        };
         if !(0..NUM_STREAMS as i32).contains(&stream) {
-            return Err(Exception::illegal_argument(format!("Bad stream type {stream}")));
+            return Err(Exception::illegal_argument(format!(
+                "Bad stream type {stream}"
+            )));
         }
         Ok(stream as usize)
     }
 
     /// `getVssForStreamOrDefault`.
     pub fn state(&self, stream: usize) -> Result<&Stream, Exception> {
-        self.streams[stream].as_ref().ok_or_else(|| Exception::illegal_argument(format!("No VolumeStreamState for stream {stream}")))
+        self.streams[stream].as_ref().ok_or_else(|| {
+            Exception::illegal_argument(format!("No VolumeStreamState for stream {stream}"))
+        })
     }
 
     fn rescale_streams(&self, index: i32, src: usize, dst: usize) -> i32 {
-        let (s, d) = (self.streams[src].as_ref().unwrap(), self.streams[dst].as_ref().unwrap());
+        let (s, d) = (
+            self.streams[src].as_ref().unwrap(),
+            self.streams[dst].as_ref().unwrap(),
+        );
         rescale(index, s.min, s.max, d.min, d.max)
     }
 
     /// `setAllIndexes`.
     fn set_all_indexes(&mut self, dst: usize, src: usize) {
-        let default = self.rescale_streams(self.streams[src].as_ref().unwrap().index(DEVICE_OUT_DEFAULT), src, dst);
+        let default = self.rescale_streams(
+            self.streams[src]
+                .as_ref()
+                .unwrap()
+                .index(DEVICE_OUT_DEFAULT),
+            src,
+            dst,
+        );
         let d = self.streams[dst].as_mut().unwrap();
         for index in d.indexes.values_mut() {
             *index = default;
@@ -498,7 +558,13 @@ impl Volumes {
 
     /// `VolumeStreamState.setIndex`: whether it changed; the streams
     /// aliased to it follow.
-    pub fn set_index(&mut self, stream: usize, index: i32, device: i32, has_modify_audio_settings: bool) -> bool {
+    pub fn set_index(
+        &mut self,
+        stream: usize,
+        index: i32,
+        device: i32,
+        has_modify_audio_settings: bool,
+    ) -> bool {
         let fixed = self.fixed_volume;
         let s = self.streams[stream].as_mut().unwrap();
         let old = s.index(device);
@@ -507,13 +573,19 @@ impl Volumes {
         let changed = old != index;
         let (old, new) = ((old + 5) / 10, (index + 5) / 10);
         if old != new && device == device_for_stream(stream) {
-            self.changed.push((stream as i32, self.alias[stream], new, old));
+            self.changed
+                .push((stream as i32, self.alias[stream], new, old));
         }
         for other in 0..NUM_STREAMS {
             if other != stream
                 && self.alias[other] == stream as i32
                 && self.streams[other].is_some()
-                && (changed || !self.streams[other].as_ref().unwrap().indexes.contains_key(&device))
+                && (changed
+                    || !self.streams[other]
+                        .as_ref()
+                        .unwrap()
+                        .indexes
+                        .contains_key(&device))
             {
                 let scaled = self.rescale_streams(index, stream, other);
                 self.set_index(other, scaled, device, has_modify_audio_settings);
@@ -524,11 +596,19 @@ impl Volumes {
 
     /// `isAbsoluteVolumeDevice`.
     pub fn is_absolute(&self, device: i32) -> bool {
-        self.absolute.as_ref().is_some_and(|a| a.device.internal_type == device)
+        self.absolute
+            .as_ref()
+            .is_some_and(|a| a.device.internal_type == device)
     }
 
     /// `VolumeStreamState.setStreamVolumeIndex`.
-    fn send_index(&self, policy: &AudioPolicy, s: &Stream, index: i32, device: i32) -> Result<(), String> {
+    fn send_index(
+        &self,
+        policy: &AudioPolicy,
+        s: &Stream,
+        index: i32,
+        device: i32,
+    ) -> Result<(), String> {
         let index = if self.replace_bt_sco && index != 0 {
             (s.min as f32 + (index * 10 - s.min) as f32 / s.step_factor + 5.0) as i32 / 10
         } else {
@@ -540,7 +620,12 @@ impl Volumes {
     /// `applyDeviceVolume_syncVSS` (`device`) or `applyAllVolumes` (none).
     /// Nothing is sent before audioserver is connected: [`Volumes::init`]
     /// sends all then.
-    pub fn apply(&self, policy: Option<&AudioPolicy>, stream: usize, device: Option<i32>) -> Result<(), String> {
+    pub fn apply(
+        &self,
+        policy: Option<&AudioPolicy>,
+        stream: usize,
+        device: Option<i32>,
+    ) -> Result<(), String> {
         let Some(policy) = policy else { return Ok(()) };
         let s = self.streams[stream].as_ref().unwrap();
         let level = |device: i32| {
@@ -558,7 +643,11 @@ impl Volumes {
                 for &device in s.indexes.keys().filter(|&&d| d != DEVICE_OUT_DEFAULT) {
                     self.send_index(policy, s, level(device), device)?;
                 }
-                let default = if s.muted { 0 } else { (s.index(DEVICE_OUT_DEFAULT) + 5) / 10 };
+                let default = if s.muted {
+                    0
+                } else {
+                    (s.index(DEVICE_OUT_DEFAULT) + 5) / 10
+                };
                 self.send_index(policy, s, default, DEVICE_OUT_DEFAULT)
             }
         }
@@ -568,10 +657,16 @@ impl Volumes {
     /// stream first; the device of absolute volume's.
     pub fn init(&self, policy: &AudioPolicy) -> Result<(), String> {
         if let Some(a) = &self.absolute {
-            policy.set_device_absolute_volume_enabled(a.device.internal_type, true, STREAM_MUSIC)?;
+            policy.set_device_absolute_volume_enabled(
+                a.device.internal_type,
+                true,
+                STREAM_MUSIC,
+            )?;
         }
         for stream in (0..NUM_STREAMS).rev() {
-            let Some(s) = &self.streams[stream] else { continue };
+            let Some(s) = &self.streams[stream] else {
+                continue;
+            };
             policy.init_stream_volume(s.stream, s.curve.0, s.curve.1)?;
             self.apply(Some(policy), stream, None)?;
         }
@@ -607,7 +702,9 @@ impl Volumes {
     /// is decided by zen mode, which the app host does not model.
     fn ringer_involved(&self, alias: usize, flags: i32) -> bool {
         let ui = alias as i32 == self.alias[STREAM_SYSTEM as usize];
-        flags & FLAG_ALLOW_RINGER_MODES != 0 || ui || !self.ringer_normal && self.ringer_affected & (1 << alias) != 0
+        flags & FLAG_ALLOW_RINGER_MODES != 0
+            || ui
+            || !self.ringer_normal && self.ringer_affected & (1 << alias) != 0
     }
 }
 
@@ -682,7 +779,10 @@ impl Volumes {
         // ringer modes) to 0 changes the ringer mode, as does any change of
         // it while the ringer mode is not normal.
         if self.ringer_involved(alias, flags) && (index == 0 || !self.ringer_normal) {
-            return Err(host.unimplemented_named("audio", "a volume change of the ringer mode or zen mode (#1475)"));
+            return Err(host.unimplemented_named(
+                "audio",
+                "a volume change of the ringer mode or zen mode (#1475)",
+            ));
         }
         let scaled = self.rescale_streams(index * 10, stream, alias);
         flags &= !FLAG_FIXED_VOLUME;
@@ -698,7 +798,10 @@ impl Volumes {
         let new = self.state(stream)?.index(device);
         if self.is_absolute(device) && flags & FLAG_ABSOLUTE_VOLUME == 0 {
             let src = self.state(stream)?.clone();
-            self.absolute.as_ref().unwrap().dispatch(stream as i32, new, &src, None);
+            self.absolute
+                .as_ref()
+                .unwrap()
+                .dispatch(stream as i32, new, &src, None);
         }
         Ok(())
     }
@@ -732,7 +835,10 @@ impl Volumes {
             return Ok(());
         }
         if self.ringer_involved(alias, flags) {
-            return Err(host.unimplemented_named("audio", "a volume adjustment of the ringer mode or zen mode (#1475)"));
+            return Err(host.unimplemented_named(
+                "audio",
+                "a volume adjustment of the ringer mode or zen mode (#1475)",
+            ));
         }
         flags &= !FLAG_FIXED_VOLUME;
         let step = {
@@ -740,7 +846,11 @@ impl Volumes {
             let step = (10.0 * a.step_factor) as i32;
             // `rescaleStep`.
             let (src, dst) = (s.max - s.min, a.max - a.min);
-            if src == 0 { 0 } else { (step * dst + src / 2) / src }
+            if src == 0 {
+                0
+            } else {
+                (step * dst + src / 2) / src
+            }
         };
         let old = self.state(stream)?.index(device);
         if self.is_absolute(device) && flags & FLAG_ABSOLUTE_VOLUME == 0 {
@@ -753,7 +863,11 @@ impl Volumes {
         }
         if direction != ADJUST_SAME {
             if mute_adjust {
-                let muted = if direction == ADJUST_TOGGLE_MUTE { !self.state(alias)?.muted } else { direction == ADJUST_MUTE };
+                let muted = if direction == ADJUST_TOGGLE_MUTE {
+                    !self.state(alias)?.muted
+                } else {
+                    direction == ADJUST_MUTE
+                };
                 for s in self.mute_alias_streams(alias, muted) {
                     self.apply_stream(policy, s);
                     effects.mute_changed.push((s as i32, muted));
@@ -761,7 +875,13 @@ impl Volumes {
             } else {
                 let current = self.state(alias)?.index(device);
                 let was_muted = self.state(alias)?.muted;
-                if self.set_index(alias, current + direction * step, device, has_modify_audio_settings) || was_muted {
+                if self.set_index(
+                    alias,
+                    current + direction * step,
+                    device,
+                    has_modify_audio_settings,
+                ) || was_muted
+                {
                     if was_muted && direction == ADJUST_RAISE {
                         for s in self.mute_alias_streams(alias, false) {
                             effects.mute_changed.push((s as i32, false));
@@ -773,7 +893,10 @@ impl Volumes {
             let new = self.state(stream)?.index(device);
             if self.is_absolute(device) && flags & FLAG_ABSOLUTE_VOLUME == 0 {
                 let src = self.state(stream)?.clone();
-                self.absolute.as_ref().unwrap().dispatch(stream as i32, new, &src, None);
+                self.absolute
+                    .as_ref()
+                    .unwrap()
+                    .dispatch(stream as i32, new, &src, None);
             }
         }
         Ok(())
@@ -804,8 +927,16 @@ impl Volumes {
         let device = absolute.device.internal_type;
         let volumes = absolute.volumes.clone();
         self.absolute = Some(absolute);
-        for (stream, info) in volumes.iter().filter(|v| v.index != INDEX_NOT_SET && v.min != INDEX_NOT_SET && v.max != INDEX_NOT_SET).map(|v| (v.stream_type, v)) {
-            let Ok(stream) = self.valid_stream(stream) else { continue };
+        for (stream, info) in volumes
+            .iter()
+            .filter(|v| {
+                v.index != INDEX_NOT_SET && v.min != INDEX_NOT_SET && v.max != INDEX_NOT_SET
+            })
+            .map(|v| (v.stream_type, v))
+        {
+            let Ok(stream) = self.valid_stream(stream) else {
+                continue;
+            };
             if self.streams[stream].is_none() {
                 continue;
             }
@@ -815,7 +946,9 @@ impl Volumes {
             self.apply_alias(policy, self.alias[stream].max(0) as usize, device);
         }
         // `setDeviceAbsoluteVolumeEnabled` for the stream driving it.
-        if let Some(Err(e)) = policy.map(|p| p.set_device_absolute_volume_enabled(device, true, STREAM_MUSIC)) {
+        if let Some(Err(e)) =
+            policy.map(|p| p.set_device_absolute_volume_enabled(device, true, STREAM_MUSIC))
+        {
             eprintln!("app host: audio: {e}");
         }
         for s in 0..NUM_STREAMS {
@@ -828,7 +961,9 @@ impl Volumes {
     /// The registration goes (unregister, or its dispatcher died).
     pub fn unregister_absolute(&mut self, policy: Option<&AudioPolicy>) {
         if let Some(a) = self.absolute.take() {
-            if let Some(Err(e)) = policy.map(|p| p.set_device_absolute_volume_enabled(a.device.internal_type, false, STREAM_MUSIC)) {
+            if let Some(Err(e)) = policy.map(|p| {
+                p.set_device_absolute_volume_enabled(a.device.internal_type, false, STREAM_MUSIC)
+            }) {
                 eprintln!("app host: audio: {e}");
             }
             for s in 0..NUM_STREAMS {
@@ -877,16 +1012,25 @@ mod tests {
         let v = volumes(&|_, _| None);
         let music = v.state(STREAM_MUSIC as usize).unwrap();
         // 15 steps, a third of them by default.
-        assert_eq!((music.max_index(), music.index(DEVICE_OUT_SPEAKER)), (150, 50));
+        assert_eq!(
+            (music.max_index(), music.index(DEVICE_OUT_SPEAKER)),
+            (150, 50)
+        );
         // The voice call takes SCO's 15 steps over its own curve of 5.
         let voice = v.state(STREAM_VOICE_CALL as usize).unwrap();
-        assert_eq!((voice.min_index(true), voice.max_index(), voice.curve), (10, 150, (1, 5)));
+        assert_eq!(
+            (voice.min_index(true), voice.max_index(), voice.curve),
+            (10, 150, (1, 5))
+        );
         // The alarm may go to 0; notifications have their own volume.
         assert_eq!(v.state(STREAM_ALARM as usize).unwrap().min_index(true), 0);
         assert_eq!(v.alias[STREAM_NOTIFICATION as usize], STREAM_NOTIFICATION);
         assert_eq!(v.alias[STREAM_SYSTEM as usize], STREAM_RING);
         assert_eq!(v.alias[STREAM_BLUETOOTH_SCO as usize], -1);
-        assert_eq!(v.valid_stream(STREAM_BLUETOOTH_SCO).unwrap(), STREAM_VOICE_CALL as usize);
+        assert_eq!(
+            v.valid_stream(STREAM_BLUETOOTH_SCO).unwrap(),
+            STREAM_VOICE_CALL as usize
+        );
         assert!(v.valid_stream(12).is_err());
     }
 
@@ -897,10 +1041,25 @@ mod tests {
             (Table::System, "volume_ring_speaker") => Some(3),
             _ => None,
         });
-        assert_eq!(v.state(STREAM_MUSIC as usize).unwrap().index(DEVICE_OUT_SPEAKER), 90);
+        assert_eq!(
+            v.state(STREAM_MUSIC as usize)
+                .unwrap()
+                .index(DEVICE_OUT_SPEAKER),
+            90
+        );
         // TTS follows music, the system stream ring, rescaled.
-        assert_eq!(v.state(STREAM_TTS as usize).unwrap().index(DEVICE_OUT_SPEAKER), 90);
-        assert_eq!(v.state(STREAM_SYSTEM as usize).unwrap().index(DEVICE_OUT_SPEAKER), 30);
+        assert_eq!(
+            v.state(STREAM_TTS as usize)
+                .unwrap()
+                .index(DEVICE_OUT_SPEAKER),
+            90
+        );
+        assert_eq!(
+            v.state(STREAM_SYSTEM as usize)
+                .unwrap()
+                .index(DEVICE_OUT_SPEAKER),
+            30
+        );
     }
 
     #[test]
@@ -909,13 +1068,26 @@ mod tests {
         v.changed.clear();
         assert!(v.set_index(STREAM_MUSIC as usize, 120, DEVICE_OUT_SPEAKER, true));
         // Accessibility's range starts at 1: 10 + 120 × 140/150.
-        assert_eq!(v.state(STREAM_ACCESSIBILITY as usize).unwrap().index(DEVICE_OUT_SPEAKER), 122);
+        assert_eq!(
+            v.state(STREAM_ACCESSIBILITY as usize)
+                .unwrap()
+                .index(DEVICE_OUT_SPEAKER),
+            122
+        );
         let mut e = Effects::default();
         v.take_changes(&mut e);
-        assert!(e.volume_changed.contains(&(STREAM_MUSIC, STREAM_MUSIC, 12, 5)));
+        assert!(
+            e.volume_changed
+                .contains(&(STREAM_MUSIC, STREAM_MUSIC, 12, 5))
+        );
         // Out of range is clamped.
         v.set_index(STREAM_MUSIC as usize, 400, DEVICE_OUT_SPEAKER, true);
-        assert_eq!(v.state(STREAM_MUSIC as usize).unwrap().index(DEVICE_OUT_SPEAKER), 150);
+        assert_eq!(
+            v.state(STREAM_MUSIC as usize)
+                .unwrap()
+                .index(DEVICE_OUT_SPEAKER),
+            150
+        );
     }
 
     #[test]

@@ -75,7 +75,13 @@ impl Resolution {
         Ok(self.setup_wizard.get().and_then(|n| n.as_deref()))
     }
 
-    pub(super) fn activity(&self, c: &ComponentName, flags: i64, calling_uid: i32, user: i32) -> Result<bool> {
+    pub(super) fn activity(
+        &self,
+        c: &ComponentName,
+        flags: i64,
+        calling_uid: i32,
+        user: i32,
+    ) -> Result<bool> {
         let found = self
             .query(calling_uid)
             .activity_info(c, flags, calling_uid, user);
@@ -144,8 +150,7 @@ impl Resolution {
         let best = query.iter().map(|ri| ri.match_).fold(0, i32::max) & MATCH_CATEGORY_MASK;
         let has = |c: &str| intent.categories.iter().flatten().any(|x| x == c);
         let home = intent.action.as_deref() == Some(ACTION_MAIN) && has(CATEGORY_HOME);
-        let exclude_setup_wizard =
-            home && has(CATEGORY_DEFAULT) && !self.device_provisioned()?;
+        let exclude_setup_wizard = home && has(CATEGORY_DEFAULT) && !self.device_provisioned()?;
         for pa in prefs {
             if pa.match_ != best || !pa.always {
                 continue;
@@ -295,8 +300,12 @@ impl Resolution {
     /// `mResolveActivity` as `setPlatformPackage` builds it: the `android`
     /// application of the system user, with its overlays.
     fn resolver_activity(&self) -> Result<ActivityInfo> {
-        if let Some(owner)=&self.state.system.resolver_owner {return Ok(owner.activity.clone());}
-        if let Some(activity)=&self.state.system.custom_resolver_activity {return Ok((**activity).clone());}
+        if let Some(owner) = &self.state.system.resolver_owner {
+            return Ok(owner.activity.clone());
+        }
+        if let Some(activity) = &self.state.system.custom_resolver_activity {
+            return Ok((**activity).clone());
+        }
         if self.state.platform.custom_resolver.is_some() {
             return Err(NotModelled("a custom resolver activity").into());
         }

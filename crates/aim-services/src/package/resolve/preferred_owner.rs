@@ -142,12 +142,15 @@ impl Resolution {
                 }
             })
             .collect();
-        let provisioned=if home {self.device_provisioned()?}else{true};
+        let provisioned = if home {
+            self.device_provisioned()?
+        } else {
+            true
+        };
         let policy = SelectionPolicy {
             always,
             remove_matches,
-            allow_set_mutation: !(home && !provisioned)
-                && !query_may_be_filtered,
+            allow_set_mutation: !(home && !provisioned) && !query_may_be_filtered,
             improve_home_behavior: self.state.system.flags.iter().any(|(name, value)| {
                 name == "android.content.pm.improve_home_app_behavior" && *value
             }),
@@ -175,16 +178,11 @@ impl Resolution {
                 }
             },
             |activity| {
-                self.same_set(
-                    activity,
-                    &candidates,
-                    home && !provisioned,
-                    user,
-                )
-                .map_err(|error| {
-                    *lookup_error.borrow_mut() = Some(error);
-                    "preferred candidate set owner failed".to_owned()
-                })
+                self.same_set(activity, &candidates, home && !provisioned, user)
+                    .map_err(|error| {
+                        *lookup_error.borrow_mut() = Some(error);
+                        "preferred candidate set owner failed".to_owned()
+                    })
             },
         );
         if let Some(error) = lookup_error.into_inner() {

@@ -335,7 +335,11 @@ fn pending_intent(r: &mut Reader<'_>) -> Result<Option<Binder>> {
 
 /// `Notification(Parcel)`, into `n`; stops (with `complete` false) at
 /// what it does not read.
-pub(crate) fn read_notification(r: &mut Reader<'_>, files: &dyn Files, n: &mut Notification) -> Result<()> {
+pub(crate) fn read_notification(
+    r: &mut Reader<'_>,
+    files: &dyn Files,
+    n: &mut Notification,
+) -> Result<()> {
     if r.read_i32()? != 1 {
         return Err(BAD_VALUE);
     }

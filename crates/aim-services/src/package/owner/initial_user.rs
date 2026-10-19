@@ -6,28 +6,51 @@ use aim_android_xml::{Element, Node, Value};
 
 impl Store {
     /// Settings.writeDefaultAppsLPr writes a container even with no pending browser.
-    pub(super) fn ensure_default_apps_owner(&self,root:&mut Element,user:u32)->Result<(),WriteError> {
-        if root.children().any(|entry|entry.name=="default-apps") {return Ok(());}
-        let browser=self.state.users.iter().find(|(id,_)|*id==user)
-            .ok_or_else(||WriteError::before("default-apps user owner absent"))?
-            .1.restrictions.default_browser.as_deref();
-        let mut defaults=element("default-apps");
-        if let Some(browser)=browser.filter(|value|!value.is_empty()) {
-            let mut entry=element("default-browser");
-            attribute(&mut entry,"packageName",Some(Value::String(browser.into())));
+    pub(super) fn ensure_default_apps_owner(
+        &self,
+        root: &mut Element,
+        user: u32,
+    ) -> Result<(), WriteError> {
+        if root.children().any(|entry| entry.name == "default-apps") {
+            return Ok(());
+        }
+        let browser = self
+            .state
+            .users
+            .iter()
+            .find(|(id, _)| *id == user)
+            .ok_or_else(|| WriteError::before("default-apps user owner absent"))?
+            .1
+            .restrictions
+            .default_browser
+            .as_deref();
+        let mut defaults = element("default-apps");
+        if let Some(browser) = browser.filter(|value| !value.is_empty()) {
+            let mut entry = element("default-browser");
+            attribute(
+                &mut entry,
+                "packageName",
+                Some(Value::String(browser.into())),
+            );
             defaults.content.push(Node::Element(entry));
         }
-        root.content.push(Node::Element(defaults));Ok(())
+        root.content.push(Node::Element(defaults));
+        Ok(())
     }
 
     /// Require the exact persisted projection of this completed scan.
     pub(crate) fn validate_committed_scan(&self, scan: &SigningScan) -> Result<(), WriteError> {
-        if self.validated.lock().unwrap().as_ref().is_some_and(|validated| validated.same_except_users(scan)) {
+        if self
+            .validated
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|validated| validated.same_except_users(scan))
+        {
             return Ok(());
         }
         let expected = self.persistent_scan_settings(scan)?;
-        if super::canonical_persistent_settings(self.state.settings.clone()) != expected
-        {
+        if super::canonical_persistent_settings(self.state.settings.clone()) != expected {
             return Err(WriteError::before(
                 "committed scan/settings ownership differs",
             ));
@@ -51,7 +74,7 @@ impl Store {
                 "initial user side-owner sections are invalid",
             ));
         }
-        self.ensure_default_apps_owner(&mut sections,user)?;
+        self.ensure_default_apps_owner(&mut sections, user)?;
         let id = i32::try_from(user).map_err(WriteError::before)?;
         let mut packages = Vec::new();
         let mut states = Vec::new();
@@ -75,9 +98,18 @@ impl Store {
         }
         packages.append(&mut sections.content);
         sections.content = packages;
-        let inventory=scan.settings.packages.iter().map(|setting|setting.name.clone()).collect();
-        let result = self.commit_initial_restrictions_inventory_using(user, sections, &inventory,
-            |file,bytes|std::io::Write::write_all(file,bytes));
+        let inventory = scan
+            .settings
+            .packages
+            .iter()
+            .map(|setting| setting.name.clone())
+            .collect();
+        let result = self.commit_initial_restrictions_inventory_using(
+            user,
+            sections,
+            &inventory,
+            |file, bytes| std::io::Write::write_all(file, bytes),
+        );
         if result.is_ok() || result.as_ref().is_err_and(|error| error.committed) {
             // Serialization/re-read normalization must not mutate live scan
             // object state (null component sets and runtime overlays included).
@@ -248,7 +280,7 @@ pub(super) fn initial_package(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::package::restrictions::{Suspension, SuspendingUser};
+    use crate::package::restrictions::{SuspendingUser, Suspension};
 
     #[test]
     fn initialized_suspension_policy_preserves_nullable_owners_and_child_order() {
@@ -264,13 +296,26 @@ mod tests {
         };
         for cross_user in [false, true] {
             let pkg = initial_package("p", &state, 10, cross_user).unwrap();
-            let children: Vec<_> = pkg.content.iter().filter_map(|n| match n {
-                Node::Element(e) => Some(e),
-                _ => None,
-            }).collect();
-            assert_eq!(children.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
-                ["suspend-params", "enabled-components", "disabled-components"]);
-            assert_eq!(children[0].int("suspending-user").unwrap(), cross_user.then_some(12));
+            let children: Vec<_> = pkg
+                .content
+                .iter()
+                .filter_map(|n| match n {
+                    Node::Element(e) => Some(e),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                children.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+                [
+                    "suspend-params",
+                    "enabled-components",
+                    "disabled-components"
+                ]
+            );
+            assert_eq!(
+                children[0].int("suspending-user").unwrap(),
+                cross_user.then_some(12)
+            );
             assert!(children[0].content.is_empty());
             assert_eq!(pkg.bool("suspended").unwrap(), Some(true));
         }
@@ -279,67 +324,166 @@ mod tests {
 
 #[cfg(test)]
 mod default_apps_owner_tests {
-    use super::*;
     use super::super::tests::Data;
-    use crate::package::{scan::{SigningScan,CapturedUsers},restrictions::Restrictions};
-    use std::{collections::BTreeMap,fs};
+    use super::*;
+    use crate::package::{
+        restrictions::Restrictions,
+        scan::{CapturedUsers, SigningScan},
+    };
+    use std::{collections::BTreeMap, fs};
 
-    fn restored(browser:Option<&str>) -> (Data,Store,SigningScan,std::path::PathBuf) {
-        let data=Data::new();let path=data.settings();
+    fn restored(browser: Option<&str>) -> (Data, Store, SigningScan, std::path::PathBuf) {
+        let data = Data::new();
+        let path = data.settings();
         fs::write(data.0.join("system/packages.xml"),b"<packages><package name='example.app' codePath='/data/app/example' userId='10100' domainSetId='00000000-0000-0000-0000-000000000001'/></packages>").unwrap();
-        let mut root=element("package-restrictions");let mut package=element("pkg");
-        attribute(&mut package,"name",Some(Value::String("example.app".into())));attribute(&mut package,"enabled",Some(Value::Int(2)));root.content.push(Node::Element(package));
-        if let Some(browser)=browser {
-            let mut defaults=element("default-apps");let mut selected=element("default-browser");
-            attribute(&mut selected,"packageName",Some(Value::String(browser.into())));defaults.content.push(Node::Element(selected));root.content.push(Node::Element(defaults));
+        let mut root = element("package-restrictions");
+        let mut package = element("pkg");
+        attribute(
+            &mut package,
+            "name",
+            Some(Value::String("example.app".into())),
+        );
+        attribute(&mut package, "enabled", Some(Value::Int(2)));
+        root.content.push(Node::Element(package));
+        if let Some(browser) = browser {
+            let mut defaults = element("default-apps");
+            let mut selected = element("default-browser");
+            attribute(
+                &mut selected,
+                "packageName",
+                Some(Value::String(browser.into())),
+            );
+            defaults.content.push(Node::Element(selected));
+            root.content.push(Node::Element(defaults));
         }
-        let mut extension=element("retained-extension");attribute(&mut extension,"owner",Some(Value::String("keep".into())));root.content.push(Node::Element(extension));
-        fs::write(&path,aim_android_xml::abx::write(&root).unwrap()).unwrap();
-        let mut store=Store::open(&data.0,&[0]).unwrap().unwrap();
-        let mut scan=SigningScan::new(&Default::default(),&store.state().settings,36).unwrap();
-        let states=store.state().users[0].1.restrictions.packages.iter().map(|(name,state)|((name.clone(),false),CapturedUsers{states:BTreeMap::from([(0,state.clone())]),active_aliases:Default::default()})).collect();
+        let mut extension = element("retained-extension");
+        attribute(&mut extension, "owner", Some(Value::String("keep".into())));
+        root.content.push(Node::Element(extension));
+        fs::write(&path, aim_android_xml::abx::write(&root).unwrap()).unwrap();
+        let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+        let mut scan = SigningScan::new(&Default::default(), &store.state().settings, 36).unwrap();
+        let states = store.state().users[0]
+            .1
+            .restrictions
+            .packages
+            .iter()
+            .map(|(name, state)| {
+                (
+                    (name.clone(), false),
+                    CapturedUsers {
+                        states: BTreeMap::from([(0, state.clone())]),
+                        active_aliases: Default::default(),
+                    },
+                )
+            })
+            .collect();
         scan.capture_user_states(states).unwrap();
-        let snapshot=crate::package::scan_snapshot::Store::new(scan.clone(),super::super::usage::Usage::new(["example.app"])).unwrap().capture();
+        let snapshot = crate::package::scan_snapshot::Store::new(
+            scan.clone(),
+            super::super::usage::Usage::new(["example.app"]),
+        )
+        .unwrap()
+        .capture();
         store.commit_scan_settings(&snapshot).unwrap();
-        (data,store,scan,path)
+        (data, store, scan, path)
     }
-    fn fresh_initial() -> (Data,Store,SigningScan,std::path::PathBuf) {
-        let data=Data::new();let path=data.settings();fs::remove_file(data.0.join("system/packages.xml")).unwrap();
+    fn fresh_initial() -> (Data, Store, SigningScan, std::path::PathBuf) {
+        let data = Data::new();
+        let path = data.settings();
+        fs::remove_file(data.0.join("system/packages.xml")).unwrap();
         let mut settings=crate::package::settings::Settings::parse(&aim_android_xml::read(b"<packages><package name='example.app' codePath='/data/app/example' userId='10100' domainSetId='00000000-0000-0000-0000-000000000001'/></packages>").unwrap()).unwrap();
-        let current=crate::package::settings::Version{sdk_version:36,database_version:3,..Default::default()};
-        let(mut store,_)=super::super::recovery::Plan::inspect(&data.0).unwrap().recover_boot(&[0],&mut settings,&current,|_,_|panic!()).unwrap();
-        let mut scan=SigningScan::new(&Default::default(),&settings,36).unwrap();
-        scan.capture_user_states(BTreeMap::from([(("example.app".into(),false),CapturedUsers{states:BTreeMap::from([(0,crate::package::restrictions::UserState{enabled:2,..Default::default()})]),active_aliases:Default::default()})])).unwrap();
-        let snapshot=crate::package::scan_snapshot::Store::new(scan.clone(),super::super::usage::Usage::new(["example.app"])).unwrap().capture();
-        store.commit_scan_settings(&snapshot).unwrap();store.claim_unread_restrictions(0).unwrap();
-        (data,store,scan,path)
+        let current = crate::package::settings::Version {
+            sdk_version: 36,
+            database_version: 3,
+            ..Default::default()
+        };
+        let (mut store, _) = super::super::recovery::Plan::inspect(&data.0)
+            .unwrap()
+            .recover_boot(&[0], &mut settings, &current, |_, _| panic!())
+            .unwrap();
+        let mut scan = SigningScan::new(&Default::default(), &settings, 36).unwrap();
+        scan.capture_user_states(BTreeMap::from([(
+            ("example.app".into(), false),
+            CapturedUsers {
+                states: BTreeMap::from([(
+                    0,
+                    crate::package::restrictions::UserState {
+                        enabled: 2,
+                        ..Default::default()
+                    },
+                )]),
+                active_aliases: Default::default(),
+            },
+        )]))
+        .unwrap();
+        let snapshot = crate::package::scan_snapshot::Store::new(
+            scan.clone(),
+            super::super::usage::Usage::new(["example.app"]),
+        )
+        .unwrap()
+        .capture();
+        store.commit_scan_settings(&snapshot).unwrap();
+        store.claim_unread_restrictions(0).unwrap();
+        (data, store, scan, path)
     }
-    fn read(path:&std::path::Path)->Element {aim_android_xml::read(&fs::read(path).unwrap()).unwrap()}
-    fn check(path:&std::path::Path,browser:Option<&str>) {
-        let root=read(path);assert_eq!(root.children().filter(|n|n.name=="default-apps").count(),1);
-        let state=Restrictions::parse(&root).unwrap();assert_eq!(state.default_browser.as_deref(),browser);
-        assert_eq!(state.packages.iter().find(|(n,_)|n=="example.app").unwrap().1.enabled,2);
+    fn read(path: &std::path::Path) -> Element {
+        aim_android_xml::read(&fs::read(path).unwrap()).unwrap()
+    }
+    fn check(path: &std::path::Path, browser: Option<&str>) {
+        let root = read(path);
+        assert_eq!(
+            root.children().filter(|n| n.name == "default-apps").count(),
+            1
+        );
+        let state = Restrictions::parse(&root).unwrap();
+        assert_eq!(state.default_browser.as_deref(), browser);
+        assert_eq!(
+            state
+                .packages
+                .iter()
+                .find(|(n, _)| n == "example.app")
+                .unwrap()
+                .1
+                .enabled,
+            2
+        );
     }
     #[test]
     fn initial_actual_store_write_retains_pending_browser_and_empty_container() {
-        for browser in [None,Some("actual.browser")] {
-            let (_data,mut store,scan,path)=fresh_initial();
-            let mut sections=element("package-restrictions");
-            if let Some(browser)=browser {
-                let mut defaults=element("default-apps");let mut selected=element("default-browser");
-                attribute(&mut selected,"packageName",Some(Value::String(browser.into())));defaults.content.push(Node::Element(selected));sections.content.push(Node::Element(defaults));
+        for browser in [None, Some("actual.browser")] {
+            let (_data, mut store, scan, path) = fresh_initial();
+            let mut sections = element("package-restrictions");
+            if let Some(browser) = browser {
+                let mut defaults = element("default-apps");
+                let mut selected = element("default-browser");
+                attribute(
+                    &mut selected,
+                    "packageName",
+                    Some(Value::String(browser.into())),
+                );
+                defaults.content.push(Node::Element(selected));
+                sections.content.push(Node::Element(defaults));
             }
-            store.commit_initial_scan_restrictions(&scan,0,false,sections).unwrap();
-            check(&path,browser);
+            store
+                .commit_initial_scan_restrictions(&scan, 0, false, sections)
+                .unwrap();
+            check(&path, browser);
         }
     }
     #[test]
     fn restored_actual_store_repairs_missing_container_and_retains_existing_browser() {
-        for browser in [None,Some("actual.restored.browser")] {
-            let (_data,mut store,scan,path)=restored(browser);
-            let extension=read(&path).children().find(|n|n.name=="retained-extension").unwrap().clone();
-            store.commit_updated_scan_restrictions(&scan,0,false).unwrap();check(&path,browser);
-            assert!(read(&path).children().any(|n|n==&extension));
+        for browser in [None, Some("actual.restored.browser")] {
+            let (_data, mut store, scan, path) = restored(browser);
+            let extension = read(&path)
+                .children()
+                .find(|n| n.name == "retained-extension")
+                .unwrap()
+                .clone();
+            store
+                .commit_updated_scan_restrictions(&scan, 0, false)
+                .unwrap();
+            check(&path, browser);
+            assert!(read(&path).children().any(|n| n == &extension));
         }
     }
 }

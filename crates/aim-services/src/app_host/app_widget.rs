@@ -37,7 +37,8 @@ const META_DATA_APPWIDGET_PROVIDER: &str = "android.appwidget.provider";
 const MATCH_DEBUG_TRIAGED_MISSING: i64 = 0x1000_0000;
 /// `ApplicationInfo.FLAG_EXTERNAL_STORAGE`.
 const FLAG_EXTERNAL_STORAGE: i32 = 1 << 18;
-const MODIFY_APPWIDGET_BIND_PERMISSIONS: &str = "android.permission.MODIFY_APPWIDGET_BIND_PERMISSIONS";
+const MODIFY_APPWIDGET_BIND_PERMISSIONS: &str =
+    "android.permission.MODIFY_APPWIDGET_BIND_PERMISSIONS";
 /// `LauncherApps.PinItemRequest.REQUEST_TYPE_APPWIDGET`.
 const REQUEST_TYPE_APPWIDGET: i32 = 2;
 /// `AppWidgetServiceImpl.CURRENT_VERSION`.
@@ -79,7 +80,10 @@ struct Persisted {
 
 /// `readAppWidgetProviderInfoLocked`: none unless the info was persisted
 /// with this build's fingerprint.
-fn read_persisted(e: &aim_android_xml::Element, fingerprint: Option<&str>) -> Result<Option<Persisted>, String> {
+fn read_persisted(
+    e: &aim_android_xml::Element,
+    fingerprint: Option<&str>,
+) -> Result<Option<Persisted>, String> {
     if e.string("os_fingerprint").as_deref() != fingerprint || fingerprint.is_none() {
         return Ok(None);
     }
@@ -97,11 +101,21 @@ fn read_persisted(e: &aim_android_xml::Element, fingerprint: Option<&str>) -> Re
         initial_layout: int("initial_layout")?,
         initial_keyguard_layout: int("initial_keyguard_layout")?,
         // `ComponentName.unflattenFromString` of a non-empty one.
-        configure: e.string("configure").filter(|c| !c.is_empty()).and_then(|c| {
-            let (package, class) = c.split_once('/')?;
-            let class = if class.starts_with('.') { format!("{package}{class}") } else { class.to_string() };
-            Some(ComponentName { package: package.to_string(), class })
-        }),
+        configure: e
+            .string("configure")
+            .filter(|c| !c.is_empty())
+            .and_then(|c| {
+                let (package, class) = c.split_once('/')?;
+                let class = if class.starts_with('.') {
+                    format!("{package}{class}")
+                } else {
+                    class.to_string()
+                };
+                Some(ComponentName {
+                    package: package.to_string(),
+                    class,
+                })
+            }),
         label: e.string("label").map(|l| l.into_owned()),
         icon: int("icon")?,
         preview_image: int("preview_image")?,
@@ -152,7 +166,14 @@ impl<A: WriteParcelable> WriteParcelable for ProviderInfo<A> {
             None => p.write_i32(0),
         }
         p.write_string16(i.label.as_deref());
-        for v in [i.icon, i.preview_image, i.preview_layout, i.auto_advance_view_id, i.resize_mode, i.widget_category] {
+        for v in [
+            i.icon,
+            i.preview_image,
+            i.preview_layout,
+            i.auto_advance_view_id,
+            i.resize_mode,
+            i.widget_category,
+        ] {
             p.write_i32(v);
         }
         p.write_i32(1);
@@ -194,11 +215,15 @@ pub struct AppWidgetService {
 
 impl AppWidgetService {
     pub fn new(host: Arc<AppHost>) -> Self {
-        AppWidgetService { host, group: Mutex::new(None) }
+        AppWidgetService {
+            host,
+            group: Mutex::new(None),
+        }
     }
 
     fn unimplemented(&self, what: &str) -> Exception {
-        self.host.unimplemented_named("appwidget", &format!("{what} (#1789)"))
+        self.host
+            .unimplemented_named("appwidget", &format!("{what} (#1789)"))
     }
 
     fn flag(&self, name: &str) -> Result<bool, Exception> {
@@ -210,7 +235,9 @@ impl AppWidgetService {
     fn enforce_call_from_package(&self, uid: i32, package: Option<&str>) -> Result<(), Exception> {
         let package = package.ok_or_else(|| Exception::new(EX_NULL_POINTER, "packageName"))?;
         if !self.host.owns_package(uid, package)? {
-            return Err(Exception::security(format!("Package {package} does not belong to {uid}")));
+            return Err(Exception::security(format!(
+                "Package {package} does not belong to {uid}"
+            )));
         }
         Ok(())
     }
@@ -236,15 +263,24 @@ impl AppWidgetService {
     /// `getUidForPackage`, or -1.
     fn package_uid(&self, package: &str, user: i32) -> Result<i32, Exception> {
         let (state, resolution) = self.host.packages()?;
-        let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
-        query.package_uid(package, 0, user).map_err(|e| self.unimplemented(e.0))?
+        let query = Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: SYSTEM_UID,
+        };
+        query
+            .package_uid(package, 0, user)
+            .map_err(|e| self.unimplemented(e.0))?
     }
 
     /// `ensureGroupStateLoadedLocked(userId)`: the app host's one user is
     /// running and unlocked.
     fn group(&self, user: i32) -> Result<Arc<Group>, Exception> {
         if user != 0 {
-            return Err(Exception::new(EX_ILLEGAL_STATE, format!("User {user} must be unlocked for widgets to be available")));
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("User {user} must be unlocked for widgets to be available"),
+            ));
         }
         let mut loaded = self.group.lock().unwrap();
         if let Some(group) = &*loaded {
@@ -260,28 +296,43 @@ impl AppWidgetService {
     /// group, and whether `performUpgradeLocked` succeeded.
     fn load(&self, user: i32) -> Result<(Group, Result<(), Exception>), Exception> {
         let mut providers: Vec<Provider> = Vec::new();
-        let update = Intent { action: Some(ACTION_APPWIDGET_UPDATE.into()), ..Default::default() };
+        let update = Intent {
+            action: Some(ACTION_APPWIDGET_UPDATE.into()),
+            ..Default::default()
+        };
         for ai in self.receivers(&update, user)? {
             // `addProviderLocked`, with `createPartialProviderInfo`.
             if ai.info.application_info.flags & FLAG_EXTERNAL_STORAGE != 0 {
                 continue;
             }
-            let has_xml = ai
-                .info
-                .item
-                .meta_data
-                .as_ref()
-                .is_some_and(|m| m.0.iter().any(|(k, v)| k == META_DATA_APPWIDGET_PROVIDER && matches!(v, Value::Int(id) if *id != 0)));
+            let has_xml = ai.info.item.meta_data.as_ref().is_some_and(|m| {
+                m.0.iter().any(|(k, v)| {
+                    k == META_DATA_APPWIDGET_PROVIDER && matches!(v, Value::Int(id) if *id != 0)
+                })
+            });
             let uid = ai.info.application_info.uid;
             let component = ComponentName {
                 package: ai.info.item.package_name.clone().unwrap_or_default(),
                 class: ai.info.item.name.clone().unwrap_or_default(),
             };
-            if has_xml && !providers.iter().any(|p| p.uid == uid && p.component == component) {
-                providers.push(Provider { uid, component, persisted: None, tag: TAG_UNDEFINED });
+            if has_xml
+                && !providers
+                    .iter()
+                    .any(|p| p.uid == uid && p.component == component)
+            {
+                providers.push(Provider {
+                    uid,
+                    component,
+                    persisted: None,
+                    tag: TAG_UNDEFINED,
+                });
             }
         }
-        let mut group = Group { providers, bind_allowed: Vec::new(), bound_widgets: 0 };
+        let mut group = Group {
+            providers,
+            bind_allowed: Vec::new(),
+            bound_widgets: 0,
+        };
         let data = self.host.data()?;
         let path = data.join(format!("system/users/{user}/appwidgets.xml"));
         let version = match super::device_policy::read_atomic_bytes(&path) {
@@ -289,7 +340,10 @@ impl AppWidgetService {
             Ok(Some(bytes)) => match self.read_state(&bytes, user, &mut group) {
                 Ok(version) => version,
                 Err(e) => {
-                    eprintln!("app host: appwidget: failed parsing {}: {e}", path.display());
+                    eprintln!(
+                        "app host: appwidget: failed parsing {}: {e}",
+                        path.display()
+                    );
                     -1
                 }
             },
@@ -306,7 +360,13 @@ impl AppWidgetService {
                 eprintln!("app host: appwidget: Failed to read preview categories: {e}");
             }
             for p in &group.providers {
-                if previews.join(format!("{}-{}-{}.binpb", p.component.package, p.component.class, p.uid)).exists() {
+                if previews
+                    .join(format!(
+                        "{}-{}-{}.binpb",
+                        p.component.package, p.component.class, p.uid
+                    ))
+                    .exists()
+                {
                     return Err(self.unimplemented("generated widget previews"));
                 }
             }
@@ -319,7 +379,10 @@ impl AppWidgetService {
         // `performUpgradeLocked`: version 0 is taken for 1.
         let upgraded = match version {
             0 | CURRENT_VERSION => Ok(()),
-            _ => Err(Exception::new(EX_ILLEGAL_STATE, "Failed to upgrade widget database")),
+            _ => Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "Failed to upgrade widget database",
+            )),
         };
         Ok((group, upgraded))
     }
@@ -344,7 +407,10 @@ impl AppWidgetService {
                     provider_index += 1;
                     // `getCanonicalPackageName` keeps the name: the
                     // receiver lookup does not throw.
-                    let package = e.string("pkg").ok_or("a provider without pkg")?.into_owned();
+                    let package = e
+                        .string("pkg")
+                        .ok_or("a provider without pkg")?
+                        .into_owned();
                     let class = e.string("cl").ok_or("a provider without cl")?.into_owned();
                     let uid = self.package_uid(&package, user).map_err(fail)?;
                     if uid < 0 {
@@ -357,7 +423,14 @@ impl AppWidgetService {
                         component: Some(component.clone()),
                         ..Default::default()
                     };
-                    let Some(activity) = self.receivers(&intent, user).map_err(fail)?.into_iter().next() else { continue };
+                    let Some(activity) = self
+                        .receivers(&intent, user)
+                        .map_err(fail)?
+                        .into_iter()
+                        .next()
+                    else {
+                        continue;
+                    };
                     let info = read_persisted(e, fingerprint.as_deref())?;
                     // Outside safe mode the provider must have been
                     // loaded; the original fails the read on a null one.
@@ -365,14 +438,20 @@ impl AppWidgetService {
                         .providers
                         .iter_mut()
                         .find(|p| p.uid == uid && p.component == component)
-                        .ok_or_else(|| format!("no loaded provider {}/{}", component.package, component.class))?;
+                        .ok_or_else(|| {
+                            format!(
+                                "no loaded provider {}/{}",
+                                component.package, component.class
+                            )
+                        })?;
                     if let Some(info) = info {
                         provider.persisted = Some((info, activity));
                     }
                     provider.tag = e.int_hex("tag")?.unwrap_or(provider_index);
                     if let Some(ids) = e.string("pending_deleted_ids").filter(|s| !s.is_empty()) {
                         for id in ids.split(',') {
-                            id.parse::<i32>().map_err(|err| format!("pending_deleted_ids: {err}"))?;
+                            id.parse::<i32>()
+                                .map_err(|err| format!("pending_deleted_ids: {err}"))?;
                         }
                     }
                 }
@@ -406,7 +485,10 @@ impl AppWidgetService {
         group.bound_widgets = widgets
             .iter()
             .filter(|(host, provider)| {
-                *provider >= 0 && group.providers.iter().any(|p| p.tag == *provider) && *host >= 0 && hosts.contains(host)
+                *provider >= 0
+                    && group.providers.iter().any(|p| p.tag == *provider)
+                    && *host >= 0
+                    && hosts.contains(host)
             })
             .count();
         Ok(version)
@@ -423,7 +505,14 @@ impl AppWidgetService {
 
     /// `getInstalledProvidersForProfile`: none for a profile outside the
     /// caller's group.
-    fn installed_providers(&self, uid: i32, category_filter: i32, profile: i32, package: Option<&str>, p: &mut Parcel) -> Result<(), Exception> {
+    fn installed_providers(
+        &self,
+        uid: i32,
+        category_filter: i32,
+        profile: i32,
+        package: Option<&str>,
+        p: &mut Parcel,
+    ) -> Result<(), Exception> {
         let user = uid / PER_USER_RANGE as i32;
         let (state, resolution) = self.host.packages()?;
         // `isEnabledGroupProfile`: no user of the app host has profiles.
@@ -432,11 +521,15 @@ impl AppWidgetService {
             return Ok(());
         }
         let empty = |p: &mut Parcel| {
-            let slice: Slice<ProviderInfo> = Slice::new(self.host.process.clone(), PROVIDER_INFO, Vec::new());
+            let slice: Slice<ProviderInfo> =
+                Slice::new(self.host.process.clone(), PROVIDER_INFO, Vec::new());
             aw::write_get_installed_providers_for_profile_reply(p, Some(&slice));
         };
         // `isCallerInstantAppLocked`.
-        if crate::package::apps_filter::instant_app_package_name(&state, uid).map_err(|e| self.unimplemented(e.0))?.is_some() {
+        if crate::package::apps_filter::instant_app_package_name(&state, uid)
+            .map_err(|e| self.unimplemented(e.0))?
+            .is_some()
+        {
             empty(p);
             return Ok(());
         }
@@ -468,7 +561,12 @@ impl AppWidgetService {
             )
             .map_err(|e| self.unimplemented(e.0))?;
             if provider_profile == profile && !filtered {
-                result.push(ProviderInfo { provider: provider.component.clone(), info: info.clone(), activity: activity.clone(), generated_previews });
+                result.push(ProviderInfo {
+                    provider: provider.component.clone(),
+                    info: info.clone(),
+                    activity: activity.clone(),
+                    generated_previews,
+                });
             }
         }
         let slice = Slice::new(self.host.process.clone(), PROVIDER_INFO, result);
@@ -479,7 +577,12 @@ impl AppWidgetService {
     /// `updateAppWidgetIds` and `partiallyUpdateAppWidgetIds` of `ids`:
     /// nothing for none; with ids the views' URIs are checked first
     /// (`checkRemoteViewsUris`).
-    fn update_ids(&self, uid: i32, package: Option<&str>, ids: Option<&[i32]>) -> Result<(), Exception> {
+    fn update_ids(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+        ids: Option<&[i32]>,
+    ) -> Result<(), Exception> {
         if ids.is_none_or(<[i32]>::is_empty) {
             return Ok(());
         }
@@ -499,9 +602,12 @@ impl Service for AppWidgetService {
         let mut p = Parcel::new();
         let result = match call.code {
             aw::GET_APP_WIDGET_IDS => {
-                let a = aw::GetAppWidgetIds::<ComponentName>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = aw::GetAppWidgetIds::<ComponentName>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
-                    let component = a.provider_component.ok_or_else(|| Exception::new(EX_NULL_POINTER, "componentName"))?;
+                    let component = a
+                        .provider_component
+                        .ok_or_else(|| Exception::new(EX_NULL_POINTER, "componentName"))?;
                     self.enforce_call_from_package(uid, Some(&component.package))?;
                     // A provider of the caller's has no widget.
                     self.unbound_group(user)?;
@@ -520,18 +626,24 @@ impl Service for AppWidgetService {
                 })()
             }
             aw::HAS_BIND_APP_WIDGET_PERMISSION => {
-                let a = aw::HasBindAppWidgetPermission::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    aw::HasBindAppWidgetPermission::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
                     let package = a.package_name.unwrap_or_default();
                     // `enforceModifyAppWidgetBindPermissions`
                     // (`enforceCallingPermission`).
-                    if self.host.check_permission(Some(MODIFY_APPWIDGET_BIND_PERMISSIONS), uid)? != 0 {
+                    if self
+                        .host
+                        .check_permission(Some(MODIFY_APPWIDGET_BIND_PERMISSIONS), uid)?
+                        != 0
+                    {
                         return Err(Exception::security(format!(
                             "hasBindAppWidgetPermission packageName={package}: uid {uid} does not have {MODIFY_APPWIDGET_BIND_PERMISSIONS}."
                         )));
                     }
                     let group = self.group(a.user_id)?;
-                    let allowed = self.package_uid(&package, a.user_id)? >= 0 && group.bind_allowed.contains(&package);
+                    let allowed = self.package_uid(&package, a.user_id)? >= 0
+                        && group.bind_allowed.contains(&package);
                     aw::write_has_bind_app_widget_permission_reply(&mut p, allowed);
                     Ok(())
                 })()
@@ -540,7 +652,10 @@ impl Service for AppWidgetService {
                 aw::IsRequestPinAppWidgetSupported::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
                     let (state, _) = self.host.packages()?;
-                    let instant = crate::package::apps_filter::instant_app_package_name(&state, uid).map_err(|e| self.unimplemented(e.0))?.is_some();
+                    let instant =
+                        crate::package::apps_filter::instant_app_package_name(&state, uid)
+                            .map_err(|e| self.unimplemented(e.0))?
+                            .is_some();
                     // `ShortcutServiceInternal.isRequestPinItemSupported`.
                     let supported = !instant
                         && super::shortcut_service::ShortcutManager::new(self.host.clone())
@@ -551,24 +666,39 @@ impl Service for AppWidgetService {
                 })()
             }
             aw::GET_INSTALLED_PROVIDERS_FOR_PROFILE => {
-                let a = aw::GetInstalledProvidersForProfile::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.installed_providers(uid, a.category_filter, a.profile_id, a.package_name.as_deref(), &mut p)
+                let a = aw::GetInstalledProvidersForProfile::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.installed_providers(
+                    uid,
+                    a.category_filter,
+                    a.profile_id,
+                    a.package_name.as_deref(),
+                    &mut p,
+                )
             }
             aw::UPDATE_APP_WIDGET_IDS | aw::PARTIALLY_UPDATE_APP_WIDGET_IDS => {
                 // The package and the ids; the views are not read where no
                 // widget takes them.
-                call.data.enforce_interface(aw::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                call.data
+                    .enforce_interface(aw::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
                 let package = call.data.read_string16().map_err(|_| BAD_VALUE)?;
-                let ids = aim_service_aidl::read_int_array(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.update_ids(uid, package.as_deref(), ids.as_deref()).map(|()| p.write_no_exception())
+                let ids =
+                    aim_service_aidl::read_int_array(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.update_ids(uid, package.as_deref(), ids.as_deref())
+                    .map(|()| p.write_no_exception())
             }
             aw::UPDATE_APP_WIDGET_PROVIDER => {
                 // The provider; its views go to its widgets, of which it
                 // has none.
-                call.data.enforce_interface(aw::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
-                let component = aim_service_aidl::read_typed::<ComponentName>(&mut call.data).map_err(|_| BAD_VALUE)?;
+                call.data
+                    .enforce_interface(aw::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
+                let component = aim_service_aidl::read_typed::<ComponentName>(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
-                    let component = component.ok_or_else(|| Exception::new(EX_NULL_POINTER, "componentName"))?;
+                    let component = component
+                        .ok_or_else(|| Exception::new(EX_NULL_POINTER, "componentName"))?;
                     self.enforce_call_from_package(uid, Some(&component.package))?;
                     self.unbound_group(user)?;
                     p.write_no_exception();
@@ -576,10 +706,14 @@ impl Service for AppWidgetService {
                 })()
             }
             aw::NOTIFY_APP_WIDGET_VIEW_DATA_CHANGED => {
-                let a = aw::NotifyAppWidgetViewDataChanged::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = aw::NotifyAppWidgetViewDataChanged::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
                     self.enforce_call_from_package(uid, a.package_name.as_deref())?;
-                    if a.app_widget_ids.as_deref().is_some_and(|ids| !ids.is_empty()) {
+                    if a.app_widget_ids
+                        .as_deref()
+                        .is_some_and(|ids| !ids.is_empty())
+                    {
                         self.unbound_group(user)?;
                     }
                     aw::write_notify_app_widget_view_data_changed_reply(&mut p);
@@ -587,7 +721,10 @@ impl Service for AppWidgetService {
                 })()
             }
             code => {
-                let name = aw::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
+                let name = aw::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
                 Err(self.unimplemented(name))
             }
         };
@@ -608,11 +745,35 @@ mod tests {
         assert_eq!(read_persisted(&e, Some("build/2")).unwrap(), None);
         assert_eq!(read_persisted(&e, None).unwrap(), None);
         let info = read_persisted(&e, Some("build/1")).unwrap().unwrap();
-        assert_eq!((info.min_width, info.min_height, info.target_cell_width), (66561, 12289, 2));
-        assert_eq!((info.update_period_millis, info.initial_layout, info.auto_advance_view_id), (86400000, 2131624638, -1));
-        assert_eq!(info.configure, Some(ComponentName { package: "com.example".into(), class: "com.example.Configure".into() }));
+        assert_eq!(
+            (info.min_width, info.min_height, info.target_cell_width),
+            (66561, 12289, 2)
+        );
+        assert_eq!(
+            (
+                info.update_period_millis,
+                info.initial_layout,
+                info.auto_advance_view_id
+            ),
+            (86400000, 2131624638, -1)
+        );
+        assert_eq!(
+            info.configure,
+            Some(ComponentName {
+                package: "com.example".into(),
+                class: "com.example.Configure".into()
+            })
+        );
         assert_eq!(info.label.as_deref(), Some("Example"));
-        assert_eq!((info.resize_mode, info.widget_category, info.widget_features, info.description_res), (3, 5, 1, 10));
+        assert_eq!(
+            (
+                info.resize_mode,
+                info.widget_category,
+                info.widget_features,
+                info.description_res
+            ),
+            (3, 5, 1, 10)
+        );
         assert!(info.extended_from_app_widget_provider);
     }
 
@@ -621,8 +782,16 @@ mod tests {
     /// previews, their categories.
     #[test]
     fn provider_info_parcels_as_the_original_writes_it() {
-        let info = Persisted { min_width: 1, label: Some("L".into()), widget_features: 4, ..Default::default() };
-        let provider = ComponentName { package: "a".into(), class: "a.B".into() };
+        let info = Persisted {
+            min_width: 1,
+            label: Some("L".into()),
+            widget_features: 4,
+            ..Default::default()
+        };
+        let provider = ComponentName {
+            package: "a".into(),
+            class: "a.B".into(),
+        };
         // A receiver, as two ints.
         struct Receiver;
         impl WriteParcelable for Receiver {
@@ -632,7 +801,13 @@ mod tests {
             }
         }
         let mut p = Parcel::new();
-        ProviderInfo { provider, info, activity: Receiver, generated_previews: true }.write_to(&mut p);
+        ProviderInfo {
+            provider,
+            info,
+            activity: Receiver,
+            generated_previews: true,
+        }
+        .write_to(&mut p);
         let mut r = p.reader();
         assert_eq!(r.read_i32().unwrap(), 1);
         assert_eq!(r.read_string16().unwrap().as_deref(), Some("a"));

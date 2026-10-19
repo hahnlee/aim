@@ -53,17 +53,38 @@ unsafe extern "C" {
     fn AMediaExtractor_getSampleTime(ex: *mut Opaque) -> i64;
     fn AMediaExtractor_advance(ex: *mut Opaque) -> bool;
     fn AMediaFormat_delete(format: *mut Opaque) -> i32;
-    fn AMediaFormat_getString(format: *mut Opaque, name: *const c_char, out: *mut *const c_char) -> bool;
+    fn AMediaFormat_getString(
+        format: *mut Opaque,
+        name: *const c_char,
+        out: *mut *const c_char,
+    ) -> bool;
     fn AMediaFormat_getInt32(format: *mut Opaque, name: *const c_char, out: *mut i32) -> bool;
     fn AMediaCodec_createDecoderByType(mime: *const c_char) -> *mut Opaque;
-    fn AMediaCodec_configure(codec: *mut Opaque, format: *const Opaque, surface: *mut c_void, crypto: *mut c_void, flags: u32) -> i32;
+    fn AMediaCodec_configure(
+        codec: *mut Opaque,
+        format: *const Opaque,
+        surface: *mut c_void,
+        crypto: *mut c_void,
+        flags: u32,
+    ) -> i32;
     fn AMediaCodec_start(codec: *mut Opaque) -> i32;
     fn AMediaCodec_stop(codec: *mut Opaque) -> i32;
     fn AMediaCodec_delete(codec: *mut Opaque) -> i32;
     fn AMediaCodec_dequeueInputBuffer(codec: *mut Opaque, timeout_us: i64) -> isize;
     fn AMediaCodec_getInputBuffer(codec: *mut Opaque, idx: usize, size: *mut usize) -> *mut u8;
-    fn AMediaCodec_queueInputBuffer(codec: *mut Opaque, idx: usize, offset: i64, size: usize, time: u64, flags: u32) -> i32;
-    fn AMediaCodec_dequeueOutputBuffer(codec: *mut Opaque, info: *mut BufferInfo, timeout_us: i64) -> isize;
+    fn AMediaCodec_queueInputBuffer(
+        codec: *mut Opaque,
+        idx: usize,
+        offset: i64,
+        size: usize,
+        time: u64,
+        flags: u32,
+    ) -> i32;
+    fn AMediaCodec_dequeueOutputBuffer(
+        codec: *mut Opaque,
+        info: *mut BufferInfo,
+        timeout_us: i64,
+    ) -> isize;
     fn AMediaCodec_getOutputBuffer(codec: *mut Opaque, idx: usize, size: *mut usize) -> *mut u8;
     fn AMediaCodec_releaseOutputBuffer(codec: *mut Opaque, idx: usize, render: bool) -> i32;
     fn AMediaCodec_getOutputFormat(codec: *mut Opaque) -> *mut Opaque;
@@ -82,7 +103,12 @@ unsafe extern "C" {
     fn AAudioStream_requestStart(stream: *mut Opaque) -> i32;
     fn AAudioStream_requestStop(stream: *mut Opaque) -> i32;
     fn AAudioStream_close(stream: *mut Opaque) -> i32;
-    fn AAudioStream_write(stream: *mut Opaque, buffer: *const c_void, frames: i32, timeout_ns: i64) -> i32;
+    fn AAudioStream_write(
+        stream: *mut Opaque,
+        buffer: *const c_void,
+        frames: i32,
+        timeout_ns: i64,
+    ) -> i32;
     fn AAudioStream_getFramesRead(stream: *mut Opaque) -> i64;
 }
 
@@ -112,19 +138,26 @@ fn decode(path: &str) -> Result<Sample, String> {
     unsafe {
         let ex = AMediaExtractor_new();
         let result = (|| {
-            if AMediaExtractor_setDataSourceFd(ex, file.as_raw_fd(), 0, length) != AMEDIA_OK || AMediaExtractor_getTrackCount(ex) == 0 {
+            if AMediaExtractor_setDataSourceFd(ex, file.as_raw_fd(), 0, length) != AMEDIA_OK
+                || AMediaExtractor_getTrackCount(ex) == 0
+            {
                 return Err(format!("{path}: not a media file"));
             }
             let format = AMediaExtractor_getTrackFormat(ex, 0);
             let mut mime: *const c_char = std::ptr::null();
             AMediaFormat_getString(format, c"mime".as_ptr(), &mut mime);
             let (mut rate, mut channels) = format_ints(format);
-            let codec = if mime.is_null() { std::ptr::null_mut() } else { AMediaCodec_createDecoderByType(mime) };
+            let codec = if mime.is_null() {
+                std::ptr::null_mut()
+            } else {
+                AMediaCodec_createDecoderByType(mime)
+            };
             if codec.is_null() {
                 AMediaFormat_delete(format);
                 return Err(format!("{path}: no decoder"));
             }
-            let configured = AMediaCodec_configure(codec, format, std::ptr::null_mut(), std::ptr::null_mut(), 0);
+            let configured =
+                AMediaCodec_configure(codec, format, std::ptr::null_mut(), std::ptr::null_mut(), 0);
             AMediaFormat_delete(format);
             if configured != AMEDIA_OK || AMediaCodec_start(codec) != AMEDIA_OK {
                 AMediaCodec_delete(codec);
@@ -144,11 +177,25 @@ fn decode(path: &str) -> Result<Sample, String> {
                         let buffer = AMediaCodec_getInputBuffer(codec, idx as usize, &mut capacity);
                         let size = AMediaExtractor_readSampleData(ex, buffer, capacity);
                         if size < 0 {
-                            AMediaCodec_queueInputBuffer(codec, idx as usize, 0, 0, 0, BUFFER_FLAG_END_OF_STREAM);
+                            AMediaCodec_queueInputBuffer(
+                                codec,
+                                idx as usize,
+                                0,
+                                0,
+                                0,
+                                BUFFER_FLAG_END_OF_STREAM,
+                            );
                             input_done = true;
                         } else {
                             let time = AMediaExtractor_getSampleTime(ex).max(0) as u64;
-                            AMediaCodec_queueInputBuffer(codec, idx as usize, 0, size as usize, time, 0);
+                            AMediaCodec_queueInputBuffer(
+                                codec,
+                                idx as usize,
+                                0,
+                                size as usize,
+                                time,
+                                0,
+                            );
                             AMediaExtractor_advance(ex);
                         }
                     }
@@ -159,8 +206,15 @@ fn decode(path: &str) -> Result<Sample, String> {
                     let mut size = 0;
                     let buffer = AMediaCodec_getOutputBuffer(codec, idx as usize, &mut size);
                     if !buffer.is_null() && info.size > 0 {
-                        let bytes = std::slice::from_raw_parts(buffer.add(info.offset as usize), info.size as usize);
-                        pcm.extend(bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])));
+                        let bytes = std::slice::from_raw_parts(
+                            buffer.add(info.offset as usize),
+                            info.size as usize,
+                        );
+                        pcm.extend(
+                            bytes
+                                .chunks_exact(2)
+                                .map(|b| i16::from_le_bytes([b[0], b[1]])),
+                        );
                     }
                     AMediaCodec_releaseOutputBuffer(codec, idx as usize, false);
                     if info.flags & BUFFER_FLAG_END_OF_STREAM != 0 {
@@ -174,7 +228,11 @@ fn decode(path: &str) -> Result<Sample, String> {
                     break Err(format!("{path}: decoding failed ({idx})"));
                 }
             }
-            .map(|()| Sample { rate, channels, pcm })
+            .map(|()| Sample {
+                rate,
+                channels,
+                pcm,
+            })
             .inspect(|_| {
                 AMediaCodec_stop(codec);
                 AMediaCodec_delete(codec);
@@ -187,7 +245,11 @@ fn decode(path: &str) -> Result<Sample, String> {
 
 /// `SoundPool.play` of `sample` at `gain` until it ends or is stopped.
 fn play(sample: &Sample, gain: f32, stop: &AtomicBool) -> Result<(), String> {
-    let pcm: Vec<i16> = sample.pcm.iter().map(|&s| (s as f32 * gain) as i16).collect();
+    let pcm: Vec<i16> = sample
+        .pcm
+        .iter()
+        .map(|&s| (s as f32 * gain) as i16)
+        .collect();
     let frames = pcm.len() as i32 / sample.channels.max(1);
     // SAFETY: the builder and stream are used only while alive and freed once.
     unsafe {
@@ -220,7 +282,10 @@ fn play(sample: &Sample, gain: f32, stop: &AtomicBool) -> Result<(), String> {
                 written += n;
             }
             let deadline = Instant::now() + PATIENCE;
-            while !stop.load(Ordering::Relaxed) && AAudioStream_getFramesRead(stream) < written as i64 && Instant::now() < deadline {
+            while !stop.load(Ordering::Relaxed)
+                && AAudioStream_getFramesRead(stream) < written as i64
+                && Instant::now() < deadline
+            {
                 std::thread::sleep(Duration::from_millis(5));
             }
             Ok(())
@@ -265,7 +330,10 @@ impl Effects {
             if let Err(e) = play(&sample, gain, &stop) {
                 log::error!("sound effect: {e}");
             }
-            me.playing.lock().unwrap().retain(|s| !Arc::ptr_eq(s, &stop));
+            me.playing
+                .lock()
+                .unwrap()
+                .retain(|s| !Arc::ptr_eq(s, &stop));
         });
         Ok(())
     }

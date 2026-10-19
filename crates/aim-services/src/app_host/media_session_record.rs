@@ -20,7 +20,10 @@
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
-use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_BAD_PARCELABLE, EX_ILLEGAL_STATE, EX_SECURITY, Exception, Parcel, Reader, Result as ParcelResult};
+use aim_binder_host::parcel::{
+    BAD_VALUE, Binder, EX_BAD_PARCELABLE, EX_ILLEGAL_STATE, EX_SECURITY, Exception, Parcel, Reader,
+    Result as ParcelResult,
+};
 use aim_service_aidl::android_media_session_isession as session;
 use aim_service_aidl::android_media_session_isessioncallback as session_cb;
 use aim_service_aidl::android_media_session_isessioncontroller as controller;
@@ -29,7 +32,10 @@ use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
 use super::content_service::ParcelUri;
 use super::kept::{KeptBundle, RawBundle};
-use super::media_session::{MediaSession, ReceiverHolder, THROW_FOR_ACTIVITY_MEDIA_BUTTON_RECEIVER, THROW_FOR_INVALID_BROADCAST_RECEIVER};
+use super::media_session::{
+    MediaSession, ReceiverHolder, THROW_FOR_ACTIVITY_MEDIA_BUTTON_RECEIVER,
+    THROW_FOR_INVALID_BROADCAST_RECEIVER,
+};
 use super::pending_intents::INTENT_SENDER_ACTIVITY;
 use super::playback::Attributes;
 use super::{AppHost, reply};
@@ -50,7 +56,12 @@ const STATE_SKIPPING_TO_PREVIOUS: i32 = 9;
 const STATE_SKIPPING_TO_NEXT: i32 = 10;
 const STATE_SKIPPING_TO_QUEUE_ITEM: i32 = 11;
 /// `ALWAYS_PRIORITY_STATES`, `TRANSITION_PRIORITY_STATES`.
-const ALWAYS_PRIORITY_STATES: [i32; 4] = [STATE_FAST_FORWARDING, STATE_REWINDING, STATE_SKIPPING_TO_PREVIOUS, STATE_SKIPPING_TO_NEXT];
+const ALWAYS_PRIORITY_STATES: [i32; 4] = [
+    STATE_FAST_FORWARDING,
+    STATE_REWINDING,
+    STATE_SKIPPING_TO_PREVIOUS,
+    STATE_SKIPPING_TO_NEXT,
+];
 const TRANSITION_PRIORITY_STATES: [i32; 3] = [STATE_BUFFERING, STATE_CONNECTING, STATE_PLAYING];
 /// `PlaybackInfo.PLAYBACK_TYPE_*`, `VolumeProvider.VOLUME_CONTROL_ABSOLUTE`.
 const PLAYBACK_TYPE_LOCAL: i32 = 1;
@@ -59,8 +70,11 @@ const VOLUME_CONTROL_ABSOLUTE: i32 = 2;
 /// `AudioAttributes.USAGE_MEDIA`.
 const USAGE_MEDIA: i32 = 1;
 /// `MediaMetadata`'s art URIs (`ART_URIS`).
-const ART_URIS: [&str; 3] =
-    ["android.media.metadata.ALBUM_ART_URI", "android.media.metadata.ART_URI", "android.media.metadata.DISPLAY_ICON_URI"];
+const ART_URIS: [&str; 3] = [
+    "android.media.metadata.ALBUM_ART_URI",
+    "android.media.metadata.ART_URI",
+    "android.media.metadata.DISPLAY_ICON_URI",
+];
 /// `Intent.FLAG_GRANT_READ_URI_PERMISSION`.
 const FLAG_GRANT_READ_URI_PERMISSION: i32 = 1;
 /// `ParcelableListBinder`'s codes.
@@ -80,7 +94,10 @@ impl Held {
     fn new(mut raw: Raw, process: &LocalProcess) -> ParcelResult<Held> {
         raw.keep_files(&|fd| process.file(fd))?;
         let binders = raw.handles().map(|h| process.strong(h)).collect();
-        Ok(Held { raw, _binders: Arc::new(binders) })
+        Ok(Held {
+            raw,
+            _binders: Arc::new(binders),
+        })
     }
 }
 
@@ -91,7 +108,10 @@ impl WriteParcelable for Held {
 }
 
 /// The bytes `read` reads, captured.
-fn captured(r: &mut Reader<'_>, read: impl FnOnce(&mut Reader<'_>) -> ParcelResult<()>) -> ParcelResult<Raw> {
+fn captured(
+    r: &mut Reader<'_>,
+    read: impl FnOnce(&mut Reader<'_>) -> ParcelResult<()>,
+) -> ParcelResult<Raw> {
     let start = r.position();
     read(r)?;
     Ok(Raw::capture(r, start))
@@ -156,7 +176,10 @@ pub(super) struct Metadata {
 
 impl ReadParcelable for Metadata {
     fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
-        Ok(Metadata { bundle: RawBundle::read_from(r)?, limit: r.read_i32()? })
+        Ok(Metadata {
+            bundle: RawBundle::read_from(r)?,
+            limit: r.read_i32()?,
+        })
     }
 }
 
@@ -198,7 +221,13 @@ impl ReadParcelable for State {
         r.read_i64()?; // active item id
         clip::char_sequence(r)?;
         clip::bundle(r)?;
-        Ok(State { raw: Raw::capture(r, start), state, position, speed, update_time })
+        Ok(State {
+            raw: Raw::capture(r, start),
+            state,
+            position,
+            speed,
+            update_time,
+        })
     }
 }
 
@@ -235,7 +264,12 @@ impl KeptState {
             held.raw.set_i32(at, value as i32);
             held.raw.set_i32(at + 4, (value >> 32) as i32);
         }
-        KeptState { held, position, update_time, ..*self }
+        KeptState {
+            held,
+            position,
+            update_time,
+            ..*self
+        }
     }
 }
 
@@ -408,8 +442,14 @@ impl Record {
                 callback_death: None,
             }),
         });
-        let _ = record.controller.set(host.process.add_service(Arc::new(ControllerStub(record.clone()))));
-        let _ = record.session.set(host.process.add_service(Arc::new(SessionStub(record.clone()))));
+        let _ = record.controller.set(
+            host.process
+                .add_service(Arc::new(ControllerStub(record.clone()))),
+        );
+        let _ = record.session.set(
+            host.process
+                .add_service(Arc::new(SessionStub(record.clone()))),
+        );
         let weak = Arc::downgrade(&record);
         let death = host.process.link_to_death(
             &record.callback,
@@ -431,7 +471,10 @@ impl Record {
 
     /// `getSessionToken`.
     pub(super) fn token(&self) -> Token {
-        Token { uid: self.owner_uid, controller: *self.controller.get().unwrap() }
+        Token {
+            uid: self.owner_uid,
+            controller: *self.controller.get().unwrap(),
+        }
     }
 
     /// `isActive`.
@@ -442,7 +485,12 @@ impl Record {
 
     /// `checkPlaybackActiveState`.
     pub(super) fn check_playback_active_state(&self, expected: bool) -> bool {
-        self.fields.lock().unwrap().playback_state.as_ref().is_some_and(|s| s.is_active() == expected)
+        self.fields
+            .lock()
+            .unwrap()
+            .playback_state
+            .as_ref()
+            .is_some_and(|s| s.is_active() == expected)
     }
 
     /// `MediaSessionService.isUserEngaged` of the record and its playback
@@ -494,7 +542,14 @@ impl Record {
     /// `performOnCallbackHolders`: `code` with `args` to each controller
     /// callback, the dead ones dropped.
     fn perform(&self, code: u32, args: impl Fn(&mut Parcel)) {
-        let handles: Vec<u32> = self.fields.lock().unwrap().holders.iter().map(|h| h.callback.handle).collect();
+        let handles: Vec<u32> = self
+            .fields
+            .lock()
+            .unwrap()
+            .holders
+            .iter()
+            .map(|h| h.callback.handle)
+            .collect();
         let mut dead = Vec::new();
         for handle in handles {
             let mut p = Parcel::new();
@@ -514,7 +569,12 @@ impl Record {
     }
 
     /// The push of what `pick` reads, unless destroyed.
-    fn push<T: Clone>(&self, code: u32, pick: impl FnOnce(&Fields) -> T, write: impl Fn(&mut Parcel, &T)) {
+    fn push<T: Clone>(
+        &self,
+        code: u32,
+        pick: impl FnOnce(&Fields) -> T,
+        write: impl Fn(&mut Parcel, &T),
+    ) {
         let value = {
             let f = self.fields.lock().unwrap();
             if f.destroyed {
@@ -526,30 +586,50 @@ impl Record {
     }
 
     fn push_playback_state(&self) {
-        self.push(controller_cb::ON_PLAYBACK_STATE_CHANGED, |f| f.playback_state.as_ref().map(|s| s.held.clone()), |p, s| {
-            aim_service_aidl::write_typed(p, s.as_ref())
-        });
+        self.push(
+            controller_cb::ON_PLAYBACK_STATE_CHANGED,
+            |f| f.playback_state.as_ref().map(|s| s.held.clone()),
+            |p, s| aim_service_aidl::write_typed(p, s.as_ref()),
+        );
     }
 
     fn push_metadata(&self) {
-        self.push(controller_cb::ON_METADATA_CHANGED, |f| f.metadata.clone(), |p, m| aim_service_aidl::write_typed(p, m.as_ref()));
+        self.push(
+            controller_cb::ON_METADATA_CHANGED,
+            |f| f.metadata.clone(),
+            |p, m| aim_service_aidl::write_typed(p, m.as_ref()),
+        );
     }
 
     fn push_queue(&self) {
         let process = self.host.process.clone();
-        self.push(controller_cb::ON_QUEUE_CHANGED, |f| f.queue.clone(), move |p, queue| {
-            // Each callback gets a slice of its own, one item inline.
-            let slice = queue.clone().map(|q| Slice::new(process.clone(), QUEUE_ITEM, q).with_inline_limit(1));
-            aim_service_aidl::write_typed(p, slice.as_ref());
-        });
+        self.push(
+            controller_cb::ON_QUEUE_CHANGED,
+            |f| f.queue.clone(),
+            move |p, queue| {
+                // Each callback gets a slice of its own, one item inline.
+                let slice = queue
+                    .clone()
+                    .map(|q| Slice::new(process.clone(), QUEUE_ITEM, q).with_inline_limit(1));
+                aim_service_aidl::write_typed(p, slice.as_ref());
+            },
+        );
     }
 
     fn push_queue_title(&self) {
-        self.push(controller_cb::ON_QUEUE_TITLE_CHANGED, |f| f.queue_title.clone(), |p, t| aim_service_aidl::write_typed(p, t.as_ref()));
+        self.push(
+            controller_cb::ON_QUEUE_TITLE_CHANGED,
+            |f| f.queue_title.clone(),
+            |p, t| aim_service_aidl::write_typed(p, t.as_ref()),
+        );
     }
 
     fn push_extras(&self) {
-        self.push(controller_cb::ON_EXTRAS_CHANGED, |f| f.extras.clone(), |p, e| aim_service_aidl::write_typed(p, e.as_ref().map(|e| &e.bundle)));
+        self.push(
+            controller_cb::ON_EXTRAS_CHANGED,
+            |f| f.extras.clone(),
+            |p, e| aim_service_aidl::write_typed(p, e.as_ref().map(|e| &e.bundle)),
+        );
     }
 
     fn push_volume(self: &Arc<Self>) {
@@ -557,7 +637,9 @@ impl Record {
             return;
         }
         match self.volume_attributes() {
-            Ok(info) => self.perform(controller_cb::ON_VOLUME_INFO_CHANGED, |p| aim_service_aidl::write_typed(p, Some(&info))),
+            Ok(info) => self.perform(controller_cb::ON_VOLUME_INFO_CHANGED, |p| {
+                aim_service_aidl::write_typed(p, Some(&info))
+            }),
             Err(e) => eprintln!("app host: media_session: pushVolumeUpdate: {}", e.message),
         }
     }
@@ -586,7 +668,9 @@ impl Record {
             self.host.process.clear_death(&h.callback, h.death);
             let mut p = Parcel::new();
             p.write_interface_token(controller_cb::DESCRIPTOR);
-            let _ = h.callback.transact(controller_cb::ON_SESSION_DESTROYED, &p, true);
+            let _ = h
+                .callback
+                .transact(controller_cb::ON_SESSION_DESTROYED, &p, true);
         }
     }
 
@@ -595,7 +679,11 @@ impl Record {
         let (kind, attributes) = {
             let f = self.fields.lock().unwrap();
             if f.volume_type == PLAYBACK_TYPE_REMOTE {
-                let current = if f.optimistic_volume != -1 { f.optimistic_volume } else { f.current_volume };
+                let current = if f.optimistic_volume != -1 {
+                    f.optimistic_volume
+                } else {
+                    f.current_volume
+                };
                 return Ok(PlaybackInfo {
                     kind: f.volume_type,
                     control: f.volume_control_type,
@@ -610,10 +698,20 @@ impl Record {
         // `getVolumeStream`: the media attributes' stream is the music
         // stream, as the audio policy's product strategies map them.
         if attributes.public_usage() != USAGE_MEDIA || attributes.flags() != 0 {
-            return Err(self.host.unimplemented_named("media_session", "the volume stream of other audio attributes (#1793)"));
+            return Err(self.host.unimplemented_named(
+                "media_session",
+                "the volume stream of other audio attributes (#1793)",
+            ));
         }
         let (current, max, _) = self.host.music_volume()?;
-        Ok(PlaybackInfo { kind, control: VOLUME_CONTROL_ABSOLUTE, max, current, attributes, control_id: None })
+        Ok(PlaybackInfo {
+            kind,
+            control: VOLUME_CONTROL_ABSOLUTE,
+            max,
+            current,
+            attributes,
+            control_id: None,
+        })
     }
 
     /// `getStateWithUpdatedPosition`.
@@ -625,9 +723,14 @@ impl Record {
             }
             (f.playback_state.clone()?, f.duration)
         };
-        if matches!(state.state, STATE_PLAYING | STATE_FAST_FORWARDING | STATE_REWINDING) && state.update_time > 0 {
+        if matches!(
+            state.state,
+            STATE_PLAYING | STATE_FAST_FORWARDING | STATE_REWINDING
+        ) && state.update_time > 0
+        {
             let now = super::alarm_service::elapsed_ms();
-            let mut position = (state.speed * (now - state.update_time) as f32) as i64 + state.position;
+            let mut position =
+                (state.speed * (now - state.update_time) as f32) as i64 + state.position;
             if duration >= 0 && position > duration {
                 position = duration;
             } else if position < 0 {
@@ -641,7 +744,13 @@ impl Record {
     /// `SessionCb`'s call `code` to the session, after
     /// `tempAllowlistTargetPkgIfPossible`: its controller's package, pid
     /// and uid, then what `args` writes.
-    fn session_call(&self, call: &Call<'_>, code: u32, package: Option<&str>, args: impl FnOnce(&mut Parcel)) -> Result<(), Exception> {
+    fn session_call(
+        &self,
+        call: &Call<'_>,
+        code: u32,
+        package: Option<&str>,
+        args: impl FnOnce(&mut Parcel),
+    ) -> Result<(), Exception> {
         let (pid, uid) = (call.sender_pid, call.sender_euid as i32);
         if let Some(service) = self.service.upgrade() {
             service.enforce_package_name(package, uid)?;
@@ -653,7 +762,13 @@ impl Record {
         p.write_i32(uid);
         args(&mut p);
         if let Err(e) = self.callback.transact(code, &p, true) {
-            eprintln!("app host: media_session: Remote failure in {}: {e:?}", session_cb::METHODS.iter().find(|(c, _)| *c == code).map_or("", |(_, n)| n));
+            eprintln!(
+                "app host: media_session: Remote failure in {}: {e:?}",
+                session_cb::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("", |(_, n)| n)
+            );
         }
         Ok(())
     }
@@ -662,14 +777,27 @@ impl Record {
     /// session's app may not grant read access to, put null.
     fn sanitize(&self, metadata: Metadata) -> Result<Metadata, Exception> {
         let mut bundle = metadata.bundle;
-        let unreadable = |_| Exception::new(EX_BAD_PARCELABLE, "a MediaMetadata that does not read");
+        let unreadable =
+            |_| Exception::new(EX_BAD_PARCELABLE, "a MediaMetadata that does not read");
         for key in ART_URIS {
-            let Some(uri) = bundle.string(key).map_err(unreadable)?.filter(|u| !u.is_empty()) else { continue };
+            let Some(uri) = bundle
+                .string(key)
+                .map_err(unreadable)?
+                .filter(|u| !u.is_empty())
+            else {
+                continue;
+            };
             let uri = crate::package::uri::Uri::parse(&uri);
             if uri.scheme() != Some("content") {
                 continue;
             }
-            match self.host.check_grant_uri_permission(self.owner_uid, &self.package, uri, FLAG_GRANT_READ_URI_PERMISSION, self.user) {
+            match self.host.check_grant_uri_permission(
+                self.owner_uid,
+                &self.package,
+                uri,
+                FLAG_GRANT_READ_URI_PERMISSION,
+                self.user,
+            ) {
                 Ok(_) => {}
                 Err(e) if e.code == EX_SECURITY => {
                     bundle = bundle.with_null(key).map_err(unreadable)?;
@@ -677,7 +805,10 @@ impl Record {
                 Err(e) => return Err(e),
             }
         }
-        Ok(Metadata { bundle, limit: metadata.limit })
+        Ok(Metadata {
+            bundle,
+            limit: metadata.limit,
+        })
     }
 
     fn held(&self, raw: Raw) -> Result<Held, Exception> {
@@ -712,9 +843,14 @@ impl Service for SessionStub {
                 Ok(())
             }
             session::SEND_EVENT => {
-                let a = session::SendEvent::<RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    session::SendEvent::<RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
-                    let data = a.data.map(|d| KeptBundle::new(d, &r.host.process)).transpose().map_err(|_| gone())?;
+                    let data = a
+                        .data
+                        .map(|d| KeptBundle::new(d, &r.host.process))
+                        .transpose()
+                        .map_err(|_| gone())?;
                     let me = r.clone();
                     r.post(move || me.push_event(a.event, data));
                     session::write_send_event_reply(&mut p);
@@ -739,8 +875,14 @@ impl Service for SessionStub {
                 let a = session::SetFlags::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
                     let flags = a.flags as i64;
-                    if flags & FLAG_EXCLUSIVE_GLOBAL_PRIORITY != 0 && r.host.check_permission(Some("android.permission.MODIFY_PHONE_STATE"), uid)? != 0 {
-                        return Err(Exception::security("Must hold the MODIFY_PHONE_STATE permission."));
+                    if flags & FLAG_EXCLUSIVE_GLOBAL_PRIORITY != 0
+                        && r.host
+                            .check_permission(Some("android.permission.MODIFY_PHONE_STATE"), uid)?
+                            != 0
+                    {
+                        return Err(Exception::security(
+                            "Must hold the MODIFY_PHONE_STATE permission.",
+                        ));
                     }
                     r.fields.lock().unwrap().flags = flags;
                     if flags & FLAG_EXCLUSIVE_GLOBAL_PRIORITY != 0
@@ -753,7 +895,8 @@ impl Service for SessionStub {
                 })()
             }
             session::SET_MEDIA_BUTTON_RECEIVER => {
-                let a = session::SetMediaButtonReceiver::<BinderIn>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = session::SetMediaButtonReceiver::<BinderIn>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
                     let pi = a.mbr.and_then(|b| b.0);
                     if let Some(pi) = pi
@@ -775,7 +918,9 @@ impl Service for SessionStub {
                 .map(|()| session::write_set_media_button_receiver_reply(&mut p))
             }
             session::SET_MEDIA_BUTTON_BROADCAST_RECEIVER => {
-                let a = session::SetMediaButtonBroadcastReceiver::<ComponentName>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    session::SetMediaButtonBroadcastReceiver::<ComponentName>::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
                 (|| {
                     if let Some(receiver) = &a.broadcast_receiver
                         && receiver.package != r.package
@@ -807,7 +952,8 @@ impl Service for SessionStub {
                 .map(|()| session::write_set_media_button_broadcast_receiver_reply(&mut p))
             }
             session::SET_LAUNCH_PENDING_INTENT => {
-                let a = session::SetLaunchPendingIntent::<BinderIn>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = session::SetLaunchPendingIntent::<BinderIn>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 let mut f = r.fields.lock().unwrap();
                 f.launch_intent_held = match a.pi.as_ref().and_then(|b| b.0) {
                     Some(Binder::Handle(h)) => Some(r.host.process.strong(h)),
@@ -818,14 +964,17 @@ impl Service for SessionStub {
                 Ok(())
             }
             session::SET_METADATA => {
-                let a = session::SetMetadata::<Metadata>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = session::SetMetadata::<Metadata>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
                     let metadata = match a.metadata {
                         Some(m) => {
                             let m = r.sanitize(m)?;
                             let mut p = Parcel::new();
                             m.write_to(&mut p);
-                            let raw = captured(&mut p.reader(), |r| Metadata::read_from(r).map(|_| ())).map_err(|_| gone())?;
+                            let raw =
+                                captured(&mut p.reader(), |r| Metadata::read_from(r).map(|_| ()))
+                                    .map_err(|_| gone())?;
                             Some(r.held(raw)?)
                         }
                         None => None,
@@ -843,16 +992,30 @@ impl Service for SessionStub {
                 })()
             }
             session::SET_PLAYBACK_STATE => {
-                let a = session::SetPlaybackState::<State>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = session::SetPlaybackState::<State>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
                     let state = match a.state {
-                        Some(s) => Some(KeptState { held: r.held(s.raw)?, state: s.state, position: s.position, speed: s.speed, update_time: s.update_time }),
+                        Some(s) => Some(KeptState {
+                            held: r.held(s.raw)?,
+                            state: s.state,
+                            position: s.position,
+                            speed: s.speed,
+                            update_time: s.update_time,
+                        }),
                         None => None,
                     };
-                    let old = r.fields.lock().unwrap().playback_state.as_ref().map_or(STATE_NONE, |s| s.state);
+                    let old = r
+                        .fields
+                        .lock()
+                        .unwrap()
+                        .playback_state
+                        .as_ref()
+                        .map_or(STATE_NONE, |s| s.state);
                     let new = state.as_ref().map_or(STATE_NONE, |s| s.state);
                     let update_priority = ALWAYS_PRIORITY_STATES.contains(&new)
-                        || (!TRANSITION_PRIORITY_STATES.contains(&old) && TRANSITION_PRIORITY_STATES.contains(&new));
+                        || (!TRANSITION_PRIORITY_STATES.contains(&old)
+                            && TRANSITION_PRIORITY_STATES.contains(&new));
                     r.fields.lock().unwrap().playback_state = state;
                     if let Some(service) = r.service.upgrade() {
                         service.on_session_playback_state_changed(r, update_priority);
@@ -873,12 +1036,16 @@ impl Service for SessionStub {
             }
             session::GET_BINDER_FOR_SET_QUEUE => {
                 session::GetBinderForSetQueue::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let binder = r.host.process.add_service(Arc::new(QueueBinder { record: r.clone(), list: Mutex::new((Vec::new(), 0, false)) }));
+                let binder = r.host.process.add_service(Arc::new(QueueBinder {
+                    record: r.clone(),
+                    list: Mutex::new((Vec::new(), 0, false)),
+                }));
                 session::write_get_binder_for_set_queue_reply(&mut p, Some(binder));
                 Ok(())
             }
             session::SET_QUEUE_TITLE => {
-                let a = session::SetQueueTitle::<Text>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    session::SetQueueTitle::<Text>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
                     let title = a.title.map(|t| r.held(t.0)).transpose()?;
                     r.fields.lock().unwrap().queue_title = title;
@@ -889,9 +1056,14 @@ impl Service for SessionStub {
                 })()
             }
             session::SET_EXTRAS => {
-                let a = session::SetExtras::<RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    session::SetExtras::<RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
-                    let extras = a.extras.map(|e| KeptBundle::new(e, &r.host.process)).transpose().map_err(|_| gone())?;
+                    let extras = a
+                        .extras
+                        .map(|e| KeptBundle::new(e, &r.host.process))
+                        .transpose()
+                        .map_err(|_| gone())?;
                     r.fields.lock().unwrap().extras = extras;
                     let me = r.clone();
                     r.post(move || me.push_extras());
@@ -914,7 +1086,8 @@ impl Service for SessionStub {
                 Ok(())
             }
             session::SET_PLAYBACK_TO_LOCAL => {
-                let a = session::SetPlaybackToLocal::<Attributes>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = session::SetPlaybackToLocal::<Attributes>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 let changed = {
                     let mut f = r.fields.lock().unwrap();
                     let changed = f.volume_type == PLAYBACK_TYPE_REMOTE;
@@ -922,7 +1095,9 @@ impl Service for SessionStub {
                     f.volume_control_id = None;
                     match a.attributes {
                         Some(attributes) => f.audio_attrs = attributes,
-                        None => eprintln!("app host: media_session: Received null audio attributes, using existing attributes"),
+                        None => eprintln!(
+                            "app host: media_session: Received null audio attributes, using existing attributes"
+                        ),
                     }
                     changed
                 };
@@ -937,7 +1112,8 @@ impl Service for SessionStub {
                 Ok(())
             }
             session::SET_PLAYBACK_TO_REMOTE => {
-                let a = session::SetPlaybackToRemote::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    session::SetPlaybackToRemote::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let changed = {
                     let mut f = r.fields.lock().unwrap();
                     let changed = f.volume_type == PLAYBACK_TYPE_LOCAL;
@@ -958,8 +1134,13 @@ impl Service for SessionStub {
                 Ok(())
             }
             code => {
-                let name = session::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
-                Err(r.host.unimplemented_named("media_session", &format!("ISession.{name} (#1793)")))
+                let name = session::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
+                Err(r
+                    .host
+                    .unimplemented_named("media_session", &format!("ISession.{name} (#1793)")))
             }
         };
         reply(result.map(|()| p))
@@ -998,7 +1179,10 @@ impl Service for QueueBinder {
             let mut i = list.0.len() as i32;
             while i < list.1 && call.data.read_i32()? != END_OF_PARCEL {
                 let Some(raw) = QueueItemIn::read(&mut call.data)?.0 else {
-                    return reply(Err(self.record.host.unimplemented_named("media_session", "a queue item with an icon bitmap (#1793)")));
+                    return reply(Err(self.record.host.unimplemented_named(
+                        "media_session",
+                        "a queue item with an icon bitmap (#1793)",
+                    )));
                 };
                 let held = Held::new(raw, &self.record.host.process)?;
                 list.0.push(held);
@@ -1028,13 +1212,18 @@ impl ControllerStub {
     /// until it dies, once.
     fn register(&self, callback: Option<Binder>) {
         let r = &self.0;
-        let Some(Binder::Handle(handle)) = callback else { return };
+        let Some(Binder::Handle(handle)) = callback else {
+            return;
+        };
         let mut f = r.fields.lock().unwrap();
         if f.destroyed {
             drop(f);
             let mut p = Parcel::new();
             p.write_interface_token(controller_cb::DESCRIPTOR);
-            let _ = r.host.process.transact(handle, controller_cb::ON_SESSION_DESTROYED, &p, true);
+            let _ = r
+                .host
+                .process
+                .transact(handle, controller_cb::ON_SESSION_DESTROYED, &p, true);
             return;
         }
         if f.holders.iter().any(|h| h.callback.handle == handle) {
@@ -1054,12 +1243,17 @@ impl ControllerStub {
                 }
             }),
         );
-        f.holders.push(Holder { callback: strong, death });
+        f.holders.push(Holder {
+            callback: strong,
+            death,
+        });
     }
 
     fn unregister(&self, callback: Option<Binder>) {
         let r = &self.0;
-        let Some(Binder::Handle(handle)) = callback else { return };
+        let Some(Binder::Handle(handle)) = callback else {
+            return;
+        };
         let mut f = r.fields.lock().unwrap();
         if let Some(i) = f.holders.iter().position(|h| h.callback.handle == handle) {
             let h = f.holders.remove(i);
@@ -1079,18 +1273,21 @@ impl Service for ControllerStub {
         macro_rules! transport {
             ($kind:ident, $code:expr, $reply:ident, |$a:ident, $q:ident| $args:expr) => {{
                 let $a = controller::$kind::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                r.session_call(call, $code, $a.package_name.as_deref(), |$q| $args).map(|()| controller::$reply(&mut p))
+                r.session_call(call, $code, $a.package_name.as_deref(), |$q| $args)
+                    .map(|()| controller::$reply(&mut p))
             }};
         }
         let result: Result<(), Exception> = match call.code {
             controller::REGISTER_CALLBACK => {
-                let a = controller::RegisterCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    controller::RegisterCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.register(a.cb);
                 controller::write_register_callback_reply(&mut p);
                 Ok(())
             }
             controller::UNREGISTER_CALLBACK => {
-                let a = controller::UnregisterCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    controller::UnregisterCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.unregister(a.cb);
                 controller::write_unregister_callback_reply(&mut p);
                 Ok(())
@@ -1107,7 +1304,10 @@ impl Service for ControllerStub {
             }
             controller::GET_SESSION_INFO => {
                 controller::GetSessionInfo::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                controller::write_get_session_info_reply(&mut p, r.session_info.as_ref().map(|i| &i.bundle));
+                controller::write_get_session_info_reply(
+                    &mut p,
+                    r.session_info.as_ref().map(|i| &i.bundle),
+                );
                 Ok(())
             }
             controller::GET_LAUNCH_PENDING_INTENT => {
@@ -1123,7 +1323,8 @@ impl Service for ControllerStub {
             }
             controller::GET_VOLUME_ATTRIBUTES => {
                 controller::GetVolumeAttributes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                r.volume_attributes().map(|info| controller::write_get_volume_attributes_reply(&mut p, Some(&info)))
+                r.volume_attributes()
+                    .map(|info| controller::write_get_volume_attributes_reply(&mut p, Some(&info)))
             }
             controller::GET_METADATA => {
                 controller::GetMetadata::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -1133,7 +1334,10 @@ impl Service for ControllerStub {
             }
             controller::GET_PLAYBACK_STATE => {
                 controller::GetPlaybackState::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                controller::write_get_playback_state_reply(&mut p, r.state_with_updated_position().as_ref());
+                controller::write_get_playback_state_reply(
+                    &mut p,
+                    r.state_with_updated_position().as_ref(),
+                );
                 Ok(())
             }
             controller::GET_QUEUE => {
@@ -1157,111 +1361,204 @@ impl Service for ControllerStub {
             }
             controller::GET_RATING_TYPE => {
                 controller::GetRatingType::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                controller::write_get_rating_type_reply(&mut p, r.fields.lock().unwrap().rating_type);
+                controller::write_get_rating_type_reply(
+                    &mut p,
+                    r.fields.lock().unwrap().rating_type,
+                );
                 Ok(())
             }
             controller::SEND_COMMAND => {
-                let a = controller::SendCommand::<RawBundle, BinderIn>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                r.session_call(call, session_cb::ON_COMMAND, a.package_name.as_deref(), |q| {
-                    q.write_string16(a.command.as_deref());
-                    aim_service_aidl::write_typed(q, a.args.as_ref());
-                    aim_service_aidl::write_typed(q, a.cb.as_ref());
-                })
+                let a = controller::SendCommand::<RawBundle, BinderIn>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                r.session_call(
+                    call,
+                    session_cb::ON_COMMAND,
+                    a.package_name.as_deref(),
+                    |q| {
+                        q.write_string16(a.command.as_deref());
+                        aim_service_aidl::write_typed(q, a.args.as_ref());
+                        aim_service_aidl::write_typed(q, a.cb.as_ref());
+                    },
+                )
                 .map(|()| controller::write_send_command_reply(&mut p))
             }
             controller::SEND_CUSTOM_ACTION => {
-                let a = controller::SendCustomAction::<RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                r.session_call(call, session_cb::ON_CUSTOM_ACTION, a.package_name.as_deref(), |q| {
-                    q.write_string16(a.action.as_deref());
-                    aim_service_aidl::write_typed(q, a.args.as_ref());
-                })
+                let a = controller::SendCustomAction::<RawBundle>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                r.session_call(
+                    call,
+                    session_cb::ON_CUSTOM_ACTION,
+                    a.package_name.as_deref(),
+                    |q| {
+                        q.write_string16(a.action.as_deref());
+                        aim_service_aidl::write_typed(q, a.args.as_ref());
+                    },
+                )
                 .map(|()| controller::write_send_custom_action_reply(&mut p))
             }
-            controller::PREPARE => transport!(Prepare, session_cb::ON_PREPARE, write_prepare_reply, |a, q| {
-                let _ = (&a, q);
-            }),
+            controller::PREPARE => transport!(
+                Prepare,
+                session_cb::ON_PREPARE,
+                write_prepare_reply,
+                |a, q| {
+                    let _ = (&a, q);
+                }
+            ),
             controller::PREPARE_FROM_MEDIA_ID => {
-                let a = controller::PrepareFromMediaId::<RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                r.session_call(call, session_cb::ON_PREPARE_FROM_MEDIA_ID, a.package_name.as_deref(), |q| {
-                    q.write_string16(a.media_id.as_deref());
-                    aim_service_aidl::write_typed(q, a.extras.as_ref());
-                })
+                let a = controller::PrepareFromMediaId::<RawBundle>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                r.session_call(
+                    call,
+                    session_cb::ON_PREPARE_FROM_MEDIA_ID,
+                    a.package_name.as_deref(),
+                    |q| {
+                        q.write_string16(a.media_id.as_deref());
+                        aim_service_aidl::write_typed(q, a.extras.as_ref());
+                    },
+                )
                 .map(|()| controller::write_prepare_from_media_id_reply(&mut p))
             }
             controller::PREPARE_FROM_SEARCH => {
-                let a = controller::PrepareFromSearch::<RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                r.session_call(call, session_cb::ON_PREPARE_FROM_SEARCH, a.package_name.as_deref(), |q| {
-                    q.write_string16(a.string.as_deref());
-                    aim_service_aidl::write_typed(q, a.extras.as_ref());
-                })
+                let a = controller::PrepareFromSearch::<RawBundle>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                r.session_call(
+                    call,
+                    session_cb::ON_PREPARE_FROM_SEARCH,
+                    a.package_name.as_deref(),
+                    |q| {
+                        q.write_string16(a.string.as_deref());
+                        aim_service_aidl::write_typed(q, a.extras.as_ref());
+                    },
+                )
                 .map(|()| controller::write_prepare_from_search_reply(&mut p))
             }
             controller::PREPARE_FROM_URI => {
-                let a = controller::PrepareFromUri::<ParcelUri, RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                r.session_call(call, session_cb::ON_PREPARE_FROM_URI, a.package_name.as_deref(), |q| {
-                    aim_service_aidl::write_typed(q, a.uri.as_ref().map(UriOut).as_ref());
-                    aim_service_aidl::write_typed(q, a.extras.as_ref());
-                })
+                let a = controller::PrepareFromUri::<ParcelUri, RawBundle>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                r.session_call(
+                    call,
+                    session_cb::ON_PREPARE_FROM_URI,
+                    a.package_name.as_deref(),
+                    |q| {
+                        aim_service_aidl::write_typed(q, a.uri.as_ref().map(UriOut).as_ref());
+                        aim_service_aidl::write_typed(q, a.extras.as_ref());
+                    },
+                )
                 .map(|()| controller::write_prepare_from_uri_reply(&mut p))
             }
             controller::PLAY => transport!(Play, session_cb::ON_PLAY, write_play_reply, |a, q| {
                 let _ = (&a, q);
             }),
             controller::PLAY_FROM_MEDIA_ID => {
-                let a = controller::PlayFromMediaId::<RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                r.session_call(call, session_cb::ON_PLAY_FROM_MEDIA_ID, a.package_name.as_deref(), |q| {
-                    q.write_string16(a.media_id.as_deref());
-                    aim_service_aidl::write_typed(q, a.extras.as_ref());
-                })
+                let a = controller::PlayFromMediaId::<RawBundle>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                r.session_call(
+                    call,
+                    session_cb::ON_PLAY_FROM_MEDIA_ID,
+                    a.package_name.as_deref(),
+                    |q| {
+                        q.write_string16(a.media_id.as_deref());
+                        aim_service_aidl::write_typed(q, a.extras.as_ref());
+                    },
+                )
                 .map(|()| controller::write_play_from_media_id_reply(&mut p))
             }
             controller::PLAY_FROM_SEARCH => {
-                let a = controller::PlayFromSearch::<RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                r.session_call(call, session_cb::ON_PLAY_FROM_SEARCH, a.package_name.as_deref(), |q| {
-                    q.write_string16(a.string.as_deref());
-                    aim_service_aidl::write_typed(q, a.extras.as_ref());
-                })
+                let a = controller::PlayFromSearch::<RawBundle>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                r.session_call(
+                    call,
+                    session_cb::ON_PLAY_FROM_SEARCH,
+                    a.package_name.as_deref(),
+                    |q| {
+                        q.write_string16(a.string.as_deref());
+                        aim_service_aidl::write_typed(q, a.extras.as_ref());
+                    },
+                )
                 .map(|()| controller::write_play_from_search_reply(&mut p))
             }
             controller::PLAY_FROM_URI => {
-                let a = controller::PlayFromUri::<ParcelUri, RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                r.session_call(call, session_cb::ON_PLAY_FROM_URI, a.package_name.as_deref(), |q| {
-                    aim_service_aidl::write_typed(q, a.uri.as_ref().map(UriOut).as_ref());
-                    aim_service_aidl::write_typed(q, a.extras.as_ref());
-                })
+                let a = controller::PlayFromUri::<ParcelUri, RawBundle>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                r.session_call(
+                    call,
+                    session_cb::ON_PLAY_FROM_URI,
+                    a.package_name.as_deref(),
+                    |q| {
+                        aim_service_aidl::write_typed(q, a.uri.as_ref().map(UriOut).as_ref());
+                        aim_service_aidl::write_typed(q, a.extras.as_ref());
+                    },
+                )
                 .map(|()| controller::write_play_from_uri_reply(&mut p))
             }
-            controller::SKIP_TO_QUEUE_ITEM => transport!(SkipToQueueItem, session_cb::ON_SKIP_TO_TRACK, write_skip_to_queue_item_reply, |a, q| q.write_i64(a.id)),
-            controller::PAUSE => transport!(Pause, session_cb::ON_PAUSE, write_pause_reply, |a, q| {
-                let _ = (&a, q);
-            }),
+            controller::SKIP_TO_QUEUE_ITEM => transport!(
+                SkipToQueueItem,
+                session_cb::ON_SKIP_TO_TRACK,
+                write_skip_to_queue_item_reply,
+                |a, q| q.write_i64(a.id)
+            ),
+            controller::PAUSE => {
+                transport!(Pause, session_cb::ON_PAUSE, write_pause_reply, |a, q| {
+                    let _ = (&a, q);
+                })
+            }
             controller::STOP => transport!(Stop, session_cb::ON_STOP, write_stop_reply, |a, q| {
                 let _ = (&a, q);
             }),
             controller::NEXT => transport!(Next, session_cb::ON_NEXT, write_next_reply, |a, q| {
                 let _ = (&a, q);
             }),
-            controller::PREVIOUS => transport!(Previous, session_cb::ON_PREVIOUS, write_previous_reply, |a, q| {
-                let _ = (&a, q);
-            }),
-            controller::FAST_FORWARD => transport!(FastForward, session_cb::ON_FAST_FORWARD, write_fast_forward_reply, |a, q| {
-                let _ = (&a, q);
-            }),
-            controller::REWIND => transport!(Rewind, session_cb::ON_REWIND, write_rewind_reply, |a, q| {
-                let _ = (&a, q);
-            }),
-            controller::SEEK_TO => transport!(SeekTo, session_cb::ON_SEEK_TO, write_seek_to_reply, |a, q| q.write_i64(a.pos)),
+            controller::PREVIOUS => transport!(
+                Previous,
+                session_cb::ON_PREVIOUS,
+                write_previous_reply,
+                |a, q| {
+                    let _ = (&a, q);
+                }
+            ),
+            controller::FAST_FORWARD => transport!(
+                FastForward,
+                session_cb::ON_FAST_FORWARD,
+                write_fast_forward_reply,
+                |a, q| {
+                    let _ = (&a, q);
+                }
+            ),
+            controller::REWIND => {
+                transport!(Rewind, session_cb::ON_REWIND, write_rewind_reply, |a, q| {
+                    let _ = (&a, q);
+                })
+            }
+            controller::SEEK_TO => transport!(
+                SeekTo,
+                session_cb::ON_SEEK_TO,
+                write_seek_to_reply,
+                |a, q| q.write_i64(a.pos)
+            ),
             controller::SET_PLAYBACK_SPEED => {
-                transport!(SetPlaybackSpeed, session_cb::ON_SET_PLAYBACK_SPEED, write_set_playback_speed_reply, |a, q| q.write_f32(a.speed))
+                transport!(
+                    SetPlaybackSpeed,
+                    session_cb::ON_SET_PLAYBACK_SPEED,
+                    write_set_playback_speed_reply,
+                    |a, q| q.write_f32(a.speed)
+                )
             }
             controller::RATE => {
                 let a = controller::Rate::<In>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                r.session_call(call, session_cb::ON_RATE, a.package_name.as_deref(), |q| aim_service_aidl::write_typed(q, a.rating.as_ref()))
-                    .map(|()| controller::write_rate_reply(&mut p))
+                r.session_call(call, session_cb::ON_RATE, a.package_name.as_deref(), |q| {
+                    aim_service_aidl::write_typed(q, a.rating.as_ref())
+                })
+                .map(|()| controller::write_rate_reply(&mut p))
             }
             code => {
-                let name = controller::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
-                Err(r.host.unimplemented_named("media_session", &format!("ISessionController.{name} (#1793)")))
+                let name = controller::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
+                Err(r.host.unimplemented_named(
+                    "media_session",
+                    &format!("ISessionController.{name} (#1793)"),
+                ))
             }
         };
         reply(result.map(|()| p))
@@ -1310,14 +1607,29 @@ mod tests {
     fn playback_states_read_and_update_their_position() {
         let p = playback_state();
         let s = State::read_from(&mut Reader::new(p.data(), &[])).unwrap();
-        assert_eq!((s.state, s.position, s.speed, s.update_time), (STATE_PLAYING, 1000, 2.0, 5000));
+        assert_eq!(
+            (s.state, s.position, s.speed, s.update_time),
+            (STATE_PLAYING, 1000, 2.0, 5000)
+        );
         assert_eq!(s.raw.parcel().data(), p.data());
-        let held = Held { raw: s.raw, _binders: Arc::new(Vec::new()) };
-        let kept = KeptState { held, state: s.state, position: s.position, speed: s.speed, update_time: s.update_time };
+        let held = Held {
+            raw: s.raw,
+            _binders: Arc::new(Vec::new()),
+        };
+        let kept = KeptState {
+            held,
+            state: s.state,
+            position: s.position,
+            speed: s.speed,
+            update_time: s.update_time,
+        };
         assert!(kept.is_active());
         let moved = kept.at(1 << 33 | 3, 9000).held.raw.parcel();
         let again = State::read_from(&mut Reader::new(moved.data(), &[])).unwrap();
-        assert_eq!((again.position, again.update_time, again.speed), (1 << 33 | 3, 9000, 2.0));
+        assert_eq!(
+            (again.position, again.update_time, again.speed),
+            (1 << 33 | 3, 9000, 2.0)
+        );
         assert_eq!(&moved.data()[24..], &p.data()[24..]);
     }
 
@@ -1341,7 +1653,10 @@ mod tests {
         crate::bundle::write(&mut p, &[]);
         p.write_string16(None); // no media URI
         p.write_i64(42);
-        let item = QueueItemIn::read(&mut Reader::new(p.data(), &[])).unwrap().0.unwrap();
+        let item = QueueItemIn::read(&mut Reader::new(p.data(), &[]))
+            .unwrap()
+            .0
+            .unwrap();
         assert_eq!(item.parcel().data(), &p.data()[class.data().len()..]);
         let mut icon = Parcel::new();
         icon.write_string16(Some(QUEUE_ITEM));
@@ -1350,7 +1665,12 @@ mod tests {
             clip::write_char_sequence(&mut icon, None);
         }
         icon.write_string16(Some("android.graphics.Bitmap"));
-        assert!(QueueItemIn::read(&mut Reader::new(icon.data(), &[])).unwrap().0.is_none());
+        assert!(
+            QueueItemIn::read(&mut Reader::new(icon.data(), &[]))
+                .unwrap()
+                .0
+                .is_none()
+        );
         let mut other = Parcel::new();
         other.write_string16(Some("android.os.Bundle"));
         assert!(QueueItemIn::read(&mut Reader::new(other.data(), &[])).is_err());

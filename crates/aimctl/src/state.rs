@@ -172,7 +172,11 @@ impl State {
             pid: pid("pid", number("pid")?)?,
             guest: match guest {
                 "" => None,
-                g => Some(pid("guest", g.parse::<u64>().map_err(|_| "state: bad guest".to_string())?)?),
+                g => Some(pid(
+                    "guest",
+                    g.parse::<u64>()
+                        .map_err(|_| "state: bad guest".to_string())?,
+                )?),
             },
             windows: match field("mode")? {
                 "windows" => true,
@@ -289,13 +293,30 @@ mod tests {
 
     #[test]
     fn stored_pids_never_become_groups_broadcasts_or_truncated_processes() {
-        let state = State { pid: 1, guest: Some(i32::MAX as u32), windows: false,
-            started: 2, inputs: crate::inputs::Inputs::default() };
+        let state = State {
+            pid: 1,
+            guest: Some(i32::MAX as u32),
+            windows: false,
+            started: 2,
+            inputs: crate::inputs::Inputs::default(),
+        };
         assert_eq!(State::parse(&state.to_text()).unwrap(), state);
-        for invalid in ["0", "2147483648", "4294967295", "4294967296", "18446744073709551615", "-1"] {
-            let text = state.to_text().replacen("pid=1\n", &format!("pid={invalid}\n"), 1);
+        for invalid in [
+            "0",
+            "2147483648",
+            "4294967295",
+            "4294967296",
+            "18446744073709551615",
+            "-1",
+        ] {
+            let text = state
+                .to_text()
+                .replacen("pid=1\n", &format!("pid={invalid}\n"), 1);
             assert!(State::parse(&text).is_err(), "resident pid {invalid}");
-            let text = state.to_text().replacen("guest=2147483647\n", &format!("guest={invalid}\n"), 1);
+            let text =
+                state
+                    .to_text()
+                    .replacen("guest=2147483647\n", &format!("guest={invalid}\n"), 1);
             assert!(State::parse(&text).is_err(), "guest pid {invalid}");
         }
     }

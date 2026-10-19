@@ -239,12 +239,18 @@ const VALIDATORS: &[(&str, Validator)] = &[
     ("lockscreen_sounds_enabled", BOOLEAN),
     ("lockscreen.disabled", BOOLEAN),
     ("sip_receive_calls", BOOLEAN),
-    ("sip_call_options", Discrete(&["SIP_ALWAYS", "SIP_ADDRESS_ONLY"])),
+    (
+        "sip_call_options",
+        Discrete(&["SIP_ALWAYS", "SIP_ADDRESS_ONLY"]),
+    ),
     ("SIP_ALWAYS", BOOLEAN),
     ("SIP_ADDRESS_ONLY", BOOLEAN),
     ("SIP_ASK_ME_EACH_TIME", BOOLEAN),
     ("pointer_speed", InclusiveFloatRange(-7.0, 7.0)),
-    ("touchpad_three_finger_tap_customization", NonNegativeInteger),
+    (
+        "touchpad_three_finger_tap_customization",
+        NonNegativeInteger,
+    ),
     // `PointerIcon.POINTER_ICON_VECTOR_STYLE_FILL_BEGIN` to `_END`,
     // `_STROKE_BEGIN` to `_END`, `DEFAULT_POINTER_SCALE` to
     // `LARGE_POINTER_SCALE`.
@@ -312,28 +318,51 @@ impl Validator {
             (Discrete(values), value) => value.is_none_or(|v| values.contains(&v)),
             (AnyString | Uri, _) => true,
             (NonNegativeInteger | AnyInteger | NonNegativeFloat | LenientIpAddress, None) => true,
-            (InclusiveIntegerRange(..) | InclusiveFloatRange(..) | NextAlarmFormatted, None) => true,
+            (InclusiveIntegerRange(..) | InclusiveFloatRange(..) | NextAlarmFormatted, None) => {
+                true
+            }
             (NonNegativeInteger, Some(v)) => int(v).is_some_and(|v| v >= 0),
             (AnyInteger, Some(v)) => int(v).is_some(),
             (NonNegativeFloat, Some(v)) => float(v).is_some_and(|v| v >= 0.0),
             (ComponentName, value) => value.is_some_and(component_name),
             // `MAX_IPV6_LENGTH`.
             (LenientIpAddress, Some(v)) => v.encode_utf16().count() <= 45,
-            (InclusiveIntegerRange(min, max), Some(v)) => int(v).is_some_and(|v| (min..=max).contains(&v)),
-            (InclusiveFloatRange(min, max), Some(v)) => float(v).is_some_and(|v| v >= min && v <= max),
+            (InclusiveIntegerRange(min, max), Some(v)) => {
+                int(v).is_some_and(|v| (min..=max).contains(&v))
+            }
+            (InclusiveFloatRange(min, max), Some(v)) => {
+                float(v).is_some_and(|v| v >= min && v <= max)
+            }
             (StayOnWhilePluggedIn, value) => value.and_then(int).is_some_and(|v| {
-                [0, AC, USB, WIRELESS, DOCK, AC | USB, AC | WIRELESS, USB | WIRELESS, AC | USB | WIRELESS, AC | DOCK, USB | DOCK]
-                    .contains(&v)
+                [
+                    0,
+                    AC,
+                    USB,
+                    WIRELESS,
+                    DOCK,
+                    AC | USB,
+                    AC | WIRELESS,
+                    USB | WIRELESS,
+                    AC | USB | WIRELESS,
+                    AC | DOCK,
+                    USB | DOCK,
+                ]
+                .contains(&v)
             }),
             (NextAlarmFormatted, Some(v)) => v.encode_utf16().count() < 1000,
-            (DisplayColorMode, value) => {
-                value.and_then(int).is_some_and(|v| COLOR_MODES.contains(&v) || VENDOR_COLOR_MODES.contains(&v))
-            }
+            (DisplayColorMode, value) => value
+                .and_then(int)
+                .is_some_and(|v| COLOR_MODES.contains(&v) || VENDOR_COLOR_MODES.contains(&v)),
             (WallpaperActivity, Some(v)) => v.encode_utf16().count() <= 1000 && component_name(v),
             (WallpaperActivity, None) => {
-                return Err(Exception::new(EX_NULL_POINTER, "ComponentName.unflattenFromString(null)"));
+                return Err(Exception::new(
+                    EX_NULL_POINTER,
+                    "ComponentName.unflattenFromString(null)",
+                ));
             }
-            (EggMode, value) => value.and_then(|v| v.parse::<i64>().ok()).is_some_and(|v| v >= 0),
+            (EggMode, value) => value
+                .and_then(|v| v.parse::<i64>().ok())
+                .is_some_and(|v| v >= 0),
         })
     }
 }
@@ -384,10 +413,17 @@ mod tests {
         assert!(ok("media_button_receiver", Some("a/.B")));
         assert!(!ok("media_button_receiver", Some("a/")));
         assert!(ok("egg_mode", Some("5000000000")));
-        assert!(validate_system_value("wallpaper_activity", None).unwrap_err().code == EX_NULL_POINTER);
+        assert!(
+            validate_system_value("wallpaper_activity", None)
+                .unwrap_err()
+                .code
+                == EX_NULL_POINTER
+        );
         assert!(ok("anything_else", Some("x")));
         assert_eq!(
-            validate_system_value("dim_screen", Some("2")).unwrap_err().message,
+            validate_system_value("dim_screen", Some("2"))
+                .unwrap_err()
+                .message,
             "Invalid value: 2 for setting: dim_screen"
         );
     }

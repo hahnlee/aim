@@ -504,11 +504,13 @@ pub(crate) fn chunked_content_digests(
     let info = match block::find_signature(apk, v3::APK_SIGNATURE_SCHEME_V3_BLOCK_ID) {
         Ok(info) => info,
         Err(Fail::Invalid(e)) => return Err(e),
-        Err(Fail::NotFound(_)) => match block::find_signature(apk, v2::APK_SIGNATURE_SCHEME_V2_BLOCK_ID) {
-            Ok(info) => info,
-            Err(Fail::Invalid(e)) => return Err(e),
-            Err(Fail::NotFound(_)) => return Ok(None),
-        },
+        Err(Fail::NotFound(_)) => {
+            match block::find_signature(apk, v2::APK_SIGNATURE_SCHEME_V2_BLOCK_ID) {
+                Ok(info) => info,
+                Err(Fail::Invalid(e)) => return Err(e),
+                Err(Fail::NotFound(_)) => return Ok(None),
+            }
+        }
     };
     block::chunked_digests(algorithms, apk, &info).map(Some)
 }

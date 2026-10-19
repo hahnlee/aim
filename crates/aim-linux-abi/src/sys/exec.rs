@@ -95,20 +95,28 @@ pub struct ExecState {
     pub mounts: String,
     /// The armed interval timers (`itimer::exec_text`).
     pub itimers: String,
-    pub regular_fds:String,
-    pub close_receipt:Option<i32>,
+    pub regular_fds: String,
+    pub close_receipt: Option<i32>,
 }
 
 const SIG_SETMASK: u64 = 2;
 const SIG_IGN: u64 = 1;
 
 impl ExecState {
-    pub fn commit_cloexec(&self)->Result<(),String>{
-        if let Some(fd)=self.close_receipt{super::exec_fd_receipt::consume(fd).map_err(|error|format!("exec descriptor receipt: errno {error}"))?;}Ok(())
+    pub fn commit_cloexec(&self) -> Result<(), String> {
+        if let Some(fd) = self.close_receipt {
+            super::exec_fd_receipt::consume(fd)
+                .map_err(|error| format!("exec descriptor receipt: errno {error}"))?;
+        }
+        Ok(())
     }
-    pub fn discard_cloexec(&self){if let Some(fd)=self.close_receipt{let _=super::exec_fd_receipt::discard(fd);}}
+    pub fn discard_cloexec(&self) {
+        if let Some(fd) = self.close_receipt {
+            let _ = super::exec_fd_receipt::discard(fd);
+        }
+    }
     /// Install this state in the new process, before the guest runs.
-    pub fn apply(&self) -> Result<(),String> {
+    pub fn apply(&self) -> Result<(), String> {
         if let Some(cwd) = &self.cwd {
             vfs::set_cwd(cwd.clone());
         }
@@ -121,9 +129,11 @@ impl ExecState {
             }
         }
         super::pstate::set_personality(self.personality);
-        vfs::load_own_mounts(&self.mounts).map_err(|error|format!("exec mount namespace: errno {error}"))?;
+        vfs::load_own_mounts(&self.mounts)
+            .map_err(|error| format!("exec mount namespace: errno {error}"))?;
         super::itimer::exec_restore(&self.itimers);
-        super::fdtab::restore_regular_exec(&self.regular_fds).map_err(|error|format!("regular exec inheritance: errno {error}"))?;
+        super::fdtab::restore_regular_exec(&self.regular_fds)
+            .map_err(|error| format!("regular exec inheritance: errno {error}"))?;
         Ok(())
     }
 
@@ -147,8 +157,8 @@ impl ExecState {
             mounts: vfs::own_mounts_text(),
             itimers: super::itimer::exec_text(),
             // Descriptor receipts are captured under the final exec admission.
-            regular_fds:String::new(),
-            close_receipt:None,
+            regular_fds: String::new(),
+            close_receipt: None,
         }
     }
 }
@@ -157,7 +167,7 @@ impl ExecState {
 ///
 /// # Safety
 /// `p` must be null or point at a readable guest array of string pointers.
-fn guest_strv(p: u64,budget:&mut usize) -> Result<Vec<CString>,errno::Errno> {
+fn guest_strv(p: u64, budget: &mut usize) -> Result<Vec<CString>, errno::Errno> {
     let mut v = Vec::new();
     if p == 0 {
         return Ok(v);
@@ -165,16 +175,22 @@ fn guest_strv(p: u64,budget:&mut usize) -> Result<Vec<CString>,errno::Errno> {
     let mut i = 0;
     loop {
         // SAFETY: caller contract.
-        let at=p.checked_add(i*8).ok_or(EFAULT)?;
-        let bytes=super::user_memory::read_exact(at,8)?;let s=u64::from_le_bytes(bytes.try_into().unwrap());
+        let at = p.checked_add(i * 8).ok_or(EFAULT)?;
+        let bytes = super::user_memory::read_exact(at, 8)?;
+        let s = u64::from_le_bytes(bytes.try_into().unwrap());
         if s == 0 {
             return Ok(v);
         }
         // SAFETY: caller contract.
-        let bytes=super::user_memory::read_cstr(s,32*super::mem::PAGE as usize).map_err(|error|if error==36{errno::E2BIG}else{error})?;
-        *budget=budget.checked_sub(bytes.len()+1+8).ok_or(errno::E2BIG)?;
-        v.push(CString::new(bytes).map_err(|_|EFAULT)?);
-        if v.len()>0x7fff_ffff{return Err(errno::E2BIG);}
+        let bytes = super::user_memory::read_cstr(s, 32 * super::mem::PAGE as usize)
+            .map_err(|error| if error == 36 { errno::E2BIG } else { error })?;
+        *budget = budget
+            .checked_sub(bytes.len() + 1 + 8)
+            .ok_or(errno::E2BIG)?;
+        v.push(CString::new(bytes).map_err(|_| EFAULT)?);
+        if v.len() > 0x7fff_ffff {
+            return Err(errno::E2BIG);
+        }
         i += 1;
     }
 }
@@ -234,9 +250,12 @@ fn classify(host: &CStr) -> Result<Kind, i64> {
         {
             return Err(-(EACCES as i64));
         }
-        let source=super::verified_source::VerifiedSource::open(host,true).map_err(|error|-(error as i64))?;
+        let source = super::verified_source::VerifiedSource::open(host, true)
+            .map_err(|error| -(error as i64))?;
         let mut buf = [0u8; BINPRM_BUF_SIZE];
-        let n=source.read_at(&mut buf,0).map_err(|error|-(error as i64))? as i64;
+        let n = source
+            .read_at(&mut buf, 0)
+            .map_err(|error| -(error as i64))? as i64;
         if let Some((interp, arg)) = parse_shebang(&buf) {
             return Ok(Kind::Script(interp, arg));
         }
@@ -265,7 +284,10 @@ fn trace_stage(stage: &str) {
     if super::tracing() {
         // SAFETY: getpid reads this process's host identity.
         let pid = unsafe { libc::getpid() };
-        crate::diag!("[linux-exec] pid={pid} tid={} stage={stage}", super::host_tid());
+        crate::diag!(
+            "[linux-exec] pid={pid} tid={} stage={stage}",
+            super::host_tid()
+        );
     }
 }
 
@@ -278,11 +300,23 @@ fn exec(ctx: &mut GuestContext, dirfd: i32, path: u64, argv: u64, envp: u64, fla
         return -(EFAULT as i64);
     }
     // SAFETY: guest string and string arrays.
-    let path=match guest_cstr(path){Ok(path)=>path,Err(error)=>return -(error as i64)};
-    let mut stack:libc::rlimit=unsafe{std::mem::zeroed()};if unsafe{libc::getrlimit(libc::RLIMIT_STACK,&mut stack)}<0{return -(errno::last()as i64);}
-    let mut budget=(stack.rlim_cur/4).min(6<<20).max(32*super::mem::PAGE)as usize;
-    let mut argv=match guest_strv(argv,&mut budget){Ok(argv)=>argv,Err(error)=>return -(error as i64)};
-    let envp=match guest_strv(envp,&mut budget){Ok(envp)=>envp,Err(error)=>return -(error as i64)};
+    let path = match guest_cstr(path) {
+        Ok(path) => path,
+        Err(error) => return -(error as i64),
+    };
+    let mut stack: libc::rlimit = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrlimit(libc::RLIMIT_STACK, &mut stack) } < 0 {
+        return -(errno::last() as i64);
+    }
+    let mut budget = (stack.rlim_cur / 4).min(6 << 20).max(32 * super::mem::PAGE) as usize;
+    let mut argv = match guest_strv(argv, &mut budget) {
+        Ok(argv) => argv,
+        Err(error) => return -(error as i64),
+    };
+    let envp = match guest_strv(envp, &mut budget) {
+        Ok(envp) => envp,
+        Err(error) => return -(error as i64),
+    };
     // Since Linux 5.18 an empty argv gets an empty argv[0].
     if argv.is_empty() {
         argv.push(CString::default());
@@ -339,7 +373,10 @@ fn in_place(
     }
     trace_stage("in-place.interpreter");
     // What Linux checks before the point of no return: the interpreter.
-    let interp=match crate::loader::interpreter_errno(&target.host){Ok(interp)=>interp,Err(error)=>return Some(-(error as i64))};
+    let interp = match crate::loader::interpreter_errno(&target.host) {
+        Ok(interp) => interp,
+        Err(error) => return Some(-(error as i64)),
+    };
     if let Some(i) = interp {
         let r = match vfs::resolve(LINUX_AT_FDCWD, i.as_bytes(), true) {
             Ok(r) => r,
@@ -378,7 +415,10 @@ fn in_place(
             // woken by CLOEXEC must not observe the old image still resetting
             // or loading after the close.
             trace_stage("in-place.close-on-exec");
-            if let Err(error)=super::fs::close_on_exec(){crate::diag!("[linux-abi] exec descriptor close: errno {error}");super::signal::die(SIGSEGV)}
+            if let Err(error) = super::fs::close_on_exec() {
+                crate::diag!("[linux-abi] exec descriptor close: errno {error}");
+                super::signal::die(SIGSEGV)
+            }
             // is_live above proves this is the calling thread's bound context.
             // Its host_sp was installed when the thread first entered guest
             // code and none of the exec resets replace it. Resume directly so
@@ -494,30 +534,83 @@ fn relaunch(program: &str, argv: &[CString], envp: &[CString], execfn: &[u8]) ->
     trace_stage("relaunch.handovers.enter");
     super::fork::spawn::wait_handovers();
     trace_stage("relaunch.receipt.prepare");
-    let mut receipt=match super::exec_fd_receipt::Receipt::prepare(){Ok(receipt)=>receipt,Err(error)=>return -(error as i64)};
+    let mut receipt = match super::exec_fd_receipt::Receipt::prepare() {
+        Ok(receipt) => receipt,
+        Err(error) => return -(error as i64),
+    };
     trace_stage("relaunch.lifecycle.enter");
-    let guard=super::fdtab::lifecycle();
+    let guard = super::fdtab::lifecycle();
     trace_stage("relaunch.receipt.capture");
-    if let Some(receipt)=&mut receipt{if let Err(error)=receipt.capture(){drop(guard);return -(error as i64);}}
+    if let Some(receipt) = &mut receipt {
+        if let Err(error) = receipt.capture() {
+            drop(guard);
+            return -(error as i64);
+        }
+    }
     trace_stage("relaunch.descriptors");
-    let mut descriptors=Vec::new();
-    for fd in super::fd_visibility::visible(){let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};if flags<0{let error=errno::last();drop(guard);return -(error as i64);}descriptors.push(fd.to_string());}
-    let mut options=vec![arg("--guest-fds"),arg(descriptors.join(",")),arg("--socket-receipts"),arg(super::fdtab::socket_exec_text())];
+    let mut descriptors = Vec::new();
+    for fd in super::fd_visibility::visible() {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 {
+            let error = errno::last();
+            drop(guard);
+            return -(error as i64);
+        }
+        descriptors.push(fd.to_string());
+    }
+    let mut options = vec![
+        arg("--guest-fds"),
+        arg(descriptors.join(",")),
+        arg("--socket-receipts"),
+        arg(super::fdtab::socket_exec_text()),
+    ];
     trace_stage("relaunch.regular-fds");
-    let regular=match super::fdtab::regular_exec_text(){Ok(text)=>text,Err(error)=>{drop(guard);return -(error as i64);}};if !regular.is_empty(){options.extend([arg("--regular-fds"),arg(regular)]);}
-    if let Some(receipt)=&receipt{options.extend([arg("--exec-close-receipt"),arg(receipt.fd().to_string())]);}
-    host.splice(1..1,options);
+    let regular = match super::fdtab::regular_exec_text() {
+        Ok(text) => text,
+        Err(error) => {
+            drop(guard);
+            return -(error as i64);
+        }
+    };
+    if !regular.is_empty() {
+        options.extend([arg("--regular-fds"), arg(regular)]);
+    }
+    if let Some(receipt) = &receipt {
+        options.extend([arg("--exec-close-receipt"), arg(receipt.fd().to_string())]);
+    }
+    host.splice(1..1, options);
     let mut hargv: Vec<*const libc::c_char> = host.iter().map(|s| s.as_ptr()).collect();
     hargv.push(std::ptr::null());
     let mut henv: Vec<*const libc::c_char> = envp.iter().map(|s| s.as_ptr()).collect();
     henv.push(std::ptr::null());
     // SAFETY: NULL-terminated arrays of C strings that outlive the call.
     trace_stage("relaunch.writer-flags");
-    let writer_flags=match super::fdtab::prepare_regular_exec(){Ok(flags)=>flags,Err(error)=>{drop(guard);return -(error as i64)}};
-    let cloexec_flags=match &receipt{Some(receipt)=>match receipt.retain_for_host_exec(){Ok(flags)=>Some(flags),Err(error)=>{drop(guard);drop(writer_flags);return -(error as i64)}},None=>None};
+    let writer_flags = match super::fdtab::prepare_regular_exec() {
+        Ok(flags) => flags,
+        Err(error) => {
+            drop(guard);
+            return -(error as i64);
+        }
+    };
+    let cloexec_flags = match &receipt {
+        Some(receipt) => match receipt.retain_for_host_exec() {
+            Ok(flags) => Some(flags),
+            Err(error) => {
+                drop(guard);
+                drop(writer_flags);
+                return -(error as i64);
+            }
+        },
+        None => None,
+    };
     trace_stage("relaunch.host-exec");
     unsafe { libc::execve(hargv[0], hargv.as_ptr(), henv.as_ptr()) };
-    let error=errno::last();drop(guard);drop(cloexec_flags);drop(writer_flags);drop(receipt);-(error as i64)
+    let error = errno::last();
+    drop(guard);
+    drop(cloexec_flags);
+    drop(writer_flags);
+    drop(receipt);
+    -(error as i64)
 }
 
 #[cfg(test)]

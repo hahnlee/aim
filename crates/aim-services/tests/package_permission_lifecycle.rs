@@ -1,9 +1,5 @@
 //! Original ART permission callback ordering with explicit owners; not live SystemServer.
-use std::{
-    fs,
-    process::Command,
-    time::Duration,
-};
+use std::{fs, process::Command, time::Duration};
 mod common {
     pub mod java;
     pub mod runtime;
@@ -76,7 +72,8 @@ fn package_permission_lifecycle_matches_original_order() {
     .unwrap();
     let boot = Boot::new(repo.join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
-    boot.wait_ready(Duration::from_secs(300)).expect("package_permission_lifecycle oracle boot readiness");
+    boot.wait_ready(Duration::from_secs(300))
+        .expect("package_permission_lifecycle oracle boot readiness");
     let guest = boot
         .data
         .join("data/local/tmp/package-permission-lifecycle");

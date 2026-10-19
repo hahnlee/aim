@@ -63,8 +63,8 @@ pub struct RunOptions<'a> {
     /// repeated when the guest execs another program.
     pub runtime_args: Vec<CString>,
     /// Explicit descriptors handed to the guest by the launcher or guest exec.
-    pub guest_fds:Vec<i32>,
-    pub socket_receipts:Vec<(i32,aim_storage::socket_inode::Receipt)>,
+    pub guest_fds: Vec<i32>,
+    pub socket_receipts: Vec<(i32, aim_storage::socket_inode::Receipt)>,
 }
 
 /// The environment a freshly started Android process sees from init.
@@ -107,12 +107,18 @@ const SIGSEGV: i32 = 11;
 /// of `opts` are used; the process state comes from the parent. Returns
 /// only on failure.
 pub fn run_fork_child(opts: RunOptions) -> String {
-    if let Err(error)=sys::fdtab::install_storage_registrar(){return error;}
-    if let Err(error)=vfs::inherit_fork_namespace(opts.path_map){return error;}
+    if let Err(error) = sys::fdtab::install_storage_registrar() {
+        return error;
+    }
+    if let Err(error) = vfs::inherit_fork_namespace(opts.path_map) {
+        return error;
+    }
     if let Err(e) = vfs::init(opts.root, opts.path_map) {
         return e;
     }
-    if let Err(error)=start_verity_runtime(){return error;}
+    if let Err(error) = start_verity_runtime() {
+        return error;
+    }
     sys::initialize_umask();
     sys::init_heap_window();
     sys::set_trace(opts.trace);
@@ -130,36 +136,61 @@ pub fn run_fork_child(opts: RunOptions) -> String {
 /// Load `program` under `root` and run it on the current thread. Returns
 /// only on a load error; the guest ends the process with exit_group.
 pub fn run(mut opts: RunOptions) -> String {
-    let _namespace_entry=if opts.mount_namespace_from_init {
-        match vfs::enter_init_namespace(opts.path_map,opts.by_pid.as_deref()){Ok(owner)=>Some(owner),Err(error)=>return error}
-    }else{None};
-    if let Some(owner)=&_namespace_entry {
-        opts.by_pid.get_or_insert_with(||owner.runtime().join("identity/by-pid"));
-        if opts.posix_control.is_none(){
-            let locator=owner.runtime().join("posix-control-owner");
-            match std::fs::symlink_metadata(&locator){
-                Ok(_)=>{
+    let _namespace_entry = if opts.mount_namespace_from_init {
+        match vfs::enter_init_namespace(opts.path_map, opts.by_pid.as_deref()) {
+            Ok(owner) => Some(owner),
+            Err(error) => return error,
+        }
+    } else {
+        None
+    };
+    if let Some(owner) = &_namespace_entry {
+        opts.by_pid
+            .get_or_insert_with(|| owner.runtime().join("identity/by-pid"));
+        if opts.posix_control.is_none() {
+            let locator = owner.runtime().join("posix-control-owner");
+            match std::fs::symlink_metadata(&locator) {
+                Ok(_) => {
                     use std::os::unix::ffi::OsStrExt;
-                    let path=match CString::new(locator.as_os_str().as_bytes()){Ok(path)=>path,Err(error)=>return error.to_string()};
-                    opts.runtime_args.extend([CString::new("--posix-control").unwrap(),path]);
-                    opts.posix_control=Some(locator);
-                },
-                Err(error)if error.kind()==std::io::ErrorKind::NotFound=>{},Err(error)=>return format!("external POSIX owner locator: {error}"),
+                    let path = match CString::new(locator.as_os_str().as_bytes()) {
+                        Ok(path) => path,
+                        Err(error) => return error.to_string(),
+                    };
+                    opts.runtime_args
+                        .extend([CString::new("--posix-control").unwrap(), path]);
+                    opts.posix_control = Some(locator);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return format!("external POSIX owner locator: {error}"),
             }
         }
     }
-    let inherited=opts.guest_fds.clone();
-    if let Err(error)=sys::fdtab::install_storage_registrar(){return error;}
+    let inherited = opts.guest_fds.clone();
+    if let Err(error) = sys::fdtab::install_storage_registrar() {
+        return error;
+    }
     if let Err(e) = vfs::init(opts.root, opts.path_map) {
         return e;
     }
-    if let Some(runtime)=vfs::standalone_runtime()&&!opts.runtime_args.iter().any(|arg|arg.as_bytes()==b"--runtime"){
-        opts.runtime_args.extend([CString::new("--runtime").unwrap(),CString::new(std::os::unix::ffi::OsStrExt::as_bytes(runtime.as_os_str())).unwrap()]);
+    if let Some(runtime) = vfs::standalone_runtime()
+        && !opts
+            .runtime_args
+            .iter()
+            .any(|arg| arg.as_bytes() == b"--runtime")
+    {
+        opts.runtime_args.extend([
+            CString::new("--runtime").unwrap(),
+            CString::new(std::os::unix::ffi::OsStrExt::as_bytes(runtime.as_os_str())).unwrap(),
+        ]);
     }
-    if let Err(error)=start_verity_runtime(){return error;}
+    if let Err(error) = start_verity_runtime() {
+        return error;
+    }
     sys::initialize_umask();
     sys::init_heap_window();
-    if let Err(error)=sys::fdtab::bootstrap(inherited,&opts.socket_receipts){return format!("inherited descriptor publication: errno {error}");}
+    if let Err(error) = sys::fdtab::bootstrap(inherited, &opts.socket_receipts) {
+        return format!("inherited descriptor publication: errno {error}");
+    }
     sys::init_fds();
     sys::set_trace(opts.trace);
     xrt::init(Some(vfs::root()), opts.cache.clone());
@@ -181,10 +212,20 @@ pub fn run(mut opts: RunOptions) -> String {
     sys::init_exec(opts.runtime_args);
     context::init_thread();
     diag::install_signal_handlers();
-    if let Err(error)=opts.state.apply(){return error;}
-    if let Err(error)=vfs::publish_process_namespace(){return format!("process mount namespace: errno {error}");}
-    let posix_admission=if opts.mount_namespace_from_init{sys::posix_locks::start_external(opts.posix_control.as_deref())}else{sys::posix_locks::start(opts.posix_control.as_deref())};
-    if let Err(error)=posix_admission{return format!("POSIX lock process admission: errno {error}");}
+    if let Err(error) = opts.state.apply() {
+        return error;
+    }
+    if let Err(error) = vfs::publish_process_namespace() {
+        return format!("process mount namespace: errno {error}");
+    }
+    let posix_admission = if opts.mount_namespace_from_init {
+        sys::posix_locks::start_external(opts.posix_control.as_deref())
+    } else {
+        sys::posix_locks::start(opts.posix_control.as_deref())
+    };
+    if let Err(error) = posix_admission {
+        return format!("POSIX lock process admission: errno {error}");
+    }
     let resolved = match vfs::resolve(vfs::LINUX_AT_FDCWD, opts.program.as_bytes(), true) {
         Ok(r) => r,
         Err(e) => return format!("{}: cannot resolve (errno {e})", opts.program),
@@ -207,14 +248,17 @@ pub fn run(mut opts: RunOptions) -> String {
     let execfn = opts.execfn.as_deref().unwrap_or(opts.program.as_bytes());
     match load_program(&resolved, &argv, &opts.envp, execfn) {
         Ok((entry, sp)) => {
-            let guest=context::prepare_guest(entry,sp);
-            if let Err(error)=opts.state.commit_cloexec(){
+            let guest = context::prepare_guest(entry, sp);
+            if let Err(error) = opts.state.commit_cloexec() {
                 crate::diag!("[linux-abi] exec descriptor receipt: {error}");
                 sys::die_process(SIGSEGV)
             }
             context::enter_prepared_guest(guest)
-        },
-        Err(e) => {opts.state.discard_cloexec();e},
+        }
+        Err(e) => {
+            opts.state.discard_cloexec();
+            e
+        }
     }
 }
 
@@ -259,40 +303,67 @@ pub fn load_program(
     Ok((entry, sp))
 }
 
-static VERITY_RUNTIME:std::sync::Mutex<Option<sys::verity_control::Runtime>>=std::sync::Mutex::new(None);
+static VERITY_RUNTIME: std::sync::Mutex<Option<sys::verity_control::Runtime>> =
+    std::sync::Mutex::new(None);
 /// The coordinator and proof store, read at start; the process registers
 /// with the coordinator when it first needs to (`verity_client`).
-static VERITY_PENDING:std::sync::Mutex<Option<(aim_storage::verity_control::OwnerConfig,std::sync::Arc<aim_storage::fsverity::Store>)>>=std::sync::Mutex::new(None);
+static VERITY_PENDING: std::sync::Mutex<
+    Option<(
+        aim_storage::verity_control::OwnerConfig,
+        std::sync::Arc<aim_storage::fsverity::Store>,
+    )>,
+> = std::sync::Mutex::new(None);
 /// This process's verity coordinator client, registering it now if it has
 /// not been: only a process that maps or enables a file that can have
 /// verity takes part, as on Linux only those touch verity state.
-pub(crate) fn verity_client()->Option<std::sync::Arc<aim_storage::verity_control::Client>>{
-    let mut current=VERITY_RUNTIME.lock().unwrap();
-    if current.is_none()&&let Some((config,store))=VERITY_PENDING.lock().unwrap().take(){
-        match sys::verity_control::Runtime::start_with_store(&config.endpoint,config.process,std::time::Duration::from_secs(5),store){
-            Ok(runtime)=>*current=Some(runtime),
+pub(crate) fn verity_client() -> Option<std::sync::Arc<aim_storage::verity_control::Client>> {
+    let mut current = VERITY_RUNTIME.lock().unwrap();
+    if current.is_none()
+        && let Some((config, store)) = VERITY_PENDING.lock().unwrap().take()
+    {
+        match sys::verity_control::Runtime::start_with_store(
+            &config.endpoint,
+            config.process,
+            std::time::Duration::from_secs(5),
+            store,
+        ) {
+            Ok(runtime) => *current = Some(runtime),
             // Without registration this process cannot honour verity.
-            Err(error)=>{diag!("verity process registration: {error}");unsafe{libc::_exit(127)}},
+            Err(error) => {
+                diag!("verity process registration: {error}");
+                unsafe { libc::_exit(127) }
+            }
         }
     }
-    current.as_ref().map(|runtime|runtime.client.clone())
+    current.as_ref().map(|runtime| runtime.client.clone())
 }
 /// The client if this process has registered.
-pub(crate) fn started_verity_client()->Option<std::sync::Arc<aim_storage::verity_control::Client>>{
-    VERITY_RUNTIME.lock().unwrap().as_ref().map(|runtime|runtime.client.clone())
+pub(crate) fn started_verity_client() -> Option<std::sync::Arc<aim_storage::verity_control::Client>>
+{
+    VERITY_RUNTIME
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|runtime| runtime.client.clone())
 }
-pub(crate) fn start_verity_runtime()->Result<(),String>{
-    let Some(runtime)=vfs::runtime_dir()else{return Ok(())};
-    let config=match aim_storage::verity_control::OwnerConfig::read(&runtime.join("verity-control-owner")){
-        Ok(config)=>config,
-        Err(error)if error.kind()==std::io::ErrorKind::NotFound=>return Ok(()),
-        Err(error)=>return Err(format!("verity coordinator owner: {error}")),
+pub(crate) fn start_verity_runtime() -> Result<(), String> {
+    let Some(runtime) = vfs::runtime_dir() else {
+        return Ok(());
     };
-    let mut pending=VERITY_PENDING.lock().unwrap();
-    if pending.is_some()||VERITY_RUNTIME.lock().unwrap().is_some(){return Err("verity process registration already initialized".into());}
-    let store=sys::regular_file::configured_store()
-        .map_err(|error|format!("verity proof store: errno {error}"))?
+    let config =
+        match aim_storage::verity_control::OwnerConfig::read(&runtime.join("verity-control-owner"))
+        {
+            Ok(config) => config,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("verity coordinator owner: {error}")),
+        };
+    let mut pending = VERITY_PENDING.lock().unwrap();
+    if pending.is_some() || VERITY_RUNTIME.lock().unwrap().is_some() {
+        return Err("verity process registration already initialized".into());
+    }
+    let store = sys::regular_file::configured_store()
+        .map_err(|error| format!("verity proof store: errno {error}"))?
         .ok_or("verity coordinator has no configured proof store")?;
-    *pending=Some((config,store));
+    *pending = Some((config, store));
     Ok(())
 }

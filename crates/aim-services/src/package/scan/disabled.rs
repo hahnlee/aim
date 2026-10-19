@@ -25,7 +25,9 @@ pub(super) struct DisabledUserStates {
 }
 
 impl DisabledUserStates {
-    pub(super) fn aliases(&self) -> Vec<i32> { self.aliases.iter().copied().collect() }
+    pub(super) fn aliases(&self) -> Vec<i32> {
+        self.aliases.iter().copied().collect()
+    }
     fn copied(users: &BTreeMap<i32, UserState>) -> Self {
         Self {
             users: users.clone(),
@@ -447,15 +449,26 @@ impl SigningScan {
     /// Mutable Settings fields may have advanced since its scan outcome.
     pub fn current_disabled_record(&self, admitted: &Record) -> Result<Record, SigningError> {
         let name = &admitted.settings.name;
-        let reject = |message: &str| SigningError::Rejected(Error {
-            package: name.clone(), path: admitted.settings.code_path.clone(),
-            phase: "factory-record", message: message.into(),
-        });
-        let setting = self.settings.disabled_system_packages.iter().find(|p| p.name == *name)
+        let reject = |message: &str| {
+            SigningError::Rejected(Error {
+                package: name.clone(),
+                path: admitted.settings.code_path.clone(),
+                phase: "factory-record",
+                message: message.into(),
+            })
+        };
+        let setting = self
+            .settings
+            .disabled_system_packages
+            .iter()
+            .find(|p| p.name == *name)
             .ok_or_else(|| reject("current disabled factory setting missing"))?;
-        let code = self.disabled_loaded.get(name)
+        let code = self
+            .disabled_loaded
+            .get(name)
             .ok_or_else(|| reject("current disabled factory code missing"))?;
-        code.validate_setting(setting, true).map_err(|e| reject(&e))?;
+        code.validate_setting(setting, true)
+            .map_err(|e| reject(&e))?;
         if admitted.origin != crate::package::owner::shared_users::ScanOrigin::SystemDirectory
             || admitted.settings.code_path != setting.code_path
             || admitted.settings.version_code != setting.version_code
@@ -464,13 +477,26 @@ impl SigningScan {
             || admitted.settings.shared_user_app_id != setting.shared_user_app_id
             || admitted.identity.internal_name != *name
             || admitted.identity.real_name != setting.real_name
-            || admitted.identity.manifest_name != code.package.manifest_package_name.as_deref().unwrap_or(&code.package.package_name)
+            || admitted.identity.manifest_name
+                != code
+                    .package
+                    .manifest_package_name
+                    .as_deref()
+                    .unwrap_or(&code.package.package_name)
             || code.package != admitted.parsed
-            || code.collected_signing != admitted.signing {
-            return Err(reject("admitted factory identity/code/signing differs from current owner"));
+            || code.collected_signing != admitted.signing
+        {
+            return Err(reject(
+                "admitted factory identity/code/signing differs from current owner",
+            ));
         }
-        Ok(Record { settings: setting.clone(), parsed: admitted.parsed.clone(),
-            signing: admitted.signing.clone(), identity: admitted.identity.clone(), origin: admitted.origin })
+        Ok(Record {
+            settings: setting.clone(),
+            parsed: admitted.parsed.clone(),
+            signing: admitted.signing.clone(),
+            identity: admitted.identity.clone(),
+            origin: admitted.origin,
+        })
     }
 
     /// Settings.disableSystemPackageLPw(replaced=true): copy the loaded factory
@@ -1029,46 +1055,126 @@ mod tests {
     }
     #[test]
     fn update_then_factory_enable_restores_system_identity_and_preserves_user_state() {
-        use crate::package::{pkg::{AndroidPackage, booleans}, settings::{Package, Settings}, sign::SigningDetails};
-        let factory = Package { name: "factory".into(), code_path: "/apex/vendor.module/priv-app/Factory".into(), app_id: 10001,
-            flags: crate::package::info::FLAG_SYSTEM | (1 << 6), private_flags: crate::package::settings::PRIVATE_FLAG_PRIVILEGED,
-            version_code: 1, ..Default::default() };
-        let mut owner = SigningScan::new(&Default::default(), &Settings { packages: vec![factory.clone()], ..Default::default() }, 36).unwrap();
-        let signing = SigningDetails { unknown: false, current_flags: Vec::new(), signatures: vec![vec![3]], scheme_version: 3, public_keys: Some(Vec::new()), past_signing_certificates: None };
-        let parsed = AndroidPackage { package_name: factory.name.clone(), uid: factory.app_id, booleans: booleans::SYSTEM | booleans::ENABLED, feature_flag_state: Some(Vec::new()), signing_details: Some(signing.parcel_details().unwrap()), ..Default::default() };
-        owner.loaded.insert(factory.name.clone(), std::sync::Arc::new(super::super::LoadedPackage::new(parsed.clone(), signing).unwrap()));
-        let users = BTreeMap::from([(0, UserState { enabled: 3, first_install_time: 123, ..Default::default() })]);
-        owner.scanned_users.insert(factory.name.clone(), users.clone());
-        let shared = owner.identities.shared_users.keys().map(|name|(
-            name.clone(), crate::package::owner::legacy_permissions::Migration::default()
-        )).collect();
-        owner.capture_legacy_permissions(
-            &[0],
-            [((factory.name.clone(), false), crate::package::owner::legacy_permissions::Migration::default())].into(),
-            shared,
-        ).unwrap();
+        use crate::package::{
+            pkg::{AndroidPackage, booleans},
+            settings::{Package, Settings},
+            sign::SigningDetails,
+        };
+        let factory = Package {
+            name: "factory".into(),
+            code_path: "/apex/vendor.module/priv-app/Factory".into(),
+            app_id: 10001,
+            flags: crate::package::info::FLAG_SYSTEM | (1 << 6),
+            private_flags: crate::package::settings::PRIVATE_FLAG_PRIVILEGED,
+            version_code: 1,
+            ..Default::default()
+        };
+        let mut owner = SigningScan::new(
+            &Default::default(),
+            &Settings {
+                packages: vec![factory.clone()],
+                ..Default::default()
+            },
+            36,
+        )
+        .unwrap();
+        let signing = SigningDetails {
+            unknown: false,
+            current_flags: Vec::new(),
+            signatures: vec![vec![3]],
+            scheme_version: 3,
+            public_keys: Some(Vec::new()),
+            past_signing_certificates: None,
+        };
+        let parsed = AndroidPackage {
+            package_name: factory.name.clone(),
+            uid: factory.app_id,
+            booleans: booleans::SYSTEM | booleans::ENABLED,
+            feature_flag_state: Some(Vec::new()),
+            signing_details: Some(signing.parcel_details().unwrap()),
+            ..Default::default()
+        };
+        owner.loaded.insert(
+            factory.name.clone(),
+            std::sync::Arc::new(super::super::LoadedPackage::new(parsed.clone(), signing).unwrap()),
+        );
+        let users = BTreeMap::from([(
+            0,
+            UserState {
+                enabled: 3,
+                first_install_time: 123,
+                ..Default::default()
+            },
+        )]);
+        owner
+            .scanned_users
+            .insert(factory.name.clone(), users.clone());
+        let shared = owner
+            .identities
+            .shared_users
+            .keys()
+            .map(|name| {
+                (
+                    name.clone(),
+                    crate::package::owner::legacy_permissions::Migration::default(),
+                )
+            })
+            .collect();
+        owner
+            .capture_legacy_permissions(
+                &[0],
+                [(
+                    (factory.name.clone(), false),
+                    crate::package::owner::legacy_permissions::Migration::default(),
+                )]
+                .into(),
+                shared,
+            )
+            .unwrap();
         assert!(owner.disable_system_package(&factory.name).unwrap());
         let active = &mut owner.settings.packages[0];
-        active.code_path = "/data/app/factory-update".into(); active.version_code = 2;
+        active.code_path = "/data/app/factory-update".into();
+        active.version_code = 2;
         active.flags = crate::package::info::FLAG_UPDATED_SYSTEM_APP;
         active.private_flags = 0;
         active.transient.updated_system_app = true;
-        assert_ne!(active.flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP, 0);
-        assert!(!owner.settings.disabled_system_packages[0].transient.updated_system_app);
+        assert_ne!(
+            active.flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP,
+            0
+        );
+        assert!(
+            !owner.settings.disabled_system_packages[0]
+                .transient
+                .updated_system_app
+        );
         let ids = owner.identities.clone();
         let mut restored = owner.enable_system_setting(&factory.name, [7; 16]).unwrap();
         assert!(!restored.transient.updated_system_app);
-        assert_eq!(restored.flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP, 0);
-        assert_eq!(owner.settings.packages[0].flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP, 0);
+        assert_eq!(
+            restored.flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP,
+            0
+        );
+        assert_eq!(
+            owner.settings.packages[0].flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP,
+            0
+        );
         assert_eq!(restored.flags, factory.flags);
         assert_eq!(restored.private_flags, factory.private_flags);
         assert_eq!(owner.settings.packages[0].flags, factory.flags);
-        assert_eq!(owner.settings.packages[0].private_flags, factory.private_flags);
+        assert_eq!(
+            owner.settings.packages[0].private_flags,
+            factory.private_flags
+        );
         super::super::enrich::application(&mut restored, &mut parsed.clone(), false, false);
-        assert_eq!(restored.flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP, 0);
+        assert_eq!(
+            restored.flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP,
+            0
+        );
         assert_ne!(restored.flags & crate::package::info::FLAG_SYSTEM, 0);
-        assert_eq!(restored.app_id, factory.app_id); assert_eq!(restored.version_code, factory.version_code);
-        assert_eq!(owner.identities, ids); assert_eq!(owner.scanned_users[&factory.name], users);
+        assert_eq!(restored.app_id, factory.app_id);
+        assert_eq!(restored.version_code, factory.version_code);
+        assert_eq!(owner.identities, ids);
+        assert_eq!(owner.scanned_users[&factory.name], users);
         assert!(owner.settings.disabled_system_packages.is_empty());
         owner.legacy_permission_users().unwrap();
     }

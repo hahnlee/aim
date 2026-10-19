@@ -28,7 +28,8 @@ fn permission(query: &Query<'_>, owner: &Handle, name: &str) -> Action<()> {
         return Ok(());
     }
     Err(ActionError::Exception(Exception::security(format!(
-        "Neither user {} nor current process has {name}.", query.calling_uid
+        "Neither user {} nor current process has {name}.",
+        query.calling_uid
     ))))
 }
 fn preferred_permission(query: &Query<'_>, owner: &Handle) -> Action<bool> {
@@ -91,11 +92,19 @@ fn preferred_permission(query: &Query<'_>, owner: &Handle) -> Action<bool> {
 }
 fn cross_user(query: &Query<'_>, owner: &Handle, user: i32, message: &str) -> Action<()> {
     if user < 0 {
-        return Err(ActionError::Exception(Exception::illegal_argument(format!("Invalid userId {user}"))));
+        return Err(ActionError::Exception(Exception::illegal_argument(
+            format!("Invalid userId {user}"),
+        )));
     }
     let uid = query.calling_uid;
-    if user == user_id(uid) || matches!(uid, 0 | SYSTEM_UID)
-        || context_permission(query, owner, "android.permission.INTERACT_ACROSS_USERS_FULL")? {
+    if user == user_id(uid)
+        || matches!(uid, 0 | SYSTEM_UID)
+        || context_permission(
+            query,
+            owner,
+            "android.permission.INTERACT_ACROSS_USERS_FULL",
+        )?
+    {
         return Ok(());
     }
     Err(ActionError::Exception(Exception::security(format!(
@@ -394,7 +403,11 @@ pub fn answer(
             pm::ADD_CROSS_PROFILE_INTENT_FILTER => {
                 let args = read!(pm::AddCrossProfileIntentFilter<ReadFilter>);
                 let filter = required(args.intent_filter, "null cross-profile add filter")?.0;
-                permission(query, owner, "android.permission.INTERACT_ACROSS_USERS_FULL")?;
+                permission(
+                    query,
+                    owner,
+                    "android.permission.INTERACT_ACROSS_USERS_FULL",
+                )?;
                 let package = required(args.owner_package, "null cross-profile owner package")?;
                 owner_rights(query, &package)?;
                 let access = owner.actions.cross_access(
@@ -426,7 +439,11 @@ pub fn answer(
             }
             pm::REMOVE_CROSS_PROFILE_INTENT_FILTER => {
                 let args = read!(pm::RemoveCrossProfileIntentFilter<ReadFilter>);
-                permission(query, owner, "android.permission.INTERACT_ACROSS_USERS_FULL")?;
+                permission(
+                    query,
+                    owner,
+                    "android.permission.INTERACT_ACROSS_USERS_FULL",
+                )?;
                 let package = required(args.owner_package, "null cross-profile remove owner")?;
                 owner_rights(query, &package)?;
                 owner.actions.cross_access(
@@ -455,7 +472,11 @@ pub fn answer(
             }
             pm::CLEAR_CROSS_PROFILE_INTENT_FILTERS => {
                 let args = read!(pm::ClearCrossProfileIntentFilters);
-                permission(query, owner, "android.permission.INTERACT_ACROSS_USERS_FULL")?;
+                permission(
+                    query,
+                    owner,
+                    "android.permission.INTERACT_ACROSS_USERS_FULL",
+                )?;
                 let package = required(args.owner_package, "null cross-profile clear owner")?;
                 owner_rights(query, &package)?;
                 owner
@@ -550,7 +571,11 @@ pub fn answer(
             }
             pm::RESET_APPLICATION_PREFERENCES => {
                 let args = read!(pm::ResetApplicationPreferences);
-                permission(query, owner, "android.permission.SET_PREFERRED_APPLICATIONS")?;
+                permission(
+                    query,
+                    owner,
+                    "android.permission.SET_PREFERRED_APPLICATIONS",
+                )?;
                 let defaults = owner.actions.default_preferences(args.user_id)?;
                 mutate(
                     owner,

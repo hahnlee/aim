@@ -313,7 +313,11 @@ pub fn xml(data: &[u8]) -> Result<Element> {
             XML_CDATA => {
                 let pool = pool.as_ref().ok_or_else(|| bad("XML without strings"))?;
                 let text = pool.get(u32_at(c.data, c.header)?).unwrap_or_default();
-                stack.last_mut().ok_or_else(|| bad("unbalanced XML"))?.text.push_str(text);
+                stack
+                    .last_mut()
+                    .ok_or_else(|| bad("unbalanced XML"))?
+                    .text
+                    .push_str(text);
             }
             XML_END_ELEMENT => {
                 let e = stack.pop().ok_or_else(|| bad("unbalanced XML"))?;

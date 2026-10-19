@@ -95,7 +95,14 @@ impl ExitInfo {
     /// `obtainRawRecord` of a process of the app host with `uid`, of a
     /// package of `package_uid`, each of which is top once it attached
     /// (`procStateToImportance` of its reported state).
-    pub(super) fn raw(package: &str, process: &str, uid: u32, package_uid: u32, pid: i32, attached: bool) -> ExitInfo {
+    pub(super) fn raw(
+        package: &str,
+        process: &str,
+        uid: u32,
+        package_uid: u32,
+        pid: i32,
+        attached: bool,
+    ) -> ExitInfo {
         ExitInfo {
             pid,
             real_uid: uid as i32,
@@ -105,7 +112,11 @@ impl ExitInfo {
             package_name: Some(package.to_string()),
             reason: REASON_UNKNOWN,
             sub_reason: SUBREASON_UNKNOWN,
-            importance: if attached { IMPORTANCE_FOREGROUND } else { IMPORTANCE_GONE },
+            importance: if attached {
+                IMPORTANCE_FOREGROUND
+            } else {
+                IMPORTANCE_GONE
+            },
             timestamp: now_ms(),
             ..Default::default()
         }
@@ -205,9 +216,17 @@ impl Container {
     /// positive), newest first, at most `max_num` (all, if not positive).
     fn exit_infos(&self, filter_pid: i32, max_num: i32) -> Vec<&ExitInfo> {
         if max_num == 1 {
-            return self.latest(filter_pid).map(|i| &self.infos[i]).into_iter().collect();
+            return self
+                .latest(filter_pid)
+                .map(|i| &self.infos[i])
+                .into_iter()
+                .collect();
         }
-        let mut infos: Vec<&ExitInfo> = self.infos.iter().filter(|i| filter_pid <= 0 || i.pid == filter_pid).collect();
+        let mut infos: Vec<&ExitInfo> = self
+            .infos
+            .iter()
+            .filter(|i| filter_pid <= 0 || i.pid == filter_pid)
+            .collect();
         infos.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         if max_num > 0 {
             infos.truncate(max_num as usize);
@@ -232,9 +251,17 @@ impl Container {
 
     /// `addExitInfoLocked`, with the state the process set claimed; the
     /// oldest exit beyond `capacity`, whose trace goes with it.
-    fn add(&mut self, mut info: ExitInfo, summaries: &mut Vec<Summary>, retriever: Option<Binder>, capacity: usize) -> Option<ExitInfo> {
+    fn add(
+        &mut self,
+        mut info: ExitInfo,
+        summaries: &mut Vec<Summary>,
+        retriever: Option<Binder>,
+        capacity: usize,
+    ) -> Option<ExitInfo> {
         if info.state.is_none() {
-            let claimed = summaries.iter().position(|s| s.uid == info.package_uid && s.pid == info.pid);
+            let claimed = summaries
+                .iter()
+                .position(|s| s.uid == info.package_uid && s.pid == info.pid);
             info.state = claimed.and_then(|at| summaries.remove(at).state);
         }
         info.trace_retriever = retriever;
@@ -242,7 +269,13 @@ impl Container {
         if self.infos.len() <= capacity {
             return None;
         }
-        let oldest = (0..self.infos.len()).fold(0, |o, i| if self.infos[i].timestamp < self.infos[o].timestamp { i } else { o });
+        let oldest = (0..self.infos.len()).fold(0, |o, i| {
+            if self.infos[i].timestamp < self.infos[o].timestamp {
+                i
+            } else {
+                o
+            }
+        });
         Some(self.infos.remove(oldest))
     }
 }
@@ -266,7 +299,10 @@ struct History {
 
 impl History {
     fn users(&self, package: &str) -> Option<&std::collections::BTreeMap<i32, Container>> {
-        self.packages.iter().find(|(p, _)| p == package).map(|(_, users)| users)
+        self.packages
+            .iter()
+            .find(|(p, _)| p == package)
+            .map(|(_, users)| users)
     }
 
     /// `ProcessMap.put`'s package: added in `ArrayMap` order (by hash, then
@@ -277,7 +313,8 @@ impl History {
             None => {
                 let hash = java_hash(package);
                 let at = self.packages.partition_point(|(p, _)| java_hash(p) <= hash);
-                self.packages.insert(at, (package.to_string(), Default::default()));
+                self.packages
+                    .insert(at, (package.to_string(), Default::default()));
                 at
             }
         };
@@ -286,13 +323,28 @@ impl History {
 
     /// `getExitInfo`: `package`'s exits in `filter_uid`, or, without a
     /// package, the uid's in every package, newest first.
-    fn exit_info(&self, package: Option<&str>, filter_uid: i32, filter_pid: i32, max_num: i32) -> Vec<&ExitInfo> {
+    fn exit_info(
+        &self,
+        package: Option<&str>,
+        filter_uid: i32,
+        filter_pid: i32,
+        max_num: i32,
+    ) -> Vec<&ExitInfo> {
         if let Some(package) = package.filter(|p| !p.is_empty()) {
-            return self.users(package).and_then(|u| u.get(&filter_uid)).map(|c| c.exit_infos(filter_pid, max_num)).unwrap_or_default();
+            return self
+                .users(package)
+                .and_then(|u| u.get(&filter_uid))
+                .map(|c| c.exit_infos(filter_pid, max_num))
+                .unwrap_or_default();
         }
         // `forEachPackageLocked` walks the packages from the last.
-        let mut results: Vec<&ExitInfo> =
-            self.packages.iter().rev().filter_map(|(_, users)| users.get(&filter_uid)).flat_map(|c| c.exit_infos(filter_pid, 0)).collect();
+        let mut results: Vec<&ExitInfo> = self
+            .packages
+            .iter()
+            .rev()
+            .filter_map(|(_, users)| users.get(&filter_uid))
+            .flat_map(|c| c.exit_infos(filter_pid, 0))
+            .collect();
         results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         if max_num > 0 {
             results.truncate(max_num as usize);
@@ -302,17 +354,37 @@ impl History {
 
     /// `getExitInfoLocked`: the newest exit of `pid` in `package` and `uid`.
     fn latest_mut(&mut self, package: &str, uid: i32, pid: i32) -> Option<&mut ExitInfo> {
-        let container = self.packages.iter_mut().find(|(p, _)| p == package)?.1.get_mut(&uid)?;
+        let container = self
+            .packages
+            .iter_mut()
+            .find(|(p, _)| p == package)?
+            .1
+            .get_mut(&uid)?;
         container.latest(pid).map(|i| &mut container.infos[i])
     }
 
     /// `addExitInfoLocked` of `raw` under its package and real uid (an
     /// isolated process's owner's): the exits that fell out of the history.
-    fn add(&mut self, raw: &ExitInfo, retriever: Option<Binder>, capacity: usize) -> Option<ExitInfo> {
+    fn add(
+        &mut self,
+        raw: &ExitInfo,
+        retriever: Option<Binder>,
+        capacity: usize,
+    ) -> Option<ExitInfo> {
         let package = raw.package_name.as_deref()?;
-        let uid = if is_isolated(raw.real_uid) { raw.package_uid } else { raw.real_uid };
+        let uid = if is_isolated(raw.real_uid) {
+            raw.package_uid
+        } else {
+            raw.real_uid
+        };
         let mut summaries = std::mem::take(&mut self.summaries);
-        let container = self.users_mut(package).entry(uid).or_insert_with(|| Container { uid, infos: Vec::new() });
+        let container = self
+            .users_mut(package)
+            .entry(uid)
+            .or_insert_with(|| Container {
+                uid,
+                infos: Vec::new(),
+            });
         let dropped = container.add(raw.clone(), &mut summaries, retriever, capacity);
         self.summaries = summaries;
         dropped
@@ -320,7 +392,12 @@ impl History {
 
     /// `handleNoteProcessDiedLocked`, without zygote's or lmkd's reports:
     /// a death not noted before is added.
-    fn note_process_died(&mut self, raw: &ExitInfo, retriever: Option<Binder>, capacity: usize) -> Option<Option<ExitInfo>> {
+    fn note_process_died(
+        &mut self,
+        raw: &ExitInfo,
+        retriever: Option<Binder>,
+        capacity: usize,
+    ) -> Option<Option<ExitInfo>> {
         let package = raw.package_name.as_deref()?;
         if self.latest_mut(package, raw.package_uid, raw.pid).is_some() {
             return None;
@@ -330,10 +407,17 @@ impl History {
 
     /// `handleNoteAppKillLocked`: an earlier record of the pid takes the
     /// kill's reason, unless it is a crash or an ANR (`preventExitInfoUpdate`).
-    fn note_app_kill(&mut self, raw: &ExitInfo, retriever: Option<Binder>, capacity: usize) -> Option<Option<ExitInfo>> {
+    fn note_app_kill(
+        &mut self,
+        raw: &ExitInfo,
+        retriever: Option<Binder>,
+        capacity: usize,
+    ) -> Option<Option<ExitInfo>> {
         let package = raw.package_name.as_deref()?;
         match self.latest_mut(package, raw.package_uid, raw.pid) {
-            Some(info) if !matches!(info.reason, REASON_ANR | REASON_CRASH | REASON_CRASH_NATIVE) => {
+            Some(info)
+                if !matches!(info.reason, REASON_ANR | REASON_CRASH | REASON_CRASH_NATIVE) =>
+            {
                 info.reason = raw.reason;
                 info.sub_reason = raw.sub_reason;
                 info.status = 0;
@@ -347,7 +431,11 @@ impl History {
 
     /// `setProcessStateSummary`.
     fn set_summary(&mut self, uid: i32, pid: i32, state: Option<Vec<u8>>) {
-        match self.summaries.iter_mut().find(|s| s.uid == uid && s.pid == pid) {
+        match self
+            .summaries
+            .iter_mut()
+            .find(|s| s.uid == uid && s.pid == pid)
+        {
             Some(s) => s.state = state,
             None => self.summaries.push(Summary { uid, pid, state }),
         }
@@ -368,7 +456,9 @@ impl History {
                             fields(value.bytes()?, |number, value| {
                                 match number {
                                     1 => container.uid = value.int()?,
-                                    2 => container.infos.push(ExitInfo::read_proto(value.bytes()?)?),
+                                    2 => {
+                                        container.infos.push(ExitInfo::read_proto(value.bytes()?)?)
+                                    }
                                     _ => {}
                                 }
                                 Ok(())
@@ -409,7 +499,11 @@ impl History {
 
     /// The guest paths of the traces the records own.
     fn traces(&self) -> impl Iterator<Item = &str> {
-        self.packages.iter().flat_map(|(_, users)| users.values()).flat_map(|c| &c.infos).filter_map(|i| i.trace_file.as_deref())
+        self.packages
+            .iter()
+            .flat_map(|(_, users)| users.values())
+            .flat_map(|c| &c.infos)
+            .filter_map(|i| i.trace_file.as_deref())
     }
 }
 
@@ -432,13 +526,23 @@ impl Tracker {
         match super::device_policy::read_atomic_bytes(&file) {
             Ok(Some(bytes)) => {
                 if let Err(e) = History::read(&bytes, &mut history) {
-                    eprintln!("app host: Error in loading historical app exit info from persistent storage: {e}");
+                    eprintln!(
+                        "app host: Error in loading historical app exit info from persistent storage: {e}"
+                    );
                 }
             }
             Ok(None) => {}
-            Err(e) => eprintln!("app host: Error in loading historical app exit info from persistent storage: {e}"),
+            Err(e) => eprintln!(
+                "app host: Error in loading historical app exit info from persistent storage: {e}"
+            ),
         }
-        let tracker = Arc::new_cyclic(|me| Tracker { me: me.clone(), data: data.to_path_buf(), capacity, retriever, history: Mutex::new(history) });
+        let tracker = Arc::new_cyclic(|me| Tracker {
+            me: me.clone(),
+            data: data.to_path_buf(),
+            capacity,
+            retriever,
+            history: Mutex::new(history),
+        });
         tracker.prune_anr_traces();
         tracker
     }
@@ -446,19 +550,30 @@ impl Tracker {
     /// The host path of a guest path under `/data`.
     fn host_path(&self, guest: &str) -> Option<PathBuf> {
         let relative = Path::new(guest).strip_prefix("/data").ok()?;
-        (!relative.components().any(|c| matches!(c, std::path::Component::ParentDir))).then(|| self.data.join(relative))
+        (!relative
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir)))
+        .then(|| self.data.join(relative))
     }
 
     /// The ANR traces in the store no record owns are removed.
     fn prune_anr_traces(&self) {
         let store = self.data.join(STORE_DIR);
-        let Ok(entries) = std::fs::read_dir(&store) else { return };
+        let Ok(entries) = std::fs::read_dir(&store) else {
+            return;
+        };
         let history = self.history.lock().unwrap();
-        let owned: Vec<&str> = history.traces().filter_map(|t| Path::new(t).file_name()?.to_str()).collect();
+        let owned: Vec<&str> = history
+            .traces()
+            .filter_map(|t| Path::new(t).file_name()?.to_str())
+            .collect();
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            if name.starts_with(ANR_FILE_PREFIX) && name.ends_with(TRACE_FILE_SUFFIX) && !owned.contains(&name) {
+            if name.starts_with(ANR_FILE_PREFIX)
+                && name.ends_with(TRACE_FILE_SUFFIX)
+                && !owned.contains(&name)
+            {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
@@ -467,7 +582,10 @@ impl Tracker {
     /// An exit that fell out of the history: its trace goes, and the
     /// history is written in a while (`schedulePersistProcessExitInfo`).
     fn added(&self, history: &mut History, dropped: Option<ExitInfo>) {
-        if let Some(path) = dropped.and_then(|d| d.trace_file).and_then(|t| self.host_path(&t)) {
+        if let Some(path) = dropped
+            .and_then(|d| d.trace_file)
+            .and_then(|t| self.host_path(&t))
+        {
             let _ = std::fs::remove_file(path);
         }
         if history.persist_scheduled {
@@ -491,7 +609,9 @@ impl Tracker {
             history.write(now_ms())
         };
         if let Err(e) = write_store(&self.data.join(STORE_DIR), &bytes) {
-            eprintln!("app host: Unable to write historical app exit info into persistent storage: {e}");
+            eprintln!(
+                "app host: Unable to write historical app exit info into persistent storage: {e}"
+            );
         }
     }
 
@@ -509,29 +629,58 @@ impl Tracker {
         }
     }
 
-    fn exit_info(&self, package: Option<&str>, filter_uid: i32, filter_pid: i32, max_num: i32) -> Vec<ExitInfo> {
-        self.history.lock().unwrap().exit_info(package, filter_uid, filter_pid, max_num).into_iter().cloned().collect()
+    fn exit_info(
+        &self,
+        package: Option<&str>,
+        filter_uid: i32,
+        filter_pid: i32,
+        max_num: i32,
+    ) -> Vec<ExitInfo> {
+        self.history
+            .lock()
+            .unwrap()
+            .exit_info(package, filter_uid, filter_pid, max_num)
+            .into_iter()
+            .cloned()
+            .collect()
     }
 }
 
 /// Writes `bytes` as the store's info file, as `AtomicFile` writes it,
 /// making the store as `FileUtils.createDir` does.
 fn write_store(store: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let system = aim_storage::guest_inode::GuestInode { uid: Some(1000), gid: Some(1000), mode: Some(0o700) };
+    let system = aim_storage::guest_inode::GuestInode {
+        uid: Some(1000),
+        gid: Some(1000),
+        mode: Some(0o700),
+    };
     if !store.is_dir() {
         std::fs::create_dir(store)?;
         aim_storage::guest_inode::record(store, system)?;
     }
     let new = store.join(format!("{INFO_FILE}.new"));
-    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&new)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&new)?;
     std::io::Write::write_all(&mut file, bytes)?;
     crate::fsync(&file)?;
-    aim_storage::guest_inode::record(&new, aim_storage::guest_inode::GuestInode { mode: Some(0o600), ..system })?;
+    aim_storage::guest_inode::record(
+        &new,
+        aim_storage::guest_inode::GuestInode {
+            mode: Some(0o600),
+            ..system
+        },
+    )?;
     std::fs::rename(&new, store.join(INFO_FILE))
 }
 
 fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 /// A field's value as `ProtoInputStream` reads it.
@@ -561,7 +710,8 @@ impl Value<'_> {
     }
 
     pub(super) fn string(&self) -> Result<String, String> {
-        self.bytes().map(|b| String::from_utf8_lossy(b).into_owned())
+        self.bytes()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
     }
 }
 
@@ -579,7 +729,10 @@ fn varint(data: &[u8], at: &mut usize) -> Result<u64, String> {
 }
 
 /// Calls `field(number, value)` for each field of a message.
-pub(super) fn fields(data: &[u8], mut field: impl FnMut(u64, Value<'_>) -> Result<(), String>) -> Result<(), String> {
+pub(super) fn fields(
+    data: &[u8],
+    mut field: impl FnMut(u64, Value<'_>) -> Result<(), String>,
+) -> Result<(), String> {
     let mut at = 0;
     while at < data.len() {
         let key = varint(data, &mut at)?;
@@ -594,7 +747,9 @@ pub(super) fn fields(data: &[u8], mut field: impl FnMut(u64, Value<'_>) -> Resul
             }
             2 => {
                 let len = varint(data, &mut at)? as usize;
-                let bytes = data.get(at..at.checked_add(len).ok_or("truncated field")?).ok_or("truncated field")?;
+                let bytes = data
+                    .get(at..at.checked_add(len).ok_or("truncated field")?)
+                    .ok_or("truncated field")?;
                 at += len;
                 Value::Bytes(bytes)
             }
@@ -655,7 +810,12 @@ impl AppHost {
             .inputs()?
             .packages
             .framework_integer(name)
-            .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, format!("no integer {name}")))?;
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    format!("no integer {name}"),
+                )
+            })?;
         let data = self.data()?.to_path_buf();
         let host = self.me.clone();
         Ok(self.exit_infos.get_or_init(|| {
@@ -675,16 +835,34 @@ impl AppHost {
 
     /// `enforceDumpPermissionForPackage`: the uid of `package` in `user`,
     /// which DUMP is needed to see unless it is the caller's app.
-    fn dump_permission_for_package(&self, call: &Call<'_>, package: &str, user: i32, function: &str) -> Result<i32, Exception> {
+    fn dump_permission_for_package(
+        &self,
+        call: &Call<'_>,
+        package: &str,
+        user: i32,
+        function: &str,
+    ) -> Result<i32, Exception> {
         let calling_uid = call.sender_euid as i32;
         if (20_000..30_000).contains(&(calling_uid % PER_USER_RANGE as i32)) {
-            return Err(Exception::new(EX_UNSUPPORTED_OPERATION, format!("activity {function}: an SDK sandbox caller (#1540)")));
+            return Err(Exception::new(
+                EX_UNSUPPORTED_OPERATION,
+                format!("activity {function}: an SDK sandbox caller (#1540)"),
+            ));
         }
         let (state, resolution) = self.packages()?;
-        let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
+        let query = Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: SYSTEM_UID,
+        };
         let uid = query
             .package_uid(package, MATCH_DIRECT_BOOT_AWARE_UNAWARE, user)
-            .map_err(|e| Exception::new(EX_UNSUPPORTED_OPERATION, format!("activity {function}: {}", e.0)))??;
+            .map_err(|e| {
+                Exception::new(
+                    EX_UNSUPPORTED_OPERATION,
+                    format!("activity {function}: {}", e.0),
+                )
+            })??;
         // `UserHandle.getAppId`, -1 for no package.
         if uid % PER_USER_RANGE as i32 != calling_uid % PER_USER_RANGE as i32
             && self.check_permission(Some("android.permission.DUMP"), calling_uid)? != 0
@@ -710,7 +888,9 @@ impl AppHost {
         const NAME: &str = "getHistoricalProcessExitReasons";
         let calling_uid = call.sender_euid as i32;
         if is_isolated(calling_uid) {
-            return Err(Exception::security(format!("Isolated process not allowed to call {NAME}")));
+            return Err(Exception::security(format!(
+                "Isolated process not allowed to call {NAME}"
+            )));
         }
         if user == USER_ALL || user == USER_CURRENT {
             return Err(Exception::illegal_argument("Unsupported userId"));
@@ -726,27 +906,50 @@ impl AppHost {
         if filter_uid == INVALID_UID {
             return Ok(Vec::new());
         }
-        Ok(self.exit_infos()?.exit_info(package, filter_uid, pid, max_num))
+        Ok(self
+            .exit_infos()?
+            .exit_info(package, filter_uid, pid, max_num))
     }
 
     /// `setProcessStateSummary` of the calling process.
-    pub(super) fn set_process_state_summary(&self, call: &Call<'_>, state: Option<Vec<u8>>) -> Result<(), Exception> {
-        if state.as_ref().is_some_and(|s| s.len() > MAX_STATE_DATA_SIZE) {
+    pub(super) fn set_process_state_summary(
+        &self,
+        call: &Call<'_>,
+        state: Option<Vec<u8>>,
+    ) -> Result<(), Exception> {
+        if state
+            .as_ref()
+            .is_some_and(|s| s.len() > MAX_STATE_DATA_SIZE)
+        {
             return Err(Exception::illegal_argument("Data size is too large"));
         }
-        self.exit_infos()?.history.lock().unwrap().set_summary(call.sender_euid as i32, call.sender_pid, state);
+        self.exit_infos()?.history.lock().unwrap().set_summary(
+            call.sender_euid as i32,
+            call.sender_pid,
+            state,
+        );
         Ok(())
     }
 
     /// `AppTraceRetriever.getTraceFileDescriptor`: the ANR trace of the
     /// newest exit of `pid` in `package` and `uid`'s user.
-    fn trace_file_descriptor(&self, call: &Call<'_>, package: Option<&str>, uid: i32, pid: i32) -> Result<Option<Descriptor>, Exception> {
+    fn trace_file_descriptor(
+        &self,
+        call: &Call<'_>,
+        package: Option<&str>,
+        uid: i32,
+        pid: i32,
+    ) -> Result<Option<Descriptor>, Exception> {
         const NAME: &str = "getTraceFileDescriptor";
         let calling_uid = call.sender_euid as i32;
         if is_isolated(calling_uid) {
-            return Err(Exception::security(format!("Isolated process not allowed to call {NAME}")));
+            return Err(Exception::security(format!(
+                "Isolated process not allowed to call {NAME}"
+            )));
         }
-        let package = package.filter(|p| !p.is_empty()).ok_or_else(|| Exception::illegal_argument("Invalid package name"))?;
+        let package = package
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| Exception::illegal_argument("Invalid package name"))?;
         let user = uid / PER_USER_RANGE as i32;
         self.handle_incoming_user(calling_uid, user, true, false, Some(NAME))?;
         let filter_uid = self.dump_permission_for_package(call, package, user, NAME)?;
@@ -754,11 +957,24 @@ impl AppHost {
             return Ok(None);
         }
         let tracker = self.exit_infos()?;
-        let trace = tracker.exit_info(Some(package), filter_uid, pid, 1).into_iter().next().and_then(|i| i.trace_file);
-        let Some(path) = trace.and_then(|t| tracker.host_path(&t)) else { return Ok(None) };
-        let Ok(file) = std::fs::File::open(&path) else { return Ok(None) };
+        let trace = tracker
+            .exit_info(Some(package), filter_uid, pid, 1)
+            .into_iter()
+            .next()
+            .and_then(|i| i.trace_file);
+        let Some(path) = trace.and_then(|t| tracker.host_path(&t)) else {
+            return Ok(None);
+        };
+        let Ok(file) = std::fs::File::open(&path) else {
+            return Ok(None);
+        };
         let file = aim_binder_host::server::file_from_fd(std::os::fd::AsFd::as_fd(&file))
-            .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, format!("{NAME}: no fileport")))?;
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    format!("{NAME}: no fileport"),
+                )
+            })?;
         Ok(Some(Descriptor(file)))
     }
 }
@@ -772,15 +988,21 @@ impl Service for TraceRetriever {
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
-        let Some(host) = self.0.upgrade() else { return Err(aim_binder_host::parcel::DEAD_OBJECT) };
+        let Some(host) = self.0.upgrade() else {
+            return Err(aim_binder_host::parcel::DEAD_OBJECT);
+        };
         match call.code {
             retriever::GET_TRACE_FILE_DESCRIPTOR => {
-                let a = retriever::GetTraceFileDescriptor::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(host.trace_file_descriptor(call, a.package_name.as_deref(), a.uid, a.pid).map(|fd| {
-                    let mut p = Parcel::new();
-                    retriever::write_get_trace_file_descriptor_reply(&mut p, fd.as_ref());
-                    p
-                }))
+                let a = retriever::GetTraceFileDescriptor::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                reply(
+                    host.trace_file_descriptor(call, a.package_name.as_deref(), a.uid, a.pid)
+                        .map(|fd| {
+                            let mut p = Parcel::new();
+                            retriever::write_get_trace_file_descriptor_reply(&mut p, fd.as_ref());
+                            p
+                        }),
+                )
             }
             code => reply(Err(host.unimplemented("app_trace_retriever", code))),
         }
@@ -839,7 +1061,10 @@ mod tests {
         for v in [4321, 10123, 10123, 10124] {
             assert_eq!(r.read_i32().unwrap(), v);
         }
-        assert_eq!(r.read_string16().unwrap().as_deref(), Some("com.example:remote"));
+        assert_eq!(
+            r.read_string16().unwrap().as_deref(),
+            Some("com.example:remote")
+        );
         assert_eq!(r.read_string16().unwrap().as_deref(), Some("com.example"));
         for v in [3, REASON_CRASH, SUBREASON_UNKNOWN, 9, IMPORTANCE_FOREGROUND] {
             assert_eq!(r.read_i32().unwrap(), v);
@@ -848,13 +1073,21 @@ mod tests {
             assert_eq!(r.read_i64().unwrap(), v);
         }
         assert_eq!(r.read_string16().unwrap().as_deref(), Some("crash"));
-        assert_eq!(aim_service_aidl::read_byte_array(&mut r).unwrap(), Some(vec![1, 2, 3]));
+        assert_eq!(
+            aim_service_aidl::read_byte_array(&mut r).unwrap(),
+            Some(vec![1, 2, 3])
+        );
         assert_eq!(r.read_i32().unwrap(), 1);
         assert_eq!(r.read_binder().unwrap(), Some(Binder::Local(0x77)));
         assert_eq!(r.read_i32().unwrap(), 0);
         assert_eq!(r.remaining(), 0);
 
-        let read_back = ExitInfo { package_name: None, state: None, trace_retriever: None, ..info };
+        let read_back = ExitInfo {
+            package_name: None,
+            state: None,
+            trace_retriever: None,
+            ..info
+        };
         let mut p = Parcel::new();
         read_back.write_to(&mut p);
         let mut r = p.reader();
@@ -880,7 +1113,10 @@ mod tests {
     /// single-result walk keeps the first of equally new exits.
     #[test]
     fn a_containers_exits_are_newest_first() {
-        let mut c = Container { uid: 10_100, infos: Vec::new() };
+        let mut c = Container {
+            uid: 10_100,
+            infos: Vec::new(),
+        };
         for (pid, t) in [(1, 10), (2, 30), (1, 20), (3, 30)] {
             c.infos.push(exit("a", 10_100, pid, t));
         }
@@ -915,15 +1151,26 @@ mod tests {
     fn the_history_keeps_its_capacity_and_claims_state() {
         let mut h = History::default();
         h.set_summary(10_100, 2, Some(vec![7]));
-        assert!(h.add(&exit("a", 10_100, 1, 20), Some(Binder::Local(1)), 2).is_none());
-        assert!(h.add(&exit("a", 10_100, 2, 10), Some(Binder::Local(1)), 2).is_none());
-        let dropped = h.add(&exit("a", 10_100, 3, 30), Some(Binder::Local(1)), 2).unwrap();
+        assert!(
+            h.add(&exit("a", 10_100, 1, 20), Some(Binder::Local(1)), 2)
+                .is_none()
+        );
+        assert!(
+            h.add(&exit("a", 10_100, 2, 10), Some(Binder::Local(1)), 2)
+                .is_none()
+        );
+        let dropped = h
+            .add(&exit("a", 10_100, 3, 30), Some(Binder::Local(1)), 2)
+            .unwrap();
         assert_eq!(dropped.pid, 2);
         assert_eq!(dropped.state, Some(vec![7]));
         assert!(h.summaries.is_empty());
         let kept = h.exit_info(Some("a"), 10_100, 0, 0);
         assert_eq!(timestamps(&kept), [30, 20]);
-        assert!(kept.iter().all(|i| i.trace_retriever == Some(Binder::Local(1))));
+        assert!(
+            kept.iter()
+                .all(|i| i.trace_retriever == Some(Binder::Local(1)))
+        );
     }
 
     /// A kill overrides the pid's earlier exit, but not a crash's, and a
@@ -951,7 +1198,10 @@ mod tests {
         h.note_app_kill(&kill, None, 16);
         let six = h.exit_info(Some("a"), 10_100, 6, 0);
         assert_eq!(six.len(), 1);
-        assert_eq!((six[0].reason, six[0].description.as_deref()), (REASON_DEPENDENCY_DIED, Some("depends")));
+        assert_eq!(
+            (six[0].reason, six[0].description.as_deref()),
+            (REASON_DEPENDENCY_DIED, Some("depends"))
+        );
     }
 
     /// An `AppsExitInfoProto` as the original wrote it: a package with two
@@ -986,18 +1236,25 @@ mod tests {
         file.varint(1, 1_760_000_000_500);
         file.message(2, &package.0);
         // An unknown fixed32 and fixed64 field.
-        file.0.extend_from_slice(&[0x1d, 1, 2, 3, 4, 0x21, 1, 2, 3, 4, 5, 6, 7, 8]);
+        file.0
+            .extend_from_slice(&[0x1d, 1, 2, 3, 4, 0x21, 1, 2, 3, 4, 5, 6, 7, 8]);
 
         let mut h = History::default();
         History::read(&file.0, &mut h).unwrap();
         let read = h.exit_info(Some("com.example"), 10_123, 0, 0);
         assert_eq!(read.len(), 1);
         let read = read[0].clone();
-        assert_eq!((read.pid, read.package_uid, read.reason, read.status), (4321, 10_123, REASON_CRASH, -1));
+        assert_eq!(
+            (read.pid, read.package_uid, read.reason, read.status),
+            (4321, 10_123, REASON_CRASH, -1)
+        );
         assert_eq!(read.package_name, None);
         assert_eq!(read.process_name.as_deref(), Some("com.example"));
         assert_eq!(read.state, Some(vec![9, 8]));
-        assert_eq!(read.trace_file.as_deref(), Some("/data/system/procexitstore/anr_x.gz"));
+        assert_eq!(
+            read.trace_file.as_deref(),
+            Some("/data/system/procexitstore/anr_x.gz")
+        );
         assert!(h.users("com.example").unwrap().contains_key(&1_010_123));
         assert_eq!(h.write(1_760_000_000_500), file.0[..file.0.len() - 14]);
 
@@ -1021,12 +1278,22 @@ mod tests {
         std::fs::write(data.join("system/procexitstore/anr_orphan.gz"), b"x").unwrap();
         let tracker = Tracker::load(&data, 16, None);
         assert!(!data.join("system/procexitstore/anr_orphan.gz").exists());
-        tracker.note_process_died(&ExitInfo::raw("com.example", "com.example", 10_123, 10_123, 77, true));
+        tracker.note_process_died(&ExitInfo::raw(
+            "com.example",
+            "com.example",
+            10_123,
+            10_123,
+            77,
+            true,
+        ));
         tracker.persist();
         let loaded = Tracker::load(&data, 16, None);
         let infos = loaded.exit_info(Some("com.example"), 10_123, 0, 0);
         assert_eq!(infos.len(), 1);
-        assert_eq!((infos[0].pid, infos[0].reason, infos[0].importance), (77, REASON_UNKNOWN, IMPORTANCE_FOREGROUND));
+        assert_eq!(
+            (infos[0].pid, infos[0].reason, infos[0].importance),
+            (77, REASON_UNKNOWN, IMPORTANCE_FOREGROUND)
+        );
         std::fs::remove_dir_all(&data).unwrap();
     }
 }

@@ -98,17 +98,25 @@ impl Owner {
     fn signal(&self) {
         let signals = {
             let mut state = self.state.lock().unwrap();
-            state.devices.values_mut().filter_map(|device| {
-                if !device.ready || device.notified { return None; }
-                device.notified = true;
-                Some(device.signal.clone())
-            }).collect::<Vec<_>>()
+            state
+                .devices
+                .values_mut()
+                .filter_map(|device| {
+                    if !device.ready || device.notified {
+                        return None;
+                    }
+                    device.notified = true;
+                    Some(device.signal.clone())
+                })
+                .collect::<Vec<_>>()
         };
         for signal in signals {
             if signal_marker(&signal).is_err() {
                 let mut state = self.state.lock().unwrap();
                 for device in state.devices.values_mut() {
-                    if Arc::ptr_eq(&device.signal, &signal) { device.notified = false; }
+                    if Arc::ptr_eq(&device.signal, &signal) {
+                        device.notified = false;
+                    }
                 }
             }
         }
@@ -419,10 +427,14 @@ impl Owner {
             pending.delivered = true;
         }
         // The client drained the readiness socket before acknowledging.
-        if let Some(device) = state.devices.get_mut(&number) { device.notified = false; }
+        if let Some(device) = state.devices.get_mut(&number) {
+            device.notified = false;
+        }
         let queued = !state.queue.is_empty();
         drop(state);
-        if queued { self.signal(); }
+        if queued {
+            self.signal();
+        }
         Ok(())
     }
     fn redirect(&self, number: u64) -> Result<Option<(SessionKey, u64)>, Errno> {
@@ -456,28 +468,51 @@ fn validate_reply(packet: &[u8], length: usize) -> Result<(), Errno> {
 }
 fn signal_marker(stream: &UnixStream) -> Result<(), Errno> {
     loop {
-        let count = unsafe { libc::send(stream.as_raw_fd(), [1u8].as_ptr().cast(), 1, libc::MSG_DONTWAIT) };
-        if count == 1 { return Ok(()); }
+        let count = unsafe {
+            libc::send(
+                stream.as_raw_fd(),
+                [1u8].as_ptr().cast(),
+                1,
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if count == 1 {
+            return Ok(());
+        }
         let error = errno::last();
-        if error == errno::EINTR { continue; }
+        if error == errno::EINTR {
+            continue;
+        }
         // A full notification buffer is already readable; readiness is level
         // state, so it does not need another byte.
-        if error == errno::EAGAIN { return Ok(()); }
+        if error == errno::EAGAIN {
+            return Ok(());
+        }
         return Err(error);
     }
 }
 fn wait_device_peer(stream: &UnixStream) -> Result<(), Errno> {
     loop {
-        let mut poll = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let mut poll = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
         if unsafe { libc::poll(&mut poll, 1, -1) } < 0 {
             let error = errno::last();
-            if error == errno::EINTR { continue; }
+            if error == errno::EINTR {
+                continue;
+            }
             return Err(error);
         }
         let mut byte = [0u8];
-        if unsafe { libc::read(stream.as_raw_fd(), byte.as_mut_ptr().cast(), 1) } >= 0 { return Ok(()); }
+        if unsafe { libc::read(stream.as_raw_fd(), byte.as_mut_ptr().cast(), 1) } >= 0 {
+            return Ok(());
+        }
         let error = errno::last();
-        if matches!(error, errno::EINTR | errno::EAGAIN) { continue; }
+        if matches!(error, errno::EINTR | errno::EAGAIN) {
+            continue;
+        }
         return Err(error);
     }
 }
@@ -1010,7 +1045,9 @@ fn handle(owner: Arc<Owner>, stream: UnixStream) {
                     state.devices.get_mut(&number).ok_or(EBADF)?.ready = true;
                     !state.queue.is_empty()
                 };
-                if queued { owner.signal(); }
+                if queued {
+                    owner.signal();
+                }
                 let _ = wait_device_peer(&stream);
             } else {
                 let mut byte = [0];
@@ -1278,7 +1315,7 @@ mod readiness_tests {
         // same notification backpressure observed in the actual broker sample.
         let mut filled = 0;
         loop {
-            match signal.write(&[1u8;4096]) {
+            match signal.write(&[1u8; 4096]) {
                 Ok(count) => filled += count,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(error) => panic!("fill notification buffer: {error}"),
@@ -1289,37 +1326,74 @@ mod readiness_tests {
         let owner = Arc::new(Owner {
             key: SessionKey(PathBuf::from("unused-owned-test-transport")),
             state: Mutex::new(State {
-                mounted: true, initialized: Some(Ok(())), init_reply: None,
-                max_write: 4096, aborted: false, next: 1, queue: VecDeque::new(),
+                mounted: true,
+                initialized: Some(Ok(())),
+                init_reply: None,
+                max_write: 4096,
+                aborted: false,
+                next: 1,
+                queue: VecDeque::new(),
                 pending: BTreeMap::new(),
-                devices: [(1, Device { signal: signal.clone(), notified: false, ready: true, redirect: None })].into(),
-                files: BTreeMap::new(), notifications: VecDeque::new(),
-                inode_locks: BTreeMap::new(), retiring: BTreeMap::new(), seen: true,
+                devices: [(
+                    1,
+                    Device {
+                        signal: signal.clone(),
+                        notified: false,
+                        ready: true,
+                        redirect: None,
+                    },
+                )]
+                .into(),
+                files: BTreeMap::new(),
+                notifications: VecDeque::new(),
+                inode_locks: BTreeMap::new(),
+                retiring: BTreeMap::new(),
+                seen: true,
             }),
             ready: Condvar::new(),
         });
         let worker = owner.clone();
         let (done, result) = mpsc::channel();
         let enqueue = std::thread::spawn(move || {
-            done.send(worker.enqueue(FORGET, 9, &1u64.to_le_bytes(), 0, 0, 1, true).map(|_|())).unwrap();
+            done.send(
+                worker
+                    .enqueue(FORGET, 9, &1u64.to_le_bytes(), 0, 0, 1, true)
+                    .map(|_| ()),
+            )
+            .unwrap();
         });
-        result.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        result
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
         enqueue.join().unwrap();
         {
-            let state = owner.state.try_lock().expect("notification held owner lock");
+            let state = owner
+                .state
+                .try_lock()
+                .expect("notification held owner lock");
             assert_eq!(state.queue.len(), 1);
             assert_eq!(u32_at(state.queue.front().unwrap(), 4).unwrap(), FORGET);
             assert!(!state.aborted);
         }
         let lifecycle = signal.clone();
         let (done, result) = mpsc::channel();
-        let waiter = std::thread::spawn(move || { done.send(wait_device_peer(&lifecycle)).unwrap(); });
-        assert!(matches!(result.recv_timeout(Duration::from_millis(30)), Err(mpsc::RecvTimeoutError::Timeout)));
+        let waiter = std::thread::spawn(move || {
+            done.send(wait_device_peer(&lifecycle)).unwrap();
+        });
+        assert!(matches!(
+            result.recv_timeout(Duration::from_millis(30)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
         // The readiness bytes really remain available even when another send
         // gets EAGAIN. A live device's nonblocking lifetime wait stays pending.
-        let mut bytes = [0;4096]; assert!(daemon.read(&mut bytes).unwrap() > 0);
+        let mut bytes = [0; 4096];
+        assert!(daemon.read(&mut bytes).unwrap() > 0);
         drop(daemon);
-        result.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        result
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
         waiter.join().unwrap();
     }
 }

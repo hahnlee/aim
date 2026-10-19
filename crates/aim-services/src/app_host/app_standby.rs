@@ -85,10 +85,17 @@ const ONE_DAY: i64 = 24 * ONE_HOUR;
 /// lead to.
 const DEFAULT_SCREEN_TIME_THRESHOLDS: [i64; 5] = [0, 0, ONE_HOUR, 2 * ONE_HOUR, 6 * ONE_HOUR];
 const MINIMUM_SCREEN_TIME_THRESHOLDS: [i64; 5] = [0, 0, 0, 30 * ONE_MINUTE, ONE_HOUR];
-const DEFAULT_ELAPSED_TIME_THRESHOLDS: [i64; 5] = [0, 12 * ONE_HOUR, 24 * ONE_HOUR, 48 * ONE_HOUR, 8 * ONE_DAY];
-const MINIMUM_ELAPSED_TIME_THRESHOLDS: [i64; 5] = [0, ONE_HOUR, ONE_HOUR, 2 * ONE_HOUR, 4 * ONE_HOUR];
-const THRESHOLD_BUCKETS: [i32; 5] =
-    [STANDBY_BUCKET_ACTIVE, STANDBY_BUCKET_WORKING_SET, STANDBY_BUCKET_FREQUENT, STANDBY_BUCKET_RARE, STANDBY_BUCKET_RESTRICTED];
+const DEFAULT_ELAPSED_TIME_THRESHOLDS: [i64; 5] =
+    [0, 12 * ONE_HOUR, 24 * ONE_HOUR, 48 * ONE_HOUR, 8 * ONE_DAY];
+const MINIMUM_ELAPSED_TIME_THRESHOLDS: [i64; 5] =
+    [0, ONE_HOUR, ONE_HOUR, 2 * ONE_HOUR, 4 * ONE_HOUR];
+const THRESHOLD_BUCKETS: [i32; 5] = [
+    STANDBY_BUCKET_ACTIVE,
+    STANDBY_BUCKET_WORKING_SET,
+    STANDBY_BUCKET_FREQUENT,
+    STANDBY_BUCKET_RARE,
+    STANDBY_BUCKET_RESTRICTED,
+];
 const BUCKET_NAMES: [&str; 5] = ["active", "working_set", "frequent", "rare", "restricted"];
 /// `ConstantsObserver`'s defaults.
 const DEFAULT_CHECK_IDLE_INTERVAL_MS: i64 = 4 * ONE_HOUR;
@@ -186,7 +193,12 @@ impl History {
     }
 
     fn screen_on_time(&self, now: i64) -> i64 {
-        self.screen_on_duration + if self.screen_on { now - self.screen_on_snapshot } else { 0 }
+        self.screen_on_duration
+            + if self.screen_on {
+                now - self.screen_on_snapshot
+            } else {
+                0
+            }
     }
 
     fn elapsed_time(&self, now: i64) -> i64 {
@@ -194,7 +206,10 @@ impl History {
     }
 
     fn user_file(&self, user: i32) -> PathBuf {
-        self.dir.join("users").join(user.to_string()).join("app_idle_stats.xml")
+        self.dir
+            .join("users")
+            .join(user.to_string())
+            .join("app_idle_stats.xml")
     }
 
     /// `getUserHistory`, read when first asked for.
@@ -202,7 +217,9 @@ impl History {
         if !self.users.contains_key(&user) {
             let read = match std::fs::read(self.user_file(user)) {
                 Ok(bytes) => read_app_idle_times(&bytes).unwrap_or_else(|e| {
-                    eprintln!("app host: app standby: unable to read app idle file for user {user}: {e}");
+                    eprintln!(
+                        "app host: app standby: unable to read app idle file for user {user}: {e}"
+                    );
                     BTreeMap::new()
                 }),
                 Err(_) => BTreeMap::new(),
@@ -214,19 +231,36 @@ impl History {
 
     /// `getAppUsageHistory`: made if it has none.
     fn usage(&mut self, package: &str, user: i32) -> &mut Usage {
-        self.user(user).entry(package.to_string()).or_insert_with(Usage::new)
+        self.user(user)
+            .entry(package.to_string())
+            .or_insert_with(Usage::new)
     }
 
     /// `reportUsage`.
-    fn report_usage(&mut self, package: &str, user: i32, new_bucket: i32, usage_reason: i32, now: i64, expiry: i64) {
+    fn report_usage(
+        &mut self,
+        package: &str,
+        user: i32,
+        new_bucket: i32,
+        usage_reason: i32,
+        now: i64,
+        expiry: i64,
+    ) {
         let elapsed_now = self.elapsed_time(now);
         let expiry_elapsed = self.elapsed_time(expiry);
-        let (screen, duration, snapshot) = (self.screen_on_time(now), self.elapsed_duration, self.elapsed_snapshot);
+        let (screen, duration, snapshot) = (
+            self.screen_on_time(now),
+            self.elapsed_duration,
+            self.elapsed_snapshot,
+        );
         let u = self.usage(package, user);
         let mut reason = REASON_MAIN_USAGE | usage_reason;
         let user_usage = is_user_usage(reason);
         let mut new_bucket = new_bucket;
-        if u.current_bucket == STANDBY_BUCKET_RESTRICTED && !user_usage && u.bucketing_reason & REASON_MAIN_MASK != REASON_MAIN_TIMEOUT {
+        if u.current_bucket == STANDBY_BUCKET_RESTRICTED
+            && !user_usage
+            && u.bucketing_reason & REASON_MAIN_MASK != REASON_MAIN_TIMEOUT
+        {
             new_bucket = STANDBY_BUCKET_RESTRICTED;
             reason = u.bucketing_reason;
         } else if expiry > now {
@@ -260,7 +294,15 @@ impl History {
     }
 
     /// `getThresholdIndex`.
-    fn threshold_index(&mut self, package: &str, user: i32, now: i64, screen: &[i64; 5], elapsed: &[i64; 5], bypass_screen: bool) -> i32 {
+    fn threshold_index(
+        &mut self,
+        package: &str,
+        user: i32,
+        now: i64,
+        screen: &[i64; 5],
+        elapsed: &[i64; 5],
+        bypass_screen: bool,
+    ) -> i32 {
         let (screen_now, elapsed_now) = (self.screen_on_time(now), self.elapsed_time(now));
         let Some(u) = self.user(user).get(package) else {
             return -1;
@@ -280,14 +322,19 @@ impl History {
 
     /// `getAppStandbyBucket`: never used, never bucketed.
     fn bucket(&mut self, package: &str, user: i32) -> i32 {
-        self.user(user).get(package).map_or(STANDBY_BUCKET_NEVER, |u| u.current_bucket)
+        self.user(user)
+            .get(package)
+            .map_or(STANDBY_BUCKET_NEVER, |u| u.current_bucket)
     }
 }
 
 /// `AppStandbyController.isUserUsage`.
 fn is_user_usage(reason: i32) -> bool {
     reason & REASON_MAIN_MASK == REASON_MAIN_USAGE
-        && matches!(reason & REASON_SUB_MASK, REASON_SUB_USAGE_USER_INTERACTION | REASON_SUB_USAGE_MOVE_TO_FOREGROUND)
+        && matches!(
+            reason & REASON_SUB_MASK,
+            REASON_SUB_USAGE_USER_INTERACTION | REASON_SUB_USAGE_MOVE_TO_FOREGROUND
+        )
 }
 
 /// `readAppIdleTimes` of `app_idle_stats.xml`.
@@ -299,22 +346,39 @@ fn read_app_idle_times(bytes: &[u8]) -> Result<BTreeMap<String, Usage>, String> 
     }
     let version = root.int("version")?.unwrap_or(0);
     for p in root.children().filter(|e| e.name == "package") {
-        let Some(name) = p.string("name") else { continue };
+        let Some(name) = p.string("name") else {
+            continue;
+        };
         let long = |n: &str| p.long(n);
-        let last_used_elapsed = long("elapsedIdleTime")?.ok_or("package without elapsedIdleTime")?;
+        let last_used_elapsed =
+            long("elapsedIdleTime")?.ok_or("package without elapsedIdleTime")?;
         let mut u = Usage {
             last_used_elapsed,
-            last_used_by_user_elapsed: long("lastUsedByUserElapsedTime")?.unwrap_or(last_used_elapsed),
+            last_used_by_user_elapsed: long("lastUsedByUserElapsedTime")?
+                .unwrap_or(last_used_elapsed),
             last_used_screen: long("screenIdleTime")?.ok_or("package without screenIdleTime")?,
             last_predicted_time: long("lastPredictedTime")?.unwrap_or(0),
             current_bucket: p.int("appLimitBucket")?.unwrap_or(STANDBY_BUCKET_ACTIVE),
-            bucketing_reason: p.int_hex("bucketReason").ok().flatten().unwrap_or(REASON_MAIN_DEFAULT),
+            bucketing_reason: p
+                .int_hex("bucketReason")
+                .ok()
+                .flatten()
+                .unwrap_or(REASON_MAIN_DEFAULT),
             last_restrict_attempt_elapsed: long("lastRestrictionAttemptElapsedTime")?.unwrap_or(0),
-            last_restrict_reason: p.int_hex("lastRestrictionAttemptReason").ok().flatten().unwrap_or(0),
+            last_restrict_reason: p
+                .int_hex("lastRestrictionAttemptReason")
+                .ok()
+                .flatten()
+                .unwrap_or(0),
             ..Usage::new()
         };
         if version >= 1 {
-            for item in p.children().filter(|e| e.name == "expiryTimes").flat_map(|e| e.children()).filter(|e| e.name == "item") {
+            for item in p
+                .children()
+                .filter(|e| e.name == "expiryTimes")
+                .flat_map(|e| e.children())
+                .filter(|e| e.name == "item")
+            {
                 let bucket = item.int("bucket")?.unwrap_or(STANDBY_BUCKET_UNKNOWN);
                 if bucket == STANDBY_BUCKET_UNKNOWN {
                     continue;
@@ -350,33 +414,64 @@ impl Constants {
     /// The defaults and the `app_standby` DeviceConfig namespace's
     /// properties (`processDefaultConstants`, `processProperties`).
     fn read(property: &dyn Fn(&str) -> Option<String>, adjust_defaults: bool) -> Constants {
-        let long = |key: &str, default: i64| property(key).and_then(|v| v.parse::<i64>().ok()).unwrap_or(default);
+        let long = |key: &str, default: i64| {
+            property(key)
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(default)
+        };
         let thresholds = |prefix: &str, defaults: [i64; 5], minimums: [i64; 5]| {
-            let keys: Vec<String> = BUCKET_NAMES.iter().map(|b| format!("{prefix}{b}")).collect();
+            let keys: Vec<String> = BUCKET_NAMES
+                .iter()
+                .map(|b| format!("{prefix}{b}"))
+                .collect();
             if keys.iter().all(|k| property(k).is_none()) {
                 return defaults;
             }
             std::array::from_fn(|i| minimums[i].max(long(&keys[i], defaults[i])))
         };
-        let threshold_keys = BUCKET_NAMES.iter().any(|b| property(&format!("screen_threshold_{b}")).is_some() || property(&format!("elapsed_threshold_{b}")).is_some());
+        let threshold_keys = BUCKET_NAMES.iter().any(|b| {
+            property(&format!("screen_threshold_{b}")).is_some()
+                || property(&format!("elapsed_threshold_{b}")).is_some()
+        });
         let (screen_thresholds, elapsed_thresholds) = if threshold_keys {
             (
-                thresholds("screen_threshold_", DEFAULT_SCREEN_TIME_THRESHOLDS, MINIMUM_SCREEN_TIME_THRESHOLDS),
-                thresholds("elapsed_threshold_", DEFAULT_ELAPSED_TIME_THRESHOLDS, MINIMUM_ELAPSED_TIME_THRESHOLDS),
+                thresholds(
+                    "screen_threshold_",
+                    DEFAULT_SCREEN_TIME_THRESHOLDS,
+                    MINIMUM_SCREEN_TIME_THRESHOLDS,
+                ),
+                thresholds(
+                    "elapsed_threshold_",
+                    DEFAULT_ELAPSED_TIME_THRESHOLDS,
+                    MINIMUM_ELAPSED_TIME_THRESHOLDS,
+                ),
             )
         } else {
-            (DEFAULT_SCREEN_TIME_THRESHOLDS, DEFAULT_ELAPSED_TIME_THRESHOLDS)
+            (
+                DEFAULT_SCREEN_TIME_THRESHOLDS,
+                DEFAULT_ELAPSED_TIME_THRESHOLDS,
+            )
         };
-        let strong_default = if adjust_defaults { DEFAULT_CURRENT_STRONG_USAGE_TIMEOUT } else { DEFAULT_LEGACY_STRONG_USAGE_TIMEOUT };
+        let strong_default = if adjust_defaults {
+            DEFAULT_CURRENT_STRONG_USAGE_TIMEOUT
+        } else {
+            DEFAULT_LEGACY_STRONG_USAGE_TIMEOUT
+        };
         Constants {
             screen_thresholds,
             elapsed_thresholds,
             check_idle_interval: (elapsed_thresholds[1] / 4).min(DEFAULT_CHECK_IDLE_INTERVAL_MS),
             strong_usage_timeout: long("strong_usage_duration", strong_default),
-            system_update_timeout: long("system_update_usage_duration", DEFAULT_SYSTEM_UPDATE_TIMEOUT),
+            system_update_timeout: long(
+                "system_update_usage_duration",
+                DEFAULT_SYSTEM_UPDATE_TIMEOUT,
+            ),
             prediction_timeout: long("prediction_timeout", DEFAULT_PREDICTION_TIMEOUT),
             auto_restricted_bucket_delay: match property("auto_restricted_bucket_delay_ms") {
-                Some(_) => (4 * ONE_HOUR).max(long("auto_restricted_bucket_delay_ms", DEFAULT_AUTO_RESTRICTED_BUCKET_DELAY_MS)),
+                Some(_) => (4 * ONE_HOUR).max(long(
+                    "auto_restricted_bucket_delay_ms",
+                    DEFAULT_AUTO_RESTRICTED_BUCKET_DELAY_MS,
+                )),
                 None => DEFAULT_AUTO_RESTRICTED_BUCKET_DELAY_MS,
             },
         }
@@ -414,15 +509,28 @@ impl AppHost {
     /// `AppStandbyController.Injector.isAppIdleEnabled`.
     pub(super) fn app_idle_enabled(&self) -> Result<bool, Exception> {
         let inputs = self.inputs()?;
-        let global = |name: &str| inputs.settings.get(Table::Global, name).and_then(|v| v.parse::<i32>().ok()).unwrap_or(1) == 1;
-        Ok(inputs.packages.framework_bool("config_enableAutoPowerModes").unwrap_or(false)
+        let global = |name: &str| {
+            inputs
+                .settings
+                .get(Table::Global, name)
+                .and_then(|v| v.parse::<i32>().ok())
+                .unwrap_or(1)
+                == 1
+        };
+        Ok(inputs
+            .packages
+            .framework_bool("config_enableAutoPowerModes")
+            .unwrap_or(false)
             && global("app_standby_enabled")
             && global("adaptive_battery_management_enabled"))
     }
 
     /// Runs `f` on the controller, made (and the apps' buckets first
     /// checked) when first needed.
-    fn with_standby<T>(self: &Arc<Self>, f: impl FnOnce(&AppHost, &mut Controller) -> Result<T, Exception>) -> Result<T, Exception> {
+    fn with_standby<T>(
+        self: &Arc<Self>,
+        f: impl FnOnce(&AppHost, &mut Controller) -> Result<T, Exception>,
+    ) -> Result<T, Exception> {
         let mut guard = self.app_standby.controller.lock().unwrap();
         if guard.is_none() {
             let controller = self.start_standby()?;
@@ -442,8 +550,15 @@ impl AppHost {
     fn start_standby(&self) -> Result<Controller, Exception> {
         let inputs = self.inputs()?;
         let enabled = self.app_idle_enabled()?;
-        let property = |key: &str| inputs.settings.get(Table::Config, &format!("app_standby/{key}"));
-        let constants = Constants::read(&property, self.flag("com.android.server.usage.adjust_default_bucket_elevation_params")?);
+        let property = |key: &str| {
+            inputs
+                .settings
+                .get(Table::Config, &format!("app_standby/{key}"))
+        };
+        let constants = Constants::read(
+            &property,
+            self.flag("com.android.server.usage.adjust_default_bucket_elevation_params")?,
+        );
         let now = elapsed_realtime();
         let mut history = History::new(&inputs.data.join("system"), now);
         history.update_display(true, now);
@@ -464,10 +579,22 @@ impl AppHost {
 
     /// `initializeDefaultsForSystemApps`: every system app active for the
     /// system update timeout.
-    fn initialize_defaults_for_system_apps(&self, c: &mut Controller, user: i32, now: i64) -> Result<(), Exception> {
+    fn initialize_defaults_for_system_apps(
+        &self,
+        c: &mut Controller,
+        user: i32,
+        now: i64,
+    ) -> Result<(), Exception> {
         for (package, _, flags) in self.installed(MATCH_DISABLED_COMPONENTS, user)? {
             if flags & FLAG_SYSTEM != 0 {
-                c.history.report_usage(&package, user, STANDBY_BUCKET_ACTIVE, REASON_SUB_USAGE_SYSTEM_UPDATE, 0, now + c.constants.system_update_timeout);
+                c.history.report_usage(
+                    &package,
+                    user,
+                    STANDBY_BUCKET_ACTIVE,
+                    REASON_SUB_USAGE_SYSTEM_UPDATE,
+                    0,
+                    now + c.constants.system_update_timeout,
+                );
             }
         }
         Ok(())
@@ -477,10 +604,17 @@ impl AppHost {
     /// application flags.
     fn installed(&self, flags: i64, user: i32) -> Result<Vec<(String, i32, i32)>, Exception> {
         let (state, resolution) = self.packages()?;
-        let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
-        let packages = query
-            .installed_packages(flags, user)
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("app standby: installed packages: {}", e.0)))??;
+        let query = Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: SYSTEM_UID,
+        };
+        let packages = query.installed_packages(flags, user).map_err(|e| {
+            Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("app standby: installed packages: {}", e.0),
+            )
+        })??;
         Ok(packages
             .into_iter()
             .filter_map(|p| {
@@ -495,7 +629,11 @@ impl AppHost {
     /// idle, or at all), and the user's (`deviceidle.xml`'s `wl`).
     fn power_allowlist(&self) -> Result<BTreeSet<String>, Exception> {
         let (state, _) = self.packages()?;
-        let system: BTreeSet<String> = self.installed(MATCH_ANY_USER | MATCH_SYSTEM_ONLY, 0)?.into_iter().map(|(n, _, _)| n).collect();
+        let system: BTreeSet<String> = self
+            .installed(MATCH_ANY_USER | MATCH_SYSTEM_ONLY, 0)?
+            .into_iter()
+            .map(|(n, _, _)| n)
+            .collect();
         let mut apps: BTreeSet<String> = state
             .system
             .allow_in_power_save_except_idle
@@ -504,10 +642,21 @@ impl AppHost {
             .filter(|p| system.contains(*p))
             .cloned()
             .collect();
-        let installed: BTreeSet<String> = self.installed(MATCH_ANY_USER, 0)?.into_iter().map(|(n, _, _)| n).collect();
+        let installed: BTreeSet<String> = self
+            .installed(MATCH_ANY_USER, 0)?
+            .into_iter()
+            .map(|(n, _, _)| n)
+            .collect();
         if let Ok(bytes) = std::fs::read(self.inputs()?.data.join("system/deviceidle.xml")) {
-            let root = aim_android_xml::read(&bytes).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("deviceidle.xml: {e}")))?;
-            apps.extend(root.children().filter(|e| e.name == "wl").filter_map(|e| e.string("n")).map(|n| n.into_owned()).filter(|n| installed.contains(n)));
+            let root = aim_android_xml::read(&bytes)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("deviceidle.xml: {e}")))?;
+            apps.extend(
+                root.children()
+                    .filter(|e| e.name == "wl")
+                    .filter_map(|e| e.string("n"))
+                    .map(|n| n.into_owned())
+                    .filter(|n| installed.contains(n)),
+            );
         }
         Ok(apps)
     }
@@ -524,14 +673,26 @@ impl AppHost {
         };
         let launchers: BTreeSet<String> = resolution
             .query_intent_activities(&intent, None, flags, 0, SYSTEM_UID)
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("app standby: launcher activities: {e:?}")))?
+            .map_err(|e| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("app standby: launcher activities: {e:?}"),
+                )
+            })?
             .into_iter()
             .filter_map(|r| match r.info {
-                crate::package::component_resolver::Info::Activity(a) => a.info.application_info.item.package_name.clone(),
+                crate::package::component_resolver::Info::Activity(a) => {
+                    a.info.application_info.item.package_name.clone()
+                }
                 _ => None,
             })
             .collect();
-        Ok(self.installed(flags, 0)?.into_iter().map(|(n, _, _)| n).filter(|n| !launchers.contains(n)).collect())
+        Ok(self
+            .installed(flags, 0)?
+            .into_iter()
+            .map(|(n, _, _)| n)
+            .filter(|n| !launchers.contains(n))
+            .collect())
     }
 
     /// `checkIdleStates` for the running user.
@@ -546,34 +707,73 @@ impl AppHost {
     }
 
     /// `checkAndUpdateStandbyState`.
-    fn check_and_update(&self, c: &mut Controller, package: &str, user: i32, uid: i32, now: i64) -> Result<(), Exception> {
+    fn check_and_update(
+        &self,
+        c: &mut Controller,
+        package: &str,
+        user: i32,
+        uid: i32,
+        now: i64,
+    ) -> Result<(), Exception> {
         let min_bucket = self.app_min_bucket(c, package, uid % PER_USER_RANGE as i32, user)?;
         if min_bucket <= STANDBY_BUCKET_ACTIVE {
-            c.history.set_bucket(package, user, now, min_bucket, REASON_MAIN_DEFAULT);
+            c.history
+                .set_bucket(package, user, now, min_bucket, REASON_MAIN_DEFAULT);
             return Ok(());
         }
         let elapsed = c.history.elapsed_time(now);
         let app = c.history.usage(package, user).clone();
         let mut reason = app.bucketing_reason;
         let old_main_reason = reason & REASON_MAIN_MASK;
-        if old_main_reason == REASON_MAIN_FORCED_BY_USER || app.current_bucket == STANDBY_BUCKET_NEVER {
+        if old_main_reason == REASON_MAIN_FORCED_BY_USER
+            || app.current_bucket == STANDBY_BUCKET_NEVER
+        {
             return Ok(());
         }
         let mut new_bucket = app.current_bucket.max(STANDBY_BUCKET_ACTIVE);
-        let prediction_late = app.last_predicted_time > 0 && elapsed - app.last_predicted_time > c.constants.prediction_timeout;
-        if matches!(old_main_reason, REASON_MAIN_DEFAULT | REASON_MAIN_USAGE | REASON_MAIN_TIMEOUT) || prediction_late {
-            if !prediction_late && (STANDBY_BUCKET_ACTIVE..=STANDBY_BUCKET_RARE).contains(&app.last_predicted_bucket) {
+        let prediction_late = app.last_predicted_time > 0
+            && elapsed - app.last_predicted_time > c.constants.prediction_timeout;
+        if matches!(
+            old_main_reason,
+            REASON_MAIN_DEFAULT | REASON_MAIN_USAGE | REASON_MAIN_TIMEOUT
+        ) || prediction_late
+        {
+            if !prediction_late
+                && (STANDBY_BUCKET_ACTIVE..=STANDBY_BUCKET_RARE)
+                    .contains(&app.last_predicted_bucket)
+            {
                 new_bucket = app.last_predicted_bucket;
                 reason = REASON_MAIN_PREDICTED | REASON_SUB_PREDICTED_RESTORED;
-            } else if !(old_main_reason == REASON_MAIN_DEFAULT && app.bucketing_reason & REASON_SUB_MASK == REASON_SUB_DEFAULT_APP_RESTORED) {
-                let (screen, elapsed_thresholds) = (c.constants.screen_thresholds, c.constants.elapsed_thresholds);
-                let index = c.history.threshold_index(package, user, now, &screen, &elapsed_thresholds, c.screen_time_bypass);
-                new_bucket = if index >= 0 { THRESHOLD_BUCKETS[index as usize] } else { STANDBY_BUCKET_NEVER };
+            } else if !(old_main_reason == REASON_MAIN_DEFAULT
+                && app.bucketing_reason & REASON_SUB_MASK == REASON_SUB_DEFAULT_APP_RESTORED)
+            {
+                let (screen, elapsed_thresholds) = (
+                    c.constants.screen_thresholds,
+                    c.constants.elapsed_thresholds,
+                );
+                let index = c.history.threshold_index(
+                    package,
+                    user,
+                    now,
+                    &screen,
+                    &elapsed_thresholds,
+                    c.screen_time_bypass,
+                );
+                new_bucket = if index >= 0 {
+                    THRESHOLD_BUCKETS[index as usize]
+                } else {
+                    STANDBY_BUCKET_NEVER
+                };
                 reason = REASON_MAIN_TIMEOUT;
             }
         }
         // `getMinBucketWithValidExpiryTime`.
-        if let Some((&bucket, _)) = app.expiry.iter().take_while(|(b, _)| new_bucket > **b).find(|(_, t)| **t > elapsed) {
+        if let Some((&bucket, _)) = app
+            .expiry
+            .iter()
+            .take_while(|(b, _)| new_bucket > **b)
+            .find(|(_, t)| **t > elapsed)
+        {
             new_bucket = bucket;
             reason = if new_bucket == STANDBY_BUCKET_ACTIVE || app.current_bucket == new_bucket {
                 app.bucketing_reason
@@ -596,8 +796,18 @@ impl AppHost {
     }
 
     /// `getAppMinBucket`: the lowest bucket `package` should ever enter.
-    fn app_min_bucket(&self, c: &Controller, package: &str, app_id: i32, user: i32) -> Result<i32, Exception> {
-        if !c.enabled || app_id < FIRST_APPLICATION_UID || package == "android" || c.power_allowlist.contains(package) {
+    fn app_min_bucket(
+        &self,
+        c: &Controller,
+        package: &str,
+        app_id: i32,
+        user: i32,
+    ) -> Result<i32, Exception> {
+        if !c.enabled
+            || app_id < FIRST_APPLICATION_UID
+            || package == "android"
+            || c.power_allowlist.contains(package)
+        {
             return Ok(STANDBY_BUCKET_EXEMPTED);
         }
         // `isActiveDeviceAdmin`, `isAdminProtectedPackages` and
@@ -605,16 +815,36 @@ impl AppHost {
         // NetworkScoreService would tell.
         let policies = self.device_policies()?;
         if policies.has_admins_or_policies() {
-            return Err(self.unimplemented_named("usagestats", "app standby with device admins or policies (#1723)"));
+            return Err(self.unimplemented_named(
+                "usagestats",
+                "app standby with device admins or policies (#1723)",
+            ));
         }
         let inputs = self.inputs()?;
-        if inputs.settings.get(Table::Global, "network_recommendations_package").as_deref() == Some(package)
-            && inputs.settings.get(Table::Global, "network_recommendations_enabled").as_deref() != Some("-1")
+        if inputs
+            .settings
+            .get(Table::Global, "network_recommendations_package")
+            .as_deref()
+            == Some(package)
+            && inputs
+                .settings
+                .get(Table::Global, "network_recommendations_enabled")
+                .as_deref()
+                != Some("-1")
         {
-            return Err(self.unimplemented_named("usagestats", "app standby of the network recommendations package (#1723)"));
+            return Err(self.unimplemented_named(
+                "usagestats",
+                "app standby of the network recommendations package (#1723)",
+            ));
         }
         let uid = user * PER_USER_RANGE as i32 + app_id;
-        if super::appops_service::mode(self, super::appops_service::OP_SYSTEM_EXEMPT_FROM_POWER_RESTRICTIONS, uid, Some(package))? == super::appops_service::MODE_ALLOWED {
+        if super::appops_service::mode(
+            self,
+            super::appops_service::OP_SYSTEM_EXEMPT_FROM_POWER_RESTRICTIONS,
+            uid,
+            Some(package),
+        )? == super::appops_service::MODE_ALLOWED
+        {
             return Ok(STANDBY_BUCKET_EXEMPTED);
         }
         if self.bound_widget_packages(user)?.contains(package) {
@@ -624,7 +854,9 @@ impl AppHost {
         if config("config_deviceProvisioningPackage") == package {
             return Ok(STANDBY_BUCKET_EXEMPTED);
         }
-        if config("config_systemWellbeing") == package || self.exact_alarm_bucket_elevation(package, uid)? {
+        if config("config_systemWellbeing") == package
+            || self.exact_alarm_bucket_elevation(package, uid)?
+        {
             return Ok(STANDBY_BUCKET_WORKING_SET);
         }
         // Carrier apps: the app host has no subscriptions, so none has
@@ -641,13 +873,19 @@ impl AppHost {
     /// AppWidgetService's `isBoundWidgetPackage` for `user`: the providers
     /// of the widgets its persisted state (`appwidgets.xml`) holds.
     fn bound_widget_packages(&self, user: i32) -> Result<BTreeSet<String>, Exception> {
-        let path = self.inputs()?.data.join(format!("system/users/{user}/appwidgets.xml"));
+        let path = self
+            .inputs()?
+            .data
+            .join(format!("system/users/{user}/appwidgets.xml"));
         let Ok(bytes) = std::fs::read(&path) else {
             return Ok(BTreeSet::new());
         };
-        let root = aim_android_xml::read(&bytes).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("appwidgets.xml: {e}")))?;
+        let root = aim_android_xml::read(&bytes)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("appwidgets.xml: {e}")))?;
         if root.children().any(|e| e.name == "g") {
-            return Err(self.unimplemented_named("usagestats", "app standby with bound widgets (#1683)"));
+            return Err(
+                self.unimplemented_named("usagestats", "app standby with bound widgets (#1683)")
+            );
         }
         Ok(BTreeSet::new())
     }
@@ -663,34 +901,61 @@ impl AppHost {
         let compat = &self.inputs()?.compat;
         let target = ps.target_sdk_version;
         let enabled = |change| compat.is_enabled(change, Some(package), target);
-        if enabled(ENABLE_USE_EXACT_ALARM) && super::permission_checker::preflight(self, USE_EXACT_ALARM, uid, package)? {
+        if enabled(ENABLE_USE_EXACT_ALARM)
+            && super::permission_checker::preflight(self, USE_EXACT_ALARM, uid, package)?
+        {
             return Ok(true);
         }
         if enabled(SCHEDULE_EXACT_ALARM_DOES_NOT_ELEVATE_BUCKET) {
             return Ok(false);
         }
         // `mExactAlarmCandidates`: the apps that ask for the permission.
-        let candidate = ps.pkg.as_ref().is_some_and(|p| p.requested_permissions.iter().any(|r| r == SCHEDULE_EXACT_ALARM));
+        let candidate = ps.pkg.as_ref().is_some_and(|p| {
+            p.requested_permissions
+                .iter()
+                .any(|r| r == SCHEDULE_EXACT_ALARM)
+        });
         if !candidate || !enabled(REQUIRE_EXACT_ALARM_PERMISSION) {
             return Ok(false);
         }
         if enabled(SCHEDULE_EXACT_ALARM_DENIED_BY_DEFAULT) {
             return super::permission_checker::preflight(self, SCHEDULE_EXACT_ALARM, uid, package);
         }
-        let mode = super::appops_service::mode(self, super::appops_service::OP_SCHEDULE_EXACT_ALARM, uid, Some(package))?;
-        Ok(mode == super::appops_service::MODE_DEFAULT || mode == super::appops_service::MODE_ALLOWED)
+        let mode = super::appops_service::mode(
+            self,
+            super::appops_service::OP_SCHEDULE_EXACT_ALARM,
+            uid,
+            Some(package),
+        )?;
+        Ok(mode == super::appops_service::MODE_DEFAULT
+            || mode == super::appops_service::MODE_ALLOWED)
     }
 
     /// `PackageManager.checkPermission(permission, package)` for `user`.
-    fn check_package_permission(&self, permission: &str, package: &str, user: i32) -> Result<bool, Exception> {
+    fn check_package_permission(
+        &self,
+        permission: &str,
+        package: &str,
+        user: i32,
+    ) -> Result<bool, Exception> {
         let (state, resolution) = self.packages()?;
-        let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
-        let uid = query.package_uid(package, 0, user).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("app standby: {}", e.0)))??;
+        let query = Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: SYSTEM_UID,
+        };
+        let uid = query
+            .package_uid(package, 0, user)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("app standby: {}", e.0)))??;
         Ok(uid >= 0 && self.check_permission(Some(permission), uid)? == 0)
     }
 
     /// `AppStandbyController.getAppStandbyBucket`.
-    pub(super) fn app_standby_bucket(self: &Arc<Self>, package: &str, user: i32) -> Result<i32, Exception> {
+    pub(super) fn app_standby_bucket(
+        self: &Arc<Self>,
+        package: &str,
+        user: i32,
+    ) -> Result<i32, Exception> {
         if !self.app_idle_enabled()? {
             return Ok(STANDBY_BUCKET_EXEMPTED);
         }
@@ -700,8 +965,15 @@ impl AppHost {
     /// `isAppIdleFiltered(package, getAppId(package), user, now)`: idle
     /// while not charging when its bucket is rare or below and its
     /// minimum bucket lets it be.
-    pub(super) fn app_idle_filtered(self: &Arc<Self>, package: &str, user: i32) -> Result<bool, Exception> {
-        let charging = self.battery_stats.get_or_init(|| Arc::new(super::battery_stats::BatteryStats::new(self))).charging();
+    pub(super) fn app_idle_filtered(
+        self: &Arc<Self>,
+        package: &str,
+        user: i32,
+    ) -> Result<bool, Exception> {
+        let charging = self
+            .battery_stats
+            .get_or_init(|| Arc::new(super::battery_stats::BatteryStats::new(self)))
+            .charging();
         if !self.app_idle_enabled()? || charging {
             return Ok(false);
         }
@@ -729,7 +1001,14 @@ impl AppHost {
                     Event::ActivityPaused => REASON_SUB_USAGE_MOVE_TO_BACKGROUND,
                 };
                 let timeout = c.constants.strong_usage_timeout;
-                c.history.report_usage(package, user, STANDBY_BUCKET_ACTIVE, sub, now, now + timeout);
+                c.history.report_usage(
+                    package,
+                    user,
+                    STANDBY_BUCKET_ACTIVE,
+                    sub,
+                    now,
+                    now + timeout,
+                );
                 Ok((c.history.usage(package, user).current_bucket != before).then_some(timeout))
             }),
             Ok(false) => Ok(None),
@@ -754,8 +1033,14 @@ impl AppHost {
     fn check_package_idle_state(self: &Arc<Self>, package: &str, user: i32) {
         let checked = self.with_standby(|host, c| {
             let (state, resolution) = host.packages()?;
-            let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
-            let uid = query.package_uid(package, 0, user).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e.0))??;
+            let query = Query {
+                state: &state,
+                filter: &resolution.apps_filter,
+                calling_uid: SYSTEM_UID,
+            };
+            let uid = query
+                .package_uid(package, 0, user)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e.0))??;
             if uid > 0 {
                 host.check_and_update(c, package, user, uid, elapsed_realtime())?;
             }
@@ -797,16 +1082,31 @@ mod tests {
     fn app_idle_times_read_as_the_original_reads_them() {
         let users = read_app_idle_times(STATS.as_bytes()).unwrap();
         let used = &users["com.example.used"];
-        assert_eq!((used.last_used_elapsed, used.last_used_by_user_elapsed, used.last_used_screen), (1000, 1000, 500));
+        assert_eq!(
+            (
+                used.last_used_elapsed,
+                used.last_used_by_user_elapsed,
+                used.last_used_screen
+            ),
+            (1000, 1000, 500)
+        );
         assert_eq!((used.current_bucket, used.bucketing_reason), (20, 0x307));
         assert_eq!(used.expiry, BTreeMap::from([(10, 7_203_882)]));
         let never = &users["com.example.never"];
-        assert_eq!((never.last_used_by_user_elapsed, never.current_bucket, never.bucketing_reason), (i32::MIN as i64, 5, 0x100));
+        assert_eq!(
+            (
+                never.last_used_by_user_elapsed,
+                never.current_bucket,
+                never.bucketing_reason
+            ),
+            (i32::MIN as i64, 5, 0x100)
+        );
     }
 
     fn history(at: i64) -> History {
         let mut h = History::new(Path::new("/nonexistent"), at);
-        h.users.insert(0, read_app_idle_times(STATS.as_bytes()).unwrap());
+        h.users
+            .insert(0, read_app_idle_times(STATS.as_bytes()).unwrap());
         h.update_display(true, at);
         h
     }
@@ -814,37 +1114,104 @@ mod tests {
     #[test]
     fn usage_makes_an_app_active_until_its_expiry() {
         let mut h = history(10_000);
-        h.report_usage("com.example.used", 0, STANDBY_BUCKET_ACTIVE, REASON_SUB_USAGE_MOVE_TO_FOREGROUND, 20_000, 20_000 + ONE_HOUR);
+        h.report_usage(
+            "com.example.used",
+            0,
+            STANDBY_BUCKET_ACTIVE,
+            REASON_SUB_USAGE_MOVE_TO_FOREGROUND,
+            20_000,
+            20_000 + ONE_HOUR,
+        );
         let u = &h.users[&0]["com.example.used"];
-        assert_eq!((u.current_bucket, u.bucketing_reason), (STANDBY_BUCKET_ACTIVE, REASON_MAIN_USAGE | REASON_SUB_USAGE_MOVE_TO_FOREGROUND));
+        assert_eq!(
+            (u.current_bucket, u.bucketing_reason),
+            (
+                STANDBY_BUCKET_ACTIVE,
+                REASON_MAIN_USAGE | REASON_SUB_USAGE_MOVE_TO_FOREGROUND
+            )
+        );
         // Elapsed time continues from the persisted duration (none here).
-        assert_eq!((u.last_used_elapsed, u.last_used_by_user_elapsed, u.last_used_screen), (10_000, 10_000, 10_000));
-        assert_eq!(u.expiry[&STANDBY_BUCKET_ACTIVE], 7_203_882.max(10_000 + ONE_HOUR));
+        assert_eq!(
+            (
+                u.last_used_elapsed,
+                u.last_used_by_user_elapsed,
+                u.last_used_screen
+            ),
+            (10_000, 10_000, 10_000)
+        );
+        assert_eq!(
+            u.expiry[&STANDBY_BUCKET_ACTIVE],
+            7_203_882.max(10_000 + ONE_HOUR)
+        );
         // A worse bucket's usage does not lower a better one.
-        h.report_usage("com.example.used", 0, STANDBY_BUCKET_WORKING_SET, REASON_SUB_USAGE_MOVE_TO_BACKGROUND, 30_000, 0);
-        assert_eq!(h.users[&0]["com.example.used"].current_bucket, STANDBY_BUCKET_ACTIVE);
+        h.report_usage(
+            "com.example.used",
+            0,
+            STANDBY_BUCKET_WORKING_SET,
+            REASON_SUB_USAGE_MOVE_TO_BACKGROUND,
+            30_000,
+            0,
+        );
+        assert_eq!(
+            h.users[&0]["com.example.used"].current_bucket,
+            STANDBY_BUCKET_ACTIVE
+        );
         assert_eq!(h.bucket("com.example.absent", 0), STANDBY_BUCKET_NEVER);
     }
 
     #[test]
     fn thresholds_index_the_time_since_use() {
         let mut h = history(0);
-        let (screen, elapsed) = (DEFAULT_SCREEN_TIME_THRESHOLDS, DEFAULT_ELAPSED_TIME_THRESHOLDS);
+        let (screen, elapsed) = (
+            DEFAULT_SCREEN_TIME_THRESHOLDS,
+            DEFAULT_ELAPSED_TIME_THRESHOLDS,
+        );
         // Used at elapsed 1000, screen 500: 13 hours later, with the screen
         // on all along, it is in the working set.
-        assert_eq!(h.threshold_index("com.example.used", 0, 13 * ONE_HOUR, &screen, &elapsed, false), 1);
-        assert_eq!(h.threshold_index("com.example.used", 0, 9 * ONE_DAY, &screen, &elapsed, false), 4);
-        assert_eq!(h.threshold_index("com.example.never", 0, ONE_DAY, &screen, &elapsed, false), -1);
-        assert_eq!(h.threshold_index("com.example.absent", 0, ONE_DAY, &screen, &elapsed, false), -1);
+        assert_eq!(
+            h.threshold_index(
+                "com.example.used",
+                0,
+                13 * ONE_HOUR,
+                &screen,
+                &elapsed,
+                false
+            ),
+            1
+        );
+        assert_eq!(
+            h.threshold_index("com.example.used", 0, 9 * ONE_DAY, &screen, &elapsed, false),
+            4
+        );
+        assert_eq!(
+            h.threshold_index("com.example.never", 0, ONE_DAY, &screen, &elapsed, false),
+            -1
+        );
+        assert_eq!(
+            h.threshold_index("com.example.absent", 0, ONE_DAY, &screen, &elapsed, false),
+            -1
+        );
     }
 
     #[test]
     fn constants_come_from_device_config_within_their_minimums() {
         let none = Constants::read(&|_| None, true);
-        assert_eq!((none.strong_usage_timeout, none.check_idle_interval), (5 * ONE_MINUTE, 3 * ONE_HOUR));
-        assert_eq!(Constants::read(&|_| None, false).strong_usage_timeout, ONE_HOUR);
-        let set = Constants::read(&|k| (k == "elapsed_threshold_working_set").then(|| "60000".into()), true);
-        assert_eq!(set.elapsed_thresholds, [0, ONE_HOUR, 24 * ONE_HOUR, 48 * ONE_HOUR, 8 * ONE_DAY]);
+        assert_eq!(
+            (none.strong_usage_timeout, none.check_idle_interval),
+            (5 * ONE_MINUTE, 3 * ONE_HOUR)
+        );
+        assert_eq!(
+            Constants::read(&|_| None, false).strong_usage_timeout,
+            ONE_HOUR
+        );
+        let set = Constants::read(
+            &|k| (k == "elapsed_threshold_working_set").then(|| "60000".into()),
+            true,
+        );
+        assert_eq!(
+            set.elapsed_thresholds,
+            [0, ONE_HOUR, 24 * ONE_HOUR, 48 * ONE_HOUR, 8 * ONE_DAY]
+        );
         assert_eq!(set.screen_thresholds, DEFAULT_SCREEN_TIME_THRESHOLDS);
         assert_eq!(set.check_idle_interval, ONE_HOUR / 4);
     }

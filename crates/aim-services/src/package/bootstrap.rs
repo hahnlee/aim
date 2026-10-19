@@ -16,11 +16,11 @@ mod existing;
 mod query;
 mod read_ahead;
 pub(crate) use query::{
-    application_query_filtering_call, domain_verification_restricted_call, granted_permissions_call,
-    installed_permissions_call,
+    application_query_filtering_call, domain_verification_restricted_call,
+    granted_permissions_call, installed_permissions_call,
 };
-mod runtime;
 mod preferred;
+mod runtime;
 mod scan;
 pub use apex::{ActiveApex, ApexInventory, ApexPackage};
 pub use query::QueryContextError;
@@ -39,7 +39,10 @@ pub struct Bridge {
 /// notification per reference, so these share the one `System` links.
 #[derive(Default)]
 struct Deaths {
-    listeners: std::sync::Mutex<(bool, std::collections::BTreeMap<u64, Box<dyn FnOnce() + Send>>)>,
+    listeners: std::sync::Mutex<(
+        bool,
+        std::collections::BTreeMap<u64, Box<dyn FnOnce() + Send>>,
+    )>,
     next: std::sync::atomic::AtomicU64,
 }
 impl Deaths {
@@ -212,13 +215,18 @@ impl Bridge {
     pub fn format_package_timestamp(&self, millis: i64) -> Result<String, OwnerError> {
         let mut data = Parcel::new();
         bridge::FormatPackageTimestamp { millis }.write(&mut data);
-        let reply = self.owner.transact(bridge::FORMAT_PACKAGE_TIMESTAMP, &data, false)
+        let reply = self
+            .owner
+            .transact(bridge::FORMAT_PACKAGE_TIMESTAMP, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let value = bridge::read_format_package_timestamp_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?
             .ok_or_else(|| OwnerError::Code("package diagnostic timestamp absent".into()))?;
-        if reader.remaining() != 0 { return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
         Ok(value)
     }
 
@@ -381,49 +389,89 @@ impl Bridge {
     }
 
     pub fn provider_authority_grants(
-        &self, uid: i32, provider: &super::info::ProviderInfo, user: i32,
+        &self,
+        uid: i32,
+        provider: &super::info::ProviderInfo,
+        user: i32,
     ) -> Result<bool, OwnerError> {
         let mut request = Parcel::new();
         bridge::CheckProviderAuthorityGrants {
-            calling_uid: uid, provider_info: Some(provider.clone()), user_id: user,
-        }.write(&mut request);
-        let reply = self.owner.transact(bridge::CHECK_PROVIDER_AUTHORITY_GRANTS, &request, false)
+            calling_uid: uid,
+            provider_info: Some(provider.clone()),
+            user_id: user,
+        }
+        .write(&mut request);
+        let reply = self
+            .owner
+            .transact(bridge::CHECK_PROVIDER_AUTHORITY_GRANTS, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let result = bridge::read_check_provider_authority_grants_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?;
-        if reader.remaining() != 0 { return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
         Ok(result)
     }
 
-    pub fn provider_clone_redirected(&self, authority: &str, uid: i32, user: i32) -> Result<bool, OwnerError> {
+    pub fn provider_clone_redirected(
+        &self,
+        authority: &str,
+        uid: i32,
+        user: i32,
+    ) -> Result<bool, OwnerError> {
         let mut request = Parcel::new();
         bridge::IsProviderCloneRedirected {
-            authority: Some(authority.into()), calling_uid: uid, user_id: user,
-        }.write(&mut request);
-        let reply = self.owner.transact(bridge::IS_PROVIDER_CLONE_REDIRECTED, &request, false)
+            authority: Some(authority.into()),
+            calling_uid: uid,
+            user_id: user,
+        }
+        .write(&mut request);
+        let reply = self
+            .owner
+            .transact(bridge::IS_PROVIDER_CLONE_REDIRECTED, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let result = bridge::read_is_provider_clone_redirected_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?;
-        if reader.remaining() != 0 { return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
         Ok(result)
     }
 
     pub fn instant_cookie_limit(&self) -> Result<i32, OwnerError> {
-        let mut request = Parcel::new(); bridge::GetInstantAppCookieLimit {}.write(&mut request);
-        let reply = self.owner.transact(bridge::GET_INSTANT_APP_COOKIE_LIMIT, &request, false).map_err(OwnerError::Transport)?;
+        let mut request = Parcel::new();
+        bridge::GetInstantAppCookieLimit {}.write(&mut request);
+        let reply = self
+            .owner
+            .transact(bridge::GET_INSTANT_APP_COOKIE_LIMIT, &request, false)
+            .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
-        let limit = bridge::read_get_instant_app_cookie_limit_reply(&mut reader).map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?;
-        if reader.remaining() != 0 { return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
+        let limit = bridge::read_get_instant_app_cookie_limit_reply(&mut reader)
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
         Ok(limit)
     }
     pub fn instant_icon_density(&self) -> Result<i32, OwnerError> {
-        let mut request = Parcel::new(); bridge::GetInstantAppIconDensity {}.write(&mut request);
-        let reply = self.owner.transact(bridge::GET_INSTANT_APP_ICON_DENSITY, &request, false).map_err(OwnerError::Transport)?;
+        let mut request = Parcel::new();
+        bridge::GetInstantAppIconDensity {}.write(&mut request);
+        let reply = self
+            .owner
+            .transact(bridge::GET_INSTANT_APP_ICON_DENSITY, &request, false)
+            .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
-        let density = bridge::read_get_instant_app_icon_density_reply(&mut reader).map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?;
-        if reader.remaining() != 0 { return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
+        let density = bridge::read_get_instant_app_icon_density_reply(&mut reader)
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
         Ok(density)
     }
 
@@ -434,192 +482,317 @@ impl Bridge {
     }
 
     pub fn package_profile_parent(&self, user: i32) -> Result<Option<i32>, OwnerError> {
-        let mut request = Parcel::new(); bridge::GetPackageProfileParent { user_id: user }.write(&mut request);
-        let reply = self.owner.transact(bridge::GET_PACKAGE_PROFILE_PARENT, &request, false).map_err(OwnerError::Transport)?;
+        let mut request = Parcel::new();
+        bridge::GetPackageProfileParent { user_id: user }.write(&mut request);
+        let reply = self
+            .owner
+            .transact(bridge::GET_PACKAGE_PROFILE_PARENT, &request, false)
+            .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let parent = bridge::read_get_package_profile_parent_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?;
-        if reader.remaining() != 0 { return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
         Ok((parent != -10000).then_some(parent))
     }
 
     pub fn parent_profile_app_linking(&self, user: i32) -> Result<bool, OwnerError> {
-        let mut request = Parcel::new(); bridge::IsParentProfileAppLinkingAllowed { user_id: user }.write(&mut request);
-        let reply = self.owner.transact(bridge::IS_PARENT_PROFILE_APP_LINKING_ALLOWED, &request, false).map_err(OwnerError::Transport)?;
+        let mut request = Parcel::new();
+        bridge::IsParentProfileAppLinkingAllowed { user_id: user }.write(&mut request);
+        let reply = self
+            .owner
+            .transact(
+                bridge::IS_PARENT_PROFILE_APP_LINKING_ALLOWED,
+                &request,
+                false,
+            )
+            .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let allowed = bridge::read_is_parent_profile_app_linking_allowed_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?;
-        if reader.remaining() != 0 { return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
         Ok(allowed)
     }
 
     pub fn package_role_holders(&self, role: &str, user: i32) -> Result<Vec<String>, OwnerError> {
-        let mut request = Parcel::new(); bridge::GetPackageRoleHolders { role: Some(role.into()), user_id: user }.write(&mut request);
-        let reply = self.owner.transact(bridge::GET_PACKAGE_ROLE_HOLDERS, &request, false).map_err(OwnerError::Transport)?;
+        let mut request = Parcel::new();
+        bridge::GetPackageRoleHolders {
+            role: Some(role.into()),
+            user_id: user,
+        }
+        .write(&mut request);
+        let reply = self
+            .owner
+            .transact(bridge::GET_PACKAGE_ROLE_HOLDERS, &request, false)
+            .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let holders = bridge::read_get_package_role_holders_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?
             .ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
-        if reader.remaining() != 0 { return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
-        holders.into_iter().map(|value| value.ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))).collect()
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
+        holders
+            .into_iter()
+            .map(|value| value.ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE)))
+            .collect()
     }
 
     pub fn application_data(&self) -> Result<Strong, OwnerError> {
-        let mut request = Parcel::new(); bridge::GetApplicationDataBridge {}.write(&mut request);
-        let reply = self.owner.transact(bridge::GET_APPLICATION_DATA_BRIDGE, &request, false)
+        let mut request = Parcel::new();
+        bridge::GetApplicationDataBridge {}.write(&mut request);
+        let reply = self
+            .owner
+            .transact(bridge::GET_APPLICATION_DATA_BRIDGE, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_get_application_data_bridge_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?
             .ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
-        if reader.remaining() != 0 { return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
-        reply.retain_remote_binder(binder).map_err(OwnerError::Transport)
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
+        reply
+            .retain_remote_binder(binder)
+            .map_err(OwnerError::Transport)
     }
 
     pub fn package_relocation(&self) -> Result<Strong, OwnerError> {
-        let mut request = Parcel::new(); bridge::GetPackageRelocationBridge {}.write(&mut request);
-        let reply = self.owner.transact(bridge::GET_PACKAGE_RELOCATION_BRIDGE, &request, false)
+        let mut request = Parcel::new();
+        bridge::GetPackageRelocationBridge {}.write(&mut request);
+        let reply = self
+            .owner
+            .transact(bridge::GET_PACKAGE_RELOCATION_BRIDGE, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_get_package_relocation_bridge_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?
             .ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
-        if reader.remaining() != 0 { return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
-        reply.retain_remote_binder(binder).map_err(OwnerError::Transport)
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
+        reply
+            .retain_remote_binder(binder)
+            .map_err(OwnerError::Transport)
     }
 
     pub fn package_moves(&self) -> Result<Strong, OwnerError> {
-        let mut request = Parcel::new(); bridge::GetPackageMoveBridge {}.write(&mut request);
-        let reply = self.owner.transact(bridge::GET_PACKAGE_MOVE_BRIDGE, &request, false)
+        let mut request = Parcel::new();
+        bridge::GetPackageMoveBridge {}.write(&mut request);
+        let reply = self
+            .owner
+            .transact(bridge::GET_PACKAGE_MOVE_BRIDGE, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_get_package_move_bridge_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?
             .ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
-        if reader.remaining() != 0 { return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
-        reply.retain_remote_binder(binder).map_err(OwnerError::Transport)
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
+        reply
+            .retain_remote_binder(binder)
+            .map_err(OwnerError::Transport)
     }
 
     pub fn package_effects(&self) -> Result<Strong, OwnerError> {
         let mut data = Parcel::new();
         bridge::GetPackageMutationBridge {}.write(&mut data);
-        let reply = self.owner.transact(bridge::GET_PACKAGE_MUTATION_BRIDGE, &data, false)
+        let reply = self
+            .owner
+            .transact(bridge::GET_PACKAGE_MUTATION_BRIDGE, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_get_package_mutation_bridge_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?
             .ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
-        if reader.remaining() != 0 { return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
-        reply.retain_remote_binder(binder).map_err(OwnerError::Transport)
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
+        reply
+            .retain_remote_binder(binder)
+            .map_err(OwnerError::Transport)
     }
 
     pub fn package_maintenance(&self) -> Result<Strong, OwnerError> {
         let mut data = Parcel::new();
         bridge::GetPackageMaintenanceBridge {}.write(&mut data);
-        let reply = self.owner.transact(bridge::GET_PACKAGE_MAINTENANCE_BRIDGE, &data, false)
+        let reply = self
+            .owner
+            .transact(bridge::GET_PACKAGE_MAINTENANCE_BRIDGE, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_get_package_maintenance_bridge_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?
             .ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
-        if reader.remaining() != 0 { return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
-        reply.retain_remote_binder(binder).map_err(OwnerError::Transport)
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
+        reply
+            .retain_remote_binder(binder)
+            .map_err(OwnerError::Transport)
     }
 
     pub fn installer_external(&self) -> Result<Strong, OwnerError> {
         let mut data = Parcel::new();
         bridge::GetInstallerExternalBridge {}.write(&mut data);
-        let reply = self.owner.transact(bridge::GET_INSTALLER_EXTERNAL_BRIDGE, &data, false)
+        let reply = self
+            .owner
+            .transact(bridge::GET_INSTALLER_EXTERNAL_BRIDGE, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_get_installer_external_bridge_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?
             .ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply.retain_remote_binder(binder).map_err(OwnerError::Transport)
+        reply
+            .retain_remote_binder(binder)
+            .map_err(OwnerError::Transport)
     }
 
     pub fn installer_files(&self) -> Result<Strong, OwnerError> {
         let mut data = Parcel::new();
         bridge::GetPackageInstallerFiles {}.write(&mut data);
-        let reply = self.owner.transact(bridge::GET_PACKAGE_INSTALLER_FILES, &data, false)
+        let reply = self
+            .owner
+            .transact(bridge::GET_PACKAGE_INSTALLER_FILES, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_get_package_installer_files_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?
             .ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply.retain_remote_binder(binder).map_err(OwnerError::Transport)
+        reply
+            .retain_remote_binder(binder)
+            .map_err(OwnerError::Transport)
     }
 
     pub fn staging_bridge(&self) -> Result<Strong, OwnerError> {
         let mut data = Parcel::new();
         bridge::GetNativeStagingBridge {}.write(&mut data);
-        let reply = self.owner.transact(bridge::GET_NATIVE_STAGING_BRIDGE, &data, false)
+        let reply = self
+            .owner
+            .transact(bridge::GET_NATIVE_STAGING_BRIDGE, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_get_native_staging_bridge_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?
             .ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply.retain_remote_binder(binder).map_err(OwnerError::Transport)
+        reply
+            .retain_remote_binder(binder)
+            .map_err(OwnerError::Transport)
     }
 
-    pub fn package_monitor_result(&self, action: &str, package: &str, user: i32, uid: i32, replacing: bool) -> Result<Parcel, OwnerError> {
+    pub fn package_monitor_result(
+        &self,
+        action: &str,
+        package: &str,
+        user: i32,
+        uid: i32,
+        replacing: bool,
+    ) -> Result<Parcel, OwnerError> {
         let mut data = Parcel::new();
-        bridge::PackageMonitorResult { action: Some(action.into()), package_name: Some(package.into()), user_id: user, uid, replacing }.write(&mut data);
-        let reply = self.owner.transact(bridge::PACKAGE_MONITOR_RESULT, &data, false).map_err(OwnerError::Transport)?;
+        bridge::PackageMonitorResult {
+            action: Some(action.into()),
+            package_name: Some(package.into()),
+            user_id: user,
+            uid,
+            replacing,
+        }
+        .write(&mut data);
+        let reply = self
+            .owner
+            .transact(bridge::PACKAGE_MONITOR_RESULT, &data, false)
+            .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let bytes = bridge::read_package_monitor_result_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?
             .ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
-        if reader.remaining() != 0 { return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
         let mut payload = Parcel::new();
         payload.write_raw(&bytes, &[]);
         Ok(payload)
     }
 
-    pub fn allocate_preferred_identity(&self) -> Result<super::preferred::registry::Identity, OwnerError> {
+    pub fn allocate_preferred_identity(
+        &self,
+    ) -> Result<super::preferred::registry::Identity, OwnerError> {
         use aim_service_aidl::dev_aim_server_ipackageresolveridentity as identity;
         let mut data = Parcel::new();
         bridge::AllocatePreferredResolverIdentity {}.write(&mut data);
-        let reply = self.owner.transact(bridge::ALLOCATE_PREFERRED_RESOLVER_IDENTITY, &data, false)
+        let reply = self
+            .owner
+            .transact(bridge::ALLOCATE_PREFERRED_RESOLVER_IDENTITY, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let binder = bridge::read_allocate_preferred_resolver_identity_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?
             .ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        let lease = reply.retain_remote_binder(binder).map_err(OwnerError::Transport)?;
+        let lease = reply
+            .retain_remote_binder(binder)
+            .map_err(OwnerError::Transport)?;
         let mut request = Parcel::new();
         identity::GetIdentityHash {}.write(&mut request);
-        let reply = lease.transact(identity::GET_IDENTITY_HASH, &request, false)
+        let reply = lease
+            .transact(identity::GET_IDENTITY_HASH, &request, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let hash = identity::read_get_identity_hash_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?;
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        Ok(super::preferred::registry::Identity { hash, lease: std::sync::Arc::new(lease) })
+        Ok(super::preferred::registry::Identity {
+            hash,
+            lease: std::sync::Arc::new(lease),
+        })
     }
 
     pub fn installer_cloud_compilation_verification_enabled(&self) -> Result<bool, OwnerError> {
         let mut data = Parcel::new();
         bridge::InstallerCloudCompilationVerificationEnabled {}.write(&mut data);
-        let reply = self.owner.transact(bridge::INSTALLER_CLOUD_COMPILATION_VERIFICATION_ENABLED, &data, false)
+        let reply = self
+            .owner
+            .transact(
+                bridge::INSTALLER_CLOUD_COMPILATION_VERIFICATION_ENABLED,
+                &data,
+                false,
+            )
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
-        let enabled = bridge::read_installer_cloud_compilation_verification_enabled_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?;
+        let enabled =
+            bridge::read_installer_cloud_compilation_verification_enabled_reply(&mut reader)
+                .map_err(OwnerError::Transport)?
+                .map_err(OwnerError::Owner)?;
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
@@ -629,11 +802,14 @@ impl Bridge {
     pub fn installer_art_service_v3_enabled(&self) -> Result<bool, OwnerError> {
         let mut data = Parcel::new();
         bridge::IsInstallerArtServiceV3Enabled {}.write(&mut data);
-        let reply = self.owner.transact(bridge::IS_INSTALLER_ART_SERVICE_V3ENABLED, &data, false)
+        let reply = self
+            .owner
+            .transact(bridge::IS_INSTALLER_ART_SERVICE_V3ENABLED, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let enabled = bridge::read_is_installer_art_service_v3enabled_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?;
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
@@ -643,11 +819,14 @@ impl Bridge {
     pub fn installer_domain_limits(&self) -> Result<(i64, i64), OwnerError> {
         let mut data = Parcel::new();
         bridge::GetInstallerDomainLimits {}.write(&mut data);
-        let reply = self.owner.transact(bridge::GET_INSTALLER_DOMAIN_LIMITS, &data, false)
+        let reply = self
+            .owner
+            .transact(bridge::GET_INSTALLER_DOMAIN_LIMITS, &data, false)
             .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let limits = bridge::read_get_installer_domain_limits_reply(&mut reader)
-            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?;
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
         let Some(limits) = limits.filter(|limits| limits.len() == 2) else {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         };
@@ -898,26 +1077,37 @@ impl Bridge {
         target_sdk: i32,
     ) -> Result<Policy, NativePolicyError> {
         let (code, data) = native_dependencies_call(package_name, target_sdk);
-        let reply = self.read(code, &data).map_err(NativePolicyError::Transport)?;
+        let reply = self
+            .read(code, &data)
+            .map_err(NativePolicyError::Transport)?;
         let mut reader = reply.reader();
         let enforce_native_dependencies =
             bridge::read_are_native_library_dependencies_enforced_reply(&mut reader)
                 .map_err(NativePolicyError::Transport)?
                 .map_err(NativePolicyError::Owner)?;
         if reader.remaining() != 0 {
-            return Err(NativePolicyError::Transport(aim_binder_host::parcel::BAD_VALUE));
+            return Err(NativePolicyError::Transport(
+                aim_binder_host::parcel::BAD_VALUE,
+            ));
         }
         let (code, data) = sdk_library_independence_call();
-        let reply = self.read(code, &data).map_err(NativePolicyError::Transport)?;
+        let reply = self
+            .read(code, &data)
+            .map_err(NativePolicyError::Transport)?;
         let mut reader = reply.reader();
         let sdk_library_independence =
             bridge::read_is_sdk_library_independence_enabled_reply(&mut reader)
                 .map_err(NativePolicyError::Transport)?
                 .map_err(NativePolicyError::Owner)?;
         if reader.remaining() != 0 {
-            return Err(NativePolicyError::Transport(aim_binder_host::parcel::BAD_VALUE));
+            return Err(NativePolicyError::Transport(
+                aim_binder_host::parcel::BAD_VALUE,
+            ));
         }
-        Ok(Policy { enforce_native_dependencies, sdk_library_independence })
+        Ok(Policy {
+            enforce_native_dependencies,
+            sdk_library_independence,
+        })
     }
 
     /// `library_policy` of each package, read in one transaction.
@@ -926,7 +1116,11 @@ impl Bridge {
         packages: impl Iterator<Item = (&'a str, i32)> + Clone,
     ) -> Result<std::collections::BTreeMap<String, Policy>, (String, NativePolicyError)> {
         let calls = std::iter::once(sdk_library_independence_call())
-            .chain(packages.clone().map(|(name, sdk)| native_dependencies_call(name, sdk)))
+            .chain(
+                packages
+                    .clone()
+                    .map(|(name, sdk)| native_dependencies_call(name, sdk)),
+            )
             .collect();
         self.read_ahead(calls, || {
             packages
@@ -946,7 +1140,9 @@ impl Bridge {
     ) -> Result<Vec<u32>, PermissionGidError> {
         permission_gids::query_with(app_id, users, |uid| {
             let (code, data) = permission_gids_call(uid);
-            let reply = self.read(code, &data).map_err(PermissionGidError::Transport)?;
+            let reply = self
+                .read(code, &data)
+                .map_err(PermissionGidError::Transport)?;
             let mut reader = reply.reader();
             let result = bridge::read_get_permission_gids_for_uid_reply(&mut reader)
                 .map_err(PermissionGidError::Transport)?
@@ -963,8 +1159,11 @@ impl Bridge {
 
 fn native_dependencies_call(package_name: &str, target_sdk: i32) -> (u32, Parcel) {
     let mut data = Parcel::new();
-    bridge::AreNativeLibraryDependenciesEnforced { package_name: Some(package_name.into()), target_sdk }
-        .write(&mut data);
+    bridge::AreNativeLibraryDependenciesEnforced {
+        package_name: Some(package_name.into()),
+        target_sdk,
+    }
+    .write(&mut data);
     (bridge::ARE_NATIVE_LIBRARY_DEPENDENCIES_ENFORCED, data)
 }
 
@@ -995,10 +1194,18 @@ mod tests {
     #[test]
     fn death_listeners_run_once_and_late_ones_at_once() {
         use super::Deaths;
-        use std::sync::{Arc, atomic::{AtomicI32, Ordering}};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicI32, Ordering},
+        };
         let deaths = Deaths::default();
         let calls = Arc::new(AtomicI32::new(0));
-        let call = |calls: &Arc<AtomicI32>| { let calls = calls.clone(); Box::new(move || { calls.fetch_add(1, Ordering::SeqCst); }) as Box<dyn FnOnce() + Send> };
+        let call = |calls: &Arc<AtomicI32>| {
+            let calls = calls.clone();
+            Box::new(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+            }) as Box<dyn FnOnce() + Send>
+        };
         deaths.add(call(&calls));
         let cleared = deaths.add(call(&calls));
         deaths.clear(cleared);
@@ -1010,95 +1217,216 @@ mod tests {
 
     #[test]
     fn cloud_verification_reads_live_binder_flag_and_preserves_owner_failures() {
-        use aim_binder_driver::{Credentials, Device, Driver, Errno, File, GuestProcess, errno, uapi::*};
+        use aim_binder_driver::{
+            Credentials, Device, Driver, Errno, File, GuestProcess, errno, uapi::*,
+        };
         use aim_binder_host::local::{Call, LocalProcess, Reply, Service};
-        use aim_binder_host::parcel::{Binder, UNKNOWN_TRANSACTION, BAD_VALUE};
-        use std::sync::{Arc, atomic::{AtomicI32, Ordering}};
+        use aim_binder_host::parcel::{BAD_VALUE, Binder, UNKNOWN_TRANSACTION};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicI32, Ordering},
+        };
         struct NoMemory;
         impl GuestProcess for NoMemory {
-            fn copy_from_user(&mut self, _: u64, _: &mut [u8]) -> Result<(), Errno> { Err(errno::EFAULT) }
-            fn copy_to_user(&mut self, _: u64, _: &[u8]) -> Result<(), Errno> { Err(errno::EFAULT) }
-            fn get_file(&mut self, _: u32) -> Result<File, Errno> { Err(errno::EBADF) }
-            fn install_file(&mut self, _: File) -> Result<u32, Errno> { Err(errno::EBADF) }
-            fn close_fd(&mut self, _: u32) { panic!("unexpected fd") }
+            fn copy_from_user(&mut self, _: u64, _: &mut [u8]) -> Result<(), Errno> {
+                Err(errno::EFAULT)
+            }
+            fn copy_to_user(&mut self, _: u64, _: &[u8]) -> Result<(), Errno> {
+                Err(errno::EFAULT)
+            }
+            fn get_file(&mut self, _: u32) -> Result<File, Errno> {
+                Err(errno::EBADF)
+            }
+            fn install_file(&mut self, _: File) -> Result<u32, Errno> {
+                Err(errno::EBADF)
+            }
+            fn close_fd(&mut self, _: u32) {
+                panic!("unexpected fd")
+            }
         }
         struct Flag(Arc<AtomicI32>);
         impl Service for Flag {
-            fn descriptor(&self) -> &str { bridge::DESCRIPTOR }
+            fn descriptor(&self) -> &str {
+                bridge::DESCRIPTOR
+            }
             fn transact(&self, call: &mut Call<'_>) -> Reply {
                 assert_eq!(call.sender_euid, 1000);
-                if call.code != bridge::INSTALLER_CLOUD_COMPILATION_VERIFICATION_ENABLED { return Err(UNKNOWN_TRANSACTION); }
+                if call.code != bridge::INSTALLER_CLOUD_COMPILATION_VERIFICATION_ENABLED {
+                    return Err(UNKNOWN_TRANSACTION);
+                }
                 bridge::InstallerCloudCompilationVerificationEnabled::read(&mut call.data)?;
                 assert_eq!(call.data.remaining(), 0);
                 let mut reply = Parcel::new();
                 match self.0.load(Ordering::Acquire) {
-                    2 => reply.write_exception(&Exception::new(EX_ILLEGAL_STATE, "cloud flag owner failed")),
+                    2 => reply.write_exception(&Exception::new(
+                        EX_ILLEGAL_STATE,
+                        "cloud flag owner failed",
+                    )),
                     3 => reply.write_no_exception(),
-                    4 => { bridge::write_installer_cloud_compilation_verification_enabled_reply(&mut reply, true); reply.write_i32(99); },
+                    4 => {
+                        bridge::write_installer_cloud_compilation_verification_enabled_reply(
+                            &mut reply, true,
+                        );
+                        reply.write_i32(99);
+                    }
                     5 => return Err(BAD_VALUE),
-                    enabled => bridge::write_installer_cloud_compilation_verification_enabled_reply(&mut reply, enabled == 1),
+                    enabled => {
+                        bridge::write_installer_cloud_compilation_verification_enabled_reply(
+                            &mut reply,
+                            enabled == 1,
+                        )
+                    }
                 }
                 Ok(reply)
             }
         }
-        struct Processes { driver: Arc<Driver>, server: Arc<LocalProcess>, client: Arc<LocalProcess> }
-        impl Drop for Processes { fn drop(&mut self) { self.driver.release(self.client.proc_handle()); self.driver.release(self.server.proc_handle()); } }
+        struct Processes {
+            driver: Arc<Driver>,
+            server: Arc<LocalProcess>,
+            client: Arc<LocalProcess>,
+        }
+        impl Drop for Processes {
+            fn drop(&mut self) {
+                self.driver.release(self.client.proc_handle());
+                self.driver.release(self.server.proc_handle());
+            }
+        }
         let driver = Driver::new();
-        let open = |pid| LocalProcess::open(&driver, Device::Binder, Credentials { pid, euid: 1000, security_context: None });
-        let server = open(99601); let client = open(99602);
-        let _processes = Processes { driver:driver.clone(), server:server.clone(), client:client.clone() };
+        let open = |pid| {
+            LocalProcess::open(
+                &driver,
+                Device::Binder,
+                Credentials {
+                    pid,
+                    euid: 1000,
+                    security_context: None,
+                },
+            )
+        };
+        let server = open(99601);
+        let client = open(99602);
+        let _processes = Processes {
+            driver: driver.clone(),
+            server: server.clone(),
+            client: client.clone(),
+        };
         let phase = Arc::new(AtomicI32::new(0));
-        let Binder::Local(ptr) = server.add_service(Arc::new(Flag(phase.clone()))) else { unreachable!() };
-        let mut object = FlatBinderObject { kind:BINDER_TYPE_BINDER, flags:0, binder:ptr, cookie:ptr }.encode();
-        driver.ioctl(server.proc_handle(), 99603, BINDER_SET_CONTEXT_MGR_EXT, &mut object, &mut NoMemory).unwrap();
-        server.start(); client.start();
-        let owner = Bridge { owner:client.strong(0), test_base_on_bcp:false, signing_debuggable:false, deaths:Deaths::default() };
+        let Binder::Local(ptr) = server.add_service(Arc::new(Flag(phase.clone()))) else {
+            unreachable!()
+        };
+        let mut object = FlatBinderObject {
+            kind: BINDER_TYPE_BINDER,
+            flags: 0,
+            binder: ptr,
+            cookie: ptr,
+        }
+        .encode();
+        driver
+            .ioctl(
+                server.proc_handle(),
+                99603,
+                BINDER_SET_CONTEXT_MGR_EXT,
+                &mut object,
+                &mut NoMemory,
+            )
+            .unwrap();
+        server.start();
+        client.start();
+        let owner = Bridge {
+            owner: client.strong(0),
+            test_base_on_bcp: false,
+            signing_debuggable: false,
+            deaths: Deaths::default(),
+        };
         for enabled in [false, true, false] {
             phase.store(i32::from(enabled), Ordering::Release);
-            assert_eq!(owner.installer_cloud_compilation_verification_enabled().unwrap(), enabled);
+            assert_eq!(
+                owner
+                    .installer_cloud_compilation_verification_enabled()
+                    .unwrap(),
+                enabled
+            );
         }
         phase.store(2, Ordering::Release);
-        assert!(matches!(owner.installer_cloud_compilation_verification_enabled(), Err(OwnerError::Owner(error)) if error.message == "cloud flag owner failed"));
+        assert!(
+            matches!(owner.installer_cloud_compilation_verification_enabled(), Err(OwnerError::Owner(error)) if error.message == "cloud flag owner failed")
+        );
         for value in [3, 4, 5] {
             phase.store(value, Ordering::Release);
-            assert!(matches!(owner.installer_cloud_compilation_verification_enabled(), Err(OwnerError::Transport(_))));
+            assert!(matches!(
+                owner.installer_cloud_compilation_verification_enabled(),
+                Err(OwnerError::Transport(_))
+            ));
         }
     }
     #[test]
     fn sdk_library_policy_reads_live_binder_flag_and_preserves_owner_failures() {
-        use aim_binder_driver::{Credentials, Device, Driver, Errno, File, GuestProcess, errno, uapi::*};
+        use aim_binder_driver::{
+            Credentials, Device, Driver, Errno, File, GuestProcess, errno, uapi::*,
+        };
         use aim_binder_host::local::{Call, LocalProcess, Reply, Service};
-        use aim_binder_host::parcel::{Binder, UNKNOWN_TRANSACTION, BAD_VALUE};
-        use std::sync::{Arc, atomic::{AtomicI32, Ordering}};
+        use aim_binder_host::parcel::{BAD_VALUE, Binder, UNKNOWN_TRANSACTION};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicI32, Ordering},
+        };
         struct NoMemory;
         impl GuestProcess for NoMemory {
-            fn copy_from_user(&mut self, _: u64, _: &mut [u8]) -> Result<(), Errno> { Err(errno::EFAULT) }
-            fn copy_to_user(&mut self, _: u64, _: &[u8]) -> Result<(), Errno> { Err(errno::EFAULT) }
-            fn get_file(&mut self, _: u32) -> Result<File, Errno> { Err(errno::EBADF) }
-            fn install_file(&mut self, _: File) -> Result<u32, Errno> { Err(errno::EBADF) }
-            fn close_fd(&mut self, _: u32) { panic!("unexpected fd") }
+            fn copy_from_user(&mut self, _: u64, _: &mut [u8]) -> Result<(), Errno> {
+                Err(errno::EFAULT)
+            }
+            fn copy_to_user(&mut self, _: u64, _: &[u8]) -> Result<(), Errno> {
+                Err(errno::EFAULT)
+            }
+            fn get_file(&mut self, _: u32) -> Result<File, Errno> {
+                Err(errno::EBADF)
+            }
+            fn install_file(&mut self, _: File) -> Result<u32, Errno> {
+                Err(errno::EBADF)
+            }
+            fn close_fd(&mut self, _: u32) {
+                panic!("unexpected fd")
+            }
         }
         struct Flags(Arc<AtomicI32>);
         impl Service for Flags {
-            fn descriptor(&self) -> &str { bridge::DESCRIPTOR }
+            fn descriptor(&self) -> &str {
+                bridge::DESCRIPTOR
+            }
             fn transact(&self, call: &mut Call<'_>) -> Reply {
                 assert_eq!(call.sender_euid, 1000);
                 let mut reply = Parcel::new();
                 match call.code {
                     bridge::ARE_NATIVE_LIBRARY_DEPENDENCIES_ENFORCED => {
-                        let args = bridge::AreNativeLibraryDependenciesEnforced::read(&mut call.data)?;
+                        let args =
+                            bridge::AreNativeLibraryDependenciesEnforced::read(&mut call.data)?;
                         assert_eq!(args.package_name.as_deref(), Some("consumer"));
                         assert_eq!(args.target_sdk, 36);
-                        bridge::write_are_native_library_dependencies_enforced_reply(&mut reply, true);
+                        bridge::write_are_native_library_dependencies_enforced_reply(
+                            &mut reply, true,
+                        );
                     }
                     bridge::IS_SDK_LIBRARY_INDEPENDENCE_ENABLED => {
                         bridge::IsSdkLibraryIndependenceEnabled::read(&mut call.data)?;
                         match self.0.load(Ordering::Acquire) {
-                            2 => reply.write_exception(&Exception::new(EX_ILLEGAL_STATE, "flag owner failed")),
-                            3 => { reply.write_no_exception(); },
-                            4 => { bridge::write_is_sdk_library_independence_enabled_reply(&mut reply, true); reply.write_i32(99); },
+                            2 => reply.write_exception(&Exception::new(
+                                EX_ILLEGAL_STATE,
+                                "flag owner failed",
+                            )),
+                            3 => {
+                                reply.write_no_exception();
+                            }
+                            4 => {
+                                bridge::write_is_sdk_library_independence_enabled_reply(
+                                    &mut reply, true,
+                                );
+                                reply.write_i32(99);
+                            }
                             5 => return Err(BAD_VALUE),
-                            enabled => bridge::write_is_sdk_library_independence_enabled_reply(&mut reply, enabled == 1),
+                            enabled => bridge::write_is_sdk_library_independence_enabled_reply(
+                                &mut reply,
+                                enabled == 1,
+                            ),
                         }
                     }
                     _ => return Err(UNKNOWN_TRANSACTION),
@@ -1107,7 +1435,11 @@ mod tests {
                 Ok(reply)
             }
         }
-        struct Processes { driver: Arc<Driver>, server: Arc<LocalProcess>, client: Arc<LocalProcess> }
+        struct Processes {
+            driver: Arc<Driver>,
+            server: Arc<LocalProcess>,
+            client: Arc<LocalProcess>,
+        }
         impl Drop for Processes {
             fn drop(&mut self) {
                 self.driver.release(self.client.proc_handle());
@@ -1115,17 +1447,52 @@ mod tests {
             }
         }
         let driver = Driver::new();
-        let open = |pid| LocalProcess::open(&driver, Device::Binder, Credentials { pid, euid: 1000, security_context: None });
+        let open = |pid| {
+            LocalProcess::open(
+                &driver,
+                Device::Binder,
+                Credentials {
+                    pid,
+                    euid: 1000,
+                    security_context: None,
+                },
+            )
+        };
         let server = open(99501);
         let client = open(99502);
-        let _processes = Processes { driver: driver.clone(), server: server.clone(), client: client.clone() };
+        let _processes = Processes {
+            driver: driver.clone(),
+            server: server.clone(),
+            client: client.clone(),
+        };
         let phase = Arc::new(AtomicI32::new(0));
-        let Binder::Local(ptr) = server.add_service(Arc::new(Flags(phase.clone()))) else { unreachable!() };
-        let mut object = FlatBinderObject { kind: BINDER_TYPE_BINDER, flags: 0, binder: ptr, cookie: ptr }.encode();
-        driver.ioctl(server.proc_handle(), 99503, BINDER_SET_CONTEXT_MGR_EXT, &mut object, &mut NoMemory).unwrap();
+        let Binder::Local(ptr) = server.add_service(Arc::new(Flags(phase.clone()))) else {
+            unreachable!()
+        };
+        let mut object = FlatBinderObject {
+            kind: BINDER_TYPE_BINDER,
+            flags: 0,
+            binder: ptr,
+            cookie: ptr,
+        }
+        .encode();
+        driver
+            .ioctl(
+                server.proc_handle(),
+                99503,
+                BINDER_SET_CONTEXT_MGR_EXT,
+                &mut object,
+                &mut NoMemory,
+            )
+            .unwrap();
         server.start();
         client.start();
-        let owner = Bridge { owner: client.strong(0), test_base_on_bcp: false, signing_debuggable: false, deaths: Deaths::default() };
+        let owner = Bridge {
+            owner: client.strong(0),
+            test_base_on_bcp: false,
+            signing_debuggable: false,
+            deaths: Deaths::default(),
+        };
         let registry = crate::package::libraries::Registry::new(&SystemConfig::default());
         let available = std::collections::BTreeMap::new();
         let mut pkg = crate::package::pkg::AndroidPackage::default();
@@ -1138,17 +1505,36 @@ mod tests {
             assert!(policy.enforce_native_dependencies);
             assert_eq!(policy.sdk_library_independence, enabled);
             let result = registry.collect(&pkg, &available, policy);
-            if enabled { assert!(result.unwrap().libraries.is_empty()); }
-            else { assert_eq!(result.unwrap_err(), crate::package::libraries::ResolveError::MissingLibrary("sdk".into())); }
+            if enabled {
+                assert!(result.unwrap().libraries.is_empty());
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    crate::package::libraries::ResolveError::MissingLibrary("sdk".into())
+                );
+            }
         }
         pkg.uses_sdk_libraries_optional = Some(vec![false]);
-        assert_eq!(registry.collect(&pkg, &available, owner.library_policy("consumer", 36).unwrap()).unwrap_err(),
-            crate::package::libraries::ResolveError::MissingLibrary("sdk".into()));
+        assert_eq!(
+            registry
+                .collect(
+                    &pkg,
+                    &available,
+                    owner.library_policy("consumer", 36).unwrap()
+                )
+                .unwrap_err(),
+            crate::package::libraries::ResolveError::MissingLibrary("sdk".into())
+        );
         phase.store(2, Ordering::Release);
-        assert!(matches!(owner.library_policy("consumer", 36), Err(NativePolicyError::Owner(error)) if error.code == EX_ILLEGAL_STATE && error.message == "flag owner failed"));
+        assert!(
+            matches!(owner.library_policy("consumer", 36), Err(NativePolicyError::Owner(error)) if error.code == EX_ILLEGAL_STATE && error.message == "flag owner failed")
+        );
         for phase_value in [3, 4, 5] {
             phase.store(phase_value, Ordering::Release);
-            assert!(matches!(owner.library_policy("consumer", 36), Err(NativePolicyError::Transport(_))));
+            assert!(matches!(
+                owner.library_policy("consumer", 36),
+                Err(NativePolicyError::Transport(_))
+            ));
         }
     }
 

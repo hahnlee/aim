@@ -73,11 +73,21 @@ fn translated_file_runs_from_the_cache() {
     const CHILD: &str = "__translation_cache_child";
     if !std::env::args().any(|argument| argument == CHILD) {
         let result = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "xlate::exec_tests::translated_file_runs_from_the_cache",
-                "--skip", CHILD, "--nocapture"])
-            .output().unwrap();
-        assert!(result.status.success(), "isolated cache execution failed: {}\n{}",
-            String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+            .args([
+                "--exact",
+                "xlate::exec_tests::translated_file_runs_from_the_cache",
+                "--skip",
+                CHILD,
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "isolated cache execution failed: {}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
         return;
     }
     let cache_dir = runtime_cache();

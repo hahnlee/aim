@@ -80,7 +80,10 @@ pub fn authorize(
             }
             Ok(true)
         }
-        Operation::UriAgent => { require(AGENT)?; Ok(true) }
+        Operation::UriAgent => {
+            require(AGENT)?;
+            Ok(true)
+        }
         Operation::Verifier => {
             if !matches!(uid, 0 | 1000 | 2000) {
                 if check(AGENT)? {

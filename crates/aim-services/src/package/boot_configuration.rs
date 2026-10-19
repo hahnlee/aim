@@ -52,7 +52,9 @@ pub struct Early {
     fix_system_apps_first_install_time: bool,
 }
 impl Early {
-    pub(crate) fn density_dpi(&self) -> i32 { self.density }
+    pub(crate) fn density_dpi(&self) -> i32 {
+        self.density
+    }
     /// None is the default image's original-PMS path; no native package policy
     /// is configured unless the actual image service list explicitly names it.
     pub fn read(
@@ -167,18 +169,29 @@ impl Early {
                 &self.image.original_roots,
             )
             .map_err(|error| error.message)?;
-        let bridge=system.package_bootstrap().map_err(|error|error.message)?;
-        self.configure_system_for(system,&bridge)
+        let bridge = system.package_bootstrap().map_err(|error| error.message)?;
+        self.configure_system_for(system, &bridge)
     }
-    fn configure_system_for(self:&Arc<Self>,system:&crate::System,bridge:&Arc<super::bootstrap::Bridge>)->Result<(),String>{
-        system.configure_native_package_early_for(bridge,self.clone(),self.policy.clone(),self.resources,self.persistence.clone())
-            .map_err(|error|error.message)
+    fn configure_system_for(
+        self: &Arc<Self>,
+        system: &crate::System,
+        bridge: &Arc<super::bootstrap::Bridge>,
+    ) -> Result<(), String> {
+        system
+            .configure_native_package_early_for(
+                bridge,
+                self.clone(),
+                self.policy.clone(),
+                self.resources,
+                self.persistence.clone(),
+            )
+            .map_err(|error| error.message)
     }
     /// The root calls this only from the explicit native entry, which is the
     /// stopped-writer capability: original PMS main has not been invoked.
     pub fn from_native_entry(
         system: &crate::System,
-        bridge:&Arc<super::bootstrap::Bridge>,
+        bridge: &Arc<super::bootstrap::Bridge>,
         source: &Source,
         properties: crate::system_package_installer_init::Properties,
     ) -> Result<Arc<Self>, String> {
@@ -199,7 +212,7 @@ impl Early {
         )?
         .ok_or("explicit native package entry did not prepare C inputs")?;
         let early = Arc::new(early);
-        early.configure_system_for(system,bridge)?;
+        early.configure_system_for(system, bridge)?;
         Ok(early)
     }
     pub fn after_scan(
@@ -623,13 +636,23 @@ impl OriginalInputs for Source {
     }
 }
 
-
 #[cfg(test)]
 pub(crate) fn epoch_fixture_early(
-    image:Arc<boot_image::Owner>,policy:Cli,resources:Config,
-    persistence:system_package_persistence_init::Inputs,
-)->Arc<Early>{
-    Arc::new(Early{image,policy,resources,persistence,
-        properties:Arc::new(||Ok([("ro.build.fingerprint".into(),"epoch-fixture".into())].into())),
-        density:320,dependency_installer_enabled:false,fix_system_apps_first_install_time:false})
+    image: Arc<boot_image::Owner>,
+    policy: Cli,
+    resources: Config,
+    persistence: system_package_persistence_init::Inputs,
+) -> Arc<Early> {
+    Arc::new(Early {
+        image,
+        policy,
+        resources,
+        persistence,
+        properties: Arc::new(|| {
+            Ok([("ro.build.fingerprint".into(), "epoch-fixture".into())].into())
+        }),
+        density: 320,
+        dependency_installer_enabled: false,
+        fix_system_apps_first_install_time: false,
+    })
 }

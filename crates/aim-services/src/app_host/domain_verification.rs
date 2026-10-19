@@ -15,18 +15,21 @@
 use std::sync::{Arc, OnceLock};
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, EX_SERVICE_SPECIFIC, Exception, Parcel};
+use aim_binder_host::parcel::{
+    BAD_VALUE, EX_ILLEGAL_STATE, EX_SERVICE_SPECIFIC, Exception, Parcel,
+};
 use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as dv;
 
 use super::{AppHost, PER_USER_RANGE};
+use crate::package::apps_filter::should_filter_application;
 use crate::package::domain_verification::owner::{Input, Owner};
 use crate::package::domain_verification::{agent, parcels};
-use crate::package::apps_filter::should_filter_application;
 use crate::package::query::Query;
 
 const SYSTEM_UID: i32 = 1000;
 const DOMAIN_VERIFICATION_AGENT: &str = "android.permission.DOMAIN_VERIFICATION_AGENT";
-const INTENT_FILTER_VERIFICATION_AGENT: &str = "android.permission.INTENT_FILTER_VERIFICATION_AGENT";
+const INTENT_FILTER_VERIFICATION_AGENT: &str =
+    "android.permission.INTENT_FILTER_VERIFICATION_AGENT";
 const QUERY_ALL_PACKAGES: &str = "android.permission.QUERY_ALL_PACKAGES";
 const DUMP: &str = "android.permission.DUMP";
 const INTERACT_ACROSS_USERS: &str = "android.permission.INTERACT_ACROSS_USERS";
@@ -39,7 +42,12 @@ const VERSION_CODE_HIGHEST: i64 = -1;
 
 /// The `NameNotFoundException` `DomainVerificationManagerStub` rethrows.
 fn name_not_found() -> Exception {
-    Exception { code: EX_SERVICE_SPECIFIC, message: String::new(), service_specific: ERROR_NAME_NOT_FOUND, parcelable: None }
+    Exception {
+        code: EX_SERVICE_SPECIFIC,
+        message: String::new(),
+        service_specific: ERROR_NAME_NOT_FOUND,
+        parcelable: None,
+    }
 }
 
 pub struct DomainVerification {
@@ -52,17 +60,26 @@ pub struct DomainVerification {
 
 impl DomainVerification {
     pub fn new(host: Arc<AppHost>) -> Self {
-        DomainVerification { host, owner: OnceLock::new(), verifiers: OnceLock::new() }
+        DomainVerification {
+            host,
+            owner: OnceLock::new(),
+            verifiers: OnceLock::new(),
+        }
     }
 
     fn unimplemented(&self, what: &str) -> Exception {
-        self.host.unimplemented_named("domain_verification", &format!("{what} (#1763)"))
+        self.host
+            .unimplemented_named("domain_verification", &format!("{what} (#1763)"))
     }
 
     /// `isChangeEnabled(RESTRICT_DOMAINS)` of a package's mock application
     /// info: its name and target SDK.
     fn restrict_domains(&self, package: &str, target_sdk: i32) -> Result<bool, Exception> {
-        Ok(self.host.inputs()?.compat.is_enabled(RESTRICT_DOMAINS, Some(package), target_sdk))
+        Ok(self
+            .host
+            .inputs()?
+            .compat
+            .is_enabled(RESTRICT_DOMAINS, Some(package), target_sdk))
     }
 
     /// The persisted state with each package of code attached in the
@@ -74,11 +91,35 @@ impl DomainVerification {
             let state = inputs.packages.state();
             let mut owner = Owner::new(domains.state.clone(), domains.legacy_info.clone());
             for package in &domains.packages {
-                let Some(code) = state.packages.get(&package.name).and_then(|ps| ps.pkg.as_deref()) else { continue };
-                let id = package.id.as_deref().ok_or_else(|| format!("{}: no domain set id", package.name))?;
-                let signatures = package.signatures.as_deref().ok_or_else(|| format!("{}: no signers", package.name))?;
-                let restrict_domains = inputs.compat.is_enabled(RESTRICT_DOMAINS, Some(&code.package_name), code.target_sdk_version);
-                let input = Input { id, name: &package.name, code: Some(code), signatures, system: package.system, restrict_domains, pre_verified: None };
+                let Some(code) = state
+                    .packages
+                    .get(&package.name)
+                    .and_then(|ps| ps.pkg.as_deref())
+                else {
+                    continue;
+                };
+                let id = package
+                    .id
+                    .as_deref()
+                    .ok_or_else(|| format!("{}: no domain set id", package.name))?;
+                let signatures = package
+                    .signatures
+                    .as_deref()
+                    .ok_or_else(|| format!("{}: no signers", package.name))?;
+                let restrict_domains = inputs.compat.is_enabled(
+                    RESTRICT_DOMAINS,
+                    Some(&code.package_name),
+                    code.target_sdk_version,
+                );
+                let input = Input {
+                    id,
+                    name: &package.name,
+                    code: Some(code),
+                    signatures,
+                    system: package.system,
+                    restrict_domains,
+                    pre_verified: None,
+                };
                 owner.add(input, &domains.config)?;
             }
             Ok(owner)
@@ -92,8 +133,14 @@ impl DomainVerification {
     /// `getPackageUid(package, 0, user)`, or -1.
     fn package_uid(&self, package: &str, user: i32) -> Result<i32, Exception> {
         let (state, resolution) = self.host.packages()?;
-        let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
-        query.package_uid(package, 0, user).map_err(|e| self.unimplemented(e.0))?
+        let query = Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: SYSTEM_UID,
+        };
+        query
+            .package_uid(package, 0, user)
+            .map_err(|e| self.unimplemented(e.0))?
     }
 
     /// The proxy's `isCallerVerifier`: `uid` is a verifier package's
@@ -104,7 +151,8 @@ impl DomainVerification {
             None => {
                 let (state, resolution) = self.host.packages()?;
                 let (legacy, modern) = agent::verifiers(&state, &resolution)?;
-                self.verifiers.get_or_init(|| agent::proxy_packages(legacy, modern))
+                self.verifiers
+                    .get_or_init(|| agent::proxy_packages(legacy, modern))
             }
         };
         for package in verifiers {
@@ -118,7 +166,9 @@ impl DomainVerification {
     /// `Context.enforcePermission` of `permission` for `uid`.
     fn enforce(&self, permission: &str, uid: i32, message: &str) -> Result<(), Exception> {
         if self.host.check_permission(Some(permission), uid)? != 0 {
-            return Err(Exception::security(format!("{message}: uid {uid} does not have {permission}.")));
+            return Err(Exception::security(format!(
+                "{message}: uid {uid} does not have {permission}."
+            )));
         }
         Ok(())
     }
@@ -129,9 +179,17 @@ impl DomainVerification {
             return Ok(());
         }
         if !self.is_caller_verifier(uid)? {
-            return self.enforce(DUMP, uid, &format!("Caller {uid} is not allowed to query domain verification state"));
+            return self.enforce(
+                DUMP,
+                uid,
+                &format!("Caller {uid} is not allowed to query domain verification state"),
+            );
         }
-        self.enforce(QUERY_ALL_PACKAGES, uid, &format!("Caller {uid} does not hold {QUERY_ALL_PACKAGES}"))
+        self.enforce(
+            QUERY_ALL_PACKAGES,
+            uid,
+            &format!("Caller {uid} does not hold {QUERY_ALL_PACKAGES}"),
+        )
     }
 
     /// `DomainVerificationEnforcer.assertApprovedVerifier`.
@@ -139,29 +197,48 @@ impl DomainVerification {
         if matches!(uid, 0 | 1000 | 2000) {
             return Ok(());
         }
-        let held = |permission| Ok::<_, Exception>(self.host.check_permission(Some(permission), uid)? == 0);
+        let held = |permission| {
+            Ok::<_, Exception>(self.host.check_permission(Some(permission), uid)? == 0)
+        };
         let mut legacy = false;
         if !held(DOMAIN_VERIFICATION_AGENT)? {
             legacy = held(INTENT_FILTER_VERIFICATION_AGENT)?;
             if !legacy {
-                return Err(Exception::security(format!("Caller {uid} does not hold {DOMAIN_VERIFICATION_AGENT}")));
+                return Err(Exception::security(format!(
+                    "Caller {uid} does not hold {DOMAIN_VERIFICATION_AGENT}"
+                )));
             }
         }
         if !legacy {
-            self.enforce(QUERY_ALL_PACKAGES, uid, &format!("Caller {uid} does not hold {QUERY_ALL_PACKAGES}"))?;
+            self.enforce(
+                QUERY_ALL_PACKAGES,
+                uid,
+                &format!("Caller {uid} does not hold {QUERY_ALL_PACKAGES}"),
+            )?;
         }
         if !self.is_caller_verifier(uid)? {
-            return Err(Exception::security(format!("Caller {uid} is not the approved domain verification agent")));
+            return Err(Exception::security(format!(
+                "Caller {uid} is not the approved domain verification agent"
+            )));
         }
         Ok(())
     }
 
     /// `DomainVerificationEnforcer.assertApprovedUserStateQuerent`:
     /// whether `package` is visible to the caller (`filterAppAccess`).
-    fn assert_approved_user_state_querent(&self, uid: i32, package: &str, user: i32) -> Result<bool, Exception> {
+    fn assert_approved_user_state_querent(
+        &self,
+        uid: i32,
+        package: &str,
+        user: i32,
+    ) -> Result<bool, Exception> {
         let caller_user = uid / PER_USER_RANGE as i32;
         if caller_user != user {
-            self.enforce(INTERACT_ACROSS_USERS, uid, "Caller is not allowed to edit other users")?;
+            self.enforce(
+                INTERACT_ACROSS_USERS,
+                uid,
+                "Caller is not allowed to edit other users",
+            )?;
         }
         let (state, resolution) = self.host.packages()?;
         for id in [caller_user, user] {
@@ -169,24 +246,45 @@ impl DomainVerification {
                 return Err(Exception::security(format!("User {id} does not exist")));
             }
         }
-        let filtered = should_filter_application(&state, &resolution.apps_filter, state.packages.get(package), uid, user, true, true)
-            .map_err(|e| self.unimplemented(e.0))?;
+        let filtered = should_filter_application(
+            &state,
+            &resolution.apps_filter,
+            state.packages.get(package),
+            uid,
+            user,
+            true,
+            true,
+        )
+        .map_err(|e| self.unimplemented(e.0))?;
         Ok(!filtered)
     }
 
     /// `getDomainVerificationUserState`: the package's web domains, each
     /// verified, selected by the user or neither, and whether the user
     /// allows its link handling; none for a package not attached.
-    fn user_state(&self, uid: i32, name: Option<&str>, user: i32) -> Result<Option<parcels::UserState>, Exception> {
+    fn user_state(
+        &self,
+        uid: i32,
+        name: Option<&str>,
+        user: i32,
+    ) -> Result<Option<parcels::UserState>, Exception> {
         let name = name.ok_or_else(name_not_found)?;
         if !self.assert_approved_user_state_querent(uid, name, user)? {
             return Err(name_not_found());
         }
         let (state, _) = self.host.packages()?;
-        let code = state.packages.get(name).and_then(|ps| ps.pkg.as_deref()).ok_or_else(name_not_found)?;
+        let code = state
+            .packages
+            .get(name)
+            .and_then(|ps| ps.pkg.as_deref())
+            .ok_or_else(name_not_found)?;
         let restrict = self.restrict_domains(&code.package_name, code.target_sdk_version)?;
         let config = &self.host.inputs()?.packages.domains().config;
-        let Some((id, allowed, states)) = self.owner()?.user_state(name, code, restrict, config, user).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))? else {
+        let Some((id, allowed, states)) = self
+            .owner()?
+            .user_state(name, code, restrict, config, user)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?
+        else {
             return Ok(None);
         };
         let mut prefix = Parcel::new();
@@ -210,12 +308,24 @@ impl DomainVerification {
         self.assert_approved_querent(uid)?;
         let name = name.ok_or_else(name_not_found)?;
         let (state, resolution) = self.host.packages()?;
-        let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: uid };
+        let query = Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: uid,
+        };
         let resolved = query.resolve_internal_package_name(name, VERSION_CODE_HIGHEST);
-        let code = state.packages.get(&resolved).and_then(|ps| ps.pkg.as_deref()).ok_or_else(name_not_found)?;
+        let code = state
+            .packages
+            .get(&resolved)
+            .and_then(|ps| ps.pkg.as_deref())
+            .ok_or_else(name_not_found)?;
         let restrict = self.restrict_domains(&code.package_name, code.target_sdk_version)?;
         let config = &self.host.inputs()?.packages.domains().config;
-        let Some((id, states)) = self.owner()?.verification(name, code, restrict, config).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))? else {
+        let Some((id, states)) = self
+            .owner()?
+            .verification(name, code, restrict, config)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?
+        else {
             return Ok(None);
         };
         let mut prefix = Parcel::new();
@@ -237,21 +347,34 @@ impl Service for DomainVerification {
         let mut p = Parcel::new();
         let result = match call.code {
             dv::QUERY_VALID_VERIFICATION_PACKAGE_NAMES => {
-                dv::QueryValidVerificationPackageNames::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.valid_verification_package_names(uid)
-                    .map(|names| dv::write_query_valid_verification_package_names_reply(&mut p, &Some(names.into_iter().map(Some).collect())))
+                dv::QueryValidVerificationPackageNames::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.valid_verification_package_names(uid).map(|names| {
+                    dv::write_query_valid_verification_package_names_reply(
+                        &mut p,
+                        &Some(names.into_iter().map(Some).collect()),
+                    )
+                })
             }
             dv::GET_DOMAIN_VERIFICATION_INFO => {
-                let a = dv::GetDomainVerificationInfo::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.info(uid, a.package_name.as_deref()).map(|info| dv::write_get_domain_verification_info_reply(&mut p, info.as_ref()))
+                let a =
+                    dv::GetDomainVerificationInfo::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.info(uid, a.package_name.as_deref())
+                    .map(|info| dv::write_get_domain_verification_info_reply(&mut p, info.as_ref()))
             }
             dv::GET_DOMAIN_VERIFICATION_USER_STATE => {
-                let a = dv::GetDomainVerificationUserState::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = dv::GetDomainVerificationUserState::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 self.user_state(uid, a.package_name.as_deref(), a.user_id)
-                    .map(|state| dv::write_get_domain_verification_user_state_reply(&mut p, state.as_ref()))
+                    .map(|state| {
+                        dv::write_get_domain_verification_user_state_reply(&mut p, state.as_ref())
+                    })
             }
             code => {
-                let name = dv::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
+                let name = dv::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
                 Err(self.unimplemented(name))
             }
         };

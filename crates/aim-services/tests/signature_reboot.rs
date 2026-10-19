@@ -10,7 +10,8 @@ use common::runtime::{Boot, Data, run};
 
 fn start(boot: &Boot) {
     run(boot.start_command().args(["start", "--windows"]));
-    boot.wait_ready(Duration::from_secs(300)).expect("signature_reboot oracle boot readiness");
+    boot.wait_ready(Duration::from_secs(300))
+        .expect("signature_reboot oracle boot readiness");
 }
 
 #[test]
@@ -20,7 +21,10 @@ fn original_pms_boots_with_native_keyset_registration() {
     let dir = std::env::temp_dir().join(format!("kr-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
+    let boot = Boot::new(
+        aim_paths::root().join("target/release/aimctl"),
+        data.0.join("g"),
+    );
     start(&boot);
     run(boot.command().arg("stop"));
     let volume = aim_storage::data::DataImage::attach(&boot.data, None).unwrap();
@@ -150,7 +154,10 @@ fn original_pms_boots_with_native_library_metadata_persistence() {
     let dir = std::env::temp_dir().join(format!("lr-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
+    let boot = Boot::new(
+        aim_paths::root().join("target/release/aimctl"),
+        data.0.join("g"),
+    );
     start(&boot);
     run(boot.command().arg("stop"));
     let volume = aim_storage::data::DataImage::attach(&boot.data, None).unwrap();
@@ -244,7 +251,10 @@ fn original_pms_boots_with_native_signature_persistence() {
     let dir = std::env::temp_dir().join(format!("sg-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
+    let boot = Boot::new(
+        aim_paths::root().join("target/release/aimctl"),
+        data.0.join("g"),
+    );
     start(&boot);
     let original = State::read(&boot.data.join("data"), &[0]).unwrap().unwrap();
     assert_eq!(original.settings.packages.len(), 243);
@@ -403,7 +413,10 @@ fn original_pms_reboots_with_native_update_owner_clearing() {
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
     let apk = migration_apk(&data.0, 1, false);
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
+    let boot = Boot::new(
+        aim_paths::root().join("target/release/aimctl"),
+        data.0.join("g"),
+    );
     start(&boot);
     let guest = boot.data.join("data/local/tmp/update-owner.apk");
     fs::copy(apk, &guest).unwrap();
@@ -515,7 +528,10 @@ fn original_pms_reboots_after_native_shared_uid_migration() {
     let data = Data(dir);
     let old = migration_apk(&data.0, 1, false);
     let leaving = migration_apk(&data.0, 2, true);
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
+    let boot = Boot::new(
+        aim_paths::root().join("target/release/aimctl"),
+        data.0.join("g"),
+    );
     start(&boot);
     for apk in [old, leaving] {
         let output = run(boot.command().arg("install").arg(apk));
@@ -636,7 +652,11 @@ fn original_pms_reboots_after_native_shared_uid_migration() {
     let apks = Apks {
         signing_overrides: None,
         files: Box::new(move |p| Some(guest.join(p.trim_start_matches('/')))),
-        platform: Platform::load(&common::runtime::cohort::original_image(), Default::default()).unwrap(),
+        platform: Platform::load(
+            &common::runtime::cohort::original_image(),
+            Default::default(),
+        )
+        .unwrap(),
     };
     let inputs = Inputs::load_verified_code(&input, &apks).unwrap();
     assert!(inputs.active[NAME].parsed.is(booleans::LEAVING_SHARED_UID));

@@ -37,7 +37,11 @@ fn decode_integer(s: &str) -> Option<i32> {
         b'+' => (false, &s[1..]),
         _ => (false, s),
     };
-    let (radix, digits) = if let Some(h) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")).or_else(|| rest.strip_prefix('#')) {
+    let (radix, digits) = if let Some(h) = rest
+        .strip_prefix("0x")
+        .or_else(|| rest.strip_prefix("0X"))
+        .or_else(|| rest.strip_prefix('#'))
+    {
         (16, h)
     } else if rest.len() > 1 && rest.starts_with('0') {
         (8, &rest[1..])
@@ -53,12 +57,23 @@ fn decode_integer(s: &str) -> Option<i32> {
 
 /// `Uri.decodeIfNeeded`.
 fn decode_if_needed(s: &str) -> String {
-    if s.contains('%') { decode(s) } else { s.to_owned() }
+    if s.contains('%') {
+        decode(s)
+    } else {
+        s.to_owned()
+    }
 }
 
 impl FullIntent {
     fn view(data: Option<Uri>) -> FullIntent {
-        FullIntent { intent: Intent { action: Some(ACTION_VIEW.into()), data, ..Intent::default() }, ..FullIntent::default() }
+        FullIntent {
+            intent: Intent {
+                action: Some(ACTION_VIEW.into()),
+                data,
+                ..Intent::default()
+            },
+            ..FullIntent::default()
+        }
     }
 
     /// `Intent.parseUri(uri, flags)`: an error as its
@@ -66,7 +81,10 @@ impl FullIntent {
     /// (`getIntentOld`), which is not modelled.
     pub fn parse_uri(uri: &str, flags: i32) -> Result<FullIntent, String> {
         let android_app = uri.starts_with("android-app:");
-        if flags & (URI_INTENT_SCHEME | URI_ANDROID_APP_SCHEME) != 0 && !uri.starts_with("intent:") && !android_app {
+        if flags & (URI_INTENT_SCHEME | URI_ANDROID_APP_SCHEME) != 0
+            && !uri.starts_with("intent:")
+            && !android_app
+        {
             return Ok(FullIntent::view(Some(Uri::parse(uri))));
         }
         let mut i = uri.rfind('#').map(|i| i as isize).unwrap_or(-1);
@@ -95,9 +113,18 @@ impl FullIntent {
         while i >= 0 && !uri[i as usize..].starts_with("end") {
             let at = i as usize;
             let rest = &uri[at..];
-            let eq = uri[at..].find('=').map_or(at as isize - 1, |e| (at + e) as isize);
-            let semi = uri[at..].find(';').map(|s| at + s).ok_or_else(|| syntax("uri end not found"))?;
-            let value = if eq < semi as isize { decode(&uri[eq as usize + 1..semi]) } else { String::new() };
+            let eq = uri[at..]
+                .find('=')
+                .map_or(at as isize - 1, |e| (at + e) as isize);
+            let semi = uri[at..]
+                .find(';')
+                .map(|s| at + s)
+                .ok_or_else(|| syntax("uri end not found"))?;
+            let value = if eq < semi as isize {
+                decode(&uri[eq as usize + 1..semi])
+            } else {
+                String::new()
+            };
             let in_selector = selector.is_some();
             let intent = selector.as_mut().unwrap_or(&mut base);
             if rest.starts_with("action=") {
@@ -113,13 +140,15 @@ impl FullIntent {
             } else if rest.starts_with("identifier=") {
                 intent.intent.identifier = Some(value);
             } else if rest.starts_with("launchFlags=") {
-                let mut f = decode_integer(&value).ok_or_else(|| syntax("NumberFormatException"))?;
+                let mut f =
+                    decode_integer(&value).ok_or_else(|| syntax("NumberFormatException"))?;
                 if flags & URI_ALLOW_UNSAFE == 0 {
                     f &= !IMMUTABLE_FLAGS;
                 }
                 intent.intent.flags = f;
             } else if rest.starts_with("extendedLaunchFlags=") {
-                intent.intent.extended_flags = decode_integer(&value).ok_or_else(|| syntax("NumberFormatException"))?;
+                intent.intent.extended_flags =
+                    decode_integer(&value).ok_or_else(|| syntax("NumberFormatException"))?;
             } else if rest.starts_with("package=") {
                 intent.intent.package = Some(value);
             } else if rest.starts_with("component=") {
@@ -147,7 +176,9 @@ impl FullIntent {
                     "i." => value.parse().ok().map(Value::Int),
                     "l." => value.parse().ok().map(Value::Long),
                     "f." => value.parse().ok().map(Value::Float),
-                    "b." | "c." | "d." | "s." => return Err(syntax("an extra of a type not modelled")),
+                    "b." | "c." | "d." | "s." => {
+                        return Err(syntax("an extra of a type not modelled"));
+                    }
                     _ => return Err(syntax("unknown EXTRA type")),
                 };
                 let value = parsed.ok_or_else(|| syntax("NumberFormatException"))?;
@@ -192,7 +223,8 @@ impl FullIntent {
                                     scheme = Some(decode_if_needed(&data[end + 1..new_end]));
                                     end = new_end;
                                     if end < data.len()
-                                        && let Some(new_end) = data[end + 1..].find('/').map(|e| e + end + 1)
+                                        && let Some(new_end) =
+                                            data[end + 1..].find('/').map(|e| e + end + 1)
                                     {
                                         authority = Some(decode_if_needed(&data[end + 1..new_end]));
                                         end = new_end;
@@ -204,7 +236,8 @@ impl FullIntent {
                         data = match (scheme, authority) {
                             (None, _) => {
                                 if !explicit_action {
-                                    intent.intent.action = Some("android.intent.action.MAIN".into());
+                                    intent.intent.action =
+                                        Some("android.intent.action.MAIN".into());
                                 }
                                 String::new()
                             }
@@ -229,12 +262,31 @@ impl FullIntent {
     /// extra only of the types the format has), its selector's after
     /// `SEL;`.
     pub fn to_uri(&self) -> String {
-        let mut uri = self.intent.data.as_ref().map(|d| d.as_str().to_string()).unwrap_or_default();
+        let mut uri = self
+            .intent
+            .data
+            .as_ref()
+            .map(|d| d.as_str().to_string())
+            .unwrap_or_default();
         let mut frag = String::new();
-        uri_inner(&mut frag, &self.intent, self.source_bounds.or(self.intent.source_bounds), self.extras.as_deref(), None, Some(ACTION_VIEW));
+        uri_inner(
+            &mut frag,
+            &self.intent,
+            self.source_bounds.or(self.intent.source_bounds),
+            self.extras.as_deref(),
+            None,
+            Some(ACTION_VIEW),
+        );
         if let Some(selector) = &self.intent.selector {
             frag.push_str("SEL;");
-            uri_inner(&mut frag, selector, None, None, selector.data.as_ref().and_then(|d| d.scheme()), None);
+            uri_inner(
+                &mut frag,
+                selector,
+                None,
+                None,
+                selector.data.as_ref().and_then(|d| d.scheme()),
+                None,
+            );
         }
         if !frag.is_empty() {
             uri.push_str("#Intent;");
@@ -250,7 +302,14 @@ impl FullIntent {
 }
 
 /// `Intent.toUriInner`.
-fn uri_inner(uri: &mut String, i: &Intent, source_bounds: Option<[i32; 4]>, extras: Option<&[(String, Value)]>, scheme: Option<&str>, default_action: Option<&str>) {
+fn uri_inner(
+    uri: &mut String,
+    i: &Intent,
+    source_bounds: Option<[i32; 4]>,
+    extras: Option<&[(String, Value)]>,
+    scheme: Option<&str>,
+    default_action: Option<&str>,
+) {
     use super::uri::{encode, encode_allowing};
     let mut field = |name: &str, value: String| {
         uri.push_str(name);
@@ -277,15 +336,25 @@ fn uri_inner(uri: &mut String, i: &Intent, source_bounds: Option<[i32; 4]>, extr
         field("launchFlags", format!("0x{:x}", i.flags as u32));
     }
     if i.extended_flags != 0 {
-        field("extendedLaunchFlags", format!("0x{:x}", i.extended_flags as u32));
+        field(
+            "extendedLaunchFlags",
+            format!("0x{:x}", i.extended_flags as u32),
+        );
     }
     if let Some(package) = &i.package {
         field("package", encode(package));
     }
     if let Some(c) = &i.component {
         // `flattenToShortString`.
-        let class = c.class.strip_prefix(&c.package).filter(|r| r.starts_with('.')).unwrap_or(&c.class);
-        field("component", encode_allowing(&format!("{}/{class}", c.package), "/"));
+        let class = c
+            .class
+            .strip_prefix(&c.package)
+            .filter(|r| r.starts_with('.'))
+            .unwrap_or(&c.class);
+        field(
+            "component",
+            encode_allowing(&format!("{}/{class}", c.package), "/"),
+        );
     }
     if let Some([l, t, r, b]) = source_bounds {
         field("sourceBounds", encode(&format!("{l} {t} {r} {b}")));
@@ -303,7 +372,12 @@ fn uri_inner(uri: &mut String, i: &Intent, source_bounds: Option<[i32; 4]>, extr
     }
 }
 
-fn write_intent(p: &mut Parcel, i: &Intent, source_bounds: Option<[i32; 4]>, extras: Option<&[(String, Value)]>) {
+fn write_intent(
+    p: &mut Parcel,
+    i: &Intent,
+    source_bounds: Option<[i32; 4]>,
+    extras: Option<&[(String, Value)]>,
+) {
     p.write_string8(i.action.as_deref());
     // `Uri.writeToParcel(out, uri)`: `NULL_TYPE_ID` for none.
     match &i.data {
@@ -332,7 +406,11 @@ fn write_intent(p: &mut Parcel, i: &Intent, source_bounds: Option<[i32; 4]>, ext
         None => p.write_i32(0),
     }
     // An `ArraySet`: by hash.
-    let categories = i.categories.clone().map(|c| crate::package::info::array_order(c, |s| s.as_str())).unwrap_or_default();
+    let categories = i
+        .categories
+        .clone()
+        .map(|c| crate::package::info::array_order(c, |s| s.as_str()))
+        .unwrap_or_default();
     p.write_i32(categories.len() as i32);
     for c in &categories {
         p.write_string8(Some(c));
@@ -349,7 +427,10 @@ fn write_intent(p: &mut Parcel, i: &Intent, source_bounds: Option<[i32; 4]>, ext
     // `writeBundle`: -1 for none.
     match extras {
         Some(extras) => {
-            let entries: Vec<(&str, Value)> = extras.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+            let entries: Vec<(&str, Value)> = extras
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.clone()))
+                .collect();
             crate::bundle::write(p, &entries);
         }
         None => p.write_i32(-1),
@@ -371,8 +452,12 @@ mod tests {
         let uri = "https://example.com/a#Intent;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;launchFlags=0x10000000;component=com.example/.Main;S.query=a%20b;i.n=3;end";
         let intent = FullIntent::parse_uri(uri, 0).unwrap();
         assert_eq!(intent.to_uri(), uri);
-        let view = FullIntent::parse_uri("#Intent;component=com.example/com.other.Main;end", 0).unwrap();
-        assert_eq!(view.to_uri(), "#Intent;component=com.example/com.other.Main;end");
+        let view =
+            FullIntent::parse_uri("#Intent;component=com.example/com.other.Main;end", 0).unwrap();
+        assert_eq!(
+            view.to_uri(),
+            "#Intent;component=com.example/com.other.Main;end"
+        );
     }
 
     #[test]
@@ -382,10 +467,19 @@ mod tests {
             0,
         )
         .unwrap();
-        assert_eq!(i.intent.action.as_deref(), Some("android.intent.action.INSERT"));
-        assert_eq!(i.intent.data.as_ref().map(|d| d.as_str()), Some("content://com.android.contacts/contacts"));
+        assert_eq!(
+            i.intent.action.as_deref(),
+            Some("android.intent.action.INSERT")
+        );
+        assert_eq!(
+            i.intent.data.as_ref().map(|d| d.as_str()),
+            Some("content://com.android.contacts/contacts")
+        );
         assert_eq!(i.intent.flags, 0x1000c000);
-        assert_eq!(i.intent.component.as_ref().map(|c| c.class.as_str()), Some("com.google.android.apps.contacts.editor.EditorActivity"));
+        assert_eq!(
+            i.intent.component.as_ref().map(|c| c.class.as_str()),
+            Some("com.google.android.apps.contacts.editor.EditorActivity")
+        );
         // Read back as `Intent(Parcel)` reads it.
         let mut p = Parcel::new();
         i.write(&mut p);
@@ -397,14 +491,39 @@ mod tests {
     /// component, a selector, extras and a plain URI.
     #[test]
     fn parses_flags_selectors_extras_and_plain_uris() {
-        let i = FullIntent::parse_uri("#Intent;launchFlags=0x10000043;component=p/.A;S.k=v%3B;i.n=7;SEL;action=s;end", 0).unwrap();
+        let i = FullIntent::parse_uri(
+            "#Intent;launchFlags=0x10000043;component=p/.A;S.k=v%3B;i.n=7;SEL;action=s;end",
+            0,
+        )
+        .unwrap();
         assert_eq!(i.intent.flags, 0x10000000);
-        assert_eq!(i.intent.component, Some(ComponentName { package: "p".into(), class: "p.A".into() }));
+        assert_eq!(
+            i.intent.component,
+            Some(ComponentName {
+                package: "p".into(),
+                class: "p.A".into()
+            })
+        );
         assert_eq!(i.intent.action.as_deref(), Some(ACTION_VIEW));
-        assert_eq!(i.intent.selector.as_ref().and_then(|s| s.action.as_deref()), Some("s"));
-        assert_eq!(i.extras, Some(vec![("k".into(), Value::String(Some("v;".into()))), ("n".into(), Value::Int(7))]));
+        assert_eq!(
+            i.intent.selector.as_ref().and_then(|s| s.action.as_deref()),
+            Some("s")
+        );
+        assert_eq!(
+            i.extras,
+            Some(vec![
+                ("k".into(), Value::String(Some("v;".into()))),
+                ("n".into(), Value::Int(7))
+            ])
+        );
         let plain = FullIntent::parse_uri("http://example.com", 0).unwrap();
-        assert_eq!((plain.intent.action.as_deref(), plain.intent.data.as_ref().map(|d| d.as_str())), (Some(ACTION_VIEW), Some("http://example.com")));
+        assert_eq!(
+            (
+                plain.intent.action.as_deref(),
+                plain.intent.data.as_ref().map(|d| d.as_str())
+            ),
+            (Some(ACTION_VIEW), Some("http://example.com"))
+        );
         assert!(FullIntent::parse_uri("#Intent;action=a", 0).is_err());
     }
 }

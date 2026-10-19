@@ -176,7 +176,10 @@ fn run() {
                 // here instead of spinning.
                 let wanted = s.wanted.lock().unwrap();
                 if *wanted {
-                    drop(s.changed.wait_timeout(wanted, Duration::from_secs_f64(TICK)));
+                    drop(
+                        s.changed
+                            .wait_timeout(wanted, Duration::from_secs_f64(TICK)),
+                    );
                 }
             }
         }

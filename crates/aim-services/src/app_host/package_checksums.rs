@@ -47,21 +47,30 @@ pub(super) fn request(host: &Arc<AppHost>, prepared: Prepared) -> Result<(), Ref
     let trusted: Option<usize> = match &prepared.trusted.0 {
         None => None,
         Some(values) => {
-            let certificates = values.iter().all(|v| matches!(v, ParcelValue::Bytes(Some(b)) if sign::is_certificate(b)));
+            let certificates = values
+                .iter()
+                .all(|v| matches!(v, ParcelValue::Bytes(Some(b)) if sign::is_certificate(b)));
             if !certificates {
-                return Err(Refused::NotModelled("trusted installers that are not X.509 certificates (#1626)"));
+                return Err(Refused::NotModelled(
+                    "trusted installers that are not X.509 certificates (#1626)",
+                ));
             }
             Some(values.len())
         }
     };
     let Some(Binder::Handle(listener)) = prepared.listener else {
-        return Err(Refused::NotModelled("a checksums listener of the app host's (#1626)"));
+        return Err(Refused::NotModelled(
+            "a checksums listener of the app host's (#1626)",
+        ));
     };
     let (root, data) = (host.root()?, host.data()?);
     let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("checksums: {e}"));
     // `getInstallerChecksums` reads the digests unless the installer is
     // adb (`isInstalledByAdb`) or nobody is trusted.
-    let adb = prepared.installer.as_deref().is_none_or(|i| i == SHELL_PACKAGE);
+    let adb = prepared
+        .installer
+        .as_deref()
+        .is_none_or(|i| i == SHELL_PACKAGE);
     let store = data.parent().map(|volume| volume.join("fs-verity"));
     let mut files = Vec::new();
     for (split, path) in &prepared.files {
@@ -69,12 +78,20 @@ pub(super) fn request(host: &Arc<AppHost>, prepared: Prepared) -> Result<(), Ref
         if !adb
             && trusted != Some(0)
             && let Some(base) = path.strip_suffix(".apk")
-            && super::packages::host_path(root, data, &format!("{base}.digests")).map_err(state)?.exists()
+            && super::packages::host_path(root, data, &format!("{base}.digests"))
+                .map_err(state)?
+                .exists()
         {
             return Err(Refused::NotModelled("installer-provided checksums (#1626)"));
         }
-        let fs_verity_digest = store.as_deref().and_then(|store| fs_verity_digest(store, &host_file));
-        files.push(ApkFile { split: split.clone(), path: host_file, fs_verity_digest });
+        let fs_verity_digest = store
+            .as_deref()
+            .and_then(|store| fs_verity_digest(store, &host_file));
+        files.push(ApkFile {
+            split: split.clone(),
+            path: host_file,
+            fs_verity_digest,
+        });
     }
     let build = host.inputs()?.packages.signing_build();
     let listener = host.process.strong(listener);
@@ -102,7 +119,12 @@ pub(super) fn request(host: &Arc<AppHost>, prepared: Prepared) -> Result<(), Ref
 /// answers them: a proof in the `store` for a file on its volume, measured
 /// as SHA-256 (`FS_IOC_MEASURE_VERITY` with a 32-byte digest).
 fn fs_verity_digest(store: &Path, file: &Path) -> Option<Vec<u8>> {
-    let log = |e: String| eprintln!("app host: ApkChecksums: fs-verity of {}: {e}", file.display());
+    let log = |e: String| {
+        eprintln!(
+            "app host: ApkChecksums: fs-verity of {}: {e}",
+            file.display()
+        )
+    };
     let open = std::fs::File::open(file).ok()?;
     let same_volume = match (open.metadata(), std::fs::metadata(store)) {
         (Ok(f), Ok(s)) => f.dev() == s.dev(),
@@ -137,4 +159,3 @@ fn fs_verity_digest(store: &Path, file: &Path) -> Option<Vec<u8>> {
         }
     }
 }
-

@@ -25,7 +25,9 @@ impl std::fmt::Debug for CallingPermissions {
     }
 }
 impl CallingPermissions {
-    pub fn new(read: std::sync::Arc<dyn Fn(&str, i32, i32) -> Result<bool, Exception> + Send + Sync>) -> Self {
+    pub fn new(
+        read: std::sync::Arc<dyn Fn(&str, i32, i32) -> Result<bool, Exception> + Send + Sync>,
+    ) -> Self {
         Self(read)
     }
     pub fn check(&self, name: &str, pid: i32, uid: i32) -> Result<bool, Exception> {
@@ -66,7 +68,9 @@ pub fn cross_user(
     shell: bool,
     operation: &str,
 ) -> Result<(), Exception> {
-    cross_user_checked(q, policy, user, shell, operation, &|name| permission(q, name))
+    cross_user_checked(q, policy, user, shell, operation, &|name| {
+        permission(q, name)
+    })
 }
 fn cross_user_checked(
     q: &Query<'_>,
@@ -167,7 +171,7 @@ pub fn normalize(
         }
     }
     params.install_flags &= !(1 << 29);
-    cross_user_checked(q, device, user, true, "createSession",&check)?;
+    cross_user_checked(q, device, user, true, "createSession", &check)?;
     let user_policy = device.users.get(&user).cloned().ok_or_else(|| {
         Exception::new(EX_ILLEGAL_STATE, "UserManager policy capture unavailable")
     })?;
@@ -273,7 +277,9 @@ pub fn normalize(
         rollback(&check, &params, "rollbackImpactLevel")?;
     }
     let apex = params.install_flags & 0x20000 != 0;
-    if apex && !check("android.permission.INSTALL_PACKAGE_UPDATES")? && !check("android.permission.INSTALL_PACKAGES")?
+    if apex
+        && !check("android.permission.INSTALL_PACKAGE_UPDATES")?
+        && !check("android.permission.INSTALL_PACKAGES")?
     {
         return Err(Exception::security("Not allowed to perform APEX updates"));
     }
@@ -434,7 +440,11 @@ pub fn normalize(
         install_permission,
     ))
 }
-fn rollback(check:&dyn Fn(&str)->Result<bool,Exception>, params: &SessionParams, field: &str) -> Result<(), Exception> {
+fn rollback(
+    check: &dyn Fn(&str) -> Result<bool, Exception>,
+    params: &SessionParams,
+    field: &str,
+) -> Result<(), Exception> {
     if params.install_flags & 0x40000 == 0 {
         return Err(Exception::illegal_argument(format!(
             "Can't set {field} when rollback is not enabled"

@@ -179,7 +179,12 @@ pub fn prepare_user_storage(uuid: Option<&str>, user: u32, flags: i32) -> io::Re
 /// is gone is not an error, one that cannot go is.
 pub fn destroy_user_storage(uuid: Option<&str>, user: u32, flags: i32) -> io::Result<Vec<PathBuf>> {
     let status = std::process::Command::new("/system/bin/vold_prepare_subdirs")
-        .args(["destroy", uuid.unwrap_or(""), &user.to_string(), &flags.to_string()])
+        .args([
+            "destroy",
+            uuid.unwrap_or(""),
+            &user.to_string(),
+            &flags.to_string(),
+        ])
         .status()?;
     if !status.success() {
         return Err(io::Error::other(format!("vold_prepare_subdirs: {status}")));
@@ -187,7 +192,11 @@ pub fn destroy_user_storage(uuid: Option<&str>, user: u32, flags: i32) -> io::Re
     let mut removed = Vec::new();
     let mut failure = None;
     // User 0's CE storage is /data/data itself, never removed.
-    for (path, ..) in user_storage_dirs(uuid, user, flags).into_iter().rev().filter(|d| d.0 != Path::new("/data/data")) {
+    for (path, ..) in user_storage_dirs(uuid, user, flags)
+        .into_iter()
+        .rev()
+        .filter(|d| d.0 != Path::new("/data/data"))
+    {
         match std::fs::remove_dir(&path) {
             Ok(()) => removed.push(path),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}

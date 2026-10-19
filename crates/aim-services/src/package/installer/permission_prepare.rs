@@ -7,7 +7,7 @@ use crate::package::{
 };
 use aim_binder_host::{
     local::{LocalProcess, Strong},
-    parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel, Reader, Binder},
+    parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel, Reader},
 };
 use aim_service_aidl::dev_aim_server_iinstallerpermissionbridge as api;
 use std::{
@@ -29,7 +29,7 @@ pub struct Owner {
     context: super::permission_capture::ContextSource,
     pending: Mutex<BTreeMap<String, Install>>,
     library_policy: Mutex<Option<LibraryDependencyPolicy>>,
-    prepared: Mutex<BTreeMap<String,Arc<Prepared>>>,
+    prepared: Mutex<BTreeMap<String, Arc<Prepared>>>,
 }
 struct Prepared {
     _candidate: Scope,
@@ -209,28 +209,58 @@ impl Owner {
     }
     pub fn release(self: &Arc<Self>) -> super::environment::ReservationRelease {
         let owner = self.clone();
-        Arc::new(move |destination,committed| owner.finish(destination,committed))
+        Arc::new(move |destination, committed| owner.finish(destination, committed))
     }
-    fn finish(&self,destination:&str,committed:bool)->Result<(),Exception>{
+    fn finish(&self, destination: &str, committed: bool) -> Result<(), Exception> {
         self.forget(destination);
-        let prepared=self.prepared.lock().unwrap().get(destination).cloned();
-        let Some(prepared)=prepared else{return Ok(());};
-        let mut retired=prepared.retired.lock().unwrap();
-        if *retired{return Ok(());}
-        let result=(||{
-            if committed{return Ok(());}
-            let current=self.snapshots.capture();let context=(self.context)(&current).map_err(illegal)?;
-            let scope=Scope(super::permission_capture::endpoint(current,context,&self.process).map_err(illegal)?);
-            let binder=self.process.add_service(scope.0.clone());let mut request=Parcel::new();
-            api::Rollback{candidate:Some(prepared.binder),current:Some(binder),package_names:Some(prepared.names.iter().cloned().map(Some).collect()),cross_user_suspensions:self.cross_user_suspensions}.write(&mut request);
-            let reply=self.bridge.transact(api::ROLLBACK,&request,false).map_err(|error|illegal(format!("original permission rollback transport: {error}")))?;
-            let mut reader=reply.reader();api::read_rollback_reply(&mut reader).map_err(|error|illegal(format!("original permission rollback reply: {error}")))??;
-            if reader.remaining()!=0{return Err(illegal("original permission rollback trailing data"));}
+        let prepared = self.prepared.lock().unwrap().get(destination).cloned();
+        let Some(prepared) = prepared else {
+            return Ok(());
+        };
+        let mut retired = prepared.retired.lock().unwrap();
+        if *retired {
+            return Ok(());
+        }
+        let result = (|| {
+            if committed {
+                return Ok(());
+            }
+            let current = self.snapshots.capture();
+            let context = (self.context)(&current).map_err(illegal)?;
+            let scope = Scope(
+                super::permission_capture::endpoint(current, context, &self.process)
+                    .map_err(illegal)?,
+            );
+            let binder = self.process.add_service(scope.0.clone());
+            let mut request = Parcel::new();
+            api::Rollback {
+                candidate: Some(prepared.binder),
+                current: Some(binder),
+                package_names: Some(prepared.names.iter().cloned().map(Some).collect()),
+                cross_user_suspensions: self.cross_user_suspensions,
+            }
+            .write(&mut request);
+            let reply = self
+                .bridge
+                .transact(api::ROLLBACK, &request, false)
+                .map_err(|error| {
+                    illegal(format!("original permission rollback transport: {error}"))
+                })?;
+            let mut reader = reply.reader();
+            api::read_rollback_reply(&mut reader).map_err(|error| {
+                illegal(format!("original permission rollback reply: {error}"))
+            })??;
+            if reader.remaining() != 0 {
+                return Err(illegal("original permission rollback trailing data"));
+            }
             Ok(())
         })();
-        *retired=true;
+        *retired = true;
         drop(retired);
-        self.prepared.lock().unwrap().retain(|_,value|!Arc::ptr_eq(value,&prepared));
+        self.prepared
+            .lock()
+            .unwrap()
+            .retain(|_, value| !Arc::ptr_eq(value, &prepared));
         result
     }
     pub fn attach(
@@ -250,13 +280,22 @@ impl Owner {
         let owner = self.clone();
         Arc::new(move |admission, base| owner.prepare(admission, base, true))
     }
-    fn prepare(&self, admission: &mut CompletedAdmission, base: &Arc<crate::package::scan_snapshot::Snapshot>, factory: bool) -> Result<(), Exception> {
+    fn prepare(
+        &self,
+        admission: &mut CompletedAdmission,
+        base: &Arc<crate::package::scan_snapshot::Snapshot>,
+        factory: bool,
+    ) -> Result<(), Exception> {
         let source =
             self.library_policy.lock().unwrap().clone().ok_or_else(|| {
                 illegal("installer original library dependency policy unavailable")
             })?;
         let policies = source(
-            &mut admission.owner.loaded_packages().iter().map(|(name, code)| (name.as_str(), &code.package)),
+            &mut admission
+                .owner
+                .loaded_packages()
+                .iter()
+                .map(|(name, code)| (name.as_str(), &code.package)),
         )
         .map_err(|error| illegal(format!("installer library policy: {error}")))?;
         admission
@@ -401,15 +440,27 @@ impl Owner {
         );
         let candidate_endpoint = self.process.add_service(candidate_scope.0.clone());
         let previous_endpoint = self.process.add_service(previous_scope.0.clone());
-        let prepared=Arc::new(Prepared{_candidate:candidate_scope,_previous:previous_scope,binder:candidate_endpoint,
-            names:records.iter().map(|(name,_)|name.clone()).collect(),retired:Mutex::new(false)});
+        let prepared = Arc::new(Prepared {
+            _candidate: candidate_scope,
+            _previous: previous_scope,
+            binder: candidate_endpoint,
+            names: records.iter().map(|(name, _)| name.clone()).collect(),
+            retired: Mutex::new(false),
+        });
         {
-            let mut active=self.prepared.lock().unwrap();
-            for metadata in &admission.completed{
-                let destination=&metadata.candidate.record.settings.code_path;
-                if active.contains_key(destination){return Err(illegal("prepared permission reservation already exists"));}
+            let mut active = self.prepared.lock().unwrap();
+            for metadata in &admission.completed {
+                let destination = &metadata.candidate.record.settings.code_path;
+                if active.contains_key(destination) {
+                    return Err(illegal("prepared permission reservation already exists"));
+                }
             }
-            for metadata in &admission.completed{active.insert(metadata.candidate.record.settings.code_path.clone(),prepared.clone());}
+            for metadata in &admission.completed {
+                active.insert(
+                    metadata.candidate.record.settings.code_path.clone(),
+                    prepared.clone(),
+                );
+            }
         }
         let mut request = Parcel::new();
         request.write_interface_token(api::DESCRIPTOR);
@@ -435,15 +486,30 @@ impl Owner {
         let bytes = aim_service_aidl::read_byte_array(&mut reader)
             .map_err(|error| illegal(format!("permission prepare payload: {error}")))?
             .ok_or_else(|| illegal("permission prepare missing payload"))?;
-        if reader.remaining()!=0{return Err(illegal(format!("permission PREPARE reply has {} trailing bytes",reader.remaining())));}
-        let current=self.snapshots.capture();
-        let targets=records.iter().map(|(name,_)|name.clone()).collect();
+        if reader.remaining() != 0 {
+            return Err(illegal(format!(
+                "permission PREPARE reply has {} trailing bytes",
+                reader.remaining()
+            )));
+        }
+        let current = self.snapshots.capture();
+        let targets = records.iter().map(|(name, _)| name.clone()).collect();
         // Check the retained admission without overwriting it with an
         // intermediate publication. The atomic commit performs the single
         // three-way merge against its latest canonical owner.
-        let mut retained=admission.owner.clone();
-        if let Some(reason)=crate::package::scan_snapshot::install_context::install_user_rebase_conflict(base,&current,&mut retained,&targets).map_err(illegal)?{
-            return Err(illegal(format!("permission install base changed: {reason}")));
+        let mut retained = admission.owner.clone();
+        if let Some(reason) =
+            crate::package::scan_snapshot::install_context::install_user_rebase_conflict(
+                base,
+                &current,
+                &mut retained,
+                &targets,
+            )
+            .map_err(illegal)?
+        {
+            return Err(illegal(format!(
+                "permission install base changed: {reason}"
+            )));
         }
         let mut input = Reader::new(&bytes, &[]);
         let decode = |input: &mut Reader<'_>| -> Result<_, i32> {
@@ -600,16 +666,45 @@ mod tests {
     fn candidate_runtime_rebuilds_new_shared_group_before_store_validation() {
         let base = base();
         let mut owner = base.owner().clone();
-        owner.rebuild_shared_processes_from_native_members().unwrap();
-        owner.identities.get_shared_user("new.group", 0, 0, true).unwrap();
+        owner
+            .rebuild_shared_processes_from_native_members()
+            .unwrap();
+        owner
+            .identities
+            .get_shared_user("new.group", 0, 0, true)
+            .unwrap();
         let usage = base.usage().clone();
         assert!(Store::new(owner.clone(), usage.clone()).is_err());
         complete_candidate_runtime(&mut owner, &base, &usage).unwrap();
-        assert!(owner.shared_processes("new.group").unwrap().unwrap().records().is_empty());
+        assert!(
+            owner
+                .shared_processes("new.group")
+                .unwrap()
+                .unwrap()
+                .records()
+                .is_empty()
+        );
         let candidate = Store::new(owner.clone(), usage.clone()).unwrap().capture();
-        assert!(candidate.owner().shared_processes("new.group").unwrap().is_some());
-        assert!(!base.owner().identities.shared_users.contains_key("new.group"));
-        owner.identities.shared_users.get_mut("new.group").unwrap().add_package("foreign", 0, 0);
+        assert!(
+            candidate
+                .owner()
+                .shared_processes("new.group")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            !base
+                .owner()
+                .identities
+                .shared_users
+                .contains_key("new.group")
+        );
+        owner
+            .identities
+            .shared_users
+            .get_mut("new.group")
+            .unwrap()
+            .add_package("foreign", 0, 0);
         let before = owner.clone();
         assert!(complete_candidate_runtime(&mut owner, &base, &usage).is_err());
         assert_eq!(owner, before);

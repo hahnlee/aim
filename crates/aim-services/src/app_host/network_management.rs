@@ -28,7 +28,10 @@ pub struct NetworkManagement {
 
 impl NetworkManagement {
     pub fn new(host: Arc<AppHost>) -> Self {
-        NetworkManagement { host, cleartext: Mutex::default() }
+        NetworkManagement {
+            host,
+            cleartext: Mutex::default(),
+        }
     }
 
     /// `setUidCleartextNetworkPolicy`: another uid's with a network stack
@@ -45,15 +48,27 @@ impl NetworkManagement {
             }
         }
         let mut cleartext = self.cleartext.lock().unwrap();
-        if cleartext.get(&uid).copied().unwrap_or(NETWORK_POLICY_ACCEPT) == policy {
+        if cleartext
+            .get(&uid)
+            .copied()
+            .unwrap_or(NETWORK_POLICY_ACCEPT)
+            == policy
+        {
             return Ok(());
         }
-        let strict_enabled = self.host.connectivity_service.get().is_some_and(|c| c.netd_connected());
+        let strict_enabled = self
+            .host
+            .connectivity_service
+            .get()
+            .is_some_and(|c| c.netd_connected());
         if !strict_enabled {
             cleartext.insert(uid, policy);
             return Ok(());
         }
-        Err(self.host.unimplemented_named("network_management", "netd's strictUidCleartextPenalty (#1714)"))
+        Err(self.host.unimplemented_named(
+            "network_management",
+            "netd's strictUidCleartextPenalty (#1714)",
+        ))
     }
 }
 
@@ -65,12 +80,16 @@ impl Service for NetworkManagement {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         match call.code {
             nm::SET_UID_CLEARTEXT_NETWORK_POLICY => {
-                let a = nm::SetUidCleartextNetworkPolicy::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(self.set_cleartext_policy(call.sender_euid as i32, a.uid, a.policy).map(|()| {
-                    let mut p = Parcel::new();
-                    nm::write_set_uid_cleartext_network_policy_reply(&mut p);
-                    p
-                }))
+                let a = nm::SetUidCleartextNetworkPolicy::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                reply(
+                    self.set_cleartext_policy(call.sender_euid as i32, a.uid, a.policy)
+                        .map(|()| {
+                            let mut p = Parcel::new();
+                            nm::write_set_uid_cleartext_network_policy_reply(&mut p);
+                            p
+                        }),
+                )
             }
             nm::IS_BANDWIDTH_CONTROL_ENABLED => {
                 nm::IsBandwidthControlEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -79,8 +98,14 @@ impl Service for NetworkManagement {
                 Ok(p)
             }
             code => {
-                let name = nm::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
-                reply(Err(self.host.unimplemented_named("network_management", &format!("{name} (#1714)"))))
+                let name = nm::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
+                reply(Err(self.host.unimplemented_named(
+                    "network_management",
+                    &format!("{name} (#1714)"),
+                )))
             }
         }
     }

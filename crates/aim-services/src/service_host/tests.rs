@@ -151,27 +151,41 @@ struct InstallerLeafFixture {
     cleared: Arc<Mutex<Vec<i32>>>,
 }
 impl Service for InstallerLeafFixture {
-    fn descriptor(&self)->&str{self.descriptor}
-    fn transact(&self,call:&mut Call<'_>)->Reply{
+    fn descriptor(&self) -> &str {
+        self.descriptor
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
         use aim_service_aidl::dev_aim_server_iinstallerexternalbridge as external;
-        if self.descriptor==external::DESCRIPTOR&&call.code==external::WATCH_APP_STATE{
-            let args=external::WatchAppState::read(&mut call.data)?;
-            assert_eq!(call.data.remaining(),0);
-            let Some(Binder::Handle(handle))=args.callback else{return Err(aim_binder_host::parcel::BAD_VALUE);};
-            self.watchers.lock().unwrap().push(self.process.upgrade().unwrap().strong(handle));
-            let mut reply=Parcel::new();reply.write_no_exception();return Ok(reply);
+        if self.descriptor == external::DESCRIPTOR && call.code == external::WATCH_APP_STATE {
+            let args = external::WatchAppState::read(&mut call.data)?;
+            assert_eq!(call.data.remaining(), 0);
+            let Some(Binder::Handle(handle)) = args.callback else {
+                return Err(aim_binder_host::parcel::BAD_VALUE);
+            };
+            self.watchers
+                .lock()
+                .unwrap()
+                .push(self.process.upgrade().unwrap().strong(handle));
+            let mut reply = Parcel::new();
+            reply.write_no_exception();
+            return Ok(reply);
         }
-        if self.descriptor==external::DESCRIPTOR&&call.code==external::CLEAR_PREAPPROVAL{
-            let args=external::ClearPreapproval::read(&mut call.data)?;
-            assert_eq!(call.data.remaining(),0);
-            assert!(args.session_id>0);
+        if self.descriptor == external::DESCRIPTOR && call.code == external::CLEAR_PREAPPROVAL {
+            let args = external::ClearPreapproval::read(&mut call.data)?;
+            assert_eq!(call.data.remaining(), 0);
+            assert!(args.session_id > 0);
             self.cleared.lock().unwrap().push(args.session_id);
-            let mut reply=Parcel::new();reply.write_no_exception();return Ok(reply);
+            let mut reply = Parcel::new();
+            reply.write_no_exception();
+            return Ok(reply);
         }
-        if self.descriptor==external::DESCRIPTOR&&call.code==external::CLOSE{
-            call.data.enforce_interface(external::DESCRIPTOR)?;assert_eq!(call.data.remaining(),0);
+        if self.descriptor == external::DESCRIPTOR && call.code == external::CLOSE {
+            call.data.enforce_interface(external::DESCRIPTOR)?;
+            assert_eq!(call.data.remaining(), 0);
             self.watchers.lock().unwrap().clear();
-            let mut reply=Parcel::new();reply.write_no_exception();return Ok(reply);
+            let mut reply = Parcel::new();
+            reply.write_no_exception();
+            return Ok(reply);
         }
         Err(UNKNOWN_TRANSACTION)
     }
@@ -191,18 +205,33 @@ impl Service for AllocationFixture {
         true
     }
     fn transact(&self, call: &mut Call<'_>) -> Reply {
-        let leaf=match call.code {
-            bootstrap::GET_NATIVE_STAGING_BRIDGE=>Some(aim_service_aidl::dev_aim_server_inativestagingbridge::DESCRIPTOR),
-            bootstrap::GET_PACKAGE_INSTALLER_FILES=>Some(aim_service_aidl::dev_aim_server_ipackageinstallerfiles::DESCRIPTOR),
-            bootstrap::GET_INSTALLER_EXTERNAL_BRIDGE=>Some(aim_service_aidl::dev_aim_server_iinstallerexternalbridge::DESCRIPTOR),
-            _=>None,
+        let leaf = match call.code {
+            bootstrap::GET_NATIVE_STAGING_BRIDGE => {
+                Some(aim_service_aidl::dev_aim_server_inativestagingbridge::DESCRIPTOR)
+            }
+            bootstrap::GET_PACKAGE_INSTALLER_FILES => {
+                Some(aim_service_aidl::dev_aim_server_ipackageinstallerfiles::DESCRIPTOR)
+            }
+            bootstrap::GET_INSTALLER_EXTERNAL_BRIDGE => {
+                Some(aim_service_aidl::dev_aim_server_iinstallerexternalbridge::DESCRIPTOR)
+            }
+            _ => None,
         };
-        if let Some(descriptor)=leaf{
-            assert_eq!(call.sender_euid,1000);call.data.enforce_interface(bootstrap::DESCRIPTOR)?;
-            assert_eq!(call.data.remaining(),0);
-            let process=self.process.upgrade().unwrap();
-            let binder=process.add_service(Arc::new(InstallerLeafFixture{descriptor,process:Arc::downgrade(&process),watchers:Mutex::new(Vec::new()),cleared:self.cleared_approvals.clone()}));
-            let mut reply=Parcel::new();reply.write_no_exception();reply.write_binder(Some(binder));return Ok(reply);
+        if let Some(descriptor) = leaf {
+            assert_eq!(call.sender_euid, 1000);
+            call.data.enforce_interface(bootstrap::DESCRIPTOR)?;
+            assert_eq!(call.data.remaining(), 0);
+            let process = self.process.upgrade().unwrap();
+            let binder = process.add_service(Arc::new(InstallerLeafFixture {
+                descriptor,
+                process: Arc::downgrade(&process),
+                watchers: Mutex::new(Vec::new()),
+                cleared: self.cleared_approvals.clone(),
+            }));
+            let mut reply = Parcel::new();
+            reply.write_no_exception();
+            reply.write_binder(Some(binder));
+            return Ok(reply);
         }
         if call.code != bootstrap::ALLOCATE_INSTALLER_BYTES {
             return self.owner.transact(call);
@@ -267,7 +296,9 @@ impl Service for Owner {
             self.batches.fetch_add(1, Ordering::SeqCst);
             let calls = aim_service_aidl::read_byte_array(&mut call.data)?.unwrap();
             let mut calls = aim_binder_host::parcel::Reader::new(&calls, &[]);
-            let count = calls.read_i32()?.min(self.batch_answers.load(Ordering::SeqCst) as i32);
+            let count = calls
+                .read_i32()?
+                .min(self.batch_answers.load(Ordering::SeqCst) as i32);
             let mut replies = Parcel::new();
             replies.write_i32(count);
             for _ in 0..count {
@@ -1261,9 +1292,7 @@ fn verify_settings_boot_entry(
             package: &crate::package::settings::Package,
             start: &aim_android_xml::Element,
         ) -> std::result::Result<(), ReadError> {
-            crate::package::settings::ReadOwners::package_header(
-                &mut self.headers, package, start,
-            )
+            crate::package::settings::ReadOwners::package_header(&mut self.headers, package, start)
         }
         fn shared_registered(
             &mut self,
@@ -1747,7 +1776,9 @@ fn exercise_bootstrap_on(
     use crate::package::installer::policy::DevicePolicy;
     let base = Arc::new(|_: u32, _: i32, _: i32| {
         Ok(DevicePolicy {
-            permissions: crate::package::installer::policy::CallingPermissions::new(Arc::new(|_, _, uid| Ok(matches!(uid, 0 | 1000)))),
+            permissions: crate::package::installer::policy::CallingPermissions::new(Arc::new(
+                |_, _, uid| Ok(matches!(uid, 0 | 1000)),
+            )),
             debuggable: false,
             apex_supported: true,
             rollback_lifetime: false,
@@ -1835,7 +1866,11 @@ fn exercise_bootstrap_on(
     let resolved = old
         .resolve_query_context(published.owner(), context.clone())
         .unwrap();
-    assert_eq!(owner.batches.load(Ordering::SeqCst), batches + 1, "one transaction reads every live owner");
+    assert_eq!(
+        owner.batches.load(Ordering::SeqCst),
+        batches + 1,
+        "one transaction reads every live owner"
+    );
     let capture = crate::package::scan_snapshot::query_state::Capture::new(
         published.clone(),
         resolved.clone(),
@@ -1862,10 +1897,14 @@ fn exercise_bootstrap_on(
     // A reply that fills its budget leaves the rest to further batches.
     owner.batch_answers.store(2, Ordering::SeqCst);
     let parts = owner.batches.load(Ordering::SeqCst);
-    let split = old.resolve_query_context(published.owner(), context.clone()).unwrap();
+    let split = old
+        .resolve_query_context(published.owner(), context.clone())
+        .unwrap();
     assert!(owner.batches.load(Ordering::SeqCst) > parts + 1);
     assert_eq!(format!("{split:?}"), format!("{resolved:?}"));
-    owner.batch_answers.store(i32::MAX as usize, Ordering::SeqCst);
+    owner
+        .batch_answers
+        .store(i32::MAX as usize, Ordering::SeqCst);
     owner.legacy_reply.store(5, Ordering::SeqCst);
     let empty_fixed = old.runtime_permissions(&capture, 0, 7, None).unwrap();
     assert_eq!(empty_fixed.packages, [(Some("fixture".into()), vec![])]);
@@ -2248,7 +2287,13 @@ fn exercise_bootstrap_on(
             .is_err()
     );
     owner.users_reply.store(0, Ordering::SeqCst);
-    let installer_fixture = verify_installer_binding(&system, &native, &first, &old, &allocation_owner.cleared_approvals);
+    let installer_fixture = verify_installer_binding(
+        &system,
+        &native,
+        &first,
+        &old,
+        &allocation_owner.cleared_approvals,
+    );
     if run_scan {
         verify_boot_scan(
             &system, &native, &first, &foreign, &old, &owner, &config, oracle,
@@ -2541,8 +2586,17 @@ fn exercise_bootstrap_on(
     if run_scan {
         use aim_service_aidl::android_content_pm_ipackagemanager as pm;
         let mut request = Parcel::new();
-        pm::SetBlockUninstallForUser { package_name: Some("android".into()), block_uninstall: false, user_id: 0 }.write(&mut request);
-        let revoked = find(&second, "query_package").transact(pm::SET_BLOCK_UNINSTALL_FOR_USER, &request, false);
+        pm::SetBlockUninstallForUser {
+            package_name: Some("android".into()),
+            block_uninstall: false,
+            user_id: 0,
+        }
+        .write(&mut request);
+        let revoked = find(&second, "query_package").transact(
+            pm::SET_BLOCK_UNINSTALL_FOR_USER,
+            &request,
+            false,
+        );
         assert!(revoked.is_err() || revoked.unwrap().reader().read_exception().unwrap().is_err());
     }
     assert!(
@@ -3288,10 +3342,16 @@ fn verify_boot_scan(
     assert_eq!(complete, untouched);
     assert!(Arc::ptr_eq(&base, &system.capture_package_scan().unwrap()));
     owner.reject.store(false, Ordering::SeqCst);
-    let mutation_seed = crate::package::owner::Store::create(&data.0.join("native-mutations"), &[0, 10]).unwrap();
+    let mutation_seed =
+        crate::package::owner::Store::create(&data.0.join("native-mutations"), &[0, 10]).unwrap();
     let mut context = query_context_for(&complete, base.version() + 1)
         .with_uninstall_blocks(mutation_seed.state())
-        .with_boot_classpath(&cohort::load().expect("NOT RUN: pinned native image required").image(cohort::Variant::Native).to_path_buf())
+        .with_boot_classpath(
+            &cohort::load()
+                .expect("NOT RUN: pinned native image required")
+                .image(cohort::Variant::Native)
+                .to_path_buf(),
+        )
         .unwrap();
     use crate::package::domain_verification::owner::Owner as DomainOwner;
     let boot_domains = bridge.boot_domains(&complete, config).unwrap();
@@ -3512,41 +3572,85 @@ fn verify_boot_scan(
     // Exercise its actual creation-metadata boundary before any file commits.
     let untouched = list_store.state().users[0].1.runtime_permissions.clone();
     for invalid in [
-        aim_storage::guest_inode::GuestInode { uid: None, ..runtime_inode },
-        aim_storage::guest_inode::GuestInode { gid: None, ..runtime_inode },
-        aim_storage::guest_inode::GuestInode { mode: Some(0o100600), ..runtime_inode },
+        aim_storage::guest_inode::GuestInode {
+            uid: None,
+            ..runtime_inode
+        },
+        aim_storage::guest_inode::GuestInode {
+            gid: None,
+            ..runtime_inode
+        },
+        aim_storage::guest_inode::GuestInode {
+            mode: Some(0o100600),
+            ..runtime_inode
+        },
     ] {
-        let error = system.commit_runtime_permissions_from_scan(
-            bridge, &mut list_store, &query, 0, &runtime_metadata, invalid).unwrap_err();
+        let error = system
+            .commit_runtime_permissions_from_scan(
+                bridge,
+                &mut list_store,
+                &query,
+                0,
+                &runtime_metadata,
+                invalid,
+            )
+            .unwrap_err();
         assert!(!error.committed);
-        assert!(error.message.contains("creation"), "actual persistence metadata error: {error:?}");
+        assert!(
+            error.message.contains("creation"),
+            "actual persistence metadata error: {error:?}"
+        );
         assert!(!runtime_file.exists());
         assert_eq!(list_store.state().users[0].1.runtime_permissions, untouched);
     }
     owner.legacy_reply.store(4, Ordering::SeqCst);
     let group = query.state().shared_users.values().next().unwrap();
     let live = bridge.legacy_permissions(group.app_id, &[0]).unwrap();
-    assert!(live.user(0).unwrap().permissions.iter().all(|permission|
-        permission.granted && permission.flags == 1 << 16));
-    let persisted = bridge.runtime_permissions(&query, 0, 7, Some("current".into())).unwrap();
+    assert!(
+        live.user(0)
+            .unwrap()
+            .permissions
+            .iter()
+            .all(|permission| permission.granted && permission.flags == 1 << 16)
+    );
+    let persisted = bridge
+        .runtime_permissions(&query, 0, 7, Some("current".into()))
+        .unwrap();
     assert!(!persisted.shared_users.is_empty());
-    assert_eq!(persisted.shared_users.len(), query.state().shared_users.len());
+    assert_eq!(
+        persisted.shared_users.len(),
+        query.state().shared_users.len()
+    );
     for (name, permissions) in &persisted.shared_users {
-        let captured = query.scan().owner().shared_legacy_permissions(name.as_ref().unwrap()).unwrap().unwrap();
+        let captured = query
+            .scan()
+            .owner()
+            .shared_legacy_permissions(name.as_ref().unwrap())
+            .unwrap()
+            .unwrap();
         let captured = captured.user(0).unwrap();
         assert_eq!(permissions.len(), captured.permissions.len());
         for (written, captured) in permissions.iter().zip(&captured.permissions) {
-            assert_eq!((&written.name, written.granted, written.flags),
-                (&captured.name, captured.granted, captured.flags));
+            assert_eq!(
+                (&written.name, written.granted, written.flags),
+                (&captured.name, captured.granted, captured.flags)
+            );
         }
     }
     assert!(persisted.packages.iter().all(|(name, _)| {
-        query.state().packages[name.as_ref().unwrap()].shared_user.is_none()
+        query.state().packages[name.as_ref().unwrap()]
+            .shared_user
+            .is_none()
     }));
     owner.legacy_reply.store(1, Ordering::SeqCst);
     assert!(bridge.legacy_permissions(group.app_id, &[0]).is_err());
-    assert_eq!(bridge.runtime_permissions(&query, 0, 7, Some("current".into())).unwrap(), persisted,
-        "malformed live receipt must not replace captured persistence maps");
+    assert_eq!(
+        bridge
+            .runtime_permissions(&query, 0, 7, Some("current".into()))
+            .unwrap(),
+        persisted,
+        "malformed live receipt must not replace captured persistence maps"
+    );
     owner.legacy_reply.store(4, Ordering::SeqCst);
     system
         .commit_runtime_permissions_from_scan(
@@ -3570,8 +3674,13 @@ fn verify_boot_scan(
     );
     assert_eq!(saved.packages, persisted.packages);
     assert_eq!(saved.shared_users, persisted.shared_users);
-    assert!(saved.shared_users.iter().all(|(_, permissions)| permissions.is_empty()),
-        "the original Settings fixture has empty captured legacy maps, distinct from the live receipt");
+    assert!(
+        saved
+            .shared_users
+            .iter()
+            .all(|(_, permissions)| permissions.is_empty()),
+        "the original Settings fixture has empty captured legacy maps, distinct from the live receipt"
+    );
     let reopened = crate::package::owner::Store::open(&list_data, &[0, 10])
         .unwrap()
         .unwrap();
@@ -3612,8 +3721,15 @@ fn verify_boot_scan(
     std::fs::create_dir(&user10_permissions).unwrap();
     let user0_bytes = std::fs::read(&runtime_file).unwrap();
     let inodes = BTreeMap::from([(0, runtime_inode), (10, runtime_inode)]);
-    let error = system.flush_runtime_permission_requests(
-        bridge, &mut list_store, &query, &mut runtime_metadata, &inodes).unwrap_err();
+    let error = system
+        .flush_runtime_permission_requests(
+            bridge,
+            &mut list_store,
+            &query,
+            &mut runtime_metadata,
+            &inodes,
+        )
+        .unwrap_err();
     assert_eq!(error.user, 10);
     assert!(!error.error.committed);
     assert!(error.error.message.contains("directory identity"));
@@ -3757,15 +3873,20 @@ fn verify_boot_scan(
         let held_user0_permissions = user0_permissions.with_file_name("held-runtime-owner");
         std::fs::rename(user0_permissions, &held_user0_permissions).unwrap();
         std::fs::create_dir(user0_permissions).unwrap();
-        let before_retry = std::fs::read(held_user0_permissions.join("runtime-permissions.xml")).unwrap();
-        let error = system.process_due_runtime_permission_requests(
-            bridge, &mut list_store, &query, &inodes, due).unwrap_err();
+        let before_retry =
+            std::fs::read(held_user0_permissions.join("runtime-permissions.xml")).unwrap();
+        let error = system
+            .process_due_runtime_permission_requests(bridge, &mut list_store, &query, &inodes, due)
+            .unwrap_err();
         assert_eq!(error.user, 0);
         assert!(!error.error.committed);
         assert!(error.error.message.contains("directory identity"));
         assert!(error.completed.is_empty());
         assert_eq!(installed.lock().unwrap().pending_write_requests(), [0]);
-        assert_eq!(std::fs::read(held_user0_permissions.join("runtime-permissions.xml")).unwrap(), before_retry);
+        assert_eq!(
+            std::fs::read(held_user0_permissions.join("runtime-permissions.xml")).unwrap(),
+            before_retry
+        );
         assert!(!runtime_file.exists());
         std::fs::remove_dir(user0_permissions).unwrap();
         std::fs::rename(&held_user0_permissions, user0_permissions).unwrap();
@@ -3890,7 +4011,9 @@ fn verify_boot_scan(
         owner.legacy_reply.store(0, Ordering::SeqCst);
     }
     // Production selects the independent verifier after publishing admitted code.
-    system.install_domain_verification_agent(bridge, &system.capture_package_queries().unwrap()).unwrap();
+    system
+        .install_domain_verification_agent(bridge, &system.capture_package_queries().unwrap())
+        .unwrap();
     let retained_domains = system.capture_package_domains().unwrap();
     assert!(Arc::ptr_eq(query.domains().unwrap(), &retained_domains));
     assert_eq!(
@@ -4143,7 +4266,10 @@ fn verify_boot_scan(
                 .transact(api::GET_DOMAIN_VERIFICATION_INFO, &request, false)
                 .unwrap();
             let denied = reply.reader().read_exception().unwrap().unwrap_err();
-            assert_eq!(denied.code, -1, "foreign domain-info denial differs: {denied:?}");
+            assert_eq!(
+                denied.code, -1,
+                "foreign domain-info denial differs: {denied:?}"
+            );
         }
         {
             use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as api;
@@ -4456,28 +4582,88 @@ fn verify_boot_scan(
     let mut exported = retained_domains.owner().clone();
     let mut group = crate::package::intent_filter::UriRelativeFilterGroup::new(1);
     group.add(0, 0, "/original-verifier");
-    exported.set_uri_groups("android", &[("verifier.example".into(), Some(vec![group]))]).unwrap();
+    exported
+        .set_uri_groups("android", &[("verifier.example".into(), Some(vec![group]))])
+        .unwrap();
     let desired = exported.persisted();
-    let prepared = query.prepare_domain_update(crate::package::domain_verification::original_bridge::merge(
-        retained_domains.owner(), &baseline, desired.clone()).unwrap()).unwrap();
-    assert!(system.commit_package_domains_if_current(bridge, prepared, &mut persistence).unwrap().is_none());
+    let prepared = query
+        .prepare_domain_update(
+            crate::package::domain_verification::original_bridge::merge(
+                retained_domains.owner(),
+                &baseline,
+                desired.clone(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(
+        system
+            .commit_package_domains_if_current(bridge, prepared, &mut persistence)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
-    assert!(Arc::ptr_eq(&committed, &system.capture_package_queries().unwrap()));
-    assert_eq!(owner.invalidations.load(Ordering::SeqCst), before_invalidations + 1);
+    assert!(Arc::ptr_eq(
+        &committed,
+        &system.capture_package_queries().unwrap()
+    ));
+    assert_eq!(
+        owner.invalidations.load(Ordering::SeqCst),
+        before_invalidations + 1
+    );
     let latest = system.capture_package_queries().unwrap();
     let merged = crate::package::domain_verification::original_bridge::merge(
-        latest.domains().unwrap().owner(), &baseline, desired.clone()).unwrap();
-    assert_eq!(merged.package("android").unwrap().id,
-        latest.domains().unwrap().owner().package("android").unwrap().id);
-    assert_eq!(merged.package("android").unwrap().users,
-        latest.domains().unwrap().owner().package("android").unwrap().users);
-    assert_eq!(merged.package("android").unwrap().uri_relative_filter_groups,
-        exported.package("android").unwrap().uri_relative_filter_groups);
+        latest.domains().unwrap().owner(),
+        &baseline,
+        desired.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        merged.package("android").unwrap().id,
+        latest
+            .domains()
+            .unwrap()
+            .owner()
+            .package("android")
+            .unwrap()
+            .id
+    );
+    assert_eq!(
+        merged.package("android").unwrap().users,
+        latest
+            .domains()
+            .unwrap()
+            .owner()
+            .package("android")
+            .unwrap()
+            .users
+    );
+    assert_eq!(
+        merged
+            .package("android")
+            .unwrap()
+            .uri_relative_filter_groups,
+        exported
+            .package("android")
+            .unwrap()
+            .uri_relative_filter_groups
+    );
     let retry = latest.prepare_domain_update(merged).unwrap();
-    let committed = system.commit_package_domains_if_current(bridge, retry, &mut persistence).unwrap().unwrap();
-    assert_eq!(persistence.state().settings.domain_verification,
-        committed.domains().unwrap().owner().persisted());
-    assert!(!committed.state().packages["android"].users[&0].domain_selection.as_ref().unwrap().0);
+    let committed = system
+        .commit_package_domains_if_current(bridge, retry, &mut persistence)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        persistence.state().settings.domain_verification,
+        committed.domains().unwrap().owner().persisted()
+    );
+    assert!(
+        !committed.state().packages["android"].users[&0]
+            .domain_selection
+            .as_ref()
+            .unwrap()
+            .0
+    );
     let bytes = std::fs::read(&path).unwrap();
     let before_invalidations = before_invalidations + 1;
     let mut updated = committed.domains().unwrap().owner().clone();
@@ -4762,9 +4948,22 @@ fn verify_boot_scan(
                 .as_deref(),
             Some("/runtime-only")
         );
-        assert_eq!(saved.active.iter().find(|package| package.name == "android").unwrap()
-            .uri_relative_filter_groups.iter().find(|(host, _)| host.as_deref() == Some("verifier.example")).unwrap()
-            .1[0].filters[0].filter.as_deref(), Some("/original-verifier"));
+        assert_eq!(
+            saved
+                .active
+                .iter()
+                .find(|package| package.name == "android")
+                .unwrap()
+                .uri_relative_filter_groups
+                .iter()
+                .find(|(host, _)| host.as_deref() == Some("verifier.example"))
+                .unwrap()
+                .1[0]
+                .filters[0]
+                .filter
+                .as_deref(),
+            Some("/original-verifier")
+        );
         assert_eq!(
             owner.invalidations.load(Ordering::SeqCst),
             invalidations + 1
@@ -6159,66 +6358,183 @@ fn verify_boot_scan(
             .unwrap();
         assert_eq!(stored.1.harmful_app_warning.as_deref(), Some(" ⚠<&😀 "));
         assert_eq!(computer_version().unwrap(), current.scan().version() as i64);
-        let set_block = |who: &Arc<LocalProcess>, package: Option<&str>, blocked, user, trailing| {
+        let set_block = |who: &Arc<LocalProcess>,
+                         package: Option<&str>,
+                         blocked,
+                         user,
+                         trailing| {
             let mut request = Parcel::new();
-            pm::SetBlockUninstallForUser { package_name: package.map(String::from), block_uninstall: blocked, user_id: user }.write(&mut request);
-            if trailing { request.write_i32(123); }
+            pm::SetBlockUninstallForUser {
+                package_name: package.map(String::from),
+                block_uninstall: blocked,
+                user_id: user,
+            }
+            .write(&mut request);
+            if trailing {
+                request.write_i32(123);
+            }
             find(who, "query_package").transact(pm::SET_BLOCK_UNINSTALL_FOR_USER, &request, false)
         };
         let get_block = |user| {
             let mut request = Parcel::new();
-            pm::GetBlockUninstallForUser { package_name: Some("android".into()), user_id: user }.write(&mut request);
-            let reply = endpoint.transact(pm::GET_BLOCK_UNINSTALL_FOR_USER, &request, false).unwrap();
-            pm::read_get_block_uninstall_for_user_reply(&mut reply.reader()).unwrap().unwrap()
+            pm::GetBlockUninstallForUser {
+                package_name: Some("android".into()),
+                user_id: user,
+            }
+            .write(&mut request);
+            let reply = endpoint
+                .transact(pm::GET_BLOCK_UNINSTALL_FOR_USER, &request, false)
+                .unwrap();
+            pm::read_get_block_uninstall_for_user_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap()
         };
         let before_block = system.capture_package_queries().unwrap();
         for blocked in [true, false, true] {
             let base = system.capture_package_queries().unwrap();
             let reply = set_block(client, Some("android"), blocked, 0, false).unwrap();
-            assert!(pm::read_set_block_uninstall_for_user_reply(&mut reply.reader()).unwrap().unwrap());
+            assert!(
+                pm::read_set_block_uninstall_for_user_reply(&mut reply.reader())
+                    .unwrap()
+                    .unwrap()
+            );
             let after = system.capture_package_queries().unwrap();
             assert_eq!(after.scan().version(), base.scan().version() + 1);
             assert_eq!(read_version(), after.scan().version());
             assert_eq!(get_block(0), blocked);
             assert!(!get_block(10));
-            assert_eq!(after.state().system.uninstall_blocks.as_ref().unwrap().get(0, Some("android")), blocked);
+            assert_eq!(
+                after
+                    .state()
+                    .system
+                    .uninstall_blocks
+                    .as_ref()
+                    .unwrap()
+                    .get(0, Some("android")),
+                blocked
+            );
             assert!(system.package_persistence_owner(&base).is_err());
-            let reopened = crate::package::owner::Store::open(&mutation_data, &[0, 10]).unwrap().unwrap();
-            assert_eq!(reopened.state().users[0].1.restrictions.block_uninstall.contains(&"android".into()), blocked);
-            assert!(reopened.state().users[1].1.restrictions.block_uninstall.is_empty());
+            let reopened = crate::package::owner::Store::open(&mutation_data, &[0, 10])
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                reopened.state().users[0]
+                    .1
+                    .restrictions
+                    .block_uninstall
+                    .contains(&"android".into()),
+                blocked
+            );
+            assert!(
+                reopened.state().users[1]
+                    .1
+                    .restrictions
+                    .block_uninstall
+                    .is_empty()
+            );
         }
-        assert!(!before_block.state().system.uninstall_blocks.as_ref().unwrap().get(0, Some("android")));
+        assert!(
+            !before_block
+                .state()
+                .system
+                .uninstall_blocks
+                .as_ref()
+                .unwrap()
+                .get(0, Some("android"))
+        );
         assert_eq!(computer_version().unwrap(), current.scan().version() as i64);
         let before_error = system.capture_package_queries().unwrap();
         owner.query_reply.store(1, Ordering::SeqCst);
         let failure = set_block(client, Some("android"), true, 10, false).unwrap();
-        assert_eq!(pm::read_set_block_uninstall_for_user_reply(&mut failure.reader()).unwrap().unwrap_err().code, -5);
+        assert_eq!(
+            pm::read_set_block_uninstall_for_user_reply(&mut failure.reader())
+                .unwrap()
+                .unwrap_err()
+                .code,
+            -5
+        );
         let committed_error = system.capture_package_queries().unwrap();
-        assert_eq!(committed_error.scan().version(), before_error.scan().version() + 1);
+        assert_eq!(
+            committed_error.scan().version(),
+            before_error.scan().version() + 1
+        );
         assert!(get_block(10));
-        let reopened = crate::package::owner::Store::open(&mutation_data, &[0, 10]).unwrap().unwrap();
-        assert!(reopened.state().users[1].1.restrictions.block_uninstall.contains(&"android".into()));
+        let reopened = crate::package::owner::Store::open(&mutation_data, &[0, 10])
+            .unwrap()
+            .unwrap();
+        assert!(
+            reopened.state().users[1]
+                .1
+                .restrictions
+                .block_uninstall
+                .contains(&"android".into())
+        );
         owner.query_reply.store(0, Ordering::SeqCst);
         let restored = set_block(client, Some("android"), false, 10, false).unwrap();
-        assert!(pm::read_set_block_uninstall_for_user_reply(&mut restored.reader()).unwrap().unwrap());
+        assert!(
+            pm::read_set_block_uninstall_for_user_reply(&mut restored.reader())
+                .unwrap()
+                .unwrap()
+        );
         let base = system.capture_package_queries().unwrap();
         let denied = set_block(foreign_client, Some("android"), false, 0, false).unwrap();
-        assert_eq!(pm::read_set_block_uninstall_for_user_reply(&mut denied.reader()).unwrap().unwrap_err().code, -1);
+        assert_eq!(
+            pm::read_set_block_uninstall_for_user_reply(&mut denied.reader())
+                .unwrap()
+                .unwrap_err()
+                .code,
+            -1
+        );
         assert!(set_block(client, Some("android"), false, 0, true).is_err());
-        assert!(Arc::ptr_eq(&base, &system.capture_package_queries().unwrap()));
+        assert!(Arc::ptr_eq(
+            &base,
+            &system.capture_package_queries().unwrap()
+        ));
         // Null names are accepted by the runtime ArraySet. The deferred writer
         // cannot serialize them; its failure preserves both the live state and disk.
         let path = mutation_data.join("system/users/0/package-restrictions.xml");
         let bytes = std::fs::read(&path).unwrap();
         let reply = set_block(client, None, true, 0, false).unwrap();
-        assert!(pm::read_set_block_uninstall_for_user_reply(&mut reply.reader()).unwrap().unwrap());
-        assert!(system.capture_package_queries().unwrap().state().system.uninstall_blocks.as_ref().unwrap().get(0, None));
+        assert!(
+            pm::read_set_block_uninstall_for_user_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap()
+        );
+        assert!(
+            system
+                .capture_package_queries()
+                .unwrap()
+                .state()
+                .system
+                .uninstall_blocks
+                .as_ref()
+                .unwrap()
+                .get(0, None)
+        );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         let reply = set_block(client, None, false, 0, false).unwrap();
-        assert!(pm::read_set_block_uninstall_for_user_reply(&mut reply.reader()).unwrap().unwrap());
+        assert!(
+            pm::read_set_block_uninstall_for_user_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap()
+        );
         let reply = set_block(client, Some("absent"), true, -99, false).unwrap();
-        assert!(pm::read_set_block_uninstall_for_user_reply(&mut reply.reader()).unwrap().unwrap());
-        assert!(system.capture_package_queries().unwrap().state().system.uninstall_blocks.as_ref().unwrap().get(-99, Some("absent")));
+        assert!(
+            pm::read_set_block_uninstall_for_user_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap()
+        );
+        assert!(
+            system
+                .capture_package_queries()
+                .unwrap()
+                .state()
+                .system
+                .uninstall_blocks
+                .as_ref()
+                .unwrap()
+                .get(-99, Some("absent"))
+        );
         let mut close = Parcel::new();
         computer_api::Close {}.write(&mut close);
         computer
@@ -6423,7 +6739,9 @@ fn verify_installer_binding(
     });
     let base: PolicySource = Arc::new(|_, _, _| {
         Ok(DevicePolicy {
-            permissions: crate::package::installer::policy::CallingPermissions::new(Arc::new(|_, _, uid| Ok(matches!(uid, 0 | 1000)))),
+            permissions: crate::package::installer::policy::CallingPermissions::new(Arc::new(
+                |_, _, uid| Ok(matches!(uid, 0 | 1000)),
+            )),
             debuggable: false,
             apex_supported: false,
             rollback_lifetime: true,
@@ -6465,13 +6783,21 @@ fn verify_installer_binding(
             Err(UNKNOWN_TRANSACTION)
         }
     }
-    register(native, "fixture_installer_effects", native.add_service(Arc::new(ExistingEffects)));
-    let effects = crate::package::effects::Owner::new(find(client, "fixture_installer_effects")).unwrap();
-    system.new_existing_package_owner(
-        bridge.clone(), effects,
-        Arc::new(crate::package::changes::Owner::default()),
-        Arc::new(crate::package::installer::existing::Restores::default()),
-    ).unwrap();
+    register(
+        native,
+        "fixture_installer_effects",
+        native.add_service(Arc::new(ExistingEffects)),
+    );
+    let effects =
+        crate::package::effects::Owner::new(find(client, "fixture_installer_effects")).unwrap();
+    system
+        .new_existing_package_owner(
+            bridge.clone(),
+            effects,
+            Arc::new(crate::package::changes::Owner::default()),
+            Arc::new(crate::package::installer::existing::Restores::default()),
+        )
+        .unwrap();
     let capture = system.capture_package_queries().unwrap();
     let worker = system
         .install_package_installer(bridge, &capture, owner.clone())

@@ -9,7 +9,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_ARGUMENT, EX_NULL_POINTER, EX_SECURITY, Exception, Parcel, UNKNOWN_TRANSACTION};
+use aim_binder_host::parcel::{
+    BAD_VALUE, EX_ILLEGAL_ARGUMENT, EX_NULL_POINTER, EX_SECURITY, Exception, Parcel,
+    UNKNOWN_TRANSACTION,
+};
 
 use super::settings_provider::{Caller, SettingsProvider};
 use super::{AppHost, reply};
@@ -53,7 +56,8 @@ impl Service for SettingsService {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         match call.code {
             SHELL_COMMAND_TRANSACTION => {
-                let command = ShellCommand::read(&self.host.process, &mut call.data).map_err(|_| BAD_VALUE)?;
+                let command = ShellCommand::read(&self.host.process, &mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 if command.has_output() {
                     let uid = call.sender_euid as i32;
                     let mut command = command;
@@ -64,7 +68,9 @@ impl Service for SettingsService {
                 p.write_no_exception();
                 Ok(p)
             }
-            DUMP_TRANSACTION => reply(Err(self.host.unimplemented_named("settings", "dump (#1585)"))),
+            DUMP_TRANSACTION => reply(Err(self
+                .host
+                .unimplemented_named("settings", "dump (#1585)"))),
             _ => Err(UNKNOWN_TRANSACTION),
         }
     }
@@ -99,7 +105,9 @@ fn java_exception(e: &Exception) -> String {
         EX_SECURITY => "java.lang.SecurityException",
         EX_ILLEGAL_ARGUMENT => "java.lang.IllegalArgumentException",
         EX_NULL_POINTER => "java.lang.NullPointerException",
-        aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION => "java.lang.UnsupportedOperationException",
+        aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION => {
+            "java.lang.UnsupportedOperationException"
+        }
         _ => "java.lang.IllegalStateException",
     };
     format!("{class}: {}", e.message)
@@ -110,7 +118,9 @@ fn parse_user_arg(arg: &str) -> Result<i32, String> {
     match arg {
         "all" => Ok(USER_ALL),
         "current" | "cur" => Ok(USER_CURRENT),
-        _ => arg.parse().map_err(|_| format!("java.lang.IllegalArgumentException: Bad user number: {arg}")),
+        _ => arg
+            .parse()
+            .map_err(|_| format!("java.lang.IllegalArgumentException: Bad user number: {arg}")),
     }
 }
 
@@ -139,7 +149,9 @@ fn optional_put_argument(command: &mut Command, arg: &str) -> bool {
             command.make_default = true;
             true
         }
-        _ if command.make_default || command.overrideable_by_restore || command.tag.is_some() => false,
+        _ if command.make_default || command.overrideable_by_restore || command.tag.is_some() => {
+            false
+        }
         _ => {
             command.tag = Some(arg.to_string());
             true
@@ -150,7 +162,11 @@ fn optional_put_argument(command: &mut Command, arg: &str) -> bool {
 /// `MyShellCommand.onCommand`: the command line read, then the call it
 /// makes.
 fn on_command(provider: &SettingsProvider, uid: i32, c: &mut ShellCommand) -> Result<i32, String> {
-    let Some(cmd) = c.command().map(str::to_string).filter(|cmd| !matches!(cmd.as_str(), "help" | "-h")) else {
+    let Some(cmd) = c
+        .command()
+        .map(str::to_string)
+        .filter(|cmd| !matches!(cmd.as_str(), "help" | "-h"))
+    else {
         help(c);
         return Ok(-1);
     };
@@ -266,9 +282,12 @@ fn on_command(provider: &SettingsProvider, uid: i32, c: &mut ShellCommand) -> Re
         },
     };
     let table = command.table.clone().unwrap_or_default();
-    let mut args: HashMap<String, Value> = HashMap::from([("_user".to_string(), Value::Int(command.user))]);
+    let mut args: HashMap<String, Value> =
+        HashMap::from([("_user".to_string(), Value::Int(command.user))]);
     let call = |method: &str, key: Option<&str>, args: &HashMap<String, Value>| {
-        provider.call(&caller, &format!("{method}_{table}"), key, args, None).map_err(|e| java_exception(&e))
+        provider
+            .call(&caller, &format!("{method}_{table}"), key, args, None)
+            .map_err(|e| java_exception(&e))
     };
     match command.verb {
         Some(Verb::Get) => {
@@ -382,11 +401,17 @@ mod tests {
         let mut c = command();
         assert!(optional_put_argument(&mut c, "tag") && optional_put_argument(&mut c, "default"));
         assert!(optional_put_argument(&mut c, "overrideableByRestore"));
-        assert_eq!((c.tag.as_deref(), c.make_default, c.overrideable_by_restore), (Some("tag"), true, true));
+        assert_eq!(
+            (c.tag.as_deref(), c.make_default, c.overrideable_by_restore),
+            (Some("tag"), true, true)
+        );
         let mut c = command();
         assert!(optional_put_argument(&mut c, "default") && !optional_put_argument(&mut c, "tag"));
         let mut c = command();
-        assert!(optional_put_argument(&mut c, "overrideableByRestore") && !optional_put_argument(&mut c, "default"));
+        assert!(
+            optional_put_argument(&mut c, "overrideableByRestore")
+                && !optional_put_argument(&mut c, "default")
+        );
         let mut c = command();
         assert!(optional_put_argument(&mut c, "a") && !optional_put_argument(&mut c, "b"));
     }
@@ -396,6 +421,9 @@ mod tests {
         assert_eq!(parse_user_arg("cur"), Ok(USER_CURRENT));
         assert_eq!(parse_user_arg("all"), Ok(USER_ALL));
         assert_eq!(parse_user_arg("10"), Ok(10));
-        assert_eq!(parse_user_arg("x"), Err("java.lang.IllegalArgumentException: Bad user number: x".into()));
+        assert_eq!(
+            parse_user_arg("x"),
+            Err("java.lang.IllegalArgumentException: Bad user number: x".into())
+        );
     }
 }

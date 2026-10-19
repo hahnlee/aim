@@ -25,8 +25,12 @@ pub fn open(
     let fd = super::procfs::content_fd_unpublished(contents, cloexec);
     if fd >= 0 {
         fdtab::insert(fd as i32, Kind::Knob(Arc::new(Knob(Box::new(on_write)))));
-        if let Err(error)=fdtab::publish_guest(fd as i32){
-            fdtab::on_close(fd as i32);unsafe{libc::close(fd as i32);}return -(error as i64);
+        if let Err(error) = fdtab::publish_guest(fd as i32) {
+            fdtab::on_close(fd as i32);
+            unsafe {
+                libc::close(fd as i32);
+            }
+            return -(error as i64);
         }
     }
     fd

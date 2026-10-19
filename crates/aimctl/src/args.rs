@@ -70,13 +70,20 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             Some("--host-runtime") => inputs.host_runtime = Some(value(&mut it, "--host-runtime")?),
             Some("--userdata") => inputs.userdata = Some(value(&mut it, "--userdata")?),
             Some("--adb-port") => {
-                if inputs.adb_port.is_some(){return Err(usage_error("duplicate --adb-port".into()));}
-                inputs.adb_port=Some(crate::inputs::parse_adb_port(it.next().ok_or_else(||usage_error("--adb-port needs a value".into()))?)?);
-            },
+                if inputs.adb_port.is_some() {
+                    return Err(usage_error("duplicate --adb-port".into()));
+                }
+                inputs.adb_port = Some(crate::inputs::parse_adb_port(
+                    it.next()
+                        .ok_or_else(|| usage_error("--adb-port needs a value".into()))?,
+                )?);
+            }
             Some("--binder-trace") => {
-                if inputs.binder_trace.is_some(){return Err(usage_error("duplicate --binder-trace".into()));}
-                inputs.binder_trace=Some(value(&mut it,"--binder-trace")?);
-            },
+                if inputs.binder_trace.is_some() {
+                    return Err(usage_error("duplicate --binder-trace".into()));
+                }
+                inputs.binder_trace = Some(value(&mut it, "--binder-trace")?);
+            }
             Some("-h" | "--help" | "help") => {
                 return Ok(Args {
                     data,
@@ -100,17 +107,30 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         match a.as_str() {
             "--" => verbatim = true,
             "--data" => data = Some(value(&mut it, "--data")?),
-            "--image" if matches!(name, "start" | "run") => inputs.image = Some(value(&mut it, "--image")?),
-            "--host-runtime" if matches!(name, "start" | "run") => inputs.host_runtime = Some(value(&mut it, "--host-runtime")?),
-            "--userdata" if matches!(name, "start" | "run") => inputs.userdata = Some(value(&mut it, "--userdata")?),
+            "--image" if matches!(name, "start" | "run") => {
+                inputs.image = Some(value(&mut it, "--image")?)
+            }
+            "--host-runtime" if matches!(name, "start" | "run") => {
+                inputs.host_runtime = Some(value(&mut it, "--host-runtime")?)
+            }
+            "--userdata" if matches!(name, "start" | "run") => {
+                inputs.userdata = Some(value(&mut it, "--userdata")?)
+            }
             "--adb-port" if matches!(name, "start" | "run") => {
-                if inputs.adb_port.is_some(){return Err(usage_error("duplicate --adb-port".into()));}
-                inputs.adb_port=Some(crate::inputs::parse_adb_port(it.next().ok_or_else(||usage_error("--adb-port needs a value".into()))?)?);
-            },
+                if inputs.adb_port.is_some() {
+                    return Err(usage_error("duplicate --adb-port".into()));
+                }
+                inputs.adb_port = Some(crate::inputs::parse_adb_port(
+                    it.next()
+                        .ok_or_else(|| usage_error("--adb-port needs a value".into()))?,
+                )?);
+            }
             "--binder-trace" if matches!(name, "start" | "run") => {
-                if inputs.binder_trace.is_some(){return Err(usage_error("duplicate --binder-trace".into()));}
-                inputs.binder_trace=Some(value(&mut it,"--binder-trace")?);
-            },
+                if inputs.binder_trace.is_some() {
+                    return Err(usage_error("duplicate --binder-trace".into()));
+                }
+                inputs.binder_trace = Some(value(&mut it, "--binder-trace")?);
+            }
             "--windows" if matches!(name, "start" | "run") => windows = true,
             "--follow" if name == "logs" => follow = true,
             s if s.starts_with('-') && name != "logs" => {
@@ -142,10 +162,17 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         _ => return Err(usage_error(format!("unknown command {name}"))),
     };
     if !matches!(command, Command::Start { .. } | Command::Run { .. })
-        && inputs != crate::inputs::Selection::default() {
-        return Err(usage_error("image, runtime, userdata and diagnostics can only be selected for start/run".into()));
+        && inputs != crate::inputs::Selection::default()
+    {
+        return Err(usage_error(
+            "image, runtime, userdata and diagnostics can only be selected for start/run".into(),
+        ));
     }
-    Ok(Args { data, inputs, command })
+    Ok(Args {
+        data,
+        inputs,
+        command,
+    })
 }
 
 #[cfg(test)]
@@ -198,8 +225,10 @@ mod tests {
 
     #[test]
     fn selected_inputs_are_start_options_and_shell_arguments_stay_verbatim() {
-        for command in ["--image /i --host-runtime /r --userdata /u start",
-            "run --image /i --host-runtime /r --userdata /u"] {
+        for command in [
+            "--image /i --host-runtime /r --userdata /u start",
+            "run --image /i --host-runtime /r --userdata /u",
+        ] {
             let selected = p(command).unwrap().inputs;
             assert_eq!(selected.image, Some("/i".into()));
             assert_eq!(selected.host_runtime, Some("/r".into()));
@@ -207,32 +236,53 @@ mod tests {
         }
         assert!(p("--image /i status").is_err());
         assert!(p("start --host-runtime").is_err());
-        assert_eq!(command("shell echo --image /i"),
-            Command::Shell(vec!["echo".into(), "--image".into(), "/i".into()]));
+        assert_eq!(
+            command("shell echo --image /i"),
+            Command::Shell(vec!["echo".into(), "--image".into(), "/i".into()])
+        );
     }
 
     #[test]
     fn adb_port_is_nonzero_start_run_configuration_not_a_shell_option() {
-        for command in ["--adb-port 5637 start","run --adb-port 65535"] {
+        for command in ["--adb-port 5637 start", "run --adb-port 65535"] {
             assert!(p(command).unwrap().inputs.adb_port.is_some());
         }
-        for command in ["start --adb-port","start --adb-port 0","run --adb-port 65536",
-                        "start --adb-port -1","start --adb-port +1",
-                        "--adb-port 1 start --adb-port 2","--adb-port 5637 status"] {
-            assert!(p(command).is_err(),"{command}");
+        for command in [
+            "start --adb-port",
+            "start --adb-port 0",
+            "run --adb-port 65536",
+            "start --adb-port -1",
+            "start --adb-port +1",
+            "--adb-port 1 start --adb-port 2",
+            "--adb-port 5637 status",
+        ] {
+            assert!(p(command).is_err(), "{command}");
         }
-        assert_eq!(command("shell echo --adb-port 5637"),Command::Shell(vec!["echo".into(),"--adb-port".into(),"5637".into()]));
+        assert_eq!(
+            command("shell echo --adb-port 5637"),
+            Command::Shell(vec!["echo".into(), "--adb-port".into(), "5637".into()])
+        );
     }
 
     #[test]
     fn binder_trace_is_explicit_start_run_only_and_shell_arguments_stay_verbatim() {
         for command in ["--binder-trace /trace start", "run --binder-trace /trace"] {
-            assert_eq!(p(command).unwrap().inputs.binder_trace,Some("/trace".into()));
+            assert_eq!(
+                p(command).unwrap().inputs.binder_trace,
+                Some("/trace".into())
+            );
         }
         assert!(p("start --binder-trace").is_err());
         assert!(p("start --binder-trace /a --binder-trace /b").is_err());
         assert!(p("--binder-trace /a status").is_err());
-        assert_eq!(command("shell echo --binder-trace /trace"),Command::Shell(vec!["echo".into(),"--binder-trace".into(),"/trace".into()]));
+        assert_eq!(
+            command("shell echo --binder-trace /trace"),
+            Command::Shell(vec![
+                "echo".into(),
+                "--binder-trace".into(),
+                "/trace".into()
+            ])
+        );
     }
 
     #[test]

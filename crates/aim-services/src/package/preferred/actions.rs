@@ -221,12 +221,23 @@ impl Actions for SystemActions {
     fn context_permission(&self, calling_uid: i32, name: &str) -> Result<bool, ActionError> {
         use aim_service_aidl::android_app_iactivitymanager as activity;
         let system = self.system()?;
-        let request = context_permission_request(calling_uid, name,
-            system.process().authenticated_inbound_identity())?;
-        let granted = system.call("activity", activity::CHECK_PERMISSION,
-            |parcel| request.write(parcel), activity::read_check_permission_reply)
-            .map_err(ActionError::Exception)? == 0;
-        system.check_package_bootstrap(&self.bridge).map_err(ActionError::Exception)?;
+        let request = context_permission_request(
+            calling_uid,
+            name,
+            system.process().authenticated_inbound_identity(),
+        )?;
+        let granted = system
+            .call(
+                "activity",
+                activity::CHECK_PERMISSION,
+                |parcel| request.write(parcel),
+                activity::read_check_permission_reply,
+            )
+            .map_err(ActionError::Exception)?
+            == 0;
+        system
+            .check_package_bootstrap(&self.bridge)
+            .map_err(ActionError::Exception)?;
         Ok(granted)
     }
 
@@ -409,17 +420,29 @@ impl Actions for SystemActions {
 /// Carry the actual inbound caller to the original independent permission
 /// owner. Rechecking each call observes adoption and drop without grant caches.
 fn context_permission_request(
-    uid: i32, name: &str, identity: Option<(i32, u32)>,
+    uid: i32,
+    name: &str,
+    identity: Option<(i32, u32)>,
 ) -> Result<aim_service_aidl::android_app_iactivitymanager::CheckPermission, ActionError> {
-    let (pid, actual_uid) = identity.ok_or_else(|| ActionError::Exception(
-        aim_binder_host::parcel::Exception::security("Preferred permission check outside authenticated inbound call")))?;
+    let (pid, actual_uid) = identity.ok_or_else(|| {
+        ActionError::Exception(aim_binder_host::parcel::Exception::security(
+            "Preferred permission check outside authenticated inbound call",
+        ))
+    })?;
     if i32::try_from(actual_uid).ok() != Some(uid) {
-        return Err(ActionError::Exception(aim_binder_host::parcel::Exception::security(
-            "Preferred permission caller differs from authenticated inbound identity")));
+        return Err(ActionError::Exception(
+            aim_binder_host::parcel::Exception::security(
+                "Preferred permission caller differs from authenticated inbound identity",
+            ),
+        ));
     }
-    Ok(aim_service_aidl::android_app_iactivitymanager::CheckPermission {
-        permission: Some(name.into()), pid, uid,
-    })
+    Ok(
+        aim_service_aidl::android_app_iactivitymanager::CheckPermission {
+            permission: Some(name.into()),
+            pid,
+            uid,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -427,55 +450,131 @@ mod permission_tests {
     use super::*;
     #[test]
     fn actual_binder_permission_receiver_observes_adoption_and_drop_per_call() {
-        use aim_binder_host::{local::{Call, LocalProcess, Reply, Service}, parcel::{Parcel, Binder, UNKNOWN_TRANSACTION}};
         use aim_binder_driver::{Credentials, Device, Driver};
+        use aim_binder_host::{
+            local::{Call, LocalProcess, Reply, Service},
+            parcel::{Binder, Parcel, UNKNOWN_TRANSACTION},
+        };
         use aim_service_aidl::android_app_iactivitymanager as activity;
-        use std::sync::{Mutex, atomic::{AtomicBool, Ordering}};
-        struct PermissionReceiver { adopted: AtomicBool, callers: Mutex<Vec<(i32,i32)>> }
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
+        struct PermissionReceiver {
+            adopted: AtomicBool,
+            callers: Mutex<Vec<(i32, i32)>>,
+        }
         impl Service for PermissionReceiver {
-            fn descriptor(&self) -> &str { activity::DESCRIPTOR }
+            fn descriptor(&self) -> &str {
+                activity::DESCRIPTOR
+            }
             fn transact(&self, call: &mut Call<'_>) -> Reply {
-                if call.code != activity::CHECK_PERMISSION { return Err(UNKNOWN_TRANSACTION); }
+                if call.code != activity::CHECK_PERMISSION {
+                    return Err(UNKNOWN_TRANSACTION);
+                }
                 let request = activity::CheckPermission::read(&mut call.data)?;
                 assert_eq!(call.data.remaining(), 0);
-                assert_eq!(request.permission.as_deref(), Some("android.permission.SET_PREFERRED_APPLICATIONS"));
+                assert_eq!(
+                    request.permission.as_deref(),
+                    Some("android.permission.SET_PREFERRED_APPLICATIONS")
+                );
                 assert_eq!((request.pid, request.uid), (717, 10226));
-                self.callers.lock().unwrap().push((request.pid,request.uid));
+                self.callers
+                    .lock()
+                    .unwrap()
+                    .push((request.pid, request.uid));
                 let mut reply = Parcel::new();
-                activity::write_check_permission_reply(&mut reply,
-                    if self.adopted.load(Ordering::SeqCst) { 0 } else { -1 });
+                activity::write_check_permission_reply(
+                    &mut reply,
+                    if self.adopted.load(Ordering::SeqCst) {
+                        0
+                    } else {
+                        -1
+                    },
+                );
                 Ok(reply)
             }
         }
         let driver = Driver::new();
-        let process = LocalProcess::open(&driver, Device::Binder, Credentials {
-            pid: 500, euid: 1000, security_context: None,
+        let process = LocalProcess::open(
+            &driver,
+            Device::Binder,
+            Credentials {
+                pid: 500,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let receiver = Arc::new(PermissionReceiver {
+            adopted: AtomicBool::new(false),
+            callers: Mutex::new(Vec::new()),
         });
-        let receiver = Arc::new(PermissionReceiver { adopted: AtomicBool::new(false), callers: Mutex::new(Vec::new()) });
-        let Binder::Local(ptr) = process.add_service(receiver.clone()) else { unreachable!() };
+        let Binder::Local(ptr) = process.add_service(receiver.clone()) else {
+            unreachable!()
+        };
         let service = process.local_service(ptr).unwrap();
         for adopted in [false, true, false] {
-            receiver.adopted.store(adopted,Ordering::SeqCst);
-            let request = context_permission_request(10226, "android.permission.SET_PREFERRED_APPLICATIONS", Some((717,10226))).unwrap();
-            let mut parcel = Parcel::new(); request.write(&mut parcel);
-            let response = service.transact(activity::CHECK_PERMISSION,&parcel,false).unwrap();
-            assert_eq!(activity::read_check_permission_reply(&mut response.reader()).unwrap().unwrap(), if adopted {0}else{-1});
+            receiver.adopted.store(adopted, Ordering::SeqCst);
+            let request = context_permission_request(
+                10226,
+                "android.permission.SET_PREFERRED_APPLICATIONS",
+                Some((717, 10226)),
+            )
+            .unwrap();
+            let mut parcel = Parcel::new();
+            request.write(&mut parcel);
+            let response = service
+                .transact(activity::CHECK_PERMISSION, &parcel, false)
+                .unwrap();
+            assert_eq!(
+                activity::read_check_permission_reply(&mut response.reader())
+                    .unwrap()
+                    .unwrap(),
+                if adopted { 0 } else { -1 }
+            );
         }
-        assert_eq!(receiver.callers.lock().unwrap().as_slice(), &[(717,10226);3]);
+        assert_eq!(
+            receiver.callers.lock().unwrap().as_slice(),
+            &[(717, 10226); 3]
+        );
     }
 
     #[test]
     fn preferred_context_permission_uses_authenticated_pid_uid_not_package_grants() {
-        use aim_service_aidl::android_app_iactivitymanager as activity;
         use aim_binder_host::parcel::Parcel;
-        let request = context_permission_request(10226, "android.permission.SET_PREFERRED_APPLICATIONS", Some((717, 10226))).unwrap();
-        let mut parcel = Parcel::new(); request.write(&mut parcel);
+        use aim_service_aidl::android_app_iactivitymanager as activity;
+        let request = context_permission_request(
+            10226,
+            "android.permission.SET_PREFERRED_APPLICATIONS",
+            Some((717, 10226)),
+        )
+        .unwrap();
+        let mut parcel = Parcel::new();
+        request.write(&mut parcel);
         let mut reader = parcel.reader();
         let decoded = activity::CheckPermission::read(&mut reader).unwrap();
-        assert_eq!(decoded.pid, 717); assert_eq!(decoded.uid, 10226);
-        assert_eq!(decoded.permission.as_deref(), Some("android.permission.SET_PREFERRED_APPLICATIONS"));
+        assert_eq!(decoded.pid, 717);
+        assert_eq!(decoded.uid, 10226);
+        assert_eq!(
+            decoded.permission.as_deref(),
+            Some("android.permission.SET_PREFERRED_APPLICATIONS")
+        );
         assert_eq!(reader.remaining(), 0);
-        assert!(context_permission_request(2000, "android.permission.SET_PREFERRED_APPLICATIONS", Some((717, 10226))).is_err());
-        assert!(context_permission_request(10226, "android.permission.SET_PREFERRED_APPLICATIONS", None).is_err());
+        assert!(
+            context_permission_request(
+                2000,
+                "android.permission.SET_PREFERRED_APPLICATIONS",
+                Some((717, 10226))
+            )
+            .is_err()
+        );
+        assert!(
+            context_permission_request(
+                10226,
+                "android.permission.SET_PREFERRED_APPLICATIONS",
+                None
+            )
+            .is_err()
+        );
     }
 }

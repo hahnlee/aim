@@ -11,7 +11,8 @@ fn user_manager_calls(jar: &[u8], owner: &str) -> usize {
     let mut count = 0;
     let mut at = 0;
     while jar[at..at + 4] == [0x50, 0x4b, 0x03, 0x04] {
-        let short = |offset| u16::from_le_bytes(jar[offset..offset + 2].try_into().unwrap()) as usize;
+        let short =
+            |offset| u16::from_le_bytes(jar[offset..offset + 2].try_into().unwrap()) as usize;
         let size = u32::from_le_bytes(jar[at + 18..at + 22].try_into().unwrap()) as usize;
         let name_length = short(at + 26);
         let start = at + 30 + name_length + short(at + 28);
@@ -22,10 +23,17 @@ fn user_manager_calls(jar: &[u8], owner: &str) -> usize {
             let dex = Dex::parse(data).unwrap();
             for class in &dex.classes {
                 if class.descriptor != "Lcom/android/server/pm/UserManagerService;"
-                    && !class.descriptor.starts_with("Lcom/android/server/pm/UserManagerService$") {
+                    && !class
+                        .descriptor
+                        .starts_with("Lcom/android/server/pm/UserManagerService$")
+                {
                     continue;
                 }
-                let names = dex.members(class).unwrap().1.into_iter()
+                let names = dex
+                    .members(class)
+                    .unwrap()
+                    .1
+                    .into_iter()
                     .map(|method| dex.method(method).unwrap().1)
                     .collect::<std::collections::BTreeSet<_>>();
                 for name in names {
@@ -34,7 +42,8 @@ fn user_manager_calls(jar: &[u8], owner: &str) -> usize {
                         let mut pc = 0;
                         while pc < instructions.len() {
                             if matches!(instructions[pc] & 0xff, 0x6e..=0x72 | 0x74..=0x78)
-                                && dex.method(u32::from(instructions[pc + 1])).unwrap().0 == owner {
+                                && dex.method(u32::from(instructions[pc + 1])).unwrap().0 == owner
+                            {
                                 count += 1;
                             }
                             pc += dex::instruction_units(&instructions, pc).unwrap();
@@ -74,7 +83,11 @@ fn native_user_manager_redirects_match_all_original_call_sites() {
         .arg(&classes)
         .arg("-classpath")
         .arg(&stubs)
-        .arg(repo.join("java/device-services/src/com/android/server/pm/NativeUserManagerBridge.java")));
+        .arg(
+            repo.join(
+                "java/device-services/src/com/android/server/pm/NativeUserManagerBridge.java",
+            ),
+        ));
     let mut class_files = Vec::new();
     let mut pending = vec![classes.clone()];
     while let Some(dir) = pending.pop() {
@@ -109,17 +122,30 @@ fn native_user_manager_redirects_match_all_original_call_sites() {
         &["/system/framework/services.jar"],
     )
     .unwrap();
-    let original = aim_paths::original_image_with("system/framework/services.jar").expect("original services.jar is required");
+    let original = aim_paths::original_image_with("system/framework/services.jar")
+        .expect("original services.jar is required");
     let services = fs::read(original.join("system/framework/services.jar")).unwrap();
     let fixture = fs::read(dex.join("classes.dex")).unwrap();
     let manifest = include_str!("fixtures/native-user-manager-redirects");
     let redirects = aim_android_image::redirect::parse(manifest).unwrap();
     assert_eq!(redirects.iter().map(|entry| entry.calls).sum::<usize>(), 14);
-    let patched = aim_android_image::redirect::redirect_jar(&services, &redirects, &[&fixture]).unwrap();
+    let patched =
+        aim_android_image::redirect::redirect_jar(&services, &redirects, &[&fixture]).unwrap();
     assert_ne!(patched, services);
-    assert_eq!(user_manager_calls(&services, "Lcom/android/server/pm/PackageManagerService;"), 14);
-    assert_eq!(user_manager_calls(&patched, "Lcom/android/server/pm/PackageManagerService;"), 0);
-    assert_eq!(user_manager_calls(&patched, "Lcom/android/server/pm/NativeUserManagerBridge;"), 14);
+    assert_eq!(
+        user_manager_calls(&services, "Lcom/android/server/pm/PackageManagerService;"),
+        14
+    );
+    assert_eq!(
+        user_manager_calls(&patched, "Lcom/android/server/pm/PackageManagerService;"),
+        0
+    );
+    assert_eq!(
+        user_manager_calls(&patched, "Lcom/android/server/pm/NativeUserManagerBridge;"),
+        14
+    );
     fs::write(data.0.join("services.redirected.fixture.jar"), patched).unwrap();
-    println!("all 14 original UM concrete PMS sites symbolically redirected; global image unchanged");
+    println!(
+        "all 14 original UM concrete PMS sites symbolically redirected; global image unchanged"
+    );
 }

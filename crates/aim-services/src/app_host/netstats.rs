@@ -64,8 +64,14 @@ struct Entry {
 impl Entry {
     /// The map's value: rxPackets, rxBytes, txPackets, txBytes.
     fn of(v: &[u8]) -> Option<Entry> {
-        let at = |i: usize| Some(u64::from_ne_bytes(v.get(i * 8..i * 8 + 8)?.try_into().ok()?) as i64);
-        Some(Entry { rx_packets: at(0)?, rx_bytes: at(1)?, tx_packets: at(2)?, tx_bytes: at(3)? })
+        let at =
+            |i: usize| Some(u64::from_ne_bytes(v.get(i * 8..i * 8 + 8)?.try_into().ok()?) as i64);
+        Some(Entry {
+            rx_packets: at(0)?,
+            rx_bytes: at(1)?,
+            tx_packets: at(2)?,
+            tx_bytes: at(3)?,
+        })
     }
 
     /// `NetworkStats.Entry.isEmpty` (no operations either).
@@ -79,7 +85,12 @@ impl WriteParcelable for Entry {
     fn write_to(&self, p: &mut Parcel) {
         let start = p.position();
         p.write_i32(0);
-        for v in [self.rx_bytes, self.rx_packets, self.tx_bytes, self.tx_packets] {
+        for v in [
+            self.rx_bytes,
+            self.rx_packets,
+            self.tx_bytes,
+            self.tx_packets,
+        ] {
             p.write_i64(v);
         }
         let size = (p.position() - start) as i32;
@@ -98,7 +109,12 @@ struct RateLimitCache {
 }
 
 impl RateLimitCache {
-    fn get_or_compute<E>(&mut self, uid: i32, now: i64, compute: impl FnOnce() -> Result<Entry, E>) -> Result<Entry, E> {
+    fn get_or_compute<E>(
+        &mut self,
+        uid: i32,
+        now: i64,
+        compute: impl FnOnce() -> Result<Entry, E>,
+    ) -> Result<Entry, E> {
         if let Some(i) = self.entries.iter().position(|e| e.0 == uid) {
             let e = self.entries.remove(i).unwrap();
             if now <= e.1 + self.expiry_ms {
@@ -127,13 +143,21 @@ pub struct NetworkStats {
 
 impl NetworkStats {
     pub fn new(host: Arc<AppHost>) -> Self {
-        NetworkStats { host, uid_cache: OnceLock::new(), app_uid_stats: OnceLock::new() }
+        NetworkStats {
+            host,
+            uid_cache: OnceLock::new(),
+            app_uid_stats: OnceLock::new(),
+        }
     }
 
     /// `DeviceConfigUtils.getDeviceConfigPropertyInt` in the tethering
     /// namespace.
     fn tethering_int(&self, name: &str, default: i32) -> Result<i32, Exception> {
-        let value = self.host.inputs()?.settings.get(Table::Config, &format!("tethering/{name}"));
+        let value = self
+            .host
+            .inputs()?
+            .settings
+            .get(Table::Config, &format!("tethering/{name}"));
         Ok(value.and_then(|v| v.parse().ok()).unwrap_or(default))
     }
 
@@ -145,7 +169,10 @@ impl NetworkStats {
             0 => Ok(default),
             FORCE_DISABLE_FEATURE_FLAG_VALUE => Ok(false),
             FORCE_ENABLE_FEATURE_FLAG_VALUE => Ok(true),
-            _ => Err(self.host.unimplemented_named("netstats", "a feature flag against the tethering module's version (#1671)")),
+            _ => Err(self.host.unimplemented_named(
+                "netstats",
+                "a feature flag against the tethering module's version (#1671)",
+            )),
         }
     }
 
@@ -154,7 +181,8 @@ impl NetworkStats {
     fn cache_config(&self) -> Result<CacheConfig, Exception> {
         Ok(CacheConfig {
             enabled: self.tethering_feature(CLIENT_CACHE_ENABLED_FLAG, false)?,
-            expiry_duration_ms: self.tethering_int(CACHE_EXPIRY_DURATION_NAME, DEFAULT_CACHE_EXPIRY_DURATION_MS)?,
+            expiry_duration_ms: self
+                .tethering_int(CACHE_EXPIRY_DURATION_NAME, DEFAULT_CACHE_EXPIRY_DURATION_MS)?,
             max_entries: self.tethering_int(CACHE_MAX_ENTRIES_NAME, DEFAULT_CACHE_MAX_ENTRIES)?,
         })
     }
@@ -167,7 +195,8 @@ impl NetworkStats {
             return Ok(c.as_ref());
         }
         let config = self.cache_config()?;
-        let enabled = !config.enabled && self.tethering_feature(SERVICE_CACHE_ENABLED_FLAG, true)?;
+        let enabled =
+            !config.enabled && self.tethering_feature(SERVICE_CACHE_ENABLED_FLAG, true)?;
         let cache = enabled.then(|| {
             Mutex::new(RateLimitCache {
                 expiry_ms: config.expiry_duration_ms as i64,
@@ -186,12 +215,24 @@ impl NetworkStats {
             None => match Mapped::open(&self.host.bpf()?.join(APP_UID_STATS_MAP)) {
                 Ok(m) => self.app_uid_stats.get_or_init(|| m),
                 // The original's BpfMapRO aborts without its map.
-                Err(e) => return Err(Exception::new(EX_ILLEGAL_STATE, format!("netstats: {APP_UID_STATS_MAP}: {e}"))),
+                Err(e) => {
+                    return Err(Exception::new(
+                        EX_ILLEGAL_STATE,
+                        format!("netstats: {APP_UID_STATS_MAP}: {e}"),
+                    ));
+                }
             },
         };
         match map.map().lookup(&(uid as u32).to_ne_bytes()) {
-            Some(v) => Entry::of(&v)
-                .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("netstats: {APP_UID_STATS_MAP}: a value of {} bytes", v.len()))),
+            Some(v) => Entry::of(&v).ok_or_else(|| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!(
+                        "netstats: {APP_UID_STATS_MAP}: a value of {} bytes",
+                        v.len()
+                    ),
+                )
+            }),
             None => Ok(Entry::default()),
         }
     }
@@ -204,8 +245,14 @@ impl NetworkStats {
         let Some(cache) = self.uid_cache()? else {
             return self.native_uid_stat(uid).map(Some);
         };
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
-        cache.lock().unwrap().get_or_compute(uid, now, || self.native_uid_stat(uid)).map(Some)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        cache
+            .lock()
+            .unwrap()
+            .get_or_compute(uid, now, || self.native_uid_stat(uid))
+            .map(Some)
     }
 }
 
@@ -223,7 +270,9 @@ impl Service for NetworkStats {
             ns::GET_RATE_LIMIT_CACHE_CONFIG => {
                 ns::GetRateLimitCacheConfig::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 match self.cache_config() {
-                    Ok(config) => ns::write_get_rate_limit_cache_config_reply(&mut p, Some(&config)),
+                    Ok(config) => {
+                        ns::write_get_rate_limit_cache_config_reply(&mut p, Some(&config))
+                    }
                     Err(e) => return reply(Err(e)),
                 }
             }
@@ -235,8 +284,13 @@ impl Service for NetworkStats {
                 }
             }
             code => {
-                let name = ns::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
-                return reply(Err(self.host.unimplemented_named("netstats", &format!("{name} (#1671)"))));
+                let name = ns::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
+                return reply(Err(self
+                    .host
+                    .unimplemented_named("netstats", &format!("{name} (#1671)"))));
             }
         }
         Ok(p)
@@ -251,7 +305,12 @@ mod tests {
     #[test]
     fn cache_config_is_a_structured_parcelable() {
         let mut p = Parcel::new();
-        CacheConfig { enabled: false, expiry_duration_ms: 1000, max_entries: 400 }.write_to(&mut p);
+        CacheConfig {
+            enabled: false,
+            expiry_duration_ms: 1000,
+            max_entries: 400,
+        }
+        .write_to(&mut p);
         let mut expected = Parcel::new();
         for v in [16, 0, 1000, 400] {
             expected.write_i32(v);
@@ -262,15 +321,32 @@ mod tests {
     #[test]
     fn stats_results_parcel_bytes_before_packets() {
         let mut p = Parcel::new();
-        Entry { rx_packets: 2, rx_bytes: 168, tx_packets: 3, tx_bytes: 200 }.write_to(&mut p);
+        Entry {
+            rx_packets: 2,
+            rx_bytes: 168,
+            tx_packets: 3,
+            tx_bytes: 200,
+        }
+        .write_to(&mut p);
         let mut expected = Parcel::new();
         expected.write_i32(36);
         for v in [168, 2, 200, 3] {
             expected.write_i64(v);
         }
         assert_eq!(p.data(), expected.data());
-        let value: Vec<u8> = [2u64, 168, 3, 200].iter().flat_map(|v| v.to_ne_bytes()).collect();
-        assert_eq!(Entry::of(&value), Some(Entry { rx_packets: 2, rx_bytes: 168, tx_packets: 3, tx_bytes: 200 }));
+        let value: Vec<u8> = [2u64, 168, 3, 200]
+            .iter()
+            .flat_map(|v| v.to_ne_bytes())
+            .collect();
+        assert_eq!(
+            Entry::of(&value),
+            Some(Entry {
+                rx_packets: 2,
+                rx_bytes: 168,
+                tx_packets: 3,
+                tx_bytes: 200
+            })
+        );
         assert_eq!(Entry::of(&value[..24]), None);
     }
 
@@ -278,9 +354,18 @@ mod tests {
     /// recomputed, empty ones never kept, the least recently used evicted.
     #[test]
     fn the_rate_limit_cache_expires_and_evicts() {
-        let mut c = RateLimitCache { expiry_ms: 1000, max: 2, entries: VecDeque::new() };
-        let e = |n| Entry { rx_bytes: n, ..Entry::default() };
-        let get = |c: &mut RateLimitCache, uid, now, v| c.get_or_compute::<()>(uid, now, || Ok(v)).unwrap();
+        let mut c = RateLimitCache {
+            expiry_ms: 1000,
+            max: 2,
+            entries: VecDeque::new(),
+        };
+        let e = |n| Entry {
+            rx_bytes: n,
+            ..Entry::default()
+        };
+        let get = |c: &mut RateLimitCache, uid, now, v| {
+            c.get_or_compute::<()>(uid, now, || Ok(v)).unwrap()
+        };
         assert_eq!(get(&mut c, 1, 0, e(1)), e(1));
         assert_eq!(get(&mut c, 1, 1000, e(2)), e(1));
         assert_eq!(get(&mut c, 1, 1001, e(3)), e(3));
@@ -291,6 +376,9 @@ mod tests {
         assert_eq!(get(&mut c, 3, 1002, e(5)), e(5));
         assert_eq!(get(&mut c, 2, 1002, e(6)), e(6));
         assert_eq!(get(&mut c, 3, 1002, e(9)), e(5));
-        assert_eq!(c.get_or_compute(4, 1002, || Err("unreadable")), Err("unreadable"));
+        assert_eq!(
+            c.get_or_compute(4, 1002, || Err("unreadable")),
+            Err("unreadable")
+        );
     }
 }

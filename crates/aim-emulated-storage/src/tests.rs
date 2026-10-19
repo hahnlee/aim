@@ -20,7 +20,10 @@ fn call(d: &Daemon, opcode: u32, node: u64, uid: u32, body: &[u8]) -> (i32, Vec<
     let reply = d.handle(&request(opcode, node, uid, body)).unwrap();
     assert_eq!(u32_at(&reply, 0).unwrap() as usize, reply.len());
     assert_eq!(u64_at(&reply, 8), Some(7));
-    (i32::from_le_bytes(reply[4..8].try_into().unwrap()), reply[16..].to_vec())
+    (
+        i32::from_le_bytes(reply[4..8].try_into().unwrap()),
+        reply[16..].to_vec(),
+    )
 }
 
 fn cstr(s: &str) -> Vec<u8> {
@@ -30,7 +33,11 @@ fn cstr(s: &str) -> Vec<u8> {
 }
 
 fn lower() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("aim-emulated-storage-{}-{:?}", std::process::id(), std::thread::current().id()));
+    let dir = std::env::temp_dir().join(format!(
+        "aim-emulated-storage-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("0/Download")).unwrap();
     fs::create_dir_all(dir.join("10")).unwrap();
@@ -48,7 +55,15 @@ fn init_agrees_to_the_protocol() {
     }
     let (error, out) = call(&d, op::INIT, 0, 0, &body);
     assert_eq!((error, out.len()), (0, 64));
-    assert_eq!((u32_at(&out, 0), u32_at(&out, 4), u32_at(&out, 12), u32_at(&out, 20)), (Some(7), Some(39), Some(1 | 32), Some(MAX_WRITE)));
+    assert_eq!(
+        (
+            u32_at(&out, 0),
+            u32_at(&out, 4),
+            u32_at(&out, 12),
+            u32_at(&out, 20)
+        ),
+        (Some(7), Some(39), Some(1 | 32), Some(MAX_WRITE))
+    );
 }
 
 #[test]
@@ -144,7 +159,10 @@ fn rename_moves_the_nodes_below() {
     noreplace.extend([0; 4]);
     noreplace.extend(cstr("b"));
     noreplace.extend(cstr("Download"));
-    assert_eq!(call(&d, op::RENAME2, user, APP, &noreplace).0, -errno::EEXIST);
+    assert_eq!(
+        call(&d, op::RENAME2, user, APP, &noreplace).0,
+        -errno::EEXIST
+    );
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -153,7 +171,10 @@ fn forgotten_nodes_go() {
     let dir = lower();
     let d = Daemon::new(&dir);
     let user = u64_at(&call(&d, op::LOOKUP, 1, APP, &cstr("0")).1, 0).unwrap();
-    assert!(d.handle(&request(op::FORGET, user, APP, &1u64.to_le_bytes())).is_none());
+    assert!(
+        d.handle(&request(op::FORGET, user, APP, &1u64.to_le_bytes()))
+            .is_none()
+    );
     assert_eq!(call(&d, op::GETATTR, user, APP, &[0; 16]).0, -errno::ENOENT);
     fs::remove_dir_all(dir).unwrap();
 }

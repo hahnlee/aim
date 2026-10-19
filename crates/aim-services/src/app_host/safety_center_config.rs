@@ -120,7 +120,12 @@ impl WriteParcelable for Written<'_> {
                 p.write_bool(s.refresh_on_page_open_allowed);
                 p.write_bool(s.notifications_allowed);
                 p.write_string16(s.deduplication_group.as_deref());
-                let hashes: Vec<Option<String>> = s.package_certificate_hashes.iter().cloned().map(Some).collect();
+                let hashes: Vec<Option<String>> = s
+                    .package_certificate_hashes
+                    .iter()
+                    .cloned()
+                    .map(Some)
+                    .collect();
                 aim_service_aidl::write_string_list(p, Some(&hashes));
                 if self.1.private_profile_title_api {
                     p.write_i32(s.title_for_private_profile);
@@ -135,8 +140,13 @@ impl WriteParcelable for Written<'_> {
 type Parse<T> = Result<T, String>;
 
 /// `parseXmlResource`.
-pub fn parse(xml: &[u8], resources: &dyn StringResources, flags: Flags) -> Parse<SafetyCenterConfig> {
-    let root = aim_android_xml::read_next(xml).map_err(|e| format!("Exception while parsing the XML resource: {e}"))?;
+pub fn parse(
+    xml: &[u8],
+    resources: &dyn StringResources,
+    flags: Flags,
+) -> Parse<SafetyCenterConfig> {
+    let root = aim_android_xml::read_next(xml)
+        .map_err(|e| format!("Exception while parsing the XML resource: {e}"))?;
     if local(&root.name) != TAG_CONFIG {
         return Err(element_missing(TAG_CONFIG));
     }
@@ -174,7 +184,9 @@ fn tags(e: &Element) -> Parse<Vec<&Element>> {
     for node in &e.content {
         match node {
             Node::Element(child) => out.push(child),
-            Node::Token(TEXT, Some(t)) if !t.trim_matches(|c: char| c.is_ascii_whitespace()).is_empty() => {
+            Node::Token(TEXT, Some(t))
+                if !t.trim_matches(|c: char| c.is_ascii_whitespace()).is_empty() =>
+            {
                 return Err("Exception while parsing the XML resource: unexpected text".into());
             }
             Node::Token(..) => {}
@@ -212,7 +224,10 @@ impl Parser<'_> {
             return Err(element_invalid(TAG_CONFIG, None));
         }
         let children = tags(root)?;
-        let Some(sources_config) = children.first().filter(|c| local(&c.name) == TAG_SOURCES_CONFIG) else {
+        let Some(sources_config) = children
+            .first()
+            .filter(|c| local(&c.name) == TAG_SOURCES_CONFIG)
+        else {
             return Err(element_missing(TAG_SOURCES_CONFIG));
         };
         if !attributes(sources_config).is_empty() {
@@ -282,7 +297,10 @@ impl Parser<'_> {
     }
 
     fn source(&self, e: &Element, kind: i32, name: &str) -> Parse<SafetySource> {
-        let mut b = SourceBuilder { kind, ..Default::default() };
+        let mut b = SourceBuilder {
+            kind,
+            ..Default::default()
+        };
         for (attr, value) in attributes(e) {
             match attr {
                 "id" => b.id = Some(self.value(&value, name, attr)?),
@@ -314,13 +332,20 @@ impl Parser<'_> {
                 }
                 "maxSeverityLevel" => {
                     let v = self.value(&value, name, attr)?;
-                    b.max_severity_level = Some(parse_int(&v).ok_or_else(|| attribute_invalid(&v, name, attr))?);
+                    b.max_severity_level =
+                        Some(parse_int(&v).ok_or_else(|| attribute_invalid(&v, name, attr))?);
                 }
                 "searchTerms" => b.search_terms = Some(self.resource_name(&value, name, attr)?),
                 "loggingAllowed" => b.logging_allowed = Some(self.boolean(&value, name, attr)?),
-                "refreshOnPageOpenAllowed" => b.refresh_on_page_open_allowed = Some(self.boolean(&value, name, attr)?),
-                "notificationsAllowed" => b.notifications_allowed = Some(self.boolean(&value, name, attr)?),
-                "deduplicationGroup" => b.deduplication_group = Some(self.value(&value, name, attr)?),
+                "refreshOnPageOpenAllowed" => {
+                    b.refresh_on_page_open_allowed = Some(self.boolean(&value, name, attr)?)
+                }
+                "notificationsAllowed" => {
+                    b.notifications_allowed = Some(self.boolean(&value, name, attr)?)
+                }
+                "deduplicationGroup" => {
+                    b.deduplication_group = Some(self.value(&value, name, attr)?)
+                }
                 "packageCertificateHashes" => {
                     for hash in java_split(&self.value(&value, name, attr)?) {
                         if !b.package_certificate_hashes.iter().any(|h| h == hash) {
@@ -334,7 +359,8 @@ impl Parser<'_> {
         if !tags(e)?.is_empty() {
             return Err(element_not_closed(name));
         }
-        b.build(self.flags).map_err(|e| element_invalid(name, Some(&e)))
+        b.build(self.flags)
+            .map_err(|e| element_invalid(name, Some(&e)))
     }
 
     /// `parseStringResourceName`: `@package:string/entry`'s id.
@@ -347,17 +373,25 @@ impl Parser<'_> {
             });
         };
         let Some((package, rest)) = rest.split_once(':').filter(|(p, _)| !p.is_empty()) else {
-            return Err(format!("Resource name \"{value}\" in {parent}.{name} does not specify a package"));
+            return Err(format!(
+                "Resource name \"{value}\" in {parent}.{name} does not specify a package"
+            ));
         };
         let Some((kind, entry)) = rest.split_once('/').filter(|(k, _)| !k.is_empty()) else {
-            return Err(format!("Resource name \"{value}\" in {parent}.{name} does not specify a type"));
+            return Err(format!(
+                "Resource name \"{value}\" in {parent}.{name} does not specify a type"
+            ));
         };
         if kind != "string" {
-            return Err(format!("Resource name \"{value}\" in {parent}.{name} is not a string"));
+            return Err(format!(
+                "Resource name \"{value}\" in {parent}.{name} is not a string"
+            ));
         }
         match self.resources.identifier(package, kind, entry) {
             Some(id) if id != 0 => Ok(id as i32),
-            _ => Err(format!("Resource name \"{value}\" in {parent}.{name} missing or invalid")),
+            _ => Err(format!(
+                "Resource name \"{value}\" in {parent}.{name} missing or invalid"
+            )),
         }
     }
 
@@ -404,7 +438,13 @@ fn parse_int(s: &str) -> Option<i32> {
 
 /// `BuilderUtils.validateAttribute`: required when unset, prohibited when
 /// set to other than the default.
-fn validate<T: PartialEq>(value: Option<&T>, name: &str, required: bool, prohibited: bool, default: Option<&T>) -> Result<(), String> {
+fn validate<T: PartialEq>(
+    value: Option<&T>,
+    name: &str,
+    required: bool,
+    prohibited: bool,
+    default: Option<&T>,
+) -> Result<(), String> {
     if value.is_none() && required {
         return Err(format!("Required attribute {name} missing"));
     }
@@ -425,7 +465,12 @@ fn validate_id(id: Option<&String>, name: &str) -> Result<String, String> {
 }
 
 /// `validateResId`.
-fn validate_res(value: Option<i32>, name: &str, required: bool, prohibited: bool) -> Result<i32, String> {
+fn validate_res(
+    value: Option<i32>,
+    name: &str,
+    required: bool,
+    prohibited: bool,
+) -> Result<i32, String> {
     validate(value.as_ref(), name, required, prohibited, Some(&ID_NULL))?;
     match value {
         None => Ok(ID_NULL),
@@ -435,7 +480,14 @@ fn validate_res(value: Option<i32>, name: &str, required: bool, prohibited: bool
 }
 
 /// `validateIntDef`.
-fn validate_int_def(value: Option<i32>, name: &str, required: bool, prohibited: bool, default: i32, valid: &[i32]) -> Result<i32, String> {
+fn validate_int_def(
+    value: Option<i32>,
+    name: &str,
+    required: bool,
+    prohibited: bool,
+    default: i32,
+    valid: &[i32],
+) -> Result<i32, String> {
     validate(value.as_ref(), name, required, prohibited, Some(&default))?;
     match value {
         None => Ok(default),
@@ -445,7 +497,12 @@ fn validate_int_def(value: Option<i32>, name: &str, required: bool, prohibited: 
 }
 
 /// `validateInteger` and `validateBoolean`.
-fn validate_or<T: PartialEq + Copy>(value: Option<T>, name: &str, prohibited: bool, default: T) -> Result<T, String> {
+fn validate_or<T: PartialEq + Copy>(
+    value: Option<T>,
+    name: &str,
+    prohibited: bool,
+    default: T,
+) -> Result<T, String> {
     validate(value.as_ref(), name, false, prohibited, Some(&default))?;
     Ok(value.unwrap_or(default))
 }
@@ -478,9 +535,19 @@ impl SourceBuilder {
         if ![TYPE_STATIC, TYPE_DYNAMIC, TYPE_ISSUE_ONLY].contains(&kind) {
             return Err("Unexpected type".into());
         }
-        let (is_static, is_dynamic, is_issue_only) = (kind == TYPE_STATIC, kind == TYPE_DYNAMIC, kind == TYPE_ISSUE_ONLY);
+        let (is_static, is_dynamic, is_issue_only) = (
+            kind == TYPE_STATIC,
+            kind == TYPE_DYNAMIC,
+            kind == TYPE_ISSUE_ONLY,
+        );
         let id = validate_id(self.id.as_ref(), "id")?;
-        validate(self.package_name.as_ref(), "packageName", is_dynamic || is_issue_only, false, None)?;
+        validate(
+            self.package_name.as_ref(),
+            "packageName",
+            is_dynamic || is_issue_only,
+            false,
+            None,
+        )?;
         let initial_display_state = validate_int_def(
             self.initial_display_state,
             "initialDisplayState",
@@ -492,7 +559,14 @@ impl SourceBuilder {
         let is_enabled = initial_display_state == DISPLAY_ENABLED;
         let is_hidden = initial_display_state == DISPLAY_HIDDEN;
         let is_dynamic_not_hidden = is_dynamic && !is_hidden;
-        let profile = validate_int_def(self.profile, "profile", true, false, PROFILE_NONE, &[PROFILE_NONE, PROFILE_PRIMARY, PROFILE_ALL])?;
+        let profile = validate_int_def(
+            self.profile,
+            "profile",
+            true,
+            false,
+            PROFILE_NONE,
+            &[PROFILE_NONE, PROFILE_PRIMARY, PROFILE_ALL],
+        )?;
         let has_all_profiles = profile == PROFILE_ALL;
         let search_terms = validate_res(self.search_terms, "searchTerms", false, is_issue_only)?;
         let is_dynamic_hidden_with_search = is_dynamic && is_hidden && search_terms != ID_NULL;
@@ -504,13 +578,45 @@ impl SourceBuilder {
             has_all_profiles && title_required,
             !has_all_profiles || is_issue_only,
         )?;
-        let summary = validate_res(self.summary, "summary", is_dynamic_not_hidden, is_issue_only)?;
-        validate(self.intent_action.as_ref(), "intentAction", (is_dynamic && is_enabled) || is_static, is_issue_only, None)?;
-        let max_severity_level = validate_or(self.max_severity_level, "maxSeverityLevel", is_static, i32::MAX)?;
+        let summary = validate_res(
+            self.summary,
+            "summary",
+            is_dynamic_not_hidden,
+            is_issue_only,
+        )?;
+        validate(
+            self.intent_action.as_ref(),
+            "intentAction",
+            (is_dynamic && is_enabled) || is_static,
+            is_issue_only,
+            None,
+        )?;
+        let max_severity_level = validate_or(
+            self.max_severity_level,
+            "maxSeverityLevel",
+            is_static,
+            i32::MAX,
+        )?;
         let logging_allowed = validate_or(self.logging_allowed, "loggingAllowed", is_static, true)?;
-        let refresh_on_page_open_allowed = validate_or(self.refresh_on_page_open_allowed, "refreshOnPageOpenAllowed", is_static, false)?;
-        let notifications_allowed = validate_or(self.notifications_allowed, "notificationsAllowed", is_static, false)?;
-        validate(self.deduplication_group.as_ref(), "deduplicationGroup", false, is_static, None)?;
+        let refresh_on_page_open_allowed = validate_or(
+            self.refresh_on_page_open_allowed,
+            "refreshOnPageOpenAllowed",
+            is_static,
+            false,
+        )?;
+        let notifications_allowed = validate_or(
+            self.notifications_allowed,
+            "notificationsAllowed",
+            is_static,
+            false,
+        )?;
+        validate(
+            self.deduplication_group.as_ref(),
+            "deduplicationGroup",
+            false,
+            is_static,
+            None,
+        )?;
         if !self.package_certificate_hashes.is_empty() && is_static {
             return Err("Prohibited attribute packageCertificateHashes present".into());
         }
@@ -564,8 +670,14 @@ impl GroupBuilder {
             return Err("Safety sources group empty".into());
         }
         let summary = validate_res(self.summary, "summary", false, false)?;
-        let stateless_icon_type =
-            validate_int_def(self.stateless_icon_type, "statelessIconType", false, false, ICON_NONE, &[ICON_NONE, ICON_PRIVACY])?;
+        let stateless_icon_type = validate_int_def(
+            self.stateless_icon_type,
+            "statelessIconType",
+            false,
+            false,
+            ICON_NONE,
+            &[ICON_NONE, ICON_PRIVACY],
+        )?;
         let only_issue_only = self.sources.iter().all(|s| s.kind == TYPE_ISSUE_ONLY);
         let inferred = if only_issue_only {
             GROUP_HIDDEN
@@ -574,15 +686,37 @@ impl GroupBuilder {
         } else {
             GROUP_STATELESS
         };
-        let kind = validate_int_def(self.kind, "type", false, false, inferred, &[GROUP_STATEFUL, GROUP_STATELESS, GROUP_HIDDEN])?;
+        let kind = validate_int_def(
+            self.kind,
+            "type",
+            false,
+            false,
+            inferred,
+            &[GROUP_STATEFUL, GROUP_STATELESS, GROUP_HIDDEN],
+        )?;
         if kind == GROUP_HIDDEN && !only_issue_only {
-            return Err("Safety sources groups of type hidden can only contain sources of type issue-only".into());
+            return Err(
+                "Safety sources groups of type hidden can only contain sources of type issue-only"
+                    .into(),
+            );
         }
         if kind != GROUP_HIDDEN && only_issue_only {
             return Err("Safety sources groups containing only sources of type issue-only must be of type hidden".into());
         }
-        let title = validate_res(self.title, "title", kind == GROUP_STATEFUL || kind == GROUP_STATELESS, false)?;
-        Ok(SafetySourcesGroup { kind, id, title, summary, stateless_icon_type, sources: self.sources })
+        let title = validate_res(
+            self.title,
+            "title",
+            kind == GROUP_STATEFUL || kind == GROUP_STATELESS,
+            false,
+        )?;
+        Ok(SafetySourcesGroup {
+            kind,
+            id,
+            title,
+            summary,
+            stateless_icon_type,
+            sources: self.sources,
+        })
     }
 }
 
@@ -614,17 +748,34 @@ mod tests {
 
     impl StringResources for Strings {
         fn identifier(&self, package: &str, kind: &str, entry: &str) -> Option<u32> {
-            (package == "p" && kind == "string").then(|| self.0.iter().find(|(n, _, _)| *n == entry).map(|(_, id, _)| *id)).flatten()
+            (package == "p" && kind == "string")
+                .then(|| {
+                    self.0
+                        .iter()
+                        .find(|(n, _, _)| *n == entry)
+                        .map(|(_, id, _)| *id)
+                })
+                .flatten()
         }
         fn string(&self, id: u32) -> Result<String, String> {
-            self.0.iter().find(|(_, i, _)| *i == id).map(|(_, _, s)| s.to_string()).ok_or_else(|| format!("no string {id:#x}"))
+            self.0
+                .iter()
+                .find(|(_, i, _)| *i == id)
+                .map(|(_, _, s)| s.to_string())
+                .ok_or_else(|| format!("no string {id:#x}"))
         }
     }
 
-    const FLAGS: Flags = Flags { private_profile_title_api: true };
+    const FLAGS: Flags = Flags {
+        private_profile_title_api: true,
+    };
 
     fn strings() -> Strings {
-        Strings(vec![("t", 0x7f01_0000, "Title"), ("s", 0x7f01_0001, "Summary"), ("pkg", 0x7f01_0002, "com.example")])
+        Strings(vec![
+            ("t", 0x7f01_0000, "Title"),
+            ("s", 0x7f01_0001, "Summary"),
+            ("pkg", 0x7f01_0002, "com.example"),
+        ])
     }
 
     /// A stateful group with a dynamic source: the resource names resolve
@@ -643,10 +794,16 @@ mod tests {
 </safety-center-config>"#;
         let config = parse(xml, &strings(), FLAGS).unwrap();
         let g = &config.groups[0];
-        assert_eq!((g.kind, g.id.as_str(), g.title, g.summary), (GROUP_STATEFUL, "G", 0x7f01_0000, 0x7f01_0001));
+        assert_eq!(
+            (g.kind, g.id.as_str(), g.title, g.summary),
+            (GROUP_STATEFUL, "G", 0x7f01_0000, 0x7f01_0001)
+        );
         let d = &g.sources[0];
         assert_eq!(d.package_name.as_deref(), Some("com.example"));
-        assert_eq!((d.kind, d.profile, d.max_severity_level, d.logging_allowed), (TYPE_DYNAMIC, PROFILE_PRIMARY, i32::MAX, true));
+        assert_eq!(
+            (d.kind, d.profile, d.max_severity_level, d.logging_allowed),
+            (TYPE_DYNAMIC, PROFILE_PRIMARY, i32::MAX, true)
+        );
         assert_eq!(g.sources[1].kind, TYPE_ISSUE_ONLY);
     }
 
@@ -656,15 +813,22 @@ mod tests {
     #[test]
     fn the_images_config_parses() {
         use crate::package::parse::resources::{Resources, Table};
-        let Some(priv_app) = aim_paths::input(aim_paths::out().join("app-host/root/apex/com.android.permission/priv-app"), "app-host")
-        else {
+        let Some(priv_app) = aim_paths::input(
+            aim_paths::out().join("app-host/root/apex/com.android.permission/priv-app"),
+            "app-host",
+        ) else {
             return;
         };
         let dir = std::fs::read_dir(&priv_app)
             .unwrap()
             .flatten()
             .map(|e| e.path())
-            .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("GoogleSafetyCenterResources@"))
+            .find(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("GoogleSafetyCenterResources@")
+            })
             .unwrap();
         let apk = aim_apps::apk::Apk::open(&dir.join("GoogleSafetyCenterResources.apk")).unwrap();
         let table = Table::parse(&apk.file_if_present("resources.arsc").unwrap().unwrap()).unwrap();
@@ -677,9 +841,23 @@ mod tests {
                 self.0.resource_string(id).ok_or_else(|| format!("{id:#x}"))
             }
         }
-        let base = Resources { tables: vec![&table], overlays: &[], config: Default::default() };
-        let id = base.identifier("com.google.android.safetycenter.resources", "raw", "safety_center_config").unwrap();
-        let file = |resources: &Resources<'_>| apk.file_if_present(&resources.resource_string(id).unwrap()).unwrap().unwrap();
+        let base = Resources {
+            tables: vec![&table],
+            overlays: &[],
+            config: Default::default(),
+        };
+        let id = base
+            .identifier(
+                "com.google.android.safetycenter.resources",
+                "raw",
+                "safety_center_config",
+            )
+            .unwrap();
+        let file = |resources: &Resources<'_>| {
+            apk.file_if_present(&resources.resource_string(id).unwrap())
+                .unwrap()
+                .unwrap()
+        };
         // The base `raw/safety_center_config.xml` gives no private profile
         // titles, which `private_profile_title_api` (on in the image's flag
         // storage) requires of all-profiles sources.
@@ -689,13 +867,32 @@ mod tests {
             "Element dynamic-safety-source invalid: Required attribute titleForPrivateProfile missing"
         );
         // The device's SDK picks `raw-v36`, which gives them.
-        let device = crate::package::parse::resources::Config { sdk_version: 36, ..Default::default() };
-        let strings = Apk(Resources { tables: vec![&table], overlays: &[], config: device });
+        let device = crate::package::parse::resources::Config {
+            sdk_version: 36,
+            ..Default::default()
+        };
+        let strings = Apk(Resources {
+            tables: vec![&table],
+            overlays: &[],
+            config: device,
+        });
         let config = parse(&file(&strings.0), &strings, FLAGS).unwrap();
         let ids: Vec<&str> = config.groups.iter().map(|g| g.id.as_str()).collect();
         assert!(ids.contains(&"GoogleAppSecuritySources"), "{ids:?}");
-        let protect = config.groups.iter().flat_map(|g| &g.sources).find(|s| s.id == "GooglePlayProtect").unwrap();
-        assert_eq!((protect.kind, protect.profile, protect.package_name.as_deref()), (TYPE_DYNAMIC, PROFILE_ALL, Some("com.android.vending")));
+        let protect = config
+            .groups
+            .iter()
+            .flat_map(|g| &g.sources)
+            .find(|s| s.id == "GooglePlayProtect")
+            .unwrap();
+        assert_eq!(
+            (
+                protect.kind,
+                protect.profile,
+                protect.package_name.as_deref()
+            ),
+            (TYPE_DYNAMIC, PROFILE_ALL, Some("com.android.vending"))
+        );
         assert_ne!(protect.title_for_private_profile, ID_NULL);
         assert_ne!(protect.title_for_work, ID_NULL);
     }
@@ -704,36 +901,64 @@ mod tests {
     #[test]
     fn invalid_configs_are_refused() {
         let group = |sources: &str| {
-            format!(r#"<safety-center-config><safety-sources-config><safety-sources-group id="G" title="@p:string/t">{sources}</safety-sources-group></safety-sources-config></safety-center-config>"#)
+            format!(
+                r#"<safety-center-config><safety-sources-config><safety-sources-group id="G" title="@p:string/t">{sources}</safety-sources-group></safety-sources-config></safety-center-config>"#
+            )
         };
         let fails = |xml: &str| parse(xml.as_bytes(), &strings(), FLAGS).unwrap_err();
         assert_eq!(fails("<other/>"), "Element safety-center-config missing");
-        assert_eq!(fails(r#"<safety-center-config a="1"/>"#), "Element safety-center-config invalid");
-        assert_eq!(fails("<safety-center-config><safety-sources-config/></safety-center-config>"), "Element safety-sources-config invalid: No safety sources groups present");
-        assert_eq!(fails(&group("")), "Element safety-sources-group invalid: Safety sources group empty");
+        assert_eq!(
+            fails(r#"<safety-center-config a="1"/>"#),
+            "Element safety-center-config invalid"
+        );
+        assert_eq!(
+            fails("<safety-center-config><safety-sources-config/></safety-center-config>"),
+            "Element safety-sources-config invalid: No safety sources groups present"
+        );
+        assert_eq!(
+            fails(&group("")),
+            "Element safety-sources-group invalid: Safety sources group empty"
+        );
         assert_eq!(
             fails(&group(r#"<dynamic-safety-source id="D" packageName="x"/>"#)),
             "Element dynamic-safety-source invalid: Required attribute profile missing"
         );
         assert_eq!(
-            fails(&group(r#"<static-safety-source id="S" profile="all_profiles" title="@p:string/t" intentAction="a" loggingAllowed="false"/>"#)),
+            fails(&group(
+                r#"<static-safety-source id="S" profile="all_profiles" title="@p:string/t" intentAction="a" loggingAllowed="false"/>"#
+            )),
             "Element static-safety-source invalid: Required attribute titleForWork missing"
         );
-        assert_eq!(fails(&group(r#"<static-safety-source id="S" foo="1"/>"#)), "Unexpected attribute static-safety-source.foo");
         assert_eq!(
-            fails(&group(r#"<dynamic-safety-source id="D" packageName="x" profile="all" />"#)),
+            fails(&group(r#"<static-safety-source id="S" foo="1"/>"#)),
+            "Unexpected attribute static-safety-source.foo"
+        );
+        assert_eq!(
+            fails(&group(
+                r#"<dynamic-safety-source id="D" packageName="x" profile="all" />"#
+            )),
             "Attribute value \"all\" in dynamic-safety-source.profile invalid"
         );
         assert_eq!(
-            fails(&group(r#"<dynamic-safety-source id="D" packageName="x" profile="primary_profile_only" title="@p:string/missing"/>"#)),
+            fails(&group(
+                r#"<dynamic-safety-source id="D" packageName="x" profile="primary_profile_only" title="@p:string/missing"/>"#
+            )),
             "Resource name \"@p:string/missing\" in dynamic-safety-source.title missing or invalid"
         );
         assert_eq!(
-            fails(&group(r#"<issue-only-safety-source id="I" packageName="x" profile="primary_profile_only"/><other/>"#)),
+            fails(&group(
+                r#"<issue-only-safety-source id="I" packageName="x" profile="primary_profile_only"/><other/>"#
+            )),
             "Element safety-sources-group not closed"
         );
-        let source = r#"<issue-only-safety-source id="I" packageName="x" profile="primary_profile_only"/>"#;
-        let twice = format!(r#"<safety-center-config><safety-sources-config><safety-sources-group id="G" type="hidden">{source}</safety-sources-group><safety-sources-group id="G" type="hidden">{source}</safety-sources-group></safety-sources-config></safety-center-config>"#);
-        assert_eq!(fails(&twice), "Element safety-sources-config invalid: Duplicate id G among safety sources groups");
+        let source =
+            r#"<issue-only-safety-source id="I" packageName="x" profile="primary_profile_only"/>"#;
+        let twice = format!(
+            r#"<safety-center-config><safety-sources-config><safety-sources-group id="G" type="hidden">{source}</safety-sources-group><safety-sources-group id="G" type="hidden">{source}</safety-sources-group></safety-sources-config></safety-center-config>"#
+        );
+        assert_eq!(
+            fails(&twice),
+            "Element safety-sources-config invalid: Duplicate id G among safety sources groups"
+        );
     }
 }

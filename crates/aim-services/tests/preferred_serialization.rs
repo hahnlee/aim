@@ -1,9 +1,5 @@
 //! Canonical native preferred backup checked by the pinned original owner.
-use std::{
-    fs,
-    process::Command,
-    time::Duration,
-};
+use std::{fs, process::Command, time::Duration};
 mod common {
     pub mod java;
     pub mod runtime;
@@ -91,7 +87,8 @@ fn preferred_backup_matches_original_owner() {
     .unwrap();
     let boot = Boot::new(repo.join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
-    boot.wait_ready(Duration::from_secs(300)).expect("preferred_serialization oracle boot readiness");
+    boot.wait_ready(Duration::from_secs(300))
+        .expect("preferred_serialization oracle boot readiness");
     let guest = boot.data.join("data/local/tmp/preferred-owner");
     fs::create_dir(&guest).unwrap();
     aim_storage::guest_inode::record(

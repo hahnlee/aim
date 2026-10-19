@@ -17,8 +17,8 @@ use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
     BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel, Reader, Result as ParcelResult,
 };
-use aim_service_aidl::android_content_icontentservice as cs;
 use aim_service_aidl::ReadParcelable;
+use aim_service_aidl::android_content_icontentservice as cs;
 
 use super::kept::{By, KeptBundle, RawBundle};
 use super::{AppHost, PER_USER_RANGE, reply};
@@ -44,7 +44,12 @@ fn master_sync_of(root: &aim_android_xml::Element, user: i32) -> Option<bool> {
     if root.name != "accounts" {
         return None;
     }
-    let mut listen = (user == 0).then(|| root.bool("listen-for-tickles").ok().flatten().unwrap_or(true));
+    let mut listen = (user == 0).then(|| {
+        root.bool("listen-for-tickles")
+            .ok()
+            .flatten()
+            .unwrap_or(true)
+    });
     for e in root.children().filter(|e| e.name == "listenForTickles") {
         if e.int("user").ok().flatten().unwrap_or(0) == user {
             listen = Some(e.bool("enabled").ok().flatten().unwrap_or(true));
@@ -225,7 +230,9 @@ impl ContentService {
         if self.host.check_permission(Some(permission), uid)? == 0 {
             return Ok(());
         }
-        Err(Exception::security(format!("{message}: Neither user {uid} nor current process has {permission}.")))
+        Err(Exception::security(format!(
+            "{message}: Neither user {uid} nor current process has {permission}."
+        )))
     }
 
     /// `getCurrentSyncsAsUser`: `enforceCrossUserPermission` and
@@ -233,9 +240,17 @@ impl ContentService {
     /// there are none: no sync runs (#1460).
     fn current_syncs(&self, uid: i32, user: i32) -> Result<(), Exception> {
         if uid / PER_USER_RANGE as i32 != user {
-            self.enforce(uid, "android.permission.INTERACT_ACROSS_USERS_FULL", "no permission to read the syncs of other users")?;
+            self.enforce(
+                uid,
+                "android.permission.INTERACT_ACROSS_USERS_FULL",
+                "no permission to read the syncs of other users",
+            )?;
         }
-        self.enforce(uid, "android.permission.READ_SYNC_STATS", "no permission to read the sync stats")
+        self.enforce(
+            uid,
+            "android.permission.READ_SYNC_STATS",
+            "no permission to read the sync stats",
+        )
     }
 
     /// `getMasterSyncAutomaticallyAsUser`: `enforceCrossUserPermission`,
@@ -248,12 +263,18 @@ impl ContentService {
                 &format!("no permission to read the sync settings for user {user}"),
             )?;
         }
-        self.enforce(uid, "android.permission.READ_SYNC_SETTINGS", "no permission to read the sync settings")?;
+        self.enforce(
+            uid,
+            "android.permission.READ_SYNC_SETTINGS",
+            "no permission to read the sync settings",
+        )?;
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
         let path = self.host.data()?.join("system/sync/accounts.xml");
         let bytes = super::device_policy::read_atomic_bytes(&path).map_err(state)?;
         let root = bytes.and_then(|b| {
-            aim_android_xml::read(&b).inspect_err(|e| eprintln!("app host: Error reading accounts: {e}")).ok()
+            aim_android_xml::read(&b)
+                .inspect_err(|e| eprintln!("app host: Error reading accounts: {e}"))
+                .ok()
         });
         if let Some(listen) = root.as_ref().and_then(|r| master_sync_of(r, user)) {
             return Ok(listen);
@@ -277,7 +298,11 @@ impl ContentService {
                 }
             }),
         );
-        let old = self.status_listeners.lock().unwrap().insert(listener, (strong, cookie, (uid, mask)));
+        let old = self
+            .status_listeners
+            .lock()
+            .unwrap()
+            .insert(listener, (strong, cookie, (uid, mask)));
         if let Some((strong, cookie, _)) = old {
             self.host.process.clear_death(&strong, cookie);
         }
@@ -370,7 +395,10 @@ impl ContentService {
         let user = self.host.incoming_user(SYSTEM_UID, user, true)?;
         // `checkContentProviderAccess`, which the system is held to as an
         // app of the current SDK.
-        if let Some(msg) = self.host.provider_access(&uri.authority().unwrap_or_default(), SYSTEM_UID, user)? {
+        if let Some(msg) =
+            self.host
+                .provider_access(&uri.authority().unwrap_or_default(), SYSTEM_UID, user)?
+        {
             return Err(Exception::security(msg));
         }
         let segments = segments(uri).ok_or_else(|| {
@@ -380,7 +408,11 @@ impl ContentService {
         self.local.lock().unwrap().insert(id, observer);
         self.root.lock().unwrap().add(
             &segments,
-            Entry { observer: Observer::Local(id), notify_for_descendants: descendants, user },
+            Entry {
+                observer: Observer::Local(id),
+                notify_for_descendants: descendants,
+                user,
+            },
         );
         Ok(id)
     }
@@ -436,7 +468,12 @@ impl ContentService {
     /// `ContentResolver.notifyChange(uri, null, true, user)` makes it
     /// (no observer, `NOTIFY_SYNC_TO_NETWORK`).
     pub(super) fn notify_from_system(&self, uri: Uri, user: i32) -> Result<(), Exception> {
-        let change = Change { observer: None, wants_self: false, flags: NOTIFY_SYNC_TO_NETWORK, user };
+        let change = Change {
+            observer: None,
+            wants_self: false,
+            flags: NOTIFY_SYNC_TO_NETWORK,
+            user,
+        };
         self.change(vec![uri], &change)
     }
 
@@ -592,7 +629,10 @@ impl Service for ContentService {
                 let args = cs::PutCache::<ParcelUri, RawBundle>::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
                 let key = args.key.map(|k| k.0);
-                let value = args.value.map(|v| KeptBundle::new(v, &self.host.process)).transpose()?;
+                let value = args
+                    .value
+                    .map(|v| KeptBundle::new(v, &self.host.process))
+                    .transpose()?;
                 empty(
                     self.cache_key(
                         call.sender_euid as i32,
@@ -628,7 +668,10 @@ impl Service for ContentService {
                             .and_then(|e| e.iter().find(|(k, _)| *k == key))
                             .map(|(_, v)| v.clone());
                         let mut p = Parcel::new();
-                        cs::write_get_cache_reply(&mut p, value.as_ref().map(|v| By(&v.bundle)).as_ref());
+                        cs::write_get_cache_reply(
+                            &mut p,
+                            value.as_ref().map(|v| By(&v.bundle)).as_ref(),
+                        );
                         p
                     }),
                 )
@@ -639,7 +682,9 @@ impl Service for ContentService {
                     cs::GetCurrentSyncs::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                     uid / PER_USER_RANGE as i32
                 } else {
-                    cs::GetCurrentSyncsAsUser::read(&mut call.data).map_err(|_| BAD_VALUE)?.user_id
+                    cs::GetCurrentSyncsAsUser::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?
+                        .user_id
                 };
                 reply(self.current_syncs(uid, user).map(|()| {
                     // `writeTypedList` of no `SyncInfo`.
@@ -652,19 +697,26 @@ impl Service for ContentService {
             cs::GET_MASTER_SYNC_AUTOMATICALLY => {
                 cs::GetMasterSyncAutomatically::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let uid = call.sender_euid as i32;
-                reply(self.master_sync(uid, uid / PER_USER_RANGE as i32).map(|listen| {
-                    let mut p = Parcel::new();
-                    cs::write_get_master_sync_automatically_reply(&mut p, listen);
-                    p
-                }))
+                reply(
+                    self.master_sync(uid, uid / PER_USER_RANGE as i32)
+                        .map(|listen| {
+                            let mut p = Parcel::new();
+                            cs::write_get_master_sync_automatically_reply(&mut p, listen);
+                            p
+                        }),
+                )
             }
             cs::GET_MASTER_SYNC_AUTOMATICALLY_AS_USER => {
-                let a = cs::GetMasterSyncAutomaticallyAsUser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(self.master_sync(call.sender_euid as i32, a.user_id).map(|listen| {
-                    let mut p = Parcel::new();
-                    cs::write_get_master_sync_automatically_as_user_reply(&mut p, listen);
-                    p
-                }))
+                let a = cs::GetMasterSyncAutomaticallyAsUser::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                reply(
+                    self.master_sync(call.sender_euid as i32, a.user_id)
+                        .map(|listen| {
+                            let mut p = Parcel::new();
+                            cs::write_get_master_sync_automatically_as_user_reply(&mut p, listen);
+                            p
+                        }),
+                )
             }
             cs::ADD_STATUS_CHANGE_LISTENER => {
                 let a = cs::AddStatusChangeListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -674,7 +726,8 @@ impl Service for ContentService {
                 empty(Ok(()))
             }
             cs::REMOVE_STATUS_CHANGE_LISTENER => {
-                let a = cs::RemoveStatusChangeListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    cs::RemoveStatusChangeListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 if let Some(Binder::Handle(listener)) = a.callback {
                     self.remove_status_listener(listener);
                 }
@@ -768,7 +821,14 @@ mod tests {
         );
         assert!(!root.remove(Observer::Remote(2)) && !root.has(Observer::Remote(2)));
         // The app host's own observers are among them, apart from apps'.
-        root.add(&s(&["a"]), Entry { observer: Observer::Local(2), notify_for_descendants: true, user: 0 });
+        root.add(
+            &s(&["a"]),
+            Entry {
+                observer: Observer::Local(2),
+                notify_for_descendants: true,
+                user: 0,
+            },
+        );
         assert_eq!(heard(&root, &["a", "b"], &change(Some(2))), [102, 1]);
         assert!(!root.remove(Observer::Local(2)) && !root.has(Observer::Local(2)));
         assert_eq!(heard(&root, &["a", "b"], &change(None)), [1]);

@@ -69,7 +69,11 @@ pub struct InputMethodManager {
 
 impl InputMethodManager {
     pub fn new(host: Arc<AppHost>) -> Self {
-        InputMethodManager { host, clients: Mutex::new(Vec::new()), tracker: std::sync::OnceLock::new() }
+        InputMethodManager {
+            host,
+            clients: Mutex::new(Vec::new()),
+            tracker: std::sync::OnceLock::new(),
+        }
     }
 
     /// `startInputOrWindowGainedFocusAsync`: the editor, if the call names
@@ -77,11 +81,13 @@ impl InputMethodManager {
     /// there is no input method.
     fn start_input(&self, call: &mut Call<'_>) -> Result<(), i32> {
         let data = &mut call.data;
-        data.enforce_interface(imm::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+        data.enforce_interface(imm::DESCRIPTOR)
+            .map_err(|_| BAD_VALUE)?;
         let _reason = data.read_i32()?;
         let client = data.read_binder()?;
         let _window = data.read_binder()?;
-        let (_flags, _soft_input_mode, _window_flags) = (data.read_i32()?, data.read_i32()?, data.read_i32()?);
+        let (_flags, _soft_input_mode, _window_flags) =
+            (data.read_i32()?, data.read_i32()?, data.read_i32()?);
         let editor = match data.read_i32()? {
             0 => None,
             _ => Some((data.read_i32()?, data.read_i32()?)),
@@ -90,11 +96,13 @@ impl InputMethodManager {
         // the accessibility connection comes with it (`startInputInner`),
         // and the back dispatcher's result receiver always follows.
         let objects = objects_after(data);
-        let connection = (objects.len() >= 3).then(|| objects[objects.len() - 3]).map(|at| {
-            let mut r = data.clone();
-            r.set_position(at);
-            r.read_binder()
-        });
+        let connection = (objects.len() >= 3)
+            .then(|| objects[objects.len() - 3])
+            .map(|at| {
+                let mut r = data.clone();
+                r.set_position(at);
+                r.read_binder()
+            });
         // `startInputSeq` and `useAsyncShowHideMethod` end the call.
         let mut tail = data.clone();
         let end = tail.position() + tail.remaining();
@@ -103,7 +111,12 @@ impl InputMethodManager {
         let uid = call.sender_euid;
         match (editor, connection) {
             (Some((input_type, ime_options)), Some(Ok(Some(Binder::Handle(handle))))) => {
-                self.host.start_editor(uid, self.host.process.strong(handle), input_type, ime_options);
+                self.host.start_editor(
+                    uid,
+                    self.host.process.strong(handle),
+                    input_type,
+                    ime_options,
+                );
             }
             _ => self.host.end_editor(uid),
         }
@@ -120,7 +133,11 @@ impl InputMethodManager {
             p.write_i32(-1); // sequence
             p.write_bool(false);
             p.write_i32(start_input_seq);
-            let _ = self.host.process.strong(client).transact(ON_START_INPUT_RESULT, &p, true);
+            let _ = self
+                .host
+                .process
+                .strong(client)
+                .transact(ON_START_INPUT_RESULT, &p, true);
         }
         Ok(())
     }
@@ -144,7 +161,11 @@ impl InputMethodManager {
     /// `enforceCallingOrSelfPermission(INTERACT_ACROSS_USERS_FULL)`.
     fn enforce_across_users(&self, uid: i32) -> Result<(), aim_binder_host::parcel::Exception> {
         const INTERACT_ACROSS_USERS_FULL: &str = "android.permission.INTERACT_ACROSS_USERS_FULL";
-        if self.host.check_permission(Some(INTERACT_ACROSS_USERS_FULL), uid)? != 0 {
+        if self
+            .host
+            .check_permission(Some(INTERACT_ACROSS_USERS_FULL), uid)?
+            != 0
+        {
             return Err(aim_binder_host::parcel::Exception::security(format!(
                 "Neither user {uid} nor current process has {INTERACT_ACROSS_USERS_FULL}."
             )));
@@ -179,7 +200,9 @@ impl Service for InputMethodManager {
             // No Android input method shows or hides: the Mac's input
             // method takes an editor's keys whenever it has the focus.
             imm::SHOW_SOFT_INPUT | imm::HIDE_SOFT_INPUT => {
-                call.data.enforce_interface(imm::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                call.data
+                    .enforce_interface(imm::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
                 let mut p = Parcel::new();
                 imm::write_show_soft_input_reply(&mut p, false);
                 Ok(p)
@@ -188,9 +211,13 @@ impl Service for InputMethodManager {
             // one with a physical keyboard, the Mac's input method behind
             // it (the owner's choice, 2026-10-19). The lists are empty,
             // asked across users with INTERACT_ACROSS_USERS_FULL.
-            imm::GET_INPUT_METHOD_LIST | imm::GET_ENABLED_INPUT_METHOD_LIST | imm::GET_INPUT_METHOD_LIST_LEGACY | imm::GET_ENABLED_INPUT_METHOD_LIST_LEGACY => {
+            imm::GET_INPUT_METHOD_LIST
+            | imm::GET_ENABLED_INPUT_METHOD_LIST
+            | imm::GET_INPUT_METHOD_LIST_LEGACY
+            | imm::GET_ENABLED_INPUT_METHOD_LIST_LEGACY => {
                 let r = &mut call.data;
-                r.enforce_interface(imm::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                r.enforce_interface(imm::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
                 let user = r.read_i32().map_err(|_| BAD_VALUE)?;
                 if user != (call.sender_euid / super::PER_USER_RANGE) as i32
                     && let Err(e) = self.enforce_across_users(call.sender_euid as i32)
@@ -199,7 +226,10 @@ impl Service for InputMethodManager {
                 }
                 let mut p = Parcel::new();
                 p.write_no_exception();
-                if matches!(call.code, imm::GET_INPUT_METHOD_LIST | imm::GET_ENABLED_INPUT_METHOD_LIST) {
+                if matches!(
+                    call.code,
+                    imm::GET_INPUT_METHOD_LIST | imm::GET_ENABLED_INPUT_METHOD_LIST
+                ) {
                     // `InputMethodInfoSafeList.empty()`: a null blob.
                     p.write_i32(1);
                     p.write_i32(-1);
@@ -209,8 +239,14 @@ impl Service for InputMethodManager {
                 Ok(p)
             }
             imm::GET_IME_TRACKER_SERVICE => {
-                call.data.enforce_interface(imm::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
-                let tracker = *self.tracker.get_or_init(|| self.host.process.add_service(Arc::new(ImeTracker(self.host.clone()))));
+                call.data
+                    .enforce_interface(imm::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
+                let tracker = *self.tracker.get_or_init(|| {
+                    self.host
+                        .process
+                        .add_service(Arc::new(ImeTracker(self.host.clone())))
+                });
                 let mut p = Parcel::new();
                 imm::write_get_ime_tracker_service_reply(&mut p, Some(tracker));
                 Ok(p)
@@ -246,15 +282,21 @@ impl Service for ImeTracker {
         match call.code {
             tracker::ON_START => {
                 let args = tracker::OnStart::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let token = Token { binder: self.0.process.add_service(Arc::new(super::activity::Token)), tag: args.tag };
+                let token = Token {
+                    binder: self.0.process.add_service(Arc::new(super::activity::Token)),
+                    tag: args.tag,
+                };
                 let mut p = Parcel::new();
                 tracker::write_on_start_reply(&mut p, Some(&token));
                 Ok(p)
             }
             // Oneway reports.
-            tracker::ON_PROGRESS | tracker::ON_FAILED | tracker::ON_CANCELLED | tracker::ON_SHOWN | tracker::ON_HIDDEN | tracker::ON_DISPATCHED => {
-                Ok(Parcel::new())
-            }
+            tracker::ON_PROGRESS
+            | tracker::ON_FAILED
+            | tracker::ON_CANCELLED
+            | tracker::ON_SHOWN
+            | tracker::ON_HIDDEN
+            | tracker::ON_DISPATCHED => Ok(Parcel::new()),
             code => reply(Err(self.0.unimplemented("ime tracker", code))),
         }
     }
@@ -294,9 +336,22 @@ impl AppHost {
 
     /// `uid`'s editor on `connection` takes the text input, in its task.
     fn start_editor(&self, uid: u32, connection: Strong, input_type: i32, ime_options: i32) {
-        let task = self.tasks.of_uid(uid).filter(|_| self.tasks.window_mode()).unwrap_or(-1);
-        *self.text_input.editor.lock().unwrap() = Some(Editor { uid, connection, task });
-        self.tell_display(&Message::Editor { task, active: true, input_type, ime_options });
+        let task = self
+            .tasks
+            .of_uid(uid)
+            .filter(|_| self.tasks.window_mode())
+            .unwrap_or(-1);
+        *self.text_input.editor.lock().unwrap() = Some(Editor {
+            uid,
+            connection,
+            task,
+        });
+        self.tell_display(&Message::Editor {
+            task,
+            active: true,
+            input_type,
+            ime_options,
+        });
     }
 
     /// `uid` has no editor (any more).
@@ -304,7 +359,12 @@ impl AppHost {
         let mut editor = self.text_input.editor.lock().unwrap();
         if let Some(e) = editor.take_if(|e| e.uid == uid) {
             drop(editor);
-            self.tell_display(&Message::Editor { task: e.task, active: false, input_type: 0, ime_options: 0 });
+            self.tell_display(&Message::Editor {
+                task: e.task,
+                active: false,
+                input_type: 0,
+                ime_options: 0,
+            });
         }
     }
 
@@ -322,7 +382,9 @@ impl AppHost {
     /// session: 0, a new connection's).
     fn type_text(&self, m: &Message) -> Result<(), String> {
         let editor = self.text_input.editor.lock().unwrap();
-        let Some(editor) = editor.as_ref() else { return Ok(()) };
+        let Some(editor) = editor.as_ref() else {
+            return Ok(());
+        };
         let call = |code: u32, write: &dyn Fn(&mut Parcel)| -> Result<(), String> {
             let mut p = Parcel::new();
             p.write_interface_token(CONNECTION_DESCRIPTOR);
@@ -330,7 +392,11 @@ impl AppHost {
             p.write_i32(1);
             p.write_i32(0);
             write(&mut p);
-            editor.connection.transact(code, &p, true).map(|_| ()).map_err(|s| format!("input connection #{code}: {s}"))
+            editor
+                .connection
+                .transact(code, &p, true)
+                .map(|_| ())
+                .map_err(|s| format!("input connection #{code}: {s}"))
         };
         // A `CharSequence` (`TextUtils.writeToParcel`): present, plain,
         // its UTF-8.
@@ -391,8 +457,14 @@ fn write_key_event(p: &mut Parcel, time: i64, action: i32, code: i32) {
 /// A connection to the text input of the display server at `socket`.
 fn text_input_link(socket: &Path) -> Result<UnixStream, String> {
     let link = UnixStream::connect(socket).map_err(|e| format!("{}: {e}", socket.display()))?;
-    let hello = wire::Request { op: wire::OP_TEXT_INPUT, id: wire::VERSION, ..Default::default() };
+    let hello = wire::Request {
+        op: wire::OP_TEXT_INPUT,
+        id: wire::VERSION,
+        ..Default::default()
+    };
     wire::send(link.as_fd(), wire::bytes(&hello), None).map_err(|e| e.to_string())?;
-    wire::recv_record::<u32>(link.as_fd()).map_err(|e| e.to_string())?.ok_or("the display server closed the connection")?;
+    wire::recv_record::<u32>(link.as_fd())
+        .map_err(|e| e.to_string())?
+        .ok_or("the display server closed the connection")?;
     Ok(link)
 }

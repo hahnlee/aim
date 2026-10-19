@@ -89,17 +89,27 @@ impl System {
             let current = state
                 .current
                 .as_mut()
-                .filter(|current| {
-                    Arc::ptr_eq(&current.bridge, bridge)
-                })
+                .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
                 .ok_or_else(|| fail("module metadata bootstrap generation changed".into()))?;
-            let latest=current.queries.clone().ok_or_else(||fail("module metadata current capture unavailable".into()))?;
-            if capture.scan().owner().loaded_packages()!=latest.scan().owner().loaded_packages() {
-                return Err(fail("module metadata accepted code changed during initialization".into()));
+            let latest = current
+                .queries
+                .clone()
+                .ok_or_else(|| fail("module metadata current capture unavailable".into()))?;
+            if capture.scan().owner().loaded_packages() != latest.scan().owner().loaded_packages() {
+                return Err(fail(
+                    "module metadata accepted code changed during initialization".into(),
+                ));
             }
-            if latest.state().system.module_metadata.is_some(){return Err(fail("module metadata owner already initialized".into()));}
-            let mut update=latest.prepare_package_update(latest.scan().owner().clone()).map_err(fail)?;
-            update.capture=update.capture.load_module_metadata(&apks.platform,config,&files,&apex).map_err(fail)?;
+            if latest.state().system.module_metadata.is_some() {
+                return Err(fail("module metadata owner already initialized".into()));
+            }
+            let mut update = latest
+                .prepare_package_update(latest.scan().owner().clone())
+                .map_err(fail)?;
+            update.capture = update
+                .capture
+                .load_module_metadata(&apks.platform, config, &files, &apex)
+                .map_err(fail)?;
             let update = current.publish_update(update)?;
             current.set_queries(Some(update.capture.clone()));
             if let Some(page) = &current.version_page {

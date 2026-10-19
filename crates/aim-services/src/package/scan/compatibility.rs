@@ -22,7 +22,9 @@ pub struct LibraryCompatibility {
 }
 
 impl LibraryCompatibility {
-    pub(crate) fn test_base_on_bootclasspath(&self) -> bool { self.test_base_on_bootclasspath }
+    pub(crate) fn test_base_on_bootclasspath(&self) -> bool {
+        self.test_base_on_bootclasspath
+    }
     /// Image SystemConfig/Build and selected boot classpath policy. No class
     /// loading or environment feature flags. Keeps Android ArrayMap order.
     pub fn new(

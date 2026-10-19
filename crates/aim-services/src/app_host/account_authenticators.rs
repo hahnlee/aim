@@ -16,12 +16,16 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use aim_android_xml::{Element, Node, Value as XmlValue};
-use aim_binder_host::parcel::{EX_UNSUPPORTED_OPERATION, Exception, Parcel, Reader, Result as ParcelResult};
+use aim_binder_host::parcel::{
+    EX_UNSUPPORTED_OPERATION, Exception, Parcel, Reader, Result as ParcelResult,
+};
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
 use super::AppHost;
 use crate::package::component_resolver::Info;
-use crate::package::info::flags::{GET_META_DATA, MATCH_DIRECT_BOOT_AWARE, MATCH_DIRECT_BOOT_UNAWARE};
+use crate::package::info::flags::{
+    GET_META_DATA, MATCH_DIRECT_BOOT_AWARE, MATCH_DIRECT_BOOT_UNAWARE,
+};
 use crate::package::intent::Intent;
 use crate::package::pkg::Value;
 
@@ -84,10 +88,18 @@ pub struct Authenticator {
 pub fn generate(host: &AppHost, user: i32) -> Result<Vec<Authenticator>, Exception> {
     let (state, resolution) = host.packages()?;
     let flags = GET_META_DATA | MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE;
-    let intent = Intent { action: Some(ACTION.into()), ..Default::default() };
+    let intent = Intent {
+        action: Some(ACTION.into()),
+        ..Default::default()
+    };
     let found = resolution
         .query_intent_services(&intent, None, flags, user, 1000)
-        .map_err(|e| Exception::new(EX_UNSUPPORTED_OPERATION, format!("queryIntentServices: {e:?}")))?;
+        .map_err(|e| {
+            Exception::new(
+                EX_UNSUPPORTED_OPERATION,
+                format!("queryIntentServices: {e:?}"),
+            )
+        })?;
     let inputs = host.inputs()?;
     let root = host.root()?;
     let mut services = Vec::new();
@@ -109,45 +121,68 @@ pub fn generate(host: &AppHost, user: i32) -> Result<Vec<Authenticator>, Excepti
             .filter(|id| *id != 0);
         let pkg = state.packages.get(&package).and_then(|ps| ps.pkg.clone());
         let parsed = match (id, pkg) {
-            (Some(id), Some(pkg)) => inputs.packages.xml_resource(root, &inputs.data, &pkg, id, |e, ctx| {
-                if e.name != ATTRIBUTES {
-                    return Err(format!("Meta-data does not start with {ATTRIBUTES} tag"));
-                }
-                // `parseServiceAttributes`.
-                let a = ctx.obtain(e);
-                let kind = a.string("accountType").filter(|t| !t.is_empty());
-                Ok(kind.map(|kind| AuthenticatorDescription {
-                    kind,
-                    package: package.clone(),
-                    label_id: a.resource_id("label", 0),
-                    icon_id: a.resource_id("icon", 0),
-                    small_icon_id: a.resource_id("smallIcon", 0),
-                    account_preferences_id: a.resource_id("accountPreferences", 0),
-                    custom_tokens: a.boolean("customTokens", false),
-                }))
-            }),
+            (Some(id), Some(pkg)) => {
+                inputs
+                    .packages
+                    .xml_resource(root, &inputs.data, &pkg, id, |e, ctx| {
+                        if e.name != ATTRIBUTES {
+                            return Err(format!("Meta-data does not start with {ATTRIBUTES} tag"));
+                        }
+                        // `parseServiceAttributes`.
+                        let a = ctx.obtain(e);
+                        let kind = a.string("accountType").filter(|t| !t.is_empty());
+                        Ok(kind.map(|kind| AuthenticatorDescription {
+                            kind,
+                            package: package.clone(),
+                            label_id: a.resource_id("label", 0),
+                            icon_id: a.resource_id("icon", 0),
+                            small_icon_id: a.resource_id("smallIcon", 0),
+                            account_preferences_id: a.resource_id("accountPreferences", 0),
+                            custom_tokens: a.boolean("customTokens", false),
+                        }))
+                    })
+            }
             (None, _) => Ok(Err(format!("No {META_DATA} meta-data"))),
-            (_, None) => Ok(Err(format!("Unable to load resources for package {package}"))),
+            (_, None) => Ok(Err(format!(
+                "Unable to load resources for package {package}"
+            ))),
         };
         match parsed.and_then(|r| r) {
-            Ok(Some(description)) => {
-                services.push(Authenticator { description, uid: si.info.application_info.uid, class: si.info.item.name.clone().unwrap_or_default() })
+            Ok(Some(description)) => services.push(Authenticator {
+                description,
+                uid: si.info.application_info.uid,
+                class: si.info.item.name.clone().unwrap_or_default(),
+            }),
+            Ok(None) => {
+                eprintln!("app host: accounts: unable to load service info {package}/{name}")
             }
-            Ok(None) => eprintln!("app host: accounts: unable to load service info {package}/{name}"),
-            Err(e) => eprintln!("app host: accounts: unable to load service info {package}/{name}: {e}"),
+            Err(e) => {
+                eprintln!("app host: accounts: unable to load service info {package}/{name}: {e}")
+            }
         }
     }
-    let path = inputs
-        .data
-        .join(format!("system/users/{user}/registered_services/{ACTION}.xml"));
+    let path = inputs.data.join(format!(
+        "system/users/{user}/registered_services/{ACTION}.xml"
+    ));
     let mut persisted = read_persisted(&path);
-    let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: 1000 };
+    let query = crate::package::query::Query {
+        state: &state,
+        filter: &resolution.apps_filter,
+        calling_uid: 1000,
+    };
     // `inSystemImage`: a package of the uid is the system image's.
     let in_system_image = |uid: i32| -> Result<bool, Exception> {
-        let packages = query
-            .packages_for_uid(uid)
-            .map_err(|e| Exception::new(EX_UNSUPPORTED_OPERATION, format!("getPackagesForUid: {}", e.0)))?;
-        Ok(packages.into_iter().flatten().flatten().any(|name| state.packages.get(&name).is_some_and(|ps| ps.is.system)))
+        let packages = query.packages_for_uid(uid).map_err(|e| {
+            Exception::new(
+                EX_UNSUPPORTED_OPERATION,
+                format!("getPackagesForUid: {}", e.0),
+            )
+        })?;
+        Ok(packages
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|name| state.packages.get(&name).is_some_and(|ps| ps.is.system)))
     };
     let (services, changed) = merge(services, &mut persisted, in_system_image)?;
     if changed && let Err(e) = write_persisted(&path, &persisted) {
@@ -183,7 +218,9 @@ fn merge(
             Some(i) if persisted[i].1 == info.uid => put(&mut services, info),
             Some(i) => {
                 let previous = persisted[i].1;
-                let previous_found = found.iter().any(|f| f.description.kind == *kind && f.uid == previous);
+                let previous_found = found
+                    .iter()
+                    .any(|f| f.description.kind == *kind && f.uid == previous);
                 if in_system_image(info.uid)? || !previous_found {
                     changed = true;
                     put(&mut services, info);
@@ -237,7 +274,10 @@ fn write_persisted(path: &Path, services: &[(String, i32)]) -> std::io::Result<(
             .map(|(kind, uid)| {
                 Node::Element(Element {
                     name: "service".into(),
-                    attrs: vec![("uid".into(), XmlValue::Int(*uid)), ("type".into(), XmlValue::String(kind.clone()))],
+                    attrs: vec![
+                        ("uid".into(), XmlValue::Int(*uid)),
+                        ("type".into(), XmlValue::String(kind.clone())),
+                    ],
                     content: Vec::new(),
                 })
             })
@@ -245,12 +285,21 @@ fn write_persisted(path: &Path, services: &[(String, i32)]) -> std::io::Result<(
     };
     let bytes = aim_android_xml::abx::write(&root).map_err(std::io::Error::other)?;
     let new = path.with_extension("xml.new");
-    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&new)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&new)?;
     std::io::Write::write_all(&mut file, &bytes)?;
     crate::fsync(&file)?;
     aim_storage::guest_inode::record(
         &new,
-        aim_storage::guest_inode::GuestInode { uid: Some(1000), gid: Some(1000), mode: Some(0o600) },
+        aim_storage::guest_inode::GuestInode {
+            uid: Some(1000),
+            gid: Some(1000),
+            mode: Some(0o600),
+        },
     )?;
     std::fs::rename(&new, path)
 }
@@ -291,7 +340,10 @@ mod tests {
         }
         assert_eq!(r.read_i32().unwrap(), 1);
         assert_eq!(r.remaining(), 0);
-        assert_eq!(AuthenticatorDescription::read_from(&mut p.reader()).unwrap(), a);
+        assert_eq!(
+            AuthenticatorDescription::read_from(&mut p.reader()).unwrap(),
+            a
+        );
     }
 
     /// `generateServicesMap`'s four cases and removals.
@@ -300,12 +352,14 @@ mod tests {
         let no_system = |_| Ok(false);
         // New types are added and persisted.
         let mut persisted = Vec::new();
-        let (services, changed) = merge(vec![authenticator("a", 10001)], &mut persisted, no_system).unwrap();
+        let (services, changed) =
+            merge(vec![authenticator("a", 10001)], &mut persisted, no_system).unwrap();
         assert!(changed);
         assert_eq!(services, vec![authenticator("a", 10001)]);
         assert_eq!(persisted, vec![("a".into(), 10001)]);
         // The same uid: unchanged.
-        let (_, changed) = merge(vec![authenticator("a", 10001)], &mut persisted, no_system).unwrap();
+        let (_, changed) =
+            merge(vec![authenticator("a", 10001)], &mut persisted, no_system).unwrap();
         assert!(!changed);
         // Another uid while the first is still there: ignored.
         let found = vec![authenticator("a", 10001), authenticator("a", 10002)];
@@ -318,11 +372,13 @@ mod tests {
         assert_eq!(services, vec![authenticator("a", 10002)]);
         assert_eq!(persisted, vec![("a".into(), 10002)]);
         // Another uid once the first is gone replaces it.
-        let (services, changed) = merge(vec![authenticator("a", 10003)], &mut persisted, no_system).unwrap();
+        let (services, changed) =
+            merge(vec![authenticator("a", 10003)], &mut persisted, no_system).unwrap();
         assert!(changed);
         assert_eq!(services, vec![authenticator("a", 10003)]);
         // A type no service has any more is removed.
-        let (services, changed) = merge(vec![authenticator("b", 10004)], &mut persisted, no_system).unwrap();
+        let (services, changed) =
+            merge(vec![authenticator("b", 10004)], &mut persisted, no_system).unwrap();
         assert!(changed);
         assert_eq!(services, vec![authenticator("b", 10004)]);
         assert_eq!(persisted, vec![("b".into(), 10004)]);
@@ -332,8 +388,14 @@ mod tests {
     /// them read back.
     #[test]
     fn persisted_services_round_trip() {
-        let path = std::env::temp_dir().join(format!("aim-registered-services-{}.xml", std::process::id()));
-        let services = vec![("com.google".to_string(), 10144), ("com.google.android.gm.pop3".to_string(), 10156)];
+        let path = std::env::temp_dir().join(format!(
+            "aim-registered-services-{}.xml",
+            std::process::id()
+        ));
+        let services = vec![
+            ("com.google".to_string(), 10144),
+            ("com.google.android.gm.pop3".to_string(), 10156),
+        ];
         write_persisted(&path, &services).unwrap();
         assert_eq!(read_persisted(&path), services);
         std::fs::remove_file(&path).unwrap();

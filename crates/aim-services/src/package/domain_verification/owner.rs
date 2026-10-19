@@ -160,14 +160,18 @@ impl Owner {
         }
         let mut names = BTreeSet::new();
         for setting in &scan.settings.packages {
-            if scan.domain_code_owner(setting)?.is_some() { names.insert(setting.name.clone()); }
+            if scan.domain_code_owner(setting)?.is_some() {
+                names.insert(setting.name.clone());
+            }
         }
         if policies.keys().cloned().collect::<BTreeSet<_>>() != names {
             return Err("boot domain policy inventory differs".into());
         }
         let mut inputs = Vec::new();
         for setting in &scan.settings.packages {
-            let Some(code) = scan.domain_code_owner(setting)? else { continue; };
+            let Some(code) = scan.domain_code_owner(setting)? else {
+                continue;
+            };
             let signing = setting
                 .signatures
                 .as_ref()
@@ -869,13 +873,25 @@ impl Owner {
         desired: State,
         active: &std::collections::BTreeSet<&str>,
     ) -> Result<(), String> {
-        self.attached.retain(|package| active.contains(package.name.as_str()));
+        self.attached
+            .retain(|package| active.contains(package.name.as_str()));
         for live in &mut self.attached {
-            let before = previous.active.iter().find(|package| package.name == live.name);
-            let after = desired.active.iter().find(|package| package.name == live.name);
-            if before == after { continue; }
+            let before = previous
+                .active
+                .iter()
+                .find(|package| package.name == live.name);
+            let after = desired
+                .active
+                .iter()
+                .find(|package| package.name == live.name);
+            if before == after {
+                continue;
+            }
             let Some(after) = after else {
-                return Err(format!("attached domain projection removed for installed package {}", live.name));
+                return Err(format!(
+                    "attached domain projection removed for installed package {}",
+                    live.name
+                ));
             };
             if !after.id.eq_ignore_ascii_case(&live.id) {
                 return Err(format!("shared domain UUID changed for {}", live.name));
@@ -886,13 +902,27 @@ impl Owner {
             if before.is_none_or(|before| before.users != after.users) {
                 live.users = after.users.clone();
             }
-            if before.is_none_or(|before| before.uri_relative_filter_groups != after.uri_relative_filter_groups) {
+            if before.is_none_or(|before| {
+                before.uri_relative_filter_groups != after.uri_relative_filter_groups
+            }) {
                 live.uri_relative_filter_groups = after.uri_relative_filter_groups.clone();
             }
         }
-        self.ids = self.attached.iter().map(|package| (package.id.clone(), package.name.clone())).collect();
-        let attached = self.attached.iter().map(|package| package.name.as_str()).collect::<std::collections::BTreeSet<_>>();
-        self.saved.active = desired.active.into_iter().filter(|package| !attached.contains(package.name.as_str())).collect();
+        self.ids = self
+            .attached
+            .iter()
+            .map(|package| (package.id.clone(), package.name.clone()))
+            .collect();
+        let attached = self
+            .attached
+            .iter()
+            .map(|package| package.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        self.saved.active = desired
+            .active
+            .into_iter()
+            .filter(|package| !attached.contains(package.name.as_str()))
+            .collect();
         self.saved.restored = desired.restored;
         self.saved.legacy = desired.legacy;
         Ok(())
@@ -1174,9 +1204,13 @@ mod tests {
     #[test]
     fn shared_rebase_preserves_runtime_only_domains_and_applies_user_delta() {
         let runtime = Package {
-            name: "core".into(), id: "core-id".into(),
-            has_auto_verify_domains: false, signature: None,
-            domains: vec![], users: vec![], uri_relative_filter_groups: vec![],
+            name: "core".into(),
+            id: "core-id".into(),
+            has_auto_verify_domains: false,
+            signature: None,
+            domains: vec![],
+            users: vec![],
+            uri_relative_filter_groups: vec![],
         };
         let mut persisted = runtime.clone();
         persisted.name = "web".into();
@@ -1184,25 +1218,36 @@ mod tests {
         persisted.has_auto_verify_domains = true;
         persisted.domains = vec![(Some("example.org".into()), 1)];
         persisted.users = vec![User {
-            id: 10, allow_link_handling: true, enabled_hosts: vec!["example.org".into()],
+            id: 10,
+            allow_link_handling: true,
+            enabled_hosts: vec!["example.org".into()],
         }];
-        let previous = State { active: vec![persisted.clone()], ..Default::default() };
+        let previous = State {
+            active: vec![persisted.clone()],
+            ..Default::default()
+        };
         let mut owner = Owner::new(State::default(), BTreeMap::new());
         owner.put(runtime.clone());
         owner.put(persisted.clone());
         let active = ["core", "web"].into_iter().collect();
-        owner.rebase_persisted_projection(&previous, previous.clone(), &active).unwrap();
+        owner
+            .rebase_persisted_projection(&previous, previous.clone(), &active)
+            .unwrap();
         assert_eq!(owner.package("core"), Some(&runtime));
         assert_eq!(owner.package("web"), Some(&persisted));
         let mut desired = previous.clone();
         desired.active[0].users.clear();
-        owner.rebase_persisted_projection(&previous, desired.clone(), &active).unwrap();
+        owner
+            .rebase_persisted_projection(&previous, desired.clone(), &active)
+            .unwrap();
         assert_eq!(owner.package("core"), Some(&runtime));
         assert!(owner.package("web").unwrap().users.is_empty());
         assert_eq!(owner.package("web").unwrap().domains, persisted.domains);
         let removed = State::default();
         let core_only = ["core"].into_iter().collect();
-        owner.rebase_persisted_projection(&desired, removed, &core_only).unwrap();
+        owner
+            .rebase_persisted_projection(&desired, removed, &core_only)
+            .unwrap();
         assert_eq!(owner.package("core"), Some(&runtime));
         assert!(owner.package("web").is_none());
         assert!(!owner.ids.contains_key("web-id"));

@@ -169,7 +169,9 @@ impl Registry {
 
     pub(crate) fn user_ids(&self) -> Result<Vec<i32>, String> {
         let state = self.state.lock().unwrap();
-        if state.revoked { return Err("preferred registry is revoked".into()); }
+        if state.revoked {
+            return Err("preferred registry is revoked".into());
+        }
         Ok(state.users.keys().copied().collect())
     }
 
@@ -429,32 +431,101 @@ mod tests {
         let mut initial = Preferred::default();
         initial.add_preferred(activity("removed"), false);
         initial.add_preferred(activity("other"), false);
-        let mut last = activity("removed"); last.always = false; last.filter.add_action("last");
+        let mut last = activity("removed");
+        last.always = false;
+        last.filter.add_action("last");
         initial.add_preferred(last, false);
         initial.persistent_resolver_present = true;
-        initial.persistent.add(super::super::PersistentPreferredActivity {
-            filter: activity("removed").filter,
-            component: unflatten("removed/.Main").unwrap(), set_by_dpm: true,
-        });
+        initial
+            .persistent
+            .add(super::super::PersistentPreferredActivity {
+                filter: activity("removed").filter,
+                component: unflatten("removed/.Main").unwrap(),
+                set_by_dpm: true,
+            });
         registry.insert_user(0, initial.clone()).unwrap();
         registry.insert_user(10, initial).unwrap();
         let before = registry.capture().unwrap();
         let snapshot = registry.snapshot(0).unwrap().unwrap();
-        let stage = registry.prepare_mutation(0, snapshot.generation,
-            &super::super::Mutation::Clear { package: Some("removed".into()) }).unwrap().stage.unwrap();
-        let bytes = aim_android_xml::abx::write(&stage.preferred.preferred_document(&stage.preferred_order,true).unwrap()).unwrap();
+        let stage = registry
+            .prepare_mutation(
+                0,
+                snapshot.generation,
+                &super::super::Mutation::Clear {
+                    package: Some("removed".into()),
+                },
+            )
+            .unwrap()
+            .stage
+            .unwrap();
+        let bytes = aim_android_xml::abx::write(
+            &stage
+                .preferred
+                .preferred_document(&stage.preferred_order, true)
+                .unwrap(),
+        )
+        .unwrap();
         let restored = Preferred::parse(Some(&bytes), None);
         assert_eq!(restored.preferred.entries().len(), 2);
         registry.publish(stage).unwrap();
         let current = registry.snapshot(0).unwrap().unwrap();
         assert_eq!(current.state.preferred.entries().len(), 2);
-        assert!(current.state.preferred.entries().iter().any(|entry| entry.component.package=="removed" && !entry.always));
+        assert!(
+            current
+                .state
+                .preferred
+                .entries()
+                .iter()
+                .any(|entry| entry.component.package == "removed" && !entry.always)
+        );
         assert_eq!(current.state.persistent.entries().len(), 1);
-        assert_eq!(registry.snapshot(10).unwrap().unwrap().state.preferred.entries().len(), 3);
-        assert_eq!(before.snapshot(0).unwrap().unwrap().state.preferred.entries().len(), 3);
-        for stage in registry.prepare_clear_all(Some("removed")).unwrap() { registry.publish(stage).unwrap(); }
-        assert_eq!(registry.snapshot(10).unwrap().unwrap().state.preferred.entries().len(), 2);
-        assert_eq!(registry.snapshot(10).unwrap().unwrap().state.persistent.entries().len(), 1);
+        assert_eq!(
+            registry
+                .snapshot(10)
+                .unwrap()
+                .unwrap()
+                .state
+                .preferred
+                .entries()
+                .len(),
+            3
+        );
+        assert_eq!(
+            before
+                .snapshot(0)
+                .unwrap()
+                .unwrap()
+                .state
+                .preferred
+                .entries()
+                .len(),
+            3
+        );
+        for stage in registry.prepare_clear_all(Some("removed")).unwrap() {
+            registry.publish(stage).unwrap();
+        }
+        assert_eq!(
+            registry
+                .snapshot(10)
+                .unwrap()
+                .unwrap()
+                .state
+                .preferred
+                .entries()
+                .len(),
+            2
+        );
+        assert_eq!(
+            registry
+                .snapshot(10)
+                .unwrap()
+                .unwrap()
+                .state
+                .persistent
+                .entries()
+                .len(),
+            1
+        );
     }
 
     #[test]

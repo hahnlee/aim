@@ -202,14 +202,20 @@ impl Core {
                 let set = unsafe {
                     libc::setpriority(libc::PRIO_PROCESS, 0, ANDROID_PRIORITY_URGENT_AUDIO)
                 };
-                let result = if set == 0 { Ok(()) } else { Err(io::Error::last_os_error()) };
+                let result = if set == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::last_os_error())
+                };
                 let ok = result.is_ok();
                 let _ = started.send(result);
                 if ok {
                     worker.run();
                 }
             })?;
-        start.recv().map_err(|_| io::Error::other("stream worker exited before starting"))??;
+        start
+            .recv()
+            .map_err(|_| io::Error::other("stream worker exited before starting"))??;
         Ok((
             Arc::new(Self {
                 shared,

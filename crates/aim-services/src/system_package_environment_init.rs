@@ -133,7 +133,7 @@ impl System {
             .map_err(|error| environment_error(format!("installer label data owner: {error}")))?;
         let labeler = Arc::new(move |path: &Path| {
             label_guard()?;
-            let path = installer_guest_context_path(&label_data,path)?;
+            let path = installer_guest_context_path(&label_data, path)?;
             label_bridge
                 .restore_installer_context(&path)
                 .map_err(|error| format!("actual install label {error:?}"))?;
@@ -143,21 +143,30 @@ impl System {
             self.environment_bridge_capability(bridge, EnvironmentLeaf::AppData)?,
         );
         let (create, flags, rollback, commit) = app.callbacks();
-        let cache=crate::package::mutation_producers::Bridge::new(self.package_bootstrap_binder_leaf(bridge,
-            aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::GET_PACKAGE_ENABLE_BRIDGE)?);
-        let cache_system=Arc::downgrade(self);let cache_bridge=bridge.clone();
-        let clear_code_cache:environment::CodeCacheClear=Arc::new(move|name,_users|{
-            let system=cache_system.upgrade().ok_or_else(||environment_error("install cache System stopped"))?;
-            let inventory=system.native_boot_persistence_users(&cache_bridge)?;
-            inventory.revalidate(&system,&cache_bridge)?;
-            cache.clear_code_cache(name,&inventory.all)?;
+        let cache =
+            crate::package::mutation_producers::Bridge::new(self.package_bootstrap_binder_leaf(
+                bridge,
+                aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::GET_PACKAGE_ENABLE_BRIDGE,
+            )?);
+        let cache_system = Arc::downgrade(self);
+        let cache_bridge = bridge.clone();
+        let clear_code_cache: environment::CodeCacheClear = Arc::new(move |name, _users| {
+            let system = cache_system
+                .upgrade()
+                .ok_or_else(|| environment_error("install cache System stopped"))?;
+            let inventory = system.native_boot_persistence_users(&cache_bridge)?;
+            inventory.revalidate(&system, &cache_bridge)?;
+            cache.clear_code_cache(name, &inventory.all)?;
             system.check_package_bootstrap(&cache_bridge)
         });
-        let user_system=Arc::downgrade(self);let user_bridge=bridge.clone();
-        let post_install_users:environment::PostInstallUsers=Arc::new(move||{
-            let system=user_system.upgrade().ok_or_else(||environment_error("post-install user System stopped"))?;
-            let inventory=system.native_boot_persistence_users(&user_bridge)?;
-            inventory.revalidate(&system,&user_bridge)?;
+        let user_system = Arc::downgrade(self);
+        let user_bridge = bridge.clone();
+        let post_install_users: environment::PostInstallUsers = Arc::new(move || {
+            let system = user_system
+                .upgrade()
+                .ok_or_else(|| environment_error("post-install user System stopped"))?;
+            let inventory = system.native_boot_persistence_users(&user_bridge)?;
+            inventory.revalidate(&system, &user_bridge)?;
             Ok(inventory.all)
         });
         let weak = Arc::downgrade(self);
@@ -182,9 +191,14 @@ impl System {
         );
         let library_bridge = bridge.clone();
         permission.configure_library_policy(Arc::new(move |packages| {
-            let packages = packages.map(|(name, package)| (name, package.target_sdk_version)).collect::<Vec<_>>();
-            library_bridge.library_policies(packages.into_iter())
-                .map_err(|(name, error)| format!("installer shared-library policy owner for {name}: {error:?}"))
+            let packages = packages
+                .map(|(name, package)| (name, package.target_sdk_version))
+                .collect::<Vec<_>>();
+            library_bridge
+                .library_policies(packages.into_iter())
+                .map_err(|(name, error)| {
+                    format!("installer shared-library policy owner for {name}: {error:?}")
+                })
         }))?;
         let metadata = environment_producers::metadata(apks.clone());
         let publish = self.package_install_query_publication(
@@ -293,16 +307,29 @@ impl System {
 
 /// Native copy/extraction callbacks hold host paths; the original SELinux owner
 /// operates in the guest VFS. Preserve the path below this exact writable root.
-fn installer_guest_context_path(data:&Path,path:&Path)->std::result::Result<String,String> {
-    if !data.is_absolute()||!path.is_absolute(){return Err("installer label path owner is not absolute".into());}
-    let text=path.to_str().ok_or("installer context path is not UTF-8")?;
-    if text.contains('\0')||text.contains("/./")||text.ends_with("/.")
-        ||path.components().any(|component|matches!(component,std::path::Component::ParentDir)) {
+fn installer_guest_context_path(data: &Path, path: &Path) -> std::result::Result<String, String> {
+    if !data.is_absolute() || !path.is_absolute() {
+        return Err("installer label path owner is not absolute".into());
+    }
+    let text = path.to_str().ok_or("installer context path is not UTF-8")?;
+    if text.contains('\0')
+        || text.contains("/./")
+        || text.ends_with("/.")
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
         return Err("installer label path has invalid components".into());
     }
-    let suffix=path.strip_prefix(data).map_err(|_|"installer label path is outside writable data owner")?;
-    let suffix=suffix.to_str().ok_or("installer context path is not UTF-8")?;
-    if suffix.is_empty(){return Err("installer label path is the data root".into());}
+    let suffix = path
+        .strip_prefix(data)
+        .map_err(|_| "installer label path is outside writable data owner")?;
+    let suffix = suffix
+        .to_str()
+        .ok_or("installer context path is not UTF-8")?;
+    if suffix.is_empty() {
+        return Err("installer label path is the data root".into());
+    }
     Ok(format!("/data/{suffix}"))
 }
 
@@ -310,18 +337,49 @@ fn installer_guest_context_path(data:&Path,path:&Path)->std::result::Result<Stri
 mod label_tests {
     #[test]
     fn installer_context_maps_reserved_host_paths_to_guest_namespace() {
-        let root=std::env::temp_dir().join(format!("aim-installer-context-{}-{}",std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let root = std::env::temp_dir().join(format!(
+            "aim-installer-context-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(root.join("app/pkg-reserved/lib/arm64")).unwrap();
-        std::fs::write(root.join("app/pkg-reserved/base.apk"),b"owned install code").unwrap();
-        let data=std::fs::canonicalize(&root).unwrap();
-        for relative in ["app/pkg-reserved","app/pkg-reserved/base.apk","app/pkg-reserved/lib/arm64"] {
-            assert_eq!(super::installer_guest_context_path(&data,&data.join(relative)).unwrap(),format!("/data/{relative}"));
+        std::fs::write(
+            root.join("app/pkg-reserved/base.apk"),
+            b"owned install code",
+        )
+        .unwrap();
+        let data = std::fs::canonicalize(&root).unwrap();
+        for relative in [
+            "app/pkg-reserved",
+            "app/pkg-reserved/base.apk",
+            "app/pkg-reserved/lib/arm64",
+        ] {
+            assert_eq!(
+                super::installer_guest_context_path(&data, &data.join(relative)).unwrap(),
+                format!("/data/{relative}")
+            );
         }
-        assert!(super::installer_guest_context_path(&data,&data.with_extension("sibling").join("app/pkg/base.apk")).is_err());
-        assert!(super::installer_guest_context_path(&data,&data.join("app/../system/install_sessions.xml")).is_err());
-        assert!(super::installer_guest_context_path(&data,&data.join("app/./pkg/base.apk")).is_err());
-        assert!(super::installer_guest_context_path(&data,&data).is_err());
+        assert!(
+            super::installer_guest_context_path(
+                &data,
+                &data.with_extension("sibling").join("app/pkg/base.apk")
+            )
+            .is_err()
+        );
+        assert!(
+            super::installer_guest_context_path(
+                &data,
+                &data.join("app/../system/install_sessions.xml")
+            )
+            .is_err()
+        );
+        assert!(
+            super::installer_guest_context_path(&data, &data.join("app/./pkg/base.apk")).is_err()
+        );
+        assert!(super::installer_guest_context_path(&data, &data).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 }
@@ -394,8 +452,8 @@ impl System {
                     && code.record.initiating_package.as_deref() == Some("android");
                 let mut request = Parcel::new();
                 use aim_service_aidl::dev_aim_server_iinstallercompletionbridge as api;
-                let installer=system.package_installer_native_owner()?;
-                let warning_ticket=installer.install_warning_ticket(code.session.id)?;
+                let installer = system.package_installer_native_owner()?;
+                let warning_ticket = installer.install_warning_ticket(code.session.id)?;
                 api::DexoptInstalledResult {
                     package_name: Some(name.clone()),
                     install_scenario: code.record.params.install_scenario,
@@ -414,8 +472,10 @@ impl System {
                         environment_error(format!("ART completion transport {code}"))
                     })?;
                 let mut reader = reply.reader();
-                let result = api::read_dexopt_installed_result_reply::<crate::package::installer::install_warnings::DexoptResult>(&mut reader)
-                    .map_err(|code| environment_error(format!("ART completion reply {code}")))??;
+                let result = api::read_dexopt_installed_result_reply::<
+                    crate::package::installer::install_warnings::DexoptResult,
+                >(&mut reader)
+                .map_err(|code| environment_error(format!("ART completion reply {code}")))??;
                 if reader.remaining() != 0 {
                     return Err(environment_error("ART completion trailing reply"));
                 }
@@ -438,12 +498,25 @@ impl System {
                 }
                 // InstallPackageHelper.completeInstallProcess, after the dexopt
                 // of executePostCommitSteps and before the backup restore.
-                let app_id = capture.state().packages.get(&name).map(|package| package.app_id)
-                    .ok_or_else(|| environment_error("installed package has no published app ID"))?;
+                let app_id = capture
+                    .state()
+                    .packages
+                    .get(&name)
+                    .map(|package| package.app_id)
+                    .ok_or_else(|| {
+                        environment_error("installed package has no published app ID")
+                    })?;
                 let mut request = Parcel::new();
-                api::PackageAdded { package_name: Some(name.clone()), app_id }.write(&mut request);
-                let reply = art.transact(api::PACKAGE_ADDED, &request, false)
-                    .map_err(|code| environment_error(format!("app-op package transport {code}")))?;
+                api::PackageAdded {
+                    package_name: Some(name.clone()),
+                    app_id,
+                }
+                .write(&mut request);
+                let reply = art
+                    .transact(api::PACKAGE_ADDED, &request, false)
+                    .map_err(|code| {
+                        environment_error(format!("app-op package transport {code}"))
+                    })?;
                 api::read_package_added_reply(&mut reply.reader())
                     .map_err(|code| environment_error(format!("app-op package reply {code}")))??;
                 for installed in receipt
@@ -474,7 +547,11 @@ impl System {
                                 .map_err(|error| {
                                     environment_error(format!("post-restore permissions {error:?}"))
                                 })?;
-                            system.restore_existing_install_preferences(&complete_bridge, &complete_name, user)?;
+                            system.restore_existing_install_preferences(
+                                &complete_bridge,
+                                &complete_name,
+                                user,
+                            )?;
                             Ok(())
                         })();
                         let _ = sender.send(result);
@@ -492,7 +569,9 @@ impl System {
                             Ok(accepted) => accepted,
                             Err(error) => {
                                 owner.restores.cancel(token);
-                                return Err(environment_error(format!("original backup restore {error:?}")));
+                                return Err(environment_error(format!(
+                                    "original backup restore {error:?}"
+                                )));
                             }
                         }
                     } else {

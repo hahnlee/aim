@@ -22,10 +22,14 @@ use aim_service_aidl::android_net_wifi_iwifimanager as wm;
 
 use super::appops_service::MODE_ALLOWED;
 use super::settings::Table;
-use super::wifi_config::{self, LoadError, SECURITY_TYPE_OWE, SECURITY_TYPE_SAE, SecurityParams, WifiConfiguration};
+use super::wifi_config::{
+    self, LoadError, SECURITY_TYPE_OWE, SECURITY_TYPE_SAE, SecurityParams, WifiConfiguration,
+};
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::package::list_slice::Slice;
-use crate::package::parse::resources::{Selected, TYPE_FIRST_INT, TYPE_REFERENCE, Table as ResourceTable};
+use crate::package::parse::resources::{
+    Selected, TYPE_FIRST_INT, TYPE_REFERENCE, Table as ResourceTable,
+};
 use crate::package::query::Query;
 
 const ACCESS_WIFI_STATE: &str = "android.permission.ACCESS_WIFI_STATE";
@@ -56,7 +60,8 @@ const SIGNATURE_MATCH: i32 = 0;
 const FLAG_SYSTEM: i32 = 1 << 0;
 const FLAG_UPDATED_SYSTEM_APP: i32 = 1 << 7;
 /// `WifiContext`'s resources APK, of an app in the Wi-Fi APEX.
-const RESOURCES_APK_ACTION: &str = "com.android.server.wifi.intent.action.SERVICE_WIFI_RESOURCES_APK";
+const RESOURCES_APK_ACTION: &str =
+    "com.android.server.wifi.intent.action.SERVICE_WIFI_RESOURCES_APK";
 const WIFI_APEX: &str = "/apex/com.android.wifi/";
 const WIFI_CONFIGURATION: &str = "android.net.wifi.WifiConfiguration";
 const ACCESS_FINE_LOCATION: &str = "android.permission.ACCESS_FINE_LOCATION";
@@ -149,7 +154,10 @@ fn store_bool(root: &aim_android_xml::Element, key: &str, default: bool) -> Resu
         .filter(|e| e.name == "Settings")
         .flat_map(|e| e.children())
         .find(|e| e.name == "map" && e.string("name").as_deref() == Some("Values"));
-    let Some(entry) = values.and_then(|v| v.children().find(|e| e.string("name").as_deref() == Some(key))) else {
+    let Some(entry) = values.and_then(|v| {
+        v.children()
+            .find(|e| e.string("name").as_deref() == Some(key))
+    }) else {
         return Ok(default);
     };
     Ok(entry.bool("value")?.unwrap_or(default))
@@ -175,7 +183,11 @@ pub struct WifiService {
 
 impl WifiService {
     pub fn new(host: Arc<AppHost>) -> Self {
-        WifiService { host, resources: OnceLock::new(), networks: OnceLock::new() }
+        WifiService {
+            host,
+            resources: OnceLock::new(),
+            networks: OnceLock::new(),
+        }
     }
 
     /// `enforceAccessPermission`.
@@ -192,14 +204,20 @@ impl WifiService {
     /// (`WIFI_VERBOSE_LOGGING_ENABLED`, false by default).
     fn verbose_logging_level(&self) -> Result<i32, Exception> {
         let enabled = self.store("wifi_verbose_logging_enabled", false)?;
-        Ok(if enabled { VERBOSE_LOGGING_LEVEL_ENABLED } else { VERBOSE_LOGGING_LEVEL_DISABLED })
+        Ok(if enabled {
+            VERBOSE_LOGGING_LEVEL_ENABLED
+        } else {
+            VERBOSE_LOGGING_LEVEL_DISABLED
+        })
     }
 
     /// A shared store boolean (`mSettingsConfigStore.get`).
     fn store(&self, key: &str, default: bool) -> Result<bool, Exception> {
-        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("wifi: {SHARED_STORE}: {e}"));
+        let state =
+            |e: String| Exception::new(EX_ILLEGAL_STATE, format!("wifi: {SHARED_STORE}: {e}"));
         match std::fs::read(self.host.data()?.join(SHARED_STORE)) {
-            Ok(bytes) => store_bool(&aim_android_xml::read(&bytes).map_err(state)?, key, default).map_err(state),
+            Ok(bytes) => store_bool(&aim_android_xml::read(&bytes).map_err(state)?, key, default)
+                .map_err(state),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(default),
             Err(e) => Err(state(e.to_string())),
         }
@@ -212,12 +230,16 @@ impl WifiService {
         // `WifiPermissionsUtil.checkPackage`.
         let package = package.unwrap_or_default();
         if !self.host.owns_package(uid, package)? {
-            return Err(Exception::security(format!("Package {package} does not belong to {uid}")));
+            return Err(Exception::security(format!(
+                "Package {package} does not belong to {uid}"
+            )));
         }
         if self.wifi_state() != WIFI_STATE_ENABLED {
             return Ok(NoConnection);
         }
-        Err(self.host.unimplemented_named("wifi", "the Mac's Wi-Fi connection (#1686)"))
+        Err(self
+            .host
+            .unimplemented_named("wifi", "the Mac's Wi-Fi connection (#1686)"))
     }
 
     fn held(&self, permission: &str, uid: i32) -> Result<bool, Exception> {
@@ -228,19 +250,37 @@ impl WifiService {
     /// answer for the current user, else its `LOCATION_MODE` setting.
     fn location_mode_enabled(&self) -> Result<bool, Exception> {
         let mut data = Parcel::new();
-        lm::IsLocationEnabledForUser { user_id: CURRENT_USER }.write(&mut data);
+        lm::IsLocationEnabledForUser {
+            user_id: CURRENT_USER,
+        }
+        .write(&mut data);
         let asked = {
             let _system = aim_binder_host::local::clear_calling_identity();
-            super::display::transact_service(&self.host.process, "location", lm::IS_LOCATION_ENABLED_FOR_USER, &data)
+            super::display::transact_service(
+                &self.host.process,
+                "location",
+                lm::IS_LOCATION_ENABLED_FOR_USER,
+                &data,
+            )
         }
         .and_then(|reply| {
-            lm::read_is_location_enabled_for_user_reply(&mut reply.reader()).map_err(|s| s.to_string())?.map_err(|e| format!("{e:?}"))
+            lm::read_is_location_enabled_for_user_reply(&mut reply.reader())
+                .map_err(|s| s.to_string())?
+                .map_err(|e| format!("{e:?}"))
         });
         match asked {
             Ok(enabled) => Ok(enabled),
             Err(e) => {
-                eprintln!("app host: wifi: Failure to get location mode via API, falling back to settings: {e}");
-                Ok(self.host.inputs()?.settings.get(Table::Secure, "location_mode").as_deref() == Some(LOCATION_MODE_ON))
+                eprintln!(
+                    "app host: wifi: Failure to get location mode via API, falling back to settings: {e}"
+                );
+                Ok(self
+                    .host
+                    .inputs()?
+                    .settings
+                    .get(Table::Secure, "location_mode")
+                    .as_deref()
+                    == Some(LOCATION_MODE_ON))
             }
         }
     }
@@ -252,9 +292,21 @@ impl WifiService {
 
     /// `checkCallersLocationPermission(.., coarseForTargetSdkLessThanQ: true)`.
     fn location_permitted(&self, package: &str, uid: i32) -> Result<bool, Exception> {
-        let target_sdk = self.host.inputs()?.packages.application_info(package, 0).map(|ai| ai.target_sdk_version);
+        let target_sdk = self
+            .host
+            .inputs()?
+            .packages
+            .application_info(package, 0)
+            .map(|ai| ai.target_sdk_version);
         let before_q = target_sdk.is_some_and(|sdk| sdk < Q);
-        if !self.held(if before_q { ACCESS_COARSE_LOCATION } else { ACCESS_FINE_LOCATION }, uid)? {
+        if !self.held(
+            if before_q {
+                ACCESS_COARSE_LOCATION
+            } else {
+                ACCESS_FINE_LOCATION
+            },
+            uid,
+        )? {
             return Ok(false);
         }
         if self.note_allowed(OP_FINE_LOCATION, package, uid)? {
@@ -267,10 +319,18 @@ impl WifiService {
     }
 
     /// `WifiPermissionsUtil.enforceCanAccessScanResults`.
-    fn enforce_can_access_scan_results(&self, package: Option<&str>, uid: i32) -> Result<(), Exception> {
-        let package = package.ok_or_else(|| Exception::security(format!("Checking UID {uid} but Package Name is Null")))?;
+    fn enforce_can_access_scan_results(
+        &self,
+        package: Option<&str>,
+        uid: i32,
+    ) -> Result<(), Exception> {
+        let package = package.ok_or_else(|| {
+            Exception::security(format!("Checking UID {uid} but Package Name is Null"))
+        })?;
         if !self.host.owns_package(uid, package)? {
-            return Err(Exception::security(format!("Package {package} does not belong to {uid}")));
+            return Err(Exception::security(format!(
+                "Package {package} does not belong to {uid}"
+            )));
         }
         for permission in SCAN_BYPASS {
             if self.held(permission, uid)? {
@@ -278,39 +338,63 @@ impl WifiService {
             }
         }
         if !self.location_mode_enabled()? {
-            return Err(Exception::security("Location mode is disabled for the device"));
+            return Err(Exception::security(
+                "Location mode is disabled for the device",
+            ));
         }
         let peers = self.held(PEERS_MAC_ADDRESS, uid)?;
         if !peers && !self.location_permitted(package, uid)? {
-            return Err(Exception::security(format!("UID {uid} has no location permission")));
+            return Err(Exception::security(format!(
+                "UID {uid} has no location permission"
+            )));
         }
         if !self.note_allowed(OP_WIFI_SCAN, package, uid)? {
-            return Err(Exception::security(format!("UID {uid} has no wifi scan permission")));
+            return Err(Exception::security(format!(
+                "UID {uid} has no wifi scan permission"
+            )));
         }
         // `doesUidBelongToUser`: the app host's one user has no profiles.
-        let current = uid % PER_USER_RANGE as i32 == 1000 || self.held(NETWORK_SETTINGS, uid)? || uid / PER_USER_RANGE as i32 == CURRENT_USER;
+        let current = uid % PER_USER_RANGE as i32 == 1000
+            || self.held(NETWORK_SETTINGS, uid)?
+            || uid / PER_USER_RANGE as i32 == CURRENT_USER;
         if !current && !self.held(INTERACT_ACROSS_USERS_FULL, uid)? {
-            return Err(Exception::security(format!("UID {uid} profile not permitted")));
+            return Err(Exception::security(format!(
+                "UID {uid} profile not permitted"
+            )));
         }
         Ok(())
     }
 
     /// `getScanResults`: none for a caller denied them; while the radio is
     /// off, `ScanRequestProxy` has none.
-    fn scan_results(&self, uid: i32, package: Option<&str>) -> Result<Option<Slice<NoScanResult>>, Exception> {
+    fn scan_results(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+    ) -> Result<Option<Slice<NoScanResult>>, Exception> {
         self.enforce_access(uid)?;
         match self.enforce_can_access_scan_results(package, uid) {
             Ok(()) => {}
             Err(e) if e.code == EX_SECURITY => {
-                eprintln!("app host: wifi: Permission violation - getScanResults not allowed for uid={uid}, packageName={}, reason={}", package.unwrap_or("null"), e.message);
+                eprintln!(
+                    "app host: wifi: Permission violation - getScanResults not allowed for uid={uid}, packageName={}, reason={}",
+                    package.unwrap_or("null"),
+                    e.message
+                );
                 return Ok(None);
             }
             Err(e) => return Err(e),
         }
         if self.wifi_state() == WIFI_STATE_ENABLED {
-            return Err(self.host.unimplemented_named("wifi", "the Mac's scan results (#1686)"));
+            return Err(self
+                .host
+                .unimplemented_named("wifi", "the Mac's scan results (#1686)"));
         }
-        Ok(Some(Slice::new(self.host.process.clone(), SCAN_RESULT, Vec::new())))
+        Ok(Some(Slice::new(
+            self.host.process.clone(),
+            SCAN_RESULT,
+            Vec::new(),
+        )))
     }
 
     /// The resources of `ServiceWifiResources`, the system's activity of
@@ -319,12 +403,25 @@ impl WifiService {
         if let Some(resources) = self.resources.get() {
             return Ok(resources);
         }
-        let Some((package, apk)) = super::safety_center::resources_apk(&self.host, "wifi", RESOURCES_APK_ACTION, WIFI_APEX)? else {
-            return Err(Exception::new(EX_ILLEGAL_STATE, "wifi: Attempted to fetch resources before Wifi Resources APK is loaded!"));
+        let Some((package, apk)) = super::safety_center::resources_apk(
+            &self.host,
+            "wifi",
+            RESOURCES_APK_ACTION,
+            WIFI_APEX,
+        )?
+        else {
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "wifi: Attempted to fetch resources before Wifi Resources APK is loaded!",
+            ));
         };
-        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("wifi: {}: {e}", apk.display()));
+        let state =
+            |e: String| Exception::new(EX_ILLEGAL_STATE, format!("wifi: {}: {e}", apk.display()));
         let apk_file = aim_apps::apk::Apk::open(&apk).map_err(|e| state(e.to_string()))?;
-        let table = match apk_file.file_if_present("resources.arsc").map_err(|e| state(e.to_string()))? {
+        let table = match apk_file
+            .file_if_present("resources.arsc")
+            .map_err(|e| state(e.to_string()))?
+        {
             Some(bytes) => ResourceTable::parse(&bytes).map_err(|e| state(e.to_string()))?,
             None => return Err(state("no resources.arsc".into())),
         };
@@ -332,8 +429,16 @@ impl WifiService {
         let resources = inputs.packages.package_resources(&table);
         // `Resources.getBoolean`: any integer, nonzero is true.
         let boolean = |name: &str| -> Result<bool, Exception> {
-            let id = resources.identifier(&package, "bool", name).ok_or_else(|| state(format!("no bool/{name}")))?;
-            let mut value = Selected { kind: TYPE_REFERENCE, data: id, table: None, resid: 0, flags: 0 };
+            let id = resources
+                .identifier(&package, "bool", name)
+                .ok_or_else(|| state(format!("no bool/{name}")))?;
+            let mut value = Selected {
+                kind: TYPE_REFERENCE,
+                data: id,
+                table: None,
+                resid: 0,
+                flags: 0,
+            };
             resources.resolve(&mut value);
             if value.kind < TYPE_FIRST_INT {
                 return Err(state(format!("bool/{name} is not an integer")));
@@ -346,7 +451,9 @@ impl WifiService {
             .and_then(|id| resources.string_array(id))
             .ok_or_else(|| state(format!("no array/{admins}")))?;
         let loaded = WifiResources {
-            mac_randomization_supported: boolean("config_wifi_connected_mac_randomization_supported")?,
+            mac_randomization_supported: boolean(
+                "config_wifi_connected_mac_randomization_supported",
+            )?,
             owe_upgrade: boolean("config_wifiOweUpgradeEnabled")?,
             sae_upgrade: boolean("config_wifiSaeUpgradeEnabled")?,
             oem_admins: oem_admins.into_iter().flatten().collect(),
@@ -360,10 +467,21 @@ impl WifiService {
         if let Some(networks) = self.networks.get() {
             return Ok(networks);
         }
-        let unmodelled = |what: &str| self.host.unimplemented_named("wifi", &format!("{what} (#1686)"));
+        let unmodelled = |what: &str| {
+            self.host
+                .unimplemented_named("wifi", &format!("{what} (#1686)"))
+        };
         let (state, resolution) = self.host.packages()?;
-        let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
-        let creator = |uid: i32| query.name_for_uid(uid).map_err(|e| LoadError::Unmodelled(e.0));
+        let query = Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: SYSTEM_UID,
+        };
+        let creator = |uid: i32| {
+            query
+                .name_for_uid(uid)
+                .map_err(|e| LoadError::Unmodelled(e.0))
+        };
         let data = self.host.data()?;
         let read = |store: &str| -> Result<Vec<WifiConfiguration>, LoadError> {
             match std::fs::read(data.join(store)) {
@@ -375,13 +493,19 @@ impl WifiService {
                 Err(e) => Err(LoadError::Corrupt(format!("{store}: {e}"))),
             }
         };
-        let networks = match read(SHARED_STORE).and_then(|shared| wifi_config::load(shared, read(USER_STORE)?)) {
+        let networks = match read(SHARED_STORE)
+            .and_then(|shared| wifi_config::load(shared, read(USER_STORE)?))
+        {
             Ok(networks) => networks,
             Err(LoadError::Corrupt(e)) => {
-                eprintln!("app host: wifi: XML deserialization of store failed. All saved networks are lost!: {e}");
+                eprintln!(
+                    "app host: wifi: XML deserialization of store failed. All saved networks are lost!: {e}"
+                );
                 Vec::new()
             }
-            Err(LoadError::Skip(e)) => return Err(Exception::new(EX_ILLEGAL_STATE, format!("wifi: {e}"))),
+            Err(LoadError::Skip(e)) => {
+                return Err(Exception::new(EX_ILLEGAL_STATE, format!("wifi: {e}")));
+            }
             Err(LoadError::Unmodelled(what)) => return Err(unmodelled(what)),
         };
         Ok(self.networks.get_or_init(|| networks))
@@ -390,7 +514,12 @@ impl WifiService {
     /// `isPrivileged`: a network settings, setup wizard, stack or managed
     /// provisioning app, or one signed with the platform key.
     fn privileged(&self, uid: i32) -> Result<bool, Exception> {
-        for permission in [NETWORK_SETTINGS, NETWORK_SETUP_WIZARD, NETWORK_STACK, NETWORK_MANAGED_PROVISIONING] {
+        for permission in [
+            NETWORK_SETTINGS,
+            NETWORK_SETUP_WIZARD,
+            NETWORK_STACK,
+            NETWORK_MANAGED_PROVISIONING,
+        ] {
             if self.held(permission, uid)? {
                 return Ok(true);
             }
@@ -401,15 +530,23 @@ impl WifiService {
     /// `checkSignatures(uid, SYSTEM_UID) == SIGNATURE_MATCH`.
     fn signed_with_platform_key(&self, uid: i32) -> Result<bool, Exception> {
         let (state, resolution) = self.host.packages()?;
-        let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
-        let matched = query.check_uid_signatures_captured(uid, SYSTEM_UID, false).map_err(|e| self.host.unimplemented_named("wifi", e.0))??;
+        let query = Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: SYSTEM_UID,
+        };
+        let matched = query
+            .check_uid_signatures_captured(uid, SYSTEM_UID, false)
+            .map_err(|e| self.host.unimplemented_named("wifi", e.0))??;
         Ok(matched == SIGNATURE_MATCH)
     }
 
     /// `isDeviceOrProfileOwner`: the app host has no owner.
     fn device_or_profile_owner(&self, package: Option<&str>) -> Result<bool, Exception> {
         if package.is_some() && self.host.device_policies()?.owned() {
-            return Err(self.host.unimplemented_named("wifi", "a device or profile owner (#1686)"));
+            return Err(self
+                .host
+                .unimplemented_named("wifi", "a device or profile owner (#1686)"));
         }
         Ok(false)
     }
@@ -424,9 +561,20 @@ impl WifiService {
         }
         let admins = &self.resources()?.oem_admins;
         let (state, resolution) = self.host.packages()?;
-        let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
-        let packages = query.packages_for_uid(uid).map_err(|e| self.host.unimplemented_named("wifi", e.0))?;
-        if !packages.unwrap_or_default().iter().flatten().any(|p| admins.contains(p)) {
+        let query = Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: SYSTEM_UID,
+        };
+        let packages = query
+            .packages_for_uid(uid)
+            .map_err(|e| self.host.unimplemented_named("wifi", e.0))?;
+        if !packages
+            .unwrap_or_default()
+            .iter()
+            .flatten()
+            .any(|p| admins.contains(p))
+        {
             return Ok(false);
         }
         self.signed_with_platform_key(uid)
@@ -434,10 +582,17 @@ impl WifiService {
 
     /// `isTargetSdkLessThanQOrPrivileged`: the app host's one user is not
     /// a guest.
-    fn target_sdk_less_than_q_or_privileged(&self, package: Option<&str>, uid: i32) -> Result<bool, Exception> {
+    fn target_sdk_less_than_q_or_privileged(
+        &self,
+        package: Option<&str>,
+        uid: i32,
+    ) -> Result<bool, Exception> {
         let inputs = self.host.inputs()?;
         let info = package.and_then(|p| inputs.packages.application_info(p, 0));
-        if info.as_ref().is_some_and(|ai| ai.target_sdk_version < Q) || self.privileged(uid)? || self.admin(uid, package)? {
+        if info.as_ref().is_some_and(|ai| ai.target_sdk_version < Q)
+            || self.privileged(uid)?
+            || self.admin(uid, package)?
+        {
             return Ok(true);
         }
         Ok(info.is_some_and(|ai| ai.flags & (FLAG_SYSTEM | FLAG_UPDATED_SYSTEM_APP) != 0))
@@ -454,9 +609,13 @@ impl WifiService {
         let none = || Slice::new(self.host.process.clone(), WIFI_CONFIGURATION, Vec::new());
         if uid != SHELL_UID && uid != ROOT_UID {
             // `WifiPermissionsUtil.checkPackage`.
-            let name = package.ok_or_else(|| Exception::security(format!("Checking UID {uid} but Package Name is Null")))?;
+            let name = package.ok_or_else(|| {
+                Exception::security(format!("Checking UID {uid} but Package Name is Null"))
+            })?;
             if !self.host.owns_package(uid, name)? {
-                return Err(Exception::security(format!("Package {name} does not belong to {uid}")));
+                return Err(Exception::security(format!(
+                    "Package {name} does not belong to {uid}"
+                )));
             }
             if !caller_networks_only {
                 let checked = {
@@ -466,7 +625,10 @@ impl WifiService {
                 match checked {
                     Ok(()) => {}
                     Err(e) if e.code == EX_SECURITY => {
-                        eprintln!("app host: wifi: Permission violation - getConfiguredNetworks not allowed for uid={uid}, packageName={name}, reason={}", e.message);
+                        eprintln!(
+                            "app host: wifi: Permission violation - getConfiguredNetworks not allowed for uid={uid}, packageName={name}, reason={}",
+                            e.message
+                        );
                         return Ok(none());
                     }
                     Err(e) => return Err(e),
@@ -476,7 +638,9 @@ impl WifiService {
         let owner = self.device_or_profile_owner(package)?;
         let privileged = self.privileged(uid)?;
         if caller_networks_only && !owner && !privileged {
-            return Err(Exception::security("Not a DO, PO, carrier or privileged app"));
+            return Err(Exception::security(
+                "Not a DO, PO, carrier or privileged app",
+            ));
         }
         let allowed = self.target_sdk_less_than_q_or_privileged(package, uid)?;
         if !allowed {
@@ -487,7 +651,9 @@ impl WifiService {
         // privileged, else for none.
         let target = if privileged { WIFI_UID } else { INVALID_UID };
         let resources = self.resources()?;
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
         let saved: Vec<WifiConfiguration> = self
             .networks()?
             .iter()
@@ -504,17 +670,26 @@ impl WifiService {
                 }
         };
         let configs = if caller_networks_only {
-            let own: Vec<WifiConfiguration> = saved.into_iter().filter(|c| c.creator_uid == uid).collect();
+            let own: Vec<WifiConfiguration> =
+                saved.into_iter().filter(|c| c.creator_uid == uid).collect();
             wifi_config::legacy_configs(&own, true, &omit)
         } else {
             wifi_config::legacy_configs(&saved, false, &omit)
         };
-        Ok(Slice::new(self.host.process.clone(), WIFI_CONFIGURATION, configs))
+        Ok(Slice::new(
+            self.host.process.clone(),
+            WIFI_CONFIGURATION,
+            configs,
+        ))
     }
 
     /// `ActiveModeWarden.getWifiState`: the Mac's radio, on or off.
     fn wifi_state(&self) -> i32 {
-        if aim_host_wifi::wifi().is_some_and(|w| w.powered) { WIFI_STATE_ENABLED } else { WIFI_STATE_DISABLED }
+        if aim_host_wifi::wifi().is_some_and(|w| w.powered) {
+            WIFI_STATE_ENABLED
+        } else {
+            WIFI_STATE_DISABLED
+        }
     }
 }
 
@@ -529,11 +704,13 @@ impl Service for WifiService {
         let result = match call.code {
             wm::GET_WIFI_ENABLED_STATE => {
                 wm::GetWifiEnabledState::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.enforce_access(uid).map(|()| wm::write_get_wifi_enabled_state_reply(&mut p, self.wifi_state()))
+                self.enforce_access(uid)
+                    .map(|()| wm::write_get_wifi_enabled_state_reply(&mut p, self.wifi_state()))
             }
             wm::GET_VERBOSE_LOGGING_LEVEL => {
                 wm::GetVerboseLoggingLevel::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.verbose_logging_level().map(|level| wm::write_get_verbose_logging_level_reply(&mut p, level))
+                self.verbose_logging_level()
+                    .map(|level| wm::write_get_verbose_logging_level_reply(&mut p, level))
             }
             wm::IS_SCAN_ALWAYS_AVAILABLE => {
                 wm::IsScanAlwaysAvailable::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -544,11 +721,13 @@ impl Service for WifiService {
             }
             wm::GET_CONNECTION_INFO => {
                 let a = wm::GetConnectionInfo::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.connection_info(uid, a.calling_package.as_deref()).map(|info| wm::write_get_connection_info_reply(&mut p, Some(&info)))
+                self.connection_info(uid, a.calling_package.as_deref())
+                    .map(|info| wm::write_get_connection_info_reply(&mut p, Some(&info)))
             }
             wm::GET_SCAN_RESULTS => {
                 let a = wm::GetScanResults::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.scan_results(uid, a.calling_package.as_deref()).map(|r| wm::write_get_scan_results_reply(&mut p, r.as_ref()))
+                self.scan_results(uid, a.calling_package.as_deref())
+                    .map(|r| wm::write_get_scan_results_reply(&mut p, r.as_ref()))
             }
             wm::GET_CONFIGURED_NETWORKS => {
                 let a = wm::GetConfiguredNetworks::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -556,8 +735,13 @@ impl Service for WifiService {
                     .map(|r| wm::write_get_configured_networks_reply(&mut p, Some(&r)))
             }
             code => {
-                let name = wm::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
-                Err(self.host.unimplemented_named("wifi", &format!("{name} (#1686)")))
+                let name = wm::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
+                Err(self
+                    .host
+                    .unimplemented_named("wifi", &format!("{name} (#1686)")))
             }
         };
         reply(result.map(|()| p))
@@ -575,10 +759,15 @@ mod tests {
         let mut p = Parcel::new();
         NoConnection.write_to(&mut p);
         let mut r = p.reader();
-        let ints = |r: &mut aim_binder_host::parcel::Reader<'_>, n: usize| (0..n).map(|_| r.read_i32().unwrap()).collect::<Vec<_>>();
+        let ints = |r: &mut aim_binder_host::parcel::Reader<'_>, n: usize| {
+            (0..n).map(|_| r.read_i32().unwrap()).collect::<Vec<_>>()
+        };
         assert_eq!(ints(&mut r, 8), [-1, -127, -1, 0, 0, -1, 0, 0]);
         assert_eq!(r.read_string16().unwrap(), None);
-        assert_eq!(r.read_string16().unwrap().as_deref(), Some("02:00:00:00:00:00"));
+        assert_eq!(
+            r.read_string16().unwrap().as_deref(),
+            Some("02:00:00:00:00:00")
+        );
         assert_eq!(ints(&mut r, 8), [0, 0, 0, 0, 0, 0, 0, 1]);
         for _ in 0..8 {
             assert_eq!(r.read_i64().unwrap(), 0);

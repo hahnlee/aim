@@ -35,7 +35,9 @@ impl CrossProfileApps {
     fn verify_calling_package(&self, uid: i32, package: Option<&str>) -> Result<(), Exception> {
         let package = package.ok_or_else(|| Exception::new(EX_NULL_POINTER, "callingPackage"))?;
         if !self.host.owns_package(uid, package)? {
-            return Err(Exception::security(format!("Package {package} does not belong to {uid}")));
+            return Err(Exception::security(format!(
+                "Package {package} does not belong to {uid}"
+            )));
         }
         Ok(())
     }
@@ -43,7 +45,11 @@ impl CrossProfileApps {
     /// `getTargetUserProfilesUnchecked`: the user's enabled profiles but
     /// itself (in which the package is enabled), none for user 0.
     fn target_profiles(user: i32) -> Vec<UserHandle> {
-        user_service::profile_ids(user).into_iter().filter(|p| *p != user).map(UserHandle).collect()
+        user_service::profile_ids(user)
+            .into_iter()
+            .filter(|p| *p != user)
+            .map(UserHandle)
+            .collect()
     }
 }
 
@@ -59,7 +65,10 @@ impl Service for CrossProfileApps {
         match call.code {
             cpa::GET_TARGET_USER_PROFILES => {
                 let a = cpa::GetTargetUserProfiles::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                match self.verify_calling_package(uid, a.calling_package.as_deref()).map(|_| Self::target_profiles(user)) {
+                match self
+                    .verify_calling_package(uid, a.calling_package.as_deref())
+                    .map(|_| Self::target_profiles(user))
+                {
                     Ok(targets) => {
                         let targets: Vec<_> = targets.into_iter().map(Some).collect();
                         cpa::write_get_target_user_profiles_reply(&mut p, Some(&targets));
@@ -69,10 +78,18 @@ impl Service for CrossProfileApps {
             }
             // No target profile: false before any permission is asked.
             cpa::CAN_INTERACT_ACROSS_PROFILES => {
-                let a = cpa::CanInteractAcrossProfiles::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                match self.verify_calling_package(uid, a.calling_package.as_deref()).map(|_| Self::target_profiles(user)) {
-                    Ok(targets) if targets.is_empty() => cpa::write_can_interact_across_profiles_reply(&mut p, false),
-                    Ok(_) => return reply(Err(self.host.unimplemented("crossprofileapps", call.code))),
+                let a =
+                    cpa::CanInteractAcrossProfiles::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match self
+                    .verify_calling_package(uid, a.calling_package.as_deref())
+                    .map(|_| Self::target_profiles(user))
+                {
+                    Ok(targets) if targets.is_empty() => {
+                        cpa::write_can_interact_across_profiles_reply(&mut p, false)
+                    }
+                    Ok(_) => {
+                        return reply(Err(self.host.unimplemented("crossprofileapps", call.code)));
+                    }
                     Err(e) => return reply(Err(e)),
                 }
             }

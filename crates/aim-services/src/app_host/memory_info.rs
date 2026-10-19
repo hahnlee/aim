@@ -18,7 +18,14 @@ const VISIBLE_APP_ADJ: i32 = 100;
 const SERVICE_ADJ: i32 = 500;
 const HOME_APP_ADJ: i32 = 600;
 const CACHED_APP_MIN_ADJ: i32 = 900;
-const OOM_ADJ: [i32; 6] = [FOREGROUND_APP_ADJ, VISIBLE_APP_ADJ, 200, 250, CACHED_APP_MIN_ADJ, 950];
+const OOM_ADJ: [i32; 6] = [
+    FOREGROUND_APP_ADJ,
+    VISIBLE_APP_ADJ,
+    200,
+    250,
+    CACHED_APP_MIN_ADJ,
+    950,
+];
 const OOM_MIN_FREE_LOW: [i32; 6] = [12288, 18432, 24576, 36864, 43008, 49152];
 const OOM_MIN_FREE_HIGH: [i32; 6] = [73728, 92160, 110592, 129024, 147456, 184320];
 
@@ -38,11 +45,21 @@ pub struct MemoryInfo {
 
 impl WriteParcelable for MemoryInfo {
     fn write_to(&self, p: &mut Parcel) {
-        for v in [self.advertised_mem, self.avail_mem, self.total_mem, self.threshold] {
+        for v in [
+            self.advertised_mem,
+            self.avail_mem,
+            self.total_mem,
+            self.threshold,
+        ] {
             p.write_i64(v);
         }
         p.write_i32(self.low_memory as i32);
-        for v in [self.hidden_app_threshold, self.secondary_server_threshold, self.visible_app_threshold, self.foreground_app_threshold] {
+        for v in [
+            self.hidden_app_threshold,
+            self.secondary_server_threshold,
+            self.visible_app_threshold,
+            self.foreground_app_threshold,
+        ] {
             p.write_i64(v);
         }
     }
@@ -123,7 +140,13 @@ fn may_see(uid: i32, target: Option<i32>, all_uids: bool, all_users: bool) -> bo
 /// `updateOomLevels`: the minimum free memory of each OOM level, in KiB,
 /// for `total_mb` of memory, a display of `width` by `height` pixels and
 /// the `config_lowMemoryKillerMinFreeKbytes*` overrides.
-fn oom_min_free(total_mb: i64, width: i32, height: i32, minfree_adj: i32, minfree_abs: i32) -> [i32; 6] {
+fn oom_min_free(
+    total_mb: i64,
+    width: i32,
+    height: i32,
+    minfree_adj: i32,
+    minfree_abs: i32,
+) -> [i32; 6] {
     let scale_mem = (total_mb - 350) as f32 / (700 - 350) as f32;
     let (min_size, max_size) = (480 * 800, 1280 * 800);
     let scale_disp = ((width * height) as f32 - min_size as f32) / (max_size - min_size) as f32;
@@ -159,7 +182,10 @@ fn oom_min_free(total_mb: i64, width: i32, height: i32, minfree_adj: i32, minfre
 /// `getMemLevel`: the minimum free memory of the first level at or above
 /// `adjustment`, in bytes.
 fn mem_level(min_free: &[i32; 6], adjustment: i32) -> i64 {
-    let i = OOM_ADJ.iter().position(|a| adjustment <= *a).unwrap_or(OOM_ADJ.len() - 1);
+    let i = OOM_ADJ
+        .iter()
+        .position(|a| adjustment <= *a)
+        .unwrap_or(OOM_ADJ.len() - 1);
     min_free[i] as i64 * 1024
 }
 
@@ -203,21 +229,41 @@ impl AppHost {
     pub(super) fn memory_info(&self) -> Result<MemoryInfo, Exception> {
         let inputs = self.inputs()?;
         let integer = |name: &str| {
-            inputs.packages.framework_integer(name).ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, format!("no {name}")))
+            inputs.packages.framework_integer(name).ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    format!("no {name}"),
+                )
+            })
         };
-        let (minfree_adj, minfree_abs) =
-            (integer("config_lowMemoryKillerMinFreeKbytesAdjust")?, integer("config_lowMemoryKillerMinFreeKbytesAbsolute")?);
+        let (minfree_adj, minfree_abs) = (
+            integer("config_lowMemoryKillerMinFreeKbytesAdjust")?,
+            integer("config_lowMemoryKillerMinFreeKbytesAbsolute")?,
+        );
         let total = aim_host_memory::total() as i64;
         let display = self.display()?;
         let mode = display.0.active();
-        let min_free = oom_min_free(total / (1024 * 1024), mode.width, mode.height, minfree_adj, minfree_abs);
+        let min_free = oom_min_free(
+            total / (1024 * 1024),
+            mode.width,
+            mode.height,
+            minfree_adj,
+            minfree_abs,
+        );
         let home = mem_level(&min_free, HOME_APP_ADJ);
         let cached = mem_level(&min_free, CACHED_APP_MIN_ADJ);
         let avail = aim_host_memory::available() as i64;
         // `Process.getAdvertisedMem`: `ro.boot.ddr_size`, else the total
         // rounded as storage sizes are.
-        let configured = self.configured.get().and_then(|c| (c.properties)("ro.boot.ddr_size"));
-        let advertised = configured.as_deref().and_then(parse_size).filter(|s| *s > 0).unwrap_or_else(|| round_storage_size(total));
+        let configured = self
+            .configured
+            .get()
+            .and_then(|c| (c.properties)("ro.boot.ddr_size"));
+        let advertised = configured
+            .as_deref()
+            .and_then(parse_size)
+            .filter(|s| *s > 0)
+            .unwrap_or_else(|| round_storage_size(total));
         Ok(MemoryInfo {
             advertised_mem: advertised,
             avail_mem: avail,
@@ -235,19 +281,35 @@ impl AppHost {
     /// `Debug.MemoryInfo` for each process it may not see. Measuring one
     /// it may see (`Debug.getMemoryInfo`) takes the guest's
     /// `/proc/<pid>/smaps`, which only a guest process can read (#1543).
-    pub(super) fn process_memory_info(&self, uid: i32, pids: Option<Vec<i32>>) -> Result<Vec<Option<ProcessMemoryInfo>>, Exception> {
+    pub(super) fn process_memory_info(
+        &self,
+        uid: i32,
+        pids: Option<Vec<i32>>,
+    ) -> Result<Vec<Option<ProcessMemoryInfo>>, Exception> {
         if super::is_isolated(uid) {
-            return Err(Exception::security("Isolated process not allowed to call getProcessMemoryInfo"));
+            return Err(Exception::security(
+                "Isolated process not allowed to call getProcessMemoryInfo",
+            ));
         }
-        let all_users = self.check_permission(Some("android.permission.INTERACT_ACROSS_USERS_FULL"), uid)? == 0;
+        let all_users =
+            self.check_permission(Some("android.permission.INTERACT_ACROSS_USERS_FULL"), uid)? == 0;
         let all_uids = self.get_tasks_allowed(uid)?;
         let pids = pids.ok_or_else(|| Exception::new(EX_NULL_POINTER, "pids is null"))?;
         let apps = self.apps.lock().unwrap();
         let target = |pid: i32| apps.values().find(|a| a.pid == pid).map(|a| a.uid as i32);
-        if pids.iter().any(|&pid| may_see(uid, target(pid), all_uids, all_users)) {
-            return Err(self.unimplemented_named("activity", "getProcessMemoryInfo of a process its caller may see (#1543)"));
+        if pids
+            .iter()
+            .any(|&pid| may_see(uid, target(pid), all_uids, all_users))
+        {
+            return Err(self.unimplemented_named(
+                "activity",
+                "getProcessMemoryInfo of a process its caller may see (#1543)",
+            ));
         }
-        Ok(pids.iter().map(|_| Some(ProcessMemoryInfo::default())).collect())
+        Ok(pids
+            .iter()
+            .map(|_| Some(ProcessMemoryInfo::default()))
+            .collect())
     }
 }
 
@@ -285,7 +347,13 @@ mod tests {
             swapped_out: base + 7,
             swapped_out_pss: base + 8,
         };
-        let mut info = ProcessMemoryInfo { dalvik: stats(10), native: stats(20), other: stats(30), has_swapped_out_pss: true, ..Default::default() };
+        let mut info = ProcessMemoryInfo {
+            dalvik: stats(10),
+            native: stats(20),
+            other: stats(30),
+            has_swapped_out_pss: true,
+            ..Default::default()
+        };
         info.other_stats[1] = stats(40);
         let mut p = Parcel::new();
         info.write_to(&mut p);
@@ -295,7 +363,10 @@ mod tests {
         assert_eq!(ints(10), [30, 31, 32, 33, 34, 35, 36, 37, 1, 38]);
         assert_eq!(ints(1), [288]);
         let other = ints(288);
-        assert_eq!((&other[..9], &other[9..18]), (&[0; 9][..], &(40..49).collect::<Vec<_>>()[..]));
+        assert_eq!(
+            (&other[..9], &other[9..18]),
+            (&[0; 9][..], &(40..49).collect::<Vec<_>>()[..])
+        );
         assert_eq!(r.remaining(), 0);
     }
 
