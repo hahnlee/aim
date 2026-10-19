@@ -14,6 +14,7 @@ const POLICY: &str = "media.audio_policy";
 const POLICY_DESCRIPTOR: &str = "android.media.IAudioPolicyService";
 const SET_DEVICE_ABSOLUTE_VOLUME_ENABLED: u32 = 17;
 const INIT_STREAM_VOLUME: u32 = 18;
+const GET_DEVICES_FOR_ATTRIBUTES: u32 = 26;
 const SET_STREAM_VOLUME_INDEX: u32 = 19;
 const LIST_AUDIO_PORTS: u32 = 44;
 const GET_PERMISSION_CONTROLLER: u32 = 104;
@@ -37,6 +38,12 @@ const TYPE_OUT_DEFAULT: i32 = 129;
 /// `AudioPortRole.SINK`, `AudioPortType.DEVICE`.
 const ROLE_SINK: i32 = 2;
 const PORT_TYPE_DEVICE: i32 = 1;
+/// `AudioContentType.MUSIC`, `AudioUsage.MEDIA`,
+/// `AudioSource.SYS_RESERVED_INVALID`: the AIDL of the attributes
+/// `USAGE_MEDIA` and `CONTENT_TYPE_MUSIC` build.
+const CONTENT_TYPE_MUSIC: i32 = 2;
+const USAGE_MEDIA: i32 = 1;
+const SOURCE_INVALID: i32 = -1;
 /// `AudioPortExt`'s tag of `device`.
 const EXT_DEVICE: i32 = 1;
 /// `MAX_PORT_GENERATION_SYNC_ATTEMPTS` of `android_media_AudioSystem.cpp`.
@@ -325,6 +332,49 @@ impl AudioPolicy {
             },
             Ok(Err(e)) => Err(format!("getPermissionController: {e:?}")),
             Err(s) => Err(format!("getPermissionController: {s}")),
+        }
+    }
+
+    /// `AudioSystem.getDevicesForAttributes` of media's attributes
+    /// (`USAGE_MEDIA`, `CONTENT_TYPE_MUSIC`), not for volume: the first
+    /// device's `AudioDeviceDescription` type and connection, if any.
+    pub fn first_media_device(&self) -> Result<Option<(i32, String)>, String> {
+        let mut data = Parcel::new();
+        data.write_interface_token(POLICY_DESCRIPTOR);
+        data.write_i32(1);
+        structured(&mut data, |p| {
+            p.write_i32(CONTENT_TYPE_MUSIC);
+            p.write_i32(USAGE_MEDIA);
+            p.write_i32(SOURCE_INVALID);
+            p.write_i32(0); // no flags
+            p.write_i32(0); // no tags
+        });
+        data.write_bool(false);
+        let reply = self
+            .policy
+            .transact(GET_DEVICES_FOR_ATTRIBUTES, &data, false)
+            .map_err(|s| format!("getDevicesForAttributes: {s}"))?;
+        let mut r = reply.reader();
+        let read = |r: &mut Reader<'_>| -> ParcelResult<Option<(i32, String)>> {
+            if r.read_i32()? <= 0 {
+                return Ok(None);
+            }
+            // `AudioDevice`: its description; its address is skipped.
+            present(r)?;
+            parcelable(r, |r| {
+                present(r)?;
+                parcelable(r, |r| {
+                    Ok(Some((
+                        r.read_i32()?,
+                        r.read_string16()?.unwrap_or_default(),
+                    )))
+                })
+            })
+        };
+        match r.read_exception() {
+            Ok(Ok(())) => read(&mut r).map_err(|s| format!("getDevicesForAttributes reply: {s}")),
+            Ok(Err(e)) => Err(format!("getDevicesForAttributes: {e:?}")),
+            Err(s) => Err(format!("getDevicesForAttributes: {s}")),
         }
     }
 

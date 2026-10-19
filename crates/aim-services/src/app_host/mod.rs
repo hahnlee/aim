@@ -63,6 +63,7 @@ pub mod kept;
 pub mod keychars;
 pub mod legacy_permission;
 pub mod locale_manager;
+mod loudness;
 mod media_route_providers;
 pub mod media_router;
 mod media_router2;

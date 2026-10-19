@@ -575,9 +575,42 @@ pub struct Playback {
     muted: Vec<i32>,
     /// The `IPlayer` calls made, to send ([`Playback::send`]).
     calls: Vec<(i32, PlayerCall)>,
+    /// AudioService's own playback callback (`onPlaybackConfigChanged`,
+    /// which `LoudnessCodecHelper.updateCodecParameters` follows), told of
+    /// each change with the players.
+    configs_listener: Option<Box<dyn Fn(Vec<PlayerDevice>) + Send>>,
+}
+
+/// What a player's configuration says of where it plays: its id, session,
+/// process and first device's port id (`getAudioDeviceInfo`'s).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerDevice {
+    pub piid: i32,
+    pub session: i32,
+    pub pid: i32,
+    pub device: Option<i32>,
 }
 
 impl Playback {
+    /// Sets AudioService's own playback callback.
+    pub fn set_configs_listener(&mut self, listener: Box<dyn Fn(Vec<PlayerDevice>) + Send>) {
+        self.configs_listener = Some(listener);
+    }
+
+    /// `getActivePlaybackConfigurations` of a privileged caller: every
+    /// player tracked.
+    pub fn players(&self) -> Vec<PlayerDevice> {
+        self.players
+            .values()
+            .map(|p| PlayerDevice {
+                piid: p.piid,
+                session: p.session,
+                pid: p.pid,
+                device: p.device_ids.first().copied(),
+            })
+            .collect()
+    }
+
     /// `AudioPlayerStateMonitor.isPlaybackActive`: an active player of
     /// `uid` (`mActiveAudioUids`).
     pub fn uid_active(&self, uid: i32) -> bool {
@@ -831,6 +864,9 @@ impl Playback {
         }
         for i in errors {
             self.clients[i].errors += 1;
+        }
+        if let Some(listener) = &self.configs_listener {
+            listener(self.players());
         }
         let configs: Vec<_> = self
             .players
