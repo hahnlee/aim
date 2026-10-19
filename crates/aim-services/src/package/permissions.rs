@@ -241,3 +241,172 @@ impl AccessUser {
         Ok(u)
     }
 }
+
+/// `PermissionFlags.ONE_TIME`, `RUNTIME_GRANTED`.
+const ONE_TIME: i32 = 1 << 21;
+const RUNTIME_GRANTED: i32 = 1 << 4;
+
+impl AccessUser {
+    /// `AppIdPermissionPolicy.getPermissionFlags`: 0 for a permission or
+    /// app id without state.
+    pub fn permission_flags(&self, app_id: i32, permission: &str) -> i32 {
+        self.app_id_permissions
+            .iter()
+            .find(|(id, _)| *id == app_id)
+            .and_then(|(_, permissions)| permissions.iter().find(|(name, _)| name == permission))
+            .map_or(0, |(_, flags)| *flags)
+    }
+
+    /// `AppIdPermissionPolicy.setPermissionFlags`: the app id's flags of
+    /// `permission` replaced, a permission left without flags removed and
+    /// an app id left without permissions too (`putWithDefault`), the
+    /// app ids in their `SparseArray` order and each one's permissions in
+    /// their `ArrayMap` order. The flags before.
+    pub fn set_permission_flags(&mut self, app_id: i32, permission: &str, flags: i32) -> i32 {
+        let at = match self
+            .app_id_permissions
+            .binary_search_by_key(&app_id, |(id, _)| *id)
+        {
+            Ok(at) => at,
+            Err(_) if flags == 0 => return 0,
+            Err(at) => {
+                self.app_id_permissions.insert(at, (app_id, Vec::new()));
+                at
+            }
+        };
+        let permissions = &mut self.app_id_permissions[at].1;
+        let old = match permissions.iter().position(|(name, _)| name == permission) {
+            Some(i) if flags == 0 => permissions.remove(i).1,
+            Some(i) => std::mem::replace(&mut permissions[i].1, flags),
+            None if flags == 0 => 0,
+            None => {
+                // `ArrayMap.put`: after the keys of its hash and below.
+                let hash = super::info::java_hash(permission);
+                let i = permissions
+                    .iter()
+                    .position(|(name, _)| super::info::java_hash(name) > hash)
+                    .unwrap_or(permissions.len());
+                permissions.insert(i, (permission.to_owned(), flags));
+                0
+            }
+        };
+        if self.app_id_permissions[at].1.is_empty() {
+            self.app_id_permissions.remove(at);
+        }
+        old
+    }
+}
+
+/// The user state document `root` (`access.abx`) with its
+/// `<app-id-permissions>` written as `AppIdPermissionPersistence
+/// .serializeAppIdPermissions` writes `app_ids`: one-time permissions
+/// never as granted. The other policies' parts are kept as read.
+pub fn with_app_id_permissions(
+    mut root: Element,
+    app_ids: &[(i32, Named)],
+) -> Result<Element, String> {
+    use aim_android_xml::{Node, Value};
+    access(&root)?;
+    let element = |name: &str, attrs: Vec<(String, Value)>, content: Vec<Node>| {
+        Node::Element(Element {
+            name: name.into(),
+            attrs,
+            content,
+        })
+    };
+    let written = element(
+        "app-id-permissions",
+        Vec::new(),
+        app_ids
+            .iter()
+            .map(|(app_id, permissions)| {
+                element(
+                    "app-id",
+                    vec![("id".into(), Value::Int(*app_id))],
+                    permissions
+                        .iter()
+                        .map(|(name, flags)| {
+                            let flags = if flags & ONE_TIME != 0 {
+                                flags & !RUNTIME_GRANTED
+                            } else {
+                                *flags
+                            };
+                            element(
+                                "permission",
+                                vec![
+                                    ("name".into(), Value::Interned(name.clone())),
+                                    ("flags".into(), Value::Int(flags)),
+                                ],
+                                Vec::new(),
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .collect(),
+    );
+    match root
+        .content
+        .iter_mut()
+        .find(|n| matches!(n, Node::Element(e) if e.name == "app-id-permissions"))
+    {
+        Some(node) => *node = written,
+        None => return Err("<access> without <app-id-permissions>".into()),
+    }
+    Ok(root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CAMERA: &str = "android.permission.CAMERA";
+    const POST_NOTIFICATIONS: &str = "android.permission.POST_NOTIFICATIONS";
+
+    #[test]
+    fn flags_are_set_in_their_maps_order() {
+        let mut u = AccessUser::default();
+        assert_eq!(u.set_permission_flags(10_100, CAMERA, 0), 0);
+        assert!(u.app_id_permissions.is_empty());
+        assert_eq!(
+            u.set_permission_flags(10_100, POST_NOTIFICATIONS, 1 << 4),
+            0
+        );
+        assert_eq!(u.set_permission_flags(10_100, CAMERA, 1 << 5), 0);
+        assert_eq!(u.set_permission_flags(10_050, CAMERA, 1 << 5), 0);
+        let names: Vec<&str> = u.app_id_permissions[1]
+            .1
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        let mut by_hash = vec![CAMERA, POST_NOTIFICATIONS];
+        by_hash.sort_by_key(|n| super::super::info::java_hash(n));
+        assert_eq!(names, by_hash);
+        assert_eq!(u.app_id_permissions[0].0, 10_050);
+        assert_eq!(
+            u.set_permission_flags(10_100, POST_NOTIFICATIONS, 1 << 5),
+            1 << 4
+        );
+        assert_eq!(u.permission_flags(10_100, POST_NOTIFICATIONS), 1 << 5);
+        u.set_permission_flags(10_050, CAMERA, 0);
+        assert_eq!(u.app_id_permissions.len(), 1);
+    }
+
+    /// The written app id permissions read back as the model, one-time
+    /// grants not persisted, the other parts kept.
+    #[test]
+    fn app_id_permissions_are_written_back() {
+        let root = aim_android_xml::text::read(
+            br#"<access><package-versions><package name="p" version="3"/></package-versions><app-id-permissions><app-id id="1"><permission name="x" flags="1"/></app-id></app-id-permissions></access>"#,
+        )
+        .unwrap();
+        let mut u = AccessUser::parse(&root).unwrap();
+        u.set_permission_flags(10_100, CAMERA, RUNTIME_GRANTED | ONE_TIME);
+        let written = with_app_id_permissions(root, &u.app_id_permissions).unwrap();
+        let bytes = aim_android_xml::abx::write(&written).unwrap();
+        let read = AccessUser::parse(&aim_android_xml::read(&bytes).unwrap()).unwrap();
+        assert_eq!(read.package_versions, [("p".to_string(), 3)]);
+        assert_eq!(read.permission_flags(1, "x"), 1);
+        assert_eq!(read.permission_flags(10_100, CAMERA), ONE_TIME);
+    }
+}

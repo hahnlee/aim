@@ -12,13 +12,18 @@
 //! whether to show a rationale, the restricted permissions' allowlists and
 //! SystemConfig's split permissions. The app host has no
 //! VirtualDeviceManager, so every device id is the default device's, as
-//! the original decides without one. The state does not change while the
-//! app host runs, so listeners are kept and never called. Grants,
-//! revocations, flag and allowlist changes, a virtual device's
-//! permissions, one-time sessions, auto-revoke, attribution sources and
-//! the permission states are not implemented (#1508).
+//! the original decides without one. Runtime and role permissions are
+//! granted and revoked and their flags updated as `PermissionService`
+//! mutates the state: user 0's `access.abx` written back
+//! (`AccessPersistence`), the package model's grants with it, the
+//! listeners told of a runtime permission's change and a uid that lost
+//! one killed. Development permissions' changes (their gids are not
+//! modelled, #1857), allowlist changes, a virtual device's permissions,
+//! one-time sessions, auto-revoke, attribution sources and the permission
+//! states are not implemented (#1508).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use aim_binder_host::local::{Call, Reply, Service};
@@ -27,6 +32,7 @@ use aim_binder_host::parcel::{
     Parcel,
 };
 use aim_service_aidl::WriteParcelable;
+use aim_service_aidl::android_permission_ionpermissionschangelistener as changed_listener;
 use aim_service_aidl::android_permission_ipermissionmanager as pm;
 
 use super::compat::CompatConfig;
@@ -39,7 +45,7 @@ use crate::package::info::{
 use crate::package::list_slice::Slice;
 use crate::package::model::{PackageState, State};
 use crate::package::parse::SplitPermission;
-use crate::package::permissions::{AccessUser, Permission};
+use crate::package::permissions::{self, AccessUser, Permission};
 use crate::package::query::Query;
 
 /// `PackageManager.PERMISSION_GRANTED`, `PERMISSION_DENIED`.
@@ -54,20 +60,33 @@ const VERSION_CODE_HIGHEST: i64 = -1;
 /// `PermissionInfo.PROTECTION_MASK_BASE`, `PROTECTION_SIGNATURE`,
 /// `PROTECTION_FLAG_INSTANT`, `FLAG_INSTALLED`.
 const PROTECTION_MASK_BASE: i32 = 0xf;
+const PROTECTION_DANGEROUS: i32 = 1;
 const PROTECTION_SIGNATURE: i32 = 2;
+const PROTECTION_FLAG_DEVELOPMENT: i32 = 0x20;
 const PROTECTION_FLAG_INSTANT: i32 = 0x1000;
+const PROTECTION_FLAG_ROLE: i32 = 0x400_0000;
+/// `PermissionInfo.FLAG_HARD_RESTRICTED`, `FLAG_SOFT_RESTRICTED`.
+const FLAG_HARD_RESTRICTED: i32 = 1 << 2;
+const FLAG_SOFT_RESTRICTED: i32 = 1 << 3;
 const FLAG_INSTALLED: i32 = 1 << 30;
-/// `Build.VERSION_CODES.O`, `CUR_DEVELOPMENT`.
+/// `Build.VERSION_CODES.M`, `O`, `Q`, `CUR_DEVELOPMENT`.
+const M: i32 = 23;
 const O: i32 = 26;
+const Q: i32 = 29;
 const CUR_DEVELOPMENT: i32 = 10000;
-/// `PermissionFlags` (services/permission) that `toApiFlags` reads.
+/// `PermissionFlags` (services/permission).
+const INSTALL_GRANTED: i32 = 1 << 0;
+const INSTALL_REVOKED: i32 = 1 << 1;
+const PROTECTION_GRANTED: i32 = 1 << 2;
 const ROLE: i32 = 1 << 3;
+const RUNTIME_GRANTED: i32 = 1 << 4;
 const USER_SET: i32 = 1 << 5;
 const USER_FIXED: i32 = 1 << 6;
 const POLICY_FIXED: i32 = 1 << 7;
 const SYSTEM_FIXED: i32 = 1 << 8;
 const PREGRANT: i32 = 1 << 9;
 const LEGACY_GRANTED: i32 = 1 << 10;
+const IMPLICIT_GRANTED: i32 = 1 << 11;
 const IMPLICIT: i32 = 1 << 12;
 const USER_SENSITIVE_WHEN_GRANTED: i32 = 1 << 13;
 const USER_SENSITIVE_WHEN_REVOKED: i32 = 1 << 14;
@@ -104,6 +123,12 @@ const API_FLAGS: &[(i32, i32)] = &[
 const FLAG_PERMISSION_REVIEW_REQUIRED: i32 = 1 << 6;
 const FLAG_PERMISSION_REVOKE_WHEN_REQUESTED: i32 = 1 << 7;
 const FLAG_PERMISSION_APPLY_RESTRICTION: i32 = 1 << 14;
+/// The flags only the system may change (`updatePermissionFlags`):
+/// `FLAG_PERMISSION_SYSTEM_FIXED`, `GRANTED_BY_DEFAULT`, the restriction
+/// exemptions and `APPLY_RESTRICTION`.
+const SYSTEM_ONLY_API_FLAGS: i32 =
+    1 << 4 | 1 << 5 | 1 << 12 | 1 << 11 | 1 << 13 | FLAG_PERMISSION_APPLY_RESTRICTION;
+const FLAG_PERMISSION_POLICY_FIXED: i32 = 1 << 2;
 /// `PackageManager.FLAG_PERMISSION_WHITELIST_*`.
 const WHITELIST_SYSTEM: i32 = 1 << 0;
 const WHITELIST_INSTALLER: i32 = 1 << 1;
@@ -131,6 +156,22 @@ const WHITELIST_RESTRICTED_PERMISSIONS: &str =
     "android.permission.WHITELIST_RESTRICTED_PERMISSIONS";
 const OBSERVE_GRANT_REVOKE_PERMISSIONS: &str =
     "android.permission.OBSERVE_GRANT_REVOKE_PERMISSIONS";
+const GRANT_RUNTIME_PERMISSIONS: &str = "android.permission.GRANT_RUNTIME_PERMISSIONS";
+const REVOKE_RUNTIME_PERMISSIONS: &str = "android.permission.REVOKE_RUNTIME_PERMISSIONS";
+const ADJUST_RUNTIME_PERMISSIONS_POLICY: &str =
+    "android.permission.ADJUST_RUNTIME_PERMISSIONS_POLICY";
+const BACKUP: &str = "android.permission.BACKUP";
+/// `PermissionService.NOTIFICATIONS_PERMISSIONS`.
+const POST_NOTIFICATIONS: &str = "android.permission.POST_NOTIFICATIONS";
+/// `PermissionManager.KILL_APP_REASON_PERMISSIONS_REVOKED`.
+const KILL_APP_REASON_PERMISSIONS_REVOKED: &str = "permissions revoked";
+/// `UserManager.DISALLOW_DEBUGGING_FEATURES`, `Process.SHELL_UID`.
+const DISALLOW_DEBUGGING_FEATURES: &str = "no_debugging_features";
+const SHELL_UID: i32 = 2000;
+/// `Settings.Secure.USER_SETUP_PERSONALIZATION_STARTED`.
+const USER_SETUP_PERSONALIZATION_STARTED: i32 = 1;
+/// User 0's access state, beside its `misc_de` directory.
+const USER0_ACCESS: &str = "misc_de/0/apexdata/com.android.permission/access.abx";
 const PERMISSION_GROUP_INFO: &str = "android.content.pm.PermissionGroupInfo";
 const PERMISSION_INFO: &str = "android.content.pm.PermissionInfo";
 
@@ -173,6 +214,78 @@ fn to_api_flags(flags: i32) -> i32 {
         api |= FLAG_PERMISSION_APPLY_RESTRICTION;
     }
     api
+}
+
+/// `PermissionFlags.updateFlags`: `old` with its API flags of `mask` set
+/// to `values`, `fromApiFlags` keeping the grants' own flags.
+fn update_flags(info_flags: i32, old: i32, mask: i32, values: i32) -> i32 {
+    let api = (to_api_flags(old) & !mask) | (values & mask);
+    let mut flags = old
+        & (INSTALL_GRANTED
+            | INSTALL_REVOKED
+            | PROTECTION_GRANTED
+            | RUNTIME_GRANTED
+            | LEGACY_GRANTED
+            | IMPLICIT_GRANTED);
+    flags |= API_FLAGS
+        .iter()
+        .filter(|(_, a)| api & a == *a)
+        .fold(0, |f, (internal, _)| f | internal);
+    if api & (FLAG_PERMISSION_REVIEW_REQUIRED | FLAG_PERMISSION_REVOKE_WHEN_REQUESTED) != 0 {
+        flags |= IMPLICIT;
+    }
+    if api & FLAG_PERMISSION_APPLY_RESTRICTION != 0 {
+        if info_flags & FLAG_HARD_RESTRICTED != 0 {
+            flags |= RESTRICTION_REVOKED;
+        }
+        if info_flags & FLAG_SOFT_RESTRICTED != 0 {
+            flags |= SOFT_RESTRICTED;
+        }
+    }
+    flags
+}
+
+/// What a permission's protection makes it (`Permission`).
+fn is_runtime(p: &Permission) -> bool {
+    p.protection_level & PROTECTION_MASK_BASE == PROTECTION_DANGEROUS
+}
+
+fn is_role(p: &Permission) -> bool {
+    p.protection_level & PROTECTION_FLAG_ROLE != 0
+}
+
+fn is_development(p: &Permission) -> bool {
+    p.protection_level & PROTECTION_MASK_BASE == PROTECTION_SIGNATURE
+        && p.protection_level & PROTECTION_FLAG_DEVELOPMENT != 0
+}
+
+/// A permission's flags changed (`onPermissionFlagsChanged`) in user 0.
+#[derive(Debug)]
+struct FlagsChanged {
+    app_id: i32,
+    permission: String,
+    old: i32,
+    new: i32,
+}
+
+/// `AppIdPermissionPolicy.setPermissionFlags` in `new`: the change, if
+/// the flags changed.
+fn set_flags(new: &mut AccessUser, app_id: i32, permission: &str, flags: i32) -> Vec<FlagsChanged> {
+    let old = new.set_permission_flags(app_id, permission, flags);
+    if old == flags {
+        return Vec::new();
+    }
+    vec![FlagsChanged {
+        app_id,
+        permission: permission.to_owned(),
+        old,
+        new: flags,
+    }]
+}
+
+/// `isRootOrSystemUid`.
+fn root_or_system(uid: i32) -> bool {
+    matches!(apps_filter::app_id(uid), ROOT_UID | SYSTEM_UID)
 }
 
 fn fuller(permission: &str) -> Option<&'static str> {
@@ -350,6 +463,237 @@ impl Access<'_> {
         Ok(apps_filter::instant_app_package_name(self.state, uid)
             .map_err(not_modelled)?
             .is_some())
+    }
+
+    /// `enforceCallingOrSelfCrossUserPermission` with the shell's
+    /// restriction: the shell may not reach a user that disallows
+    /// debugging features.
+    fn enforce_cross_user_not_shell(
+        &self,
+        caller: i32,
+        user: i32,
+        restrictions: &BTreeSet<String>,
+        message: &str,
+    ) -> Result<(), Exception> {
+        self.enforce_cross_user(caller, user, true, message)?;
+        if apps_filter::app_id(caller) == SHELL_UID
+            && restrictions.contains(DISALLOW_DEBUGGING_FEATURES)
+        {
+            return Err(Exception::security(format!(
+                "{message}: Shell is disallowed to access user {user}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The packages of the app id `app_id`: its package or its shared
+    /// user's.
+    fn packages_of(&self, app_id: i32) -> Vec<&PackageState> {
+        match apps_filter::setting(self.state, app_id) {
+            Some(Setting::Package(ps)) => vec![ps],
+            Some(Setting::Shared(su)) => apps_filter::shared_packages(self.state, su).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// `setRuntimePermissionGranted` of a caller: its checks, then the
+    /// state's change in `new` (`MutateStateScope
+    /// .setRuntimePermissionGranted`), reporting errors.
+    #[allow(clippy::too_many_arguments)]
+    fn set_runtime_permission_granted(
+        &self,
+        new: &mut AccessUser,
+        restrictions: &BTreeSet<String>,
+        caller: i32,
+        package: &str,
+        permission: &str,
+        user: i32,
+        granted: bool,
+    ) -> Result<Vec<FlagsChanged>, Exception> {
+        let method = if granted {
+            "grantRuntimePermission"
+        } else {
+            "revokeRuntimePermission"
+        };
+        if !self.user_exists(user) {
+            eprintln!("app host: permissionmgr: {method}: Unknown user {user}");
+            return Ok(Vec::new());
+        }
+        self.enforce_cross_user_not_shell(caller, user, restrictions, method)?;
+        let enforced = if granted {
+            GRANT_RUNTIME_PERMISSIONS
+        } else {
+            REVOKE_RUNTIME_PERMISSIONS
+        };
+        self.enforce(caller, enforced, method)?;
+        let controller = self
+            .state
+            .system
+            .permission_controller_package
+            .as_ref()
+            .ok_or_else(|| not_modelled(NotModelled("the permission controller package")))?
+            .as_deref()
+            .and_then(|name| self.state.packages.get(name));
+        // Unknown and invisible packages alike, not to leak which exist.
+        let Some((ps, pkg)) = self
+            .package(package, caller, user)?
+            .and_then(|ps| Some((ps, ps.pkg.as_deref()?)))
+        else {
+            eprintln!("app host: permissionmgr: {method}: Unknown package {package}");
+            return Ok(Vec::new());
+        };
+        let can_manage_role = root_or_system(caller)
+            || controller.is_some_and(|c| c.app_id == apps_filter::app_id(caller));
+        let override_policy_fixed = self.holds(caller, ADJUST_RUNTIME_PERMISSIONS_POLICY)?;
+        let definition = self.definition(permission).ok_or_else(|| {
+            Exception::illegal_argument(format!("Unknown permission {permission}"))
+        })?;
+        let name = &ps.name;
+        if is_development(definition) {
+            return Err(not_modelled(NotModelled(
+                "a development permission's grant (#1857)",
+            )));
+        } else if is_role(definition) {
+            if !can_manage_role {
+                return Err(Exception::security(format!(
+                    "Permission {permission} is managed by role"
+                )));
+            }
+        } else if is_runtime(definition) {
+            // A legacy app's permissions stay granted, pending review.
+            if pkg.target_sdk_version < M {
+                return Ok(Vec::new());
+            }
+            if granted
+                && info::user_state(ps, user).instant_app
+                && definition.protection_level & PROTECTION_FLAG_INSTANT == 0
+            {
+                return Err(Exception::security(format!(
+                    "Cannot grant non-instant permission {permission} to package {name}"
+                )));
+            }
+        } else {
+            return Err(Exception::security(format!(
+                "Permission {permission} requested by package {name} is not a changeable permission type"
+            )));
+        }
+        let old = new.permission_flags(ps.app_id, permission);
+        if !pkg.requested_permissions.iter().any(|r| r == permission) && old == 0 {
+            eprintln!(
+                "app host: permissionmgr: Permission {permission} isn't requested by package {name}"
+            );
+            return Ok(Vec::new());
+        }
+        let refused = [
+            (
+                old & SYSTEM_FIXED != 0,
+                "Cannot change system fixed permission",
+            ),
+            (
+                old & POLICY_FIXED != 0 && !override_policy_fixed,
+                "Cannot change policy fixed permission",
+            ),
+            (
+                granted && old & RESTRICTION_REVOKED != 0,
+                "Cannot grant hard-restricted non-exempt permission",
+            ),
+            (
+                granted && old & SOFT_RESTRICTED != 0,
+                "Cannot grant soft-restricted non-exempt permission",
+            ),
+        ];
+        if let Some((_, why)) = refused.iter().find(|(refused, _)| *refused) {
+            eprintln!("app host: permissionmgr: {method}: {why} {permission} for package {name}");
+            return Ok(Vec::new());
+        }
+        let flags = if granted {
+            old | RUNTIME_GRANTED
+        } else {
+            old & !RUNTIME_GRANTED
+        };
+        Ok(set_flags(new, ps.app_id, permission, flags))
+    }
+
+    /// `updatePermissionFlags` of a caller.
+    #[allow(clippy::too_many_arguments)]
+    fn update_permission_flags(
+        &self,
+        new: &mut AccessUser,
+        restrictions: &BTreeSet<String>,
+        caller: i32,
+        package: &str,
+        permission: &str,
+        (mut mask, mut values): (i32, i32),
+        check_adjust_policy: bool,
+        user: i32,
+    ) -> Result<Vec<FlagsChanged>, Exception> {
+        const METHOD: &str = "updatePermissionFlags";
+        if !self.user_exists(user) {
+            eprintln!("app host: permissionmgr: {METHOD}: Unknown user {user}");
+            return Ok(Vec::new());
+        }
+        self.enforce_cross_user_not_shell(caller, user, restrictions, METHOD)?;
+        self.enforce_any(
+            caller,
+            METHOD,
+            &[GRANT_RUNTIME_PERMISSIONS, REVOKE_RUNTIME_PERMISSIONS],
+        )?;
+        if !root_or_system(caller) && mask & FLAG_PERMISSION_POLICY_FIXED != 0 {
+            if check_adjust_policy {
+                self.enforce(
+                    caller,
+                    ADJUST_RUNTIME_PERMISSIONS_POLICY,
+                    &format!("Need {ADJUST_RUNTIME_PERMISSIONS_POLICY} to change policy flags"),
+                )?;
+            } else {
+                // `getUidTargetSdkVersion`: the lowest of the uid's
+                // packages.
+                let target = self
+                    .packages_of(apps_filter::app_id(caller))
+                    .iter()
+                    .filter_map(|ps| ps.pkg.as_ref().map(|pkg| pkg.target_sdk_version))
+                    .min()
+                    .unwrap_or(CUR_DEVELOPMENT);
+                if target >= Q {
+                    return Err(Exception::illegal_argument(format!(
+                        "{ADJUST_RUNTIME_PERMISSIONS_POLICY} needs to be checked for packages targeting {Q} or later when changing policy flags"
+                    )));
+                }
+            }
+        }
+        let Some((ps, pkg)) = self
+            .package(package, caller, user)?
+            .and_then(|ps| Some((ps, ps.pkg.as_deref()?)))
+        else {
+            eprintln!("app host: permissionmgr: {METHOD}: Unknown package {package}");
+            return Ok(Vec::new());
+        };
+        let requested = pkg.requested_permissions.iter().any(|r| r == permission)
+            || self.packages_of(ps.app_id).iter().any(|shared| {
+                shared
+                    .pkg
+                    .as_ref()
+                    .is_some_and(|p| p.requested_permissions.iter().any(|r| r == permission))
+            });
+        // Only the system changes these.
+        if !root_or_system(caller) {
+            mask &= !SYSTEM_ONLY_API_FLAGS;
+            values &= !SYSTEM_ONLY_API_FLAGS;
+        }
+        let definition = self.definition(permission).ok_or_else(|| {
+            Exception::illegal_argument(format!("Unknown permission {permission}"))
+        })?;
+        let old = new.permission_flags(ps.app_id, permission);
+        if !requested && old == 0 {
+            eprintln!(
+                "app host: permissionmgr: {METHOD}: Permission {permission} isn't requested by package {}",
+                ps.name
+            );
+            return Ok(Vec::new());
+        }
+        let info_flags = self.permission_info(definition).map_or(0, |i| i.flags);
+        let flags = update_flags(info_flags, old, mask, values);
+        Ok(set_flags(new, ps.app_id, permission, flags))
     }
 
     /// `checkPermission`.
@@ -794,6 +1138,9 @@ pub struct PermissionManager {
     host: Arc<AppHost>,
     groups: OnceLock<Vec<PermissionGroupInfo>>,
     listeners: Mutex<Vec<Binder>>,
+    /// User 0's access state as the service last changed it; the
+    /// persisted one until then. Held while it changes (`mutateState`).
+    user0: Mutex<Option<Arc<AccessUser>>>,
 }
 
 impl PermissionManager {
@@ -802,19 +1149,43 @@ impl PermissionManager {
             host,
             groups: OnceLock::new(),
             listeners: Mutex::new(Vec::new()),
+            user0: Mutex::new(None),
         }
+    }
+
+    /// User 0's access state, from `access.abx` until it changes.
+    fn user0(&self) -> Result<Arc<AccessUser>, Exception> {
+        let mut user0 = self.user0.lock().unwrap();
+        if let Some(state) = &*user0 {
+            return Ok(state.clone());
+        }
+        let state = Arc::new(
+            self.host
+                .inputs()?
+                .packages
+                .access()
+                .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no permission state of user 0"))?
+                .clone(),
+        );
+        *user0 = Some(state.clone());
+        Ok(state)
     }
 
     fn access<T>(
         &self,
         f: impl FnOnce(&Access<'_>) -> Result<T, Exception>,
     ) -> Result<T, Exception> {
+        let user0 = self.user0()?;
+        self.access_with(&user0, f)
+    }
+
+    fn access_with<T>(
+        &self,
+        user0: &AccessUser,
+        f: impl FnOnce(&Access<'_>) -> Result<T, Exception>,
+    ) -> Result<T, Exception> {
         let inputs = self.host.inputs()?;
         let (state, resolution) = self.host.packages()?;
-        let user0 = inputs
-            .packages
-            .access()
-            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no permission state of user 0"))?;
         f(&Access {
             state: &state,
             filter: &resolution.apps_filter,
@@ -823,6 +1194,203 @@ impl PermissionManager {
             user0,
             compat: &inputs.compat,
         })
+    }
+
+    /// `service.mutateState` of user 0's state: `change` decides the new
+    /// state from the current one; a changed state is written
+    /// (`AccessPersistence`), the package model's grants follow it, and
+    /// the flags-changed listener's effects run (`onStateMutated`): the
+    /// listeners told of each uid whose runtime permissions changed, and
+    /// a uid that lost one killed unless `kill` is none.
+    fn mutate(
+        &self,
+        kill: Option<&str>,
+        change: impl FnOnce(&Access<'_>, &mut AccessUser) -> Result<Vec<FlagsChanged>, Exception>,
+    ) -> Result<(), Exception> {
+        self.user0()?;
+        let mut held = self.user0.lock().unwrap();
+        let before = held.clone().expect("loaded");
+        let mut after = (*before).clone();
+        let changes = self.access_with(&before, |access| change(access, &mut after))?;
+        if changes.is_empty() {
+            return Ok(());
+        }
+        self.write_user0(&after)?;
+        let after = Arc::new(after);
+        *held = Some(after.clone());
+        drop(held);
+        self.grants_changed(&after, &changes)?;
+        self.on_state_mutated(&changes, kill)
+    }
+
+    /// `AccessPersistence.writeUserState` of user 0 through `AtomicFile`
+    /// with its reserve copy: the document as read with its
+    /// `<app-id-permissions>` written anew.
+    fn write_user0(&self, state: &AccessUser) -> Result<(), Exception> {
+        let fail = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{USER0_ACCESS}: {e}"));
+        let path = self.host.data()?.join(USER0_ACCESS);
+        let backup = path.with_extension("abx.bak");
+        let read = if backup.exists() { &backup } else { &path };
+        let bytes = std::fs::read(read).map_err(|e| fail(e.to_string()))?;
+        let root = aim_android_xml::read(&bytes).map_err(fail)?;
+        let root =
+            permissions::with_app_id_permissions(root, &state.app_id_permissions).map_err(fail)?;
+        let bytes = aim_android_xml::abx::write(&root).map_err(fail)?;
+        let owner = aim_storage::guest_inode::read(read)
+            .map_err(|e| fail(e.to_string()))?
+            .unwrap_or(aim_storage::guest_inode::GuestInode {
+                uid: Some(SYSTEM_UID as u32),
+                gid: Some(SYSTEM_UID as u32),
+                mode: Some(0o600),
+            });
+        let write = |to: &std::path::Path| -> std::io::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(to)?;
+            std::io::Write::write_all(&mut file, &bytes)?;
+            crate::fsync(&file)?;
+            aim_storage::guest_inode::record(to, owner)
+        };
+        let new = path.with_extension("abx.new");
+        write(&new)
+            .and_then(|()| std::fs::rename(&new, &path))
+            .and_then(|()| {
+                if backup.exists() {
+                    std::fs::remove_file(&backup)?;
+                }
+                Ok(())
+            })
+            .map_err(|e| fail(e.to_string()))?;
+        // `writeWithReserveCopy`: a failed reserve copy is only logged.
+        if let Err(e) = write(&path.with_extension("abx.reservecopy")) {
+            eprintln!("app host: permissionmgr: Failed to write the reserve copy: {e}");
+        }
+        Ok(())
+    }
+
+    /// The package model's grants of the app ids that changed, as the
+    /// package service reads them from the access state.
+    fn grants_changed(
+        &self,
+        state: &AccessUser,
+        changes: &[FlagsChanged],
+    ) -> Result<(), Exception> {
+        let (before, _) = self.host.packages()?;
+        let mut model = (*before).clone();
+        for ps in model.packages.values_mut() {
+            if !changes.iter().any(|c| c.app_id == ps.app_id) {
+                continue;
+            }
+            let granted = state
+                .app_id_permissions
+                .iter()
+                .find(|(id, _)| *id == ps.app_id)
+                .map(|(_, permissions)| {
+                    permissions
+                        .iter()
+                        .filter(|(_, flags)| permission_granted(*flags))
+                        .map(|(name, _)| name.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(user) = ps.users.get_mut(&0) {
+                user.granted_permissions = granted;
+            }
+        }
+        self.host.user_states_changed(&before, Arc::new(model))
+    }
+
+    /// `OnPermissionFlagsChangedListener.onStateMutated`.
+    fn on_state_mutated(
+        &self,
+        changes: &[FlagsChanged],
+        kill: Option<&str>,
+    ) -> Result<(), Exception> {
+        let mut changed = Vec::new();
+        // By uid, whether only notification permissions were revoked.
+        let mut revoked: BTreeMap<i32, bool> = BTreeMap::new();
+        self.access(|access| {
+            for c in changes {
+                let Some(definition) = access.definition(&c.permission) else {
+                    continue;
+                };
+                if !is_runtime(definition) {
+                    continue;
+                }
+                // User 0's uid is its app id.
+                let uid = c.app_id;
+                if permission_granted(c.old) && !permission_granted(c.new) {
+                    let only = revoked.get(&uid).copied().unwrap_or(true);
+                    revoked.insert(uid, c.permission == POST_NOTIFICATIONS && only);
+                }
+                if !changed.contains(&uid) {
+                    changed.push(uid);
+                }
+            }
+            Ok(())
+        })?;
+        let listeners = self.listeners.lock().unwrap().clone();
+        for uid in changed {
+            let mut data = Parcel::new();
+            data.write_interface_token(changed_listener::DESCRIPTOR);
+            data.write_i32(uid);
+            data.write_string16(Some(DEFAULT_DEVICE));
+            for listener in &listeners {
+                let sent = match *listener {
+                    Binder::Handle(handle) => self
+                        .host
+                        .process
+                        .transact(
+                            handle,
+                            changed_listener::ON_PERMISSIONS_CHANGED,
+                            &data,
+                            true,
+                        )
+                        .map(drop),
+                    Binder::Local(ptr) => match self.host.process.local_service(ptr) {
+                        Some(service) => service
+                            .transact(changed_listener::ON_PERMISSIONS_CHANGED, &data, true)
+                            .map(drop),
+                        None => Ok(()),
+                    },
+                };
+                if let Err(e) = sent {
+                    eprintln!(
+                        "app host: permissionmgr: Error when calling OnPermissionsChangeListener: {e:?}"
+                    );
+                }
+            }
+        }
+        let Some(reason) = kill else { return Ok(()) };
+        for (uid, only_notifications) in revoked {
+            if only_notifications && self.backup_and_restore_running(uid)? {
+                continue;
+            }
+            let host = self.host.clone();
+            let reason = reason.to_owned();
+            // `handler.post`: after the call.
+            std::thread::spawn(move || host.kill_uid_for_permission_change(uid as u32, &reason));
+        }
+        Ok(())
+    }
+
+    /// `isAppBackupAndRestoreRunning`: a uid holding BACKUP while its
+    /// user is in setup, or in deferred setup.
+    fn backup_and_restore_running(&self, uid: i32) -> Result<bool, Exception> {
+        if !self.access(|access| Ok(access.check_uid_permission(uid, BACKUP)? == GRANTED))? {
+            return Ok(false);
+        }
+        let settings = &self.host.inputs()?.settings;
+        // `getIntForUser`: a setting not set or not an int is none.
+        let int = |name: &str| {
+            settings
+                .get(super::settings::Table::Secure, name)
+                .and_then(|v| v.parse::<i32>().ok())
+        };
+        Ok(int("user_setup_complete") == Some(0)
+            || int("user_setup_personalization_state") == Some(USER_SETUP_PERSONALIZATION_STARTED))
     }
 
     /// `Context.checkPermission(permission, INVALID_PID, uid)` in the
@@ -1071,6 +1639,84 @@ impl Service for PermissionManager {
                     }
                 };
                 result.map(|result| parcel(|p| pm::write_check_uid_permission_reply(p, result)))
+            }
+            pm::GRANT_RUNTIME_PERMISSION | pm::REVOKE_RUNTIME_PERMISSION => {
+                let (method, package, permission, device, user, reason) =
+                    if call.code == pm::GRANT_RUNTIME_PERMISSION {
+                        let a = pm::GrantRuntimePermission::read(&mut call.data)
+                            .map_err(|_| BAD_VALUE)?;
+                        let (p, n, d) = (a.package_name, a.permission_name, a.persistent_device_id);
+                        ("grantRuntimePermission", p, n, d, a.user_id, None)
+                    } else {
+                        let a = pm::RevokeRuntimePermission::read(&mut call.data)
+                            .map_err(|_| BAD_VALUE)?;
+                        let (p, n, d) = (a.package_name, a.permission_name, a.persistent_device_id);
+                        (
+                            "revokeRuntimePermission",
+                            p,
+                            n,
+                            d,
+                            a.user_id,
+                            Some(a.reason),
+                        )
+                    };
+                (|| {
+                    let package = non_null(package.as_deref(), method, "packageName")?;
+                    let permission = non_null(permission.as_deref(), method, "permissionName")?;
+                    self.default_device(non_null(device.as_deref(), method, "deviceId")?)?;
+                    let restrictions = self.host.user_restrictions()?.clone();
+                    let granted = reason.is_none();
+                    // A revocation's reason, else the default one.
+                    let kill = reason
+                        .flatten()
+                        .unwrap_or_else(|| KILL_APP_REASON_PERMISSIONS_REVOKED.to_owned());
+                    self.mutate(Some(&kill), |access, new| {
+                        access.set_runtime_permission_granted(
+                            new,
+                            &restrictions,
+                            caller,
+                            package,
+                            permission,
+                            user,
+                            granted,
+                        )
+                    })
+                })()
+                .map(|()| {
+                    if call.code == pm::GRANT_RUNTIME_PERMISSION {
+                        parcel(pm::write_grant_runtime_permission_reply)
+                    } else {
+                        parcel(pm::write_revoke_runtime_permission_reply)
+                    }
+                })
+            }
+            pm::UPDATE_PERMISSION_FLAGS => {
+                let a = pm::UpdatePermissionFlags::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                const METHOD: &str = "updatePermissionFlags";
+                (|| {
+                    let package = non_null(a.package_name.as_deref(), METHOD, "packageName")?;
+                    let permission =
+                        non_null(a.permission_name.as_deref(), METHOD, "permissionName")?;
+                    self.default_device(non_null(
+                        a.persistent_device_id.as_deref(),
+                        METHOD,
+                        "deviceId",
+                    )?)?;
+                    let restrictions = self.host.user_restrictions()?.clone();
+                    self.mutate(Some(KILL_APP_REASON_PERMISSIONS_REVOKED), |access, new| {
+                        access.update_permission_flags(
+                            new,
+                            &restrictions,
+                            caller,
+                            package,
+                            permission,
+                            (a.flag_mask, a.flag_values),
+                            a.check_adjust_policy_flag_permission,
+                            a.user_id,
+                        )
+                    })
+                })()
+                .map(|()| parcel(pm::write_update_permission_flags_reply))
             }
             code => {
                 let name = pm::METHODS
@@ -1534,6 +2180,148 @@ mod tests {
         let groups = permission_groups(&state);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].item.package_name.as_deref(), Some("system"));
+    }
+
+    /// The fixture with uid 1041 holding the grant permissions but not
+    /// ADJUST_RUNTIME_PERMISSIONS_POLICY, and `android` the permission
+    /// controller.
+    fn with_writable_access<T>(f: impl FnOnce(&Access<'_>, &mut AccessUser) -> T) -> T {
+        let (mut state, defined, user0) = fixture();
+        state.system.permission_controller_package = Some(Some("android".into()));
+        state.system.system_permissions = Some(BTreeMap::from([(
+            1041,
+            BTreeSet::from([
+                GRANT_RUNTIME_PERMISSIONS.to_string(),
+                REVOKE_RUNTIME_PERMISSIONS.to_string(),
+            ]),
+        )]));
+        let groups = permission_groups(&state);
+        let filter = AppsFilter::default();
+        let compat = CompatConfig::default();
+        let mut new = user0.clone();
+        f(
+            &Access {
+                state: &state,
+                filter: &filter,
+                defined: &defined,
+                groups: &groups,
+                user0: &user0,
+                compat: &compat,
+            },
+            &mut new,
+        )
+    }
+
+    /// CtsPermissionTestCases' `GrantRuntimePermissionTest` and
+    /// `RevokeRuntimePermissionTest` shapes: the caller needs the grant or
+    /// revoke permission; a runtime permission's grant keeps its other
+    /// flags; policy-fixed ones need ADJUST_RUNTIME_PERMISSIONS_POLICY; a
+    /// permission that is not runtime cannot change; an unknown package
+    /// changes nothing.
+    #[test]
+    fn runtime_permissions_are_granted_and_revoked() {
+        let none = BTreeSet::new();
+        with_writable_access(|a, new| {
+            let grant = |new: &mut AccessUser, caller, package, permission, granted| {
+                a.set_runtime_permission_granted(
+                    new, &none, caller, package, permission, 0, granted,
+                )
+            };
+            let err = grant(new, 10_001, "asked", CAMERA, true).unwrap_err();
+            assert!(
+                err.message.contains("GRANT_RUNTIME_PERMISSIONS"),
+                "{}",
+                err.message
+            );
+            let changed = grant(new, 1041, "asked", CAMERA, true).unwrap();
+            assert_eq!(
+                (changed[0].old, changed[0].new),
+                (USER_SET, USER_SET | RUNTIME_GRANTED)
+            );
+            assert!(grant(new, 1041, "asked", CAMERA, true).unwrap().is_empty());
+            // Policy fixed: refused without the policy permission, not for
+            // the system.
+            assert!(grant(new, 1041, "denied", CAMERA, true).unwrap().is_empty());
+            assert_eq!(grant(new, 1000, "denied", CAMERA, true).unwrap().len(), 1);
+            let err = grant(new, 1041, "asked", INTERNET, true).unwrap_err();
+            assert!(err.message.contains("not a changeable permission type"));
+            assert!(
+                grant(new, 1041, "missing", CAMERA, true)
+                    .unwrap()
+                    .is_empty()
+            );
+            let changed = grant(new, 1041, "granted", CAMERA, false).unwrap();
+            assert_eq!(changed[0].new, USER_SET);
+            assert_eq!(new.permission_flags(10_001, CAMERA), USER_SET);
+            let shell = BTreeSet::from([DISALLOW_DEBUGGING_FEATURES.to_string()]);
+            let err = a
+                .set_runtime_permission_granted(new, &shell, 2000, "asked", CAMERA, 0, true)
+                .unwrap_err();
+            assert!(
+                err.message.contains("Shell is disallowed"),
+                "{}",
+                err.message
+            );
+        });
+    }
+
+    /// `updatePermissionFlags`: the API flags of the mask set, the
+    /// system's flags only the system's to change, policy flags only with
+    /// ADJUST_RUNTIME_PERMISSIONS_POLICY.
+    #[test]
+    fn permission_flags_are_updated() {
+        const FLAG_USER_SET: i32 = 1 << 0;
+        const FLAG_USER_FIXED: i32 = 1 << 1;
+        const FLAG_SYSTEM_FIXED: i32 = 1 << 4;
+        let none = BTreeSet::new();
+        with_writable_access(|a, new| {
+            let update = |new: &mut AccessUser, caller, mask, values, adjust| {
+                a.update_permission_flags(
+                    new,
+                    &none,
+                    caller,
+                    "asked",
+                    CAMERA,
+                    (mask, values),
+                    adjust,
+                    0,
+                )
+            };
+            let changed = update(
+                new,
+                1041,
+                FLAG_USER_SET | FLAG_USER_FIXED,
+                FLAG_USER_FIXED,
+                true,
+            )
+            .unwrap();
+            assert_eq!((changed[0].old, changed[0].new), (USER_SET, USER_FIXED));
+            // Ignored for an app.
+            assert!(
+                update(new, 1041, FLAG_SYSTEM_FIXED, FLAG_SYSTEM_FIXED, true)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                update(new, 1000, FLAG_SYSTEM_FIXED, FLAG_SYSTEM_FIXED, true).unwrap()[0].new,
+                USER_FIXED | SYSTEM_FIXED
+            );
+            let err = update(new, 1041, FLAG_PERMISSION_POLICY_FIXED, 0, true).unwrap_err();
+            assert!(
+                err.message.contains("to change policy flags"),
+                "{}",
+                err.message
+            );
+        });
+        assert_eq!(
+            update_flags(
+                FLAG_HARD_RESTRICTED,
+                RUNTIME_GRANTED,
+                FLAG_PERMISSION_APPLY_RESTRICTION,
+                FLAG_PERMISSION_APPLY_RESTRICTION
+            ),
+            RUNTIME_GRANTED | RESTRICTION_REVOKED
+        );
     }
 
     /// The parcels as `PermissionInfo`, `PermissionGroupInfo` and
