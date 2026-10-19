@@ -85,22 +85,28 @@ past the services their main threads waited for (`performance_hint`,
 past `TrafficStats` (`netstats getUidStats` reads netd's per-uid map, which
 the Linux layer's socket accounting fills): Maps gets past its terms
 (WebView) and its sign-in page to its Explore screen, whose map draws no
-tiles (#1743); the AOSP Camera app fails on a Mac without a camera, which
+tiles: none is requested (#1743); the AOSP Camera app fails on a Mac without a camera, which
 no longer declares one (#646). Gmail draws its welcome page and its
 add-an-address page; Calendar its month view (Play services' account
 sign-in starts from its add-account session and shows its Google
 sign-in page); Chrome draws its first-run screen with its renderer in an
 isolated process, and past it starts its tabbed activity, which publishes
 its dynamic shortcut, draws its new tab page with its Discover feed,
-and opens and draws web pages (its renderers in isolated processes);
+and opens and draws web pages (its renderers in isolated processes); its
+GPU process no longer dies every few minutes on `getProcessMemoryInfo`,
+which the app host now measures from the guest's `smaps` (2026-10-20);
 YouTube Music gets its system routes and registers its router, and its
 discovery binds Play services' route provider, which the app host now
 serves but has not yet been run with YouTube Music (#1663); Messages
 draws its
 welcome page in WebView, its renderer started by the WebView zygote;
 Contacts draws its empty contact list (appwidget, content trigger jobs);
-Drive and Play Store reach their sign-in pages (Play Store's own sign-in
-button does not answer yet). Play services' persistent process gets its
+Drive and Play Store reach their sign-in pages, and Play Store's
+downloads start in DownloadProvider (its jobs get their network,
+`allocateBytes`; 2026-10-20). The Google app gets past its splash to its
+search page. Settings' home shows the storage used and free
+(`storagestats`); its storage page stops at cache quotas, which need
+usage stats (#1824, #1723). Play services' persistent process gets its
 installed modules, Wi-Fi scan results (none, the Mac's radio being off),
 statsd, DeviceConfig writes, usb, Safety Center and app op mode watches;
 AppSearch is the original module, run by the app host's `aim-appsearch`
