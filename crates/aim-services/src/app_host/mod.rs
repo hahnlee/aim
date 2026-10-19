@@ -51,6 +51,7 @@ pub mod keychars;
 pub mod media_router;
 pub mod memory_info;
 pub mod kept;
+pub mod netpolicy_service;
 pub mod netstats;
 pub mod network;
 mod network_native;
@@ -498,6 +499,7 @@ impl AppHost {
             ("performance_hint", Arc::new(hint_manager::HintManager::new(self.clone()))),
             ("sensorservice", Arc::new(sensor_service::SensorService)),
             ("wifi", Arc::new(wifi_service::WifiService::new(self.clone()))),
+            ("netpolicy", Arc::new(netpolicy_service::NetworkPolicy::new(self.clone()))),
             ("role", self.role_service.get_or_init(|| Arc::new(role_service::RoleManager::new(self.clone()))).clone()),
             ("settings", Arc::new(settings_service::SettingsService::new(self.clone(), settings))),
             (

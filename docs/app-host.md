@@ -44,6 +44,7 @@ and boot are unchanged.
 | `performance_hint` | the host, same | HintManagerService's client data (`app_host/hint_manager.rs`), which every process's `APerformanceHintManager` waits for without a timeout: the Power HAL's version, preferred rate and support info as the service reads them at its start; hint sessions, channels and headroom: #1689 |
 | `sensorservice` | the host, same | SensorService as a device without a sensors HAL has it (`app_host/sensor_service.rs`), which `SensorManager` waits for: no sensors, `NORMAL` mode; connections: #1692 |
 | `wifi` | the host, same | WifiServiceImpl over the Mac's Wi-Fi (`app_host/wifi_service.rs`, `crates/aim-host-wifi`: CoreWLAN): the Mac's radio is the Wi-Fi state, the verbose logging level and scanning always available come from the shared config store (`WifiConfigStore.xml`), and with the radio off there is no connection; the Mac's connection, scans and the rest: #1686 |
+| `netpolicy` | the host, same | NetworkPolicyManagerService's reads (`app_host/netpolicy_service.rs`): Data Saver and the uids' policies as `readPolicyAL` read them from `netpolicy.xml` (its allowlist after the policy list, as `writePolicyAL` writes it); listeners are taken and never told, as nothing changes; writes and network policies: #1711 |
 | `aim.app_host` | the host, same | `startActivity(String)` (code 1: a component, `package/.Class`, or a package, whose launch activity it resolves) for the shell and `aimctl open` |
 
 The start arguments, the configuration and the compat changes follow the
