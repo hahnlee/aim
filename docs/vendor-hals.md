@@ -90,10 +90,11 @@ and honest:
   feature, since neither sensor is on every Mac. At boot guest-init reads
   the sensors as the HAL does and reports the SKU
   (`androidboot.product.vendor.sku`, `crates/aim-guest-init/src/sku.rs`):
-  `light`, `hinge` or `light_hinge`, or none on a Mac with neither.
+  `light`, `hinge` or `light_hinge`, or none on a Mac with neither, and a
+  `front` part for a built-in camera (docs/camera.md).
   SystemConfig then adds the features in
-  `/vendor/etc/permissions/sku_<sku>/`: `android.hardware.sensor.light`
-  and `android.hardware.sensor.hinge_angle`.
+  `/vendor/etc/permissions/sku_<sku>/`: `android.hardware.sensor.light`,
+  `android.hardware.sensor.hinge_angle` and the front camera's.
 - Both are on-change and not wake-up sensors. While one is active, a poller
   reads the host at the requested rate (between 200 ms and 1 s) and writes
   an event when a value changes, and once on activation. `flush` writes

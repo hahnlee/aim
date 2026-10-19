@@ -22,11 +22,12 @@
      whose SKU's directory declares them (docs/vendor-hals.md), and nothing
      backs the others. Without picture-in-picture: the lightweight shell
      has no PiP (docs/m1-shell.md, D3), and apps check the feature before
-     they ask for it. -->
+     they ask for it. Without android.hardware.camera, a rear camera, which
+     no Mac has; a Mac's built-in camera is a front one, declared by its SKU
+     (docs/camera.md). -->
 <permissions>
     <feature name="android.hardware.audio.output" />
     <feature name="android.hardware.bluetooth" />
-    <feature name="android.hardware.camera" />
     <feature name="android.hardware.location" />
     <feature name="android.hardware.location.gps" />
     <feature name="android.hardware.location.network" />

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A Mac with a built-in camera, which faces its user: the camera provider
+     lists it as the front camera (docs/camera.md), and the overlay puts this
+     file in the SKUs that have it (crates/aim-guest-init/src/sku.rs). The
+     features of AOSP's android.hardware.camera.front.xml. -->
+<permissions>
+    <feature name="android.hardware.camera.any" />
+    <feature name="android.hardware.camera.front" />
+</permissions>
