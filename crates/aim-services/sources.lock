@@ -297,7 +297,7 @@ INTERFACES=(
   "android.app.ILocaleManager|system/framework/framework.jar|setApplicationLocales,getApplicationLocales,getSystemLocales,getOverrideLocaleConfig"
   "android.app.IGrammaticalInflectionManager|system/framework/framework.jar|setRequestedApplicationGrammaticalGender,setSystemWideGrammaticalGender,getSystemGrammaticalGender,peekSystemGrammaticalGenderByUserId"
   "android.hardware.usb.IUsbManager|system/framework/framework.jar|*"
-  "android.safetycenter.ISafetyCenterManager|apex/com.android.permission/javalib/framework-permission-s.jar|isSafetyCenterEnabled,setSafetySourceData,getSafetyCenterConfig"
+  "android.safetycenter.ISafetyCenterManager|apex/com.android.permission/javalib/framework-permission-s.jar|isSafetyCenterEnabled,setSafetySourceData,getSafetySourceData,reportSafetySourceError,getSafetyCenterConfig"
   "com.android.internal.appwidget.IAppWidgetService|system/framework/framework.jar|*"
   "android.app.usage.IUsageStatsManager|system/framework/framework.jar|isAppStandbyEnabled,isAppInactive,getAppStandbyBucket"
   "android.webkit.IWebViewUpdateService|system/framework/framework.jar|notifyRelroCreationCompleted,waitForAndGetProvider,getValidWebViewPackages,getAllWebViewPackages,getCurrentWebViewPackageName,getCurrentWebViewPackage,getDefaultWebViewPackage"
