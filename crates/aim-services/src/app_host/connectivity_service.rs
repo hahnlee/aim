@@ -664,11 +664,11 @@ fn mac_network() -> Option<(Uplink, Vec<Ipv4Addr>)> {
 }
 
 impl ConnectivityService {
-    /// The default network's capabilities as the system's own callers see
-    /// them (JobScheduler's `ConnectivityController`); none while the Mac
-    /// has no network.
-    pub(super) fn default_network(&self) -> Option<NetworkCapabilities> {
-        self.shared.state.lock().unwrap().network.as_ref().map(|_| network_capabilities())
+    /// The default network and its capabilities as the system's own
+    /// callers see them (JobScheduler's `ConnectivityController`); none
+    /// while the Mac has no network.
+    pub(super) fn default_network(&self) -> Option<(Network, NetworkCapabilities)> {
+        self.shared.state.lock().unwrap().network.as_ref().map(|n| (Network(n.id), network_capabilities()))
     }
 
     /// Whether netd has registered and been given its interface
