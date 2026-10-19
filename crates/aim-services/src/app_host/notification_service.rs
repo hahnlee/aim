@@ -528,10 +528,14 @@ impl NotificationManager {
         Ok(guard)
     }
 
-    /// `getAutomaticZenRules` (`enforcePolicyAccess`, then the rules
-    /// `canManageAutomaticZenRule` lets `uid` see). The app host runs user
-    /// 0 alone, the zen user of every caller (`getCallingZenUser`).
-    fn automatic_zen_rules(&self, uid: i32) -> Result<Vec<zen_config::AzrWithId>, Exception> {
+    /// The rules `uid` may see after `enforcePolicyAccess(uid, method)`:
+    /// those `canManageAutomaticZenRule` lets it manage. The app host runs
+    /// user 0 alone, the zen user of every caller (`getCallingZenUser`).
+    fn manageable_zen_rules(
+        &self,
+        uid: i32,
+        method: &str,
+    ) -> Result<Vec<zen_config::ZenRule>, Exception> {
         let manage = self
             .host
             .check_permission(Some("android.permission.MANAGE_NOTIFICATIONS"), uid)?
@@ -545,10 +549,10 @@ impl NotificationManager {
                 .iter()
                 .any(|p| zen_config::policy_access_approved(policy, p, user))
         {
-            eprintln!("app host: Notification policy access denied calling getAutomaticZenRules");
+            eprintln!("app host: Notification policy access denied calling {method}");
             return Err(Exception::security("Notification policy access denied"));
         }
-        let rules = zen_config::read(policy)?
+        Ok(zen_config::read(policy)?
             .rules()
             .into_iter()
             .filter(|r| {
@@ -557,8 +561,26 @@ impl NotificationManager {
                     || manage
                     || r.pkg.as_ref().is_some_and(|p| packages.contains(p))
             })
-            .collect();
-        zen_config::automatic_zen_rules(rules)
+            .collect())
+    }
+
+    /// `getAutomaticZenRules`.
+    fn automatic_zen_rules(&self, uid: i32) -> Result<Vec<zen_config::AzrWithId>, Exception> {
+        zen_config::automatic_zen_rules(self.manageable_zen_rules(uid, "getAutomaticZenRules")?)
+    }
+
+    /// `getAutomaticZenRule`: the rule of `id`, if `uid` may manage it.
+    fn automatic_zen_rule(
+        &self,
+        uid: i32,
+        id: Option<&str>,
+    ) -> Result<Option<zen_config::AutomaticZenRule>, Exception> {
+        let id = id.ok_or_else(|| Exception::new(EX_NULL_POINTER, "Id is null"))?;
+        self.manageable_zen_rules(uid, "getAutomaticZenRule")?
+            .into_iter()
+            .find(|r| r.id.as_deref() == Some(id))
+            .map(zen_config::automatic_zen_rule)
+            .transpose()
     }
 
     /// `getZenModeConfig`: the system or the phone, else STATUS_BAR_SERVICE.
@@ -2437,6 +2459,17 @@ impl Service for NotificationManager {
                                     rules,
                                 )),
                             );
+                            p
+                        }),
+                )
+            }
+            nm::GET_AUTOMATIC_ZEN_RULE => {
+                let a = nm::GetAutomaticZenRule::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(
+                    self.automatic_zen_rule(call.sender_euid as i32, a.id.as_deref())
+                        .map(|rule| {
+                            let mut p = Parcel::new();
+                            nm::write_get_automatic_zen_rule_reply(&mut p, rule.as_ref());
                             p
                         }),
                 )
