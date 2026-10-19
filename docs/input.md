@@ -314,6 +314,11 @@ runs: the app host's native InputMethodManager makes the Mac's input
 method the input method (the owner's choice, 2026-10-17; option A below
 without the APK).
 
+- **No Android input method.** To Android the device has a physical
+  keyboard and no input method: `getInputMethodList`,
+  `getEnabledInputMethodList` and their legacy forms are empty, whatever
+  the installed IMEs and the settings say (the owner's choice,
+  2026-10-19).
 - **Which window types.** An editor's start
   (`startInputOrWindowGainedFocusAsync` with an `EditorInfo` and an input
   connection) is told to the display server on the app host's text input

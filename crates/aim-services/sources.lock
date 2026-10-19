@@ -163,7 +163,7 @@ INTERFACES=(
   "android.app.IAppTask|system/framework/framework.jar|getTaskInfo"
   "android.content.om.IOverlayManager|system/framework/framework.jar|getOverlayInfosForTarget"
   "android.hardware.input.IInputManager|system/framework/framework.jar|getVelocityTrackerStrategy,getInputDevice,getInputDeviceIds,registerInputDevicesChangedListener"
-  "com.android.internal.view.IInputMethodManager|system/framework/framework.jar|addClient,showSoftInput,hideSoftInput,getImeTrackerService"
+  "com.android.internal.view.IInputMethodManager|system/framework/framework.jar|addClient,getInputMethodList,getEnabledInputMethodList,getInputMethodListLegacy,getEnabledInputMethodListLegacy,showSoftInput,hideSoftInput,getImeTrackerService"
   "com.android.internal.inputmethod.IImeTracker|system/framework/framework.jar|onStart"
   "android.os.IPermissionController|system/framework/framework.jar|*"
   "android.app.IApplicationThread|system/framework/framework.jar|bindApplication,scheduleTransaction,setProcessState,scheduleExit,scheduleRegisteredReceiver,scheduleCreateService,scheduleServiceArgs,scheduleBindService,scheduleUnbindService,scheduleStopService,scheduleInstallProvider,unstableProviderDied,scheduleReceiver,updateTimeZone,scheduleCrash"
