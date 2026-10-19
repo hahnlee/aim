@@ -49,7 +49,12 @@ impl MakeUidVisible {
             filter: query.filter,
             calling_uid: 1000,
         };
+        // `getPackage(uid)`: the setting of the uid's app id, which an
+        // isolated uid has none of.
         let package = |uid| -> Result<Option<&super::model::PackageState>, NotModelled> {
+            if apps_filter::is_isolated(uid) {
+                return Ok(None);
+            }
             Ok(system
                 .packages_for_uid(uid)?
                 .unwrap_or_default()

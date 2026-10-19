@@ -80,14 +80,14 @@ gets `getVolumes`. Settings, Clock and Safety draw. Maps and Camera got
 past the services their main threads waited for (`performance_hint`,
 `sensorservice`; cameraserver now starts with the camera provider), and
 past `TrafficStats` (`netstats getUidStats` reads netd's per-uid map, which
-the Linux layer's socket accounting fills): Maps draws its welcome screen
-and, once its terms are accepted, stops at WebView (#1491); Camera at a
-Mac without a camera (#646). Gmail stops at `getAccountsByFeatures`
+the Linux layer's socket accounting fills): Maps gets past its terms
+(WebView) to its sign-in page, whose Skip does not answer yet; Camera at
+a Mac without a camera (#646). Gmail stops at `getAccountsByFeatures`
 (#1504); Chrome draws its first-run screen with its renderer in an
 isolated process, and past it starts its tabbed activity, which stops at
-`addDynamicShortcuts` (shortcut writes, #1669); Messages loads WebView
-(its RELRO made at the provider's preparation) and stops at its renderer, an
-external isolated service (#1492); the Google apps at Play services (#1673, #1623, #1504).
+`addDynamicShortcuts` (shortcut writes, #1669); Messages draws its
+welcome page in WebView, its renderer started by the WebView zygote; the
+Google apps stop at Play services (#1673, #1623, #1504).
 
 ## Native system services (2026-09-29, ADR 0013)
 

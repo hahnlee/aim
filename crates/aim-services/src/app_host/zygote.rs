@@ -30,7 +30,9 @@ pub struct Start {
     pub seinfo: String,
     pub instruction_set: Option<String>,
     pub app_data_dir: Option<String>,
-    pub package_name: String,
+    /// `--start-child-zygote`.
+    pub start_child_zygote: bool,
+    pub package_name: Option<String>,
     pub is_top_app: bool,
     /// App data isolation (`ProcessList.startProcess`): the app's packages'
     /// and the allowlisted ones' volume and CE data inode, in their
@@ -41,8 +43,17 @@ pub struct Start {
     pub bind_mount_app_storage_dirs: bool,
     pub bind_mount_app_data_dirs: bool,
     pub disabled_compat_changes: Vec<i64>,
-    /// `ProcessList.PROC_START_SEQ_IDENT` and the start's sequence number.
-    pub start_seq: i64,
+    /// The class whose `main` runs (`android.app.ActivityThread` for an
+    /// app), and the arguments after it: an app's start sequence
+    /// (`ProcessList.PROC_START_SEQ_IDENT`), a child zygote's socket.
+    pub process_class: String,
+    pub extra_args: Vec<String>,
+}
+
+/// `ActivityThread`, and its argument `PROC_START_SEQ_IDENT` for a start.
+pub const ACTIVITY_THREAD: &str = "android.app.ActivityThread";
+pub fn start_seq_arg(seq: i64) -> String {
+    format!("seq={seq}")
 }
 
 /// A package's data: its name, its volume's UUID, its CE data inode.
@@ -92,7 +103,12 @@ impl Start {
         if let Some(dir) = &self.app_data_dir {
             args.push(format!("--app-data-dir={dir}"));
         }
-        args.push(format!("--package-name={}", self.package_name));
+        if self.start_child_zygote {
+            args.push("--start-child-zygote".into());
+        }
+        if let Some(package) = &self.package_name {
+            args.push(format!("--package-name={package}"));
+        }
         if self.is_top_app {
             args.push("--is-top-app".into());
         }
@@ -116,8 +132,8 @@ impl Start {
                 .collect();
             args.push(format!("--disabled-compat-changes={}", ids.join(",")));
         }
-        args.push("android.app.ActivityThread".into());
-        args.push(format!("seq={}", self.start_seq));
+        args.push(self.process_class.clone());
+        args.extend(self.extra_args.iter().cloned());
         args
     }
 }
@@ -148,6 +164,27 @@ pub struct Session {
 impl Session {
     pub fn new(stream: UnixStream) -> Self {
         Session { stream }
+    }
+
+    /// A session with the child zygote on abstract socket `name`, through
+    /// the relay (its connection's first line names it).
+    pub fn child(mut stream: UnixStream, name: &str) -> io::Result<Self> {
+        if name.contains('\n') {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "embedded newline"));
+        }
+        stream.write_all(format!("@{name}\n").as_bytes())?;
+        Ok(Session { stream })
+    }
+
+    /// `ZygoteProcess.preloadApp`: the application of `info` (its
+    /// `ApplicationInfo` parcel) preloaded, as zygote answers (`1` when
+    /// it did).
+    pub fn preload_app(&mut self, info_parcel: &[u8]) -> io::Result<i32> {
+        let encoded = aim_android_xml::base64::encode(info_parcel);
+        self.stream.write_all(format!("2\n--preload-app\n{encoded}\n").as_bytes())?;
+        let mut reply = [0u8; 4];
+        self.stream.read_exact(&mut reply)?;
+        Ok(i32::from_be_bytes(reply))
     }
 
     /// Starts `start`: the new process's pid, as zygote answers it (a
@@ -181,14 +218,16 @@ mod tests {
             seinfo: "default:targetSdkVersion=35:complete".into(),
             instruction_set: Some("arm64".into()),
             app_data_dir: Some("/data/user/0/com.android.calculator2".into()),
-            package_name: "com.android.calculator2".into(),
+            start_child_zygote: false,
+            package_name: Some("com.android.calculator2".into()),
             is_top_app: true,
             pkg_data_info: vec![DataInfo { package: "com.android.calculator2".into(), volume_uuid: None, ce_data_inode: 4242 }],
             allowlisted_data_info: vec![DataInfo { package: "com.google.android.gms".into(), volume_uuid: None, ce_data_inode: 77 }],
             bind_mount_app_storage_dirs: false,
             bind_mount_app_data_dirs: true,
             disabled_compat_changes: vec![1, 2],
-            start_seq: 7,
+            process_class: ACTIVITY_THREAD.into(),
+            extra_args: vec![start_seq_arg(7)],
         }
     }
 

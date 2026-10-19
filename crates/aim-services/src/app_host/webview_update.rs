@@ -8,9 +8,10 @@
 //! (`waitForAndGetProvider`), which makes the provider visible to it.
 //!
 //! The provider is prepared (`prepareWebViewInSystemServer`) when the
-//! service is first asked. Changing the provider, package changes, the
-//! repair of a default provider not installed for every user, pinning its
-//! files and the WebView zygote are not implemented (#1491).
+//! service is first asked, and the WebView zygote started once its RELRO
+//! files are made (`webview_zygote`). Changing the provider, package
+//! changes, the repair of a default provider not installed for every user
+//! and pinning its files are not implemented (#1491).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Condvar, Mutex};
@@ -142,13 +143,14 @@ pub struct WebViewUpdate {
     /// The configured providers, read once; and whether the provider was
     /// prepared.
     providers: std::sync::OnceLock<Vec<Provider>>,
-    state: Mutex<Option<State>>,
-    ready: Condvar,
+    /// The state, and its change (relro files finished), shared with the
+    /// thread that starts the WebView zygote once they are.
+    shared: Arc<(Mutex<Option<State>>, Condvar)>,
 }
 
 impl WebViewUpdate {
     pub fn new(host: Arc<AppHost>) -> Self {
-        WebViewUpdate { host, providers: std::sync::OnceLock::new(), state: Mutex::new(None), ready: Condvar::new() }
+        WebViewUpdate { host, providers: std::sync::OnceLock::new(), shared: Arc::new((Mutex::new(None), Condvar::new())) }
     }
 
     fn providers(&self) -> Result<&[Provider], Exception> {
@@ -251,13 +253,24 @@ impl WebViewUpdate {
     /// The state, the provider prepared first (`prepareWebViewInSystemServer`,
     /// then `onWebViewProviderChanged`: its RELRO files made).
     fn state(&self) -> Result<std::sync::MutexGuard<'_, Option<State>>, Exception> {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.shared.0.lock().unwrap();
         if guard.is_none() {
             let mut state = State::default();
             match self.preferred()? {
                 Some(info) => {
                     state.any_installed = true;
                     (state.relros_started, state.relros_finished) = self.create_relros(&info);
+                    // `WebViewZygote.onWebViewProviderChanged`, then
+                    // `startZygoteWhenReady`: the zygote started once the
+                    // RELRO files are made, or the wait for them ends.
+                    if let Some(app) = &info.application_info {
+                        self.host.webview_provider_changed(app.clone());
+                    }
+                    let (host, shared) = (self.host.clone(), self.shared.clone());
+                    std::thread::spawn(move || {
+                        wait_ready(&shared);
+                        host.ensure_webview_zygote();
+                    });
                     state.current = Some(info);
                 }
                 None => eprintln!("app host: webviewupdate: Could not find a loadable WebView package"),
@@ -292,16 +305,8 @@ impl WebViewUpdate {
     /// `waitForAndGetProvider`: the provider once its RELRO files are made,
     /// waiting at most `WAIT_TIMEOUT`.
     fn wait_for_and_get_provider(&self, caller: i32) -> Result<(Option<PackageInfo>, i32), Exception> {
-        let deadline = Instant::now() + WAIT_TIMEOUT;
-        let mut guard = self.state()?;
-        let ready = |s: &State| !s.dirty && s.relros_started == s.relros_finished && s.any_installed;
-        while !ready(guard.as_ref().unwrap()) {
-            let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
-            guard = self.ready.wait_timeout(guard, deadline - now).unwrap().0;
-        }
+        drop(self.state()?);
+        let guard = wait_ready(&self.shared);
         let s = guard.as_ref().unwrap();
         let status = if ready(s) {
             LIBLOAD_SUCCESS
@@ -329,11 +334,31 @@ impl WebViewUpdate {
         if caller != SHARED_RELRO_UID as i32 && caller != SYSTEM_UID {
             return;
         }
-        if let Some(s) = self.state.lock().unwrap().as_mut() {
+        if let Some(s) = self.shared.0.lock().unwrap().as_mut() {
             s.relros_finished += 1;
         }
-        self.ready.notify_all();
+        self.shared.1.notify_all();
     }
+}
+
+/// `webViewIsReadyLocked`.
+fn ready(s: &State) -> bool {
+    !s.dirty && s.relros_started == s.relros_finished && s.any_installed
+}
+
+/// The state once the provider is ready, waiting for it at most
+/// `WAIT_TIMEOUT` (`waitForAndGetProvider`'s wait).
+fn wait_ready(shared: &(Mutex<Option<State>>, Condvar)) -> std::sync::MutexGuard<'_, Option<State>> {
+    let deadline = Instant::now() + WAIT_TIMEOUT;
+    let mut guard = shared.0.lock().unwrap();
+    while guard.as_ref().is_some_and(|s| !ready(s)) {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        guard = shared.1.wait_timeout(guard, deadline - now).unwrap().0;
+    }
+    guard
 }
 
 /// `WebViewFactory.getWebViewLibrary`: its meta-data's library.
