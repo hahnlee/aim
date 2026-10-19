@@ -648,6 +648,15 @@ impl Service for AppWidgetService {
                     Ok(())
                 })()
             }
+            // `computeMaximumWidgetBitmapMemory` at the service's start:
+            // 1.5 times the default display's real size at 4 bytes a pixel.
+            aw::GET_MAX_BITMAP_MEMORY => {
+                aw::GetMaxBitmapMemory::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.host.display().map(|display| {
+                    let (width, height) = (display.0.width, display.0.height);
+                    aw::write_get_max_bitmap_memory_reply(&mut p, 6 * width * height);
+                })
+            }
             aw::IS_REQUEST_PIN_APP_WIDGET_SUPPORTED => {
                 aw::IsRequestPinAppWidgetSupported::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
