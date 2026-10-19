@@ -92,6 +92,11 @@ pub struct SystemConfig {
     /// retain insertion order). Settings validates their registration.
     pub oem_defined_uids: Vec<(String, i32)>,
     pub rejected_oem_uids: Vec<RejectedOemUid>,
+    /// `<enhanced-confirmation-trusted-package>` and `-installer`: package
+    /// and SHA-256 certificate digest, each once (an `ArraySet`). They are
+    /// kept with `enhanced_confirmation_mode_apis_enabled` (`system`).
+    pub ecm_trusted_packages: Vec<(String, Vec<u8>)>,
+    pub ecm_trusted_installers: Vec<(String, Vec<u8>)>,
     unavailable: Vec<String>,
 }
 
@@ -445,6 +450,19 @@ impl SystemConfig {
                         self.hidden_api_allowlist.push(package.into_owned());
                     }
                 }
+                "enhanced-confirmation-trusted-package"
+                | "enhanced-confirmation-trusted-installer" => {
+                    if let Some(signed) = signed_package(&e) {
+                        let set = if e.name == "enhanced-confirmation-trusted-package" {
+                            &mut self.ecm_trusted_packages
+                        } else {
+                            &mut self.ecm_trusted_installers
+                        };
+                        if !set.contains(&signed) {
+                            set.push(signed);
+                        }
+                    }
+                }
                 // Any directory may name actors; a duplicate or one in the
                 // android namespace stops the original's system server.
                 "named-actor" => {
@@ -623,6 +641,25 @@ fn fallback_categories(
 /// name.
 pub type Properties = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// `parseEnhancedConfirmationTrustedPackage`: a package and its
+/// `sha256-cert-digest` (`new Signature(digest without ':')`), none
+/// without either or with a digest that is not hex of even length.
+fn signed_package(e: &aim_android_xml::Element) -> Option<(String, Vec<u8>)> {
+    let package = e.string("package").filter(|p| !p.is_empty())?;
+    let digest = e
+        .string("sha256-cert-digest")
+        .filter(|d| !d.is_empty())?
+        .replace(':', "");
+    if digest.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = (0..digest.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(digest.get(i..i + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    Some((package.into_owned(), bytes))
+}
+
 /// What the image's framework fixes: its aconfig flags,
 /// `config_useRoundIcon` and `raw/fallback_categories` after system asset
 /// overlays, which even a newly created AssetManager includes.
@@ -643,6 +680,14 @@ impl Framework {
             fallback_categories: platform.framework_file(root, "raw", "fallback_categories"),
         })
     }
+}
+
+/// `android.permission.flags.enhanced_confirmation_mode_apis_enabled`,
+/// without which SystemConfig skips the enhanced confirmation entries.
+fn ecm_enabled(framework: &Framework) -> bool {
+    framework.flags.iter().any(|(n, on)| {
+        n == "android.permission.flags.enhanced_confirmation_mode_apis_enabled" && *on
+    })
 }
 
 /// The device's side of the model's state: SystemConfig and the
@@ -680,6 +725,12 @@ pub fn system(
         compatibility_mode: true,
         fallback_categories: fallback_categories(framework.fallback_categories.as_deref(), prop)?,
         flags: framework.flags.clone(),
+        ecm_trusted_packages: ecm_enabled(framework)
+            .then_some(config.ecm_trusted_packages)
+            .unwrap_or_default(),
+        ecm_trusted_installers: ecm_enabled(framework)
+            .then_some(config.ecm_trusted_installers)
+            .unwrap_or_default(),
         ..System::default()
     })
 }
@@ -1032,6 +1083,36 @@ mod tests {
         assert!(libraries["libvendor.so"].native);
         assert_eq!(libraries["libvendor.so"].filename, "libvendor.so");
         assert!(!libraries["apex"].native);
+    }
+
+    /// `<enhanced-confirmation-trusted-*>`: each package and digest once,
+    /// none without a package or with a digest `Signature` refuses.
+    #[test]
+    fn reads_enhanced_confirmation_trusted_packages() {
+        let root = std::env::temp_dir().join(format!("aim-sysconfig-ecm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        write(
+            &root,
+            "system/etc/sysconfig/enhanced-confirmation.xml",
+            r#"<config>
+<enhanced-confirmation-trusted-package package="a" sha256-cert-digest="0A:1b" />
+<enhanced-confirmation-trusted-package package="a" sha256-cert-digest="0a1b" />
+<enhanced-confirmation-trusted-installer package="i" sha256-cert-digest="ff" />
+<enhanced-confirmation-trusted-installer package="" sha256-cert-digest="ff" />
+<enhanced-confirmation-trusted-installer package="odd" sha256-cert-digest="fff" />
+<enhanced-confirmation-trusted-installer package="hex" sha256-cert-digest="zz" />
+</config>"#,
+        );
+        let config = SystemConfig::read(&root, &|_| None);
+        assert_eq!(
+            config.ecm_trusted_packages,
+            [("a".to_string(), vec![0x0a, 0x1b])]
+        );
+        assert_eq!(
+            config.ecm_trusted_installers,
+            [("i".to_string(), vec![0xff])]
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
