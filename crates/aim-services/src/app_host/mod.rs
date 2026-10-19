@@ -63,6 +63,7 @@ pub mod locale_manager;
 pub mod media_router;
 pub mod media_session;
 mod media_session_record;
+mod media_route_providers;
 mod media_router2;
 pub mod memory_info;
 pub mod kept;
