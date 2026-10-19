@@ -5,16 +5,19 @@
 //! meta-data), then `appwidgets.xml` (`loadGroupStateLocked`): each
 //! provider's info persisted with this build's fingerprint, the hosts, the
 //! packages allowed to bind and the widgets, bound to their provider and
-//! host. The calls apps make at start are answered as the original
-//! answers them for a user with no bound widgets; their RemoteViews are
-//! not read where no widget takes them. Bound widgets, RemoteViews updates
-//! of widgets, providers whose info must be parsed (`getInfoLocked`),
-//! generated previews, the host side and the writes are not implemented
-//! (#1789).
+//! host. A provider's info the state file did not persist is parsed from
+//! its meta-data's XML when first asked for (`getInfoLocked`). The calls
+//! apps make at start are answered as the original answers them for a
+//! user with no bound widgets; their RemoteViews are not read where no
+//! widget takes them. `notifyProviderInheritance` marks the caller's
+//! providers and writes the group's state back (`saveStateLocked`). Bound
+//! widgets, RemoteViews updates of widgets, generated previews, the host
+//! side and the other writes are not implemented (#1789).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex};
 
+use aim_android_xml::{Element, Node, Value as XmlValue};
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
@@ -26,6 +29,7 @@ use crate::package::info::ActivityInfo;
 use crate::package::info::flags::{GET_META_DATA, GET_SHARED_LIBRARY_FILES};
 use crate::package::intent::{ComponentName, Intent};
 use crate::package::list_slice::Slice;
+use crate::package::parse::attrs::TypedArray;
 use crate::package::pkg::Value;
 use crate::package::query::Query;
 
@@ -49,6 +53,9 @@ const TAG_UNDEFINED: i32 = -1;
 const REMOTE_VIEWS_PROTO: &str = "android.appwidget.flags.remote_views_proto";
 const GENERATED_PREVIEWS: &str = "android.appwidget.flags.generated_previews";
 const PROVIDER_INFO: &str = "android.appwidget.AppWidgetProviderInfo";
+/// `AppWidgetProviderInfo.RESIZE_NONE`, `WIDGET_CATEGORY_HOME_SCREEN`.
+const RESIZE_NONE: i32 = 0;
+const WIDGET_CATEGORY_HOME_SCREEN: i32 = 1;
 
 /// An `AppWidgetProviderInfo` as `AppWidgetXmlUtil.readAppWidgetProviderInfoLocked`
 /// reads it from the state file.
@@ -192,25 +199,67 @@ impl<A: WriteParcelable> WriteParcelable for ProviderInfo<A> {
 struct Provider {
     uid: i32,
     component: ComponentName,
-    /// `info`, as `setInfoLocked` set it from the state file, with the
-    /// receiver it was read for.
-    persisted: Option<(Persisted, ActivityInfo)>,
+    /// `info.providerInfo`: the receiver, as loaded or as read with the
+    /// state file's info.
+    activity: ActivityInfo,
+    /// `info`: partial (all defaults) until the state file sets it or
+    /// `getInfoLocked` parses it.
+    info: Persisted,
+    /// `mInfoParsed`.
+    parsed: bool,
+    /// `infoTag`, the meta-data key the state file names.
+    info_tag: Option<String>,
+    tag: i32,
+    /// `pendingDeletedWidgetIds`.
+    pending_deleted: Vec<i32>,
+}
+
+/// What `serializeProvider` writes of a provider.
+struct Saved<'a> {
+    component: &'a ComponentName,
+    tag: i32,
+    info_tag: Option<&'a str>,
+    /// The info, if parsed (`mInfoParsed`).
+    info: Option<&'a Persisted>,
+    pending_deleted: &'a [i32],
+}
+
+impl Provider {
+    fn saved(&self) -> Saved<'_> {
+        Saved {
+            component: &self.component,
+            tag: self.tag,
+            info_tag: self.info_tag.as_deref(),
+            info: self.parsed.then_some(&self.info),
+            pending_deleted: &self.pending_deleted,
+        }
+    }
+}
+
+/// A `Host` of the group the state file names.
+struct Host {
+    package: String,
+    id: i32,
     tag: i32,
 }
 
 /// What `ensureGroupStateLoadedLocked` loaded of user 0's group.
 struct Group {
     providers: Vec<Provider>,
-    /// `mPackagesWithBindWidgetPermission`.
+    hosts: Vec<Host>,
+    /// `mPackagesWithBindWidgetPermission`, in its `ArraySet` order.
     bind_allowed: Vec<String>,
     /// Widgets bound to a provider and a host (`bindLoadedWidgetsLocked`).
     bound_widgets: usize,
+    /// Whether the state file holds the backup restore controller's state
+    /// (`br`).
+    restore_state: bool,
 }
 
 pub struct AppWidgetService {
     host: Arc<AppHost>,
     /// `mLoadedUserIds` and the group, once loaded.
-    group: Mutex<Option<Arc<Group>>>,
+    group: Mutex<Option<Group>>,
 }
 
 impl AppWidgetService {
@@ -273,9 +322,13 @@ impl AppWidgetService {
             .map_err(|e| self.unimplemented(e.0))?
     }
 
-    /// `ensureGroupStateLoadedLocked(userId)`: the app host's one user is
-    /// running and unlocked.
-    fn group(&self, user: i32) -> Result<Arc<Group>, Exception> {
+    /// `ensureGroupStateLoadedLocked(userId)`, then `f` over the group:
+    /// the app host's one user is running and unlocked.
+    fn with_group<T>(
+        &self,
+        user: i32,
+        f: impl FnOnce(&mut Group) -> Result<T, Exception>,
+    ) -> Result<T, Exception> {
         if user != 0 {
             return Err(Exception::new(
                 EX_ILLEGAL_STATE,
@@ -283,13 +336,13 @@ impl AppWidgetService {
             ));
         }
         let mut loaded = self.group.lock().unwrap();
-        if let Some(group) = &*loaded {
-            return Ok(group.clone());
+        if loaded.is_none() {
+            let (group, upgraded) = self.load(user)?;
+            let group = loaded.insert(group);
+            upgraded?;
+            return f(group);
         }
-        let (group, upgraded) = self.load(user)?;
-        let group = Arc::new(group);
-        *loaded = Some(group.clone());
-        upgraded.map(|()| group)
+        f(loaded.as_mut().unwrap())
     }
 
     /// `loadGroupWidgetProvidersLocked`, then `loadGroupStateLocked`: the
@@ -323,15 +376,21 @@ impl AppWidgetService {
                 providers.push(Provider {
                     uid,
                     component,
-                    persisted: None,
+                    activity: ai,
+                    info: Persisted::default(),
+                    parsed: false,
+                    info_tag: None,
                     tag: TAG_UNDEFINED,
+                    pending_deleted: Vec::new(),
                 });
             }
         }
         let mut group = Group {
             providers,
+            hosts: Vec::new(),
             bind_allowed: Vec::new(),
             bound_widgets: 0,
+            restore_state: false,
         };
         let data = self.host.data()?;
         let path = data.join(format!("system/users/{user}/appwidgets.xml"));
@@ -374,6 +433,7 @@ impl AppWidgetService {
         if version < 0 {
             // `clearWidgetsLocked` and the hosts.
             group.bound_widgets = 0;
+            group.hosts.clear();
             return Ok((group, Ok(())));
         }
         // `performUpgradeLocked`: version 0 is taken for 1.
@@ -394,8 +454,7 @@ impl AppWidgetService {
         let fingerprint = self.host.property("ro.build.fingerprint");
         let mut version = -1;
         let (mut provider_index, mut host_index) = (-1, -1);
-        // Hosts by tag, and widgets' host and provider tags.
-        let mut hosts: Vec<i32> = Vec::new();
+        // Widgets' host and provider tags.
         let mut widgets: Vec<(i32, i32)> = Vec::new();
         let fail = |e: Exception| e.message;
         let mut elements = vec![&root];
@@ -444,14 +503,20 @@ impl AppWidgetService {
                                 component.package, component.class
                             )
                         })?;
+                    // `setInfoLocked`.
                     if let Some(info) = info {
-                        provider.persisted = Some((info, activity));
+                        provider.info = info;
+                        provider.activity = activity;
+                        provider.parsed = true;
                     }
                     provider.tag = e.int_hex("tag")?.unwrap_or(provider_index);
+                    provider.info_tag = e.string("info_tag").map(|t| t.into_owned());
                     if let Some(ids) = e.string("pending_deleted_ids").filter(|s| !s.is_empty()) {
                         for id in ids.split(',') {
-                            id.parse::<i32>()
-                                .map_err(|err| format!("pending_deleted_ids: {err}"))?;
+                            provider.pending_deleted.push(
+                                id.parse::<i32>()
+                                    .map_err(|err| format!("pending_deleted_ids: {err}"))?,
+                            );
                         }
                     }
                 }
@@ -461,17 +526,20 @@ impl AppWidgetService {
                     // A host of no installed package is a zombie, pruned
                     // outside safe mode.
                     if self.package_uid(&package, user).map_err(fail)? >= 0 {
-                        e.int_hex("id")?.ok_or("a host without id")?;
-                        hosts.push(e.int_hex("tag")?.unwrap_or(host_index));
+                        let id = e.int_hex("id")?.ok_or("a host without id")?;
+                        let tag = e.int_hex("tag")?.unwrap_or(host_index);
+                        group.hosts.push(Host { package, id, tag });
                     }
                 }
                 "b" => {
                     if let Some(package) = e.string("packageName").map(|p| p.into_owned())
                         && self.package_uid(&package, user).map_err(fail)? >= 0
+                        && !group.bind_allowed.contains(&package)
                     {
                         group.bind_allowed.push(package);
                     }
                 }
+                "br" => group.restore_state = true,
                 "g" => {
                     e.int_hex("id")?.ok_or("a widget without id")?;
                     let host = e.int_hex("h")?.ok_or("a widget without h")?;
@@ -488,19 +556,29 @@ impl AppWidgetService {
                 *provider >= 0
                     && group.providers.iter().any(|p| p.tag == *provider)
                     && *host >= 0
-                    && hosts.contains(host)
+                    && group.hosts.iter().any(|h| h.tag == *host)
             })
             .count();
+        // `ArraySet<Pair<Integer, String>>`: by the pair's hash, user 0's
+        // and the package's.
+        let bind_allowed = std::mem::take(&mut group.bind_allowed);
+        group.bind_allowed = crate::package::info::array_order(bind_allowed, |p| p.as_str());
         Ok(version)
     }
 
-    /// A group with no bound widgets, which the calls below answer.
-    fn unbound_group(&self, user: i32) -> Result<Arc<Group>, Exception> {
-        let group = self.group(user)?;
-        if group.bound_widgets > 0 {
-            return Err(self.unimplemented("bound app widgets"));
-        }
-        Ok(group)
+    /// `f` over a group with no bound widgets, which the calls below
+    /// answer.
+    fn with_unbound_group<T>(
+        &self,
+        user: i32,
+        f: impl FnOnce(&mut Group) -> Result<T, Exception>,
+    ) -> Result<T, Exception> {
+        self.with_group(user, |group| {
+            if group.bound_widgets > 0 {
+                return Err(self.unimplemented("bound app widgets"));
+            }
+            f(group)
+        })
     }
 
     /// `getInstalledProvidersForProfile`: none for a profile outside the
@@ -533,44 +611,218 @@ impl AppWidgetService {
             empty(p);
             return Ok(());
         }
-        let group = self.unbound_group(user)?;
         let generated_previews = self.flag(GENERATED_PREVIEWS)?;
-        let mut result = Vec::new();
-        for provider in &group.providers {
-            if package.is_some_and(|name| name != provider.component.package) {
-                continue;
+        let result = self.with_unbound_group(user, |group| {
+            let mut result = Vec::new();
+            for provider in &mut group.providers {
+                if package.is_some_and(|name| name != provider.component.package) {
+                    continue;
+                }
+                let info = self.info(provider)?.clone();
+                if info.widget_category & category_filter == 0 {
+                    continue;
+                }
+                let activity = &provider.activity;
+                let provider_profile = activity.info.application_info.uid / PER_USER_RANGE as i32;
+                // `canAccessProvider` (the caller's own profile), then
+                // `filterAppAccess`.
+                let filtered = crate::package::apps_filter::should_filter_application(
+                    &state,
+                    &resolution.apps_filter,
+                    state.packages.get(&provider.component.package),
+                    uid,
+                    profile,
+                    true,
+                    true,
+                )
+                .map_err(|e| self.unimplemented(e.0))?;
+                if provider_profile == profile && !filtered {
+                    result.push(ProviderInfo {
+                        provider: provider.component.clone(),
+                        info,
+                        activity: activity.clone(),
+                        generated_previews,
+                    });
+                }
             }
-            // `getInfoLocked` parses what was not persisted.
-            let Some((info, activity)) = &provider.persisted else {
-                return Err(self.unimplemented("a provider's info not persisted with this build"));
-            };
-            if info.widget_category & category_filter == 0 {
-                continue;
-            }
-            let provider_profile = activity.info.application_info.uid / PER_USER_RANGE as i32;
-            // `canAccessProvider` (the caller's own profile), then
-            // `filterAppAccess`.
-            let filtered = crate::package::apps_filter::should_filter_application(
-                &state,
-                &resolution.apps_filter,
-                state.packages.get(&provider.component.package),
-                uid,
-                profile,
-                true,
-                true,
-            )
-            .map_err(|e| self.unimplemented(e.0))?;
-            if provider_profile == profile && !filtered {
-                result.push(ProviderInfo {
-                    provider: provider.component.clone(),
-                    info: info.clone(),
-                    activity: activity.clone(),
-                    generated_previews,
-                });
-            }
-        }
+            Ok(result)
+        })?;
         let slice = Slice::new(self.host.process.clone(), PROVIDER_INFO, result);
         aw::write_get_installed_providers_for_profile_reply(p, Some(&slice));
+        Ok(())
+    }
+
+    /// `Provider.getInfoLocked`: the info, parsed from the provider's
+    /// meta-data the first time it is asked for when the state file did
+    /// not set it (`parseAppWidgetProviderInfo` of `infoTag`, else of
+    /// `android.appwidget.provider`); a provider whose XML does not parse
+    /// keeps its partial info.
+    fn info<'p>(&self, provider: &'p mut Provider) -> Result<&'p Persisted, Exception> {
+        if !provider.parsed {
+            let mut parsed = None;
+            if let Some(tag) = provider.info_tag.clone().filter(|t| !t.is_empty()) {
+                parsed = self.parse_info(provider, &tag)?;
+            }
+            if parsed.is_none() {
+                parsed = self.parse_info(provider, META_DATA_APPWIDGET_PROVIDER)?;
+            }
+            if let Some(info) = parsed {
+                provider.info = info;
+            }
+            provider.parsed = true;
+        }
+        Ok(&provider.info)
+    }
+
+    /// `parseAppWidgetProviderInfo` of the meta-data `key` of `provider`'s
+    /// receiver: its `appwidget-provider` element's attributes as the
+    /// package's resources resolve them (the dimensions their complex
+    /// data, as `AppWidgetManager` converts them in the app), and the
+    /// receiver's safe label and icon.
+    fn parse_info(&self, provider: &Provider, key: &str) -> Result<Option<Persisted>, Exception> {
+        let activity = &provider.activity;
+        let item = &activity.info.item;
+        let name = format!(
+            "{}/{} for user {}",
+            provider.component.package, provider.component.class, provider.uid
+        );
+        // `loadXmlMetaData`: the meta-data's resource.
+        let id = item
+            .meta_data
+            .as_ref()
+            .and_then(|m| m.0.iter().find(|(k, _)| k == key))
+            .and_then(|(_, v)| match v {
+                Value::Int(id) => Some(*id),
+                _ => None,
+            })
+            .unwrap_or(0);
+        if id == 0 {
+            eprintln!("app host: appwidget: No {key} meta-data for AppWidget provider '{name}'");
+            return Ok(None);
+        }
+        let (state, _) = self.host.packages()?;
+        let Some(pkg) = state
+            .packages
+            .get(&provider.component.package)
+            .and_then(|ps| ps.pkg.clone())
+        else {
+            eprintln!("app host: appwidget: XML parsing failed for AppWidget provider {name}");
+            return Ok(None);
+        };
+        let inputs = self.host.inputs()?;
+        let root = self.host.root()?;
+        let fail = |e: String| self.unimplemented(&format!("the provider XML of {name}: {e}"));
+        let parsed = inputs
+            .packages
+            .xml_resource(root, &inputs.data, &pkg, id as u32, |e, ctx| {
+                (e.name == "appwidget-provider")
+                    .then(|| read_provider_info(&ctx.obtain(e), &provider.component.package))
+            })
+            .map_err(fail)?;
+        let Some(mut info) = parsed else {
+            eprintln!(
+                "app host: appwidget: Meta-data does not start with appwidget-provider tag for AppWidget provider {name}"
+            );
+            return Ok(None);
+        };
+        // `ComponentInfo.loadUnsafeLabel`, then `loadSafeLabel` (the system
+        // server loads safe labels).
+        let app = &activity.info.application_info.item;
+        let ids: Vec<u32> = [item.label_res, app.label_res]
+            .iter()
+            .map(|&r| r as u32)
+            .collect();
+        let texts = inputs
+            .packages
+            .resource_names_and_strings(root, &inputs.data, &pkg, &ids)
+            .map_err(fail)?;
+        let text = |i: usize, res: i32| (res != 0).then(|| texts[i].1.clone()).flatten();
+        let unsafe_label = item
+            .non_localized_label
+            .clone()
+            .or_else(|| text(0, item.label_res))
+            .or_else(|| app.non_localized_label.clone())
+            .or_else(|| text(1, app.label_res))
+            .or_else(|| item.name.clone())
+            .unwrap_or_default();
+        info.label = Some(safe_label(&unsafe_label).ok_or_else(|| {
+            self.host.unimplemented_named(
+                "appwidget",
+                &format!("the safe label of {unsafe_label:?} (#1855)"),
+            )
+        })?);
+        // `ComponentInfo.getIconResource`.
+        info.icon = if item.icon != 0 { item.icon } else { app.icon };
+        Ok(Some(info))
+    }
+
+    /// `notifyProviderInheritance`: each named provider of the caller's
+    /// marked as extending `AppWidgetProvider` (on its info as it is, which
+    /// a later parse replaces), then the group's state saved.
+    fn notify_provider_inheritance(
+        &self,
+        uid: i32,
+        components: Option<Vec<Option<ComponentName>>>,
+    ) -> Result<(), Exception> {
+        let user = uid / PER_USER_RANGE as i32;
+        let Some(components) = components else {
+            return Ok(());
+        };
+        let mut named = Vec::new();
+        for component in components {
+            let Some(component) = component else {
+                return Ok(());
+            };
+            self.enforce_call_from_package(uid, Some(&component.package))?;
+            named.push(component);
+        }
+        self.with_group(user, |group| {
+            for component in &named {
+                // `lookupProviderLocked` of the caller's uid.
+                let Some(provider) = group
+                    .providers
+                    .iter_mut()
+                    .find(|p| p.uid == uid && p.component == *component)
+                else {
+                    return Ok(());
+                };
+                provider.info.extended_from_app_widget_provider = true;
+            }
+            self.save_state(user, group)
+        })
+    }
+
+    /// `saveStateLocked` of `user`'s group (`saveGroupStateAsync`'s, made
+    /// at once): the providers and hosts tagged by their index, then the
+    /// state file written as `writeProfileStateToStreamLocked` writes it.
+    fn save_state(&self, user: i32, group: &mut Group) -> Result<(), Exception> {
+        if group.bound_widgets > 0 {
+            return Err(self.unimplemented("saving bound app widgets"));
+        }
+        if group.restore_state {
+            return Err(self.unimplemented("saving the backup restore controller's state"));
+        }
+        for (i, p) in group.providers.iter_mut().enumerate() {
+            p.tag = i as i32;
+        }
+        for (i, h) in group.hosts.iter_mut().enumerate() {
+            h.tag = i as i32;
+        }
+        let fingerprint = self.host.property("ro.build.fingerprint");
+        let providers: Vec<Saved> = group.providers.iter().map(Provider::saved).collect();
+        let root = state_document(
+            &providers,
+            &group.hosts,
+            &group.bind_allowed,
+            fingerprint.as_deref().unwrap_or_default(),
+        );
+        let path = self
+            .host
+            .data()?
+            .join(format!("system/users/{user}/appwidgets.xml"));
+        if let Err(e) = write_atomic(&path, &root) {
+            eprintln!("app host: appwidget: Failed open state file for write: {e}");
+        }
         Ok(())
     }
 
@@ -610,7 +862,7 @@ impl Service for AppWidgetService {
                         .ok_or_else(|| Exception::new(EX_NULL_POINTER, "componentName"))?;
                     self.enforce_call_from_package(uid, Some(&component.package))?;
                     // A provider of the caller's has no widget.
-                    self.unbound_group(user)?;
+                    self.with_unbound_group(user, |_| Ok(()))?;
                     aw::write_get_app_widget_ids_reply(&mut p, &Some(Vec::new()));
                     Ok(())
                 })()
@@ -620,7 +872,7 @@ impl Service for AppWidgetService {
                 (|| {
                     self.enforce_call_from_package(uid, a.calling_package.as_deref())?;
                     // No widget is found (`lookupWidgetLocked`).
-                    self.unbound_group(user)?;
+                    self.with_unbound_group(user, |_| Ok(()))?;
                     aw::write_get_app_widget_info_reply::<ProviderInfo>(&mut p, None);
                     Ok(())
                 })()
@@ -641,9 +893,10 @@ impl Service for AppWidgetService {
                             "hasBindAppWidgetPermission packageName={package}: uid {uid} does not have {MODIFY_APPWIDGET_BIND_PERMISSIONS}."
                         )));
                     }
-                    let group = self.group(a.user_id)?;
                     let allowed = self.package_uid(&package, a.user_id)? >= 0
-                        && group.bind_allowed.contains(&package);
+                        && self.with_group(a.user_id, |group| {
+                            Ok(group.bind_allowed.contains(&package))
+                        })?;
                     aw::write_has_bind_app_widget_permission_reply(&mut p, allowed);
                     Ok(())
                 })()
@@ -709,7 +962,7 @@ impl Service for AppWidgetService {
                     let component = component
                         .ok_or_else(|| Exception::new(EX_NULL_POINTER, "componentName"))?;
                     self.enforce_call_from_package(uid, Some(&component.package))?;
-                    self.unbound_group(user)?;
+                    self.with_unbound_group(user, |_| Ok(()))?;
                     p.write_no_exception();
                     Ok(())
                 })()
@@ -723,11 +976,17 @@ impl Service for AppWidgetService {
                         .as_deref()
                         .is_some_and(|ids| !ids.is_empty())
                     {
-                        self.unbound_group(user)?;
+                        self.with_unbound_group(user, |_| Ok(()))?;
                     }
                     aw::write_notify_app_widget_view_data_changed_reply(&mut p);
                     Ok(())
                 })()
+            }
+            aw::NOTIFY_PROVIDER_INHERITANCE => {
+                let a = aw::NotifyProviderInheritance::<ComponentName>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.notify_provider_inheritance(uid, a.component_names)
+                    .map(|()| aw::write_notify_provider_inheritance_reply(&mut p))
             }
             code => {
                 let name = aw::METHODS
@@ -739,6 +998,208 @@ impl Service for AppWidgetService {
         };
         reply(result.map(|()| p))
     }
+}
+
+/// The `R.styleable.AppWidgetProviderInfo` attributes of a provider's
+/// `appwidget-provider` element, as `parseAppWidgetProviderInfo` reads
+/// them; the label and icon come from its receiver.
+fn read_provider_info(a: &TypedArray, package: &str) -> Persisted {
+    // `peekValue(..).data`: a dimension's complex data, which the app's
+    // `AppWidgetManager` converts.
+    let data = |name: &str| a.peek(name).map(|v| v.data as i32);
+    let min_width = data("minWidth").unwrap_or(0);
+    let min_height = data("minHeight").unwrap_or(0);
+    Persisted {
+        min_width,
+        min_height,
+        min_resize_width: data("minResizeWidth").unwrap_or(min_width),
+        min_resize_height: data("minResizeHeight").unwrap_or(min_height),
+        max_resize_width: data("maxResizeWidth").unwrap_or(0),
+        max_resize_height: data("maxResizeHeight").unwrap_or(0),
+        target_cell_width: a.int("targetCellWidth", 0),
+        target_cell_height: a.int("targetCellHeight", 0),
+        update_period_millis: a.int("updatePeriodMillis", 0),
+        initial_layout: a.resource_id("initialLayout", 0),
+        initial_keyguard_layout: a.resource_id("initialKeyguardLayout", 0),
+        configure: a.string("configure").map(|class| ComponentName {
+            package: package.to_string(),
+            class,
+        }),
+        label: None,
+        icon: 0,
+        preview_image: a.resource_id("previewImage", 0),
+        preview_layout: a.resource_id("previewLayout", 0),
+        // `View.NO_ID`.
+        auto_advance_view_id: a.resource_id("autoAdvanceViewId", -1),
+        resize_mode: a.int("resizeMode", RESIZE_NONE),
+        widget_category: a.int("widgetCategory", WIDGET_CATEGORY_HOME_SCREEN),
+        widget_features: a.int("widgetFeatures", 0),
+        description_res: a.resource_id("description", 0),
+        extended_from_app_widget_provider: false,
+    }
+}
+
+/// `TextUtils.makeSafeForPresentation(label, 1000, 1000, TRIM |
+/// FIRST_LINE)` of a label it leaves as it is: one line without HTML
+/// markup, control characters or white space to collapse or trim, of at
+/// most 20 characters each at most an em wide, so that at the 42 px the
+/// ellipsizing assumes it fits 1000 px; none for any other, which needs
+/// `Html.fromHtml` and the system font's measures (#1855).
+fn safe_label(label: &str) -> Option<String> {
+    let narrow = |c: char| {
+        (c as u32) < 0x0370
+            || ('\u{3040}'..='\u{30ff}').contains(&c)
+            || ('\u{3130}'..='\u{318f}').contains(&c)
+            || ('\u{4e00}'..='\u{9fff}').contains(&c)
+            || ('\u{ac00}'..='\u{d7a3}').contains(&c)
+    };
+    let plain = !label.is_empty()
+        && label.chars().count() <= 20
+        && !label.starts_with(' ')
+        && !label.ends_with(' ')
+        && !label.contains("  ")
+        && label.chars().all(|c| {
+            narrow(c)
+                && !c.is_control()
+                && !matches!(c, '<' | '>' | '&')
+                && (c == ' ' || !c.is_whitespace())
+        });
+    plain.then(|| label.to_string())
+}
+
+/// `ComponentName.flattenToShortString`.
+fn flatten_to_short_string(c: &ComponentName) -> String {
+    match c.class.strip_prefix(&c.package) {
+        Some(rest) if rest.starts_with('.') => format!("{}/{rest}", c.package),
+        _ => format!("{}/{}", c.package, c.class),
+    }
+}
+
+/// `writeProfileStateToStreamLocked` of a group without widgets: the
+/// providers (`serializeProvider`, with the info of those parsed,
+/// `AppWidgetXmlUtil.writeAppWidgetProviderInfoLocked`), the hosts
+/// (`serializeHost`) and the packages allowed to bind.
+fn state_document(
+    providers: &[Saved],
+    hosts: &[Host],
+    bind_allowed: &[String],
+    fingerprint: &str,
+) -> Element {
+    let element = |name: &str, attrs: Vec<(&str, XmlValue)>| Element {
+        name: name.into(),
+        attrs: attrs.into_iter().map(|(n, v)| (n.to_string(), v)).collect(),
+        content: Vec::new(),
+    };
+    let mut content = Vec::new();
+    for p in providers {
+        let mut attrs = vec![
+            ("pkg", XmlValue::String(p.component.package.clone())),
+            ("cl", XmlValue::String(p.component.class.clone())),
+            ("tag", XmlValue::IntHex(p.tag)),
+        ];
+        if let Some(tag) = p.info_tag.filter(|t| !t.is_empty()) {
+            attrs.push(("info_tag", XmlValue::String(tag.into())));
+        }
+        if let Some(i) = p.info {
+            for (name, v) in [
+                ("min_width", i.min_width),
+                ("min_height", i.min_height),
+                ("min_resize_width", i.min_resize_width),
+                ("min_resize_height", i.min_resize_height),
+                ("max_resize_width", i.max_resize_width),
+                ("max_resize_height", i.max_resize_height),
+                ("target_cell_width", i.target_cell_width),
+                ("target_cell_height", i.target_cell_height),
+                ("update_period_millis", i.update_period_millis),
+                ("initial_layout", i.initial_layout),
+                ("initial_keyguard_layout", i.initial_keyguard_layout),
+            ] {
+                attrs.push((name, XmlValue::Int(v)));
+            }
+            if let Some(c) = &i.configure {
+                attrs.push(("configure", XmlValue::String(flatten_to_short_string(c))));
+            }
+            if let Some(label) = &i.label {
+                attrs.push(("label", XmlValue::String(label.clone())));
+            }
+            for (name, v) in [
+                ("icon", i.icon),
+                ("preview_image", i.preview_image),
+                ("preview_layout", i.preview_layout),
+                ("auto_advance_view_id", i.auto_advance_view_id),
+                ("resize_mode", i.resize_mode),
+                ("widget_category", i.widget_category),
+                ("widget_features", i.widget_features),
+                ("description_res", i.description_res),
+            ] {
+                attrs.push((name, XmlValue::Int(v)));
+            }
+            attrs.push((
+                "provider_inheritance",
+                XmlValue::Bool(i.extended_from_app_widget_provider),
+            ));
+            attrs.push(("os_fingerprint", XmlValue::String(fingerprint.into())));
+        }
+        if !p.pending_deleted.is_empty() {
+            let ids: Vec<String> = p.pending_deleted.iter().map(i32::to_string).collect();
+            attrs.push(("pending_deleted_ids", XmlValue::String(ids.join(","))));
+        }
+        content.push(Node::Element(element("p", attrs)));
+    }
+    for h in hosts {
+        content.push(Node::Element(element(
+            "h",
+            vec![
+                ("pkg", XmlValue::String(h.package.clone())),
+                ("id", XmlValue::IntHex(h.id)),
+                ("tag", XmlValue::IntHex(h.tag)),
+            ],
+        )));
+    }
+    for package in bind_allowed {
+        content.push(Node::Element(element(
+            "b",
+            vec![("packageName", XmlValue::String(package.clone()))],
+        )));
+    }
+    let mut root = element("gs", vec![("version", XmlValue::Int(CURRENT_VERSION))]);
+    root.content = content;
+    root
+}
+
+/// `AtomicFile.startWrite` (a legacy backup is the file again), then
+/// `finishWrite`: the new file synced and renamed over the file, the
+/// system's, mode 0600.
+fn write_atomic(path: &std::path::Path, root: &Element) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let bytes = aim_android_xml::abx::write(root).map_err(std::io::Error::other)?;
+    let with = |suffix: &str| {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        std::path::PathBuf::from(name)
+    };
+    let backup = with(".bak");
+    if backup.exists() {
+        std::fs::rename(&backup, path)?;
+    }
+    let new = with(".new");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&new)?;
+    std::io::Write::write_all(&mut file, &bytes)?;
+    crate::fsync(&file)?;
+    aim_storage::guest_inode::record(
+        &new,
+        aim_storage::guest_inode::GuestInode {
+            uid: Some(1000),
+            gid: Some(1000),
+            mode: Some(0o600),
+        },
+    )?;
+    std::fs::rename(&new, path)
 }
 
 #[cfg(test)]
@@ -784,6 +1245,257 @@ mod tests {
             (3, 5, 1, 10)
         );
         assert!(info.extended_from_app_widget_provider);
+    }
+
+    /// `writeProfileStateToStreamLocked`: a parsed provider's info written
+    /// as `writeAppWidgetProviderInfoLocked` writes it reads back as
+    /// `readAppWidgetProviderInfoLocked` reads it; a provider not parsed is
+    /// written without one; hosts, the packages allowed to bind and the
+    /// version follow.
+    #[test]
+    fn the_state_file_is_written_as_the_original_writes_it() {
+        let info = Persisted {
+            min_width: 0x10301,
+            min_resize_width: 0x10301,
+            target_cell_width: 2,
+            initial_layout: 0x7f0d0001,
+            configure: Some(ComponentName {
+                package: "com.example".into(),
+                class: "com.example.Configure".into(),
+            }),
+            label: Some("Clock".into()),
+            icon: 0x7f080001,
+            auto_advance_view_id: -1,
+            resize_mode: 3,
+            widget_category: 1,
+            extended_from_app_widget_provider: true,
+            ..Default::default()
+        };
+        let component = |class: &str| ComponentName {
+            package: "com.example".into(),
+            class: class.into(),
+        };
+        let (a, b) = (component("com.example.A"), component("com.example.B"));
+        let providers = [
+            Saved {
+                component: &a,
+                tag: 0,
+                info_tag: None,
+                info: Some(&info),
+                pending_deleted: &[3, 4],
+            },
+            Saved {
+                component: &b,
+                tag: 1,
+                info_tag: None,
+                info: None,
+                pending_deleted: &[],
+            },
+        ];
+        let hosts = [Host {
+            package: "com.launcher".into(),
+            id: 1024,
+            tag: 0,
+        }];
+        let document = state_document(&providers, &hosts, &["com.launcher".into()], "build/1");
+        let bytes = aim_android_xml::abx::write(&document).unwrap();
+        let root = aim_android_xml::read(&bytes).unwrap();
+        assert_eq!(root.name, "gs");
+        assert_eq!(root.int("version").unwrap(), Some(CURRENT_VERSION));
+        let children: Vec<_> = root.children().collect();
+        assert_eq!(
+            children.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["p", "p", "h", "b"]
+        );
+        let (a, b) = (children[0], children[1]);
+        assert_eq!(
+            a.string("configure").as_deref(),
+            Some("com.example/.Configure")
+        );
+        assert_eq!(read_persisted(a, Some("build/1")).unwrap(), Some(info));
+        assert_eq!(a.int_hex("tag").unwrap(), Some(0));
+        assert_eq!(a.string("pending_deleted_ids").as_deref(), Some("3,4"));
+        assert_eq!(read_persisted(b, Some("build/1")).unwrap(), None);
+        assert_eq!(b.string("os_fingerprint"), None);
+        assert_eq!(b.int_hex("tag").unwrap(), Some(1));
+        let h = children[2];
+        assert_eq!(
+            (h.string("pkg").as_deref(), h.int_hex("id").unwrap()),
+            (Some("com.launcher"), Some(1024))
+        );
+        assert_eq!(
+            children[3].string("packageName").as_deref(),
+            Some("com.launcher")
+        );
+    }
+
+    /// `parseAppWidgetProviderInfo` of an `appwidget-provider` element:
+    /// dimensions as their complex data, the resize minimums defaulting to
+    /// the minimums, a configure activity of the provider's package, and
+    /// the defaults of what it does not give.
+    #[test]
+    fn a_provider_xml_parses_as_the_original_parses_it() {
+        use crate::package::parse::resources::{
+            Config, Resources, TYPE_DIMENSION, TYPE_FIRST_INT, TYPE_INT_HEX, TYPE_STRING,
+        };
+        let names = [
+            "minWidth",
+            "minHeight",
+            "minResizeWidth",
+            "minResizeHeight",
+            "maxResizeWidth",
+            "maxResizeHeight",
+            "targetCellWidth",
+            "targetCellHeight",
+            "updatePeriodMillis",
+            "initialLayout",
+            "initialKeyguardLayout",
+            "configure",
+            "previewImage",
+            "previewLayout",
+            "autoAdvanceViewId",
+            "resizeMode",
+            "widgetCategory",
+            "widgetFeatures",
+            "description",
+        ];
+        let ids: std::collections::HashMap<String, u32> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.to_string(), 0x0101_0000 + i as u32))
+            .collect();
+        let attr =
+            |name: &str, value: aim_apps::res::Value, kind: u8, data: u32| aim_apps::res::Attr {
+                ns: crate::package::parse::attrs::ANDROID.into(),
+                name: name.into(),
+                id: ids[name],
+                value,
+                kind,
+                data,
+            };
+        // 110dp, 40dp: `TypedValue` complex data, unit dip.
+        let (dp110, dp40) = ((110 << 8) | 1, (40 << 8) | 1);
+        let e = aim_apps::res::Element {
+            name: "appwidget-provider".into(),
+            attrs: vec![
+                attr(
+                    "minWidth",
+                    aim_apps::res::Value::Dimension(dp110),
+                    TYPE_DIMENSION,
+                    dp110,
+                ),
+                attr(
+                    "minHeight",
+                    aim_apps::res::Value::Dimension(dp40),
+                    TYPE_DIMENSION,
+                    dp40,
+                ),
+                attr(
+                    "targetCellWidth",
+                    aim_apps::res::Value::Int(2),
+                    TYPE_FIRST_INT,
+                    2,
+                ),
+                attr(
+                    "updatePeriodMillis",
+                    aim_apps::res::Value::Int(0),
+                    TYPE_FIRST_INT,
+                    0,
+                ),
+                attr(
+                    "configure",
+                    aim_apps::res::Value::String("com.example.Configure".into()),
+                    TYPE_STRING,
+                    0,
+                ),
+                attr("resizeMode", aim_apps::res::Value::Int(3), TYPE_INT_HEX, 3),
+                attr(
+                    "widgetFeatures",
+                    aim_apps::res::Value::Int(5),
+                    TYPE_INT_HEX,
+                    5,
+                ),
+            ],
+            ..Default::default()
+        };
+        let res = Resources {
+            tables: Vec::new(),
+            overlays: &[],
+            config: Config::default(),
+        };
+        let ctx = crate::package::parse::attrs::Ctx {
+            res: &res,
+            attrs: &ids,
+            error: Default::default(),
+        };
+        let info = read_provider_info(&ctx.obtain(&e), "com.example");
+        assert!(ctx.error.take().is_none());
+        assert_eq!(
+            (
+                info.min_width,
+                info.min_height,
+                info.min_resize_width,
+                info.min_resize_height
+            ),
+            (dp110 as i32, dp40 as i32, dp110 as i32, dp40 as i32)
+        );
+        assert_eq!(
+            (
+                info.max_resize_width,
+                info.target_cell_width,
+                info.target_cell_height
+            ),
+            (0, 2, 0)
+        );
+        assert_eq!(
+            info.configure,
+            Some(ComponentName {
+                package: "com.example".into(),
+                class: "com.example.Configure".into()
+            })
+        );
+        assert_eq!(
+            (
+                info.resize_mode,
+                info.widget_category,
+                info.widget_features,
+                info.auto_advance_view_id,
+                info.initial_layout
+            ),
+            (3, WIDGET_CATEGORY_HOME_SCREEN, 5, -1, 0)
+        );
+    }
+
+    /// The labels `makeSafeForPresentation` leaves as they are, and those
+    /// it would change, which are not taken.
+    #[test]
+    fn plain_labels_are_their_safe_labels() {
+        assert_eq!(safe_label("Clock").as_deref(), Some("Clock"));
+        assert_eq!(safe_label("디지털 시계").as_deref(), Some("디지털 시계"));
+        for label in [
+            "",
+            " Clock",
+            "Clock ",
+            "a  b",
+            "a\nb",
+            "a&amp;b",
+            "<b>x</b>",
+            "an extremely long widget label",
+            "🙂",
+        ] {
+            assert_eq!(safe_label(label), None, "{label:?}");
+        }
+    }
+
+    #[test]
+    fn components_flatten_to_their_short_string() {
+        let c = |package: &str, class: &str| ComponentName {
+            package: package.into(),
+            class: class.into(),
+        };
+        assert_eq!(flatten_to_short_string(&c("a.b", "a.b.C")), "a.b/.C");
+        assert_eq!(flatten_to_short_string(&c("a.b", "x.C")), "a.b/x.C");
+        assert_eq!(flatten_to_short_string(&c("a.b", "a.bC")), "a.b/a.bC");
     }
 
     /// `AppWidgetProviderInfo.writeToParcel`: the provider, the sizes, the
