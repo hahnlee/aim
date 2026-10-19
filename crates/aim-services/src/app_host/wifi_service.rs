@@ -8,14 +8,21 @@
 //! networks (`getConfiguredNetworks`) are the config stores' as
 //! `WifiConfigManager` loads them (`wifi_config`), with the Wi-Fi resources
 //! APK's MAC randomization and auto-upgrade settings; there is no carrier
-//! app without telephony. The rest is not implemented (#1686).
+//! app without telephony. Multicast locks are held as
+//! `WifiMulticastLockManager` holds them; the Mac's network stack does not
+//! filter the multicast packets the guest's sockets receive, so there is no
+//! filter to stop while one is held, and the app host keeps no battery
+//! stats to report them to (#1513). The rest is not implemented (#1686).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, EX_SECURITY, Exception, Parcel};
+use aim_binder_host::local::{Call, Reply, Service, Strong};
+use aim_binder_host::parcel::{
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_SECURITY, Exception, Parcel,
+};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_location_ilocationmanager as lm;
 use aim_service_aidl::android_net_wifi_iwifimanager as wm;
@@ -33,6 +40,7 @@ use crate::package::parse::resources::{
 use crate::package::query::Query;
 
 const ACCESS_WIFI_STATE: &str = "android.permission.ACCESS_WIFI_STATE";
+const CHANGE_WIFI_MULTICAST_STATE: &str = "android.permission.CHANGE_WIFI_MULTICAST_STATE";
 const NETWORK_SETTINGS: &str = "android.permission.NETWORK_SETTINGS";
 const NETWORK_SETUP_WIZARD: &str = "android.permission.NETWORK_SETUP_WIZARD";
 const NETWORK_MANAGED_PROVISIONING: &str = "android.permission.NETWORK_MANAGED_PROVISIONING";
@@ -174,8 +182,42 @@ struct WifiResources {
     oem_admins: Vec<String>,
 }
 
+/// A held multicast lock (`WifiMulticastLockManager.Multicaster`), linked
+/// to its binder's death.
+struct Multicaster {
+    uid: i32,
+    handle: u32,
+    tag: Option<String>,
+    strong: Strong,
+    death: u64,
+}
+
+/// `WifiMulticastLockManager`'s locks and the number each uid holds
+/// (`mNumLocksPerActiveOwner`). A uid's processes stay top while they
+/// run, so no owner becomes inactive (`handleImportanceChanged`).
+#[derive(Default)]
+struct Multicast {
+    multicasters: Vec<Multicaster>,
+    active: HashMap<i32, usize>,
+}
+
+impl Multicast {
+    /// `removeMulticasterLocked`.
+    fn remove(&mut self, at: usize) -> Multicaster {
+        let m = self.multicasters.remove(at);
+        if let Some(n) = self.active.get_mut(&m.uid) {
+            *n -= 1;
+            if *n == 0 {
+                self.active.remove(&m.uid);
+            }
+        }
+        m
+    }
+}
+
 pub struct WifiService {
     host: Arc<AppHost>,
+    multicast: Arc<Mutex<Multicast>>,
     resources: OnceLock<WifiResources>,
     /// `WifiConfigManager`'s networks once loaded from the stores.
     networks: OnceLock<Vec<WifiConfiguration>>,
@@ -185,9 +227,89 @@ impl WifiService {
     pub fn new(host: Arc<AppHost>) -> Self {
         WifiService {
             host,
+            multicast: Arc::default(),
             resources: OnceLock::new(),
             networks: OnceLock::new(),
         }
+    }
+
+    /// `enforceMulticastChangePermission`.
+    fn enforce_multicast_change(&self, uid: i32) -> Result<(), Exception> {
+        if self
+            .host
+            .check_permission(Some(CHANGE_WIFI_MULTICAST_STATE), uid)?
+            != 0
+        {
+            return Err(Exception::security(format!(
+                "WifiService: Neither user {uid} nor current process has {CHANGE_WIFI_MULTICAST_STATE}."
+            )));
+        }
+        Ok(())
+    }
+
+    /// `acquireMulticastLock`: the lock kept until released or its
+    /// binder dies.
+    fn acquire_multicast_lock(
+        &self,
+        uid: i32,
+        binder: Option<Binder>,
+        tag: Option<String>,
+    ) -> Result<(), Exception> {
+        self.enforce_multicast_change(uid)?;
+        let Some(Binder::Handle(handle)) = binder else {
+            return Err(Exception::new(EX_NULL_POINTER, "binder"));
+        };
+        let strong = self.host.process.strong(handle);
+        let multicast = Arc::downgrade(&self.multicast);
+        let death_tag = tag.clone();
+        let death = self.host.process.link_to_death(
+            &strong,
+            Box::new(move || {
+                // `Multicaster.binderDied`.
+                let Some(multicast) = multicast.upgrade() else {
+                    return;
+                };
+                let mut multicast = multicast.lock().unwrap();
+                if let Some(at) = multicast
+                    .multicasters
+                    .iter()
+                    .position(|m| m.uid == uid && m.handle == handle && m.tag == death_tag)
+                {
+                    multicast.remove(at);
+                }
+            }),
+        );
+        let mut multicast = self.multicast.lock().unwrap();
+        *multicast.active.entry(uid).or_default() += 1;
+        multicast.multicasters.push(Multicaster {
+            uid,
+            handle,
+            tag,
+            strong,
+            death,
+        });
+        Ok(())
+    }
+
+    /// `releaseMulticastLock`: the latest lock of the caller's with the
+    /// tag and binder.
+    fn release_multicast_lock(
+        &self,
+        uid: i32,
+        binder: Option<Binder>,
+        tag: Option<String>,
+    ) -> Result<(), Exception> {
+        self.enforce_multicast_change(uid)?;
+        let mut multicast = self.multicast.lock().unwrap();
+        if let Some(at) = multicast
+            .multicasters
+            .iter()
+            .rposition(|m| m.uid == uid && m.tag == tag && binder == Some(Binder::Handle(m.handle)))
+        {
+            let m = multicast.remove(at);
+            self.host.process.clear_death(&m.strong, m.death);
+        }
+        Ok(())
     }
 
     /// `enforceAccessPermission`.
@@ -702,6 +824,23 @@ impl Service for WifiService {
         let uid = call.sender_euid as i32;
         let mut p = Parcel::new();
         let result = match call.code {
+            wm::ACQUIRE_MULTICAST_LOCK => {
+                let a = wm::AcquireMulticastLock::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.acquire_multicast_lock(uid, a.binder, a.lock_tag)
+                    .map(|()| wm::write_acquire_multicast_lock_reply(&mut p))
+            }
+            wm::RELEASE_MULTICAST_LOCK => {
+                let a = wm::ReleaseMulticastLock::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.release_multicast_lock(uid, a.binder, a.lock_tag)
+                    .map(|()| wm::write_release_multicast_lock_reply(&mut p))
+            }
+            wm::IS_MULTICAST_ENABLED => {
+                wm::IsMulticastEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.enforce_access(uid).map(|()| {
+                    let enabled = !self.multicast.lock().unwrap().active.is_empty();
+                    wm::write_is_multicast_enabled_reply(&mut p, enabled)
+                })
+            }
             wm::GET_WIFI_ENABLED_STATE => {
                 wm::GetWifiEnabledState::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.enforce_access(uid)
