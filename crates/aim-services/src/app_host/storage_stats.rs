@@ -6,8 +6,7 @@
 //! counting allocated blocks (`getAppSize`, `getUserSize`,
 //! `getExternalSize`). No `StorageStatsAugmenter` is registered in the app
 //! host (AppSearch's runs in its own process, #1520). Cache quotas are
-//! #1824, ART-managed file stats #1825, crates and internal storage over
-//! 512 GB #1826.
+//! #1824, ART-managed file stats #1825, crates #1826.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::fs;
@@ -168,6 +167,18 @@ fn round_storage_size(size: i64) -> i64 {
         }
     }
     val * pow
+}
+
+/// `getTotalBytes` of internal storage over 512 GB from its block
+/// device's size: rounded only when that is at most 3 GB more ("1 TB" for
+/// 997 GB to 999 GB), else as it is.
+fn total_from_block_device(total: i64) -> i64 {
+    let rounded = round_storage_size(total);
+    if rounded - total <= 3 * GIGABYTE {
+        rounded
+    } else {
+        total
+    }
 }
 
 /// `File.getTotalSpace` of `path`; 0 when it cannot be read.
@@ -797,8 +808,10 @@ impl StorageStatsService {
     }
 
     /// `getTotalBytes`: internal storage is the data volume and the system
-    /// partition rounded (`StorageManager.getPrimaryStorageSize`); no other
-    /// volume of the app host has a UUID.
+    /// partition rounded (`StorageManager.getPrimaryStorageSize`) up to
+    /// 512 GB, above that its block device's size
+    /// (`getInternalStorageBlockDeviceSize`); no other volume of the app
+    /// host has a UUID.
     fn total_bytes(&self, uuid: Option<&str>) -> Result<i64, Exception> {
         let Some(uuid) = uuid else {
             let rounded = round_storage_size(
@@ -807,7 +820,9 @@ impl StorageStatsService {
             if rounded <= 512 * GIGABYTE {
                 return Ok(rounded);
             }
-            return Err(self.unimplemented("getTotalBytes of internal storage over 512 GB (#1826)"));
+            return Ok(total_from_block_device(
+                self.host.internal_storage_block_device_size()?,
+            ));
         };
         Err(io_exception(&format!(
             "Failed to find storage device for UUID {uuid}"
@@ -1106,6 +1121,19 @@ mod tests {
         assert_eq!(round_storage_size(30 * GIGABYTE), 32 * GIGABYTE);
         assert_eq!(round_storage_size(500 * GIGABYTE), 512 * GIGABYTE);
         assert_eq!(round_storage_size(513 * GIGABYTE), 1000 * GIGABYTE);
+    }
+
+    /// Above 512 GB: a block device just short of a power of two shows as
+    /// it, one further below as its own size.
+    #[test]
+    fn large_internal_storage_rounds_only_within_3_gb() {
+        assert_eq!(total_from_block_device(998 * GIGABYTE), 1000 * GIGABYTE);
+        assert_eq!(total_from_block_device(1000 * GIGABYTE), 1000 * GIGABYTE);
+        assert_eq!(total_from_block_device(994_610_155_520), 994_610_155_520);
+        assert_eq!(
+            total_from_block_device(1_000_555_581_440),
+            1_000_555_581_440
+        );
     }
 
     #[test]
