@@ -1724,6 +1724,38 @@ impl Service for ConnectivityService {
                     Ok(())
                 })()
             }
+            // `LegacyNetworkActivityTracker`: the default network, Ethernet,
+            // gets no idle timer (`setupDataActivityTracking` tracks only
+            // cellular and Wi-Fi), so it stays active.
+            cm::IS_DEFAULT_NETWORK_ACTIVE => {
+                cm::IsDefaultNetworkActive::read(&mut call.data).map_err(bad)?;
+                cm::write_is_default_network_active_reply(&mut p, true);
+                Ok(())
+            }
+            // `reportNetworkConnectivity`: a report that agrees with the
+            // network's validation only goes to the connectivity diagnostics
+            // callbacks, which none registers; one that disagrees revalidates
+            // the network, which is not implemented.
+            cm::REPORT_NETWORK_CONNECTIVITY => {
+                let a = cm::ReportNetworkConnectivity::<Network>::read(&mut call.data).map_err(bad)?;
+                (|| {
+                    self.enforce_access(uid)?;
+                    if !self.has(uid, INTERNET_PERMISSION)? {
+                        return Err(Exception::security(format!(
+                            "ConnectivityService: Neither user {uid} nor current process has {INTERNET_PERMISSION}."
+                        )));
+                    }
+                    let known = match a.network.as_ref() {
+                        None => self.default_network().is_some(),
+                        Some(_) => self.shared.state.lock().unwrap().net(a.network.as_ref()).is_some(),
+                    };
+                    if known && !a.has_connectivity {
+                        return Err(self.host.unimplemented_named("connectivity", "revalidating a network an app reports without connectivity (#1509)"));
+                    }
+                    cm::write_report_network_connectivity_reply(&mut p);
+                    Ok(())
+                })()
+            }
             cm::IS_ACTIVE_NETWORK_METERED => {
                 cm::IsActiveNetworkMetered::read(&mut call.data).map_err(bad)?;
                 self.enforce_access(uid)

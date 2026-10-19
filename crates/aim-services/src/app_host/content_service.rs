@@ -204,6 +204,16 @@ impl ContentService {
         Err(Exception::security(format!("{message}: Neither user {uid} nor current process has {permission}.")))
     }
 
+    /// `getCurrentSyncsAsUser`: `enforceCrossUserPermission` and
+    /// READ_SYNC_STATS, then SyncStorageEngine's current syncs, of which
+    /// there are none: no sync runs (#1460).
+    fn current_syncs(&self, uid: i32, user: i32) -> Result<(), Exception> {
+        if uid / PER_USER_RANGE as i32 != user {
+            self.enforce(uid, "android.permission.INTERACT_ACROSS_USERS_FULL", "no permission to read the syncs of other users")?;
+        }
+        self.enforce(uid, "android.permission.READ_SYNC_STATS", "no permission to read the sync stats")
+    }
+
     /// `getMasterSyncAutomaticallyAsUser`: `enforceCrossUserPermission`,
     /// READ_SYNC_SETTINGS, then SyncStorageEngine's setting of the user.
     fn master_sync(&self, uid: i32, user: i32) -> Result<bool, Exception> {
@@ -545,6 +555,22 @@ impl Service for ContentService {
                         p
                     }),
                 )
+            }
+            cs::GET_CURRENT_SYNCS | cs::GET_CURRENT_SYNCS_AS_USER => {
+                let uid = call.sender_euid as i32;
+                let user = if call.code == cs::GET_CURRENT_SYNCS {
+                    cs::GetCurrentSyncs::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                    uid / PER_USER_RANGE as i32
+                } else {
+                    cs::GetCurrentSyncsAsUser::read(&mut call.data).map_err(|_| BAD_VALUE)?.user_id
+                };
+                reply(self.current_syncs(uid, user).map(|()| {
+                    // `writeTypedList` of no `SyncInfo`.
+                    let mut p = Parcel::new();
+                    p.write_no_exception();
+                    p.write_i32(0);
+                    p
+                }))
             }
             cs::GET_MASTER_SYNC_AUTOMATICALLY => {
                 cs::GetMasterSyncAutomatically::read(&mut call.data).map_err(|_| BAD_VALUE)?;
