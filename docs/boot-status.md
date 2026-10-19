@@ -104,7 +104,12 @@ Contacts draws its empty contact list (appwidget, content trigger jobs);
 Drive and Play Store reach their sign-in pages, and Play Store's
 downloads start in DownloadProvider (its jobs get their network,
 `allocateBytes`; 2026-10-20). The Google app gets past its splash to its
-search page. Settings' home shows the storage used and free
+search page. An app's runtime permission request shows PermissionController's
+dialog (YouTube's notification permission; `ecm_enhanced_confirmation`,
+`getPermissionPolicy`), and the permission service grants, revokes and
+persists runtime permissions; YouTube itself still dies on
+`finishActivityAffinity` (#1861). Clock asks the app host nothing it does
+not answer but battery stats (#1513). Settings' home shows the storage used and free
 (`storagestats`); its storage page stops at cache quotas, which need
 usage stats (#1824, #1723). Play services' persistent process gets its
 installed modules, Wi-Fi scan results (none, the Mac's radio being off),
