@@ -198,6 +198,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aim-host-lock"
+version = "0.1.0"
+dependencies = [
+ "aim-hostcall",
+]
+
+[[package]]
 name = "aim-host-memory"
 version = "0.1.0"
 dependencies = [
@@ -303,6 +310,7 @@ dependencies = [
  "aim-host-audio",
  "aim-host-display",
  "aim-host-location",
+ "aim-host-lock",
  "aim-host-memory",
  "aim-host-sensors",
  "aim-host-wifi",

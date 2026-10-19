@@ -85,7 +85,7 @@ and, once its terms are accepted, stops at WebView (#1491); Camera at a
 Mac without a camera (#646). Gmail stops at `getAccountsByFeatures`
 (#1504); Chrome draws its first-run screen with its renderer in an
 isolated process, and past it starts its tabbed activity, which stops at
-`isRequestPinItemSupported` (#1669); Messages at WebView
+`addDynamicShortcuts` (shortcut writes, #1669); Messages at WebView
 (#1491); the Google apps at Play services (#1673, #1623, #1504).
 
 ## Native system services (2026-09-29, ADR 0013)

@@ -23,6 +23,7 @@ aim-hostcall.workspace = true
 aim-service-aidl = { path = "aidl" }
 aim-storage.workspace = true
 aim-host-wifi = { path = "../aim-host-wifi" }
+aim-host-lock = { path = "../aim-host-lock" }
 aim-uplink = { path = "../aim-uplink" }
 android-image-extract = { path = "../../tools/android-image-extract" }
 crc32fast = "1.5"

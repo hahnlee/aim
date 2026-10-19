@@ -96,6 +96,12 @@ impl RoleManager {
         RoleManager { host, roles: Mutex::new(None), listeners: Mutex::new(HashMap::new()) }
     }
 
+    /// The holders of `role` of user 0 (`RoleManager.getRoleHoldersAsUser`
+    /// as the system asks it): none for a role that is not available.
+    pub(super) fn holders_of(&self, role: &str) -> Result<Vec<String>, Exception> {
+        Ok(self.roles()?.holders(role).map(<[String]>::to_vec).unwrap_or_default())
+    }
+
     /// `getOrCreateUserState(0)`: the persisted state as `readForUser`
     /// reads it (its reserve copy if it cannot), none without the file.
     fn roles(&self) -> Result<Arc<Roles>, Exception> {
