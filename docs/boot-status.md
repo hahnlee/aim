@@ -85,9 +85,9 @@ the Linux layer's socket accounting fills): Maps gets past its terms
 a Mac without a camera (#646). Gmail stops at `getAccountsByFeatures`
 (#1504); Chrome draws its first-run screen with its renderer in an
 isolated process, and past it starts its tabbed activity, which publishes
-its dynamic shortcut and draws its new tab page with its Discover
-feed; opening a page stops at `updateServiceGroup` (its renderer's
-priority); Messages draws its
+its dynamic shortcut, draws its new tab page with its Discover feed,
+and opens and draws web pages (its renderers in isolated processes);
+Messages draws its
 welcome page in WebView, its renderer started by the WebView zygote; the
 Google apps stop at Play services (#1673, #1623, #1504).
 

@@ -2805,6 +2805,14 @@ impl Service for Activity {
                 am::write_unbind_service_reply(&mut p, unbound);
                 Ok(p)
             }
+            am::UPDATE_SERVICE_GROUP => {
+                let a = am::UpdateServiceGroup::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.update_service_group(a.connection).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_update_service_group_reply(&mut p);
+                    p
+                }))
+            }
             am::PUBLISH_SERVICE => {
                 let a = am::PublishService::<kept::RawIntent>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.0.publish_service(a.token, a.intent, a.service);
