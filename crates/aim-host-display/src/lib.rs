@@ -213,8 +213,16 @@ fn present(p: &mut Present) -> i64 {
     let mut fds = vec![writer.as_raw_fd()];
     let mut flag = 0;
     if p.acquire >= 0 {
-        fds.push(p.acquire);
+        // SAFETY: open, checked above; borrowed for this call.
+        let acquire = unsafe { BorrowedFd::borrow_raw(p.acquire) }.try_clone_to_owned();
+        let Ok(acquire) = acquire else {
+            return neg(errno::ENOMEM);
+        };
+        fds.push(acquire.as_raw_fd());
         flag |= wire::PRESENT_ACQUIRE;
+        if hold_until_shown(acquire, fence.as_fd()).is_err() {
+            return neg(errno::ENOMEM);
+        }
     }
     let r = request(
         &Request {
@@ -231,6 +239,17 @@ fn present(p: &mut Present) -> i64 {
         p.present = match aim_sync_file::give_to_guest(fence){Ok(fd)=>fd,Err(error)=>return neg(error)};
     }
     r
+}
+
+/// Keep an acquire fence sent to the server open until the frame's present
+/// fence `shown` signals. A unix socket whose only reference is a message in
+/// flight can be taken for garbage by Darwin's unix domain socket collector
+/// while the server receives it, which flushes it: the server would read
+/// the fence as failed, so signaled, and show the frame before its content
+/// (#785). The guest may close its fence right after the call, and a merge
+/// is ours alone.
+fn hold_until_shown(acquire: OwnedFd, shown: BorrowedFd) -> std::io::Result<()> {
+    aim_sync_file::on_signal(shown, move |_| drop(acquire))
 }
 
 /// A guest array of `count` `T`s at `at`, or `-EINVAL`.
@@ -284,9 +303,12 @@ fn layers(f: &mut Layers) -> i64 {
     };
     let mut fds = vec![writer.as_raw_fd()];
     let mut flag = 0;
-    if let Some(a) = &acquire {
+    if let Some(a) = acquire {
         fds.push(a.as_raw_fd());
         flag |= wire::PRESENT_ACQUIRE;
+        if hold_until_shown(a, fence.as_fd()).is_err() {
+            return neg(errno::ENOMEM);
+        }
     }
     let sent: Vec<Layer> = layers.iter().map(|l| Layer { acquire: -1, ..*l }).collect();
     let r = Request {
