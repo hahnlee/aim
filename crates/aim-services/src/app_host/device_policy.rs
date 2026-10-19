@@ -112,6 +112,8 @@ impl Default for UserData {
 pub struct Policies {
     /// A device owner, or a profile owner of a user.
     owned: bool,
+    /// The owners' system update policy (`OwnersData.mSystemUpdatePolicy`).
+    system_update_policy: bool,
     /// An active admin or a delegation of a user.
     admins: bool,
     /// A policy the policy engine keeps.
@@ -127,9 +129,12 @@ impl Policies {
     /// `loadSettingsLocked` and `DevicePolicyEngine.load` read it.
     pub fn load(data: &Path) -> Result<Policies, String> {
         let system = data.join("system");
+        let owners = read_atomic(&system.join(DEVICE_OWNER_XML))?;
         let mut policies = Policies {
-            owned: read_atomic(&system.join(DEVICE_OWNER_XML))?
-                .is_some_and(|root| names_owner(&root, "device-owner", DEVICE_OWNER_TAGS)),
+            owned: owners.as_ref().is_some_and(|root| names_owner(root, "device-owner", DEVICE_OWNER_TAGS)),
+            system_update_policy: owners.as_ref().is_some_and(|root| {
+                root.name == "root" && root.children().take_while(|e| DEVICE_OWNER_TAGS.contains(&e.name.as_str())).any(|e| e.name == "system-update-policy")
+            }),
             ..Default::default()
         };
         // `getPolicyFileDirectory`: the system user's file is in
@@ -568,6 +573,16 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                     authorize(caller.full_cross_users(a.user_handle)?)?;
                 }
                 dp::write_package_has_active_admins_reply(&mut p, false);
+                Ok(())
+            })()
+        }
+        dp::GET_SYSTEM_UPDATE_POLICY => {
+            dp::GetSystemUpdatePolicy::read(r).map_err(|_| BAD_VALUE)?;
+            (|| {
+                if feature()? && device.policies()?.system_update_policy {
+                    return Err(device.unimplemented("a system update policy (#1521)"));
+                }
+                dp::write_get_system_update_policy_reply::<ParcelableResource>(&mut p, None);
                 Ok(())
             })()
         }
@@ -1030,6 +1045,14 @@ mod tests {
         write(&suffixed(&owner_file, ".bak"), &element("root", &[], vec![owner]));
         assert!(Policies::load(&dir).unwrap().owned());
         fs::remove_file(suffixed(&owner_file, ".bak")).unwrap();
+        // `mSystemUpdatePolicy`, with or without an owner, while no
+        // unknown tag ends the read before it.
+        let update = element("system-update-policy", &[("policy_type", Value::Int(1))], vec![]);
+        write(&owner_file, &element("root", &[], vec![update.clone()]));
+        assert!(Policies::load(&dir).unwrap().system_update_policy);
+        write(&owner_file, &element("root", &[], vec![element("something-else", &[], vec![]), update]));
+        assert!(!Policies::load(&dir).unwrap().system_update_policy);
+        fs::remove_file(&owner_file).unwrap();
         let profile = element("profile-owner", &[("component", string("com.example.dpc/.Admin"))], vec![]);
         fs::create_dir_all(dir.join("system/users/10")).unwrap();
         write(&dir.join("system/users/10").join(PROFILE_OWNER_XML), &element("root", &[], vec![profile]));
@@ -1164,6 +1187,20 @@ mod tests {
 
     fn not_authorized() -> Exception {
         Exception::security("Calling identity is not authorized")
+    }
+
+    /// `getSystemUpdatePolicy`: none without a persisted one, which is not
+    /// read yet.
+    #[test]
+    fn the_system_update_policy_is_none_unless_persisted() {
+        let mut device = Fake::default();
+        let r = call(&device, APP, dp::GET_SYSTEM_UPDATE_POLICY, |p| dp::GetSystemUpdatePolicy {}.write(p));
+        let mut reader = r.reader();
+        assert!(reader.read_exception().unwrap().is_ok());
+        assert_eq!(reader.read_i32().unwrap(), 0);
+        device.policies.system_update_policy = true;
+        let r = call(&device, APP, dp::GET_SYSTEM_UPDATE_POLICY, |p| dp::GetSystemUpdatePolicy {}.write(p));
+        assert_eq!(exception(&r).code, aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION);
     }
 
     /// An app's reads of its own user on a device without owners, admins
