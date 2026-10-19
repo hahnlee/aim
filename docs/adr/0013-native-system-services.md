@@ -491,6 +491,31 @@ The migration's state and conformance results are in
   process zygote starts as an app's does not have. They stay
   unimplemented (#1518), and so does the AppSearch module's service
   (#1761), which needs `services.jar`'s `SystemService` as well.
+- **Originals only system_server runs (2026-10-19, #1761).** Where a
+  service exists only inside system_server and a native port is not yet
+  worth it, the app host runs the original in a process of the system
+  uid, with the smallest explicit stand-in for what starts it there.
+  AppSearch's module runs in `aim-appsearch`, an init service of the app
+  host image (`image/app-host/aim-appsearch.rc`, `tools/app-host-image.sh`)
+  that runs `app_process` on `aim-services.jar`, as `/system/bin/am` runs
+  its jar. `AppSearchHost` plays ZygoteInit's part for the system server
+  (`handleSystemServerProcess`): the umask, the class loader of
+  `SYSTEMSERVERCLASSPATH` with its linker namespace
+  (`ClassLoaderFactory`, as `createPathClassLoader` makes it; the module's
+  JNI library loads through it) and the start of its `Server` in that
+  loader by `RuntimeInit.applicationInit`, as `zygoteInit` does after
+  `commonInit`, which `app_process` has run. `Server` plays SystemServer's
+  and SystemServiceManager's part for the module: the system context
+  (`createSystemContext`), `initializeMainlineModules`, the module's
+  Lifecycle started where SystemServer starts it (after
+  PHASE_DEVICE_SPECIFIC_SERVICES_READY, so it is given the later phases)
+  and user 0 started and unlocked. The module publishes `app_search`
+  itself. What it asks of system_server's internals that this process has
+  not shows as the original reacts to it: StorageStatsService's
+  `StorageStatsManagerLocal` (#1520), on which the module's `onStart`
+  stops after publishing its binder and registering its receivers, and
+  its maintenance `JobService`, a component of the `android` package
+  (#1518), which JobScheduler refuses.
 
 ### CTS-derived conformance (2026-10-16)
 

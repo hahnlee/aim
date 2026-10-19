@@ -1,0 +1,8 @@
+# The app host's AppSearch (docs/app-host.md, #1761): AppSearchManagerService
+# runs only in system_server, which the app host does not have, so a
+# process of the system uid runs the original module (aim-services.jar's
+# AppSearchHost, system_server's class path).
+service aim-appsearch /system_ext/bin/aim-appsearch
+    class main
+    user system
+    group system
