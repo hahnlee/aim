@@ -128,11 +128,38 @@ pub fn host_qos(nice: i32, policy: i32) -> libc::qos_class_t {
     }
 }
 
+/// Darwin's default priority (`BASEPRI_DEFAULT`) and the top of its user
+/// range (`MAXPRI_USER`).
+const BASEPRI_DEFAULT: i32 = 31;
+const MAXPRI_USER: i32 = 63;
+
 /// The Darwin timeshare priority of a nice value, as Darwin's own nice
 /// value sets it: the task importance `-nice` over the default priority
 /// (31), within the user range (15-47).
 fn timeshare_priority(nice: i32) -> i32 {
-    (31 - nice).clamp(15, 47)
+    (BASEPRI_DEFAULT - nice).clamp(15, 47)
+}
+
+/// This task's base priority (`task->priority`): the default moved by the
+/// host process's nice value (Darwin's task importance), or a host clamp.
+fn task_priority() -> i32 {
+    // SAFETY: proc_pidinfo into a local struct of the size given.
+    unsafe {
+        let mut info: libc::proc_taskinfo = std::mem::zeroed();
+        let size = size_of::<libc::proc_taskinfo>() as i32;
+        if libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDTASKINFO,
+            0,
+            (&raw mut info).cast(),
+            size,
+        ) == size
+        {
+            info.pti_priority
+        } else {
+            BASEPRI_DEFAULT
+        }
+    }
 }
 
 thread_local! {
@@ -154,6 +181,12 @@ thread_local! {
 /// Darwin sets a thread's QoS only from the thread itself, so a thread that
 /// changes another's scheduling marks it ([`thread::Sched::host_stale`])
 /// and that thread applies it at its next syscall ([`apply_stale_sched`]).
+/// Darwin keeps a fixed or timeshare priority as an importance over its
+/// default priority on top of the task's base priority, which the host
+/// process's nice value moves (a job a shell starts in the background runs
+/// at nice 5); a Linux thread's priority is its own, so the importance is
+/// taken from the task's base priority as it is, and threads apply theirs
+/// again when it changes ([`task_priority_changed`]).
 pub fn apply_host_sched(nice: i32, policy: i32) {
     let raised = matches!(policy, SCHED_FIFO | SCHED_RR)
         || nice < 0 && !matches!(policy, SCHED_BATCH | SCHED_IDLE);
@@ -170,12 +203,24 @@ pub fn apply_host_sched(nice: i32, policy: i32) {
         SCHED_BATCH => (libc::SCHED_OTHER, timeshare_priority(nice.max(10))),
         _ => (libc::SCHED_OTHER, timeshare_priority(nice)),
     };
+    let priority = (priority + BASEPRI_DEFAULT - task_priority()).min(MAXPRI_USER);
     // SAFETY: sched_param is plain data; plain call on the calling thread.
     unsafe {
         let mut param: libc::sched_param = std::mem::zeroed();
         param.sched_priority = priority;
         libc::pthread_setschedparam(libc::pthread_self(), policy, &param);
     }
+}
+
+/// The task's base priority changed (the host process's nice value): every
+/// other thread applies its scheduling again at its next syscall.
+pub fn task_priority_changed() {
+    let me = thread::gettid() as i32;
+    thread::with_table(|t| {
+        for th in t.values().filter(|th| th.tid != me) {
+            th.sched.host_stale.store(true, SeqCst);
+        }
+    });
 }
 
 /// Apply the calling thread's scheduling, changed by another thread, to

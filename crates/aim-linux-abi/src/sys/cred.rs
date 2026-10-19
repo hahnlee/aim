@@ -1460,7 +1460,7 @@ pub fn setpriority(a: [u64; 6]) -> i64 {
     }
     let a = [a[0], who, a[2], a[3], a[4], a[5]];
     if a[0] == PRIO_PROCESS && is_self(a[1] as i32) {
-        return with(|id| {
+        let r = with(|id| {
             if nice < id.priority && !id.can_nice(nice) {
                 return -(EACCES as i64);
             }
@@ -1472,6 +1472,10 @@ pub fn setpriority(a: [u64; 6]) -> i64 {
             nice_changed(a[1] as i32, nice);
             0
         });
+        if r == 0 {
+            super::process::task_priority_changed();
+        }
+        return r;
     }
     if a[0] == PRIO_PROCESS
         && let Some(tid) = other_thread(a[1])

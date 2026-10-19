@@ -382,27 +382,47 @@ fn thread_priority(pid: u32, name: &str) -> Option<i32> {
 }
 
 /// Background scheduling (a nice value of 10 or more, SCHED_IDLE) lowers
-/// the host thread's QoS, and the default brings it back.
+/// the host thread's QoS, and the default brings it back. The priorities
+/// are the threads' own whatever nice value linux-run starts at (a shell's
+/// background job runs at nice 5).
 #[test]
 fn background_qos() {
-    use std::io::{BufRead, Write};
-    use std::process::Stdio;
     let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
         aim_paths::skip("the pinned NDK or the extracted image is missing");
         return;
     };
     let g = Guest::new(&image, "t_qos");
     let prog = g.build(&clang, "t_qos");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_linux-run"))
+    qos_steps(&g, &prog, 0);
+    qos_steps(&g, &prog, 5);
+}
+
+/// t_qos's steps with linux-run started `renice` above this process's
+/// nice value.
+fn qos_steps(g: &Guest, prog: &str, renice: i32) {
+    use std::io::{BufRead, Write};
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_linux-run"));
+    command
         .arg("--path-map")
         .arg(&g.map)
         .arg("--cache")
         .arg(&g.cache)
-        .arg(&prog)
+        .arg(prog)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stdout(Stdio::piped());
+    // SAFETY: getpriority and setpriority are async-signal-safe.
+    unsafe {
+        command.pre_exec(move || {
+            let nice = libc::getpriority(libc::PRIO_PROCESS, 0);
+            if libc::setpriority(libc::PRIO_PROCESS, 0, nice + renice) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
     // Darwin's base priorities of the default, utility and background QoS,
@@ -426,7 +446,7 @@ fn background_qos() {
         assert_eq!(
             thread_priority(child.id(), "qos-worker"),
             Some(want),
-            "{step}"
+            "{step} at nice +{renice}"
         );
         writeln!(stdin).unwrap();
     }
