@@ -33,6 +33,7 @@ const ON_USER_STARTED: u32 = 8;
 const SETUP_APP_DIR: u32 = 23;
 /// `IVoldListener`'s volume calls.
 const LISTENER_DESCRIPTOR: &str = "android.os.IVoldListener";
+const ON_DISK_CREATED: u32 = 1;
 const ON_VOLUME_CREATED: u32 = 5;
 const ON_VOLUME_STATE_CHANGED: u32 = 6;
 const ON_VOLUME_METADATA_CHANGED: u32 = 7;
@@ -373,6 +374,26 @@ impl AppHost {
             })? as i64;
         }
         Ok(*size)
+    }
+
+    /// `getVolumeRecords`: `mRecords`, read from `storage.xml`
+    /// (`readSettingsLocked`); the records are of volumes on vold's disks,
+    /// which the app host does not keep (#1839).
+    fn volume_records(&self) -> Result<(), Exception> {
+        let path = self.inputs()?.data.join("system/storage.xml");
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(io_exception(&format!("{}: {e}", path.display()))),
+        };
+        let root = aim_android_xml::read(&bytes)
+            .map_err(|e| io_exception(&format!("{}: {e}", path.display())))?;
+        if root.children().any(|e| e.name == "volume") {
+            return Err(
+                self.unimplemented_named("mount", "the volume records of vold's disks (#1839)")
+            );
+        }
+        Ok(())
     }
 
     /// Whether user 0's emulated volume is mounted
@@ -976,6 +997,14 @@ impl Service for Listener {
             .enforce_interface(LISTENER_DESCRIPTOR)
             .map_err(|_| BAD_VALUE)?;
         let id = call.data.read_string16().map_err(|_| BAD_VALUE)?;
+        // `mDisks`: the app host keeps none, vold reporting none for its
+        // guest.
+        if call.code == ON_DISK_CREATED {
+            eprintln!(
+                "app host: mount: vold's disk {}: portable and adoptable storage (#1839) is not implemented",
+                id.as_deref().unwrap_or_default()
+            );
+        }
         if id.as_deref() != Some(VOLUME) {
             return Ok(Parcel::new());
         }
@@ -1027,6 +1056,15 @@ impl Service for Listener {
     }
 }
 
+/// A `DiskInfo` or `VolumeRecord`, of which the app host has none.
+enum NoDisk {}
+
+impl WriteParcelable for NoDisk {
+    fn write_to(&self, _: &mut Parcel) {
+        match *self {}
+    }
+}
+
 /// `mount`: the `IStorageManager` calls of apps.
 pub struct StorageManager(pub Arc<AppHost>);
 
@@ -1051,6 +1089,21 @@ impl Service for StorageManager {
                 let mut p = Parcel::new();
                 sm::write_is_ce_storage_unlocked_reply(&mut p, args.user_id == 0);
                 Ok(p)
+            }
+            // `mDisks`, of which there are none (#1839).
+            sm::GET_DISKS => {
+                sm::GetDisks::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                sm::write_get_disks_reply::<NoDisk>(&mut p, Some(&[]));
+                Ok(p)
+            }
+            sm::GET_VOLUME_RECORDS => {
+                sm::GetVolumeRecords::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.0.volume_records().map(|()| {
+                    let mut p = Parcel::new();
+                    sm::write_get_volume_records_reply::<NoDisk>(&mut p, Some(&[]));
+                    p
+                }))
             }
             sm::GET_VOLUMES => {
                 sm::GetVolumes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
