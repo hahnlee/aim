@@ -16,7 +16,7 @@ mod apex;
 mod apex_image;
 mod apex_register;
 pub use apex_image::{ApexCode, ApexImage};
-pub use apex_register::ApexScanResult;
+pub use apex_register::{ApexScanResult, registered_apex};
 mod authorize;
 mod enrich;
 pub use enrich::{ScanClock, ScanTime};

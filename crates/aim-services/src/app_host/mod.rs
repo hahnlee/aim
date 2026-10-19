@@ -16,6 +16,7 @@ pub mod activity;
 pub mod activity_stack;
 pub mod activity_start;
 pub mod alarm_service;
+pub mod apex_manager;
 mod app_op_infos;
 pub mod appops_sampling;
 pub mod appops_service;
@@ -687,6 +688,7 @@ impl AppHost {
             &|name| (configured.properties)(name),
             // `SharedLibrariesImpl.ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES`.
             &|name, target_sdk| compat.is_enabled(142_191_088, Some(name), target_sdk),
+            &apex_manager::inventory(&self.process).map_err(state)?,
         )
         .map_err(state)?;
         let settings = settings::Settings::load(&configured.data).map_err(state)?;

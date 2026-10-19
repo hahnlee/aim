@@ -562,6 +562,56 @@ impl SigningScan {
     }
 }
 
+/// One container as `scanApexPackages` registers it, for a reader of the
+/// persisted settings that runs no scan (the app host): the package after
+/// `addForInitLI`'s container policy, signing and identity, and its
+/// application flags, and whether it starts stopped
+/// (`SCAN_AS_STOPPED_SYSTEM_APP`). Library compatibility is not applied (#808); a
+/// container with a shared user, or adopting an original package, is not
+/// represented.
+pub fn registered_apex(
+    source: &super::ApexCode,
+    settings: &crate::package::settings::Settings,
+    config: &SystemConfig,
+    apks: &Apks,
+) -> Result<(AndroidPackage, i32, i32, bool), String> {
+    let mut parsed = source.parsed.clone();
+    let identity = Identity::select_for_apex(&parsed, settings);
+    // No container is scanned yet when the APEXes are, as in the initial scan.
+    if parsed.shared_user_id.is_some()
+        || identity.internal_name != identity.manifest_name
+        || Identity::original_setting(&parsed, settings, &|_| false).is_some()
+    {
+        return Err(format!(
+            "{}: a container with a shared user or an original package is not represented",
+            source.info.module_path
+        ));
+    }
+    let disabled = settings
+        .disabled_system_packages
+        .iter()
+        .any(|p| p.name == identity.internal_name);
+    let updated = !source.info.factory || disabled;
+    container_policy(&source.info.module_path).apply_manifest(
+        &mut parsed,
+        &source.signing,
+        None,
+        updated,
+        apks,
+    )?;
+    super::validate::static_library(&parsed, false)?;
+    parsed.signing_details = Some(source.signing.parcel_details()?);
+    identity.apply(&mut parsed);
+    parsed.uid = -1;
+    let (flags, private_flags) = application_flags(&parsed, updated);
+    let stopped = super::boot::initial_stopped(
+        &parsed,
+        config,
+        apks.platform.framework_boolean("config_stopSystemPackagesByDefault")?,
+    );
+    Ok((parsed, flags, private_flags, stopped))
+}
+
 fn container_policy(path: &str) -> ScanPolicy {
     // getSystemPackageScanFlags always includes SYSTEM, even for /data APEX.
     // Partition masks use the actual code path, not the preinstalled origin.
