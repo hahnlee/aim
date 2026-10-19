@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, Parcel};
+use aim_binder_host::parcel::{BAD_VALUE, Exception, Parcel};
 use aim_service_aidl::com_android_internal_app_ibatterystats as bs;
 
 use super::kept::RawIntent;
@@ -24,6 +24,7 @@ use super::{AppHost, reply};
 
 /// `BatteryManager.BATTERY_STATUS_UNKNOWN`, `BATTERY_STATUS_FULL`,
 /// `BATTERY_PLUGGED_NONE`.
+const UPDATE_DEVICE_STATS: &str = "android.permission.UPDATE_DEVICE_STATS";
 const STATUS_UNKNOWN: i32 = 1;
 const STATUS_FULL: i32 = 5;
 const PLUGGED_NONE: i32 = 0;
@@ -359,6 +360,22 @@ impl Service for BatteryStats {
             bs::COMPUTE_CHARGE_TIME_REMAINING => {
                 bs::ComputeChargeTimeRemaining::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 bs::write_compute_charge_time_remaining_reply(&mut p, ms(s.charge_time_remaining()));
+            }
+            // `noteResetBluetoothScanLocked` stops the BLE scan timers that
+            // run. None does: their starts (`noteBleScanStarted` and the
+            // rest) are not taken (#1513), so the reset changes nothing.
+            bs::NOTE_BLE_SCAN_RESET => {
+                bs::NoteBleScanReset::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                drop(s);
+                let Some(host) = self.host.upgrade() else { return Err(BAD_VALUE) };
+                let permitted = host.check_permission(Some(UPDATE_DEVICE_STATS), call.sender_euid as i32);
+                return reply(permitted.and_then(|held| match held {
+                    0 => Ok(p),
+                    _ => Err(Exception::security(format!("Access denied, requires: {UPDATE_DEVICE_STATS}"))),
+                }).map(|mut p| {
+                    bs::write_note_ble_scan_reset_reply(&mut p);
+                    p
+                }));
             }
             code => {
                 drop(s);
