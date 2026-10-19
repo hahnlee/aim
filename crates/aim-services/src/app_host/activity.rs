@@ -1167,6 +1167,16 @@ impl Service for ActivityClientController {
                 let token = Self::token(call)?;
                 let stopped = call.code == acc::ACTIVITY_STOPPED;
                 self.report(token, if stopped { "stopped" } else { "destroyed" }, |_| {});
+                if let Some(Binder::Local(t)) = token {
+                    self.0.activity_usage_stats(
+                        t,
+                        if stopped {
+                            super::usage_events::ACTIVITY_STOPPED
+                        } else {
+                            super::usage_events::ACTIVITY_DESTROYED
+                        },
+                    );
+                }
                 self.0.activity_reported(
                     token,
                     if stopped {
