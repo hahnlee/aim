@@ -154,6 +154,10 @@ pub struct AudioService {
     /// `mModeDispatchers`: told of a mode change, which the app host's
     /// `MODE_NORMAL` never has.
     mode_dispatchers: Arc<Mutex<HashMap<u32, (Strong, u64)>>>,
+    /// `LoudnessCodecHelper.mLoudnessUpdateDispatchers`: told of the
+    /// loudness parameters of the codecs apps start updates for
+    /// (`startLoudnessCodecUpdates`).
+    loudness_dispatchers: Arc<Mutex<HashMap<u32, (Strong, u64)>>>,
 }
 
 /// `AudioRoutesInfo`: `AudioDeviceInventory.mCurAudioRoutes`, which the
@@ -184,6 +188,7 @@ impl AudioService {
             routes_observers: Arc::new(Mutex::new(HashMap::new())),
             comm_dev_dispatchers: Arc::new(Mutex::new(HashMap::new())),
             mode_dispatchers: Arc::new(Mutex::new(HashMap::new())),
+            loudness_dispatchers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1418,6 +1423,22 @@ impl Service for AudioService {
                 if let Some(Binder::Handle(dispatcher)) = args.dispatcher {
                     self.let_go(&self.mode_dispatchers, dispatcher);
                 }
+            }
+            audio::REGISTER_LOUDNESS_CODEC_UPDATES_DISPATCHER => {
+                let args = audio::RegisterLoudnessCodecUpdatesDispatcher::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                if let Some(Binder::Handle(dispatcher)) = args.dispatcher {
+                    self.keep(&self.loudness_dispatchers, dispatcher);
+                }
+                audio::write_register_loudness_codec_updates_dispatcher_reply(&mut p);
+            }
+            audio::UNREGISTER_LOUDNESS_CODEC_UPDATES_DISPATCHER => {
+                let args = audio::UnregisterLoudnessCodecUpdatesDispatcher::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                if let Some(Binder::Handle(dispatcher)) = args.dispatcher {
+                    self.let_go(&self.loudness_dispatchers, dispatcher);
+                }
+                audio::write_unregister_loudness_codec_updates_dispatcher_reply(&mut p);
             }
             audio::IS_STREAM_AFFECTED_BY_MUTE => {
                 let args =
