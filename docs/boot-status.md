@@ -50,6 +50,9 @@ is its client. netd (hosting DnsResolver) and bpfloader, whose loaded
 BPF programs netd waits for, start for apps' name lookups: the app
 host's connectivity service gives them the Mac's network and DNS
 servers, and `ping www.google.com` in the guest resolves (2026-10-18).
+tombstoned starts too, so a crash's tombstone (`/data/tombstones`) and
+the stack traces a process dumps on SIGQUIT (`/data/anr`) are kept
+(2026-10-20).
 The times above are from before these joined. Calculator, started through
 the app host, draws its first frame about 0.36 s after its process starts,
 its window is on the display, and taps on the display's touchscreen

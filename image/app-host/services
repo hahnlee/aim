@@ -12,7 +12,8 @@
 # log and serves the stats manager's calls; the Bluetooth HAL is the
 # controller the Bluetooth app's stack drives over the Mac's CoreBluetooth;
 # aim-appsearch runs the original AppSearch module, which only system_server
-# would run.
+# would run; tombstoned keeps the tombstones crash_dump writes and the stack
+# traces processes dump on SIGQUIT.
 apexd-bootstrap
 apexd
 keystore2
@@ -20,6 +21,7 @@ odsign
 vendor.keymint-default
 prng_seeder
 logd
+tombstoned
 servicemanager
 hwservicemanager
 derive_classpath
