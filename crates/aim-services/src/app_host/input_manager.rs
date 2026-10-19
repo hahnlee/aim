@@ -4,7 +4,7 @@
 //! virtual keyboard (`EventHub::createVirtualKeyboardLocked`), whose key
 //! character map an app's `KeyCharacterMap.load` falls back to; the
 //! touchscreen, keyboard and mouse InputReader would find are not modelled
-//! yet (#1434).
+//! yet (#1434). Its shell command is `input_shell.rs`.
 
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -127,6 +127,11 @@ impl Service for InputManager {
         im::DESCRIPTOR
     }
 
+    /// A shell command's input and outputs.
+    fn accepts_fds(&self) -> bool {
+        true
+    }
+
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let mut p = Parcel::new();
         match call.code {
@@ -160,6 +165,14 @@ impl Service for InputManager {
                 let args = im::RegisterInputDevicesChangedListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.listeners.lock().unwrap().extend(args.listener);
                 im::write_register_input_devices_changed_listener_reply(&mut p);
+            }
+            crate::shell::SHELL_COMMAND_TRANSACTION => {
+                let mut command = crate::shell::ShellCommand::read(&self.host.process, &mut call.data).map_err(|_| BAD_VALUE)?;
+                if command.has_output() {
+                    let result = super::input_shell::run(&self.host, call.sender_euid as i32, &mut command);
+                    command.finish(result);
+                }
+                p.write_no_exception();
             }
             code => return reply(Err(self.host.unimplemented("input", code))),
         }

@@ -43,6 +43,7 @@ pub mod generations;
 pub mod hint_manager;
 pub mod input_manager;
 pub mod input_method;
+pub mod input_shell;
 pub mod job_info;
 pub mod job_scheduler;
 pub mod job_store;

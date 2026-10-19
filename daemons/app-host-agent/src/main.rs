@@ -57,6 +57,10 @@ const KILL_PROCESS: u32 = 4;
 const MOUNT_STORAGE: u32 = 5;
 /// `IAppHostAgent.playSoundEffect(String path, float gain)`.
 const PLAY_SOUND_EFFECT: u32 = 6;
+/// `IAppHostAgent.injectMotion(int action, long downTimeNanos, long
+/// eventTimeNanos, float x, float y, float pressure)`: a one-finger
+/// touchscreen motion in the display's pixels.
+const INJECT_MOTION: u32 = 7;
 /// `InputTransport.cpp`'s `SOCKET_BUFFER_SIZE`.
 const SOCKET_BUFFER_SIZE: libc::c_int = 32 * 1024;
 
@@ -194,6 +198,7 @@ pub trait IAppHostAgent: Interface {
     fn focus_input_channel(&self, index: i32) -> bool;
     fn set_input_channel_frame(&self, index: i32, region: input::Region) -> bool;
     fn play_sound_effect(&self, path: &str, gain: f32) -> Result<(), String>;
+    fn inject_motion(&self, motion: &aim_input_transport::Motion);
 }
 
 declare_binder_interface! {
@@ -216,6 +221,7 @@ impl IAppHostAgent for BpAppHostAgent {
     fn play_sound_effect(&self, _: &str, _: f32) -> Result<(), String> {
         Err("not the agent".into())
     }
+    fn inject_motion(&self, _: &aim_input_transport::Motion) {}
 }
 
 impl IAppHostAgent for binder::binder_impl::Binder<BnAppHostAgent> {
@@ -230,6 +236,9 @@ impl IAppHostAgent for binder::binder_impl::Binder<BnAppHostAgent> {
     }
     fn play_sound_effect(&self, path: &str, gain: f32) -> Result<(), String> {
         self.0.play_sound_effect(path, gain)
+    }
+    fn inject_motion(&self, motion: &aim_input_transport::Motion) {
+        self.0.inject_motion(motion)
     }
 }
 
@@ -293,6 +302,19 @@ fn on_transact(
                     log::error!("{error}");
                     Status::new_exception_str(binder::ExceptionCode::ILLEGAL_STATE, Some(error))
                 }
+            })?;
+            Ok(())
+        }
+        INJECT_MOTION => {
+            let action: i32 = data.read()?;
+            let (down_time, time): (i64, i64) = (data.read()?, data.read()?);
+            let (x, y, pressure): (f32, f32, f32) = (data.read()?, data.read()?, data.read()?);
+            reply.write(&match aim_input_transport::Motion::injected(action, down_time, time, x, y, pressure) {
+                Some(motion) => {
+                    agent.inject_motion(&motion);
+                    Status::ok()
+                }
+                None => Status::new_exception_str(binder::ExceptionCode::ILLEGAL_ARGUMENT, Some(format!("injected action {action}"))),
             })?;
             Ok(())
         }
@@ -377,6 +399,9 @@ impl IAppHostAgent for Agent {
 
     fn play_sound_effect(&self, path: &str, gain: f32) -> Result<(), String> {
         self.effects.play(path, gain)
+    }
+    fn inject_motion(&self, motion: &aim_input_transport::Motion) {
+        self.input.inject(motion)
     }
 }
 
