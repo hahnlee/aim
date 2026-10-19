@@ -292,6 +292,11 @@ impl BatteryStats {
 
     /// `setBatteryState`, as BatteryService calls it with each health
     /// info it processes.
+    /// `isCharging` (`BatteryManager.isCharging`).
+    pub(super) fn charging(&self) -> bool {
+        self.stats.lock().unwrap().charging
+    }
+
     pub(super) fn set_battery_state(self: &Arc<Self>, status: i32, plug_type: i32, level: i32, time_to_full: i64, now: i64) {
         let Some(host) = self.host.upgrade() else { return };
         let Some(config) = self.config(&host) else { return eprintln!("app host: batterystats: no configuration yet") };
