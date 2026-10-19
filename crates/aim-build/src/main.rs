@@ -10,6 +10,7 @@ mod bench;
 mod boot;
 mod cargo;
 mod fetch;
+mod fmt;
 mod graph;
 mod hash;
 mod lockfile;
@@ -57,6 +58,8 @@ commands:
                          verify linkage and generated transaction codes; no build
   generate-service-aidl regenerate the typed service contract from existing pins;
                          no image or dependency build
+  fmt [--check]          rustfmt over the repository's own crates (not the
+                         fetched or generated ones)
   status [NODE...]       which nodes are stale, and why
   storage [DATA...]      what the system, derived and data images occupy on the
                          host, and what a data image could give back (docs/storage.md)
@@ -113,6 +116,7 @@ struct Args {
     compare: Vec<String>,
     template_inputs: std::collections::HashMap<String, String>,
     template_boot_timeout: Option<Duration>,
+    check: bool,
 }
 
 fn parse(args: Vec<String>) -> Result<Args, String> {
@@ -133,6 +137,7 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         compare: Vec::new(),
         template_inputs: std::collections::HashMap::new(),
         template_boot_timeout: None,
+        check: false,
     };
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| args.next().ok_or(format!("{flag} needs a value"));
@@ -164,6 +169,7 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
                 parsed.jobs = value(&arg)?.parse().map_err(|_| "--jobs needs a number")?
             }
             "--integration" if parsed.command == "test" => parsed.integration = true,
+            "--check" if parsed.command == "fmt" => parsed.check = true,
             "--timeout" if parsed.command == "test" => {
                 let secs = value(&arg)?
                     .parse()
@@ -451,6 +457,7 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
             };
             bench::run(&ctx, &options)
         }
+        "fmt" => fmt::run(args.check),
         "storage" => {
             storage::run(&args.names)?;
             Ok(ExitCode::SUCCESS)
