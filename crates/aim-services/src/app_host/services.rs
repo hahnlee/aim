@@ -11,7 +11,8 @@
 //! started again. The app host binds services itself too, as the system
 //! does (`bindServiceAsUser` from system_server, a connection of its
 //! own). A service runs in its process (`android:process`), started for
-//! it when it does not run. Isolated services are not run (#1492).
+//! it when it does not run. An isolated service runs in an isolated process
+//! of its own; external services and shared isolated processes are #1492.
 //! `getServices` lists them as `getRunningServiceInfoLocked` does.
 //!
 //! A service becomes foreground (`setServiceForegroundLocked`) with the
@@ -59,6 +60,9 @@ const BIND_EXTERNAL_SERVICE: i64 = 0x8000_0000;
 const BIND_EXTERNAL_SERVICE_LONG: i64 = 1 << 62;
 /// `ServiceInfo.FLAG_ISOLATED_PROCESS`.
 const FLAG_ISOLATED_PROCESS: i32 = 0x2;
+/// `Context.BIND_SHARED_ISOLATED_PROCESS`, `BIND_PACKAGE_ISOLATED_PROCESS`.
+const BIND_SHARED_ISOLATED_PROCESS: i64 = 0x2000;
+const BIND_PACKAGE_ISOLATED_PROCESS: i64 = 1 << 14;
 /// `Process.SYSTEM_UID`.
 const SYSTEM_UID: i32 = 1000;
 /// `ActivityThread.SERVICE_DONE_EXECUTING_START`.
@@ -189,8 +193,12 @@ struct Record {
     token: Binder,
     package: String,
     class: String,
+    /// The instance it was bound as (`bindServiceInstance`): an isolated
+    /// service has a record, so a process, per instance.
+    instance: Option<String>,
     info: ServiceInfo,
-    /// Its process's start, and whether it was created there.
+    /// Its process's start (an isolated service's own process), and
+    /// whether it was created there.
     app: Option<i64>,
     created: bool,
     start_requested: bool,
@@ -766,9 +774,6 @@ impl AppHost {
                 format!("not exported from uid {target}")
             }));
         }
-        if info.flags & FLAG_ISOLATED_PROCESS != 0 {
-            return Err(self.unimplemented_named("activity", "an isolated service (#1492)"));
-        }
         Ok(Lookup::Found(Box::new(info)))
     }
 
@@ -776,6 +781,7 @@ impl AppHost {
     fn service_record(
         state: &mut State,
         info: ServiceInfo,
+        instance: Option<String>,
         process: &Arc<aim_binder_host::local::LocalProcess>,
     ) -> Binder {
         let package = info
@@ -789,7 +795,7 @@ impl AppHost {
         if let Some(r) = state
             .records
             .iter()
-            .find(|r| r.package == package && r.class == class)
+            .find(|r| r.package == package && r.class == class && r.instance == instance)
         {
             return r.token;
         }
@@ -798,6 +804,7 @@ impl AppHost {
             token,
             package,
             class,
+            instance,
             info,
             app: None,
             created: false,
@@ -867,7 +874,7 @@ impl AppHost {
         let grants = self.check_grant_from_intent(&intent, uid, package, user)?.map(|n| (n, self.new_start_owner()));
         let kept = KeptIntent::new(intent, &self.process);
         let mut state = self.services.state.lock().unwrap();
-        let token = Self::service_record(&mut state, info, &self.process);
+        let token = Self::service_record(&mut state, info, None, &self.process);
         self.set_fgs_restriction(&mut state, token, calling_package, uid, false)?;
         let r = state.record(token).unwrap();
         let (app_uid, package, target_sdk) =
@@ -955,7 +962,7 @@ impl AppHost {
         let Some(r) = state
             .records
             .iter_mut()
-            .find(|r| r.package == package && r.class == class)
+            .find(|r| r.package == package && r.class == class && r.instance.is_none())
         else {
             return Ok(0);
         };
@@ -1047,6 +1054,11 @@ impl AppHost {
                 self.unimplemented_named("activity", "an external service's binding (#1492)")
             );
         }
+        if flags & (BIND_SHARED_ISOLATED_PROCESS | BIND_PACKAGE_ISOLATED_PROCESS) != 0 {
+            return Err(
+                self.unimplemented_named("activity", "a binding into a shared isolated process (#1492)")
+            );
+        }
         let user = self.incoming_user(uid, user, false)?;
         let info = match self.retrieve_service(
             &intent,
@@ -1060,7 +1072,7 @@ impl AppHost {
             Lookup::Found(info) => *info,
         };
         let conn = Conn::App(self.process.strong(conn));
-        self.bind_found(intent, info, conn, Some(client), activity, flags, client_label)?;
+        self.bind_found(intent, info, instance, conn, Some(client), activity, flags, client_label)?;
         Ok(1)
     }
 
@@ -1081,7 +1093,7 @@ impl AppHost {
             Lookup::Found(info) => *info,
             Lookup::None | Lookup::Denied(_) => return Ok(false),
         };
-        self.bind_found(intent, info, Conn::Host(conn), None, None, bind_flags, 0)?;
+        self.bind_found(intent, info, None, Conn::Host(conn), None, None, bind_flags, 0)?;
         Ok(true)
     }
 
@@ -1105,6 +1117,7 @@ impl AppHost {
         &self,
         intent: RawIntent,
         info: ServiceInfo,
+        instance: Option<String>,
         conn: Conn,
         client: Option<i64>,
         activity: Option<u64>,
@@ -1113,7 +1126,7 @@ impl AppHost {
     ) -> Result<(), Exception> {
         let kept = KeptIntent::new(intent, &self.process);
         let mut state = self.services.state.lock().unwrap();
-        let token = Self::service_record(&mut state, info, &self.process);
+        let token = Self::service_record(&mut state, info, instance, &self.process);
         let r = state.record(token).unwrap();
         if r.binding(&kept.intent.intent).is_none() {
             r.bindings.push(Binding {
@@ -1325,6 +1338,14 @@ impl AppHost {
         }
         let package = r.package.clone();
         let process = super::providers::process_name(&r.info.info);
+        // `getProcessNameForService`: an isolated service runs alone in a
+        // new isolated process named after it.
+        if r.info.flags & FLAG_ISOLATED_PROCESS != 0 {
+            let process = format!("{process}:{}", r.class);
+            let (seq, _) = self.start_isolated_process(&package, &process)?;
+            state.record(token).unwrap().app = Some(seq);
+            return Ok(());
+        }
         let running = self.running_process(&process, r.info.info.application_info.uid as u32);
         match running {
             Some((seq, attached)) => {

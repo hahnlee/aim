@@ -192,6 +192,8 @@ const COMMON_SERVICES: &[&str] = &[
     "connectivity",
     "network_management",
 ];
+/// Those of them an isolated process gets.
+const ISOLATED_COMMON_SERVICES: &[&str] = &["package", "permissionmgr"];
 /// `PackageManager.GET_SHARED_LIBRARY_FILES | MATCH_DEBUG_TRIAGED_MISSING`,
 /// `ActivityManagerService.STOCK_PM_FLAGS`.
 const STOCK_PM_FLAGS: i64 = 0x400 | 0x1000_0000;
@@ -252,6 +254,9 @@ struct App {
     package: String,
     process: String,
     uid: u32,
+    /// Its package's uid (`ProcessRecord.info.uid`): its own uid, or an
+    /// isolated process's owner's.
+    package_uid: u32,
     pid: i32,
     started: Instant,
     /// `SystemClock.elapsedRealtime` and `uptimeMillis` at the start.
@@ -281,6 +286,35 @@ struct App {
     /// The packages it loaded code of (`ProcessRecord.getPkgDeps`): a
     /// change of one kills it.
     package_deps: Vec<String>,
+}
+
+/// `Process.FIRST_ISOLATED_UID`, `LAST_ISOLATED_UID`.
+const FIRST_ISOLATED_UID: u32 = 99_000;
+const LAST_ISOLATED_UID: u32 = 99_999;
+
+/// `ProcessList.IsolatedUidRange` of the isolated uids of processes not
+/// spawned from an application zygote: the uids in use, and the app id to
+/// try next.
+struct IsolatedUids {
+    used: HashSet<u32>,
+    next: u32,
+}
+
+impl IsolatedUids {
+    /// `allocateIsolatedUidLocked`: the next unused uid of `user`.
+    fn allocate(&mut self, user: u32) -> Option<u32> {
+        for _ in FIRST_ISOLATED_UID..=LAST_ISOLATED_UID {
+            if !(FIRST_ISOLATED_UID..=LAST_ISOLATED_UID).contains(&self.next) {
+                self.next = FIRST_ISOLATED_UID;
+            }
+            let uid = user * PER_USER_RANGE + self.next;
+            self.next += 1;
+            if self.used.insert(uid) {
+                return Some(uid);
+            }
+        }
+        None
+    }
 }
 
 #[derive(Default)]
@@ -332,6 +366,8 @@ pub struct AppHost {
     /// Processes' last crash and recent crash count, by process name and
     /// uid (`AppErrors.mProcessCrashTimes`, `mProcessCrashCounts`).
     app_errors: Mutex<AppErrors>,
+    /// `ProcessList.mGlobalIsolatedUids`.
+    isolated_uids: Mutex<IsolatedUids>,
     storage: storage::Volumes,
     text_input: input_method::TextInput,
     content_service: OnceLock<Arc<content_service::ContentService>>,
@@ -399,6 +435,7 @@ impl AppHost {
             uid_observers: Default::default(),
             tzdata: OnceLock::new(),
             app_errors: Default::default(),
+            isolated_uids: Mutex::new(IsolatedUids { used: HashSet::new(), next: FIRST_ISOLATED_UID }),
             storage: Default::default(),
             text_input: Default::default(),
             content_service: OnceLock::new(),
@@ -677,6 +714,18 @@ impl AppHost {
     /// and any other start makes the process good again and resets its
     /// crash counts.
     fn start_process_for(&self, name: &str, process: &str, request: Option<activity_start::StartRequest>, from_background: bool) -> Result<i32, Exception> {
+        self.start_app_process(name, process, request, from_background, false).map(|(_, pid)| pid)
+    }
+
+    /// A new isolated process `process` of package `name`, for a service
+    /// (`startProcessLocked` with `isolated`): its start and pid. Its uid
+    /// is a new isolated uid, which the package manager knows to be the
+    /// package's (`addIsolatedUid`) until the process dies.
+    fn start_isolated_process(&self, name: &str, process: &str) -> Result<(i64, i32), Exception> {
+        self.start_app_process(name, process, None, false, true)
+    }
+
+    fn start_app_process(&self, name: &str, process: &str, request: Option<activity_start::StartRequest>, from_background: bool, isolated: bool) -> Result<(i64, i32), Exception> {
         if process == "system" {
             return Err(self.unimplemented_named("activity", &format!("a component of {name} in system_server's process (#1518)")));
         }
@@ -698,8 +747,43 @@ impl AppHost {
         let listed = state.list.iter().find(|e| e.name == name).ok_or_else(|| {
             Exception::new(EX_ILLEGAL_STATE, format!("{name} not in packages.list"))
         })?;
-        let uid = listed.uid;
-        {
+        let owner = listed.uid;
+        let uid = if isolated {
+            self.isolated_uids
+                .lock()
+                .unwrap()
+                .allocate(owner / PER_USER_RANGE)
+                .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("no isolated uid left for {process}")))?
+        } else {
+            owner
+        };
+        let started = self.spawn(name, process, request, from_background, isolated, uid, owner, setting, listed);
+        if isolated {
+            match &started {
+                Ok(_) => self.isolated_owners_changed(|owners| owners.push((uid as i32, owner as i32)))?,
+                Err(_) => self.free_isolated_uid(uid)?,
+            }
+        }
+        started
+    }
+
+    /// The rest of `startProcessLocked` for the process `process` of
+    /// package `name` (of `package_uid`) with `uid`.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn(
+        &self,
+        name: &str,
+        process: &str,
+        request: Option<activity_start::StartRequest>,
+        from_background: bool,
+        isolated: bool,
+        uid: u32,
+        package_uid: u32,
+        setting: &package::settings::Package,
+        listed: &package::list::Entry,
+    ) -> Result<(i64, i32), Exception> {
+        let inputs = self.inputs()?;
+        if !isolated {
             let key = (process.to_string(), uid);
             let mut errors = self.app_errors.lock().unwrap();
             if from_background {
@@ -712,16 +796,26 @@ impl AppHost {
                 errors.bad.remove(&key);
             }
         }
-        let mount_external = self.mount_mode(uid as i32, name)?;
-        let external_storage_access = self.has_external_storage_access(uid as i32, name)?;
-        let gids = process_gids(listed.gids.clone(), uid, mount_external, external_storage_access);
+        // An isolated process has no gids and no external storage.
+        let (mount_external, gids) = if isolated {
+            (zygote::MountExternal::None, Vec::new())
+        } else {
+            let mount_external = self.mount_mode(uid as i32, name)?;
+            let external_storage_access = self.has_external_storage_access(uid as i32, name)?;
+            (mount_external, process_gids(listed.gids.clone(), uid, mount_external, external_storage_access))
+        };
         let target_sdk = setting.target_sdk_version;
         let app_info = inputs
             .packages
             .application_info(name, STOCK_PM_FLAGS)
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("no application info of {name}")))?;
         let start_seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        let isolation = self.data_isolation(name, uid, target_sdk, mount_external)?;
+        let mut isolation = self.data_isolation(name, uid, target_sdk, mount_external)?;
+        // An isolated process does not even mount its own app's data.
+        if isolated {
+            isolation.packages.clear();
+            isolation.allowlisted.clear();
+        }
         let start = zygote::Start {
             uid,
             gids,
@@ -768,7 +862,7 @@ impl AppHost {
             if let Some(request) = request {
                 self.launch_in_attached(seq, uid, &package, request)?;
             }
-            return Ok(pid);
+            return Ok((seq, pid));
         }
         let pid = {
             if zygote.is_none() {
@@ -794,6 +888,7 @@ impl AppHost {
                 package: name.to_string(),
                 process: process.to_string(),
                 uid,
+                package_uid,
                 pid,
                 started,
                 start_elapsed: clock_ms(libc::CLOCK_MONOTONIC_RAW),
@@ -805,13 +900,14 @@ impl AppHost {
                 removed: false,
                 first_frame: None,
                 last_activity: 0,
-                persistent: uid / PER_USER_RANGE == 0
+                persistent: !isolated
+                    && uid / PER_USER_RANGE == 0
                     && app_info.flags & PERSISTENT_MASK == PERSISTENT_MASK
                     && app_info.process_name.as_deref() == Some(process),
                 package_deps: Vec::new(),
             },
         );
-        Ok(pid)
+        Ok((start_seq, pid))
     }
 
     /// `ProcessList.startProcess`'s app data isolation for `package`'s
@@ -828,7 +924,7 @@ impl AppHost {
         let user = (uid / PER_USER_RANGE) as i32;
         let app_id = uid % PER_USER_RANGE;
         let mut data_dirs = flag("persist.zygote.app_data_isolation", true)
-            && (FIRST_APPLICATION_UID..=19_999).contains(&app_id)
+            && ((FIRST_APPLICATION_UID..=19_999).contains(&app_id) || is_isolated(uid as i32))
             && inputs.compat.is_enabled(APP_DATA_DIRECTORY_ISOLATION, Some(package), target_sdk);
         let ps = state.packages.get(package).ok_or_else(|| Exception::illegal_argument(format!("unknown package {package}")))?;
         let targets: Vec<&str> = match &ps.shared_user {
@@ -969,10 +1065,15 @@ impl AppHost {
             let mut apps = self.apps.lock().unwrap();
             let app = apps.remove(&start_seq);
             let gone = app.as_ref().filter(|a| a.thread.is_some() && !apps.values().any(|o| o.uid == a.uid && o.thread.is_some()));
-            let exit = app.as_ref().map(|a| exit_info::ExitInfo::raw(&a.package, &a.process, a.uid, a.pid, a.thread.is_some()));
+            let exit = app.as_ref().map(|a| exit_info::ExitInfo::raw(&a.package, &a.process, a.uid, a.package_uid, a.pid, a.thread.is_some()));
             (app.as_ref().is_some_and(|a| a.removed), gone.map(|a| a.uid), exit)
         };
         if let Some(exit) = exit {
+            if is_isolated(exit.real_uid)
+                && let Err(e) = self.free_isolated_uid(exit.real_uid as u32)
+            {
+                eprintln!("app host: isolated uid {}: {}", exit.real_uid, e.message);
+            }
             self.note_exit(&exit, false);
         }
         if let Some(uid) = gone {
@@ -1003,7 +1104,7 @@ impl AppHost {
         const PROCESS_CRASH_COUNT_RESET_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
         const PROCESS_CRASH_COUNT_LIMIT: u32 = 12;
         let found = self.apps.lock().unwrap().iter().find(|(_, a)| a.pid == pid && a.uid == uid).map(|(seq, a)| {
-            (*seq, a.process.clone(), exit_info::ExitInfo::raw(&a.package, &a.process, a.uid, a.pid, a.thread.is_some()))
+            (*seq, a.process.clone(), exit_info::ExitInfo::raw(&a.package, &a.process, a.uid, a.package_uid, a.pid, a.thread.is_some()))
         });
         let Some((start_seq, process, mut exit)) = found else { return };
         exit.reason = if native { exit_info::REASON_CRASH_NATIVE } else { exit_info::REASON_CRASH };
@@ -1373,7 +1474,7 @@ impl AppHost {
             .lock()
             .unwrap()
             .get(&start_seq)
-            .map(|a| exit_info::ExitInfo::raw(&a.package, &a.process, a.uid, a.pid, a.thread.is_some()))
+            .map(|a| exit_info::ExitInfo::raw(&a.package, &a.process, a.uid, a.package_uid, a.pid, a.thread.is_some()))
             .ok_or_else(|| format!("no process of start {start_seq}"))?;
         let pid = exit.pid;
         self.note_exit(&exit_info::ExitInfo { reason, sub_reason, description: Some(description.into()), ..exit }, true);
@@ -1645,6 +1746,22 @@ impl AppHost {
             .resolution(&state)
             .map_err(|_| Exception::new(EX_ILLEGAL_STATE, "package resolution: MIME groups"))?;
         Ok((state, resolution))
+    }
+
+    /// `PackageManagerInternal.addIsolatedUid`/`removeIsolatedUid`: the
+    /// package model's isolated uids and their owners, changed by `change`.
+    fn isolated_owners_changed(&self, change: impl FnOnce(&mut Vec<(i32, i32)>)) -> Result<(), Exception> {
+        let (before, _) = self.packages()?;
+        let mut state = (*before).clone();
+        change(&mut state.system.isolated_owners);
+        self.user_states_changed(&before, Arc::new(state))
+    }
+
+    /// The isolated uid `uid` is free again (`freeIsolatedUidLocked`), and
+    /// no longer has an owner.
+    fn free_isolated_uid(&self, uid: u32) -> Result<(), Exception> {
+        self.isolated_uids.lock().unwrap().used.remove(&uid);
+        self.isolated_owners_changed(|owners| owners.retain(|(isolated, _)| *isolated != uid as i32))
     }
 
     /// Replaces the package model's state `before` with `state`, which
@@ -2069,8 +2186,11 @@ impl AppHost {
         let core_settings =
             bind::core_settings(&inputs.settings, analog_clock_fps).map_err(state)?;
         let published = self.published.lock().unwrap();
+        // An isolated process gets only those it may use (`getCommonServicesLocked`).
+        let isolated = is_isolated(app.uid as i32);
         let services: Vec<(ParcelValue, ParcelValue)> = COMMON_SERVICES
             .iter()
+            .filter(|name| !isolated || ISOLATED_COMMON_SERVICES.contains(name))
             .filter_map(|name| published.iter().find(|(n, _)| n == name))
             .map(|(name, binder)| {
                 (
@@ -3111,6 +3231,23 @@ impl Service for Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// As `IsolatedUidRange.allocateIsolatedUidLocked`: in turn through
+    /// the range, per user, skipping uids in use, none when all are.
+    #[test]
+    fn isolated_uids_are_allocated_in_turn() {
+        let mut uids = IsolatedUids { used: HashSet::new(), next: FIRST_ISOLATED_UID };
+        assert_eq!(uids.allocate(0), Some(99_000));
+        assert_eq!(uids.allocate(10), Some(1_099_001));
+        uids.used.insert(99_002);
+        assert_eq!(uids.allocate(0), Some(99_003));
+        uids.next = LAST_ISOLATED_UID;
+        assert_eq!(uids.allocate(0), Some(99_999));
+        assert_eq!(uids.allocate(0), Some(99_001));
+        uids.used.extend(99_000..=99_999);
+        assert_eq!(uids.allocate(0), None);
+        assert_eq!(uids.allocate(10), Some(1_099_002));
+    }
 
     #[test]
     fn the_fuse_daemon_has_the_lower_filesystem_gids() {
