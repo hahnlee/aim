@@ -856,7 +856,14 @@ fn color_state_list(r: &mut Reader<'_>) -> Result<()> {
 
 /// `Icon(Parcel)`.
 pub(crate) fn icon(r: &mut Reader<'_>, files: &dyn Files) -> Result<Icon> {
-    let icon = match r.read_i32()? {
+    icon_typed(r, files).map(|(_, icon, _)| icon)
+}
+
+/// `Icon(Parcel)`, with its type (`Icon.TYPE_*`) and whether it has a
+/// tint.
+pub(crate) fn icon_typed(r: &mut Reader<'_>, files: &dyn Files) -> Result<(i32, Icon, bool)> {
+    let ty = r.read_i32()?;
+    let icon = match ty {
         // TYPE_BITMAP, TYPE_ADAPTIVE_BITMAP
         1 | 5 => bitmap(r, files)?.map_or(Icon::Unreadable, Icon::Image),
         // TYPE_RESOURCE: package, id, monochrome, inset scale
@@ -880,9 +887,9 @@ pub(crate) fn icon(r: &mut Reader<'_>, files: &dyn Files) -> Result<Icon> {
         4 | 6 => Icon::Uri(r.read_string16()?.unwrap_or_default()),
         _ => return Err(BAD_VALUE),
     };
-    typed(r, color_state_list)?; // tint
+    let tinted = typed(r, color_state_list)?.is_some();
     r.read_i32()?; // blend mode
-    Ok(icon)
+    Ok((ty, icon, tinted))
 }
 
 /// `Parcel.writeBlob`'s content after its length: in place, or an ashmem

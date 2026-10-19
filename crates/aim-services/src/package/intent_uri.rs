@@ -225,8 +225,81 @@ impl FullIntent {
 
     /// `Intent.writeToParcel`, with no clip data, original intent or
     /// creator token.
+    /// `Intent.toUri(0)`: its data, then its fields after `#Intent;` (an
+    /// extra only of the types the format has), its selector's after
+    /// `SEL;`.
+    pub fn to_uri(&self) -> String {
+        let mut uri = self.intent.data.as_ref().map(|d| d.as_str().to_string()).unwrap_or_default();
+        let mut frag = String::new();
+        uri_inner(&mut frag, &self.intent, self.source_bounds.or(self.intent.source_bounds), self.extras.as_deref(), None, Some(ACTION_VIEW));
+        if let Some(selector) = &self.intent.selector {
+            frag.push_str("SEL;");
+            uri_inner(&mut frag, selector, None, None, selector.data.as_ref().and_then(|d| d.scheme()), None);
+        }
+        if !frag.is_empty() {
+            uri.push_str("#Intent;");
+            uri.push_str(&frag);
+            uri.push_str("end");
+        }
+        uri
+    }
+
     pub fn write(&self, p: &mut Parcel) {
         write_intent(p, &self.intent, self.source_bounds, self.extras.as_deref());
+    }
+}
+
+/// `Intent.toUriInner`.
+fn uri_inner(uri: &mut String, i: &Intent, source_bounds: Option<[i32; 4]>, extras: Option<&[(String, Value)]>, scheme: Option<&str>, default_action: Option<&str>) {
+    use super::uri::{encode, encode_allowing};
+    let mut field = |name: &str, value: String| {
+        uri.push_str(name);
+        uri.push('=');
+        uri.push_str(&value);
+        uri.push(';');
+    };
+    if let Some(scheme) = scheme {
+        field("scheme", encode(scheme));
+    }
+    if let Some(action) = i.action.as_deref().filter(|a| Some(*a) != default_action) {
+        field("action", encode(action));
+    }
+    for c in i.categories.iter().flatten() {
+        field("category", encode(c));
+    }
+    if let Some(ty) = &i.ty {
+        field("type", encode_allowing(ty, "/"));
+    }
+    if let Some(id) = &i.identifier {
+        field("identifier", encode_allowing(id, "/"));
+    }
+    if i.flags != 0 {
+        field("launchFlags", format!("0x{:x}", i.flags as u32));
+    }
+    if i.extended_flags != 0 {
+        field("extendedLaunchFlags", format!("0x{:x}", i.extended_flags as u32));
+    }
+    if let Some(package) = &i.package {
+        field("package", encode(package));
+    }
+    if let Some(c) = &i.component {
+        // `flattenToShortString`.
+        let class = c.class.strip_prefix(&c.package).filter(|r| r.starts_with('.')).unwrap_or(&c.class);
+        field("component", encode_allowing(&format!("{}/{class}", c.package), "/"));
+    }
+    if let Some([l, t, r, b]) = source_bounds {
+        field("sourceBounds", encode(&format!("{l} {t} {r} {b}")));
+    }
+    for (key, value) in extras.into_iter().flatten() {
+        let (kind, text) = match value {
+            Value::String(Some(s)) => ('S', s.clone()),
+            Value::Bool(b) => ('B', b.to_string()),
+            Value::Int(v) => ('i', v.to_string()),
+            Value::Long(v) => ('l', v.to_string()),
+            Value::Float(v) => ('f', crate::package::parse::attrs::java_float(*v)),
+            _ => continue,
+        };
+        field(&format!("{kind}.{}", encode(key)), encode(&text));
     }
 }
 
@@ -293,6 +366,15 @@ mod tests {
     use crate::package::intent_filter::Plain;
 
     /// A shortcut's intent: data, then its action, flags and component.
+    #[test]
+    fn writes_the_intent_format_parse_uri_reads() {
+        let uri = "https://example.com/a#Intent;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;launchFlags=0x10000000;component=com.example/.Main;S.query=a%20b;i.n=3;end";
+        let intent = FullIntent::parse_uri(uri, 0).unwrap();
+        assert_eq!(intent.to_uri(), uri);
+        let view = FullIntent::parse_uri("#Intent;component=com.example/com.other.Main;end", 0).unwrap();
+        assert_eq!(view.to_uri(), "#Intent;component=com.example/com.other.Main;end");
+    }
+
     #[test]
     fn parses_the_intent_format() {
         let i = FullIntent::parse_uri(

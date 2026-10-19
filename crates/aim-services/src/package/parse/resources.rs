@@ -475,6 +475,8 @@ struct Package {
     /// Type names by id, and resource ids by type and entry name.
     type_names: HashMap<u8, String>,
     ids: HashMap<(String, String), u32>,
+    /// Entry names by type and entry id.
+    names: HashMap<(u8, u16), String>,
 }
 
 /// A resource table (`resources.arsc`).
@@ -561,6 +563,15 @@ impl Table {
         self.packages
             .iter()
             .find_map(|p| p.ids.get(&(kind.to_owned(), name.to_owned())).copied())
+    }
+
+    /// `getResourceName`'s package id, type and entry of `id`.
+    pub fn entry_name(&self, id: u32) -> Option<(u8, &str, &str)> {
+        let pid = (id >> 24) as u8;
+        let p = self.packages.iter().find(|p| p.id == pid || (p.id == 0 && pid == SHARED_LIBRARY_ID))?;
+        let ty = p.type_names.get(&((id >> 16) as u8))?;
+        let name = p.names.get(&(((id >> 16) as u8), id as u16))?;
+        Some((pid, ty.as_str(), name.as_str()))
     }
 
     /// `getResourceTypeName`.
@@ -663,6 +674,7 @@ fn package(c: &[u8], header: usize) -> Result<Package> {
     let mut types: HashMap<u8, TypeGroup> = HashMap::new();
     let mut type_names = HashMap::new();
     let mut ids = HashMap::new();
+    let mut names = HashMap::new();
     let mut overlayables = Vec::new();
     for sub in chunks(&c[header..]) {
         let sub = sub?;
@@ -681,6 +693,7 @@ fn package(c: &[u8], header: usize) -> Result<Package> {
                     // first one's.
                     ids.entry((type_name.clone(), name.to_owned()))
                         .or_insert(rid);
+                    names.entry((type_id, entry)).or_insert_with(|| name.to_owned());
                 }
             }
         }
@@ -717,6 +730,7 @@ fn package(c: &[u8], header: usize) -> Result<Package> {
         overlayables,
         type_names,
         ids,
+        names,
     })
 }
 
@@ -963,6 +977,11 @@ impl Resources<'_> {
         )
     }
 
+    /// `getResourceName`: the package id, type and entry of `id`.
+    pub fn entry_name(&self, id: u32) -> Option<(u8, &str, &str)> {
+        self.tables.iter().find_map(|t| t.entry_name(id))
+    }
+
     /// `getString`: a string resource's string.
     pub fn resource_string(&self, id: u32) -> Option<String> {
         self.resource_string_source(id).map(|(_, s)| s.to_owned())
@@ -1019,6 +1038,7 @@ mod tests {
                 overlayables: Vec::new(),
                 type_names: HashMap::new(),
                 ids: HashMap::new(),
+                names: HashMap::new(),
             }],
         }
     }
@@ -1043,6 +1063,7 @@ mod tests {
                 overlayables: Vec::new(),
                 type_names: HashMap::new(),
                 ids: HashMap::new(),
+                names: HashMap::new(),
             }],
         };
         let res = Resources { tables: vec![&t], overlays: &[], config: Config::default() };

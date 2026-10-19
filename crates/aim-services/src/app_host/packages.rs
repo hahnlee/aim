@@ -334,6 +334,22 @@ impl Packages {
         })
     }
 
+    /// `getResourcesForApplication`'s `getResourceName` and `getString` of
+    /// each of `ids` in `pkg`'s resources: its package id, type and entry,
+    /// and its string if it is one.
+    #[allow(clippy::type_complexity)]
+    pub fn resource_names_and_strings(&self, root: &Path, data: &Path, pkg: &AndroidPackage, ids: &[u32]) -> Result<Vec<(Option<(u8, String, String)>, Option<String>)>, String> {
+        self.with_resources(root, data, pkg, |resources, _, _| {
+            Ok(ids
+                .iter()
+                .map(|&id| {
+                    let name = resources.entry_name(id).map(|(p, t, n)| (p, t.to_owned(), n.to_owned()));
+                    (name, resources.resource_string(id))
+                })
+                .collect())
+        })
+    }
+
     /// `ActivityRecord.WindowStyle` of the theme `theme` of `pkg`, an app
     /// targeting `target_sdk` (`getThemeResource`, else `Theme` or
     /// `Theme_Holo`): the `R.styleable.Window` attributes

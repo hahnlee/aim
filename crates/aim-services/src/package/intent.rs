@@ -46,6 +46,8 @@ pub struct Intent {
     /// An `ArraySet`; `None` when empty.
     pub categories: Option<Vec<String>>,
     pub selector: Option<Box<Intent>>,
+    /// `mSourceBounds`: left, top, right, bottom.
+    pub source_bounds: Option<[i32; 4]>,
 }
 
 impl Intent {
@@ -86,9 +88,7 @@ impl Intent {
             if package_query {
                 return Err(BAD_VALUE);
             }
-            for _ in 0..4 {
-                r.read_i32()?; // source bounds
-            }
+            i.source_bounds = Some([r.read_i32()?, r.read_i32()?, r.read_i32()?, r.read_i32()?]);
         }
         let n = r.read_i32()?;
         if n > 0 {
