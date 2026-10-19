@@ -268,7 +268,7 @@ impl WebViewUpdate {
                     }
                     let (host, shared) = (self.host.clone(), self.shared.clone());
                     std::thread::spawn(move || {
-                        wait_ready(&shared);
+                        drop(wait_ready(&shared));
                         host.ensure_webview_zygote();
                     });
                     state.current = Some(info);

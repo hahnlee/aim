@@ -350,6 +350,12 @@ pub fn encode(value: &str) -> String {
     preferred_encode(value, "")
 }
 
+/// `Uri.encode(value, allow)`: what is neither unreserved nor in `allow`
+/// escaped.
+pub fn encode_allowing(value: &str, allow: &str) -> String {
+    preferred_encode(value, allow)
+}
+
 /// `findPortSeparator`: the last `:` of the authority when only digits
 /// follow it.
 fn port_separator(authority: &str) -> Option<usize> {

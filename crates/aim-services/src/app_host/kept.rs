@@ -683,7 +683,7 @@ mod tests {
         let mut out = Parcel::new();
         kept.write_to(&mut out);
         let read = RawIntent::read_from(&mut Reader::new(out.data(), &[])).unwrap();
-        assert_eq!(read.intent, crate::package::intent::Intent { selector: None, ..i.intent.clone() });
+        assert_eq!(read.intent, crate::package::intent::Intent { selector: None, source_bounds: None, ..i.intent.clone() });
         let spans = Spans::of(&read.raw).unwrap();
         assert!(!present(&read.raw, spans.bounds));
         assert_eq!(extras(&read).len(), 1);
