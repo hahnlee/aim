@@ -25,6 +25,7 @@ use super::activity_start::StartArgs;
 use super::broadcasts::filter_equals;
 use super::kept::{By, KeptIntent, RawBundle, RawIntent};
 use super::{AppHost, PER_USER_RANGE};
+use crate::package::component_resolver::ResolveInfo;
 
 /// What a start of a sent activity record carries beside its intent
 /// (`sendInner`'s `resultTo`, `resultWho`, `requestCode`, `flagsMask` and
@@ -42,11 +43,11 @@ pub(super) struct Sent {
 const IMMUTABLE_FLAGS: i32 = 0x1 | 0x2 | 0x40 | 0x80;
 
 /// `ActivityManager.INTENT_SENDER_*`.
-const INTENT_SENDER_BROADCAST: i32 = 1;
-const INTENT_SENDER_ACTIVITY: i32 = 2;
+pub(super) const INTENT_SENDER_BROADCAST: i32 = 1;
+pub(super) const INTENT_SENDER_ACTIVITY: i32 = 2;
 const INTENT_SENDER_ACTIVITY_RESULT: i32 = 3;
-const INTENT_SENDER_SERVICE: i32 = 4;
-const INTENT_SENDER_FOREGROUND_SERVICE: i32 = 5;
+pub(super) const INTENT_SENDER_SERVICE: i32 = 4;
+pub(super) const INTENT_SENDER_FOREGROUND_SERVICE: i32 = 5;
 const INTENT_SENDER_UNKNOWN: i32 = 0;
 /// `PendingIntent.FLAG_*`.
 const FLAG_ONE_SHOT: i32 = 1 << 30;
@@ -382,6 +383,40 @@ impl AppHost {
                 kind: INTENT_SENDER_UNKNOWN,
             },
         }
+    }
+
+    /// `PendingIntent.getIntentSenderType` and `getCreatorPackage` of
+    /// `target`: unknown and none if it is not the app host's.
+    pub(super) fn intent_sender_kind(&self, target: Binder) -> (i32, Option<String>) {
+        let records = self.pending_intents.records.lock().unwrap();
+        records.iter().find(|r| r.binder == target).map_or((INTENT_SENDER_UNKNOWN, None), |r| (r.kind, Some(r.package.clone())))
+    }
+
+    /// `queryIntentComponentsForIntentSender`: the components the request
+    /// intent of the PendingIntent `target` resolves to for its creator, by
+    /// its type; none if it is not the app host's.
+    pub(super) fn query_intent_components_for_intent_sender(
+        &self,
+        target: Binder,
+        flags: i64,
+    ) -> Result<Option<Vec<ResolveInfo>>, Exception> {
+        let (kind, intent, resolved_type, uid, user) = {
+            let records = self.pending_intents.records.lock().unwrap();
+            let Some(r) = records.iter().find(|r| r.binder == target) else { return Ok(None) };
+            let Some(intent) = r.intents.last() else { return Ok(None) };
+            let resolved_type = r.resolved_types.as_ref().and_then(|t| t.last().cloned().flatten());
+            (r.kind, intent.intent.intent.clone(), resolved_type, r.uid, r.user)
+        };
+        let (_, resolution) = self.packages()?;
+        let found = match kind {
+            INTENT_SENDER_ACTIVITY => resolution.query_intent_activities(&intent, resolved_type.as_deref(), flags, user, uid),
+            INTENT_SENDER_SERVICE | INTENT_SENDER_FOREGROUND_SERVICE => {
+                resolution.query_intent_services(&intent, None, flags, user, uid)
+            }
+            INTENT_SENDER_BROADCAST => resolution.query_intent_receivers(&intent, resolved_type.as_deref(), flags, user, uid),
+            kind => return Err(Exception::new(EX_ILLEGAL_STATE, format!("Unsupported intent sender type: {kind}"))),
+        };
+        found.map(Some).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("queryIntentComponentsForIntentSender: {e:?}")))
     }
 
     /// `registerIntentSenderCancelListenerEx`: false if it is cancelled.
