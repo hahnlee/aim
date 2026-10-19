@@ -518,6 +518,19 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                 Ok(())
             })()
         }
+        dp::IS_COMMON_CRITERIA_MODE_ENABLED => {
+            let a = dp::IsCommonCriteriaModeEnabled::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
+            (|| {
+                // Only a device owner or an organization-owned device's
+                // profile owner turns it on; there is none.
+                unmanaged()?;
+                if a.admin.is_some() {
+                    caller.identity(a.admin.as_ref(), None)?;
+                }
+                dp::write_is_common_criteria_mode_enabled_reply(&mut p, false);
+                Ok(())
+            })()
+        }
         dp::GET_KEYGUARD_DISABLED_FEATURES => {
             let a = dp::GetKeyguardDisabledFeatures::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
             (|| {

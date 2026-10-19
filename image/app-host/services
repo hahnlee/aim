@@ -9,7 +9,8 @@
 # battery to the battery service; netd hosts DnsResolver, which resolves
 # apps' names on the network the connectivity service gives it, once
 # bpfloader has marked the BPF programs loaded; statsd takes the atoms apps
-# log and serves the stats manager's calls.
+# log and serves the stats manager's calls; the Bluetooth HAL is the
+# controller the Bluetooth app's stack drives over the Mac's CoreBluetooth.
 apexd-bootstrap
 apexd
 keystore2
@@ -46,5 +47,6 @@ mediametrics
 media.swcodec
 cameraserver
 vendor.camera-provider-aim
+vendor.bluetooth-aim
 statsd
 aim-app-host-agent
