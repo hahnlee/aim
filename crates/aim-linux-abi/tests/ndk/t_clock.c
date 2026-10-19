@@ -33,12 +33,6 @@ static int64_t ns_of(clockid_t id) {
   return ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
-static void spin_ms(int ms) {
-  int64_t end = ns_of(CLOCK_MONOTONIC) + ms * 1000000LL;
-  while (ns_of(CLOCK_MONOTONIC) < end) {
-  }
-}
-
 static void getres(void) {
   const clockid_t fine[] = {CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_MONOTONIC_RAW,
                             CLOCK_BOOTTIME, CLOCK_REALTIME_ALARM, CLOCK_BOOTTIME_ALARM,
@@ -117,10 +111,19 @@ static void* spinner(void* arg) {
 }
 
 static void cpu_clocks(void) {
+  // Busy for 30 ms of the thread's own CPU time, however loaded the host
+  // is: the CPU clocks advance only while it runs, and never past the
+  // monotonic clock; the process's counts at least the thread's.
+  int64_t w0 = ns_of(CLOCK_MONOTONIC);
   int64_t t0 = ns_of(CLOCK_THREAD_CPUTIME_ID), p0 = ns_of(CLOCK_PROCESS_CPUTIME_ID);
-  spin_ms(30);
-  int64_t t1 = ns_of(CLOCK_THREAD_CPUTIME_ID), p1 = ns_of(CLOCK_PROCESS_CPUTIME_ID);
-  CHECK(t1 - t0 >= 15000000 && p1 - p0 >= 15000000);
+  int64_t t1;
+  while ((t1 = ns_of(CLOCK_THREAD_CPUTIME_ID)) - t0 < 30000000 &&
+         ns_of(CLOCK_MONOTONIC) - w0 < 10000000000LL) {
+  }
+  int64_t p1 = ns_of(CLOCK_PROCESS_CPUTIME_ID), w1 = ns_of(CLOCK_MONOTONIC);
+  CHECK(t1 - t0 >= 30000000);
+  CHECK(t1 - t0 <= w1 - w0);
+  CHECK(p1 - p0 >= t1 - t0);
   CHECK(p1 >= t1);
 
   clockid_t self;
