@@ -15,6 +15,7 @@ cargo aim boot                   # aim-display + guest-init, docs/boot-status.md
 cargo aim bench [--runs N]       # boot and measure, docs/perf-baseline.md
 cargo aim clean [NODE...]        # forget nodes and remove their outputs
 cargo aim storage [DATA...]      # what the disk images occupy, docs/storage.md
+cargo aim fmt [--check]          # rustfmt over the repository's own crates
 ```
 
 What the build made runs as a resident guest, with its apps managed, by
@@ -203,6 +204,13 @@ build` of the host crates on a fresh checkout therefore starts with
 `cargo aim build aidl-gen`. `cargo aim build hal/health` does that;
 afterwards `cargo build -p health --target aarch64-linux-android --profile
 android` also works.
+
+The code is formatted with rustfmt's defaults. Format with `cargo aim
+fmt`, not `cargo fmt`: `hal/binder` and `hal/binder-ndk-sys` build AOSP's
+binder crate from `_build`, and the AIDL crates are generated into
+`target`, so `cargo fmt` would rewrite those sources too (and the
+fetched tree would then fail its content hash). `cargo aim fmt` formats
+only the members whose targets are all in the repository.
 
 ## n2
 
