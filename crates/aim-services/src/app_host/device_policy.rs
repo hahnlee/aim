@@ -39,6 +39,8 @@ const SYSTEM_UID: i32 = 1000;
 const CAMERASERVER_UID: i32 = 1047;
 /// `UserHandle.USER_NULL`.
 const USER_NULL: i32 = -10000;
+/// `DevicePolicyManager.PERMISSION_POLICY_PROMPT`.
+const PERMISSION_POLICY_PROMPT: i32 = 0;
 /// `DevicePolicyManager.ENCRYPTION_STATUS_*`.
 const ENCRYPTION_STATUS_UNSUPPORTED: i32 = 0;
 const ENCRYPTION_STATUS_ACTIVE: i32 = 3;
@@ -582,6 +584,16 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                     authorize(!a.parent)?;
                 }
                 dp::write_get_screen_capture_disabled_reply(&mut p, false);
+                Ok(())
+            })()
+        }
+        dp::GET_PERMISSION_POLICY => {
+            dp::GetPermissionPolicy::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
+            (|| {
+                // `DevicePolicyCache.getPermissionPolicy` of the caller's
+                // user: no resolved policy sets one.
+                unmanaged()?;
+                dp::write_get_permission_policy_reply(&mut p, PERMISSION_POLICY_PROMPT);
                 Ok(())
             })()
         }
