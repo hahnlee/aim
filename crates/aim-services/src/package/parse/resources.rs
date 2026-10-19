@@ -469,6 +469,8 @@ struct TypeGroup {
 
 struct Package {
     id: u8,
+    /// `ResTable_package.name`.
+    name: String,
     types: HashMap<u8, TypeGroup>,
     /// `<overlayable>`s: name and actor.
     overlayables: Vec<(String, String)>,
@@ -556,6 +558,15 @@ impl Table {
                 *e = (*e).min(id);
                 m
             })
+    }
+
+    /// `getIdentifier(name, kind, package)`: the id of `type/name` in the
+    /// package named `package`.
+    pub fn identifier(&self, package: &str, kind: &str, name: &str) -> Option<u32> {
+        self.packages
+            .iter()
+            .filter(|p| p.name == package)
+            .find_map(|p| p.ids.get(&(kind.to_owned(), name.to_owned())).copied())
     }
 
     /// Resource `type/name`'s id.
@@ -662,6 +673,14 @@ impl Overlay {
 
 fn package(c: &[u8], header: usize) -> Result<Package> {
     let id = u32_at(c, 8)? as u8;
+    let units: Vec<u16> = c
+        .get(12..12 + 256)
+        .ok_or_else(|| bad("short package header"))?
+        .chunks_exact(2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+        .take_while(|&u| u != 0)
+        .collect();
+    let name = String::from_utf16_lossy(&units);
     let pool_at = |at: usize| -> Result<Option<Strings>> {
         let off = u32_at(c, at)? as usize;
         if off == 0 || off >= c.len() {
@@ -726,6 +745,7 @@ fn package(c: &[u8], header: usize) -> Result<Package> {
     }
     Ok(Package {
         id,
+        name,
         types,
         overlayables,
         type_names,
@@ -982,6 +1002,11 @@ impl Resources<'_> {
         self.tables.iter().find_map(|t| t.entry_name(id))
     }
 
+    /// `getIdentifier(name, kind, package)` over the tables.
+    pub fn identifier(&self, package: &str, kind: &str, name: &str) -> Option<u32> {
+        self.tables.iter().find_map(|t| t.identifier(package, kind, name))
+    }
+
     /// `getString`: a string resource's string.
     pub fn resource_string(&self, id: u32) -> Option<String> {
         self.resource_string_source(id).map(|(_, s)| s.to_owned())
@@ -1024,6 +1049,7 @@ mod tests {
             styled_strings: HashMap::new(),
             packages: vec![Package {
                 id: 0x7f,
+                name: String::new(),
                 types: [(
                     1,
                     TypeGroup {
@@ -1059,6 +1085,7 @@ mod tests {
             styled_strings: HashMap::new(),
             packages: vec![Package {
                 id: 0x7f,
+                name: String::new(),
                 types: [(2, TypeGroup { spec_flags: vec![0; 3], types: vec![Type { config: Config::default(), entries: bags.into() }] })].into(),
                 overlayables: Vec::new(),
                 type_names: HashMap::new(),

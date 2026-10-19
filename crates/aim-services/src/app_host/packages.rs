@@ -309,6 +309,20 @@ impl Packages {
         &self.domains
     }
 
+    /// A package context's resources (`createPackageContext`): the
+    /// framework's, then the package's `table`, in the device's
+    /// configuration.
+    pub fn package_resources<'a>(
+        &'a self,
+        table: &'a crate::package::parse::resources::Table,
+    ) -> crate::package::parse::resources::Resources<'a> {
+        crate::package::parse::resources::Resources {
+            tables: vec![&self.platform.framework, table],
+            overlays: &self.platform.framework_overlays,
+            config: self.platform.config(),
+        }
+    }
+
     fn framework_resources(&self) -> crate::package::parse::resources::Resources<'_> {
         crate::package::parse::resources::Resources {
             tables: vec![&self.platform.framework],
