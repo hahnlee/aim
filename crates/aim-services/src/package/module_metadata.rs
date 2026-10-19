@@ -420,6 +420,7 @@ mod tests {
                 attr("isHidden", Value::String("TrUe".into())),
             ],
             children: vec![],
+            text: String::new(),
         }
     }
     #[test]
@@ -442,6 +443,7 @@ mod tests {
             name: "module-metadata".into(),
             attrs: vec![],
             children: vec![module("BB", 1), module("Aa", 2), module("BB", 3)],
+            text: String::new(),
         };
         owner
             .parse(&root, &|id| Ok(format!("localized-{id}")), &apex, true)

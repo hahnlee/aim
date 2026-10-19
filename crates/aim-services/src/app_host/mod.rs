@@ -88,6 +88,7 @@ pub mod telephony_registry;
 pub mod uid_observers;
 pub mod uri_grants;
 pub mod usage_stats;
+pub mod webview_update;
 mod app_standby;
 pub mod trust_service;
 pub mod user_service;
@@ -259,6 +260,11 @@ struct App {
     /// Its package's uid (`ProcessRecord.info.uid`): its own uid, or an
     /// isolated process's owner's.
     package_uid: u32,
+    /// Whether it was started isolated (`ProcessRecord.isolated`), and the
+    /// entry point it runs instead of an application, with its arguments
+    /// (`getIsolatedEntryPoint`).
+    isolated: bool,
+    entry_point: Option<(String, Vec<String>)>,
     pid: i32,
     started: Instant,
     /// `SystemClock.elapsedRealtime` and `uptimeMillis` at the start.
@@ -290,6 +296,8 @@ struct App {
     package_deps: Vec<String>,
 }
 
+/// `Process.SYSTEM_UID`.
+const SYSTEM_UID: u32 = 1000;
 /// `Process.FIRST_ISOLATED_UID`, `LAST_ISOLATED_UID`.
 const FIRST_ISOLATED_UID: u32 = 99_000;
 const LAST_ISOLATED_UID: u32 = 99_999;
@@ -547,6 +555,7 @@ impl AppHost {
             ("sensorservice", Arc::new(sensor_service::SensorService)),
             ("wifi", Arc::new(wifi_service::WifiService::new(self.clone()))),
             ("usagestats", Arc::new(usage_stats::UsageStats::new(self.clone()))),
+            ("webviewupdate", Arc::new(webview_update::WebViewUpdate::new(self.clone()))),
             ("netpolicy", Arc::new(netpolicy_service::NetworkPolicy::new(self.clone()))),
             ("telephony.registry", Arc::new(telephony_registry::TelephonyRegistry::new(self.clone()))),
             ("network_management", Arc::new(network_management::NetworkManagement::new(self.clone()))),
@@ -730,6 +739,81 @@ impl AppHost {
         self.start_app_process(name, process, None, false, true)
     }
 
+    /// `ActivityManagerInternal.startIsolatedProcess`: a process `process`
+    /// of the system (`android`) with `uid`, isolated, that runs `entry`'s
+    /// `main` with `args` once it attaches (`runIsolatedEntryPoint`)
+    /// instead of an application, for `abi`. The package manager knows
+    /// `uid` to be the system's until it dies.
+    pub(super) fn start_isolated_entry_point(&self, entry: &str, args: &[String], process: &str, abi: &str, uid: u32) -> Result<i32, Exception> {
+        let inputs = self.inputs()?;
+        let configured = self.configured.get().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host not configured"))?;
+        let sdk = (configured.properties)("ro.build.version.sdk").and_then(|v| v.parse().ok()).ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no ro.build.version.sdk"))?;
+        let start_seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        let start = zygote::Start {
+            uid,
+            gids: Vec::new(),
+            runtime_flags: hidden_api_policy(0, 0, 0, inputs.settings.get(settings::Table::Global, "hidden_api_policy").as_deref()) << API_ENFORCEMENT_POLICY_SHIFT
+                | memory_safety(&inputs.compat, "android", 0, sdk),
+            mount_external: zygote::MountExternal::None,
+            target_sdk_version: sdk,
+            nice_name: process.to_string(),
+            // `info.seInfo` (none) and `seInfoUser`.
+            seinfo: format!("null{SEINFO_COMPLETE}"),
+            instruction_set: Some(instruction_set(abi)),
+            app_data_dir: None,
+            package_name: "android".into(),
+            is_top_app: true,
+            pkg_data_info: Vec::new(),
+            allowlisted_data_info: Vec::new(),
+            bind_mount_app_storage_dirs: false,
+            bind_mount_app_data_dirs: false,
+            disabled_compat_changes: inputs.compat.disabled_changes("android", sdk),
+            start_seq,
+        };
+        let started = Instant::now();
+        let pid = {
+            let mut zygote = self.zygote.lock().unwrap();
+            if zygote.is_none() {
+                let stream = (configured.connect)().map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("zygote relay: {e}")))?;
+                *zygote = Some(zygote::Session::new(stream));
+            }
+            match zygote.as_mut().unwrap().start(&start) {
+                Ok(pid) => pid,
+                Err(e) => {
+                    *zygote = None;
+                    return Err(Exception::new(EX_ILLEGAL_STATE, format!("zygote: {e}")));
+                }
+            }
+        };
+        eprintln!("app host: Start proc {pid}:{process}/{uid} for {entry} in {:?}", started.elapsed());
+        self.isolated_owners_changed(|owners| owners.push((uid as i32, SYSTEM_UID as i32)))?;
+        self.apps.lock().unwrap().insert(
+            start_seq,
+            App {
+                package: "android".into(),
+                process: process.to_string(),
+                uid,
+                package_uid: SYSTEM_UID,
+                isolated: true,
+                entry_point: Some((entry.to_string(), args.to_vec())),
+                pid,
+                started,
+                start_elapsed: clock_ms(libc::CLOCK_MONOTONIC_RAW),
+                start_uptime: clock_ms(libc::CLOCK_UPTIME_RAW),
+                thread: None,
+                activities: Vec::new(),
+                config: None,
+                providers: Vec::new(),
+                removed: false,
+                first_frame: None,
+                last_activity: 0,
+                persistent: false,
+                package_deps: Vec::new(),
+            },
+        );
+        Ok(pid)
+    }
+
     fn start_app_process(&self, name: &str, process: &str, request: Option<activity_start::StartRequest>, from_background: bool, isolated: bool) -> Result<(i64, i32), Exception> {
         if process == "system" {
             return Err(self.unimplemented_named("activity", &format!("a component of {name} in system_server's process (#1518)")));
@@ -894,6 +978,8 @@ impl AppHost {
                 process: process.to_string(),
                 uid,
                 package_uid,
+                isolated,
+                entry_point: None,
                 pid,
                 started,
                 start_elapsed: clock_ms(libc::CLOCK_MONOTONIC_RAW),
@@ -1026,6 +1112,17 @@ impl AppHost {
             call.sender_pid,
             app.started.elapsed()
         );
+        if let Some((entry, args)) = &app.entry_point {
+            // An isolated process that runs an entry point instead of
+            // being bound to an application.
+            let mut p = Parcel::new();
+            thread::RunIsolatedEntryPoint { entry_point: Some(entry.clone()), entry_point_args: Some(args.iter().cloned().map(Some).collect()) }.write(&mut p);
+            strong
+                .transact(thread::RUN_ISOLATED_ENTRY_POINT, &p, true)
+                .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("runIsolatedEntryPoint: {s}")))?;
+            app.thread = Some(strong);
+            return Ok(());
+        }
         let providers = self.process_providers(&app.process, app.uid)?;
         let (bind, config) = self.bind_application(app, providers.clone())?;
         app.config = Some(config);
@@ -1066,15 +1163,16 @@ impl AppHost {
     /// The process of `start_seq`, `pid`, died: what it had goes, and its
     /// exit is noted (`noteProcessDiedLocked`).
     fn process_died(&self, start_seq: i64, pid: i32) {
-        let (removed, gone, exit) = {
+        let (removed, gone, exit, isolated) = {
             let mut apps = self.apps.lock().unwrap();
             let app = apps.remove(&start_seq);
+            let isolated = app.as_ref().is_some_and(|a| a.isolated);
             let gone = app.as_ref().filter(|a| a.thread.is_some() && !apps.values().any(|o| o.uid == a.uid && o.thread.is_some()));
             let exit = app.as_ref().map(|a| exit_info::ExitInfo::raw(&a.package, &a.process, a.uid, a.package_uid, a.pid, a.thread.is_some()));
-            (app.as_ref().is_some_and(|a| a.removed), gone.map(|a| a.uid), exit)
+            (app.as_ref().is_some_and(|a| a.removed), gone.map(|a| a.uid), exit, isolated)
         };
         if let Some(exit) = exit {
-            if is_isolated(exit.real_uid)
+            if isolated
                 && let Err(e) = self.free_isolated_uid(exit.real_uid as u32)
             {
                 eprintln!("app host: isolated uid {}: {}", exit.real_uid, e.message);
@@ -1768,6 +1866,21 @@ impl AppHost {
         let (before, _) = self.packages()?;
         let mut state = (*before).clone();
         change(&mut state.system.isolated_owners);
+        self.user_states_changed(&before, Arc::new(state))
+    }
+
+    /// `PackageManagerInternal.grantImplicitAccess(user, null,
+    /// appId(recipient), visible, true)`: the package of `visible` made
+    /// visible to `recipient`'s.
+    pub(super) fn grant_implicit_access(&self, recipient: i32, visible: i32) -> Result<(), Exception> {
+        let (before, resolution) = self.packages()?;
+        let query = crate::package::query::Query { state: &before, filter: &resolution.apps_filter, calling_uid: recipient };
+        let grants = crate::package::visibility_mutation::MakeUidVisible { recipient, visible }
+            .grant(&query)
+            .map_err(|e| self.unimplemented_named("package", &format!("grantImplicitAccess: {}", e.0)))??;
+        let Some(grants) = grants else { return Ok(()) };
+        let mut state = (*before).clone();
+        state.system.implicit_access = grants;
         self.user_states_changed(&before, Arc::new(state))
     }
 

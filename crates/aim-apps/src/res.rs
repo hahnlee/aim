@@ -29,6 +29,7 @@ pub const TABLE: u16 = 0x0002;
 pub const XML: u16 = 0x0003;
 pub const XML_START_ELEMENT: u16 = 0x0102;
 pub const XML_END_ELEMENT: u16 = 0x0103;
+pub const XML_CDATA: u16 = 0x0104;
 pub const XML_RESOURCE_MAP: u16 = 0x0180;
 pub const TABLE_PACKAGE: u16 = 0x0200;
 pub const TABLE_TYPE: u16 = 0x0201;
@@ -219,6 +220,8 @@ pub struct Element {
     pub name: String,
     pub attrs: Vec<Attr>,
     pub children: Vec<Element>,
+    /// Its text (`XmlPullParser.nextText`), as its CDATA chunks hold it.
+    pub text: String,
 }
 
 #[derive(Clone, Debug)]
@@ -304,7 +307,13 @@ pub fn xml(data: &[u8]) -> Result<Element> {
                     name,
                     attrs,
                     children: Vec::new(),
+                    text: String::new(),
                 });
+            }
+            XML_CDATA => {
+                let pool = pool.as_ref().ok_or_else(|| bad("XML without strings"))?;
+                let text = pool.get(u32_at(c.data, c.header)?).unwrap_or_default();
+                stack.last_mut().ok_or_else(|| bad("unbalanced XML"))?.text.push_str(text);
             }
             XML_END_ELEMENT => {
                 let e = stack.pop().ok_or_else(|| bad("unbalanced XML"))?;
