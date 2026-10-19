@@ -2,20 +2,61 @@
 //! the Mac's Wi-Fi (`aim_host_wifi`): its radio is Android's Wi-Fi state;
 //! the verbose logging level and scanning always available are what the
 //! shared config store (`WifiConfigStore.xml`, `WifiSettingsConfigStore`)
-//! persisted; with the radio off there is no connection (`new WifiInfo()`).
-//! The rest is not implemented (#1686).
+//! persisted; with the radio off there is no connection (`new WifiInfo()`)
+//! and no scan result (the Mac does not scan with its radio off), given to
+//! a caller `enforceCanAccessScanResults` lets read them. The rest is not
+//! implemented (#1686).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::Arc;
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel};
+use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, EX_SECURITY, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
+use aim_service_aidl::android_location_ilocationmanager as lm;
 use aim_service_aidl::android_net_wifi_iwifimanager as wm;
 
-use super::{AppHost, reply};
+use super::appops_service::MODE_ALLOWED;
+use super::settings::Table;
+use super::{AppHost, PER_USER_RANGE, reply};
+use crate::package::list_slice::Slice;
 
 const ACCESS_WIFI_STATE: &str = "android.permission.ACCESS_WIFI_STATE";
+const NETWORK_SETTINGS: &str = "android.permission.NETWORK_SETTINGS";
+/// The permissions that read scan results without location access
+/// (`enforceCanAccessScanResults`).
+const SCAN_BYPASS: [&str; 6] = [
+    NETWORK_SETTINGS,
+    "android.permission.NETWORK_SETUP_WIZARD",
+    "android.permission.NETWORK_MANAGED_PROVISIONING",
+    "android.permission.NETWORK_STACK",
+    "android.permission.MAINLINE_NETWORK_STACK",
+    "android.permission.RADIO_SCAN_WITHOUT_LOCATION",
+];
+const ACCESS_FINE_LOCATION: &str = "android.permission.ACCESS_FINE_LOCATION";
+const ACCESS_COARSE_LOCATION: &str = "android.permission.ACCESS_COARSE_LOCATION";
+const PEERS_MAC_ADDRESS: &str = "android.permission.PEERS_MAC_ADDRESS";
+const INTERACT_ACROSS_USERS_FULL: &str = "android.permission.INTERACT_ACROSS_USERS_FULL";
+/// `AppOpsManager.OP_COARSE_LOCATION`, `OP_FINE_LOCATION`, `OP_WIFI_SCAN`.
+const OP_COARSE_LOCATION: i32 = 0;
+const OP_FINE_LOCATION: i32 = 1;
+const OP_WIFI_SCAN: i32 = 10;
+/// `Build.VERSION_CODES.Q`.
+const Q: i32 = 29;
+/// `Settings.Secure.LOCATION_MODE_ON`.
+const LOCATION_MODE_ON: &str = "3";
+/// The user the app host runs (`getCurrentUser`).
+const CURRENT_USER: i32 = 0;
+const SCAN_RESULT: &str = "android.net.wifi.ScanResult";
+
+/// No scan result, of which a list is written.
+enum NoScanResult {}
+
+impl WriteParcelable for NoScanResult {
+    fn write_to(&self, _: &mut Parcel) {
+        match *self {}
+    }
+}
 /// `WifiManager.WIFI_STATE_DISABLED`, `WIFI_STATE_ENABLED`.
 const WIFI_STATE_DISABLED: i32 = 1;
 const WIFI_STATE_ENABLED: i32 = 3;
@@ -137,6 +178,96 @@ impl WifiService {
         Err(self.host.unimplemented_named("wifi", "the Mac's Wi-Fi connection (#1686)"))
     }
 
+    fn held(&self, permission: &str, uid: i32) -> Result<bool, Exception> {
+        Ok(self.host.check_permission(Some(permission), uid)? == 0)
+    }
+
+    /// `WifiPermissionsUtil.isLocationModeEnabled`: the location service's
+    /// answer for the current user, else its `LOCATION_MODE` setting.
+    fn location_mode_enabled(&self) -> Result<bool, Exception> {
+        let asked = super::display::check_service(&self.host.process, "location").and_then(|location| {
+            let mut data = Parcel::new();
+            lm::IsLocationEnabledForUser { user_id: CURRENT_USER }.write(&mut data);
+            let reply = location.transact(lm::IS_LOCATION_ENABLED_FOR_USER, &data, false).map_err(|s| s.to_string())?;
+            lm::read_is_location_enabled_for_user_reply(&mut reply.reader()).map_err(|s| s.to_string())?.map_err(|e| format!("{e:?}"))
+        });
+        match asked {
+            Ok(enabled) => Ok(enabled),
+            Err(e) => {
+                eprintln!("app host: wifi: Failure to get location mode via API, falling back to settings: {e}");
+                Ok(self.host.inputs()?.settings.get(Table::Secure, "location_mode").as_deref() == Some(LOCATION_MODE_ON))
+            }
+        }
+    }
+
+    /// `noteAppOpAllowed`.
+    fn note_allowed(&self, op: i32, package: &str, uid: i32) -> Result<bool, Exception> {
+        Ok(super::appops_service::note(&self.host, op, uid, Some(package))? == MODE_ALLOWED)
+    }
+
+    /// `checkCallersLocationPermission(.., coarseForTargetSdkLessThanQ: true)`.
+    fn location_permitted(&self, package: &str, uid: i32) -> Result<bool, Exception> {
+        let target_sdk = self.host.inputs()?.packages.application_info(package, 0).map(|ai| ai.target_sdk_version);
+        let before_q = target_sdk.is_some_and(|sdk| sdk < Q);
+        if !self.held(if before_q { ACCESS_COARSE_LOCATION } else { ACCESS_FINE_LOCATION }, uid)? {
+            return Ok(false);
+        }
+        if self.note_allowed(OP_FINE_LOCATION, package, uid)? {
+            return Ok(true);
+        }
+        if before_q {
+            return self.note_allowed(OP_COARSE_LOCATION, package, uid);
+        }
+        Ok(false)
+    }
+
+    /// `WifiPermissionsUtil.enforceCanAccessScanResults`.
+    fn enforce_can_access_scan_results(&self, package: Option<&str>, uid: i32) -> Result<(), Exception> {
+        let package = package.ok_or_else(|| Exception::security(format!("Checking UID {uid} but Package Name is Null")))?;
+        if !self.host.owns_package(uid, package)? {
+            return Err(Exception::security(format!("Package {package} does not belong to {uid}")));
+        }
+        for permission in SCAN_BYPASS {
+            if self.held(permission, uid)? {
+                return Ok(());
+            }
+        }
+        if !self.location_mode_enabled()? {
+            return Err(Exception::security("Location mode is disabled for the device"));
+        }
+        let peers = self.held(PEERS_MAC_ADDRESS, uid)?;
+        if !peers && !self.location_permitted(package, uid)? {
+            return Err(Exception::security(format!("UID {uid} has no location permission")));
+        }
+        if !self.note_allowed(OP_WIFI_SCAN, package, uid)? {
+            return Err(Exception::security(format!("UID {uid} has no wifi scan permission")));
+        }
+        // `doesUidBelongToUser`: the app host's one user has no profiles.
+        let current = uid % PER_USER_RANGE as i32 == 1000 || self.held(NETWORK_SETTINGS, uid)? || uid / PER_USER_RANGE as i32 == CURRENT_USER;
+        if !current && !self.held(INTERACT_ACROSS_USERS_FULL, uid)? {
+            return Err(Exception::security(format!("UID {uid} profile not permitted")));
+        }
+        Ok(())
+    }
+
+    /// `getScanResults`: none for a caller denied them; while the radio is
+    /// off, `ScanRequestProxy` has none.
+    fn scan_results(&self, uid: i32, package: Option<&str>) -> Result<Option<Slice<NoScanResult>>, Exception> {
+        self.enforce_access(uid)?;
+        match self.enforce_can_access_scan_results(package, uid) {
+            Ok(()) => {}
+            Err(e) if e.code == EX_SECURITY => {
+                eprintln!("app host: wifi: Permission violation - getScanResults not allowed for uid={uid}, packageName={}, reason={}", package.unwrap_or("null"), e.message);
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        }
+        if self.wifi_state() == WIFI_STATE_ENABLED {
+            return Err(self.host.unimplemented_named("wifi", "the Mac's scan results (#1686)"));
+        }
+        Ok(Some(Slice::new(self.host.process.clone(), SCAN_RESULT, Vec::new())))
+    }
+
     /// `ActiveModeWarden.getWifiState`: the Mac's radio, on or off.
     fn wifi_state(&self) -> i32 {
         if aim_host_wifi::wifi().is_some_and(|w| w.powered) { WIFI_STATE_ENABLED } else { WIFI_STATE_DISABLED }
@@ -170,6 +301,10 @@ impl Service for WifiService {
             wm::GET_CONNECTION_INFO => {
                 let a = wm::GetConnectionInfo::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.connection_info(uid, a.calling_package.as_deref()).map(|info| wm::write_get_connection_info_reply(&mut p, Some(&info)))
+            }
+            wm::GET_SCAN_RESULTS => {
+                let a = wm::GetScanResults::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.scan_results(uid, a.calling_package.as_deref()).map(|r| wm::write_get_scan_results_reply(&mut p, r.as_ref()))
             }
             code => {
                 let name = wm::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
