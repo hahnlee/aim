@@ -222,8 +222,12 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
             Err(error) => return -(error as i64),
         }
     }
+    // A file the guest creates keeps its owner's access on the host, as
+    // mkdirat's does (fsops::host_mode), so its recorded metadata stays
+    // readable; the guest's mode is recorded when the host's differs.
+    let host_create_mode = if creating && attrs::recording() { mode | 0o600 } else { mode };
     // SAFETY: host path from the resolver.
-    let fd = unsafe { libc::open(r.host.as_ptr(), hflags&!libc::O_TRUNC, mode as libc::c_uint) };
+    let fd = unsafe { libc::open(r.host.as_ptr(), hflags&!libc::O_TRUNC, host_create_mode as libc::c_uint) };
     if fd < 0 {
         return -(errno::last() as i64);
     }
@@ -235,6 +239,10 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     }
     if creating {
         if let Err(error) = attrs::created(attrs::Host::Fd(fd), || r.guest.clone()) {
+            unsafe { libc::close(fd); }
+            return -(error as i64);
+        }
+        if let Err(error) = record_created_mode(attrs::Host::Fd(fd), &r.guest, mode as u32) {
             unsafe { libc::close(fd); }
             return -(error as i64);
         }
@@ -273,6 +281,30 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
         super::random::adopt(fd);
     }
     fd as i64
+}
+
+/// The mode of a file the guest created with `want`, under the umask,
+/// recorded when the host's (which keeps its owner's access) differs.
+pub(super) fn record_created_mode(host: attrs::Host, guest: &str, want: u32) -> Result<(), errno::Errno> {
+    if !attrs::recording() {
+        return Ok(());
+    }
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let got = unsafe { match host {
+        attrs::Host::Fd(fd) => libc::fstat(fd, &mut st),
+        attrs::Host::Path(p) | attrs::Host::Image(p) => libc::lstat(p.as_ptr(), &mut st),
+    } };
+    if got < 0 {
+        return Err(errno::last());
+    }
+    attrs::apply(host, || guest.into(), &mut st);
+    let made = st.st_mode as u32 & 0o7777;
+    let wanted = want & 0o7777 & !super::pstate::current_umask();
+    let mode = (made & !0o700) | (wanted & 0o700);
+    if mode == made {
+        return Ok(());
+    }
+    attrs::record_checked(host, || guest.into(), attrs::Attr { mode: Some(mode), ..Default::default() })
 }
 
 fn open_permissions(r: &vfs::Resolved, flags: u64, creating: bool, id: &super::cred::Identity)
@@ -1657,6 +1689,33 @@ mod dac_tests {
         // The kernel owner retains the same descriptor and bytes after rejected guest operations.
         assert_eq!(unsafe{libc::read(hidden,(&mut byte as *mut u8).cast(),1)},1); assert_eq!(byte,b'k');
         fdtab::unhide(hidden); drop(file); fs::remove_file(path).unwrap();
+    }
+
+    /// A file created with no permissions, so no one reads it while it
+    /// is written, then made readable through its descriptor (as
+    /// FileBlobCache writes a shader cache): its creator owns it, with the
+    /// group of its set-group-ID directory, and the mode set.
+    #[test]
+    fn a_file_created_with_no_permissions_is_its_creators_and_takes_fchmod() {
+        if fdtab::isolated_kernel_test("sys::fs::dac_tests::a_file_created_with_no_permissions_is_its_creators_and_takes_fchmod"){return;}
+        let (_guard, _root) = vfs::test_view();
+        let base = "/data/aim-create-mode-zero";
+        let (host, _) = vfs::lookup(base);
+        if host.exists() { fs::remove_dir_all(&host).unwrap(); }
+        fs::create_dir_all(host.join("cache")).unwrap();
+        record(base,1000,1000,0o755);
+        record(&format!("{base}/cache"),10154,20154,0o2771);
+        let mut app = identity(10154,10154); app.groups.push(20154);
+        super::super::cred::init(app.clone(), None);
+        let file = format!("{base}/cache/shaders");
+        let fd = open(&file,O_CREAT|O_EXCL|2,0,&app);
+        assert!(fd >= 0, "open failed {fd}");
+        assert_eq!(write([fd as u64,b"cache".as_ptr() as u64,5,0,0,0]),5);
+        assert_eq!(super::super::fsops::fchmod([fd as u64,0o400,0,0,0,0]),0);
+        closed(fd);
+        let stat = stat_at_as(vfs::LINUX_AT_FDCWD,file.as_bytes(),0,&app).unwrap();
+        assert_eq!((stat.st_uid, stat.st_gid, stat.st_mode as u32 & 0o7777), (10154, 20154, 0o400));
+        closed(open(&file,0,0,&app));
     }
 
     #[test]
