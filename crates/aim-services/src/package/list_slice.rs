@@ -9,11 +9,15 @@ pub struct Slice<T> {
     process:Arc<LocalProcess>,
     creator:&'static str,
     items:Mutex<Option<Vec<T>>>,
+    /// `setInlineCountLimit`: at most this many items written inline.
+    inline_limit:usize,
 }
 impl<T> Slice<T> {
     pub fn new(process:Arc<LocalProcess>,creator:&'static str,items:Vec<T>)->Self {
-        Self{process,creator,items:Mutex::new(Some(items))}
+        Self{process,creator,items:Mutex::new(Some(items)),inline_limit:usize::MAX}
     }
+    /// `setInlineCountLimit`.
+    pub fn with_inline_limit(mut self,limit:usize)->Self {self.inline_limit=limit;self}
 }
 impl<T:WriteParcelable+Send+Sync+'static> WriteParcelable for Slice<T> {
     fn write_to(&self,parcel:&mut Parcel) {
@@ -24,7 +28,7 @@ impl<T:WriteParcelable+Send+Sync+'static> WriteParcelable for Slice<T> {
         if count==0{return;}
         parcel.write_string16(Some(self.creator));
         let mut index=0;
-        while index<items.len()&&parcel.data().len()<MAX_IPC_SIZE {
+        while index<items.len()&&index<self.inline_limit&&parcel.data().len()<MAX_IPC_SIZE {
             parcel.write_i32(1);items[index].write_to(parcel);index+=1;
         }
         if index<items.len() {

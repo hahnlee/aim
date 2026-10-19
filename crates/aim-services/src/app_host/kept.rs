@@ -482,9 +482,11 @@ impl WriteParcelable for RawIntent {
 #[derive(Clone)]
 pub struct RawBundle(Raw);
 
-/// `Parcel.VAL_PARCELABLE`, `VAL_INTEGER`.
+/// `Parcel.VAL_PARCELABLE`, `VAL_INTEGER`, `VAL_NULL`, `VAL_STRING`.
 const VAL_PARCELABLE: i32 = 4;
 const VAL_INTEGER: i32 = 1;
+const VAL_NULL: i32 = -1;
+const VAL_STRING: i32 = 0;
 
 impl RawBundle {
     /// An empty bundle (`new Bundle()`).
@@ -516,6 +518,30 @@ impl RawBundle {
             parts.push((key.to_string(), Raw::of(&p)));
         }
         Ok(RawBundle(bundle_of(magic, parts, has_intent)))
+    }
+
+    /// The bundle with `key` put as null (`Bundle.putString(key, null)`).
+    pub fn with_null(&self, key: &str) -> Result<RawBundle> {
+        let (magic, mut parts, has_intent) = self.entries()?.unwrap_or((crate::bundle::MAGIC, Vec::new(), false));
+        let mut p = Parcel::new();
+        p.write_string16(Some(key));
+        p.write_i32(VAL_NULL);
+        parts.retain(|(k, _)| k != key);
+        parts.push((key.to_string(), Raw::of(&p)));
+        Ok(RawBundle(bundle_of(magic, parts, has_intent)))
+    }
+
+    /// The string `key` holds (`getString`); none for another type.
+    pub fn string(&self, key: &str) -> Result<Option<String>> {
+        let Some((_, parts, _)) = self.entries()? else { return Ok(None) };
+        let Some((_, entry)) = parts.iter().find(|(k, _)| k == key) else { return Ok(None) };
+        let p = entry.parcel();
+        let mut r = p.reader();
+        r.read_string16()?;
+        if r.read_i32()? != VAL_STRING {
+            return Ok(None);
+        }
+        r.read_string16()
     }
 
     /// The intent the parcelable `key` holds (`getParcelable(key,

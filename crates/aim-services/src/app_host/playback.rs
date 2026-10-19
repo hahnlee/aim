@@ -400,8 +400,111 @@ struct Recorder {
     started: bool,
 }
 
+/// `AudioPlayerStateMonitor`, a privileged playback callback of the
+/// system server: the uids with an active player (`mActiveAudioUids`),
+/// the uids that started one, the latest first
+/// (`mSortedAudioPlaybackClientUids`), the active players it last heard
+/// of by piid with their uid and type, and its listener (MediaSessionService's),
+/// told of the uid and type of each player whose activeness changed.
+#[derive(Default)]
+pub struct StateMonitor {
+    active_uids: Vec<i32>,
+    sorted_uids: Vec<i32>,
+    previous: BTreeMap<i32, (i32, i32)>,
+    listener: Option<Box<dyn Fn(i32, i32) + Send>>,
+}
+
+impl StateMonitor {
+    /// `registerListener`.
+    pub fn set_listener(&mut self, listener: Box<dyn Fn(i32, i32) + Send>) {
+        self.listener = Some(listener);
+    }
+
+    /// `getSortedAudioPlaybackClientUids`.
+    pub fn sorted_uids(&self) -> Vec<i32> {
+        self.sorted_uids.clone()
+    }
+
+    /// `isPlaybackActive`.
+    pub fn is_playback_active(&self, uid: i32) -> bool {
+        self.active_uids.contains(&uid)
+    }
+
+    /// `cleanUpAudioPlaybackUids`: the inactive uids of the user of
+    /// `media_button_uid` played after it, forgotten.
+    pub fn clean_up(&mut self, media_button_uid: i32) {
+        const PER_USER: i32 = super::PER_USER_RANGE as i32;
+        let user = media_button_uid / PER_USER;
+        let mut i = self.sorted_uids.len();
+        while i > 0 {
+            i -= 1;
+            let uid = self.sorted_uids[i];
+            if uid == media_button_uid {
+                break;
+            }
+            if uid / PER_USER == user && !self.active_uids.contains(&uid) {
+                self.sorted_uids.remove(i);
+            }
+        }
+    }
+
+    /// `onPlaybackConfigChanged` of the players `configs` (piid, uid, type,
+    /// active), in their order.
+    fn changed(&mut self, configs: &[(i32, i32, i32, bool)]) {
+        self.active_uids.clear();
+        let mut active = BTreeMap::new();
+        for &(piid, uid, kind, is_active) in configs {
+            if is_active {
+                if !self.active_uids.contains(&uid) {
+                    self.active_uids.push(uid);
+                }
+                active.insert(piid, (uid, kind));
+            }
+        }
+        for (piid, &(uid, _)) in &active {
+            if self.previous.contains_key(piid) {
+                continue;
+            }
+            match self.sorted_uids.iter().position(|&u| u == uid) {
+                Some(0) => continue,
+                Some(i) => {
+                    self.sorted_uids.remove(i);
+                }
+                None => {}
+            }
+            self.sorted_uids.insert(0, uid);
+        }
+        // The first active uid moved to the front, those before it shifted.
+        if !self.active_uids.is_empty() && !self.active_uids.contains(&self.sorted_uids[0]) {
+            let first = (1..self.sorted_uids.len()).find(|&i| self.active_uids.contains(&self.sorted_uids[i]));
+            // With none found, the original puts -1 first.
+            let uid = first.map_or(-1, |i| self.sorted_uids[i]);
+            for i in (1..=first.unwrap_or(0)).rev() {
+                self.sorted_uids[i] = self.sorted_uids[i - 1];
+            }
+            self.sorted_uids[0] = uid;
+        }
+        let mut told = Vec::new();
+        for &(piid, uid, kind, is_active) in configs {
+            let was_active = self.previous.remove(&piid).is_some();
+            if was_active != is_active {
+                told.push((uid, kind));
+            }
+        }
+        told.extend(self.previous.values().copied());
+        self.previous = active;
+        if let Some(listener) = &self.listener {
+            for (uid, kind) in told {
+                listener(uid, kind);
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Playback {
+    /// The system server's `AudioPlayerStateMonitor`.
+    pub monitor: StateMonitor,
     players: BTreeMap<i32, Player>,
     /// `mPiidToPortId`.
     port_ids: BTreeMap<i32, i32>,
@@ -607,6 +710,8 @@ impl Playback {
         for i in errors {
             self.clients[i].errors += 1;
         }
+        let configs: Vec<_> = self.players.values().map(|p| (p.piid, p.uid, p.player_type, p.active())).collect();
+        self.monitor.changed(&configs);
     }
 
     /// `trackRecorder`.
@@ -1021,5 +1126,31 @@ mod tests {
         assert!(a.force_ducking());
         assert!(!attributes(11, 0).force_ducking());
         assert_eq!(Attributes::built(1001, 0, 0).public_usage(), 0);
+    }
+
+    /// `AudioPlayerStateMonitor`: a newly active player's uid first, the
+    /// first active uid moved to the front when the front one stops, the
+    /// listener told of each player whose activeness changed, and the
+    /// inactive uids played after the media button uid cleaned up.
+    #[test]
+    fn the_state_monitor_sorts_uids_by_playback() {
+        let told = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut m = StateMonitor::default();
+        let t = told.clone();
+        m.set_listener(Box::new(move |uid, kind| t.lock().unwrap().push((uid, kind))));
+        m.changed(&[(1, 10_100, 2, true)]);
+        m.changed(&[(1, 10_100, 2, true), (2, 10_200, 2, true)]);
+        assert_eq!(m.sorted_uids(), [10_200, 10_100]);
+        m.changed(&[(1, 10_100, 2, true), (2, 10_200, 2, false)]);
+        assert_eq!(m.sorted_uids(), [10_100, 10_200]);
+        assert!(m.is_playback_active(10_100) && !m.is_playback_active(10_200));
+        // A player gone is told too.
+        m.changed(&[]);
+        assert_eq!(*told.lock().unwrap(), [(10_100, 2), (10_200, 2), (10_200, 2), (10_100, 2)]);
+        m.changed(&[(3, 10_300, 2, true)]);
+        m.changed(&[]);
+        assert_eq!(m.sorted_uids(), [10_300, 10_100, 10_200]);
+        m.clean_up(10_100);
+        assert_eq!(m.sorted_uids(), [10_300, 10_100]);
     }
 }

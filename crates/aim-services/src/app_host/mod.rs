@@ -62,6 +62,7 @@ pub mod legacy_permission;
 pub mod locale_manager;
 pub mod media_router;
 pub mod media_session;
+mod media_session_record;
 mod media_router2;
 pub mod memory_info;
 pub mod kept;
@@ -604,7 +605,7 @@ impl AppHost {
             ("grammatical_inflection", Arc::new(grammatical_inflection::GrammaticalInflection::new(self.clone()))),
             ("domain_verification", Arc::new(domain_verification::DomainVerification::new(self.clone()))),
             ("usb", Arc::new(usb_service::UsbService::new(self.clone()))),
-            ("media_session", Arc::new(media_session::MediaSession::new(self.clone()))),
+            ("media_session", media_session::MediaSession::new(self.clone(), settings.clone())),
             ("safety_center", Arc::new(safety_center::SafetyCenter::new(self.clone()))),
             ("appwidget", Arc::new(app_widget::AppWidgetService::new(self.clone()))),
             ("restrictions", Arc::new(restrictions_service::RestrictionsManager::new(self.clone()))),

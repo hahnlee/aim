@@ -957,6 +957,13 @@ impl AppHost {
         }
     }
 
+    /// `UriGrantsManagerInternal.checkGrantUriPermission` of `uri` in its
+    /// user, `user` unless it names one: the uid to grant, -1 for none
+    /// needed, or a `SecurityException`.
+    pub(super) fn check_grant_uri_permission(&self, calling_uid: i32, target: &str, uri: Uri, modes: i32, user: i32) -> Result<i32, Exception> {
+        self.check_grant(calling_uid, Some(target), &GrantUri::resolve(user, uri, modes), modes, -1)
+    }
+
     /// `checkGrantUriPermissionUnlocked`: the uid of `target` (or
     /// `last_target_uid`, when known) when `calling_uid` may grant it
     /// `uri` with `modes` and it needs the grant; -1 when there is none to
