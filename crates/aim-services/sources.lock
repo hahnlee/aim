@@ -291,7 +291,7 @@ INTERFACES=(
   "android.os.IDeviceIdentifiersPolicyService|system/framework/framework.jar|getSerial,getSerialForPackage"
   "android.permission.ILegacyPermissionManager|system/framework/framework.jar|checkDeviceIdentifierAccess,checkPhoneNumberAccess"
   "android.content.IRestrictionsManager|system/framework/framework.jar|getApplicationRestrictions,getApplicationRestrictionsPerAdminForUser,hasRestrictionsProvider,requestPermission,notifyPermissionResponse,createLocalApprovalIntent"
-  "android.app.ILocaleManager|system/framework/framework.jar|getApplicationLocales,getSystemLocales,getOverrideLocaleConfig"
+  "android.app.ILocaleManager|system/framework/framework.jar|setApplicationLocales,getApplicationLocales,getSystemLocales,getOverrideLocaleConfig"
   "android.app.IGrammaticalInflectionManager|system/framework/framework.jar|setRequestedApplicationGrammaticalGender,setSystemWideGrammaticalGender,getSystemGrammaticalGender,peekSystemGrammaticalGenderByUserId"
   "android.app.usage.IUsageStatsManager|system/framework/framework.jar|isAppStandbyEnabled,isAppInactive,getAppStandbyBucket"
   "android.webkit.IWebViewUpdateService|system/framework/framework.jar|notifyRelroCreationCompleted,waitForAndGetProvider,getValidWebViewPackages,getAllWebViewPackages,getCurrentWebViewPackageName,getCurrentWebViewPackage,getDefaultWebViewPackage"
