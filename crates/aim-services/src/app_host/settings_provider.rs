@@ -30,14 +30,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 use aim_android_image::dex::{self, Dex};
 use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
-    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader, UNKNOWN_TRANSACTION,
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader,
+    UNKNOWN_TRANSACTION,
 };
 use aim_service_aidl::android_content_icontentprovider as cp;
 use aim_service_aidl::android_os_iremotecallback as remote_callback;
 
 use super::appops_service::{self, MODE_DEFAULT, OP_WRITE_SETTINGS};
-use super::device_config::{self, PUBLIC_NAMESPACES};
 use super::cursor::{BulkCursor, Rows};
+use super::device_config::{self, PUBLIC_NAMESPACES};
 use super::generations::{self, GenerationRegistry, TRACK_GENERATION};
 use super::settings::{Change, ResetMode, SYSTEM_PACKAGE_NAME, Setting, Table};
 use super::settings_validators::{PRIVATE_SETTINGS, PUBLIC_SETTINGS, validate_system_value};
@@ -56,9 +57,22 @@ const IS_PRESERVED_IN_RESTORE: &str = "is_preserved_in_restore";
 const ALL_COLUMNS: [&str; 4] = [ID, NAME, VALUE, IS_PRESERVED_IN_RESTORE];
 /// `DatabaseHelper`'s valid tables; `SettingsProvider.REMOVED_LEGACY_TABLES`
 /// among them.
-const VALID_TABLES: [&str; 7] =
-    ["system", "secure", "global", "bluetooth_devices", "favorites", "old_favorites", "android_metadata"];
-const REMOVED_LEGACY_TABLES: [&str; 5] = ["favorites", "old_favorites", "bluetooth_devices", "bookmarks", "android_metadata"];
+const VALID_TABLES: [&str; 7] = [
+    "system",
+    "secure",
+    "global",
+    "bluetooth_devices",
+    "favorites",
+    "old_favorites",
+    "android_metadata",
+];
+const REMOVED_LEGACY_TABLES: [&str; 5] = [
+    "favorites",
+    "old_favorites",
+    "bluetooth_devices",
+    "bookmarks",
+    "android_metadata",
+];
 /// `ContentResolver.QUERY_ARG_SQL_SELECTION`, `QUERY_ARG_SQL_SELECTION_ARGS`.
 const QUERY_ARG_SQL_SELECTION: &str = "android:query-arg-sql-selection";
 const QUERY_ARG_SQL_SELECTION_ARGS: &str = "android:query-arg-sql-selection-args";
@@ -78,7 +92,8 @@ const RESULT_SETTINGS_LIST: &str = "result_settings_list";
 const WRITE_SECURE_SETTINGS: &str = "android.permission.WRITE_SECURE_SETTINGS";
 const WRITE_SETTINGS: &str = "android.permission.WRITE_SETTINGS";
 const LOCAL_MAC_ADDRESS: &str = "android.permission.LOCAL_MAC_ADDRESS";
-const MODIFY_SETTINGS_OVERRIDEABLE_BY_RESTORE: &str = "android.permission.MODIFY_SETTINGS_OVERRIDEABLE_BY_RESTORE";
+const MODIFY_SETTINGS_OVERRIDEABLE_BY_RESTORE: &str =
+    "android.permission.MODIFY_SETTINGS_OVERRIDEABLE_BY_RESTORE";
 /// `Process.ROOT_UID`, `SYSTEM_UID`, `SHELL_UID`.
 const ROOT_UID: i32 = 0;
 const SYSTEM_UID: i32 = 1000;
@@ -123,7 +138,8 @@ const EXTRA_CALLING_PACKAGE: &str = "calling_package";
 /// The DeviceConfig permissions.
 const WRITE_DEVICE_CONFIG: &str = "android.permission.WRITE_DEVICE_CONFIG";
 const WRITE_ALLOWLISTED_DEVICE_CONFIG: &str = "android.permission.WRITE_ALLOWLISTED_DEVICE_CONFIG";
-const READ_WRITE_SYNC_DISABLED_MODE_CONFIG: &str = "android.permission.READ_WRITE_SYNC_DISABLED_MODE_CONFIG";
+const READ_WRITE_SYNC_DISABLED_MODE_CONFIG: &str =
+    "android.permission.READ_WRITE_SYNC_DISABLED_MODE_CONFIG";
 const MONITOR_DEVICE_CONFIG_ACCESS: &str = "android.permission.MONITOR_DEVICE_CONFIG_ACCESS";
 /// `ActivityManager.isRunningInUserTestHarness`'s property.
 const TEST_HARNESS: &str = "persist.sys.test_harness";
@@ -143,7 +159,9 @@ impl Table {
 
     /// The table of the system, secure or global settings a path names.
     fn named(path: &str) -> Option<Table> {
-        [Table::System, Table::Secure, Table::Global].into_iter().find(|t| t.path() == path)
+        [Table::System, Table::Secure, Table::Global]
+            .into_iter()
+            .find(|t| t.path() == path)
     }
 }
 
@@ -201,15 +219,24 @@ impl Declared {
         let jar = aim_apps::apk::Apk::open(jar).map_err(|e| e.0)?;
         let mut sets: [Option<HashSet<String>>; 3] = Default::default();
         for index in 1.. {
-            let name = if index == 1 { "classes.dex".to_string() } else { format!("classes{index}.dex") };
-            let Some(bytes) = jar.file_if_present(&name).map_err(|e| e.0)? else { break };
+            let name = if index == 1 {
+                "classes.dex".to_string()
+            } else {
+                format!("classes{index}.dex")
+            };
+            let Some(bytes) = jar.file_if_present(&name).map_err(|e| e.0)? else {
+                break;
+            };
             let dex = Dex::parse(&bytes)?;
             for (set, class) in sets.iter_mut().zip(CLASSES) {
                 if let Some(class) = dex.class(class) {
-                    let names = dex.static_values(class)?.into_iter().filter_map(|(_, value)| match value {
-                        dex::Value::String(s) => Some(s),
-                        _ => None,
-                    });
+                    let names = dex
+                        .static_values(class)?
+                        .into_iter()
+                        .filter_map(|(_, value)| match value {
+                            dex::Value::String(s) => Some(s),
+                            _ => None,
+                        });
                     set.get_or_insert_default().extend(names);
                 }
             }
@@ -217,7 +244,11 @@ impl Declared {
         let [Some(system), Some(secure), Some(global)] = sets else {
             return Err("no android.provider.Settings classes".into());
         };
-        Ok(Declared { system, secure, global })
+        Ok(Declared {
+            system,
+            secure,
+            global,
+        })
     }
 }
 
@@ -247,7 +278,9 @@ impl Service for SettingsProvider {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         match call.code {
             cp::CALL_TRANSACTION => {}
-            cp::OPEN_FILE_TRANSACTION | cp::OPEN_ASSET_FILE_TRANSACTION | cp::OPEN_TYPED_ASSET_FILE_TRANSACTION => {
+            cp::OPEN_FILE_TRANSACTION
+            | cp::OPEN_ASSET_FILE_TRANSACTION
+            | cp::OPEN_TYPED_ASSET_FILE_TRANSACTION => {
                 return provider_reply(self.open(call));
             }
             cp::QUERY_TRANSACTION
@@ -265,18 +298,28 @@ impl Service for SettingsProvider {
         let method = r.read_string16().map_err(|_| BAD_VALUE)?.ok_or(BAD_VALUE)?;
         let arg = r.read_string16().map_err(|_| BAD_VALUE)?;
         let extras = bundle::read(r).map_err(|_| BAD_VALUE)?.unwrap_or_default();
-        let caller = Caller { uid: call.sender_euid as i32, package };
-        reply(self.call(&caller, &method, arg.as_deref(), &extras, Some(&call.data)).map(|result| {
-            let mut p = Parcel::new();
-            p.write_no_exception();
-            match result {
-                Some(result) => {
-                    bundle::write(&mut p, &result.iter().map(|(k, v)| (k.as_str(), v.clone())).collect::<Vec<_>>())
-                }
-                None => p.write_i32(-1),
-            }
-            p
-        }))
+        let caller = Caller {
+            uid: call.sender_euid as i32,
+            package,
+        };
+        reply(
+            self.call(&caller, &method, arg.as_deref(), &extras, Some(&call.data))
+                .map(|result| {
+                    let mut p = Parcel::new();
+                    p.write_no_exception();
+                    match result {
+                        Some(result) => bundle::write(
+                            &mut p,
+                            &result
+                                .iter()
+                                .map(|(k, v)| (k.as_str(), v.clone()))
+                                .collect::<Vec<_>>(),
+                        ),
+                        None => p.write_i32(-1),
+                    }
+                    p
+                }),
+        )
     }
 }
 
@@ -392,13 +435,18 @@ fn read_content_values(r: &mut Reader<'_>) -> Result<HashMap<String, Content>, i
 
 impl SettingsProvider {
     /// `ContentValues.getAsString(key)`.
-    fn content_string(&self, values: &HashMap<String, Content>, key: &str) -> Result<Option<String>, Exception> {
+    fn content_string(
+        &self,
+        values: &HashMap<String, Content>,
+        key: &str,
+    ) -> Result<Option<String>, Exception> {
         match values.get(key) {
             None | Some(Content::Text(None)) => Ok(None),
             Some(Content::Text(Some(s))) => Ok(Some(s.clone())),
-            Some(Content::Other(class)) => {
-                Err(self.host.unimplemented_named("settings provider", &format!("a {class} setting value (#1583)")))
-            }
+            Some(Content::Other(class)) => Err(self.host.unimplemented_named(
+                "settings provider",
+                &format!("a {class} setting value (#1583)"),
+            )),
         }
     }
 
@@ -419,15 +467,29 @@ impl SettingsProvider {
         match code {
             cp::QUERY_TRANSACTION => {
                 let n = r.read_i32()?;
-                let projection = (0..n.max(0)).map(|_| r.read_string16()).collect::<Result<Vec<_>, _>>()?;
+                let projection = (0..n.max(0))
+                    .map(|_| r.read_string16())
+                    .collect::<Result<Vec<_>, _>>()?;
                 let args = bundle::read(r)?.unwrap_or_default();
                 let observer = r.read_binder()?;
                 r.read_binder()?; // the cancellation signal
                 let (selection, selection_args) = selection(&args);
                 let projection = (n > 0).then_some(projection);
-                let rows = self.query(&caller, &uri, projection.as_deref(), selection, selection_args.as_deref())?;
+                let rows = self.query(
+                    &caller,
+                    &uri,
+                    projection.as_deref(),
+                    selection,
+                    selection_args.as_deref(),
+                )?;
                 let window_size = self.window_size()?;
-                let cursor = BulkCursor::new(self.host.process.clone(), rows, observer, PROVIDER_NAME, window_size)?;
+                let cursor = BulkCursor::new(
+                    self.host.process.clone(),
+                    rows,
+                    observer,
+                    PROVIDER_NAME,
+                    window_size,
+                )?;
                 let binder = self.host.process.add_service(cursor.clone());
                 p.write_no_exception();
                 p.write_i32(1);
@@ -444,12 +506,16 @@ impl SettingsProvider {
                 let inserted = self.insert(&caller, &uri, &values)?;
                 p.write_no_exception();
                 // `maybeAddUserId` of the URI's user, unless current (-2).
-                let user = uri.authority().unwrap_or_default().rsplit_once('@').map(|(u, _)| u.parse().unwrap_or(-10_000));
+                let user = uri
+                    .authority()
+                    .unwrap_or_default()
+                    .rsplit_once('@')
+                    .map(|(u, _)| u.parse().unwrap_or(-10_000));
                 let user = user.filter(|&user: &i32| user != -2);
                 match (inserted, user) {
-                    (Some(inserted), Some(user)) => {
-                        inserted.with_encoded_authority(Some(&format!("{user}@settings"))).write(&mut p)
-                    }
+                    (Some(inserted), Some(user)) => inserted
+                        .with_encoded_authority(Some(&format!("{user}@settings")))
+                        .write(&mut p),
                     (Some(inserted), None) => inserted.write(&mut p),
                     (None, _) => p.write_i32(0),
                 }
@@ -458,11 +524,19 @@ impl SettingsProvider {
                 // `createTypedArray`; `bulkInsert` inserts each.
                 let n = r.read_i32()?;
                 if n < 0 {
-                    return Err(Exception::new(EX_NULL_POINTER, "Attempt to get length of null array").into());
+                    return Err(Exception::new(
+                        EX_NULL_POINTER,
+                        "Attempt to get length of null array",
+                    )
+                    .into());
                 }
                 let mut all = Vec::new();
                 for _ in 0..n {
-                    all.push(if r.read_i32()? != 0 { Some(read_content_values(r)?) } else { None });
+                    all.push(if r.read_i32()? != 0 {
+                        Some(read_content_values(r)?)
+                    } else {
+                        None
+                    });
                 }
                 let mut count = 0;
                 for values in all {
@@ -485,7 +559,8 @@ impl SettingsProvider {
                 let values = read_content_values(r)?;
                 let extras = bundle::read(r)?.unwrap_or_default();
                 let (selection, selection_args) = selection(&extras);
-                let count = self.update(&caller, &uri, &values, selection, selection_args.as_deref())?;
+                let count =
+                    self.update(&caller, &uri, &values, selection, selection_args.as_deref())?;
                 p.write_no_exception();
                 p.write_i32(count);
             }
@@ -516,7 +591,10 @@ impl SettingsProvider {
             cp::OPEN_TYPED_ASSET_FILE_TRANSACTION => {
                 let filter = mime_type.unwrap_or_default();
                 if filter != "*/*" && !compare_mime_types(&get_type(&uri)?, &filter) {
-                    return Err(Thrown::Database(FILE_NOT_FOUND, format!("Can't open {} as type {filter}", uri.as_str())));
+                    return Err(Thrown::Database(
+                        FILE_NOT_FOUND,
+                        format!("Can't open {} as type {filter}", uri.as_str()),
+                    ));
                 }
                 self.open_file(&caller, &uri, "r")?
             }
@@ -571,9 +649,16 @@ impl SettingsProvider {
             "wa" => (false, true, true, false, true),
             "rw" => (true, true, true, false, false),
             "rwt" => (true, true, true, true, false),
-            _ => return Err(Thrown::Database(ILLEGAL_ARGUMENT, format!("Bad mode '{mode}'"))),
+            _ => {
+                return Err(Thrown::Database(
+                    ILLEGAL_ARGUMENT,
+                    format!("Bad mode '{mode}'"),
+                ));
+            }
         };
-        let path = self.ringtone_cache_dir(user)?.join(ringtone_cache(setting).unwrap_or_default());
+        let path = self
+            .ringtone_cache_dir(user)?
+            .join(ringtone_cache(setting).unwrap_or_default());
         let existed = path.exists();
         let file = std::fs::OpenOptions::new()
             .read(read)
@@ -593,9 +678,13 @@ impl SettingsProvider {
 
     /// `getRingtoneCacheDir`: user `user`'s, made if missing.
     fn ringtone_cache_dir(&self, user: i32) -> Result<PathBuf, Exception> {
-        let dir = self.host.data()?.join(format!("system_de/{user}/ringtones"));
+        let dir = self
+            .host
+            .data()?
+            .join(format!("system_de/{user}/ringtones"));
         if !dir.exists() {
-            std::fs::create_dir(&dir).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", dir.display())))?;
+            std::fs::create_dir(&dir)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", dir.display())))?;
             record_system(&dir, 0o700)?;
         }
         Ok(dir)
@@ -605,18 +694,33 @@ impl SettingsProvider {
     /// set by a package there is, of an audio or video type as the
     /// content resolver tells it, asked as the system for a privileged
     /// app and as the app otherwise.
-    fn valid_media_uri(&self, caller: &Caller, package: Option<&str>, name: &str, value: &str) -> Result<bool, Exception> {
+    fn valid_media_uri(
+        &self,
+        caller: &Caller,
+        package: Option<&str>,
+        name: &str,
+        value: &str,
+    ) -> Result<bool, Exception> {
         let uri = Uri::parse(value);
-        if uri.authority().is_some_and(|a| a.rsplit('@').next() == Some("settings")) {
+        if uri
+            .authority()
+            .is_some_and(|a| a.rsplit('@').next() == Some("settings"))
+        {
             return Ok(false);
         }
         // `getCallingApplicationInfoOrThrow`.
         let info = package.and_then(|p| self.host.inputs().ok()?.packages.application_info(p, 0));
         let Some(info) = info else {
-            eprintln!("app host: settings: isValidMediaUri: cannot get calling app info for setting: {name} URI: {value}");
+            eprintln!(
+                "app host: settings: isValidMediaUri: cannot get calling app info for setting: {name} URI: {value}"
+            );
             return Ok(false);
         };
-        let uid = if info.private_flags & PRIVATE_FLAG_PRIVILEGED != 0 { SYSTEM_UID } else { caller.uid };
+        let uid = if info.private_flags & PRIVATE_FLAG_PRIVILEGED != 0 {
+            SYSTEM_UID
+        } else {
+            caller.uid
+        };
         let Some(mime_type) = self.host.provider_type(&uri, uid)? else {
             eprintln!(
                 "app host: settings: mutateSystemSetting for setting: {name} URI: {value} ignored: failure to find mimeType (no access from this context?)"
@@ -624,7 +728,10 @@ impl SettingsProvider {
             return Ok(false);
         };
         if !(mime_type.starts_with("audio/")
-            || matches!(mime_type.as_str(), "application/ogg" | "application/x-flac" | "application/mp4")
+            || matches!(
+                mime_type.as_str(),
+                "application/ogg" | "application/x-flac" | "application/mp4"
+            )
             || mime_type.starts_with("video/"))
         {
             eprintln!(
@@ -644,11 +751,14 @@ impl SettingsProvider {
         let copied = (|| -> Result<(), String> {
             let mut input = self.host.open_provider_input(&Uri::parse(value))?;
             let existed = path.exists();
-            let mut out = std::fs::File::create(path).map_err(|e| format!("java.io.FileNotFoundException: {}", open_failed(&e)))?;
+            let mut out = std::fs::File::create(path)
+                .map_err(|e| format!("java.io.FileNotFoundException: {}", open_failed(&e)))?;
             if !existed {
                 record_system(path, 0o600).map_err(|e| e.message)?;
             }
-            std::io::copy(&mut input, &mut out).map(|_| ()).map_err(|e| format!("java.io.IOException: {e}"))
+            std::io::copy(&mut input, &mut out)
+                .map(|_| ())
+                .map_err(|e| format!("java.io.IOException: {e}"))
         })();
         if let Err(e) = copied {
             eprintln!("app host: settings: Failed to cache ringtone: {e}");
@@ -658,8 +768,13 @@ impl SettingsProvider {
 
 /// A file or directory the system made, as the guest sees it.
 fn record_system(path: &Path, mode: u32) -> Result<(), Exception> {
-    let inode = aim_storage::guest_inode::GuestInode { uid: Some(SYSTEM_UID as u32), gid: Some(SYSTEM_UID as u32), mode: Some(mode) };
-    aim_storage::guest_inode::record(path, inode).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display())))
+    let inode = aim_storage::guest_inode::GuestInode {
+        uid: Some(SYSTEM_UID as u32),
+        gid: Some(SYSTEM_UID as u32),
+        mode: Some(mode),
+    };
+    aim_storage::guest_inode::record(path, inode)
+        .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display())))
 }
 
 /// `ErrnoException.getMessage` of `Os.open`'s failure.
@@ -724,7 +839,10 @@ fn read_attribution_source(r: &mut Reader<'_>) -> Result<Option<String>, i32> {
 /// `packageValueForCallResult`: the value, and the generation data a
 /// tracking client asked for, in the reply `Bundle`'s order.
 fn value_result(value: Option<String>, generation: Vec<(String, Value)>) -> Vec<(String, Value)> {
-    let mut result = vec![(VALUE.to_string(), value.map_or(Value::Null, |v| Value::String(Some(v))))];
+    let mut result = vec![(
+        VALUE.to_string(),
+        value.map_or(Value::Null, |v| Value::String(Some(v))),
+    )];
     result.extend(generation);
     array_order(result, |(key, _)| key)
 }
@@ -732,7 +850,12 @@ fn value_result(value: Option<String>, generation: Vec<(String, Value)>) -> Vec<
 /// `UserRestrictionsUtils.isSettingRestrictedForUser`: whether a change of
 /// `name` to `value` by `uid` is one a user restriction (`restricted`)
 /// forbids.
-fn setting_restricted(name: &str, value: Option<&str>, uid: i32, restricted: &dyn Fn(&str) -> bool) -> bool {
+fn setting_restricted(
+    name: &str,
+    value: Option<&str>,
+    uid: i32,
+    restricted: &dyn Fn(&str) -> bool,
+) -> bool {
     let restriction = match name {
         "location_mode" => {
             if restricted("no_config_location") && uid != SYSTEM_UID {
@@ -744,8 +867,15 @@ fn setting_restricted(name: &str, value: Option<&str>, uid: i32, restricted: &dy
             }
             "no_share_location"
         }
-        "install_non_market_apps" | "adb_enabled" | "adb_wifi_enabled" | "airplane_mode_on" | "doze_enabled"
-        | "doze_always_on" | "doze_pulse_on_pick_up" | "doze_pulse_on_long_press" | "doze_pulse_on_double_tap"
+        "install_non_market_apps"
+        | "adb_enabled"
+        | "adb_wifi_enabled"
+        | "airplane_mode_on"
+        | "doze_enabled"
+        | "doze_always_on"
+        | "doze_pulse_on_pick_up"
+        | "doze_pulse_on_long_press"
+        | "doze_pulse_on_double_tap"
             if value == Some("0") =>
         {
             return false;
@@ -764,10 +894,18 @@ fn setting_restricted(name: &str, value: Option<&str>, uid: i32, restricted: &dy
         "safe_boot_disallowed" if value == Some("1") => return false,
         "safe_boot_disallowed" => "no_safe_boot",
         "airplane_mode_on" => "no_airplane_mode",
-        "doze_enabled" | "doze_always_on" | "doze_pulse_on_pick_up" | "doze_pulse_on_long_press"
+        "doze_enabled"
+        | "doze_always_on"
+        | "doze_pulse_on_pick_up"
+        | "doze_pulse_on_long_press"
         | "doze_pulse_on_double_tap" => "no_ambient_display",
-        "screen_brightness" | "screen_brightness_mode" | "auto_time" | "auto_time_zone" | "screen_off_timeout"
-        | "private_dns_mode" | "private_dns_specifier"
+        "screen_brightness"
+        | "screen_brightness_mode"
+        | "auto_time"
+        | "auto_time_zone"
+        | "screen_off_timeout"
+        | "private_dns_mode"
+        | "private_dns_specifier"
             if uid == SYSTEM_UID =>
         {
             return false;
@@ -803,7 +941,9 @@ fn enforce_system_mutation(
     match op {
         Op::Insert { .. } if PUBLIC_SETTINGS.contains(&name) => return Ok(()),
         Op::Delete if PUBLIC_SETTINGS.contains(&name) || PRIVATE_SETTINGS.contains(&name) => {
-            return Err(Exception::illegal_argument("You cannot delete system defined secure settings."));
+            return Err(Exception::illegal_argument(
+                "You cannot delete system defined secure settings.",
+            ));
         }
         Op::Reset { .. } => return Ok(()),
         _ => {}
@@ -840,10 +980,16 @@ fn reset_mode(mode: i32, trusted_caller: bool) -> Result<ResetMode, Exception> {
         2 => (ResetMode::UntrustedDefaults, "reset to untrusted defaults"),
         3 => (ResetMode::UntrustedChanges, "reset untrusted changes"),
         4 => (ResetMode::TrustedDefaults, "reset to trusted defaults"),
-        _ => return Err(Exception::illegal_argument(format!("Invalid reset mode: {mode}"))),
+        _ => {
+            return Err(Exception::illegal_argument(format!(
+                "Invalid reset mode: {mode}"
+            )));
+        }
     };
     if !trusted_caller {
-        return Err(Exception::security(format!("Only system, shell/root on a debuggable build can {what}")));
+        return Err(Exception::security(format!(
+            "Only system, shell/root on a debuggable build can {what}"
+        )));
     }
     Ok(mode)
 }
@@ -878,16 +1024,29 @@ fn java_split(s: &str, separator: char) -> Vec<&str> {
 /// The `RemoteCallback` a bundle's `value` holds, read from `parcel`: its
 /// `IRemoteCallback`'s handle, none for a null value or binder.
 fn remote_callback_of(value: &Value, parcel: &Reader<'_>) -> Result<Option<u32>, Exception> {
-    let Value::Lazy { kind: bundle::VAL_PARCELABLE, start, .. } = *value else {
+    let Value::Lazy {
+        kind: bundle::VAL_PARCELABLE,
+        start,
+        ..
+    } = *value
+    else {
         return Ok(None);
     };
     let mut r = parcel.clone();
     r.set_position(start);
-    let class = r.read_string16().map_err(|_| Exception::illegal_argument("a bad parcelable"))?;
+    let class = r
+        .read_string16()
+        .map_err(|_| Exception::illegal_argument("a bad parcelable"))?;
     if class.as_deref() != Some(REMOTE_CALLBACK) {
-        return Err(Exception::illegal_argument(format!("{} is not a {REMOTE_CALLBACK}", class.unwrap_or_default())));
+        return Err(Exception::illegal_argument(format!(
+            "{} is not a {REMOTE_CALLBACK}",
+            class.unwrap_or_default()
+        )));
     }
-    match r.read_binder().map_err(|_| Exception::illegal_argument("a bad parcelable"))? {
+    match r
+        .read_binder()
+        .map_err(|_| Exception::illegal_argument("a bad parcelable"))?
+    {
         Some(Binder::Handle(handle)) => Ok(Some(handle)),
         _ => Ok(None),
     }
@@ -908,64 +1067,209 @@ impl aim_service_aidl::WriteParcelable for Results<'_> {
 /// `Global.getMovedToSecureSettings` and `Global.getMovedToSystemSettings`
 /// at the tag.
 const SYSTEM_MOVED_TO_SECURE: &[&str] = &[
-    "adaptive_sleep", "android_id", "http_proxy", "location_providers_allowed", "lock_biometric_weak_flags",
-    "lock_pattern_autolock", "lock_pattern_visible_pattern", "lock_pattern_tactile_feedback_enabled", "logging_id",
-    "parental_control_enabled", "parental_control_last_update", "parental_control_redirect_url", "settings_classname",
-    "use_google_mail", "wifi_networks_available_repeat_delay", "wifi_num_open_networks_kept", "wifi_on",
-    "wifi_watchdog_acceptable_packet_loss_percentage", "wifi_watchdog_ap_count", "wifi_watchdog_background_check_delay_ms",
-    "wifi_watchdog_background_check_enabled", "wifi_watchdog_background_check_timeout_ms",
-    "wifi_watchdog_initial_ignored_ping_count", "wifi_watchdog_max_ap_checks", "wifi_watchdog_on", "wifi_watchdog_ping_count",
-    "wifi_watchdog_ping_delay_ms", "wifi_watchdog_ping_timeout_ms", "install_non_market_apps",
+    "adaptive_sleep",
+    "android_id",
+    "http_proxy",
+    "location_providers_allowed",
+    "lock_biometric_weak_flags",
+    "lock_pattern_autolock",
+    "lock_pattern_visible_pattern",
+    "lock_pattern_tactile_feedback_enabled",
+    "logging_id",
+    "parental_control_enabled",
+    "parental_control_last_update",
+    "parental_control_redirect_url",
+    "settings_classname",
+    "use_google_mail",
+    "wifi_networks_available_repeat_delay",
+    "wifi_num_open_networks_kept",
+    "wifi_on",
+    "wifi_watchdog_acceptable_packet_loss_percentage",
+    "wifi_watchdog_ap_count",
+    "wifi_watchdog_background_check_delay_ms",
+    "wifi_watchdog_background_check_enabled",
+    "wifi_watchdog_background_check_timeout_ms",
+    "wifi_watchdog_initial_ignored_ping_count",
+    "wifi_watchdog_max_ap_checks",
+    "wifi_watchdog_on",
+    "wifi_watchdog_ping_count",
+    "wifi_watchdog_ping_delay_ms",
+    "wifi_watchdog_ping_timeout_ms",
+    "install_non_market_apps",
 ];
 const SYSTEM_MOVED_TO_GLOBAL: &[&str] = &[
-    "airplane_mode_on", "airplane_mode_radios", "airplane_mode_toggleable_radios", "auto_time", "auto_time_zone",
-    "car_dock_sound", "car_undock_sound", "desk_dock_sound", "desk_undock_sound", "dock_sounds_enabled", "lock_sound",
-    "unlock_sound", "low_battery_sound", "power_sounds_enabled", "stay_on_while_plugged_in", "wifi_sleep_policy",
-    "mode_ringer", "window_animation_scale", "transition_animation_scale", "animator_duration_scale",
-    "fancy_ime_animations", "compatibility_mode", "emergency_tone", "call_auto_retry", "debug_app", "wait_for_debugger",
-    "always_finish_activities", "tzinfo_content_url", "tzinfo_metadata_url", "selinux_content_url",
-    "selinux_metadata_url", "sms_short_codes_content_url", "sms_short_codes_metadata_url", "cert_pin_content_url",
-    "cert_pin_metadata_url", "nfc", "cell", "wifi", "bluetooth", "wimax", "show_processes",
+    "airplane_mode_on",
+    "airplane_mode_radios",
+    "airplane_mode_toggleable_radios",
+    "auto_time",
+    "auto_time_zone",
+    "car_dock_sound",
+    "car_undock_sound",
+    "desk_dock_sound",
+    "desk_undock_sound",
+    "dock_sounds_enabled",
+    "lock_sound",
+    "unlock_sound",
+    "low_battery_sound",
+    "power_sounds_enabled",
+    "stay_on_while_plugged_in",
+    "wifi_sleep_policy",
+    "mode_ringer",
+    "window_animation_scale",
+    "transition_animation_scale",
+    "animator_duration_scale",
+    "fancy_ime_animations",
+    "compatibility_mode",
+    "emergency_tone",
+    "call_auto_retry",
+    "debug_app",
+    "wait_for_debugger",
+    "always_finish_activities",
+    "tzinfo_content_url",
+    "tzinfo_metadata_url",
+    "selinux_content_url",
+    "selinux_metadata_url",
+    "sms_short_codes_content_url",
+    "sms_short_codes_metadata_url",
+    "cert_pin_content_url",
+    "cert_pin_metadata_url",
+    "nfc",
+    "cell",
+    "wifi",
+    "bluetooth",
+    "wimax",
+    "show_processes",
     // `MOVED_TO_SECURE_THEN_GLOBAL`.
-    "adb_enabled", "bluetooth_on", "data_roaming", "device_provisioned", "http_proxy", "network_preference",
-    "usb_mass_storage_enabled", "wifi_mobile_data_transition_wakelock_timeout_ms", "wifi_max_dhcp_retry_count",
+    "adb_enabled",
+    "bluetooth_on",
+    "data_roaming",
+    "device_provisioned",
+    "http_proxy",
+    "network_preference",
+    "usb_mass_storage_enabled",
+    "wifi_mobile_data_transition_wakelock_timeout_ms",
+    "wifi_max_dhcp_retry_count",
     "wifi_networks_available_notification_on",
 ];
 const SECURE_MOVED_TO_GLOBAL: &[&str] = &[
-    "adb_enabled", "assisted_gps_enabled", "bluetooth_on", "cdma_cell_broadcast_sms", "roaming_settings",
-    "subscription_mode", "data_activity_timeout_mobile", "data_activity_timeout_wifi", "data_roaming",
-    "development_settings_enabled", "device_provisioned", "display_size_forced", "download_manager_max_bytes_over_mobile",
-    "download_manager_recommended_max_bytes_over_mobile", "mobile_data", "netstats_dev_bucket_duration",
-    "netstats_dev_delete_age", "netstats_dev_persist_bytes", "netstats_dev_rotate_age", "netstats_enabled",
-    "netstats_global_alert_bytes", "netstats_poll_interval", "netstats_sample_enabled", "netstats_time_cache_max_age",
-    "netstats_uid_bucket_duration", "netstats_uid_delete_age", "netstats_uid_persist_bytes", "netstats_uid_rotate_age",
-    "netstats_uid_tag_bucket_duration", "netstats_uid_tag_delete_age", "netstats_uid_tag_persist_bytes",
-    "netstats_uid_tag_rotate_age", "network_preference", "nitz_update_diff", "nitz_update_spacing", "ntp_server",
-    "ntp_timeout", "pdp_watchdog_error_poll_count", "pdp_watchdog_long_poll_interval_ms",
-    "pdp_watchdog_max_pdp_reset_fail_count", "pdp_watchdog_poll_interval_ms", "pdp_watchdog_trigger_packet_count",
-    "setup_prepaid_data_service_url", "setup_prepaid_detection_redir_host", "setup_prepaid_detection_target_url",
-    "tether_dun_apn", "tether_dun_required", "tether_supported", "usb_mass_storage_enabled", "use_google_mail",
-    "wifi_country_code", "wifi_framework_scan_interval_ms", "wifi_frequency_band", "wifi_idle_ms",
-    "wifi_max_dhcp_retry_count", "wifi_mobile_data_transition_wakelock_timeout_ms",
-    "wifi_networks_available_notification_on", "wifi_networks_available_repeat_delay", "wifi_num_open_networks_kept",
-    "wifi_on", "wifi_p2p_device_name", "wifi_supplicant_scan_interval_ms", "wifi_verbose_logging_enabled",
-    "wifi_enhanced_auto_join", "wifi_network_show_rssi", "wifi_watchdog_on", "wifi_watchdog_poor_network_test_enabled",
-    "wifi_p2p_pending_factory_reset", "wimax_networks_available_notification_on", "verifier_timeout",
-    "verifier_default_response", "data_stall_alarm_non_aggressive_delay_in_ms", "data_stall_alarm_aggressive_delay_in_ms",
-    "gprs_register_check_period_ms", "wtf_is_fatal", "battery_discharge_duration_threshold",
-    "battery_discharge_threshold", "send_action_app_error", "dropbox_age_seconds", "dropbox_max_files",
-    "dropbox_quota_kb", "dropbox_quota_percent", "dropbox_reserve_percent", "dropbox:", "logcat_for_",
-    "sys_free_storage_log_interval", "disk_free_change_reporting_threshold", "sys_storage_threshold_percentage",
-    "sys_storage_threshold_max_bytes", "sys_storage_full_threshold_bytes", "sync_max_retry_delay_in_seconds",
-    "connectivity_change_delay", "captive_portal_detection_enabled", "captive_portal_server", "set_install_location",
-    "default_install_location", "inet_condition_debounce_up_delay", "inet_condition_debounce_down_delay",
-    "read_external_storage_enforced_default", "http_proxy", "global_http_proxy_host", "global_http_proxy_port",
-    "global_http_proxy_exclusion_list", "set_global_http_proxy", "default_dns_server", "preferred_network_mode",
-    "webview_data_reduction_proxy_key", "secure_frp_mode",
+    "adb_enabled",
+    "assisted_gps_enabled",
+    "bluetooth_on",
+    "cdma_cell_broadcast_sms",
+    "roaming_settings",
+    "subscription_mode",
+    "data_activity_timeout_mobile",
+    "data_activity_timeout_wifi",
+    "data_roaming",
+    "development_settings_enabled",
+    "device_provisioned",
+    "display_size_forced",
+    "download_manager_max_bytes_over_mobile",
+    "download_manager_recommended_max_bytes_over_mobile",
+    "mobile_data",
+    "netstats_dev_bucket_duration",
+    "netstats_dev_delete_age",
+    "netstats_dev_persist_bytes",
+    "netstats_dev_rotate_age",
+    "netstats_enabled",
+    "netstats_global_alert_bytes",
+    "netstats_poll_interval",
+    "netstats_sample_enabled",
+    "netstats_time_cache_max_age",
+    "netstats_uid_bucket_duration",
+    "netstats_uid_delete_age",
+    "netstats_uid_persist_bytes",
+    "netstats_uid_rotate_age",
+    "netstats_uid_tag_bucket_duration",
+    "netstats_uid_tag_delete_age",
+    "netstats_uid_tag_persist_bytes",
+    "netstats_uid_tag_rotate_age",
+    "network_preference",
+    "nitz_update_diff",
+    "nitz_update_spacing",
+    "ntp_server",
+    "ntp_timeout",
+    "pdp_watchdog_error_poll_count",
+    "pdp_watchdog_long_poll_interval_ms",
+    "pdp_watchdog_max_pdp_reset_fail_count",
+    "pdp_watchdog_poll_interval_ms",
+    "pdp_watchdog_trigger_packet_count",
+    "setup_prepaid_data_service_url",
+    "setup_prepaid_detection_redir_host",
+    "setup_prepaid_detection_target_url",
+    "tether_dun_apn",
+    "tether_dun_required",
+    "tether_supported",
+    "usb_mass_storage_enabled",
+    "use_google_mail",
+    "wifi_country_code",
+    "wifi_framework_scan_interval_ms",
+    "wifi_frequency_band",
+    "wifi_idle_ms",
+    "wifi_max_dhcp_retry_count",
+    "wifi_mobile_data_transition_wakelock_timeout_ms",
+    "wifi_networks_available_notification_on",
+    "wifi_networks_available_repeat_delay",
+    "wifi_num_open_networks_kept",
+    "wifi_on",
+    "wifi_p2p_device_name",
+    "wifi_supplicant_scan_interval_ms",
+    "wifi_verbose_logging_enabled",
+    "wifi_enhanced_auto_join",
+    "wifi_network_show_rssi",
+    "wifi_watchdog_on",
+    "wifi_watchdog_poor_network_test_enabled",
+    "wifi_p2p_pending_factory_reset",
+    "wimax_networks_available_notification_on",
+    "verifier_timeout",
+    "verifier_default_response",
+    "data_stall_alarm_non_aggressive_delay_in_ms",
+    "data_stall_alarm_aggressive_delay_in_ms",
+    "gprs_register_check_period_ms",
+    "wtf_is_fatal",
+    "battery_discharge_duration_threshold",
+    "battery_discharge_threshold",
+    "send_action_app_error",
+    "dropbox_age_seconds",
+    "dropbox_max_files",
+    "dropbox_quota_kb",
+    "dropbox_quota_percent",
+    "dropbox_reserve_percent",
+    "dropbox:",
+    "logcat_for_",
+    "sys_free_storage_log_interval",
+    "disk_free_change_reporting_threshold",
+    "sys_storage_threshold_percentage",
+    "sys_storage_threshold_max_bytes",
+    "sys_storage_full_threshold_bytes",
+    "sync_max_retry_delay_in_seconds",
+    "connectivity_change_delay",
+    "captive_portal_detection_enabled",
+    "captive_portal_server",
+    "set_install_location",
+    "default_install_location",
+    "inet_condition_debounce_up_delay",
+    "inet_condition_debounce_down_delay",
+    "read_external_storage_enforced_default",
+    "http_proxy",
+    "global_http_proxy_host",
+    "global_http_proxy_port",
+    "global_http_proxy_exclusion_list",
+    "set_global_http_proxy",
+    "default_dns_server",
+    "preferred_network_mode",
+    "webview_data_reduction_proxy_key",
+    "secure_frp_mode",
 ];
 const GLOBAL_MOVED_TO_SECURE: &[&str] = &[
-    "install_non_market_apps", "zen_duration", "charging_sounds_enabled", "charging_vibration_enabled",
-    "notification_bubbles", "bugreport_in_power_menu", "custom_bugreport_handler_app", "custom_bugreport_handler_user",
+    "install_non_market_apps",
+    "zen_duration",
+    "charging_sounds_enabled",
+    "charging_vibration_enabled",
+    "notification_bubbles",
+    "bugreport_in_power_menu",
+    "custom_bugreport_handler_app",
+    "custom_bugreport_handler_user",
 ];
 const GLOBAL_MOVED_TO_SYSTEM: &[&str] = &["apply_ramping_ringer"];
 
@@ -986,14 +1290,22 @@ fn java_space(c: char) -> bool {
 fn where_value(clause: &str, brackets: bool) -> Option<&str> {
     let mut s = clause.trim_matches(java_space);
     if brackets {
-        s = s.strip_prefix('(')?.strip_suffix(')')?.trim_matches(java_space);
+        s = s
+            .strip_prefix('(')?
+            .strip_suffix(')')?
+            .trim_matches(java_space);
     }
-    s.strip_prefix("name")?.trim_start_matches(java_space).strip_prefix('=').map(|v| v.trim_start_matches(java_space))
+    s.strip_prefix("name")?
+        .trim_start_matches(java_space)
+        .strip_prefix('=')
+        .map(|v| v.trim_start_matches(java_space))
 }
 
 /// `WHERE_PATTERN_WITH_PARAM_*`: `name = ?`, bare or in brackets.
 fn where_with_param(clause: &str) -> bool {
-    [false, true].into_iter().any(|brackets| where_value(clause, brackets) == Some("?"))
+    [false, true]
+        .into_iter()
+        .any(|brackets| where_value(clause, brackets) == Some("?"))
 }
 
 /// `WHERE_PATTERN_NO_PARAM_*`: `name = 'value'` (or `"value"`), bare or in
@@ -1014,7 +1326,13 @@ fn where_no_param(clause: &str) -> bool {
 fn arrays_to_string(args: Option<&[Option<String>]>) -> String {
     match args {
         None => "null".into(),
-        Some(args) => format!("[{}]", args.iter().map(|a| a.as_deref().unwrap_or("null")).collect::<Vec<_>>().join(", ")),
+        Some(args) => format!(
+            "[{}]",
+            args.iter()
+                .map(|a| a.as_deref().unwrap_or("null"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 
@@ -1026,12 +1344,21 @@ fn arguments(
     support_all: bool,
 ) -> Result<Arguments, Thrown> {
     let segments = uri.path_segments();
-    let table_for = |name: Option<String>| -> Result<Arguments, Thrown> { Ok(Arguments { table: table_for_setting(uri, name.as_deref())?, name }) };
+    let table_for = |name: Option<String>| -> Result<Arguments, Thrown> {
+        Ok(Arguments {
+            table: table_for_setting(uri, name.as_deref())?,
+            name,
+        })
+    };
     match (segments.len(), clause) {
         (1, Some(clause)) if where_with_param(clause) => match args {
             Some([name]) => return table_for(name.clone()),
             Some(_) => {}
-            None => return Err(Exception::new(EX_NULL_POINTER, "Attempt to get length of null array").into()),
+            None => {
+                return Err(
+                    Exception::new(EX_NULL_POINTER, "Attempt to get length of null array").into(),
+                );
+            }
         },
         (1, Some(clause)) if where_no_param(clause) => {
             // `substring` between the first and the last quote, of
@@ -1040,7 +1367,9 @@ fn arguments(
             let last = |q| clause.rfind(q).map_or(-1, |i| i as i64);
             let (start, end) = (first('\'').max(first('"')) + 1, last('\'').max(last('"')));
             if start > end {
-                eprintln!("app host: settings: StringIndexOutOfBoundsException: begin {start}, end {end}");
+                eprintln!(
+                    "app host: settings: StringIndexOutOfBoundsException: begin {start}, end {end}"
+                );
                 return Err(UNKNOWN_TRANSACTION.into());
             }
             return table_for(Some(clause[start as usize..end as usize].to_string()));
@@ -1060,7 +1389,9 @@ fn arguments(
 /// `getValidTableOrThrow`.
 fn valid_table(uri: &Uri) -> Result<String, Thrown> {
     let segments = uri.path_segments();
-    let table = segments.first().ok_or_else(|| illegal_argument(format!("Invalid URI:{}", uri.as_str())))?;
+    let table = segments
+        .first()
+        .ok_or_else(|| illegal_argument(format!("Invalid URI:{}", uri.as_str())))?;
     if !VALID_TABLES.contains(&table.as_str()) {
         return Err(illegal_argument(format!("Bad root path: {table}")));
     }
@@ -1090,7 +1421,11 @@ fn table_for_setting(uri: &Uri, name: Option<&str>) -> Result<String, Thrown> {
 /// `SettingsProvider.getType`.
 fn get_type(uri: &Uri) -> Result<String, Thrown> {
     let args = arguments(uri, None, None, true)?;
-    let kind = if args.name.as_deref().is_none_or(str::is_empty) { "dir" } else { "item" };
+    let kind = if args.name.as_deref().is_none_or(str::is_empty) {
+        "dir"
+    } else {
+        "item"
+    };
     Ok(format!("vnd.android.cursor.{kind}/{}", args.table))
 }
 
@@ -1118,7 +1453,10 @@ fn normalize_projection(projection: Option<&[Option<String>]>) -> Result<Vec<Str
         .iter()
         .map(|column| match column.as_deref() {
             Some(c) if ALL_COLUMNS.contains(&c) => Ok(c.to_string()),
-            c => Err(illegal_argument(format!("Invalid column: {}", c.unwrap_or("null")))),
+            c => Err(illegal_argument(format!(
+                "Invalid column: {}",
+                c.unwrap_or("null")
+            ))),
         })
         .collect()
 }
@@ -1139,7 +1477,10 @@ fn setting_row(setting: &Setting, columns: &[String]) -> Vec<Option<String>> {
 /// `isKeyValid`: not empty, nor what `SettingsState.isBinary` would not
 /// write to XML.
 fn key_valid(key: &str) -> bool {
-    !key.is_empty() && key.chars().all(|c| matches!(c, '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}'))
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| matches!(c, '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}'))
 }
 
 impl SettingsProvider {
@@ -1180,8 +1521,11 @@ impl SettingsProvider {
             "SET_ALL_config" => {
                 // `getSettingFlags`: the map `putSerializable` wrote as one.
                 let flags = match (extras.get(FLAGS), parcel) {
-                    (Some(value), Some(parcel)) => bundle::string_map(value, parcel)
-                        .map_err(|_| Exception::illegal_argument("_flags is not a Map<String, String>"))?,
+                    (Some(value), Some(parcel)) => {
+                        bundle::string_map(value, parcel).map_err(|_| {
+                            Exception::illegal_argument("_flags is not a Map<String, String>")
+                        })?
+                    }
                     _ => None,
                 };
                 let result = self.set_all_config(caller, string(PREFIX), flags)?;
@@ -1192,8 +1536,16 @@ impl SettingsProvider {
                     Some(Value::Int(mode)) => *mode,
                     _ => -1,
                 };
-                if ![SYNC_DISABLED_MODE_NONE, SYNC_DISABLED_MODE_PERSISTENT, SYNC_DISABLED_MODE_UNTIL_REBOOT].contains(&mode) {
-                    return Err(Exception::illegal_argument(format!("Invalid sync disabled mode: {mode}")));
+                if ![
+                    SYNC_DISABLED_MODE_NONE,
+                    SYNC_DISABLED_MODE_PERSISTENT,
+                    SYNC_DISABLED_MODE_UNTIL_REBOOT,
+                ]
+                .contains(&mode)
+                {
+                    return Err(Exception::illegal_argument(format!(
+                        "Invalid sync disabled mode: {mode}"
+                    )));
                 }
                 self.set_sync_disabled_mode(caller, mode)?;
                 return Ok(None);
@@ -1201,14 +1553,19 @@ impl SettingsProvider {
             "GET_SYNC_DISABLED_MODE_config" => {
                 self.enforce_sync_disabled_mode_access(caller)?;
                 let mode = self.sync_disabled_mode()?;
-                return Ok(Some(vec![(GET_SYNC_DISABLED_MODE_RETURN.to_string(), Value::Int(mode))]));
+                return Ok(Some(vec![(
+                    GET_SYNC_DISABLED_MODE_RETURN.to_string(),
+                    Value::Int(mode),
+                )]));
             }
             // `getAllConfigFlagNamespaces`, a `HashSet` put as a
             // serializable.
             "LIST_namespaces_config" => {
                 let flags = self.host.inputs()?.settings.config_flags(None)?;
-                let mut namespaces: Vec<String> =
-                    flags.keys().filter_map(|n| n.find('/').filter(|&i| i != 0).map(|i| n[..i].to_string())).collect();
+                let mut namespaces: Vec<String> = flags
+                    .keys()
+                    .filter_map(|n| n.find('/').filter(|&i| i != 0).map(|i| n[..i].to_string()))
+                    .collect();
                 namespaces.sort();
                 namespaces.dedup();
                 let set = Value::Serializable {
@@ -1225,7 +1582,8 @@ impl SettingsProvider {
                 // `setMonitorCallback`: none is no change.
                 if let Some(handle) = callback {
                     self.enforce_monitor(caller)?;
-                    *self.monitor.lock().unwrap() = Some(Arc::new(self.host.process.strong(handle)));
+                    *self.monitor.lock().unwrap() =
+                        Some(Arc::new(self.host.process.strong(handle)));
                 }
                 return Ok(None);
             }
@@ -1251,7 +1609,10 @@ impl SettingsProvider {
             }
             ("DELETE", Some(Table::Config)) => {
                 let deleted = self.delete_config(caller, name)?;
-                Some(vec![(RESULT_ROWS_DELETED.to_string(), Value::Int(deleted as i32))])
+                Some(vec![(
+                    RESULT_ROWS_DELETED.to_string(),
+                    Value::Int(deleted as i32),
+                )])
             }
             ("RESET", Some(Table::Config)) => {
                 let mode = match extras.get(RESET_MODE) {
@@ -1280,29 +1641,48 @@ impl SettingsProvider {
                     Some(Value::Int(mode)) => *mode,
                     _ => 0,
                 };
-                let reset = Op::Reset { mode: reset_mode(mode, self.trusted_for_reset(caller))?, tag: string(TAG) };
+                let reset = Op::Reset {
+                    mode: reset_mode(mode, self.trusted_for_reset(caller))?,
+                    tag: string(TAG),
+                };
                 self.mutate(caller, table, None, reset, requesting)?;
                 None
             }
             ("DELETE", Some(table)) => {
                 let deleted = self.mutate(caller, table, name, Op::Delete, requesting)?;
-                Some(vec![(RESULT_ROWS_DELETED.to_string(), Value::Int(deleted as i32))])
+                Some(vec![(
+                    RESULT_ROWS_DELETED.to_string(),
+                    Value::Int(deleted as i32),
+                )])
             }
             // `getAllConfigFlags`, a `HashMap` put as a serializable and
             // so written as a map, then `reportDeviceConfigAccess`.
             ("LIST", Some(Table::Config)) => {
                 let prefix = string(PREFIX);
-                let mut flags: Vec<_> = self.host.inputs()?.settings.config_flags(prefix)?.into_iter().collect();
+                let mut flags: Vec<_> = self
+                    .host
+                    .inputs()?
+                    .settings
+                    .config_flags(prefix)?
+                    .into_iter()
+                    .collect();
                 flags.sort();
                 let mut result = vec![(VALUE.to_string(), Value::StringMap(flags))];
                 if tracking {
-                    result.extend(self.generations()?.generation_data(Table::Config, 0, prefix.unwrap_or_default()));
+                    result.extend(self.generations()?.generation_data(
+                        Table::Config,
+                        0,
+                        prefix.unwrap_or_default(),
+                    ));
                 }
                 if let Some(prefix) = prefix {
                     let package = self.resolve_calling_package(caller)?;
                     self.report_to_monitor(&prefix.replace('/', ""), || {
                         vec![
-                            (EXTRA_MONITOR_CALLBACK_TYPE, Value::String(Some(EXTRA_ACCESS_CALLBACK.into()))),
+                            (
+                                EXTRA_MONITOR_CALLBACK_TYPE,
+                                Value::String(Some(EXTRA_ACCESS_CALLBACK.into())),
+                            ),
                             (EXTRA_CALLING_PACKAGE, Value::String(package.clone())),
                         ]
                     });
@@ -1312,8 +1692,14 @@ impl SettingsProvider {
             // `buildSettingsList` of `getAll*Settings`.
             ("LIST", Some(table)) => {
                 let lines = self.all(caller, table, requesting)?;
-                let lines = lines.iter().map(|s| format!("{}={}", s.name, s.value.as_deref().unwrap_or("null"))).collect();
-                Some(vec![(RESULT_SETTINGS_LIST.to_string(), Value::StringList(lines))])
+                let lines = lines
+                    .iter()
+                    .map(|s| format!("{}={}", s.name, s.value.as_deref().unwrap_or("null")))
+                    .collect();
+                Some(vec![(
+                    RESULT_SETTINGS_LIST.to_string(),
+                    Value::StringList(lines),
+                )])
             }
             _ => {
                 eprintln!("app host: settings: call() with invalid method: {method}");
@@ -1338,7 +1724,11 @@ impl SettingsProvider {
         if tracking {
             // A setting set or declared has its own generation, the unset
             // others share one.
-            let key = if setting.is_some() || self.predefined(table, name)? { name } else { generations::UNSET };
+            let key = if setting.is_some() || self.predefined(table, name)? {
+                name
+            } else {
+                generations::UNSET
+            };
             generation = self.generations()?.generation_data(table, requesting, key);
         }
         Ok(value_result(setting.and_then(|s| s.value), generation))
@@ -1347,24 +1737,47 @@ impl SettingsProvider {
     /// The setting `getGlobalSetting`, `getSecureSetting` and
     /// `getSystemSetting` read for `requesting` (a config flag's is user
     /// 0's): none when absent or hidden from the caller.
-    fn setting_of(&self, caller: &Caller, table: Table, name: &str, requesting: i32) -> Result<Option<Setting>, Exception> {
+    fn setting_of(
+        &self,
+        caller: &Caller,
+        table: Table,
+        name: &str,
+        requesting: i32,
+    ) -> Result<Option<Setting>, Exception> {
         let user = match table {
             Table::Secure | Table::System => self.calling_user(caller, requesting)?,
             Table::Global | Table::Config => 0,
         };
         // `isSecureSettingAccessible`: the Bluetooth address only to who
         // may see the device's MAC addresses.
-        let accessible = table != Table::Secure || name != "bluetooth_address" || self.has(caller, LOCAL_MAC_ADDRESS)?;
+        let accessible = table != Table::Secure
+            || name != "bluetooth_address"
+            || self.has(caller, LOCAL_MAC_ADDRESS)?;
         // The app host keeps user 0's settings only (#1523).
-        Ok(if accessible && user == 0 { self.host.inputs()?.settings.setting(table, name) } else { None })
+        Ok(if accessible && user == 0 {
+            self.host.inputs()?.settings.setting(table, name)
+        } else {
+            None
+        })
     }
 
     /// `getAllGlobalSettings`, `getAllSecureSettings` and
     /// `getAllSystemSettings`: the settings of `table` the caller sees.
-    fn all(&self, caller: &Caller, table: Table, requesting: i32) -> Result<Vec<Setting>, Exception> {
-        let user = if table == Table::Global { 0 } else { self.calling_user(caller, requesting)? };
+    fn all(
+        &self,
+        caller: &Caller,
+        table: Table,
+        requesting: i32,
+    ) -> Result<Vec<Setting>, Exception> {
+        let user = if table == Table::Global {
+            0
+        } else {
+            self.calling_user(caller, requesting)?
+        };
         if user != 0 {
-            return Err(self.host.unimplemented_named("settings provider", "another user's settings (#1523)"));
+            return Err(self
+                .host
+                .unimplemented_named("settings provider", "another user's settings (#1523)"));
         }
         let hidden = table == Table::Secure && !self.has(caller, LOCAL_MAC_ADDRESS)?;
         let mut settings = self.host.inputs()?.settings.all(table);
@@ -1387,9 +1800,13 @@ impl SettingsProvider {
         let settings = if REMOVED_LEGACY_TABLES.contains(&args.table.as_str()) {
             Vec::new()
         } else {
-            let table = Table::named(&args.table).ok_or_else(|| illegal_argument(format!("Invalid Uri path:{}", uri.as_str())))?;
+            let table = Table::named(&args.table)
+                .ok_or_else(|| illegal_argument(format!("Invalid Uri path:{}", uri.as_str())))?;
             match &args.name {
-                Some(name) => self.setting_of(caller, table, name, caller.user())?.into_iter().collect(),
+                Some(name) => self
+                    .setting_of(caller, table, name, caller.user())?
+                    .into_iter()
+                    .collect(),
                 None => self.all(caller, table, caller.user())?,
             }
         };
@@ -1399,7 +1816,12 @@ impl SettingsProvider {
 
     /// `SettingsProvider.insert`: the URI of the setting changed, if it
     /// changed.
-    fn insert(&self, caller: &Caller, uri: &Uri, values: &HashMap<String, Content>) -> Result<Option<Uri>, Thrown> {
+    fn insert(
+        &self,
+        caller: &Caller,
+        uri: &Uri,
+        values: &HashMap<String, Content>,
+    ) -> Result<Option<Uri>, Thrown> {
         let table = valid_table(uri)?;
         if REMOVED_LEGACY_TABLES.contains(&table.as_str()) {
             return Ok(None);
@@ -1408,10 +1830,19 @@ impl SettingsProvider {
             return Ok(None);
         };
         let value = self.content_string(values, VALUE)?;
-        let table = Table::named(&table).ok_or_else(|| illegal_argument(format!("Bad Uri path:{}", uri.as_str())))?;
-        let insert = Op::Insert { value: value.as_deref(), tag: None, make_default: false, overrideable_by_restore: false, update: false };
+        let table = Table::named(&table)
+            .ok_or_else(|| illegal_argument(format!("Bad Uri path:{}", uri.as_str())))?;
+        let insert = Op::Insert {
+            value: value.as_deref(),
+            tag: None,
+            make_default: false,
+            overrideable_by_restore: false,
+            update: false,
+        };
         let inserted = self.mutate(caller, table, Some(&name), insert, caller.user())?;
-        Ok(inserted.then(|| Uri::parse(&format!("content://settings/{}", table.path())).with_appended_path(&name)))
+        Ok(inserted.then(|| {
+            Uri::parse(&format!("content://settings/{}", table.path())).with_appended_path(&name)
+        }))
     }
 
     /// `SettingsProvider.delete`: the rows deleted.
@@ -1429,7 +1860,8 @@ impl SettingsProvider {
         let Some(name) = args.name.filter(|n| key_valid(n)) else {
             return Ok(0);
         };
-        let table = Table::named(&args.table).ok_or_else(|| illegal_argument(format!("Bad Uri path:{}", uri.as_str())))?;
+        let table = Table::named(&args.table)
+            .ok_or_else(|| illegal_argument(format!("Bad Uri path:{}", uri.as_str())))?;
         Ok(self.mutate(caller, table, Some(&name), Op::Delete, caller.user())? as i32)
     }
 
@@ -1448,12 +1880,22 @@ impl SettingsProvider {
         if REMOVED_LEGACY_TABLES.contains(&args.table.as_str()) {
             return Ok(0);
         }
-        if !self.content_string(values, NAME)?.is_some_and(|n| key_valid(&n)) {
+        if !self
+            .content_string(values, NAME)?
+            .is_some_and(|n| key_valid(&n))
+        {
             return Ok(0);
         }
         let value = self.content_string(values, VALUE)?;
-        let table = Table::named(&args.table).ok_or_else(|| illegal_argument(format!("Invalid Uri path:{}", uri.as_str())))?;
-        let update = Op::Insert { value: value.as_deref(), tag: None, make_default: false, overrideable_by_restore: false, update: true };
+        let table = Table::named(&args.table)
+            .ok_or_else(|| illegal_argument(format!("Invalid Uri path:{}", uri.as_str())))?;
+        let update = Op::Insert {
+            value: value.as_deref(),
+            tag: None,
+            make_default: false,
+            overrideable_by_restore: false,
+            update: true,
+        };
         Ok(self.mutate(caller, table, args.name.as_deref(), update, caller.user())? as i32)
     }
 
@@ -1487,7 +1929,9 @@ impl SettingsProvider {
         }
         // The global and secure settings are WRITE_SECURE_SETTINGS'.
         if !self.has(caller, WRITE_SECURE_SETTINGS)? {
-            return Err(Exception::security(format!("Permission denial, must have one of: [{WRITE_SECURE_SETTINGS}]")));
+            return Err(Exception::security(format!(
+                "Permission denial, must have one of: [{WRITE_SECURE_SETTINGS}]"
+            )));
         }
         let user = self.calling_user(caller, requesting)?;
         if self.restricted(name, value, caller.uid)? {
@@ -1498,7 +1942,15 @@ impl SettingsProvider {
             Table::Global => (0, CRITICAL_GLOBAL_SETTINGS),
             _ => (user, CRITICAL_SECURE_SETTINGS),
         };
-        self.apply(caller, table, state_user, name.unwrap_or_default(), op, package, critical)
+        self.apply(
+            caller,
+            table,
+            state_user,
+            name.unwrap_or_default(),
+            op,
+            package,
+            critical,
+        )
     }
 
     fn mutate_system(
@@ -1511,7 +1963,9 @@ impl SettingsProvider {
     ) -> Result<bool, Exception> {
         let package = self.calling_package(caller)?;
         // Without WRITE_SECURE_SETTINGS, the WRITE_SETTINGS app op decides.
-        if !self.has(caller, WRITE_SECURE_SETTINGS)? && !self.check_and_note_write_settings(caller, package)? {
+        if !self.has(caller, WRITE_SECURE_SETTINGS)?
+            && !self.check_and_note_write_settings(caller, package)?
+        {
             eprintln!(
                 "app host: settings: calling package {} is not allowed to write system settings: {}",
                 package.unwrap_or("null"),
@@ -1521,7 +1975,9 @@ impl SettingsProvider {
         }
         let user = self.calling_user(caller, requesting)?;
         if self.restricted(name, value, caller.uid)? {
-            eprintln!("app host: settings: user {user} is disallowed to change system setting: {name:?}");
+            eprintln!(
+                "app host: settings: user {user} is disallowed to change system setting: {name:?}"
+            );
             return Ok(false);
         }
         let name = name.unwrap_or_default();
@@ -1530,9 +1986,14 @@ impl SettingsProvider {
             let info = package
                 .and_then(|p| packages.application_info(p, 0))
                 .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "Calling package doesn't exist"))?;
-            Ok((info.private_flags & PRIVATE_FLAG_PRIVILEGED != 0, info.target_sdk_version))
+            Ok((
+                info.private_flags & PRIVATE_FLAG_PRIVILEGED != 0,
+                info.target_sdk_version,
+            ))
         })?;
-        let cache = ringtone_cache(name).map(|cache| self.ringtone_cache_dir(user).map(|dir| dir.join(cache))).transpose()?;
+        let cache = ringtone_cache(name)
+            .map(|cache| self.ringtone_cache_dir(user).map(|dir| dir.join(cache)))
+            .transpose()?;
         if cache.is_some()
             && let Some(value) = value
             && !self.valid_media_uri(caller, package, name, value)?
@@ -1543,7 +2004,11 @@ impl SettingsProvider {
             validate_system_value(name, value)?;
         }
         // A reset is of the user asked for.
-        let state_user = if matches!(op, Op::Reset { .. }) { requesting } else { user };
+        let state_user = if matches!(op, Op::Reset { .. }) {
+            requesting
+        } else {
+            user
+        };
         if !self.apply(caller, Table::System, state_user, name, op, package, &[])? {
             return Ok(false);
         }
@@ -1574,23 +2039,34 @@ impl SettingsProvider {
         critical: &[&str],
     ) -> Result<bool, Exception> {
         if user != 0 {
-            return Err(self.host.unimplemented_named("settings provider", "another user's settings (#1523)"));
+            return Err(self
+                .host
+                .unimplemented_named("settings provider", "another user's settings (#1523)"));
         }
         let generations = self.generations()?;
         let settings = &self.host.inputs()?.settings;
         let changed = match op {
-            Op::Insert { value, tag, make_default, overrideable_by_restore, update } => {
+            Op::Insert {
+                value,
+                tag,
+                make_default,
+                overrideable_by_restore,
+                update,
+            } => {
                 // `updateSettingLocked`: only a setting there is.
                 if update && settings.setting(table, name).is_none() {
                     return Ok(false);
                 }
-                if overrideable_by_restore && !self.has(caller, MODIFY_SETTINGS_OVERRIDEABLE_BY_RESTORE)? {
+                if overrideable_by_restore
+                    && !self.has(caller, MODIFY_SETTINGS_OVERRIDEABLE_BY_RESTORE)?
+                {
                     return Err(Exception::security(format!(
                         "Caller is not allowed to modify settings overrideable by restore: Neither user {} nor current process has {MODIFY_SETTINGS_OVERRIDEABLE_BY_RESTORE}.",
                         caller.uid
                     )));
                 }
-                let unset_undeclared = !self.predefined(table, name)? && settings.setting(table, name).is_none();
+                let unset_undeclared =
+                    !self.predefined(table, name)? && settings.setting(table, name).is_none();
                 let change = Change {
                     value,
                     tag,
@@ -1615,7 +2091,9 @@ impl SettingsProvider {
                 }
                 vec![name.to_string()]
             }
-            Op::Reset { mode, tag } => settings.reset(table, mode, package, tag, None, &|p| self.system_package(p))?,
+            Op::Reset { mode, tag } => {
+                settings.reset(table, mode, package, tag, None, &|p| self.system_package(p))?
+            }
         };
         for name in &changed {
             self.notify(table, user, name)?;
@@ -1650,7 +2128,10 @@ impl SettingsProvider {
         let mut path = prefix.to_string();
         for name in changed {
             let flag = java_split(name, '/').get(1).copied().ok_or_else(|| {
-                Exception::new(EX_ILLEGAL_STATE, format!("ArrayIndexOutOfBoundsException: {name} has no flag name"))
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("ArrayIndexOutOfBoundsException: {name} has no flag name"),
+                )
             })?;
             path.push_str(flag);
             path.push('/');
@@ -1676,12 +2157,18 @@ impl SettingsProvider {
     fn enforce_device_config_write(&self, caller: &Caller) -> Result<(), Exception> {
         if self.has(caller, WRITE_DEVICE_CONFIG)? {
             if caller.user() != 0 {
-                return Err(self.host.unimplemented_named("settings provider", "another user's DeviceConfig writes (#1523)"));
+                return Err(self.host.unimplemented_named(
+                    "settings provider",
+                    "another user's DeviceConfig writes (#1523)",
+                ));
             }
             return Ok(());
         }
         if self.has(caller, WRITE_ALLOWLISTED_DEVICE_CONFIG)? {
-            return Err(self.host.unimplemented_named("settings provider", "allowlisted DeviceConfig writes (#1776)"));
+            return Err(self.host.unimplemented_named(
+                "settings provider",
+                "allowlisted DeviceConfig writes (#1776)",
+            ));
         }
         Err(Exception::security(
             "Permission denial to mutate flag, must have root, WRITE_DEVICE_CONFIG, or WRITE_ALLOWLISTED_DEVICE_CONFIG",
@@ -1692,7 +2179,13 @@ impl SettingsProvider {
     /// caller's, as a package that is not the system's
     /// (`forceNonSystemPackage`), its staged name notified too for an
     /// aconfig flag (`notifyIndividualAconfigSyspropChanged`).
-    fn insert_config(&self, caller: &Caller, name: Option<&str>, value: Option<&str>, make_default: bool) -> Result<bool, Exception> {
+    fn insert_config(
+        &self,
+        caller: &Caller,
+        name: Option<&str>,
+        value: Option<&str>,
+        make_default: bool,
+    ) -> Result<bool, Exception> {
         let package = self.resolve_calling_package(caller)?;
         self.enforce_device_config_write(caller)?;
         let name = name.unwrap_or_default();
@@ -1712,7 +2205,11 @@ impl SettingsProvider {
         if let Some(slash) = name.find('/').filter(|&i| i != 0)
             && settings.aconfig_flag(&name[slash + 1..]).is_some()
         {
-            self.notify(Table::Config, 0, &format!("staged/{}*{}", &name[..slash], &name[slash + 1..]))?;
+            self.notify(
+                Table::Config,
+                0,
+                &format!("staged/{}*{}", &name[..slash], &name[slash + 1..]),
+            )?;
         }
         Ok(true)
     }
@@ -1722,7 +2219,12 @@ impl SettingsProvider {
         self.resolve_calling_package(caller)?;
         self.enforce_device_config_write(caller)?;
         let name = name.unwrap_or_default();
-        if !self.host.inputs()?.settings.delete(Table::Config, name, false) {
+        if !self
+            .host
+            .inputs()?
+            .settings
+            .delete(Table::Config, name, false)
+        {
             return Ok(false);
         }
         self.notify(Table::Config, 0, name)?;
@@ -1732,7 +2234,12 @@ impl SettingsProvider {
     /// `resetConfigSetting`: the flags `prefix` starts (all without one)
     /// in `mode`, those of a namespace banned first unless the shell
     /// resets them (`banConfigurationIfNecessary`).
-    fn reset_config(&self, caller: &Caller, mode: ResetMode, prefix: Option<&str>) -> Result<(), Exception> {
+    fn reset_config(
+        &self,
+        caller: &Caller,
+        mode: ResetMode,
+        prefix: Option<&str>,
+    ) -> Result<(), Exception> {
         let package = self.resolve_calling_package(caller)?;
         let settings = &self.host.inputs()?.settings;
         settings.config_flags(prefix)?;
@@ -1747,7 +2254,14 @@ impl SettingsProvider {
                 }
             }
         }
-        let changed = settings.reset(Table::Config, mode, package.as_deref(), None, prefix, &|p| self.system_package(p))?;
+        let changed = settings.reset(
+            Table::Config,
+            mode,
+            package.as_deref(),
+            None,
+            prefix,
+            &|p| self.system_package(p),
+        )?;
         for name in &changed {
             self.notify(Table::Config, 0, name)?;
         }
@@ -1756,7 +2270,12 @@ impl SettingsProvider {
 
     /// `setAllConfigSettings` of `prefix` to `flags` (`SET_ALL_RESULT_*`),
     /// the map as `readHashMapInternal` made it, iterated in its order.
-    fn set_all_config(&self, caller: &Caller, prefix: Option<&str>, flags: Option<Vec<(String, Option<String>)>>) -> Result<i32, Exception> {
+    fn set_all_config(
+        &self,
+        caller: &Caller,
+        prefix: Option<&str>,
+        flags: Option<Vec<(String, Option<String>)>>,
+    ) -> Result<i32, Exception> {
         let Some(flags) = flags else {
             return Err(Exception::new(
                 EX_NULL_POINTER,
@@ -1766,7 +2285,10 @@ impl SettingsProvider {
         self.enforce_device_config_write(caller)?;
         let package = self.resolve_calling_package(caller)?;
         if self.sync_disabled_mode()? != SYNC_DISABLED_MODE_NONE {
-            eprintln!("app host: settings: did not write settings for prefix '{}' because sync is disabled", prefix.unwrap_or("null"));
+            eprintln!(
+                "app host: settings: did not write settings for prefix '{}' because sync is disabled",
+                prefix.unwrap_or("null")
+            );
             return Ok(SET_ALL_RESULT_DISABLED);
         }
         let Some(prefix) = prefix else {
@@ -1779,12 +2301,17 @@ impl SettingsProvider {
         let mut flags = device_config::hash_map_order(flags, capacity);
         let caller_system = self.caller_system(caller, package.as_deref())?;
         let settings = &self.host.inputs()?.settings;
-        let Some(changed) = settings.set_config(prefix, &mut flags, package.as_deref(), caller_system) else {
+        let Some(changed) =
+            settings.set_config(prefix, &mut flags, package.as_deref(), caller_system)
+        else {
             return Ok(SET_ALL_RESULT_FAILURE);
         };
         if !changed.is_empty() {
             self.report_to_monitor(&prefix.replace('/', ""), || {
-                vec![(EXTRA_MONITOR_CALLBACK_TYPE, Value::String(Some(EXTRA_NAMESPACE_UPDATED_CALLBACK.into())))]
+                vec![(
+                    EXTRA_MONITOR_CALLBACK_TYPE,
+                    Value::String(Some(EXTRA_NAMESPACE_UPDATED_CALLBACK.into())),
+                )]
             });
             self.notify_config_change(prefix, &changed)?;
         }
@@ -1794,7 +2321,9 @@ impl SettingsProvider {
     /// `enforceHasAtLeastOnePermission(WRITE_DEVICE_CONFIG,
     /// READ_WRITE_SYNC_DISABLED_MODE_CONFIG)`.
     fn enforce_sync_disabled_mode_access(&self, caller: &Caller) -> Result<(), Exception> {
-        if self.has(caller, WRITE_DEVICE_CONFIG)? || self.has(caller, READ_WRITE_SYNC_DISABLED_MODE_CONFIG)? {
+        if self.has(caller, WRITE_DEVICE_CONFIG)?
+            || self.has(caller, READ_WRITE_SYNC_DISABLED_MODE_CONFIG)?
+        {
             return Ok(());
         }
         Err(Exception::security(format!(
@@ -1806,11 +2335,18 @@ impl SettingsProvider {
     /// the global `DEVICE_CONFIG_SYNC_DISABLED`, set by the system.
     fn set_sync_disabled_mode(&self, caller: &Caller, mode: i32) -> Result<(), Exception> {
         self.enforce_sync_disabled_mode_access(caller)?;
-        self.sync_disabled_until_reboot.store(mode == SYNC_DISABLED_MODE_UNTIL_REBOOT, Ordering::Relaxed);
-        let value = if mode == SYNC_DISABLED_MODE_PERSISTENT { "1" } else { "0" };
+        self.sync_disabled_until_reboot
+            .store(mode == SYNC_DISABLED_MODE_UNTIL_REBOOT, Ordering::Relaxed);
+        let value = if mode == SYNC_DISABLED_MODE_PERSISTENT {
+            "1"
+        } else {
+            "0"
+        };
         let settings = &self.host.inputs()?.settings;
         let unset = !self.predefined(Table::Global, DEVICE_CONFIG_SYNC_DISABLED)?
-            && settings.setting(Table::Global, DEVICE_CONFIG_SYNC_DISABLED).is_none();
+            && settings
+                .setting(Table::Global, DEVICE_CONFIG_SYNC_DISABLED)
+                .is_none();
         let change = Change {
             value: Some(value),
             tag: None,
@@ -1834,12 +2370,25 @@ impl SettingsProvider {
         if self.sync_disabled_until_reboot.load(Ordering::Relaxed) {
             return Ok(SYNC_DISABLED_MODE_UNTIL_REBOOT);
         }
-        Ok(match self.host.inputs()?.settings.get(Table::Global, DEVICE_CONFIG_SYNC_DISABLED) {
-            None if super::system_boolean(self.host.property(TEST_HARNESS).as_deref(), false) => SYNC_DISABLED_MODE_PERSISTENT,
-            None => SYNC_DISABLED_MODE_NONE,
-            Some(value) if value != "0" => SYNC_DISABLED_MODE_PERSISTENT,
-            Some(_) => SYNC_DISABLED_MODE_NONE,
-        })
+        Ok(
+            match self
+                .host
+                .inputs()?
+                .settings
+                .get(Table::Global, DEVICE_CONFIG_SYNC_DISABLED)
+            {
+                None if super::system_boolean(
+                    self.host.property(TEST_HARNESS).as_deref(),
+                    false,
+                ) =>
+                {
+                    SYNC_DISABLED_MODE_PERSISTENT
+                }
+                None => SYNC_DISABLED_MODE_NONE,
+                Some(value) if value != "0" => SYNC_DISABLED_MODE_PERSISTENT,
+                Some(_) => SYNC_DISABLED_MODE_NONE,
+            },
+        )
     }
 
     /// `enforceCallingOrSelfPermission(MONITOR_DEVICE_CONFIG_ACCESS)`.
@@ -1856,15 +2405,24 @@ impl SettingsProvider {
     /// `reportDeviceConfigAccess` and `reportDeviceConfigUpdate`: the
     /// monitor sent `extras` and the namespace, unless it is public; a
     /// failed send is logged where `RemoteCallback.sendResult` ignores it.
-    fn report_to_monitor(&self, namespace: &str, extras: impl FnOnce() -> Vec<(&'static str, Value)>) {
+    fn report_to_monitor(
+        &self,
+        namespace: &str,
+        extras: impl FnOnce() -> Vec<(&'static str, Value)>,
+    ) {
         if PUBLIC_NAMESPACES.contains(&namespace) {
             return;
         }
-        let Some(monitor) = self.monitor.lock().unwrap().clone() else { return };
+        let Some(monitor) = self.monitor.lock().unwrap().clone() else {
+            return;
+        };
         let mut entries = extras();
         entries.push((EXTRA_NAMESPACE, Value::String(Some(namespace.to_string()))));
         let mut request = Parcel::new();
-        remote_callback::SendResult { data: Some(Results(&entries)) }.write(&mut request);
+        remote_callback::SendResult {
+            data: Some(Results(&entries)),
+        }
+        .write(&mut request);
         if let Err(e) = monitor.transact(remote_callback::SEND_RESULT, &request, true) {
             eprintln!("app host: settings: the DeviceConfig monitor: {e}");
         }
@@ -1877,7 +2435,9 @@ impl SettingsProvider {
         }
         let user = self.host.incoming_user(caller.uid, requesting, false)?;
         if user < 0 {
-            return Err(Exception::illegal_argument(format!("Call does not support special user #{user}")));
+            return Err(Exception::illegal_argument(format!(
+                "Call does not support special user #{user}"
+            )));
         }
         Ok(user)
     }
@@ -1908,14 +2468,24 @@ impl SettingsProvider {
     /// `isCallerSystemOrShellOrRootOnDebuggableBuild`.
     fn trusted_for_reset(&self, caller: &Caller) -> bool {
         let debuggable = || {
-            self.host.configured.get().and_then(|c| (c.properties)("ro.debuggable")).as_deref() == Some("1")
+            self.host
+                .configured
+                .get()
+                .and_then(|c| (c.properties)("ro.debuggable"))
+                .as_deref()
+                == Some("1")
         };
-        caller.app_id() == SYSTEM_UID || matches!(caller.app_id(), SHELL_UID | ROOT_UID) && debuggable()
+        caller.app_id() == SYSTEM_UID
+            || matches!(caller.app_id(), SHELL_UID | ROOT_UID) && debuggable()
     }
 
     /// `Settings.checkAndNoteWriteSettingsOperation(…, true)`: the
     /// WRITE_SETTINGS op noted, its default mode WRITE_SETTINGS'.
-    fn check_and_note_write_settings(&self, caller: &Caller, package: Option<&str>) -> Result<bool, Exception> {
+    fn check_and_note_write_settings(
+        &self,
+        caller: &Caller,
+        package: Option<&str>,
+    ) -> Result<bool, Exception> {
         let Some(package) = package else {
             return Ok(false);
         };
@@ -1925,17 +2495,26 @@ impl SettingsProvider {
             MODE_DEFAULT if self.has(caller, WRITE_SETTINGS)? => return Ok(true),
             _ => {}
         }
-        Err(Exception::security(format!("{package} was not granted  this permission: {WRITE_SETTINGS}.")))
+        Err(Exception::security(format!(
+            "{package} was not granted  this permission: {WRITE_SETTINGS}."
+        )))
     }
 
     /// `isSettingRestrictedForUser` under the app host's user's
     /// restrictions.
-    fn restricted(&self, name: Option<&str>, value: Option<&str>, uid: i32) -> Result<bool, Exception> {
+    fn restricted(
+        &self,
+        name: Option<&str>,
+        value: Option<&str>,
+        uid: i32,
+    ) -> Result<bool, Exception> {
         let Some(name) = name else {
             return Ok(false);
         };
         let restrictions = self.host.user_restrictions()?;
-        Ok(setting_restricted(name, value, uid, &|r| restrictions.contains(r)))
+        Ok(setting_restricted(name, value, uid, &|r| {
+            restrictions.contains(r)
+        }))
     }
 
     /// `Setting.update`'s `callerSystem`: `isCalledFromSystem` (a uid of
@@ -2007,8 +2586,8 @@ impl SettingsProvider {
             return Ok(declared);
         }
         let jar = self.host.root()?.join("system/framework/framework.jar");
-        let declared =
-            Declared::read(&jar).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", jar.display())))?;
+        let declared = Declared::read(&jar)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", jar.display())))?;
         Ok(self.declared.get_or_init(|| declared))
     }
 
@@ -2017,7 +2596,12 @@ impl SettingsProvider {
         if let Some(generations) = self.generations.get() {
             return Ok(generations);
         }
-        let property = |name: &str| self.host.configured.get().and_then(|c| (c.properties)(name));
+        let property = |name: &str| {
+            self.host
+                .configured
+                .get()
+                .and_then(|c| (c.properties)(name))
+        };
         let max_users = if property("ro.build.id").is_some_and(|id| id.starts_with("JVP")) {
             1
         } else {
@@ -2028,11 +2612,15 @@ impl SettingsProvider {
                     .inputs()?
                     .packages
                     .framework_integer("config_multiuserMaximumUsers")
-                    .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no config_multiuserMaximumUsers"))?,
+                    .ok_or_else(|| {
+                        Exception::new(EX_ILLEGAL_STATE, "no config_multiuserMaximumUsers")
+                    })?,
             };
             configured.max(1) as usize
         };
-        Ok(self.generations.get_or_init(|| GenerationRegistry::new(max_users)))
+        Ok(self
+            .generations
+            .get_or_init(|| GenerationRegistry::new(max_users)))
     }
 }
 
@@ -2075,7 +2663,10 @@ mod tests {
         let p = callback(REMOTE_CALLBACK);
         let parcel = Reader::new(p.data(), p.objects());
         let extras = bundle::read(&mut parcel.clone()).unwrap().unwrap();
-        assert_eq!(remote_callback_of(&extras[MONITOR_CALLBACK], &parcel).unwrap(), Some(7));
+        assert_eq!(
+            remote_callback_of(&extras[MONITOR_CALLBACK], &parcel).unwrap(),
+            Some(7)
+        );
         let p = callback("android.os.Bundle");
         let parcel = Reader::new(p.data(), p.objects());
         let extras = bundle::read(&mut parcel.clone()).unwrap().unwrap();
@@ -2085,16 +2676,28 @@ mod tests {
 
     #[test]
     fn mime_types_compare_as_clip_description_compares_them() {
-        assert!(compare_mime_types("vnd.android.cursor.item/system", "vnd.android.cursor.item/*"));
-        assert!(compare_mime_types("vnd.android.cursor.item/system", "vnd.android.cursor.item/system"));
-        assert!(!compare_mime_types("vnd.android.cursor.item/system", "audio/*"));
+        assert!(compare_mime_types(
+            "vnd.android.cursor.item/system",
+            "vnd.android.cursor.item/*"
+        ));
+        assert!(compare_mime_types(
+            "vnd.android.cursor.item/system",
+            "vnd.android.cursor.item/system"
+        ));
+        assert!(!compare_mime_types(
+            "vnd.android.cursor.item/system",
+            "audio/*"
+        ));
         assert!(!compare_mime_types("vnd.android.cursor.item/system", "*"));
     }
 
     #[test]
     fn an_open_failure_reads_as_errno_exception() {
         let e = std::io::Error::from_raw_os_error(libc::ENOENT);
-        assert_eq!(open_failed(&e), "open failed: ENOENT (No such file or directory)");
+        assert_eq!(
+            open_failed(&e),
+            "open failed: ENOENT (No such file or directory)"
+        );
     }
 
     /// A tracked `GET_secure`'s reply, as the original's to Calculator:
@@ -2104,11 +2707,28 @@ mod tests {
     #[test]
     fn tracked_reply_carries_the_generation_array() {
         let registry = GenerationRegistry::new(4);
-        let result = value_result(Some("1".into()), registry.generation_data(Table::Secure, 0, "a"));
+        let result = value_result(
+            Some("1".into()),
+            registry.generation_data(Table::Secure, 0, "a"),
+        );
         let keys: Vec<_> = result.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, ["_track_generation", "value", "_generation_index", "_generation"]);
+        assert_eq!(
+            keys,
+            [
+                "_track_generation",
+                "value",
+                "_generation_index",
+                "_generation"
+            ]
+        );
         let mut p = Parcel::new();
-        bundle::write(&mut p, &result.iter().map(|(k, v)| (k.as_str(), v.clone())).collect::<Vec<_>>());
+        bundle::write(
+            &mut p,
+            &result
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.clone()))
+                .collect::<Vec<_>>(),
+        );
         let mut r = Reader::new(p.data(), p.objects());
         let entries = bundle::read(&mut r).unwrap().unwrap();
         assert_eq!(entries["value"], Value::String(Some("1".into())));
@@ -2119,8 +2739,14 @@ mod tests {
         };
         assert_eq!(kind, 4); // VAL_PARCELABLE
         r.set_position(start);
-        assert_eq!(r.read_string16().unwrap().as_deref(), Some("android.util.MemoryIntArray"));
-        assert_eq!(r.read_string16().unwrap().as_deref(), Some("android.os.ParcelFileDescriptor"));
+        assert_eq!(
+            r.read_string16().unwrap().as_deref(),
+            Some("android.util.MemoryIntArray")
+        );
+        assert_eq!(
+            r.read_string16().unwrap().as_deref(),
+            Some("android.os.ParcelFileDescriptor")
+        );
         assert_eq!(r.read_i32(), Ok(0));
         assert_eq!(p.objects(), [r.position() as u64]);
         assert_eq!(p.files().len(), 1);
@@ -2128,21 +2754,52 @@ mod tests {
         assert_eq!(r.position(), start + len);
         // An unset value is a null, not a null string.
         let mut p = Parcel::new();
-        bundle::write(&mut p, &[("value", value_result(None, Vec::new())[0].1.clone())]);
-        assert_eq!(&p.data()[p.data().len() - 8..p.data().len() - 4], (-1i32).to_le_bytes());
+        bundle::write(
+            &mut p,
+            &[("value", value_result(None, Vec::new())[0].1.clone())],
+        );
+        assert_eq!(
+            &p.data()[p.data().len() - 8..p.data().len() - 4],
+            (-1i32).to_le_bytes()
+        );
     }
 
     #[test]
     fn restrictions_forbid_changes() {
         let set = |r: &str| r == "no_config_location" || r == "no_debugging_features";
         assert!(setting_restricted("location_mode", Some("0"), 10_050, &set));
-        assert!(!setting_restricted("location_mode", Some("3"), SYSTEM_UID, &|_| false));
+        assert!(!setting_restricted(
+            "location_mode",
+            Some("3"),
+            SYSTEM_UID,
+            &|_| false
+        ));
         assert!(setting_restricted("adb_enabled", Some("1"), 2000, &set));
         assert!(!setting_restricted("adb_enabled", Some("0"), 2000, &set));
-        assert!(!setting_restricted("screen_brightness", Some("5"), SYSTEM_UID, &|_| true));
-        assert!(setting_restricted("screen_brightness", Some("5"), 10_050, &|r| r == "no_config_brightness"));
-        assert!(setting_restricted("data_roaming3", Some("1"), 10_050, &|r| r == "no_data_roaming"));
-        assert!(!setting_restricted("font_scale", Some("1"), 10_050, &|_| true));
+        assert!(!setting_restricted(
+            "screen_brightness",
+            Some("5"),
+            SYSTEM_UID,
+            &|_| true
+        ));
+        assert!(setting_restricted(
+            "screen_brightness",
+            Some("5"),
+            10_050,
+            &|r| r == "no_config_brightness"
+        ));
+        assert!(setting_restricted(
+            "data_roaming3",
+            Some("1"),
+            10_050,
+            &|r| r == "no_data_roaming"
+        ));
+        assert!(!setting_restricted(
+            "font_scale",
+            Some("1"),
+            10_050,
+            &|_| true
+        ));
     }
 
     /// `SettingsProviderTest.testWriteSystemSetting*` and CTS's
@@ -2150,18 +2807,32 @@ mod tests {
     /// any; others fail by their target SDK.
     #[test]
     fn apps_write_public_system_settings() {
-        let insert = Op::Insert { value: Some("1"), tag: None, make_default: false, overrideable_by_restore: false, update: false };
+        let insert = Op::Insert {
+            value: Some("1"),
+            tag: None,
+            make_default: false,
+            overrideable_by_restore: false,
+            update: false,
+        };
         let app = |privileged, sdk| move || Ok((privileged, sdk));
         assert!(enforce_system_mutation(10_050, &insert, "font_scale", &app(false, 34)).is_ok());
-        let e = enforce_system_mutation(10_050, &insert, "pointer_speed", &app(false, 34)).unwrap_err();
+        let e =
+            enforce_system_mutation(10_050, &insert, "pointer_speed", &app(false, 34)).unwrap_err();
         assert_eq!(e.message, "You cannot change private secure settings.");
         let e = enforce_system_mutation(10_050, &insert, "my_own", &app(false, 34)).unwrap_err();
-        assert_eq!(e.message, "You cannot keep your settings in the secure settings.");
+        assert_eq!(
+            e.message,
+            "You cannot keep your settings in the secure settings."
+        );
         assert!(enforce_system_mutation(10_050, &insert, "my_own", &app(false, 22)).is_ok());
         assert!(enforce_system_mutation(10_050, &insert, "my_own", &app(true, 34)).is_ok());
         assert!(enforce_system_mutation(SHELL_UID, &insert, "my_own", &app(false, 34)).is_ok());
-        let e = enforce_system_mutation(10_050, &Op::Delete, "font_scale", &app(true, 34)).unwrap_err();
-        assert_eq!(e.message, "You cannot delete system defined secure settings.");
+        let e =
+            enforce_system_mutation(10_050, &Op::Delete, "font_scale", &app(true, 34)).unwrap_err();
+        assert_eq!(
+            e.message,
+            "You cannot delete system defined secure settings."
+        );
         assert!(enforce_system_mutation(10_050, &Op::Delete, "my_own", &app(true, 34)).is_ok());
     }
 
@@ -2173,7 +2844,10 @@ mod tests {
             reset_mode(2, false).unwrap_err().message,
             "Only system, shell/root on a debuggable build can reset to untrusted defaults"
         );
-        assert_eq!(reset_mode(0, true).unwrap_err().message, "Invalid reset mode: 0");
+        assert_eq!(
+            reset_mode(0, true).unwrap_err().message,
+            "Invalid reset mode: 0"
+        );
     }
 
     #[test]
@@ -2201,7 +2875,9 @@ mod tests {
     #[test]
     #[ignore = "requires pinned original image; run explicitly"]
     fn system_names_are_the_framework_s() {
-        let declared = Declared::read(&aim_paths::original_image().join("system/framework/framework.jar")).unwrap();
+        let declared =
+            Declared::read(&aim_paths::original_image().join("system/framework/framework.jar"))
+                .unwrap();
         let names = PUBLIC_SETTINGS.iter().chain(PRIVATE_SETTINGS).copied();
         for name in names.chain(crate::app_host::settings_validators::validated_names()) {
             assert!(declared.system.contains(name), "{name}");
@@ -2220,8 +2896,14 @@ mod tests {
         }
     }
 
-    fn args(uri: &str, clause: Option<&str>, args: Option<&[&str]>, all: bool) -> Result<Arguments, String> {
-        let args: Option<Vec<Option<String>>> = args.map(|a| a.iter().map(|s| Some(s.to_string())).collect());
+    fn args(
+        uri: &str,
+        clause: Option<&str>,
+        args: Option<&[&str]>,
+        all: bool,
+    ) -> Result<Arguments, String> {
+        let args: Option<Vec<Option<String>>> =
+            args.map(|a| a.iter().map(|s| Some(s.to_string())).collect());
         arguments(&Uri::parse(uri), clause, args.as_deref(), all).map_err(|e| match e {
             Thrown::Database(code, message) => format!("{code}: {message}"),
             Thrown::Binder(e) => format!("binder {}: {}", e.code, e.message),
@@ -2230,58 +2912,156 @@ mod tests {
     }
 
     fn named(table: &str, name: Option<&str>) -> Result<Arguments, String> {
-        Ok(Arguments { table: table.into(), name: name.map(str::to_string) })
+        Ok(Arguments {
+            table: table.into(),
+            name: name.map(str::to_string),
+        })
     }
 
     /// `SettingsProviderTest`'s query forms and `Arguments`' patterns.
     #[test]
     fn arguments_read_as_the_provider_reads_them() {
         let uri = "content://settings/system";
-        assert_eq!(args("content://settings/system/font_scale", None, None, false), named("system", Some("font_scale")));
-        assert_eq!(args(uri, Some("name=?"), Some(&["font_scale"]), false), named("system", Some("font_scale")));
-        assert_eq!(args(uri, Some(" ( name = ? ) "), Some(&["font_scale"]), false), named("system", Some("font_scale")));
-        assert_eq!(args(uri, Some("name='font_scale'"), None, false), named("system", Some("font_scale")));
-        assert_eq!(args(uri, Some("(name = \"font_scale\")"), None, false), named("system", Some("font_scale")));
+        assert_eq!(
+            args("content://settings/system/font_scale", None, None, false),
+            named("system", Some("font_scale"))
+        );
+        assert_eq!(
+            args(uri, Some("name=?"), Some(&["font_scale"]), false),
+            named("system", Some("font_scale"))
+        );
+        assert_eq!(
+            args(uri, Some(" ( name = ? ) "), Some(&["font_scale"]), false),
+            named("system", Some("font_scale"))
+        );
+        assert_eq!(
+            args(uri, Some("name='font_scale'"), None, false),
+            named("system", Some("font_scale"))
+        );
+        assert_eq!(
+            args(uri, Some("(name = \"font_scale\")"), None, false),
+            named("system", Some("font_scale"))
+        );
         assert_eq!(args(uri, None, None, true), named("system", None));
         // A moved setting is found where it moved to.
-        assert_eq!(args("content://settings/system/adb_enabled", None, None, false), named("global", Some("adb_enabled")));
-        assert_eq!(args("content://settings/system/android_id", None, None, false), named("secure", Some("android_id")));
-        assert_eq!(args("content://settings/global/apply_ramping_ringer", None, None, false), named("system", Some("apply_ramping_ringer")));
+        assert_eq!(
+            args("content://settings/system/adb_enabled", None, None, false),
+            named("global", Some("adb_enabled"))
+        );
+        assert_eq!(
+            args("content://settings/system/android_id", None, None, false),
+            named("secure", Some("android_id"))
+        );
+        assert_eq!(
+            args(
+                "content://settings/global/apply_ramping_ringer",
+                None,
+                None,
+                false
+            ),
+            named("system", Some("apply_ramping_ringer"))
+        );
         let unsupported = "2: Supported SQL:\n  uri content://some_table/some_property with null where and where args\n  uri content://some_table with query name=? and single name as arg\n  uri content://some_table with query name=some_name and null args\n  but got - uri:content://settings/system, where:value=? whereArgs:[1, 2]";
-        assert_eq!(args(uri, Some("value=?"), Some(&["1", "2"]), true), Err(unsupported.into()));
-        assert!(args(uri, None, None, false).unwrap_err().ends_with("where:null whereArgs:null"));
-        assert!(args(uri, Some("name=?"), Some(&["a", "b"]), true).unwrap_err().ends_with("whereArgs:[a, b]"));
-        assert_eq!(args(uri, Some("name=?"), None, true), Err("binder -4: Attempt to get length of null array".into()));
+        assert_eq!(
+            args(uri, Some("value=?"), Some(&["1", "2"]), true),
+            Err(unsupported.into())
+        );
+        assert!(
+            args(uri, None, None, false)
+                .unwrap_err()
+                .ends_with("where:null whereArgs:null")
+        );
+        assert!(
+            args(uri, Some("name=?"), Some(&["a", "b"]), true)
+                .unwrap_err()
+                .ends_with("whereArgs:[a, b]")
+        );
+        assert_eq!(
+            args(uri, Some("name=?"), None, true),
+            Err("binder -4: Attempt to get length of null array".into())
+        );
         // `.` matches no line terminator.
         assert!(args(uri, Some("name='a\nb'"), None, true).is_err());
-        assert_eq!(args(uri, Some("name='\"'"), None, true), named("system", Some("")));
-        assert_eq!(args(uri, Some("name='\""), None, true), Err("status -74".into()));
-        assert_eq!(args("content://settings/nope/a", None, None, false), Err("2: Bad root path: nope".into()));
-        assert_eq!(args("content://settings", None, None, true).unwrap_err().lines().last(), Some("  but got - uri:content://settings, where:null whereArgs:null"));
+        assert_eq!(
+            args(uri, Some("name='\"'"), None, true),
+            named("system", Some(""))
+        );
+        assert_eq!(
+            args(uri, Some("name='\""), None, true),
+            Err("status -74".into())
+        );
+        assert_eq!(
+            args("content://settings/nope/a", None, None, false),
+            Err("2: Bad root path: nope".into())
+        );
+        assert_eq!(
+            args("content://settings", None, None, true)
+                .unwrap_err()
+                .lines()
+                .last(),
+            Some("  but got - uri:content://settings, where:null whereArgs:null")
+        );
     }
 
     #[test]
     fn types_are_of_the_table_a_setting_is_in() {
         let ty = |uri| get_type(&Uri::parse(uri)).map_err(|_| ());
-        assert_eq!(ty("content://settings/secure"), Ok("vnd.android.cursor.dir/secure".into()));
+        assert_eq!(
+            ty("content://settings/secure"),
+            Ok("vnd.android.cursor.dir/secure".into())
+        );
         // Moved to secure, then from there to global.
-        assert_eq!(ty("content://settings/system/wifi_on"), Ok("vnd.android.cursor.item/global".into()));
-        assert_eq!(ty("content://settings/system/android_id"), Ok("vnd.android.cursor.item/secure".into()));
-        assert_eq!(ty("content://settings/favorites"), Ok("vnd.android.cursor.dir/favorites".into()));
+        assert_eq!(
+            ty("content://settings/system/wifi_on"),
+            Ok("vnd.android.cursor.item/global".into())
+        );
+        assert_eq!(
+            ty("content://settings/system/android_id"),
+            Ok("vnd.android.cursor.item/secure".into())
+        );
+        assert_eq!(
+            ty("content://settings/favorites"),
+            Ok("vnd.android.cursor.dir/favorites".into())
+        );
         assert!(ty("content://settings/system/a/b").is_err());
     }
 
     #[test]
     fn projections_rows_and_keys() {
-        assert_eq!(normalize_projection(None).ok(), Some(ALL_COLUMNS.map(str::to_string).to_vec()));
+        assert_eq!(
+            normalize_projection(None).ok(),
+            Some(ALL_COLUMNS.map(str::to_string).to_vec())
+        );
         let projection = [Some("value".to_string()), Some("name".to_string())];
         let columns = normalize_projection(Some(&projection)).ok().unwrap();
-        let setting = Setting { name: "a".into(), value: None, id: 7, preserved_in_restore: true, ..Default::default() };
+        let setting = Setting {
+            name: "a".into(),
+            value: None,
+            id: 7,
+            preserved_in_restore: true,
+            ..Default::default()
+        };
         assert_eq!(setting_row(&setting, &columns), [None, Some("a".into())]);
-        assert_eq!(setting_row(&setting, &ALL_COLUMNS.map(str::to_string)), [Some("7".into()), Some("a".into()), None, Some("true".into())]);
-        let Err(Thrown::Database(ILLEGAL_ARGUMENT, message)) = normalize_projection(Some(&[None])) else { panic!() };
+        assert_eq!(
+            setting_row(&setting, &ALL_COLUMNS.map(str::to_string)),
+            [
+                Some("7".into()),
+                Some("a".into()),
+                None,
+                Some("true".into())
+            ]
+        );
+        let Err(Thrown::Database(ILLEGAL_ARGUMENT, message)) = normalize_projection(Some(&[None]))
+        else {
+            panic!()
+        };
         assert_eq!(message, "Invalid column: null");
-        assert!(key_valid("font_scale") && !key_valid("") && !key_valid("a\u{1}") && !key_valid("\u{1f600}"));
+        assert!(
+            key_valid("font_scale")
+                && !key_valid("")
+                && !key_valid("a\u{1}")
+                && !key_valid("\u{1f600}")
+        );
     }
 
     /// `ContentValues.writeToParcel` of a name and values of the types

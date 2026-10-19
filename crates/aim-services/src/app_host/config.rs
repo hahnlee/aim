@@ -312,7 +312,10 @@ impl Configuration {
     pub fn of_freeform_task(&self, bounds: Rect) -> Configuration {
         let density = self.density_dpi as f32 / 160.0;
         let dp = |px: i32| (px as f32 / density + 0.5) as i32;
-        let (width_dp, height_dp) = (dp(bounds.width()).min(self.screen_width_dp), dp(bounds.height()).min(self.screen_height_dp));
+        let (width_dp, height_dp) = (
+            dp(bounds.width()).min(self.screen_width_dp),
+            dp(bounds.height()).min(self.screen_height_dp),
+        );
         let mut task = self.clone();
         task.window.windowing_mode = WINDOWING_MODE_FREEFORM;
         task.window.bounds = bounds;
@@ -320,7 +323,11 @@ impl Configuration {
         task.screen_width_dp = width_dp;
         task.screen_height_dp = height_dp;
         task.smallest_screen_width_dp = dp(bounds.width().min(bounds.height()));
-        task.orientation = if width_dp <= height_dp { ORIENTATION_PORTRAIT } else { ORIENTATION_LANDSCAPE };
+        task.orientation = if width_dp <= height_dp {
+            ORIENTATION_PORTRAIT
+        } else {
+            ORIENTATION_LANDSCAPE
+        };
         // `WindowContainer.computeScreenLayout`, keeping the direction.
         let reduced = reduce_screen_layout(
             self.screen_layout & (SCREENLAYOUT_LONG_MASK | SCREENLAYOUT_SIZE_MASK),
@@ -342,29 +349,85 @@ impl Configuration {
                 changed |= what;
             }
         };
-        differ(self.font_scale.to_bits() as i32, newer.font_scale.to_bits() as i32, CONFIG_FONT_SCALE);
+        differ(
+            self.font_scale.to_bits() as i32,
+            newer.font_scale.to_bits() as i32,
+            CONFIG_FONT_SCALE,
+        );
         differ(self.mcc, newer.mcc, CONFIG_MCC);
         differ(self.mnc, newer.mnc, CONFIG_MNC);
-        differ(self.screen_layout & SCREENLAYOUT_LAYOUTDIR_MASK, newer.screen_layout & SCREENLAYOUT_LAYOUTDIR_MASK, CONFIG_LAYOUT_DIRECTION);
+        differ(
+            self.screen_layout & SCREENLAYOUT_LAYOUTDIR_MASK,
+            newer.screen_layout & SCREENLAYOUT_LAYOUTDIR_MASK,
+            CONFIG_LAYOUT_DIRECTION,
+        );
         differ(self.touchscreen, newer.touchscreen, CONFIG_TOUCHSCREEN);
         differ(self.keyboard, newer.keyboard, CONFIG_KEYBOARD);
-        differ(self.keyboard_hidden, newer.keyboard_hidden, CONFIG_KEYBOARD_HIDDEN);
-        differ(self.hard_keyboard_hidden, newer.hard_keyboard_hidden, CONFIG_KEYBOARD_HIDDEN);
+        differ(
+            self.keyboard_hidden,
+            newer.keyboard_hidden,
+            CONFIG_KEYBOARD_HIDDEN,
+        );
+        differ(
+            self.hard_keyboard_hidden,
+            newer.hard_keyboard_hidden,
+            CONFIG_KEYBOARD_HIDDEN,
+        );
         differ(self.navigation, newer.navigation, CONFIG_NAVIGATION);
-        differ(self.navigation_hidden, newer.navigation_hidden, CONFIG_KEYBOARD_HIDDEN);
+        differ(
+            self.navigation_hidden,
+            newer.navigation_hidden,
+            CONFIG_KEYBOARD_HIDDEN,
+        );
         differ(self.orientation, newer.orientation, CONFIG_ORIENTATION);
-        differ(self.screen_layout & !SCREENLAYOUT_LAYOUTDIR_MASK, newer.screen_layout & !SCREENLAYOUT_LAYOUTDIR_MASK, CONFIG_SCREEN_LAYOUT);
-        differ(self.color_mode & COLOR_MODE_HDR_MASK, newer.color_mode & COLOR_MODE_HDR_MASK, CONFIG_COLOR_MODE);
-        differ(self.color_mode & COLOR_MODE_WIDE_COLOR_GAMUT_MASK, newer.color_mode & COLOR_MODE_WIDE_COLOR_GAMUT_MASK, CONFIG_COLOR_MODE);
+        differ(
+            self.screen_layout & !SCREENLAYOUT_LAYOUTDIR_MASK,
+            newer.screen_layout & !SCREENLAYOUT_LAYOUTDIR_MASK,
+            CONFIG_SCREEN_LAYOUT,
+        );
+        differ(
+            self.color_mode & COLOR_MODE_HDR_MASK,
+            newer.color_mode & COLOR_MODE_HDR_MASK,
+            CONFIG_COLOR_MODE,
+        );
+        differ(
+            self.color_mode & COLOR_MODE_WIDE_COLOR_GAMUT_MASK,
+            newer.color_mode & COLOR_MODE_WIDE_COLOR_GAMUT_MASK,
+            CONFIG_COLOR_MODE,
+        );
         differ(self.ui_mode, newer.ui_mode, CONFIG_UI_MODE);
-        differ(self.screen_width_dp, newer.screen_width_dp, CONFIG_SCREEN_SIZE);
-        differ(self.screen_height_dp, newer.screen_height_dp, CONFIG_SCREEN_SIZE);
-        differ(self.smallest_screen_width_dp, newer.smallest_screen_width_dp, CONFIG_SMALLEST_SCREEN_SIZE);
+        differ(
+            self.screen_width_dp,
+            newer.screen_width_dp,
+            CONFIG_SCREEN_SIZE,
+        );
+        differ(
+            self.screen_height_dp,
+            newer.screen_height_dp,
+            CONFIG_SCREEN_SIZE,
+        );
+        differ(
+            self.smallest_screen_width_dp,
+            newer.smallest_screen_width_dp,
+            CONFIG_SMALLEST_SCREEN_SIZE,
+        );
         differ(self.density_dpi, newer.density_dpi, CONFIG_DENSITY);
         differ(self.assets_seq, newer.assets_seq, CONFIG_ASSETS_PATHS);
-        differ(i32::from(self.window != newer.window), 0, CONFIG_WINDOW_CONFIGURATION);
-        differ(self.font_weight_adjustment, newer.font_weight_adjustment, CONFIG_FONT_WEIGHT_ADJUSTMENT);
-        differ(self.grammatical_gender, newer.grammatical_gender, CONFIG_GRAMMATICAL_GENDER);
+        differ(
+            i32::from(self.window != newer.window),
+            0,
+            CONFIG_WINDOW_CONFIGURATION,
+        );
+        differ(
+            self.font_weight_adjustment,
+            newer.font_weight_adjustment,
+            CONFIG_FONT_WEIGHT_ADJUSTMENT,
+        );
+        differ(
+            self.grammatical_gender,
+            newer.grammatical_gender,
+            CONFIG_GRAMMATICAL_GENDER,
+        );
         if self.locales != newer.locales {
             changed |= CONFIG_LOCALE | CONFIG_LAYOUT_DIRECTION;
         }
@@ -391,14 +454,19 @@ pub struct SizeBuckets {
 
 impl aim_service_aidl::ReadParcelable for SizeBuckets {
     /// Its generated `writeToParcel`: which fields are present, then each.
-    fn read_from(r: &mut aim_binder_host::parcel::Reader<'_>) -> aim_binder_host::parcel::Result<SizeBuckets> {
+    fn read_from(
+        r: &mut aim_binder_host::parcel::Reader<'_>,
+    ) -> aim_binder_host::parcel::Result<SizeBuckets> {
         let flags = r.read_i32()?;
         let mut array = |bit: i32| -> aim_binder_host::parcel::Result<Option<Vec<i32>>> {
             if flags & bit == 0 {
                 return Ok(None);
             }
             let n = r.read_i32()?;
-            (0..n.max(0)).map(|_| r.read_i32()).collect::<aim_binder_host::parcel::Result<Vec<_>>>().map(Some)
+            (0..n.max(0))
+                .map(|_| r.read_i32())
+                .collect::<aim_binder_host::parcel::Result<Vec<_>>>()
+                .map(Some)
         };
         Ok(SizeBuckets {
             horizontal: array(0x1)?,
@@ -415,9 +483,13 @@ impl SizeBuckets {
     /// threshold are no change.
     pub fn filter_diff(&self, mut diff: i32, old: &Configuration, new: &Configuration) -> i32 {
         let crosses = |thresholds: &Option<Vec<i32>>, a: i32, b: i32| {
-            thresholds.iter().flatten().any(|&t| (a < t && b >= t) || (a >= t && b < t))
+            thresholds
+                .iter()
+                .flatten()
+                .any(|&t| (a < t && b >= t) || (a >= t && b < t))
         };
-        let non_size = SCREENLAYOUT_LAYOUTDIR_MASK | SCREENLAYOUT_ROUND_MASK | SCREENLAYOUT_COMPAT_NEEDED;
+        let non_size =
+            SCREENLAYOUT_LAYOUTDIR_MASK | SCREENLAYOUT_ROUND_MASK | SCREENLAYOUT_COMPAT_NEEDED;
         let non_size_unchanged = old.screen_layout & non_size == new.screen_layout & non_size;
         if diff & CONFIG_SCREEN_SIZE != 0
             && !crosses(&self.horizontal, old.screen_width_dp, new.screen_width_dp)
@@ -425,15 +497,28 @@ impl SizeBuckets {
         {
             diff &= !CONFIG_SCREEN_SIZE;
         }
-        if diff & CONFIG_SMALLEST_SCREEN_SIZE != 0 && !crosses(&self.smallest, old.smallest_screen_width_dp, new.smallest_screen_width_dp) {
+        if diff & CONFIG_SMALLEST_SCREEN_SIZE != 0
+            && !crosses(
+                &self.smallest,
+                old.smallest_screen_width_dp,
+                new.smallest_screen_width_dp,
+            )
+        {
             diff &= !CONFIG_SMALLEST_SCREEN_SIZE;
         }
         if diff & CONFIG_SCREEN_LAYOUT != 0 && non_size_unchanged {
-            let (old_size, new_size) = (old.screen_layout & SCREENLAYOUT_SIZE_MASK, new.screen_layout & SCREENLAYOUT_SIZE_MASK);
+            let (old_size, new_size) = (
+                old.screen_layout & SCREENLAYOUT_SIZE_MASK,
+                new.screen_layout & SCREENLAYOUT_SIZE_MASK,
+            );
             let size_crosses = old_size != new_size
                 && (!new.is_layout_size_at_least(old_size)
-                    || self.screen_layout_size.iter().flatten().any(|&s| old.is_layout_size_at_least(s) != new.is_layout_size_at_least(s)));
-            let long_crosses = self.screen_layout_long_set && old.screen_layout & SCREENLAYOUT_LONG_MASK != new.screen_layout & SCREENLAYOUT_LONG_MASK;
+                    || self.screen_layout_size.iter().flatten().any(|&s| {
+                        old.is_layout_size_at_least(s) != new.is_layout_size_at_least(s)
+                    }));
+            let long_crosses = self.screen_layout_long_set
+                && old.screen_layout & SCREENLAYOUT_LONG_MASK
+                    != new.screen_layout & SCREENLAYOUT_LONG_MASK;
             if !size_crosses && !long_crosses {
                 diff &= !CONFIG_SCREEN_LAYOUT;
             }
@@ -522,7 +607,11 @@ impl CompatibilityInfo {
     /// (`ro.sf.lcd_density`), whatever the display's density: an app that
     /// needs no compatibility then has the default compatibility info,
     /// which `ViewRootImpl` applies to no configuration.
-    pub fn of(app: &ApplicationInfo, config: &Configuration, device_density: i32) -> CompatibilityInfo {
+    pub fn of(
+        app: &ApplicationInfo,
+        config: &Configuration,
+        device_density: i32,
+    ) -> CompatibilityInfo {
         let screen_layout = config.screen_layout;
         let sw = config.smallest_screen_width_dp;
         let density = device_density;
@@ -697,14 +786,17 @@ mod tests {
     /// (`CompatibilityInfo(ApplicationInfo, ...)`, android-16.0.0_r1).
     #[test]
     fn a_modern_app_keeps_the_device_density_on_another_display_density() {
-        let mut c = Configuration::of(&Display::phone_for_test(), &Device {
-            locales: "en-US",
-            right_to_left: false,
-            night: false,
-            font_scale: 1.0,
-            font_weight_adjustment: 0,
-            seq: 1,
-        });
+        let mut c = Configuration::of(
+            &Display::phone_for_test(),
+            &Device {
+                locales: "en-US",
+                right_to_left: false,
+                night: false,
+                font_scale: 1.0,
+                font_weight_adjustment: 0,
+                seq: 1,
+            },
+        );
         c.density_dpi = 144;
         let app = ApplicationInfo {
             target_sdk_version: 33,
@@ -715,41 +807,115 @@ mod tests {
             ..Default::default()
         };
         let compat = CompatibilityInfo::of(&app, &c, 320);
-        assert_eq!((compat.flags, compat.application_density, compat.application_scale), (4, 320, 1.0));
+        assert_eq!(
+            (
+                compat.flags,
+                compat.application_density,
+                compat.application_scale
+            ),
+            (4, 320, 1.0)
+        );
     }
 
     #[test]
     fn a_freeform_task_takes_its_sizes_from_its_bounds() {
         let display = Display::phone_for_test();
-        let device = Device { locales: "en-US", right_to_left: false, night: false, font_scale: 1.0, font_weight_adjustment: 0, seq: 1 };
+        let device = Device {
+            locales: "en-US",
+            right_to_left: false,
+            night: false,
+            font_scale: 1.0,
+            font_weight_adjustment: 0,
+            seq: 1,
+        };
         let global = Configuration::of(&display, &device);
-        let bounds = Rect { left: 100, top: 200, right: 900, bottom: 1000 };
+        let bounds = Rect {
+            left: 100,
+            top: 200,
+            right: 900,
+            bottom: 1000,
+        };
         let task = global.of_freeform_task(bounds);
-        assert_eq!((task.window.windowing_mode, task.window.bounds, task.window.app_bounds), (5, bounds, Some(bounds)));
+        assert_eq!(
+            (
+                task.window.windowing_mode,
+                task.window.bounds,
+                task.window.app_bounds
+            ),
+            (5, bounds, Some(bounds))
+        );
         assert_eq!(task.window.max_bounds, global.window.max_bounds);
-        assert_eq!((task.screen_width_dp, task.screen_height_dp, task.smallest_screen_width_dp), (400, 400, 400));
+        assert_eq!(
+            (
+                task.screen_width_dp,
+                task.screen_height_dp,
+                task.smallest_screen_width_dp
+            ),
+            (400, 400, 400)
+        );
         assert_eq!(task.orientation, ORIENTATION_PORTRAIT);
         // 400 dp square: small, not long, the direction kept.
-        assert_eq!(task.screen_layout, SCREENLAYOUT_LAYOUTDIR_LTR | SCREENLAYOUT_LONG_NO | SCREENLAYOUT_SIZE_SMALL);
+        assert_eq!(
+            task.screen_layout,
+            SCREENLAYOUT_LAYOUTDIR_LTR | SCREENLAYOUT_LONG_NO | SCREENLAYOUT_SIZE_SMALL
+        );
     }
 
     #[test]
     fn a_resize_changes_sizes_that_buckets_may_filter() {
         let display = Display::phone_for_test();
-        let device = Device { locales: "en-US", right_to_left: false, night: false, font_scale: 1.0, font_weight_adjustment: 0, seq: 1 };
+        let device = Device {
+            locales: "en-US",
+            right_to_left: false,
+            night: false,
+            font_scale: 1.0,
+            font_weight_adjustment: 0,
+            seq: 1,
+        };
         let global = Configuration::of(&display, &device);
-        let old = global.of_freeform_task(Rect { left: 0, top: 0, right: 800, bottom: 1400 });
-        let moved = global.of_freeform_task(Rect { left: 50, top: 0, right: 850, bottom: 1400 });
+        let old = global.of_freeform_task(Rect {
+            left: 0,
+            top: 0,
+            right: 800,
+            bottom: 1400,
+        });
+        let moved = global.of_freeform_task(Rect {
+            left: 50,
+            top: 0,
+            right: 850,
+            bottom: 1400,
+        });
         // A move changes only the window configuration.
         assert_eq!(old.diff(&moved), CONFIG_WINDOW_CONFIGURATION);
-        let wider = global.of_freeform_task(Rect { left: 0, top: 0, right: 900, bottom: 1400 });
+        let wider = global.of_freeform_task(Rect {
+            left: 0,
+            top: 0,
+            right: 900,
+            bottom: 1400,
+        });
         let diff = old.diff(&wider);
         // 400 to 450 dp wide: small to normal too.
-        assert_eq!(diff, CONFIG_WINDOW_CONFIGURATION | CONFIG_SCREEN_SIZE | CONFIG_SMALLEST_SCREEN_SIZE | CONFIG_SCREEN_LAYOUT);
+        assert_eq!(
+            diff,
+            CONFIG_WINDOW_CONFIGURATION
+                | CONFIG_SCREEN_SIZE
+                | CONFIG_SMALLEST_SCREEN_SIZE
+                | CONFIG_SCREEN_LAYOUT
+        );
         // It crosses no bucket of 600, but one of 420; a larger layout size
         // crosses no layout bucket of none.
-        let buckets = |t: i32| SizeBuckets { horizontal: Some(vec![t]), smallest: Some(vec![t]), ..Default::default() };
-        assert_eq!(buckets(600).filter_diff(diff, &old, &wider), CONFIG_WINDOW_CONFIGURATION);
-        assert_eq!(buckets(420).filter_diff(diff, &old, &wider), diff & !CONFIG_SCREEN_LAYOUT);
+        let buckets = |t: i32| SizeBuckets {
+            horizontal: Some(vec![t]),
+            smallest: Some(vec![t]),
+            ..Default::default()
+        };
+        assert_eq!(
+            buckets(600).filter_diff(diff, &old, &wider),
+            CONFIG_WINDOW_CONFIGURATION
+        );
+        assert_eq!(
+            buckets(420).filter_diff(diff, &old, &wider),
+            diff & !CONFIG_SCREEN_LAYOUT
+        );
     }
 }

@@ -156,8 +156,11 @@ impl NativeOwners {
                 )??;
                 if state != 1 {
                     // PackageManager.INSTALL_ACTIVATION_FAILED
-                    staged.failed(root.id, -128,
-                        format!("Staged APEX {} not activated: {state}", root.id))?;
+                    staged.failed(
+                        root.id,
+                        -128,
+                        format!("Staged APEX {} not activated: {state}", root.id),
+                    )?;
                     continue;
                 }
             }
@@ -188,24 +191,44 @@ impl NativeOwners {
         }
         const INSTALL_FAILED_INTERNAL_ERROR: i32 = -110;
         let internal = |error: Exception| (INSTALL_FAILED_INTERNAL_ERROR, error.message);
-        let ordered = std::iter::once(root.id).chain(root.children.iter().copied()).collect::<Vec<_>>();
-        let _attempt = self.install_warnings.begin(root.id, ordered.clone()).map_err(internal)?;
+        let ordered = std::iter::once(root.id)
+            .chain(root.children.iter().copied())
+            .collect::<Vec<_>>();
+        let _attempt = self
+            .install_warnings
+            .begin(root.id, ordered.clone())
+            .map_err(internal)?;
         let result = (|| {
             let config = self.install_config.lock().unwrap().clone().ok_or_else(|| {
-                (INSTALL_FAILED_INTERNAL_ERROR, "Boot APK install owner unavailable".to_string())
+                (
+                    INSTALL_FAILED_INTERNAL_ERROR,
+                    "Boot APK install owner unavailable".to_string(),
+                )
             })?;
             let lite = self.lite_policy.lock().unwrap().clone().ok_or_else(|| {
-                (INSTALL_FAILED_INTERNAL_ERROR, "Boot APK lite owner unavailable".to_string())
+                (
+                    INSTALL_FAILED_INTERNAL_ERROR,
+                    "Boot APK lite owner unavailable".to_string(),
+                )
             })?;
-            let code = crate::package::installer::pipeline::verify_batch(&config.apks, apk, &lite().map_err(internal)?)
-                .map_err(|error| (error.legacy_status, error.message))?;
+            let code = crate::package::installer::pipeline::verify_batch(
+                &config.apks,
+                apk,
+                &lite().map_err(internal)?,
+            )
+            .map_err(|error| (error.legacy_status, error.message))?;
             crate::package::installer::pipeline::install(config.owners.as_ref(), code, &self.source)
                 .map_err(|error| match error {
-                    crate::package::installer::pipeline::Error::Pending => {
-                        (INSTALL_FAILED_INTERNAL_ERROR, "Boot staged APK unexpectedly pending".into())
+                    crate::package::installer::pipeline::Error::Pending => (
+                        INSTALL_FAILED_INTERNAL_ERROR,
+                        "Boot staged APK unexpectedly pending".into(),
+                    ),
+                    crate::package::installer::pipeline::Error::Install(error) => {
+                        (error.legacy_status, error.message)
                     }
-                    crate::package::installer::pipeline::Error::Install(error) => (error.legacy_status, error.message),
-                    crate::package::installer::pipeline::Error::Owner { error, .. } => internal(error),
+                    crate::package::installer::pipeline::Error::Owner { error, .. } => {
+                        internal(error)
+                    }
                 })
         })();
         self.install_warnings.retire(&ordered);

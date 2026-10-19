@@ -31,11 +31,15 @@ pub type AppDataCreate =
 pub type AppDataFlags = Arc<dyn Fn(i32) -> Result<i32, Exception> + Send + Sync>;
 pub type AppDataRollback = Arc<dyn Fn(&str, i32, i64) -> Result<(), Exception> + Send + Sync>;
 pub type PostInstallUsers = Arc<dyn Fn() -> Result<Vec<i32>, Exception> + Send + Sync>;
-pub type InstallUsers = Arc<dyn Fn(&Arc<Snapshot>) -> Result<Vec<scan::User>, Exception> + Send + Sync>;
+pub type InstallUsers =
+    Arc<dyn Fn(&Arc<Snapshot>) -> Result<Vec<scan::User>, Exception> + Send + Sync>;
 pub type CodeCacheClear = Arc<dyn Fn(&str, &[i32]) -> Result<(), Exception> + Send + Sync>;
 pub type AppDataCommit = Arc<dyn Fn(&str, i32, i64) -> Result<(), Exception> + Send + Sync>;
-pub type RuntimePrepare =
-    Arc<dyn Fn(&mut scan::live_install::CompletedAdmission, &Arc<Snapshot>) -> Result<(), Exception> + Send + Sync>;
+pub type RuntimePrepare = Arc<
+    dyn Fn(&mut scan::live_install::CompletedAdmission, &Arc<Snapshot>) -> Result<(), Exception>
+        + Send
+        + Sync,
+>;
 pub type ReservationRelease = Arc<dyn Fn(&str, bool) -> Result<(), Exception> + Send + Sync>;
 pub type QueryPublication = Arc<dyn Fn(&Arc<Snapshot>) -> Result<(), String> + Send + Sync>;
 pub type Completion = Arc<dyn Fn(PublishedInstall) -> Result<(), Exception> + Send + Sync>;
@@ -103,7 +107,8 @@ impl Owner {
         self.config.clone()
     }
     pub fn new(config: Config) -> Result<Arc<Self>, String> {
-        current_install_users(&config, &config.snapshots.capture()).map_err(|error| error.message)?;
+        current_install_users(&config, &config.snapshots.capture())
+            .map_err(|error| error.message)?;
         let data = fs::canonicalize(&config.data).map_err(|error| error.to_string())?;
         if !data.is_dir()
             || config.directory_inode.uid.is_none()
@@ -174,15 +179,27 @@ fn reservation_install_users(
     current: &Arc<Snapshot>,
     targets: &std::collections::BTreeSet<String>,
 ) -> Result<Vec<scan::User>, Failure> {
-    if !base.same_lineage(current){return Err(failure(-110,"Installation base lineage changed"));}
-    if !Arc::ptr_eq(base,current) {
-        let mut checked=base.owner().clone();
-        if let Some(conflict)=crate::package::scan_snapshot::install_context::install_user_rebase_conflict(
-            base,current,&mut checked,targets).map_err(|error|failure(-110,error))? {
-            return Err(failure(-110,format!("Installation base owner changed: {conflict}")));
+    if !base.same_lineage(current) {
+        return Err(failure(-110, "Installation base lineage changed"));
+    }
+    if !Arc::ptr_eq(base, current) {
+        let mut checked = base.owner().clone();
+        if let Some(conflict) =
+            crate::package::scan_snapshot::install_context::install_user_rebase_conflict(
+                base,
+                current,
+                &mut checked,
+                targets,
+            )
+            .map_err(|error| failure(-110, error))?
+        {
+            return Err(failure(
+                -110,
+                format!("Installation base owner changed: {conflict}"),
+            ));
         }
     }
-    captured_install_users(install_users,current)
+    captured_install_users(install_users, current)
 }
 fn validate_install_users(
     users: Vec<scan::User>,
@@ -207,15 +224,83 @@ fn validate_install_users(
 #[cfg(test)]
 mod install_user_tests {
     use super::*;
-    use crate::package::{owner::usage::Usage,scan::{CapturedUsers,SigningScan},
-        settings::{Package,Settings}};
-    use std::{collections::{BTreeMap,BTreeSet},sync::atomic::{AtomicUsize,Ordering as AtomicOrdering}};
-    fn snapshot_fixture()->Arc<Store>{
-        let packages=vec![Package{name:"target.fixture".into(),app_id:10101,code_path:"/data/app/target".into(),version_code:1,..Default::default()},Package{name:"background.fixture".into(),app_id:10102,code_path:"/data/app/background".into(),version_code:1,..Default::default()}];
-        let settings=Settings{packages,..Default::default()};let mut owner=SigningScan::new(&Default::default(),&settings,29).unwrap();
-        owner.capture_user_states(settings.packages.iter().map(|package|((package.name.clone(),false),CapturedUsers{states:BTreeMap::from([(0,Default::default())]),active_aliases:Default::default()})).collect()).unwrap();let legacy=owner.settings.packages.iter().map(|package|((package.name.clone(),false),crate::package::owner::legacy_permissions::Migration::default())).collect();let shared=owner.identities.shared_users.keys().map(|name|(name.clone(),Default::default())).collect();owner.capture_legacy_permissions(&[0],legacy,shared).unwrap();Arc::new(Store::new(owner,Usage::new(["target.fixture","background.fixture"])).unwrap())
+    use crate::package::{
+        owner::usage::Usage,
+        scan::{CapturedUsers, SigningScan},
+        settings::{Package, Settings},
+    };
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    };
+    fn snapshot_fixture() -> Arc<Store> {
+        let packages = vec![
+            Package {
+                name: "target.fixture".into(),
+                app_id: 10101,
+                code_path: "/data/app/target".into(),
+                version_code: 1,
+                ..Default::default()
+            },
+            Package {
+                name: "background.fixture".into(),
+                app_id: 10102,
+                code_path: "/data/app/background".into(),
+                version_code: 1,
+                ..Default::default()
+            },
+        ];
+        let settings = Settings {
+            packages,
+            ..Default::default()
+        };
+        let mut owner = SigningScan::new(&Default::default(), &settings, 29).unwrap();
+        owner
+            .capture_user_states(
+                settings
+                    .packages
+                    .iter()
+                    .map(|package| {
+                        (
+                            (package.name.clone(), false),
+                            CapturedUsers {
+                                states: BTreeMap::from([(0, Default::default())]),
+                                active_aliases: Default::default(),
+                            },
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let legacy = owner
+            .settings
+            .packages
+            .iter()
+            .map(|package| {
+                (
+                    (package.name.clone(), false),
+                    crate::package::owner::legacy_permissions::Migration::default(),
+                )
+            })
+            .collect();
+        let shared = owner
+            .identities
+            .shared_users
+            .keys()
+            .map(|name| (name.clone(), Default::default()))
+            .collect();
+        owner
+            .capture_legacy_permissions(&[0], legacy, shared)
+            .unwrap();
+        Arc::new(Store::new(owner, Usage::new(["target.fixture", "background.fixture"])).unwrap())
     }
-    fn user(id:i32)->scan::User{scan::User{id,pre_created:false,adb_install_disallowed:false}}
+    fn user(id: i32) -> scan::User {
+        scan::User {
+            id,
+            pre_created: false,
+            adb_install_disallowed: false,
+        }
+    }
     #[test]
     fn install_reservation_requires_current_permission_user_inventory() {
         assert_eq!(
@@ -229,23 +314,90 @@ mod install_user_tests {
         );
     }
     #[test]
-    fn reservation_resolves_users_from_rebased_current_snapshot(){
-        let store=snapshot_fixture();let base=store.capture();let mut owner=base.owner().clone();let mut state=owner.scanned_user_states("background.fixture").unwrap()[&0].clone();state.hidden=true;owner.set_user_state("background.fixture",0,state).unwrap();store.publish(&base,owner,base.usage().clone()).unwrap();let current=store.capture();assert_ne!(base.metadata_revision(),current.metadata_revision());
-        let called=Arc::new(std::sync::Mutex::new(None));let seen=called.clone();let expected=current.clone();let users:InstallUsers=Arc::new(move|snapshot|{*seen.lock().unwrap()=Some(snapshot.clone());assert!(Arc::ptr_eq(snapshot,&expected));Ok(vec![user(0)])});
-        let values=reservation_install_users(&users,&base,&current,&BTreeSet::from(["target.fixture".into()])).unwrap();assert_eq!(values,vec![user(0)]);assert!(Arc::ptr_eq(called.lock().unwrap().as_ref().unwrap(),&current));
+    fn reservation_resolves_users_from_rebased_current_snapshot() {
+        let store = snapshot_fixture();
+        let base = store.capture();
+        let mut owner = base.owner().clone();
+        let mut state = owner.scanned_user_states("background.fixture").unwrap()[&0].clone();
+        state.hidden = true;
+        owner
+            .set_user_state("background.fixture", 0, state)
+            .unwrap();
+        store.publish(&base, owner, base.usage().clone()).unwrap();
+        let current = store.capture();
+        assert_ne!(base.metadata_revision(), current.metadata_revision());
+        let called = Arc::new(std::sync::Mutex::new(None));
+        let seen = called.clone();
+        let expected = current.clone();
+        let users: InstallUsers = Arc::new(move |snapshot| {
+            *seen.lock().unwrap() = Some(snapshot.clone());
+            assert!(Arc::ptr_eq(snapshot, &expected));
+            Ok(vec![user(0)])
+        });
+        let values = reservation_install_users(
+            &users,
+            &base,
+            &current,
+            &BTreeSet::from(["target.fixture".into()]),
+        )
+        .unwrap();
+        assert_eq!(values, vec![user(0)]);
+        assert!(Arc::ptr_eq(
+            called.lock().unwrap().as_ref().unwrap(),
+            &current
+        ));
     }
     #[test]
-    fn reservation_rejects_protected_conflict_before_resolving_users(){
-        let store=snapshot_fixture();let base=store.capture();let mut owner=base.owner().clone();let mut state=owner.scanned_user_states("target.fixture").unwrap()[&0].clone();state.hidden=true;owner.set_user_state("target.fixture",0,state).unwrap();store.publish(&base,owner,base.usage().clone()).unwrap();let calls=Arc::new(AtomicUsize::new(0));let counted=calls.clone();let users:InstallUsers=Arc::new(move|_|{counted.fetch_add(1,AtomicOrdering::SeqCst);Ok(vec![user(0)])});
-        let error=reservation_install_users(&users,&base,&store.capture(),&BTreeSet::from(["target.fixture".into()])).unwrap_err();assert!(error.message.contains("Installation base owner changed"));assert_eq!(calls.load(AtomicOrdering::SeqCst),0);
+    fn reservation_rejects_protected_conflict_before_resolving_users() {
+        let store = snapshot_fixture();
+        let base = store.capture();
+        let mut owner = base.owner().clone();
+        let mut state = owner.scanned_user_states("target.fixture").unwrap()[&0].clone();
+        state.hidden = true;
+        owner.set_user_state("target.fixture", 0, state).unwrap();
+        store.publish(&base, owner, base.usage().clone()).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let users: InstallUsers = Arc::new(move |_| {
+            counted.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(vec![user(0)])
+        });
+        let error = reservation_install_users(
+            &users,
+            &base,
+            &store.capture(),
+            &BTreeSet::from(["target.fixture".into()]),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("Installation base owner changed"));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
     }
     #[test]
-    fn reservation_rejects_foreign_lineage_before_resolving_users(){
-        let base=snapshot_fixture().capture();let foreign=snapshot_fixture().capture();let calls=Arc::new(AtomicUsize::new(0));let counted=calls.clone();let users:InstallUsers=Arc::new(move|_|{counted.fetch_add(1,AtomicOrdering::SeqCst);Ok(vec![user(0)])});let error=reservation_install_users(&users,&base,&foreign,&BTreeSet::new()).unwrap_err();assert_eq!(error.message,"Installation base lineage changed");assert_eq!(calls.load(AtomicOrdering::SeqCst),0);
+    fn reservation_rejects_foreign_lineage_before_resolving_users() {
+        let base = snapshot_fixture().capture();
+        let foreign = snapshot_fixture().capture();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let users: InstallUsers = Arc::new(move |_| {
+            counted.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(vec![user(0)])
+        });
+        let error =
+            reservation_install_users(&users, &base, &foreign, &BTreeSet::new()).unwrap_err();
+        assert_eq!(error.message, "Installation base lineage changed");
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
     }
     #[test]
-    fn reservation_rejects_current_permission_user_inventory_mismatch(){
-        let store=snapshot_fixture();let current=store.capture();let users:InstallUsers=Arc::new(|_|Ok(vec![user(10)]));let error=reservation_install_users(&users,&current,&current,&BTreeSet::new()).unwrap_err();assert_eq!(error.message,"Installation user inventory differs from permission owner");
+    fn reservation_rejects_current_permission_user_inventory_mismatch() {
+        let store = snapshot_fixture();
+        let current = store.capture();
+        let users: InstallUsers = Arc::new(|_| Ok(vec![user(10)]));
+        let error =
+            reservation_install_users(&users, &current, &current, &BTreeSet::new()).unwrap_err();
+        assert_eq!(
+            error.message,
+            "Installation user inventory differs from permission owner"
+        );
     }
 }
 fn token() -> String {
@@ -314,54 +466,127 @@ fn copy_tree(source: &Path, target: &Path, config: &Config) -> Result<(), Failur
         .map_err(|error| failure(-4, error))
 }
 pub(crate) fn capture_visibility_checked(
-    base:&Arc<Snapshot>,snapshots:&crate::package::scan_snapshot::Store,names:&[String],
-    mut users:impl FnMut()->Result<Vec<i32>,Failure>,
-    mut capture:impl FnMut(&crate::package::settings::Package,&[i32])->Result<(u64,Vec<i32>),Failure>,
-)->Result<Vec<Vec<i32>>,Failure>{
-    let targets=names.iter().cloned().collect();
-    let mut last=String::new();
+    base: &Arc<Snapshot>,
+    snapshots: &crate::package::scan_snapshot::Store,
+    names: &[String],
+    mut users: impl FnMut() -> Result<Vec<i32>, Failure>,
+    mut capture: impl FnMut(
+        &crate::package::settings::Package,
+        &[i32],
+    ) -> Result<(u64, Vec<i32>), Failure>,
+) -> Result<Vec<Vec<i32>>, Failure> {
+    let targets = names.iter().cloned().collect();
+    let mut last = String::new();
     for _ in 0..8 {
-        let current=snapshots.capture();
-        if !base.same_lineage(&current){return Err(failure(-110,"pre-install visibility capture lineage changed"));}
-        let mut checked=base.owner().clone();
-        if let Some(conflict)=crate::package::scan_snapshot::install_context::install_user_rebase_conflict(
-            base,&current,&mut checked,&targets).map_err(|error|failure(-110,error))? {
-            return Err(failure(-110,format!("pre-install visibility owner changed: base={} current={} metadata={}->{}: {conflict}",
-                base.version(),current.version(),base.metadata_revision(),current.metadata_revision())));
+        let current = snapshots.capture();
+        if !base.same_lineage(&current) {
+            return Err(failure(
+                -110,
+                "pre-install visibility capture lineage changed",
+            ));
         }
-        let all_users=users()?;let mut values=Vec::with_capacity(names.len());let mut capture_metadata=None;
+        let mut checked = base.owner().clone();
+        if let Some(conflict) =
+            crate::package::scan_snapshot::install_context::install_user_rebase_conflict(
+                base,
+                &current,
+                &mut checked,
+                &targets,
+            )
+            .map_err(|error| failure(-110, error))?
+        {
+            return Err(failure(
+                -110,
+                format!(
+                    "pre-install visibility owner changed: base={} current={} metadata={}->{}: {conflict}",
+                    base.version(),
+                    current.version(),
+                    base.metadata_revision(),
+                    current.metadata_revision()
+                ),
+            ));
+        }
+        let all_users = users()?;
+        let mut values = Vec::with_capacity(names.len());
+        let mut capture_metadata = None;
         for name in names {
-            if let Some(setting)=current.owner().settings.packages.iter().find(|setting|&setting.name==name){
-                let(metadata,allowlist)=capture(setting,&all_users)?;
-                super::post_install::validate_visibility(&all_users,&allowlist).map_err(|error|failure(-110,error.message))?;
-                if capture_metadata.is_some_and(|expected|expected!=metadata){capture_metadata=None;values.clear();break;}
-                capture_metadata=Some(metadata);
+            if let Some(setting) = current
+                .owner()
+                .settings
+                .packages
+                .iter()
+                .find(|setting| &setting.name == name)
+            {
+                let (metadata, allowlist) = capture(setting, &all_users)?;
+                super::post_install::validate_visibility(&all_users, &allowlist)
+                    .map_err(|error| failure(-110, error.message))?;
+                if capture_metadata.is_some_and(|expected| expected != metadata) {
+                    capture_metadata = None;
+                    values.clear();
+                    break;
+                }
+                capture_metadata = Some(metadata);
                 values.push(allowlist);
-            }else{values.push(Vec::new());}
+            } else {
+                values.push(Vec::new());
+            }
         }
-        let latest=snapshots.capture();
-        if !base.same_lineage(&latest){return Err(failure(-110,"pre-install visibility capture lineage changed"));}
-        let mut checked=base.owner().clone();
-        if let Some(conflict)=crate::package::scan_snapshot::install_context::install_user_rebase_conflict(
-            base,&latest,&mut checked,&targets).map_err(|error|failure(-110,error))? {
-            return Err(failure(-110,format!("pre-install visibility owner changed: base={} current={} metadata={}->{}: {conflict}",
-                base.version(),latest.version(),base.metadata_revision(),latest.metadata_revision())));
+        let latest = snapshots.capture();
+        if !base.same_lineage(&latest) {
+            return Err(failure(
+                -110,
+                "pre-install visibility capture lineage changed",
+            ));
         }
-        let metadata_coherent=capture_metadata.map_or_else(
-            ||current.same_metadata_generation(&latest),
-            |metadata|metadata==latest.metadata_revision());
-        let latest_users=users()?;
-        if values.len()==names.len()&&latest_users==all_users&&metadata_coherent {
+        let mut checked = base.owner().clone();
+        if let Some(conflict) =
+            crate::package::scan_snapshot::install_context::install_user_rebase_conflict(
+                base,
+                &latest,
+                &mut checked,
+                &targets,
+            )
+            .map_err(|error| failure(-110, error))?
+        {
+            return Err(failure(
+                -110,
+                format!(
+                    "pre-install visibility owner changed: base={} current={} metadata={}->{}: {conflict}",
+                    base.version(),
+                    latest.version(),
+                    base.metadata_revision(),
+                    latest.metadata_revision()
+                ),
+            ));
+        }
+        let metadata_coherent = capture_metadata.map_or_else(
+            || current.same_metadata_generation(&latest),
+            |metadata| metadata == latest.metadata_revision(),
+        );
+        let latest_users = users()?;
+        if values.len() == names.len() && latest_users == all_users && metadata_coherent {
             return Ok(values);
         }
-        last=format!("capture_metadata={capture_metadata:?} latest_metadata={} users={all_users:?}->{latest_users:?} values={}/{}",
-            latest.metadata_revision(),values.len(),names.len());
+        last = format!(
+            "capture_metadata={capture_metadata:?} latest_metadata={} users={all_users:?}->{latest_users:?} values={}/{}",
+            latest.metadata_revision(),
+            values.len(),
+            names.len()
+        );
         // Only the read-only policy capture repeats; code/app-data/permission
         // preparation and the original admission base retain their ownership.
     }
-    let current=snapshots.capture();
-    Err(failure(-110,format!("pre-install visibility capture did not stabilize: base={} current={} metadata={}->{} {last}",
-        base.version(),current.version(),base.metadata_revision(),current.metadata_revision())))
+    let current = snapshots.capture();
+    Err(failure(
+        -110,
+        format!(
+            "pre-install visibility capture did not stabilize: base={} current={} metadata={}->{} {last}",
+            base.version(),
+            current.version(),
+            base.metadata_revision(),
+            current.metadata_revision()
+        ),
+    ))
 }
 
 impl pipeline::Environment for Owner {
@@ -370,11 +595,22 @@ impl pipeline::Environment for Owner {
         code: Vec<VerifiedCode>,
         base: &Arc<Snapshot>,
     ) -> Result<Box<dyn pipeline::Reservation>, Failure> {
-        let current=self.config.snapshots.capture();
-        let targets=code.iter().map(|member|if member.package.static_shared_library_name.is_some(){
-            format!("{}_{}",member.package.package_name,member.package.static_shared_lib_version)
-        }else{member.package.package_name.clone()}).collect();
-        let users = reservation_install_users(&self.config.install_users,base,&current,&targets)?;
+        let current = self.config.snapshots.capture();
+        let targets = code
+            .iter()
+            .map(|member| {
+                if member.package.static_shared_library_name.is_some() {
+                    format!(
+                        "{}_{}",
+                        member.package.package_name, member.package.static_shared_lib_version
+                    )
+                } else {
+                    member.package.package_name.clone()
+                }
+            })
+            .collect();
+        let users =
+            reservation_install_users(&self.config.install_users, base, &current, &targets)?;
         let mut reserved = Reserved {
             config: self.config.clone(),
             members: Vec::new(),
@@ -484,7 +720,10 @@ impl pipeline::Environment for Owner {
             })?;
             let install = (self.config.library_policy)(&code).map_err(|error| {
                 if let Err(cleanup) = (self.config.release_permissions)(&guest, false) {
-                    self.errors.lock().unwrap().push(format!("Install permission rollback {guest}: {}", cleanup.message));
+                    self.errors.lock().unwrap().push(format!(
+                        "Install permission rollback {guest}: {}",
+                        cleanup.message
+                    ));
                 }
                 if let Err(cleanup) = fs::remove_dir_all(&host) {
                     self.errors.lock().unwrap().push(format!(
@@ -525,27 +764,66 @@ impl pipeline::Environment for Owner {
             }
             prepare_native_libraries(member, &self.config)?;
         }
-        let names=reserved.members.iter().map(|member| {
-            if member.code.package.static_shared_library_name.is_some() {
-                format!("{}_{}",member.code.package.package_name,member.code.package.static_shared_lib_version)
-            } else { member.code.package.package_name.clone() }
-        }).collect::<Vec<_>>();
-        let visibility=capture_visibility_checked(base,&self.config.snapshots,&names,
-            ||(self.config.post_install_users)().map_err(|error|failure(-110,error.message)),
-            |setting,users|self.config.effects.capture_post_install_visibility(setting,users)
-                .map_err(|error|failure(-110,format!("Original pre-install visibility: {}",error.message))))?;
-        for(member,values)in reserved.members.iter_mut().zip(visibility){member.prior_visibility=values;}
+        let names = reserved
+            .members
+            .iter()
+            .map(|member| {
+                if member.code.package.static_shared_library_name.is_some() {
+                    format!(
+                        "{}_{}",
+                        member.code.package.package_name,
+                        member.code.package.static_shared_lib_version
+                    )
+                } else {
+                    member.code.package.package_name.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let visibility = capture_visibility_checked(
+            base,
+            &self.config.snapshots,
+            &names,
+            || (self.config.post_install_users)().map_err(|error| failure(-110, error.message)),
+            |setting, users| {
+                self.config
+                    .effects
+                    .capture_post_install_visibility(setting, users)
+                    .map_err(|error| {
+                        failure(
+                            -110,
+                            format!("Original pre-install visibility: {}", error.message),
+                        )
+                    })
+            },
+        )?;
+        for (member, values) in reserved.members.iter_mut().zip(visibility) {
+            member.prior_visibility = values;
+        }
         Ok(Box::new(reserved))
     }
     fn publish_queries(&self, snapshot: &Arc<Snapshot>) -> Result<(), String> {
         (self.config.publish)(snapshot)
     }
     fn finish(&self, receipt: PublishedInstall) -> Result<(), Exception> {
-        self.pending.complete(receipt.generation,|| (self.config.completion)(receipt),|plan| {
-            plan.validate(&self.config.snapshots.capture())?;
-            self.config.effects.post_install(plan)
-        },|old| self.config.code_resources.clean(old,false).map_err(|message|
-            Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,format!("Committed install old code cleanup: {message}"))))
+        self.pending.complete(
+            receipt.generation,
+            || (self.config.completion)(receipt),
+            |plan| {
+                plan.validate(&self.config.snapshots.capture())?;
+                self.config.effects.post_install(plan)
+            },
+            |old| {
+                self.config
+                    .code_resources
+                    .clean(old, false)
+                    .map_err(|message| {
+                        Exception::new(
+                            aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                            format!("Committed install old code cleanup: {message}"),
+                        )
+                    })
+            },
+        )
     }
 }
 // SCAN_NEW_INSTALL consumes ABI metadata already derived by installation.
@@ -563,12 +841,20 @@ fn prepare_native_libraries(member: &mut Member, config: &Config) -> Result<(), 
     };
     let package = &mut member.code.package;
     let override_abi = member.code.record.params.abi_override.as_deref();
-    prepare_native_package(&config.apks, package, &config.abi, &scan::NativeLibraryEnvironment {
-        preferred_abi: &config.preferred_abi,
-        app_lib32_install_dir: &config.app_lib32_dir,
-        code_is_directory: true,
-        canonical_source: None,
-    }, override_abi, member.install, &destination)?;
+    prepare_native_package(
+        &config.apks,
+        package,
+        &config.abi,
+        &scan::NativeLibraryEnvironment {
+            preferred_abi: &config.preferred_abi,
+            app_lib32_install_dir: &config.app_lib32_dir,
+            code_is_directory: true,
+            canonical_source: None,
+        },
+        override_abi,
+        member.install,
+        &destination,
+    )?;
     member.metadata.primary_cpu_abi = package.primary_cpu_abi.clone();
     member.metadata.secondary_cpu_abi = package.secondary_cpu_abi.clone();
     member.metadata.legacy_native_library_path = package.native_library_root_dir.clone();
@@ -584,13 +870,18 @@ fn prepare_native_package(
     install: scan::NativeLibraryInstallPolicy,
     destination: &scan::NativeLibraryDestination<'_>,
 ) -> Result<(), Failure> {
-    apks.copy_native_libraries_with_override(
-        package, policy, override_abi, install, destination,
-    ).map_err(|error| failure(error.code, error.message))?;
-    let libraries = apks.native_library_scan(
-        package, policy, environment, false, false,
-        override_abi.filter(|value| *value != "-"),
-    ).map_err(|error| failure(-110, format!("Install native library metadata: {error:?}")))?;
+    apks.copy_native_libraries_with_override(package, policy, override_abi, install, destination)
+        .map_err(|error| failure(error.code, error.message))?;
+    let libraries = apks
+        .native_library_scan(
+            package,
+            policy,
+            environment,
+            false,
+            false,
+            override_abi.filter(|value| *value != "-"),
+        )
+        .map_err(|error| failure(-110, format!("Install native library metadata: {error:?}")))?;
     libraries.apply_metadata(package);
     Ok(())
 }
@@ -750,7 +1041,8 @@ impl pipeline::Reservation for Reserved {
     ) -> Result<(), Failure> {
         // Permission/access preparation is performed by its actual owner before
         // any app-data operation. It populates the candidate's runtime owners.
-        (self.config.permissions)(admission, &self.base).map_err(|error| failure(-110, error.message))?;
+        (self.config.permissions)(admission, &self.base)
+            .map_err(|error| failure(-110, error.message))?;
         for metadata in &mut admission.completed {
             let setting = &metadata.candidate.record.settings;
             let seinfo = admission
@@ -838,24 +1130,53 @@ impl pipeline::Reservation for Reserved {
     }
     fn publication_finished(&self, snapshot: &Arc<Snapshot>) -> Result<(), Exception> {
         let result = (|| {
-        let all_users=(self.config.post_install_users)()?;
-        let mut plans=Vec::new();
-        for member in &self.members {
-            let name=if member.code.package.static_shared_library_name.is_some(){format!("{}_{}",member.code.package.package_name,member.code.package.static_shared_lib_version)}else{member.code.package.package_name.clone()};
-            let mut plan=super::post_install::Plan::capture(&self.base,snapshot,&name,member.code.record.user as i32,
-                member.code.record.params.install_flags,if member.code.record.params.data_loader_params.is_some(){1}else{0},member.code.package.static_shared_library_name.is_some(),&all_users)?;
-            plan.prior_visibility=member.prior_visibility.clone();
-            plan.validate(&self.config.snapshots.capture())?;
-            // Original setPrepareResult(clearCodeCache=replace), after committed
-            // app-data preparation and before either ART completion branch.
-            if plan.replacing {(self.config.clear_code_cache)(&name,&plan.cache_users)?;}
-            plans.push(plan);
-        }
-        self.pending.retain_with_errors(snapshot.version(),plans,self.commit_errors.lock().unwrap().clone())
+            let all_users = (self.config.post_install_users)()?;
+            let mut plans = Vec::new();
+            for member in &self.members {
+                let name = if member.code.package.static_shared_library_name.is_some() {
+                    format!(
+                        "{}_{}",
+                        member.code.package.package_name,
+                        member.code.package.static_shared_lib_version
+                    )
+                } else {
+                    member.code.package.package_name.clone()
+                };
+                let mut plan = super::post_install::Plan::capture(
+                    &self.base,
+                    snapshot,
+                    &name,
+                    member.code.record.user as i32,
+                    member.code.record.params.install_flags,
+                    if member.code.record.params.data_loader_params.is_some() {
+                        1
+                    } else {
+                        0
+                    },
+                    member.code.package.static_shared_library_name.is_some(),
+                    &all_users,
+                )?;
+                plan.prior_visibility = member.prior_visibility.clone();
+                plan.validate(&self.config.snapshots.capture())?;
+                // Original setPrepareResult(clearCodeCache=replace), after committed
+                // app-data preparation and before either ART completion branch.
+                if plan.replacing {
+                    (self.config.clear_code_cache)(&name, &plan.cache_users)?;
+                }
+                plans.push(plan);
+            }
+            self.pending.retain_with_errors(
+                snapshot.version(),
+                plans,
+                self.commit_errors.lock().unwrap().clone(),
+            )
         })();
         match result {
-            Ok(())=>Ok(()),
-            Err(error)=>super::post_install::committed_result(Err(error),&self.commit_errors.lock().unwrap()),
+            Ok(()) => Ok(()),
+            Err(error) => super::post_install::committed_result(
+                Err(error),
+                &self.commit_errors.lock().unwrap(),
+            ),
         }
     }
 }
@@ -865,7 +1186,8 @@ impl Drop for Reserved {
         for member in &self.members {
             if let Err(error) = (self.config.release_permissions)(&member.guest, committed) {
                 self.errors.lock().unwrap().push(format!(
-                    "Install permission release {}: {}", member.guest, error.message
+                    "Install permission release {}: {}",
+                    member.guest, error.message
                 ));
             }
         }
@@ -904,7 +1226,10 @@ fn record_inode(path: &Path, inode: &GuestInode) -> io::Result<()> {
 #[cfg(test)]
 mod native_library_tests {
     use super::*;
-    use crate::package::{parse::Platform, pkg::{AndroidPackage, booleans}};
+    use crate::package::{
+        parse::Platform,
+        pkg::{AndroidPackage, booleans},
+    };
     fn archive() -> Vec<u8> {
         let name = b"lib/arm64-v8a/libfixture.so";
         let payload = b"original native library bytes";
@@ -938,8 +1263,16 @@ mod native_library_tests {
     #[test]
     fn live_install_prepares_selected_abi_and_extract_or_direct_libraries() {
         struct Data(PathBuf);
-        impl Drop for Data { fn drop(&mut self) { fs::remove_dir_all(&self.0).unwrap(); } }
-        let data = Data(std::env::temp_dir().join(format!("aim-install-native-{}-{}",std::process::id(),token())));
+        impl Drop for Data {
+            fn drop(&mut self) {
+                fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        let data = Data(std::env::temp_dir().join(format!(
+            "aim-install-native-{}-{}",
+            std::process::id(),
+            token()
+        )));
         fs::create_dir(&data.0).unwrap();
         let apk = data.0.join("base.apk");
         let original = archive();
@@ -947,52 +1280,104 @@ mod native_library_tests {
         let files = apk.clone();
         let apks = Apks {
             signing_overrides: None,
-            files: Box::new(move |path| (path == "/data/app/fixture/base.apk").then(||files.clone())),
-            platform: Platform::load(&aim_paths::derived_image(),Default::default()).unwrap(),
+            files: Box::new(move |path| {
+                (path == "/data/app/fixture/base.apk").then(|| files.clone())
+            }),
+            platform: Platform::load(&aim_paths::derived_image(), Default::default()).unwrap(),
         };
         let policy = scan::AbiPolicy {
-            all: vec!["arm64-v8a".into()], bit32: vec![], bit64: vec!["arm64-v8a".into()],
-            native32: vec![], native64: vec!["arm64-v8a".into()], force_multi_arch_match: false,
+            all: vec!["arm64-v8a".into()],
+            bit32: vec![],
+            bit64: vec!["arm64-v8a".into()],
+            native32: vec![],
+            native64: vec!["arm64-v8a".into()],
+            force_multi_arch_match: false,
         };
         let env = scan::NativeLibraryEnvironment {
-            preferred_abi:"arm64-v8a",app_lib32_install_dir:"/data/app-lib",code_is_directory:true,canonical_source:None,
+            preferred_abi: "arm64-v8a",
+            app_lib32_install_dir: "/data/app-lib",
+            code_is_directory: true,
+            canonical_source: None,
         };
-        for extract in [false,true] {
-            let root = data.0.join(if extract {"extract"} else {"direct"});
+        for extract in [false, true] {
+            let root = data.0.join(if extract { "extract" } else { "direct" });
             let destination = scan::NativeLibraryDestination {
-                guest_root:"/data/app/fixture/lib",root:&root,
-                owner:GuestInode {uid:Some(1000),gid:Some(1000),mode:None},
-                zip_time:&|_|Ok(UNIX_EPOCH),restorecon:&|_|Ok(()),
+                guest_root: "/data/app/fixture/lib",
+                root: &root,
+                owner: GuestInode {
+                    uid: Some(1000),
+                    gid: Some(1000),
+                    mode: None,
+                },
+                zip_time: &|_| Ok(UNIX_EPOCH),
+                restorecon: &|_| Ok(()),
             };
             let install = scan::NativeLibraryInstallPolicy {
-                page_size:4096,extract,debuggable:false,compat_16kb_disabled:false,manifest_compat_disabled:false,
+                page_size: 4096,
+                extract,
+                debuggable: false,
+                compat_16kb_disabled: false,
+                manifest_compat_disabled: false,
             };
             let mut package = AndroidPackage {
-                package_name:"fixture".into(), path:Some("/data/app/fixture".into()),
-                base_apk_path:Some("/data/app/fixture/base.apk".into()),
-                booleans:if extract {booleans::EXTRACT_NATIVE_LIBS} else {0}, ..Default::default()
+                package_name: "fixture".into(),
+                path: Some("/data/app/fixture".into()),
+                base_apk_path: Some("/data/app/fixture/base.apk".into()),
+                booleans: if extract {
+                    booleans::EXTRACT_NATIVE_LIBS
+                } else {
+                    0
+                },
+                ..Default::default()
             };
-            prepare_native_package(&apks,&mut package,&policy,&env,Some("-"),install,&destination).unwrap();
-            assert_eq!(package.primary_cpu_abi.as_deref(),Some("arm64-v8a"));
-            assert_eq!(package.native_library_dir.as_deref(),Some("/data/app/fixture/lib/arm64"));
+            prepare_native_package(
+                &apks,
+                &mut package,
+                &policy,
+                &env,
+                Some("-"),
+                install,
+                &destination,
+            )
+            .unwrap();
+            assert_eq!(package.primary_cpu_abi.as_deref(), Some("arm64-v8a"));
+            assert_eq!(
+                package.native_library_dir.as_deref(),
+                Some("/data/app/fixture/lib/arm64")
+            );
             let lib = root.join("arm64/libfixture.so");
             if extract {
-                assert_eq!(fs::read(&lib).unwrap(),b"original native library bytes");
+                assert_eq!(fs::read(&lib).unwrap(), b"original native library bytes");
                 let inode = guest_inode::read(&lib).unwrap().unwrap();
-                assert_eq!((inode.uid,inode.gid),(Some(1000),Some(1000)));
-            } else { assert!(!lib.exists()); }
-            let error = prepare_native_package(&apks,&mut package,&policy,&env,Some("x86"),install,&destination).unwrap_err();
-            assert_eq!(error.legacy_status,-113);
-            assert_eq!(fs::read(&apk).unwrap(),original);
+                assert_eq!((inode.uid, inode.gid), (Some(1000), Some(1000)));
+            } else {
+                assert!(!lib.exists());
+            }
+            let error = prepare_native_package(
+                &apks,
+                &mut package,
+                &policy,
+                &env,
+                Some("x86"),
+                install,
+                &destination,
+            )
+            .unwrap_err();
+            assert_eq!(error.legacy_status, -113);
+            assert_eq!(fs::read(&apk).unwrap(), original);
         }
     }
 }
 
 #[cfg(test)]
-pub(super) fn committed_fault_reservation(config:Config,base:Arc<Snapshot>,created:Vec<(String,i32,i64)>)->(Arc<Owner>,Box<dyn pipeline::Reservation>){
-    let owner=Owner::new(config).unwrap();
-    let reservation=committed_fault_reservation_from_owner(&owner,base,created);
-    (owner,reservation)
+pub(super) fn committed_fault_reservation(
+    config: Config,
+    base: Arc<Snapshot>,
+    created: Vec<(String, i32, i64)>,
+) -> (Arc<Owner>, Box<dyn pipeline::Reservation>) {
+    let owner = Owner::new(config).unwrap();
+    let reservation = committed_fault_reservation_from_owner(&owner, base, created);
+    (owner, reservation)
 }
 
 #[cfg(test)]

@@ -105,9 +105,7 @@ impl Bridge {
             return None;
         };
         let file = self.process.file(fd)?;
-        read_bounded(aim_binder_host::server::file_fd(
-            &file,
-        )?)
+        read_bounded(aim_binder_host::server::file_fd(&file)?)
     }
 }
 

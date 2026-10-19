@@ -28,7 +28,7 @@ pub struct Owner {
 struct Live {
     safe_mode: bool,
     system_ready: bool,
-    boot_dexopt_start_nanos:Option<i64>,
+    boot_dexopt_start_nanos: Option<i64>,
     frozen: BTreeMap<String, usize>,
     revision: u64,
     publication_error: Option<String>,
@@ -117,12 +117,17 @@ impl Owner {
     }
     /// StorageManager.isCeStorageUnlocked is independent of UM unlock progress.
     /// Supplied by the actual Java System.nanoTime call immediately before ART onBoot.
-    pub fn note_boot_dexopt_start_nanos(&self,start:i64)->Result<(),String>{
-        let mut state=self.state.lock().unwrap();
-        state.boot_dexopt_start_nanos=Some(start);Ok(())
+    pub fn note_boot_dexopt_start_nanos(&self, start: i64) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap();
+        state.boot_dexopt_start_nanos = Some(start);
+        Ok(())
     }
-    pub fn boot_dexopt_start_nanos(&self)->Result<i64,String>{
-        self.state.lock().unwrap().boot_dexopt_start_nanos.ok_or_else(||"actual Java boot dexopt start has not been recorded".into())
+    pub fn boot_dexopt_start_nanos(&self) -> Result<i64, String> {
+        self.state
+            .lock()
+            .unwrap()
+            .boot_dexopt_start_nanos
+            .ok_or_else(|| "actual Java boot dexopt start has not been recorded".into())
     }
     pub fn ce_storage_unlocked(&self, user: i32) -> Result<bool, String> {
         (self.ce_storage)(user)
@@ -132,7 +137,9 @@ impl Owner {
     }
     pub fn checked_is_frozen(&self, name: &str) -> Result<bool, String> {
         let state = self.state.lock().unwrap();
-        if let Some(error) = &state.publication_error { return Err(error.clone()); }
+        if let Some(error) = &state.publication_error {
+            return Err(error.clone());
+        }
         Ok(state.frozen.contains_key(name))
     }
 
@@ -393,10 +400,12 @@ mod tests {
         assert!(!owner.is_frozen("p"));
         let generations = Arc::new(Mutex::new(Vec::new()));
         let published = generations.clone();
-        owner.install_frozen_publisher(Arc::new(move |revision, frozen| {
-            published.lock().unwrap().push((revision, frozen));
-            Ok(())
-        })).unwrap();
+        owner
+            .install_frozen_publisher(Arc::new(move |revision, frozen| {
+                published.lock().unwrap().push((revision, frozen));
+                Ok(())
+            }))
+            .unwrap();
         let a = owner.freeze("p".into()).unwrap();
         let b = owner.freeze("p".into()).unwrap();
         assert!(owner.is_frozen("p"));
@@ -406,13 +415,16 @@ mod tests {
         assert_eq!(owner.frozen_snapshot().unwrap()["p"], 1);
         drop(b);
         assert!(!owner.is_frozen("p"));
-        assert_eq!(*generations.lock().unwrap(), vec![
-            (0, BTreeMap::new()),
-            (1, BTreeMap::from([("p".into(), 1)])),
-            (2, BTreeMap::from([("p".into(), 2)])),
-            (3, BTreeMap::from([("p".into(), 1)])),
-            (4, BTreeMap::new()),
-        ]);
+        assert_eq!(
+            *generations.lock().unwrap(),
+            vec![
+                (0, BTreeMap::new()),
+                (1, BTreeMap::from([("p".into(), 1)])),
+                (2, BTreeMap::from([("p".into(), 2)])),
+                (3, BTreeMap::from([("p".into(), 1)])),
+                (4, BTreeMap::new()),
+            ]
+        );
         assert_eq!(
             owner.ce_storage_unlocked(0),
             Err("missing CE storage owner".into())

@@ -36,17 +36,32 @@ const HIERARCHICAL_TYPE_ID: i32 = 3;
 
 impl Uri {
     /// Decoded Uri.Builder parts used by Settings' preferred-app expansion.
-    pub fn preferred_hierarchical(scheme: &str, authority: Option<&str>, path: Option<&str>) -> Uri {
+    pub fn preferred_hierarchical(
+        scheme: &str,
+        authority: Option<&str>,
+        path: Option<&str>,
+    ) -> Uri {
         let mut string = format!("{scheme}:");
-        if let Some(authority) = authority { string.push_str("//"); string.push_str(&preferred_encode(authority, "@:")); }
+        if let Some(authority) = authority {
+            string.push_str("//");
+            string.push_str(&preferred_encode(authority, "@:"));
+        }
         if let Some(path) = path {
-            if !path.is_empty() && !path.starts_with('/') { string.push('/'); }
+            if !path.is_empty() && !path.starts_with('/') {
+                string.push('/');
+            }
             string.push_str(&preferred_encode(path, "/"));
         }
-        Uri { kind: Kind::PreferredHierarchical, string }
+        Uri {
+            kind: Kind::PreferredHierarchical,
+            string,
+        }
     }
     pub fn preferred_opaque(scheme: &str, part: &str) -> Uri {
-        Uri { kind: Kind::Opaque, string: format!("{scheme}:{}", preferred_encode(part, "")) }
+        Uri {
+            kind: Kind::Opaque,
+            string: format!("{scheme}:{}", preferred_encode(part, "")),
+        }
     }
 
     /// `Uri.parse`.
@@ -208,7 +223,9 @@ impl Uri {
         let s = self.string.as_bytes();
         let ssi = self.ssi();
         let mut start = ssi.map_or(0, |ssi| ssi + 1);
-        if self.kind == Kind::PreferredHierarchical && start == s.len() { return Some(String::new()); }
+        if self.kind == Kind::PreferredHierarchical && start == s.len() {
+            return Some(String::new());
+        }
         if ssi.is_some() && (start == s.len() || s[start] != b'/') {
             return None;
         }
@@ -286,7 +303,9 @@ impl Uri {
         match self.kind {
             Kind::Opaque => false,
             Kind::Hierarchical | Kind::PreferredHierarchical => true,
-            Kind::String => self.ssi().is_none_or(|ssi| self.string.as_bytes().get(ssi + 1) == Some(&b'/')),
+            Kind::String => self
+                .ssi()
+                .is_none_or(|ssi| self.string.as_bytes().get(ssi + 1) == Some(&b'/')),
         }
     }
 
@@ -303,21 +322,30 @@ impl Uri {
     /// `HierarchicalUri` writes it; an opaque one as `OpaqueUri` writes it.
     pub fn with_encoded_authority(&self, authority: Option<&str>) -> Uri {
         let mut string = self.scheme().map(|s| format!("{s}:")).unwrap_or_default();
-        let fragment = self.fsi().map(|fsi| &self.string[fsi + 1..]).filter(|f| !f.is_empty());
+        let fragment = self
+            .fsi()
+            .map(|fsi| &self.string[fsi + 1..])
+            .filter(|f| !f.is_empty());
         if !self.is_hierarchical() {
             string.push_str(&self.encoded_ssp());
             if let Some(fragment) = fragment {
                 string.push('#');
                 string.push_str(fragment);
             }
-            return Uri { kind: Kind::Opaque, string };
+            return Uri {
+                kind: Kind::Opaque,
+                string,
+            };
         }
         if let Some(authority) = authority {
             string.push_str("//");
             string.push_str(authority);
         }
         let path = self.encoded_path().unwrap_or_default();
-        if !path.is_empty() && !path.starts_with('/') && (self.scheme().is_some() || authority.is_some()) {
+        if !path.is_empty()
+            && !path.starts_with('/')
+            && (self.scheme().is_some() || authority.is_some())
+        {
             string.push('/');
         }
         string.push_str(&path);
@@ -329,7 +357,10 @@ impl Uri {
             string.push('#');
             string.push_str(fragment);
         }
-        Uri { kind: Kind::Hierarchical, string }
+        Uri {
+            kind: Kind::Hierarchical,
+            string,
+        }
     }
 
     /// `Uri.withAppendedPath` of a hierarchical URI with no query or
@@ -341,7 +372,10 @@ impl Uri {
             string.push('/');
         }
         string.push_str(segment);
-        Uri { kind: Kind::Hierarchical, string }
+        Uri {
+            kind: Kind::Hierarchical,
+            string,
+        }
     }
 }
 
@@ -507,10 +541,28 @@ mod tests {
         let uri = Uri::parse("content://10@a.b/x%20y?q#f");
         assert_eq!(uri.user_info().as_deref(), Some("10"));
         let built = uri.with_encoded_authority(Some(&encode("a.b")));
-        assert_eq!((built.as_str(), built.class_name()), ("content://a.b/x%20y?q#f", "android.net.Uri$HierarchicalUri"));
-        assert_eq!(Uri::parse("content://a.b?#").with_encoded_authority(Some("a.b")).as_str(), "content://a.b");
-        assert_eq!(Uri::parse("content://a:1/x").with_encoded_authority(Some(&encode("a:1"))).as_str(), "content://a%3A1/x");
-        assert_eq!(Uri::parse("content:x#").with_encoded_authority(Some("y")).as_str(), "content:x");
+        assert_eq!(
+            (built.as_str(), built.class_name()),
+            ("content://a.b/x%20y?q#f", "android.net.Uri$HierarchicalUri")
+        );
+        assert_eq!(
+            Uri::parse("content://a.b?#")
+                .with_encoded_authority(Some("a.b"))
+                .as_str(),
+            "content://a.b"
+        );
+        assert_eq!(
+            Uri::parse("content://a:1/x")
+                .with_encoded_authority(Some(&encode("a:1")))
+                .as_str(),
+            "content://a%3A1/x"
+        );
+        assert_eq!(
+            Uri::parse("content:x#")
+                .with_encoded_authority(Some("y"))
+                .as_str(),
+            "content:x"
+        );
         assert_eq!(Uri::parse("content://a.b/x").user_info(), None);
     }
 
@@ -518,18 +570,35 @@ mod tests {
     #[test]
     fn appends_a_path() {
         let uri = Uri::parse("content://settings/global").with_appended_path("a b");
-        assert_eq!((uri.as_str(), uri.class_name()), ("content://settings/global/a b", "android.net.Uri$HierarchicalUri"));
-        assert_eq!(Uri::parse("content://settings/").with_appended_path("x").as_str(), "content://settings/x");
+        assert_eq!(
+            (uri.as_str(), uri.class_name()),
+            (
+                "content://settings/global/a b",
+                "android.net.Uri$HierarchicalUri"
+            )
+        );
+        assert_eq!(
+            Uri::parse("content://settings/")
+                .with_appended_path("x")
+                .as_str(),
+            "content://settings/x"
+        );
     }
 }
-
 
 fn preferred_encode(value: &str, allowed: &str) -> String {
     let mut encoded = String::new();
     for &byte in value.as_bytes() {
         let character = char::from(byte);
-        if byte.is_ascii_alphanumeric() || "_-!.~'()*".contains(character) || allowed.contains(character) { encoded.push(character); }
-        else { encoded.push('%'); encoded.push_str(&format!("{byte:02X}")); }
+        if byte.is_ascii_alphanumeric()
+            || "_-!.~'()*".contains(character)
+            || allowed.contains(character)
+        {
+            encoded.push(character);
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
     }
     encoded
 }

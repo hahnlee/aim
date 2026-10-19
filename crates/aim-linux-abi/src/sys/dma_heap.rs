@@ -45,7 +45,10 @@ const RDEV: i32 = 248 << 24;
 
 /// An unlinked marked host file of `size`, published as a guest fd.
 fn marked_file(size: u64, cloexec: bool) -> i64 {
-    let mut tmpl = std::env::temp_dir().join("linux-abi-dmabuf.XXXXXX").into_os_string().into_encoded_bytes();
+    let mut tmpl = std::env::temp_dir()
+        .join("linux-abi-dmabuf.XXXXXX")
+        .into_os_string()
+        .into_encoded_bytes();
     tmpl.push(0);
     // SAFETY: mkstemp fills in the template; the name is removed at once.
     unsafe {
@@ -74,10 +77,15 @@ pub fn open(guest: &str, flags: u64) -> Option<i64> {
 }
 
 fn kind_of(st: &libc::stat) -> Option<Kind> {
-    if st.st_mode & libc::S_IFMT != libc::S_IFREG || st.st_nlink != 0 || st.st_flags & MARK != MARK {
+    if st.st_mode & libc::S_IFMT != libc::S_IFREG || st.st_nlink != 0 || st.st_flags & MARK != MARK
+    {
         return None;
     }
-    Some(if st.st_size == 0 { Kind::Heap } else { Kind::Buffer })
+    Some(if st.st_size == 0 {
+        Kind::Heap
+    } else {
+        Kind::Buffer
+    })
 }
 
 fn stat_of(fd: i32) -> Option<libc::stat> {
@@ -118,8 +126,21 @@ pub fn stat(guest: &str) -> Option<libc::stat> {
 fn name(fd: i32) -> String {
     let mut buf = [0u8; NAME_LEN];
     // SAFETY: reading our attribute into a local buffer.
-    let n = unsafe { libc::fgetxattr(fd, NAME_XATTR.as_ptr(), buf.as_mut_ptr().cast(), buf.len(), 0, 0) };
-    if n <= 0 { String::new() } else { String::from_utf8_lossy(&buf[..n as usize]).into_owned() }
+    let n = unsafe {
+        libc::fgetxattr(
+            fd,
+            NAME_XATTR.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            0,
+            0,
+        )
+    };
+    if n <= 0 {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&buf[..n as usize]).into_owned()
+    }
 }
 
 /// Link text for `/proc/self/fd/N`: a buffer's dentry, `dmabuf:<name>`;
@@ -136,7 +157,9 @@ pub fn link_name(fd: i32, st: &libc::stat) -> Option<String> {
 pub fn before_mmap(fd: i32, len: u64, off: u64) -> Option<i64> {
     let st = stat_of(fd)?;
     match kind_of(&st)? {
-        Kind::Buffer if off.div_ceil(PAGE) + len.div_ceil(PAGE) > st.st_size as u64 / PAGE => Some(-(EINVAL as i64)),
+        Kind::Buffer if off.div_ceil(PAGE) + len.div_ceil(PAGE) > st.st_size as u64 / PAGE => {
+            Some(-(EINVAL as i64))
+        }
         Kind::Buffer => None,
         // The heap's node has no mmap (`dma_heap_fops`).
         Kind::Heap => Some(-(libc::ENODEV as i64)),
@@ -194,7 +217,9 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
                 return Some(-(EINVAL as i64));
             };
             // SAFETY: writing our attribute from the guest's bytes.
-            let r = unsafe { libc::fsetxattr(fd, NAME_XATTR.as_ptr(), bytes.as_ptr().cast(), end, 0, 0) };
+            let r = unsafe {
+                libc::fsetxattr(fd, NAME_XATTR.as_ptr(), bytes.as_ptr().cast(), end, 0, 0)
+            };
             if r < 0 { -(errno::last() as i64) } else { 0 }
         }
         _ => -(libc::ENOTTY as i64),
@@ -210,7 +235,10 @@ mod tests {
         data[..8].copy_from_slice(&len.to_le_bytes());
         data[12..16].copy_from_slice(&fd_flags.to_le_bytes());
         let r = ioctl(heap, HEAP_ALLOC, data.as_mut_ptr() as u64).unwrap();
-        (r, u32::from_le_bytes(data[8..12].try_into().unwrap()) as i32)
+        (
+            r,
+            u32::from_le_bytes(data[8..12].try_into().unwrap()) as i32,
+        )
     }
 
     #[test]
@@ -227,22 +255,37 @@ mod tests {
         let (r, buf) = alloc(heap, 5000, (O_CLOEXEC | 2) as u32);
         assert_eq!(r, 0);
         let st = stat_of(buf).unwrap();
-        assert_eq!((kind_of(&st), st.st_size as u64), (Some(Kind::Buffer), PAGE));
+        assert_eq!(
+            (kind_of(&st), st.st_size as u64),
+            (Some(Kind::Buffer), PAGE)
+        );
         // The heap has no mmap; a buffer maps up to its end.
         assert_eq!(before_mmap(heap, PAGE, 0), Some(-(libc::ENODEV as i64)));
         assert_eq!(before_mmap(buf, PAGE, 0), None);
         assert_eq!(before_mmap(buf, 2 * PAGE, 0), Some(-(EINVAL as i64)));
         // CPU access brackets: read, write or both, start or end.
         assert_eq!(ioctl(buf, BUF_SYNC, [SYNC_RW].as_ptr() as u64), Some(0));
-        assert_eq!(ioctl(buf, BUF_SYNC, [SYNC_END | 1].as_ptr() as u64), Some(0));
-        assert_eq!(ioctl(buf, BUF_SYNC, [0u64].as_ptr() as u64), Some(-(EINVAL as i64)));
-        assert_eq!(ioctl(buf, BUF_SYNC, [8u64].as_ptr() as u64), Some(-(EINVAL as i64)));
+        assert_eq!(
+            ioctl(buf, BUF_SYNC, [SYNC_END | 1].as_ptr() as u64),
+            Some(0)
+        );
+        assert_eq!(
+            ioctl(buf, BUF_SYNC, [0u64].as_ptr() as u64),
+            Some(-(EINVAL as i64))
+        );
+        assert_eq!(
+            ioctl(buf, BUF_SYNC, [8u64].as_ptr() as u64),
+            Some(-(EINVAL as i64))
+        );
         // A name of the buffer's, in its link.
         let mut name = [0u8; NAME_LEN];
         name[..5].copy_from_slice(b"c2buf");
         assert_eq!(ioctl(buf, BUF_SET_NAME_B, name.as_ptr() as u64), Some(0));
         assert_eq!(link_name(buf, &st).as_deref(), Some("/dmabuf:c2buf"));
-        assert_eq!(ioctl(buf, BUF_SET_NAME_B, [b'x'; NAME_LEN].as_ptr() as u64), Some(-(EINVAL as i64)));
+        assert_eq!(
+            ioctl(buf, BUF_SET_NAME_B, [b'x'; NAME_LEN].as_ptr() as u64),
+            Some(-(EINVAL as i64))
+        );
         // Another fd's ioctl of these kinds is not ours.
         assert_eq!(ioctl(0, BUF_SYNC, 0), None);
         // SAFETY: our fds.

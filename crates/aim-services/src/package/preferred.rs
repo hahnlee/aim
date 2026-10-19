@@ -10,8 +10,8 @@
 pub mod actions;
 pub mod defaults;
 mod double;
-pub mod registry;
 pub mod records;
+pub mod registry;
 mod serialization;
 
 use aim_android_xml::{Element, Node, Value};
@@ -535,14 +535,28 @@ impl Preferred {
     /// Settings.readPreferredActivitiesLPw uses this load-only rule. Public
     /// addPreferredActivity deliberately retains distinct live registrations.
     fn should_add_restored_preferred(&self, activity: &PreferredActivity) -> bool {
-        let matching = self.preferred.entries().iter()
-            .filter(|old| filter_equals(&old.filter, &activity.filter)).collect::<Vec<_>>();
-        if matching.is_empty() { return true; }
-        if !activity.always { return false; }
-        !matching.into_iter().any(|old| old.always
-            && old.match_ == (activity.match_ & super::intent_filter::MATCH_CATEGORY_MASK)
-            && old.component == activity.component
-            && old.set.as_ref().zip(activity.set.as_ref()).is_some_and(|(old, new)| old == new))
+        let matching = self
+            .preferred
+            .entries()
+            .iter()
+            .filter(|old| filter_equals(&old.filter, &activity.filter))
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            return true;
+        }
+        if !activity.always {
+            return false;
+        }
+        !matching.into_iter().any(|old| {
+            old.always
+                && old.match_ == (activity.match_ & super::intent_filter::MATCH_CATEGORY_MASK)
+                && old.component == activity.component
+                && old
+                    .set
+                    .as_ref()
+                    .zip(activity.set.as_ref())
+                    .is_some_and(|(old, new)| old == new)
+        })
     }
 
     /// Adds a choice after permission checks. Empty-action filters are ignored
@@ -976,7 +990,10 @@ mod owner_tests {
     fn settings_reload_drops_duplicate_live_choices_using_original_candidate_order() {
         let mut state = Preferred::default();
         let mut first = choice("one", true);
-        first.set = Some(vec![unflatten("one/.Main").unwrap(), unflatten("two/.Main").unwrap()]);
+        first.set = Some(vec![
+            unflatten("one/.Main").unwrap(),
+            unflatten("two/.Main").unwrap(),
+        ]);
         state.add_preferred(first.clone(), false);
         state.add_preferred(first.clone(), false);
         assert_eq!(state.preferred.entries().len(), 2);
@@ -985,17 +1002,23 @@ mod owner_tests {
         let restored = Preferred::parse(Some(&bytes), None);
         assert_eq!(restored.preferred.entries().len(), 1);
         assert_eq!(restored.preferred.entries()[0], first);
-        let mut reordered = first.clone(); reordered.set.as_mut().unwrap().reverse();
+        let mut reordered = first.clone();
+        reordered.set.as_mut().unwrap().reverse();
         assert!(restored.should_add_restored_preferred(&reordered));
-        let mut other_choice = first.clone(); other_choice.component = unflatten("two/.Main").unwrap();
+        let mut other_choice = first.clone();
+        other_choice.component = unflatten("two/.Main").unwrap();
         assert!(restored.should_add_restored_preferred(&other_choice));
-        let mut different_match = first.clone(); different_match.match_ = 0x200000;
+        let mut different_match = first.clone();
+        different_match.match_ = 0x200000;
         assert!(restored.should_add_restored_preferred(&different_match));
-        let mut no_candidates = first.clone(); no_candidates.set = None;
+        let mut no_candidates = first.clone();
+        no_candidates.set = None;
         assert!(restored.should_add_restored_preferred(&no_candidates));
-        let mut last_chosen = first.clone(); last_chosen.always = false;
+        let mut last_chosen = first.clone();
+        last_chosen.always = false;
         assert!(!restored.should_add_restored_preferred(&last_chosen));
-        let mut distinct_filter = last_chosen; distinct_filter.filter.add_action("different");
+        let mut distinct_filter = last_chosen;
+        distinct_filter.filter.add_action("different");
         assert!(restored.should_add_restored_preferred(&distinct_filter));
     }
 
@@ -1214,7 +1237,11 @@ impl Preferred {
     ) -> Selection {
         Selection {
             chosen: None,
-            edits: self.preferred.entries().iter().enumerate()
+            edits: self
+                .preferred
+                .entries()
+                .iter()
+                .enumerate()
                 .filter(|(_, activity)| !contains_activity(&activity.component))
                 .map(|(registration, _)| Edit::Remove { registration })
                 .collect(),
@@ -1423,7 +1450,13 @@ mod selection_tests {
         preferred.add_preferred(live, false);
         preferred.add_preferred(activity("missing-last", false), false);
         let selection = preferred.dangling_selection(|component| component.package == "live");
-        assert_eq!(selection.edits, [Edit::Remove { registration: 0 }, Edit::Remove { registration: 2 }]);
+        assert_eq!(
+            selection.edits,
+            [
+                Edit::Remove { registration: 0 },
+                Edit::Remove { registration: 2 }
+            ]
+        );
         preferred.apply_selection(&selection).unwrap();
         assert_eq!(preferred.preferred.entries().len(), 1);
         assert_eq!(preferred.preferred.entries()[0].component.package, "live");
@@ -1543,7 +1576,9 @@ pub enum Mutation {
     Reset {
         defaults: Vec<PreferredActivity>,
     },
-    ApplyDefaults { defaults: Vec<PreferredActivity> },
+    ApplyDefaults {
+        defaults: Vec<PreferredActivity>,
+    },
 }
 #[derive(Clone, Debug, Default)]
 pub struct MutationEffects {

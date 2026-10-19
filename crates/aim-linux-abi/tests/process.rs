@@ -144,7 +144,9 @@ fn check(name: &str) {
 }
 
 #[test]
-fn new_mount_namespace_clone_preserves_parent_view(){check("clone_new_mount_namespace");}
+fn new_mount_namespace_clone_preserves_parent_view() {
+    check("clone_new_mount_namespace");
+}
 
 #[test]
 fn fork_returns_twice_and_wait4_reports_the_exit() {
@@ -209,10 +211,21 @@ fn stdio_null_keeps_the_layer_log() {
     assert!(!err.contains("visible"), "{err}");
     assert!(err.contains("[linux] exit_group"), "{err}");
     assert!(err.matches("/system/bin/sh loaded").count() >= 2, "{err}");
-    let load=err.rfind("stage=in-place.load").expect("in-place exec load stage");
-    let close=err.rfind("stage=in-place.close-on-exec").expect("in-place exec close commit");
-    assert!(load<close,"CLOEXEC must commit only after the new image is loaded: {err}");
-    assert!(!err.lines().any(|line|line.contains("[linux] execve(")&&line.contains(" = 0 ")),"successful in-place exec must enter the new image without returning through the dispatcher: {err}");
+    let load = err
+        .rfind("stage=in-place.load")
+        .expect("in-place exec load stage");
+    let close = err
+        .rfind("stage=in-place.close-on-exec")
+        .expect("in-place exec close commit");
+    assert!(
+        load < close,
+        "CLOEXEC must commit only after the new image is loaded: {err}"
+    );
+    assert!(
+        !err.lines()
+            .any(|line| line.contains("[linux] execve(") && line.contains(" = 0 ")),
+        "successful in-place exec must enter the new image without returning through the dispatcher: {err}"
+    );
 }
 
 #[test]
@@ -529,9 +542,14 @@ fn socket_inode_owner_is_shared_across_real_guest_fork() {
     // A socket's owner travels with it through the binder host, as in a boot.
     let binder = format!("dev.aim.test.process-scm.{}", std::process::id());
     let _server = aim_binder_host::server::Server::start(&binder).expect("binder host");
-    let out = linux_run(root, &["--binder", &binder, PROGRAM, "socket_inode_owner_fork"], |_| {});
+    let out = linux_run(
+        root,
+        &["--binder", &binder, PROGRAM, "socket_inode_owner_fork"],
+        |_| {},
+    );
     assert!(
-        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("ok socket_inode_owner_fork\n"),
+        out.status.success()
+            && String::from_utf8_lossy(&out.stdout).contains("ok socket_inode_owner_fork\n"),
         "{:?}\n{}",
         out.status,
         String::from_utf8_lossy(&out.stderr)

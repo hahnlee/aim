@@ -22,7 +22,12 @@ pub enum Message {
     /// App host to host: task `task` (-1: the display, in device mode) has
     /// an editor of `input_type` and `ime_options` (`EditorInfo`), or
     /// (`active` false) none.
-    Editor { task: i32, active: bool, input_type: i32, ime_options: i32 },
+    Editor {
+        task: i32,
+        active: bool,
+        input_type: i32,
+        ime_options: i32,
+    },
     /// Host to app host: the input method's marked text, the cursor at
     /// `cursor` within it (`setComposingText`).
     Compose { text: String, cursor: i32 },
@@ -82,7 +87,12 @@ impl Message {
             o.extend_from_slice(s.as_bytes());
         };
         match self {
-            Message::Editor { task, active, input_type, ime_options } => {
+            Message::Editor {
+                task,
+                active,
+                input_type,
+                ime_options,
+            } => {
                 o.push(EDITOR);
                 i32(&mut o, *task);
                 o.push(*active as u8);
@@ -118,10 +128,21 @@ impl Message {
     pub fn decode(bytes: &[u8]) -> io::Result<Message> {
         let mut i = In(bytes);
         let m = match i.u8()? {
-            EDITOR => Message::Editor { task: i.i32()?, active: i.u8()? != 0, input_type: i.i32()?, ime_options: i.i32()? },
-            COMPOSE => Message::Compose { text: i.str()?, cursor: i.i32()? },
+            EDITOR => Message::Editor {
+                task: i.i32()?,
+                active: i.u8()? != 0,
+                input_type: i.i32()?,
+                ime_options: i.i32()?,
+            },
+            COMPOSE => Message::Compose {
+                text: i.str()?,
+                cursor: i.i32()?,
+            },
             COMMIT => Message::Commit { text: i.str()? },
-            DELETE => Message::Delete { before: i.i32()?, after: i.i32()? },
+            DELETE => Message::Delete {
+                before: i.i32()?,
+                after: i.i32()?,
+            },
             ACTION => Message::Action { code: i.i32()? },
             KEY => Message::Key { code: i.i32()? },
             _ => return Err(bad()),
@@ -170,10 +191,23 @@ mod tests {
     #[test]
     fn frames_round_trip() {
         let messages = [
-            Message::Editor { task: 3, active: true, input_type: 0x21, ime_options: 6 },
-            Message::Compose { text: "한".into(), cursor: 1 },
-            Message::Commit { text: "한글".into() },
-            Message::Delete { before: 1, after: 0 },
+            Message::Editor {
+                task: 3,
+                active: true,
+                input_type: 0x21,
+                ime_options: 6,
+            },
+            Message::Compose {
+                text: "한".into(),
+                cursor: 1,
+            },
+            Message::Commit {
+                text: "한글".into(),
+            },
+            Message::Delete {
+                before: 1,
+                after: 0,
+            },
             Message::Action { code: 6 },
             Message::Key { code: 66 },
         ];

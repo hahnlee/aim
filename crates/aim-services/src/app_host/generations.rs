@@ -62,7 +62,11 @@ impl MemoryIntArray {
         if base == libc::MAP_FAILED {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(MemoryIntArray { file, base: base.cast(), len: size })
+        Ok(MemoryIntArray {
+            file,
+            base: base.cast(),
+            len: size,
+        })
     }
 
     fn at(&self, index: usize) -> &AtomicI32 {
@@ -97,7 +101,14 @@ fn random_uuid() -> String {
     b[6] = b[6] & 0x0f | 0x40;
     b[8] = b[8] & 0x3f | 0x80;
     let hex: String = b.iter().map(|b| format!("{b:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
 }
 
 /// A backing store and the index of each tracked name in it.
@@ -116,14 +127,19 @@ impl GenerationRegistry {
     /// system settings of two users more, the global and the config ones.
     pub fn new(max_users: usize) -> GenerationRegistry {
         GenerationRegistry {
-            max_stores: ((max_users + 2) * 2 + 2).clamp(MIN_NUM_BACKING_STORE, MAX_NUM_BACKING_STORE),
+            max_stores: ((max_users + 2) * 2 + 2)
+                .clamp(MIN_NUM_BACKING_STORE, MAX_NUM_BACKING_STORE),
             stores: Mutex::new(HashMap::new()),
         }
     }
 
     /// The global settings are shared across users.
     fn key(table: Table, user: i32) -> (Table, i32) {
-        if table == Table::Global { (Table::Global, 0) } else { (table, user) }
+        if table == Table::Global {
+            (Table::Global, 0)
+        } else {
+            (table, user)
+        }
     }
 
     /// `incrementGeneration`: of a flag, its namespace's (`namespace/`).
@@ -150,7 +166,9 @@ impl GenerationRegistry {
         if let Some(store) = stores.get(&Self::key(table, user))
             && let Some(&index) = store.indexes.get(key)
         {
-            store.array.set(index, store.array.get(index).wrapping_add(1));
+            store
+                .array
+                .set(index, store.array.get(index).wrapping_add(1));
         }
     }
 
@@ -162,9 +180,14 @@ impl GenerationRegistry {
         let count = stores.len();
         let store = match stores.entry(Self::key(table, user)) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::hash_map::Entry::Vacant(_) if count >= self.max_stores => return Vec::new(),
+            std::collections::hash_map::Entry::Vacant(_) if count >= self.max_stores => {
+                return Vec::new();
+            }
             std::collections::hash_map::Entry::Vacant(e) => match MemoryIntArray::new(MAX_SIZE) {
-                Ok(array) => e.insert(Store { array, indexes: HashMap::new() }),
+                Ok(array) => e.insert(Store {
+                    array,
+                    indexes: HashMap::new(),
+                }),
                 Err(err) => {
                     eprintln!("app host: settings: error creating generation tracker: {err}");
                     return Vec::new();
@@ -188,7 +211,10 @@ impl GenerationRegistry {
             return Vec::new();
         };
         vec![
-            (TRACK_GENERATION.to_string(), Value::MemoryIntArray(SharedFile(file))),
+            (
+                TRACK_GENERATION.to_string(),
+                Value::MemoryIntArray(SharedFile(file)),
+            ),
             (GENERATION_INDEX.to_string(), Value::Int(index as i32)),
             (GENERATION.to_string(), Value::Int(store.array.get(index))),
         ]
@@ -221,7 +247,10 @@ mod tests {
         registry.increment(Table::Secure, 0, "a");
         registry.increment(Table::Secure, 0, "b");
         assert_eq!(registry.generation(Table::Secure, 0, "a"), Some(2));
-        assert_eq!(registry.generation_data(Table::Secure, 0, "b")[1].1, Value::Int(1));
+        assert_eq!(
+            registry.generation_data(Table::Secure, 0, "b")[1].1,
+            Value::Int(1)
+        );
         registry.generation_data(Table::Global, 10, "g");
         registry.increment(Table::Global, 0, "g");
         assert_eq!(registry.generation(Table::Global, 10, "g"), Some(2));
@@ -231,7 +260,10 @@ mod tests {
         registry.generation_data(Table::System, 0, UNSET);
         registry.increment_unset(Table::System, 0);
         assert_eq!(registry.generation(Table::System, 0, UNSET), Some(2));
-        assert_eq!(GenerationRegistry::new(40).max_stores, MAX_NUM_BACKING_STORE);
+        assert_eq!(
+            GenerationRegistry::new(40).max_stores,
+            MAX_NUM_BACKING_STORE
+        );
         assert_eq!(GenerationRegistry::new(1).max_stores, MIN_NUM_BACKING_STORE);
     }
 

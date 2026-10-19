@@ -25,7 +25,8 @@ const CE_DATABASE_VERSION: i32 = 10;
 /// `META_KEY_FOR_AUTHENTICATOR_UID_FOR_TYPE_PREFIX`.
 const META_AUTH_UID_PREFIX: &str = "auth_uid_for_type:";
 /// `SELECTION_ACCOUNTS_ID_BY_ACCOUNT`.
-const ACCOUNT_ID_BY_ACCOUNT: &str = "accounts_id=(select _id FROM accounts WHERE name=? AND type=?)";
+const ACCOUNT_ID_BY_ACCOUNT: &str =
+    "accounts_id=(select _id FROM accounts WHERE name=? AND type=?)";
 
 /// A failure of the databases (Java's `SQLiteException`).
 #[derive(Debug)]
@@ -49,7 +50,10 @@ pub struct AccountsDb {
 fn check_version(db: &Connection, schema: &str, path: &Path, version: i32) -> Result<()> {
     let found: i32 = db.query_row(&format!("PRAGMA {schema}.user_version"), [], |r| r.get(0))?;
     if found != version {
-        return Err(DbError(format!("{}: version {found}, not {version}", path.display())));
+        return Err(DbError(format!(
+            "{}: version {found}, not {version}",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -58,21 +62,33 @@ impl AccountsDb {
     /// `AccountsDb.create` of the DE database at `de`.
     pub fn open(de: &Path) -> Result<AccountsDb> {
         if !de.exists() {
-            return Err(DbError(format!("{}: no database (the app host does not create one, #1504)", de.display())));
+            return Err(DbError(format!(
+                "{}: no database (the app host does not create one, #1504)",
+                de.display()
+            )));
         }
         let db = Connection::open(de)?;
         db.query_row("PRAGMA journal_mode=TRUNCATE", [], |_| Ok(()))?;
         check_version(&db, "main", de, DE_DATABASE_VERSION)?;
-        Ok(AccountsDb { db, de: de.to_path_buf(), ce_attached: false })
+        Ok(AccountsDb {
+            db,
+            de: de.to_path_buf(),
+            ce_attached: false,
+        })
     }
 
     /// `attachCeDatabase`.
     pub fn attach_ce(&mut self, ce: &Path) -> Result<()> {
         if !ce.exists() {
-            return Err(DbError(format!("{}: no database (the app host does not create one, #1504)", ce.display())));
+            return Err(DbError(format!(
+                "{}: no database (the app host does not create one, #1504)",
+                ce.display()
+            )));
         }
-        self.db.execute("ATTACH DATABASE ?1 AS ceDb", [ce.to_string_lossy()])?;
-        self.db.query_row("PRAGMA ceDb.journal_mode=TRUNCATE", [], |_| Ok(()))?;
+        self.db
+            .execute("ATTACH DATABASE ?1 AS ceDb", [ce.to_string_lossy()])?;
+        self.db
+            .query_row("PRAGMA ceDb.journal_mode=TRUNCATE", [], |_| Ok(()))?;
         check_version(&self.db, "ceDb", ce, CE_DATABASE_VERSION)?;
         self.ce_attached = true;
         Ok(())
@@ -87,15 +103,22 @@ impl AccountsDb {
     fn wrote(&self) -> Result<()> {
         let journal = self.de.with_extension("db-journal");
         if journal.exists() {
-            let inode = aim_storage::guest_inode::GuestInode { uid: Some(1000), gid: Some(1000), mode: Some(0o660) };
-            aim_storage::guest_inode::record(&journal, inode).map_err(|e| DbError(format!("{}: {e}", journal.display())))?;
+            let inode = aim_storage::guest_inode::GuestInode {
+                uid: Some(1000),
+                gid: Some(1000),
+                mode: Some(0o660),
+            };
+            aim_storage::guest_inode::record(&journal, inode)
+                .map_err(|e| DbError(format!("{}: {e}", journal.display())))?;
         }
         Ok(())
     }
 
     /// `findMetaAuthUid`: the authenticators' uids by type, in key order.
     pub fn find_meta_auth_uid(&self) -> Result<Vec<(String, i32)>> {
-        let mut q = self.db.prepare("SELECT key, value FROM meta WHERE key LIKE ? ORDER BY key")?;
+        let mut q = self
+            .db
+            .prepare("SELECT key, value FROM meta WHERE key LIKE ? ORDER BY key")?;
         let rows = q.query_map([format!("{META_AUTH_UID_PREFIX}%")], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
         })?;
@@ -109,7 +132,9 @@ impl AccountsDb {
                 eprintln!("app host: accounts: meta {key}: auth type or uid empty");
                 continue;
             }
-            let uid = value.parse().map_err(|_| DbError(format!("meta {key}: uid {value}")))?;
+            let uid = value
+                .parse()
+                .map_err(|_| DbError(format!("meta {key}: uid {value}")))?;
             map.push((kind, uid));
         }
         Ok(map)
@@ -136,7 +161,9 @@ impl AccountsDb {
 
     /// `findAllDeAccounts`: by id.
     pub fn find_all_de_accounts(&self) -> Result<Vec<(i64, Account)>> {
-        let mut q = self.db.prepare("SELECT _id, type, name FROM accounts ORDER BY _id")?;
+        let mut q = self
+            .db
+            .prepare("SELECT _id, type, name FROM accounts ORDER BY _id")?;
         let rows = q.query_map([], |r| Ok((r.get(0)?, Account::new(r.get(2)?, r.get(1)?))))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -149,12 +176,19 @@ impl AccountsDb {
              JOIN accounts ON accounts._id = visibility.accounts_id",
         )?;
         let rows = q.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<i32>>(1)?.unwrap_or(0), Account::new(r.get(2)?, r.get(3)?)))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<i32>>(1)?.unwrap_or(0),
+                Account::new(r.get(2)?, r.get(3)?),
+            ))
         })?;
         let mut result: HashMap<Account, HashMap<String, i32>> = HashMap::new();
         for row in rows {
             let (package, visibility, account) = row?;
-            result.entry(account).or_default().insert(package, visibility);
+            result
+                .entry(account)
+                .or_default()
+                .insert(package, visibility);
         }
         Ok(result)
     }
@@ -173,28 +207,51 @@ impl AccountsDb {
     }
 
     /// `findAccountPasswordByNameAndType`.
-    pub fn find_account_password_by_name_and_type(&self, name: &str, kind: &str) -> Result<Option<String>> {
+    pub fn find_account_password_by_name_and_type(
+        &self,
+        name: &str,
+        kind: &str,
+    ) -> Result<Option<String>> {
         Ok(self
             .db
-            .query_row("SELECT password FROM ceDb.accounts WHERE name=? AND type=?", params![name, kind], |r| r.get(0))
+            .query_row(
+                "SELECT password FROM ceDb.accounts WHERE name=? AND type=?",
+                params![name, kind],
+                |r| r.get(0),
+            )
             .optional()?
             .flatten())
     }
 
     /// The CE `table`'s two columns of `account`'s rows.
-    fn ce_pairs(&self, table: &str, columns: &str, account: &Account) -> Result<HashMap<String, Option<String>>> {
-        let mut q = self.db.prepare(&format!("SELECT {columns} FROM ceDb.{table} WHERE {ACCOUNT_ID_BY_ACCOUNT}"))?;
-        let rows = q.query_map(params![account.name, account.kind], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    fn ce_pairs(
+        &self,
+        table: &str,
+        columns: &str,
+        account: &Account,
+    ) -> Result<HashMap<String, Option<String>>> {
+        let mut q = self.db.prepare(&format!(
+            "SELECT {columns} FROM ceDb.{table} WHERE {ACCOUNT_ID_BY_ACCOUNT}"
+        ))?;
+        let rows = q.query_map(params![account.name, account.kind], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// `findUserExtrasForAccount`.
-    pub fn find_user_extras_for_account(&self, account: &Account) -> Result<HashMap<String, Option<String>>> {
+    pub fn find_user_extras_for_account(
+        &self,
+        account: &Account,
+    ) -> Result<HashMap<String, Option<String>>> {
         self.ce_pairs("extras", "key, value", account)
     }
 
     /// `findAuthTokensByAccount`.
-    pub fn find_auth_tokens_by_account(&self, account: &Account) -> Result<HashMap<String, Option<String>>> {
+    pub fn find_auth_tokens_by_account(
+        &self,
+        account: &Account,
+    ) -> Result<HashMap<String, Option<String>>> {
         self.ce_pairs("authtokens", "type, authtoken", account)
     }
 
@@ -216,7 +273,9 @@ impl AccountsDb {
 
     /// `deleteGrantsByUid`.
     pub fn delete_grants_by_uid(&self, uid: i32) -> Result<bool> {
-        let n = self.db.execute("DELETE FROM grants WHERE uid=?", [uid.to_string()])?;
+        let n = self
+            .db
+            .execute("DELETE FROM grants WHERE uid=?", [uid.to_string()])?;
         self.wrote()?;
         Ok(n > 0)
     }
@@ -316,24 +375,65 @@ mod tests {
             vec![("com.example".into(), 10100), ("org.other".into(), 10101)]
         );
         let all = db.find_all_de_accounts().unwrap();
-        assert_eq!(all, vec![(1, account("a@example.com", "com.example")), (2, account("b", "org.other"))]);
+        assert_eq!(
+            all,
+            vec![
+                (1, account("a@example.com", "com.example")),
+                (2, account("b", "org.other"))
+            ]
+        );
         let a = account("a@example.com", "com.example");
-        assert_eq!(db.find_de_account_previous_name(&a).unwrap().as_deref(), Some("old@example.com"));
-        assert_eq!(db.find_de_account_previous_name(&account("b", "org.other")).unwrap(), None);
+        assert_eq!(
+            db.find_de_account_previous_name(&a).unwrap().as_deref(),
+            Some("old@example.com")
+        );
+        assert_eq!(
+            db.find_de_account_previous_name(&account("b", "org.other"))
+                .unwrap(),
+            None
+        );
         let visibility = db.find_all_visibility_values().unwrap();
         assert_eq!(visibility[&a]["com.app"], 1);
         assert_eq!(visibility[&a]["android:accounts:key_legacy_visible"], 4);
-        assert_eq!(db.find_matching_grants_count_any_token(10200, &a).unwrap(), 1);
-        assert_eq!(db.find_matching_grants_count_any_token(10300, &a).unwrap(), 0);
+        assert_eq!(
+            db.find_matching_grants_count_any_token(10200, &a).unwrap(),
+            1
+        );
+        assert_eq!(
+            db.find_matching_grants_count_any_token(10300, &a).unwrap(),
+            0
+        );
         assert_eq!(db.find_all_uid_grants().unwrap(), vec![10200, 10300]);
         assert!(!db.is_ce_attached());
         db.attach_ce(&ce).unwrap();
-        assert_eq!(db.find_account_password_by_name_and_type("a@example.com", "com.example").unwrap().as_deref(), Some("secret"));
-        assert_eq!(db.find_account_password_by_name_and_type("b", "org.other").unwrap(), None);
-        assert_eq!(db.find_user_extras_for_account(&a).unwrap()["k"].as_deref(), Some("v"));
-        assert_eq!(db.find_auth_tokens_by_account(&a).unwrap()["mail"].as_deref(), Some("token"));
-        assert!(db.find_auth_tokens_by_account(&account("b", "org.other")).unwrap().is_empty());
-        assert_eq!(db.find_ce_accounts_not_in_de().unwrap(), vec![account("gone", "com.example")]);
+        assert_eq!(
+            db.find_account_password_by_name_and_type("a@example.com", "com.example")
+                .unwrap()
+                .as_deref(),
+            Some("secret")
+        );
+        assert_eq!(
+            db.find_account_password_by_name_and_type("b", "org.other")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            db.find_user_extras_for_account(&a).unwrap()["k"].as_deref(),
+            Some("v")
+        );
+        assert_eq!(
+            db.find_auth_tokens_by_account(&a).unwrap()["mail"].as_deref(),
+            Some("token")
+        );
+        assert!(
+            db.find_auth_tokens_by_account(&account("b", "org.other"))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            db.find_ce_accounts_not_in_de().unwrap(),
+            vec![account("gone", "com.example")]
+        );
         let _ = std::fs::remove_dir_all(de.parent().unwrap());
     }
 
@@ -342,10 +442,15 @@ mod tests {
         let (de, ce) = create("writes");
         populate(&de, &ce);
         let db = AccountsDb::open(&de).unwrap();
-        db.insert_or_replace_meta_auth_type_and_uid("com.example", 10111).unwrap();
-        db.insert_or_replace_meta_auth_type_and_uid("net.new", 10112).unwrap();
+        db.insert_or_replace_meta_auth_type_and_uid("com.example", 10111)
+            .unwrap();
+        db.insert_or_replace_meta_auth_type_and_uid("net.new", 10112)
+            .unwrap();
         assert!(!db.delete_meta_by_auth_type_and_uid("org.other", 1).unwrap());
-        assert!(db.delete_meta_by_auth_type_and_uid("org.other", 10101).unwrap());
+        assert!(
+            db.delete_meta_by_auth_type_and_uid("org.other", 10101)
+                .unwrap()
+        );
         assert_eq!(
             db.find_meta_auth_uid().unwrap(),
             vec![("com.example".into(), 10111), ("net.new".into(), 10112)]
@@ -359,7 +464,10 @@ mod tests {
     #[test]
     fn only_the_original_versions_open() {
         let (de, ce) = create("versions");
-        Connection::open(&ce).unwrap().execute_batch("PRAGMA user_version = 9;").unwrap();
+        Connection::open(&ce)
+            .unwrap()
+            .execute_batch("PRAGMA user_version = 9;")
+            .unwrap();
         let mut db = AccountsDb::open(&de).unwrap();
         assert!(db.attach_ce(&ce).is_err());
         assert!(AccountsDb::open(&de.with_file_name("none.db")).is_err());

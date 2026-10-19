@@ -6,8 +6,15 @@ impl System {
         bridge: &Arc<crate::package::bootstrap::Bridge>,
     ) -> Result<Arc<crate::package::observers::Owner>> {
         self.check_package_bootstrap(bridge)?;
-        if let Some(owner) = self.package_bootstrap.lock().unwrap().current.as_ref()
-            .filter(|current| Arc::ptr_eq(&current.bridge, bridge)).and_then(|current| current.package_observers.clone()) {
+        if let Some(owner) = self
+            .package_bootstrap
+            .lock()
+            .unwrap()
+            .current
+            .as_ref()
+            .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
+            .and_then(|current| current.package_observers.clone())
+        {
             return Ok(owner);
         }
         use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as api;
@@ -51,8 +58,16 @@ impl System {
         self.check_package_bootstrap(bridge)?;
         let owner = crate::package::observers::Owner::new(target);
         let mut state = self.package_bootstrap.lock().unwrap();
-        let current = state.current.as_mut().filter(|current| Arc::ptr_eq(&current.bridge, bridge))
-            .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "observer bootstrap changed"))?;
+        let current = state
+            .current
+            .as_mut()
+            .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "observer bootstrap changed",
+                )
+            })?;
         Ok(current.package_observers.get_or_insert(owner).clone())
     }
 }

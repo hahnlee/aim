@@ -14,9 +14,18 @@ pub fn node() -> Node {
     Node {
         name: "cts-host-tools".into(),
         deps: Vec::new(),
-        inputs: vec![repo("upstream/cts-host-tools.lock.json"), repo("tools/cts-host-tools.py")],
-        outputs: ["deapexer", "debugfs_static", "fsck.erofs", "provenance.json"]
-            .map(|name| out().join(name)).into(),
+        inputs: vec![
+            repo("upstream/cts-host-tools.lock.json"),
+            repo("tools/cts-host-tools.py"),
+        ],
+        outputs: [
+            "deapexer",
+            "debugfs_static",
+            "fsck.erofs",
+            "provenance.json",
+        ]
+        .map(|name| out().join(name))
+        .into(),
         tools: vec![Tool::Python],
         recipe: 1,
         action: Action::CtsHostTools,

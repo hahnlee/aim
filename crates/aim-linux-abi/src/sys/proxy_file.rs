@@ -91,17 +91,31 @@ mod tests {
     fn linux_io_dup_offsets_positioned_io_stat_and_revoke_use_native_owner() {
         // fork_restore mutates a process-wide child namespace, so exercise
         // that boundary in an actual child rather than other tests' process.
-        let mut child=std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact","sys::proxy_file::tests::proxy_linux_io_controlled_child","--ignored","--nocapture"])
-            .stdin(std::process::Stdio::piped()).spawn().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sys::proxy_file::tests::proxy_linux_io_controlled_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
         use std::io::Write;
-        child.stdin.take().unwrap().write_all(b"AIM-PROXY-CHILD1\n").unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"AIM-PROXY-CHILD1\n")
+            .unwrap();
         assert!(child.wait().unwrap().success());
     }
     #[test]
-    #[ignore="controlled child of linux_io_dup_offsets_positioned_io_stat_and_revoke_use_native_owner"]
+    #[ignore = "controlled child of linux_io_dup_offsets_positioned_io_stat_and_revoke_use_native_owner"]
     fn proxy_linux_io_controlled_child() {
-        let mut input=String::new();std::io::stdin().read_line(&mut input).unwrap();assert_eq!(input,"AIM-PROXY-CHILD1\n");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        assert_eq!(input, "AIM-PROXY-CHILD1\n");
         let path = std::env::temp_dir().join(format!("aim-proxy-linux-{}", std::process::id()));
         let file = std::fs::OpenOptions::new()
             .create_new(true)
@@ -191,8 +205,8 @@ mod tests {
         );
         assert_eq!(super::super::fsops::fsync([fd as u64, 0, 0, 0, 0, 0]), -1);
         assert_eq!(seek(fd, 0, 0), -1);
-        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]),0);
-        assert_eq!(super::super::fs::close([dup as u64, 0, 0, 0, 0, 0]),0);
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(super::super::fs::close([dup as u64, 0, 0, 0, 0, 0]), 0);
         drop(worker);
         std::fs::remove_file(path).unwrap();
     }

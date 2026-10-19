@@ -238,7 +238,10 @@ impl SigningScan {
                     expecting_better: &expecting_better,
                     new_domain_id: inputs.new_domain_id,
                     completion: ScanMetadataCompletion {
-                        scan_as_instant_app:super::permission_admissions::boot_scan_as_instant(Some(inputs.users),&identity.internal_name),
+                        scan_as_instant_app: super::permission_admissions::boot_scan_as_instant(
+                            Some(inputs.users),
+                            &identity.internal_name,
+                        ),
                         seinfo: inputs.seinfo,
                         abi_policy: inputs.abi_policy,
                         native_environment: &environment,
@@ -366,7 +369,10 @@ impl SigningScan {
                     expecting_better: &expecting_better,
                     new_domain_id: inputs.new_domain_id,
                     completion: ScanMetadataCompletion {
-                        scan_as_instant_app:super::permission_admissions::boot_scan_as_instant(Some(&users),&name),
+                        scan_as_instant_app: super::permission_admissions::boot_scan_as_instant(
+                            Some(&users),
+                            &name,
+                        ),
                         seinfo: inputs.seinfo,
                         abi_policy: inputs.abi_policy,
                         native_environment: &environment,
@@ -457,7 +463,10 @@ impl SigningScan {
             let parsed =
                 match apks.checked_parsed_path(&code.location.path, code.location.parse_flags()) {
                     Ok(parsed) => parsed,
-                    Err(crate::package::parse::Error::Parse(message) | crate::package::parse::Error::Status(_, message)) => {
+                    Err(
+                        crate::package::parse::Error::Parse(message)
+                        | crate::package::parse::Error::Status(_, message),
+                    ) => {
                         factory_rejected.push((
                             code.location.path.clone(),
                             SigningError::Rejected(Error {
@@ -525,7 +534,10 @@ impl SigningScan {
                 super::UpdatedSystemBootInputs {
                     certificates: inputs.certificates,
                     completion: ScanMetadataCompletion {
-                        scan_as_instant_app:super::permission_admissions::boot_scan_as_instant(Some(inputs.users),&code.parsed.package_name),
+                        scan_as_instant_app: super::permission_admissions::boot_scan_as_instant(
+                            Some(inputs.users),
+                            &code.parsed.package_name,
+                        ),
                         seinfo: inputs.seinfo,
                         abi_policy: inputs.abi_policy,
                         native_environment: &environment,
@@ -733,7 +745,8 @@ impl SigningScan {
                 message,
             })
         };
-        super::process_policy::validate(&raw.parsed).map_err(|error| fail("validation", error.message))?;
+        super::process_policy::validate(&raw.parsed)
+            .map_err(|error| fail("validation", error.message))?;
         if raw.location.partition != Partition::Data
             || raw.location.kind != Kind::App
             || raw.location.apex.is_some()
@@ -882,7 +895,11 @@ impl SigningScan {
             restrict_update_hash: code.parsed.restrict_update_hash.clone(),
         };
         let completion = ScanMetadataCompletion {
-            scan_as_instant_app:inputs.completion.scan_as_instant_app||super::permission_admissions::boot_scan_as_instant(Some(saved_users),&previous.name),
+            scan_as_instant_app: inputs.completion.scan_as_instant_app
+                || super::permission_admissions::boot_scan_as_instant(
+                    Some(saved_users),
+                    &previous.name,
+                ),
             context: AbiScanContext {
                 mode: AbiScanMode::Existing {
                     first_boot_or_upgrade,

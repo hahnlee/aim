@@ -102,14 +102,24 @@ fn update_timeout(ts: u64, t0: i64) {
 fn host_poll(fds: &mut [libc::pollfd], ms: i32, mask: u64) -> i64 {
     let old = swap_sigmask(mask);
     // SAFETY: a pollfd array we own.
-    let fuse_ready=fds.iter().any(|descriptor|super::fuse_device::readiness(descriptor.fd).is_some_and(|events|events.is_ok_and(|events|events&(descriptor.events|POLLERR|POLLHUP)!=0)));
-    let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as u32, if fuse_ready{0}else{ms}) };
+    let fuse_ready = fds.iter().any(|descriptor| {
+        super::fuse_device::readiness(descriptor.fd).is_some_and(|events| {
+            events.is_ok_and(|events| events & (descriptor.events | POLLERR | POLLHUP) != 0)
+        })
+    });
+    let n = unsafe {
+        libc::poll(
+            fds.as_mut_ptr(),
+            fds.len() as u32,
+            if fuse_ready { 0 } else { ms },
+        )
+    };
     let err = errno::last();
     restore_sigmask(old);
     if n < 0 { -(err as i64) } else { n as i64 }
 }
 #[cfg(test)]
-thread_local!{pub(super) static BEFORE_WAIT:std::cell::RefCell<Option<Box<dyn FnOnce()>>>=const{std::cell::RefCell::new(None)};}
+thread_local! {pub(super) static BEFORE_WAIT:std::cell::RefCell<Option<Box<dyn FnOnce()>>>=const{std::cell::RefCell::new(None)};}
 
 pub fn ppoll(a: [u64; 6]) -> i64 {
     let (fds, nfds, ts, mask) = (a[0], a[1], a[2], a[3]);
@@ -128,34 +138,70 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
     let mut invalid = false;
     let mut host = Vec::with_capacity(guest.len());
     for entry in guest.iter() {
-        let mut pin = if entry.fd < 0 { None } else {
+        let mut pin = if entry.fd < 0 {
+            None
+        } else {
             match super::fdtab::pin_guest(entry.fd) {
                 Ok(pin) if !matches!(pin.kind(), Some(super::fdtab::Kind::Path(_))) => Some(pin),
-                Ok(_) => { invalid = true; None },
-                Err(EBADF) => { invalid = true; None },
+                Ok(_) => {
+                    invalid = true;
+                    None
+                }
+                Err(EBADF) => {
+                    invalid = true;
+                    None
+                }
                 Err(error) => return -(error as i64),
             }
         };
-        let pty=match pin.as_ref().and_then(|pin|pin.kind()){
-            Some(super::fdtab::Kind::Pty(description))=>match description.watch(){Ok(watch)=>Some(watch),Err(error)=>return -(error as i64)},_=>None,
+        let pty = match pin.as_ref().and_then(|pin| pin.kind()) {
+            Some(super::fdtab::Kind::Pty(description)) => match description.watch() {
+                Ok(watch) => Some(watch),
+                Err(error) => return -(error as i64),
+            },
+            _ => None,
         };
-        let fd=pty.as_ref().map_or_else(||pin.as_ref().map_or(-1,|pin|pin.descriptor().as_raw_fd()),|watch|watch.observation.data().as_raw_fd());
-        if pty.is_some(){pin=None;}
-        if entry.events & POLLIN != 0 && fd >= 0 { super::binder::poll(fd); }
-        host.push(libc::pollfd { fd, events: to_host(entry.events), revents: 0 });
+        let fd = pty.as_ref().map_or_else(
+            || pin.as_ref().map_or(-1, |pin| pin.descriptor().as_raw_fd()),
+            |watch| watch.observation.data().as_raw_fd(),
+        );
+        if pty.is_some() {
+            pin = None;
+        }
+        if entry.events & POLLIN != 0 && fd >= 0 {
+            super::binder::poll(fd);
+        }
+        host.push(libc::pollfd {
+            fd,
+            events: to_host(entry.events),
+            revents: 0,
+        });
         pins.push(pin);
         ptys.push(pty);
     }
-    for watch in ptys.iter().flatten(){
-        let Some(notification)=watch.observation.notification()else{return -(crate::errno::EIO as i64);};
-        host.push(libc::pollfd{fd:notification.as_raw_fd(),events:libc::POLLIN,revents:0});
+    for watch in ptys.iter().flatten() {
+        let Some(notification) = watch.observation.notification() else {
+            return -(crate::errno::EIO as i64);
+        };
+        host.push(libc::pollfd {
+            fd: notification.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        });
     }
-    if pins.iter().flatten().any(super::close_effects::observes){
-        if let Err(error)=super::close_effects::observe_socket(){return -(error as i64);}
+    if pins.iter().flatten().any(super::close_effects::observes) {
+        if let Err(error) = super::close_effects::observe_socket() {
+            return -(error as i64);
+        }
     }
     let t0 = now_ns();
     #[cfg(test)]
-    BEFORE_WAIT.with(|hook|{let action=hook.borrow_mut().take();if let Some(action)=action{action();}});
+    BEFORE_WAIT.with(|hook| {
+        let action = hook.borrow_mut().take();
+        if let Some(action) = action {
+            action();
+        }
+    });
     loop {
         let left = if ms < 0 {
             -1
@@ -167,15 +213,24 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             return n;
         }
         let mut ready = 0;
-        for (((g, h), pin),pty) in guest.iter_mut().zip(&mut host).zip(&pins).zip(&ptys) {
-            if g.fd >= 0 && pin.is_none()&&pty.is_none() { g.revents = POLLNVAL; ready += 1; continue; }
-            if let Some(watch)=pty{
-                h.revents=watch.events(h.revents);
+        for (((g, h), pin), pty) in guest.iter_mut().zip(&mut host).zip(&pins).zip(&ptys) {
+            if g.fd >= 0 && pin.is_none() && pty.is_none() {
+                g.revents = POLLNVAL;
+                ready += 1;
+                continue;
+            }
+            if let Some(watch) = pty {
+                h.revents = watch.events(h.revents);
             }
             if h.revents & libc::POLLIN != 0 && super::inotify::spuriously_ready(h.fd) {
                 h.revents &= !libc::POLLIN;
             }
-            if let Some(events)=super::fuse_device::readiness(h.fd){h.revents=match events{Ok(events)=>events,Err(_)=>POLLERR};}
+            if let Some(events) = super::fuse_device::readiness(h.fd) {
+                h.revents = match events {
+                    Ok(events) => events,
+                    Err(_) => POLLERR,
+                };
+            }
             g.revents = from_host(h.revents, g.events);
             if g.revents != 0 {
                 ready += 1;
@@ -217,20 +272,46 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
             }
         }
         if ev != 0 {
-            let pin = match super::fdtab::pin_guest(fd as i32) { Ok(pin) => pin, Err(error) => return -(error as i64) };
-            if matches!(pin.kind(), Some(super::fdtab::Kind::Path(_))) { return -(EBADF as i64); }
-            let pty=match pin.kind(){Some(super::fdtab::Kind::Pty(description))=>match description.watch(){Ok(watch)=>Some(watch),Err(error)=>return -(error as i64)},_=>None};
-            let host_fd=pty.as_ref().map_or_else(||pin.descriptor().as_raw_fd(),|watch|watch.observation.data().as_raw_fd());
-            if ev & POLLIN != 0 { super::binder::poll(host_fd); }
-            host.push(libc::pollfd { fd: host_fd, events: ev, revents: 0 });
+            let pin = match super::fdtab::pin_guest(fd as i32) {
+                Ok(pin) => pin,
+                Err(error) => return -(error as i64),
+            };
+            if matches!(pin.kind(), Some(super::fdtab::Kind::Path(_))) {
+                return -(EBADF as i64);
+            }
+            let pty = match pin.kind() {
+                Some(super::fdtab::Kind::Pty(description)) => match description.watch() {
+                    Ok(watch) => Some(watch),
+                    Err(error) => return -(error as i64),
+                },
+                _ => None,
+            };
+            let host_fd = pty.as_ref().map_or_else(
+                || pin.descriptor().as_raw_fd(),
+                |watch| watch.observation.data().as_raw_fd(),
+            );
+            if ev & POLLIN != 0 {
+                super::binder::poll(host_fd);
+            }
+            host.push(libc::pollfd {
+                fd: host_fd,
+                events: ev,
+                revents: 0,
+            });
             guest_fds.push(fd);
-            pins.push(if pty.is_none(){Some(pin)}else{None});
+            pins.push(if pty.is_none() { Some(pin) } else { None });
             ptys.push(pty);
         }
     }
-    for watch in ptys.iter().flatten(){
-        let Some(notification)=watch.observation.notification()else{return -(crate::errno::EIO as i64);};
-        host.push(libc::pollfd{fd:notification.as_raw_fd(),events:libc::POLLIN,revents:0});
+    for watch in ptys.iter().flatten() {
+        let Some(notification) = watch.observation.notification() else {
+            return -(crate::errno::EIO as i64);
+        };
+        host.push(libc::pollfd {
+            fd: notification.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        });
     }
     // The 6th argument is { const sigset_t *ss; size_t ss_len; }.
     let mask = if sig == 0 {
@@ -239,16 +320,29 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
         // SAFETY: guest struct.
         unsafe { (sig as *const u64).read_unaligned() }
     };
-    if pins.iter().flatten().any(super::close_effects::observes){
-        if let Err(error)=super::close_effects::observe_socket(){return -(error as i64);}
+    if pins.iter().flatten().any(super::close_effects::observes) {
+        if let Err(error) = super::close_effects::observe_socket() {
+            return -(error as i64);
+        }
     }
     let t0 = now_ns();
     let n = host_poll(&mut host, ms, mask);
     if n < 0 {
         return n;
     }
-    for descriptor in &mut host{if let Some(events)=super::fuse_device::readiness(descriptor.fd){descriptor.revents=match events{Ok(events)=>events,Err(_)=>POLLERR};}}
-    for (descriptor,watch) in host.iter_mut().zip(&ptys){if let Some(watch)=watch{descriptor.revents=watch.events(descriptor.revents);}}
+    for descriptor in &mut host {
+        if let Some(events) = super::fuse_device::readiness(descriptor.fd) {
+            descriptor.revents = match events {
+                Ok(events) => events,
+                Err(_) => POLLERR,
+            };
+        }
+    }
+    for (descriptor, watch) in host.iter_mut().zip(&ptys) {
+        if let Some(watch) = watch {
+            descriptor.revents = watch.events(descriptor.revents);
+        }
+    }
     if host.iter().any(|p| p.revents & POLLNVAL != 0) {
         return -(EBADF as i64);
     }
@@ -282,7 +376,11 @@ mod pin_tests {
 
     #[test]
     fn poll_keeps_unknown_and_negative_fd_semantics_and_select_guest_indexes() {
-        if super::super::fdtab::isolated_kernel_test("sys::poll::pin_tests::poll_keeps_unknown_and_negative_fd_semantics_and_select_guest_indexes") { return; }
+        if super::super::fdtab::isolated_kernel_test(
+            "sys::poll::pin_tests::poll_keeps_unknown_and_negative_fd_semantics_and_select_guest_indexes",
+        ) {
+            return;
+        }
         let (_view, _root) = crate::vfs::test_view();
         let mut raw = [0; 2];
         assert_eq!(unsafe { libc::pipe(raw.as_mut_ptr()) }, 0);
@@ -290,21 +388,68 @@ mod pin_tests {
         let write = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw[1]) };
         super::super::fdtab::publish_guest(read.as_raw_fd()).unwrap();
         let byte = b'x';
-        assert_eq!(unsafe { libc::write(write.as_raw_fd(), (&byte as *const u8).cast(), 1) }, 1);
-        let mut entries = [libc::pollfd { fd: read.as_raw_fd(), events: POLLIN, revents: 0 },
-            libc::pollfd { fd: write.as_raw_fd(), events: POLLOUT, revents: 0 },
-            libc::pollfd { fd: -1, events: POLLIN, revents: 0 }];
+        assert_eq!(
+            unsafe { libc::write(write.as_raw_fd(), (&byte as *const u8).cast(), 1) },
+            1
+        );
+        let mut entries = [
+            libc::pollfd {
+                fd: read.as_raw_fd(),
+                events: POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: write.as_raw_fd(),
+                events: POLLOUT,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: -1,
+                events: POLLIN,
+                revents: 0,
+            },
+        ];
         let timeout = [0u64; 2];
-        assert_eq!(ppoll([entries.as_mut_ptr() as u64, 3, timeout.as_ptr() as u64, 0, 0, 0]), 2);
+        assert_eq!(
+            ppoll([
+                entries.as_mut_ptr() as u64,
+                3,
+                timeout.as_ptr() as u64,
+                0,
+                0,
+                0
+            ]),
+            2
+        );
         assert_eq!(entries[0].revents, POLLIN);
         assert_eq!(entries[1].revents, POLLNVAL);
         assert_eq!(entries[2].revents, 0);
         let fd = read.as_raw_fd() as usize;
         let mut selected = vec![0u64; (fd + 1).div_ceil(64)];
         selected[fd / 64] |= 1 << (fd % 64);
-        assert_eq!(pselect6([(fd + 1) as u64, selected.as_mut_ptr() as u64, 0, 0, timeout.as_ptr() as u64, 0]), 1);
+        assert_eq!(
+            pselect6([
+                (fd + 1) as u64,
+                selected.as_mut_ptr() as u64,
+                0,
+                0,
+                timeout.as_ptr() as u64,
+                0
+            ]),
+            1
+        );
         assert_eq!(selected[fd / 64], 1 << (fd % 64));
         super::super::fdtab::withdraw_guest(read.as_raw_fd()).unwrap();
-        assert_eq!(pselect6([(fd + 1) as u64, selected.as_mut_ptr() as u64, 0, 0, timeout.as_ptr() as u64, 0]), -(EBADF as i64));
+        assert_eq!(
+            pselect6([
+                (fd + 1) as u64,
+                selected.as_mut_ptr() as u64,
+                0,
+                0,
+                timeout.as_ptr() as u64,
+                0
+            ]),
+            -(EBADF as i64)
+        );
     }
 }

@@ -13,8 +13,8 @@ use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
     BAD_VALUE, Binder, EX_NULL_POINTER, Exception, Parcel, Reader, Result as ParcelResult,
 };
-use aim_service_aidl::com_android_internal_statusbar_istatusbarservice as sb;
 use aim_service_aidl::com_android_internal_statusbar_istatusbar as bar_aidl;
+use aim_service_aidl::com_android_internal_statusbar_istatusbarservice as sb;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
 use super::{AppHost, PER_USER_RANGE, reply};
@@ -100,26 +100,54 @@ impl StatusBar {
     /// tile's package acting for the current user (another user's request
     /// does nothing with REQUEST_LISTENING_OTHER_USER_NOOP); the bar is
     /// asked to bind the tile.
-    fn request_tile_listening(&self, call: &Call<'_>, component: Option<ComponentName>, user: i32) -> Result<(), Exception> {
-        let component = component.ok_or_else(|| Exception::new(EX_NULL_POINTER, "componentName"))?;
+    fn request_tile_listening(
+        &self,
+        call: &Call<'_>,
+        component: Option<ComponentName>,
+        user: i32,
+    ) -> Result<(), Exception> {
+        let component =
+            component.ok_or_else(|| Exception::new(EX_NULL_POINTER, "componentName"))?;
         let uid = call.sender_euid as i32;
-        if self.host.change_enabled(REQUEST_LISTENING_MUST_MATCH_PACKAGE, uid)? {
-            let user = self.host.handle_incoming_user(uid, user, false, false, Some(&component.package))?;
+        if self
+            .host
+            .change_enabled(REQUEST_LISTENING_MUST_MATCH_PACKAGE, uid)?
+        {
+            let user = self.host.handle_incoming_user(
+                uid,
+                user,
+                false,
+                false,
+                Some(&component.package),
+            )?;
             // `checkCallingUidPackage`.
             let package_uid = self.host.package_uid(&component.package, 0, user)?;
-            if uid.rem_euclid(PER_USER_RANGE as i32) != package_uid.rem_euclid(PER_USER_RANGE as i32) {
-                return Err(Exception::security(format!("Package {} does not belong to the calling uid {uid}", component.package)));
+            if uid.rem_euclid(PER_USER_RANGE as i32)
+                != package_uid.rem_euclid(PER_USER_RANGE as i32)
+            {
+                return Err(Exception::security(format!(
+                    "Package {} does not belong to the calling uid {uid}",
+                    component.package
+                )));
             }
             if user != CURRENT_USER {
-                if self.host.change_enabled(REQUEST_LISTENING_OTHER_USER_NOOP, uid)? {
+                if self
+                    .host
+                    .change_enabled(REQUEST_LISTENING_OTHER_USER_NOOP, uid)?
+                {
                     return Ok(());
                 }
-                return Err(Exception::illegal_argument(format!("User {user} is not the current user.")));
+                return Err(Exception::illegal_argument(format!(
+                    "User {user} is not the current user."
+                )));
             }
         }
         if let Some(bar) = self.bar.lock().unwrap().as_ref() {
             let mut p = Parcel::new();
-            bar_aidl::RequestTileServiceListeningState { component_name: Some(component) }.write(&mut p);
+            bar_aidl::RequestTileServiceListeningState {
+                component_name: Some(component),
+            }
+            .write(&mut p);
             let _ = bar.transact(bar_aidl::REQUEST_TILE_SERVICE_LISTENING_STATE, &p, true);
         }
         Ok(())
@@ -170,12 +198,16 @@ impl Service for StatusBar {
                 })())
             }
             sb::REQUEST_TILE_SERVICE_LISTENING_STATE => {
-                let a = sb::RequestTileServiceListeningState::<ComponentName>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(self.request_tile_listening(call, a.component_name, a.user_id).map(|()| {
-                    let mut p = Parcel::new();
-                    sb::write_request_tile_service_listening_state_reply(&mut p);
-                    p
-                }))
+                let a = sb::RequestTileServiceListeningState::<ComponentName>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                reply(
+                    self.request_tile_listening(call, a.component_name, a.user_id)
+                        .map(|()| {
+                            let mut p = Parcel::new();
+                            sb::write_request_tile_service_listening_state_reply(&mut p);
+                            p
+                        }),
+                )
             }
             code => reply(Err(self.host.unimplemented("statusbar", code))),
         }

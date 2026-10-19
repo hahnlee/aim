@@ -106,13 +106,28 @@ pub struct Shaper {
 
 /// `PlaybackActivityMonitor.DUCK_VSHAPE`: to -14 dB over the focus ramp
 /// time of a notification (`getFocusRampTimeMs`).
-const DUCK: Shaper = Shaper { id: 1, scale: Some((500.0, &[(0.0, 1.0), (1.0, 0.2)])) };
+const DUCK: Shaper = Shaper {
+    id: 1,
+    scale: Some((500.0, &[(0.0, 1.0), (1.0, 0.2)])),
+};
 /// `STRONG_DUCK_VSHAPE`: to -35 dB.
-const STRONG_DUCK: Shaper = Shaper { id: 4, scale: Some((500.0, &[(0.0, 1.0), (1.0, 0.017783)])) };
+const STRONG_DUCK: Shaper = Shaper {
+    id: 4,
+    scale: Some((500.0, &[(0.0, 1.0), (1.0, 0.017783)])),
+};
 /// The default `FadeManagerConfiguration`'s fade out and in of a fadeable
 /// usage (`createVolShaperConfigForDuration`, `VOLUME_SHAPER_SYSTEM_FADE_ID`).
-const FADE_OUT: Shaper = Shaper { id: 2, scale: Some((FADE_OUT_DURATION_MS as f64, &[(0.0, 1.0), (0.25, 0.65), (1.0, 0.0)])) };
-const FADE_IN: Shaper = Shaper { id: 2, scale: Some((1000.0, &[(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)])) };
+const FADE_OUT: Shaper = Shaper {
+    id: 2,
+    scale: Some((
+        FADE_OUT_DURATION_MS as f64,
+        &[(0.0, 1.0), (0.25, 0.65), (1.0, 0.0)],
+    )),
+};
+const FADE_IN: Shaper = Shaper {
+    id: 2,
+    scale: Some((1000.0, &[(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)])),
+};
 
 impl WriteParcelable for Shaper {
     /// `VolumeShaperConfiguration`, and its `InterpolatorConfig`, as
@@ -193,18 +208,25 @@ fn fadeable(attributes: &Attributes, player_type: i32) -> bool {
 
 /// `getFadeOutDurationOnFocusLossMillis` of a focus request's attributes.
 pub fn fade_out_duration_ms(attributes: &Attributes) -> u64 {
-    if fadeable(attributes, PLAYER_TYPE_UNKNOWN) { FADE_OUT_DURATION_MS } else { 0 }
+    if fadeable(attributes, PLAYER_TYPE_UNKNOWN) {
+        FADE_OUT_DURATION_MS
+    } else {
+        0
+    }
 }
 
 /// `getFadeOutVolumeShaperConfig` and `getFadeInVolumeShaperConfig`: the
 /// fadeable usages' shapers.
 fn fade_shapers(attributes: &Attributes) -> Option<(Shaper, Shaper)> {
-    [USAGE_MEDIA, USAGE_GAME].contains(&attributes.usage).then_some((FADE_OUT, FADE_IN))
+    [USAGE_MEDIA, USAGE_GAME]
+        .contains(&attributes.usage)
+        .then_some((FADE_OUT, FADE_IN))
 }
 
 /// `AudioAttributes.isSystemUsage`.
 pub fn is_system_usage(usage: i32) -> bool {
-    usage == USAGE_CALL_ASSISTANT || (SYSTEM_USAGE_OFFSET..=SYSTEM_USAGE_OFFSET + 4).contains(&usage)
+    usage == USAGE_CALL_ASSISTANT
+        || (SYSTEM_USAGE_OFFSET..=SYSTEM_USAGE_OFFSET + 4).contains(&usage)
 }
 
 /// `android.media.AudioAttributes`, kept as written.
@@ -235,10 +257,17 @@ impl ReadParcelable for Attributes {
         }
         let force_ducking = match r.read_i32()? {
             ATTR_PARCEL_IS_NULL_BUNDLE => false,
-            ATTR_PARCEL_IS_VALID_BUNDLE => bundle::read(r)?.is_some_and(|b| b.get(KEY_FORCE_DUCKING) == Some(&Value::Bool(true))),
+            ATTR_PARCEL_IS_VALID_BUNDLE => bundle::read(r)?
+                .is_some_and(|b| b.get(KEY_FORCE_DUCKING) == Some(&Value::Bool(true))),
             _ => return Err(BAD_VALUE),
         };
-        Ok(Attributes { usage, content_type, flags, force_ducking, raw: Raw::capture(r, start) })
+        Ok(Attributes {
+            usage,
+            content_type,
+            flags,
+            force_ducking,
+            raw: Raw::capture(r, start),
+        })
     }
 }
 
@@ -253,7 +282,11 @@ impl Attributes {
     /// .setFlags(flags).build()`: the flags the builder takes, the
     /// communication notification usages folded into one.
     pub fn built(usage: i32, content_type: i32, flags: i32) -> Attributes {
-        let usage = if (7..=9).contains(&usage) { USAGE_NOTIFICATION } else { usage };
+        let usage = if (7..=9).contains(&usage) {
+            USAGE_NOTIFICATION
+        } else {
+            usage
+        };
         let flags = flags & FLAG_ALL_API_SET;
         let mut p = Parcel::new();
         p.write_i32(usage);
@@ -264,12 +297,22 @@ impl Attributes {
         p.write_i32(0); // no tags
         p.write_i32(ATTR_PARCEL_IS_NULL_BUNDLE);
         let raw = Raw::of(&p);
-        Attributes { usage, content_type, flags, force_ducking: false, raw }
+        Attributes {
+            usage,
+            content_type,
+            flags,
+            force_ducking: false,
+            raw,
+        }
     }
 
     /// `getUsage`: a system usage is unknown.
     pub fn public_usage(&self) -> i32 {
-        if is_system_usage(self.usage) { 0 } else { self.usage }
+        if is_system_usage(self.usage) {
+            0
+        } else {
+            self.usage
+        }
     }
 
     pub fn force_ducking(&self) -> bool {
@@ -288,7 +331,11 @@ impl Attributes {
     /// and whether anyone may capture it.
     fn write_anonymized(&self, p: &mut Parcel) {
         // A system usage is set as one, another as itself; `build()` folds the communication notifications into one.
-        let usage = if (7..=9).contains(&self.usage) { USAGE_NOTIFICATION } else { self.usage };
+        let usage = if (7..=9).contains(&self.usage) {
+            USAGE_NOTIFICATION
+        } else {
+            self.usage
+        };
         let mut flags = self.flags & FLAG_ALL_PUBLIC;
         if self.flags & FLAG_NO_SYSTEM_CAPTURE != 0 || self.flags & FLAG_NO_MEDIA_PROJECTION != 0 {
             flags |= FLAG_NO_MEDIA_PROJECTION | FLAG_NO_SYSTEM_CAPTURE;
@@ -301,7 +348,6 @@ impl Attributes {
         p.write_i32(0); // no tags
         p.write_i32(ATTR_PARCEL_IS_NULL_BUNDLE);
     }
-
 }
 
 /// `PlayerBase.PlayerIdCard`.
@@ -320,7 +366,12 @@ impl ReadParcelable for PlayerIdCard {
             Some(aim_binder_host::parcel::Binder::Handle(h)) => Some(h),
             _ => None,
         };
-        Ok(PlayerIdCard { player_type, attributes, player, session: r.read_i32()? })
+        Ok(PlayerIdCard {
+            player_type,
+            attributes,
+            player,
+            session: r.read_i32()?,
+        })
     }
 }
 
@@ -476,7 +527,8 @@ impl StateMonitor {
         }
         // The first active uid moved to the front, those before it shifted.
         if !self.active_uids.is_empty() && !self.active_uids.contains(&self.sorted_uids[0]) {
-            let first = (1..self.sorted_uids.len()).find(|&i| self.active_uids.contains(&self.sorted_uids[i]));
+            let first = (1..self.sorted_uids.len())
+                .find(|&i| self.active_uids.contains(&self.sorted_uids[i]));
             // With none found, the original puts -1 first.
             let uid = first.map_or(-1, |i| self.sorted_uids[i]);
             for i in (1..=first.unwrap_or(0)).rev() {
@@ -534,7 +586,14 @@ impl Playback {
 
     /// `trackPlayer` of a caller of `uid`, `pid` given `piid`: the player's
     /// `IPlayer` and death link, made by the caller.
-    pub fn track(&mut self, piid: i32, card: PlayerIdCard, uid: i32, pid: i32, player: Option<(Strong, u64)>) {
+    pub fn track(
+        &mut self,
+        piid: i32,
+        card: PlayerIdCard,
+        uid: i32,
+        pid: i32,
+        player: Option<(Strong, u64)>,
+    ) {
         self.players.insert(
             piid,
             Player {
@@ -557,7 +616,9 @@ impl Playback {
     /// `checkConfigurationCaller`: a player is changed by its own uid, or
     /// by root's (audioserver relays as itself).
     fn caller_may(&self, piid: i32, uid: i32) -> bool {
-        self.players.get(&piid).is_some_and(|p| uid == 0 || p.uid == uid)
+        self.players
+            .get(&piid)
+            .is_some_and(|p| uid == 0 || p.uid == uid)
     }
 
     /// `playerAttributes`: whether it changed.
@@ -584,7 +645,9 @@ impl Playback {
 
     /// `playerEvent`: whether the configurations changed.
     pub fn event(&mut self, piid: i32, event: i32, values: &[i32], uid: i32) -> bool {
-        let Some(p) = self.players.get(&piid) else { return false };
+        let Some(p) = self.players.get(&piid) else {
+            return false;
+        };
         if event == PLAYER_UPDATE_PORT_ID {
             if let Some(port) = values.first() {
                 self.port_ids.insert(piid, *port);
@@ -641,12 +704,20 @@ impl Playback {
     }
 
     fn by_port(&self, port: i32) -> Option<i32> {
-        self.port_ids.iter().find(|(_, p)| **p == port).map(|(piid, _)| *piid)
+        self.port_ids
+            .iter()
+            .find(|(_, p)| **p == port)
+            .map(|(piid, _)| *piid)
     }
 
     /// `portMuteEvent` from audioserver: `handleMutedEvent`.
     pub fn port_mute(&mut self, port: i32, muted: i32) -> bool {
-        let Some(p) = self.by_port(port).and_then(|piid| self.players.get_mut(&piid)) else { return false };
+        let Some(p) = self
+            .by_port(port)
+            .and_then(|piid| self.players.get_mut(&piid))
+        else {
+            return false;
+        };
         if p.player_type == PLAYER_TYPE_JAM_SOUNDPOOL {
             return false;
         }
@@ -656,8 +727,18 @@ impl Playback {
     }
 
     /// `portEvent` from audioserver: a format update (`handleFormatEvent`).
-    pub fn port_event(&mut self, port: i32, event: i32, extras: Option<&std::collections::HashMap<String, Value>>) -> bool {
-        let Some(p) = self.by_port(port).and_then(|piid| self.players.get_mut(&piid)) else { return false };
+    pub fn port_event(
+        &mut self,
+        port: i32,
+        event: i32,
+        extras: Option<&std::collections::HashMap<String, Value>>,
+    ) -> bool {
+        let Some(p) = self
+            .by_port(port)
+            .and_then(|piid| self.players.get_mut(&piid))
+        else {
+            return false;
+        };
         if p.player_type == PLAYER_TYPE_JAM_SOUNDPOOL || event != PLAYER_UPDATE_FORMAT {
             return false;
         }
@@ -666,7 +747,11 @@ impl Playback {
             Some(Value::Int(v)) => *v,
             _ => 0,
         };
-        let format = (matches!(extras.get(EXTRA_SPATIALIZED), Some(Value::Bool(true))), int(EXTRA_CHANNEL_MASK), int(EXTRA_SAMPLE_RATE));
+        let format = (
+            matches!(extras.get(EXTRA_SPATIALIZED), Some(Value::Bool(true))),
+            int(EXTRA_CHANNEL_MASK),
+            int(EXTRA_SAMPLE_RATE),
+        );
         let changed = p.format != format;
         p.format = format;
         changed
@@ -674,7 +759,12 @@ impl Playback {
 
     /// `registerPlaybackCallback`.
     pub fn add_client(&mut self, dispatcher: Strong, death: u64, privileged: bool) {
-        self.clients.push(Client { dispatcher, death, privileged, errors: 0 });
+        self.clients.push(Client {
+            dispatcher,
+            death,
+            privileged,
+            errors: 0,
+        });
     }
 
     /// `RecordingActivityMonitor.registerRecordingCallback`.
@@ -684,14 +774,18 @@ impl Playback {
 
     /// `unregisterRecordingCallback`: the death links to clear.
     pub fn remove_recording_client(&mut self, handle: u32) -> Vec<(Strong, u64)> {
-        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.recording_clients).into_iter().partition(|(d, _, _)| d.handle == handle);
+        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.recording_clients)
+            .into_iter()
+            .partition(|(d, _, _)| d.handle == handle);
         self.recording_clients = kept;
         gone.into_iter().map(|(d, death, _)| (d, death)).collect()
     }
 
     /// `unregisterPlaybackCallback`: the death links to clear.
     pub fn remove_client(&mut self, handle: u32) -> Vec<(Strong, u64)> {
-        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.clients).into_iter().partition(|c| c.dispatcher.handle == handle);
+        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.clients)
+            .into_iter()
+            .partition(|c| c.dispatcher.handle == handle);
         self.clients = kept;
         gone.into_iter().map(|c| (c.dispatcher, c.death)).collect()
     }
@@ -699,7 +793,11 @@ impl Playback {
     /// `getActivePlaybackConfigurations`: all of them, or the active ones
     /// anonymized.
     pub fn write_configurations(&self, p: &mut Parcel, privileged: bool) {
-        let players: Vec<&Player> = self.players.values().filter(|pl| privileged || pl.active()).collect();
+        let players: Vec<&Player> = self
+            .players
+            .values()
+            .filter(|pl| privileged || pl.active())
+            .collect();
         p.write_i32(players.len() as i32);
         for pl in players {
             p.write_i32(1);
@@ -714,25 +812,44 @@ impl Playback {
             return;
         }
         let mut errors = Vec::new();
-        for (i, c) in self.clients.iter().enumerate().filter(|(_, c)| c.errors < MAX_ERRORS) {
+        for (i, c) in self
+            .clients
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.errors < MAX_ERRORS)
+        {
             let mut p = Parcel::new();
             p.write_interface_token(DISPATCHER_DESCRIPTOR);
             self.write_configurations(&mut p, c.privileged);
             p.write_bool(c.privileged && released);
-            if c.dispatcher.transact(DISPATCH_PLAYBACK_CONFIG_CHANGE, &p, true).is_err() {
+            if c.dispatcher
+                .transact(DISPATCH_PLAYBACK_CONFIG_CHANGE, &p, true)
+                .is_err()
+            {
                 errors.push(i);
             }
         }
         for i in errors {
             self.clients[i].errors += 1;
         }
-        let configs: Vec<_> = self.players.values().map(|p| (p.piid, p.uid, p.player_type, p.active())).collect();
+        let configs: Vec<_> = self
+            .players
+            .values()
+            .map(|p| (p.piid, p.uid, p.player_type, p.active()))
+            .collect();
         self.monitor.changed(&configs);
     }
 
     /// `trackRecorder`.
     pub fn track_recorder(&mut self, riid: i32, recorder: Strong, death: u64) {
-        self.recorders.insert(riid, Recorder { recorder, death, started: false });
+        self.recorders.insert(
+            riid,
+            Recorder {
+                recorder,
+                death,
+                started: false,
+            },
+        );
     }
 
     /// `recorderEvent`.
@@ -749,7 +866,11 @@ impl Playback {
 
     /// The players of a dead process (`IPlayer` deaths).
     pub fn players_of(&self, handle: u32) -> Vec<i32> {
-        self.players.values().filter(|p| p.iplayer == Some(handle)).map(|p| p.piid).collect()
+        self.players
+            .values()
+            .filter(|p| p.iplayer == Some(handle))
+            .map(|p| p.piid)
+            .collect()
     }
 
     /// A call to a player's `IPlayer`; none without one (`getPlayerProxy`
@@ -765,11 +886,17 @@ impl Playback {
     /// Sends the `IPlayer` calls made.
     pub fn send(&mut self) {
         for (piid, call) in std::mem::take(&mut self.calls) {
-            let Some((player, _)) = self.players.get(&piid).and_then(|p| p.player.as_ref()) else { continue };
+            let Some((player, _)) = self.players.get(&piid).and_then(|p| p.player.as_ref()) else {
+                continue;
+            };
             let mut p = Parcel::new();
             let code = match call {
                 PlayerCall::Shape(shaper, operation) => {
-                    iplayer::ApplyVolumeShaper { configuration: Some(shaper), operation: Some(operation) }.write(&mut p);
+                    iplayer::ApplyVolumeShaper {
+                        configuration: Some(shaper),
+                        operation: Some(operation),
+                    }
+                    .write(&mut p);
                     iplayer::APPLY_VOLUME_SHAPER
                 }
                 PlayerCall::Volume(vol) => {
@@ -785,11 +912,19 @@ impl Playback {
 
     /// `DuckedApp.addDuck`.
     fn add_duck(&mut self, uid: i32, piid: i32, skip_ramp: bool) {
-        let Some(&(strong, ref ducked)) = self.duckers.get(&uid) else { return };
+        let Some(&(strong, ref ducked)) = self.duckers.get(&uid) else {
+            return;
+        };
         if ducked.contains(&piid) {
             return;
         }
-        if self.call(piid, PlayerCall::Shape(if strong { STRONG_DUCK } else { DUCK }, Operation::Play { skip_ramp })) {
+        if self.call(
+            piid,
+            PlayerCall::Shape(
+                if strong { STRONG_DUCK } else { DUCK },
+                Operation::Play { skip_ramp },
+            ),
+        ) {
             self.duckers.get_mut(&uid).unwrap().1.push(piid);
         }
     }
@@ -804,20 +939,32 @@ impl Playback {
     /// winner's) ducked, strongly for an assistant; none when one of them
     /// speaks (unless forced) or cannot be ducked, and the loser is then
     /// told instead.
-    pub fn duck_players(&mut self, winner_uid: i32, loser_uid: i32, strong: bool, force: bool) -> bool {
+    pub fn duck_players(
+        &mut self,
+        winner_uid: i32,
+        loser_uid: i32,
+        strong: bool,
+        force: bool,
+    ) -> bool {
         if self.players.is_empty() {
             return true;
         }
         let mut to_duck = Vec::new();
-        for p in self.players.values().filter(|p| p.uid != winner_uid && p.uid == loser_uid && p.state == PLAYER_STATE_STARTED) {
-            if !force && p.attributes.content_type == CONTENT_TYPE_SPEECH || UNDUCKABLE_PLAYER_TYPES.contains(&p.player_type) {
+        for p in self.players.values().filter(|p| {
+            p.uid != winner_uid && p.uid == loser_uid && p.state == PLAYER_STATE_STARTED
+        }) {
+            if !force && p.attributes.content_type == CONTENT_TYPE_SPEECH
+                || UNDUCKABLE_PLAYER_TYPES.contains(&p.player_type)
+            {
                 return false;
             }
             to_duck.push(p.piid);
         }
         // `duckUid`: the uid is ducked even without players, for those
         // that start.
-        self.duckers.entry(loser_uid).or_insert((strong, Vec::new()));
+        self.duckers
+            .entry(loser_uid)
+            .or_insert((strong, Vec::new()));
         for piid in to_duck {
             self.add_duck(loser_uid, piid, false);
         }
@@ -826,20 +973,30 @@ impl Playback {
 
     /// `DuckingManager.unduckUid`.
     fn unduck_uid(&mut self, uid: i32) {
-        let Some((strong, ducked)) = self.duckers.remove(&uid) else { return };
+        let Some((strong, ducked)) = self.duckers.remove(&uid) else {
+            return;
+        };
         let id = if strong { STRONG_DUCK.id } else { DUCK.id };
         for piid in ducked {
-            self.call(piid, PlayerCall::Shape(Shaper { id, scale: None }, Operation::Reverse));
+            self.call(
+                piid,
+                PlayerCall::Shape(Shaper { id, scale: None }, Operation::Reverse),
+            );
         }
     }
 
     /// `FadedOutApp.addFade`.
     fn add_fade(&mut self, uid: i32, piid: i32, skip_ramp: bool) {
-        let Some(faded) = self.faded.get(&uid) else { return };
+        let Some(faded) = self.faded.get(&uid) else {
+            return;
+        };
         if faded.contains(&piid) {
             return;
         }
-        if self.call(piid, PlayerCall::Shape(FADE_OUT, Operation::Play { skip_ramp })) {
+        if self.call(
+            piid,
+            PlayerCall::Shape(FADE_OUT, Operation::Play { skip_ramp }),
+        ) {
             self.faded.get_mut(&uid).unwrap().push(piid);
         }
     }
@@ -856,16 +1013,26 @@ impl Playback {
     /// winner's) faded out, unless the winner's request is speech, the
     /// loser pauses on a duck, or one of them is not fadeable. Whether
     /// some are.
-    pub fn fade_out_players(&mut self, winner_uid: i32, winner_content_type: i32, loser_uid: i32, loser_flags: i32) -> bool {
+    pub fn fade_out_players(
+        &mut self,
+        winner_uid: i32,
+        winner_content_type: i32,
+        loser_uid: i32,
+        loser_flags: i32,
+    ) -> bool {
         if self.players.is_empty() {
             return false;
         }
         // `canCauseFadeOut`.
-        if winner_content_type == CONTENT_TYPE_SPEECH || loser_flags & AUDIOFOCUS_FLAG_PAUSES_ON_DUCKABLE_LOSS != 0 {
+        if winner_content_type == CONTENT_TYPE_SPEECH
+            || loser_flags & AUDIOFOCUS_FLAG_PAUSES_ON_DUCKABLE_LOSS != 0
+        {
             return false;
         }
         let mut to_fade = Vec::new();
-        for p in self.players.values().filter(|p| p.uid != winner_uid && p.uid == loser_uid && p.state == PLAYER_STATE_STARTED) {
+        for p in self.players.values().filter(|p| {
+            p.uid != winner_uid && p.uid == loser_uid && p.state == PLAYER_STATE_STARTED
+        }) {
             if !fadeable(&p.attributes, p.player_type) {
                 return false;
             }
@@ -885,9 +1052,13 @@ impl Playback {
     /// joining its fade out; one whose usage no longer fades is left, as
     /// the original's null shaper fails.
     fn unfade_uid(&mut self, uid: i32) {
-        let Some(faded) = self.faded.remove(&uid) else { return };
+        let Some(faded) = self.faded.remove(&uid) else {
+            return;
+        };
         for piid in faded {
-            let Some(p) = self.players.get(&piid) else { continue };
+            let Some(p) = self.players.get(&piid) else {
+                continue;
+            };
             match fade_shapers(&p.attributes) {
                 Some((out, fade_in)) => {
                     self.call(piid, PlayerCall::Shape(fade_in, Operation::Join(out.id)));
@@ -911,7 +1082,12 @@ impl Playback {
 
     /// `mutePlayersForCall`: media and game players.
     pub fn mute_for_call(&mut self) {
-        let piids: Vec<i32> = self.players.values().filter(|p| USAGES_TO_MUTE_IN_RING_OR_CALL.contains(&p.attributes.public_usage())).map(|p| p.piid).collect();
+        let piids: Vec<i32> = self
+            .players
+            .values()
+            .filter(|p| USAGES_TO_MUTE_IN_RING_OR_CALL.contains(&p.attributes.public_usage()))
+            .map(|p| p.piid)
+            .collect();
         for piid in piids {
             if self.call(piid, PlayerCall::Volume(0.0)) {
                 self.muted.push(piid);
@@ -939,7 +1115,9 @@ impl Playback {
 }
 
 /// A port event's extras (`PersistableBundle`, as a Bundle is written).
-pub fn read_extras(raw: &crate::app_host::kept::RawBundle) -> Option<std::collections::HashMap<String, Value>> {
+pub fn read_extras(
+    raw: &crate::app_host::kept::RawBundle,
+) -> Option<std::collections::HashMap<String, Value>> {
     let mut p = Parcel::new();
     raw.write_to(&mut p);
     bundle::read(&mut Reader::new(p.data(), &[])).ok().flatten()
@@ -970,7 +1148,12 @@ mod tests {
     }
 
     fn card() -> PlayerIdCard {
-        PlayerIdCard { player_type: 1, attributes: attributes(1, 0), player: None, session: 9 }
+        PlayerIdCard {
+            player_type: 1,
+            attributes: attributes(1, 0),
+            player: None,
+            session: 9,
+        }
     }
 
     #[test]
@@ -1014,14 +1197,35 @@ mod tests {
     #[test]
     fn a_sound_pool_reports_only_its_release() {
         let mut pb = Playback::default();
-        pb.track(5, PlayerIdCard { player_type: PLAYER_TYPE_JAM_SOUNDPOOL, ..card() }, 10_154, 77, None);
+        pb.track(
+            5,
+            PlayerIdCard {
+                player_type: PLAYER_TYPE_JAM_SOUNDPOOL,
+                ..card()
+            },
+            10_154,
+            77,
+            None,
+        );
         assert!(!pb.event(5, PLAYER_STATE_STARTED, &[], 10_154));
         assert!(pb.event(5, PLAYER_STATE_RELEASED, &[], 10_154));
     }
 
     /// A player of `uid` with an `IPlayer`, of `usage` and `content_type`.
-    fn track(pb: &mut Playback, piid: i32, uid: i32, usage: i32, content_type: i32, player_type: i32) {
-        let card = PlayerIdCard { player_type, attributes: Attributes::built(usage, content_type, 0), player: Some(piid as u32), session: 9 };
+    fn track(
+        pb: &mut Playback,
+        piid: i32,
+        uid: i32,
+        usage: i32,
+        content_type: i32,
+        player_type: i32,
+    ) {
+        let card = PlayerIdCard {
+            player_type,
+            attributes: Attributes::built(usage, content_type, 0),
+            player: Some(piid as u32),
+            session: 9,
+        };
         pb.track(piid, card, uid, 77, None);
     }
 
@@ -1034,17 +1238,35 @@ mod tests {
         pb.event(5, PLAYER_STATE_STARTED, &[], 10_154);
         pb.event(7, PLAYER_STATE_STARTED, &[], 10_155);
         assert!(pb.duck_players(10_155, 10_154, false, false));
-        assert_eq!(pb.take_calls(), [(5, PlayerCall::Shape(DUCK, Operation::Play { skip_ramp: false }))]);
+        assert_eq!(
+            pb.take_calls(),
+            [(
+                5,
+                PlayerCall::Shape(DUCK, Operation::Play { skip_ramp: false })
+            )]
+        );
         assert_eq!(pb.ducked_uids(), [10_154]);
         // One that starts while ducked is ducked at once.
         pb.event(6, PLAYER_STATE_STARTED, &[], 10_154);
-        assert_eq!(pb.take_calls(), [(6, PlayerCall::Shape(DUCK, Operation::Play { skip_ramp: true }))]);
+        assert_eq!(
+            pb.take_calls(),
+            [(
+                6,
+                PlayerCall::Shape(DUCK, Operation::Play { skip_ramp: true })
+            )]
+        );
         // The winner's own players are not ducked; a released one is forgotten.
         pb.release(6, 10_154);
         pb.restore(10_155);
         assert!(pb.take_calls().is_empty());
         pb.restore(10_154);
-        assert_eq!(pb.take_calls(), [(5, PlayerCall::Shape(Shaper { id: 1, scale: None }, Operation::Reverse))]);
+        assert_eq!(
+            pb.take_calls(),
+            [(
+                5,
+                PlayerCall::Shape(Shaper { id: 1, scale: None }, Operation::Reverse)
+            )]
+        );
         assert!(pb.ducked_uids().is_empty());
     }
 
@@ -1057,7 +1279,13 @@ mod tests {
         assert!(pb.ducked_uids().is_empty());
         // A forced duck (accessibility's) ducks speech, strongly for an assistant.
         assert!(pb.duck_players(10_155, 10_154, true, true));
-        assert_eq!(pb.take_calls(), [(5, PlayerCall::Shape(STRONG_DUCK, Operation::Play { skip_ramp: false }))]);
+        assert_eq!(
+            pb.take_calls(),
+            [(
+                5,
+                PlayerCall::Shape(STRONG_DUCK, Operation::Play { skip_ramp: false })
+            )]
+        );
         track(&mut pb, 6, 10_156, USAGE_MEDIA, 2, PLAYER_TYPE_AAUDIO);
         pb.event(6, PLAYER_STATE_STARTED, &[], 10_156);
         assert!(!pb.duck_players(10_155, 10_156, false, true));
@@ -1077,14 +1305,26 @@ mod tests {
         assert!(!pb.fade_out_players(10_155, CONTENT_TYPE_SPEECH, 10_154, 0));
         assert!(!pb.fade_out_players(10_155, 2, 10_154, AUDIOFOCUS_FLAG_PAUSES_ON_DUCKABLE_LOSS));
         assert!(pb.fade_out_players(10_155, 2, 10_154, 0));
-        assert_eq!(pb.take_calls(), [(5, PlayerCall::Shape(FADE_OUT, Operation::Play { skip_ramp: false }))]);
+        assert_eq!(
+            pb.take_calls(),
+            [(
+                5,
+                PlayerCall::Shape(FADE_OUT, Operation::Play { skip_ramp: false })
+            )]
+        );
         pb.forget_uid(10_154);
-        assert_eq!(pb.take_calls(), [(5, PlayerCall::Shape(FADE_IN, Operation::Join(2)))]);
+        assert_eq!(
+            pb.take_calls(),
+            [(5, PlayerCall::Shape(FADE_IN, Operation::Join(2)))]
+        );
         // An alarm is not faded.
         track(&mut pb, 6, 10_156, 4, 2, 1);
         pb.event(6, PLAYER_STATE_STARTED, &[], 10_156);
         assert!(!pb.fade_out_players(10_155, 2, 10_156, 0));
-        assert_eq!(fade_out_duration_ms(&Attributes::built(USAGE_GAME, 2, 0)), 2000);
+        assert_eq!(
+            fade_out_duration_ms(&Attributes::built(USAGE_GAME, 2, 0)),
+            2000
+        );
         assert_eq!(fade_out_duration_ms(&Attributes::built(4, 2, 0)), 0);
     }
 
@@ -1095,9 +1335,15 @@ mod tests {
         track(&mut pb, 6, 10_154, USAGE_GAME, 2, 1);
         track(&mut pb, 7, 10_154, USAGE_NOTIFICATION, 4, 1);
         pb.mute_for_call();
-        assert_eq!(pb.take_calls(), [(5, PlayerCall::Volume(0.0)), (6, PlayerCall::Volume(0.0))]);
+        assert_eq!(
+            pb.take_calls(),
+            [(5, PlayerCall::Volume(0.0)), (6, PlayerCall::Volume(0.0))]
+        );
         pb.unmute_for_call();
-        assert_eq!(pb.take_calls(), [(5, PlayerCall::Volume(1.0)), (6, PlayerCall::Volume(1.0))]);
+        assert_eq!(
+            pb.take_calls(),
+            [(5, PlayerCall::Volume(1.0)), (6, PlayerCall::Volume(1.0))]
+        );
         pb.unmute_for_call();
         assert!(pb.take_calls().is_empty());
     }
@@ -1111,18 +1357,58 @@ mod tests {
         Operation::Join(2).write_to(&mut p);
         let mut r = Reader::new(p.data(), &[]);
         assert_eq!(r.read_i32().unwrap(), 4 * 5 + 8 + 4 * 5 + 4 * 4); // its size
-        assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap(), r.read_i32().unwrap()), (1, 1, 1 << 1)); // SCALE, id, CLOCK_TIME
+        assert_eq!(
+            (
+                r.read_i32().unwrap(),
+                r.read_i32().unwrap(),
+                r.read_i32().unwrap()
+            ),
+            (1, 1, 1 << 1)
+        ); // SCALE, id, CLOCK_TIME
         assert_eq!(f64::from_bits(r.read_i64().unwrap() as u64), 500.0);
         assert_eq!(r.read_i32().unwrap(), 1); // an interpolator
-        assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap()), (4 * 5 + 4 * 4, 2)); // its size, CUBIC
-        assert_eq!((r.read_f32().unwrap(), r.read_f32().unwrap(), r.read_i32().unwrap()), (0.0, 0.0, 4));
+        assert_eq!(
+            (r.read_i32().unwrap(), r.read_i32().unwrap()),
+            (4 * 5 + 4 * 4, 2)
+        ); // its size, CUBIC
+        assert_eq!(
+            (
+                r.read_f32().unwrap(),
+                r.read_f32().unwrap(),
+                r.read_i32().unwrap()
+            ),
+            (0.0, 0.0, 4)
+        );
         let xy: Vec<f32> = (0..4).map(|_| r.read_f32().unwrap()).collect();
         assert_eq!(xy, [0.0, 1.0, 1.0, 0.2]);
         // An id alone: no interpolator.
-        assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap(), r.read_i32().unwrap(), r.read_i32().unwrap()), (4 * 4 + 8 + 4, 0, 1, 0));
+        assert_eq!(
+            (
+                r.read_i32().unwrap(),
+                r.read_i32().unwrap(),
+                r.read_i32().unwrap(),
+                r.read_i32().unwrap()
+            ),
+            (4 * 4 + 8 + 4, 0, 1, 0)
+        );
         assert_eq!((r.read_i64().unwrap(), r.read_i32().unwrap()), (0, 0));
-        assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap(), r.read_i32().unwrap(), r.read_f32().unwrap()), (16, 1 << 4, -1, 1.0));
-        assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap(), r.read_i32().unwrap()), (16, 1 << 2, 2));
+        assert_eq!(
+            (
+                r.read_i32().unwrap(),
+                r.read_i32().unwrap(),
+                r.read_i32().unwrap(),
+                r.read_f32().unwrap()
+            ),
+            (16, 1 << 4, -1, 1.0)
+        );
+        assert_eq!(
+            (
+                r.read_i32().unwrap(),
+                r.read_i32().unwrap(),
+                r.read_i32().unwrap()
+            ),
+            (16, 1 << 2, 2)
+        );
         assert!(r.read_f32().unwrap().is_nan());
         assert_eq!(r.remaining(), 0);
     }
@@ -1153,7 +1439,9 @@ mod tests {
         let told = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut m = StateMonitor::default();
         let t = told.clone();
-        m.set_listener(Box::new(move |uid, kind| t.lock().unwrap().push((uid, kind))));
+        m.set_listener(Box::new(move |uid, kind| {
+            t.lock().unwrap().push((uid, kind))
+        }));
         m.changed(&[(1, 10_100, 2, true)]);
         m.changed(&[(1, 10_100, 2, true), (2, 10_200, 2, true)]);
         assert_eq!(m.sorted_uids(), [10_200, 10_100]);
@@ -1162,7 +1450,10 @@ mod tests {
         assert!(m.is_playback_active(10_100) && !m.is_playback_active(10_200));
         // A player gone is told too.
         m.changed(&[]);
-        assert_eq!(*told.lock().unwrap(), [(10_100, 2), (10_200, 2), (10_200, 2), (10_100, 2)]);
+        assert_eq!(
+            *told.lock().unwrap(),
+            [(10_100, 2), (10_200, 2), (10_200, 2), (10_100, 2)]
+        );
         m.changed(&[(3, 10_300, 2, true)]);
         m.changed(&[]);
         assert_eq!(m.sorted_uids(), [10_300, 10_100, 10_200]);

@@ -229,7 +229,9 @@ impl Writes {
         let Some((pre, dropped)) = inner.pre_state(call.sent) else {
             return Some(Answer::NotModelled);
         };
-        let Ok(filter) = inner.filter(&pre) else { return Some(Answer::NotModelled) };
+        let Ok(filter) = inner.filter(&pre) else {
+            return Some(Answer::NotModelled);
+        };
         let q = Query {
             state: &pre,
             filter: &filter,
@@ -445,7 +447,11 @@ impl Inner {
             .map(|(_, s, dropped)| (s.clone(), *dropped))
     }
 
-    fn filter(&mut self, state: &Arc<State>) -> std::result::Result<Arc<AppsFilter>, super::domain_verification::uri_parcel::MatchError> {
+    fn filter(
+        &mut self,
+        state: &Arc<State>,
+    ) -> std::result::Result<Arc<AppsFilter>, super::domain_verification::uri_parcel::MatchError>
+    {
         match &self.filter {
             Some((s, f)) if Arc::ptr_eq(s, state) => Ok(f.clone()),
             _ => {

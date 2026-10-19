@@ -196,12 +196,26 @@ pub struct Observation {
 }
 impl Observation {
     /// Restore weak resources from an authenticated kernel fork receipt.
-    pub fn from_parts(data:PrivateFd,status:super::status::ReadOnly,notification:PrivateFd)->io::Result<Self>{
-        if unsafe{libc::isatty(data.as_raw_fd())}!=1{return Err(error(libc::ENOTTY));}
-        let mut stat:libc::stat=unsafe{std::mem::zeroed()};
-        if unsafe{libc::fstat(notification.as_raw_fd(),&mut stat)}<0{return Err(io::Error::last_os_error());}
-        if stat.st_mode&libc::S_IFMT!=libc::S_IFIFO{return Err(error(libc::EPROTO));}
-        Ok(Self{data,status,notification:Some(notification)})
+    pub fn from_parts(
+        data: PrivateFd,
+        status: super::status::ReadOnly,
+        notification: PrivateFd,
+    ) -> io::Result<Self> {
+        if unsafe { libc::isatty(data.as_raw_fd()) } != 1 {
+            return Err(error(libc::ENOTTY));
+        }
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(notification.as_raw_fd(), &mut stat) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if stat.st_mode & libc::S_IFMT != libc::S_IFIFO {
+            return Err(error(libc::EPROTO));
+        }
+        Ok(Self {
+            data,
+            status,
+            notification: Some(notification),
+        })
     }
     pub fn data(&self) -> BorrowedFd<'_> {
         self.data.as_fd()
@@ -391,8 +405,18 @@ impl Registry {
             .checked_add(1)
             .ok_or_else(|| error(libc::EOVERFLOW))?;
         let retained = right.try_clone()?;
-        self.bridge.as_ref().unwrap().register(reader.as_raw_fd(), tag)?;
-        self.carriers.insert(key, Carrier { reader, right: retained, tag });
+        self.bridge
+            .as_ref()
+            .unwrap()
+            .register(reader.as_raw_fd(), tag)?;
+        self.carriers.insert(
+            key,
+            Carrier {
+                reader,
+                right: retained,
+                tag,
+            },
+        );
         Ok(writer)
     }
     fn ensure_bridge(&mut self) -> io::Result<()> {
@@ -474,14 +498,14 @@ const SHUTDOWN: u32 = 8;
 const EXPORT_CARRIER: u32 = 9;
 const IMPORT_CARRIER: u32 = 10;
 const CLASSIFY_CARRIER: u32 = 11;
-const GET_LOCK:u32=12;
-const SET_LOCK:u32=13;
-const CLAIM_TTY:u32=14;
-const GET_SESSION:u32=15;
-const SET_FOREGROUND:u32=16;
-const DETACH_TTY:u32=17;
-const OPEN_SLAVE_NODE:u32=18;
-const INHERIT_PROCESS:u32=19;
+const GET_LOCK: u32 = 12;
+const SET_LOCK: u32 = 13;
+const CLAIM_TTY: u32 = 14;
+const GET_SESSION: u32 = 15;
+const SET_FOREGROUND: u32 = 16;
+const DETACH_TTY: u32 = 17;
+const OPEN_SLAVE_NODE: u32 = 18;
+const INHERIT_PROCESS: u32 = 19;
 pub const CLASS: u32 = 7;
 const MAX_DATA: usize = 4096;
 #[derive(Default)]
@@ -645,7 +669,13 @@ impl Registry {
         let capability = self.grant_flags(pair, side, flags)?;
         self.capability_reply(capability, side, flags, request)
     }
-    fn capability_reply(&self, capability: Capability, side: Side, flags: u64, request: &Message) -> io::Result<()> {
+    fn capability_reply(
+        &self,
+        capability: Capability,
+        side: Side,
+        flags: u64,
+        request: &Message,
+    ) -> io::Result<()> {
         let backing = SendRight::from_fd(capability.descriptor())?;
         let notification = capability
             .notification()
@@ -678,7 +708,7 @@ pub struct Server {
     controller: ProcessIdentity,
     stopping: bool,
     parent_controller: bool,
-    sessions:super::session::Sessions,
+    sessions: super::session::Sessions,
 }
 #[derive(Clone, Debug)]
 pub struct OwnerConfig {
@@ -728,12 +758,16 @@ impl OwnerConfig {
         published.and(removed)
     }
     pub fn read(path: &std::path::Path, init: ProcessIdentity) -> io::Result<Self> {
-        let record=Self::read_record(path)?;
-        if record.process!=init||!init.is_live(){return Err(error(libc::EPERM));}
+        let record = Self::read_record(path)?;
+        if record.process != init || !init.is_live() {
+            return Err(error(libc::EPERM));
+        }
         Ok(record)
     }
-    pub fn read_standalone(path:&std::path::Path)->io::Result<Self>{Self::read_record(path)}
-    fn read_record(path:&std::path::Path)->io::Result<Self>{
+    pub fn read_standalone(path: &std::path::Path) -> io::Result<Self> {
+        Self::read_record(path)
+    }
+    fn read_record(path: &std::path::Path) -> io::Result<Self> {
         use std::{io::Read, os::unix::fs::OpenOptionsExt};
         let mut file = crate::private_fd::PrivateFile::allocate(|| {
             std::fs::OpenOptions::new()
@@ -748,7 +782,9 @@ impl OwnerConfig {
         if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
             return Err(error(libc::EPROTO));
         }
-        if stat.st_uid!=unsafe{libc::geteuid()}||stat.st_mode&0o077!=0{return Err(error(libc::EPERM));}
+        if stat.st_uid != unsafe { libc::geteuid() } || stat.st_mode & 0o077 != 0 {
+            return Err(error(libc::EPERM));
+        }
         let mut text = String::new();
         file.by_ref().take(1025).read_to_string(&mut text)?;
         if text.len() > 1024 || !text.ends_with('\n') {
@@ -783,12 +819,19 @@ pub struct RunningServer {
 }
 impl RunningServer {
     pub fn start(endpoint: &str, runtime: &std::path::Path) -> io::Result<Self> {
-        Self::from_server(endpoint,Server::register(endpoint,runtime)?)
+        Self::from_server(endpoint, Server::register(endpoint, runtime)?)
     }
-    pub fn start_with_credentials(endpoint:&str,runtime:&std::path::Path,table:&std::path::Path)->io::Result<Self>{
-        Self::from_server(endpoint,Server::register(endpoint,runtime)?.with_credentials(table)?)
+    pub fn start_with_credentials(
+        endpoint: &str,
+        runtime: &std::path::Path,
+        table: &std::path::Path,
+    ) -> io::Result<Self> {
+        Self::from_server(
+            endpoint,
+            Server::register(endpoint, runtime)?.with_credentials(table)?,
+        )
     }
-    fn from_server(endpoint:&str,mut server:Server)->io::Result<Self>{
+    fn from_server(endpoint: &str, mut server: Server) -> io::Result<Self> {
         let process = ProcessIdentity::running(unsafe { libc::getpid() })?;
         let client = Client::lookup(endpoint, process)?;
         let worker = std::thread::Builder::new()
@@ -847,27 +890,37 @@ impl Server {
             controller: ProcessIdentity::running(unsafe { libc::getpid() })?,
             stopping: false,
             parent_controller: false,
-            sessions:super::session::Sessions::new(),
+            sessions: super::session::Sessions::new(),
         })
     }
     pub fn with_parent_controller(mut self) -> io::Result<Self> {
         self.controller = ProcessIdentity::running(unsafe { libc::getppid() })?;
         self.registry.ensure_bridge()?;
-        self.registry.bridge.as_ref().unwrap().watch_process(self.controller.host_pid)?;
+        self.registry
+            .bridge
+            .as_ref()
+            .unwrap()
+            .watch_process(self.controller.host_pid)?;
         self.parent_controller = true;
         Ok(self)
     }
-    pub fn with_credentials(mut self,table:&std::path::Path)->io::Result<Self>{
-        let table=std::fs::canonicalize(table)?;
-        if !std::fs::symlink_metadata(&table)?.is_dir(){return Err(error(libc::ENOTDIR));}
-        self.sessions.set_table(table);Ok(self)
+    pub fn with_credentials(mut self, table: &std::path::Path) -> io::Result<Self> {
+        let table = std::fs::canonicalize(table)?;
+        if !std::fs::symlink_metadata(&table)?.is_dir() {
+            return Err(error(libc::ENOTDIR));
+        }
+        self.sessions.set_table(table);
+        Ok(self)
     }
     pub fn run(&mut self) -> io::Result<()> {
         while !self.stopping {
             match self.step(Duration::from_secs(3600)) {
                 Ok(()) => {
-                    if self.parent_controller && !self.controller.is_live()
-                        && self.registry.descriptions.is_empty() && self.registry.carriers.is_empty() {
+                    if self.parent_controller
+                        && !self.controller.is_live()
+                        && self.registry.descriptions.is_empty()
+                        && self.registry.carriers.is_empty()
+                    {
                         self.stopping = true;
                     }
                 }
@@ -904,8 +957,16 @@ impl Server {
             return Err(error(libc::EIO));
         }
         let header = unsafe { &*words.as_ptr().cast::<Header>() };
-        if self.registry.bridge_port.as_ref().is_some_and(|port|port.name==header.local){
-            if let Some((0,pid,true))=super::carrier::event(header.id,&words){self.sessions.leader_exit(pid)?;return Ok(());}
+        if self
+            .registry
+            .bridge_port
+            .as_ref()
+            .is_some_and(|port| port.name == header.local)
+        {
+            if let Some((0, pid, true)) = super::carrier::event(header.id, &words) {
+                self.sessions.leader_exit(pid)?;
+                return Ok(());
+            }
         }
         if self.registry.bridge_event(header, &words)? {
             return Ok(());
@@ -931,43 +992,89 @@ impl Server {
         }
         Ok(())
     }
-    fn description_event(&mut self,header:&Header)->io::Result<()>{
-        if header.id!=70||header.bits&0x80000000!=0||header.size!=36{return Err(error(libc::EPROTO));}
-        let Some(description)=self.registry.descriptions.remove(&header.local)else{return Ok(());};
-        let pair=description.pair.clone();
-        description.status.publish(true,true,description.flags);
+    fn description_event(&mut self, header: &Header) -> io::Result<()> {
+        if header.id != 70 || header.bits & 0x80000000 != 0 || header.size != 36 {
+            return Err(error(libc::EPROTO));
+        }
+        let Some(description) = self.registry.descriptions.remove(&header.local) else {
+            return Ok(());
+        };
+        let pair = description.pair.clone();
+        description.status.publish(true, true, description.flags);
         drop(description);
         pair.refresh()?;
-        if pair.peer_closed(Side::Slave)?{self.sessions.master_closed(&pair)?;}
+        if pair.peer_closed(Side::Slave)? {
+            self.sessions.master_closed(&pair)?;
+        }
         self.registry.notify_pair(&pair)
     }
     fn grant_slave(&mut self, pair: Arc<Pair>, request: &Message) -> io::Result<()> {
         let flags = request.frame.flags;
-        let capability = self.registry.grant_flags(pair.clone(), Side::Slave, flags)?;
+        let capability = self
+            .registry
+            .grant_flags(pair.clone(), Side::Slave, flags)?;
         let previous = self.sessions.clone();
         let result = (|| {
-            if flags & 0x100 == 0 && matches!(flags & 3, 0 | 2)
-                && self.sessions.claim(&pair, request.actor, false, true, true)? {
+            if flags & 0x100 == 0
+                && matches!(flags & 3, 0 | 2)
+                && self
+                    .sessions
+                    .claim(&pair, request.actor, false, true, true)?
+            {
                 self.registry.ensure_bridge()?;
-                self.registry.bridge.as_ref().unwrap().watch_process(request.actor.host_pid)?;
+                self.registry
+                    .bridge
+                    .as_ref()
+                    .unwrap()
+                    .watch_process(request.actor.host_pid)?;
             }
-            self.registry.capability_reply(capability, Side::Slave, flags, request)
+            self.registry
+                .capability_reply(capability, Side::Slave, flags, request)
         })();
-        if result.is_err() { self.sessions = previous; }
+        if result.is_err() {
+            self.sessions = previous;
+        }
         result
     }
     fn handle(&mut self, request: &Message) -> io::Result<()> {
-        if request.frame.op==INHERIT_PROCESS{
-            if !request.ports.is_empty()||request.frame.data.len()!=20{return Err(error(libc::EPROTO));}
-            let bytes=&request.frame.data;
-            let child=ProcessIdentity{host_pid:i32::from_le_bytes(bytes[..4].try_into().unwrap()),start_seconds:u64::from_le_bytes(bytes[4..12].try_into().unwrap()),start_microseconds:u64::from_le_bytes(bytes[12..20].try_into().unwrap())};
-            self.sessions.inherit(request.actor,child)?;
-            return request.reply.as_ref().ok_or_else(||error(libc::EPROTO))?.send(&Frame{op:INHERIT_PROCESS,serial:request.frame.serial,..Default::default()},&[]);
+        if request.frame.op == INHERIT_PROCESS {
+            if !request.ports.is_empty() || request.frame.data.len() != 20 {
+                return Err(error(libc::EPROTO));
+            }
+            let bytes = &request.frame.data;
+            let child = ProcessIdentity {
+                host_pid: i32::from_le_bytes(bytes[..4].try_into().unwrap()),
+                start_seconds: u64::from_le_bytes(bytes[4..12].try_into().unwrap()),
+                start_microseconds: u64::from_le_bytes(bytes[12..20].try_into().unwrap()),
+            };
+            self.sessions.inherit(request.actor, child)?;
+            return request
+                .reply
+                .as_ref()
+                .ok_or_else(|| error(libc::EPROTO))?
+                .send(
+                    &Frame {
+                        op: INHERIT_PROCESS,
+                        serial: request.frame.serial,
+                        ..Default::default()
+                    },
+                    &[],
+                );
         }
-        if request.frame.op==OPEN_SLAVE_NODE{
-            if !request.ports.is_empty()||request.frame.data.contains(&0){return Err(error(libc::EPROTO));}
-            let pair=self.registry.descriptions.values().find(|description|description.pair.slave_path()==request.frame.data).map(|description|description.pair.clone()).ok_or_else(||error(libc::ENOENT))?;
-            if pair.slave_lock(){return Err(error(libc::EIO));}
+        if request.frame.op == OPEN_SLAVE_NODE {
+            if !request.ports.is_empty() || request.frame.data.contains(&0) {
+                return Err(error(libc::EPROTO));
+            }
+            let pair = self
+                .registry
+                .descriptions
+                .values()
+                .find(|description| description.pair.slave_path() == request.frame.data)
+                .map(|description| description.pair.clone())
+                .ok_or_else(|| error(libc::ENOENT))?;
+            if pair.slave_lock() {
+                return Err(error(libc::EIO));
+            }
             return self.grant_slave(pair, request);
         }
         if request.frame.op == SHUTDOWN {
@@ -1052,24 +1159,62 @@ impl Server {
             if side != Side::Master {
                 return Err(error(libc::EPERM));
             }
-            if pair.slave_lock(){return Err(error(libc::EIO));}
+            if pair.slave_lock() {
+                return Err(error(libc::EIO));
+            }
             return self.grant_slave(pair, request);
         }
         let frame = match request.frame.op {
-            GET_LOCK|SET_LOCK=>{
-                if side!=Side::Master{return Err(error(libc::ENOTTY));}
-                if request.frame.op==SET_LOCK{pair.set_slave_lock(request.frame.flags!=0);}
-                Frame{flags:u64::from(pair.slave_lock()),..Default::default()}
+            GET_LOCK | SET_LOCK => {
+                if side != Side::Master {
+                    return Err(error(libc::ENOTTY));
+                }
+                if request.frame.op == SET_LOCK {
+                    pair.set_slave_lock(request.frame.flags != 0);
+                }
+                Frame {
+                    flags: u64::from(pair.slave_lock()),
+                    ..Default::default()
+                }
             }
-            CLAIM_TTY=>{
-                if self.sessions.claim(&pair,request.actor,request.frame.flags==1,false,matches!(flags&3,0|2))?{
-                    self.registry.ensure_bridge()?;self.registry.bridge.as_ref().unwrap().watch_process(request.actor.host_pid)?;
+            CLAIM_TTY => {
+                if self.sessions.claim(
+                    &pair,
+                    request.actor,
+                    request.frame.flags == 1,
+                    false,
+                    matches!(flags & 3, 0 | 2),
+                )? {
+                    self.registry.ensure_bridge()?;
+                    self.registry
+                        .bridge
+                        .as_ref()
+                        .unwrap()
+                        .watch_process(request.actor.host_pid)?;
                 }
                 Frame::default()
             }
-            GET_SESSION=>{let(sid,pgrp)=self.sessions.state(&pair,request.actor,side==Side::Master)?;Frame{flags:sid as u32 as u64|(pgrp as u32 as u64)<<32,..Default::default()}},
-            SET_FOREGROUND=>{self.sessions.set_foreground(&pair,request.actor,request.frame.flags as i32)?;Frame::default()},
-            DETACH_TTY=>{if side==Side::Master{return Err(error(libc::ENOTTY));}self.sessions.detach(&pair,request.actor)?;Frame::default()},
+            GET_SESSION => {
+                let (sid, pgrp) =
+                    self.sessions
+                        .state(&pair, request.actor, side == Side::Master)?;
+                Frame {
+                    flags: sid as u32 as u64 | (pgrp as u32 as u64) << 32,
+                    ..Default::default()
+                }
+            }
+            SET_FOREGROUND => {
+                self.sessions
+                    .set_foreground(&pair, request.actor, request.frame.flags as i32)?;
+                Frame::default()
+            }
+            DETACH_TTY => {
+                if side == Side::Master {
+                    return Err(error(libc::ENOTTY));
+                }
+                self.sessions.detach(&pair, request.actor)?;
+                Frame::default()
+            }
             READINESS => {
                 let readiness = if side == Side::Master {
                     pair.master_readiness()?
@@ -1215,8 +1360,11 @@ fn decode(words: [u64; 600]) -> io::Result<Message> {
     let start = 28 + count * 12;
     let length = get(bytes, start + 28) as usize;
     let payload_end = start + 40 + length;
-    if length > MAX_DATA || size != payload_end.next_multiple_of(4) || get(bytes, start + 36) != 2
-        || bytes[payload_end..size].iter().any(|byte| *byte != 0) {
+    if length > MAX_DATA
+        || size != payload_end.next_multiple_of(4)
+        || get(bytes, start + 36) != 2
+        || bytes[payload_end..size].iter().any(|byte| *byte != 0)
+    {
         return Err(error(libc::EPROTO));
     }
     let trailer = size.next_multiple_of(4);
@@ -1350,8 +1498,16 @@ impl Client {
     pub fn open_slave(&self, master: &RemoteEndpoint, flags: u64) -> io::Result<RemoteEndpoint> {
         self.slave_from_right(master.capability.right(), flags)
     }
-    pub fn open_slave_path(&self,path:&[u8],flags:u64)->io::Result<RemoteEndpoint>{
-        self.with_carrier(self.import(self.call(Frame{op:OPEN_SLAVE_NODE,data:path.to_vec(),flags,..Default::default()},None)?)?)
+    pub fn open_slave_path(&self, path: &[u8], flags: u64) -> io::Result<RemoteEndpoint> {
+        self.with_carrier(self.import(self.call(
+            Frame {
+                op: OPEN_SLAVE_NODE,
+                data: path.to_vec(),
+                flags,
+                ..Default::default()
+            },
+            None,
+        )?)?)
     }
     pub fn slave_from_right(&self, master: &SendRight, flags: u64) -> io::Result<RemoteEndpoint> {
         self.with_carrier(self.import(self.call(
@@ -1478,24 +1634,77 @@ impl Client {
         )
         .map(|_| ())
     }
-    pub fn slave_lock(&self,endpoint:&RemoteEndpoint,set:Option<bool>)->io::Result<bool>{
-        self.call(Frame{op:if set.is_some(){SET_LOCK}else{GET_LOCK},flags:u64::from(set.unwrap_or(false)),..Default::default()},Some(endpoint.capability.right())).map(|reply|reply.frame.flags!=0)
+    pub fn slave_lock(&self, endpoint: &RemoteEndpoint, set: Option<bool>) -> io::Result<bool> {
+        self.call(
+            Frame {
+                op: if set.is_some() { SET_LOCK } else { GET_LOCK },
+                flags: u64::from(set.unwrap_or(false)),
+                ..Default::default()
+            },
+            Some(endpoint.capability.right()),
+        )
+        .map(|reply| reply.frame.flags != 0)
     }
-    pub fn claim_tty(&self,endpoint:&RemoteEndpoint,force:bool)->io::Result<()> {
-        self.call(Frame{op:CLAIM_TTY,flags:u64::from(force),..Default::default()},Some(endpoint.capability.right())).map(|_|())
+    pub fn claim_tty(&self, endpoint: &RemoteEndpoint, force: bool) -> io::Result<()> {
+        self.call(
+            Frame {
+                op: CLAIM_TTY,
+                flags: u64::from(force),
+                ..Default::default()
+            },
+            Some(endpoint.capability.right()),
+        )
+        .map(|_| ())
     }
-    pub fn tty_session(&self,endpoint:&RemoteEndpoint)->io::Result<(i32,i32)>{
-        self.call(Frame{op:GET_SESSION,..Default::default()},Some(endpoint.capability.right())).map(|reply|(reply.frame.flags as u32 as i32,(reply.frame.flags>>32)as u32 as i32))
+    pub fn tty_session(&self, endpoint: &RemoteEndpoint) -> io::Result<(i32, i32)> {
+        self.call(
+            Frame {
+                op: GET_SESSION,
+                ..Default::default()
+            },
+            Some(endpoint.capability.right()),
+        )
+        .map(|reply| {
+            (
+                reply.frame.flags as u32 as i32,
+                (reply.frame.flags >> 32) as u32 as i32,
+            )
+        })
     }
-    pub fn set_foreground(&self,endpoint:&RemoteEndpoint,pgrp:i32)->io::Result<()>{
-        self.call(Frame{op:SET_FOREGROUND,flags:pgrp as u32 as u64,..Default::default()},Some(endpoint.capability.right())).map(|_|())
+    pub fn set_foreground(&self, endpoint: &RemoteEndpoint, pgrp: i32) -> io::Result<()> {
+        self.call(
+            Frame {
+                op: SET_FOREGROUND,
+                flags: pgrp as u32 as u64,
+                ..Default::default()
+            },
+            Some(endpoint.capability.right()),
+        )
+        .map(|_| ())
     }
-    pub fn detach_tty(&self,endpoint:&RemoteEndpoint)->io::Result<()>{
-        self.call(Frame{op:DETACH_TTY,..Default::default()},Some(endpoint.capability.right())).map(|_|())
+    pub fn detach_tty(&self, endpoint: &RemoteEndpoint) -> io::Result<()> {
+        self.call(
+            Frame {
+                op: DETACH_TTY,
+                ..Default::default()
+            },
+            Some(endpoint.capability.right()),
+        )
+        .map(|_| ())
     }
-    pub fn inherit_child(&self,child:ProcessIdentity)->io::Result<()>{
-        let mut data=child.host_pid.to_le_bytes().to_vec();data.extend(child.start_seconds.to_le_bytes());data.extend(child.start_microseconds.to_le_bytes());
-        self.call(Frame{op:INHERIT_PROCESS,data,..Default::default()},None).map(|_|())
+    pub fn inherit_child(&self, child: ProcessIdentity) -> io::Result<()> {
+        let mut data = child.host_pid.to_le_bytes().to_vec();
+        data.extend(child.start_seconds.to_le_bytes());
+        data.extend(child.start_microseconds.to_le_bytes());
+        self.call(
+            Frame {
+                op: INHERIT_PROCESS,
+                data,
+                ..Default::default()
+            },
+            None,
+        )
+        .map(|_| ())
     }
 }
 
@@ -1516,21 +1725,61 @@ mod tests {
     #[test]
     fn mach_frame_preserves_unaligned_payload_and_rejects_nonzero_padding() {
         let receiver = Port::allocate(1).unwrap();
-        assert_eq!(unsafe { mach_port_insert_right(task(), receiver.name, receiver.name, 20) }, 0);
+        assert_eq!(
+            unsafe { mach_port_insert_right(task(), receiver.name, receiver.name, 20) },
+            0
+        );
         let destination = SendRight::adopt(receiver.name).unwrap();
         for length in [1, 2, 3, 5, 7, 268] {
             let data = vec![b'x'; length];
-            send(destination.name(), 0, false, &Frame { data: data.clone(), ..Default::default() }, &[]).unwrap();
+            send(
+                destination.name(),
+                0,
+                false,
+                &Frame {
+                    data: data.clone(),
+                    ..Default::default()
+                },
+                &[],
+            )
+            .unwrap();
             let received = receive(receiver.name, Duration::from_secs(1)).unwrap();
             assert_eq!(received.frame.data, data);
         }
-        send(destination.name(), 0, false, &Frame { data: vec![b'x'; 2], ..Default::default() }, &[]).unwrap();
+        send(
+            destination.name(),
+            0,
+            false,
+            &Frame {
+                data: vec![b'x'; 2],
+                ..Default::default()
+            },
+            &[],
+        )
+        .unwrap();
         let mut words = [0u64; 600];
-        assert_eq!(unsafe { mach_msg(words.as_mut_ptr().cast(), 2 | 0x100 | 0x400 | (3 << 24), 0, 4800, receiver.name, 1000, 0) }, 0);
-        let bytes = unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), 4800) };
+        assert_eq!(
+            unsafe {
+                mach_msg(
+                    words.as_mut_ptr().cast(),
+                    2 | 0x100 | 0x400 | (3 << 24),
+                    0,
+                    4800,
+                    receiver.name,
+                    1000,
+                    0,
+                )
+            },
+            0
+        );
+        let bytes =
+            unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), 4800) };
         assert_eq!(get(bytes, 4), 72);
         bytes[70] = 1;
-        assert_eq!(decode(words).err().unwrap().raw_os_error(), Some(libc::EPROTO));
+        assert_eq!(
+            decode(words).err().unwrap().raw_os_error(),
+            Some(libc::EPROTO)
+        );
     }
     #[test]
     fn written_carrier_retires_without_stopping_server() {
@@ -1570,7 +1819,9 @@ mod tests {
         let header = unsafe { &*words.as_ptr().cast::<Header>() };
         assert!(server.registry.bridge_event(header, &words).unwrap());
         assert!(server.registry.carriers.is_empty());
-        drop(carrier);drop(capability);drop(pair);
+        drop(carrier);
+        drop(capability);
+        drop(pair);
 
         let worker = std::thread::spawn(move || server.run());
         let client = Client::lookup(&name, actual).unwrap();
@@ -1580,92 +1831,256 @@ mod tests {
         let mut byte = [0];
         assert_eq!(client.read(&master, &mut byte).unwrap(), 1);
         assert_eq!(byte, *b"x");
-        drop(slave);drop(master);client.shutdown().unwrap();worker.join().unwrap().unwrap();
-        assert_eq!(fs::read_dir(&runtime).unwrap().count(), 0);fs::remove_dir(runtime).unwrap();
+        drop(slave);
+        drop(master);
+        client.shutdown().unwrap();
+        worker.join().unwrap().unwrap();
+        assert_eq!(fs::read_dir(&runtime).unwrap().count(), 0);
+        fs::remove_dir(runtime).unwrap();
     }
     #[test]
     fn stale_no_senders_notification_is_idempotent_and_server_accepts_next_pty() {
-        let runtime=runtime();let actual=ProcessIdentity::running(unsafe{libc::getpid()}).unwrap();
-        let name=format!("dev.aim.pty-stale-notification.{}",actual.host_pid);
-        let mut server=Server::register(&name,&runtime).unwrap();
-        let pair=Arc::new(Pair::allocate(&runtime).unwrap());
-        let capability=server.registry.grant(pair.clone(),Side::Master).unwrap();
-        let local=*server.registry.descriptions.keys().next().unwrap();
-        let notification=Header{size:36,local,id:70,..Default::default()};
+        let runtime = runtime();
+        let actual = ProcessIdentity::running(unsafe { libc::getpid() }).unwrap();
+        let name = format!("dev.aim.pty-stale-notification.{}", actual.host_pid);
+        let mut server = Server::register(&name, &runtime).unwrap();
+        let pair = Arc::new(Pair::allocate(&runtime).unwrap());
+        let capability = server.registry.grant(pair.clone(), Side::Master).unwrap();
+        let local = *server.registry.descriptions.keys().next().unwrap();
+        let notification = Header {
+            size: 36,
+            local,
+            id: 70,
+            ..Default::default()
+        };
         server.description_event(&notification).unwrap();
         drop(capability);
         server.description_event(&notification).unwrap();
-        assert_eq!(server.description_event(&Header{size:36,local,id:71,..Default::default()}).unwrap_err().raw_os_error(),Some(libc::EPROTO));
+        assert_eq!(
+            server
+                .description_event(&Header {
+                    size: 36,
+                    local,
+                    id: 71,
+                    ..Default::default()
+                })
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EPROTO)
+        );
         drop(pair);
 
-        let worker=std::thread::spawn(move||server.run());
-        let client=Client::lookup(&name,actual).unwrap();
-        let master=client.allocate(2).unwrap();let slave=client.open_slave(&master,2).unwrap();
-        assert_eq!(client.write(&slave,b"x").unwrap(),1);let mut byte=[0];
-        assert_eq!(client.read(&master,&mut byte).unwrap(),1);assert_eq!(byte,*b"x");
-        drop(slave);drop(master);client.shutdown().unwrap();worker.join().unwrap().unwrap();
-        assert_eq!(fs::read_dir(&runtime).unwrap().count(),0);fs::remove_dir(runtime).unwrap();
+        let worker = std::thread::spawn(move || server.run());
+        let client = Client::lookup(&name, actual).unwrap();
+        let master = client.allocate(2).unwrap();
+        let slave = client.open_slave(&master, 2).unwrap();
+        assert_eq!(client.write(&slave, b"x").unwrap(), 1);
+        let mut byte = [0];
+        assert_eq!(client.read(&master, &mut byte).unwrap(), 1);
+        assert_eq!(byte, *b"x");
+        drop(slave);
+        drop(master);
+        client.shutdown().unwrap();
+        worker.join().unwrap().unwrap();
+        assert_eq!(fs::read_dir(&runtime).unwrap().count(), 0);
+        fs::remove_dir(runtime).unwrap();
     }
     #[test]
-    #[ignore="real session child of virtual_session_detach_preserves_unread_output"]
-    fn session_child(){
-        use std::io::{BufRead,Write};
-        assert!(unsafe{libc::setsid()}>0);
-        unsafe{libc::alarm(8);}
-        let mut mask:libc::sigset_t=unsafe{std::mem::zeroed()};
-        unsafe{libc::sigemptyset(&mut mask);libc::sigaddset(&mut mask,libc::SIGHUP);libc::sigaddset(&mut mask,libc::SIGCONT);assert_eq!(libc::pthread_sigmask(libc::SIG_BLOCK,&mask,std::ptr::null_mut()),0);}
-        let mut line=String::new();std::io::stdin().lock().read_line(&mut line).unwrap();
-        let fields=line.trim().split(',').collect::<Vec<_>>();
-        let owner=ProcessIdentity{host_pid:fields[1].parse().unwrap(),start_seconds:fields[2].parse().unwrap(),start_microseconds:fields[3].parse().unwrap()};
-        let client=Client::lookup(fields[0],owner).unwrap();
-        let receiver=Port::allocate(1).unwrap();
-        assert_eq!(unsafe{mach_port_insert_right(task(),receiver.name,receiver.name,20)},0);
-        let right=SendRight::adopt(receiver.name).unwrap();
-        let name=format!("dev.aim.pty-session-child.{}",std::process::id());
-        crate::posix_control::register_service(&name,&right).unwrap();
-        println!("SESSION_RECEIVER {name}");std::io::stdout().flush().unwrap();
-        let mut message=receive(receiver.name,Duration::from_secs(3)).unwrap();assert_eq!(message.actor,owner);assert_eq!(message.ports.len(),1);
-        let master=message.ports.pop().unwrap();
-        let slave=client.slave_from_right(&master,2).unwrap();
-        let pid=unsafe{libc::getpid()};assert_eq!(client.tty_session(&slave).unwrap(),(pid,pid));
-        assert_eq!(unsafe{libc::tcgetsid(slave.capability.descriptor().as_raw_fd())},-1,"Darwin controlling tty would revoke the keeper on exit");
-        client.claim_tty(&slave,false).unwrap();client.set_foreground(&slave,pid).unwrap();
-        assert_eq!(client.set_foreground(&slave,-1).unwrap_err().raw_os_error(),Some(libc::EINVAL));
-        assert_eq!(client.write(&slave,&[b'x';268]).unwrap(),268);
+    #[ignore = "real session child of virtual_session_detach_preserves_unread_output"]
+    fn session_child() {
+        use std::io::{BufRead, Write};
+        assert!(unsafe { libc::setsid() } > 0);
+        unsafe {
+            libc::alarm(8);
+        }
+        let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigemptyset(&mut mask);
+            libc::sigaddset(&mut mask, libc::SIGHUP);
+            libc::sigaddset(&mut mask, libc::SIGCONT);
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut()),
+                0
+            );
+        }
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line).unwrap();
+        let fields = line.trim().split(',').collect::<Vec<_>>();
+        let owner = ProcessIdentity {
+            host_pid: fields[1].parse().unwrap(),
+            start_seconds: fields[2].parse().unwrap(),
+            start_microseconds: fields[3].parse().unwrap(),
+        };
+        let client = Client::lookup(fields[0], owner).unwrap();
+        let receiver = Port::allocate(1).unwrap();
+        assert_eq!(
+            unsafe { mach_port_insert_right(task(), receiver.name, receiver.name, 20) },
+            0
+        );
+        let right = SendRight::adopt(receiver.name).unwrap();
+        let name = format!("dev.aim.pty-session-child.{}", std::process::id());
+        crate::posix_control::register_service(&name, &right).unwrap();
+        println!("SESSION_RECEIVER {name}");
+        std::io::stdout().flush().unwrap();
+        let mut message = receive(receiver.name, Duration::from_secs(3)).unwrap();
+        assert_eq!(message.actor, owner);
+        assert_eq!(message.ports.len(), 1);
+        let master = message.ports.pop().unwrap();
+        let slave = client.slave_from_right(&master, 2).unwrap();
+        let pid = unsafe { libc::getpid() };
+        assert_eq!(client.tty_session(&slave).unwrap(), (pid, pid));
+        assert_eq!(
+            unsafe { libc::tcgetsid(slave.capability.descriptor().as_raw_fd()) },
+            -1,
+            "Darwin controlling tty would revoke the keeper on exit"
+        );
+        client.claim_tty(&slave, false).unwrap();
+        client.set_foreground(&slave, pid).unwrap();
+        assert_eq!(
+            client
+                .set_foreground(&slave, -1)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EINVAL)
+        );
+        assert_eq!(client.write(&slave, &[b'x'; 268]).unwrap(), 268);
         client.detach_tty(&slave).unwrap();
-        let(mut first,mut second)=(0,0);assert_eq!(unsafe{libc::sigwait(&mask,&mut first)},0);assert_eq!(unsafe{libc::sigwait(&mask,&mut second)},0);
-        assert!([first,second].contains(&libc::SIGHUP)&&[first,second].contains(&libc::SIGCONT));
-        assert_eq!(client.tty_session(&slave).unwrap_err().raw_os_error(),Some(libc::ENOTTY));
-        drop(slave);drop(master);println!("VIRTUAL_SESSION_CHILD_EXECUTED");
+        let (mut first, mut second) = (0, 0);
+        assert_eq!(unsafe { libc::sigwait(&mask, &mut first) }, 0);
+        assert_eq!(unsafe { libc::sigwait(&mask, &mut second) }, 0);
+        assert!(
+            [first, second].contains(&libc::SIGHUP) && [first, second].contains(&libc::SIGCONT)
+        );
+        assert_eq!(
+            client.tty_session(&slave).unwrap_err().raw_os_error(),
+            Some(libc::ENOTTY)
+        );
+        drop(slave);
+        drop(master);
+        println!("VIRTUAL_SESSION_CHILD_EXECUTED");
     }
     #[test]
-    fn virtual_session_detach_preserves_unread_output(){
-        if super::super::tests::isolated("pty_owner::transport::tests::virtual_session_detach_preserves_unread_output"){return;}
-        use std::{io::{BufRead,BufReader,Write},process::{Command,Stdio}};
-        let runtime=runtime();let pairs=runtime.join("pairs");fs::DirBuilder::new().mode(0o700).create(&pairs).unwrap();
-        let table=runtime.join("identity/by-pid");fs::create_dir_all(&table).unwrap();
-        let namespace=crate::mount_namespace::Namespace::open(&runtime,"session").unwrap();namespace.initialize(&format!("root\t/\t{}\n",pairs.display())).unwrap();
-        let actual=ProcessIdentity::running(unsafe{libc::getpid()}).unwrap();let name=format!("dev.aim.pty-session-owner.{}",actual.host_pid);
-        let owner=RunningServer::start_with_credentials(&name,&pairs,&table).unwrap();let client=Client::lookup(&name,actual).unwrap();let master=client.allocate(2).unwrap();
-        struct Child(std::process::Child);impl Drop for Child{fn drop(&mut self){if self.0.try_wait().unwrap().is_none(){self.0.kill().unwrap();}self.0.wait().unwrap();}}
-        let mut command=Command::new(std::env::current_exe().unwrap());
-        command.args(["--exact","pty_owner::transport::tests::session_child","--ignored","--nocapture"]).stdin(Stdio::piped()).stdout(Stdio::piped());
+    fn virtual_session_detach_preserves_unread_output() {
+        if super::super::tests::isolated(
+            "pty_owner::transport::tests::virtual_session_detach_preserves_unread_output",
+        ) {
+            return;
+        }
+        use std::{
+            io::{BufRead, BufReader, Write},
+            process::{Command, Stdio},
+        };
+        let runtime = runtime();
+        let pairs = runtime.join("pairs");
+        fs::DirBuilder::new().mode(0o700).create(&pairs).unwrap();
+        let table = runtime.join("identity/by-pid");
+        fs::create_dir_all(&table).unwrap();
+        let namespace = crate::mount_namespace::Namespace::open(&runtime, "session").unwrap();
+        namespace
+            .initialize(&format!("root\t/\t{}\n", pairs.display()))
+            .unwrap();
+        let actual = ProcessIdentity::running(unsafe { libc::getpid() }).unwrap();
+        let name = format!("dev.aim.pty-session-owner.{}", actual.host_pid);
+        let owner = RunningServer::start_with_credentials(&name, &pairs, &table).unwrap();
+        let client = Client::lookup(&name, actual).unwrap();
+        let master = client.allocate(2).unwrap();
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                if self.0.try_wait().unwrap().is_none() {
+                    self.0.kill().unwrap();
+                }
+                self.0.wait().unwrap();
+            }
+        }
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "pty_owner::transport::tests::session_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
         use std::os::unix::process::CommandExt;
         // Block before exec so every libtest thread inherits the wait set.
-        unsafe{command.pre_exec(||{let mut mask:libc::sigset_t=std::mem::zeroed();libc::sigemptyset(&mut mask);libc::sigaddset(&mut mask,libc::SIGHUP);libc::sigaddset(&mut mask,libc::SIGCONT);if libc::sigprocmask(libc::SIG_BLOCK,&mask,std::ptr::null_mut())<0{Err(io::Error::last_os_error())}else{Ok(())}});}
-        let mut child=Child(command.spawn().unwrap());
-        let process=ProcessIdentity::running(child.0.id()as i32).unwrap();
-        crate::process_namespace::register_mount_namespace(&table,process,namespace.id()).unwrap();
-        fs::write(table.join(process.host_pid.to_string()),"uid\t2000\ncap_effective\t0x0\n").unwrap();
-        writeln!(child.0.stdin.as_mut().unwrap(),"{name},{},{},{}",actual.host_pid,actual.start_seconds,actual.start_microseconds).unwrap();
-        let mut output=BufReader::new(child.0.stdout.take().unwrap());let mut line=String::new();
-        let receiver=loop{line.clear();assert!(output.read_line(&mut line).unwrap()>0);if let Some(name)=line.trim().strip_prefix("SESSION_RECEIVER "){break name.to_string();}};
-        let destination=crate::posix_control::Client::lookup(&receiver).unwrap().capability().unwrap();send(destination.name(),0,false,&Frame::default(),&[master.capability.right()]).unwrap();
-        let mut marker=false;let mut transcript=String::new();loop{line.clear();if output.read_line(&mut line).unwrap()==0{break;}marker|=line.contains("VIRTUAL_SESSION_CHILD_EXECUTED");transcript.push_str(&line);}
-        let status=child.0.wait().unwrap();assert!(status.success(),"session child {status}: {transcript}");assert!(marker);
-        let mut notification=libc::pollfd{fd:master.capability.notification().unwrap().as_raw_fd(),events:libc::POLLIN,revents:0};assert_eq!(unsafe{libc::poll(&mut notification,1,2000)},1);
-        let mut bytes=[0;268];assert_eq!(client.read(&master,&mut bytes).unwrap(),268);assert!(bytes.iter().all(|byte|*byte==b'x'));
-        drop(master);owner.shutdown().unwrap();fs::remove_dir_all(runtime).unwrap();
+        unsafe {
+            command.pre_exec(|| {
+                let mut mask: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut mask);
+                libc::sigaddset(&mut mask, libc::SIGHUP);
+                libc::sigaddset(&mut mask, libc::SIGCONT);
+                if libc::sigprocmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut()) < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        let mut child = Child(command.spawn().unwrap());
+        let process = ProcessIdentity::running(child.0.id() as i32).unwrap();
+        crate::process_namespace::register_mount_namespace(&table, process, namespace.id())
+            .unwrap();
+        fs::write(
+            table.join(process.host_pid.to_string()),
+            "uid\t2000\ncap_effective\t0x0\n",
+        )
+        .unwrap();
+        writeln!(
+            child.0.stdin.as_mut().unwrap(),
+            "{name},{},{},{}",
+            actual.host_pid,
+            actual.start_seconds,
+            actual.start_microseconds
+        )
+        .unwrap();
+        let mut output = BufReader::new(child.0.stdout.take().unwrap());
+        let mut line = String::new();
+        let receiver = loop {
+            line.clear();
+            assert!(output.read_line(&mut line).unwrap() > 0);
+            if let Some(name) = line.trim().strip_prefix("SESSION_RECEIVER ") {
+                break name.to_string();
+            }
+        };
+        let destination = crate::posix_control::Client::lookup(&receiver)
+            .unwrap()
+            .capability()
+            .unwrap();
+        send(
+            destination.name(),
+            0,
+            false,
+            &Frame::default(),
+            &[master.capability.right()],
+        )
+        .unwrap();
+        let mut marker = false;
+        let mut transcript = String::new();
+        loop {
+            line.clear();
+            if output.read_line(&mut line).unwrap() == 0 {
+                break;
+            }
+            marker |= line.contains("VIRTUAL_SESSION_CHILD_EXECUTED");
+            transcript.push_str(&line);
+        }
+        let status = child.0.wait().unwrap();
+        assert!(status.success(), "session child {status}: {transcript}");
+        assert!(marker);
+        let mut notification = libc::pollfd {
+            fd: master.capability.notification().unwrap().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut notification, 1, 2000) }, 1);
+        let mut bytes = [0; 268];
+        assert_eq!(client.read(&master, &mut bytes).unwrap(), 268);
+        assert!(bytes.iter().all(|byte| *byte == b'x'));
+        drop(master);
+        owner.shutdown().unwrap();
+        fs::remove_dir_all(runtime).unwrap();
     }
     #[test]
     fn final_description_event_wakes_master_without_query_and_preserves_bytes() {
@@ -1683,7 +2098,16 @@ mod tests {
         let master = client.allocate(2 | 0x800).unwrap();
         assert!(!client.readiness(&master).unwrap().hangup);
         let mut name = [0i8; 128];
-        assert_eq!(unsafe { libc::ioctl(master.capability.descriptor().as_raw_fd(), 0x40807453u64 as libc::c_ulong, name.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe {
+                libc::ioctl(
+                    master.capability.descriptor().as_raw_fd(),
+                    0x40807453u64 as libc::c_ulong,
+                    name.as_mut_ptr(),
+                )
+            },
+            0
+        );
         let path = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_bytes();
         let slave = client.open_slave_path(path, 2 | 0x100 | 0x800).unwrap();
         let duplicate = slave.try_clone().unwrap();

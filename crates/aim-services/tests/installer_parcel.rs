@@ -1,9 +1,5 @@
 //! Differential against the pinned original PackageInstaller DTO constructors.
-use std::{
-    fs,
-    process::Command,
-    time::Duration,
-};
+use std::{fs, process::Command, time::Duration};
 mod common {
     pub mod installer_codec;
     pub mod java;
@@ -14,8 +10,7 @@ use common::runtime::{Boot, Data, run};
 #[test]
 #[ignore = "requires original pinned image, aimctl, JDK and d8; run explicitly"]
 fn installer_parcels_match_original_framework() {
-    let directory =
-        std::env::temp_dir().join(format!("ic-{}", std::process::id()));
+    let directory = std::env::temp_dir().join(format!("ic-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
     let data = Data(directory);
     let repo = aim_paths::root();
@@ -73,7 +68,8 @@ fn installer_parcels_match_original_framework() {
     common::java::check_linkage(&dex.join("classes.dex"), &[]).unwrap();
     let boot = Boot::new(repo.join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
-    boot.wait_ready(Duration::from_secs(300)).expect("installer_parcel oracle boot readiness");
+    boot.wait_ready(Duration::from_secs(300))
+        .expect("installer_parcel oracle boot readiness");
     let guest = boot.data.join("data/local/tmp/installer-codec");
     fs::create_dir(&guest).unwrap();
     common::installer_codec::export(&guest);

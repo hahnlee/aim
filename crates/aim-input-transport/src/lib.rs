@@ -74,7 +74,9 @@ impl Region {
 pub fn touched(regions: &[Region], start: (f32, f32)) -> (Option<usize>, Vec<usize>) {
     let at = regions.iter().rposition(|r| r.takes(start));
     let above = at.map_or(0, |at| at + 1);
-    let outside = (above..regions.len()).filter(|&i| regions[i].watch_outside).collect();
+    let outside = (above..regions.len())
+        .filter(|&i| regions[i].watch_outside)
+        .collect();
     (at, outside)
 }
 
@@ -135,16 +137,23 @@ impl Touch {
     pub fn report(&mut self, time: i64, x_min: i32, y_min: i32, scale: (f32, f32)) -> Vec<Motion> {
         let mut current: Vec<(u32, i32, f32, f32)> = Vec::new();
         for slot in &self.slots {
-            let Some(tracking) = slot.tracking else { continue };
+            let Some(tracking) = slot.tracking else {
+                continue;
+            };
             let x = (slot.x - x_min) as f32 * scale.0;
             let y = (slot.y - y_min) as f32 * scale.1;
             // A pointer keeps its id while its tracking id lasts; a new one
             // takes the lowest free id.
-            let id = self.pointers.iter().find(|p| p.1 == tracking).map(|p| p.0).unwrap_or_else(|| {
-                (0..=MAX_POINTER_ID)
-                    .find(|id| !self.pointers.iter().chain(&current).any(|p| p.0 == *id))
-                    .unwrap_or(MAX_POINTER_ID)
-            });
+            let id = self
+                .pointers
+                .iter()
+                .find(|p| p.1 == tracking)
+                .map(|p| p.0)
+                .unwrap_or_else(|| {
+                    (0..=MAX_POINTER_ID)
+                        .find(|id| !self.pointers.iter().chain(&current).any(|p| p.0 == *id))
+                        .unwrap_or(MAX_POINTER_ID)
+                });
             if current.len() < MAX_POINTERS {
                 current.push((id, tracking, x, y));
             }
@@ -152,31 +161,57 @@ impl Touch {
         current.sort_by_key(|p| p.0);
         let mut motions = Vec::new();
         let mut state = self.pointers.clone();
-        let coords = |s: &[(u32, i32, f32, f32)]| s.iter().map(|p| (p.0, p.2, p.3)).collect::<Vec<_>>();
+        let coords =
+            |s: &[(u32, i32, f32, f32)]| s.iter().map(|p| (p.0, p.2, p.3)).collect::<Vec<_>>();
         // Ups, with the last positions of the pointers that stay.
-        for up in self.pointers.iter().filter(|p| !current.iter().any(|c| c.0 == p.0)) {
+        for up in self
+            .pointers
+            .iter()
+            .filter(|p| !current.iter().any(|c| c.0 == p.0))
+        {
             for p in state.iter_mut() {
                 if let Some(c) = current.iter().find(|c| c.0 == p.0) {
                     *p = *c;
                 }
             }
             let index = state.iter().position(|p| p.0 == up.0).unwrap() as i32;
-            let action = if state.len() == 1 { ACTION_UP } else { ACTION_POINTER_UP | (index << POINTER_INDEX_SHIFT) };
-            motions.push(Motion::touched(action, time, self.down_time, coords(&state)));
+            let action = if state.len() == 1 {
+                ACTION_UP
+            } else {
+                ACTION_POINTER_UP | (index << POINTER_INDEX_SHIFT)
+            };
+            motions.push(Motion::touched(
+                action,
+                time,
+                self.down_time,
+                coords(&state),
+            ));
             state.retain(|p| p.0 != up.0);
         }
         // A move of the pointers that stayed.
-        let moved = state.iter().any(|p| current.iter().any(|c| c.0 == p.0 && (c.2, c.3) != (p.2, p.3)));
+        let moved = state.iter().any(|p| {
+            current
+                .iter()
+                .any(|c| c.0 == p.0 && (c.2, c.3) != (p.2, p.3))
+        });
         for p in state.iter_mut() {
             if let Some(c) = current.iter().find(|c| c.0 == p.0) {
                 *p = *c;
             }
         }
         if moved {
-            motions.push(Motion::touched(ACTION_MOVE, time, self.down_time, coords(&state)));
+            motions.push(Motion::touched(
+                ACTION_MOVE,
+                time,
+                self.down_time,
+                coords(&state),
+            ));
         }
         // Downs.
-        for down in current.iter().filter(|c| !self.pointers.iter().any(|p| p.0 == c.0)) {
+        for down in current
+            .iter()
+            .filter(|c| !self.pointers.iter().any(|p| p.0 == c.0))
+        {
             state.push(*down);
             state.sort_by_key(|p| p.0);
             let action = if state.len() == 1 {
@@ -186,7 +221,12 @@ impl Touch {
                 let index = state.iter().position(|p| p.0 == down.0).unwrap() as i32;
                 ACTION_POINTER_DOWN | (index << POINTER_INDEX_SHIFT)
             };
-            motions.push(Motion::touched(action, time, self.down_time, coords(&state)));
+            motions.push(Motion::touched(
+                action,
+                time,
+                self.down_time,
+                coords(&state),
+            ));
         }
         self.pointers = current;
         motions
@@ -196,14 +236,29 @@ impl Touch {
 impl Motion {
     /// A motion of the touchscreen, its pointers pressed.
     fn touched(action: i32, time: i64, down_time: i64, pointers: Vec<(u32, f32, f32)>) -> Motion {
-        Motion { action, time, down_time, pointers, device: DEVICE_ID, pressure: 1.0, size: 0.0 }
+        Motion {
+            action,
+            time,
+            down_time,
+            pointers,
+            device: DEVICE_ID,
+            pressure: 1.0,
+            size: 0.0,
+        }
     }
 
     /// A one-finger touchscreen motion injected as `InputShellCommand`
     /// makes it (`injectMotionEvent`): `action` (down, move or up) at
     /// `(x, y)` in the display's pixels, with `pressure` and the default
     /// size, of no device; `None` for another action.
-    pub fn injected(action: i32, down_time: i64, time: i64, x: f32, y: f32, pressure: f32) -> Option<Motion> {
+    pub fn injected(
+        action: i32,
+        down_time: i64,
+        time: i64,
+        x: f32,
+        y: f32,
+        pressure: f32,
+    ) -> Option<Motion> {
         matches!(action, ACTION_DOWN | ACTION_MOVE | ACTION_UP).then(|| Motion {
             action,
             time,
@@ -227,7 +282,11 @@ impl Motion {
     pub fn outside(&self, visible: bool) -> Motion {
         let (id, x, y) = self.pointers[0];
         let (x, y) = if visible { (x, y) } else { (0.0, 0.0) };
-        Motion { action: ACTION_OUTSIDE, pointers: vec![(id, x, y)], ..*self }
+        Motion {
+            action: ACTION_OUTSIDE,
+            pointers: vec![(id, x, y)],
+            ..*self
+        }
     }
 
     /// Whether the gesture ends with it (the last pointer's up).
@@ -240,8 +299,12 @@ impl Motion {
     /// window's transform takes the display's pixels to the window's.
     pub fn message(&self, seq: u32, id: i32, origin: (f32, f32)) -> Vec<u8> {
         let mut m = header(MOTION, seq);
-        let i32s = |m: &mut Vec<u8>, v: &[i32]| v.iter().for_each(|v| m.extend_from_slice(&v.to_ne_bytes()));
-        let f32s = |m: &mut Vec<u8>, v: &[f32]| v.iter().for_each(|v| m.extend_from_slice(&v.to_ne_bytes()));
+        let i32s = |m: &mut Vec<u8>, v: &[i32]| {
+            v.iter().for_each(|v| m.extend_from_slice(&v.to_ne_bytes()))
+        };
+        let f32s = |m: &mut Vec<u8>, v: &[f32]| {
+            v.iter().for_each(|v| m.extend_from_slice(&v.to_ne_bytes()))
+        };
         i32s(&mut m, &[id, self.pointers.len() as i32]);
         m.extend_from_slice(&self.time.to_ne_bytes());
         i32s(&mut m, &[self.device, SOURCE_TOUCHSCREEN, 0]); // display 0
@@ -258,7 +321,12 @@ impl Motion {
             // `PointerCoords`: the bits of its axes that are not zero
             // (`setAxisValue` clears an axis set to zero), highest first,
             // their values in axis order, not resampled.
-            let axes = [(AXIS_X, x), (AXIS_Y, y), (AXIS_PRESSURE, self.pressure), (AXIS_SIZE, self.size)];
+            let axes = [
+                (AXIS_X, x),
+                (AXIS_Y, y),
+                (AXIS_PRESSURE, self.pressure),
+                (AXIS_SIZE, self.size),
+            ];
             let set: Vec<_> = axes.iter().filter(|(_, v)| *v != 0.0).collect();
             let bits = set.iter().fold(0u64, |b, (a, _)| b | (1 << 63) >> a);
             m.extend_from_slice(&bits.to_ne_bytes());
@@ -286,7 +354,12 @@ mod tests {
     use super::*;
 
     fn region(touchable: [i32; 4], watch_outside: bool) -> Region {
-        Region { frame: touchable, touchable, watch_outside, owner: 10_001 }
+        Region {
+            frame: touchable,
+            touchable,
+            watch_outside,
+            owner: 10_001,
+        }
     }
 
     /// A touch goes to the front window that takes it; the windows in
@@ -296,15 +369,27 @@ mod tests {
         let activity = region([0, 0, 1080, 1920], false);
         let tooltip = region([0, 0, 400, 120], true);
         // Outside the tooltip: the activity, the tooltip told.
-        assert_eq!(touched(&[activity, tooltip], (540.0, 1000.0)), (Some(0), vec![1]));
+        assert_eq!(
+            touched(&[activity, tooltip], (540.0, 1000.0)),
+            (Some(0), vec![1])
+        );
         // On it: the tooltip.
-        assert_eq!(touched(&[activity, tooltip], (100.0, 50.0)), (Some(1), vec![]));
+        assert_eq!(
+            touched(&[activity, tooltip], (100.0, 50.0)),
+            (Some(1), vec![])
+        );
         // A modal popup takes its task's touches, outside it too.
         let menu = region([0, 0, 1080, 1920], true);
-        assert_eq!(touched(&[activity, menu], (540.0, 1000.0)), (Some(1), vec![]));
+        assert_eq!(
+            touched(&[activity, menu], (540.0, 1000.0)),
+            (Some(1), vec![])
+        );
         // An untouchable window takes none.
         let untouchable = region([0, 0, 0, 0], false);
-        assert_eq!(touched(&[activity, untouchable], (5.0, 5.0)), (Some(0), vec![]));
+        assert_eq!(
+            touched(&[activity, untouchable], (5.0, 5.0)),
+            (Some(0), vec![])
+        );
     }
 
     fn slot(t: &mut Touch, slot: i32, tracking: i32, x: i32, y: i32) {
@@ -325,11 +410,17 @@ mod tests {
         assert_eq!(m[0].pointers, vec![(0, 100.0, 200.0)]);
         t.abs(ABS_MT_POSITION_X, 110);
         let m = t.report(20, 0, 0, (1.0, 1.0));
-        assert_eq!((m[0].action, m[0].pointers[0].1, m[0].down_time), (ACTION_MOVE, 110.0, 10));
+        assert_eq!(
+            (m[0].action, m[0].pointers[0].1, m[0].down_time),
+            (ACTION_MOVE, 110.0, 10)
+        );
         assert!(t.report(25, 0, 0, (1.0, 1.0)).is_empty());
         slot(&mut t, 0, -1, 0, 0);
         let m = t.report(30, 0, 0, (1.0, 1.0));
-        assert_eq!((m[0].action, m[0].pointers.clone()), (ACTION_UP, vec![(0, 110.0, 200.0)]));
+        assert_eq!(
+            (m[0].action, m[0].pointers.clone()),
+            (ACTION_UP, vec![(0, 110.0, 200.0)])
+        );
     }
 
     #[test]
@@ -339,7 +430,10 @@ mod tests {
         t.report(1, 0, 0, (1.0, 1.0));
         slot(&mut t, 1, 2, 50, 50);
         let m = t.report(2, 0, 0, (1.0, 1.0));
-        assert_eq!(m[0].action, ACTION_POINTER_DOWN | (1 << POINTER_INDEX_SHIFT));
+        assert_eq!(
+            m[0].action,
+            ACTION_POINTER_DOWN | (1 << POINTER_INDEX_SHIFT)
+        );
         assert_eq!(m[0].pointers.len(), 2);
         slot(&mut t, 0, -1, 0, 0);
         let m = t.report(3, 0, 0, (1.0, 1.0));
@@ -348,7 +442,10 @@ mod tests {
         // The remaining pointer keeps its id.
         slot(&mut t, 1, -1, 0, 0);
         let m = t.report(4, 0, 0, (1.0, 1.0));
-        assert_eq!((m[0].action, m[0].pointers.clone()), (ACTION_UP, vec![(1, 50.0, 50.0)]));
+        assert_eq!(
+            (m[0].action, m[0].pointers.clone()),
+            (ACTION_UP, vec![(1, 50.0, 50.0)])
+        );
     }
 
     #[test]
@@ -362,8 +459,14 @@ mod tests {
         assert_eq!((float(8 + 112), float(8 + 116)), (-30.0, -40.0));
         // The header, the body up to the pointers, one pointer.
         assert_eq!(bytes.len(), 8 + 160 + 144);
-        assert_eq!(&bytes[8 + 160..8 + 168], &[0, 0, 0, 0, TOOL_FINGER as u8, 0, 0, 0]);
-        assert_eq!(u64::from_ne_bytes(bytes[176..184].try_into().unwrap()), 0xe000_0000_0000_0000);
+        assert_eq!(
+            &bytes[8 + 160..8 + 168],
+            &[0, 0, 0, 0, TOOL_FINGER as u8, 0, 0, 0]
+        );
+        assert_eq!(
+            u64::from_ne_bytes(bytes[176..184].try_into().unwrap()),
+            0xe000_0000_0000_0000
+        );
     }
 
     /// An injected tap's down and up: no device, the default size, and
@@ -374,10 +477,16 @@ mod tests {
         let bytes = down.message(1, 2, (0.0, 0.0));
         let int = |b: &[u8], at: usize| i32::from_ne_bytes(b[at..at + 4].try_into().unwrap());
         assert_eq!(int(&bytes, 8 + 16), INJECTED_DEVICE_ID);
-        assert_eq!(u64::from_ne_bytes(bytes[176..184].try_into().unwrap()), 0xf000_0000_0000_0000);
+        assert_eq!(
+            u64::from_ne_bytes(bytes[176..184].try_into().unwrap()),
+            0xf000_0000_0000_0000
+        );
         let up = Motion::injected(ACTION_UP, 7, 7, 1.0, 2.0, 0.0).unwrap();
         let bytes = up.message(1, 2, (0.0, 0.0));
-        assert_eq!(u64::from_ne_bytes(bytes[176..184].try_into().unwrap()), 0xd000_0000_0000_0000);
+        assert_eq!(
+            u64::from_ne_bytes(bytes[176..184].try_into().unwrap()),
+            0xd000_0000_0000_0000
+        );
         let float = |at: usize| f32::from_ne_bytes(bytes[at..at + 4].try_into().unwrap());
         assert_eq!((float(184), float(188), float(192)), (1.0, 2.0, 1.0));
         assert!(Motion::injected(ACTION_OUTSIDE, 7, 7, 1.0, 2.0, 1.0).is_none());

@@ -124,21 +124,42 @@ mod tests {
 
     #[test]
     fn shell_uses_resident_selection_and_authenticated_namespace_entry() {
-        let root = std::env::temp_dir().join(format!("aimctl-selected-shell-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("aimctl-selected-shell-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let files = Files::of(&root.join("data")).unwrap();
         std::fs::create_dir_all(files.path_map().parent().unwrap()).unwrap();
         std::fs::write(files.path_map(), b"fixture").unwrap();
-        let selected = crate::inputs::Inputs { image: "/selected-image".into(),
-            host_runtime: "/selected-runtime".into(), userdata: "/selected-templates".into(), binder_trace: None, adb_port: None };
-        let original = State { pid: 1, guest: Some(42), windows: false, started: 0, inputs: selected };
+        let selected = crate::inputs::Inputs {
+            image: "/selected-image".into(),
+            host_runtime: "/selected-runtime".into(),
+            userdata: "/selected-templates".into(),
+            binder_trace: None,
+            adb_port: None,
+        };
+        let original = State {
+            pid: 1,
+            guest: Some(42),
+            windows: false,
+            started: 0,
+            inputs: selected,
+        };
         let stored = State::parse(&original.to_text()).unwrap();
         let guest = Guest::of(&files, &stored).unwrap();
         let command = guest.command(&["/system/bin/getprop", "sys.boot_completed"]);
         assert_eq!(command.get_program(), "/selected-runtime/linux-run");
-        let args = command.get_args().map(|arg| arg.to_string_lossy()).collect::<Vec<_>>();
-        assert!(args.windows(2).any(|pair| pair == ["--root", "/selected-image"]));
-        assert!(args.windows(2).any(|pair| pair == ["--binder", "dev.aim.guest-init.42.binder"]));
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--root", "/selected-image"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--binder", "dev.aim.guest-init.42.binder"])
+        );
         assert!(args.iter().any(|arg| arg == "--mount-namespace-from-init"));
         std::fs::remove_dir_all(root).unwrap();
     }

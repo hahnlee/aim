@@ -36,7 +36,9 @@ impl VpnManager {
     /// `Context.enforceCallingOrSelfPermission`.
     fn enforce(&self, uid: i32, permission: &str, message: &str) -> Result<(), Exception> {
         if self.host.check_permission(Some(permission), uid)? != 0 {
-            return Err(Exception::security(format!("{message}: Neither user {uid} nor current process has {permission}.")));
+            return Err(Exception::security(format!(
+                "{message}: Neither user {uid} nor current process has {permission}."
+            )));
         }
         Ok(())
     }

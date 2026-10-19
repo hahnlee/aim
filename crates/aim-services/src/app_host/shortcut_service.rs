@@ -18,7 +18,9 @@ use std::sync::{Arc, Mutex};
 
 use aim_android_xml::{Element, Node, TEXT, Value as Xml};
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception, Parcel};
+use aim_binder_host::parcel::{
+    BAD_VALUE, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception, Parcel,
+};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_content_pm_ishortcutservice as ss;
 
@@ -71,11 +73,16 @@ const DEFAULT_MAX_ICON_DIMENSION_LOWRAM_DP: i64 = 48;
 const SHORTCUTS_METADATA: &str = "android.app.shortcuts";
 
 fn not_modelled(what: &str) -> Exception {
-    Exception::new(EX_UNSUPPORTED_OPERATION, format!("shortcut: {what} (#1669)"))
+    Exception::new(
+        EX_UNSUPPORTED_OPERATION,
+        format!("shortcut: {what} (#1669)"),
+    )
 }
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 /// `PersistableBundle.restoreFromXml` of `e`'s children: its entries in
@@ -83,13 +90,21 @@ fn now_ms() -> i64 {
 fn persistable(e: &Element) -> Result<Vec<(String, Value)>, String> {
     let mut entries = Vec::new();
     for c in e.children() {
-        let name = c.string("name").map(|s| s.into_owned()).ok_or("an entry without a name")?;
+        let name = c
+            .string("name")
+            .map(|s| s.into_owned())
+            .ok_or("an entry without a name")?;
         let value = match c.name.as_str() {
             "string" => Value::String(Some(text(c))),
             "int" => Value::Int(c.int("value")?.ok_or("an int without a value")?),
             "long" => Value::Long(c.long("value")?.ok_or("a long without a value")?),
             "boolean" => Value::Bool(c.bool("value")?.ok_or("a boolean without a value")?),
-            "string-array" => Value::StringArray(c.children().filter(|i| i.name == "item").map(|i| i.string("value").map(|s| s.into_owned())).collect()),
+            "string-array" => Value::StringArray(
+                c.children()
+                    .filter(|i| i.name == "item")
+                    .map(|i| i.string("value").map(|s| s.into_owned()))
+                    .collect(),
+            ),
             other => return Err(format!("a persistable bundle's <{other}>")),
         };
         entries.retain(|(k, _): &(String, Value)| *k != name);
@@ -100,10 +115,13 @@ fn persistable(e: &Element) -> Result<Vec<(String, Value)>, String> {
 
 /// An element's text.
 fn text(e: &Element) -> String {
-    e.content.iter().filter_map(|n| match n {
-        Node::Token(TEXT, Some(t)) => Some(t.as_str()),
-        _ => None,
-    }).collect()
+    e.content
+        .iter()
+        .filter_map(|n| match n {
+            Node::Token(TEXT, Some(t)) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A `ShortcutInfo` as `ShortcutPackage.parseShortcut` reads it.
@@ -159,7 +177,9 @@ impl Shortcut {
         for c in e.children() {
             match c.name.as_str() {
                 "intent" => {
-                    let uri = c.string("intent-base").ok_or("an intent without intent-base")?;
+                    let uri = c
+                        .string("intent-base")
+                        .ok_or("an intent without intent-base")?;
                     let mut intent = FullIntent::parse_uri(&uri, 0)?;
                     let mut bundle = intent.extras.take();
                     if let Some(x) = c.children().find(|x| x.name == "extras") {
@@ -172,10 +192,16 @@ impl Shortcut {
                 // `<categories>` holds the `XmlUtils` string array the pull
                 // parser reads next.
                 "categories" => {
-                    for array in c.children().filter(|a| a.name == "string-array" && a.string("name").as_deref() == Some("categories")) {
+                    for array in c.children().filter(|a| {
+                        a.name == "string-array"
+                            && a.string("name").as_deref() == Some("categories")
+                    }) {
                         let mut items: Vec<String> = Vec::new();
                         for item in array.children().filter(|i| i.name == "item") {
-                            let v = item.string("value").map(|s| s.into_owned()).unwrap_or_default();
+                            let v = item
+                                .string("value")
+                                .map(|s| s.into_owned())
+                                .unwrap_or_default();
                             if !items.contains(&v) {
                                 items.push(v);
                             }
@@ -231,11 +257,15 @@ struct ForCreator<'a>(&'a Shortcut, i32, &'a str);
 impl WriteParcelable for ForCreator<'_> {
     fn write_to(&self, p: &mut Parcel) {
         let ForCreator(s, user, package) = self;
-        let char_sequence = |p: &mut Parcel, t: &Option<String>| crate::clip::write_char_sequence(p, t.as_deref());
+        let char_sequence =
+            |p: &mut Parcel, t: &Option<String>| crate::clip::write_char_sequence(p, t.as_deref());
         let persistable = |p: &mut Parcel, b: &Option<Vec<(String, Value)>>| match b {
             Some(entries) => {
                 p.write_string16(Some("android.os.PersistableBundle"));
-                let entries: Vec<(&str, Value)> = entries.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+                let entries: Vec<(&str, Value)> = entries
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.clone()))
+                    .collect();
                 crate::bundle::write(p, &entries);
             }
             None => p.write_string16(None),
@@ -358,15 +388,24 @@ struct Incoming {
 
 /// A `PersistableBundle` parcel (`readParcelable`): its entries in their
 /// `ArrayMap` order, of the types `saveToXml` writes here.
-fn persistable_parcel(r: &mut aim_binder_host::parcel::Reader<'_>, unsupported: &mut Option<&'static str>) -> aim_binder_host::parcel::Result<Option<Vec<(String, Value)>>> {
+fn persistable_parcel(
+    r: &mut aim_binder_host::parcel::Reader<'_>,
+    unsupported: &mut Option<&'static str>,
+) -> aim_binder_host::parcel::Result<Option<Vec<(String, Value)>>> {
     if r.read_string16()?.is_none() {
         return Ok(None);
     }
-    let Some(map) = crate::bundle::read(r)? else { return Ok(None) };
+    let Some(map) = crate::bundle::read(r)? else {
+        return Ok(None);
+    };
     let mut entries = Vec::new();
     for (k, v) in map {
         match v {
-            Value::String(_) | Value::Int(_) | Value::Long(_) | Value::Bool(_) | Value::StringArray(_) => entries.push((k, v)),
+            Value::String(_)
+            | Value::Int(_)
+            | Value::Long(_)
+            | Value::Bool(_)
+            | Value::StringArray(_) => entries.push((k, v)),
             _ => *unsupported = Some("a persistable bundle value of another type"),
         }
     }
@@ -374,17 +413,25 @@ fn persistable_parcel(r: &mut aim_binder_host::parcel::Reader<'_>, unsupported: 
 }
 
 impl aim_service_aidl::ReadParcelable for Incoming {
-    fn read_from(r: &mut aim_binder_host::parcel::Reader<'_>) -> aim_binder_host::parcel::Result<Self> {
+    fn read_from(
+        r: &mut aim_binder_host::parcel::Reader<'_>,
+    ) -> aim_binder_host::parcel::Result<Self> {
         use aim_binder_host::parcel::BAD_VALUE;
         let user = r.read_i32()?;
-        let mut id = r.read_string8()?.filter(|i| !i.is_empty()).ok_or(BAD_VALUE)?;
+        let mut id = r
+            .read_string8()?
+            .filter(|i| !i.is_empty())
+            .ok_or(BAD_VALUE)?;
         // `getSafeId`.
         if id.chars().count() > MAX_ID_LENGTH {
             id = id.chars().take(MAX_ID_LENGTH).collect();
         }
         let package = r.read_string8()?;
         let activity = match r.read_string16()? {
-            Some(_) => Some(ComponentName { package: r.read_string16()?.unwrap_or_default(), class: r.read_string16()?.unwrap_or_default() }),
+            Some(_) => Some(ComponentName {
+                package: r.read_string16()?.unwrap_or_default(),
+                class: r.read_string16()?.unwrap_or_default(),
+            }),
             None => None,
         };
         let mut shortcut = Shortcut {
@@ -418,7 +465,15 @@ impl aim_service_aidl::ReadParcelable for Incoming {
         };
         shortcut.timestamp = r.read_i64()?;
         shortcut.disabled_reason = r.read_i32()?;
-        let mut incoming = Incoming { shortcut, user, package, key_only: true, icon: None, has_intents: false, unsupported: None };
+        let mut incoming = Incoming {
+            shortcut,
+            user,
+            package,
+            key_only: true,
+            icon: None,
+            has_intents: false,
+            unsupported: None,
+        };
         if r.read_i32()? == 0 {
             return Ok(incoming);
         }
@@ -439,8 +494,13 @@ impl aim_service_aidl::ReadParcelable for Incoming {
             incoming.has_intents = true;
             for _ in 0..n {
                 if r.read_string16()?.is_some() {
-                    let raw = <super::kept::RawIntent as aim_service_aidl::ReadParcelable>::read_from(r)?;
-                    intents.push(FullIntent { intent: raw.intent, source_bounds: None, extras: None });
+                    let raw =
+                        <super::kept::RawIntent as aim_service_aidl::ReadParcelable>::read_from(r)?;
+                    intents.push(FullIntent {
+                        intent: raw.intent,
+                        source_bounds: None,
+                        extras: None,
+                    });
                 }
             }
         }
@@ -512,17 +572,39 @@ fn persistable_xml(entries: &[(String, Value)]) -> Vec<Node> {
     let element = |name: &str, key: &str, attrs: Vec<(String, Xml)>, content: Vec<Node>| {
         let mut all = vec![("name".to_string(), Xml::String(key.into()))];
         all.extend(attrs);
-        Node::Element(Element { name: name.into(), attrs: all, content })
+        Node::Element(Element {
+            name: name.into(),
+            attrs: all,
+            content,
+        })
     };
     entries
         .iter()
         .filter_map(|(k, v)| {
             Some(match v {
-                Value::String(Some(s)) => element("string", k, Vec::new(), vec![Node::Token(TEXT, Some(s.clone()))]),
-                Value::String(None) => Node::Element(Element { name: "null".into(), attrs: vec![("name".into(), Xml::String(k.clone()))], content: Vec::new() }),
-                Value::Int(i) => element("int", k, vec![("value".into(), Xml::Int(*i))], Vec::new()),
-                Value::Long(l) => element("long", k, vec![("value".into(), Xml::Long(*l))], Vec::new()),
-                Value::Bool(b) => element("boolean", k, vec![("value".into(), Xml::Bool(*b))], Vec::new()),
+                Value::String(Some(s)) => element(
+                    "string",
+                    k,
+                    Vec::new(),
+                    vec![Node::Token(TEXT, Some(s.clone()))],
+                ),
+                Value::String(None) => Node::Element(Element {
+                    name: "null".into(),
+                    attrs: vec![("name".into(), Xml::String(k.clone()))],
+                    content: Vec::new(),
+                }),
+                Value::Int(i) => {
+                    element("int", k, vec![("value".into(), Xml::Int(*i))], Vec::new())
+                }
+                Value::Long(l) => {
+                    element("long", k, vec![("value".into(), Xml::Long(*l))], Vec::new())
+                }
+                Value::Bool(b) => element(
+                    "boolean",
+                    k,
+                    vec![("value".into(), Xml::Bool(*b))],
+                    Vec::new(),
+                ),
                 Value::StringArray(items) => element(
                     "string-array",
                     k,
@@ -530,8 +612,16 @@ fn persistable_xml(entries: &[(String, Value)]) -> Vec<Node> {
                     items
                         .iter()
                         .map(|i| match i {
-                            Some(v) => Node::Element(Element { name: "item".into(), attrs: vec![("value".into(), Xml::String(v.clone()))], content: Vec::new() }),
-                            None => Node::Element(Element { name: "null".into(), attrs: Vec::new(), content: Vec::new() }),
+                            Some(v) => Node::Element(Element {
+                                name: "item".into(),
+                                attrs: vec![("value".into(), Xml::String(v.clone()))],
+                                content: Vec::new(),
+                            }),
+                            None => Node::Element(Element {
+                                name: "null".into(),
+                                attrs: Vec::new(),
+                                content: Vec::new(),
+                            }),
                         })
                         .collect(),
                 ),
@@ -546,20 +636,36 @@ impl Shortcut {
     fn to_xml(&self) -> Element {
         let mut attrs = Vec::new();
         let string = |attrs: &mut Vec<(String, Xml)>, n: &str, v: Option<&str>| attr(attrs, n, v);
-        let long = |attrs: &mut Vec<(String, Xml)>, n: &str, v: i64| attr(attrs, n, Some(&v.to_string()));
+        let long =
+            |attrs: &mut Vec<(String, Xml)>, n: &str, v: i64| attr(attrs, n, Some(&v.to_string()));
         string(&mut attrs, "id", Some(&self.id));
-        let activity = self.activity.as_ref().map(|a| format!("{}/{}", a.package, a.class));
+        let activity = self
+            .activity
+            .as_ref()
+            .map(|a| format!("{}/{}", a.package, a.class));
         string(&mut attrs, "activity", activity.as_deref());
         string(&mut attrs, "title", self.title.as_deref());
         long(&mut attrs, "titleid", self.title_res_id.into());
         string(&mut attrs, "titlename", self.title_res_name.as_deref());
-        string(&mut attrs, "splash-screen-theme-name", self.splash_theme.as_deref());
+        string(
+            &mut attrs,
+            "splash-screen-theme-name",
+            self.splash_theme.as_deref(),
+        );
         string(&mut attrs, "text", self.text.as_deref());
         long(&mut attrs, "textid", self.text_res_id.into());
         string(&mut attrs, "textname", self.text_res_name.as_deref());
         string(&mut attrs, "dmessage", self.disabled_message.as_deref());
-        long(&mut attrs, "dmessageid", self.disabled_message_res_id.into());
-        string(&mut attrs, "dmessagename", self.disabled_message_res_name.as_deref());
+        long(
+            &mut attrs,
+            "dmessageid",
+            self.disabled_message_res_id.into(),
+        );
+        string(
+            &mut attrs,
+            "dmessagename",
+            self.disabled_message_res_name.as_deref(),
+        );
         long(&mut attrs, "disabled-reason", self.disabled_reason.into());
         long(&mut attrs, "timestamp", self.timestamp);
         string(&mut attrs, "locus-id", self.locus_id.as_deref());
@@ -573,31 +679,61 @@ impl Shortcut {
         if let Some(categories) = self.categories.as_deref().filter(|c| !c.is_empty()) {
             let items = categories
                 .iter()
-                .map(|c| Node::Element(Element { name: "item".into(), attrs: vec![("value".into(), Xml::String(c.clone()))], content: Vec::new() }))
+                .map(|c| {
+                    Node::Element(Element {
+                        name: "item".into(),
+                        attrs: vec![("value".into(), Xml::String(c.clone()))],
+                        content: Vec::new(),
+                    })
+                })
                 .collect();
             let array = Element {
                 name: "string-array".into(),
-                attrs: vec![("name".into(), Xml::String("categories".into())), ("num".into(), Xml::Int(categories.len() as i32))],
+                attrs: vec![
+                    ("name".into(), Xml::String("categories".into())),
+                    ("num".into(), Xml::Int(categories.len() as i32)),
+                ],
                 content: items,
             };
-            content.push(Node::Element(Element { name: "categories".into(), attrs: Vec::new(), content: vec![Node::Element(array)] }));
+            content.push(Node::Element(Element {
+                name: "categories".into(),
+                attrs: Vec::new(),
+                content: vec![Node::Element(array)],
+            }));
         }
         for (intent, extras) in &self.intents {
-            let mut e = Element { name: "intent".into(), attrs: Vec::new(), content: Vec::new() };
+            let mut e = Element {
+                name: "intent".into(),
+                attrs: Vec::new(),
+                content: Vec::new(),
+            };
             attr(&mut e.attrs, "intent-base", Some(&intent.to_uri()));
             if let Some(extras) = extras {
-                e.content.push(Node::Element(Element { name: "extras".into(), attrs: Vec::new(), content: persistable_xml(extras) }));
+                e.content.push(Node::Element(Element {
+                    name: "extras".into(),
+                    attrs: Vec::new(),
+                    content: persistable_xml(extras),
+                }));
             }
             content.push(Node::Element(e));
         }
         if let Some(extras) = &self.extras {
-            content.push(Node::Element(Element { name: "extras".into(), attrs: Vec::new(), content: persistable_xml(extras) }));
+            content.push(Node::Element(Element {
+                name: "extras".into(),
+                attrs: Vec::new(),
+                content: persistable_xml(extras),
+            }));
         }
-        Element { name: "shortcut".into(), attrs, content }
+        Element {
+            name: "shortcut".into(),
+            attrs,
+            content,
+        }
     }
 
     fn is_floating(&self) -> bool {
-        (self.flags & (FLAG_PINNED | FLAG_CACHED_ALL) != 0) && self.flags & (FLAG_DYNAMIC | FLAG_MANIFEST) == 0
+        (self.flags & (FLAG_PINNED | FLAG_CACHED_ALL) != 0)
+            && self.flags & (FLAG_DYNAMIC | FLAG_MANIFEST) == 0
     }
 
     fn is_visible_to_publisher(&self) -> bool {
@@ -639,7 +775,11 @@ impl Package {
             return Err(format!("<{}>", root.name));
         }
         let info = root.children().find(|c| c.name == "package-info");
-        if info.and_then(|i| i.int("shadow").ok().flatten()).unwrap_or(0) != 0 {
+        if info
+            .and_then(|i| i.int("shadow").ok().flatten())
+            .unwrap_or(0)
+            != 0
+        {
             return Err("a shadow package".into());
         }
         let mut shortcuts: Vec<Shortcut> = Vec::new();
@@ -655,8 +795,12 @@ impl Package {
             }
         }
         Ok(Package {
-            version: info.and_then(|i| i.long("version").ok().flatten()).unwrap_or(0),
-            last_update_time: info.and_then(|i| i.long("last_udpate_time").ok().flatten()).unwrap_or(0),
+            version: info
+                .and_then(|i| i.long("version").ok().flatten())
+                .unwrap_or(0),
+            last_update_time: info
+                .and_then(|i| i.long("last_udpate_time").ok().flatten())
+                .unwrap_or(0),
             shortcuts: array_order(shortcuts, |s| s.id.as_str()),
             file,
             root,
@@ -669,7 +813,9 @@ impl Package {
 
     fn set_attr_long(&mut self, name: &str, v: i64) {
         self.root.attrs.retain(|(n, _)| n != name);
-        self.root.attrs.push((name.into(), Xml::String(v.to_string())));
+        self.root
+            .attrs
+            .push((name.into(), Xml::String(v.to_string())));
     }
 
     fn find(&self, id: &str) -> Option<&Shortcut> {
@@ -687,19 +833,42 @@ impl Package {
     /// written when it has nothing (`hasNoShortcut`, no share target, no
     /// call made). Its package info and share targets are written as read.
     fn save(&mut self) -> Result<(), Exception> {
-        let kept = |name: &str| self.root.children().filter(|c| c.name == name).cloned().map(Node::Element).collect::<Vec<_>>();
+        let kept = |name: &str| {
+            self.root
+                .children()
+                .filter(|c| c.name == name)
+                .cloned()
+                .map(Node::Element)
+                .collect::<Vec<_>>()
+        };
         let share_targets = kept("share-target");
         let mut content = kept("package-info");
-        content.extend(self.shortcuts.iter().map(|s| Node::Element(s.element.clone().unwrap_or_else(|| s.to_xml()))));
+        content.extend(
+            self.shortcuts
+                .iter()
+                .map(|s| Node::Element(s.element.clone().unwrap_or_else(|| s.to_xml()))),
+        );
         content.extend(share_targets.iter().cloned());
         let mut attrs = Vec::new();
         attr(&mut attrs, "name", self.root.string("name").as_deref());
         for name in ["call-count", "last-reset"] {
             attr(&mut attrs, name, Some(&self.attr_long(name).to_string()));
         }
-        self.root = Element { name: "package".into(), attrs, content };
-        let roots = if self.shortcuts.is_empty() && share_targets.is_empty() && self.attr_long("call-count") == 0 { &[][..] } else { std::slice::from_ref(&self.root) };
-        write_resilient(&self.file, roots).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", self.file.display())))
+        self.root = Element {
+            name: "package".into(),
+            attrs,
+            content,
+        };
+        let roots = if self.shortcuts.is_empty()
+            && share_targets.is_empty()
+            && self.attr_long("call-count") == 0
+        {
+            &[][..]
+        } else {
+            std::slice::from_ref(&self.root)
+        };
+        write_resilient(&self.file, roots)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", self.file.display())))
     }
 
     /// `forceDeleteShortcutInner`: its bitmap file left for the dangling
@@ -718,7 +887,11 @@ impl Package {
     fn delete_all_dynamic(&mut self) {
         let now = now_ms();
         let mut changed = false;
-        for s in self.shortcuts.iter_mut().filter(|s| s.flags & FLAG_DYNAMIC != 0 && s.is_visible_to_publisher()) {
+        for s in self
+            .shortcuts
+            .iter_mut()
+            .filter(|s| s.flags & FLAG_DYNAMIC != 0 && s.is_visible_to_publisher())
+        {
             changed = true;
             s.timestamp = now;
             s.flags &= !FLAG_DYNAMIC;
@@ -734,7 +907,11 @@ impl Package {
     /// invisible ones.
     fn ensure_not_immutable(&self, id: &str) -> Result<(), Exception> {
         match self.find(id) {
-            Some(s) if s.is_immutable() && s.is_visible_to_publisher() => Err(Exception::illegal_argument(format!("Manifest shortcut ID={id} may not be manipulated via APIs"))),
+            Some(s) if s.is_immutable() && s.is_visible_to_publisher() => {
+                Err(Exception::illegal_argument(format!(
+                    "Manifest shortcut ID={id} may not be manipulated via APIs"
+                )))
+            }
             _ => Ok(()),
         }
     }
@@ -742,8 +919,15 @@ impl Package {
     /// `deleteOrDisableWithId(id, disable, false, true, reason)`, the
     /// disabled reason given to disable: the shortcut deleted, if it was
     /// not kept pinned or cached.
-    fn delete_or_disable(&mut self, id: &str, disable: Option<i32>, dummy_main: impl Fn(&ComponentName) -> bool) -> Result<Option<Shortcut>, Exception> {
-        let Some(old) = self.find(id) else { return Ok(None) };
+    fn delete_or_disable(
+        &mut self,
+        id: &str,
+        disable: Option<i32>,
+        dummy_main: impl Fn(&ComponentName) -> bool,
+    ) -> Result<Option<Shortcut>, Exception> {
+        let Some(old) = self.find(id) else {
+            return Ok(None);
+        };
         if old.flags & FLAG_DISABLED != 0 && !old.is_visible_to_publisher() {
             return Ok(None);
         }
@@ -771,7 +955,11 @@ impl Package {
     }
 
     /// `deleteDynamicWithId(id, true)`.
-    fn delete_dynamic(&mut self, id: &str, dummy_main: impl Fn(&ComponentName) -> bool) -> Result<(), Exception> {
+    fn delete_dynamic(
+        &mut self,
+        id: &str,
+        dummy_main: impl Fn(&ComponentName) -> bool,
+    ) -> Result<(), Exception> {
         self.delete_or_disable(id, None, dummy_main).map(|_| ())
     }
 
@@ -790,7 +978,11 @@ impl Package {
     /// dynamic shortcuts ranked from 0 (`mShortcutRankComparator`).
     fn adjust_ranks(&mut self) {
         let now = now_ms();
-        for s in self.shortcuts.iter_mut().filter(|s| s.is_floating() && s.rank != 0) {
+        for s in self
+            .shortcuts
+            .iter_mut()
+            .filter(|s| s.is_floating() && s.rank != 0)
+        {
             s.timestamp = now;
             s.rank = 0;
             s.touched();
@@ -804,13 +996,21 @@ impl Package {
             }
         }
         for activity in activities {
-            let mut list: Vec<usize> = (0..self.shortcuts.len()).filter(|&i| !self.shortcuts[i].is_floating() && self.shortcuts[i].activity.as_ref() == Some(&activity)).collect();
+            let mut list: Vec<usize> = (0..self.shortcuts.len())
+                .filter(|&i| {
+                    !self.shortcuts[i].is_floating()
+                        && self.shortcuts[i].activity.as_ref() == Some(&activity)
+                })
+                .collect();
             list.sort_by(|&a, &b| {
                 let (a, b) = (&self.shortcuts[a], &self.shortcuts[b]);
                 a.rank
                     .cmp(&b.rank)
                     .then(b.rank_changed().cmp(&a.rank_changed()))
-                    .then((a.implicit_rank & IMPLICIT_RANK_MASK).cmp(&(b.implicit_rank & IMPLICIT_RANK_MASK)))
+                    .then(
+                        (a.implicit_rank & IMPLICIT_RANK_MASK)
+                            .cmp(&(b.implicit_rank & IMPLICIT_RANK_MASK)),
+                    )
                     .then(a.id.encode_utf16().cmp(b.id.encode_utf16()))
             });
             let mut rank = 0;
@@ -830,7 +1030,12 @@ impl Package {
     }
 
     /// `enforceShortcutCountsBeforeOperation`.
-    fn enforce_counts(&self, new: &[Incoming], operation: Operation, max: i64) -> Result<(), Exception> {
+    fn enforce_counts(
+        &self,
+        new: &[Incoming],
+        operation: Operation,
+        max: i64,
+    ) -> Result<(), Exception> {
         let mut counts: Vec<(ComponentName, i64)> = Vec::new();
         let mut add = |a: Option<&ComponentName>, n: i64| {
             let Some(a) = a else { return };
@@ -840,12 +1045,16 @@ impl Package {
             }
         };
         for s in &self.shortcuts {
-            if s.flags & FLAG_MANIFEST != 0 || (s.flags & FLAG_DYNAMIC != 0 && operation != Operation::Set) {
+            if s.flags & FLAG_MANIFEST != 0
+                || (s.flags & FLAG_DYNAMIC != 0 && operation != Operation::Set)
+            {
                 add(s.activity.as_ref(), 1);
             }
         }
         for n in new.iter().rev() {
-            let Some(activity) = n.shortcut.activity.as_ref() else { continue };
+            let Some(activity) = n.shortcut.activity.as_ref() else {
+                continue;
+            };
             if let Some(original) = self.find(&n.shortcut.id)
                 && operation != Operation::Set
                 && !original.is_floating()
@@ -855,7 +1064,9 @@ impl Package {
             add(Some(activity), 1);
         }
         if counts.iter().any(|(_, n)| *n > max) {
-            return Err(Exception::illegal_argument("Max number of dynamic shortcuts exceeded"));
+            return Err(Exception::illegal_argument(
+                "Max number of dynamic shortcuts exceeded",
+            ));
         }
         Ok(())
     }
@@ -864,7 +1075,9 @@ impl Package {
     /// under `max` (`mShortcutTypeRankAndTimeComparator`'s last ones
     /// removed).
     fn ensure_count_before_push(&mut self, max: i64) -> Result<(), Exception> {
-        let mut app: Vec<usize> = (0..self.shortcuts.len()).filter(|&i| self.shortcuts[i].flags & FLAG_PINNED == 0).collect();
+        let mut app: Vec<usize> = (0..self.shortcuts.len())
+            .filter(|&i| self.shortcuts[i].flags & FLAG_PINNED == 0)
+            .collect();
         if (app.len() as i64) < max {
             return Ok(());
         }
@@ -874,15 +1087,34 @@ impl Package {
             let (a, b) = (&self.shortcuts[a], &self.shortcuts[b]);
             declared(b)
                 .cmp(&declared(a))
-                .then_with(|| if dynamic(a) && dynamic(b) { a.rank.cmp(&b.rank) } else { dynamic(b).cmp(&dynamic(a)) })
-                .then_with(|| if dynamic(a) || dynamic(b) { std::cmp::Ordering::Equal } else { b.timestamp.cmp(&a.timestamp) })
+                .then_with(|| {
+                    if dynamic(a) && dynamic(b) {
+                        a.rank.cmp(&b.rank)
+                    } else {
+                        dynamic(b).cmp(&dynamic(a))
+                    }
+                })
+                .then_with(|| {
+                    if dynamic(a) || dynamic(b) {
+                        std::cmp::Ordering::Equal
+                    } else {
+                        b.timestamp.cmp(&a.timestamp)
+                    }
+                })
         });
         let mut removed = Vec::new();
         while app.len() as i64 >= max {
             let i = app.pop().unwrap();
             if declared(&self.shortcuts[i]) {
-                let name = self.root.string("name").map(|s| s.into_owned()).unwrap_or_default();
-                return Err(Exception::illegal_argument(format!("{name} has published {} manifest shortcuts across different activities.", app.len())));
+                let name = self
+                    .root
+                    .string("name")
+                    .map(|s| s.into_owned())
+                    .unwrap_or_default();
+                return Err(Exception::illegal_argument(format!(
+                    "{name} has published {} manifest shortcuts across different activities.",
+                    app.len()
+                )));
             }
             removed.push(self.shortcuts[i].id.clone());
         }
@@ -914,7 +1146,10 @@ fn read_resilient(file: &Path) -> Result<Option<Element>, String> {
         Err(e) => {
             let mut reserve = file.as_os_str().to_owned();
             reserve.push(".reservecopy");
-            eprintln!("app host: shortcut: {}: {e}; reading its reserve copy", file.display());
+            eprintln!(
+                "app host: shortcut: {}: {e}; reading its reserve copy",
+                file.display()
+            );
             read(Path::new(&reserve))
         }
     }
@@ -930,10 +1165,22 @@ fn write_resilient(file: &Path, roots: &[Element]) -> std::io::Result<()> {
         let mut new = path.as_os_str().to_owned();
         new.push(".new");
         let new = PathBuf::from(new);
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&new)?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&new)?;
         std::io::Write::write_all(&mut f, &bytes)?;
         crate::fsync(&f)?;
-        aim_storage::guest_inode::record(&new, aim_storage::guest_inode::GuestInode { uid: Some(1000), gid: Some(1000), mode: Some(0o600) })?;
+        aim_storage::guest_inode::record(
+            &new,
+            aim_storage::guest_inode::GuestInode {
+                uid: Some(1000),
+                gid: Some(1000),
+                mode: Some(0o600),
+            },
+        )?;
         std::fs::rename(&new, &path)?;
     }
     Ok(())
@@ -949,12 +1196,20 @@ pub struct ShortcutManager {
 
 impl ShortcutManager {
     pub fn new(host: Arc<AppHost>) -> Self {
-        ShortcutManager { host, user: Mutex::new(None), last_reset: Mutex::new(None) }
+        ShortcutManager {
+            host,
+            user: Mutex::new(None),
+            last_reset: Mutex::new(None),
+        }
     }
 
     /// `KeyValueListParser.getLong` of `shortcut_manager_constants`.
     fn constant(&self, key: &str, default: i64) -> Result<i64, Exception> {
-        let config = self.host.inputs()?.settings.get(super::settings::Table::Global, "shortcut_manager_constants");
+        let config = self
+            .host
+            .inputs()?
+            .settings
+            .get(super::settings::Table::Global, "shortcut_manager_constants");
         Ok(config
             .as_deref()
             .unwrap_or_default()
@@ -970,42 +1225,84 @@ impl ShortcutManager {
     /// pinned shortcut or widget (`injectGetPinConfirmationActivity`).
     /// The system user's items are not restricted on its home screen
     /// (`areShortcutsSupportedOnHomeScreen`).
-    pub(super) fn pin_confirmation_activity(&self, user: i32, request_type: i32) -> Result<Option<String>, Exception> {
+    pub(super) fn pin_confirmation_activity(
+        &self,
+        user: i32,
+        request_type: i32,
+    ) -> Result<Option<String>, Exception> {
         if user != 0 {
             return Err(not_modelled("a pin request of another user"));
         }
-        let roles = self.host.role_service.get().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "shortcut: no role service"))?;
+        let roles = self
+            .host
+            .role_service
+            .get()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "shortcut: no role service"))?;
         let Some(launcher) = roles.holders_of(ROLE_HOME)?.into_iter().next() else {
             eprintln!("app host: shortcut: Default launcher not found. userId={user}");
             return Ok(None);
         };
-        let action = if request_type == REQUEST_TYPE_SHORTCUT { ACTION_CONFIRM_PIN_SHORTCUT } else { ACTION_CONFIRM_PIN_APPWIDGET };
-        let intent = crate::package::intent::Intent { action: Some(action.into()), package: Some(launcher), ..Default::default() };
-        Ok(self.query_activities(&intent, user, false)?.into_iter().next().map(|c| c.class))
+        let action = if request_type == REQUEST_TYPE_SHORTCUT {
+            ACTION_CONFIRM_PIN_SHORTCUT
+        } else {
+            ACTION_CONFIRM_PIN_APPWIDGET
+        };
+        let intent = crate::package::intent::Intent {
+            action: Some(action.into()),
+            package: Some(launcher),
+            ..Default::default()
+        };
+        Ok(self
+            .query_activities(&intent, user, false)?
+            .into_iter()
+            .next()
+            .map(|c| c.class))
     }
 
     /// `queryActivities`: the activities resolved, of installed packages,
     /// enabled unless system, and exported if `exported_only`.
-    fn query_activities(&self, intent: &crate::package::intent::Intent, user: i32, exported_only: bool) -> Result<Vec<ComponentName>, Exception> {
+    fn query_activities(
+        &self,
+        intent: &crate::package::intent::Intent,
+        user: i32,
+        exported_only: bool,
+    ) -> Result<Vec<ComponentName>, Exception> {
         let (state, resolution) = self.host.packages()?;
         let found = resolution
-            .query_intent_activities(intent, None, PACKAGE_MATCH_FLAGS | MATCH_DISABLED_COMPONENTS, user, 1000)
+            .query_intent_activities(
+                intent,
+                None,
+                PACKAGE_MATCH_FLAGS | MATCH_DISABLED_COMPONENTS,
+                user,
+                1000,
+            )
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("shortcut: {e:?}")))?;
-        let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: 1000 };
+        let query = crate::package::query::Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: 1000,
+        };
         let mut activities = Vec::new();
         for r in found {
-            let crate::package::component_resolver::Info::Activity(a) = r.info else { continue };
+            let crate::package::component_resolver::Info::Activity(a) = r.info else {
+                continue;
+            };
             let app = &a.info.application_info;
             // `isInstalled`, then `isSystem` or `isEnabled`.
             if !app.enabled || app.flags & FLAG_INSTALLED == 0 {
                 continue;
             }
-            let component = ComponentName { package: app.item.package_name.clone().unwrap_or_default(), class: a.info.item.name.clone().unwrap_or_default() };
+            let component = ComponentName {
+                package: app.item.package_name.clone().unwrap_or_default(),
+                class: a.info.item.name.clone().unwrap_or_default(),
+            };
             let setting = query
                 .internal_component_enabled(Some(&component), 1000, user, true)
                 .map_err(|e| not_modelled(&e.0))??;
-            let enabled = (setting == COMPONENT_ENABLED_STATE_DEFAULT && a.info.enabled) || setting == COMPONENT_ENABLED_STATE_ENABLED;
-            if (app.flags & SYSTEM_APP_MASK == 0 && !enabled) || (exported_only && !a.info.exported) {
+            let enabled = (setting == COMPONENT_ENABLED_STATE_DEFAULT && a.info.enabled)
+                || setting == COMPONENT_ENABLED_STATE_ENABLED;
+            if (app.flags & SYSTEM_APP_MASK == 0 && !enabled) || (exported_only && !a.info.exported)
+            {
                 continue;
             }
             activities.push(component);
@@ -1014,7 +1311,12 @@ impl ShortcutManager {
     }
 
     /// `queryActivities(getMainActivityIntent(), package, activity, user)`.
-    fn main_activities(&self, package: &str, activity: Option<&ComponentName>, user: i32) -> Result<Vec<ComponentName>, Exception> {
+    fn main_activities(
+        &self,
+        package: &str,
+        activity: Option<&ComponentName>,
+        user: i32,
+    ) -> Result<Vec<ComponentName>, Exception> {
         let intent = crate::package::intent::Intent {
             action: Some(ACTION_MAIN.into()),
             categories: Some(vec![CATEGORY_LAUNCHER.into()]),
@@ -1027,38 +1329,80 @@ impl ShortcutManager {
 
     /// `ShortcutService.setDynamicShortcuts` and `addDynamicShortcuts`:
     /// whether the call was within the rate limit.
-    fn publish(&self, uid: i32, package: Option<&str>, mut new: Vec<Incoming>, user: i32, operation: Operation) -> Result<bool, Exception> {
+    fn publish(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+        mut new: Vec<Incoming>,
+        user: i32,
+        operation: Operation,
+    ) -> Result<bool, Exception> {
         let package = self.verify_caller(uid, package, user)?;
-        let unlimited = self.host.check_permission(Some(UNLIMITED_SHORTCUTS_API_CALLS), uid)? == 0;
+        let unlimited = self
+            .host
+            .check_permission(Some(UNLIMITED_SHORTCUTS_API_CALLS), uid)?
+            == 0;
         for n in &new {
             // `verifyShortcutInfoPackage`.
             if n.package.as_deref() != Some(package.as_str()) {
                 return Err(Exception::security("Shortcut package name mismatch"));
             }
             if uid / PER_USER_RANGE as i32 != n.user {
-                return Err(Exception::security("UserId in shortcut doesn't match the caller"));
+                return Err(Exception::security(
+                    "UserId in shortcut doesn't match the caller",
+                ));
             }
             if let Some(what) = n.unsupported {
-                return Err(self.host.unimplemented_named("shortcut", &format!("{what} (#1669)")));
+                return Err(self
+                    .host
+                    .unimplemented_named("shortcut", &format!("{what} (#1669)")));
             }
-            if let Some((ty @ (TYPE_BITMAP | TYPE_ADAPTIVE_BITMAP | TYPE_URI | TYPE_URI_ADAPTIVE_BITMAP), _, _)) = n.icon {
-                let what = if ty == TYPE_BITMAP || ty == TYPE_ADAPTIVE_BITMAP { "a bitmap icon" } else { "an icon URI's grant check" };
-                return Err(self.host.unimplemented_named("shortcut", &format!("{what} (#1669)")));
+            if let Some((
+                ty @ (TYPE_BITMAP | TYPE_ADAPTIVE_BITMAP | TYPE_URI | TYPE_URI_ADAPTIVE_BITMAP),
+                _,
+                _,
+            )) = n.icon
+            {
+                let what = if ty == TYPE_BITMAP || ty == TYPE_ADAPTIVE_BITMAP {
+                    "a bitmap icon"
+                } else {
+                    "an icon URI's grant check"
+                };
+                return Err(self
+                    .host
+                    .unimplemented_named("shortcut", &format!("{what} (#1669)")));
             }
         }
-        let max_shortcuts = self.constant("max_shortcuts", DEFAULT_MAX_SHORTCUTS_PER_ACTIVITY)?.max(0);
-        let max_updates = self.constant("max_updates_per_interval", DEFAULT_MAX_UPDATES_PER_INTERVAL)?.max(0);
-        let max_per_app = self.constant("max_shortcuts_per_app", DEFAULT_MAX_SHORTCUTS_PER_APP)?.max(0);
+        let max_shortcuts = self
+            .constant("max_shortcuts", DEFAULT_MAX_SHORTCUTS_PER_ACTIVITY)?
+            .max(0);
+        let max_updates = self
+            .constant("max_updates_per_interval", DEFAULT_MAX_UPDATES_PER_INTERVAL)?
+            .max(0);
+        let max_per_app = self
+            .constant("max_shortcuts_per_app", DEFAULT_MAX_SHORTCUTS_PER_APP)?
+            .max(0);
         self.with_user(|u| {
             self.on_called_by_publisher(u, &package)?;
-            let p = u.packages.get_mut(&package).ok_or_else(|| not_modelled("a package's first shortcut state"))?;
+            let p = u
+                .packages
+                .get_mut(&package)
+                .ok_or_else(|| not_modelled("a package's first shortcut state"))?;
             for n in new.iter().rev() {
                 p.ensure_not_immutable(&n.shortcut.id)?;
             }
             // `fillInDefaultActivity`.
             if new.iter().any(|n| n.shortcut.activity.is_none()) {
-                let default = self.main_activities(&package, None, user)?.into_iter().next();
-                let default = default.ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("Launcher activity not found for package {package}")))?;
+                let default = self
+                    .main_activities(&package, None, user)?
+                    .into_iter()
+                    .next();
+                let default = default.ok_or_else(|| {
+                    Exception::new(
+                        EX_ILLEGAL_STATE,
+                        format!("Launcher activity not found for package {package}"),
+                    )
+                })?;
                 for n in new.iter_mut().filter(|n| n.shortcut.activity.is_none()) {
                     n.shortcut.activity = Some(default.clone());
                 }
@@ -1069,7 +1413,8 @@ impl ShortcutManager {
             let rank = |p: &mut Package, new: &mut [Incoming]| {
                 p.shortcuts.iter_mut().for_each(|s| s.implicit_rank = 0);
                 for (i, n) in new.iter_mut().enumerate() {
-                    n.shortcut.implicit_rank = (n.shortcut.implicit_rank & RANK_CHANGED_BIT) | (i as i32 & IMPLICIT_RANK_MASK);
+                    n.shortcut.implicit_rank = (n.shortcut.implicit_rank & RANK_CHANGED_BIT)
+                        | (i as i32 & IMPLICIT_RANK_MASK);
                 }
             };
             if operation == Operation::Add {
@@ -1105,14 +1450,30 @@ impl ShortcutManager {
     fn fix_up_incoming(&self, package: &str, n: &mut Incoming, user: i32) -> Result<(), Exception> {
         let s = &mut n.shortcut;
         if s.flags & FLAG_RETURNED_BY_SERVICE != 0 {
-            eprintln!("app host: shortcut: Re-publishing ShortcutInfo returned by server is not supported. Some information such as icon may lost from shortcut.");
+            eprintln!(
+                "app host: shortcut: Re-publishing ShortcutInfo returned by server is not supported. Some information such as icon may lost from shortcut."
+            );
         }
         if let Some(a) = &s.activity {
             if a.package != package {
-                return Err(Exception::new(EX_ILLEGAL_STATE, format!("Cannot publish shortcut: activity {}/{} does not belong to package {package}", a.package, a.class)));
+                return Err(Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!(
+                        "Cannot publish shortcut: activity {}/{} does not belong to package {package}",
+                        a.package, a.class
+                    ),
+                ));
             }
-            if a.class != DUMMY_MAIN_ACTIVITY && self.main_activities(package, Some(a), user)?.is_empty() {
-                return Err(Exception::new(EX_ILLEGAL_STATE, format!("Cannot publish shortcut: activity {}/{} is not main activity", a.package, a.class)));
+            if a.class != DUMMY_MAIN_ACTIVITY
+                && self.main_activities(package, Some(a), user)?.is_empty()
+            {
+                return Err(Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!(
+                        "Cannot publish shortcut: activity {}/{} is not main activity",
+                        a.package, a.class
+                    ),
+                ));
             }
         }
         // `enforceMandatoryFields(false)`.
@@ -1123,18 +1484,34 @@ impl ShortcutManager {
             return Err(Exception::illegal_argument("Short label must be provided"));
         }
         if !n.has_intents {
-            return Err(Exception::new(EX_NULL_POINTER, "Shortcut Intent must be provided"));
+            return Err(Exception::new(
+                EX_NULL_POINTER,
+                "Shortcut Intent must be provided",
+            ));
         }
         if s.intents.is_empty() {
-            return Err(Exception::illegal_argument("Shortcut Intent must be provided"));
+            return Err(Exception::illegal_argument(
+                "Shortcut Intent must be provided",
+            ));
         }
         // `validateIcon`.
         if let Some((ty, _, tinted)) = &n.icon {
-            if !matches!(*ty, TYPE_RESOURCE | TYPE_BITMAP | TYPE_ADAPTIVE_BITMAP | TYPE_URI | TYPE_URI_ADAPTIVE_BITMAP) {
-                return Err(Exception::illegal_argument("Unsupported icon type: only the bitmap and resource types are supported"));
+            if !matches!(
+                *ty,
+                TYPE_RESOURCE
+                    | TYPE_BITMAP
+                    | TYPE_ADAPTIVE_BITMAP
+                    | TYPE_URI
+                    | TYPE_URI_ADAPTIVE_BITMAP
+            ) {
+                return Err(Exception::illegal_argument(
+                    "Unsupported icon type: only the bitmap and resource types are supported",
+                ));
             }
             if *tinted {
-                return Err(Exception::illegal_argument("Icons with tints are not supported"));
+                return Err(Exception::illegal_argument(
+                    "Icons with tints are not supported",
+                ));
             }
         }
         s.flags &= FLAG_LONG_LIVED;
@@ -1143,13 +1520,23 @@ impl ShortcutManager {
 
     /// `addOrReplaceDynamicShortcut`, then `forceReplaceShortcutInner`
     /// unless excluded from the launcher.
-    fn add_or_replace_dynamic(&self, p: &mut Package, n: Incoming, max_per_app: i64) -> Result<(), Exception> {
-        let Incoming { mut shortcut, icon, .. } = n;
+    fn add_or_replace_dynamic(
+        &self,
+        p: &mut Package,
+        n: Incoming,
+        max_per_app: i64,
+    ) -> Result<(), Exception> {
+        let Incoming {
+            mut shortcut, icon, ..
+        } = n;
         shortcut.flags |= FLAG_DYNAMIC;
         if let Some(old) = p.find(&shortcut.id) {
             // `ensureUpdatableWith(newShortcut, false)`.
             if old.is_visible_to_publisher() && old.is_immutable() {
-                return Err(Exception::new(EX_ILLEGAL_STATE, "Target ShortcutInfo is immutable"));
+                return Err(Exception::new(
+                    EX_ILLEGAL_STATE,
+                    "Target ShortcutInfo is immutable",
+                ));
             }
             shortcut.flags |= old.flags & (FLAG_PINNED | FLAG_CACHED_ALL);
         }
@@ -1163,16 +1550,24 @@ impl ShortcutManager {
         shortcut.icon_res_name = None;
         shortcut.bitmap_path = None;
         shortcut.icon_uri = None;
-        shortcut.flags &= !(FLAG_HAS_ICON_FILE | FLAG_ADAPTIVE_BITMAP | FLAG_HAS_ICON_RES | FLAG_HAS_ICON_URI);
+        shortcut.flags &=
+            !(FLAG_HAS_ICON_FILE | FLAG_ADAPTIVE_BITMAP | FLAG_HAS_ICON_RES | FLAG_HAS_ICON_URI);
         if let Some((_, icon, _)) = icon {
-            let crate::notifications::parcels::Icon::Resource { package, id } = icon else { unreachable!("refused by publish") };
+            let crate::notifications::parcels::Icon::Resource { package, id } = icon else {
+                unreachable!("refused by publish")
+            };
             if package != p.root.string("name").as_deref().unwrap_or_default() {
-                return Err(Exception::illegal_argument("Icon resource must reside in shortcut owner package"));
+                return Err(Exception::illegal_argument(
+                    "Icon resource must reside in shortcut owner package",
+                ));
             }
             shortcut.icon_res_id = id;
             shortcut.flags |= FLAG_HAS_ICON_RES;
         }
-        self.fix_up_resource_names_and_values(&mut shortcut, &p.root.string("name").unwrap_or_default())?;
+        self.fix_up_resource_names_and_values(
+            &mut shortcut,
+            &p.root.string("name").unwrap_or_default(),
+        )?;
         p.ensure_count_before_push(max_per_app)?;
         p.put(shortcut);
         Ok(())
@@ -1180,17 +1575,33 @@ impl ShortcutManager {
 
     /// `fixUpShortcutResourceNamesAndValues`: `lookupAndFillInResourceNames`
     /// and `resolveResourceStrings` in the publisher's resources.
-    fn fix_up_resource_names_and_values(&self, s: &mut Shortcut, package: &str) -> Result<(), Exception> {
-        let ids = [s.title_res_id, s.text_res_id, s.disabled_message_res_id, s.icon_res_id];
+    fn fix_up_resource_names_and_values(
+        &self,
+        s: &mut Shortcut,
+        package: &str,
+    ) -> Result<(), Exception> {
+        let ids = [
+            s.title_res_id,
+            s.text_res_id,
+            s.disabled_message_res_id,
+            s.icon_res_id,
+        ];
         s.flags |= FLAG_STRINGS_RESOLVED;
         if ids.iter().all(|&i| i == 0) {
             return Ok(());
         }
         let (state, _) = self.host.packages()?;
-        let pkg = state.packages.get(package).and_then(|ps| ps.pkg.clone()).ok_or_else(|| Exception::illegal_argument(format!("no package {package}")))?;
+        let pkg = state
+            .packages
+            .get(package)
+            .and_then(|ps| ps.pkg.clone())
+            .ok_or_else(|| Exception::illegal_argument(format!("no package {package}")))?;
         let inputs = self.host.inputs()?;
         let ids_u: Vec<u32> = ids.iter().map(|&i| i as u32).collect();
-        let found = inputs.packages.resource_names_and_strings(self.host.root()?, &inputs.data, &pkg, &ids_u).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("shortcut: {e}")))?;
+        let found = inputs
+            .packages
+            .resource_names_and_strings(self.host.root()?, &inputs.data, &pkg, &ids_u)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("shortcut: {e}")))?;
         // `lookUpResourceName`: a framework resource by its ID.
         let name = |i: usize, with_type: bool| -> Option<String> {
             if ids[i] == 0 {
@@ -1198,9 +1609,16 @@ impl ShortcutManager {
             }
             match &found[i].0 {
                 Some((0x01, _, _)) => Some(ids[i].to_string()),
-                Some((_, ty, entry)) => Some(if with_type { format!("{ty}/{entry}") } else { entry.clone() }),
+                Some((_, ty, entry)) => Some(if with_type {
+                    format!("{ty}/{entry}")
+                } else {
+                    entry.clone()
+                }),
                 None => {
-                    eprintln!("app host: shortcut: Resource name for ID={} not found in package {package}. Resource IDs may change when the application is upgraded, and the system may not be able to find the correct resource.", ids[i]);
+                    eprintln!(
+                        "app host: shortcut: Resource name for ID={} not found in package {package}. Resource IDs may change when the application is upgraded, and the system may not be able to find the correct resource.",
+                        ids[i]
+                    );
                     None
                 }
             }
@@ -1214,7 +1632,10 @@ impl ShortcutManager {
             if ids[i] != 0 {
                 match &found[i].1 {
                     Some(v) => *current = Some(v.clone()),
-                    None => eprintln!("app host: shortcut: Resource for ID={} not found in package {package}", ids[i]),
+                    None => eprintln!(
+                        "app host: shortcut: Resource for ID={} not found in package {package}",
+                        ids[i]
+                    ),
                 }
             }
         };
@@ -1226,16 +1647,31 @@ impl ShortcutManager {
 
     /// `removeDynamicShortcuts` and `removeAllDynamicShortcuts` (`ids`
     /// none).
-    fn remove(&self, uid: i32, package: Option<&str>, ids: Option<Vec<Option<String>>>, user: i32, all: bool) -> Result<(), Exception> {
+    fn remove(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+        ids: Option<Vec<Option<String>>>,
+        user: i32,
+        all: bool,
+    ) -> Result<(), Exception> {
         let package = self.verify_caller(uid, package, user)?;
         let ids = match (all, ids) {
             (true, _) => Vec::new(),
             (false, Some(ids)) => ids,
-            (false, None) => return Err(Exception::new(EX_NULL_POINTER, "shortcutIds must be provided")),
+            (false, None) => {
+                return Err(Exception::new(
+                    EX_NULL_POINTER,
+                    "shortcutIds must be provided",
+                ));
+            }
         };
         self.with_user(|u| {
             self.on_called_by_publisher(u, &package)?;
-            let p = u.packages.get_mut(&package).ok_or_else(|| not_modelled("a package's first shortcut state"))?;
+            let p = u
+                .packages
+                .get_mut(&package)
+                .ok_or_else(|| not_modelled("a package's first shortcut state"))?;
             if all {
                 p.delete_all_dynamic();
             } else {
@@ -1243,7 +1679,10 @@ impl ShortcutManager {
                     p.ensure_not_immutable(id.as_deref().unwrap_or_default())?;
                 }
                 for id in ids.iter().rev() {
-                    let id = id.as_deref().filter(|i| !i.is_empty()).ok_or_else(|| Exception::illegal_argument(""))?;
+                    let id = id
+                        .as_deref()
+                        .filter(|i| !i.is_empty())
+                        .ok_or_else(|| Exception::illegal_argument(""))?;
                     if p.find(id).is_some_and(Shortcut::is_visible_to_publisher) {
                         p.delete_dynamic(id, |a| a.class == DUMMY_MAIN_ACTIVITY)?;
                     }
@@ -1256,17 +1695,31 @@ impl ShortcutManager {
 
     /// `disableShortcuts` (`message` some, or `message_res` given) and
     /// `enableShortcuts` (neither) of the caller's shortcuts `ids`.
-    fn disable_or_enable(&self, uid: i32, package: Option<&str>, ids: Option<Vec<Option<String>>>, disable: Option<(Option<String>, i32)>, user: i32) -> Result<(), Exception> {
+    fn disable_or_enable(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+        ids: Option<Vec<Option<String>>>,
+        disable: Option<(Option<String>, i32)>,
+        user: i32,
+    ) -> Result<(), Exception> {
         let package = self.verify_caller(uid, package, user)?;
-        let ids = ids.ok_or_else(|| Exception::new(EX_NULL_POINTER, "shortcutIds must be provided"))?;
+        let ids =
+            ids.ok_or_else(|| Exception::new(EX_NULL_POINTER, "shortcutIds must be provided"))?;
         self.with_user(|u| {
             self.on_called_by_publisher(u, &package)?;
-            let p = u.packages.get_mut(&package).ok_or_else(|| not_modelled("a package's first shortcut state"))?;
+            let p = u
+                .packages
+                .get_mut(&package)
+                .ok_or_else(|| not_modelled("a package's first shortcut state"))?;
             for id in ids.iter().rev() {
                 p.ensure_not_immutable(id.as_deref().unwrap_or_default())?;
             }
             for id in ids.iter().rev() {
-                let id = id.as_deref().filter(|i| !i.is_empty()).ok_or_else(|| Exception::illegal_argument(""))?;
+                let id = id
+                    .as_deref()
+                    .filter(|i| !i.is_empty())
+                    .ok_or_else(|| Exception::illegal_argument(""))?;
                 if !p.find(id).is_some_and(Shortcut::is_visible_to_publisher) {
                     continue;
                 }
@@ -1275,7 +1728,9 @@ impl ShortcutManager {
                     continue;
                 };
                 // `disableWithId`: a kept shortcut's disabled message.
-                p.delete_or_disable(id, Some(DISABLED_REASON_BY_APP), |a| a.class == DUMMY_MAIN_ACTIVITY)?;
+                p.delete_or_disable(id, Some(DISABLED_REASON_BY_APP), |a| {
+                    a.class == DUMMY_MAIN_ACTIVITY
+                })?;
                 if let Some(s) = p.shortcuts.iter_mut().find(|s| s.id == id) {
                     if let Some(message) = message {
                         s.disabled_message = Some(message.clone());
@@ -1300,8 +1755,15 @@ impl ShortcutManager {
     }
 
     /// `verifyCaller`.
-    fn verify_caller(&self, uid: i32, package: Option<&str>, user: i32) -> Result<String, Exception> {
-        let package = package.filter(|p| !p.is_empty()).ok_or_else(|| Exception::illegal_argument("packageName"))?;
+    fn verify_caller(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+        user: i32,
+    ) -> Result<String, Exception> {
+        let package = package
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| Exception::illegal_argument("packageName"))?;
         if uid.rem_euclid(PER_USER_RANGE as i32) == 1000 {
             return Ok(package.to_owned());
         }
@@ -1312,8 +1774,16 @@ impl ShortcutManager {
             return Err(Exception::security("Calling package name mismatch"));
         }
         let (state, _) = self.host.packages()?;
-        if state.packages.get(package).and_then(|ps| ps.users.get(&user)).is_some_and(|u| u.instant_app) {
-            return Err(Exception::new(EX_ILLEGAL_STATE, "Ephemeral apps can't use ShortcutManager"));
+        if state
+            .packages
+            .get(package)
+            .and_then(|ps| ps.users.get(&user))
+            .is_some_and(|u| u.instant_app)
+        {
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "Ephemeral apps can't use ShortcutManager",
+            ));
         }
         Ok(package.to_owned())
     }
@@ -1321,7 +1791,10 @@ impl ShortcutManager {
     /// `getUserShortcutsLocked(0)`: the user loaded, then
     /// `checkPackageChanges` (removed packages cleaned up, updated ones
     /// rescanned, the scan time saved).
-    fn with_user<T>(&self, f: impl FnOnce(&mut User) -> Result<T, Exception>) -> Result<T, Exception> {
+    fn with_user<T>(
+        &self,
+        f: impl FnOnce(&mut User) -> Result<T, Exception>,
+    ) -> Result<T, Exception> {
         let mut guard = self.user.lock().unwrap();
         if guard.is_none() {
             *guard = Some(self.load_user()?);
@@ -1333,7 +1806,13 @@ impl ShortcutManager {
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("shortcut: {e}"));
         let dir = self.host.data()?.join("system_ce/0/shortcut_service");
         let file = dir.join("shortcuts.xml");
-        let root = read_resilient(&file).map_err(state)?.unwrap_or_else(|| Element { name: "user".into(), attrs: Vec::new(), content: Vec::new() });
+        let root = read_resilient(&file)
+            .map_err(state)?
+            .unwrap_or_else(|| Element {
+                name: "user".into(),
+                attrs: Vec::new(),
+                content: Vec::new(),
+            });
         if root.name != "user" {
             return Err(state(format!("shortcuts.xml: <{}>", root.name)));
         }
@@ -1344,18 +1823,33 @@ impl ShortcutManager {
         if let Ok(entries) = std::fs::read_dir(dir.join("packages")) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_owned();
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_owned();
                 // `forMainFilesIn`: the files but their reserve copies.
                 if !name.ends_with(".xml") {
                     continue;
                 }
-                let Some(root) = read_resilient(&path).map_err(state)? else { continue };
-                let package = Package::load(path.clone(), root).map_err(|e| not_modelled(&format!("{}: {e}", path.display())))?;
-                let key = package.root.string("name").map(|s| s.into_owned()).unwrap_or_default();
+                let Some(root) = read_resilient(&path).map_err(state)? else {
+                    continue;
+                };
+                let package = Package::load(path.clone(), root)
+                    .map_err(|e| not_modelled(&format!("{}: {e}", path.display())))?;
+                let key = package
+                    .root
+                    .string("name")
+                    .map(|s| s.into_owned())
+                    .unwrap_or_default();
                 packages.insert(key, package);
             }
         }
-        let mut user = User { file, root, packages };
+        let mut user = User {
+            file,
+            root,
+            packages,
+        };
         self.check_package_changes(&mut user)?;
         Ok(user)
     }
@@ -1364,54 +1858,104 @@ impl ShortcutManager {
     fn check_package_changes(&self, user: &mut User) -> Result<(), Exception> {
         let (state, _) = self.host.packages()?;
         for name in user.packages.keys() {
-            if !state.packages.get(name).is_some_and(|ps| ps.users.get(&0).is_none_or(|u| u.installed)) {
+            if !state
+                .packages
+                .get(name)
+                .is_some_and(|ps| ps.users.get(&0).is_none_or(|u| u.installed))
+            {
                 return Err(not_modelled("cleaning up a removed package's shortcuts"));
             }
         }
-        let fingerprint = self.host.property("ro.build.fingerprint").unwrap_or_default();
-        let after_ota = user.root.string("last-app-scan-fp").as_deref() != Some(fingerprint.as_str());
+        let fingerprint = self
+            .host
+            .property("ro.build.fingerprint")
+            .unwrap_or_default();
+        let after_ota =
+            user.root.string("last-app-scan-fp").as_deref() != Some(fingerprint.as_str());
         let now = now_ms();
-        let scanned = user.root.long("last-app-scan-time2").ok().flatten().unwrap_or(0);
+        let scanned = user
+            .root
+            .long("last-app-scan-time2")
+            .ok()
+            .flatten()
+            .unwrap_or(0);
         // `ShortcutUser.loadFromXml`: a scan time in the future is none.
         let scanned = if scanned < now { scanned } else { 0 };
         let updated = state.packages.values().any(|ps| {
-            ps.users.get(&0).is_none_or(|u| u.installed) && ((after_ota && ps.is.system) || ps.last_update_time >= scanned)
+            ps.users.get(&0).is_none_or(|u| u.installed)
+                && ((after_ota && ps.is.system) || ps.last_update_time >= scanned)
         });
         if updated {
-            return Err(not_modelled("rescanning an updated package's manifest shortcuts"));
+            return Err(not_modelled(
+                "rescanning an updated package's manifest shortcuts",
+            ));
         }
-        user.root.attrs.retain(|(n, _)| n != "last-app-scan-time2" && n != "last-app-scan-fp");
-        user.root.attrs.push(("last-app-scan-time2".into(), Xml::Long(now)));
-        user.root.attrs.push(("last-app-scan-fp".into(), Xml::String(fingerprint)));
-        write_resilient(&user.file, std::slice::from_ref(&user.root)).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", user.file.display())))
+        user.root
+            .attrs
+            .retain(|(n, _)| n != "last-app-scan-time2" && n != "last-app-scan-fp");
+        user.root
+            .attrs
+            .push(("last-app-scan-time2".into(), Xml::Long(now)));
+        user.root
+            .attrs
+            .push(("last-app-scan-fp".into(), Xml::String(fingerprint)));
+        write_resilient(&user.file, std::slice::from_ref(&user.root))
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", user.file.display())))
     }
 
     /// `ShortcutUser.onCalledByPublisher`: `detectLocaleChange`, then
     /// `rescanPackageIfNeeded(package, false)`.
     fn on_called_by_publisher(&self, user: &User, package: &str) -> Result<(), Exception> {
         let locales = self.host.inputs()?.locales.clone();
-        if user.root.string("locales").is_some_and(|l| !l.is_empty() && *l != locales) {
+        if user
+            .root
+            .string("locales")
+            .is_some_and(|l| !l.is_empty() && *l != locales)
+        {
             return Err(not_modelled("relabelling shortcuts for a new locale"));
         }
         let (state, _) = self.host.packages()?;
-        let Some(ps) = state.packages.get(package) else { return Ok(()) };
+        let Some(ps) = state.packages.get(package) else {
+            return Ok(());
+        };
         let pkg = ps.pkg.as_deref();
         match user.packages.get(package) {
             Some(p) => {
                 // `areAllActivitiesStillEnabled`.
-                let enabled = p.shortcuts.iter().filter_map(|s| s.activity.as_ref()).all(|a| {
-                    pkg.is_some_and(|pkg| pkg.activities.iter().any(|act| act.main.component.name == a.class && act.main.exported && act.main.enabled))
-                });
-                if p.version != ps.version_code || p.last_update_time != ps.last_update_time || !enabled {
+                let enabled = p
+                    .shortcuts
+                    .iter()
+                    .filter_map(|s| s.activity.as_ref())
+                    .all(|a| {
+                        pkg.is_some_and(|pkg| {
+                            pkg.activities.iter().any(|act| {
+                                act.main.component.name == a.class
+                                    && act.main.exported
+                                    && act.main.enabled
+                            })
+                        })
+                    });
+                if p.version != ps.version_code
+                    || p.last_update_time != ps.last_update_time
+                    || !enabled
+                {
                     return Err(not_modelled("rescanning a package's manifest shortcuts"));
                 }
             }
             None => {
                 let manifest = pkg.is_some_and(|pkg| {
-                    pkg.activities.iter().any(|a| a.main.component.meta_data.as_ref().is_some_and(|m| m.0.iter().any(|(k, _)| k == SHORTCUTS_METADATA)))
+                    pkg.activities.iter().any(|a| {
+                        a.main
+                            .component
+                            .meta_data
+                            .as_ref()
+                            .is_some_and(|m| m.0.iter().any(|(k, _)| k == SHORTCUTS_METADATA))
+                    })
                 });
                 if manifest {
-                    return Err(not_modelled("publishing a new package's manifest shortcuts"));
+                    return Err(not_modelled(
+                        "publishing a new package's manifest shortcuts",
+                    ));
                 }
             }
         }
@@ -1421,14 +1965,23 @@ impl ShortcutManager {
     /// `updateTimesLocked`: the base state's last reset time, moved on
     /// each interval passed and saved when changed.
     fn last_reset(&self) -> Result<i64, Exception> {
-        let interval = self.constant("reset_interval_sec", DEFAULT_RESET_INTERVAL_SEC)?.max(1) * 1000;
+        let interval = self
+            .constant("reset_interval_sec", DEFAULT_RESET_INTERVAL_SEC)?
+            .max(1)
+            * 1000;
         let file = self.host.data()?.join("system/shortcut_service.xml");
         let mut guard = self.last_reset.lock().unwrap();
         let prev = match *guard {
             Some(v) => v,
             None => {
-                let root = read_resilient(&file).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
-                root.and_then(|r| r.children().find(|c| c.name == "last_reset_time").and_then(|c| c.long("value").ok().flatten())).unwrap_or(0)
+                let root =
+                    read_resilient(&file).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+                root.and_then(|r| {
+                    r.children()
+                        .find(|c| c.name == "last_reset_time")
+                        .and_then(|c| c.long("value").ok().flatten())
+                })
+                .unwrap_or(0)
             }
         };
         let now = now_ms();
@@ -1439,9 +1992,19 @@ impl ShortcutManager {
             next = (now / interval) * interval + next % interval;
         }
         if Some(next) != *guard && next != prev {
-            let value = Element { name: "last_reset_time".into(), attrs: vec![("value".into(), Xml::Long(next))], content: Vec::new() };
-            let root = Element { name: "root".into(), attrs: Vec::new(), content: vec![Node::Element(value)] };
-            write_resilient(&file, &[root]).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", file.display())))?;
+            let value = Element {
+                name: "last_reset_time".into(),
+                attrs: vec![("value".into(), Xml::Long(next))],
+                content: Vec::new(),
+            };
+            let root = Element {
+                name: "root".into(),
+                attrs: Vec::new(),
+                content: vec![Node::Element(value)],
+            };
+            write_resilient(&file, &[root]).map_err(|e| {
+                Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", file.display()))
+            })?;
         }
         *guard = Some(next);
         Ok(next)
@@ -1450,7 +2013,12 @@ impl ShortcutManager {
     /// `ShortcutPackage.getApiCallCount`: reset while the app is in the
     /// foreground (each app host process is), for an unlimited caller, or
     /// since the last reset.
-    fn api_call_count(&self, package: &mut Package, uid: i32, unlimited: bool) -> Result<i64, Exception> {
+    fn api_call_count(
+        &self,
+        package: &mut Package,
+        uid: i32,
+        unlimited: bool,
+    ) -> Result<i64, Exception> {
         let last = self.last_reset()?;
         let mut changed = false;
         if (self.host.uid_running(uid) || unlimited) && package.attr_long("call-count") > 0 {
@@ -1472,15 +2040,26 @@ impl ShortcutManager {
 
     /// A call taking a package, a `ParceledListSlice` of `ShortcutInfo`
     /// and a user.
-    fn read_list_call(&self, call: &mut Call<'_>) -> aim_binder_host::parcel::Result<(Option<String>, Vec<Incoming>, i32)> {
+    fn read_list_call(
+        &self,
+        call: &mut Call<'_>,
+    ) -> aim_binder_host::parcel::Result<(Option<String>, Vec<Incoming>, i32)> {
         let r = &mut call.data;
         r.enforce_interface(ss::DESCRIPTOR)?;
         let package = r.read_string16()?;
-        let list = if r.read_i32()? != 0 { crate::package::list_slice::read(r, &self.host.process)? } else { Vec::new() };
+        let list = if r.read_i32()? != 0 {
+            crate::package::list_slice::read(r, &self.host.process)?
+        } else {
+            Vec::new()
+        };
         Ok((package, list, r.read_i32()?))
     }
 
-    fn transact_inner(&self, call: &mut Call<'_>, p: &mut Parcel) -> Result<Result<(), Exception>, i32> {
+    fn transact_inner(
+        &self,
+        call: &mut Call<'_>,
+        p: &mut Parcel,
+    ) -> Result<Result<(), Exception>, i32> {
         let uid = call.sender_euid as i32;
         Ok(match call.code {
             ss::GET_SHORTCUTS => {
@@ -1489,26 +2068,61 @@ impl ShortcutManager {
                     let package = self.verify_caller(uid, a.package_name.as_deref(), a.user_id)?;
                     let shortcuts = self.with_user(|user| {
                         self.on_called_by_publisher(user, &package)?;
-                        let want = (if a.match_flags & MATCH_DYNAMIC != 0 { FLAG_DYNAMIC } else { 0 })
-                            | (if a.match_flags & MATCH_PINNED != 0 { FLAG_PINNED } else { 0 })
-                            | (if a.match_flags & MATCH_MANIFEST != 0 { FLAG_MANIFEST } else { 0 })
-                            | (if a.match_flags & MATCH_CACHED != 0 { FLAG_CACHED_ALL } else { 0 });
+                        let want = (if a.match_flags & MATCH_DYNAMIC != 0 {
+                            FLAG_DYNAMIC
+                        } else {
+                            0
+                        }) | (if a.match_flags & MATCH_PINNED != 0 {
+                            FLAG_PINNED
+                        } else {
+                            0
+                        }) | (if a.match_flags & MATCH_MANIFEST != 0 {
+                            FLAG_MANIFEST
+                        } else {
+                            0
+                        }) | (if a.match_flags & MATCH_CACHED != 0 {
+                            FLAG_CACHED_ALL
+                        } else {
+                            0
+                        });
                         Ok(user
                             .packages
                             .get(&package)
-                            .map(|p| p.shortcuts.iter().filter(|s| s.disabled_reason < DISABLED_REASON_RESTORE_ISSUE_START && s.flags & want != 0).cloned().collect::<Vec<_>>())
+                            .map(|p| {
+                                p.shortcuts
+                                    .iter()
+                                    .filter(|s| {
+                                        s.disabled_reason < DISABLED_REASON_RESTORE_ISSUE_START
+                                            && s.flags & want != 0
+                                    })
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                            })
                             .unwrap_or_default())
                     })?;
-                    let items: Vec<OwnedForCreator> = shortcuts.into_iter().map(|s| OwnedForCreator(s, a.user_id, package.clone())).collect();
-                    ss::write_get_shortcuts_reply(p, Some(&Slice::new(self.host.process.clone(), "android.content.pm.ShortcutInfo", items)));
+                    let items: Vec<OwnedForCreator> = shortcuts
+                        .into_iter()
+                        .map(|s| OwnedForCreator(s, a.user_id, package.clone()))
+                        .collect();
+                    ss::write_get_shortcuts_reply(
+                        p,
+                        Some(&Slice::new(
+                            self.host.process.clone(),
+                            "android.content.pm.ShortcutInfo",
+                            items,
+                        )),
+                    );
                     Ok(())
                 })()
             }
             ss::GET_MAX_SHORTCUT_COUNT_PER_ACTIVITY => {
-                let a = ss::GetMaxShortcutCountPerActivity::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = ss::GetMaxShortcutCountPerActivity::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
                     self.verify_caller(uid, a.package_name.as_deref(), a.user_id)?;
-                    let max = self.constant("max_shortcuts", DEFAULT_MAX_SHORTCUTS_PER_ACTIVITY)?.max(0) as i32;
+                    let max = self
+                        .constant("max_shortcuts", DEFAULT_MAX_SHORTCUTS_PER_ACTIVITY)?
+                        .max(0) as i32;
                     ss::write_get_max_shortcut_count_per_activity_reply(p, max);
                     Ok(())
                 })()
@@ -1517,9 +2131,15 @@ impl ShortcutManager {
                 let a = ss::GetIconMaxDimensions::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
                     self.verify_caller(uid, a.package_name.as_deref(), a.user_id)?;
-                    let low_ram = self.host.property("ro.config.low_ram").is_some_and(|v| v == "true");
+                    let low_ram = self
+                        .host
+                        .property("ro.config.low_ram")
+                        .is_some_and(|v| v == "true");
                     let dp = if low_ram {
-                        self.constant("max_icon_dimension_dp_lowram", DEFAULT_MAX_ICON_DIMENSION_LOWRAM_DP)?
+                        self.constant(
+                            "max_icon_dimension_dp_lowram",
+                            DEFAULT_MAX_ICON_DIMENSION_LOWRAM_DP,
+                        )?
                     } else {
                         self.constant("max_icon_dimension_dp", DEFAULT_MAX_ICON_DIMENSION_DP)?
                     }
@@ -1534,7 +2154,9 @@ impl ShortcutManager {
                 let a = ss::GetRemainingCallCount::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
                     let package = self.verify_caller(uid, a.package_name.as_deref(), a.user_id)?;
-                    let max = self.constant("max_updates_per_interval", DEFAULT_MAX_UPDATES_PER_INTERVAL)?.max(0);
+                    let max = self
+                        .constant("max_updates_per_interval", DEFAULT_MAX_UPDATES_PER_INTERVAL)?
+                        .max(0);
                     let count = self.with_user(|user| {
                         self.on_called_by_publisher(user, &package)?;
                         match user.packages.get_mut(&package) {
@@ -1550,48 +2172,93 @@ impl ShortcutManager {
                 let a = ss::GetRateLimitResetTime::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
                     self.verify_caller(uid, a.package_name.as_deref(), a.user_id)?;
-                    let interval = self.constant("reset_interval_sec", DEFAULT_RESET_INTERVAL_SEC)?.max(1) * 1000;
+                    let interval = self
+                        .constant("reset_interval_sec", DEFAULT_RESET_INTERVAL_SEC)?
+                        .max(1)
+                        * 1000;
                     ss::write_get_rate_limit_reset_time_reply(p, self.last_reset()? + interval);
                     Ok(())
                 })()
             }
             ss::IS_REQUEST_PIN_ITEM_SUPPORTED => {
-                let a = ss::IsRequestPinItemSupported::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    ss::IsRequestPinItemSupported::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
                     // `verifyCallerUserId`.
-                    if uid.rem_euclid(PER_USER_RANGE as i32) != 1000 && uid / PER_USER_RANGE as i32 != a.user {
+                    if uid.rem_euclid(PER_USER_RANGE as i32) != 1000
+                        && uid / PER_USER_RANGE as i32 != a.user
+                    {
                         return Err(Exception::security("Invalid userId"));
                     }
-                    let supported = self.pin_confirmation_activity(a.user, a.request_type)?.is_some();
+                    let supported = self
+                        .pin_confirmation_activity(a.user, a.request_type)?
+                        .is_some();
                     ss::write_is_request_pin_item_supported_reply(p, supported);
                     Ok(())
                 })()
             }
             ss::SET_DYNAMIC_SHORTCUTS | ss::ADD_DYNAMIC_SHORTCUTS => {
                 let (package, list, user) = self.read_list_call(call).map_err(|_| BAD_VALUE)?;
-                let operation = if call.code == ss::SET_DYNAMIC_SHORTCUTS { Operation::Set } else { Operation::Add };
-                self.publish(uid, package.as_deref(), list, user, operation).map(|ok| ss::write_set_dynamic_shortcuts_reply(p, ok))
+                let operation = if call.code == ss::SET_DYNAMIC_SHORTCUTS {
+                    Operation::Set
+                } else {
+                    Operation::Add
+                };
+                self.publish(uid, package.as_deref(), list, user, operation)
+                    .map(|ok| ss::write_set_dynamic_shortcuts_reply(p, ok))
             }
             ss::REMOVE_DYNAMIC_SHORTCUTS => {
                 let a = ss::RemoveDynamicShortcuts::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.remove(uid, a.package_name.as_deref(), a.shortcut_ids, a.user_id, false).map(|()| p.write_no_exception())
+                self.remove(
+                    uid,
+                    a.package_name.as_deref(),
+                    a.shortcut_ids,
+                    a.user_id,
+                    false,
+                )
+                .map(|()| p.write_no_exception())
             }
             ss::REMOVE_ALL_DYNAMIC_SHORTCUTS => {
-                let a = ss::RemoveAllDynamicShortcuts::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.remove(uid, a.package_name.as_deref(), None, a.user_id, true).map(|()| p.write_no_exception())
+                let a =
+                    ss::RemoveAllDynamicShortcuts::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.remove(uid, a.package_name.as_deref(), None, a.user_id, true)
+                    .map(|()| p.write_no_exception())
             }
             ss::DISABLE_SHORTCUTS => {
-                let a = ss::DisableShortcuts::<Text>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let disable = Some((a.disabled_message.and_then(|t| t.0), a.disabled_message_res_id));
-                self.disable_or_enable(uid, a.package_name.as_deref(), a.shortcut_ids, disable, a.user_id).map(|()| p.write_no_exception())
+                let a =
+                    ss::DisableShortcuts::<Text>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let disable = Some((
+                    a.disabled_message.and_then(|t| t.0),
+                    a.disabled_message_res_id,
+                ));
+                self.disable_or_enable(
+                    uid,
+                    a.package_name.as_deref(),
+                    a.shortcut_ids,
+                    disable,
+                    a.user_id,
+                )
+                .map(|()| p.write_no_exception())
             }
             ss::ENABLE_SHORTCUTS => {
                 let a = ss::EnableShortcuts::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.disable_or_enable(uid, a.package_name.as_deref(), a.shortcut_ids, None, a.user_id).map(|()| p.write_no_exception())
+                self.disable_or_enable(
+                    uid,
+                    a.package_name.as_deref(),
+                    a.shortcut_ids,
+                    None,
+                    a.user_id,
+                )
+                .map(|()| p.write_no_exception())
             }
             code => {
-                let name = ss::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
-                Err(self.host.unimplemented_named("shortcut", &format!("{name} (#1669)")))
+                let name = ss::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
+                Err(self
+                    .host
+                    .unimplemented_named("shortcut", &format!("{name} (#1669)")))
             }
         })
     }
@@ -1637,11 +2304,26 @@ mod tests {
 </package>"##;
         let root = aim_android_xml::read(xml).unwrap();
         let p = Package::load(PathBuf::from("p.xml"), root).unwrap();
-        assert_eq!((p.version, p.last_update_time, p.attr_long("call-count")), (7, 9, 3));
-        assert_eq!(p.shortcuts.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(
+            (p.version, p.last_update_time, p.attr_long("call-count")),
+            (7, 9, 3)
+        );
+        assert_eq!(
+            p.shortcuts
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
         let b = &p.shortcuts[1];
         assert_eq!((b.flags, b.icon_res_id, b.timestamp), (420, 2, 11));
-        assert_eq!(b.activity, Some(ComponentName { package: "com.example".into(), class: "com.example.Main".into() }));
+        assert_eq!(
+            b.activity,
+            Some(ComponentName {
+                package: "com.example".into(),
+                class: "com.example.Main".into()
+            })
+        );
         assert_eq!(b.intents[0].0.intent.action.as_deref(), Some("a"));
         assert_eq!(b.intents[0].1.as_ref().map(|e| e.len()), Some(3));
         assert_eq!(b.categories, Some(vec!["c".to_string()]));
@@ -1693,11 +2375,39 @@ mod tests {
         p.write_i32(0);
         p.write_i32(-1);
         let n = <Incoming as aim_service_aidl::ReadParcelable>::read_from(&mut p.reader()).unwrap();
-        assert_eq!((n.user, n.package.as_deref(), n.key_only, n.has_intents, n.unsupported), (0, Some("com.example"), false, false, None));
+        assert_eq!(
+            (
+                n.user,
+                n.package.as_deref(),
+                n.key_only,
+                n.has_intents,
+                n.unsupported
+            ),
+            (0, Some("com.example"), false, false, None)
+        );
         let s = &n.shortcut;
-        assert_eq!((s.id.as_str(), s.title.as_deref(), s.rank, s.timestamp, s.flags), ("s1", Some("T"), i32::MAX, 5, FLAG_LONG_LIVED | FLAG_PINNED));
-        assert_eq!((s.categories.as_deref(), s.locus_id.as_deref()), (Some(&["c".to_string()][..]), Some("l")));
-        let Some((TYPE_RESOURCE, crate::notifications::parcels::Icon::Resource { package, id }, false)) = &n.icon else { panic!("{:?}", n.icon.map(|i| i.0)) };
+        assert_eq!(
+            (
+                s.id.as_str(),
+                s.title.as_deref(),
+                s.rank,
+                s.timestamp,
+                s.flags
+            ),
+            ("s1", Some("T"), i32::MAX, 5, FLAG_LONG_LIVED | FLAG_PINNED)
+        );
+        assert_eq!(
+            (s.categories.as_deref(), s.locus_id.as_deref()),
+            (Some(&["c".to_string()][..]), Some("l"))
+        );
+        let Some((
+            TYPE_RESOURCE,
+            crate::notifications::parcels::Icon::Resource { package, id },
+            false,
+        )) = &n.icon
+        else {
+            panic!("{:?}", n.icon.map(|i| i.0))
+        };
         assert_eq!((package.as_str(), *id), ("com.example", 0x7f01_0002));
     }
 
@@ -1722,23 +2432,45 @@ mod tests {
     /// theirs.
     #[test]
     fn ranks_are_adjusted_per_activity() {
-        let root = aim_android_xml::read(br#"<package name="com.example"><package-info version="1" /></package>"#).unwrap();
+        let root = aim_android_xml::read(
+            br#"<package name="com.example"><package-info version="1" /></package>"#,
+        )
+        .unwrap();
         let mut p = Package::load(PathBuf::from("p.xml"), root).unwrap();
-        let main = ComponentName { package: "com.example".into(), class: "com.example.Main".into() };
+        let main = ComponentName {
+            package: "com.example".into(),
+            class: "com.example.Main".into(),
+        };
         let shortcut = |id: &str, rank, flags, implicit_rank| {
-            let mut s = Shortcut::parse(&aim_android_xml::read(format!(r#"<shortcut id="{id}" />"#).as_bytes()).unwrap()).unwrap();
-            (s.activity, s.rank, s.flags, s.implicit_rank, s.element) = (Some(main.clone()), rank, flags, implicit_rank, None);
+            let mut s = Shortcut::parse(
+                &aim_android_xml::read(format!(r#"<shortcut id="{id}" />"#).as_bytes()).unwrap(),
+            )
+            .unwrap();
+            (s.activity, s.rank, s.flags, s.implicit_rank, s.element) =
+                (Some(main.clone()), rank, flags, implicit_rank, None);
             s
         };
         p.put(shortcut("m", 0, FLAG_MANIFEST | FLAG_IMMUTABLE, 0));
         p.put(shortcut("a", 0, FLAG_DYNAMIC, 0));
         p.put(shortcut("b", 1, FLAG_DYNAMIC, 0));
         p.put(shortcut("new", 1, FLAG_DYNAMIC, RANK_CHANGED_BIT));
-        p.put(shortcut("last", i32::MAX, FLAG_DYNAMIC, RANK_CHANGED_BIT | 1));
+        p.put(shortcut(
+            "last",
+            i32::MAX,
+            FLAG_DYNAMIC,
+            RANK_CHANGED_BIT | 1,
+        ));
         p.adjust_ranks();
-        let mut ranks: Vec<(&str, i32)> = p.shortcuts.iter().map(|s| (s.id.as_str(), s.rank)).collect();
+        let mut ranks: Vec<(&str, i32)> = p
+            .shortcuts
+            .iter()
+            .map(|s| (s.id.as_str(), s.rank))
+            .collect();
         ranks.sort();
-        assert_eq!(ranks, [("a", 0), ("b", 2), ("last", 3), ("m", 0), ("new", 1)]);
+        assert_eq!(
+            ranks,
+            [("a", 0), ("b", 2), ("last", 3), ("m", 0), ("new", 1)]
+        );
     }
 
     /// `deleteOrDisableWithId(disable)` and `enableWithId`: a pinned
@@ -1746,23 +2478,56 @@ mod tests {
     /// kept; one only dynamic is deleted; enabling clears the reason.
     #[test]
     fn shortcuts_are_disabled_and_enabled_as_the_package_does() {
-        let root = aim_android_xml::read(br#"<package name="com.example"><package-info version="1" /></package>"#).unwrap();
+        let root = aim_android_xml::read(
+            br#"<package name="com.example"><package-info version="1" /></package>"#,
+        )
+        .unwrap();
         let mut p = Package::load(PathBuf::from("p.xml"), root).unwrap();
         let shortcut = |id: &str, flags, reason| {
-            let mut s = Shortcut::parse(&aim_android_xml::read(format!(r#"<shortcut id="{id}" />"#).as_bytes()).unwrap()).unwrap();
+            let mut s = Shortcut::parse(
+                &aim_android_xml::read(format!(r#"<shortcut id="{id}" />"#).as_bytes()).unwrap(),
+            )
+            .unwrap();
             (s.rank, s.flags, s.disabled_reason, s.element) = (3, flags, reason, None);
             s
         };
         p.put(shortcut("pinned", FLAG_DYNAMIC | FLAG_PINNED, 0));
-        p.put(shortcut("restored", FLAG_PINNED, DISABLED_REASON_RESTORE_ISSUE_START));
+        p.put(shortcut(
+            "restored",
+            FLAG_PINNED,
+            DISABLED_REASON_RESTORE_ISSUE_START,
+        ));
         p.put(shortcut("dynamic", FLAG_DYNAMIC, 0));
         let never = |_: &ComponentName| false;
-        assert!(p.delete_or_disable("pinned", Some(DISABLED_REASON_BY_APP), never).unwrap().is_none());
-        assert!(p.delete_or_disable("restored", Some(DISABLED_REASON_BY_APP), never).unwrap().is_none());
-        assert_eq!(p.delete_or_disable("dynamic", Some(DISABLED_REASON_BY_APP), never).unwrap().map(|s| s.id), Some("dynamic".into()));
+        assert!(
+            p.delete_or_disable("pinned", Some(DISABLED_REASON_BY_APP), never)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            p.delete_or_disable("restored", Some(DISABLED_REASON_BY_APP), never)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            p.delete_or_disable("dynamic", Some(DISABLED_REASON_BY_APP), never)
+                .unwrap()
+                .map(|s| s.id),
+            Some("dynamic".into())
+        );
         let state = |p: &Package, id| p.find(id).map(|s| (s.flags, s.disabled_reason, s.rank));
-        assert_eq!(state(&p, "pinned"), Some((FLAG_PINNED | FLAG_DISABLED, DISABLED_REASON_BY_APP, 0)));
-        assert_eq!(state(&p, "restored"), Some((FLAG_PINNED | FLAG_DISABLED, DISABLED_REASON_RESTORE_ISSUE_START, 0)));
+        assert_eq!(
+            state(&p, "pinned"),
+            Some((FLAG_PINNED | FLAG_DISABLED, DISABLED_REASON_BY_APP, 0))
+        );
+        assert_eq!(
+            state(&p, "restored"),
+            Some((
+                FLAG_PINNED | FLAG_DISABLED,
+                DISABLED_REASON_RESTORE_ISSUE_START,
+                0
+            ))
+        );
         assert_eq!(state(&p, "dynamic"), None);
         p.enable("pinned").unwrap();
         assert_eq!(state(&p, "pinned"), Some((FLAG_PINNED, 0, 0)));

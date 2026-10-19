@@ -3,12 +3,12 @@
 //! ends or it is told to stop; `aimctl start` runs it in the background
 //! and `aimctl stop` stops it.
 
+use aim_storage::process_namespace::ProcessIdentity;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::process::CommandExt;
 use std::os::unix::fs::MetadataExt;
-use aim_storage::process_namespace::ProcessIdentity;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -88,14 +88,22 @@ fn inputs(selected: &crate::inputs::Inputs) -> Result<(), String> {
 
 /// `aimctl start`: `aimctl run` in a session of its own, its output in the
 /// log, and back once guest-init has laid out the guest.
-pub fn start(files: &Files, windows: bool, selected: &crate::inputs::Inputs) -> Result<ExitCode, String> {
+pub fn start(
+    files: &Files,
+    windows: bool,
+    selected: &crate::inputs::Inputs,
+) -> Result<ExitCode, String> {
     check_free(files)?;
     inputs(selected)?;
     fs::create_dir_all(files.dir()).map_err(|e| format!("{}: {e}", files.dir().display()))?;
     let log =
         fs::File::create(files.log()).map_err(|e| format!("{}: {e}", files.log().display()))?;
     let mut command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
-    command.arg("--data").arg(&files.data).arg("run").args(selected.arguments());
+    command
+        .arg("--data")
+        .arg(&files.data)
+        .arg("run")
+        .args(selected.arguments());
     if windows {
         command.arg("--windows");
     }
@@ -194,8 +202,11 @@ fn shims_args(files: &Files, own: bool, selected: &crate::inputs::Inputs) -> Vec
     args
 }
 
-fn guest_init_args(files: &Files, selected: &crate::inputs::Inputs) -> Result<Vec<OsString>, String> {
-    let mut args=vec![
+fn guest_init_args(
+    files: &Files,
+    selected: &crate::inputs::Inputs,
+) -> Result<Vec<OsString>, String> {
+    let mut args = vec![
         "--image".into(),
         selected.image.clone().into(),
         "--data".into(),
@@ -213,8 +224,15 @@ fn guest_init_args(files: &Files, selected: &crate::inputs::Inputs) -> Result<Ve
         selected.program("linux-run").into(),
         "--quiet".into(),
     ];
-    if let Some(path)=&selected.binder_trace {args.extend(["--binder-trace".into(),path.clone().into()]);}
-    if let Some(port)=selected.adb_port {args.extend(["--androidboot".into(),format!("aim.adb.port={port}").into()]);}
+    if let Some(path) = &selected.binder_trace {
+        args.extend(["--binder-trace".into(), path.clone().into()]);
+    }
+    if let Some(port) = selected.adb_port {
+        args.extend([
+            "--androidboot".into(),
+            format!("aim.adb.port={port}").into(),
+        ]);
+    }
     if let Some(services) = selected.app_host_services()? {
         args.extend(["--only".into(), services.join(",").into()]);
     }
@@ -257,7 +275,11 @@ fn end(children: &mut [Child], patience: Duration) -> Vec<u32> {
     killed
 }
 
-fn start_display(files: &Files, windows: bool, selected: &crate::inputs::Inputs) -> Result<Child, String> {
+fn start_display(
+    files: &Files,
+    windows: bool,
+    selected: &crate::inputs::Inputs,
+) -> Result<Child, String> {
     let socket = files.display();
     let _ = fs::remove_file(&socket);
     let mut display = Command::new(selected.program("aim-display"))
@@ -278,7 +300,11 @@ fn start_display(files: &Files, windows: bool, selected: &crate::inputs::Inputs)
 
 /// `aimctl run`: the guest in the foreground until guest-init ends, or
 /// SIGTERM, SIGINT or SIGHUP stops it.
-pub fn run(files: &Files, windows: bool, selected: crate::inputs::Inputs) -> Result<ExitCode, String> {
+pub fn run(
+    files: &Files,
+    windows: bool,
+    selected: crate::inputs::Inputs,
+) -> Result<ExitCode, String> {
     fs::create_dir_all(files.dir()).map_err(|e| format!("{}: {e}", files.dir().display()))?;
     let _lock = state::lock(&files.lock())
         .map_err(|_| format!("{}: a guest is already running", files.data.display()))?;
@@ -309,8 +335,8 @@ pub fn run(files: &Files, windows: bool, selected: crate::inputs::Inputs) -> Res
     let owner = ProcessIdentity::running(std::process::id() as i32)
         .map_err(|error| format!("resident birth: {error}"))?;
     match fs::remove_file(files.cleanup()) {
-        Ok(()) => {},
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(format!("clear cleanup receipt: {error}")),
     }
     let result = supervise(files, &mut state);
@@ -319,12 +345,18 @@ pub fn run(files: &Files, windows: bool, selected: crate::inputs::Inputs) -> Res
         Ok(_) => String::new(),
         Err(error) => error.clone(),
     };
-    let receipt = format!("{} {} {} {}\n{}\n{}\n", owner.host_pid,
-        owner.start_seconds, owner.start_microseconds, state.started,
-        if success { "ok" } else { "error" }, detail);
+    let receipt = format!(
+        "{} {} {} {}\n{}\n{}\n",
+        owner.host_pid,
+        owner.start_seconds,
+        owner.start_microseconds,
+        state.started,
+        if success { "ok" } else { "error" },
+        detail
+    );
     let temporary = files.cleanup().with_extension("new");
-    let written = fs::write(&temporary, receipt)
-        .and_then(|()| fs::rename(&temporary, files.cleanup()));
+    let written =
+        fs::write(&temporary, receipt).and_then(|()| fs::rename(&temporary, files.cleanup()));
     let _ = fs::remove_file(files.state());
     let _ = fs::remove_file(files.display());
     if let Err(error) = written {
@@ -346,11 +378,19 @@ impl DataBinding {
         if !metadata.is_file() {
             return Err("DATA backing is not a regular file".into());
         }
-        Ok(Self { image: fs::canonicalize(image).map_err(|error| error.to_string())?,
-            dev: metadata.dev(), ino: metadata.ino() })
+        Ok(Self {
+            image: fs::canonicalize(image).map_err(|error| error.to_string())?,
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        })
     }
 
-    fn finish(self, files: &Files, guest: ProcessIdentity, deadline: Instant) -> Result<(), String> {
+    fn finish(
+        self,
+        files: &Files,
+        guest: ProcessIdentity,
+        deadline: Instant,
+    ) -> Result<(), String> {
         if guest.is_live() {
             return Err("owned guest must be reaped before DATA finish".into());
         }
@@ -364,7 +404,8 @@ impl DataBinding {
             return Err("multiple attachments of the owned DATA backing".into());
         }
         for attachment in attached {
-            if attachment.shadow.is_some() || !attachment.writable
+            if attachment.shadow.is_some()
+                || !attachment.writable
                 || attachment.mounts.iter().any(|mount| mount != &files.data)
             {
                 return Err("DATA attachment has a foreign mount or shadow".into());
@@ -376,9 +417,15 @@ impl DataBinding {
         {
             return Err("owned DATA remains attached after normal detach".into());
         }
-        eprintln!("aimctl: DATA finish guest {}:{}:{} backing {}:{}:{} detached",
-            guest.host_pid, guest.start_seconds, guest.start_microseconds,
-            self.image.display(), self.dev, self.ino);
+        eprintln!(
+            "aimctl: DATA finish guest {}:{}:{} backing {}:{}:{} detached",
+            guest.host_pid,
+            guest.start_seconds,
+            guest.start_microseconds,
+            self.image.display(),
+            self.dev,
+            self.ino
+        );
         Ok(())
     }
 }
@@ -388,11 +435,19 @@ fn sweep_memfds(inputs: &crate::inputs::Inputs, deadline: Instant) -> Result<(),
         return Err("memfd cleanup deadline reached".into());
     }
     let mut child = Command::new(inputs.program("linux-run"))
-        .arg("--sweep-memfds").stdin(Stdio::null()).stdout(Stdio::null())
-        .stderr(Stdio::inherit()).spawn().map_err(|error| format!("memfd cleanup: {error}"))?;
+        .arg("--sweep-memfds")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|error| format!("memfd cleanup: {error}"))?;
     loop {
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
-            return if status.success() { Ok(()) } else { Err(format!("memfd cleanup: {status}")) };
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(format!("memfd cleanup: {status}"))
+            };
         }
         if Instant::now() >= deadline {
             child.kill().map_err(|error| error.to_string())?;
@@ -445,8 +500,10 @@ fn supervise(files: &Files, state: &mut State) -> Result<ExitCode, String> {
         std::thread::sleep(Duration::from_millis(100));
     };
     drop(children);
-    let deadline = stopping.map_or_else(|| Instant::now() + FINISH_PATIENCE,
-        |started| (started + RUN_PATIENCE).min(Instant::now() + FINISH_PATIENCE));
+    let deadline = stopping.map_or_else(
+        || Instant::now() + FINISH_PATIENCE,
+        |started| (started + RUN_PATIENCE).min(Instant::now() + FINISH_PATIENCE),
+    );
     let birth = guest_birth.map_err(|error| format!("guest birth: {error}"))?;
     if birth.is_live() {
         return Err("reaped guest birth still live".into());
@@ -461,7 +518,7 @@ fn supervise(files: &Files, state: &mut State) -> Result<ExitCode, String> {
     match (sweep, finish) {
         (Err(sweep), Err(finish)) => return Err(format!("{sweep}; DATA finish: {finish}")),
         (Err(error), _) | (_, Err(error)) => return Err(error),
-        (Ok(()), Ok(())) => {},
+        (Ok(()), Ok(())) => {}
     }
     if !status.success() {
         return Err(format!("guest-init stopped with {status}"));
@@ -477,8 +534,8 @@ pub fn stop(files: &Files) -> Result<ExitCode, String> {
             Ok(receipt) if receipt.lines().nth(1) != Some("ok") => {
                 return Err("last resident cleanup failed; receipt retained".into());
             }
-            Ok(_) => {},
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(format!("resident cleanup receipt: {error}")),
         }
         println!("not running");
@@ -487,19 +544,27 @@ pub fn stop(files: &Files) -> Result<ExitCode, String> {
     let owner = ProcessIdentity::running(state.pid as i32)
         .map_err(|error| format!("resident birth: {error}"))?;
     if end_run_owned(&files.lock(), owner, RUN_PATIENCE)? {
-        return Err(format!("resident {} required forced process termination; cleanup unproven", state.pid));
+        return Err(format!(
+            "resident {} required forced process termination; cleanup unproven",
+            state.pid
+        ));
     }
     let _lock = state::lock(&files.lock())?;
     let receipt = fs::read_to_string(files.cleanup())
         .map_err(|error| format!("resident cleanup unproven: {error}"))?;
     let mut lines = receipt.lines();
-    let expected = format!("{} {} {} {}", owner.host_pid, owner.start_seconds,
-        owner.start_microseconds, state.started);
+    let expected = format!(
+        "{} {} {} {}",
+        owner.host_pid, owner.start_seconds, owner.start_microseconds, state.started
+    );
     if lines.next() != Some(expected.as_str()) {
         return Err("resident cleanup receipt belongs to another run".into());
     }
     if lines.next() != Some("ok") {
-        return Err(format!("resident cleanup failed: {}", lines.collect::<Vec<_>>().join("\n")));
+        return Err(format!(
+            "resident cleanup failed: {}",
+            lines.collect::<Vec<_>>().join("\n")
+        ));
     }
     verify_data_detached(files)?;
     verify_registered_workers_ended(files)?;
@@ -524,26 +589,49 @@ fn verify_registered_workers_ended(files: &Files) -> Result<(), String> {
     for file in fs::read_dir(&table).map_err(|error| format!("worker registry: {error}"))? {
         let file = file.map_err(|error| error.to_string())?;
         let name = file.file_name();
-        let Some(pid) = name.to_str().and_then(|name| name.strip_suffix(".mount-namespace"))
-            .and_then(|pid| pid.parse::<i32>().ok()) else { continue; };
-        if pid <= 0 || !file.file_type().map_err(|error| error.to_string())?.is_file() {
+        let Some(pid) = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".mount-namespace"))
+            .and_then(|pid| pid.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if pid <= 0
+            || !file
+                .file_type()
+                .map_err(|error| error.to_string())?
+                .is_file()
+        {
             return Err("invalid worker registry record".into());
         }
         let mut text = String::new();
-        fs::File::open(file.path()).map_err(|error| error.to_string())?
-            .take(4097).read_to_string(&mut text).map_err(|error| error.to_string())?;
+        fs::File::open(file.path())
+            .map_err(|error| error.to_string())?
+            .take(4097)
+            .read_to_string(&mut text)
+            .map_err(|error| error.to_string())?;
         let fields = text.trim_end_matches('\n').split('\t').collect::<Vec<_>>();
-        if text.len() > 4096 || fields.len() != 5 || fields[0] != "AIMPROCNS1"
+        if text.len() > 4096
+            || fields.len() != 5
+            || fields[0] != "AIMPROCNS1"
             || fields[1].parse::<i32>() != Ok(pid)
         {
             return Err("invalid worker registry binding".into());
         }
-        let recorded = ProcessIdentity { host_pid: pid,
-            start_seconds: fields[2].parse().map_err(|_| "invalid worker birth".to_string())?,
-            start_microseconds: fields[3].parse().map_err(|_| "invalid worker birth".to_string())? };
+        let recorded = ProcessIdentity {
+            host_pid: pid,
+            start_seconds: fields[2]
+                .parse()
+                .map_err(|_| "invalid worker birth".to_string())?,
+            start_microseconds: fields[3]
+                .parse()
+                .map_err(|_| "invalid worker birth".to_string())?,
+        };
         if same_birth(recorded)? {
-            return Err(format!("registered worker still live: {}:{}:{}; not signalled without owned ancestry",
-                pid, recorded.start_seconds, recorded.start_microseconds));
+            return Err(format!(
+                "registered worker still live: {}:{}:{}; not signalled without owned ancestry",
+                pid, recorded.start_seconds, recorded.start_microseconds
+            ));
         }
     }
     Ok(())
@@ -555,18 +643,32 @@ fn process_info(pid: i32) -> Result<Option<libc::proc_bsdinfo>, String> {
     // SAFETY: kernel-owned metadata, written to a correctly sized buffer.
     let count = unsafe {
         *libc::__error() = 0;
-        libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 1,
-            (&mut info as *mut libc::proc_bsdinfo).cast(), size)
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            1,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
     };
-    if count == size { return Ok(Some(info)); }
+    if count == size {
+        return Ok(Some(info));
+    }
     let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) { return Ok(None); }
-    Err(format!("process metadata {pid}: {error}; returned {count}/{size}"))
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(None);
+    }
+    Err(format!(
+        "process metadata {pid}: {error}; returned {count}/{size}"
+    ))
 }
 
 fn info_identity(info: &libc::proc_bsdinfo) -> ProcessIdentity {
-    ProcessIdentity { host_pid: info.pbi_pid as i32,
-        start_seconds: info.pbi_start_tvsec, start_microseconds: info.pbi_start_tvusec }
+    ProcessIdentity {
+        host_pid: info.pbi_pid as i32,
+        start_seconds: info.pbi_start_tvsec,
+        start_microseconds: info.pbi_start_tvusec,
+    }
 }
 
 fn same_birth(process: ProcessIdentity) -> Result<bool, String> {
@@ -574,48 +676,88 @@ fn same_birth(process: ProcessIdentity) -> Result<bool, String> {
 }
 
 fn signal_owned(process: ProcessIdentity, signal: i32) -> Result<(), String> {
-    if !same_birth(process)? { return Ok(()); }
+    if !same_birth(process)? {
+        return Ok(());
+    }
     // SAFETY: a retained birth from a verified owned-parent edge; individual PID only.
-    if unsafe { libc::kill(process.host_pid, signal) } == 0 { return Ok(()); }
+    if unsafe { libc::kill(process.host_pid, signal) } == 0 {
+        return Ok(());
+    }
     let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) { return Ok(()); }
-    Err(format!("owned pid {} signal {signal}: {error}", process.host_pid))
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(format!(
+        "owned pid {} signal {signal}: {error}",
+        process.host_pid
+    ))
 }
 
-fn collect_descendants(members: &mut Vec<ProcessIdentity>, deadline: Instant) -> Result<(), String> {
+fn collect_descendants(
+    members: &mut Vec<ProcessIdentity>,
+    deadline: Instant,
+) -> Result<(), String> {
     let mut at = 0;
     while at < members.len() {
-        if Instant::now() >= deadline { return Err("owned process snapshot deadline reached".into()); }
+        if Instant::now() >= deadline {
+            return Err("owned process snapshot deadline reached".into());
+        }
         let parent = members[at];
         at += 1;
-        if !same_birth(parent)? { continue; }
+        if !same_birth(parent)? {
+            continue;
+        }
         let mut pids = vec![0i32; 128];
         let count = loop {
             // proc_listchildpids returns PID count, not byte count (Apple libproc).
             let count = unsafe {
                 *libc::__error() = 0;
-                libc::proc_listchildpids(parent.host_pid, pids.as_mut_ptr().cast(),
-                    (pids.len() * std::mem::size_of::<i32>()) as i32)
+                libc::proc_listchildpids(
+                    parent.host_pid,
+                    pids.as_mut_ptr().cast(),
+                    (pids.len() * std::mem::size_of::<i32>()) as i32,
+                )
             };
-            if count < 0 || (count == 0 && std::io::Error::last_os_error().raw_os_error() != Some(0)) {
-                return Err(format!("owned child snapshot {}: {}", parent.host_pid,
-                    std::io::Error::last_os_error()));
+            if count < 0
+                || (count == 0 && std::io::Error::last_os_error().raw_os_error() != Some(0))
+            {
+                return Err(format!(
+                    "owned child snapshot {}: {}",
+                    parent.host_pid,
+                    std::io::Error::last_os_error()
+                ));
             }
-            if (count as usize) < pids.len() { break count as usize; }
+            if (count as usize) < pids.len() {
+                break count as usize;
+            }
             if pids.len() >= 16384 || Instant::now() >= deadline {
                 return Err("owned child snapshot truncated".into());
             }
             pids.resize(pids.len() * 2, 0);
         };
         for pid in pids.into_iter().take(count).filter(|pid| *pid > 0) {
-            let Some(info) = process_info(pid)? else { continue; };
-            if info.pbi_ppid as i32 != parent.host_pid || !same_birth(parent)? { continue; }
+            let Some(info) = process_info(pid)? else {
+                continue;
+            };
+            if info.pbi_ppid as i32 != parent.host_pid || !same_birth(parent)? {
+                continue;
+            }
             let child = info_identity(&info);
-            if !same_birth(child)? || members.contains(&child) { continue; }
-            if members.len() >= 16384 { return Err("owned descendant snapshot truncated".into()); }
-            eprintln!("aimctl: owned child {}:{}:{} parent {}:{}:{}",
-                child.host_pid, child.start_seconds, child.start_microseconds,
-                parent.host_pid, parent.start_seconds, parent.start_microseconds);
+            if !same_birth(child)? || members.contains(&child) {
+                continue;
+            }
+            if members.len() >= 16384 {
+                return Err("owned descendant snapshot truncated".into());
+            }
+            eprintln!(
+                "aimctl: owned child {}:{}:{} parent {}:{}:{}",
+                child.host_pid,
+                child.start_seconds,
+                child.start_microseconds,
+                parent.host_pid,
+                parent.start_seconds,
+                parent.start_microseconds
+            );
             members.push(child);
         }
     }
@@ -624,7 +766,9 @@ fn collect_descendants(members: &mut Vec<ProcessIdentity>, deadline: Instant) ->
 
 fn all_ended(members: &[ProcessIdentity]) -> Result<bool, String> {
     for member in members {
-        if same_birth(*member)? { return Ok(false); }
+        if same_birth(*member)? {
+            return Ok(false);
+        }
     }
     Ok(true)
 }
@@ -639,31 +783,41 @@ fn end_run(lock: &Path, pid: u32, patience: Duration) -> Result<bool, String> {
 /// reparenting; process-group membership never establishes ownership.
 fn end_run_owned(lock: &Path, owner: ProcessIdentity, patience: Duration) -> Result<bool, String> {
     let deadline = Instant::now() + patience;
-    if !same_birth(owner)? { return Err("resident birth ended before stop".into()); }
+    if !same_birth(owner)? {
+        return Err("resident birth ended before stop".into());
+    }
     let mut members = vec![owner];
     collect_descendants(&mut members, Instant::now() + SNAPSHOT_PATIENCE)?;
     signal_owned(owner, libc::SIGTERM)?;
     while Instant::now() < deadline {
         collect_descendants(&mut members, Instant::now() + SNAPSHOT_PATIENCE)?;
         if !same_birth(owner)? {
-            for member in members.iter().skip(1).rev() { signal_owned(*member, libc::SIGTERM)?; }
+            for member in members.iter().skip(1).rev() {
+                signal_owned(*member, libc::SIGTERM)?;
+            }
         }
         if all_ended(&members)? {
             return if state::held(lock) {
                 Err("owned run ended but its lock has another holder".into())
-            } else { Ok(false) };
+            } else {
+                Ok(false)
+            };
         }
         std::thread::sleep(Duration::from_millis(20));
     }
     let killed_deadline = Instant::now() + KILL_PATIENCE;
     collect_descendants(&mut members, killed_deadline)?;
     // Children first, retaining every captured incarnation through final checks.
-    for member in members.iter().rev() { signal_owned(*member, libc::SIGKILL)?; }
+    for member in members.iter().rev() {
+        signal_owned(*member, libc::SIGKILL)?;
+    }
     while Instant::now() < killed_deadline {
         if all_ended(&members)? {
             return if state::held(lock) {
                 Err("owned run ended but its lock has another holder".into())
-            } else { Ok(true) };
+            } else {
+                Ok(true)
+            };
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -730,7 +884,10 @@ mod tests {
         );
         assert!(shims.contains(&"--scoped"));
         // The user's own guest keeps the stable identifiers.
-        assert!(!strings(&shims_args(&files, true, &crate::inputs::Inputs::default())).contains(&"--scoped"));
+        assert!(
+            !strings(&shims_args(&files, true, &crate::inputs::Inputs::default()))
+                .contains(&"--scoped")
+        );
         assert!(files.is_of(Path::new("/d")) && !files.is_of(Path::new("/e")));
     }
 
@@ -738,12 +895,22 @@ mod tests {
     fn an_app_host_image_starts_only_its_services() {
         let image = std::env::temp_dir().join(format!("aimctl-app-host-{}", std::process::id()));
         fs::create_dir_all(image.join("system/etc/aim")).unwrap();
-        fs::write(image.join("system/etc/aim/app-host-services"), "# what starts\nlogd\n\nzygote # the app's\n").unwrap();
+        fs::write(
+            image.join("system/etc/aim/app-host-services"),
+            "# what starts\nlogd\n\nzygote # the app's\n",
+        )
+        .unwrap();
         let files = Files::of(Path::new("/d")).unwrap();
-        let selected = crate::inputs::Inputs { image: image.clone(), ..Default::default() };
+        let selected = crate::inputs::Inputs {
+            image: image.clone(),
+            ..Default::default()
+        };
         let args = guest_init_args(&files, &selected).unwrap();
         let args = strings(&args);
-        assert_eq!(args[args.iter().position(|a| *a == "--only").unwrap() + 1], "logd,zygote");
+        assert_eq!(
+            args[args.iter().position(|a| *a == "--only").unwrap() + 1],
+            "logd,zygote"
+        );
         // An image that boots Android whole starts everything.
         fs::remove_file(image.join("system/etc/aim/app-host-services")).unwrap();
         assert!(!strings(&guest_init_args(&files, &selected).unwrap()).contains(&"--only"));
@@ -753,8 +920,13 @@ mod tests {
     #[test]
     fn selected_inputs_reach_init_display_and_shims() {
         let files = Files::of(Path::new("/d")).unwrap();
-        let selected = crate::inputs::Inputs { image: "/image".into(),
-            host_runtime: "/runtime".into(), userdata: "/templates".into(), binder_trace: Some("/trace.tsv".into()), adb_port: Some(5637) };
+        let selected = crate::inputs::Inputs {
+            image: "/image".into(),
+            host_runtime: "/runtime".into(),
+            userdata: "/templates".into(),
+            binder_trace: Some("/trace.tsv".into()),
+            adb_port: Some(5637),
+        };
         let args = guest_init_args(&files, &selected).unwrap();
         let args = strings(&args);
         let after = |flag: &str| args[args.iter().position(|arg| *arg == flag).unwrap() + 1];
@@ -766,7 +938,11 @@ mod tests {
         let shims = shims_args(&files, false, &selected);
         let shims = strings(&shims);
         assert!(shims.windows(2).any(|pair| pair == ["--image", "/image"]));
-        assert!(shims.windows(2).any(|pair| pair == ["--host", "/runtime/aim-display"]));
+        assert!(
+            shims
+                .windows(2)
+                .any(|pair| pair == ["--host", "/runtime/aim-display"])
+        );
     }
 
     /// `program` with `args`, in a session of its own, SIGTERM ignored
@@ -865,19 +1041,27 @@ mod tests {
         let mut command = Command::new("/usr/bin/perl");
         command.args(["-e", "use Fcntl ':flock'; open my $f, '>', $ARGV[0] or die; flock $f, LOCK_EX or die; sleep 600"])
             .arg(&lock);
-        unsafe { command.pre_exec(|| {
-            if libc::setpgid(0, 0) != 0 { return Err(std::io::Error::last_os_error()); }
-            libc::signal(libc::SIGTERM, libc::SIG_IGN);
-            Ok(())
-        }); }
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                Ok(())
+            });
+        }
         let mut run = command.spawn().unwrap();
         let owner = ProcessIdentity::running(run.id() as i32).unwrap();
         let mut peer_command = Command::new("/bin/sleep");
         peer_command.arg("600");
-        unsafe { peer_command.pre_exec(move || {
-            if libc::setpgid(0, owner.host_pid) != 0 { return Err(std::io::Error::last_os_error()); }
-            Ok(())
-        }); }
+        unsafe {
+            peer_command.pre_exec(move || {
+                if libc::setpgid(0, owner.host_pid) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         let mut peer = peer_command.spawn().unwrap();
         let peer_birth = ProcessIdentity::running(peer.id() as i32).unwrap();
         let reaper = std::thread::spawn(move || run.wait());

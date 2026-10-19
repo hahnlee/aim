@@ -76,7 +76,10 @@ pub fn hashed(ty: u32) -> bool {
 /// Maps indexed by a u32 key. Maps of programs, maps and devices hold
 /// what userspace stored (fds, ifindexes).
 pub fn arrayed(ty: u32) -> bool {
-    matches!(ty, ARRAY | PERCPU_ARRAY | PROG_ARRAY | ARRAY_OF_MAPS | DEVMAP)
+    matches!(
+        ty,
+        ARRAY | PERCPU_ARRAY | PROG_ARRAY | ARRAY_OF_MAPS | DEVMAP
+    )
 }
 
 pub fn ncpu() -> usize {
@@ -139,7 +142,10 @@ impl Map {
 
     pub fn lock(&self) -> Guard<'_> {
         let l = &self.h().lock;
-        while l.compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        while l
+            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
             std::thread::yield_now();
         }
         Guard(l)
@@ -237,7 +243,9 @@ impl Drop for Guard<'_> {
 }
 
 fn fnv(b: &[u8]) -> u64 {
-    b.iter().fold(0xcbf2_9ce4_8422_2325, |h, &c| (h ^ c as u64).wrapping_mul(0x100_0000_01b3))
+    b.iter().fold(0xcbf2_9ce4_8422_2325, |h, &c| {
+        (h ^ c as u64).wrapping_mul(0x100_0000_01b3)
+    })
 }
 
 /// A map file at a host path, mapped while this lives.
@@ -256,13 +264,25 @@ impl Mapped {
         use std::os::fd::AsRawFd;
         let file = std::fs::File::options().read(true).write(true).open(path)?;
         let len = file.metadata()?.len() as usize;
-        let invalid = || io::Error::new(io::ErrorKind::InvalidData, format!("{}: not a map file", path.display()));
+        let invalid = || {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: not a map file", path.display()),
+            )
+        };
         if len < HEADER {
             return Err(invalid());
         }
         // SAFETY: a shared mapping of the whole file.
         let base = unsafe {
-            libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, file.as_raw_fd(), 0)
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
         };
         if base == libc::MAP_FAILED {
             return Err(io::Error::last_os_error());
@@ -270,8 +290,18 @@ impl Mapped {
         let header = (base as usize + len - HEADER) as *const Header;
         // SAFETY: the header at the end of the mapping.
         let h = unsafe { &*header };
-        let mapped = Mapped { map: Map { base: base as u64, header }, len };
-        if h.magic != MAGIC || h.kind != KIND_MAP || h.data_len as usize + HEADER != len || h.max_entries == 0 {
+        let mapped = Mapped {
+            map: Map {
+                base: base as u64,
+                header,
+            },
+            len,
+        };
+        if h.magic != MAGIC
+            || h.kind != KIND_MAP
+            || h.data_len as usize + HEADER != len
+            || h.max_entries == 0
+        {
             return Err(invalid());
         }
         Ok(mapped)
@@ -322,18 +352,36 @@ mod tests {
             for k in [7u32, 8] {
                 let i = map.claim(&k.to_ne_bytes(), 0).unwrap();
                 // SAFETY: the claimed slot's value.
-                unsafe { std::ptr::copy_nonoverlapping((k as u64 * 10).to_ne_bytes().as_ptr(), map.value_of(i), 8) };
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        (k as u64 * 10).to_ne_bytes().as_ptr(),
+                        map.value_of(i),
+                        8,
+                    )
+                };
             }
             assert_eq!(map.claim(&9u32.to_ne_bytes(), 0), Err(NoSlot::Full));
-            assert_eq!(map.claim(&7u32.to_ne_bytes(), BPF_NOEXIST), Err(NoSlot::Exists));
+            assert_eq!(
+                map.claim(&7u32.to_ne_bytes(), BPF_NOEXIST),
+                Err(NoSlot::Exists)
+            );
         }
-        assert_eq!(map.lookup(&8u32.to_ne_bytes()), Some(80u64.to_ne_bytes().to_vec()));
+        assert_eq!(
+            map.lookup(&8u32.to_ne_bytes()),
+            Some(80u64.to_ne_bytes().to_vec())
+        );
         // Another mapping of the file sees the same elements.
         let again = Mapped::open(&path).unwrap();
-        assert_eq!(again.map().lookup(&7u32.to_ne_bytes()), Some(70u64.to_ne_bytes().to_vec()));
+        assert_eq!(
+            again.map().lookup(&7u32.to_ne_bytes()),
+            Some(70u64.to_ne_bytes().to_vec())
+        );
         assert_eq!(again.map().lookup(&[0; 3]), None);
         std::fs::write(&path, [0u8; 64]).unwrap();
-        assert_eq!(Mapped::open(&path).err().map(|e| e.kind()), Some(io::ErrorKind::InvalidData));
+        assert_eq!(
+            Mapped::open(&path).err().map(|e| e.kind()),
+            Some(io::ErrorKind::InvalidData)
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

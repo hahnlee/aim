@@ -236,7 +236,12 @@ impl DataImage {
     /// generation finds and normally detaches this exact image in `attach`;
     /// on exit, the parent owner does that after this process is gone.
     pub fn handoff_detach(&mut self) -> Result<(), String> {
-        self.device.take().map(|_| ()).ok_or_else(|| format!("{}: no attached DATA image to hand off",self.image.display()))
+        self.device.take().map(|_| ()).ok_or_else(|| {
+            format!(
+                "{}: no attached DATA image to hand off",
+                self.image.display()
+            )
+        })
     }
 
     /// Detaches the image, compacting it first when it holds more than
@@ -470,63 +475,128 @@ mod tests {
     fn detach_handoff_keeps_the_image_lock_until_the_boot_owner_drops() {
         // The lock's release is observed at once; a concurrent spawn's child
         // would still hold its descriptor until it execs. The fixture runs alone.
-        const MARKER:&str="DATA_HANDOFF_LOCK_EXECUTED";
-        if crate::inode_lease::tests::isolated_fork_fixture("data::tests::detach_handoff_keeps_the_image_lock_until_the_boot_owner_drops",MARKER){return;}
-        let root=std::env::temp_dir().join(format!("aim-data-handoff-lock-{}",std::process::id()));
-        fs::create_dir(&root).unwrap();let lock_path=root.join("data.lock");
-        let lock=File::create(&lock_path).unwrap();
-        assert_eq!(unsafe{libc::flock(lock.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},0);
-        let mut data=DataImage{dir:root.join("data"),image:root.join("data.asif"),device:Some("/dev/not-a-device".into()),_lock:lock};
-        data.handoff_detach().unwrap();assert!(data.device.is_none());
-        assert!(data.handoff_detach().unwrap_err().contains("no attached DATA image"));
-        let contender=File::open(&lock_path).unwrap();
-        assert_eq!(unsafe{libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},-1);
-        assert_eq!(std::io::Error::last_os_error().raw_os_error(),Some(libc::EWOULDBLOCK));
-        drop(data);assert_eq!(unsafe{libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},0);
-        fs::remove_dir_all(root).unwrap();println!("{MARKER}");
+        const MARKER: &str = "DATA_HANDOFF_LOCK_EXECUTED";
+        if crate::inode_lease::tests::isolated_fork_fixture(
+            "data::tests::detach_handoff_keeps_the_image_lock_until_the_boot_owner_drops",
+            MARKER,
+        ) {
+            return;
+        }
+        let root =
+            std::env::temp_dir().join(format!("aim-data-handoff-lock-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let lock_path = root.join("data.lock");
+        let lock = File::create(&lock_path).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let mut data = DataImage {
+            dir: root.join("data"),
+            image: root.join("data.asif"),
+            device: Some("/dev/not-a-device".into()),
+            _lock: lock,
+        };
+        data.handoff_detach().unwrap();
+        assert!(data.device.is_none());
+        assert!(
+            data.handoff_detach()
+                .unwrap_err()
+                .contains("no attached DATA image")
+        );
+        let contender = File::open(&lock_path).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EWOULDBLOCK)
+        );
+        drop(data);
+        assert_eq!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        fs::remove_dir_all(root).unwrap();
+        println!("{MARKER}");
     }
 
     #[test]
     #[ignore = "creates and attaches one owned disposable APFS data image"]
     fn readonly_template_clone_is_private_writable_and_preserves_source() {
-        use std::os::unix::fs::{MetadataExt,PermissionsExt};
-        use sha2::{Digest,Sha256};
-        let root=std::env::temp_dir().join(format!("aim-ro-clone-{}",std::process::id()));
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = std::env::temp_dir().join(format!("aim-ro-clone-{}", std::process::id()));
         fs::create_dir(&root).unwrap();
-        let template=root.join("empty.asif");create(&template).unwrap();
-        fs::set_permissions(&template,fs::Permissions::from_mode(0o444)).unwrap();
-        let source_metadata=fs::metadata(&template).unwrap();
-        let source_hash=Sha256::digest(fs::read(&template).unwrap());
-        let inherited=root.join("inherited.asif");fs::copy(&template,&inherited).unwrap();
-        assert_eq!(fs::metadata(&inherited).unwrap().permissions().mode()&0o777,0o444);
+        let template = root.join("empty.asif");
+        create(&template).unwrap();
+        fs::set_permissions(&template, fs::Permissions::from_mode(0o444)).unwrap();
+        let source_metadata = fs::metadata(&template).unwrap();
+        let source_hash = Sha256::digest(fs::read(&template).unwrap());
+        let inherited = root.join("inherited.asif");
+        fs::copy(&template, &inherited).unwrap();
+        assert_eq!(
+            fs::metadata(&inherited).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
         fs::remove_file(&inherited).unwrap();
-        let dir=root.join("data");
-        let data=DataImage::attach(&dir,Some(&template)).unwrap();
-        let copied=fs::metadata(data.image()).unwrap();
-        assert_eq!(copied.permissions().mode()&0o777,0o600);
-        assert_eq!(copied.uid(),unsafe{libc::geteuid()});
-        assert_ne!((copied.dev(),copied.ino()),(source_metadata.dev(),source_metadata.ino()));
-        let file=data.dir().join("owner-write");fs::write(&file,b"private writable clone").unwrap();
-        File::open(&file).unwrap().sync_all().unwrap();sync_volume(data.dir()).unwrap();
-        assert_eq!(fs::read(&file).unwrap(),b"private writable clone");data.detach().unwrap();
-        assert_eq!(Sha256::digest(fs::read(&template).unwrap()),source_hash);
-        let after=fs::metadata(&template).unwrap();
-        assert_eq!((after.dev(),after.ino(),after.permissions().mode()),(source_metadata.dev(),source_metadata.ino(),source_metadata.permissions().mode()));
+        let dir = root.join("data");
+        let data = DataImage::attach(&dir, Some(&template)).unwrap();
+        let copied = fs::metadata(data.image()).unwrap();
+        assert_eq!(copied.permissions().mode() & 0o777, 0o600);
+        assert_eq!(copied.uid(), unsafe { libc::geteuid() });
+        assert_ne!(
+            (copied.dev(), copied.ino()),
+            (source_metadata.dev(), source_metadata.ino())
+        );
+        let file = data.dir().join("owner-write");
+        fs::write(&file, b"private writable clone").unwrap();
+        File::open(&file).unwrap().sync_all().unwrap();
+        sync_volume(data.dir()).unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"private writable clone");
+        data.detach().unwrap();
+        assert_eq!(Sha256::digest(fs::read(&template).unwrap()), source_hash);
+        let after = fs::metadata(&template).unwrap();
+        assert_eq!(
+            (after.dev(), after.ino(), after.permissions().mode()),
+            (
+                source_metadata.dev(),
+                source_metadata.ino(),
+                source_metadata.permissions().mode()
+            )
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     #[ignore = "creates and attaches one owned disposable APFS data image"]
     fn detach_handoff_keeps_the_exact_attachment_until_owner_references_close() {
-        let root=std::env::temp_dir().join(format!("aim-data-handoff-{}",std::process::id()));
+        let root = std::env::temp_dir().join(format!("aim-data-handoff-{}", std::process::id()));
         fs::create_dir(&root).unwrap();
-        let dir=root.join("data");let mut data=DataImage::attach(&dir,None).unwrap();
-        let image=data.image().to_path_buf();let device=data.device.clone().unwrap();
-        let file_path=data.dir().join("owned-reference");fs::write(&file_path,b"actual owner reference").unwrap();
-        let reference=File::open(&file_path).unwrap();data.handoff_detach().unwrap();drop(data);
-        assert!(disk::attachments_of(&image).unwrap().iter().any(|attachment|attachment.device==device));
-        drop(reference);disk::detach(&device,PATIENCE).unwrap();
-        assert!(disk::attachments_of(&image).unwrap().iter().all(|attachment|attachment.device!=device));
+        let dir = root.join("data");
+        let mut data = DataImage::attach(&dir, None).unwrap();
+        let image = data.image().to_path_buf();
+        let device = data.device.clone().unwrap();
+        let file_path = data.dir().join("owned-reference");
+        fs::write(&file_path, b"actual owner reference").unwrap();
+        let reference = File::open(&file_path).unwrap();
+        data.handoff_detach().unwrap();
+        drop(data);
+        assert!(
+            disk::attachments_of(&image)
+                .unwrap()
+                .iter()
+                .any(|attachment| attachment.device == device)
+        );
+        drop(reference);
+        disk::detach(&device, PATIENCE).unwrap();
+        assert!(
+            disk::attachments_of(&image)
+                .unwrap()
+                .iter()
+                .all(|attachment| attachment.device != device)
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

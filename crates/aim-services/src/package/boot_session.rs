@@ -310,7 +310,15 @@ impl Session {
             return Ok(());
         }
         self.early.close();
-        for endpoint in self.raw_metadata_leases.lock().unwrap().drain(..).filter_map(|lease|lease.upgrade()){endpoint.close_lease();}
+        for endpoint in self
+            .raw_metadata_leases
+            .lock()
+            .unwrap()
+            .drain(..)
+            .filter_map(|lease| lease.upgrade())
+        {
+            endpoint.close_lease();
+        }
         let (raw, scanned, runtime) = {
             let mut state = self.state.lock().unwrap();
             state.phase = Phase::Closed;
@@ -369,7 +377,7 @@ impl Service for Session {
             Construct,
             Snapshot,
             InitialMetadata,
-            InitialKnown(i32,i32),
+            InitialKnown(i32, i32),
             InitialDefinitions,
             InitialCrossUser,
             InitialRuntime(i32),
@@ -430,35 +438,36 @@ impl Service for Session {
                 api::FinishConstruction::read(&mut call.data)?;
                 Action::Construct
             }
-            api::GET_INITIAL_KNOWN_PACKAGE_NAMES=>{
-                let args=api::GetInitialKnownPackageNames::read(&mut call.data)?;
-                Action::InitialKnown(args.kind,args.user_id)
+            api::GET_INITIAL_KNOWN_PACKAGE_NAMES => {
+                let args = api::GetInitialKnownPackageNames::read(&mut call.data)?;
+                Action::InitialKnown(args.kind, args.user_id)
             }
-            api::GET_INITIAL_LEGACY_PERMISSION_DEFINITIONS_RECORD=>{
+            api::GET_INITIAL_LEGACY_PERMISSION_DEFINITIONS_RECORD => {
                 api::GetInitialLegacyPermissionDefinitionsRecord::read(&mut call.data)?;
                 Action::InitialDefinitions
             }
-            api::GET_INITIAL_CROSS_USER_SUSPENSIONS=>{
+            api::GET_INITIAL_CROSS_USER_SUSPENSIONS => {
                 api::GetInitialCrossUserSuspensions::read(&mut call.data)?;
                 Action::InitialCrossUser
             }
-            api::GET_INITIAL_LEGACY_RUNTIME_PERMISSIONS_STATE_RECORD=>{
-                let args=api::GetInitialLegacyRuntimePermissionsStateRecord::read(&mut call.data)?;
+            api::GET_INITIAL_LEGACY_RUNTIME_PERMISSIONS_STATE_RECORD => {
+                let args =
+                    api::GetInitialLegacyRuntimePermissionsStateRecord::read(&mut call.data)?;
                 Action::InitialRuntime(args.user_id)
             }
-            api::GET_INITIAL_LEGACY_PERMISSIONS_VERSION=>{
-                let args=api::GetInitialLegacyPermissionsVersion::read(&mut call.data)?;
+            api::GET_INITIAL_LEGACY_PERMISSIONS_VERSION => {
+                let args = api::GetInitialLegacyPermissionsVersion::read(&mut call.data)?;
                 Action::InitialRuntimeVersion(args.user_id)
             }
-            api::GET_INITIAL_DEVICE_UPGRADING=>{
+            api::GET_INITIAL_DEVICE_UPGRADING => {
                 api::GetInitialDeviceUpgrading::read(&mut call.data)?;
                 Action::InitialUpgrading
             }
-            api::GET_INITIAL_PERMISSION_ADMISSIONS_RECORD=>{
+            api::GET_INITIAL_PERMISSION_ADMISSIONS_RECORD => {
                 api::GetInitialPermissionAdmissionsRecord::read(&mut call.data)?;
                 Action::InitialAdmissions
             }
-            api::GET_INITIAL_METADATA_SNAPSHOT=>{
+            api::GET_INITIAL_METADATA_SNAPSHOT => {
                 api::GetInitialMetadataSnapshot::read(&mut call.data)?;
                 Action::InitialMetadata
             }
@@ -572,43 +581,59 @@ impl Service for Session {
                     self.finish_construction()?;
                     api::write_finish_construction_reply(&mut reply);
                 }
-                Action::InitialKnown(kind,user)=>{
-                    let names=self.require_raw()?.known_package_names(kind,user)?;
-                    api::write_get_initial_known_package_names_reply(&mut reply,&Some(names));
+                Action::InitialKnown(kind, user) => {
+                    let names = self.require_raw()?.known_package_names(kind, user)?;
+                    api::write_get_initial_known_package_names_reply(&mut reply, &Some(names));
                 }
-                Action::InitialDefinitions=>{
-                    let bytes=self.require_raw()?.legacy_permission_definitions_record()?;
-                    api::write_get_initial_legacy_permission_definitions_record_reply(&mut reply,&Some(bytes));
+                Action::InitialDefinitions => {
+                    let bytes = self.require_raw()?.legacy_permission_definitions_record()?;
+                    api::write_get_initial_legacy_permission_definitions_record_reply(
+                        &mut reply,
+                        &Some(bytes),
+                    );
                 }
-                Action::InitialCrossUser=>{
-                    let enabled=self.require_raw()?.cross_user_suspensions()?;
-                    api::write_get_initial_cross_user_suspensions_reply(&mut reply,enabled);
+                Action::InitialCrossUser => {
+                    let enabled = self.require_raw()?.cross_user_suspensions()?;
+                    api::write_get_initial_cross_user_suspensions_reply(&mut reply, enabled);
                 }
-                Action::InitialRuntime(user)=>{
-                    let bytes=self.require_raw()?.legacy_runtime_permissions_state_record(user)?;
-                    api::write_get_initial_legacy_runtime_permissions_state_record_reply(&mut reply,&Some(bytes));
+                Action::InitialRuntime(user) => {
+                    let bytes = self
+                        .require_raw()?
+                        .legacy_runtime_permissions_state_record(user)?;
+                    api::write_get_initial_legacy_runtime_permissions_state_record_reply(
+                        &mut reply,
+                        &Some(bytes),
+                    );
                 }
-                Action::InitialRuntimeVersion(user)=>{
-                    let version=self.require_raw()?.legacy_permissions_version(user)?;
-                    api::write_get_initial_legacy_permissions_version_reply(&mut reply,version);
+                Action::InitialRuntimeVersion(user) => {
+                    let version = self.require_raw()?.legacy_permissions_version(user)?;
+                    api::write_get_initial_legacy_permissions_version_reply(&mut reply, version);
                 }
-                Action::InitialUpgrading=>{
-                    let upgrading=self.require_raw()?.device_upgrading()?;
-                    api::write_get_initial_device_upgrading_reply(&mut reply,upgrading);
+                Action::InitialUpgrading => {
+                    let upgrading = self.require_raw()?.device_upgrading()?;
+                    api::write_get_initial_device_upgrading_reply(&mut reply, upgrading);
                 }
-                Action::InitialAdmissions=>{
-                    let bytes=self.require_raw()?.permission_admissions_record()?;
-                    api::write_get_initial_permission_admissions_record_reply(&mut reply,&Some(bytes));
+                Action::InitialAdmissions => {
+                    let bytes = self.require_raw()?.permission_admissions_record()?;
+                    api::write_get_initial_permission_admissions_record_reply(
+                        &mut reply,
+                        &Some(bytes),
+                    );
                 }
-                Action::InitialMetadata=>{
-                    let raw=self.require_raw()?;
-                    let snapshot=raw.metadata_snapshot()?;
-                    let endpoint=Arc::new(super::scan_snapshot::endpoint::Endpoint::raw_metadata(snapshot));
-                    let mut leases=self.raw_metadata_leases.lock().unwrap();
-                    if self.closed.load(Ordering::Acquire){return Err(illegal("native raw metadata epoch closed"));}
-                    leases.retain(|lease|lease.strong_count()!=0);leases.push(Arc::downgrade(&endpoint));
-                    let binder=self.process.add_service(endpoint);
-                    api::write_get_initial_metadata_snapshot_reply(&mut reply,Some(binder));
+                Action::InitialMetadata => {
+                    let raw = self.require_raw()?;
+                    let snapshot = raw.metadata_snapshot()?;
+                    let endpoint = Arc::new(
+                        super::scan_snapshot::endpoint::Endpoint::raw_metadata(snapshot),
+                    );
+                    let mut leases = self.raw_metadata_leases.lock().unwrap();
+                    if self.closed.load(Ordering::Acquire) {
+                        return Err(illegal("native raw metadata epoch closed"));
+                    }
+                    leases.retain(|lease| lease.strong_count() != 0);
+                    leases.push(Arc::downgrade(&endpoint));
+                    let binder = self.process.add_service(endpoint);
+                    api::write_get_initial_metadata_snapshot_reply(&mut reply, Some(binder));
                 }
                 Action::Snapshot => {
                     self.require_scan()?;
@@ -707,14 +732,26 @@ impl Service for Session {
 
 #[cfg(test)]
 impl Session {
-    pub(crate) fn epoch_fixture_set_scanned(&self,scanned:Scanned,metadata:&Arc<super::scan_snapshot::endpoint::Endpoint>){
-        let mut state=self.state.lock().unwrap();
-        assert!(state.phase==Phase::Early);
-        state.scanned=Some(scanned);state.phase=Phase::Scanned;
-        self.raw_metadata_leases.lock().unwrap().push(Arc::downgrade(metadata));
+    pub(crate) fn epoch_fixture_set_scanned(
+        &self,
+        scanned: Scanned,
+        metadata: &Arc<super::scan_snapshot::endpoint::Endpoint>,
+    ) {
+        let mut state = self.state.lock().unwrap();
+        assert!(state.phase == Phase::Early);
+        state.scanned = Some(scanned);
+        state.phase = Phase::Scanned;
+        self.raw_metadata_leases
+            .lock()
+            .unwrap()
+            .push(Arc::downgrade(metadata));
     }
-    pub(crate) fn epoch_fixture_is_closed_and_empty(&self)->bool{
-        let state=self.state.lock().unwrap();
-        self.closed.load(Ordering::Acquire)&&state.phase==Phase::Closed&&state.raw.is_none()&&state.scanned.is_none()&&state.runtime.is_none()
+    pub(crate) fn epoch_fixture_is_closed_and_empty(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        self.closed.load(Ordering::Acquire)
+            && state.phase == Phase::Closed
+            && state.raw.is_none()
+            && state.scanned.is_none()
+            && state.runtime.is_none()
     }
 }

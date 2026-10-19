@@ -138,13 +138,19 @@ impl External {
             .read_exception()
             .map_err(|code| illegal(format!("Removal {stage} exception transport: {code}")))?
             .map_err(|mut error| {
-                error.message = format!("Removal {stage} original exception {}: {}", error.code, error.message);
+                error.message = format!(
+                    "Removal {stage} original exception {}: {}",
+                    error.code, error.message
+                );
                 error
             })?;
-        let value =
-            read(&mut reader, &reply).map_err(|code| illegal(format!("Removal {stage} reply decode: {code}")))?;
+        let value = read(&mut reader, &reply)
+            .map_err(|code| illegal(format!("Removal {stage} reply decode: {code}")))?;
         if reader.remaining() != 0 || self.revoked.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(illegal(format!("Removal {stage} owner changed or sent {} trailing reply bytes", reader.remaining())));
+            return Err(illegal(format!(
+                "Removal {stage} owner changed or sent {} trailing reply bytes",
+                reader.remaining()
+            )));
         }
         Ok(value)
     }
@@ -197,7 +203,11 @@ impl External {
         )
     }
     pub fn sdk_library_independence(&self) -> Result<bool, Exception> {
-        self.call(external_api::IS_SDK_LIBRARY_INDEPENDENCE_ENABLED, |_| {}, |reader| reader.read_bool())
+        self.call(
+            external_api::IS_SDK_LIBRARY_INDEPENDENCE_ENABLED,
+            |_| {},
+            |reader| reader.read_bool(),
+        )
     }
     pub fn users(&self) -> Result<Vec<i32>, Exception> {
         self.call(
@@ -790,7 +800,8 @@ pub struct PolicySource {
     pub admission: AdmissionPolicySource,
     pub removal: RemovalPolicySource,
 }
-pub type PreferredRemoval = Arc<dyn Fn(&str, i32, bool) -> Result<PostCommitEffect, Exception> + Send + Sync>;
+pub type PreferredRemoval =
+    Arc<dyn Fn(&str, i32, bool) -> Result<PostCommitEffect, Exception> + Send + Sync>;
 pub enum PostCommitEffect {
     Deferred(Arc<dyn Fn() -> Result<(), Exception> + Send + Sync>),
     Added {
@@ -857,9 +868,18 @@ pub struct Controller {
     pub keystore: Arc<owner::keystore::KeystoreCleanup>,
 }
 
-fn should_remove_setting(package: &crate::package::model::PackageState, plan: &Plan, data_removed: bool) -> bool {
-    !package.is.system && !plan.keep_uninstalled && data_removed
-        && !package.users.iter().any(|(user, state)| state.installed && !plan.users.contains(user))
+fn should_remove_setting(
+    package: &crate::package::model::PackageState,
+    plan: &Plan,
+    data_removed: bool,
+) -> bool {
+    !package.is.system
+        && !plan.keep_uninstalled
+        && data_removed
+        && !package
+            .users
+            .iter()
+            .any(|(user, state)| state.installed && !plan.users.contains(user))
 }
 
 fn should_restore_factory(package: &crate::package::model::PackageState, plan: &Plan) -> bool {
@@ -953,7 +973,9 @@ impl Controller {
                 0 | 1000 => Ok(true),
                 _ => self.external.permission(name, request.pid, request.uid),
             };
-            admit(query, request.clone(), &captured, &permission, || (self.policy.removal)(query, &request))
+            admit(query, request.clone(), &captured, &permission, || {
+                (self.policy.removal)(query, &request)
+            })
         })?;
         match admission {
             Admission::Rejected(status) => self.complete(&request, receiver, status, None),
@@ -1175,7 +1197,11 @@ impl Controller {
                 self.store.clear_domain_user(&package.name, user)?;
                 if !remove_setting || plan.users.first() == Some(&user) {
                     let preferred_user = if remove_setting { -1 } else { user };
-                    effects.push((self.preferred_removal)(&package.name, preferred_user, false)?);
+                    effects.push((self.preferred_removal)(
+                        &package.name,
+                        preferred_user,
+                        false,
+                    )?);
                 }
                 let scope =
                     self.external
@@ -1485,11 +1511,12 @@ impl NativeStore {
             package.users.retain(|state| state.id != user);
         }
         let mut disk = self.disk.lock().unwrap();
-        let result = self
-            .snapshots
-            .publish_removal_after(&base, &BTreeSet::from([name.to_owned()]), next, |snapshot| {
-                disk.commit_domains(&snapshot.owner().settings.domain_verification)
-            });
+        let result = self.snapshots.publish_removal_after(
+            &base,
+            &BTreeSet::from([name.to_owned()]),
+            next,
+            |snapshot| disk.commit_domains(&snapshot.owner().settings.domain_verification),
+        );
         drop(disk);
         self.finish_publication(base, result)
     }
@@ -1499,8 +1526,13 @@ impl NativeStore {
             .owner()
             .prepare_live_code_retirement(name)
             .map_err(illegal)?;
-        let result = self.snapshots.publish_removal_after(&base,&BTreeSet::from([name.to_owned()]),next, |_| Ok(()));
-        self.finish_publication(base,result)
+        let result = self.snapshots.publish_removal_after(
+            &base,
+            &BTreeSet::from([name.to_owned()]),
+            next,
+            |_| Ok(()),
+        );
+        self.finish_publication(base, result)
     }
     pub fn user_state(
         &self,
@@ -1508,24 +1540,36 @@ impl NativeStore {
         user: i32,
         state: UserState,
     ) -> Result<Arc<Snapshot>, Exception> {
-        self.user_states(user,vec![(name.to_owned(),state)])
+        self.user_states(user, vec![(name.to_owned(), state)])
     }
     /// One reconciliation volume publishes its actual installd inode receipts
     /// together. Physical creation has already happened, even if another member
     /// subsequently failed; the caller still returns those operation failures.
-    pub fn user_states(&self,user:i32,states:Vec<(String,UserState)>) -> Result<Arc<Snapshot>,Exception> {
-        if user<0{return Err(illegal("Negative app-data receipt user"));}
+    pub fn user_states(
+        &self,
+        user: i32,
+        states: Vec<(String, UserState)>,
+    ) -> Result<Arc<Snapshot>, Exception> {
+        if user < 0 {
+            return Err(illegal("Negative app-data receipt user"));
+        }
         let base = self.snapshots.capture();
         let mut next = base.owner().clone();
-        let mut names=BTreeSet::new();
-        for (name,state) in states {
-            if !names.insert(name.clone()){return Err(illegal("Duplicate app-data receipt package"));}
-            next.set_user_state(&name,user,state).map_err(illegal)?;
+        let mut names = BTreeSet::new();
+        for (name, state) in states {
+            if !names.insert(name.clone()) {
+                return Err(illegal("Duplicate app-data receipt package"));
+            }
+            next.set_user_state(&name, user, state).map_err(illegal)?;
         }
-        if names.is_empty(){return Ok(base);}
-        next.complete_retained_library_dependencies().map_err(illegal)?;
+        if names.is_empty() {
+            return Ok(base);
+        }
+        next.complete_retained_library_dependencies()
+            .map_err(illegal)?;
         if !next.loaded_packages().is_empty() {
-            super::permission_prepare::complete_candidate_runtime(&mut next, &base, base.usage()).map_err(illegal)?;
+            super::permission_prepare::complete_candidate_runtime(&mut next, &base, base.usage())
+                .map_err(illegal)?;
         }
         let mut disk = self.disk.lock().unwrap();
         let result = self
@@ -1569,11 +1613,16 @@ impl NativeStore {
         let mut metadata = base.owner().clone();
         metadata.settings.domain_verification.clear_package(name);
         owner::key_sets::clear_package(&mut metadata.settings, name).map_err(illegal)?;
-        let next = metadata.prepare_live_package_removal(name).map_err(illegal)?;
+        let next = metadata
+            .prepare_live_package_removal(name)
+            .map_err(illegal)?;
         let mut disk = self.disk.lock().unwrap();
-        let result = self.snapshots.publish_removal_after(&base, &BTreeSet::from([name.to_owned()]), next, |snapshot| {
-            disk.commit_removed_package_all(snapshot.owner(), name)
-        });
+        let result = self.snapshots.publish_removal_after(
+            &base,
+            &BTreeSet::from([name.to_owned()]),
+            next,
+            |snapshot| disk.commit_removed_package_all(snapshot.owner(), name),
+        );
         drop(disk);
         let next = self.finish_publication(base, result)?;
         let users: Vec<_> = self
@@ -1618,11 +1667,14 @@ mod admission_policy_tests {
                 debuggable: false,
                 apex_supported: false,
                 rollback_lifetime: false,
-                users: BTreeMap::from([(0, UserPolicy {
-                    disallow_install_apps: false,
-                    disallow_debugging_features: false,
-                    organization_managed: false,
-                })]),
+                users: BTreeMap::from([(
+                    0,
+                    UserPolicy {
+                        disallow_install_apps: false,
+                        disallow_debugging_features: false,
+                        organization_managed: false,
+                    },
+                )]),
                 adopted_shell_uids: BTreeSet::new(),
                 verifier_uid: None,
             },
@@ -1637,52 +1689,118 @@ mod admission_policy_tests {
         }
     }
     fn request(version: i64) -> Request {
-        Request { package: "absent.package".into(), version, caller_package: None,
-            uid: 0, pid: 7, user: 0, flags: 0, existing_only: false }
+        Request {
+            package: "absent.package".into(),
+            version,
+            caller_package: None,
+            uid: 0,
+            pid: 7,
+            user: 0,
+            flags: 0,
+            existing_only: false,
+        }
     }
 
     #[test]
     fn absent_target_skips_per_user_policy_after_admission_priorities() {
         let state = State::default();
         let filter = AppsFilter::default();
-        let query = Query { state: &state, filter: &filter, calling_uid: 0 };
+        let query = Query {
+            state: &state,
+            filter: &filter,
+            calling_uid: 0,
+        };
         let calls = AtomicUsize::new(0);
         let details = || {
             calls.fetch_add(1, Ordering::SeqCst);
             Err(illegal("unreachable per-user policy"))
         };
-        assert!(matches!(admit(&query, request(-1), &admission(false), &|name| policy::permission(&query, name), details).unwrap(),
-            Admission::Rejected(INTERNAL_ERROR)));
+        assert!(matches!(
+            admit(
+                &query,
+                request(-1),
+                &admission(false),
+                &|name| policy::permission(&query, name),
+                details
+            )
+            .unwrap(),
+            Admission::Rejected(INTERNAL_ERROR)
+        ));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        let invalid = match admit(&query, request(-2), &admission(false), &|name| policy::permission(&query, name), details) {
+        let invalid = match admit(
+            &query,
+            request(-2),
+            &admission(false),
+            &|name| policy::permission(&query, name),
+            details,
+        ) {
             Err(error) => error,
             Ok(_) => panic!("invalid version accepted"),
         };
         assert_eq!(invalid.code, EX_ILLEGAL_ARGUMENT);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert!(matches!(admit(&query, request(-1), &admission(true), &|name| policy::permission(&query, name), details).unwrap(),
-            Admission::Rejected(APP_PINNED)));
+        assert!(matches!(
+            admit(
+                &query,
+                request(-1),
+                &admission(true),
+                &|name| policy::permission(&query, name),
+                details
+            )
+            .unwrap(),
+            Admission::Rejected(APP_PINNED)
+        ));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
     fn known_target_captures_per_user_policy_before_user_action() {
-        let mut caller = PackageState { name: "caller.package".into(), app_id: 10100,
-            target_sdk_version: 35, ..Default::default() };
-        caller.users.insert(0, PackageUserState { granted_permissions:
-            vec!["android.permission.DELETE_PACKAGES".into()], ..Default::default() });
-        let target = PackageState { name: "known.package".into(), app_id: 10101,
-            target_sdk_version: 35, ..Default::default() };
-        let state = State { packages: [(caller.name.clone(), caller),
-            (target.name.clone(), target)].into(), ..Default::default() };
+        let mut caller = PackageState {
+            name: "caller.package".into(),
+            app_id: 10100,
+            target_sdk_version: 35,
+            ..Default::default()
+        };
+        caller.users.insert(
+            0,
+            PackageUserState {
+                granted_permissions: vec!["android.permission.DELETE_PACKAGES".into()],
+                ..Default::default()
+            },
+        );
+        let target = PackageState {
+            name: "known.package".into(),
+            app_id: 10101,
+            target_sdk_version: 35,
+            ..Default::default()
+        };
+        let state = State {
+            packages: [(caller.name.clone(), caller), (target.name.clone(), target)].into(),
+            ..Default::default()
+        };
         let filter = AppsFilter::default();
-        let query = Query { state: &state, filter: &filter, calling_uid: 10100 };
-        let request = Request { package: "known.package".into(), version: -1,
-            caller_package: Some("caller.package".into()), uid: 10100, pid: 7,
-            user: 0, flags: 0, existing_only: false };
-        let error = match admit(&query, request, &admission(false), &|name| policy::permission(&query, name), || {
-            Err(illegal("known target policy failure"))
-        }) {
+        let query = Query {
+            state: &state,
+            filter: &filter,
+            calling_uid: 10100,
+        };
+        let request = Request {
+            package: "known.package".into(),
+            version: -1,
+            caller_package: Some("caller.package".into()),
+            uid: 10100,
+            pid: 7,
+            user: 0,
+            flags: 0,
+            existing_only: false,
+        };
+        let error = match admit(
+            &query,
+            request,
+            &admission(false),
+            &|name| policy::permission(&query, name),
+            || Err(illegal("known target policy failure")),
+        ) {
             Err(error) => error,
             Ok(_) => panic!("user action bypassed known-target policy capture"),
         };
@@ -1693,7 +1811,7 @@ mod admission_policy_tests {
     fn updated_system_uninstall_restores_factory_before_disabled_user_cleanup() {
         use crate::package::{
             scan::{CapturedUsers, SigningScan},
-            settings::{Package, Settings, FLAG_SYSTEM, PRIVATE_FLAG_PRIVILEGED},
+            settings::{FLAG_SYSTEM, PRIVATE_FLAG_PRIVILEGED, Package, Settings},
         };
         let active = Package {
             name: "factory.package".into(),
@@ -1768,9 +1886,7 @@ mod admission_policy_tests {
         assert!(should_restore_factory(&package, &plan));
         assert!(should_remove_setting(&package, &plan, true));
 
-        let restored = owner
-            .enable_system_setting(&factory.name, [7; 16])
-            .unwrap();
+        let restored = owner.enable_system_setting(&factory.name, [7; 16]).unwrap();
         let disabled = uninstalled(&UserState::default(), 0);
         owner
             .set_user_state(&restored.name, 0, disabled.clone())
@@ -1799,70 +1915,175 @@ mod admission_policy_tests {
         assert!(!should_restore_factory(&package, &plan));
         assert!(!should_remove_setting(&package, &plan, true));
         assert_eq!(owner.settings.packages, vec![restored]);
-        assert_eq!(owner.scanned_user_states(&factory.name).unwrap()[&0], disabled);
+        assert_eq!(
+            owner.scanned_user_states(&factory.name).unwrap()[&0],
+            disabled
+        );
     }
 }
 
 #[cfg(test)]
 mod batch_user_state_tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize,Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Directory(std::path::PathBuf);
-    impl Drop for Directory {fn drop(&mut self){std::fs::remove_dir_all(&self.0).unwrap();}}
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
 
     #[test]
     fn batch_user_states_commits_two_inode_receipts_once_and_rejects_invalid_second() {
-        let directory=Directory(std::env::temp_dir().join(format!("aim-batch-app-data-{}-{}",std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())));
+        let directory = Directory(std::env::temp_dir().join(
+            format!("aim-batch-app-data-{}-{}",std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()),
+        ));
         std::fs::create_dir_all(directory.0.join("system/users/0")).unwrap();
-        let settings=crate::package::settings::Settings {packages:[("core.one",10100),("core.two",10101)].into_iter()
-            .map(|(name,app_id)|crate::package::settings::Package {name:name.into(),app_id,code_path:format!("/system/app/{name}"),
-                domain_set_id:Some(format!("00000000-0000-0000-0000-{app_id:012x}")),..Default::default()}).collect(),..Default::default()};
-        let mut scan=crate::package::scan::SigningScan::new(&Default::default(),&settings,36).unwrap();
-        let original=UserState {installed:true,stopped:true,..Default::default()};
-        scan.capture_user_states(settings.packages.iter().map(|setting|((setting.name.clone(),false),crate::package::scan::CapturedUsers {
-            states:BTreeMap::from([(0,original.clone())]),active_aliases:Default::default(),
-        })).collect()).unwrap();
-        let snapshots=Arc::new(scan_snapshot::Store::new(scan,crate::package::owner::usage::Usage::new(["core.one","core.two"])).unwrap());
-        let mut disk=owner::Store::create(&directory.0,&[0]).unwrap();
+        let settings = crate::package::settings::Settings {
+            packages: [("core.one", 10100), ("core.two", 10101)]
+                .into_iter()
+                .map(|(name, app_id)| crate::package::settings::Package {
+                    name: name.into(),
+                    app_id,
+                    code_path: format!("/system/app/{name}"),
+                    domain_set_id: Some(format!("00000000-0000-0000-0000-{app_id:012x}")),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut scan =
+            crate::package::scan::SigningScan::new(&Default::default(), &settings, 36).unwrap();
+        let original = UserState {
+            installed: true,
+            stopped: true,
+            ..Default::default()
+        };
+        scan.capture_user_states(
+            settings
+                .packages
+                .iter()
+                .map(|setting| {
+                    (
+                        (setting.name.clone(), false),
+                        crate::package::scan::CapturedUsers {
+                            states: BTreeMap::from([(0, original.clone())]),
+                            active_aliases: Default::default(),
+                        },
+                    )
+                })
+                .collect(),
+        )
+        .unwrap();
+        let snapshots = Arc::new(
+            scan_snapshot::Store::new(
+                scan,
+                crate::package::owner::usage::Usage::new(["core.one", "core.two"]),
+            )
+            .unwrap(),
+        );
+        let mut disk = owner::Store::create(&directory.0, &[0]).unwrap();
         disk.commit_scan_settings(&snapshots.capture()).unwrap();
-        let publications=Arc::new(AtomicUsize::new(0));let publish_count=publications.clone();
-        let invalidations=Arc::new(AtomicUsize::new(0));let invalidation_count=invalidations.clone();
-        let disk=Arc::new(Mutex::new(disk));
-        let published_disk=disk.clone();
-        let store=NativeStore {snapshots:snapshots.clone(),disk,
-            publish:Arc::new(move |base,next|{assert!(published_disk.try_lock().is_ok(),"query publisher must run after disk guard is released");assert_eq!(next.version(),base.version()+1);publish_count.fetch_add(1,Ordering::SeqCst);Ok(())}),
-            invalidate:Arc::new(move ||{invalidation_count.fetch_add(1,Ordering::SeqCst);Ok(())})};
-        let before=snapshots.capture();
-        let first=UserState {ce_data_inode:111,de_data_inode:112,..original.clone()};
-        let second=UserState {ce_data_inode:221,de_data_inode:222,..original};
-        let committed=store.user_states(0,vec![("core.one".into(),first.clone()),("core.two".into(),second.clone())]).unwrap();
-        assert_eq!(committed.version(),before.version()+1);
-        assert_eq!(publications.load(Ordering::SeqCst),1);
-        assert_eq!(committed.owner().scanned_user_states("core.one").unwrap()[&0],first);
-        assert_eq!(committed.owner().scanned_user_states("core.two").unwrap()[&0],second);
-        let path=directory.0.join("system/users/0/package-restrictions.xml");
-        let bytes=std::fs::read(&path).unwrap();
-        let root=aim_android_xml::read(&bytes).unwrap();
-        let restrictions=crate::package::restrictions::Restrictions::parse(&root).unwrap();
-        let written=restrictions.packages.into_iter().collect::<BTreeMap<_,_>>();
-        assert_eq!(written["core.one"].ce_data_inode,111);
-        assert_eq!(written["core.one"].de_data_inode,112);
-        assert_eq!(written["core.two"].ce_data_inode,221);
-        assert_eq!(written["core.two"].de_data_inode,222);
-        let changed=UserState {de_data_inode:999,..first};
-        assert!(store.user_states(0,vec![("core.one".into(),changed),("unaccepted.package".into(),second)]).is_err());
-        assert!(Arc::ptr_eq(&committed,&snapshots.capture()));
-        assert_eq!(publications.load(Ordering::SeqCst),1);
-        assert_eq!(std::fs::read(&path).unwrap(),bytes);
-        store.finish_after_unlock(before.version(),Ok(())).unwrap();
-        assert_eq!(invalidations.load(Ordering::SeqCst),1);
-        store.clear_domain_user("core.one",0).unwrap();
-        let uninstalled=UserState {installed:false,..snapshots.capture().owner().scanned_user_states("core.two").unwrap()[&0].clone()};
-        store.user_state("core.two",0,uninstalled).unwrap();
+        let publications = Arc::new(AtomicUsize::new(0));
+        let publish_count = publications.clone();
+        let invalidations = Arc::new(AtomicUsize::new(0));
+        let invalidation_count = invalidations.clone();
+        let disk = Arc::new(Mutex::new(disk));
+        let published_disk = disk.clone();
+        let store = NativeStore {
+            snapshots: snapshots.clone(),
+            disk,
+            publish: Arc::new(move |base, next| {
+                assert!(
+                    published_disk.try_lock().is_ok(),
+                    "query publisher must run after disk guard is released"
+                );
+                assert_eq!(next.version(), base.version() + 1);
+                publish_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+            invalidate: Arc::new(move || {
+                invalidation_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+        };
+        let before = snapshots.capture();
+        let first = UserState {
+            ce_data_inode: 111,
+            de_data_inode: 112,
+            ..original.clone()
+        };
+        let second = UserState {
+            ce_data_inode: 221,
+            de_data_inode: 222,
+            ..original
+        };
+        let committed = store
+            .user_states(
+                0,
+                vec![
+                    ("core.one".into(), first.clone()),
+                    ("core.two".into(), second.clone()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(committed.version(), before.version() + 1);
+        assert_eq!(publications.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            committed.owner().scanned_user_states("core.one").unwrap()[&0],
+            first
+        );
+        assert_eq!(
+            committed.owner().scanned_user_states("core.two").unwrap()[&0],
+            second
+        );
+        let path = directory.0.join("system/users/0/package-restrictions.xml");
+        let bytes = std::fs::read(&path).unwrap();
+        let root = aim_android_xml::read(&bytes).unwrap();
+        let restrictions = crate::package::restrictions::Restrictions::parse(&root).unwrap();
+        let written = restrictions
+            .packages
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(written["core.one"].ce_data_inode, 111);
+        assert_eq!(written["core.one"].de_data_inode, 112);
+        assert_eq!(written["core.two"].ce_data_inode, 221);
+        assert_eq!(written["core.two"].de_data_inode, 222);
+        let changed = UserState {
+            de_data_inode: 999,
+            ..first
+        };
+        assert!(
+            store
+                .user_states(
+                    0,
+                    vec![
+                        ("core.one".into(), changed),
+                        ("unaccepted.package".into(), second)
+                    ]
+                )
+                .is_err()
+        );
+        assert!(Arc::ptr_eq(&committed, &snapshots.capture()));
+        assert_eq!(publications.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        store.finish_after_unlock(before.version(), Ok(())).unwrap();
+        assert_eq!(invalidations.load(Ordering::SeqCst), 1);
+        store.clear_domain_user("core.one", 0).unwrap();
+        let uninstalled = UserState {
+            installed: false,
+            ..snapshots
+                .capture()
+                .owner()
+                .scanned_user_states("core.two")
+                .unwrap()[&0]
+                .clone()
+        };
+        store.user_state("core.two", 0, uninstalled).unwrap();
         store.remove_setting("core.two").unwrap();
-        assert_eq!(publications.load(Ordering::SeqCst),4);
+        assert_eq!(publications.load(Ordering::SeqCst), 4);
     }
 }
 fn illegal(message: impl Into<String>) -> Exception {

@@ -178,7 +178,9 @@ pub fn port_to_fd(p: Port) -> Option<i32> {
     // SAFETY: the fresh descriptor is exclusively owned until returned.
     unsafe {
         let fd = fileport_makefd(p);
-        if fd < 0 { return None; }
+        if fd < 0 {
+            return None;
+        }
         let flags = libc::fcntl(fd, libc::F_GETFD);
         if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
             let error = *libc::__error();
@@ -436,24 +438,47 @@ pub fn call(buf: &mut Buffer, dest: Port, reply_port: Port, msg: &Msg) -> Result
 
 /// A bounded request/reply exchange for native startup handshakes.
 /// The caller owns the reply receive right and must destroy it on timeout.
-pub fn call_bounded(buf: &mut Buffer, dest: Port, reply_port: Port, msg: &Msg,
-    timeout_ms: u32) -> Result<Received, Kern> {
+pub fn call_bounded(
+    buf: &mut Buffer,
+    dest: Port,
+    reply_port: Port,
+    msg: &Msg,
+    timeout_ms: u32,
+) -> Result<Received, Kern> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
     let size = encode(buf, msg, (dest, COPY_SEND), (reply_port, MAKE_SEND_ONCE));
     // Send once. After an interrupted receive, wait for this same pending reply.
     check(unsafe {
-        mach_msg(buf.bytes().as_mut_ptr(), SEND_MSG | 0x10,
-            size, 0, NULL, timeout_ms, NULL)
+        mach_msg(
+            buf.bytes().as_mut_ptr(),
+            SEND_MSG | 0x10,
+            size,
+            0,
+            NULL,
+            timeout_ms,
+            NULL,
+        )
     })?;
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() { return Err(0x10004003); }
+        if remaining.is_zero() {
+            return Err(0x10004003);
+        }
         let timeout = remaining.as_millis().max(1).min(u32::MAX as u128) as u32;
         let result = unsafe {
-            mach_msg(buf.bytes().as_mut_ptr(), receive_options() | 0x100 | 0x400,
-                0, BUFFER as u32, reply_port, timeout, NULL)
+            mach_msg(
+                buf.bytes().as_mut_ptr(),
+                receive_options() | 0x100 | 0x400,
+                0,
+                BUFFER as u32,
+                reply_port,
+                timeout,
+                NULL,
+            )
         };
-        if result == 0x10004005 { continue; } // MACH_RCV_INTERRUPTED
+        if result == 0x10004005 {
+            continue;
+        } // MACH_RCV_INTERRUPTED
         check(result)?;
         return Ok(decode(buf));
     }
@@ -520,8 +545,18 @@ pub fn reply(buf: &mut Buffer, to: Port, msg: &Msg) {
 
 /// Bounded send-once reply. COPY_SEND attachments remain owned by the caller
 /// through success or failure; the caller releases its reply right on error.
-pub fn reply_bounded(buf:&mut Buffer,to:Port,msg:&Msg,timeout_ms:u32)->Result<(),i32>{
-    let size=encode(buf,msg,(to,MOVE_SEND_ONCE),(NULL,0));
-    let result=unsafe{mach_msg(buf.bytes().as_mut_ptr(),SEND_MSG|0x10,size,0,NULL,timeout_ms,NULL)};
-    if result==0{Ok(())}else{Err(result)}
+pub fn reply_bounded(buf: &mut Buffer, to: Port, msg: &Msg, timeout_ms: u32) -> Result<(), i32> {
+    let size = encode(buf, msg, (to, MOVE_SEND_ONCE), (NULL, 0));
+    let result = unsafe {
+        mach_msg(
+            buf.bytes().as_mut_ptr(),
+            SEND_MSG | 0x10,
+            size,
+            0,
+            NULL,
+            timeout_ms,
+            NULL,
+        )
+    };
+    if result == 0 { Ok(()) } else { Err(result) }
 }

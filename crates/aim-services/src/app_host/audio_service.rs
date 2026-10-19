@@ -30,8 +30,8 @@ use aim_service_aidl::{ParcelValue, WriteParcelable, android_media_iaudioservice
 use super::audio_focus::{self, Focus, FocusInfo, Request};
 use super::audio_policy::AudioPolicy;
 use super::kept::RawBundle;
-use super::playback::{self, Attributes, Playback, PlayerIdCard};
 use super::kept::RawIntent;
+use super::playback::{self, Attributes, Playback, PlayerIdCard};
 use super::settings::Table;
 use super::volume::{self, Absolute, Config, DeviceAttributes, Effects, VolumeInfo, Volumes};
 use super::{AppHost, reply};
@@ -50,7 +50,8 @@ const REMOTE_AUDIO_PLAYBACK: &str = "android.permission.REMOTE_AUDIO_PLAYBACK";
 const CHANGE_ACCESSIBILITY_VOLUME: &str = "android.permission.CHANGE_ACCESSIBILITY_VOLUME";
 const BLUETOOTH_PRIVILEGED: &str = "android.permission.BLUETOOTH_PRIVILEGED";
 /// The permissions the focus calls check.
-const MODIFY_AUDIO_SETTINGS_PRIVILEGED: &str = "android.permission.MODIFY_AUDIO_SETTINGS_PRIVILEGED";
+const MODIFY_AUDIO_SETTINGS_PRIVILEGED: &str =
+    "android.permission.MODIFY_AUDIO_SETTINGS_PRIVILEGED";
 const CALL_AUDIO_INTERCEPTION: &str = "android.permission.CALL_AUDIO_INTERCEPTION";
 /// `AudioAttributes.FLAG_CALL_REDIRECTION`, `USAGE_CALL_ASSISTANT` (the
 /// one supported system usage), `USAGE_ASSISTANCE_ACCESSIBILITY`.
@@ -115,7 +116,9 @@ fn sound_assets(xml: Option<&[u8]>) -> ([String; 16], bool, bool) {
             if e.name != "asset" {
                 continue;
             }
-            let (Some(aim_apps::res::Value::String(id)), Some(aim_apps::res::Value::String(file))) = (e.named("id"), e.named("file")) else {
+            let (Some(aim_apps::res::Value::String(id)), Some(aim_apps::res::Value::String(file))) =
+                (e.named("id"), e.named("file"))
+            else {
                 continue;
             };
             if let Some(fx) = EFFECTS.iter().position(|n| n == id) {
@@ -124,7 +127,11 @@ fn sound_assets(xml: Option<&[u8]>) -> ([String; 16], bool, bool) {
             }
         }
     }
-    (files, named[12..16].iter().sum::<i32>() == 4, named[FX_HOME] > 0)
+    (
+        files,
+        named[12..16].iter().sum::<i32>() == 4,
+        named[FX_HOME] > 0,
+    )
 }
 
 pub struct AudioService {
@@ -164,7 +171,9 @@ impl WriteParcelable for SpeakerRoute {
 
 impl AudioService {
     pub fn new(host: Arc<AppHost>) -> Self {
-        let native = host.process.add_service(Arc::new(AudioManagerNative(host.clone())));
+        let native = host
+            .process
+            .add_service(Arc::new(AudioManagerNative(host.clone())));
         AudioService {
             host,
             navigation_repeat: AtomicBool::new(false),
@@ -218,7 +227,11 @@ impl AudioService {
         if let Some(e) = self.effects.get() {
             return Ok(e);
         }
-        let xml = self.host.inputs()?.packages.framework_file(self.host.root()?, "xml", "audio_assets");
+        let xml =
+            self.host
+                .inputs()?
+                .packages
+                .framework_file(self.host.root()?, "xml", "audio_assets");
         let (files, repeat, home) = sound_assets(xml.as_deref());
         if repeat {
             self.navigation_repeat.store(true, Ordering::Relaxed);
@@ -235,28 +248,51 @@ impl AudioService {
     fn play_effect(&self, effect: i32, volume: f32) -> Result<(), Exception> {
         {
             let guard = self.host.volumes()?;
-            if guard.as_ref().unwrap().state(volume::STREAM_SYSTEM as usize)?.muted {
+            if guard
+                .as_ref()
+                .unwrap()
+                .state(volume::STREAM_SYSTEM as usize)?
+                .muted
+            {
                 return Ok(());
             }
         }
-        let Some(file) = usize::try_from(effect).ok().and_then(|e| self.effects().map(|f| f.get(e).cloned()).transpose()) else {
+        let Some(file) = usize::try_from(effect)
+            .ok()
+            .and_then(|e| self.effects().map(|f| f.get(e).cloned()).transpose())
+        else {
             return Ok(());
         };
         let file = file?;
         let gain = if volume < 0.0 {
-            let db = self.host.inputs()?.packages.framework_integer("config_soundEffectVolumeDb").unwrap_or(0);
+            let db = self
+                .host
+                .inputs()?
+                .packages
+                .framework_integer("config_soundEffectVolumeDb")
+                .unwrap_or(0);
             10f32.powf(db as f32 / 20.0)
         } else {
             // As AudioService passes it on, in thousandths.
             (volume * 1000.0) as i32 as f32 / 1000.0
         };
         let root = self.host.root()?;
-        let partition = if root.join("product").join(SOUND_EFFECTS_PATH).join(&file).is_file() { "product" } else { "system" };
+        let partition = if root
+            .join("product")
+            .join(SOUND_EFFECTS_PATH)
+            .join(&file)
+            .is_file()
+        {
+            "product"
+        } else {
+            "system"
+        };
         let path = format!("/{partition}/{SOUND_EFFECTS_PATH}{file}");
-        self.host.call_agent(PLAY_SOUND_EFFECT, "playSoundEffect", |p| {
-            p.write_string16(Some(&path));
-            p.write_f32(gain);
-        })?;
+        self.host
+            .call_agent(PLAY_SOUND_EFFECT, "playSoundEffect", |p| {
+                p.write_string16(Some(&path));
+                p.write_f32(gain);
+            })?;
         Ok(())
     }
 }
@@ -280,15 +316,22 @@ impl Service for AudioManagerNative {
             // AudioService's barrier waits for the permission updates it
             // has queued for audioserver; the app host sends none.
             PERMISSION_UPDATE_BARRIER => {
-                call.data.enforce_interface(NATIVE_DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                call.data
+                    .enforce_interface(NATIVE_DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
                 let mut p = Parcel::new();
                 p.write_no_exception();
                 Ok(p)
             }
             // One-way: a port's mute, from audioserver.
             PORT_MUTE_EVENT => {
-                call.data.enforce_interface(NATIVE_DESCRIPTOR).map_err(|_| BAD_VALUE)?;
-                let (port, event) = (call.data.read_i32().map_err(|_| BAD_VALUE)?, call.data.read_i32().map_err(|_| BAD_VALUE)?);
+                call.data
+                    .enforce_interface(NATIVE_DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
+                let (port, event) = (
+                    call.data.read_i32().map_err(|_| BAD_VALUE)?,
+                    call.data.read_i32().map_err(|_| BAD_VALUE)?,
+                );
                 if super::broadcasts::is_core(call.sender_euid as i32) {
                     let mut pb = self.0.playback.lock().unwrap();
                     if pb.port_mute(port, event) {
@@ -313,7 +356,11 @@ impl AppHost {
         let v = guard.as_ref().unwrap();
         let stream = v.valid_stream(volume::STREAM_MUSIC)?;
         let state = v.state(stream)?;
-        let index = if state.muted { 0 } else { (state.index(volume::device_for_stream(stream)) + 5) / 10 };
+        let index = if state.muted {
+            0
+        } else {
+            (state.index(volume::device_for_stream(stream)) + 5) / 10
+        };
         Ok((index, (state.max_index() + 5) / 10, v.is_volume_fixed()))
     }
 
@@ -324,7 +371,12 @@ impl AppHost {
         if volumes.is_none() {
             let inputs = self.inputs()?;
             let (state, _) = self.packages()?;
-            let configured = self.configured.get().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "app host not configured"))?;
+            let configured = self.configured.get().ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "app host not configured",
+                )
+            })?;
             let flag = |name: &str| state.system.flags.iter().any(|(n, on)| n == name && *on);
             let resource = |name: &str| inputs.packages.framework_bool(name).unwrap_or(false);
             if resource("config_handleVolumeAliasesUsingVolumeGroups") {
@@ -332,7 +384,12 @@ impl AppHost {
             }
             let integer = |name: &str| inputs.packages.framework_integer(name);
             let property = |name: &str| (configured.properties)(name).and_then(|v| v.parse().ok());
-            let setting = |table: Table, name: &str| inputs.settings.get(table, name).and_then(|v| v.parse().ok());
+            let setting = |table: Table, name: &str| {
+                inputs
+                    .settings
+                    .get(table, name)
+                    .and_then(|v| v.parse().ok())
+            };
             *volumes = Some(Volumes::new(&Config {
                 // `TelephonyManager.isVoiceCapable`.
                 voice_capable: resource("config_voice_capable"),
@@ -340,10 +397,20 @@ impl AppHost {
                 fixed_volume: resource("config_useFixedVolume"),
                 assistant_volume: resource("config_useAssistantVolume"),
                 replace_bt_sco: flag("com.android.media.audio.replace_stream_bt_sco"),
-                equal_sco_lea_vc_range: flag("com.android.media.audio.equal_sco_lea_vc_index_range"),
-                alarm_min: flag("com.android.media.audio.alarm_min_volume_zero").then(|| integer("config_audio_alarm_min_vol")).flatten(),
-                notification: (integer("config_audio_notif_vol_steps"), integer("config_audio_notif_vol_default")),
-                ring: (integer("config_audio_ring_vol_steps"), integer("config_audio_ring_vol_default")),
+                equal_sco_lea_vc_range: flag(
+                    "com.android.media.audio.equal_sco_lea_vc_index_range",
+                ),
+                alarm_min: flag("com.android.media.audio.alarm_min_volume_zero")
+                    .then(|| integer("config_audio_alarm_min_vol"))
+                    .flatten(),
+                notification: (
+                    integer("config_audio_notif_vol_steps"),
+                    integer("config_audio_notif_vol_default"),
+                ),
+                ring: (
+                    integer("config_audio_ring_vol_steps"),
+                    integer("config_audio_ring_vol_default"),
+                ),
                 property: &property,
                 setting: &setting,
             }));
@@ -382,8 +449,14 @@ impl AppHost {
                 &[
                     ("android.media.EXTRA_VOLUME_STREAM_TYPE", Value::Int(stream)),
                     ("android.media.EXTRA_VOLUME_STREAM_VALUE", Value::Int(index)),
-                    ("android.media.EXTRA_PREV_VOLUME_STREAM_VALUE", Value::Int(old)),
-                    ("android.media.EXTRA_VOLUME_STREAM_TYPE_ALIAS", Value::Int(alias)),
+                    (
+                        "android.media.EXTRA_PREV_VOLUME_STREAM_VALUE",
+                        Value::Int(old),
+                    ),
+                    (
+                        "android.media.EXTRA_VOLUME_STREAM_TYPE_ALIAS",
+                        Value::Int(alias),
+                    ),
                 ],
             );
             self.broadcasts.send_from_system(self, intent);
@@ -393,7 +466,10 @@ impl AppHost {
                 "android.media.STREAM_MUTE_CHANGED_ACTION",
                 flags,
                 &[
-                    ("android.media.EXTRA_STREAM_VOLUME_MUTED", Value::Bool(muted)),
+                    (
+                        "android.media.EXTRA_STREAM_VOLUME_MUTED",
+                        Value::Bool(muted),
+                    ),
                     ("android.media.EXTRA_VOLUME_STREAM_TYPE", Value::Int(stream)),
                 ],
             );
@@ -402,32 +478,58 @@ impl AppHost {
     }
 
     /// `checkNoteAppOp` of a stream's volume op.
-    fn volume_op_allowed(&self, stream: usize, uid: i32, package: Option<&str>) -> Result<bool, Exception> {
+    fn volume_op_allowed(
+        &self,
+        stream: usize,
+        uid: i32,
+        package: Option<&str>,
+    ) -> Result<bool, Exception> {
         Ok(super::appops_service::note(self, STREAM_VOLUME_OPS[stream], uid, package)? == 0)
     }
 
     /// `setStreamVolumeWithAttribution`.
-    fn set_stream_volume(&self, uid: i32, args: audio::SetStreamVolumeWithAttribution) -> Result<(), Exception> {
+    fn set_stream_volume(
+        &self,
+        uid: i32,
+        args: audio::SetStreamVolumeWithAttribution,
+    ) -> Result<(), Exception> {
         let mut effects = Effects::default();
         {
             let mut guard = self.volumes()?;
             let v = guard.as_mut().unwrap();
             let stream = v.valid_stream(args.stream_type)?;
-            if stream as i32 == volume::STREAM_ACCESSIBILITY && !self.granted(CHANGE_ACCESSIBILITY_VOLUME, uid)? {
+            if stream as i32 == volume::STREAM_ACCESSIBILITY
+                && !self.granted(CHANGE_ACCESSIBILITY_VOLUME, uid)?
+            {
                 return Ok(());
             }
-            if stream as i32 == volume::STREAM_VOICE_CALL && args.index == 0 && !self.granted(MODIFY_PHONE_STATE, uid)? {
+            if stream as i32 == volume::STREAM_VOICE_CALL
+                && args.index == 0
+                && !self.granted(MODIFY_PHONE_STATE, uid)?
+            {
                 return Ok(());
             }
-            if stream as i32 == volume::STREAM_ASSISTANT && !self.granted(MODIFY_AUDIO_ROUTING, uid)? {
+            if stream as i32 == volume::STREAM_ASSISTANT
+                && !self.granted(MODIFY_AUDIO_ROUTING, uid)?
+            {
                 return Ok(());
             }
             let alias = v.alias[stream];
-            if alias >= 0 && !self.volume_op_allowed(alias as usize, uid, args.calling_package.as_deref())? {
+            if alias >= 0
+                && !self.volume_op_allowed(alias as usize, uid, args.calling_package.as_deref())?
+            {
                 return Ok(());
             }
             let has_modify = self.granted(MODIFY_AUDIO_SETTINGS, uid)?;
-            v.set_stream_volume(self, self.audio_policy.get(), stream, args.index, args.flags, has_modify, &mut effects)?;
+            v.set_stream_volume(
+                self,
+                self.audio_policy.get(),
+                stream,
+                args.index,
+                args.flags,
+                has_modify,
+                &mut effects,
+            )?;
             v.take_changes(&mut effects);
         }
         self.volume_effects(effects);
@@ -435,32 +537,64 @@ impl AppHost {
     }
 
     /// `adjustStreamVolumeWithAttribution`.
-    fn adjust_stream_volume(&self, uid: i32, args: audio::AdjustStreamVolumeWithAttribution) -> Result<(), Exception> {
+    fn adjust_stream_volume(
+        &self,
+        uid: i32,
+        args: audio::AdjustStreamVolumeWithAttribution,
+    ) -> Result<(), Exception> {
         let mut effects = Effects::default();
         {
             let mut guard = self.volumes()?;
             let v = guard.as_mut().unwrap();
             let stream = v.valid_stream(args.stream_type)?;
-            if stream as i32 == volume::STREAM_ACCESSIBILITY && !self.granted(CHANGE_ACCESSIBILITY_VOLUME, uid)? {
+            if stream as i32 == volume::STREAM_ACCESSIBILITY
+                && !self.granted(CHANGE_ACCESSIBILITY_VOLUME, uid)?
+            {
                 return Ok(());
             }
             let d = args.direction;
-            if !matches!(d, volume::ADJUST_LOWER | volume::ADJUST_RAISE | volume::ADJUST_SAME | volume::ADJUST_MUTE | volume::ADJUST_UNMUTE | volume::ADJUST_TOGGLE_MUTE) {
+            if !matches!(
+                d,
+                volume::ADJUST_LOWER
+                    | volume::ADJUST_RAISE
+                    | volume::ADJUST_SAME
+                    | volume::ADJUST_MUTE
+                    | volume::ADJUST_UNMUTE
+                    | volume::ADJUST_TOGGLE_MUTE
+            ) {
                 return Err(Exception::illegal_argument(format!("Bad direction {d}")));
             }
-            let mute_adjust = matches!(d, volume::ADJUST_MUTE | volume::ADJUST_UNMUTE | volume::ADJUST_TOGGLE_MUTE);
-            if mute_adjust && stream as i32 == volume::STREAM_VOICE_CALL && !self.granted(MODIFY_PHONE_STATE, uid)? {
+            let mute_adjust = matches!(
+                d,
+                volume::ADJUST_MUTE | volume::ADJUST_UNMUTE | volume::ADJUST_TOGGLE_MUTE
+            );
+            if mute_adjust
+                && stream as i32 == volume::STREAM_VOICE_CALL
+                && !self.granted(MODIFY_PHONE_STATE, uid)?
+            {
                 return Ok(());
             }
-            if stream as i32 == volume::STREAM_ASSISTANT && !self.granted(MODIFY_AUDIO_ROUTING, uid)? {
+            if stream as i32 == volume::STREAM_ASSISTANT
+                && !self.granted(MODIFY_AUDIO_ROUTING, uid)?
+            {
                 return Ok(());
             }
             let alias = v.alias[stream];
-            if alias >= 0 && !self.volume_op_allowed(alias as usize, uid, args.calling_package.as_deref())? {
+            if alias >= 0
+                && !self.volume_op_allowed(alias as usize, uid, args.calling_package.as_deref())?
+            {
                 return Ok(());
             }
             let has_modify = self.granted(MODIFY_AUDIO_SETTINGS, uid)?;
-            v.adjust_stream_volume(self, self.audio_policy.get(), stream, d, args.flags, has_modify, &mut effects)?;
+            v.adjust_stream_volume(
+                self,
+                self.audio_policy.get(),
+                stream,
+                d,
+                args.flags,
+                has_modify,
+                &mut effects,
+            )?;
             v.take_changes(&mut effects);
         }
         self.volume_effects(effects);
@@ -475,10 +609,15 @@ impl AppHost {
             return Ok(());
         }
         if !self.granted(MODIFY_AUDIO_ROUTING, uid)? {
-            return Err(Exception::security("Missing MODIFY_AUDIO_ROUTING permission"));
+            return Err(Exception::security(
+                "Missing MODIFY_AUDIO_ROUTING permission",
+            ));
         }
         if attributes.usage != 17 {
-            return Err(Exception::illegal_argument(format!("Unsupported usage {}", attributes.usage)));
+            return Err(Exception::illegal_argument(format!(
+                "Unsupported usage {}",
+                attributes.usage
+            )));
         }
         Ok(())
     }
@@ -489,9 +628,15 @@ impl AppHost {
     /// devices; none if audioserver cannot list them, as `getDevicesStatic`
     /// finds none then.
     fn communication_device_ids(&self) -> Vec<i32> {
-        let Some(policy) = self.audio_policy.get() else { return Vec::new() };
+        let Some(policy) = self.audio_policy.get() else {
+            return Vec::new();
+        };
         match policy.output_device_ports() {
-            Ok(ports) => ports.iter().filter(|d| d.is_communication_device()).map(|d| d.id).collect(),
+            Ok(ports) => ports
+                .iter()
+                .filter(|d| d.is_communication_device())
+                .map(|d| d.id)
+                .collect(),
             Err(e) => {
                 eprintln!("app host: audio: {e}");
                 Vec::new()
@@ -535,7 +680,10 @@ impl AppHost {
             );
             (strong, cookie)
         });
-        self.playback.lock().unwrap().track(piid, card, uid, call.sender_pid, player);
+        self.playback
+            .lock()
+            .unwrap()
+            .track(piid, card, uid, call.sender_pid, player);
         Ok(piid)
     }
 
@@ -547,7 +695,9 @@ impl AppHost {
         let Some(policy) = self.audio_policy.get() else {
             return Ok(playback::RECORD_RIID_INVALID);
         };
-        let riid = policy.new_client_id().map_err(|e| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, e))?;
+        let riid = policy
+            .new_client_id()
+            .map_err(|e| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, e))?;
         let strong = self.process.strong(handle);
         let me = self.me.clone();
         let cookie = self.process.link_to_death(
@@ -558,23 +708,42 @@ impl AppHost {
                 }
             }),
         );
-        self.playback.lock().unwrap().track_recorder(riid, strong, cookie);
+        self.playback
+            .lock()
+            .unwrap()
+            .track_recorder(riid, strong, cookie);
         Ok(riid)
     }
 
     /// `registerDeviceVolumeDispatcherForAbsoluteVolume`.
-    fn register_absolute(&self, uid: i32, args: audio::RegisterDeviceVolumeDispatcherForAbsoluteVolume<DeviceAttributes, VolumeInfo>) -> Result<(), Exception> {
+    fn register_absolute(
+        &self,
+        uid: i32,
+        args: audio::RegisterDeviceVolumeDispatcherForAbsoluteVolume<DeviceAttributes, VolumeInfo>,
+    ) -> Result<(), Exception> {
         if !self.granted(MODIFY_AUDIO_ROUTING, uid)? && !self.granted(BLUETOOTH_PRIVILEGED, uid)? {
-            return Err(Exception::security("Missing MODIFY_AUDIO_ROUTING or BLUETOOTH_PRIVILEGED permissions"));
+            return Err(Exception::security(
+                "Missing MODIFY_AUDIO_ROUTING or BLUETOOTH_PRIVILEGED permissions",
+            ));
         }
-        let device = args.device.ok_or_else(|| Exception::new(EX_NULL_POINTER, "device"))?;
-        let volumes: Vec<VolumeInfo> = args.volumes.ok_or_else(|| Exception::new(EX_NULL_POINTER, "volumes"))?.into_iter().flatten().collect();
+        let device = args
+            .device
+            .ok_or_else(|| Exception::new(EX_NULL_POINTER, "device"))?;
+        let volumes: Vec<VolumeInfo> = args
+            .volumes
+            .ok_or_else(|| Exception::new(EX_NULL_POINTER, "volumes"))?
+            .into_iter()
+            .flatten()
+            .collect();
         let mut effects = Effects::default();
         {
             let mut guard = self.volumes()?;
             let v = guard.as_mut().unwrap();
             if !args.register {
-                if v.absolute.as_ref().is_some_and(|a| a.device.internal_type == device.internal_type) {
+                if v.absolute
+                    .as_ref()
+                    .is_some_and(|a| a.device.internal_type == device.internal_type)
+                {
                     v.unregister_absolute(self.audio_policy.get());
                 }
                 return Ok(());
@@ -583,7 +752,10 @@ impl AppHost {
                 return Err(Exception::new(EX_NULL_POINTER, "cb"));
             };
             if device.internal_type != super::audio_policy::DEVICE_OUT_SPEAKER {
-                return Err(self.unimplemented_named("audio", &format!("absolute volume of device {:#x}", device.internal_type)));
+                return Err(self.unimplemented_named(
+                    "audio",
+                    &format!("absolute volume of device {:#x}", device.internal_type),
+                ));
             }
             let dispatcher = self.process.strong(handle);
             // `AbsoluteVolumeDeviceInfo` unregisters when its dispatcher dies.
@@ -593,13 +765,23 @@ impl AppHost {
                 Box::new(move || {
                     if let Some(host) = me.upgrade()
                         && let Some(v) = host.volumes.lock().unwrap().as_mut()
-                        && v.absolute.as_ref().is_some_and(|a| a.dispatcher.handle == handle)
+                        && v.absolute
+                            .as_ref()
+                            .is_some_and(|a| a.dispatcher.handle == handle)
                     {
                         v.unregister_absolute(host.audio_policy.get());
                     }
                 }),
             );
-            v.register_absolute(self.audio_policy.get(), Absolute { device, volumes, dispatcher, handles_adjustment: args.handlesvolume_adjustment });
+            v.register_absolute(
+                self.audio_policy.get(),
+                Absolute {
+                    device,
+                    volumes,
+                    dispatcher,
+                    handles_adjustment: args.handlesvolume_adjustment,
+                },
+            );
             v.take_changes(&mut effects);
         }
         self.volume_effects(effects);
@@ -609,7 +791,10 @@ impl AppHost {
     /// Runs `f` on the focus stack and the players, then sends the
     /// players' calls, clears the death links of the requesters released
     /// and schedules the timers asked for.
-    fn with_focus<T>(&self, f: impl FnOnce(&mut Focus<Strong, (Strong, u64)>, &mut Playback) -> T) -> T {
+    fn with_focus<T>(
+        &self,
+        f: impl FnOnce(&mut Focus<Strong, (Strong, u64)>, &mut Playback) -> T,
+    ) -> T {
         let mut focus = self.focus.lock().unwrap();
         let out = {
             let mut pb = self.playback.lock().unwrap();
@@ -645,7 +830,8 @@ impl AppHost {
             return Ok(true);
         }
         Ok(attributes.usage == USAGE_CALL_ASSISTANT
-            && (attributes.flags() & FLAG_CALL_REDIRECTION != 0 && self.granted(CALL_AUDIO_INTERCEPTION, uid)?
+            && (attributes.flags() & FLAG_CALL_REDIRECTION != 0
+                && self.granted(CALL_AUDIO_INTERCEPTION, uid)?
                 || self.granted(MODIFY_AUDIO_ROUTING, uid)?))
     }
 
@@ -655,18 +841,41 @@ impl AppHost {
     fn focus_blocked(&self, uid: i32, package: &str, sdk: i32) -> Result<bool, Exception> {
         let package = if package.is_empty() {
             let (state, resolution) = self.packages()?;
-            let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
-            let names = query.packages_for_uid(uid).map_err(|e| Exception::new(aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION, format!("getPackagesForUid: {}", e.0)))?;
-            names.into_iter().flatten().flatten().find(|n| !n.is_empty()).unwrap_or_else(|| format!("[{uid}]"))
+            let query = crate::package::query::Query {
+                state: &state,
+                filter: &resolution.apps_filter,
+                calling_uid: SYSTEM_UID,
+            };
+            let names = query.packages_for_uid(uid).map_err(|e| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION,
+                    format!("getPackagesForUid: {}", e.0),
+                )
+            })?;
+            names
+                .into_iter()
+                .flatten()
+                .flatten()
+                .find(|n| !n.is_empty())
+                .unwrap_or_else(|| format!("[{uid}]"))
         } else {
             package.to_string()
         };
-        let allowed = super::appops_service::note(self, super::appops_service::OP_TAKE_AUDIO_FOCUS, uid, Some(&package))? == 0;
+        let allowed = super::appops_service::note(
+            self,
+            super::appops_service::OP_TAKE_AUDIO_FOCUS,
+            uid,
+            Some(&package),
+        )? == 0;
         Ok(!allowed && sdk >= VANILLA_ICE_CREAM)
     }
 
     /// `requestAudioFocus`, then `MediaFocusControl`'s.
-    fn request_focus(&self, uid: i32, a: audio::RequestAudioFocus<Attributes>) -> Result<i32, Exception> {
+    fn request_focus(
+        &self,
+        uid: i32,
+        a: audio::RequestAudioFocus<Attributes>,
+    ) -> Result<i32, Exception> {
         if a.flags & audio_focus::AUDIOFOCUS_FLAG_TEST != 0 {
             return Err(Exception::illegal_argument("Invalid test flag"));
         }
@@ -687,10 +896,14 @@ impl AppHost {
                 return Ok(audio_focus::AUDIOFOCUS_REQUEST_FAILED);
             }
         }
-        let (Some(package), Some(client_id), Some(attributes)) = (a.calling_package_name, a.client_id, a.aa) else {
+        let (Some(package), Some(client_id), Some(attributes)) =
+            (a.calling_package_name, a.client_id, a.aa)
+        else {
             return Ok(audio_focus::AUDIOFOCUS_REQUEST_FAILED);
         };
-        let overrides = self.granted(MODIFY_AUDIO_SETTINGS_PRIVILEGED, uid)? || self.granted(MODIFY_AUDIO_ROUTING, uid)? || uid < FIRST_APPLICATION_UID;
+        let overrides = self.granted(MODIFY_AUDIO_SETTINGS_PRIVILEGED, uid)?
+            || self.granted(MODIFY_AUDIO_ROUTING, uid)?
+            || uid < FIRST_APPLICATION_UID;
         if !overrides && self.focus_blocked(uid, &package, a.sdk)? {
             return Ok(audio_focus::AUDIOFOCUS_REQUEST_FAILED);
         }
@@ -702,17 +915,30 @@ impl AppHost {
         let handle = |b: Option<Binder>, name: &str| match b {
             None => Ok(None),
             Some(Binder::Handle(h)) => Ok(Some(h)),
-            Some(Binder::Local(_)) => Err(self.unimplemented_named("audio", &format!("focus requests with a {name} of the app host's"))),
+            Some(Binder::Local(_)) => Err(self.unimplemented_named(
+                "audio",
+                &format!("focus requests with a {name} of the app host's"),
+            )),
         };
         let Some(source) = handle(a.cb, "token")? else {
             return Err(Exception::new(EX_NULL_POINTER, "cb"));
         };
         let dispatcher = handle(a.fd, "dispatcher")?.map(|h| self.process.strong(h));
         let cb = self.process.strong(source);
-        if cb.transact(PING_TRANSACTION, &Parcel::new(), false).is_err() {
+        if cb
+            .transact(PING_TRANSACTION, &Parcel::new(), false)
+            .is_err()
+        {
             return Ok(audio_focus::AUDIOFOCUS_REQUEST_FAILED);
         }
-        if self.inputs()?.settings.get(Table::System, MULTI_AUDIO_FOCUS_ENABLED).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0) != 0 {
+        if self
+            .inputs()?
+            .settings
+            .get(Table::System, MULTI_AUDIO_FOCUS_ENABLED)
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(0)
+            != 0
+        {
             return Err(self.unimplemented_named("audio", "multiple audio focus"));
         }
         let request = Request {
@@ -753,7 +979,9 @@ impl Service for AudioService {
         let uid = call.sender_euid as i32;
         let host = &self.host;
         // A stream's state read under the volumes' lock.
-        let read = |stream: i32, f: &dyn Fn(&Volumes, usize) -> Result<i32, Exception>| -> Result<i32, Exception> {
+        let read = |stream: i32,
+                    f: &dyn Fn(&Volumes, usize) -> Result<i32, Exception>|
+         -> Result<i32, Exception> {
             let guard = host.volumes()?;
             let v = guard.as_ref().unwrap();
             let stream = v.valid_stream(stream)?;
@@ -761,7 +989,8 @@ impl Service for AudioService {
         };
         match call.code {
             audio::TRACK_PLAYER => {
-                let a = audio::TrackPlayer::<PlayerIdCard>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = audio::TrackPlayer::<PlayerIdCard>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 match host.track_player(call, a.pic) {
                     Ok(piid) => audio::write_track_player_reply(&mut p, piid),
                     Err(e) => return reply(Err(e)),
@@ -769,7 +998,8 @@ impl Service for AudioService {
             }
             // One-way, as the rest of the players' and recorders' events.
             audio::PLAYER_ATTRIBUTES => {
-                let a = audio::PlayerAttributes::<Attributes>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = audio::PlayerAttributes::<Attributes>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 if let Some(attr) = a.attr
                     && host.validate_usage(&attr, uid).is_ok()
                 {
@@ -809,7 +1039,8 @@ impl Service for AudioService {
                 }
             }
             audio::PORT_EVENT => {
-                let a = audio::PortEvent::<RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    audio::PortEvent::<RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 if super::broadcasts::is_core(uid) {
                     let extras = a.extras.as_ref().and_then(playback::read_extras);
                     let mut pb = host.playback.lock().unwrap();
@@ -831,7 +1062,10 @@ impl Service for AudioService {
             }
             audio::RECORDER_EVENT => {
                 let a = audio::RecorderEvent::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                host.playback.lock().unwrap().recorder_event(a.riid, a.event);
+                host.playback
+                    .lock()
+                    .unwrap()
+                    .recorder_event(a.riid, a.event);
             }
             audio::RELEASE_RECORDER => {
                 let a = audio::ReleaseRecorder::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -839,7 +1073,8 @@ impl Service for AudioService {
                 playback::clear(&host.process, link);
             }
             audio::REGISTER_PLAYBACK_CALLBACK => {
-                let a = audio::RegisterPlaybackCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    audio::RegisterPlaybackCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 if let Some(Binder::Handle(handle)) = a.pcdb {
                     let privileged = match host.granted(MODIFY_AUDIO_ROUTING, uid) {
                         Ok(v) => v,
@@ -855,12 +1090,16 @@ impl Service for AudioService {
                             }
                         }),
                     );
-                    host.playback.lock().unwrap().add_client(strong, cookie, privileged);
+                    host.playback
+                        .lock()
+                        .unwrap()
+                        .add_client(strong, cookie, privileged);
                 }
                 audio::write_register_playback_callback_reply(&mut p);
             }
             audio::REGISTER_RECORDING_CALLBACK => {
-                let a = audio::RegisterRecordingCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = audio::RegisterRecordingCallback::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 if let Some(Binder::Handle(handle)) = a.rcdb {
                     // `checkCallingPermission(MODIFY_AUDIO_ROUTING)`.
                     let privileged = match host.granted(MODIFY_AUDIO_ROUTING, uid) {
@@ -873,24 +1112,37 @@ impl Service for AudioService {
                         &strong,
                         Box::new(move || {
                             if let Some(host) = me.upgrade() {
-                                host.playback.lock().unwrap().remove_recording_client(handle);
+                                host.playback
+                                    .lock()
+                                    .unwrap()
+                                    .remove_recording_client(handle);
                             }
                         }),
                     );
-                    host.playback.lock().unwrap().add_recording_client(strong, cookie, privileged);
+                    host.playback
+                        .lock()
+                        .unwrap()
+                        .add_recording_client(strong, cookie, privileged);
                 }
                 audio::write_register_recording_callback_reply(&mut p);
             }
             audio::UNREGISTER_RECORDING_CALLBACK => {
-                let a = audio::UnregisterRecordingCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = audio::UnregisterRecordingCallback::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 if let Some(Binder::Handle(handle)) = a.rcdb {
-                    for link in host.playback.lock().unwrap().remove_recording_client(handle) {
+                    for link in host
+                        .playback
+                        .lock()
+                        .unwrap()
+                        .remove_recording_client(handle)
+                    {
                         playback::clear(&host.process, Some(link));
                     }
                 }
             }
             audio::UNREGISTER_PLAYBACK_CALLBACK => {
-                let a = audio::UnregisterPlaybackCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = audio::UnregisterPlaybackCallback::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 if let Some(Binder::Handle(handle)) = a.pcdb {
                     for link in host.playback.lock().unwrap().remove_client(handle) {
                         playback::clear(&host.process, Some(link));
@@ -898,23 +1150,29 @@ impl Service for AudioService {
                 }
             }
             audio::GET_ACTIVE_PLAYBACK_CONFIGURATIONS => {
-                audio::GetActivePlaybackConfigurations::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                audio::GetActivePlaybackConfigurations::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 let privileged = match host.granted(MODIFY_AUDIO_ROUTING, uid) {
                     Ok(v) => v,
                     Err(e) => return reply(Err(e)),
                 };
                 p.write_no_exception();
-                host.playback.lock().unwrap().write_configurations(&mut p, privileged);
+                host.playback
+                    .lock()
+                    .unwrap()
+                    .write_configurations(&mut p, privileged);
             }
             audio::REQUEST_AUDIO_FOCUS => {
-                let a = audio::RequestAudioFocus::<Attributes>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = audio::RequestAudioFocus::<Attributes>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 match host.request_focus(uid, a) {
                     Ok(result) => audio::write_request_audio_focus_reply(&mut p, result),
                     Err(e) => return reply(Err(e)),
                 }
             }
             audio::ABANDON_AUDIO_FOCUS => {
-                let a = audio::AbandonAudioFocus::<Attributes>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = audio::AbandonAudioFocus::<Attributes>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 let valid = match a.aa.as_ref().map(|aa| host.valid_focus_usage(aa, uid)) {
                     Some(Err(e)) => return reply(Err(e)),
                     Some(Ok(valid)) => valid,
@@ -930,7 +1188,8 @@ impl Service for AudioService {
                 audio::write_abandon_audio_focus_reply(&mut p, result);
             }
             audio::UNREGISTER_AUDIO_FOCUS_CLIENT => {
-                let a = audio::UnregisterAudioFocusClient::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = audio::UnregisterAudioFocusClient::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 if let Err(e) = host.with_focus(|f, pb| match a.client_id {
                     Some(client_id) => {
                         f.unregister(&client_id, pb);
@@ -946,10 +1205,14 @@ impl Service for AudioService {
             }
             audio::GET_CURRENT_AUDIO_FOCUS => {
                 audio::GetCurrentAudioFocus::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                audio::write_get_current_audio_focus_reply(&mut p, host.focus.lock().unwrap().current());
+                audio::write_get_current_audio_focus_reply(
+                    &mut p,
+                    host.focus.lock().unwrap().current(),
+                );
             }
             audio::GET_FOCUS_RAMP_TIME_MS => {
-                let a = audio::GetFocusRampTimeMs::<Attributes>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = audio::GetFocusRampTimeMs::<Attributes>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 let Some(attr) = a.attr else {
                     return reply(Err(Exception::new(EX_NULL_POINTER, "attr")));
                 };
@@ -959,10 +1222,21 @@ impl Service for AudioService {
                 audio::GetFocusDuckedUidsForTest::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 match host.granted(QUERY_AUDIO_STATE, uid) {
                     Ok(true) => {}
-                    Ok(false) => return reply(Err(Exception::security(format!("Access denied, requires: {QUERY_AUDIO_STATE}")))),
+                    Ok(false) => {
+                        return reply(Err(Exception::security(format!(
+                            "Access denied, requires: {QUERY_AUDIO_STATE}"
+                        ))));
+                    }
                     Err(e) => return reply(Err(e)),
                 }
-                let uids = host.playback.lock().unwrap().ducked_uids().into_iter().map(ParcelValue::Integer).collect();
+                let uids = host
+                    .playback
+                    .lock()
+                    .unwrap()
+                    .ducked_uids()
+                    .into_iter()
+                    .map(ParcelValue::Integer)
+                    .collect();
                 audio::write_get_focus_ducked_uids_for_test_reply(&mut p, &Some(uids));
             }
             // `getMode`: the mode owner's (`getAudioModeOwnerHandler`); the
@@ -975,7 +1249,11 @@ impl Service for AudioService {
                 let a = audio::SetRingtonePlayer::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 match host.granted(REMOTE_AUDIO_PLAYBACK, uid) {
                     Ok(true) => {}
-                    Ok(false) => return reply(Err(Exception::security(format!("Access denied, requires: {REMOTE_AUDIO_PLAYBACK}")))),
+                    Ok(false) => {
+                        return reply(Err(Exception::security(format!(
+                            "Access denied, requires: {REMOTE_AUDIO_PLAYBACK}"
+                        ))));
+                    }
                     Err(e) => return reply(Err(e)),
                 }
                 let player = match a.player {
@@ -988,14 +1266,23 @@ impl Service for AudioService {
             }
             audio::GET_RINGTONE_PLAYER => {
                 audio::GetRingtonePlayer::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let player = self.ringtone_player.lock().unwrap().as_ref().map(Strong::binder);
+                let player = self
+                    .ringtone_player
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(Strong::binder);
                 audio::write_get_ringtone_player_reply(&mut p, player);
             }
             audio::GET_FOCUS_STACK => {
                 audio::GetFocusStack::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 match host.granted(MODIFY_AUDIO_ROUTING, uid) {
                     Ok(true) => {}
-                    Ok(false) => return reply(Err(Exception::security(format!("Access denied, requires: {MODIFY_AUDIO_ROUTING}")))),
+                    Ok(false) => {
+                        return reply(Err(Exception::security(format!(
+                            "Access denied, requires: {MODIFY_AUDIO_ROUTING}"
+                        ))));
+                    }
                     Err(e) => return reply(Err(e)),
                 }
                 let infos: Vec<Option<FocusInfo>> = host.focus.lock().unwrap().infos();
@@ -1011,26 +1298,38 @@ impl Service for AudioService {
                 // By convention 0 when muted.
                 match read(args.stream_type, &|v, s| {
                     let st = v.state(s)?;
-                    Ok(if st.muted { 0 } else { (st.index(volume::device_for_stream(s)) + 5) / 10 })
+                    Ok(if st.muted {
+                        0
+                    } else {
+                        (st.index(volume::device_for_stream(s)) + 5) / 10
+                    })
                 }) {
                     Ok(index) => audio::write_get_stream_volume_reply(&mut p, index),
                     Err(e) => return reply(Err(e)),
                 }
             }
             audio::GET_STREAM_MAX_VOLUME => {
-                let args = audio::GetStreamMaxVolume::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                match read(args.stream_type, &|v, s| Ok((v.state(s)?.max_index() + 5) / 10)) {
+                let args =
+                    audio::GetStreamMaxVolume::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match read(args.stream_type, &|v, s| {
+                    Ok((v.state(s)?.max_index() + 5) / 10)
+                }) {
                     Ok(max) => audio::write_get_stream_max_volume_reply(&mut p, max),
                     Err(e) => return reply(Err(e)),
                 }
             }
             audio::GET_STREAM_MIN_VOLUME => {
-                let args = audio::GetStreamMinVolume::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let privileged = match host.granted(MODIFY_AUDIO_SETTINGS, uid).and_then(|s| Ok(s || uid == SYSTEM_UID || host.granted(MODIFY_AUDIO_ROUTING, uid)?)) {
+                let args =
+                    audio::GetStreamMinVolume::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let privileged = match host.granted(MODIFY_AUDIO_SETTINGS, uid).and_then(|s| {
+                    Ok(s || uid == SYSTEM_UID || host.granted(MODIFY_AUDIO_ROUTING, uid)?)
+                }) {
                     Ok(privileged) => privileged,
                     Err(e) => return reply(Err(e)),
                 };
-                match read(args.stream_type, &|v, s| Ok((v.state(s)?.min_index(privileged) + 5) / 10)) {
+                match read(args.stream_type, &|v, s| {
+                    Ok((v.state(s)?.min_index(privileged) + 5) / 10)
+                }) {
                     Ok(min) => audio::write_get_stream_min_volume_reply(&mut p, min),
                     Err(e) => return reply(Err(e)),
                 }
@@ -1045,7 +1344,10 @@ impl Service for AudioService {
             audio::IS_VOLUME_FIXED => {
                 audio::IsVolumeFixed::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 match self.host.volumes() {
-                    Ok(v) => audio::write_is_volume_fixed_reply(&mut p, v.as_ref().unwrap().is_volume_fixed()),
+                    Ok(v) => audio::write_is_volume_fixed_reply(
+                        &mut p,
+                        v.as_ref().unwrap().is_volume_fixed(),
+                    ),
                     Err(e) => return reply(Err(e)),
                 }
             }
@@ -1055,115 +1357,157 @@ impl Service for AudioService {
                 audio::IsSpatializerEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 // `SpatializerHelper.isEnabled`: without the effect
                 // (`ro.audio.spatializer_enabled`) it is not supported.
-                if super::system_boolean(self.host.property("ro.audio.spatializer_enabled").as_deref(), false) {
-                    return reply(Err(self.host.unimplemented_named("audio", "a spatializer (#1779)")));
+                if super::system_boolean(
+                    self.host
+                        .property("ro.audio.spatializer_enabled")
+                        .as_deref(),
+                    false,
+                ) {
+                    return reply(Err(self
+                        .host
+                        .unimplemented_named("audio", "a spatializer (#1779)")));
                 }
                 audio::write_is_spatializer_enabled_reply(&mut p, false);
             }
             audio::GET_AVAILABLE_COMMUNICATION_DEVICE_IDS => {
-                audio::GetAvailableCommunicationDeviceIds::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                audio::write_get_available_communication_device_ids_reply(&mut p, &Some(self.host.communication_device_ids()));
+                audio::GetAvailableCommunicationDeviceIds::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                audio::write_get_available_communication_device_ids_reply(
+                    &mut p,
+                    &Some(self.host.communication_device_ids()),
+                );
             }
             audio::IS_BLUETOOTH_A2DP_ON => {
                 audio::IsBluetoothA2dpOn::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 audio::write_is_bluetooth_a2dp_on_reply(&mut p, false);
             }
             audio::START_WATCHING_ROUTES => {
-                let args = audio::StartWatchingRoutes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args =
+                    audio::StartWatchingRoutes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 if let Some(Binder::Handle(observer)) = args.observer {
                     self.watch_routes(observer);
                 }
                 audio::write_start_watching_routes_reply(&mut p, Some(&SpeakerRoute));
             }
             audio::REGISTER_COMMUNICATION_DEVICE_DISPATCHER => {
-                let args = audio::RegisterCommunicationDeviceDispatcher::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args = audio::RegisterCommunicationDeviceDispatcher::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 if let Some(Binder::Handle(dispatcher)) = args.dispatcher {
                     self.keep(&self.comm_dev_dispatchers, dispatcher);
                 }
                 audio::write_register_communication_device_dispatcher_reply(&mut p);
             }
             audio::UNREGISTER_COMMUNICATION_DEVICE_DISPATCHER => {
-                let args = audio::UnregisterCommunicationDeviceDispatcher::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args = audio::UnregisterCommunicationDeviceDispatcher::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 if let Some(Binder::Handle(dispatcher)) = args.dispatcher {
                     self.let_go(&self.comm_dev_dispatchers, dispatcher);
                 }
             }
             audio::REGISTER_MODE_DISPATCHER => {
-                let args = audio::RegisterModeDispatcher::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args =
+                    audio::RegisterModeDispatcher::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 if let Some(Binder::Handle(dispatcher)) = args.dispatcher {
                     self.keep(&self.mode_dispatchers, dispatcher);
                 }
                 audio::write_register_mode_dispatcher_reply(&mut p);
             }
             audio::UNREGISTER_MODE_DISPATCHER => {
-                let args = audio::UnregisterModeDispatcher::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args =
+                    audio::UnregisterModeDispatcher::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 if let Some(Binder::Handle(dispatcher)) = args.dispatcher {
                     self.let_go(&self.mode_dispatchers, dispatcher);
                 }
             }
             audio::IS_STREAM_AFFECTED_BY_MUTE => {
-                let args = audio::IsStreamAffectedByMute::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args =
+                    audio::IsStreamAffectedByMute::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 match read(args.stream_type, &|v, s| Ok(v.affected_by_mute(s) as i32)) {
-                    Ok(affected) => audio::write_is_stream_affected_by_mute_reply(&mut p, affected != 0),
+                    Ok(affected) => {
+                        audio::write_is_stream_affected_by_mute_reply(&mut p, affected != 0)
+                    }
                     Err(e) => return reply(Err(e)),
                 }
             }
             audio::GET_LAST_AUDIBLE_STREAM_VOLUME => {
-                let args = audio::GetLastAudibleStreamVolume::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args = audio::GetLastAudibleStreamVolume::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 match host.granted(QUERY_AUDIO_STATE, uid) {
                     Ok(true) => {}
-                    Ok(false) => return reply(Err(Exception::security(format!("uid {uid} does not have {QUERY_AUDIO_STATE}.")))),
+                    Ok(false) => {
+                        return reply(Err(Exception::security(format!(
+                            "uid {uid} does not have {QUERY_AUDIO_STATE}."
+                        ))));
+                    }
                     Err(e) => return reply(Err(e)),
                 }
-                match read(args.stream_type, &|v, s| Ok((v.state(s)?.index(volume::device_for_stream(s)) + 5) / 10)) {
+                match read(args.stream_type, &|v, s| {
+                    Ok((v.state(s)?.index(volume::device_for_stream(s)) + 5) / 10)
+                }) {
                     Ok(index) => audio::write_get_last_audible_stream_volume_reply(&mut p, index),
                     Err(e) => return reply(Err(e)),
                 }
             }
             audio::SET_STREAM_VOLUME_WITH_ATTRIBUTION => {
-                let args = audio::SetStreamVolumeWithAttribution::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args = audio::SetStreamVolumeWithAttribution::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 if let Err(e) = host.set_stream_volume(uid, args) {
                     return reply(Err(e));
                 }
                 audio::write_set_stream_volume_with_attribution_reply(&mut p);
             }
             audio::ADJUST_STREAM_VOLUME_WITH_ATTRIBUTION => {
-                let args = audio::AdjustStreamVolumeWithAttribution::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args = audio::AdjustStreamVolumeWithAttribution::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 if let Err(e) = host.adjust_stream_volume(uid, args) {
                     return reply(Err(e));
                 }
                 audio::write_adjust_stream_volume_with_attribution_reply(&mut p);
             }
             audio::REGISTER_DEVICE_VOLUME_DISPATCHER_FOR_ABSOLUTE_VOLUME => {
-                let args = audio::RegisterDeviceVolumeDispatcherForAbsoluteVolume::<DeviceAttributes, VolumeInfo>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args = audio::RegisterDeviceVolumeDispatcherForAbsoluteVolume::<
+                    DeviceAttributes,
+                    VolumeInfo,
+                >::read(&mut call.data)
+                .map_err(|_| BAD_VALUE)?;
                 if let Err(e) = host.register_absolute(uid, args) {
                     return reply(Err(e));
                 }
                 audio::write_register_device_volume_dispatcher_for_absolute_volume_reply(&mut p);
             }
             audio::ARE_NAVIGATION_REPEAT_SOUND_EFFECTS_ENABLED => {
-                audio::AreNavigationRepeatSoundEffectsEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                audio::AreNavigationRepeatSoundEffectsEnabled::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 if let Err(e) = self.effects() {
                     return reply(Err(e));
                 }
-                audio::write_are_navigation_repeat_sound_effects_enabled_reply(&mut p, self.navigation_repeat.load(Ordering::Relaxed));
+                audio::write_are_navigation_repeat_sound_effects_enabled_reply(
+                    &mut p,
+                    self.navigation_repeat.load(Ordering::Relaxed),
+                );
             }
             audio::SET_NAVIGATION_REPEAT_SOUND_EFFECTS_ENABLED => {
-                let args = audio::SetNavigationRepeatSoundEffectsEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args = audio::SetNavigationRepeatSoundEffectsEnabled::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 if let Err(e) = self.effects() {
                     return reply(Err(e));
                 }
-                self.navigation_repeat.store(args.enabled, Ordering::Relaxed);
+                self.navigation_repeat
+                    .store(args.enabled, Ordering::Relaxed);
             }
             audio::IS_HOME_SOUND_EFFECT_ENABLED => {
                 audio::IsHomeSoundEffectEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 if let Err(e) = self.effects() {
                     return reply(Err(e));
                 }
-                audio::write_is_home_sound_effect_enabled_reply(&mut p, self.home_sound.load(Ordering::Relaxed));
+                audio::write_is_home_sound_effect_enabled_reply(
+                    &mut p,
+                    self.home_sound.load(Ordering::Relaxed),
+                );
             }
             audio::SET_HOME_SOUND_EFFECT_ENABLED => {
-                let args = audio::SetHomeSoundEffectEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args = audio::SetHomeSoundEffectEnabled::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 if let Err(e) = self.effects() {
                     return reply(Err(e));
                 }
@@ -1173,15 +1517,26 @@ impl Service for AudioService {
             audio::PLAY_SOUND_EFFECT => {
                 let args = audio::PlaySoundEffect::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let enabled = match self.host.inputs() {
-                    Ok(inputs) => inputs.settings.get(Table::System, SOUND_EFFECTS_ENABLED).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0) != 0,
+                    Ok(inputs) => {
+                        inputs
+                            .settings
+                            .get(Table::System, SOUND_EFFECTS_ENABLED)
+                            .and_then(|v| v.parse::<i32>().ok())
+                            .unwrap_or(0)
+                            != 0
+                    }
                     Err(e) => return reply(Err(e)),
                 };
-                if enabled && matches!(args.user_id, 0 | USER_CURRENT) && let Err(e) = self.play_effect(args.effect_type, -1.0) {
+                if enabled
+                    && matches!(args.user_id, 0 | USER_CURRENT)
+                    && let Err(e) = self.play_effect(args.effect_type, -1.0)
+                {
                     eprintln!("app host: sound effect {}: {e:?}", args.effect_type);
                 }
             }
             audio::PLAY_SOUND_EFFECT_VOLUME => {
-                let args = audio::PlaySoundEffectVolume::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args =
+                    audio::PlaySoundEffectVolume::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 if let Err(e) = self.play_effect(args.effect_type, args.volume) {
                     eprintln!("app host: sound effect {}: {e:?}", args.effect_type);
                 }

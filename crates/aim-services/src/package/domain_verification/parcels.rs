@@ -190,21 +190,31 @@ mod tests {
 
     #[test]
     fn uri_group_bundle_retains_null_filter_and_empty_filter_distinction() {
-        use crate::package::intent_filter::UriRelativeFilterGroup;
         use crate::package::domain_verification::uri_parcel::Group;
+        use crate::package::intent_filter::UriRelativeFilterGroup;
         use aim_service_aidl::ReadParcelable;
         let mut group = UriRelativeFilterGroup::new(0);
-        group.add_nullable(0, 0, None); group.add(0, 0, "");
+        group.add_nullable(0, 0, None);
+        group.add(0, 0, "");
         let value = UriGroups::prepare(&[(Some("x.example".into()), vec![group])]).unwrap();
         let mut reader = aim_binder_host::parcel::Reader::new(value.0.data(), &[]);
-        reader.read_i32().unwrap(); assert_eq!(reader.read_i32().unwrap(), crate::bundle::MAGIC);
-        assert_eq!(reader.read_i32().unwrap(), 1); reader.read_string16().unwrap();
-        assert_eq!(reader.read_i32().unwrap(), 11); reader.read_i32().unwrap(); assert_eq!(reader.read_i32().unwrap(), 1);
-        assert_eq!(reader.read_i32().unwrap(), 4); reader.read_i32().unwrap(); reader.read_string16().unwrap();
+        reader.read_i32().unwrap();
+        assert_eq!(reader.read_i32().unwrap(), crate::bundle::MAGIC);
+        assert_eq!(reader.read_i32().unwrap(), 1);
+        reader.read_string16().unwrap();
+        assert_eq!(reader.read_i32().unwrap(), 11);
+        reader.read_i32().unwrap();
+        assert_eq!(reader.read_i32().unwrap(), 1);
+        assert_eq!(reader.read_i32().unwrap(), 4);
+        reader.read_i32().unwrap();
+        reader.read_string16().unwrap();
         let decoded = Group::read_from(&mut reader).unwrap();
-        let filters = decoded.filters.unwrap(); assert_eq!(filters.len(), 2);
-        assert_eq!(filters[0].as_ref().unwrap().filter, None); assert_eq!(filters[1].as_ref().unwrap().filter.as_deref(), Some(""));
-        assert!(!reader.read_bool().unwrap()); assert_eq!(reader.remaining(), 0);
+        let filters = decoded.filters.unwrap();
+        assert_eq!(filters.len(), 2);
+        assert_eq!(filters[0].as_ref().unwrap().filter, None);
+        assert_eq!(filters[1].as_ref().unwrap().filter.as_deref(), Some(""));
+        assert!(!reader.read_bool().unwrap());
+        assert_eq!(reader.remaining(), 0);
     }
 
     #[test]

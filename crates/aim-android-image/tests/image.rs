@@ -346,7 +346,10 @@ reason = "built"
     let paths: Vec<&str> = plan.steps.iter().map(|s| s.path.as_str()).collect();
     assert_eq!(
         paths,
-        ["/system/app/Stock/oat/arm64/Stock.odex", "/system/etc/hosts"]
+        [
+            "/system/app/Stock/oat/arm64/Stock.odex",
+            "/system/etc/hosts"
+        ]
     );
     // An included entry is checked like any other, at its include's line.
     write(

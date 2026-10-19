@@ -22,9 +22,13 @@ impl Store {
         self.state.users.sort_by_key(|(id, _)| *id);
         self.restrictions
             .insert(user, element("package-restrictions"));
-        self.durable_restrictions.insert(user,element("package-restrictions"));
+        self.durable_restrictions
+            .insert(user, element("package-restrictions"));
         self.unread_restrictions.insert(user);
-        if let Err(error) = self.claim_unread_restrictions(user).and_then(|_|self.claim_runtime_permissions(user)) {
+        if let Err(error) = self
+            .claim_unread_restrictions(user)
+            .and_then(|_| self.claim_runtime_permissions(user))
+        {
             self.state.users.retain(|(id, _)| *id != user);
             self.restrictions.remove(&user);
             self.durable_restrictions.remove(&user);

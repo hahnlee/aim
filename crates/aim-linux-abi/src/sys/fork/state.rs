@@ -19,15 +19,31 @@ use crate::sys::{
 };
 
 #[derive(Default)]
-pub struct Writer(Vec<u8>,Vec<fdtab::ForkPrivateFd>,Option<crate::errno::Errno>);
+pub struct Writer(
+    Vec<u8>,
+    Vec<fdtab::ForkPrivateFd>,
+    Option<crate::errno::Errno>,
+);
 
 impl Writer {
-    pub fn error(&mut self,error:crate::errno::Errno){self.2.get_or_insert(error);}
-    pub fn retain_private(&mut self,fd:i32){
-        if self.1.iter().any(|owner|owner.target()==fd)||self.2.is_some(){return;}
-        match fdtab::hold_fork_private(unsafe{std::os::fd::BorrowedFd::borrow_raw(fd)}){Ok(owner)=>self.1.push(owner),Err(error)=>self.2=Some(error)}
+    pub fn error(&mut self, error: crate::errno::Errno) {
+        self.2.get_or_insert(error);
     }
-    pub fn take_private(&mut self)->Result<Vec<fdtab::ForkPrivateFd>,crate::errno::Errno>{if let Some(error)=self.2.take(){return Err(error);}Ok(std::mem::take(&mut self.1))}
+    pub fn retain_private(&mut self, fd: i32) {
+        if self.1.iter().any(|owner| owner.target() == fd) || self.2.is_some() {
+            return;
+        }
+        match fdtab::hold_fork_private(unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }) {
+            Ok(owner) => self.1.push(owner),
+            Err(error) => self.2 = Some(error),
+        }
+    }
+    pub fn take_private(&mut self) -> Result<Vec<fdtab::ForkPrivateFd>, crate::errno::Errno> {
+        if let Some(error) = self.2.take() {
+            return Err(error);
+        }
+        Ok(std::mem::take(&mut self.1))
+    }
     pub fn into_bytes(self) -> Vec<u8> {
         self.0
     }
@@ -94,10 +110,19 @@ pub struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     pub fn new(buf: &'a [u8]) -> Self {
-        Reader { buf, total: buf.len(), bad: false, stage: "header", failure: None, owner_error: None }
+        Reader {
+            buf,
+            total: buf.len(),
+            bad: false,
+            stage: "header",
+            failure: None,
+            owner_error: None,
+        }
     }
 
-    pub fn owner_error(&self) -> Option<crate::errno::Errno> { self.owner_error }
+    pub fn owner_error(&self) -> Option<crate::errno::Errno> {
+        self.owner_error
+    }
 
     /// Whether everything read so far was there, and all of it was read.
     pub fn ok(&self) -> bool {
@@ -108,13 +133,24 @@ impl<'a> Reader<'a> {
     pub fn intact(&self) -> bool {
         !self.bad
     }
-    pub fn stage(&mut self, stage: &'static str) { self.stage = stage; }
+    pub fn stage(&mut self, stage: &'static str) {
+        self.stage = stage;
+    }
     pub fn diagnostic(&self) -> String {
-        let (stage, offset) = self.failure.unwrap_or((self.stage, self.total - self.buf.len()));
-        format!("stage={stage} offset={offset} total={} remaining={} invalid={}", self.total, self.buf.len(), self.bad)
+        let (stage, offset) = self
+            .failure
+            .unwrap_or((self.stage, self.total - self.buf.len()));
+        format!(
+            "stage={stage} offset={offset} total={} remaining={} invalid={}",
+            self.total,
+            self.buf.len(),
+            self.bad
+        )
     }
     pub fn invalidate(&mut self) {
-        if self.failure.is_none() { self.failure = Some((self.stage, self.total - self.buf.len())); }
+        if self.failure.is_none() {
+            self.failure = Some((self.stage, self.total - self.buf.len()));
+        }
         self.bad = true;
     }
 
@@ -187,7 +223,7 @@ impl<'a> Reader<'a> {
 }
 
 /// Every module's state, in restore order.
-pub fn save(w:&mut Writer,mounts:&str){
+pub fn save(w: &mut Writer, mounts: &str) {
     w.u32(0x46444e03);
     crate::xrt::fork_save(w);
     crate::diag::fork_save(w);
@@ -217,8 +253,12 @@ pub fn save(w:&mut Writer,mounts:&str){
 /// names; false when the blob is damaged.
 pub fn restore(r: &mut Reader) -> bool {
     r.stage("state-version");
-    let version=r.u32();
-    if version!=0x46444e03{eprintln!("fork state version: received={version:#x} expected=0x46444e03");r.invalidate();return false;}
+    let version = r.u32();
+    if version != 0x46444e03 {
+        eprintln!("fork state version: received={version:#x} expected=0x46444e03");
+        r.invalidate();
+        return false;
+    }
     r.stage("xrt");
     crate::xrt::fork_restore(r);
     r.stage("diag");
@@ -250,7 +290,10 @@ pub fn restore(r: &mut Reader) -> bool {
     r.stage("wait");
     wait::fork_restore(r);
     r.stage("mount-namespace");
-    if let Err(error)=crate::vfs::load_own_mounts(&r.str()){eprintln!("fork mount namespace restore failed: errno={error}");return false;}
+    if let Err(error) = crate::vfs::load_own_mounts(&r.str()) {
+        eprintln!("fork mount namespace restore failed: errno={error}");
+        return false;
+    }
     r.stage("fdtab");
     fdtab::fork_restore(r);
     r.stage("ptrace");
@@ -272,10 +315,18 @@ pub fn restore(r: &mut Reader) -> bool {
     }
     wait::after_fork_child();
     r.stage("descriptor-rebuild");
-    if let Err(error)=fdtab::after_fork_child(){eprintln!("fork descriptor rebuild: errno {error}");r.invalidate();return false;}
+    if let Err(error) = fdtab::after_fork_child() {
+        eprintln!("fork descriptor rebuild: errno {error}");
+        r.invalidate();
+        return false;
+    }
     super::super::posix_locks::reset_fork();
     r.stage("posix-admission");
-    if let Err(error)=super::super::posix_locks::attach_fork(){r.owner_error=Some(error);crate::diag!("fork POSIX owner admission: errno {error}");return false;}
+    if let Err(error) = super::super::posix_locks::attach_fork() {
+        r.owner_error = Some(error);
+        crate::diag!("fork POSIX owner admission: errno {error}");
+        return false;
+    }
     true
 }
 
@@ -285,18 +336,44 @@ mod tests {
 
     #[test]
     fn damage_diagnostics_retain_first_owner_and_exact_byte_boundary() {
-        let mut w=Writer::default();w.u64(7);w.str("abc");
-        let bytes=w.into_bytes();
-        let mut short=Reader::new(&bytes[..18]);short.stage("prefix");assert_eq!(short.u64(),7);
-        short.stage("names");assert_eq!(short.str(),"");assert!(!short.intact());
-        short.stage("later");short.u64();
-        assert_eq!(short.diagnostic(),"stage=names offset=16 total=18 remaining=2 invalid=true");
-        let mut invalid=Reader::new(&[1,0,0,0,0,0,0,0,255]);invalid.stage("utf8");assert_eq!(invalid.str(),"");
-        assert_eq!(invalid.diagnostic(),"stage=utf8 offset=9 total=9 remaining=0 invalid=true");
-        let mut tail=Reader::new(&[0;9]);tail.stage("descriptor-flags");tail.u64();assert!(tail.intact());assert!(!tail.ok());
-        assert_eq!(tail.diagnostic(),"stage=descriptor-flags offset=8 total=9 remaining=1 invalid=false");
-        let mut version=Reader::new(&[0;8]);assert!(!restore(&mut version));
-        assert_eq!(version.diagnostic(),"stage=state-version offset=8 total=8 remaining=0 invalid=true");
+        let mut w = Writer::default();
+        w.u64(7);
+        w.str("abc");
+        let bytes = w.into_bytes();
+        let mut short = Reader::new(&bytes[..18]);
+        short.stage("prefix");
+        assert_eq!(short.u64(), 7);
+        short.stage("names");
+        assert_eq!(short.str(), "");
+        assert!(!short.intact());
+        short.stage("later");
+        short.u64();
+        assert_eq!(
+            short.diagnostic(),
+            "stage=names offset=16 total=18 remaining=2 invalid=true"
+        );
+        let mut invalid = Reader::new(&[1, 0, 0, 0, 0, 0, 0, 0, 255]);
+        invalid.stage("utf8");
+        assert_eq!(invalid.str(), "");
+        assert_eq!(
+            invalid.diagnostic(),
+            "stage=utf8 offset=9 total=9 remaining=0 invalid=true"
+        );
+        let mut tail = Reader::new(&[0; 9]);
+        tail.stage("descriptor-flags");
+        tail.u64();
+        assert!(tail.intact());
+        assert!(!tail.ok());
+        assert_eq!(
+            tail.diagnostic(),
+            "stage=descriptor-flags offset=8 total=9 remaining=1 invalid=false"
+        );
+        let mut version = Reader::new(&[0; 8]);
+        assert!(!restore(&mut version));
+        assert_eq!(
+            version.diagnostic(),
+            "stage=state-version offset=8 total=8 remaining=0 invalid=true"
+        );
     }
 
     #[test]

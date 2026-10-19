@@ -14,7 +14,11 @@ pub const KEY: &str = "product.vendor.sku";
 /// present`) and that has a built-in camera or not (`front`), or none
 /// without either.
 pub fn of(present: u32, front: bool) -> Option<&'static str> {
-    match (present & present::LIGHT != 0, present & present::HINGE != 0, front) {
+    match (
+        present & present::LIGHT != 0,
+        present & present::HINGE != 0,
+        front,
+    ) {
         (false, false, false) => None,
         (true, false, false) => Some("light"),
         (false, true, false) => Some("hinge"),
@@ -29,7 +33,10 @@ pub fn of(present: u32, front: bool) -> Option<&'static str> {
 /// This Mac's SKU: the sensors the HAL lists, read as it reads them, and
 /// whether the camera provider lists a built-in camera.
 pub fn host() -> Option<&'static str> {
-    of(aim_host_sensors::read_sensors().present, aim_host_camera::has_built_in())
+    of(
+        aim_host_sensors::read_sensors().present,
+        aim_host_camera::has_built_in(),
+    )
 }
 
 #[cfg(test)]
@@ -41,9 +48,15 @@ mod tests {
         assert_eq!(of(0, false), None);
         assert_eq!(of(present::LIGHT, false), Some("light"));
         assert_eq!(of(present::HINGE, false), Some("hinge"));
-        assert_eq!(of(present::LIGHT | present::HINGE, false), Some("light_hinge"));
+        assert_eq!(
+            of(present::LIGHT | present::HINGE, false),
+            Some("light_hinge")
+        );
         assert_eq!(of(0, true), Some("front"));
-        assert_eq!(of(present::LIGHT | present::HINGE, true), Some("light_hinge_front"));
+        assert_eq!(
+            of(present::LIGHT | present::HINGE, true),
+            Some("light_hinge_front")
+        );
     }
 
     /// Each SKU's directory holds the features its name says, and only
@@ -51,12 +64,21 @@ mod tests {
     #[test]
     fn the_overlay_declares_each_skus_features() {
         let overlay = include_str!("../../../image/overlay.toml");
-        for present in [0, present::LIGHT, present::HINGE, present::LIGHT | present::HINGE] {
+        for present in [
+            0,
+            present::LIGHT,
+            present::HINGE,
+            present::LIGHT | present::HINGE,
+        ] {
             for front in [false, true] {
-                let Some(sku) = of(present, front) else { continue };
+                let Some(sku) = of(present, front) else {
+                    continue;
+                };
                 let mut files: Vec<&str> = overlay
                     .lines()
-                    .filter_map(|l| l.strip_prefix(&format!("path = \"/vendor/etc/permissions/sku_{sku}/")))
+                    .filter_map(|l| {
+                        l.strip_prefix(&format!("path = \"/vendor/etc/permissions/sku_{sku}/"))
+                    })
                     .map(|l| l.trim_end_matches('"'))
                     .collect();
                 files.sort();

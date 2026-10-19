@@ -1,9 +1,9 @@
 //! Exclusive native install_sessions.xml and staging owner.
 //! Original android-16.0.0_r1 AtomicFile/PackageInstallerSession protocol (AOSP, Apache-2.0).
-#[path = "storage/staged.rs"]
-mod staged;
 #[path = "storage/dex_metadata.rs"]
 mod dex_metadata;
+#[path = "storage/staged.rs"]
+mod staged;
 use super::{
     Parameters, Record, Session,
     codec::{Object, SessionParams},
@@ -37,7 +37,11 @@ fn before(error: impl ToString) -> Error {
     }
 }
 fn install_error(error: crate::package::parse::lite::InstallError) -> Error {
-    Error { legacy_status: error.legacy_status, committed: false, message: error.message }
+    Error {
+        legacy_status: error.legacy_status,
+        committed: false,
+        message: error.message,
+    }
 }
 fn element(name: &str) -> Element {
     Element {
@@ -791,7 +795,9 @@ impl Store {
             {
                 continue;
             }
-            let part = crate::package::parse::lite::install_lite(&entry.path(), &policy.environment).map_err(install_error)?;
+            let part =
+                crate::package::parse::lite::install_lite(&entry.path(), &policy.environment)
+                    .map_err(install_error)?;
             replacements.insert(part.split.clone());
             parts.push((part, true));
         }
@@ -829,7 +835,11 @@ impl Store {
             let name =
                 split.map_or_else(|| "base.apk".into(), |split| format!("split_{split}.apk"));
             let host = files(&path).ok_or_else(|| before("Existing APK VFS owner unavailable"))?;
-            parts.push((crate::package::parse::lite::install_lite(&host, &policy.environment).map_err(install_error)?, false));
+            parts.push((
+                crate::package::parse::lite::install_lite(&host, &policy.environment)
+                    .map_err(install_error)?,
+                false,
+            ));
             copies.push((name, host));
         }
         crate::package::parse::lite::validate_install_splits(&parts).map_err(install_error)?;
@@ -872,8 +882,10 @@ impl Store {
             {
                 continue;
             }
-            let split = crate::package::parse::lite::install_lite(&entry.path(), &policy.environment)
-                .map_err(install_error)?.split;
+            let split =
+                crate::package::parse::lite::install_lite(&entry.path(), &policy.environment)
+                    .map_err(install_error)?
+                    .split;
             let target =
                 split.map_or_else(|| "base.apk".into(), |split| format!("split_{split}.apk"));
             if !valid_filename(&target) {
@@ -1237,32 +1249,76 @@ mod tests {
         Ok(())
     }
     fn persisted_prepared_session(stage: &str) -> String {
-        format!("<sessions><session sessionId='7' userId='0' installerUid='10100' createdMillis='1' mode='1' installFlags='16' installLocation='1' sizeBytes='-1' installRason='0' packageSource='0' prepared='true' sessionStageDir='{stage}'/></sessions>")
+        format!(
+            "<sessions><session sessionId='7' userId='0' installerUid='10100' createdMillis='1' mode='1' installFlags='16' installLocation='1' sizeBytes='-1' installRason='0' packageSource='0' prepared='true' sessionStageDir='{stage}'/></sessions>"
+        )
     }
     #[test]
     fn inherited_required_split_type_inventory_is_validated_before_copying_original_apks() {
-        let input = aim_paths::fetched().join("cts-tradefed/android-cts/testcases/CtsPackageManagerHostTestCases");
-        assert!(input.is_dir(), "Pinned CTS split APK inputs must be available");
-        let environment = crate::package::parse::lite::Environment { sdk: 36, codenames: vec![], properties: BTreeMap::new() };
-        let policy = super::super::native::LitePolicy { environment, art_managed_extensions: vec![], cloud_compilation_verification: false };
-        let names = ["CtsSplitAppTypeFeature.apk", "CtsSplitAppTypeFeatureData.apk", "CtsSplitAppTypeFeatureFoo.apk"];
+        let input = aim_paths::fetched()
+            .join("cts-tradefed/android-cts/testcases/CtsPackageManagerHostTestCases");
+        assert!(
+            input.is_dir(),
+            "Pinned CTS split APK inputs must be available"
+        );
+        let environment = crate::package::parse::lite::Environment {
+            sdk: 36,
+            codenames: vec![],
+            properties: BTreeMap::new(),
+        };
+        let policy = super::super::native::LitePolicy {
+            environment,
+            art_managed_extensions: vec![],
+            cloud_compilation_verification: false,
+        };
+        let names = [
+            "CtsSplitAppTypeFeature.apk",
+            "CtsSplitAppTypeFeatureData.apk",
+            "CtsSplitAppTypeFeatureFoo.apk",
+        ];
         let base = input.join("CtsSplitApp.apk");
-        let parts: Vec<_> = names.iter().map(|name| crate::package::parse::lite::install_lite(&input.join(name), &policy.environment).unwrap()).collect();
+        let parts: Vec<_> = names
+            .iter()
+            .map(|name| {
+                crate::package::parse::lite::install_lite(&input.join(name), &policy.environment)
+                    .unwrap()
+            })
+            .collect();
         let existing = crate::package::pkg::AndroidPackage {
             base_apk_path: Some("/installed/base.apk".into()),
             split_names: Some(parts.iter().map(|part| part.split.clone()).collect()),
-            split_code_paths: Some(names.iter().map(|name| Some(format!("/installed/{name}"))).collect()),
+            split_code_paths: Some(
+                names
+                    .iter()
+                    .map(|name| Some(format!("/installed/{name}")))
+                    .collect(),
+            ),
             ..Default::default()
         };
-        let files: crate::package::write::Files = Box::new(move |guest| guest.strip_prefix("/installed/").map(|name| if name == "base.apk" { base.clone() } else { input.join(name) }));
+        let files: crate::package::write::Files = Box::new(move |guest| {
+            guest.strip_prefix("/installed/").map(|name| {
+                if name == "base.apk" {
+                    base.clone()
+                } else {
+                    input.join(name)
+                }
+            })
+        });
         for required_removed in [false, true] {
             let data = Data::new();
             fs::create_dir_all(data.0.join("app/vmdl7.tmp")).unwrap();
-            fs::write(data.main(), persisted_prepared_session("/data/app/vmdl7.tmp").replace("mode='1'", "mode='2'")).unwrap();
+            fs::write(
+                data.main(),
+                persisted_prepared_session("/data/app/vmdl7.tmp").replace("mode='1'", "mode='2'"),
+            )
+            .unwrap();
             let store = data.open(Arc::new(label));
             let records = store.recovered().unwrap();
             let (session, record) = &records[0];
-            let split = parts[if required_removed { 1 } else { 2 }].split.as_ref().unwrap();
+            let split = parts[if required_removed { 1 } else { 2 }]
+                .split
+                .as_ref()
+                .unwrap();
             let stage = store.stage_path(session, record).unwrap();
             fs::write(stage.join(format!("{split}.removed")), []).unwrap();
             let result = store.inherit_existing(session, record, &existing, &files, &policy);
@@ -1272,7 +1328,11 @@ mod tests {
             } else {
                 result.unwrap();
                 assert!(stage.join("base.apk").exists());
-                assert!(stage.join(format!("split_{}.apk", parts[1].split.as_ref().unwrap())).exists());
+                assert!(
+                    stage
+                        .join(format!("split_{}.apk", parts[1].split.as_ref().unwrap()))
+                        .exists()
+                );
             }
         }
     }
@@ -1282,8 +1342,10 @@ mod tests {
         // staged owner; an ordinary session never carries one.
         let data = Data::new();
         fs::create_dir(data.0.join("app-staging")).unwrap();
-        let ready = persisted_prepared_session("/data/app-staging/session_7")
-            .replace("prepared='true'", "prepared='true' stagedSession='true' committed='true' sealed='true' isReady='true'");
+        let ready = persisted_prepared_session("/data/app-staging/session_7").replace(
+            "prepared='true'",
+            "prepared='true' stagedSession='true' committed='true' sealed='true' isReady='true'",
+        );
         fs::write(data.main(), &ready).unwrap();
         let store = data.open(Arc::new(label));
         let records = store.recovered().unwrap();
@@ -1313,7 +1375,9 @@ mod tests {
         assert!(!stage.exists());
         let missing = std::io::Error::from_raw_os_error(libc::ENOENT).to_string();
         for error in [
-            store.write_target(session, record, "base.apk", 0).unwrap_err(),
+            store
+                .write_target(session, record, "base.apk", 0)
+                .unwrap_err(),
             store.resolved_path(session, record).unwrap_err(),
         ] {
             assert!(!error.committed);
@@ -1335,7 +1399,11 @@ mod tests {
             let store = data.open(Arc::new(label));
             let error = store.recovered().err().unwrap();
             assert!(!error.committed);
-            assert!(error.message.contains("stage path differs from native owner"));
+            assert!(
+                error
+                    .message
+                    .contains("stage path differs from native owner")
+            );
         }
     }
     #[test]

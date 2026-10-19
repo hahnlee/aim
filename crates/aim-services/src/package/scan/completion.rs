@@ -19,7 +19,7 @@ pub struct ScanMetadataCompletion<'a> {
     /// Original SystemServer factory-test mode, supplied by its boot owner.
     pub factory_test: bool,
     /// Original adjusted SCAN_AS_INSTANT_APP request bit, not a final-state guess.
-    pub scan_as_instant_app:bool,
+    pub scan_as_instant_app: bool,
 }
 
 #[derive(Debug)]
@@ -235,7 +235,10 @@ impl SigningScan {
                     error: NativeLibraryError::Input(message),
                 }
             })?;
-        let old_package=self.loaded.get(&candidate.record.settings.name).map(|code|code.runtime_package().clone());
+        let old_package = self
+            .loaded
+            .get(&candidate.record.settings.name)
+            .map(|code| code.runtime_package().clone());
         let mut staged = self.clone();
         let first_shared_code = candidate.record.settings.shared_app_id().is_some_and(|id| {
             !self.settings.packages.iter().any(|setting| {
@@ -398,9 +401,13 @@ impl SigningScan {
             );
         }
         staged.complete_transferred_identity(&candidate.record.identity);
-        staged.permission_admissions.push(super::permission_admissions::Admission{
-            name:candidate.record.settings.name.clone(),scan_as_instant:inputs.scan_as_instant_app,old_package,
-        });
+        staged
+            .permission_admissions
+            .push(super::permission_admissions::Admission {
+                name: candidate.record.settings.name.clone(),
+                scan_as_instant: inputs.scan_as_instant_app,
+                old_package,
+            });
         *self = staged;
         Ok(CompletedScanMetadata {
             candidate,
@@ -485,26 +492,39 @@ impl SigningScan {
     ) -> Result<NewPackageOutcome, SigningError> {
         let at = self.accepted_slot(&candidate.record, "update-owner")?;
         if matches!(mode, AbiScanMode::Install { .. })
-            || candidate.record.settings.flags & crate::package::settings::FLAG_SYSTEM == 0 {
+            || candidate.record.settings.flags & crate::package::settings::FLAG_SYSTEM == 0
+        {
             return Ok(candidate);
         }
-        let reject = || SigningError::Rejected(super::Error {
-            package: candidate.record.settings.name.clone(),
-            path: candidate.record.settings.code_path.clone(),
-            phase: "update-owner",
-            message: "initial update-owner setting provenance differs".into(),
-        });
+        let reject = || {
+            SigningError::Rejected(super::Error {
+                package: candidate.record.settings.name.clone(),
+                path: candidate.record.settings.code_path.clone(),
+                phase: "update-owner",
+                message: "initial update-owner setting provenance differs".into(),
+            })
+        };
         let bound = |saved: &crate::package::settings::Package| {
             saved.name == candidate.record.settings.name
                 && saved.uid_owner_id() == candidate.record.settings.uid_owner_id()
                 && saved.install_source == candidate.record.settings.install_source
         };
         match mode {
-            AbiScanMode::Existing { saved: Some(saved), .. }
-                | AbiScanMode::DisabledFactory { saved, .. } if !bound(saved) => return Err(reject()),
-            AbiScanMode::Original { installed, original, .. }
-                if !bound(original) || installed.name != candidate.record.identity.manifest_name =>
-                    return Err(reject()),
+            AbiScanMode::Existing {
+                saved: Some(saved), ..
+            }
+            | AbiScanMode::DisabledFactory { saved, .. }
+                if !bound(saved) =>
+            {
+                return Err(reject());
+            }
+            AbiScanMode::Original {
+                installed,
+                original,
+                ..
+            } if !bound(original) || installed.name != candidate.record.identity.manifest_name => {
+                return Err(reject());
+            }
             _ => {}
         }
         let old = match mode {
@@ -514,14 +534,19 @@ impl SigningScan {
             AbiScanMode::Apex => None,
             AbiScanMode::Install { .. } => unreachable!(),
         };
-        let configured = if matches!(mode, AbiScanMode::Apex) { None } else {
-            self.system_app_update_owners.get(&candidate.record.parsed.package_name)
+        let configured = if matches!(mode, AbiScanMode::Apex) {
+            None
+        } else {
+            self.system_app_update_owners
+                .get(&candidate.record.parsed.package_name)
         };
         let previous = old.and_then(|setting| setting.install_source.update_owner.as_ref());
         candidate.record.settings.install_source.update_owner =
             if old.is_none() || previous.is_some() && previous == configured {
                 configured.cloned()
-            } else { None };
+            } else {
+                None
+            };
         self.settings.packages[at] = candidate.record.settings.clone();
         Ok(candidate)
     }

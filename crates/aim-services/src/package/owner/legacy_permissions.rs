@@ -169,7 +169,11 @@ fn boolean(r: &mut Reader<'_>) -> Result<bool, String> {
 /// The call that reads one UID's live permission state.
 pub fn call(app_id: i32, users: &[i32]) -> (u32, Parcel) {
     let mut request = Parcel::new();
-    bridge::GetLegacyPermissionState { app_id, user_ids: Some(users.to_vec()) }.write(&mut request);
+    bridge::GetLegacyPermissionState {
+        app_id,
+        user_ids: Some(users.to_vec()),
+    }
+    .write(&mut request);
     (bridge::GET_LEGACY_PERMISSION_STATE, request)
 }
 

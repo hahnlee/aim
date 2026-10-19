@@ -5,10 +5,10 @@ use std::process::Command;
 use std::time::Duration;
 
 mod common {
-    pub mod java;
     pub mod certificate_collection;
-    pub mod signing_overrides;
+    pub mod java;
     pub mod runtime;
+    pub mod signing_overrides;
 }
 use common::java::sources;
 use common::runtime::{Boot, Data, run};
@@ -73,9 +73,13 @@ fn allocation_matches_the_original_runtime() {
         ],
     )
     .unwrap();
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
+    let boot = Boot::new(
+        aim_paths::root().join("target/release/aimctl"),
+        data.0.join("g"),
+    );
     run(boot.start_command().args(["start", "--windows"]));
-    boot.wait_ready(Duration::from_secs(300)).expect("app_ids oracle boot readiness");
+    boot.wait_ready(Duration::from_secs(300))
+        .expect("app_ids oracle boot readiness");
     fs::copy(
         dex.join("classes.dex"),
         boot.data.join("data/local/tmp/app-ids.dex"),

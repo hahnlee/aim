@@ -532,19 +532,31 @@ impl NotificationManager {
     /// `canManageAutomaticZenRule` lets `uid` see). The app host runs user
     /// 0 alone, the zen user of every caller (`getCallingZenUser`).
     fn automatic_zen_rules(&self, uid: i32) -> Result<Vec<zen_config::AzrWithId>, Exception> {
-        let manage = self.host.check_permission(Some("android.permission.MANAGE_NOTIFICATIONS"), uid)? == 0;
+        let manage = self
+            .host
+            .check_permission(Some("android.permission.MANAGE_NOTIFICATIONS"), uid)?
+            == 0;
         let packages = self.packages_for_uid(uid)?;
         let guard = self.state()?;
         let policy = &guard.as_ref().unwrap().policy;
         let user = uid / PER_USER_RANGE as i32;
-        if !manage && !packages.iter().any(|p| zen_config::policy_access_approved(policy, p, user)) {
+        if !manage
+            && !packages
+                .iter()
+                .any(|p| zen_config::policy_access_approved(policy, p, user))
+        {
             eprintln!("app host: Notification policy access denied calling getAutomaticZenRules");
             return Err(Exception::security("Notification policy access denied"));
         }
         let rules = zen_config::read(policy)?
             .rules()
             .into_iter()
-            .filter(|r| uid == 0 || uid == 1000 || manage || r.pkg.as_ref().is_some_and(|p| packages.contains(p)))
+            .filter(|r| {
+                uid == 0
+                    || uid == 1000
+                    || manage
+                    || r.pkg.as_ref().is_some_and(|p| packages.contains(p))
+            })
             .collect();
         zen_config::automatic_zen_rules(rules)
     }
@@ -552,7 +564,12 @@ impl NotificationManager {
     /// `getZenModeConfig`: the system or the phone, else STATUS_BAR_SERVICE.
     fn zen_mode_config(&self, uid: i32) -> Result<zen_config::ZenModeConfig, Exception> {
         let system_or_phone = uid == 0 || matches!(uid % PER_USER_RANGE as i32, 1000 | 1001);
-        if !system_or_phone && self.host.check_permission(Some("android.permission.STATUS_BAR_SERVICE"), uid)? != 0 {
+        if !system_or_phone
+            && self
+                .host
+                .check_permission(Some("android.permission.STATUS_BAR_SERVICE"), uid)?
+                != 0
+        {
             return Err(Exception::security(format!(
                 "INotificationManager.getZenModeConfig: uid {uid} does not have android.permission.STATUS_BAR_SERVICE."
             )));
@@ -564,10 +581,14 @@ impl NotificationManager {
     /// `getPackagesForUid`.
     fn packages_for_uid(&self, uid: i32) -> Result<Vec<String>, Exception> {
         let (state, resolution) = self.host.packages()?;
-        let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: 1000 };
-        let packages = query
-            .packages_for_uid(uid)
-            .map_err(|e| Exception::new(EX_UNSUPPORTED_OPERATION, format!("notification: {}", e.0)))?;
+        let query = crate::package::query::Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: 1000,
+        };
+        let packages = query.packages_for_uid(uid).map_err(|e| {
+            Exception::new(EX_UNSUPPORTED_OPERATION, format!("notification: {}", e.0))
+        })?;
         Ok(packages.into_iter().flatten().flatten().collect())
     }
 
@@ -759,7 +780,9 @@ impl NotificationManager {
     /// foreground service's (`NotificationManagerInternal
     /// .enqueueNotification`, which ActivityManager posts as the app).
     pub(super) fn enqueue_internal(&self, e: Enqueue) -> Result<(), Exception> {
-        let user = self.host.incoming_user(e.calling_uid, e.incoming_user, true)?;
+        let user = self
+            .host
+            .incoming_user(e.calling_uid, e.incoming_user, true)?;
         let uid = self.notification_uid(&e.op_package, &e.package, e.calling_uid, user)?;
         let mut n = e.notification.n.clone();
         if n.allowlist_token.is_some_and(|t| t != self.token) {
@@ -770,9 +793,21 @@ impl NotificationManager {
         }
         // ActivityManager's policy for a foreground service's
         // notification, asked outside the service's locks.
-        let policy = self.host.apply_foreground_service_notification(&e.notification, e.tag.as_deref(), e.id, &e.package, user);
+        let policy = self.host.apply_foreground_service_notification(
+            &e.notification,
+            e.tag.as_deref(),
+            e.id,
+            &e.package,
+            user,
+        );
         let target_sdk = self.target_sdk(&e.package)?;
-        let fixes = self.fixes(&n, &e.package, uid, target_sdk, policy != FgsPolicy::NotForegroundService)?;
+        let fixes = self.fixes(
+            &n,
+            &e.package,
+            uid,
+            target_sdk,
+            policy != FgsPolicy::NotForegroundService,
+        )?;
         let (raw, flags_at) = apply(e.notification.raw.clone(), &mut n, &fixes)?;
         let process = &self.host.process;
         let binders = raw.handles().map(|h| process.strong(h)).collect();
@@ -786,8 +821,16 @@ impl NotificationManager {
             // Posted only as an update of what shows; the service posts it
             // once its deferral ends.
             let key = key(user, &e.package, e.id, e.tag.as_deref(), uid);
-            if !self.state()?.as_ref().unwrap().records.iter().any(|r| r.key == key) {
-                self.host.foreground_service_notification_updated(false, e.id, &e.package, user);
+            if !self
+                .state()?
+                .as_ref()
+                .unwrap()
+                .records
+                .iter()
+                .any(|r| r.key == key)
+            {
+                self.host
+                    .foreground_service_notification_updated(false, e.id, &e.package, user);
                 return Ok(());
             }
         }
@@ -1053,7 +1096,9 @@ impl NotificationManager {
                     .map_err(channel_error)?;
                 Self::save(state)?;
             } else if !channel.user_visible_task_shown
-                && n.channel_id.as_deref().is_some_and(|c| !c.is_empty() && c != DEFAULT_CHANNEL_ID)
+                && n.channel_id
+                    .as_deref()
+                    .is_some_and(|c| !c.is_empty() && c != DEFAULT_CHANNEL_ID)
             {
                 channel.user_visible_task_shown = true;
             }
@@ -1178,17 +1223,24 @@ impl NotificationManager {
         self.notify_posted(state, at);
         // maybeReportForegroundServiceUpdate, outside the lock.
         let r = &state.records[at];
-        let fgs = (r.parsed.flags & FLAG_FOREGROUND_SERVICE != 0).then(|| (r.id, r.package.clone(), r.user));
+        let fgs = (r.parsed.flags & FLAG_FOREGROUND_SERVICE != 0)
+            .then(|| (r.id, r.package.clone(), r.user));
         drop(guard);
         if let Some((id, package, user)) = fgs {
-            self.host.foreground_service_notification_updated(true, id, &package, user);
+            self.host
+                .foreground_service_notification_updated(true, id, &package, user);
         }
         Ok(())
     }
 
     /// `NotificationManagerInternal.cancelNotification` of a foreground
     /// service's notification, as the system.
-    pub(super) fn cancel_foreground_service_notification(&self, package: &str, id: i32, user: i32) -> Result<(), Exception> {
+    pub(super) fn cancel_foreground_service_notification(
+        &self,
+        package: &str,
+        id: i32,
+        user: i32,
+    ) -> Result<(), Exception> {
         let mut guard = self.state()?;
         self.cancel(
             guard.as_mut().unwrap(),
@@ -1209,11 +1261,24 @@ impl NotificationManager {
     /// `removeForegroundServiceFlagFromNotification`: the notification of
     /// a service no longer foreground loses its flag, its listeners told,
     /// or goes if the package is over its count.
-    pub(super) fn remove_foreground_service_flag(&self, package: &str, id: i32, user: i32) -> Result<(), Exception> {
+    pub(super) fn remove_foreground_service_flag(
+        &self,
+        package: &str,
+        id: i32,
+        user: i32,
+    ) -> Result<(), Exception> {
         let mut guard = self.state()?;
         let state = guard.as_mut().unwrap();
-        let count = state.records.iter().filter(|r| r.package == package && r.user == user).count();
-        let Some(at) = state.records.iter().position(|r| r.package == package && r.tag.is_none() && r.id == id && r.user == user) else {
+        let count = state
+            .records
+            .iter()
+            .filter(|r| r.package == package && r.user == user)
+            .count();
+        let Some(at) = state
+            .records
+            .iter()
+            .position(|r| r.package == package && r.tag.is_none() && r.id == id && r.user == user)
+        else {
             return Ok(());
         };
         if count > MAX_PACKAGE_NOTIFICATIONS {
@@ -1561,7 +1626,11 @@ impl NotificationManager {
         let r = &mut call.data;
         r.enforce_interface(nm::DESCRIPTOR).map_err(bad)?;
         let package = r.read_string16().map_err(bad)?.unwrap_or_default();
-        let uid = if for_package { r.read_i32().map_err(bad)? } else { calling_uid };
+        let uid = if for_package {
+            r.read_i32().map_err(bad)?
+        } else {
+            calling_uid
+        };
         if r.read_i32().map_err(bad)? == 0 {
             return Err(Exception::new(EX_NULL_POINTER, "channelsList"));
         }
@@ -1653,9 +1722,17 @@ impl NotificationManager {
 
     /// `NotificationManagerInternal.getNotificationChannel`: whether
     /// `package` of `uid` has the channel `id` (the default one for none).
-    pub(super) fn has_channel(&self, package: &str, uid: i32, id: Option<&str>) -> Result<bool, Exception> {
+    pub(super) fn has_channel(
+        &self,
+        package: &str,
+        uid: i32,
+        id: Option<&str>,
+    ) -> Result<bool, Exception> {
         self.with_prefs(|state, defaults| {
-            Ok(state.prefs.conversation_channel(package, uid, id, None, true, false, defaults).is_some())
+            Ok(state
+                .prefs
+                .conversation_channel(package, uid, id, None, true, false, defaults)
+                .is_some())
         })
     }
 
@@ -1693,11 +1770,18 @@ impl NotificationManager {
     /// `setNotificationDelegate`: `checkCallerIsSameApp`, then the
     /// delegate (by its `ApplicationInfo` as the caller sees it, none if
     /// it does not) set, or revoked without one.
-    fn set_delegate(&self, call: &Call<'_>, package: Option<String>, delegate: Option<String>) -> Result<(), Exception> {
+    fn set_delegate(
+        &self,
+        call: &Call<'_>,
+        package: Option<String>,
+        delegate: Option<String>,
+    ) -> Result<(), Exception> {
         let uid = call.sender_euid as i32;
         let package = package.unwrap_or_default();
         if !(uid == 0 && package == "root") && !self.host.owns_package(uid, &package)? {
-            return Err(Exception::security(format!("Package {package} is not owned by uid {uid}")));
+            return Err(Exception::security(format!(
+                "Package {package} is not owned by uid {uid}"
+            )));
         }
         let delegate_uid = match &delegate {
             None => None,
@@ -1705,10 +1789,16 @@ impl NotificationManager {
                 /// `MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE`.
                 const FLAGS: i64 = 0x0004_0000 | 0x0008_0000;
                 let (state, resolution) = self.host.packages()?;
-                let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: uid };
+                let query = crate::package::query::Query {
+                    state: &state,
+                    filter: &resolution.apps_filter,
+                    calling_uid: uid,
+                };
                 let info = query
                     .application_info(delegate, FLAGS, uid / PER_USER_RANGE as i32)
-                    .map_err(|e| Exception::new(EX_UNSUPPORTED_OPERATION, format!("notification: {}", e.0)))??;
+                    .map_err(|e| {
+                        Exception::new(EX_UNSUPPORTED_OPERATION, format!("notification: {}", e.0))
+                    })??;
                 match info {
                     Some(info) => Some(info.uid),
                     None => return Ok(()),
@@ -1717,7 +1807,11 @@ impl NotificationManager {
         };
         self.with_prefs(|state, defaults| {
             match (&delegate, delegate_uid) {
-                (Some(delegate), Some(delegate_uid)) => state.prefs.set_delegate(&package, uid, delegate, delegate_uid, defaults),
+                (Some(delegate), Some(delegate_uid)) => {
+                    state
+                        .prefs
+                        .set_delegate(&package, uid, delegate, delegate_uid, defaults)
+                }
                 _ => state.prefs.revoke_delegate(&package, uid),
             }
             Self::save(state)
@@ -1817,7 +1911,11 @@ impl Incoming {
         raw.keep_files(&|fd| process.file(fd))
             .map_err(|_| Exception::illegal_argument("a notification's file"))?;
         let binders = raw.handles().map(|h| process.strong(h)).collect();
-        Ok(Incoming { n, raw, _binders: Arc::new(binders) })
+        Ok(Incoming {
+            n,
+            raw,
+            _binders: Arc::new(binders),
+        })
     }
 
     /// It flagged `FLAG_FOREGROUND_SERVICE`.
@@ -1850,8 +1948,15 @@ impl Incoming {
             FOREGROUND_SERVICE_IMMEDIATE => true,
             FOREGROUND_SERVICE_DEFERRED => false,
             _ => {
-                let media = n.extras.template.as_deref().is_some_and(|s| MEDIA_STYLES.contains(&s)) && n.extras.media_session;
-                media || matches!(n.category.as_deref(), Some("call" | "navigation")) || !n.actions.is_empty()
+                let media = n
+                    .extras
+                    .template
+                    .as_deref()
+                    .is_some_and(|s| MEDIA_STYLES.contains(&s))
+                    && n.extras.media_session;
+                media
+                    || matches!(n.category.as_deref(), Some("call" | "navigation"))
+                    || !n.actions.is_empty()
             }
         }
     }
@@ -2311,20 +2416,30 @@ impl Service for NotificationManager {
                 nm::GetZenModeConfig::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply(self.zen_mode_config(call.sender_euid as i32).map(|config| {
                     let mut p = Parcel::new();
-                    nm::write_get_zen_mode_config_reply(&mut p, Some(&zen_config::ConfigParcel(config, self.host.process.clone())));
+                    nm::write_get_zen_mode_config_reply(
+                        &mut p,
+                        Some(&zen_config::ConfigParcel(config, self.host.process.clone())),
+                    );
                     p
                 }))
             }
             nm::GET_AUTOMATIC_ZEN_RULES => {
                 nm::GetAutomaticZenRules::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(self.automatic_zen_rules(call.sender_euid as i32).map(|rules| {
-                    let mut p = Parcel::new();
-                    nm::write_get_automatic_zen_rules_reply(
-                        &mut p,
-                        Some(&Slice::new(self.host.process.clone(), zen_config::AZR_WITH_ID_CLASS, rules)),
-                    );
-                    p
-                }))
+                reply(
+                    self.automatic_zen_rules(call.sender_euid as i32)
+                        .map(|rules| {
+                            let mut p = Parcel::new();
+                            nm::write_get_automatic_zen_rules_reply(
+                                &mut p,
+                                Some(&Slice::new(
+                                    self.host.process.clone(),
+                                    zen_config::AZR_WITH_ID_CLASS,
+                                    rules,
+                                )),
+                            );
+                            p
+                        }),
+                )
             }
             nm::GET_ZEN_MODE => {
                 nm::GetZenMode::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -2398,7 +2513,11 @@ mod tests {
     #[test]
     fn a_foreground_service_notification_is_flagged_and_shown_as_the_original_shows_it() {
         let (raw, n) = builder_notification();
-        let incoming = Incoming { n, raw, _binders: Arc::default() };
+        let incoming = Incoming {
+            n,
+            raw,
+            _binders: Arc::default(),
+        };
         let fgs = incoming.foreground_service();
         let (_, flagged) = read(&fgs.raw);
         assert_eq!(flagged.flags, incoming.n.flags | FLAG_FOREGROUND_SERVICE);

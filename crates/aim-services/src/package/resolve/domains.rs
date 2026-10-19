@@ -238,7 +238,9 @@ impl Resolution {
                 .map_or(&[][..], |(_, g)| g.as_slice());
             let level = match ps {
                 Some(ps)
-                    if groups.is_empty() || UriRelativeFilterGroup::match_groups(groups, data).map_err(ResolutionError::UriMatching)? =>
+                    if groups.is_empty()
+                        || UriRelativeFilterGroup::match_groups(groups, data)
+                            .map_err(ResolutionError::UriMatching)? =>
                 {
                     self.approval_level(ps, &host, user)?
                 }
@@ -277,9 +279,7 @@ impl Resolution {
                 .collect();
             packages.dedup();
             if packages.len() > 1 {
-                return Err(NotModelled(
-                    "approved web handlers installed at the same time",
-                ).into());
+                return Err(NotModelled("approved web handlers installed at the same time").into());
             }
             approved.retain(|ri| Some(ri.component().0) == packages.first().copied());
             // filterToLastDeclared: of one package, its last declared

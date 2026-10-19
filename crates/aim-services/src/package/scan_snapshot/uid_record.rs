@@ -134,8 +134,10 @@ mod tests {
                 runtime: None,
             })
             .unwrap();
-        assert!(captured(&snapshot(retained))
-            .unwrap_err()
-            .contains("legacy"));
+        assert!(
+            captured(&snapshot(retained))
+                .unwrap_err()
+                .contains("legacy")
+        );
     }
 }

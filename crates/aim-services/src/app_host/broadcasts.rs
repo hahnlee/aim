@@ -15,7 +15,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use aim_binder_host::local::{Call, Strong};
-use aim_binder_host::parcel::{Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader, Result as ParcelResult};
+use aim_binder_host::parcel::{
+    Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader, Result as ParcelResult,
+};
 use aim_service_aidl::android_app_iactivitymanager as am;
 use aim_service_aidl::android_app_iapplicationthread as thread;
 use aim_service_aidl::android_content_iintentreceiver as intent_receiver;
@@ -260,10 +262,12 @@ impl Options {
                 Some(Value::Int(v)) => *v,
                 _ => 0,
             },
-            temporary_allowlist_duration: long("android:broadcast.temporaryAppAllowlistDuration").unwrap_or(0),
+            temporary_allowlist_duration: long("android:broadcast.temporaryAppAllowlistDuration")
+                .unwrap_or(0),
             id_for_response_event: long("android:broadcast.idForResponseEvent").unwrap_or(0),
             // `CHANGE_INVALID` is no change.
-            require_compat_change: long("android:broadcast.requireCompatChangeId").filter(|&id| id != 0),
+            require_compat_change: long("android:broadcast.requireCompatChangeId")
+                .filter(|&id| id != 0),
         })
     }
 }
@@ -285,12 +289,24 @@ fn can_access_unexported(uid: i32) -> bool {
 /// Whether `filter` takes `intent` (`IntentResolver.queryIntent`'s match
 /// of a candidate): a filter is found by the intent's action, type or
 /// scheme, so an intent with none of them finds none.
-fn takes(filter: &IntentFilter, intent: &Intent, resolved_type: Option<&str>) -> Result<bool, Exception> {
+fn takes(
+    filter: &IntentFilter,
+    intent: &Intent,
+    resolved_type: Option<&str>,
+) -> Result<bool, Exception> {
     if intent.action.is_none() && resolved_type.is_none() && intent.scheme().is_none() {
         return Ok(false);
     }
     filter
-        .matches(intent.action.as_deref(), resolved_type, intent.scheme(), intent.data.as_ref(), intent.categories.as_deref(), false, None)
+        .matches(
+            intent.action.as_deref(),
+            resolved_type,
+            intent.scheme(),
+            intent.data.as_ref(),
+            intent.categories.as_deref(),
+            false,
+            None,
+        )
         .map(|m| m >= 0)
         .map_err(|e| Exception::illegal_argument(format!("{e:?}")))
 }
@@ -325,15 +341,26 @@ impl AppHost {
     /// Whether `package` is an instant app for `user`.
     fn instant_app(&self, package: &str, user: i32) -> Result<bool, Exception> {
         let (state, _) = self.packages()?;
-        Ok(state.packages.get(package).and_then(|ps| ps.users.get(&user.max(0))).is_some_and(|u| u.instant_app))
+        Ok(state
+            .packages
+            .get(package)
+            .and_then(|ps| ps.users.get(&user.max(0)))
+            .is_some_and(|u| u.instant_app))
     }
 
     /// Whether `permission` has an app op (`AppOpsManager.permissionToOp`):
     /// a runtime permission's, or an app op permission's.
     fn permission_has_op(&self, permission: &str) -> Result<bool, Exception> {
-        Ok(self.inputs()?.packages.permissions().iter().find(|p| p.name == permission).is_some_and(|p| {
-            p.protection_level & PROTECTION_MASK_BASE == PROTECTION_DANGEROUS || p.protection_level & PROTECTION_FLAG_APPOP != 0
-        }))
+        Ok(self
+            .inputs()?
+            .packages
+            .permissions()
+            .iter()
+            .find(|p| p.name == permission)
+            .is_some_and(|p| {
+                p.protection_level & PROTECTION_MASK_BASE == PROTECTION_DANGEROUS
+                    || p.protection_level & PROTECTION_FLAG_APPOP != 0
+            }))
     }
 
     /// Whether `uid` holds `permission`, and with it its app op, which the
@@ -343,7 +370,10 @@ impl AppHost {
             return Ok(false);
         }
         if self.permission_has_op(permission)? {
-            return Err(self.unimplemented_named("activity", &format!("the app op of {permission} in a broadcast (#1463)")));
+            return Err(self.unimplemented_named(
+                "activity",
+                &format!("the app op of {permission} in a broadcast (#1463)"),
+            ));
         }
         Ok(true)
     }
@@ -352,17 +382,29 @@ impl AppHost {
 impl Broadcasts {
     /// `registerReceiverWithFeature`: the first sticky broadcast the
     /// filter matches.
-    pub fn register(&self, host: &AppHost, call: &Call<'_>, args: Registration) -> Result<Option<RawIntent>, Exception> {
+    pub fn register(
+        &self,
+        host: &AppHost,
+        call: &Call<'_>,
+        args: Registration,
+    ) -> Result<Option<RawIntent>, Exception> {
         if is_isolated(call.sender_euid as i32) {
-            return Err(Exception::security("Isolated process not allowed to call registerReceiver"));
+            return Err(Exception::security(
+                "Isolated process not allowed to call registerReceiver",
+            ));
         }
-        let mut filter = args.filter.ok_or_else(|| Exception::new(EX_NULL_POINTER, "filter"))?.0;
+        let mut filter = args
+            .filter
+            .ok_or_else(|| Exception::new(EX_NULL_POINTER, "filter"))?
+            .0;
         let Some((start_seq, package, uid, pid)) = host.app_of_thread(args.caller) else {
             return Ok(None);
         };
         let caller_package = args.caller_package.unwrap_or_default();
         if !is_core(uid) && caller_package != package {
-            return Err(Exception::security(format!("Given caller package {caller_package} is not running in process {pid}:{package}/{uid}")));
+            return Err(Exception::security(format!(
+                "Given caller package {caller_package} is not running in process {pid}:{package}/{uid}"
+            )));
         }
         let instant_app = host.instant_app(&caller_package, uid / PER_USER_RANGE as i32)?;
         let user = host.incoming_user(uid, args.user, false)?;
@@ -370,9 +412,15 @@ impl Broadcasts {
         // (An unset priority is no system one.)
         if is_core(uid) && filter.priority == 0 {
             let important = filter.actions.iter().any(|a| {
-                ["android.intent.action.USER_", "android.intent.action.PACKAGE_", "android.intent.action.UID_", "android.intent.action.EXTERNAL_", "android.bluetooth."]
-                    .iter()
-                    .any(|p| a.starts_with(p))
+                [
+                    "android.intent.action.USER_",
+                    "android.intent.action.PACKAGE_",
+                    "android.intent.action.UID_",
+                    "android.intent.action.EXTERNAL_",
+                    "android.bluetooth.",
+                ]
+                .iter()
+                .any(|p| a.starts_with(p))
                     || a == "android.intent.action.ACTION_SHUTDOWN"
             });
             if important {
@@ -385,15 +433,24 @@ impl Broadcasts {
             only_protected = false;
         }
         for action in &filter.actions {
-            only_protected &= crate::package::query::is_protected_broadcast(&model, action).map_err(|e| host.unimplemented_named("package", e.0))?;
+            only_protected &= crate::package::query::is_protected_broadcast(&model, action)
+                .map_err(|e| host.unimplemented_named("package", e.0))?;
         }
         let mut flags = args.flags;
         if flags & RECEIVER_EXPORTED != 0 && flags & RECEIVER_NOT_EXPORTED != 0 {
-            return Err(Exception::illegal_argument("Receiver can't specify both RECEIVER_EXPORTED and RECEIVER_NOT_EXPORTEDflag"));
+            return Err(Exception::illegal_argument(
+                "Receiver can't specify both RECEIVER_EXPORTED and RECEIVER_NOT_EXPORTEDflag",
+            ));
         }
-        let require_explicit = host.change_enabled(DYNAMIC_RECEIVER_EXPLICIT_EXPORT_REQUIRED, uid)?;
-        if flags & RECEIVER_VISIBLE_TO_INSTANT_APPS != 0 && flags & RECEIVER_NOT_EXPORTED != 0 && require_explicit {
-            return Err(Exception::illegal_argument("Receiver can't specify both RECEIVER_VISIBLE_TO_INSTANT_APPS and RECEIVER_NOT_EXPORTED flag"));
+        let require_explicit =
+            host.change_enabled(DYNAMIC_RECEIVER_EXPLICIT_EXPORT_REQUIRED, uid)?;
+        if flags & RECEIVER_VISIBLE_TO_INSTANT_APPS != 0
+            && flags & RECEIVER_NOT_EXPORTED != 0
+            && require_explicit
+        {
+            return Err(Exception::illegal_argument(
+                "Receiver can't specify both RECEIVER_VISIBLE_TO_INSTANT_APPS and RECEIVER_NOT_EXPORTED flag",
+            ));
         }
         let explicit = flags & (RECEIVER_EXPORTED | RECEIVER_NOT_EXPORTED) != 0;
         if !only_protected {
@@ -423,12 +480,22 @@ impl Broadcasts {
                 Some(a) => filter.actions.iter().any(|f| f == a),
                 None => filter.actions.is_empty(),
             };
-            if !action_listed || instant_app && r.intent.intent.flags & FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS == 0 {
+            if !action_listed
+                || instant_app && r.intent.intent.flags & FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS == 0
+            {
                 continue;
             }
             let i = &r.intent.intent;
             let m = filter
-                .matches(i.action.as_deref(), sticky.resolved_type.as_deref(), i.scheme(), i.data.as_ref(), i.categories.as_deref(), false, None)
+                .matches(
+                    i.action.as_deref(),
+                    sticky.resolved_type.as_deref(),
+                    i.scheme(),
+                    i.data.as_ref(),
+                    i.categories.as_deref(),
+                    false,
+                    None,
+                )
                 .map_err(|e| Exception::illegal_argument(format!("{e:?}")))?;
             if m >= 0 {
                 matched.push(r.clone());
@@ -437,34 +504,66 @@ impl Broadcasts {
         let Some(Binder::Handle(handle)) = args.receiver else {
             return Ok(matched.first().map(|r| r.intent.clone()));
         };
-        match st.receivers.iter().position(|r| r.receiver.handle == handle) {
+        match st
+            .receivers
+            .iter()
+            .position(|r| r.receiver.handle == handle)
+        {
             Some(at) => {
                 let r = &st.receivers[at];
                 let mismatch = if r.uid != uid {
-                    Some(format!("uid {uid} was previously registered for uid {}", r.uid))
+                    Some(format!(
+                        "uid {uid} was previously registered for uid {}",
+                        r.uid
+                    ))
                 } else if r.pid != pid {
-                    Some(format!("pid {pid} was previously registered for pid {}", r.pid))
+                    Some(format!(
+                        "pid {pid} was previously registered for pid {}",
+                        r.pid
+                    ))
                 } else if r.user != user {
-                    Some(format!("user {user} was previously registered for user {}", r.user))
+                    Some(format!(
+                        "user {user} was previously registered for user {}",
+                        r.user
+                    ))
                 } else {
                     None
                 };
                 if let Some(m) = mismatch {
-                    return Err(Exception::illegal_argument(format!("Receiver requested to register for {m} callerPackage is {caller_package}")));
+                    return Err(Exception::illegal_argument(format!(
+                        "Receiver requested to register for {m} callerPackage is {caller_package}"
+                    )));
                 }
             }
             None => {
-                let registered = st.receivers.iter().filter(|r| r.start_seq == start_seq).count();
+                let registered = st
+                    .receivers
+                    .iter()
+                    .filter(|r| r.start_seq == start_seq)
+                    .count();
                 if registered >= MAX_RECEIVERS_ALLOWED_PER_APP {
                     return Err(Exception::new(
                         EX_ILLEGAL_STATE,
-                        format!("Too many receivers, total of {registered}, registered for pid: {pid}, callerPackage: {caller_package}"),
+                        format!(
+                            "Too many receivers, total of {registered}, registered for pid: {pid}, callerPackage: {caller_package}"
+                        ),
                     ));
                 }
-                st.receivers.push(Receiver { receiver: host.process.strong(handle), start_seq, pid, uid, user, filters: Vec::new() });
+                st.receivers.push(Receiver {
+                    receiver: host.process.strong(handle),
+                    start_seq,
+                    pid,
+                    uid,
+                    user,
+                    filters: Vec::new(),
+                });
             }
         }
-        let receiver = st.receivers.iter_mut().find(|r| r.receiver.handle == handle).unwrap();
+        let receiver = st
+            .receivers
+            .iter_mut()
+            .find(|r| r.receiver.handle == handle)
+            .unwrap();
         receiver.filters.push(Filter {
             filter,
             package: caller_package,
@@ -477,7 +576,9 @@ impl Broadcasts {
         // have is returned.
         let mut first = None;
         for r in matched {
-            if first.is_none() && (exported || r.calling_uid == uid || can_access_unexported(r.calling_uid)) {
+            if first.is_none()
+                && (exported || r.calling_uid == uid || can_access_unexported(r.calling_uid))
+            {
                 first = Some(r.intent.clone());
             }
             let sender = Sender {
@@ -491,8 +592,18 @@ impl Broadcasts {
                 app_op: OP_NONE,
                 require_compat_change: None,
             };
-            let receiver = st.receivers.iter().find(|r| r.receiver.handle == handle).unwrap();
-            if !self.skip(host, &sender, receiver, receiver.filters.last().unwrap(), r.intent.intent.flags)? {
+            let receiver = st
+                .receivers
+                .iter()
+                .find(|r| r.receiver.handle == handle)
+                .unwrap();
+            if !self.skip(
+                host,
+                &sender,
+                receiver,
+                receiver.filters.last().unwrap(),
+                r.intent.intent.flags,
+            )? {
                 let replay = Record {
                     intent: r.intent.clone(),
                     binders: r.binders.clone(),
@@ -506,7 +617,10 @@ impl Broadcasts {
                     result_data: None,
                     result_extras: None,
                 };
-                st.queues.entry(start_seq).or_default().push_back(Delivery::Once(Arc::new(replay), handle));
+                st.queues
+                    .entry(start_seq)
+                    .or_default()
+                    .push_back(Delivery::Once(Arc::new(replay), handle));
             }
         }
         self.send_next(host, &mut st, start_seq);
@@ -519,15 +633,23 @@ impl Broadcasts {
             return Err(Exception::new(EX_NULL_POINTER, "receiver"));
         };
         let mut st = self.state.lock().unwrap();
-        let Some(at) = st.receivers.iter().position(|r| r.receiver.handle == handle) else {
+        let Some(at) = st
+            .receivers
+            .iter()
+            .position(|r| r.receiver.handle == handle)
+        else {
             return Ok(());
         };
         let removed = st.receivers.remove(at);
         let seq = removed.start_seq;
-        let waiting = st.queues.get(&seq).and_then(|q| q.front()).and_then(|d| match d {
-            Delivery::Chained(id, h) if *h == handle => Some(*id),
-            _ => None,
-        });
+        let waiting = st
+            .queues
+            .get(&seq)
+            .and_then(|q| q.front())
+            .and_then(|d| match d {
+                Delivery::Chained(id, h) if *h == handle => Some(*id),
+                _ => None,
+            });
         if let Some(id) = waiting.filter(|_| st.busy.remove(&seq)) {
             st.queues.get_mut(&seq).unwrap().pop_front();
             self.advance(host, &mut st, id);
@@ -537,10 +659,22 @@ impl Broadcasts {
     }
 
     /// `broadcastIntentWithFeature` (`broadcastIntentLocked`).
-    pub fn broadcast(&self, host: &AppHost, call: &Call<'_>, args: am::BroadcastIntentWithFeature<RawIntent, RawBundle>) -> Result<i32, Exception> {
+    pub fn broadcast(
+        &self,
+        host: &AppHost,
+        call: &Call<'_>,
+        args: am::BroadcastIntentWithFeature<RawIntent, RawBundle>,
+    ) -> Result<i32, Exception> {
         let caller = host.app_of_thread(args.caller);
         let (app, package) = (caller.as_ref().map(|c| c.0), caller.map(|c| c.1));
-        self.broadcast_as(host, call.sender_euid as i32, call.sender_pid, app, package, args)
+        self.broadcast_as(
+            host,
+            call.sender_euid as i32,
+            call.sender_pid,
+            app,
+            package,
+            args,
+        )
     }
 
     /// `broadcastIntentLocked` of `calling_uid` (of `calling_pid`) from its
@@ -556,16 +690,24 @@ impl Broadcasts {
         args: am::BroadcastIntentWithFeature<RawIntent, RawBundle>,
     ) -> Result<i32, Exception> {
         if is_isolated(calling_uid) {
-            return Err(Exception::security("Isolated process not allowed to call broadcastIntent"));
+            return Err(Exception::security(
+                "Isolated process not allowed to call broadcastIntent",
+            ));
         }
-        let mut intent = args.intent.ok_or_else(|| Exception::new(EX_NULL_POINTER, "intent"))?;
+        let mut intent = args
+            .intent
+            .ok_or_else(|| Exception::new(EX_NULL_POINTER, "intent"))?;
         // `verifyBroadcastLocked`.
         if intent.has_fds() {
-            return Err(Exception::illegal_argument("File descriptors passed in Intent"));
+            return Err(Exception::illegal_argument(
+                "File descriptors passed in Intent",
+            ));
         }
         let mut flags = intent.intent.flags;
         if flags & FLAG_RECEIVER_BOOT_UPGRADE != 0 {
-            return Err(Exception::illegal_argument("Can't use FLAG_RECEIVER_BOOT_UPGRADE here"));
+            return Err(Exception::illegal_argument(
+                "Can't use FLAG_RECEIVER_BOOT_UPGRADE here",
+            ));
         }
         if flags & FLAG_RECEIVER_FROM_SHELL != 0 && !matches!(calling_uid, ROOT_UID | SHELL_UID) {
             flags &= !FLAG_RECEIVER_FROM_SHELL;
@@ -575,9 +717,16 @@ impl Broadcasts {
         // `enforceBroadcastOptionPermissionsInternal`.
         if calling_uid != SYSTEM_UID {
             if options.flags & OPTION_IS_ALARM_BROADCAST != 0 {
-                return Err(Exception::security("Non-system callers may not flag broadcasts as alarm"));
+                return Err(Exception::security(
+                    "Non-system callers may not flag broadcasts as alarm",
+                ));
             }
-            if options.flags & OPTION_INTERACTIVE != 0 && !host.holds("android.permission.BROADCAST_OPTION_INTERACTIVE", calling_uid)? {
+            if options.flags & OPTION_INTERACTIVE != 0
+                && !host.holds(
+                    "android.permission.BROADCAST_OPTION_INTERACTIVE",
+                    calling_uid,
+                )?
+            {
                 return Err(Exception::security(format!(
                     "Permission Denial: setInteractive() from pid={}, uid={calling_uid} requires android.permission.BROADCAST_OPTION_INTERACTIVE",
                     calling_pid
@@ -619,16 +768,30 @@ impl Broadcasts {
                 "android.permission.START_FOREGROUND_SERVICES_FROM_BACKGROUND",
             ]
             .iter()
-            .try_fold(false, |held, p| Ok::<_, Exception>(held || host.holds(p, calling_uid)?))?
+            .try_fold(false, |held, p| {
+                Ok::<_, Exception>(held || host.holds(p, calling_uid)?)
+            })?
         {
             return Err(denied(
                 "android.permission.CHANGE_DEVICE_IDLE_TEMP_WHITELIST or android.permission.START_ACTIVITIES_FROM_BACKGROUND or android.permission.START_FOREGROUND_SERVICES_FROM_BACKGROUND",
             ));
         }
-        if options.flags & OPTION_ALLOW_BACKGROUND_ACTIVITY_STARTS != 0 && !host.holds("android.permission.START_ACTIVITIES_FROM_BACKGROUND", calling_uid)? {
-            return Err(denied("android.permission.START_ACTIVITIES_FROM_BACKGROUND"));
+        if options.flags & OPTION_ALLOW_BACKGROUND_ACTIVITY_STARTS != 0
+            && !host.holds(
+                "android.permission.START_ACTIVITIES_FROM_BACKGROUND",
+                calling_uid,
+            )?
+        {
+            return Err(denied(
+                "android.permission.START_ACTIVITIES_FROM_BACKGROUND",
+            ));
         }
-        if options.id_for_response_event > 0 && !host.holds("android.permission.ACCESS_BROADCAST_RESPONSE_STATS", calling_uid)? {
+        if options.id_for_response_event > 0
+            && !host.holds(
+                "android.permission.ACCESS_BROADCAST_RESPONSE_STATS",
+                calling_uid,
+            )?
+        {
             return Err(Exception::security(format!(
                 "recordResponseEventWhileInBackground: Neither user {calling_uid} nor current process has android.permission.ACCESS_BROADCAST_RESPONSE_STATS."
             )));
@@ -643,12 +806,16 @@ impl Broadcasts {
         let (model, _) = host.packages()?;
         let action = intent.intent.action.clone();
         let protected = match action.as_deref() {
-            Some(a) => crate::package::query::is_protected_broadcast(&model, a).map_err(|e| host.unimplemented_named("package", e.0))?,
+            Some(a) => crate::package::query::is_protected_broadcast(&model, a)
+                .map_err(|e| host.unimplemented_named("package", e.0))?,
             None => false,
         };
         // `isCallerSystem`: the core uids that send system broadcasts; the
         // app host runs no persistent processes.
-        let caller_system = matches!(calling_uid.rem_euclid(PER_USER_RANGE as i32), 0 | 1000 | 1001 | 1002 | 1027 | 1068 | 1073);
+        let caller_system = matches!(
+            calling_uid.rem_euclid(PER_USER_RANGE as i32),
+            0 | 1000 | 1001 | 1002 | 1027 | 1068 | 1073
+        );
         if !caller_system {
             if protected {
                 return Err(Exception::security(format!(
@@ -657,10 +824,18 @@ impl Broadcasts {
                     calling_pid
                 )));
             }
-            if matches!(action.as_deref(), Some("android.appwidget.action.APPWIDGET_CONFIGURE" | "android.appwidget.action.APPWIDGET_UPDATE")) {
+            if matches!(
+                action.as_deref(),
+                Some(
+                    "android.appwidget.action.APPWIDGET_CONFIGURE"
+                        | "android.appwidget.action.APPWIDGET_UPDATE"
+                )
+            ) {
                 let a = action.as_deref().unwrap();
                 let Some(package) = &caller_package else {
-                    return Err(Exception::security(format!("Permission Denial: not allowed to send broadcast {a} from unknown caller.")));
+                    return Err(Exception::security(format!(
+                        "Permission Denial: not allowed to send broadcast {a} from unknown caller."
+                    )));
                 };
                 match &intent.intent.component {
                     Some(c) if c.package != *package => {
@@ -671,7 +846,11 @@ impl Broadcasts {
                     }
                     Some(_) => {}
                     // Confined to the sender's own package.
-                    None => intent = intent.with_package(package).map_err(|_| Exception::illegal_argument("intent"))?,
+                    None => {
+                        intent = intent
+                            .with_package(package)
+                            .map_err(|_| Exception::illegal_argument("intent"))?
+                    }
                 }
             }
         }
@@ -681,7 +860,9 @@ impl Broadcasts {
             }
             match a.as_str() {
                 "com.android.launcher.action.INSTALL_SHORTCUT" => {
-                    eprintln!("app host: broadcast {a} no longer supported. It will not be delivered.");
+                    eprintln!(
+                        "app host: broadcast {a} no longer supported. It will not be delivered."
+                    );
                     self.cancel_result_to(host, &intent, result_to, result_to_app, user);
                     return Ok(BROADCAST_SUCCESS);
                 }
@@ -689,8 +870,10 @@ impl Broadcasts {
                 // before S with a window over the shade (the app host's
                 // apps are in front).
                 "android.intent.action.CLOSE_SYSTEM_DIALOGS" => {
-                    if !host.holds("android.permission.BROADCAST_CLOSE_SYSTEM_DIALOGS", calling_uid)?
-                        && host.change_enabled(LOCK_DOWN_CLOSE_SYSTEM_DIALOGS, calling_uid)?
+                    if !host.holds(
+                        "android.permission.BROADCAST_CLOSE_SYSTEM_DIALOGS",
+                        calling_uid,
+                    )? && host.change_enabled(LOCK_DOWN_CLOSE_SYSTEM_DIALOGS, calling_uid)?
                     {
                         return Err(Exception::security(format!(
                             "Permission Denial: android.intent.action.CLOSE_SYSTEM_DIALOGS broadcast from {} (pid={}, uid={calling_uid}) requires android.permission.BROADCAST_CLOSE_SYSTEM_DIALOGS.",
@@ -708,8 +891,16 @@ impl Broadcasts {
         let excluded_permissions = strings(args.exclude_permissions);
         let excluded_packages = strings(args.exclude_packages);
         let resolved_type = args.resolved_type;
-        let binders = intent.handles().into_iter().map(|h| host.process.strong(h)).collect();
-        let result_extras = args.map.map(|m| KeptBundle::new(m, &host.process)).transpose().map_err(|_| Exception::illegal_argument("result extras"))?;
+        let binders = intent
+            .handles()
+            .into_iter()
+            .map(|h| host.process.strong(h))
+            .collect();
+        let result_extras = args
+            .map
+            .map(|m| KeptBundle::new(m, &host.process))
+            .transpose()
+            .map_err(|_| Exception::illegal_argument("result extras"))?;
         let record = Arc::new(Record {
             intent,
             binders: Arc::new(binders),
@@ -735,17 +926,31 @@ impl Broadcasts {
                 return Ok(BROADCAST_STICKY_CANT_HAVE_PERMISSION);
             }
             if record.intent.intent.component.is_some() {
-                return Err(Exception::security("Sticky broadcasts can't target a specific component"));
+                return Err(Exception::security(
+                    "Sticky broadcasts can't target a specific component",
+                ));
             }
             let i = &record.intent.intent;
-            if user != USER_ALL && st.stickies.iter().any(|s| s.record.user == USER_ALL && filter_equals(&s.record.intent.intent, i)) {
+            if user != USER_ALL
+                && st
+                    .stickies
+                    .iter()
+                    .any(|s| s.record.user == USER_ALL && filter_equals(&s.record.intent.intent, i))
+            {
                 return Err(Exception::illegal_argument(format!(
                     "Sticky broadcast {} for user {user} conflicts with existing global broadcast",
                     i.action.as_deref().unwrap_or("null")
                 )));
             }
-            let sticky = Sticky { record: record.clone(), resolved_type: resolved_type.clone() };
-            match st.stickies.iter().position(|s| s.record.user == user && filter_equals(&s.record.intent.intent, i)) {
+            let sticky = Sticky {
+                record: record.clone(),
+                resolved_type: resolved_type.clone(),
+            };
+            match st
+                .stickies
+                .iter()
+                .position(|s| s.record.user == user && filter_equals(&s.record.intent.intent, i))
+            {
                 Some(at) => st.stickies[at] = sticky,
                 None => st.stickies.push(sticky),
             }
@@ -760,21 +965,41 @@ impl Broadcasts {
             excluded_permissions: &excluded_permissions,
             excluded_packages: &excluded_packages,
             app_op: args.app_op,
-            require_compat_change: options
-                .require_compat_change
-                .map(|id| (id, options.flags & OPTION_REQUIRE_COMPAT_CHANGE_ENABLED != 0)),
+            require_compat_change: options.require_compat_change.map(|id| {
+                (
+                    id,
+                    options.flags & OPTION_REQUIRE_COMPAT_CHANGE_ENABLED != 0,
+                )
+            }),
         };
         // The registered receivers, by priority, one filter per receiver.
         let mut registered: Vec<(i32, u32, i64)> = Vec::new();
         let block_null_action = action.is_none()
             && !can_access_unexported(calling_uid)
-            && model.system.flags.iter().any(|(name, on)| name == "android.security.block_null_action_intents" && *on)
+            && model
+                .system
+                .flags
+                .iter()
+                .any(|(name, on)| name == "android.security.block_null_action_intents" && *on)
             && host.change_enabled(BLOCK_NULL_ACTION_INTENTS, calling_uid)?;
         if record.intent.intent.component.is_none() && !block_null_action {
-            registered = self.registered_targets(host, &st, &record.intent.intent, resolved_type.as_deref(), user, &sender)?;
+            registered = self.registered_targets(
+                host,
+                &st,
+                &record.intent.intent,
+                resolved_type.as_deref(),
+                user,
+                &sender,
+            )?;
         }
         let manifest = if flags & FLAG_RECEIVER_REGISTERED_ONLY == 0 {
-            self.manifest_targets(host, &record.intent.intent, resolved_type.as_deref(), user, &sender)?
+            self.manifest_targets(
+                host,
+                &record.intent.intent,
+                resolved_type.as_deref(),
+                user,
+                &sender,
+            )?
         } else {
             Vec::new()
         };
@@ -824,7 +1049,9 @@ impl Broadcasts {
             }
             let mut taken = None;
             for f in &r.filters {
-                if i.package.as_ref().is_some_and(|p| *p != f.package) || !takes(&f.filter, i, resolved_type)? {
+                if i.package.as_ref().is_some_and(|p| *p != f.package)
+                    || !takes(&f.filter, i, resolved_type)?
+                {
                     continue;
                 }
                 taken = Some(f);
@@ -853,7 +1080,13 @@ impl Broadcasts {
 
     /// `Context.sendBroadcastAsUser(intent, user, receiverPermission)` of a
     /// system service of the app host: to receivers holding `permission`.
-    pub fn send_from_system_with_permission(&self, host: &AppHost, intent: RawIntent, user: i32, permission: &str) {
+    pub fn send_from_system_with_permission(
+        &self,
+        host: &AppHost,
+        intent: RawIntent,
+        user: i32,
+        permission: &str,
+    ) {
         self.send_as_system(host, intent, user, None, &[permission.to_string()]);
     }
 
@@ -882,14 +1115,22 @@ impl Broadcasts {
     ) {
         let mut flags = intent.intent.flags | FLAG_EXCLUDE_STOPPED_PACKAGES;
         let allowed_implicit = host.packages().map(|(model, _)| {
-            intent.intent.action.as_ref().is_some_and(|a| model.system.allow_implicit_broadcasts.contains(a))
+            intent
+                .intent
+                .action
+                .as_ref()
+                .is_some_and(|a| model.system.allow_implicit_broadcasts.contains(a))
         });
         if allowed_implicit.unwrap_or(false) {
             flags |= FLAG_RECEIVER_INCLUDE_BACKGROUND;
         }
         let extended = intent.intent.extended_flags;
         intent.set_flags(flags, extended);
-        let binders = intent.handles().into_iter().map(|h| host.process.strong(h)).collect();
+        let binders = intent
+            .handles()
+            .into_iter()
+            .map(|h| host.process.strong(h))
+            .collect();
         let record = Arc::new(Record {
             intent,
             binders: Arc::new(binders),
@@ -918,75 +1159,139 @@ impl Broadcasts {
         let i = &record.intent.intent;
         let allowed = |uid: i32| {
             let app_id = uid.rem_euclid(PER_USER_RANGE as i32);
-            allow_list.is_none_or(|allowed| app_id < FIRST_APPLICATION_UID || allowed.binary_search(&app_id).is_ok())
+            allow_list.is_none_or(|allowed| {
+                app_id < FIRST_APPLICATION_UID || allowed.binary_search(&app_id).is_ok()
+            })
         };
-        let targets = self.registered_targets(host, &st, i, None, user, &sender).and_then(|registered| {
-            let owner = |handle: u32| st.receivers.iter().find(|r| r.receiver.handle == handle).map(|r| r.uid);
-            let registered = registered.into_iter().filter(|&(_, handle, _)| allowed(owner(handle).unwrap_or_default())).collect();
-            let manifest = if flags & FLAG_RECEIVER_REGISTERED_ONLY == 0 {
-                self.manifest_targets(host, i, None, user, &sender)?.into_iter().filter(|m| allowed(m.uid as i32)).collect()
-            } else {
-                Vec::new()
-            };
-            Ok(merge(manifest, registered))
-        });
+        let targets = self
+            .registered_targets(host, &st, i, None, user, &sender)
+            .and_then(|registered| {
+                let owner = |handle: u32| {
+                    st.receivers
+                        .iter()
+                        .find(|r| r.receiver.handle == handle)
+                        .map(|r| r.uid)
+                };
+                let registered = registered
+                    .into_iter()
+                    .filter(|&(_, handle, _)| allowed(owner(handle).unwrap_or_default()))
+                    .collect();
+                let manifest = if flags & FLAG_RECEIVER_REGISTERED_ONLY == 0 {
+                    self.manifest_targets(host, i, None, user, &sender)?
+                        .into_iter()
+                        .filter(|m| allowed(m.uid as i32))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                Ok(merge(manifest, registered))
+            });
         match targets {
             Ok(targets) => self.enqueue(host, &mut st, &record, targets),
             Err(e) => eprintln!("app host: a system broadcast: {e:?}"),
         }
         drop(st);
         // `broadcastIntentLocked`'s own handling of the zone's change.
-        if record.intent.intent.action.as_deref() == Some("android.intent.action.TIMEZONE_CHANGED") {
+        if record.intent.intent.action.as_deref() == Some("android.intent.action.TIMEZONE_CHANGED")
+        {
             host.update_time_zone();
         }
     }
 
     /// `collectReceiverComponents` for `intent`, then BroadcastSkipPolicy's
     /// checks: the manifest receivers it goes to, by priority.
-    fn manifest_targets(&self, host: &AppHost, intent: &Intent, resolved_type: Option<&str>, user: i32, s: &Sender<'_>) -> Result<Vec<Arc<Manifest>>, Exception> {
+    fn manifest_targets(
+        &self,
+        host: &AppHost,
+        intent: &Intent,
+        resolved_type: Option<&str>,
+        user: i32,
+        s: &Sender<'_>,
+    ) -> Result<Vec<Arc<Manifest>>, Exception> {
         let (_, resolution) = host.packages()?;
         let found = resolution
-            .query_intent_receivers(intent, resolved_type, super::STOCK_PM_FLAGS, user.max(0), SYSTEM_UID)
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("queryIntentReceivers: {e:?}")))?;
+            .query_intent_receivers(
+                intent,
+                resolved_type,
+                super::STOCK_PM_FLAGS,
+                user.max(0),
+                SYSTEM_UID,
+            )
+            .map_err(|e| {
+                Exception::new(EX_ILLEGAL_STATE, format!("queryIntentReceivers: {e:?}"))
+            })?;
         let mut targets = Vec::new();
         for ri in found {
-            let Info::Activity(info) = ri.info else { continue };
+            let Info::Activity(info) = ri.info else {
+                continue;
+            };
             if let Some(why) = self.skip_manifest(host, s, &info, intent)? {
                 eprintln!("app host: {why}");
                 continue;
             }
             let process = super::providers::process_name(&info.info);
             let uid = info.info.application_info.uid as u32;
-            targets.push(Arc::new(Manifest { info, process, uid, priority: ri.priority }));
+            targets.push(Arc::new(Manifest {
+                info,
+                process,
+                uid,
+                priority: ri.priority,
+            }));
         }
         Ok(targets)
     }
 
     /// BroadcastSkipPolicy's checks of a manifest receiver: why the
     /// broadcast skips it, if it does.
-    fn skip_manifest(&self, host: &AppHost, s: &Sender<'_>, info: &ActivityInfo, intent: &Intent) -> Result<Option<String>, Exception> {
+    fn skip_manifest(
+        &self,
+        host: &AppHost,
+        s: &Sender<'_>,
+        info: &ActivityInfo,
+        intent: &Intent,
+    ) -> Result<Option<String>, Exception> {
         let app = &info.info.application_info;
         let (uid, package) = (app.uid, app.item.package_name.clone().unwrap_or_default());
-        let name = format!("{package}/{}", info.info.item.name.as_deref().unwrap_or_default());
+        let name = format!(
+            "{package}/{}",
+            info.info.item.name.as_deref().unwrap_or_default()
+        );
         let action = intent.action.as_deref().unwrap_or("null");
         if let Some((change, enabled)) = s.require_compat_change
             && host.change_enabled(change, uid)? != enabled
         {
-            return Ok(Some(format!("Compat change filtered: broadcasting {action} to uid {uid} due to compat change {change}")));
+            return Ok(Some(format!(
+                "Compat change filtered: broadcasting {action} to uid {uid} due to compat change {change}"
+            )));
         }
-        if !host.check_component_permission(info.permission.as_deref(), s.uid, uid, info.info.exported)? {
+        if !host.check_component_permission(
+            info.permission.as_deref(),
+            s.uid,
+            uid,
+            info.info.exported,
+        )? {
             return Ok(Some(if info.info.exported {
-                format!("Permission Denial: broadcasting {action} to {name} requires {}", info.permission.as_deref().unwrap_or("null"))
+                format!(
+                    "Permission Denial: broadcasting {action} to {name} requires {}",
+                    info.permission.as_deref().unwrap_or("null")
+                )
             } else {
-                format!("Permission Denial: broadcasting {action} to {name} is not exported from uid {uid}")
+                format!(
+                    "Permission Denial: broadcasting {action} to {name} is not exported from uid {uid}"
+                )
             }));
         }
         if let Some(permission) = &info.permission
             && host.permission_has_op(permission)?
         {
-            return Err(host.unimplemented_named("activity", &format!("the app op of {permission} in a broadcast (#1463)")));
+            return Err(host.unimplemented_named(
+                "activity",
+                &format!("the app op of {permission} in a broadcast (#1463)"),
+            ));
         }
-        if info.flags & FLAG_SINGLE_USER != 0 && host.check_permission(Some("android.permission.INTERACT_ACROSS_USERS"), uid)? != 0 {
+        if info.flags & FLAG_SINGLE_USER != 0
+            && host.check_permission(Some("android.permission.INTERACT_ACROSS_USERS"), uid)? != 0
+        {
             return Ok(Some(format!(
                 "Permission Denial: Receiver {name} requests FLAG_SINGLE_USER, but app does not hold android.permission.INTERACT_ACROSS_USERS"
             )));
@@ -994,39 +1299,61 @@ impl Broadcasts {
         let user = uid / PER_USER_RANGE as i32;
         let instant = host.instant_app(&package, user)?;
         if instant && s.uid != uid {
-            return Ok(Some(format!("Instant App Denial: receiving {action} to {name}: Instant Apps do not support manifest receivers")));
+            return Ok(Some(format!(
+                "Instant App Denial: receiving {action} to {name}: Instant Apps do not support manifest receivers"
+            )));
         }
         if s.instant && info.flags & FLAG_VISIBLE_TO_INSTANT_APP == 0 && s.uid != uid {
-            return Ok(Some(format!("Instant App Denial: receiving {action} to {name} requires receiver have visibleToInstantApps set")));
+            return Ok(Some(format!(
+                "Instant App Denial: receiving {action} to {name} requires receiver have visibleToInstantApps set"
+            )));
         }
         match self.app_start_mode(host, uid, &package, app.target_sdk_version, instant)? {
             StartMode::Normal => {}
-            StartMode::Disabled => return Ok(Some(format!("Background execution disabled: receiving {action} to {name}"))),
+            StartMode::Disabled => {
+                return Ok(Some(format!(
+                    "Background execution disabled: receiving {action} to {name}"
+                )));
+            }
             _ if self.disallow_background_start(host, intent, s)? => {
-                return Ok(Some(format!("Background execution not allowed: receiving {action} to {name}")));
+                return Ok(Some(format!(
+                    "Background execution not allowed: receiving {action} to {name}"
+                )));
             }
             _ => {}
         }
         for permission in s.excluded_permissions {
             if host.check_permission(Some(permission), uid)? == 0 {
                 if host.permission_has_op(permission)? {
-                    return Err(host.unimplemented_named("activity", &format!("the app op of {permission} in a broadcast (#1463)")));
+                    return Err(host.unimplemented_named(
+                        "activity",
+                        &format!("the app op of {permission} in a broadcast (#1463)"),
+                    ));
                 }
-                return Ok(Some(format!("Skipping delivery to {package} due to excluded permission {permission}")));
+                return Ok(Some(format!(
+                    "Skipping delivery to {package} due to excluded permission {permission}"
+                )));
             }
         }
         if s.excluded_packages.contains(&package) {
-            return Ok(Some(format!("Skipping delivery of excluded package {action} to {name}")));
+            return Ok(Some(format!(
+                "Skipping delivery of excluded package {action} to {name}"
+            )));
         }
         if uid != SYSTEM_UID {
             for permission in s.required_permissions {
                 if !host.holds(permission, uid)? {
-                    return Ok(Some(format!("Permission Denial: receiving {action} to {name} requires {permission}")));
+                    return Ok(Some(format!(
+                        "Permission Denial: receiving {action} to {name} requires {permission}"
+                    )));
                 }
             }
         }
         if s.app_op != OP_NONE {
-            return Err(host.unimplemented_named("activity", &format!("app op {} of a broadcast (#1463)", s.app_op)));
+            return Err(host.unimplemented_named(
+                "activity",
+                &format!("app op {} of a broadcast (#1463)", s.app_op),
+            ));
         }
         Ok(None)
     }
@@ -1035,7 +1362,14 @@ impl Broadcasts {
     /// (`appRestrictedInBackgroundLOSP`): an instant app's starts are
     /// disabled, an app targeting O or later is restricted, an older one
     /// as its `RUN_IN_BACKGROUND` op says.
-    fn app_start_mode(&self, host: &AppHost, uid: i32, package: &str, target_sdk: i32, instant: bool) -> Result<StartMode, Exception> {
+    fn app_start_mode(
+        &self,
+        host: &AppHost,
+        uid: i32,
+        package: &str,
+        target_sdk: i32,
+        instant: bool,
+    ) -> Result<StartMode, Exception> {
         const O: i32 = 26;
         if instant {
             return Ok(StartMode::Disabled);
@@ -1043,27 +1377,43 @@ impl Broadcasts {
         if target_sdk >= O {
             return Ok(StartMode::DelayedRigid);
         }
-        Ok(match super::appops_service::note(host, OP_RUN_IN_BACKGROUND, uid, Some(package))? {
-            0 => StartMode::Normal,
-            MODE_IGNORED => StartMode::Delayed,
-            _ => StartMode::DelayedRigid,
-        })
+        Ok(
+            match super::appops_service::note(host, OP_RUN_IN_BACKGROUND, uid, Some(package))? {
+                0 => StartMode::Normal,
+                MODE_IGNORED => StartMode::Delayed,
+                _ => StartMode::DelayedRigid,
+            },
+        )
     }
 
     /// `disallowBackgroundStart`: a broadcast excluding the background, or
     /// an implicit one not including it whose required permissions are not
     /// all signature ones (`isSignaturePerm`).
-    fn disallow_background_start(&self, host: &AppHost, intent: &Intent, s: &Sender<'_>) -> Result<bool, Exception> {
+    fn disallow_background_start(
+        &self,
+        host: &AppHost,
+        intent: &Intent,
+        s: &Sender<'_>,
+    ) -> Result<bool, Exception> {
         let signature = !s.required_null
             && s.required_permissions.iter().all(|name| {
                 host.inputs().is_ok_and(|inputs| {
-                    inputs.packages.permissions().iter().find(|p| p.name == *name).is_some_and(|p| {
-                        p.protection_level & (PROTECTION_MASK_BASE | PROTECTION_FLAG_PRIVILEGED) == PROTECTION_SIGNATURE
-                    })
+                    inputs
+                        .packages
+                        .permissions()
+                        .iter()
+                        .find(|p| p.name == *name)
+                        .is_some_and(|p| {
+                            p.protection_level & (PROTECTION_MASK_BASE | PROTECTION_FLAG_PRIVILEGED)
+                                == PROTECTION_SIGNATURE
+                        })
                 })
             });
         Ok(intent.flags & FLAG_RECEIVER_EXCLUDE_BACKGROUND != 0
-            || intent.component.is_none() && intent.package.is_none() && intent.flags & FLAG_RECEIVER_INCLUDE_BACKGROUND == 0 && !signature)
+            || intent.component.is_none()
+                && intent.package.is_none()
+                && intent.flags & FLAG_RECEIVER_INCLUDE_BACKGROUND == 0
+                && !signature)
     }
 
     /// The process a manifest receiver runs in, started for it when it does
@@ -1072,9 +1422,19 @@ impl Broadcasts {
         if let Some((seq, _)) = host.running_process(&m.process, m.uid) {
             return Some(seq);
         }
-        let package = m.info.info.application_info.item.package_name.clone().unwrap_or_default();
+        let package = m
+            .info
+            .info
+            .application_info
+            .item
+            .package_name
+            .clone()
+            .unwrap_or_default();
         if let Err(e) = host.start_process_for(&package, &m.process, None, true) {
-            eprintln!("app host: unable to launch {} for broadcast: {}", m.process, e.message);
+            eprintln!(
+                "app host: unable to launch {} for broadcast: {}",
+                m.process, e.message
+            );
             return None;
         }
         host.running_process(&m.process, m.uid).map(|(seq, _)| seq)
@@ -1110,7 +1470,13 @@ impl Broadcasts {
         intent.set_flags(flags, extended);
         let record = Arc::new(Record {
             intent: intent.clone(),
-            binders: Arc::new(intent.handles().into_iter().map(|h| host.process.strong(h)).collect()),
+            binders: Arc::new(
+                intent
+                    .handles()
+                    .into_iter()
+                    .map(|h| host.process.strong(h))
+                    .collect(),
+            ),
             calling_uid: SYSTEM_UID,
             calling_package: Some("android".into()),
             ordered: false,
@@ -1123,8 +1489,13 @@ impl Broadcasts {
         });
         {
             let mut st = self.state.lock().unwrap();
-            let sticky = Sticky { record, resolved_type: None };
-            match st.stickies.iter().position(|s| s.record.user == USER_ALL && filter_equals(&s.record.intent.intent, &intent.intent)) {
+            let sticky = Sticky {
+                record,
+                resolved_type: None,
+            };
+            match st.stickies.iter().position(|s| {
+                s.record.user == USER_ALL && filter_equals(&s.record.intent.intent, &intent.intent)
+            }) {
                 Some(at) => st.stickies[at] = sticky,
                 None => st.stickies.push(sticky),
             }
@@ -1139,10 +1510,18 @@ impl Broadcasts {
     }
 
     /// `unbroadcastIntent`: a sticky broadcast goes.
-    pub fn unbroadcast(&self, host: &AppHost, call: &Call<'_>, intent: Option<RawIntent>, user: i32) -> Result<(), Exception> {
+    pub fn unbroadcast(
+        &self,
+        host: &AppHost,
+        call: &Call<'_>,
+        intent: Option<RawIntent>,
+        user: i32,
+    ) -> Result<(), Exception> {
         let uid = call.sender_euid as i32;
         if intent.as_ref().is_some_and(RawIntent::has_fds) {
-            return Err(Exception::illegal_argument("File descriptors passed in Intent"));
+            return Err(Exception::illegal_argument(
+                "File descriptors passed in Intent",
+            ));
         }
         let user = host.incoming_user(uid, user, true)?;
         if !host.check_component_permission(Some(BROADCAST_STICKY), uid, -1, true)? {
@@ -1153,7 +1532,9 @@ impl Broadcasts {
         }
         let intent = intent.ok_or_else(|| Exception::new(EX_NULL_POINTER, "intent"))?;
         let mut st = self.state.lock().unwrap();
-        if let Some(at) = st.stickies.iter().position(|s| s.record.user == user && filter_equals(&s.record.intent.intent, &intent.intent)) {
+        if let Some(at) = st.stickies.iter().position(|s| {
+            s.record.user == user && filter_equals(&s.record.intent.intent, &intent.intent)
+        }) {
             st.stickies.remove(at);
         }
         Ok(())
@@ -1161,17 +1542,32 @@ impl Broadcasts {
 
     /// `finishReceiver`: the caller's process finished the chained
     /// delivery it was sent; its result goes on to the next receiver.
-    pub fn finish(&self, host: &AppHost, args: am::FinishReceiver<RawBundle>) -> Result<(), Exception> {
+    pub fn finish(
+        &self,
+        host: &AppHost,
+        args: am::FinishReceiver<RawBundle>,
+    ) -> Result<(), Exception> {
         if args.map.as_ref().is_some_and(RawBundle::has_fds) {
-            return Err(Exception::illegal_argument("File descriptors passed in Bundle"));
+            return Err(Exception::illegal_argument(
+                "File descriptors passed in Bundle",
+            ));
         }
         let Some((seq, ..)) = host.app_of_thread(args.who) else {
             eprintln!("app host: finishReceiver: no app");
             return Ok(());
         };
-        let extras = args.map.map(|m| KeptBundle::new(m, &host.process)).transpose().map_err(|_| Exception::illegal_argument("result extras"))?;
+        let extras = args
+            .map
+            .map(|m| KeptBundle::new(m, &host.process))
+            .transpose()
+            .map_err(|_| Exception::illegal_argument("result extras"))?;
         let mut st = self.state.lock().unwrap();
-        let id = match st.queues.get(&seq).and_then(|q| q.front()).filter(|_| st.busy.contains(&seq)) {
+        let id = match st
+            .queues
+            .get(&seq)
+            .and_then(|q| q.front())
+            .filter(|_| st.busy.contains(&seq))
+        {
             Some(Delivery::Chained(id, _)) => Some(*id),
             Some(Delivery::Manifest(_, _, id)) => *id,
             _ => return Ok(()),
@@ -1210,7 +1606,14 @@ impl Broadcasts {
 
     /// BroadcastSkipPolicy's checks of a registered receiver: whether the
     /// broadcast skips it.
-    fn skip(&self, host: &AppHost, s: &Sender<'_>, r: &Receiver, f: &Filter, intent_flags: i32) -> Result<bool, Exception> {
+    fn skip(
+        &self,
+        host: &AppHost,
+        s: &Sender<'_>,
+        r: &Receiver,
+        f: &Filter,
+        intent_flags: i32,
+    ) -> Result<bool, Exception> {
         if let Some((change, enabled)) = s.require_compat_change
             && host.change_enabled(change, r.uid)? != enabled
         {
@@ -1222,7 +1625,8 @@ impl Broadcasts {
             return Ok(true);
         }
         let visible = intent_flags & FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS != 0;
-        if (!visible && f.instant_app || !f.visible_to_instant_apps && s.instant) && r.uid != s.uid {
+        if (!visible && f.instant_app || !f.visible_to_instant_apps && s.instant) && r.uid != s.uid
+        {
             return Ok(true);
         }
         for permission in s.required_permissions {
@@ -1230,7 +1634,9 @@ impl Broadcasts {
                 return Ok(true);
             }
         }
-        if s.required_permissions.is_empty() && !host.check_component_permission(None, r.uid, -1, true)? {
+        if s.required_permissions.is_empty()
+            && !host.check_component_permission(None, r.uid, -1, true)?
+        {
             return Ok(true);
         }
         for permission in s.excluded_permissions {
@@ -1242,7 +1648,10 @@ impl Broadcasts {
             return Ok(true);
         }
         if s.app_op != OP_NONE {
-            return Err(host.unimplemented_named("activity", &format!("app op {} of a broadcast (#1463)", s.app_op)));
+            return Err(host.unimplemented_named(
+                "activity",
+                &format!("app op {} of a broadcast (#1463)", s.app_op),
+            ));
         }
         Ok(!f.exported && !host.check_component_permission(None, s.original_uid, r.uid, false)?)
     }
@@ -1262,8 +1671,16 @@ impl Broadcasts {
                 let sent = {
                     let result = chain.and_then(|id| st.chains.get(&id));
                     let (code, data, extras) = match result {
-                        Some(c) => (c.result_code, c.result_data.as_deref(), c.result_extras.as_ref()),
-                        None => (record.result_code, record.result_data.as_deref(), record.result_extras.as_ref()),
+                        Some(c) => (
+                            c.result_code,
+                            c.result_data.as_deref(),
+                            c.result_extras.as_ref(),
+                        ),
+                        None => (
+                            record.result_code,
+                            record.result_data.as_deref(),
+                            record.result_extras.as_ref(),
+                        ),
                     };
                     self.deliver_manifest(host, start_seq, &record, &m, code, data, extras)
                 };
@@ -1297,8 +1714,26 @@ impl Broadcasts {
             let registered = st.receivers.iter().any(|r| r.receiver.handle == handle);
             let sent = registered
                 && match chain.and_then(|id| st.chains.get(&id)) {
-                    Some(c) => self.deliver(host, start_seq, handle, &record, c.result_code, c.result_data.as_deref(), c.result_extras.as_ref(), false),
-                    None => self.deliver(host, start_seq, handle, &record, record.result_code, record.result_data.as_deref(), record.result_extras.as_ref(), true),
+                    Some(c) => self.deliver(
+                        host,
+                        start_seq,
+                        handle,
+                        &record,
+                        c.result_code,
+                        c.result_data.as_deref(),
+                        c.result_extras.as_ref(),
+                        false,
+                    ),
+                    None => self.deliver(
+                        host,
+                        start_seq,
+                        handle,
+                        &record,
+                        record.result_code,
+                        record.result_data.as_deref(),
+                        record.result_extras.as_ref(),
+                        true,
+                    ),
                 };
             if let (Some(_), true) = (chain, sent) {
                 st.busy.insert(start_seq);
@@ -1315,8 +1750,14 @@ impl Broadcasts {
     /// aborted, to its result receiver.
     fn advance(&self, host: &AppHost, st: &mut State, id: u64) {
         loop {
-            let Some(chain) = st.chains.get_mut(&id) else { return };
-            let next = if chain.aborted { None } else { chain.targets.pop_front() };
+            let Some(chain) = st.chains.get_mut(&id) else {
+                return;
+            };
+            let next = if chain.aborted {
+                None
+            } else {
+                chain.targets.pop_front()
+            };
             let Some(target) = next else {
                 let chain = st.chains.remove(&id).unwrap();
                 self.send_result(host, chain);
@@ -1349,7 +1790,9 @@ impl Broadcasts {
     /// The final result of a chain to its result receiver: through its
     /// process's thread, else to the receiver itself.
     fn send_result(&self, host: &AppHost, chain: Chain) {
-        let Some((result_to, app)) = chain.result_to else { return };
+        let Some((result_to, app)) = chain.result_to else {
+            return;
+        };
         let record = &chain.record;
         let extras = chain.result_extras.as_ref().map(|e| By(&e.bundle));
         let sent = match app {
@@ -1366,8 +1809,15 @@ impl Broadcasts {
                     assume_delivered: true,
                     sending_user: record.user,
                     process_state: PROCESS_STATE_TOP,
-                    sent_from_uid: if record.share_identity { record.calling_uid } else { INVALID_UID },
-                    sent_from_package: record.share_identity.then(|| record.calling_package.clone()).flatten(),
+                    sent_from_uid: if record.share_identity {
+                        record.calling_uid
+                    } else {
+                        INVALID_UID
+                    },
+                    sent_from_package: record
+                        .share_identity
+                        .then(|| record.calling_package.clone())
+                        .flatten(),
                 }
                 .write(&mut p);
                 host.call_thread(seq, thread::SCHEDULE_REGISTERED_RECEIVER, &p)
@@ -1384,7 +1834,10 @@ impl Broadcasts {
                     sending_user: record.user,
                 }
                 .write(&mut p);
-                result_to.transact(intent_receiver::PERFORM_RECEIVE, &p, true).map(|_| ()).map_err(|s| format!("{s}"))
+                result_to
+                    .transact(intent_receiver::PERFORM_RECEIVE, &p, true)
+                    .map(|_| ())
+                    .map_err(|s| format!("{s}"))
             }
         };
         if let Err(e) = sent {
@@ -1393,8 +1846,17 @@ impl Broadcasts {
     }
 
     /// `scheduleCanceledResultTo`.
-    fn cancel_result_to(&self, host: &AppHost, intent: &RawIntent, result_to: Option<u32>, app: Option<i64>, user: i32) {
-        let (Some(handle), Some(seq)) = (result_to, app) else { return };
+    fn cancel_result_to(
+        &self,
+        host: &AppHost,
+        intent: &RawIntent,
+        result_to: Option<u32>,
+        app: Option<i64>,
+        user: i32,
+    ) {
+        let (Some(handle), Some(seq)) = (result_to, app) else {
+            return;
+        };
         let mut p = Parcel::new();
         thread::ScheduleRegisteredReceiver::<By<RawIntent>, RawBundle> {
             receiver: Some(Binder::Handle(handle)),
@@ -1442,8 +1904,15 @@ impl Broadcasts {
             assume_delivered,
             sending_user: record.user,
             process_state: PROCESS_STATE_TOP,
-            sent_from_uid: if record.share_identity { record.calling_uid } else { INVALID_UID },
-            sent_from_package: record.share_identity.then(|| record.calling_package.clone()).flatten(),
+            sent_from_uid: if record.share_identity {
+                record.calling_uid
+            } else {
+                INVALID_UID
+            },
+            sent_from_package: record
+                .share_identity
+                .then(|| record.calling_package.clone())
+                .flatten(),
         }
         .write(&mut p);
         match host.call_thread(start_seq, thread::SCHEDULE_REGISTERED_RECEIVER, &p) {
@@ -1475,9 +1944,23 @@ impl Broadcasts {
             app.thread.as_ref()?;
             app.config.clone()?
         };
-        let compat = super::config::CompatibilityInfo::of(&m.info.info.application_info, &config, host.inputs().ok()?.device_density);
-        let package = m.info.info.application_info.item.package_name.clone().unwrap_or_default();
-        let intent = record.intent.with_component(&package, m.info.info.item.name.as_deref().unwrap_or_default());
+        let compat = super::config::CompatibilityInfo::of(
+            &m.info.info.application_info,
+            &config,
+            host.inputs().ok()?.device_density,
+        );
+        let package = m
+            .info
+            .info
+            .application_info
+            .item
+            .package_name
+            .clone()
+            .unwrap_or_default();
+        let intent = record.intent.with_component(
+            &package,
+            m.info.info.item.name.as_deref().unwrap_or_default(),
+        );
         let mut p = Parcel::new();
         thread::ScheduleReceiver {
             intent: Some(By(&intent)),
@@ -1490,17 +1973,29 @@ impl Broadcasts {
             assume_delivered: false,
             sending_user: record.user,
             process_state: PROCESS_STATE_TOP,
-            sent_from_uid: if record.share_identity { record.calling_uid } else { INVALID_UID },
-            sent_from_package: record.share_identity.then(|| record.calling_package.clone()).flatten(),
+            sent_from_uid: if record.share_identity {
+                record.calling_uid
+            } else {
+                INVALID_UID
+            },
+            sent_from_package: record
+                .share_identity
+                .then(|| record.calling_package.clone())
+                .flatten(),
         }
         .write(&mut p);
-        Some(match host.call_thread(start_seq, thread::SCHEDULE_RECEIVER, &p) {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!("app host: a broadcast was not delivered to {}: {e}", m.process);
-                false
-            }
-        })
+        Some(
+            match host.call_thread(start_seq, thread::SCHEDULE_RECEIVER, &p) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!(
+                        "app host: a broadcast was not delivered to {}: {e}",
+                        m.process
+                    );
+                    false
+                }
+            },
+        )
     }
 }
 
@@ -1510,7 +2005,11 @@ mod tests {
     use crate::package::uri::Uri;
 
     fn intent(action: Option<&str>, data: Option<&str>) -> Intent {
-        Intent { action: action.map(Into::into), data: data.map(Uri::parse), ..Intent::default() }
+        Intent {
+            action: action.map(Into::into),
+            data: data.map(Uri::parse),
+            ..Intent::default()
+        }
     }
 
     #[test]
@@ -1533,9 +2032,21 @@ mod tests {
         let a = intent(Some("a"), Some("content://x"));
         assert!(filter_equals(&a, &intent(Some("a"), Some("content://x"))));
         assert!(!filter_equals(&a, &intent(Some("a"), Some("content://y"))));
-        assert!(!filter_equals(&a, &Intent { package: Some("p".into()), ..a.clone() }));
+        assert!(!filter_equals(
+            &a,
+            &Intent {
+                package: Some("p".into()),
+                ..a.clone()
+            }
+        ));
         // The flags are not compared.
-        assert!(filter_equals(&a, &Intent { flags: 0x10, ..a.clone() }));
+        assert!(filter_equals(
+            &a,
+            &Intent {
+                flags: 0x10,
+                ..a.clone()
+            }
+        ));
     }
 
     #[test]
@@ -1546,12 +2057,22 @@ mod tests {
             &[
                 ("android:broadcast.flags", Value::Int(OPTION_SHARE_IDENTITY)),
                 ("android:broadcast.requireCompatChangeId", Value::Long(42)),
-                ("android:broadcast.requireAllOfPermissions", Value::StringArray(vec![Some("p".into())])),
+                (
+                    "android:broadcast.requireAllOfPermissions",
+                    Value::StringArray(vec![Some("p".into())]),
+                ),
             ],
         );
         let raw = RawBundle::read_from(&mut Reader::new(p.data(), &[])).unwrap();
         let o = Options::read(Some(&raw)).unwrap();
-        assert_eq!((o.flags, o.require_compat_change, o.temporary_allowlist_duration), (OPTION_SHARE_IDENTITY, Some(42), 0));
+        assert_eq!(
+            (
+                o.flags,
+                o.require_compat_change,
+                o.temporary_allowlist_duration
+            ),
+            (OPTION_SHARE_IDENTITY, Some(42), 0)
+        );
     }
 
     #[test]

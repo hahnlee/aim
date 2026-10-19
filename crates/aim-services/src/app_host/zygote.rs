@@ -69,7 +69,14 @@ pub struct DataInfo {
 fn data_info_arg(name: &str, infos: &[DataInfo]) -> String {
     let entries: Vec<String> = infos
         .iter()
-        .map(|i| format!("{},{},{}", i.package, i.volume_uuid.as_deref().unwrap_or("null"), i.ce_data_inode))
+        .map(|i| {
+            format!(
+                "{},{},{}",
+                i.package,
+                i.volume_uuid.as_deref().unwrap_or("null"),
+                i.ce_data_inode
+            )
+        })
         .collect();
     format!("{name}={}", entries.join(","))
 }
@@ -116,7 +123,10 @@ impl Start {
             args.push(data_info_arg("--pkg-data-info-map", &self.pkg_data_info));
         }
         if !self.allowlisted_data_info.is_empty() {
-            args.push(data_info_arg("--allowlisted-data-info-map", &self.allowlisted_data_info));
+            args.push(data_info_arg(
+                "--allowlisted-data-info-map",
+                &self.allowlisted_data_info,
+            ));
         }
         if self.bind_mount_app_storage_dirs {
             args.push("--bind-mount-storage-dirs".into());
@@ -170,7 +180,10 @@ impl Session {
     /// the relay (its connection's first line names it).
     pub fn child(mut stream: UnixStream, name: &str) -> io::Result<Self> {
         if name.contains('\n') {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "embedded newline"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "embedded newline",
+            ));
         }
         stream.write_all(format!("@{name}\n").as_bytes())?;
         Ok(Session { stream })
@@ -181,7 +194,8 @@ impl Session {
     /// it did).
     pub fn preload_app(&mut self, info_parcel: &[u8]) -> io::Result<i32> {
         let encoded = aim_android_xml::base64::encode(info_parcel);
-        self.stream.write_all(format!("2\n--preload-app\n{encoded}\n").as_bytes())?;
+        self.stream
+            .write_all(format!("2\n--preload-app\n{encoded}\n").as_bytes())?;
         let mut reply = [0u8; 4];
         self.stream.read_exact(&mut reply)?;
         Ok(i32::from_be_bytes(reply))
@@ -221,8 +235,16 @@ mod tests {
             start_child_zygote: false,
             package_name: Some("com.android.calculator2".into()),
             is_top_app: true,
-            pkg_data_info: vec![DataInfo { package: "com.android.calculator2".into(), volume_uuid: None, ce_data_inode: 4242 }],
-            allowlisted_data_info: vec![DataInfo { package: "com.google.android.gms".into(), volume_uuid: None, ce_data_inode: 77 }],
+            pkg_data_info: vec![DataInfo {
+                package: "com.android.calculator2".into(),
+                volume_uuid: None,
+                ce_data_inode: 4242,
+            }],
+            allowlisted_data_info: vec![DataInfo {
+                package: "com.google.android.gms".into(),
+                volume_uuid: None,
+                ce_data_inode: 77,
+            }],
             bind_mount_app_storage_dirs: false,
             bind_mount_app_data_dirs: true,
             disabled_compat_changes: vec![1, 2],

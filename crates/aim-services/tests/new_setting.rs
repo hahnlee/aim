@@ -31,11 +31,7 @@ fn original_setting_adoption_matches_the_original_runtime() {
 }
 
 fn compare_new_settings(original_only: bool) {
-    let dir = std::env::temp_dir().join(format!(
-        "ns-{}-{}",
-        original_only,
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("ns-{}-{}", original_only, std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
     let java = aim_paths::fetched().join("java");
@@ -82,9 +78,13 @@ fn compare_new_settings(original_only: bool) {
         &["/system/framework/services.jar"],
     )
     .unwrap();
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
+    let boot = Boot::new(
+        aim_paths::root().join("target/release/aimctl"),
+        data.0.join("g"),
+    );
     run(boot.start_command().args(["start", "--windows"]));
-    boot.wait_ready(Duration::from_secs(300)).expect("new_setting oracle boot readiness");
+    boot.wait_ready(Duration::from_secs(300))
+        .expect("new_setting oracle boot readiness");
     fs::copy(
         dex.join("classes.dex"),
         boot.data.join("data/local/tmp/new-setting.dex"),
@@ -1496,11 +1496,18 @@ fn compare_new_settings(original_only: bool) {
         }
     }
     assert_eq!(path_cases, 72);
-    fs::write(boot.data.join("data/local/tmp/native-paths.tsv"), path_inputs).unwrap();
+    fs::write(
+        boot.data.join("data/local/tmp/native-paths.tsv"),
+        path_inputs,
+    )
+    .unwrap();
     let original = run(boot.command().args([
-        "shell", "/system/bin/app_process",
+        "shell",
+        "/system/bin/app_process",
         "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
-        "/system/bin", "com.android.server.pm.NewSettingOracle", "native-paths-batch",
+        "/system/bin",
+        "com.android.server.pm.NewSettingOracle",
+        "native-paths-batch",
         "/data/local/tmp/native-paths.tsv",
     ]));
     let output = String::from_utf8(original.stdout).unwrap();
@@ -1510,9 +1517,13 @@ fn compare_new_settings(original_only: bool) {
         assert_eq!(&format!("{}\n", actual.join("\n")), expected, "{label}");
     }
     eprintln!("native/original library paths match {path_cases} selected-ABI cases");
-    let config = SystemConfig::read(&common::runtime::cohort::original_image(), &|p| properties.get(p).cloned());
-    let framework =
-        aim_services::package::system_config::Framework::load(&common::runtime::cohort::original_image()).unwrap();
+    let config = SystemConfig::read(&common::runtime::cohort::original_image(), &|p| {
+        properties.get(p).cloned()
+    });
+    let framework = aim_services::package::system_config::Framework::load(
+        &common::runtime::cohort::original_image(),
+    )
+    .unwrap();
     let app_system = aim_services::package::system_config::system(
         &common::runtime::cohort::original_image(),
         &|p| properties.get(p).cloned(),
@@ -2226,7 +2237,7 @@ fn compare_new_settings(original_only: bool) {
         // completion transaction retains all accepted metadata; copied files
         // remain the installation cleanup owner's responsibility.
         let inputs = || ScanMetadataCompletion {
-            scan_as_instant_app:false,
+            scan_as_instant_app: false,
             seinfo: common::seinfo::scan(),
             factory_test: false,
             abi_policy: &abi_policy,
@@ -2456,7 +2467,7 @@ fn compare_new_settings(original_only: bool) {
         ..context
     };
     let inputs = || ScanMetadataCompletion {
-            scan_as_instant_app:false,
+        scan_as_instant_app: false,
         seinfo: common::seinfo::scan(),
         factory_test: false,
         abi_policy: &abi_policy,

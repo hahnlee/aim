@@ -200,25 +200,41 @@ impl WriteParcelable for Point {
 
 /// The text of `e`'s child `name` (`nextText`).
 fn child_text<'a>(e: &'a Element, name: &str) -> Option<&'a str> {
-    e.children().find(|c| c.name == name)?.content.iter().find_map(|n| match n {
-        Node::Token(TEXT, Some(text)) => Some(text.as_str()),
-        _ => None,
-    })
+    e.children()
+        .find(|c| c.name == name)?
+        .content
+        .iter()
+        .find_map(|n| match n {
+            Node::Token(TEXT, Some(text)) => Some(text.as_str()),
+            _ => None,
+        })
 }
 
 /// `StableDeviceValues.loadFromXml`: the persisted width and height, 0
 /// where one is not a number.
 fn stable_values(root: &Element) -> (i32, i32) {
-    let Some(values) = root.children().find(|e| e.name == "stable-device-values") else { return (0, 0) };
-    let int = |name: &str| child_text(values, name).and_then(|t| t.parse().ok()).unwrap_or(0);
+    let Some(values) = root.children().find(|e| e.name == "stable-device-values") else {
+        return (0, 0);
+    };
+    let int = |name: &str| {
+        child_text(values, name)
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(0)
+    };
     (int("stable-display-width"), int("stable-display-height"))
 }
 
 /// `root` with its stable values set to `size` (`saveToXml`), or the
 /// document `PersistentDataStore` writes from an empty state.
 fn with_stable_values(root: Option<Element>, size: (i32, i32)) -> Element {
-    let element = |name: &str, content: Vec<Node>| Element { name: name.into(), attrs: Vec::new(), content };
-    let text = |name: &str, value: String| Node::Element(element(name, vec![Node::Token(TEXT, Some(value))]));
+    let element = |name: &str, content: Vec<Node>| Element {
+        name: name.into(),
+        attrs: Vec::new(),
+        content,
+    };
+    let text = |name: &str, value: String| {
+        Node::Element(element(name, vec![Node::Token(TEXT, Some(value))]))
+    };
     let mut root = root.unwrap_or_else(|| {
         let empty = |name: &str| Node::Element(element(name, Vec::new()));
         element(
@@ -232,13 +248,18 @@ fn with_stable_values(root: Option<Element>, size: (i32, i32)) -> Element {
             ],
         )
     });
-    let values = vec![text("stable-display-width", size.0.to_string()), text("stable-display-height", size.1.to_string())];
+    let values = vec![
+        text("stable-display-width", size.0.to_string()),
+        text("stable-display-height", size.1.to_string()),
+    ];
     match root.content.iter_mut().find_map(|n| match n {
         Node::Element(e) if e.name == "stable-device-values" => Some(e),
         _ => None,
     }) {
         Some(e) => e.content = values,
-        None => root.content.push(Node::Element(element("stable-device-values", values))),
+        None => root
+            .content
+            .push(Node::Element(element("stable-device-values", values))),
     }
     root
 }
@@ -249,12 +270,21 @@ fn write_state(data: &Path, root: &Element) -> std::io::Result<()> {
     let bytes = aim_android_xml::abx::write(root).map_err(std::io::Error::other)?;
     let path = data.join(STATE_XML);
     let new = data.join(format!("{STATE_XML}.new"));
-    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&new)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&new)?;
     std::io::Write::write_all(&mut file, &bytes)?;
     crate::fsync(&file)?;
     aim_storage::guest_inode::record(
         &new,
-        aim_storage::guest_inode::GuestInode { uid: Some(1000), gid: Some(1000), mode: Some(0o600) },
+        aim_storage::guest_inode::GuestInode {
+            uid: Some(1000),
+            gid: Some(1000),
+            mode: Some(0o600),
+        },
     )?;
     std::fs::rename(&new, path)
 }
@@ -292,7 +322,9 @@ impl DisplayManager {
         let path = data.join(STATE_XML);
         let root = match std::fs::read(&path) {
             Ok(bytes) => aim_android_xml::read(&bytes)
-                .inspect_err(|e| eprintln!("app host: Failed to load display manager persistent store data: {e}"))
+                .inspect_err(|e| {
+                    eprintln!("app host: Failed to load display manager persistent store data: {e}")
+                })
                 .ok()
                 .filter(|r| r.name == "display-manager-state"),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -303,15 +335,23 @@ impl DisplayManager {
             persisted
         } else {
             let packages = &self.host.inputs()?.packages;
-            let integer = |name: &str| packages.framework_integer(name).ok_or_else(|| state(format!("no {name}")));
-            let configured = (integer("config_stableDeviceDisplayWidth")?, integer("config_stableDeviceDisplayHeight")?);
+            let integer = |name: &str| {
+                packages
+                    .framework_integer(name)
+                    .ok_or_else(|| state(format!("no {name}")))
+            };
+            let configured = (
+                integer("config_stableDeviceDisplayWidth")?,
+                integer("config_stableDeviceDisplayHeight")?,
+            );
             let size = if configured.0 > 0 && configured.1 > 0 {
                 configured
             } else {
                 let display = self.host.display()?;
                 (display.0.width, display.0.height)
             };
-            write_state(&data, &with_stable_values(root, size)).map_err(|e| state(format!("{}: {e}", path.display())))?;
+            write_state(&data, &with_stable_values(root, size))
+                .map_err(|e| state(format!("{}: {e}", path.display())))?;
             size
         };
         *stable = Some(size);
@@ -384,12 +424,26 @@ impl Service for DisplayManager {
                     inputs
                         .packages
                         .framework_bool("config_enableWifiDisplay")
-                        .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no config_enableWifiDisplay"))
+                        .ok_or_else(|| {
+                            Exception::new(EX_ILLEGAL_STATE, "no config_enableWifiDisplay")
+                        })
                 });
-                let forced = self.host.property("persist.debug.wfd.enable").and_then(|v| super::activity::parse_int(&v)) == Some(1);
+                let forced = self
+                    .host
+                    .property("persist.debug.wfd.enable")
+                    .and_then(|v| super::activity::parse_int(&v))
+                    == Some(1);
                 match configured {
-                    Ok(true) => return reply(Err(self.host.unimplemented_named("display", "a Wi-Fi display adapter (#1658)"))),
-                    Ok(false) if forced => return reply(Err(self.host.unimplemented_named("display", "a Wi-Fi display adapter (#1658)"))),
+                    Ok(true) => {
+                        return reply(Err(self
+                            .host
+                            .unimplemented_named("display", "a Wi-Fi display adapter (#1658)")));
+                    }
+                    Ok(false) if forced => {
+                        return reply(Err(self
+                            .host
+                            .unimplemented_named("display", "a Wi-Fi display adapter (#1658)")));
+                    }
                     Ok(false) => {}
                     Err(e) => return reply(Err(e)),
                 }
@@ -398,7 +452,9 @@ impl Service for DisplayManager {
             dm::GET_STABLE_DISPLAY_SIZE => {
                 dm::GetStableDisplaySize::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 match self.stable_display_size() {
-                    Ok((w, h)) => dm::write_get_stable_display_size_reply(&mut p, Some(&Point(w, h))),
+                    Ok((w, h)) => {
+                        dm::write_get_stable_display_size_reply(&mut p, Some(&Point(w, h)))
+                    }
                     Err(e) => return reply(Err(e)),
                 }
             }
@@ -434,10 +490,16 @@ mod tests {
         let xml = b"<display-manager-state><display-states /><stable-device-values><stable-display-width>1080</stable-display-width><stable-display-height>x</stable-display-height></stable-device-values></display-manager-state>";
         let root = aim_android_xml::read(xml).unwrap();
         assert_eq!(stable_values(&root), (1080, 0));
-        assert_eq!(stable_values(&with_stable_values(Some(root), (1200, 1920))), (1200, 1920));
+        assert_eq!(
+            stable_values(&with_stable_values(Some(root), (1200, 1920))),
+            (1200, 1920)
+        );
         let fresh = with_stable_values(None, (800, 1280));
         assert_eq!(stable_values(&fresh), (800, 1280));
-        assert_eq!(child_text(&fresh, "brightness-nits-for-default-display"), Some("-1.0"));
+        assert_eq!(
+            child_text(&fresh, "brightness-nits-for-default-display"),
+            Some("-1.0")
+        );
         assert_eq!(fresh.children().count(), 5);
     }
 

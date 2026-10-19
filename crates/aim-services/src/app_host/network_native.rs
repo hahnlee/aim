@@ -100,11 +100,19 @@ pub(super) struct Native {
 }
 
 impl Native {
-    fn call(service: &Strong, descriptor: &str, code: u32, name: &str, write: impl FnOnce(&mut Parcel)) -> Result<(), String> {
+    fn call(
+        service: &Strong,
+        descriptor: &str,
+        code: u32,
+        name: &str,
+        write: impl FnOnce(&mut Parcel),
+    ) -> Result<(), String> {
         let mut data = Parcel::new();
         data.write_interface_token(descriptor);
         write(&mut data);
-        let reply = service.transact(code, &data, false).map_err(|s| format!("{name}: {s}"))?;
+        let reply = service
+            .transact(code, &data, false)
+            .map_err(|s| format!("{name}: {s}"))?;
         match reply.reader().read_exception() {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(format!("{name}: {e:?}")),
@@ -123,10 +131,15 @@ impl Native {
         let mut data = Parcel::new();
         data.write_interface_token(NETD_DESCRIPTOR);
         data.write_string16(Some(interface));
-        let reply = self.netd.transact(INTERFACE_GET_CFG, &data, false).map_err(|s| format!("interfaceGetCfg: {s}"))?;
+        let reply = self
+            .netd
+            .transact(INTERFACE_GET_CFG, &data, false)
+            .map_err(|s| format!("interfaceGetCfg: {s}"))?;
         let mut r = reply.reader();
         let read = |e| format!("interfaceGetCfg: {e}");
-        r.read_exception().map_err(read)?.map_err(|e| format!("interfaceGetCfg: {e:?}"))?;
+        r.read_exception()
+            .map_err(read)?
+            .map_err(|e| format!("interfaceGetCfg: {e:?}"))?;
         // `InterfaceConfigurationParcel`: present, its size, then ifName,
         // hwAddr, ipv4Addr, prefixLength and flags.
         if r.read_i32().map_err(read)? == 0 {
@@ -159,7 +172,12 @@ impl Native {
         })
     }
 
-    fn resolver(&self, code: u32, name: &str, write: impl FnOnce(&mut Parcel)) -> Result<(), String> {
+    fn resolver(
+        &self,
+        code: u32,
+        name: &str,
+        write: impl FnOnce(&mut Parcel),
+    ) -> Result<(), String> {
         Self::call(&self.resolver, RESOLVER_DESCRIPTOR, code, name, write)
     }
 
@@ -183,7 +201,9 @@ impl Native {
                 p.write_bool(false); // local routes kept
             })
         })?;
-        self.resolver(CREATE_NETWORK_CACHE, "createNetworkCache", |p| p.write_i32(n.net_id))?;
+        self.resolver(CREATE_NETWORK_CACHE, "createNetworkCache", |p| {
+            p.write_i32(n.net_id)
+        })?;
         self.netd(NETWORK_ADD_INTERFACE, "networkAddInterface", |p| {
             p.write_i32(n.net_id);
             p.write_string16(Some(&n.interface));
@@ -191,7 +211,11 @@ impl Native {
         for route in &n.routes {
             // `NetdUtils.modifyRoute` of a unicast route.
             let (dst, prefix) = route.destination;
-            let next_hop = if route.gateway.is_unspecified() { NEXTHOP_NONE.to_string() } else { route.gateway.to_string() };
+            let next_hop = if route.gateway.is_unspecified() {
+                NEXTHOP_NONE.to_string()
+            } else {
+                route.gateway.to_string()
+            };
             self.netd(NETWORK_ADD_ROUTE, "networkAddRoute", |p| {
                 p.write_i32(n.net_id);
                 p.write_string16(Some(&route.interface));
@@ -200,13 +224,19 @@ impl Native {
             })?;
         }
         self.configure_dns(n)?;
-        self.netd(NETWORK_SET_DEFAULT, "networkSetDefault", |p| p.write_i32(n.net_id))
+        self.netd(NETWORK_SET_DEFAULT, "networkSetDefault", |p| {
+            p.write_i32(n.net_id)
+        })
     }
 
     /// `sendDnsConfigurationForNetwork`.
     pub(super) fn configure_dns(&self, n: &NativeNetwork) -> Result<(), String> {
         let servers: Vec<String> = n.dns.iter().map(Ipv4Addr::to_string).collect();
-        self.resolver(SET_RESOLVER_CONFIGURATION, "setResolverConfiguration", |p| write_resolver_params(p, n, &servers))
+        self.resolver(
+            SET_RESOLVER_CONFIGURATION,
+            "setResolverConfiguration",
+            |p| write_resolver_params(p, n, &servers),
+        )
     }
 
     /// `makeDefault(null)` of the default network, then
@@ -214,8 +244,12 @@ impl Native {
     pub(super) fn destroy(&self, n: &NativeNetwork) -> Result<(), String> {
         self.netd(NETWORK_CLEAR_DEFAULT, "networkClearDefault", |_| {})?;
         self.netd(NETWORK_DESTROY, "networkDestroy", |p| p.write_i32(n.net_id))?;
-        self.resolver(DESTROY_NETWORK_CACHE, "destroyNetworkCache", |p| p.write_i32(n.net_id))?;
-        self.netd(INTERFACE_CLEAR_ADDRS, "interfaceClearAddrs", |p| p.write_string16(Some(&n.interface)))
+        self.resolver(DESTROY_NETWORK_CACHE, "destroyNetworkCache", |p| {
+            p.write_i32(n.net_id)
+        })?;
+        self.netd(INTERFACE_CLEAR_ADDRS, "interfaceClearAddrs", |p| {
+            p.write_string16(Some(&n.interface))
+        })
     }
 }
 
@@ -252,7 +286,14 @@ fn write_resolver_params(p: &mut Parcel, n: &NativeNetwork, servers: &[String]) 
         strings(p, &[]); // domains
         let strict = n.private_dns.as_ref().and_then(|s| s.as_deref());
         p.write_string16(Some(strict.unwrap_or_default())); // TLS name
-        strings(p, if matches!(n.private_dns, Some(None)) { servers } else { &[] });
+        strings(
+            p,
+            if matches!(n.private_dns, Some(None)) {
+                servers
+            } else {
+                &[]
+            },
+        );
         strings(p, &[]); // TLS fingerprints
         p.write_string16(Some("")); // CA certificate
         p.write_i32(0); // TLS connect timeout
@@ -279,7 +320,15 @@ mod tests {
             "dns_resolver_max_samples" => Some(5),
             _ => None,
         });
-        assert_eq!(s, ResolverSettings { sample_validity: 1800, success_threshold: 25, min_samples: 8, max_samples: 64 });
+        assert_eq!(
+            s,
+            ResolverSettings {
+                sample_validity: 1800,
+                success_threshold: 25,
+                min_samples: 8,
+                max_samples: 64
+            }
+        );
     }
 
     #[test]

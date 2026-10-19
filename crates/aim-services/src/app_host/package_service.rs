@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception, Parcel, Reader};
+use aim_binder_host::parcel::{
+    BAD_VALUE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception, Parcel, Reader,
+};
 use aim_service_aidl::android_content_pm_ipackagemanager as pm;
 
 use super::AppHost;
@@ -30,8 +32,17 @@ pub struct PackageService {
 impl PackageService {
     pub fn new(host: Arc<AppHost>) -> Self {
         let writes = Writes::new(host.clone());
-        let installer = host.process.add_service(Arc::new(super::package_installer::PackageInstaller::new(host.clone())));
-        PackageService { host, installer, reported: Mutex::new(HashSet::new()), writes }
+        let installer =
+            host.process
+                .add_service(Arc::new(super::package_installer::PackageInstaller::new(
+                    host.clone(),
+                )));
+        PackageService {
+            host,
+            installer,
+            reported: Mutex::new(HashSet::new()),
+            writes,
+        }
     }
 
     fn unmodelled(&self, code: u32, reason: &'static str) -> Reply {
@@ -59,11 +70,18 @@ impl PackageService {
         let uid = call.sender_euid;
         Some(match call.code {
             pm::REGISTER_PACKAGE_MONITOR_CALLBACK => {
-                let Ok(a) = pm::RegisterPackageMonitorCallback::read(&mut call.data) else { return Some(Err(BAD_VALUE)) };
-                reply(self.writes.register_monitor(call, a.callback, a.user_id), pm::write_register_package_monitor_callback_reply)
+                let Ok(a) = pm::RegisterPackageMonitorCallback::read(&mut call.data) else {
+                    return Some(Err(BAD_VALUE));
+                };
+                reply(
+                    self.writes.register_monitor(call, a.callback, a.user_id),
+                    pm::write_register_package_monitor_callback_reply,
+                )
             }
             pm::UNREGISTER_PACKAGE_MONITOR_CALLBACK => {
-                let Ok(a) = pm::UnregisterPackageMonitorCallback::read(&mut call.data) else { return Some(Err(BAD_VALUE)) };
+                let Ok(a) = pm::UnregisterPackageMonitorCallback::read(&mut call.data) else {
+                    return Some(Err(BAD_VALUE));
+                };
                 self.writes.unregister_monitor(a.callback);
                 reply(Ok(()), pm::write_unregister_package_monitor_callback_reply)
             }
@@ -73,10 +91,15 @@ impl PackageService {
                     Err(status) => return Some(Err(status)),
                 };
                 let write = match call.code {
-                    pm::SET_COMPONENT_ENABLED_SETTING => pm::write_set_component_enabled_setting_reply,
+                    pm::SET_COMPONENT_ENABLED_SETTING => {
+                        pm::write_set_component_enabled_setting_reply
+                    }
                     _ => pm::write_set_application_enabled_setting_reply,
                 };
-                reply(setting.and_then(|s| self.writes.set_enabled(call, &[s])), write)
+                reply(
+                    setting.and_then(|s| self.writes.set_enabled(call, &[s])),
+                    write,
+                )
             }
             pm::SET_COMPONENT_ENABLED_SETTINGS => {
                 let batch = match Batch::read(uid as i32, &mut call.data) {
@@ -84,15 +107,20 @@ impl PackageService {
                     Err(status) => return Some(Err(status)),
                 };
                 // No settings: the user does not exist.
-                let result = batch.settings(query).and_then(|settings| match settings.is_empty() {
-                    true => Ok(()),
-                    false => self.writes.set_enabled(call, &settings),
-                });
+                let result = batch
+                    .settings(query)
+                    .and_then(|settings| match settings.is_empty() {
+                        true => Ok(()),
+                        false => self.writes.set_enabled(call, &settings),
+                    });
                 reply(result, pm::write_set_component_enabled_settings_reply)
             }
             // One-way; ART Service's `DexUseManagerLocal` records the use.
             pm::NOTIFY_DEX_LOAD => reply(
-                Err(self.host.unimplemented_named("package", "notifyDexLoad: ART Service's dex use (#1425)")),
+                Err(self.host.unimplemented_named(
+                    "package",
+                    "notifyDexLoad: ART Service's dex use (#1425)",
+                )),
                 |_| {},
             ),
             _ => return None,
@@ -166,12 +194,18 @@ impl Service for PackageService {
             let request = crate::package::query::checksums::Request::read(&mut call.data)?;
             let mut reply = Parcel::new();
             match request.prepare(&query) {
-                Err(crate::package::apps_filter::NotModelled(reason)) => return self.unmodelled(call.code, reason),
+                Err(crate::package::apps_filter::NotModelled(reason)) => {
+                    return self.unmodelled(call.code, reason);
+                }
                 Ok(Err(e)) => reply.write_exception(&e),
                 Ok(Ok(prepared)) => match super::package_checksums::request(&self.host, prepared) {
                     Ok(()) => pm::write_request_package_checksums_reply(&mut reply),
-                    Err(super::package_checksums::Refused::NotModelled(reason)) => return self.unmodelled(call.code, reason),
-                    Err(super::package_checksums::Refused::Exception(e)) => reply.write_exception(&e),
+                    Err(super::package_checksums::Refused::NotModelled(reason)) => {
+                        return self.unmodelled(call.code, reason);
+                    }
+                    Err(super::package_checksums::Refused::Exception(e)) => {
+                        reply.write_exception(&e)
+                    }
                 },
             }
             return Ok(reply);

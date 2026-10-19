@@ -33,7 +33,10 @@ const ATTR_NAME: &str = "grammatical_gender";
 /// `<grammatical_inflection>`, or not specified without one.
 fn gender_from_xml(element: &aim_android_xml::Element) -> Result<Option<i32>, String> {
     if element.name == TAG_GRAMMATICAL_INFLECTION {
-        return element.int(ATTR_NAME)?.map(Some).ok_or_else(|| format!("missing {ATTR_NAME}"));
+        return element
+            .int(ATTR_NAME)?
+            .map(Some)
+            .ok_or_else(|| format!("missing {ATTR_NAME}"));
     }
     for child in element.children() {
         if let Some(gender) = gender_from_xml(child)? {
@@ -51,17 +54,25 @@ pub struct GrammaticalInflection {
 
 impl GrammaticalInflection {
     pub fn new(host: Arc<AppHost>) -> Self {
-        GrammaticalInflection { host, cache: Default::default() }
+        GrammaticalInflection {
+            host,
+            cache: Default::default(),
+        }
     }
 
     fn unimplemented(&self, what: &str) -> Exception {
-        self.host.unimplemented_named("grammatical_inflection", &format!("{what} (#1758)"))
+        self.host
+            .unimplemented_named("grammatical_inflection", &format!("{what} (#1758)"))
     }
 
     /// `checkSystemTermsOfAddressIsEnabled`.
     fn enabled(&self) -> Result<bool, Exception> {
         let (state, _) = self.host.packages()?;
-        Ok(state.system.flags.iter().any(|(n, on)| n == SYSTEM_TERMS_OF_ADDRESS_ENABLED && *on))
+        Ok(state
+            .system
+            .flags
+            .iter()
+            .any(|(n, on)| n == SYSTEM_TERMS_OF_ADDRESS_ENABLED && *on))
     }
 
     /// `checkSystemGrammaticalGenderPermission`.
@@ -76,16 +87,23 @@ impl GrammaticalInflection {
         if let Some(&gender) = cache.get(&user) {
             return Ok(gender);
         }
-        let file = self.host.data()?.join(format!("system_ce/{user}/{TAG_GRAMMATICAL_INFLECTION}/user_settings.xml"));
+        let file = self.host.data()?.join(format!(
+            "system_ce/{user}/{TAG_GRAMMATICAL_INFLECTION}/user_settings.xml"
+        ));
         let read = match super::device_policy::read_atomic_bytes(&file) {
             Ok(None) => return Ok(NOT_SPECIFIED),
-            Ok(Some(bytes)) => aim_android_xml::read_next(&bytes).and_then(|root| gender_from_xml(&root)),
+            Ok(Some(bytes)) => {
+                aim_android_xml::read_next(&bytes).and_then(|root| gender_from_xml(&root))
+            }
             Err(e) => Err(e),
         };
         let gender = match read {
             Ok(gender) => gender.unwrap_or(NOT_SPECIFIED),
             Err(e) => {
-                eprintln!("app host: grammatical_inflection: Failed to parse XML configuration from {}: {e}", file.display());
+                eprintln!(
+                    "app host: grammatical_inflection: Failed to parse XML configuration from {}: {e}",
+                    file.display()
+                );
                 return Ok(NOT_SPECIFIED);
             }
         };
@@ -98,7 +116,12 @@ impl GrammaticalInflection {
 
     /// `enforceCallerPermissions`.
     fn enforce_caller(&self, uid: i32) -> Result<(), Exception> {
-        if !matches!(uid, 0 | 1000 | 2000) && self.host.check_permission(Some(CHANGE_CONFIGURATION), uid)? != 0 {
+        if !matches!(uid, 0 | 1000 | 2000)
+            && self
+                .host
+                .check_permission(Some(CHANGE_CONFIGURATION), uid)?
+                != 0
+        {
             return Err(Exception::security(format!(
                 "Caller must be system, shell, root or hold CHANGE_CONFIGURATION permission.: Neither user {uid} nor current process has {CHANGE_CONFIGURATION}."
             )));
@@ -117,9 +140,14 @@ impl Service for GrammaticalInflection {
         let mut p = Parcel::new();
         let result = match call.code {
             gi::GET_SYSTEM_GRAMMATICAL_GENDER => {
-                let a = gi::GetSystemGrammaticalGender::<AttributionSourceState>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    gi::GetSystemGrammaticalGender::<AttributionSourceState>::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
                 (|| {
-                    let source = a.attribution_source.as_ref().ok_or_else(|| Exception::new(EX_NULL_POINTER, "attributionSource"))?;
+                    let source = a
+                        .attribution_source
+                        .as_ref()
+                        .ok_or_else(|| Exception::new(EX_NULL_POINTER, "attributionSource"))?;
                     if !self.permitted(source)? {
                         return Err(Exception::security(format!(
                             "AttributionSource: AttributionSource {{ uid = {}, packageName = {} }} does not have READ_SYSTEM_GRAMMATICAL_GENDER permission.",
@@ -127,22 +155,37 @@ impl Service for GrammaticalInflection {
                             source.package.as_deref().unwrap_or("null")
                         )));
                     }
-                    let gender = if self.enabled()? { self.system_gender(a.user_id)? } else { NOT_SPECIFIED };
+                    let gender = if self.enabled()? {
+                        self.system_gender(a.user_id)?
+                    } else {
+                        NOT_SPECIFIED
+                    };
                     gi::write_get_system_grammatical_gender_reply(&mut p, gender);
                     Ok(())
                 })()
             }
             gi::PEEK_SYSTEM_GRAMMATICAL_GENDER_BY_USER_ID => {
-                let a = gi::PeekSystemGrammaticalGenderByUserId::<AttributionSourceState>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = gi::PeekSystemGrammaticalGenderByUserId::<AttributionSourceState>::read(
+                    &mut call.data,
+                )
+                .map_err(|_| BAD_VALUE)?;
                 (|| {
-                    let source = a.attribution_source.as_ref().ok_or_else(|| Exception::new(EX_NULL_POINTER, "attributionSource"))?;
-                    let gender = if self.enabled()? && self.permitted(source)? { self.system_gender(a.user_id)? } else { NOT_SPECIFIED };
+                    let source = a
+                        .attribution_source
+                        .as_ref()
+                        .ok_or_else(|| Exception::new(EX_NULL_POINTER, "attributionSource"))?;
+                    let gender = if self.enabled()? && self.permitted(source)? {
+                        self.system_gender(a.user_id)?
+                    } else {
+                        NOT_SPECIFIED
+                    };
                     gi::write_peek_system_grammatical_gender_by_user_id_reply(&mut p, gender);
                     Ok(())
                 })()
             }
             gi::SET_SYSTEM_WIDE_GRAMMATICAL_GENDER => {
-                let a = gi::SetSystemWideGrammaticalGender::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = gi::SetSystemWideGrammaticalGender::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
                     self.enforce_caller(uid)?;
                     if !self.enabled()? {
@@ -156,7 +199,10 @@ impl Service for GrammaticalInflection {
                 })()
             }
             code => {
-                let name = gi::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
+                let name = gi::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
                 Err(self.unimplemented(name))
             }
         };
@@ -172,9 +218,16 @@ mod tests {
     /// attribute, not specified without one, an error without the attribute.
     #[test]
     fn genders_are_read_as_the_service_parses_them() {
-        let gender = |xml: &str| gender_from_xml(&aim_android_xml::read_next(xml.as_bytes()).unwrap());
-        assert_eq!(gender(r#"<grammatical_inflection grammatical_gender="2" />"#), Ok(Some(2)));
-        assert_eq!(gender(r#"<a><b /><grammatical_inflection grammatical_gender="3" /></a>"#), Ok(Some(3)));
+        let gender =
+            |xml: &str| gender_from_xml(&aim_android_xml::read_next(xml.as_bytes()).unwrap());
+        assert_eq!(
+            gender(r#"<grammatical_inflection grammatical_gender="2" />"#),
+            Ok(Some(2))
+        );
+        assert_eq!(
+            gender(r#"<a><b /><grammatical_inflection grammatical_gender="3" /></a>"#),
+            Ok(Some(3))
+        );
         assert_eq!(gender("<a />"), Ok(None));
         assert!(gender("<grammatical_inflection />").is_err());
     }

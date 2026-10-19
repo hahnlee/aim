@@ -87,7 +87,9 @@ impl CompatConfig {
     /// overrides (`CompatChange.loadOverrides`); a file that does not
     /// parse is skipped whole.
     fn load_overrides(&mut self, file: &Path) {
-        let Ok(bytes) = std::fs::read(file) else { return };
+        let Ok(bytes) = std::fs::read(file) else {
+            return;
+        };
         match parse_overrides(&bytes) {
             Ok(overrides) => {
                 for (id, deferred, validated, raw) in overrides {
@@ -163,10 +165,12 @@ impl CompatConfig {
     /// `willChangeBeEnabled`: change `id` for `package` once installed,
     /// by an override for all its versions, else its default.
     pub fn will_be_enabled(&self, id: i64, package: &str) -> bool {
-        self.changes.get(&id).is_none_or(|c| match c.raw.get(package) {
-            Some(&(i64::MIN, i64::MAX, enabled)) => enabled,
-            _ => !c.disabled,
-        })
+        self.changes
+            .get(&id)
+            .is_none_or(|c| match c.raw.get(package) {
+                Some(&(i64::MIN, i64::MAX, enabled)) => enabled,
+                _ => !c.disabled,
+            })
     }
 
     /// Change `id`'s value for a uid of no package
@@ -201,27 +205,48 @@ impl CompatConfig {
 }
 
 /// A change's overrides in a file: its deferred, validated and raw ones.
-type ChangeOverrides = (i64, Vec<(String, bool)>, Vec<(String, bool)>, Vec<(String, (i64, i64, bool))>);
+type ChangeOverrides = (
+    i64,
+    Vec<(String, bool)>,
+    Vec<(String, bool)>,
+    Vec<(String, (i64, i64, bool))>,
+);
 
 /// `com.android.server.compat.overrides.XmlParser.read`: the
 /// `<change-overrides>` of `<overrides>`.
 fn parse_overrides(bytes: &[u8]) -> Result<Vec<ChangeOverrides>, String> {
     let root = aim_android_xml::read(bytes)?;
     let value = |e: &aim_android_xml::Element| -> Result<(String, bool), String> {
-        let package = e.string("packageName").ok_or("an override without a packageName")?;
+        let package = e
+            .string("packageName")
+            .ok_or("an override without a packageName")?;
         // xsdc's reader takes a boolean as `Boolean.parseBoolean` does.
-        let enabled = e.string("enabled").ok_or("an override without enabled")?.eq_ignore_ascii_case("true");
+        let enabled = e
+            .string("enabled")
+            .ok_or("an override without enabled")?
+            .eq_ignore_ascii_case("true");
         Ok((package.to_string(), enabled))
     };
     let mut changes = Vec::new();
     for change in root.children().filter(|c| c.name == "change-overrides") {
-        let id = change.long("changeId")?.ok_or("change-overrides without a changeId")?;
+        let id = change
+            .long("changeId")?
+            .ok_or("change-overrides without a changeId")?;
         let values = |name: &str| -> Result<Vec<(String, bool)>, String> {
-            change.children().filter(|e| e.name == name).flat_map(|e| e.children().filter(|v| v.name == "override-value")).map(value).collect()
+            change
+                .children()
+                .filter(|e| e.name == name)
+                .flat_map(|e| e.children().filter(|v| v.name == "override-value"))
+                .map(value)
+                .collect()
         };
         let (deferred, validated) = (values("deferred")?, values("validated")?);
         let mut raw = Vec::new();
-        for v in change.children().filter(|e| e.name == "raw").flat_map(|e| e.children().filter(|v| v.name == "raw-override-value")) {
+        for v in change
+            .children()
+            .filter(|e| e.name == "raw")
+            .flat_map(|e| e.children().filter(|v| v.name == "raw-override-value"))
+        {
             let (package, enabled) = value(v)?;
             let min = v.long("minVersionCode")?.unwrap_or(i64::MIN);
             let max = v.long("maxVersionCode")?.unwrap_or(i64::MAX);
@@ -285,7 +310,11 @@ mod tests {
             let change = c.changes.get_mut(&id).unwrap();
             assert!(deferred.is_empty());
             change.evaluated.extend(validated.iter().cloned());
-            change.raw.extend(validated.into_iter().map(|(p, e)| (p, (i64::MIN, i64::MAX, e))));
+            change.raw.extend(
+                validated
+                    .into_iter()
+                    .map(|(p, e)| (p, (i64::MIN, i64::MAX, e))),
+            );
             change.raw.extend(raw);
         }
         assert!(c.is_enabled(1, Some("p"), 29));

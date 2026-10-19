@@ -67,11 +67,15 @@ struct Watch {
     entries: HashMap<Vec<u8>, i32>,
 }
 
-impl Drop for Watch{fn drop(&mut self){
-    for fd in std::iter::once(self.fd).chain(self.entries.values().copied()){
-        if let Err(error)=fdtab::close_fork_private(fd){crate::diag!("inotify private watch close: errno {error}");}
+impl Drop for Watch {
+    fn drop(&mut self) {
+        for fd in std::iter::once(self.fd).chain(self.entries.values().copied()) {
+            if let Err(error) = fdtab::close_fork_private(fd) {
+                crate::diag!("inotify private watch close: errno {error}");
+            }
+        }
     }
-}}
+}
 
 #[derive(Default)]
 struct State {
@@ -164,7 +168,9 @@ fn sync_entries(kq: i32, wd: i32, w: &mut Watch) {
         let ino = (unsafe { libc::fstat(*fd, &mut st) } == 0).then_some(st.st_ino);
         let keep = ino.is_some() && files.get(name).copied() == ino;
         if !keep {
-            if let Err(error)=fdtab::close_fork_private(*fd){crate::diag!("inotify private entry close: errno {error}");}
+            if let Err(error) = fdtab::close_fork_private(*fd) {
+                crate::diag!("inotify private entry close: errno {error}");
+            }
         }
         keep
     });
@@ -238,7 +244,10 @@ pub fn inotify_init1(a: [u64; 6]) -> i64 {
         })),
     );
     if let Err(error) = fdtab::publish_guest(kq) {
-        fdtab::on_close(kq); unsafe { libc::close(kq); }
+        fdtab::on_close(kq);
+        unsafe {
+            libc::close(kq);
+        }
         return -(error as i64);
     }
     kq as i64
@@ -263,8 +272,11 @@ pub fn inotify_add_watch(a: [u64; 6]) -> i64 {
         return -(EINVAL as i64);
     }
     // SAFETY: guest path.
-    let owned_path=match guest_cstr(a[1]){Ok(bytes)=>bytes,Err(error)=>return -(error as i64)};
-    let path=owned_path.as_slice();
+    let owned_path = match guest_cstr(a[1]) {
+        Ok(bytes) => bytes,
+        Err(error) => return -(error as i64),
+    };
+    let path = owned_path.as_slice();
     let r = match vfs::resolve(vfs::LINUX_AT_FDCWD, path, mask & IN_DONT_FOLLOW == 0) {
         Ok(r) => r,
         Err(e) => return -(e as i64),
@@ -563,7 +575,8 @@ pub(super) fn save(ino: &Inotify, w: &mut super::fork_state::Writer) {
     let s = ino.state.lock().unwrap();
     w.seq(s.watches.iter(), |w, (wd, x)| {
         w.i32(*wd);
-        w.retain_private(x.fd);w.i32(x.fd);
+        w.retain_private(x.fd);
+        w.i32(x.fd);
         w.u64(x.dev_ino.0);
         w.u64(x.dev_ino.1);
         w.u32(x.mask);
@@ -579,7 +592,8 @@ pub(super) fn save(ino: &Inotify, w: &mut super::fork_state::Writer) {
         });
         w.seq(x.entries.iter(), |w, (name, efd)| {
             w.bytes(name);
-            w.retain_private(*efd);w.i32(*efd);
+            w.retain_private(*efd);
+            w.i32(*efd);
         });
     });
     w.i32(s.next_wd);

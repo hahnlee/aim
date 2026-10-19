@@ -50,7 +50,9 @@ impl UsbService {
     /// `@EnforcePermission(MANAGE_USB)`.
     fn enforce_manage(&self, uid: i32) -> Result<(), Exception> {
         if self.host.check_permission(Some(MANAGE_USB), uid)? != 0 {
-            return Err(Exception::security(format!("Access denied, requires: {MANAGE_USB}")));
+            return Err(Exception::security(format!(
+                "Access denied, requires: {MANAGE_USB}"
+            )));
         }
         Ok(())
     }
@@ -77,7 +79,12 @@ impl Service for UsbService {
         let result = match call.code {
             usb::GET_DEVICE_LIST => {
                 usb::GetDeviceList::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                usb::write_get_device_list_reply(&mut p, &usb::GetDeviceListReply { devices: Some(NoDevices) });
+                usb::write_get_device_list_reply(
+                    &mut p,
+                    &usb::GetDeviceListReply {
+                        devices: Some(NoDevices),
+                    },
+                );
                 Ok(())
             }
             usb::GET_CURRENT_ACCESSORY => {
@@ -87,36 +94,50 @@ impl Service for UsbService {
             }
             usb::IS_UVC_GADGET_SUPPORT_ENABLED => {
                 usb::IsUvcGadgetSupportEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let enabled = system_boolean(self.host.property("ro.usb.uvc.enabled").as_deref(), false);
+                let enabled =
+                    system_boolean(self.host.property("ro.usb.uvc.enabled").as_deref(), false);
                 usb::write_is_uvc_gadget_support_enabled_reply(&mut p, enabled);
                 Ok(())
             }
             // `isFunctionEnabled` asks `getCurrentFunctions` of the same
             // caller.
-            usb::IS_FUNCTION_ENABLED | usb::GET_CURRENT_FUNCTIONS | usb::GET_SCREEN_UNLOCKED_FUNCTIONS => {
+            usb::IS_FUNCTION_ENABLED
+            | usb::GET_CURRENT_FUNCTIONS
+            | usb::GET_SCREEN_UNLOCKED_FUNCTIONS => {
                 self.enforce_manage(uid).and(Err(Self::no_device_manager()))
             }
-            usb::GET_GADGET_HAL_VERSION | usb::GET_CURRENT_USB_SPEED => {
-                self.enforce_manage(uid).and(Err(Self::device_manager_null()))
-            }
+            usb::GET_GADGET_HAL_VERSION | usb::GET_CURRENT_USB_SPEED => self
+                .enforce_manage(uid)
+                .and(Err(Self::device_manager_null())),
             usb::GET_USB_HAL_VERSION => {
                 usb::GetUsbHalVersion::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.enforce_manage(uid).map(|()| usb::write_get_usb_hal_version_reply(&mut p, USB_HAL_NOT_SUPPORTED))
+                self.enforce_manage(uid)
+                    .map(|()| usb::write_get_usb_hal_version_reply(&mut p, USB_HAL_NOT_SUPPORTED))
             }
             usb::GET_PORTS => {
                 usb::GetPorts::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.enforce_manage(uid).map(|()| usb::write_get_ports_reply::<None_>(&mut p, Some(&[])))
+                self.enforce_manage(uid)
+                    .map(|()| usb::write_get_ports_reply::<None_>(&mut p, Some(&[])))
             }
             usb::GET_PORT_STATUS => {
                 let a = usb::GetPortStatus::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 if a.port_id.is_none() {
-                    return reply(Err(Exception::new(EX_NULL_POINTER, "portId must not be null")));
+                    return reply(Err(Exception::new(
+                        EX_NULL_POINTER,
+                        "portId must not be null",
+                    )));
                 }
-                self.enforce_manage(uid).map(|()| usb::write_get_port_status_reply::<None_>(&mut p, None))
+                self.enforce_manage(uid)
+                    .map(|()| usb::write_get_port_status_reply::<None_>(&mut p, None))
             }
             code => {
-                let name = usb::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
-                Err(self.host.unimplemented_named("usb", &format!("{name} (#1783)")))
+                let name = usb::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
+                Err(self
+                    .host
+                    .unimplemented_named("usb", &format!("{name} (#1783)")))
             }
         };
         reply(result.map(|()| p))

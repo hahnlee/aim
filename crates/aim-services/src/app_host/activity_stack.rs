@@ -102,7 +102,15 @@ pub struct Activity {
 
 impl Activity {
     /// A new opaque activity, not yet launched.
-    pub fn new(token: u64, task: i32, start_seq: i64, component: &str, launch_mode: i32, user: u32, result_to: Option<u64>) -> Activity {
+    pub fn new(
+        token: u64,
+        task: i32,
+        start_seq: i64,
+        component: &str,
+        launch_mode: i32,
+        user: u32,
+        result_to: Option<u64>,
+    ) -> Activity {
         Activity {
             token,
             task,
@@ -167,25 +175,45 @@ pub enum Command {
     /// `LaunchActivityItem` and `ResumeActivityItem`.
     Launch(u64),
     /// `PauseActivityItem`: finishing, user leaving.
-    Pause { token: u64, finishing: bool, user_leaving: bool },
+    Pause {
+        token: u64,
+        finishing: bool,
+        user_leaving: bool,
+    },
     /// `ActivityResultItem`, `NewIntentItem` and `ResumeActivityItem`.
-    Resume { token: u64, results: Vec<Payload>, new_intents: Vec<Payload> },
+    Resume {
+        token: u64,
+        results: Vec<Payload>,
+        new_intents: Vec<Payload>,
+    },
     /// `NewIntentItem` to a resumed activity.
-    NewIntent { token: u64, intents: Vec<Payload> },
+    NewIntent {
+        token: u64,
+        intents: Vec<Payload>,
+    },
     /// `ActivityResultItem` to a resumed activity.
-    Result { token: u64, results: Vec<Payload> },
+    Result {
+        token: u64,
+        results: Vec<Payload>,
+    },
     /// `StartActivityItem`: a stopped activity visible again, not resumed.
     Start(u64),
     Stop(u64),
     /// `DestroyActivityItem`, finishing.
     Destroy(u64),
-    TopResumed { token: u64, on_top: bool },
+    TopResumed {
+        token: u64,
+        on_top: bool,
+    },
     /// The top resumed activity's loss is given up on after
     /// `TOP_RESUMED_STATE_LOSS_TIMEOUT` unless it reported it: the loss of
     /// this number.
     LossTimeout(u64),
     /// Its windows shown or hidden (`dispatchAppVisibility`).
-    Visible { token: u64, visible: bool },
+    Visible {
+        token: u64,
+        visible: bool,
+    },
     /// The task is in front and focused.
     Front(i32),
     /// A task without activities, gone.
@@ -281,7 +309,9 @@ impl Stack {
     /// starts with a forwarded result (`sourceRecord.resultTo = null`),
     /// if that target is still in a task, and its result.
     pub fn forward_result(&mut self, token: u64) -> (Option<u64>, Option<Payload>) {
-        let Some(a) = self.get_mut(token) else { return (None, None) };
+        let Some(a) = self.get_mut(token) else {
+            return (None, None);
+        };
         let (to, result) = (a.result_to.take(), a.result);
         (to.filter(|t| self.get(*t).is_some()), result)
     }
@@ -296,18 +326,27 @@ impl Stack {
 
     /// The top activity of `task` that is not finishing.
     pub fn top(&self, task: i32) -> Option<&Activity> {
-        self.activities.iter().rev().find(|a| a.task == task && !a.finishing)
+        self.activities
+            .iter()
+            .rev()
+            .find(|a| a.task == task && !a.finishing)
     }
 
     /// The root activity of `task`, not finishing.
     pub fn root(&self, task: i32) -> Option<&Activity> {
-        self.activities.iter().find(|a| a.task == task && !a.finishing)
+        self.activities
+            .iter()
+            .find(|a| a.task == task && !a.finishing)
     }
 
     /// The focused task: the front one with a running activity
     /// (`getTopDisplayFocusedRootTask`).
     pub fn focused(&self) -> Option<i32> {
-        self.tasks.iter().rev().map(|t| t.id).find(|&t| self.top(t).is_some())
+        self.tasks
+            .iter()
+            .rev()
+            .map(|t| t.id)
+            .find(|&t| self.top(t).is_some())
     }
 
     /// The focused task's top activity (`topRunningActivity`).
@@ -337,14 +376,21 @@ impl Stack {
             }
             translucent = true;
         }
-        if translucent { Visibility::BehindTranslucent } else { Visibility::Visible }
+        if translucent {
+            Visibility::BehindTranslucent
+        } else {
+            Visibility::Visible
+        }
     }
 
     /// `TaskFragment.isTranslucent` of a visible task: none of its visible
     /// activities occludes it, so none that is not finishing does (its top
     /// one that does is visible).
     pub fn translucent(&self, task: i32) -> bool {
-        !self.activities.iter().any(|a| a.task == task && !a.finishing && a.occludes_parent)
+        !self
+            .activities
+            .iter()
+            .any(|a| a.task == task && !a.finishing && a.occludes_parent)
     }
 
     /// Whether `a` is visible (`EnsureActivitiesVisibleHelper`): in a
@@ -353,7 +399,12 @@ impl Stack {
         if a.finishing || self.visibility(a.task) == Visibility::Invisible {
             return false;
         }
-        for above in self.activities.iter().rev().filter(|b| b.task == a.task && !b.finishing) {
+        for above in self
+            .activities
+            .iter()
+            .rev()
+            .filter(|b| b.task == a.task && !b.finishing)
+        {
             if above.token == a.token {
                 return true;
             }
@@ -367,7 +418,8 @@ impl Stack {
     /// Whether `a` is to be resumed: the top of a visible task
     /// (`shouldResumeActivity`).
     fn resumable(&self, a: &Activity) -> bool {
-        self.visibility(a.task) == Visibility::Visible && self.top(a.task).is_some_and(|t| t.token == a.token)
+        self.visibility(a.task) == Visibility::Visible
+            && self.top(a.task).is_some_and(|t| t.token == a.token)
     }
 
     /// `FindTaskResult`: the top activity of the front task of
@@ -375,16 +427,33 @@ impl Stack {
     /// document) of the front task of `affinity`, skipping tasks topped by
     /// a `singleInstance` activity. `document` is the data of a start that
     /// is a document (`Intent.isDocument`), none of another.
-    pub fn find_task(&self, component: &str, affinity: Option<&str>, user: u32, document: Option<Option<&Uri>>) -> Option<u64> {
+    pub fn find_task(
+        &self,
+        component: &str,
+        affinity: Option<&str>,
+        user: u32,
+        document: Option<Option<&Uri>>,
+    ) -> Option<u64> {
         let mut candidate = None;
         for task in self.tasks.iter().rev().filter(|t| t.user == user) {
-            let Some(top) = self.top(task.id).filter(|a| a.user == user && a.launch_mode != LAUNCH_SINGLE_INSTANCE) else { continue };
+            let Some(top) = self
+                .top(task.id)
+                .filter(|a| a.user == user && a.launch_mode != LAUNCH_SINGLE_INSTANCE)
+            else {
+                continue;
+            };
             // The task's document data, if its intent is a document.
-            let task_document = (task.intent.flags & FLAG_ACTIVITY_NEW_DOCUMENT != 0).then_some(task.intent.data.as_ref());
+            let task_document = (task.intent.flags & FLAG_ACTIVITY_NEW_DOCUMENT != 0)
+                .then_some(task.intent.data.as_ref());
             if task.real_activity == component && document.flatten() == task_document.flatten() {
                 return Some(top.token);
             }
-            if document.is_none() && task_document.is_none() && candidate.is_none() && task.affinity.is_some() && task.affinity.as_deref() == affinity {
+            if document.is_none()
+                && task_document.is_none()
+                && candidate.is_none()
+                && task.affinity.is_some()
+                && task.affinity.as_deref() == affinity
+            {
                 candidate = Some(top.token);
             }
         }
@@ -393,12 +462,18 @@ impl Stack {
 
     /// `findActivity` of `component`, not comparing intents.
     fn find_activity(&self, component: &str, user: u32) -> Option<&Activity> {
-        self.activities.iter().rev().find(|a| !a.finishing && a.user == user && a.component == component)
+        self.activities
+            .iter()
+            .rev()
+            .find(|a| !a.finishing && a.user == user && a.component == component)
     }
 
     /// `Task.findActivityInHistory`.
     fn find_in_history(&self, task: i32, component: &str, user: u32) -> Option<&Activity> {
-        self.activities.iter().rev().find(|a| a.task == task && !a.finishing && a.user == user && a.component == component)
+        self.activities
+            .iter()
+            .rev()
+            .find(|a| a.task == task && !a.finishing && a.user == user && a.component == component)
     }
 
     /// `startActivityInner`'s decision for `s`, or what of it the app host
@@ -411,7 +486,10 @@ impl Stack {
         if mode == LAUNCH_SINGLE_INSTANCE_PER_TASK {
             flags |= FLAG_ACTIVITY_NEW_TASK;
         }
-        let mut d = Decision { result_to: s.result_to, ..Default::default() };
+        let mut d = Decision {
+            result_to: s.result_to,
+            ..Default::default()
+        };
         if d.result_to.is_some() && flags & FLAG_ACTIVITY_NEW_TASK != 0 {
             d.cancel_result = true;
             d.result_to = None;
@@ -425,7 +503,9 @@ impl Stack {
             flags |= FLAG_ACTIVITY_MULTIPLE_TASK;
         }
         let source = s.source.and_then(|t| self.get(t));
-        let not_top = s.source.filter(|_| flags & FLAG_ACTIVITY_PREVIOUS_IS_TOP != 0);
+        let not_top = s
+            .source
+            .filter(|_| flags & FLAG_ACTIVITY_PREVIOUS_IS_TOP != 0);
         // `computeLaunchingTaskFlags`.
         if source.is_none_or(|src| src.launch_mode == LAUNCH_SINGLE_INSTANCE) || single {
             flags |= FLAG_ACTIVITY_NEW_TASK;
@@ -438,30 +518,60 @@ impl Stack {
             }
         }
         // `resolveReusableTask`.
-        let put = ((flags & FLAG_ACTIVITY_NEW_TASK != 0 && flags & FLAG_ACTIVITY_MULTIPLE_TASK == 0) || single) && d.result_to.is_none();
+        let put = ((flags & FLAG_ACTIVITY_NEW_TASK != 0
+            && flags & FLAG_ACTIVITY_MULTIPLE_TASK == 0)
+            || single)
+            && d.result_to.is_none();
         let mut reused = match put {
             false => None,
-            true if mode == LAUNCH_SINGLE_INSTANCE => self.find_activity(s.component, s.user).map(|a| a.task),
+            true if mode == LAUNCH_SINGLE_INSTANCE => {
+                self.find_activity(s.component, s.user).map(|a| a.task)
+            }
             true => {
                 // `FindTaskResult` of the start's intent, with its flags.
-                let document = (flags & FLAG_ACTIVITY_NEW_DOCUMENT != 0).then_some(s.intent.data.as_ref());
-                self.find_task(s.component, s.affinity, s.user, document).and_then(|t| self.get(t)).map(|a| a.task)
+                let document =
+                    (flags & FLAG_ACTIVITY_NEW_DOCUMENT != 0).then_some(s.intent.data.as_ref());
+                self.find_task(s.component, s.affinity, s.user, document)
+                    .and_then(|t| self.get(t))
+                    .map(|a| a.task)
             }
         };
-        if mode == LAUNCH_SINGLE_INSTANCE_PER_TASK && reused.and_then(|t| self.root(t)).is_some_and(|r| r.component != s.component) {
+        if mode == LAUNCH_SINGLE_INSTANCE_PER_TASK
+            && reused
+                .and_then(|t| self.root(t))
+                .is_some_and(|r| r.component != s.component)
+        {
             reused = None;
         }
         // `computeTargetTask`.
-        let target = reused.or_else(|| if d.result_to.is_none() && flags & FLAG_ACTIVITY_NEW_TASK != 0 { None } else { source.map(|a| a.task) });
+        let target = reused.or_else(|| {
+            if d.result_to.is_none() && flags & FLAG_ACTIVITY_NEW_TASK != 0 {
+                None
+            } else {
+                source.map(|a| a.task)
+            }
+        });
         d.outcome = Outcome::New(target);
         if let Some(task) = target
             && let Some(top) = self.top(task)
         {
-            if mode == LAUNCH_SINGLE_INSTANCE && source.is_some_and(|a| a.task == task) && self.find_activity(s.component, s.user).is_some_and(|a| a.task != task) {
-                return Err("a singleInstance activity in its caller's task while another instance runs");
+            if mode == LAUNCH_SINGLE_INSTANCE
+                && source.is_some_and(|a| a.task == task)
+                && self
+                    .find_activity(s.component, s.user)
+                    .is_some_and(|a| a.task != task)
+            {
+                return Err(
+                    "a singleInstance activity in its caller's task while another instance runs",
+                );
             }
             // `setTargetRootTaskIfNeeded`.
-            let current = self.focused().and_then(|f| self.activities.iter().rev().find(|a| a.task == f && !a.finishing && Some(a.token) != not_top));
+            let current = self.focused().and_then(|f| {
+                self.activities
+                    .iter()
+                    .rev()
+                    .find(|a| a.task == f && !a.finishing && Some(a.token) != not_top)
+            });
             let mut moved_to_front = false;
             if current.is_none_or(|a| a.task != task) || self.focused() != Some(task) {
                 flags |= FLAG_ACTIVITY_BROUGHT_TO_FRONT;
@@ -477,21 +587,43 @@ impl Stack {
             let task_record = self.task(task).ok_or("a task without its record")?;
             let mut deliver = None;
             let mut adding = false;
-            if flags & (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK) == FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK {
-                d.clear = self.activities.iter().rev().filter(|a| a.task == task && !a.finishing).map(|a| a.token).collect();
+            if flags & (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK)
+                == FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK
+            {
+                d.clear = self
+                    .activities
+                    .iter()
+                    .rev()
+                    .filter(|a| a.task == task && !a.finishing)
+                    .map(|a| a.token)
+                    .collect();
                 d.set_intent = true;
                 adding = true;
-            } else if flags & FLAG_ACTIVITY_CLEAR_TOP != 0 || single || mode == LAUNCH_SINGLE_INSTANCE_PER_TASK {
+            } else if flags & FLAG_ACTIVITY_CLEAR_TOP != 0
+                || single
+                || mode == LAUNCH_SINGLE_INSTANCE_PER_TASK
+            {
                 match self.find_in_history(task, s.component, s.user) {
                     Some(r) => {
-                        let at = self.activities.iter().position(|a| a.token == r.token).unwrap();
-                        d.clear = self.activities[at + 1..].iter().rev().filter(|a| a.task == task && !a.finishing).map(|a| a.token).collect();
+                        let at = self
+                            .activities
+                            .iter()
+                            .position(|a| a.token == r.token)
+                            .unwrap();
+                        d.clear = self.activities[at + 1..]
+                            .iter()
+                            .rev()
+                            .filter(|a| a.task == task && !a.finishing)
+                            .map(|a| a.token)
+                            .collect();
                         // A standard activity is made anew.
-                        if r.launch_mode == LAUNCH_MULTIPLE && flags & FLAG_ACTIVITY_SINGLE_TOP == 0 {
+                        if r.launch_mode == LAUNCH_MULTIPLE && flags & FLAG_ACTIVITY_SINGLE_TOP == 0
+                        {
                             d.clear.push(r.token);
                             adding = true;
                         } else {
-                            d.set_intent = self.root(task).is_some_and(|root| root.token == r.token);
+                            d.set_intent =
+                                self.root(task).is_some_and(|root| root.token == r.token);
                             deliver = Some(r.token);
                         }
                     }
@@ -506,17 +638,25 @@ impl Stack {
                     None => adding = true,
                 }
             } else if s.component == task_record.real_activity {
-                if (flags & FLAG_ACTIVITY_SINGLE_TOP != 0 || mode == LAUNCH_SINGLE_TOP) && top.component == s.component && d.result_to.is_none() {
+                if (flags & FLAG_ACTIVITY_SINGLE_TOP != 0 || mode == LAUNCH_SINGLE_TOP)
+                    && top.component == s.component
+                    && d.result_to.is_none()
+                {
                     d.set_intent = self.root(task).is_some_and(|root| root.token == top.token);
                     deliver = Some(top.token);
-                } else if !same_intent_filter(&task_record.intent, s.intent) || reused_top.is_none() {
+                } else if !same_intent_filter(&task_record.intent, s.intent) || reused_top.is_none()
+                {
                     adding = true;
                 }
             } else {
                 adding = true;
             }
             if !adding {
-                let code = if moved_to_front { START_TASK_TO_FRONT } else { START_DELIVERED_TO_TOP };
+                let code = if moved_to_front {
+                    START_TASK_TO_FRONT
+                } else {
+                    START_DELIVERED_TO_TOP
+                };
                 d.outcome = deliver.map_or(Outcome::Front(code), |t| Outcome::Deliver(t, code));
                 d.flags = flags;
                 return Ok(d);
@@ -525,7 +665,14 @@ impl Stack {
         // `deliverToCurrentTopIfNeeded`, after the target task came to the
         // front and was cleared.
         let focused = d.front.or_else(|| self.focused());
-        let top = focused.and_then(|f| self.activities.iter().rev().find(|a| a.task == f && !a.finishing && Some(a.token) != not_top && !d.clear.contains(&a.token)));
+        let top = focused.and_then(|f| {
+            self.activities.iter().rev().find(|a| {
+                a.task == f
+                    && !a.finishing
+                    && Some(a.token) != not_top
+                    && !d.clear.contains(&a.token)
+            })
+        });
         if let Some(top) = top
             && top.component == s.component
             && top.user == s.user
@@ -544,7 +691,13 @@ impl Stack {
     /// Carries out `d` with what it comes to: the task brought to the
     /// front, the activities cleared, then the new activity or intent,
     /// and the focused tasks' top activities resumed.
-    pub fn apply(&mut self, d: &Decision, then: Then, identity: Option<Identity<'_>>, user_leaving: bool) -> Vec<Command> {
+    pub fn apply(
+        &mut self,
+        d: &Decision,
+        then: Then,
+        identity: Option<Identity<'_>>,
+        user_leaving: bool,
+    ) -> Vec<Command> {
         let mut out = Vec::new();
         if let Some(task) = d.front {
             self.move_to_front(task);
@@ -633,7 +786,11 @@ impl Stack {
         let (finishing, task) = (a.finishing, a.task);
         self.touch(task);
         self.update_top_resumed(out);
-        out.push(Command::Pause { token, finishing, user_leaving });
+        out.push(Command::Pause {
+            token,
+            finishing,
+            user_leaving,
+        });
     }
 
     /// `resumeFocusedTasksTopActivities`: the resumed activities of tasks
@@ -642,13 +799,24 @@ impl Stack {
     /// activity is launched or resumed, then those of the other visible
     /// tasks. Whether one was.
     fn resume_focused(&mut self, user_leaving: bool, out: &mut Vec<Command>) -> bool {
-        let hidden: Vec<u64> = self.activities.iter().filter(|a| a.state == State::Resumed && self.visibility(a.task) != Visibility::Visible).map(|a| a.token).collect();
+        let hidden: Vec<u64> = self
+            .activities
+            .iter()
+            .filter(|a| a.state == State::Resumed && self.visibility(a.task) != Visibility::Visible)
+            .map(|a| a.token)
+            .collect();
         for t in hidden {
             self.pause(t, user_leaving, out);
         }
         let focused = self.focused();
         let mut order: Vec<i32> = focused.into_iter().collect();
-        order.extend(self.tasks.iter().rev().map(|t| t.id).filter(|&t| Some(t) != focused && self.visibility(t) == Visibility::Visible));
+        order.extend(
+            self.tasks
+                .iter()
+                .rev()
+                .map(|t| t.id)
+                .filter(|&t| Some(t) != focused && self.visibility(t) == Visibility::Visible),
+        );
         let mut resumed = false;
         for task in order {
             resumed |= self.resume_top(task, user_leaving, out);
@@ -660,15 +828,25 @@ impl Stack {
     /// the task first, else, with no activity pausing, launch or resume
     /// the top one. Whether it was.
     fn resume_top(&mut self, task: i32, user_leaving: bool, out: &mut Vec<Command>) -> bool {
-        let Some(top) = self.top(task).map(|a| a.token) else { return false };
-        let others: Vec<u64> = self.activities.iter().filter(|a| a.task == task && a.token != top && a.state == State::Resumed).map(|a| a.token).collect();
+        let Some(top) = self.top(task).map(|a| a.token) else {
+            return false;
+        };
+        let others: Vec<u64> = self
+            .activities
+            .iter()
+            .filter(|a| a.task == task && a.token != top && a.state == State::Resumed)
+            .map(|a| a.token)
+            .collect();
         for t in others {
             self.pause(t, user_leaving, out);
         }
         if self.activities.iter().any(|a| a.state == State::Pausing) {
             return false;
         }
-        if !matches!(self.get(top).unwrap().state, State::Resumed | State::Pausing | State::Destroying) {
+        if !matches!(
+            self.get(top).unwrap().state,
+            State::Resumed | State::Pausing | State::Destroying
+        ) {
             // The task becomes active (`setResumedActivity`).
             self.touch(task);
         }
@@ -680,9 +858,19 @@ impl Stack {
             }
             State::Started | State::Paused | State::Stopping | State::Stopped => {
                 a.state = State::Resumed;
-                let (results, new_intents) = (std::mem::take(&mut a.results), std::mem::take(&mut a.new_intents));
-                out.push(Command::Visible { token: top, visible: true });
-                out.push(Command::Resume { token: top, results, new_intents });
+                let (results, new_intents) = (
+                    std::mem::take(&mut a.results),
+                    std::mem::take(&mut a.new_intents),
+                );
+                out.push(Command::Visible {
+                    token: top,
+                    visible: true,
+                });
+                out.push(Command::Resume {
+                    token: top,
+                    results,
+                    new_intents,
+                });
             }
             _ => return false,
         }
@@ -704,12 +892,19 @@ impl Stack {
         let shown: Vec<u64> = self
             .activities
             .iter()
-            .filter(|a| matches!(a.state, State::Stopping | State::Stopped) && self.shown(a) && !self.resumable(a))
+            .filter(|a| {
+                matches!(a.state, State::Stopping | State::Stopped)
+                    && self.shown(a)
+                    && !self.resumable(a)
+            })
             .map(|a| a.token)
             .collect();
         for token in shown {
             self.get_mut(token).unwrap().state = State::Started;
-            out.push(Command::Visible { token, visible: true });
+            out.push(Command::Visible {
+                token,
+                visible: true,
+            });
             out.push(Command::Start(token));
         }
     }
@@ -721,7 +916,12 @@ impl Stack {
         let hidden: Vec<(u64, bool)> = self
             .activities
             .iter()
-            .filter(|a| Some(a.token) != except && !a.finishing && matches!(a.state, State::Started | State::Paused) && !self.shown(a))
+            .filter(|a| {
+                Some(a.token) != except
+                    && !a.finishing
+                    && matches!(a.state, State::Started | State::Paused)
+                    && !self.shown(a)
+            })
             .map(|a| (a.token, a.no_history))
             .collect();
         for (token, no_history) in hidden {
@@ -730,7 +930,10 @@ impl Stack {
                 continue;
             }
             self.get_mut(token).unwrap().state = State::Stopping;
-            out.push(Command::Visible { token, visible: false });
+            out.push(Command::Visible {
+                token,
+                visible: false,
+            });
             out.push(Command::Stop(token));
         }
     }
@@ -739,14 +942,24 @@ impl Stack {
     /// activity is the top resumed one; the one last told so is told it
     /// lost it, and the new one is told once that one reported it did.
     fn update_top_resumed(&mut self, out: &mut Vec<Command>) {
-        let new = self.focused().and_then(|f| self.activities.iter().find(|a| a.task == f && a.state == State::Resumed)).map(|a| a.token);
+        let new = self
+            .focused()
+            .and_then(|f| {
+                self.activities
+                    .iter()
+                    .find(|a| a.task == f && a.state == State::Resumed)
+            })
+            .map(|a| a.token);
         if new == self.top_resumed {
             return;
         }
         if let Some(last) = self.last_reported
             && !self.waiting_for_prev
         {
-            out.push(Command::TopResumed { token: last, on_top: false });
+            out.push(Command::TopResumed {
+                token: last,
+                on_top: false,
+            });
             self.loss += 1;
             out.push(Command::LossTimeout(self.loss));
             self.waiting_for_prev = true;
@@ -760,7 +973,10 @@ impl Stack {
         if let Some(top) = self.top_resumed
             && !self.waiting_for_prev
         {
-            out.push(Command::TopResumed { token: top, on_top: true });
+            out.push(Command::TopResumed {
+                token: top,
+                on_top: true,
+            });
             self.last_reported = Some(top);
         }
     }
@@ -782,7 +998,9 @@ impl Stack {
     /// the focused tasks' tops resume.
     pub fn paused(&mut self, token: u64) -> Vec<Command> {
         let mut out = Vec::new();
-        let Some(a) = self.get_mut(token) else { return out };
+        let Some(a) = self.get_mut(token) else {
+            return out;
+        };
         a.state = State::Paused;
         if a.finishing {
             self.complete_finishing(token, &mut out);
@@ -796,7 +1014,12 @@ impl Stack {
     /// once the next activity is idle if that is not yet visible or is
     /// resumed in its place, else at once.
     fn complete_finishing(&mut self, token: u64, out: &mut Vec<Command>) {
-        let not_yet_visible = self.focused_top().is_some_and(|n| !matches!(n.state, State::Started | State::Resumed | State::Pausing | State::Paused));
+        let not_yet_visible = self.focused_top().is_some_and(|n| {
+            !matches!(
+                n.state,
+                State::Started | State::Resumed | State::Pausing | State::Paused
+            )
+        });
         if not_yet_visible || self.resume_focused(false, out) {
             return;
         }
@@ -807,13 +1030,20 @@ impl Stack {
     /// `activityIdleInternal` of the top of a task: the finishing
     /// activities are destroyed, those no longer visible stopped.
     pub fn idle(&mut self, token: u64) -> Vec<Command> {
-        let Some(task) = self.get(token).map(|a| a.task) else { return Vec::new() };
+        let Some(task) = self.get(token).map(|a| a.task) else {
+            return Vec::new();
+        };
         if self.top(task).map(|a| a.token) != Some(token) {
             return Vec::new();
         }
         let mut out = Vec::new();
         for a in self.activities.iter_mut().filter(|a| a.token != token) {
-            if a.finishing && matches!(a.state, State::Started | State::Paused | State::Stopping | State::Stopped) {
+            if a.finishing
+                && matches!(
+                    a.state,
+                    State::Started | State::Paused | State::Stopping | State::Stopped
+                )
+            {
                 a.state = State::Destroying;
                 out.push(Command::Destroy(a.token));
             }
@@ -829,7 +1059,9 @@ impl Stack {
     /// stopped.
     pub fn set_occludes_parent(&mut self, token: u64, occludes: bool) -> (bool, Vec<Command>) {
         let mut out = Vec::new();
-        let Some(a) = self.get_mut(token) else { return (false, out) };
+        let Some(a) = self.get_mut(token) else {
+            return (false, out);
+        };
         let changed = std::mem::replace(&mut a.occludes_parent, occludes) != occludes;
         if changed || !occludes {
             self.resume_focused(false, &mut out);
@@ -852,7 +1084,9 @@ impl Stack {
     /// too.
     pub fn destroyed(&mut self, token: u64) -> Vec<Command> {
         let mut out = Vec::new();
-        let Some(at) = self.activities.iter().position(|a| a.token == token) else { return out };
+        let Some(at) = self.activities.iter().position(|a| a.token == token) else {
+            return out;
+        };
         let task = self.activities.remove(at).task;
         self.remove_if_empty(task, &mut out);
         self.settle(&mut out);
@@ -882,7 +1116,12 @@ impl Stack {
     /// `removeActivities`: the task's activities finish, bottom first.
     pub fn remove(&mut self, task: i32) -> Vec<Command> {
         let mut out = Vec::new();
-        let all: Vec<u64> = self.activities.iter().filter(|a| a.task == task && !a.finishing).map(|a| a.token).collect();
+        let all: Vec<u64> = self
+            .activities
+            .iter()
+            .filter(|a| a.task == task && !a.finishing)
+            .map(|a| a.token)
+            .collect();
         for t in all {
             self.finish_one(t, false, &mut out);
         }
@@ -920,9 +1159,14 @@ impl Stack {
 
     /// `sendResult` to `to`: now if it is resumed, else at its resume.
     pub fn send_result(&mut self, to: u64, result: Payload) -> Vec<Command> {
-        let Some(r) = self.get_mut(to) else { return Vec::new() };
+        let Some(r) = self.get_mut(to) else {
+            return Vec::new();
+        };
         if r.state == State::Resumed {
-            vec![Command::Result { token: to, results: vec![result] }]
+            vec![Command::Result {
+                token: to,
+                results: vec![result],
+            }]
         } else {
             r.results.push(result);
             Vec::new()
@@ -932,9 +1176,14 @@ impl Stack {
     /// `deliverNewIntentLocked` to `token`: now if it is resumed, else at
     /// its next resume.
     fn new_intent(&mut self, token: u64, intent: Payload) -> Vec<Command> {
-        let Some(a) = self.get_mut(token) else { return Vec::new() };
+        let Some(a) = self.get_mut(token) else {
+            return Vec::new();
+        };
         if a.state == State::Resumed {
-            vec![Command::NewIntent { token, intents: vec![intent] }]
+            vec![Command::NewIntent {
+                token,
+                intents: vec![intent],
+            }]
         } else {
             a.new_intents.push(intent);
             Vec::new()
@@ -945,7 +1194,12 @@ impl Stack {
     /// they leave empty.
     pub fn process_died(&mut self, start_seq: i64) -> Vec<Command> {
         let mut out = Vec::new();
-        let gone: Vec<(u64, i32)> = self.activities.iter().filter(|a| a.start_seq == start_seq).map(|a| (a.token, a.task)).collect();
+        let gone: Vec<(u64, i32)> = self
+            .activities
+            .iter()
+            .filter(|a| a.start_seq == start_seq)
+            .map(|a| (a.token, a.task))
+            .collect();
         self.activities.retain(|a| a.start_seq != start_seq);
         for &(token, task) in &gone {
             if self.last_reported == Some(token) {
@@ -962,12 +1216,21 @@ impl Stack {
 /// `adjustLaunchFlagsToDocumentMode`.
 fn document_flags(flags: i32, mode: i32, document_launch_mode: i32) -> i32 {
     let document = FLAG_ACTIVITY_NEW_DOCUMENT | FLAG_ACTIVITY_MULTIPLE_TASK;
-    if flags & FLAG_ACTIVITY_NEW_DOCUMENT != 0 && matches!(mode, LAUNCH_SINGLE_INSTANCE | LAUNCH_SINGLE_TASK) {
+    if flags & FLAG_ACTIVITY_NEW_DOCUMENT != 0
+        && matches!(mode, LAUNCH_SINGLE_INSTANCE | LAUNCH_SINGLE_TASK)
+    {
         return flags & !document;
     }
     match document_launch_mode {
-        DOCUMENT_LAUNCH_INTO_EXISTING | DOCUMENT_LAUNCH_ALWAYS => flags | FLAG_ACTIVITY_NEW_DOCUMENT,
-        DOCUMENT_LAUNCH_NEVER if mode != LAUNCH_SINGLE_INSTANCE_PER_TASK || flags & FLAG_ACTIVITY_NEW_DOCUMENT != 0 => flags & !document,
+        DOCUMENT_LAUNCH_INTO_EXISTING | DOCUMENT_LAUNCH_ALWAYS => {
+            flags | FLAG_ACTIVITY_NEW_DOCUMENT
+        }
+        DOCUMENT_LAUNCH_NEVER
+            if mode != LAUNCH_SINGLE_INSTANCE_PER_TASK
+                || flags & FLAG_ACTIVITY_NEW_DOCUMENT != 0 =>
+        {
+            flags & !document
+        }
         _ => flags,
     }
 }
@@ -992,7 +1255,16 @@ mod tests {
     const APP: &str = "com.example";
 
     fn task(id: i32, class: &str, affinity: Option<&str>) -> Box<Task> {
-        Box::new(Task { id, affinity: affinity.map(str::to_string), real_activity: format!("{APP}/{class}"), intent: Intent::default(), base: LaunchIntent::Component, uid: 10_100, user: 0, last_active: 0 })
+        Box::new(Task {
+            id,
+            affinity: affinity.map(str::to_string),
+            real_activity: format!("{APP}/{class}"),
+            intent: Intent::default(),
+            base: LaunchIntent::Component,
+            uid: 10_100,
+            user: 0,
+            last_active: 0,
+        })
     }
 
     fn activity(token: u64, task: i32, class: &str, mode: i32) -> Activity {
@@ -1003,29 +1275,93 @@ mod tests {
     /// `id`, then paused-for, launched and its loss reported as the app
     /// would.
     fn launch_new(s: &mut Stack, token: u64, id: i32, class: &str, mode: i32) -> Vec<Command> {
-        let d = Decision { outcome: Outcome::New(None), ..Default::default() };
-        s.apply(&d, Then::Add(activity(token, id, class, mode), Some(task(id, class, Some(APP)))), None, true)
+        let d = Decision {
+            outcome: Outcome::New(None),
+            ..Default::default()
+        };
+        s.apply(
+            &d,
+            Then::Add(
+                activity(token, id, class, mode),
+                Some(task(id, class, Some(APP))),
+            ),
+            None,
+            true,
+        )
     }
 
-    fn start<'a>(component: &'a str, mode: i32, intent: &'a Intent, source: Option<u64>) -> super::Start<'a> {
-        super::Start { component, affinity: Some(APP), launch_mode: mode, document_launch_mode: 0, intent, user: 0, source, result_to: None }
+    fn start<'a>(
+        component: &'a str,
+        mode: i32,
+        intent: &'a Intent,
+        source: Option<u64>,
+    ) -> super::Start<'a> {
+        super::Start {
+            component,
+            affinity: Some(APP),
+            launch_mode: mode,
+            document_launch_mode: 0,
+            intent,
+            user: 0,
+            source,
+            result_to: None,
+        }
     }
 
     #[test]
     fn a_started_activity_resumes_once_the_one_under_it_paused() {
         let mut s = Stack::default();
-        assert_eq!(launch_new(&mut s, 1, 7, "A", 0), [Launch(1), Front(7), TopResumed { token: 1, on_top: true }]);
+        assert_eq!(
+            launch_new(&mut s, 1, 7, "A", 0),
+            [
+                Launch(1),
+                Front(7),
+                TopResumed {
+                    token: 1,
+                    on_top: true
+                }
+            ]
+        );
         // B on A: A pauses first, told it lost the top state.
-        let d = Decision { outcome: Outcome::New(Some(7)), ..Default::default() };
+        let d = Decision {
+            outcome: Outcome::New(Some(7)),
+            ..Default::default()
+        };
         assert_eq!(
             s.apply(&d, Then::Add(activity(2, 7, "B", 0), None), None, true),
-            [TopResumed { token: 1, on_top: false }, LossTimeout(1), Pause { token: 1, finishing: false, user_leaving: true }]
+            [
+                TopResumed {
+                    token: 1,
+                    on_top: false
+                },
+                LossTimeout(1),
+                Pause {
+                    token: 1,
+                    finishing: false,
+                    user_leaving: true
+                }
+            ]
         );
         // B launches; it is told it is on top once A reported its loss.
         assert_eq!(s.paused(1), [Launch(2)]);
-        assert_eq!(s.top_resumed_released(None), [TopResumed { token: 2, on_top: true }]);
+        assert_eq!(
+            s.top_resumed_released(None),
+            [TopResumed {
+                token: 2,
+                on_top: true
+            }]
+        );
         // B idle: A is stopped.
-        assert_eq!(s.idle(2), [Visible { token: 1, visible: false }, Stop(1)]);
+        assert_eq!(
+            s.idle(2),
+            [
+                Visible {
+                    token: 1,
+                    visible: false
+                },
+                Stop(1)
+            ]
+        );
         s.stopped(1);
         assert_eq!(s.get(1).unwrap().state, State::Stopped);
     }
@@ -1034,7 +1370,10 @@ mod tests {
     fn a_finishing_activity_hands_its_result_back_and_is_destroyed() {
         let mut s = Stack::default();
         launch_new(&mut s, 1, 7, "A", 0);
-        let d = Decision { outcome: Outcome::New(Some(7)), ..Default::default() };
+        let d = Decision {
+            outcome: Outcome::New(Some(7)),
+            ..Default::default()
+        };
         let mut b = activity(2, 7, "B", 0);
         (b.result_to, b.result) = (Some(1), Some(42));
         s.apply(&d, Then::Add(b, None), None, true);
@@ -1044,10 +1383,43 @@ mod tests {
         s.stopped(1);
         let (finished, out) = s.finish(2);
         assert!(finished);
-        assert_eq!(out, [TopResumed { token: 2, on_top: false }, LossTimeout(2), Pause { token: 2, finishing: true, user_leaving: false }]);
+        assert_eq!(
+            out,
+            [
+                TopResumed {
+                    token: 2,
+                    on_top: false
+                },
+                LossTimeout(2),
+                Pause {
+                    token: 2,
+                    finishing: true,
+                    user_leaving: false
+                }
+            ]
+        );
         // B paused: A resumes with B's result, B waits for A's idle.
-        assert_eq!(s.paused(2), [Visible { token: 1, visible: true }, Resume { token: 1, results: vec![42], new_intents: vec![] }]);
-        assert_eq!(s.top_resumed_released(Some(2)), [TopResumed { token: 1, on_top: true }]);
+        assert_eq!(
+            s.paused(2),
+            [
+                Visible {
+                    token: 1,
+                    visible: true
+                },
+                Resume {
+                    token: 1,
+                    results: vec![42],
+                    new_intents: vec![]
+                }
+            ]
+        );
+        assert_eq!(
+            s.top_resumed_released(Some(2)),
+            [TopResumed {
+                token: 1,
+                on_top: true
+            }]
+        );
         assert_eq!(s.idle(1), [Destroy(2)]);
         assert_eq!(s.destroyed(2), []);
         // A, the last activity, finishes: nothing takes its place, so it
@@ -1064,18 +1436,54 @@ mod tests {
         launch_new(&mut s, 1, 7, "A", LAUNCH_SINGLE_TASK);
         let none = Intent::default();
         // A singleTask activity started again from its own task: delivered.
-        let d = s.decide(&start("com.example/A", LAUNCH_SINGLE_TASK, &none, Some(1))).unwrap();
+        let d = s
+            .decide(&start("com.example/A", LAUNCH_SINGLE_TASK, &none, Some(1)))
+            .unwrap();
         assert_eq!(d.outcome, Outcome::Deliver(1, START_DELIVERED_TO_TOP));
-        assert_eq!(s.apply(&d, Then::Deliver(1, 5), None, true), [NewIntent { token: 1, intents: vec![5] }]);
-        let d = Decision { outcome: Outcome::New(Some(7)), ..Default::default() };
+        assert_eq!(
+            s.apply(&d, Then::Deliver(1, 5), None, true),
+            [NewIntent {
+                token: 1,
+                intents: vec![5]
+            }]
+        );
+        let d = Decision {
+            outcome: Outcome::New(Some(7)),
+            ..Default::default()
+        };
         s.apply(&d, Then::Add(activity(2, 7, "B", 0), None), None, true);
         s.paused(1);
         // From B: B is cleared, and A gets the intent at its resume.
-        let d = s.decide(&start("com.example/A", LAUNCH_SINGLE_TASK, &none, Some(2))).unwrap();
-        assert_eq!((d.clear.clone(), d.outcome.clone()), (vec![2], Outcome::Deliver(1, START_DELIVERED_TO_TOP)));
+        let d = s
+            .decide(&start("com.example/A", LAUNCH_SINGLE_TASK, &none, Some(2)))
+            .unwrap();
+        assert_eq!(
+            (d.clear.clone(), d.outcome.clone()),
+            (vec![2], Outcome::Deliver(1, START_DELIVERED_TO_TOP))
+        );
         let out = s.apply(&d, Then::Deliver(1, 6), None, true);
-        assert_eq!(out, [Pause { token: 2, finishing: true, user_leaving: true }]);
-        assert_eq!(s.paused(2), [Visible { token: 1, visible: true }, Resume { token: 1, results: vec![], new_intents: vec![6] }]);
+        assert_eq!(
+            out,
+            [Pause {
+                token: 2,
+                finishing: true,
+                user_leaving: true
+            }]
+        );
+        assert_eq!(
+            s.paused(2),
+            [
+                Visible {
+                    token: 1,
+                    visible: true
+                },
+                Resume {
+                    token: 1,
+                    results: vec![],
+                    new_intents: vec![6]
+                }
+            ]
+        );
     }
 
     #[test]
@@ -1084,18 +1492,51 @@ mod tests {
         launch_new(&mut s, 1, 7, "Main", LAUNCH_SINGLE_TASK);
         let none = Intent::default();
         // From a service: NEW_TASK, and the task of the affinity is reused.
-        let d = s.decide(&start("com.example/Other", 0, &none, None)).unwrap();
-        assert_eq!((d.flags & FLAG_ACTIVITY_NEW_TASK, d.outcome), (FLAG_ACTIVITY_NEW_TASK, Outcome::New(Some(7))));
+        let d = s
+            .decide(&start("com.example/Other", 0, &none, None))
+            .unwrap();
+        assert_eq!(
+            (d.flags & FLAG_ACTIVITY_NEW_TASK, d.outcome),
+            (FLAG_ACTIVITY_NEW_TASK, Outcome::New(Some(7)))
+        );
         // A singleInstance activity of no affinity goes alone.
-        let expired = super::Start { affinity: None, ..start("com.example/Expired", LAUNCH_SINGLE_INSTANCE, &none, None) };
+        let expired = super::Start {
+            affinity: None,
+            ..start("com.example/Expired", LAUNCH_SINGLE_INSTANCE, &none, None)
+        };
         let d = s.decide(&expired).unwrap();
         assert_eq!(d.outcome, Outcome::New(None));
-        let out = s.apply(&d, Then::Add(activity(2, 8, "Expired", LAUNCH_SINGLE_INSTANCE), Some(task(8, "Expired", None))), None, true);
+        let out = s.apply(
+            &d,
+            Then::Add(
+                activity(2, 8, "Expired", LAUNCH_SINGLE_INSTANCE),
+                Some(task(8, "Expired", None)),
+            ),
+            None,
+            true,
+        );
         // On a fullscreen display the task behind pauses first.
-        assert_eq!(out, [TopResumed { token: 1, on_top: false }, LossTimeout(1), Pause { token: 1, finishing: false, user_leaving: true }, Front(8)]);
+        assert_eq!(
+            out,
+            [
+                TopResumed {
+                    token: 1,
+                    on_top: false
+                },
+                LossTimeout(1),
+                Pause {
+                    token: 1,
+                    finishing: false,
+                    user_leaving: true
+                },
+                Front(8)
+            ]
+        );
         assert_eq!(s.paused(1), [Launch(2)]);
         // What it starts goes into a task of its own too: the affinity's.
-        let d = s.decide(&start("com.example/Other", 0, &none, Some(2))).unwrap();
+        let d = s
+            .decide(&start("com.example/Other", 0, &none, Some(2)))
+            .unwrap();
         assert_eq!(d.outcome, Outcome::New(Some(7)));
         assert_ne!(d.flags & FLAG_ACTIVITY_BROUGHT_TO_FRONT, 0);
         // Started again, it is found and gets the intent.
@@ -1108,47 +1549,117 @@ mod tests {
         let mut s = Stack::default();
         launch_new(&mut s, 1, 7, "Main", 0);
         let none = Intent::default();
-        let new_task = Intent { flags: FLAG_ACTIVITY_NEW_TASK, ..Default::default() };
+        let new_task = Intent {
+            flags: FLAG_ACTIVITY_NEW_TASK,
+            ..Default::default()
+        };
         // NEW_TASK of an activity of another affinity: a new task.
-        let other = super::Start { affinity: Some("other"), ..start("com.example/B", 0, &new_task, Some(1)) };
+        let other = super::Start {
+            affinity: Some("other"),
+            ..start("com.example/B", 0, &new_task, Some(1))
+        };
         assert_eq!(s.decide(&other).unwrap().outcome, Outcome::New(None));
         // Of the same affinity: on top of the existing task.
-        assert_eq!(s.decide(&start("com.example/B", 0, &new_task, Some(1))).unwrap().outcome, Outcome::New(Some(7)));
+        assert_eq!(
+            s.decide(&start("com.example/B", 0, &new_task, Some(1)))
+                .unwrap()
+                .outcome,
+            Outcome::New(Some(7))
+        );
         // The task's own root, same intent: the task in front, nothing
         // added.
-        assert_eq!(s.decide(&start("com.example/Main", 0, &new_task, Some(1))).unwrap().outcome, Outcome::Front(START_DELIVERED_TO_TOP));
+        assert_eq!(
+            s.decide(&start("com.example/Main", 0, &new_task, Some(1)))
+                .unwrap()
+                .outcome,
+            Outcome::Front(START_DELIVERED_TO_TOP)
+        );
         // MULTIPLE_TASK: always a new one.
-        let multiple = Intent { flags: FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_MULTIPLE_TASK, ..Default::default() };
-        assert_eq!(s.decide(&start("com.example/Main", 0, &multiple, Some(1))).unwrap().outcome, Outcome::New(None));
+        let multiple = Intent {
+            flags: FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_MULTIPLE_TASK,
+            ..Default::default()
+        };
+        assert_eq!(
+            s.decide(&start("com.example/Main", 0, &multiple, Some(1)))
+                .unwrap()
+                .outcome,
+            Outcome::New(None)
+        );
         // Without NEW_TASK from an activity: its task.
-        assert_eq!(s.decide(&start("com.example/B", 0, &none, Some(1))).unwrap().outcome, Outcome::New(Some(7)));
+        assert_eq!(
+            s.decide(&start("com.example/B", 0, &none, Some(1)))
+                .unwrap()
+                .outcome,
+            Outcome::New(Some(7))
+        );
         // A result asked for with NEW_TASK is cancelled.
-        let for_result = super::Start { result_to: Some(1), ..other };
+        let for_result = super::Start {
+            result_to: Some(1),
+            ..other
+        };
         let d = s.decide(&for_result).unwrap();
         assert!(d.cancel_result && d.result_to.is_none());
         // A document from an activity: a task of its own, no other's
         // affinity.
-        let document = Intent { flags: FLAG_ACTIVITY_NEW_DOCUMENT, ..Default::default() };
-        let d = s.decide(&start("com.example/B", 0, &document, Some(1))).unwrap();
-        assert_eq!((d.flags & FLAG_ACTIVITY_NEW_TASK, d.outcome), (FLAG_ACTIVITY_NEW_TASK, Outcome::New(None)));
+        let document = Intent {
+            flags: FLAG_ACTIVITY_NEW_DOCUMENT,
+            ..Default::default()
+        };
+        let d = s
+            .decide(&start("com.example/B", 0, &document, Some(1)))
+            .unwrap();
+        assert_eq!(
+            (d.flags & FLAG_ACTIVITY_NEW_TASK, d.outcome),
+            (FLAG_ACTIVITY_NEW_TASK, Outcome::New(None))
+        );
         // Of the root of a task that is no document, with no data: that
         // task, as `FindTaskResult` compares no data with none.
-        assert_eq!(s.decide(&start("com.example/Main", 0, &document, Some(1))).unwrap().outcome, Outcome::Front(START_DELIVERED_TO_TOP));
+        assert_eq!(
+            s.decide(&start("com.example/Main", 0, &document, Some(1)))
+                .unwrap()
+                .outcome,
+            Outcome::Front(START_DELIVERED_TO_TOP)
+        );
         // Always a new document: MULTIPLE_TASK.
-        let always = super::Start { document_launch_mode: DOCUMENT_LAUNCH_ALWAYS, ..start("com.example/Main", 0, &none, Some(1)) };
+        let always = super::Start {
+            document_launch_mode: DOCUMENT_LAUNCH_ALWAYS,
+            ..start("com.example/Main", 0, &none, Some(1))
+        };
         let d = s.decide(&always).unwrap();
         assert_ne!(d.flags & FLAG_ACTIVITY_MULTIPLE_TASK, 0);
         assert_eq!(d.outcome, Outcome::New(None));
         // A document task of some data is found by a document of the same
         // data alone.
-        let data = |uri: &str| Intent { flags: FLAG_ACTIVITY_NEW_DOCUMENT, data: Some(Uri::parse(uri)), ..Default::default() };
+        let data = |uri: &str| Intent {
+            flags: FLAG_ACTIVITY_NEW_DOCUMENT,
+            data: Some(Uri::parse(uri)),
+            ..Default::default()
+        };
         let mut doc = task(9, "Doc", Some(APP));
         doc.intent = data("content://a");
-        let d = Decision { outcome: Outcome::New(None), ..Default::default() };
-        s.apply(&d, Then::Add(activity(5, 9, "Doc", 0), Some(doc)), None, true);
+        let d = Decision {
+            outcome: Outcome::New(None),
+            ..Default::default()
+        };
+        s.apply(
+            &d,
+            Then::Add(activity(5, 9, "Doc", 0), Some(doc)),
+            None,
+            true,
+        );
         let (a, b) = (data("content://a"), data("content://b"));
-        assert_eq!(s.decide(&start("com.example/Doc", 0, &a, Some(1))).unwrap().outcome, Outcome::Front(START_DELIVERED_TO_TOP));
-        assert_eq!(s.decide(&start("com.example/Doc", 0, &b, Some(1))).unwrap().outcome, Outcome::New(None));
+        assert_eq!(
+            s.decide(&start("com.example/Doc", 0, &a, Some(1)))
+                .unwrap()
+                .outcome,
+            Outcome::Front(START_DELIVERED_TO_TOP)
+        );
+        assert_eq!(
+            s.decide(&start("com.example/Doc", 0, &b, Some(1)))
+                .unwrap()
+                .outcome,
+            Outcome::New(None)
+        );
     }
 
     #[test]
@@ -1156,39 +1667,115 @@ mod tests {
         let mut s = Stack::default();
         launch_new(&mut s, 1, 7, "A", LAUNCH_SINGLE_TOP);
         let none = Intent::default();
-        assert_eq!(s.decide(&start("com.example/A", LAUNCH_SINGLE_TOP, &none, Some(1))).unwrap().outcome, Outcome::Deliver(1, START_DELIVERED_TO_TOP));
-        let flagged = Intent { flags: FLAG_ACTIVITY_SINGLE_TOP, ..Default::default() };
-        assert_eq!(s.decide(&start("com.example/A", 0, &flagged, Some(1))).unwrap().outcome, Outcome::Deliver(1, START_DELIVERED_TO_TOP));
-        assert_eq!(s.decide(&start("com.example/A", 0, &none, Some(1))).unwrap().outcome, Outcome::New(Some(7)));
+        assert_eq!(
+            s.decide(&start("com.example/A", LAUNCH_SINGLE_TOP, &none, Some(1)))
+                .unwrap()
+                .outcome,
+            Outcome::Deliver(1, START_DELIVERED_TO_TOP)
+        );
+        let flagged = Intent {
+            flags: FLAG_ACTIVITY_SINGLE_TOP,
+            ..Default::default()
+        };
+        assert_eq!(
+            s.decide(&start("com.example/A", 0, &flagged, Some(1)))
+                .unwrap()
+                .outcome,
+            Outcome::Deliver(1, START_DELIVERED_TO_TOP)
+        );
+        assert_eq!(
+            s.decide(&start("com.example/A", 0, &none, Some(1)))
+                .unwrap()
+                .outcome,
+            Outcome::New(Some(7))
+        );
         // CLEAR_TOP keeps a singleTop activity, and makes a standard one
         // anew.
-        let clear = Intent { flags: FLAG_ACTIVITY_CLEAR_TOP, ..Default::default() };
-        assert_eq!(s.decide(&start("com.example/A", 0, &clear, Some(1))).unwrap().outcome, Outcome::Deliver(1, START_DELIVERED_TO_TOP));
+        let clear = Intent {
+            flags: FLAG_ACTIVITY_CLEAR_TOP,
+            ..Default::default()
+        };
+        assert_eq!(
+            s.decide(&start("com.example/A", 0, &clear, Some(1)))
+                .unwrap()
+                .outcome,
+            Outcome::Deliver(1, START_DELIVERED_TO_TOP)
+        );
         let mut s = Stack::default();
         launch_new(&mut s, 1, 7, "A", 0);
-        let d = s.decide(&start("com.example/A", 0, &clear, Some(1))).unwrap();
+        let d = s
+            .decide(&start("com.example/A", 0, &clear, Some(1)))
+            .unwrap();
         assert_eq!((d.clear, d.outcome), (vec![1], Outcome::New(Some(7))));
     }
 
     #[test]
     fn freeform_tasks_stay_resumed_and_focus_moves() {
-        let mut s = Stack { freeform: true, ..Default::default() };
+        let mut s = Stack {
+            freeform: true,
+            ..Default::default()
+        };
         launch_new(&mut s, 1, 7, "A", 0);
         // Another task's start pauses nothing of this one; it takes the
         // top resumed state.
         assert_eq!(
             launch_new(&mut s, 2, 8, "B", 0),
-            [Launch(2), Front(8), TopResumed { token: 1, on_top: false }, LossTimeout(1)]
+            [
+                Launch(2),
+                Front(8),
+                TopResumed {
+                    token: 1,
+                    on_top: false
+                },
+                LossTimeout(1)
+            ]
         );
-        assert_eq!(s.top_resumed_released(Some(1)), [TopResumed { token: 2, on_top: true }]);
+        assert_eq!(
+            s.top_resumed_released(Some(1)),
+            [TopResumed {
+                token: 2,
+                on_top: true
+            }]
+        );
         // Brought to the front, the first takes it back.
-        assert_eq!(s.bring_to_front(7), [Front(7), TopResumed { token: 2, on_top: false }, LossTimeout(2)]);
+        assert_eq!(
+            s.bring_to_front(7),
+            [
+                Front(7),
+                TopResumed {
+                    token: 2,
+                    on_top: false
+                },
+                LossTimeout(2)
+            ]
+        );
         // A stale timeout changes nothing.
         assert_eq!(s.top_resumed_released(Some(1)), []);
-        assert_eq!(s.top_resumed_released(None), [TopResumed { token: 1, on_top: true }]);
+        assert_eq!(
+            s.top_resumed_released(None),
+            [TopResumed {
+                token: 1,
+                on_top: true
+            }]
+        );
         // The front task's last activity finishes: focus moves back, and,
         // the other being resumed already, it is destroyed at once.
-        assert_eq!(s.finish(1).1, [TopResumed { token: 1, on_top: false }, LossTimeout(3), Pause { token: 1, finishing: true, user_leaving: false }, Front(8)]);
+        assert_eq!(
+            s.finish(1).1,
+            [
+                TopResumed {
+                    token: 1,
+                    on_top: false
+                },
+                LossTimeout(3),
+                Pause {
+                    token: 1,
+                    finishing: true,
+                    user_leaving: false
+                },
+                Front(8)
+            ]
+        );
         assert_eq!(s.paused(1), [Destroy(1)]);
         assert_eq!(s.destroyed(1), [TaskEmpty(7)]);
     }
@@ -1200,19 +1787,44 @@ mod tests {
         launch_new(&mut s, 2, 8, "B", 0);
         s.paused(1);
         s.top_resumed_released(None);
-        assert_eq!(s.idle(2), [Visible { token: 1, visible: false }, Stop(1)]);
+        assert_eq!(
+            s.idle(2),
+            [
+                Visible {
+                    token: 1,
+                    visible: false
+                },
+                Stop(1)
+            ]
+        );
         s.stopped(1);
         // B finishes: A's task is focused, and A comes back once B paused;
         // B is destroyed once A is idle.
         assert_eq!(s.finish(2).1.last(), Some(&Front(7)));
-        assert_eq!(s.paused(2), [Visible { token: 1, visible: true }, Resume { token: 1, results: vec![], new_intents: vec![] }]);
+        assert_eq!(
+            s.paused(2),
+            [
+                Visible {
+                    token: 1,
+                    visible: true
+                },
+                Resume {
+                    token: 1,
+                    results: vec![],
+                    new_intents: vec![]
+                }
+            ]
+        );
         assert_eq!(s.idle(1), [Destroy(2)]);
         assert_eq!(s.destroyed(2), [TaskEmpty(8)]);
     }
 
     #[test]
     fn a_dead_process_takes_its_tasks() {
-        let mut s = Stack { freeform: true, ..Default::default() };
+        let mut s = Stack {
+            freeform: true,
+            ..Default::default()
+        };
         launch_new(&mut s, 1, 7, "A", 0);
         let mut b = activity(2, 8, "B", 0);
         b.start_seq = 2;
@@ -1228,7 +1840,10 @@ mod tests {
         launch_new(&mut s, 1, 7, "A", 0);
         let mut b = activity(2, 7, "Dialog", 0);
         b.occludes_parent = false;
-        let d = Decision { outcome: Outcome::New(Some(7)), ..Default::default() };
+        let d = Decision {
+            outcome: Outcome::New(Some(7)),
+            ..Default::default()
+        };
         s.apply(&d, Then::Add(b, None), None, true);
         assert_eq!(s.paused(1), [Launch(2)]);
         s.top_resumed_released(None);
@@ -1237,7 +1852,20 @@ mod tests {
         assert_eq!(s.get(1).unwrap().state, State::Paused);
         // B finishes: A resumes; B is destroyed once A is idle.
         s.finish(2);
-        assert_eq!(s.paused(2), [Visible { token: 1, visible: true }, Resume { token: 1, results: vec![], new_intents: vec![] }]);
+        assert_eq!(
+            s.paused(2),
+            [
+                Visible {
+                    token: 1,
+                    visible: true
+                },
+                Resume {
+                    token: 1,
+                    results: vec![],
+                    new_intents: vec![]
+                }
+            ]
+        );
         assert_eq!(s.idle(1), [Destroy(2)]);
     }
 
@@ -1247,17 +1875,61 @@ mod tests {
         launch_new(&mut s, 1, 7, "A", 0);
         let mut b = activity(2, 8, "B", 0);
         b.occludes_parent = false;
-        let out = s.apply(&Decision::default(), Then::Add(b, Some(task(8, "B", None))), None, true);
-        assert_eq!(out, [TopResumed { token: 1, on_top: false }, LossTimeout(1), Pause { token: 1, finishing: false, user_leaving: true }, Front(8)]);
+        let out = s.apply(
+            &Decision::default(),
+            Then::Add(b, Some(task(8, "B", None))),
+            None,
+            true,
+        );
+        assert_eq!(
+            out,
+            [
+                TopResumed {
+                    token: 1,
+                    on_top: false
+                },
+                LossTimeout(1),
+                Pause {
+                    token: 1,
+                    finishing: false,
+                    user_leaving: true
+                },
+                Front(8)
+            ]
+        );
         assert_eq!(s.paused(1), [Launch(2)]);
         assert_eq!(s.visibility(7), Visibility::BehindTranslucent);
         assert_eq!(s.idle(2), []);
         // B turns opaque (`convertFromTranslucent`): A is hidden and stops.
-        assert_eq!(s.set_occludes_parent(2, true), (true, vec![Visible { token: 1, visible: false }, Stop(1)]));
+        assert_eq!(
+            s.set_occludes_parent(2, true),
+            (
+                true,
+                vec![
+                    Visible {
+                        token: 1,
+                        visible: false
+                    },
+                    Stop(1)
+                ]
+            )
+        );
         s.stopped(1);
         assert_eq!(s.set_occludes_parent(2, true), (false, vec![]));
         // Translucent again: A shows, started but not resumed.
-        assert_eq!(s.set_occludes_parent(2, false), (true, vec![Visible { token: 1, visible: true }, Start(1)]));
+        assert_eq!(
+            s.set_occludes_parent(2, false),
+            (
+                true,
+                vec![
+                    Visible {
+                        token: 1,
+                        visible: true
+                    },
+                    Start(1)
+                ]
+            )
+        );
         assert_eq!(s.get(1).unwrap().state, State::Started);
     }
 
@@ -1268,11 +1940,23 @@ mod tests {
         let mut b = activity(2, 7, "Pick", 0);
         b.no_history = true;
         (b.result_to, b.result) = (Some(1), Some(42));
-        let d = Decision { outcome: Outcome::New(Some(7)), ..Default::default() };
+        let d = Decision {
+            outcome: Outcome::New(Some(7)),
+            ..Default::default()
+        };
         s.apply(&d, Then::Add(b, None), None, true);
         s.paused(1);
         s.top_resumed_released(None);
-        assert_eq!(s.idle(2), [Visible { token: 1, visible: false }, Stop(1)]);
+        assert_eq!(
+            s.idle(2),
+            [
+                Visible {
+                    token: 1,
+                    visible: false
+                },
+                Stop(1)
+            ]
+        );
         s.stopped(1);
         s.apply(&d, Then::Add(activity(3, 7, "Next", 0), None), None, true);
         assert_eq!(s.paused(2), [Launch(3)]);
@@ -1280,18 +1964,54 @@ mod tests {
         // Next idle: Pick, hidden, finishes with its result cancelled to
         // Main and is destroyed; Main stays stopped.
         assert_eq!(s.idle(3), [Destroy(2)]);
-        assert_eq!((s.get(1).unwrap().state, s.get(1).unwrap().results.clone()), (State::Stopped, vec![42]));
+        assert_eq!(
+            (s.get(1).unwrap().state, s.get(1).unwrap().results.clone()),
+            (State::Stopped, vec![42])
+        );
         assert_eq!(s.destroyed(2), []);
         // Main gets it when it comes back.
         s.finish(3);
-        assert_eq!(s.paused(3), [Visible { token: 1, visible: true }, Resume { token: 1, results: vec![42], new_intents: vec![] }]);
+        assert_eq!(
+            s.paused(3),
+            [
+                Visible {
+                    token: 1,
+                    visible: true
+                },
+                Resume {
+                    token: 1,
+                    results: vec![42],
+                    new_intents: vec![]
+                }
+            ]
+        );
     }
 
     #[test]
     fn document_modes_adjust_the_flags() {
-        assert_eq!(document_flags(FLAG_ACTIVITY_NEW_DOCUMENT | FLAG_ACTIVITY_MULTIPLE_TASK, LAUNCH_SINGLE_TASK, 0), 0);
-        assert_eq!(document_flags(0, 0, DOCUMENT_LAUNCH_ALWAYS), FLAG_ACTIVITY_NEW_DOCUMENT);
-        assert_eq!(document_flags(FLAG_ACTIVITY_MULTIPLE_TASK, 0, DOCUMENT_LAUNCH_NEVER), 0);
-        assert_eq!(document_flags(FLAG_ACTIVITY_MULTIPLE_TASK, LAUNCH_SINGLE_INSTANCE_PER_TASK, DOCUMENT_LAUNCH_NEVER), FLAG_ACTIVITY_MULTIPLE_TASK);
+        assert_eq!(
+            document_flags(
+                FLAG_ACTIVITY_NEW_DOCUMENT | FLAG_ACTIVITY_MULTIPLE_TASK,
+                LAUNCH_SINGLE_TASK,
+                0
+            ),
+            0
+        );
+        assert_eq!(
+            document_flags(0, 0, DOCUMENT_LAUNCH_ALWAYS),
+            FLAG_ACTIVITY_NEW_DOCUMENT
+        );
+        assert_eq!(
+            document_flags(FLAG_ACTIVITY_MULTIPLE_TASK, 0, DOCUMENT_LAUNCH_NEVER),
+            0
+        );
+        assert_eq!(
+            document_flags(
+                FLAG_ACTIVITY_MULTIPLE_TASK,
+                LAUNCH_SINGLE_INSTANCE_PER_TASK,
+                DOCUMENT_LAUNCH_NEVER
+            ),
+            FLAG_ACTIVITY_MULTIPLE_TASK
+        );
     }
 }

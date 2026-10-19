@@ -99,21 +99,21 @@ impl Bridge {
     /// MediaSessionService once it is published (again after
     /// system_server restarts).
     pub fn start(driver: &Arc<Driver>, display: &Path) {
-        Self::start_for_namespace(driver,display,std::process::id() as i32)
+        Self::start_for_namespace(driver, display, std::process::id() as i32)
     }
-    pub fn start_for_namespace(driver:&Arc<Driver>,display:&Path,guest_pid:i32){
+    pub fn start_for_namespace(driver: &Arc<Driver>, display: &Path, guest_pid: i32) {
         let driver = driver.clone();
         let display = display.to_owned();
         let _ = std::thread::Builder::new()
             .name("media".into())
             .spawn(move || {
-                if let Err(e) = Bridge::run(&driver, &display,guest_pid) {
+                if let Err(e) = Bridge::run(&driver, &display, guest_pid) {
                     eprintln!("guest-init: media: {e}");
                 }
             });
     }
 
-    fn run(driver: &Arc<Driver>, display: &Path,guest_pid:i32) -> Result<(), String> {
+    fn run(driver: &Arc<Driver>, display: &Path, guest_pid: i32) -> Result<(), String> {
         let link = connect(display)?;
         let process = LocalProcess::open(
             driver,

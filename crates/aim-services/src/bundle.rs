@@ -49,7 +49,10 @@ pub enum Value {
     LongArray(Vec<i64>),
     /// A parcelable of the class `class`, written to `data`
     /// (`writeParcelable`, length-prefixed).
-    Parcelable { class: String, data: Vec<u8> },
+    Parcelable {
+        class: String,
+        data: Vec<u8>,
+    },
     /// A `Parcelable[]` (`putParcelableArray`, `writeParcelableArray`),
     /// length-prefixed: each item's class and fields.
     ParcelableArray(Vec<(String, Vec<u8>)>),
@@ -62,7 +65,10 @@ pub enum Value {
     /// A `Serializable` that is neither a `Map` nor a `List`
     /// (`writeSerializable`), length-prefixed: its class's name and its
     /// Object Serialization stream.
-    Serializable { class: String, data: Vec<u8> },
+    Serializable {
+        class: String,
+        data: Vec<u8>,
+    },
     /// A `MemoryIntArray` (`writeParcelable`): its shared memory, as the
     /// `ParcelFileDescriptor` its `writeToParcel` writes.
     MemoryIntArray(SharedFile),
@@ -210,16 +216,24 @@ pub fn write(p: &mut Parcel, entries: &[(&str, Value)]) {
     let length = (p.position() - start) as i32;
     p.set_i32_at(length_at, length);
     // Whether it holds an intent (`Bundle.putParcelable` of one).
-    p.write_bool(entries.iter().any(|(_, v)| {
-        matches!(v, Value::Parcelable { class, .. } if class == "android.content.Intent")
-    }));
+    p.write_bool(entries.iter().any(
+        |(_, v)| matches!(v, Value::Parcelable { class, .. } if class == "android.content.Intent"),
+    ));
 }
 
 /// A `Map<String, String>` value of a bundle read from `parcel`
 /// (`readHashMap`): its entries in the order written, or none for a value
 /// that is no map. A key or value that is not a string is a bad value.
-pub fn string_map(value: &Value, parcel: &Reader<'_>) -> Result<Option<Vec<(String, Option<String>)>>> {
-    let Value::Lazy { kind: VAL_MAP, start, len } = *value else {
+pub fn string_map(
+    value: &Value,
+    parcel: &Reader<'_>,
+) -> Result<Option<Vec<(String, Option<String>)>>> {
+    let Value::Lazy {
+        kind: VAL_MAP,
+        start,
+        len,
+    } = *value
+    else {
         return Ok(None);
     };
     let mut r = parcel.clone();
@@ -268,7 +282,11 @@ pub fn read(r: &mut Reader<'_>) -> Result<Option<HashMap<String, Value>>> {
             VAL_BOOLEAN => Value::Bool(r.read_bool()?),
             VAL_STRINGARRAY => {
                 let n = r.read_i32()?;
-                Value::StringArray((0..n.max(0)).map(|_| r.read_string16()).collect::<Result<_>>()?)
+                Value::StringArray(
+                    (0..n.max(0))
+                        .map(|_| r.read_string16())
+                        .collect::<Result<_>>()?,
+                )
             }
             VAL_INTARRAY => {
                 let n = r.read_i32()?;
@@ -326,7 +344,13 @@ mod tests {
     #[test]
     fn keys_are_written_in_array_map_order() {
         let mut p = Parcel::new();
-        write(&mut p, &[("android.os.extra.CYCLE_COUNT", Value::Int(2)), ("seq", Value::Int(1))]);
+        write(
+            &mut p,
+            &[
+                ("android.os.extra.CYCLE_COUNT", Value::Int(2)),
+                ("seq", Value::Int(1)),
+            ],
+        );
         let mut r = Reader::new(p.data(), &[]);
         r.read_i32().unwrap();
         r.read_i32().unwrap();
@@ -334,7 +358,10 @@ mod tests {
         assert_eq!(r.read_string16().unwrap().as_deref(), Some("seq"));
         r.read_i32().unwrap();
         r.read_i32().unwrap();
-        assert_eq!(r.read_string16().unwrap().as_deref(), Some("android.os.extra.CYCLE_COUNT"));
+        assert_eq!(
+            r.read_string16().unwrap().as_deref(),
+            Some("android.os.extra.CYCLE_COUNT")
+        );
     }
 
     /// `putStringArrayList`: a length-prefixed list of string values.
@@ -357,9 +384,18 @@ mod tests {
     /// map (`getValueType` finds a `Map` first) and read back as one.
     #[test]
     fn string_maps_read_as_written() {
-        let entries = vec![("a/b".to_string(), Some("1".to_string())), ("a/c".to_string(), None)];
+        let entries = vec![
+            ("a/b".to_string(), Some("1".to_string())),
+            ("a/c".to_string(), None),
+        ];
         let mut p = Parcel::new();
-        write(&mut p, &[("_flags", Value::StringMap(entries.clone())), ("v", Value::Int(1))]);
+        write(
+            &mut p,
+            &[
+                ("_flags", Value::StringMap(entries.clone())),
+                ("v", Value::Int(1)),
+            ],
+        );
         let parcel = Reader::new(p.data(), &[]);
         let read = read(&mut parcel.clone()).unwrap().unwrap();
         assert_eq!(string_map(&read["_flags"], &parcel), Ok(Some(entries)));

@@ -61,8 +61,10 @@ pub fn getppid() -> i64 {
 /// The parent process Linux reports for host parent `host`: its thread
 /// group, when it is a thread running as a process of its own (`fork`).
 pub fn linux_ppid(host: i32) -> i32 {
-    if !super::pidns::contains(host){return 0;}
-    let group=super::procrec::tgid(host);
+    if !super::pidns::contains(host) {
+        return 0;
+    }
+    let group = super::procrec::tgid(host);
     super::pidns::guest_pid(group).unwrap_or(0)
 }
 
@@ -180,7 +182,10 @@ pub fn apply_host_sched(nice: i32, policy: i32) {
 /// the host.
 pub fn apply_stale_sched(th: &Thread) {
     if th.sched.host_stale.load(SeqCst) && th.sched.host_stale.swap(false, SeqCst) {
-        apply_host_sched(super::cred::thread_nice(th.tid), th.sched.policy.load(SeqCst));
+        apply_host_sched(
+            super::cred::thread_nice(th.tid),
+            th.sched.policy.load(SeqCst),
+        );
     }
 }
 
@@ -199,8 +204,11 @@ fn may_change(pid: i64) -> Result<(), i64> {
 /// thread and set its host scheduling ([`apply_host_sched`]); another
 /// process's threads are checked, not changed (#1616).
 pub fn sched_policy(nr: u64, a: [u64; 6]) -> i64 {
-    let mut a=a;
-    a[0]=match super::pidns::syscall_pid(a[0] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};
+    let mut a = a;
+    a[0] = match super::pidns::syscall_pid(a[0] as i32) {
+        Ok(pid) => pid as u64,
+        Err(error) => return error,
+    };
     let th = match sched_target(a[0] as i64) {
         Ok(t) => t,
         Err(e) => return e,
@@ -260,8 +268,11 @@ pub fn sched_priority_range(nr: u64, a: [u64; 6]) -> i64 {
 
 /// sched_setaffinity: accepted; Darwin places the host threads.
 pub fn sched_setaffinity(a: [u64; 6]) -> i64 {
-    let mut a=a;
-    a[0]=match super::pidns::syscall_pid(a[0] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};
+    let mut a = a;
+    a[0] = match super::pidns::syscall_pid(a[0] as i32) {
+        Ok(pid) => pid as u64,
+        Err(error) => return error,
+    };
     match sched_target(a[0] as i64) {
         Ok(Some(_)) => 0,
         Ok(None) => may_change(a[0] as i64).map_or_else(|e| e, |_| 0),
@@ -272,8 +283,11 @@ pub fn sched_setaffinity(a: [u64; 6]) -> i64 {
 /// sched_getaffinity: every online host CPU. Returns the mask size in bytes
 /// as the kernel does (a multiple of 8 covering the CPUs).
 pub fn sched_getaffinity(a: [u64; 6]) -> i64 {
-    let mut a=a;
-    a[0]=match super::pidns::syscall_pid(a[0] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};
+    let mut a = a;
+    a[0] = match super::pidns::syscall_pid(a[0] as i32) {
+        Ok(pid) => pid as u64,
+        Err(error) => return error,
+    };
     let (pid, len, mask) = (a[0] as i64, a[1] as usize, a[2]);
     if let Err(e) = sched_target(pid) {
         return e;

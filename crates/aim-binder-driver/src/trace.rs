@@ -107,7 +107,9 @@ impl Trace {
 
     /// Whether calls of `code` on `descriptor` are captured.
     pub fn captures(&self, descriptor: &str, code: u32) -> bool {
-        self.captures.iter().any(|(d, c)| d == descriptor && *c == code)
+        self.captures
+            .iter()
+            .any(|(d, c)| d == descriptor && *c == code)
     }
 
     /// A transaction was sent.
@@ -132,7 +134,9 @@ impl Trace {
 
     /// Whether pending call `id` is captured, so its reply is too.
     pub fn captured(&self, id: TxnId) -> bool {
-        self.pending.get(&id).is_some_and(|(_, record)| record.data.is_some())
+        self.pending
+            .get(&id)
+            .is_some_and(|(_, record)| record.data.is_some())
     }
 
     /// The data of the reply to captured call `id`.
@@ -172,13 +176,24 @@ impl Trace {
         for (returning, entries) in [(false, &self.pending), (true, &self.returning)] {
             for (&id, (sent, record)) in entries {
                 records.push(PendingTraceRecord {
-                    id, returning, age: now.duration_since(*sent), record: record.clone(),
-                    from_stack: None, to_stack: None, from_queued: 0, to_queued: 0,
+                    id,
+                    returning,
+                    age: now.duration_since(*sent),
+                    record: record.clone(),
+                    from_stack: None,
+                    to_stack: None,
+                    from_queued: 0,
+                    to_queued: 0,
                 });
             }
         }
         records.sort_by_key(|record| record.id);
-        PendingTraceSnapshot { at: self.start.map_or(Duration::ZERO, |start| now.duration_since(start)), records }
+        PendingTraceSnapshot {
+            at: self
+                .start
+                .map_or(Duration::ZERO, |start| now.duration_since(start)),
+            records,
+        }
     }
 
     pub fn take(&mut self) -> Vec<TraceRecord> {

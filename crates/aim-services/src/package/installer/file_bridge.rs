@@ -62,9 +62,7 @@ impl Transfer {
                 let run = (|| -> io::Result<()> {
                     let mut header = [0u8; 8];
                     let mut buffer = [0u8; 8192];
-                    while !owner.stop.load(Ordering::SeqCst)
-                        && server.read(&mut header)? == 8
-                    {
+                    while !owner.stop.load(Ordering::SeqCst) && server.read(&mut header)? == 8 {
                         let command = i32::from_be_bytes(header[..4].try_into().unwrap());
                         match command {
                             1 => {

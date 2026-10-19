@@ -16,7 +16,9 @@ pub trait ReadOwners {
     fn start_attempt(&mut self, settings: &Settings, pending: &[Package]) -> Result<(), ReadError>;
     fn package_registered(&mut self, package: &Package, created: bool) -> Result<(), ReadError>;
     fn package_header(&mut self, _package: &Package, _start: &Element) -> Result<(), ReadError> {
-        Err(ReadError::Owner("package header persistence owner unavailable".into()))
+        Err(ReadError::Owner(
+            "package header persistence owner unavailable".into(),
+        ))
     }
     fn shared_registered(&mut self, group: &SharedUser, created: bool) -> Result<(), ReadError>;
     fn package_child(

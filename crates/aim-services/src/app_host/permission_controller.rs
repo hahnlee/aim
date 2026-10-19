@@ -41,8 +41,12 @@ impl Service for PermissionController {
                     Err(e) => return reply(Err(e)),
                 };
                 let app_id = args.uid.rem_euclid(100_000);
-                let names: Vec<Option<String>> =
-                    state.packages.values().filter(|ps| ps.app_id == app_id).map(|ps| Some(ps.name.clone())).collect();
+                let names: Vec<Option<String>> = state
+                    .packages
+                    .values()
+                    .filter(|ps| ps.app_id == app_id)
+                    .map(|ps| Some(ps.name.clone()))
+                    .collect();
                 pc::write_get_packages_for_uid_reply(&mut p, &Some(names));
             }
             pc::GET_PACKAGE_UID => {
@@ -51,7 +55,10 @@ impl Service for PermissionController {
                     Ok(packages) => packages,
                     Err(e) => return reply(Err(e)),
                 };
-                let uid = args.package_name.and_then(|name| state.packages.get(&name).map(|ps| ps.app_id)).unwrap_or(-1);
+                let uid = args
+                    .package_name
+                    .and_then(|name| state.packages.get(&name).map(|ps| ps.app_id))
+                    .unwrap_or(-1);
                 pc::write_get_package_uid_reply(&mut p, uid);
             }
             pc::IS_RUNTIME_PERMISSION => {
@@ -59,7 +66,9 @@ impl Service for PermissionController {
                 let runtime = match host.inputs() {
                     Ok(inputs) => args.permission.is_some_and(|name| {
                         inputs.packages.permissions().iter().any(|perm| {
-                            perm.name == name && perm.protection_level & PROTECTION_MASK_BASE == PROTECTION_DANGEROUS
+                            perm.name == name
+                                && perm.protection_level & PROTECTION_MASK_BASE
+                                    == PROTECTION_DANGEROUS
                         })
                     }),
                     Err(e) => return reply(Err(e)),

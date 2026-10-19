@@ -22,17 +22,48 @@ enum Job {
     Stop,
 }
 #[derive(Clone)]
-enum Callback { Remote(Arc<Strong>), Local(Arc<LocalService>) }
-impl Callback {
-    fn clear_death(&self,process:&LocalProcess,cookie:u64){if let Self::Remote(node)=self{process.clear_death(node,cookie);}}
-    fn send(&self,request:&Parcel)->Result<(),i32>{match self{
-        Self::Remote(node)=>node.transact(aim_service_aidl::android_os_iremotecallback::SEND_RESULT,request,true).map(|_|()),
-        Self::Local(node)=>node.transact(aim_service_aidl::android_os_iremotecallback::SEND_RESULT,request,true).map(|_|()),
-    }}
+enum Callback {
+    Remote(Arc<Strong>),
+    Local(Arc<LocalService>),
 }
-#[derive(Clone,Copy,PartialEq,Eq,PartialOrd,Ord)]
-enum CallbackKey{Local(u64),Remote(u32)}
-impl From<Binder> for CallbackKey{fn from(binder:Binder)->Self{match binder{Binder::Local(ptr)=>Self::Local(ptr),Binder::Handle(handle)=>Self::Remote(handle)}}}
+impl Callback {
+    fn clear_death(&self, process: &LocalProcess, cookie: u64) {
+        if let Self::Remote(node) = self {
+            process.clear_death(node, cookie);
+        }
+    }
+    fn send(&self, request: &Parcel) -> Result<(), i32> {
+        match self {
+            Self::Remote(node) => node
+                .transact(
+                    aim_service_aidl::android_os_iremotecallback::SEND_RESULT,
+                    request,
+                    true,
+                )
+                .map(|_| ()),
+            Self::Local(node) => node
+                .transact(
+                    aim_service_aidl::android_os_iremotecallback::SEND_RESULT,
+                    request,
+                    true,
+                )
+                .map(|_| ()),
+        }
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CallbackKey {
+    Local(u64),
+    Remote(u32),
+}
+impl From<Binder> for CallbackKey {
+    fn from(binder: Binder) -> Self {
+        match binder {
+            Binder::Local(ptr) => Self::Local(ptr),
+            Binder::Handle(handle) => Self::Remote(handle),
+        }
+    }
+}
 struct Listener {
     node: Callback,
     user: i32,
@@ -177,11 +208,15 @@ impl Owner {
                 "package monitor callback is null",
             )
         })?;
-        let node=match callback{
-            Binder::Handle(handle)=>Callback::Remote(Arc::new(self.process.strong(handle))),
-            Binder::Local(pointer)=>Callback::Local(Arc::new(self.process.local_service(pointer).ok_or_else(||Exception::illegal_argument("package monitor local capability unavailable"))?)),
+        let node = match callback {
+            Binder::Handle(handle) => Callback::Remote(Arc::new(self.process.strong(handle))),
+            Binder::Local(pointer) => {
+                Callback::Local(Arc::new(self.process.local_service(pointer).ok_or_else(
+                    || Exception::illegal_argument("package monitor local capability unavailable"),
+                )?))
+            }
         };
-        let callback=CallbackKey::from(callback);
+        let callback = CallbackKey::from(callback);
         let generation = self.next_listener.fetch_add(1, Ordering::Relaxed);
         let weak = Arc::downgrade(self);
         let mut listeners = self.listeners.lock().unwrap();
@@ -189,20 +224,24 @@ impl Owner {
             drop(listeners);
             return self.ensure_open();
         }
-        let death = if let Callback::Remote(remote)=&node{self.process.link_to_death(
-            remote,
-            Box::new(move || {
-                if let Some(owner) = weak.upgrade() {
-                    let mut listeners = owner.listeners.lock().unwrap();
-                    if listeners
-                        .get(&callback)
-                        .is_some_and(|listener| listener.generation == generation)
-                    {
-                        listeners.remove(&callback);
+        let death = if let Callback::Remote(remote) = &node {
+            self.process.link_to_death(
+                remote,
+                Box::new(move || {
+                    if let Some(owner) = weak.upgrade() {
+                        let mut listeners = owner.listeners.lock().unwrap();
+                        if listeners
+                            .get(&callback)
+                            .is_some_and(|listener| listener.generation == generation)
+                        {
+                            listeners.remove(&callback);
+                        }
                     }
-                }
-            }),
-        )}else{0};
+                }),
+            )
+        } else {
+            0
+        };
         let old = listeners.insert(
             callback,
             Listener {
@@ -227,7 +266,11 @@ impl Owner {
                 "package monitor callback is null",
             )
         })?;
-        let old = self.listeners.lock().unwrap().remove(&CallbackKey::from(callback));
+        let old = self
+            .listeners
+            .lock()
+            .unwrap()
+            .remove(&CallbackKey::from(callback));
         if let Some(old) = old {
             old.node.clear_death(&self.process, old.death);
         }
@@ -347,30 +390,76 @@ impl Drop for Workers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aim_binder_driver::{Driver,Device,Credentials};
-    use aim_binder_host::local::{Service,Call,Reply};
+    use aim_binder_driver::{Credentials, Device, Driver};
+    use aim_binder_host::local::{Call, Reply, Service};
     struct Callback(Arc<Mutex<Vec<i32>>>);
     impl Service for Callback {
-        fn descriptor(&self)->&str{aim_service_aidl::android_os_iremotecallback::DESCRIPTOR}
-        fn transact(&self,call:&mut Call<'_>)->Reply{
-            assert_eq!(call.code,aim_service_aidl::android_os_iremotecallback::SEND_RESULT);assert!(call.is_oneway());
-            call.data.enforce_interface(self.descriptor())?;assert_eq!(call.data.read_i32()?,1);
-            self.0.lock().unwrap().push(call.data.read_i32()?);assert_eq!(call.data.remaining(),0);Ok(Parcel::new())
+        fn descriptor(&self) -> &str {
+            aim_service_aidl::android_os_iremotecallback::DESCRIPTOR
+        }
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            assert_eq!(
+                call.code,
+                aim_service_aidl::android_os_iremotecallback::SEND_RESULT
+            );
+            assert!(call.is_oneway());
+            call.data.enforce_interface(self.descriptor())?;
+            assert_eq!(call.data.read_i32()?, 1);
+            self.0.lock().unwrap().push(call.data.read_i32()?);
+            assert_eq!(call.data.remaining(), 0);
+            Ok(Parcel::new())
         }
     }
     #[test]
-    fn local_monitor_capability_replaces_delivery_cookie_and_retires_on_unregister(){
-        let driver=Driver::new();let process=LocalProcess::open(&driver,Device::Binder,Credentials{pid:98811,euid:1000,security_context:None});
-        let deliveries=Arc::new(Mutex::new(Vec::new()));let binder=process.add_service(Arc::new(Callback(deliveries.clone())));
-        let(owner,workers)=Owner::start(process.clone()).unwrap();
-        owner.register(Some(binder),0,1000).unwrap();owner.register(Some(binder),10,1000).unwrap();
-        assert_eq!(owner.listeners.lock().unwrap().len(),1);
-        let payload:ResultPayload=Arc::new(|uid|{assert_eq!(uid,1000);let mut p=Parcel::new();p.write_i32(71);Ok(Some(p))});
-        owner.notify("android.intent.action.PACKAGE_ADDED",0,None,payload.clone()).unwrap();
-        owner.notify("android.intent.action.PACKAGE_ADDED",10,None,payload.clone()).unwrap();
-        assert!(owner.wait(2000,false).unwrap());assert_eq!(*deliveries.lock().unwrap(),[71]);
-        owner.unregister(Some(binder)).unwrap();owner.notify("android.intent.action.PACKAGE_ADDED",10,None,payload).unwrap();
-        assert!(owner.wait(2000,false).unwrap());assert_eq!(*deliveries.lock().unwrap(),[71]);
-        owner.close();drop(workers);driver.release(process.proc_handle());
+    fn local_monitor_capability_replaces_delivery_cookie_and_retires_on_unregister() {
+        let driver = Driver::new();
+        let process = LocalProcess::open(
+            &driver,
+            Device::Binder,
+            Credentials {
+                pid: 98811,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let deliveries = Arc::new(Mutex::new(Vec::new()));
+        let binder = process.add_service(Arc::new(Callback(deliveries.clone())));
+        let (owner, workers) = Owner::start(process.clone()).unwrap();
+        owner.register(Some(binder), 0, 1000).unwrap();
+        owner.register(Some(binder), 10, 1000).unwrap();
+        assert_eq!(owner.listeners.lock().unwrap().len(), 1);
+        let payload: ResultPayload = Arc::new(|uid| {
+            assert_eq!(uid, 1000);
+            let mut p = Parcel::new();
+            p.write_i32(71);
+            Ok(Some(p))
+        });
+        owner
+            .notify(
+                "android.intent.action.PACKAGE_ADDED",
+                0,
+                None,
+                payload.clone(),
+            )
+            .unwrap();
+        owner
+            .notify(
+                "android.intent.action.PACKAGE_ADDED",
+                10,
+                None,
+                payload.clone(),
+            )
+            .unwrap();
+        assert!(owner.wait(2000, false).unwrap());
+        assert_eq!(*deliveries.lock().unwrap(), [71]);
+        owner.unregister(Some(binder)).unwrap();
+        owner
+            .notify("android.intent.action.PACKAGE_ADDED", 10, None, payload)
+            .unwrap();
+        assert!(owner.wait(2000, false).unwrap());
+        assert_eq!(*deliveries.lock().unwrap(), [71]);
+        owner.close();
+        drop(workers);
+        driver.release(process.proc_handle());
     }
 }

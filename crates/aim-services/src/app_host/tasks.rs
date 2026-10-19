@@ -24,8 +24,8 @@ use aim_binder_host::parcel::Exception;
 use super::activity::Item;
 use super::activity_stack::Command;
 use super::config::{Configuration, Rect};
-use super::{AppHost, exit_info};
 use super::surface::{self, Change, Layer};
+use super::{AppHost, exit_info};
 
 /// A task on the display: in window mode, a window.
 pub struct Task {
@@ -76,22 +76,43 @@ impl Tasks {
     }
 
     fn send_bounds(&self, task: i32, bounds: Rect) {
-        self.send(&Record { op: window::TASK, task, bounds: [bounds.left, bounds.top, bounds.right, bounds.bottom], ..Default::default() });
+        self.send(&Record {
+            op: window::TASK,
+            task,
+            bounds: [bounds.left, bounds.top, bounds.right, bounds.bottom],
+            ..Default::default()
+        });
     }
 
     /// The front task of `uid`'s root activities.
     pub fn of_uid(&self, uid: u32) -> Option<i32> {
-        self.tasks.lock().unwrap().iter().rev().find(|t| t.uid == uid).map(|t| t.id)
+        self.tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|t| t.uid == uid)
+            .map(|t| t.id)
     }
 
     /// The bounds of task `id`.
     pub fn bounds(&self, id: i32) -> Option<Rect> {
-        self.tasks.lock().unwrap().iter().find(|t| t.id == id).map(|t| t.bounds)
+        self.tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.bounds)
     }
 
     /// The minimal size of task `id` (`mMinWidth`, `mMinHeight`).
     pub fn min_size(&self, id: i32) -> Option<(i32, i32)> {
-        self.tasks.lock().unwrap().iter().find(|t| t.id == id).map(|t| t.min_size)
+        self.tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.min_size)
     }
 
     /// The bounds of task `id` in window mode, a freeform task's.
@@ -101,7 +122,12 @@ impl Tasks {
 
     /// The bounds of the tasks.
     fn all_bounds(&self) -> Vec<Rect> {
-        self.tasks.lock().unwrap().iter().map(|t| t.bounds).collect()
+        self.tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|t| t.bounds)
+            .collect()
     }
 
     /// Runs `f` with the layer of task `id`, made by `make` if it has none.
@@ -112,7 +138,10 @@ impl Tasks {
         f: impl FnOnce(&Layer) -> Result<T, String>,
     ) -> Result<T, String> {
         let mut tasks = self.tasks.lock().unwrap();
-        let task = tasks.iter_mut().find(|t| t.id == id).ok_or_else(|| format!("no task {id}"))?;
+        let task = tasks
+            .iter_mut()
+            .find(|t| t.id == id)
+            .ok_or_else(|| format!("no task {id}"))?;
         if task.layer.is_none() {
             task.layer = Some(make(task)?);
         }
@@ -128,12 +157,15 @@ impl Tasks {
             .filter_map(|(z, t)| {
                 let layer = t.layer.as_ref()?;
                 let b = t.bounds;
-                Some((layer, Change {
-                    position: Some((b.left as f32, b.top as f32)),
-                    z: Some(z as i32),
-                    crop: Some([0.0, 0.0, b.width() as f32, b.height() as f32]),
-                    ..Default::default()
-                }))
+                Some((
+                    layer,
+                    Change {
+                        position: Some((b.left as f32, b.top as f32)),
+                        z: Some(z as i32),
+                        crop: Some([0.0, 0.0, b.width() as f32, b.height() as f32]),
+                        ..Default::default()
+                    },
+                ))
             })
             .collect()
     }
@@ -153,7 +185,9 @@ impl AppHost {
                 if !windows {
                     return;
                 }
-                let Ok(reader) = stream.try_clone() else { return };
+                let Ok(reader) = stream.try_clone() else {
+                    return;
+                };
                 *host.tasks.bridge.lock().unwrap() = Some(stream);
                 host.take_requests(reader);
             }
@@ -168,20 +202,51 @@ impl AppHost {
     /// `package`: its id. It has the display, or in window mode freeform's
     /// default bounds. It answers the package's pending launch, else the
     /// launch `source`'s task has not answered yet.
-    pub(super) fn new_task(&self, uid: u32, package: &str, class: &str, activity: super::freeform::Activity, source: Option<i32>) -> Result<i32, Exception> {
+    pub(super) fn new_task(
+        &self,
+        uid: u32,
+        package: &str,
+        class: &str,
+        activity: super::freeform::Activity,
+        source: Option<i32>,
+    ) -> Result<i32, Exception> {
         let display = self.display()?.0.clone();
-        let area = Rect { left: 0, top: 0, right: display.width, bottom: display.height };
+        let area = Rect {
+            left: 0,
+            top: 0,
+            right: display.width,
+            bottom: display.height,
+        };
         let windows = self.tasks.window_mode();
-        let bounds = if windows { super::freeform::default_bounds(&activity, area, display.density_dpi(), false, &self.tasks.all_bounds()) } else { area };
+        let bounds = if windows {
+            super::freeform::default_bounds(
+                &activity,
+                area,
+                display.density_dpi(),
+                false,
+                &self.tasks.all_bounds(),
+            )
+        } else {
+            area
+        };
         let id = {
             let mut next = self.tasks.next.lock().unwrap();
             *next += 1;
             *next
         };
         let component = format!("{package}/{class}");
-        let launch = if windows { self.pending_launches.lock().unwrap().remove(package) } else { None };
+        let launch = if windows {
+            self.pending_launches.lock().unwrap().remove(package)
+        } else {
+            None
+        };
         let mut tasks = self.tasks.tasks.lock().unwrap();
-        let launch = launch.or_else(|| tasks.iter_mut().find(|t| Some(t.id) == source).and_then(|t| t.launch.take()));
+        let launch = launch.or_else(|| {
+            tasks
+                .iter_mut()
+                .find(|t| Some(t.id) == source)
+                .and_then(|t| t.launch.take())
+        });
         tasks.push(Task {
             id,
             uid,
@@ -208,23 +273,42 @@ impl AppHost {
     pub(super) fn task_to_front(&self, id: i32) -> Result<(), String> {
         {
             let mut tasks = self.tasks.tasks.lock().unwrap();
-            let at = tasks.iter().position(|t| t.id == id).ok_or_else(|| format!("no task {id}"))?;
+            let at = tasks
+                .iter()
+                .position(|t| t.id == id)
+                .ok_or_else(|| format!("no task {id}"))?;
             let task = tasks.remove(at);
             tasks.push(task);
         }
         self.place_tasks()?;
         self.raise_windows_of(id)?;
-        self.tasks.send(&Record { op: window::FRONT, task: id, ..Default::default() });
+        self.tasks.send(&Record {
+            op: window::FRONT,
+            task: id,
+            ..Default::default()
+        });
         Ok(())
     }
 
     /// The layer of task `id`, the parent of its windows: made at its
     /// bounds, in front.
-    pub(super) fn task_layer<T>(&self, id: i32, f: impl FnOnce(&Layer) -> Result<T, String>) -> Result<T, String> {
+    pub(super) fn task_layer<T>(
+        &self,
+        id: i32,
+        f: impl FnOnce(&Layer) -> Result<T, String>,
+    ) -> Result<T, String> {
         let composer = self.composer().map_err(|e| format!("{e:?}"))?;
         let made = self.tasks.with_layer(
             id,
-            |task| composer.create_surface(&self.process, &format!("Task={id} {}", task.component), surface::CONTAINER, None, &[]),
+            |task| {
+                composer.create_surface(
+                    &self.process,
+                    &format!("Task={id} {}", task.component),
+                    surface::CONTAINER,
+                    None,
+                    &[],
+                )
+            },
             f,
         )?;
         self.place_tasks()?;
@@ -241,7 +325,14 @@ impl AppHost {
     /// An activity of task `id` is idle: the launch the task answers drew
     /// its first frame.
     pub(super) fn task_idle(&self, id: i32) {
-        let launch = self.tasks.tasks.lock().unwrap().iter_mut().find(|t| t.id == id).and_then(|t| t.launch.take());
+        let launch = self
+            .tasks
+            .tasks
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|t| t.id == id)
+            .and_then(|t| t.launch.take());
         if let Some(launch) = launch {
             self.tasks.send_text(window::DRAWN, id, &launch);
         }
@@ -258,7 +349,11 @@ impl AppHost {
         };
         self.activities.task_tokens.lock().unwrap().remove(&id);
         if removed {
-            self.tasks.send(&Record { op: window::REMOVED, task: id, ..Default::default() });
+            self.tasks.send(&Record {
+                op: window::REMOVED,
+                task: id,
+                ..Default::default()
+            });
         }
     }
 
@@ -267,7 +362,12 @@ impl AppHost {
         loop {
             let mut record = Record::default();
             // SAFETY: `Record` is plain old data; every byte pattern is one.
-            let buf = unsafe { std::slice::from_raw_parts_mut((&mut record as *mut Record).cast::<u8>(), size_of::<Record>()) };
+            let buf = unsafe {
+                std::slice::from_raw_parts_mut(
+                    (&mut record as *mut Record).cast::<u8>(),
+                    size_of::<Record>(),
+                )
+            };
             if stream.read_exact(buf).is_err() {
                 *self.tasks.bridge.lock().unwrap() = None;
                 return;
@@ -289,7 +389,15 @@ impl AppHost {
             window::SET_BOUNDS => {
                 // `resizeTask`.
                 let [left, top, right, bottom] = r.bounds;
-                self.move_task(r.task, Rect { left, top, right, bottom })
+                self.move_task(
+                    r.task,
+                    Rect {
+                        left,
+                        top,
+                        right,
+                        bottom,
+                    },
+                )
             }
             op => Err(format!("unknown request {op}")),
         }
@@ -299,21 +407,35 @@ impl AppHost {
     /// for it (`findTask`) comes to the front, else the activity starts in
     /// a new one.
     fn launch(self: &Arc<Self>, component: &str) -> Result<(), String> {
-        let (package, class) = component.split_once('/').ok_or_else(|| format!("{component}: not a component"))?;
-        let class = if class.starts_with('.') { format!("{package}{class}") } else { class.to_string() };
-        let info = self.activity_info_of(package, &class).map_err(|e| format!("{e:?}"))?;
+        let (package, class) = component
+            .split_once('/')
+            .ok_or_else(|| format!("{component}: not a component"))?;
+        let class = if class.starts_with('.') {
+            format!("{package}{class}")
+        } else {
+            class.to_string()
+        };
+        let info = self
+            .activity_info_of(package, &class)
+            .map_err(|e| format!("{e:?}"))?;
         let user = info.info.application_info.uid as u32 / super::PER_USER_RANGE;
         let real = super::activity_start::real_component(&info);
         let found = {
             let stack = self.activities.stack.lock().unwrap();
-            stack.find_task(&real, info.task_affinity.as_deref(), user, None).and_then(|t| stack.get(t)).map(|a| a.task)
+            stack
+                .find_task(&real, info.task_affinity.as_deref(), user, None)
+                .and_then(|t| stack.get(t))
+                .map(|a| a.task)
         };
         if let Some(id) = found {
             self.focus_task(id)?;
             self.tasks.send_text(window::DRAWN, id, component);
             return Ok(());
         }
-        self.pending_launches.lock().unwrap().insert(package.to_string(), component.to_string());
+        self.pending_launches
+            .lock()
+            .unwrap()
+            .insert(package.to_string(), component.to_string());
         if let Err(e) = self.start_launcher(package, &class, info) {
             self.pending_launches.lock().unwrap().remove(package);
             // The server's splash waits for the launch's end.
@@ -339,15 +461,35 @@ impl AppHost {
     /// (`killTaskProcessesIfPossible`) unless one has an activity in
     /// another task.
     fn close_task(self: &Arc<Self>, id: i32) -> Result<(), String> {
-        let (package, uid) = self.tasks.tasks.lock().unwrap().iter().find(|t| t.id == id).map(|t| (t.package.clone(), t.uid)).ok_or_else(|| format!("no task {id}"))?;
+        let (package, uid) = self
+            .tasks
+            .tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| (t.package.clone(), t.uid))
+            .ok_or_else(|| format!("no task {id}"))?;
         eprintln!("app host: removing task {id}");
         let starts = self.starts_of_package(&package, uid / super::PER_USER_RANGE);
-        let elsewhere = self.activities.stack.lock().unwrap().activities.iter().any(|a| a.task != id && starts.contains(&a.start_seq));
+        let elsewhere = self
+            .activities
+            .stack
+            .lock()
+            .unwrap()
+            .activities
+            .iter()
+            .any(|a| a.task != id && starts.contains(&a.start_seq));
         let commands = self.activities.stack.lock().unwrap().remove(id);
         self.run(commands);
         if !elsewhere {
             for start_seq in starts {
-                self.kill_process(start_seq, exit_info::REASON_USER_REQUESTED, exit_info::SUBREASON_REMOVE_TASK, "remove task")?;
+                self.kill_process(
+                    start_seq,
+                    exit_info::REASON_USER_REQUESTED,
+                    exit_info::SUBREASON_REMOVE_TASK,
+                    "remove task",
+                )?;
             }
         }
         Ok(())
@@ -362,21 +504,54 @@ impl AppHost {
         let min_dp = self
             .inputs()
             .ok()
-            .and_then(|i| i.packages.framework_dimension_dp("default_minimal_size_resizable_task"))
+            .and_then(|i| {
+                i.packages
+                    .framework_dimension_dp("default_minimal_size_resizable_task")
+            })
             .ok_or("no default_minimal_size_resizable_task")? as i32;
-        let density = self.display().map_err(|e| format!("{e:?}"))?.0.density_dpi() as f32 / 160.0;
+        let density = self
+            .display()
+            .map_err(|e| format!("{e:?}"))?
+            .0
+            .density_dpi() as f32
+            / 160.0;
         let bounds = {
             let mut tasks = self.tasks.tasks.lock().unwrap();
-            let task = tasks.iter_mut().find(|t| t.id == id).ok_or_else(|| format!("no task {id}"))?;
+            let task = tasks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .ok_or_else(|| format!("no task {id}"))?;
             let default_min = (min_dp as f32 * density) as i32;
-            let min = (if task.min_size.0 < 0 { default_min } else { task.min_size.0 }, if task.min_size.1 < 0 { default_min } else { task.min_size.1 });
+            let min = (
+                if task.min_size.0 < 0 {
+                    default_min
+                } else {
+                    task.min_size.0
+                },
+                if task.min_size.1 < 0 {
+                    default_min
+                } else {
+                    task.min_size.1
+                },
+            );
             task.bounds = minimal_dimensions(bounds, task.bounds, min);
             task.bounds
         };
         self.place_tasks()?;
         self.move_windows_of(id, bounds)?;
-        let uids: BTreeSet<u32> = self.activities.records.lock().unwrap().values().filter(|r| r.task == id).map(|r| r.uid).collect();
-        let globals: HashMap<u32, Configuration> = uids.into_iter().filter_map(|uid| Some((uid, self.global_config(uid)?))).collect();
+        let uids: BTreeSet<u32> = self
+            .activities
+            .records
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|r| r.task == id)
+            .map(|r| r.uid)
+            .collect();
+        let globals: HashMap<u32, Configuration> = uids
+            .into_iter()
+            .filter_map(|uid| Some((uid, self.global_config(uid)?)))
+            .collect();
         let (mut items, relaunching) = self.reconfigure_activities(id, &globals, bounds);
         // A relaunching activity's windows are not told (`reportResized`).
         if !relaunching {
@@ -418,7 +593,11 @@ fn minimal_dimensions(mut bounds: Rect, previous: Rect, min: (i32, i32)) -> Rect
 /// whether it shows a window per task.
 fn bridge(socket: &Path) -> Result<(UnixStream, bool), String> {
     let link = UnixStream::connect(socket).map_err(|e| format!("{}: {e}", socket.display()))?;
-    let hello = wire::Request { op: wire::OP_WINDOWS, id: wire::VERSION, ..Default::default() };
+    let hello = wire::Request {
+        op: wire::OP_WINDOWS,
+        id: wire::VERSION,
+        ..Default::default()
+    };
     wire::send(link.as_fd(), wire::bytes(&hello), None).map_err(|e| e.to_string())?;
     let answer = wire::recv_record::<Windows>(link.as_fd())
         .map_err(|e| e.to_string())?
@@ -432,13 +611,44 @@ mod tests {
 
     #[test]
     fn a_task_keeps_its_minimal_size() {
-        let previous = Rect { left: 100, top: 100, right: 900, bottom: 1500 };
+        let previous = Rect {
+            left: 100,
+            top: 100,
+            right: 900,
+            bottom: 1500,
+        };
         // Shrunk from the left: the right edge stays, the left one goes back.
-        let from_left = Rect { left: 800, top: 100, right: 900, bottom: 1500 };
-        assert_eq!(minimal_dimensions(from_left, previous, (440, 440)), Rect { left: 460, top: 100, right: 900, bottom: 1500 });
+        let from_left = Rect {
+            left: 800,
+            top: 100,
+            right: 900,
+            bottom: 1500,
+        };
+        assert_eq!(
+            minimal_dimensions(from_left, previous, (440, 440)),
+            Rect {
+                left: 460,
+                top: 100,
+                right: 900,
+                bottom: 1500
+            }
+        );
         // Shrunk from the bottom: the bottom edge grows back.
-        let from_bottom = Rect { left: 100, top: 100, right: 900, bottom: 200 };
-        assert_eq!(minimal_dimensions(from_bottom, previous, (440, 440)), Rect { left: 100, top: 100, right: 900, bottom: 540 });
+        let from_bottom = Rect {
+            left: 100,
+            top: 100,
+            right: 900,
+            bottom: 200,
+        };
+        assert_eq!(
+            minimal_dimensions(from_bottom, previous, (440, 440)),
+            Rect {
+                left: 100,
+                top: 100,
+                right: 900,
+                bottom: 540
+            }
+        );
         assert_eq!(minimal_dimensions(previous, previous, (440, 440)), previous);
     }
 }

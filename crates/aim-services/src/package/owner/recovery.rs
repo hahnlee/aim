@@ -97,8 +97,12 @@ pub struct Report {
 }
 
 impl Plan {
-    pub fn with_native_readers(mut self,readers:crate::package::settings::native_read::SharedReaders)->Self{
-        self.native_readers=Some(readers);self
+    pub fn with_native_readers(
+        mut self,
+        readers: crate::package::settings::native_read::SharedReaders,
+    ) -> Self {
+        self.native_readers = Some(readers);
+        self
     }
     pub fn inspect(data: &std::path::Path) -> Result<Self, Error> {
         let paths = settings_paths(data);
@@ -457,14 +461,25 @@ impl Plan {
                 })?;
             }
         }
-        let state =
-            if let Some(readers)=&self.native_readers {
-                let readers=readers.0.lock().map_err(|_|Error{events:report.events.clone(),message:"native Settings owner poisoned".into()})?;
-                State::read_related_seeded(&self.data,users,settings.clone(),!report.first_boot,&readers.remaining)
-            }else{State::read_related_mode(&self.data, users, settings.clone(), !report.first_boot)}.map_err(|message| Error {
+        let state = if let Some(readers) = &self.native_readers {
+            let readers = readers.0.lock().map_err(|_| Error {
                 events: report.events.clone(),
-                message,
+                message: "native Settings owner poisoned".into(),
             })?;
+            State::read_related_seeded(
+                &self.data,
+                users,
+                settings.clone(),
+                !report.first_boot,
+                &readers.remaining,
+            )
+        } else {
+            State::read_related_mode(&self.data, users, settings.clone(), !report.first_boot)
+        }
+        .map_err(|message| Error {
+            events: report.events.clone(),
+            message,
+        })?;
         let present = document.is_some();
         let mut store = Store::from_state_mode(
             &self.data,
@@ -478,9 +493,17 @@ impl Plan {
             events: report.events.clone(),
             message,
         })?;
-        if let Some(readers)=&self.native_readers {
-            let readers=readers.0.lock().map_err(|_|Error{events:report.events.clone(),message:"native Settings owner poisoned".into()})?;
-            store.seed_native_readers(&readers.remaining).map_err(|message|Error{events:report.events.clone(),message})?;
+        if let Some(readers) = &self.native_readers {
+            let readers = readers.0.lock().map_err(|_| Error {
+                events: report.events.clone(),
+                message: "native Settings owner poisoned".into(),
+            })?;
+            store
+                .seed_native_readers(&readers.remaining)
+                .map_err(|message| Error {
+                    events: report.events.clone(),
+                    message,
+                })?;
         }
         self.check().map_err(|message| Error {
             events: report.events.clone(),

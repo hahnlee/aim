@@ -60,10 +60,14 @@ struct Policy {
 
 impl Policy {
     fn read(elements: &[aim_android_xml::Element]) -> Result<Policy, String> {
-        let root = elements.first().filter(|e| e.name == "policy-list").ok_or("no <policy-list>")?;
+        let root = elements
+            .first()
+            .filter(|e| e.name == "policy-list")
+            .ok_or("no <policy-list>")?;
         let version = root.int("version")?.unwrap_or(0);
         let mut p = Policy {
-            restrict_background: version >= VERSION_ADDED_RESTRICT_BACKGROUND && root.bool("restrictBackground")?.unwrap_or(false),
+            restrict_background: version >= VERSION_ADDED_RESTRICT_BACKGROUND
+                && root.bool("restrictBackground")?.unwrap_or(false),
             uid_policy: BTreeMap::new(),
             network_policies: 0,
         };
@@ -125,7 +129,10 @@ pub struct NetworkPolicy {
 
 impl NetworkPolicy {
     pub fn new(host: Arc<AppHost>) -> Self {
-        NetworkPolicy { host, policy: OnceLock::new() }
+        NetworkPolicy {
+            host,
+            policy: OnceLock::new(),
+        }
     }
 
     /// The policy read at the start; Data Saver as `initService` sets it.
@@ -135,17 +142,31 @@ impl NetworkPolicy {
         }
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("netpolicy: {e}"));
         let policy = match std::fs::read(self.host.data()?.join(POLICY_FILE)) {
-            Ok(bytes) => Policy::read(&aim_android_xml::read_sequence(&bytes).map_err(state)?).map_err(state)?,
+            Ok(bytes) => Policy::read(&aim_android_xml::read_sequence(&bytes).map_err(state)?)
+                .map_err(state)?,
             // `upgradeDefaultBackgroundDataUL`.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Policy {
-                restrict_background: self.host.inputs()?.settings.get(Table::Global, "default_restrict_background_data").as_deref() == Some("1"),
+                restrict_background: self
+                    .host
+                    .inputs()?
+                    .settings
+                    .get(Table::Global, "default_restrict_background_data")
+                    .as_deref()
+                    == Some("1"),
                 uid_policy: BTreeMap::new(),
                 network_policies: 0,
             },
             Err(e) => return Err(state(e.to_string())),
         };
-        if self.host.power_service.get().is_some_and(|p| matches!(p.power_save_mode(), Ok(true))) {
-            return Err(self.host.unimplemented_named("netpolicy", "battery saver's Data Saver (#1489)"));
+        if self
+            .host
+            .power_service
+            .get()
+            .is_some_and(|p| matches!(p.power_save_mode(), Ok(true)))
+        {
+            return Err(self
+                .host
+                .unimplemented_named("netpolicy", "battery saver's Data Saver (#1489)"));
         }
         Ok(self.policy.get_or_init(|| policy))
     }
@@ -155,17 +176,27 @@ impl NetworkPolicy {
     /// (none if denied); no carrier adds a policy without telephony.
     fn network_policies(&self, uid: i32, package: Option<&str>) -> Result<usize, Exception> {
         self.enforce(uid, MANAGE_NETWORK_POLICY)?;
-        if self.host.check_permission(Some(READ_PRIVILEGED_PHONE_STATE), uid)? != 0 {
+        if self
+            .host
+            .check_permission(Some(READ_PRIVILEGED_PHONE_STATE), uid)?
+            != 0
+        {
             if self.host.check_permission(Some(READ_PHONE_STATE), uid)? != 0 {
-                return Err(Exception::security(format!("NetworkPolicy: Neither user {uid} nor current process has {READ_PHONE_STATE}.")));
+                return Err(Exception::security(format!(
+                    "NetworkPolicy: Neither user {uid} nor current process has {READ_PHONE_STATE}."
+                )));
             }
-            if super::appops_service::note(&self.host, OP_READ_PHONE_STATE, uid, package)? != MODE_ALLOWED {
+            if super::appops_service::note(&self.host, OP_READ_PHONE_STATE, uid, package)?
+                != MODE_ALLOWED
+            {
                 return Ok(0);
             }
         }
         let n = self.policy()?.network_policies;
         if n > 0 {
-            return Err(self.host.unimplemented_named("netpolicy", "network policies of netpolicy.xml (#1711)"));
+            return Err(self
+                .host
+                .unimplemented_named("netpolicy", "network policies of netpolicy.xml (#1711)"));
         }
         Ok(0)
     }
@@ -173,7 +204,9 @@ impl NetworkPolicy {
     /// `@EnforcePermission`.
     fn enforce(&self, uid: i32, permission: &str) -> Result<(), Exception> {
         if self.host.check_permission(Some(permission), uid)? != 0 {
-            return Err(Exception::security(format!("Access denied, requires: {permission}")));
+            return Err(Exception::security(format!(
+                "Access denied, requires: {permission}"
+            )));
         }
         Ok(())
     }
@@ -185,7 +218,10 @@ impl NetworkPolicy {
                 return Ok(());
             }
         }
-        Err(Exception::security(format!("Requires one of the following permissions: {}.", permissions.join(", "))))
+        Err(Exception::security(format!(
+            "Requires one of the following permissions: {}.",
+            permissions.join(", ")
+        )))
     }
 }
 
@@ -202,61 +238,95 @@ impl Service for NetworkPolicy {
                 np::GetRestrictBackground::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.enforce(uid, MANAGE_NETWORK_POLICY)
                     .and_then(|()| self.policy())
-                    .map(|policy| np::write_get_restrict_background_reply(&mut p, policy.restrict_background))
+                    .map(|policy| {
+                        np::write_get_restrict_background_reply(&mut p, policy.restrict_background)
+                    })
             }
             np::GET_RESTRICT_BACKGROUND_BY_CALLER => {
                 np::GetRestrictBackgroundByCaller::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.enforce(uid, ACCESS_NETWORK_STATE)
                     .and_then(|()| self.policy())
-                    .map(|policy| np::write_get_restrict_background_by_caller_reply(&mut p, policy.status(uid)))
+                    .map(|policy| {
+                        np::write_get_restrict_background_by_caller_reply(
+                            &mut p,
+                            policy.status(uid),
+                        )
+                    })
             }
             np::GET_RESTRICT_BACKGROUND_STATUS => {
-                let a = np::GetRestrictBackgroundStatus::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    np::GetRestrictBackgroundStatus::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 // `PermissionUtils.enforceNetworkStackPermission`.
                 self.enforce_any(uid, &[NETWORK_STACK, MAINLINE_NETWORK_STACK])
                     .and_then(|()| self.policy())
-                    .map(|policy| np::write_get_restrict_background_status_reply(&mut p, policy.status(a.uid)))
+                    .map(|policy| {
+                        np::write_get_restrict_background_status_reply(&mut p, policy.status(a.uid))
+                    })
             }
             np::GET_NETWORK_POLICIES => {
                 let a = np::GetNetworkPolicies::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.network_policies(uid, a.calling_package.as_deref()).map(|_| {
-                    p.write_no_exception();
-                    p.write_i32(0);
-                })
+                self.network_policies(uid, a.calling_package.as_deref())
+                    .map(|_| {
+                        p.write_no_exception();
+                        p.write_i32(0);
+                    })
             }
             np::GET_UID_POLICY => {
                 let a = np::GetUidPolicy::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.enforce(uid, MANAGE_NETWORK_POLICY).and_then(|()| self.policy()).map(|policy| {
-                    np::write_get_uid_policy_reply(&mut p, policy.uid_policy.get(&a.uid).copied().unwrap_or(POLICY_NONE))
-                })
+                self.enforce(uid, MANAGE_NETWORK_POLICY)
+                    .and_then(|()| self.policy())
+                    .map(|policy| {
+                        np::write_get_uid_policy_reply(
+                            &mut p,
+                            policy
+                                .uid_policy
+                                .get(&a.uid)
+                                .copied()
+                                .unwrap_or(POLICY_NONE),
+                        )
+                    })
             }
             np::GET_UIDS_WITH_POLICY => {
                 let a = np::GetUidsWithPolicy::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.enforce(uid, MANAGE_NETWORK_POLICY).and_then(|()| self.policy()).map(|policy| {
-                    let uids = policy
-                        .uid_policy
-                        .iter()
-                        .filter(|&(_, &v)| (a.policy == POLICY_NONE && v == POLICY_NONE) || v & a.policy != 0)
-                        .map(|(&u, _)| u)
-                        .collect();
-                    np::write_get_uids_with_policy_reply(&mut p, &Some(uids))
-                })
+                self.enforce(uid, MANAGE_NETWORK_POLICY)
+                    .and_then(|()| self.policy())
+                    .map(|policy| {
+                        let uids = policy
+                            .uid_policy
+                            .iter()
+                            .filter(|&(_, &v)| {
+                                (a.policy == POLICY_NONE && v == POLICY_NONE) || v & a.policy != 0
+                            })
+                            .map(|(&u, _)| u)
+                            .collect();
+                        np::write_get_uids_with_policy_reply(&mut p, &Some(uids))
+                    })
             }
             np::REGISTER_LISTENER | np::UNREGISTER_LISTENER => {
                 let listener = if call.code == np::REGISTER_LISTENER {
-                    np::RegisterListener::read(&mut call.data).map_err(|_| BAD_VALUE)?.listener
+                    np::RegisterListener::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?
+                        .listener
                 } else {
-                    np::UnregisterListener::read(&mut call.data).map_err(|_| BAD_VALUE)?.listener
+                    np::UnregisterListener::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?
+                        .listener
                 };
                 if listener.is_none() {
                     Err(Exception::new(EX_NULL_POINTER, "listener"))
                 } else {
-                    self.enforce_any(uid, &[CONNECTIVITY_INTERNAL, OBSERVE_NETWORK_POLICY]).map(|()| p.write_no_exception())
+                    self.enforce_any(uid, &[CONNECTIVITY_INTERNAL, OBSERVE_NETWORK_POLICY])
+                        .map(|()| p.write_no_exception())
                 }
             }
             code => {
-                let name = np::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
-                Err(self.host.unimplemented_named("netpolicy", &format!("{name} (#1711)")))
+                let name = np::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
+                Err(self
+                    .host
+                    .unimplemented_named("netpolicy", &format!("{name} (#1711)")))
             }
         };
         reply(result.map(|()| p))
@@ -280,19 +350,54 @@ mod tests {
 <restrict-background uid="10150" />
 <restrict-background uid="10200" />
 </whitelist>"#;
-        let elements = [aim_android_xml::read(list).unwrap(), aim_android_xml::read(allowlist).unwrap()];
+        let elements = [
+            aim_android_xml::read(list).unwrap(),
+            aim_android_xml::read(allowlist).unwrap(),
+        ];
         let p = Policy::read(&elements).unwrap();
         assert!(p.restrict_background);
-        assert_eq!(p.uid_policy, BTreeMap::from([(10103, 4), (10150, 1), (10200, 4)]));
-        assert_eq!((p.status(10103), p.status(10150), p.status(10300)), (RESTRICT_BACKGROUND_STATUS_WHITELISTED, RESTRICT_BACKGROUND_STATUS_ENABLED, RESTRICT_BACKGROUND_STATUS_ENABLED));
+        assert_eq!(
+            p.uid_policy,
+            BTreeMap::from([(10103, 4), (10150, 1), (10200, 4)])
+        );
+        assert_eq!(
+            (p.status(10103), p.status(10150), p.status(10300)),
+            (
+                RESTRICT_BACKGROUND_STATUS_WHITELISTED,
+                RESTRICT_BACKGROUND_STATUS_ENABLED,
+                RESTRICT_BACKGROUND_STATUS_ENABLED
+            )
+        );
         // The image's file (ABX): Data Saver off, four uids allowed metered
         // background, an empty allowlist after the list.
-        let image: &[u8] = &[0x41, 0x42, 0x58, 0x00, 0x10, 0x32, 0xff, 0xff, 0x00, 0x0b, 0x70, 0x6f, 0x6c, 0x69, 0x63, 0x79, 0x2d, 0x6c, 0x69, 0x73, 0x74, 0x6f, 0xff, 0xff, 0x00, 0x07, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x00, 0x00, 0x00, 0x0e, 0xdf, 0xff, 0xff, 0x00, 0x12, 0x72, 0x65, 0x73, 0x74, 0x72, 0x69, 0x63, 0x74, 0x42, 0x61, 0x63, 0x6b, 0x67, 0x72, 0x6f, 0x75, 0x6e, 0x64, 0x32, 0xff, 0xff, 0x00, 0x0a, 0x75, 0x69, 0x64, 0x2d, 0x70, 0x6f, 0x6c, 0x69, 0x63, 0x79, 0x6f, 0xff, 0xff, 0x00, 0x03, 0x75, 0x69, 0x64, 0x00, 0x00, 0x27, 0x77, 0x6f, 0xff, 0xff, 0x00, 0x06, 0x70, 0x6f, 0x6c, 0x69, 0x63, 0x79, 0x00, 0x00, 0x00, 0x04, 0x33, 0x00, 0x03, 0x32, 0x00, 0x03, 0x6f, 0x00, 0x04, 0x00, 0x00, 0x27, 0xa6, 0x6f, 0x00, 0x05, 0x00, 0x00, 0x00, 0x04, 0x33, 0x00, 0x03, 0x32, 0x00, 0x03, 0x6f, 0x00, 0x04, 0x00, 0x00, 0x27, 0xcf, 0x6f, 0x00, 0x05, 0x00, 0x00, 0x00, 0x04, 0x33, 0x00, 0x03, 0x32, 0x00, 0x03, 0x6f, 0x00, 0x04, 0x00, 0x00, 0x27, 0xe4, 0x6f, 0x00, 0x05, 0x00, 0x00, 0x00, 0x04, 0x33, 0x00, 0x03, 0x33, 0x00, 0x00, 0x32, 0xff, 0xff, 0x00, 0x09, 0x77, 0x68, 0x69, 0x74, 0x65, 0x6c, 0x69, 0x73, 0x74, 0x33, 0x00, 0x06, 0x11];
+        let image: &[u8] = &[
+            0x41, 0x42, 0x58, 0x00, 0x10, 0x32, 0xff, 0xff, 0x00, 0x0b, 0x70, 0x6f, 0x6c, 0x69,
+            0x63, 0x79, 0x2d, 0x6c, 0x69, 0x73, 0x74, 0x6f, 0xff, 0xff, 0x00, 0x07, 0x76, 0x65,
+            0x72, 0x73, 0x69, 0x6f, 0x6e, 0x00, 0x00, 0x00, 0x0e, 0xdf, 0xff, 0xff, 0x00, 0x12,
+            0x72, 0x65, 0x73, 0x74, 0x72, 0x69, 0x63, 0x74, 0x42, 0x61, 0x63, 0x6b, 0x67, 0x72,
+            0x6f, 0x75, 0x6e, 0x64, 0x32, 0xff, 0xff, 0x00, 0x0a, 0x75, 0x69, 0x64, 0x2d, 0x70,
+            0x6f, 0x6c, 0x69, 0x63, 0x79, 0x6f, 0xff, 0xff, 0x00, 0x03, 0x75, 0x69, 0x64, 0x00,
+            0x00, 0x27, 0x77, 0x6f, 0xff, 0xff, 0x00, 0x06, 0x70, 0x6f, 0x6c, 0x69, 0x63, 0x79,
+            0x00, 0x00, 0x00, 0x04, 0x33, 0x00, 0x03, 0x32, 0x00, 0x03, 0x6f, 0x00, 0x04, 0x00,
+            0x00, 0x27, 0xa6, 0x6f, 0x00, 0x05, 0x00, 0x00, 0x00, 0x04, 0x33, 0x00, 0x03, 0x32,
+            0x00, 0x03, 0x6f, 0x00, 0x04, 0x00, 0x00, 0x27, 0xcf, 0x6f, 0x00, 0x05, 0x00, 0x00,
+            0x00, 0x04, 0x33, 0x00, 0x03, 0x32, 0x00, 0x03, 0x6f, 0x00, 0x04, 0x00, 0x00, 0x27,
+            0xe4, 0x6f, 0x00, 0x05, 0x00, 0x00, 0x00, 0x04, 0x33, 0x00, 0x03, 0x33, 0x00, 0x00,
+            0x32, 0xff, 0xff, 0x00, 0x09, 0x77, 0x68, 0x69, 0x74, 0x65, 0x6c, 0x69, 0x73, 0x74,
+            0x33, 0x00, 0x06, 0x11,
+        ];
         let p = Policy::read(&aim_android_xml::read_sequence(image).unwrap()).unwrap();
         assert!(!p.restrict_background);
-        assert_eq!(p.uid_policy, BTreeMap::from([(10103, 4), (10150, 4), (10191, 4), (10212, 4)]));
+        assert_eq!(
+            p.uid_policy,
+            BTreeMap::from([(10103, 4), (10150, 4), (10191, 4), (10212, 4)])
+        );
         assert_eq!(p.network_policies, 0);
-        let off = Policy { restrict_background: false, uid_policy: BTreeMap::new(), network_policies: 0 };
+        let off = Policy {
+            restrict_background: false,
+            uid_policy: BTreeMap::new(),
+            network_policies: 0,
+        };
         assert_eq!(off.status(10300), RESTRICT_BACKGROUND_STATUS_DISABLED);
     }
 }

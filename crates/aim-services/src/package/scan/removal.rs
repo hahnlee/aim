@@ -13,13 +13,38 @@ pub struct RemovedSetting {
 impl SigningScan {
     /// A retained factory remains verified, but active declarations must be
     /// withdrawn before its normal system-path scan can re-admit the code.
-    pub fn withdraw_for_live_factory(&mut self,name:&str)->Result<(),String> {
-        let setting=self.settings.packages.iter().find(|package|package.name==name).cloned().ok_or("factory restoration active setting absent")?;
-        if !self.settings.disabled_system_packages.iter().any(|package|package.name==name) {return Err("factory restoration disabled setting absent".into());}
-        let code=self.loaded.get(name).cloned().ok_or("factory restoration active code absent")?;
-        let record=super::Record{settings:setting.clone(),parsed:code.package.clone(),signing:code.collected_signing.clone(),
-            identity:super::Identity{manifest_name:code.package.package_name.clone(),internal_name:name.into(),real_name:setting.real_name.clone()},
-            origin:crate::package::owner::shared_users::ScanOrigin::Data};
+    pub fn withdraw_for_live_factory(&mut self, name: &str) -> Result<(), String> {
+        let setting = self
+            .settings
+            .packages
+            .iter()
+            .find(|package| package.name == name)
+            .cloned()
+            .ok_or("factory restoration active setting absent")?;
+        if !self
+            .settings
+            .disabled_system_packages
+            .iter()
+            .any(|package| package.name == name)
+        {
+            return Err("factory restoration disabled setting absent".into());
+        }
+        let code = self
+            .loaded
+            .get(name)
+            .cloned()
+            .ok_or("factory restoration active code absent")?;
+        let record = super::Record {
+            settings: setting.clone(),
+            parsed: code.package.clone(),
+            signing: code.collected_signing.clone(),
+            identity: super::Identity {
+                manifest_name: code.package.package_name.clone(),
+                internal_name: name.into(),
+                real_name: setting.real_name.clone(),
+            },
+            origin: crate::package::owner::shared_users::ScanOrigin::Data,
+        };
         self.withdraw_scanned_package(&record);
         Ok(())
     }
@@ -27,19 +52,34 @@ impl SigningScan {
     /// UID/signers and exact user state for a later reinstall or unarchival.
     pub fn prepare_live_code_retirement(&self, name: &str) -> Result<Self, String> {
         let mut next = self.clone();
-        let saved = next.settings.packages.iter().find(|package| package.name == name)
-            .cloned().ok_or("code retirement setting unavailable")?;
+        let saved = next
+            .settings
+            .packages
+            .iter()
+            .find(|package| package.name == name)
+            .cloned()
+            .ok_or("code retirement setting unavailable")?;
         if saved.flags & crate::package::settings::FLAG_SYSTEM != 0 {
             return Err("system code retirement requires factory restoration".into());
         }
-        let users = next.scanned_users.get(name).cloned().ok_or("code retirement user owner unavailable")?;
+        let users = next
+            .scanned_users
+            .get(name)
+            .cloned()
+            .ok_or("code retirement user owner unavailable")?;
         if users.values().any(|state| state.installed) {
             return Err("code retirement has installed users".into());
         }
         if let Some(code) = next.loaded.get(name).cloned() {
             let record = super::Record {
-                settings: saved.clone(), parsed: code.package.clone(), signing: code.collected_signing.clone(),
-                identity: super::Identity { manifest_name: code.package.package_name.clone(), internal_name: name.into(), real_name: saved.real_name.clone() },
+                settings: saved.clone(),
+                parsed: code.package.clone(),
+                signing: code.collected_signing.clone(),
+                identity: super::Identity {
+                    manifest_name: code.package.package_name.clone(),
+                    internal_name: name.into(),
+                    real_name: saved.real_name.clone(),
+                },
                 origin: crate::package::owner::shared_users::ScanOrigin::Data,
             };
             next.withdraw_scanned_package(&record);
@@ -48,7 +88,9 @@ impl SigningScan {
         next.update_disabled_user_aliases(name, &users);
         next.retain_seinfo_after_code_removal()?;
         next.complete_retained_library_dependencies()?;
-        if next.has_shared_processes() { next.rebuild_shared_processes_from_native_members()?; }
+        if next.has_shared_processes() {
+            next.rebuild_shared_processes_from_native_members()?;
+        }
         next.rebind_retired_code_runtime(name)?;
         Ok(next)
     }
@@ -57,8 +99,13 @@ impl SigningScan {
     /// cleanup. Updated-system restoration is a separate scan admission.
     pub fn prepare_live_package_removal(&self, name: &str) -> Result<Self, String> {
         let mut next = self.clone();
-        let saved = next.settings.packages.iter().find(|package| package.name == name)
-            .cloned().ok_or("live removal package setting unavailable")?;
+        let saved = next
+            .settings
+            .packages
+            .iter()
+            .find(|package| package.name == name)
+            .cloned()
+            .ok_or("live removal package setting unavailable")?;
         if saved.flags & crate::package::settings::FLAG_SYSTEM != 0 {
             return Err("system removal requires a factory restoration admission".into());
         }
@@ -69,16 +116,25 @@ impl SigningScan {
         }
         if let Some(code) = next.loaded.get(name).cloned() {
             let record = super::Record {
-                settings: saved.clone(), parsed: code.package.clone(), signing: code.collected_signing.clone(),
-                identity: super::Identity { manifest_name: code.package.package_name.clone(), internal_name: name.into(), real_name: saved.real_name.clone() },
+                settings: saved.clone(),
+                parsed: code.package.clone(),
+                signing: code.collected_signing.clone(),
+                identity: super::Identity {
+                    manifest_name: code.package.package_name.clone(),
+                    internal_name: name.into(),
+                    real_name: saved.real_name.clone(),
+                },
                 origin: crate::package::owner::shared_users::ScanOrigin::Data,
             };
             next.withdraw_scanned_package(&record);
         }
-        next.remove_package_setting(name).map_err(|error| format!("live setting retirement: {error:?}"))?;
+        next.remove_package_setting(name)
+            .map_err(|error| format!("live setting retirement: {error:?}"))?;
         next.retain_seinfo_after_code_removal()?;
         next.complete_retained_library_dependencies()?;
-        if next.has_shared_processes() { next.rebuild_shared_processes_from_native_members()?; }
+        if next.has_shared_processes() {
+            next.rebuild_shared_processes_from_native_members()?;
+        }
         Ok(next)
     }
     /// Remove the real-name key only after permission uninstall and any shared
@@ -220,17 +276,20 @@ impl SigningScan {
 mod tests {
     use super::*;
     use crate::package::{
+        bootstrap::{ApexInventory, ScanUsers},
         domain_verification::{self, owner::Owner as DomainOwner},
-        bootstrap::{ApexInventory,ScanUsers},
         intent_filter::{ACTION_VIEW, CATEGORY_BROWSABLE, IntentFilter, ParsedIntentInfo},
         pkg::{Activity, AndroidPackage},
         restrictions::UserState,
-        scan_snapshot::query_state::{Context,PackageInputs,UserInputs},
-        settings::{Signatures, FLAG_SYSTEM},
+        scan_snapshot::query_state::{Context, PackageInputs, UserInputs},
+        settings::{FLAG_SYSTEM, Signatures},
         sign::SigningDetails,
         system_config::SystemConfig,
     };
-    use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::Arc,
+    };
 
     fn owner(xml: &[u8]) -> SigningScan {
         let root = aim_android_xml::read(xml).unwrap();
@@ -239,64 +298,220 @@ mod tests {
     }
 
     fn domain_fixture() -> (SigningScan, Arc<super::super::LoadedPackage>) {
-        let id="00000000-0000-0000-0000-000000000001";
-        let signing=SigningDetails{unknown:false,scheme_version:3,signatures:vec![vec![7]],current_flags:vec![],public_keys:Some(vec![]),past_signing_certificates:None};
-        let mut filter=IntentFilter{auto_verify:true,..Default::default()};
-        filter.add_action(ACTION_VIEW);filter.add_category(CATEGORY_BROWSABLE);filter.add_category("android.intent.category.DEFAULT");
-        filter.add_data_scheme("https");filter.add_data_authority("fixture.example",None);
-        let mut activity=Activity::default();activity.main.component.intents.push(ParsedIntentInfo{filter,..Default::default()});
-        let setting=Package{name:"fixture".into(),code_path:"/data/app/fixture".into(),app_id:10123,domain_set_id:Some(id.into()),
-            signatures:Some(Signatures{scheme_version:3,signatures:signing.signatures.clone(),current_flags:vec![],public_keys:Some(vec![]),past_signatures:None}),..Default::default()};
-        let parsed=AndroidPackage{package_name:setting.name.clone(),path:Some(setting.code_path.clone()),base_apk_path:Some(format!("{}/base.apk",setting.code_path)),
-            uid:setting.app_id,target_sdk_version:36,activities:vec![activity],signing_details:Some(signing.parcel_details().unwrap()),..Default::default()};
-        let code=Arc::new(super::super::LoadedPackage::new(parsed,signing).unwrap());
-        let mut scan=SigningScan::new(&Default::default(),&crate::package::settings::Settings{packages:vec![setting],domain_verification:domain_verification::State{active:vec![domain_verification::Package{
-            name:"fixture".into(),id:id.into(),has_auto_verify_domains:true,signature:None,domains:vec![(Some("fixture.example".into()),1)],
-            users:vec![domain_verification::User{id:0,allow_link_handling:false,enabled_hosts:vec!["fixture.example".into()]}],uri_relative_filter_groups:vec![],}],..Default::default()},..Default::default()},36).unwrap();
-        scan.loaded.insert("fixture".into(),code.clone());
-        scan.scanned_users.insert("fixture".into(),BTreeMap::from([(0,UserState::default())]));
-        (scan,code)
+        let id = "00000000-0000-0000-0000-000000000001";
+        let signing = SigningDetails {
+            unknown: false,
+            scheme_version: 3,
+            signatures: vec![vec![7]],
+            current_flags: vec![],
+            public_keys: Some(vec![]),
+            past_signing_certificates: None,
+        };
+        let mut filter = IntentFilter {
+            auto_verify: true,
+            ..Default::default()
+        };
+        filter.add_action(ACTION_VIEW);
+        filter.add_category(CATEGORY_BROWSABLE);
+        filter.add_category("android.intent.category.DEFAULT");
+        filter.add_data_scheme("https");
+        filter.add_data_authority("fixture.example", None);
+        let mut activity = Activity::default();
+        activity.main.component.intents.push(ParsedIntentInfo {
+            filter,
+            ..Default::default()
+        });
+        let setting = Package {
+            name: "fixture".into(),
+            code_path: "/data/app/fixture".into(),
+            app_id: 10123,
+            domain_set_id: Some(id.into()),
+            signatures: Some(Signatures {
+                scheme_version: 3,
+                signatures: signing.signatures.clone(),
+                current_flags: vec![],
+                public_keys: Some(vec![]),
+                past_signatures: None,
+            }),
+            ..Default::default()
+        };
+        let parsed = AndroidPackage {
+            package_name: setting.name.clone(),
+            path: Some(setting.code_path.clone()),
+            base_apk_path: Some(format!("{}/base.apk", setting.code_path)),
+            uid: setting.app_id,
+            target_sdk_version: 36,
+            activities: vec![activity],
+            signing_details: Some(signing.parcel_details().unwrap()),
+            ..Default::default()
+        };
+        let code = Arc::new(super::super::LoadedPackage::new(parsed, signing).unwrap());
+        let mut scan = SigningScan::new(
+            &Default::default(),
+            &crate::package::settings::Settings {
+                packages: vec![setting],
+                domain_verification: domain_verification::State {
+                    active: vec![domain_verification::Package {
+                        name: "fixture".into(),
+                        id: id.into(),
+                        has_auto_verify_domains: true,
+                        signature: None,
+                        domains: vec![(Some("fixture.example".into()), 1)],
+                        users: vec![domain_verification::User {
+                            id: 0,
+                            allow_link_handling: false,
+                            enabled_hosts: vec!["fixture.example".into()],
+                        }],
+                        uri_relative_filter_groups: vec![],
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            36,
+        )
+        .unwrap();
+        scan.loaded.insert("fixture".into(), code.clone());
+        scan.scanned_users.insert(
+            "fixture".into(),
+            BTreeMap::from([(0, UserState::default())]),
+        );
+        (scan, code)
     }
 
     #[test]
     fn retained_domain_setting_requires_uninstalled_non_system_owner() {
-        let (mut scan,_)=domain_fixture();let setting=scan.settings.packages[0].clone();
+        let (mut scan, _) = domain_fixture();
+        let setting = scan.settings.packages[0].clone();
         assert!(scan.domain_code_owner(&setting).unwrap().is_some());
         scan.loaded.remove(&setting.name);
-        assert!(scan.domain_code_owner(&setting).unwrap_err().contains("installed package"));
-        scan.scanned_users.get_mut(&setting.name).unwrap().get_mut(&0).unwrap().installed=false;
+        assert!(
+            scan.domain_code_owner(&setting)
+                .unwrap_err()
+                .contains("installed package")
+        );
+        scan.scanned_users
+            .get_mut(&setting.name)
+            .unwrap()
+            .get_mut(&0)
+            .unwrap()
+            .installed = false;
         assert!(scan.domain_code_owner(&setting).unwrap().is_none());
-        let mut system=setting.clone();system.flags|=FLAG_SYSTEM;
-        assert!(scan.domain_code_owner(&system).unwrap_err().contains("system domain"));
+        let mut system = setting.clone();
+        system.flags |= FLAG_SYSTEM;
+        assert!(
+            scan.domain_code_owner(&system)
+                .unwrap_err()
+                .contains("system domain")
+        );
         scan.scanned_users.remove(&setting.name);
-        assert!(scan.domain_code_owner(&setting).unwrap_err().contains("user owner"));
+        assert!(
+            scan.domain_code_owner(&setting)
+                .unwrap_err()
+                .contains("user owner")
+        );
     }
 
     #[test]
     fn retired_domain_state_stays_persisted_and_reattaches_on_reinstall() {
-        let (mut scan,code)=domain_fixture();let config=SystemConfig::default();
-        let policies=BTreeMap::from([("fixture".into(),true)]);
-        let mut domains=DomainOwner::from_boot(&scan,&config,&policies).unwrap().owner;
-        let expected=domains.persisted();assert!(domains.package("fixture").is_some());
-        scan.scanned_users.get_mut("fixture").unwrap().get_mut(&0).unwrap().installed=false;
-        scan.loaded.remove("fixture");assert!(scan.domain_code_owner(&scan.settings.packages[0]).unwrap().is_none());
-        domains.rebase_persisted_projection(&expected,expected.clone(),&BTreeSet::new()).unwrap();
-        assert!(domains.package("fixture").is_none());assert_eq!(domains.persisted(),expected);
-        let retired=DomainOwner::from_boot(&scan,&config,&BTreeMap::new()).unwrap().owner;
-        assert!(retired.package("fixture").is_none());assert_eq!(retired.persisted(),expected);
-        let stale=PackageInputs{app_id:10123,path:"/data/app/fixture".into(),version:0,installed_permissions:vec![],
-            domain_verification:Some((expected.active[0].id.clone(),vec![("fixture.example".into(),1)])),uri_relative_filter_groups:vec![],
-            filter_application_query:false,syncable_authorities:vec![],users:BTreeMap::from([(0,UserInputs{gids:vec![],granted_permissions:vec![],domain_selection:Some((false,vec![("fixture.example".into(),1)]))})])};
-        let context=Context{scan_version:1,native_domains:None,boot_classes:None,nonce:None,system:Default::default(),platform:Default::default(),users:Default::default(),
-            apex_inventory:ApexInventory{packages:Some(vec![]),active:vec![]},scan_users:ScanUsers{users:Some(vec![])},cross_user_suspensions:false,
-            packages:BTreeMap::from([(("fixture".into(),false),stale)]),retained_packages:Default::default()};
-        let resolved=context.resolve_domains(&scan,&retired,&config,&BTreeMap::new()).unwrap();let inputs=&resolved.packages[&("fixture".into(),false)];
-        assert!(inputs.domain_verification.is_none()&&inputs.uri_relative_filter_groups.is_empty()&&inputs.users[&0].domain_selection.is_none());
-        assert!(resolved.clone().resolve_domains(&scan,&retired,&config,&policies).unwrap_err().contains("inventory differs"));
-        scan.loaded.insert("fixture".into(),code);scan.scanned_users.get_mut("fixture").unwrap().get_mut(&0).unwrap().installed=true;
-        let reattached=DomainOwner::from_boot(&scan,&config,&policies).unwrap().owner;
-        assert_eq!(reattached.package("fixture"),expected.active.first());
-        assert_eq!(reattached.persisted(),expected);
+        let (mut scan, code) = domain_fixture();
+        let config = SystemConfig::default();
+        let policies = BTreeMap::from([("fixture".into(), true)]);
+        let mut domains = DomainOwner::from_boot(&scan, &config, &policies)
+            .unwrap()
+            .owner;
+        let expected = domains.persisted();
+        assert!(domains.package("fixture").is_some());
+        scan.scanned_users
+            .get_mut("fixture")
+            .unwrap()
+            .get_mut(&0)
+            .unwrap()
+            .installed = false;
+        scan.loaded.remove("fixture");
+        assert!(
+            scan.domain_code_owner(&scan.settings.packages[0])
+                .unwrap()
+                .is_none()
+        );
+        domains
+            .rebase_persisted_projection(&expected, expected.clone(), &BTreeSet::new())
+            .unwrap();
+        assert!(domains.package("fixture").is_none());
+        assert_eq!(domains.persisted(), expected);
+        let retired = DomainOwner::from_boot(&scan, &config, &BTreeMap::new())
+            .unwrap()
+            .owner;
+        assert!(retired.package("fixture").is_none());
+        assert_eq!(retired.persisted(), expected);
+        let stale = PackageInputs {
+            app_id: 10123,
+            path: "/data/app/fixture".into(),
+            version: 0,
+            installed_permissions: vec![],
+            domain_verification: Some((
+                expected.active[0].id.clone(),
+                vec![("fixture.example".into(), 1)],
+            )),
+            uri_relative_filter_groups: vec![],
+            filter_application_query: false,
+            syncable_authorities: vec![],
+            users: BTreeMap::from([(
+                0,
+                UserInputs {
+                    gids: vec![],
+                    granted_permissions: vec![],
+                    domain_selection: Some((false, vec![("fixture.example".into(), 1)])),
+                },
+            )]),
+        };
+        let context = Context {
+            scan_version: 1,
+            native_domains: None,
+            boot_classes: None,
+            nonce: None,
+            system: Default::default(),
+            platform: Default::default(),
+            users: Default::default(),
+            apex_inventory: ApexInventory {
+                packages: Some(vec![]),
+                active: vec![],
+            },
+            scan_users: ScanUsers {
+                users: Some(vec![]),
+            },
+            cross_user_suspensions: false,
+            packages: BTreeMap::from([(("fixture".into(), false), stale)]),
+            retained_packages: Default::default(),
+        };
+        let resolved = context
+            .resolve_domains(&scan, &retired, &config, &BTreeMap::new())
+            .unwrap();
+        let inputs = &resolved.packages[&("fixture".into(), false)];
+        assert!(
+            inputs.domain_verification.is_none()
+                && inputs.uri_relative_filter_groups.is_empty()
+                && inputs.users[&0].domain_selection.is_none()
+        );
+        assert!(
+            resolved
+                .clone()
+                .resolve_domains(&scan, &retired, &config, &policies)
+                .unwrap_err()
+                .contains("inventory differs")
+        );
+        scan.loaded.insert("fixture".into(), code);
+        scan.scanned_users
+            .get_mut("fixture")
+            .unwrap()
+            .get_mut(&0)
+            .unwrap()
+            .installed = true;
+        let reattached = DomainOwner::from_boot(&scan, &config, &policies)
+            .unwrap()
+            .owner;
+        assert_eq!(reattached.package("fixture"), expected.active.first());
+        assert_eq!(reattached.persisted(), expected);
     }
 
     #[test]

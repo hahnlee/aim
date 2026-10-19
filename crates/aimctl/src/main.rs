@@ -289,7 +289,14 @@ fn open(files: &Files, package: &str) -> Result<ExitCode, String> {
     if state.inputs.app_host_services()?.is_some() {
         let guest = booted(files)?;
         let (status, out) = guest.output(
-            &["/system/bin/service", "call", "aim.app_host", "1", "s16", package],
+            &[
+                "/system/bin/service",
+                "call",
+                "aim.app_host",
+                "1",
+                "s16",
+                package,
+            ],
             COMMAND_PATIENCE,
         )?;
         print!("{out}");

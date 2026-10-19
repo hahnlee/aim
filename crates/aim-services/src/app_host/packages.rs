@@ -120,7 +120,11 @@ impl Packages {
                 package::scan::registered_apex(code, &persisted.settings, &config, &apks)
                     .map_err(|e| format!("{}: {e}", code.info.module_path))?;
             let pkg = Arc::new(pkg);
-            containers.push((code, pkg.clone(), join_apex(code, pkg, flags, private_flags, stopped)?));
+            containers.push((
+                code,
+                pkg.clone(),
+                join_apex(code, pkg, flags, private_flags, stopped)?,
+            ));
         }
         let platform = apks.platform;
         let restrictions = persisted
@@ -173,13 +177,17 @@ impl Packages {
         let mut libraries = package::libraries::Registry::new(&config);
         for setting in &persisted.settings.packages {
             if let Some(ps) = packages.get(&setting.name) {
-                libraries.add_package(ps, None).map_err(|e| format!("{}: shared libraries: {}", setting.name, e.0))?;
+                libraries
+                    .add_package(ps, None)
+                    .map_err(|e| format!("{}: shared libraries: {}", setting.name, e.0))?;
             }
         }
         let resolved = libraries
             .resolve(&packages, &|ps| {
                 let target_sdk = ps.pkg.as_ref().map_or(0, |pkg| pkg.target_sdk_version);
-                Ok(package::libraries::Policy::pinned(enforce_native_dependencies(&ps.name, target_sdk)))
+                Ok(package::libraries::Policy::pinned(
+                    enforce_native_dependencies(&ps.name, target_sdk),
+                ))
             })
             .map_err(|e| format!("{}: shared libraries: {:?}", e.package, e.cause))?;
         let shared_libraries = resolved.registry.entries().cloned().collect();
@@ -221,7 +229,11 @@ impl Packages {
                 ..Default::default()
             },
         );
-        let permissions = persisted.access.as_ref().map(|a| a.permissions.clone()).unwrap_or_default();
+        let permissions = persisted
+            .access
+            .as_ref()
+            .map(|a| a.permissions.clone())
+            .unwrap_or_default();
         let mut system =
             system_config::system(root, property, &system_config::Framework::load(root)?)?;
         system.sdk_sandbox_package = Some(Some(sdk_sandbox_package(&packages)?));
@@ -387,10 +399,19 @@ impl Packages {
     /// (`TypedValue.complexToFloat` of a `COMPLEX_UNIT_DIP` dimension).
     pub fn framework_dimension_dp(&self, name: &str) -> Option<f32> {
         const COMPLEX_UNIT_DIP: u32 = 1;
-        const RADIX_MULTS: [f32; 4] = [1.0 / 256.0, 1.0 / 32768.0, 1.0 / 8388608.0, 1.0 / 2147483648.0];
+        const RADIX_MULTS: [f32; 4] = [
+            1.0 / 256.0,
+            1.0 / 32768.0,
+            1.0 / 8388608.0,
+            1.0 / 2147483648.0,
+        ];
         let value = self.framework_value("dimen", name)?;
-        (value.kind == crate::package::parse::resources::TYPE_DIMENSION && value.data & 0xf == COMPLEX_UNIT_DIP)
-            .then(|| (value.data & 0xffff_ff00) as i32 as f32 * RADIX_MULTS[((value.data >> 4) & 3) as usize])
+        (value.kind == crate::package::parse::resources::TYPE_DIMENSION
+            && value.data & 0xf == COMPLEX_UNIT_DIP)
+            .then(|| {
+                (value.data & 0xffff_ff00) as i32 as f32
+                    * RADIX_MULTS[((value.data >> 4) & 3) as usize]
+            })
     }
 
     /// The file of the framework's resource `kind/name` (`openRawResource`,
@@ -438,7 +459,10 @@ impl Packages {
             let (table, file) = resources
                 .resource_string_source(id)
                 .ok_or_else(|| format!("no XML resource {id:#x}"))?;
-            let bytes = match table_apks.get(table).ok_or("an XML resource of an overlay")? {
+            let bytes = match table_apks
+                .get(table)
+                .ok_or("an XML resource of an overlay")?
+            {
                 Some(i) => apks[*i].file(file),
                 None => aim_apps::apk::Apk::open(&root.join("system/framework/framework-res.apk"))
                     .and_then(|apk| apk.file(file)),
@@ -462,12 +486,20 @@ impl Packages {
     /// each of `ids` in `pkg`'s resources: its package id, type and entry,
     /// and its string if it is one.
     #[allow(clippy::type_complexity)]
-    pub fn resource_names_and_strings(&self, root: &Path, data: &Path, pkg: &AndroidPackage, ids: &[u32]) -> Result<Vec<(Option<(u8, String, String)>, Option<String>)>, String> {
+    pub fn resource_names_and_strings(
+        &self,
+        root: &Path,
+        data: &Path,
+        pkg: &AndroidPackage,
+        ids: &[u32],
+    ) -> Result<Vec<(Option<(u8, String, String)>, Option<String>)>, String> {
         self.with_resources(root, data, pkg, |resources, _, _| {
             Ok(ids
                 .iter()
                 .map(|&id| {
-                    let name = resources.entry_name(id).map(|(p, t, n)| (p, t.to_owned(), n.to_owned()));
+                    let name = resources
+                        .entry_name(id)
+                        .map(|(p, t, n)| (p, t.to_owned(), n.to_owned()));
                     (name, resources.resource_string(id))
                 })
                 .collect())
@@ -479,13 +511,29 @@ impl Packages {
     /// `Theme_Holo`): the `R.styleable.Window` attributes
     /// `AttributeCache.get` obtains on the theme of a package's context
     /// (`Resources.selectDefaultTheme`).
-    pub fn window_style(&self, root: &Path, data: &Path, pkg: &AndroidPackage, theme: u32, target_sdk: i32) -> Result<WindowStyle, String> {
+    pub fn window_style(
+        &self,
+        root: &Path,
+        data: &Path,
+        pkg: &AndroidPackage,
+        theme: u32,
+        target_sdk: i32,
+    ) -> Result<WindowStyle, String> {
         const HONEYCOMB: i32 = 11;
         const ICE_CREAM_SANDWICH: i32 = 14;
         const N: i32 = 24;
-        let style = |name: &str| self.platform.framework.id("style", name).ok_or_else(|| format!("no framework style {name}"));
+        let style = |name: &str| {
+            self.platform
+                .framework
+                .id("style", name)
+                .ok_or_else(|| format!("no framework style {name}"))
+        };
         let theme = match theme {
-            0 => style(if target_sdk < HONEYCOMB { "Theme" } else { "Theme.Holo" })?,
+            0 => style(if target_sdk < HONEYCOMB {
+                "Theme"
+            } else {
+                "Theme.Holo"
+            })?,
             theme => theme,
         };
         let default = style(if target_sdk < HONEYCOMB {
@@ -500,9 +548,15 @@ impl Packages {
         self.with_resources(root, data, pkg, |resources, _, _| {
             // `TypedArray.getBoolean`: an integer's, else false.
             let flag = |name: &str| -> Result<bool, String> {
-                let attr = self.platform.framework.id("attr", name).ok_or_else(|| format!("no attribute {name}"))?;
+                let attr = self
+                    .platform
+                    .framework
+                    .id("attr", name)
+                    .ok_or_else(|| format!("no attribute {name}"))?;
                 let int = parse::resources::TYPE_FIRST_INT..=parse::resources::TYPE_LAST_INT;
-                Ok(resources.styled_attr(theme, default, attr).is_some_and(|v| int.contains(&v.kind) && v.data != 0))
+                Ok(resources
+                    .styled_attr(theme, default, attr)
+                    .is_some_and(|v| int.contains(&v.kind) && v.data != 0))
             };
             Ok(WindowStyle {
                 translucent: flag("windowIsTranslucent")?,
@@ -522,7 +576,11 @@ impl Packages {
         root: &Path,
         data: &Path,
         pkg: &AndroidPackage,
-        f: impl FnOnce(&parse::resources::Resources<'_>, &[aim_apps::apk::Apk], &[Option<usize>]) -> Result<T, String>,
+        f: impl FnOnce(
+            &parse::resources::Resources<'_>,
+            &[aim_apps::apk::Apk],
+            &[Option<usize>],
+        ) -> Result<T, String>,
     ) -> Result<T, String> {
         let base = pkg.base_apk_path.as_deref().ok_or("no base APK")?;
         let mut paths = vec![base];
@@ -683,14 +741,18 @@ fn join(
     // `scanSystemPackageLI`: a static shared library not from an APEX
     // has its synthetic name (`renameStaticSharedLibraryPackage`).
     if pkg.static_shared_library_name.is_some() && !setting.code_path.starts_with("/apex/") {
-        pkg.set_package_name(format!("{}_{}", pkg.package_name, pkg.static_shared_lib_version));
+        pkg.set_package_name(format!(
+            "{}_{}",
+            pkg.package_name, pkg.static_shared_lib_version
+        ));
     }
     pkg.uid = setting.app_id;
     pkg.primary_cpu_abi = setting.primary_cpu_abi.clone();
     pkg.secondary_cpu_abi = setting.secondary_cpu_abi.clone();
     // The signers PackageManager collected and persisted (`<sigs>`).
     if let Some(saved) = &setting.signatures {
-        let signing = package::sign::SigningDetails::from_saved(saved).and_then(|s| s.parcel_details());
+        let signing =
+            package::sign::SigningDetails::from_saved(saved).and_then(|s| s.parcel_details());
         pkg.signing_details = Some(signing.map_err(|e| format!("signatures: {e}"))?);
     }
     let seinfo = listed.map(|l| l.seinfo.clone());
@@ -797,7 +859,8 @@ fn join_apex(
         name: pkg.package_name.clone(),
         app_id: -1,
         path: code.info.module_path.clone(),
-        version_code: (i64::from(pkg.version_code_major) << 32) | i64::from(pkg.version_code as u32),
+        version_code: (i64::from(pkg.version_code_major) << 32)
+            | i64::from(pkg.version_code as u32),
         target_sdk_version: pkg.target_sdk_version,
         category_override: -1,
         signatures: Some(settings::Signatures {
@@ -856,7 +919,9 @@ mod tests {
     #[test]
     fn containers_register_and_name_their_modules() {
         use crate::package::bootstrap::{ActiveApex, ApexInventory, ApexPackage};
-        let Some(root) = aim_paths::input(aim_paths::derived_image(), "derived-image") else { return };
+        let Some(root) = aim_paths::input(aim_paths::derived_image(), "derived-image") else {
+            return;
+        };
         let data = Path::new("/nonexistent");
         let module_path = "/system/apex/com.google.android.tethering.capex";
         let inventory = ApexInventory {
@@ -887,7 +952,8 @@ mod tests {
             platform: Platform::load(&root, Default::default()).unwrap(),
         };
         let config = system_config::SystemConfig::read(&root, &|_| None);
-        let image = package::scan::ApexImage::load(&apks, &inventory, parse::PARSE_IS_SYSTEM_DIR).unwrap();
+        let image =
+            package::scan::ApexImage::load(&apks, &inventory, parse::PARSE_IS_SYSTEM_DIR).unwrap();
         let code = &image.packages[0];
         let (pkg, flags, private_flags, stopped) =
             package::scan::registered_apex(code, &Default::default(), &config, &apks).unwrap();
@@ -898,7 +964,10 @@ mod tests {
         assert!(pkg.is2(package::pkg::booleans2::APEX) && pkg.is(booleans::SYSTEM));
         assert!(container.is.system && container.users[&0].installed);
 
-        let user = restrictions::UserState { installed: true, ..Default::default() };
+        let user = restrictions::UserState {
+            installed: true,
+            ..Default::default()
+        };
         let system_package = |name: &str, code_path: &str| {
             let setting = settings::Package {
                 name: name.into(),
@@ -914,13 +983,31 @@ mod tests {
             "com.google.android.networkstack.tethering",
             "/apex/com.android.tethering/priv-app/TetheringGoogle@BE2A.250530.026.F3",
         );
-        let provider = system_package("com.google.android.modulemetadata", "/product/app/ModuleMetadataGoogle");
+        let provider = system_package(
+            "com.google.android.modulemetadata",
+            "/product/app/ModuleMetadataGoogle",
+        );
         let mut users = BTreeMap::new();
-        users.insert(0, model::User { id: 0, unlocking_or_unlocked: true, ..Default::default() });
+        users.insert(
+            0,
+            model::User {
+                id: 0,
+                unlocking_or_unlocked: true,
+                ..Default::default()
+            },
+        );
         let state = model::State {
-            packages: [container, tethering.clone(), provider].into_iter().map(|ps| (ps.name.clone(), ps)).collect(),
+            packages: [container, tethering.clone(), provider]
+                .into_iter()
+                .map(|ps| (ps.name.clone(), ps))
+                .collect(),
             users,
-            system: system_config::system(&root, &|_| None, &system_config::Framework::load(&root).unwrap()).unwrap(),
+            system: system_config::system(
+                &root,
+                &|_| None,
+                &system_config::Framework::load(&root).unwrap(),
+            )
+            .unwrap(),
             ..Default::default()
         };
         let results = [package::scan::ApexScanResult {
@@ -951,7 +1038,11 @@ mod tests {
         assert_eq!(module.apex.as_deref(), Some("com.android.tethering"));
         assert_eq!(
             module.apks.as_deref(),
-            Some(&[Some("com.google.android.networkstack.tethering".to_string())][..])
+            Some(
+                &[Some(
+                    "com.google.android.networkstack.tethering".to_string()
+                )][..]
+            )
         );
     }
 }

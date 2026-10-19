@@ -28,14 +28,19 @@ use std::sync::{Arc, Mutex, Weak};
 
 use aim_android_xml::Element;
 use aim_binder_host::local::{Call, Reply, Service, Strong};
-use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, StatusCode};
+use aim_binder_host::parcel::{
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, StatusCode,
+};
 use aim_service_aidl::android_media_session_iactivesessionslistener as active_listener;
 use aim_service_aidl::android_media_session_ionmediakeyeventsessionchangedlistener as key_listener;
 use aim_service_aidl::android_media_session_isessionmanager as sm;
 
 use super::kept::{KeptBundle, RawBundle};
 use super::media_session_record::{Record, Token};
-use super::pending_intents::{INTENT_SENDER_ACTIVITY, INTENT_SENDER_BROADCAST, INTENT_SENDER_FOREGROUND_SERVICE, INTENT_SENDER_SERVICE};
+use super::pending_intents::{
+    INTENT_SENDER_ACTIVITY, INTENT_SENDER_BROADCAST, INTENT_SENDER_FOREGROUND_SERVICE,
+    INTENT_SENDER_SERVICE,
+};
 use super::settings_provider::{Caller, SettingsProvider};
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::bundle::Value;
@@ -94,13 +99,25 @@ pub(super) struct ReceiverHolder {
 impl ReceiverHolder {
     /// `create(userId, broadcastReceiver)`.
     pub(super) fn broadcast(user: i32, component: ComponentName) -> ReceiverHolder {
-        ReceiverHolder { user, package: component.package.clone(), component: Some(component), kind: COMPONENT_TYPE_BROADCAST }
+        ReceiverHolder {
+            user,
+            package: component.package.clone(),
+            component: Some(component),
+            kind: COMPONENT_TYPE_BROADCAST,
+        }
     }
 
     /// `create(userId, pendingIntent, sessionPackageName)`: the component
     /// the PendingIntent's creator resolves its intent to, if one.
-    pub(super) fn create(host: &AppHost, user: i32, pending_intent: Option<Binder>, session_package: &str) -> Result<Option<ReceiverHolder>, Exception> {
-        let Some(pi) = pending_intent else { return Ok(None) };
+    pub(super) fn create(
+        host: &AppHost,
+        user: i32,
+        pending_intent: Option<Binder>,
+        session_package: &str,
+    ) -> Result<Option<ReceiverHolder>, Exception> {
+        let Some(pi) = pending_intent else {
+            return Ok(None);
+        };
         let (kind, creator) = host.intent_sender_kind(pi);
         // `getComponentType(pendingIntent)`.
         let kind = match kind {
@@ -111,13 +128,17 @@ impl ReceiverHolder {
         };
         // `getComponentName`.
         let flags = match kind {
-            COMPONENT_TYPE_ACTIVITY => Some(PACKAGE_MANAGER_COMMON_FLAGS | MATCH_DEFAULT_ONLY | GET_ACTIVITIES),
+            COMPONENT_TYPE_ACTIVITY => {
+                Some(PACKAGE_MANAGER_COMMON_FLAGS | MATCH_DEFAULT_ONLY | GET_ACTIVITIES)
+            }
             COMPONENT_TYPE_SERVICE => Some(PACKAGE_MANAGER_COMMON_FLAGS | GET_SERVICES),
             COMPONENT_TYPE_BROADCAST => Some(PACKAGE_MANAGER_COMMON_FLAGS | GET_RECEIVERS),
             _ => None,
         };
         let found = match flags {
-            Some(flags) => host.query_intent_components_for_intent_sender(pi, flags)?.unwrap_or_default(),
+            Some(flags) => host
+                .query_intent_components_for_intent_sender(pi, flags)?
+                .unwrap_or_default(),
             None => Vec::new(),
         };
         let component = found.into_iter().find_map(|ri| {
@@ -127,15 +148,29 @@ impl ReceiverHolder {
                 Info::Provider(p) => p.info,
             };
             match (info.item.package_name, info.item.name) {
-                (Some(package), Some(class)) if Some(&package) == creator.as_ref() => Some(ComponentName { package, class }),
+                (Some(package), Some(class)) if Some(&package) == creator.as_ref() => {
+                    Some(ComponentName { package, class })
+                }
                 _ => None,
             }
         });
         Ok(Some(match component {
-            Some(component) => ReceiverHolder { user, package: component.package.clone(), component: Some(component), kind },
+            Some(component) => ReceiverHolder {
+                user,
+                package: component.package.clone(),
+                component: Some(component),
+                kind,
+            },
             None => {
-                eprintln!("app host: media_session: Unresolvable implicit intent is set, pi={pi:?}");
-                ReceiverHolder { user, component: None, package: session_package.to_string(), kind: COMPONENT_TYPE_INVALID }
+                eprintln!(
+                    "app host: media_session: Unresolvable implicit intent is set, pi={pi:?}"
+                );
+                ReceiverHolder {
+                    user,
+                    component: None,
+                    package: session_package.to_string(),
+                    kind: COMPONENT_TYPE_INVALID,
+                }
             }
         }))
     }
@@ -153,25 +188,47 @@ impl ReceiverHolder {
 /// none for anything else, and a bad number throws. A type left out is
 /// the component's (`getComponentType(context, componentName)`), which
 /// `kind` looks up.
-fn unflatten_receiver(info: Option<&str>, kind: impl FnOnce(&ComponentName) -> Result<i32, Exception>) -> Result<Option<ReceiverHolder>, Exception> {
-    let Some(info) = info.filter(|i| !i.is_empty()) else { return Ok(None) };
+fn unflatten_receiver(
+    info: Option<&str>,
+    kind: impl FnOnce(&ComponentName) -> Result<i32, Exception>,
+) -> Result<Option<ReceiverHolder>, Exception> {
+    let Some(info) = info.filter(|i| !i.is_empty()) else {
+        return Ok(None);
+    };
     let tokens: Vec<&str> = info.split(',').collect();
     if tokens.len() != 2 && tokens.len() != 3 {
         return Ok(None);
     }
     // `ComponentName.unflattenFromString`.
-    let Some(sep) = tokens[0].find('/').filter(|&sep| sep + 1 < tokens[0].len()) else { return Ok(None) };
+    let Some(sep) = tokens[0].find('/').filter(|&sep| sep + 1 < tokens[0].len()) else {
+        return Ok(None);
+    };
     let (package, class) = (&tokens[0][..sep], &tokens[0][sep + 1..]);
-    let class = if class.starts_with('.') { format!("{package}{class}") } else { class.to_string() };
-    let component = ComponentName { package: package.to_string(), class };
+    let class = if class.starts_with('.') {
+        format!("{package}{class}")
+    } else {
+        class.to_string()
+    };
+    let component = ComponentName {
+        package: package.to_string(),
+        class,
+    };
     // `Integer.parseInt` of the user and the type throws on a bad number.
-    let number = |t: &str| t.parse::<i32>().map_err(|_| Exception::illegal_argument(format!("For input string: \"{t}\"")));
+    let number = |t: &str| {
+        t.parse::<i32>()
+            .map_err(|_| Exception::illegal_argument(format!("For input string: \"{t}\"")))
+    };
     let user = number(tokens[1])?;
     let kind = match tokens.get(2) {
         Some(t) => number(t)?,
         None => kind(&component)?,
     };
-    Ok(Some(ReceiverHolder { user, package: component.package.clone(), component: Some(component), kind }))
+    Ok(Some(ReceiverHolder {
+        user,
+        package: component.package.clone(),
+        component: Some(component),
+        kind,
+    }))
 }
 
 /// `ManagedServices.isPackageAllowed` of the notification listeners as
@@ -183,7 +240,9 @@ fn notification_listener_allowed(policy: Option<&Element>, package: &str, user: 
         .children()
         .filter(|e| e.name == "enabled_listeners")
         .flat_map(|e| e.children())
-        .filter(|e| e.name == "service_listing" && e.int("user").ok().flatten().unwrap_or(0) == user)
+        .filter(|e| {
+            e.name == "service_listing" && e.int("user").ok().flatten().unwrap_or(0) == user
+        })
         .filter_map(|e| e.string("approved").map(|a| a.into_owned()))
         .flat_map(|approved| approved.split(':').map(str::to_owned).collect::<Vec<_>>())
         .filter(|entry| !entry.is_empty())
@@ -254,7 +313,11 @@ struct Stack<S> {
 
 impl<S> Default for Stack<S> {
     fn default() -> Self {
-        Stack { sessions: Vec::new(), media_button_session: None, cached_active: HashMap::new() }
+        Stack {
+            sessions: Vec::new(),
+            media_button_session: None,
+            cached_active: HashMap::new(),
+        }
     }
 }
 
@@ -291,25 +354,40 @@ impl<S: Session> Stack<S> {
 
     /// `onPlaybackStateChanged`: to the top if its priority changes, and
     /// the media button session of its uid found again.
-    fn on_playback_state_changed(&mut self, record: &Arc<S>, update_priority: bool, monitor: &dyn Monitor) -> Option<ButtonChange<S>> {
+    fn on_playback_state_changed(
+        &mut self,
+        record: &Arc<S>,
+        update_priority: bool,
+        monitor: &dyn Monitor,
+    ) -> Option<ButtonChange<S>> {
         if update_priority {
             self.sessions.retain(|s| !Arc::ptr_eq(s, record));
             self.sessions.insert(0, record.clone());
             self.clear_cache(record.user());
         }
-        let uid = self.media_button_session.as_ref().map(|b| b.uid()).filter(|&uid| uid == record.uid())?;
+        let uid = self
+            .media_button_session
+            .as_ref()
+            .map(|b| b.uid())
+            .filter(|&uid| uid == record.uid())?;
         let found = self.find_media_button_session(uid, monitor);
         (!same(&found, &self.media_button_session)).then(|| self.update_media_button_session(found))
     }
 
     /// `updateMediaButtonSessionIfNeeded`: the session of the uid that
     /// played last, if any.
-    fn update_media_button_session_if_needed(&mut self, monitor: &mut dyn Monitor) -> Option<ButtonChange<S>> {
+    fn update_media_button_session_if_needed(
+        &mut self,
+        monitor: &mut dyn Monitor,
+    ) -> Option<ButtonChange<S>> {
         for uid in monitor.sorted_uids() {
-            let Some(found) = self.find_media_button_session(uid, monitor) else { continue };
+            let Some(found) = self.find_media_button_session(uid, monitor) else {
+                continue;
+            };
             monitor.clean_up(found.uid());
             let found = Some(found);
-            return (!same(&found, &self.media_button_session)).then(|| self.update_media_button_session(found));
+            return (!same(&found, &self.media_button_session))
+                .then(|| self.update_media_button_session(found));
         }
         None
     }
@@ -348,7 +426,11 @@ impl<S: Session> Stack<S> {
     fn priority_list(&self, active_only: bool, user: i32) -> Vec<Arc<S>> {
         let mut result = Vec::new();
         let (mut last_playback_active, mut last_active) = (0, 0);
-        for session in self.sessions.iter().filter(|s| user == USER_ALL || s.user() == user) {
+        for session in self
+            .sessions
+            .iter()
+            .filter(|s| user == USER_ALL || s.user() == user)
+        {
             if !session.is_active() {
                 if !active_only {
                     result.push(session.clone());
@@ -458,19 +540,23 @@ impl MediaSession {
         // `onStart`'s AudioPlayerStateMonitor listener: the user's media
         // button session updated on the handler.
         let me = Arc::downgrade(&service);
-        host.playback.lock().unwrap().monitor.set_listener(Box::new(move |uid, player_type| {
-            if player_type == PLAYER_TYPE_JAM_SOUNDPOOL {
-                return;
-            }
-            let me = me.clone();
-            if let Some(service) = me.upgrade() {
-                service.post(Box::new(move || {
-                    if let Some(service) = me.upgrade() {
-                        service.on_audio_player_changed(uid / PER_USER_RANGE as i32);
-                    }
-                }));
-            }
-        }));
+        host.playback
+            .lock()
+            .unwrap()
+            .monitor
+            .set_listener(Box::new(move |uid, player_type| {
+                if player_type == PLAYER_TYPE_JAM_SOUNDPOOL {
+                    return;
+                }
+                let me = me.clone();
+                if let Some(service) = me.upgrade() {
+                    service.post(Box::new(move || {
+                        if let Some(service) = me.upgrade() {
+                            service.on_audio_player_changed(uid / PER_USER_RANGE as i32);
+                        }
+                    }));
+                }
+            }));
         service
     }
 
@@ -484,11 +570,17 @@ impl MediaSession {
     }
 
     /// `MediaServerUtils.enforcePackageName`.
-    pub(super) fn enforce_package_name(&self, package: Option<&str>, uid: i32) -> Result<(), Exception> {
+    pub(super) fn enforce_package_name(
+        &self,
+        package: Option<&str>,
+        uid: i32,
+    ) -> Result<(), Exception> {
         if matches!(uid, 0 | 2000) {
             return Ok(());
         }
-        let package = package.filter(|p| !p.is_empty()).ok_or_else(|| Exception::illegal_argument("packageName may not be empty"))?;
+        let package = package
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| Exception::illegal_argument("packageName may not be empty"))?;
         if !self.host.owns_package(uid, package)? {
             return Err(Exception::illegal_argument(format!(
                 "packageName does not belong to the calling uid; pkg={package}, uid={uid}"
@@ -504,7 +596,11 @@ impl MediaSession {
             return Ok(user);
         }
         if self.held(INTERACT_ACROSS_USERS_FULL, uid)? {
-            return Ok(if user == USER_CURRENT { CURRENT_USER } else { user });
+            return Ok(if user == USER_CURRENT {
+                CURRENT_USER
+            } else {
+                user
+            });
         }
         Err(Exception::security(format!(
             "Permission denied while calling from {} with user id: {user}; Need to run as either the calling user id ({calling}), or with {INTERACT_ACROSS_USERS_FULL} permission",
@@ -513,15 +609,25 @@ impl MediaSession {
     }
 
     /// `enforceMediaPermissions`.
-    fn enforce_media_permissions(&self, package: Option<&str>, uid: i32, user: i32) -> Result<(), Exception> {
-        if self.held(STATUS_BAR_SERVICE, uid)? || uid == SYSTEM_UID || self.held(MEDIA_CONTENT_CONTROL, uid)? {
+    fn enforce_media_permissions(
+        &self,
+        package: Option<&str>,
+        uid: i32,
+        user: i32,
+    ) -> Result<(), Exception> {
+        if self.held(STATUS_BAR_SERVICE, uid)?
+            || uid == SYSTEM_UID
+            || self.held(MEDIA_CONTENT_CONTROL, uid)?
+        {
             return Ok(());
         }
         // `hasEnabledNotificationListener`: only for the caller's own user.
         let allowed = match package {
             Some(package) if uid / PER_USER_RANGE as i32 == user => {
                 let path = self.host.data()?.join("system/notification_policy.xml");
-                let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+                let state = |e: String| {
+                    Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()))
+                };
                 let policy = match super::device_policy::read_atomic_bytes(&path).map_err(state)? {
                     Some(bytes) => aim_android_xml::read_next_optional(&bytes).map_err(state)?,
                     None => None,
@@ -537,7 +643,12 @@ impl MediaSession {
     }
 
     /// `verifySessionsRequest`.
-    fn verify_sessions_request(&self, component: Option<&ComponentName>, user: i32, uid: i32) -> Result<i32, Exception> {
+    fn verify_sessions_request(
+        &self,
+        component: Option<&ComponentName>,
+        user: i32,
+        uid: i32,
+    ) -> Result<i32, Exception> {
         let package = component.map(|c| c.package.as_str());
         if package.is_some() {
             self.enforce_package_name(package, uid)?;
@@ -565,15 +676,33 @@ impl MediaSession {
         }
         let info = self.setting(user)?;
         let last_receiver = unflatten_receiver(info.as_deref(), |c| self.component_type(c, user))?;
-        self.sessions.lock().unwrap().users.entry(user).or_insert(User { stack: Stack::default(), session_counts: HashMap::new(), last_receiver });
+        self.sessions
+            .lock()
+            .unwrap()
+            .users
+            .entry(user)
+            .or_insert(User {
+                stack: Stack::default(),
+                session_counts: HashMap::new(),
+                last_receiver,
+            });
         Ok(Some(user))
     }
 
     /// `Settings.Secure.getString(MEDIA_BUTTON_RECEIVER)` of `user`.
     fn setting(&self, user: i32) -> Result<Option<String>, Exception> {
-        let caller = Caller { uid: SYSTEM_UID, package: Some("android".into()) };
+        let caller = Caller {
+            uid: SYSTEM_UID,
+            package: Some("android".into()),
+        };
         let extras = HashMap::from([("_user".to_string(), Value::Int(user))]);
-        let got = self.settings.call(&caller, "GET_secure", Some(MEDIA_BUTTON_RECEIVER), &extras, None)?;
+        let got = self.settings.call(
+            &caller,
+            "GET_secure",
+            Some(MEDIA_BUTTON_RECEIVER),
+            &extras,
+            None,
+        )?;
         Ok(match got.as_deref() {
             Some([(_, Value::String(value)), ..]) => value.clone(),
             _ => None,
@@ -584,12 +713,29 @@ impl MediaSession {
     /// else a receiver.
     fn component_type(&self, component: &ComponentName, user: i32) -> Result<i32, Exception> {
         let (state, resolution) = self.host.packages()?;
-        let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
-        let modelled = |e: crate::package::apps_filter::NotModelled| self.host.unimplemented_named("media_session", e.0);
-        if let Ok(Some(_)) = query.activity_info(component, PACKAGE_MANAGER_COMMON_FLAGS | GET_ACTIVITIES, SYSTEM_UID, user).map_err(modelled)? {
+        let query = crate::package::query::Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: SYSTEM_UID,
+        };
+        let modelled = |e: crate::package::apps_filter::NotModelled| {
+            self.host.unimplemented_named("media_session", e.0)
+        };
+        if let Ok(Some(_)) = query
+            .activity_info(
+                component,
+                PACKAGE_MANAGER_COMMON_FLAGS | GET_ACTIVITIES,
+                SYSTEM_UID,
+                user,
+            )
+            .map_err(modelled)?
+        {
             return Ok(COMPONENT_TYPE_ACTIVITY);
         }
-        if let Ok(Some(_)) = query.service_info(component, PACKAGE_MANAGER_COMMON_FLAGS | GET_SERVICES, user).map_err(modelled)? {
+        if let Ok(Some(_)) = query
+            .service_info(component, PACKAGE_MANAGER_COMMON_FLAGS | GET_SERVICES, user)
+            .map_err(modelled)?
+        {
             return Ok(COMPONENT_TYPE_SERVICE);
         }
         Ok(COMPONENT_TYPE_BROADCAST)
@@ -598,7 +744,11 @@ impl MediaSession {
     /// `componentNameExists`: a receiver of `ACTION_MEDIA_BUTTON` the
     /// component names, none naming any. A receiver found with none named
     /// is the original's `NullPointerException` making the holder.
-    pub(super) fn media_button_receiver_exists(&self, component: Option<&ComponentName>, user: i32) -> Result<bool, Exception> {
+    pub(super) fn media_button_receiver_exists(
+        &self,
+        component: Option<&ComponentName>,
+        user: i32,
+    ) -> Result<bool, Exception> {
         let intent = Intent {
             action: Some(ACTION_MEDIA_BUTTON.into()),
             flags: FLAG_RECEIVER_FOREGROUND,
@@ -608,33 +758,66 @@ impl MediaSession {
         let (_, resolution) = self.host.packages()?;
         let found = resolution
             .query_intent_receivers(&intent, None, 0, user, SYSTEM_UID)
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("queryBroadcastReceiversAsUser: {e:?}")))?;
+            .map_err(|e| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("queryBroadcastReceiversAsUser: {e:?}"),
+                )
+            })?;
         if component.is_none() && !found.is_empty() {
-            return Err(Exception::new(EX_NULL_POINTER, "Attempt to invoke virtual method 'java.lang.String android.content.ComponentName.getPackageName()' on a null object reference"));
+            return Err(Exception::new(
+                EX_NULL_POINTER,
+                "Attempt to invoke virtual method 'java.lang.String android.content.ComponentName.getPackageName()' on a null object reference",
+            ));
         }
         Ok(!found.is_empty())
     }
 
     /// `createSessionInternal`.
-    fn create_session(&self, uid: i32, user: i32, package: String, cb: u32, tag: Option<String>, session_info: Option<RawBundle>) -> Result<Arc<Record>, Result<Exception, String>> {
+    fn create_session(
+        &self,
+        uid: i32,
+        user: i32,
+        package: String,
+        cb: u32,
+        tag: Option<String>,
+        session_info: Option<RawBundle>,
+    ) -> Result<Arc<Record>, Result<Exception, String>> {
         let user_record = self.full_user(user).map_err(Ok)?;
         if user_record.is_none() {
             eprintln!("app host: media_session: Request from invalid user: {user}, pkg={package}");
             return Err(Err("Session request from invalid user.".into()));
         }
-        let count = self.sessions.lock().unwrap().users.get(&user).map_or(0, |u| u.session_counts.get(&uid).copied().unwrap_or(0));
-        if count >= SESSION_CREATION_LIMIT_PER_UID && !self.has_media_control_permission(uid).map_err(Ok)? {
+        let count = self
+            .sessions
+            .lock()
+            .unwrap()
+            .users
+            .get(&user)
+            .map_or(0, |u| u.session_counts.get(&uid).copied().unwrap_or(0));
+        if count >= SESSION_CREATION_LIMIT_PER_UID
+            && !self.has_media_control_permission(uid).map_err(Ok)?
+        {
             return Err(Err(format!("Created too many sessions. count={count})")));
         }
-        let session_info = session_info.map(|i| KeptBundle::new(i, &self.host.process)).transpose().map_err(|_| Ok(Exception::illegal_argument("a parcel that does not read")))?;
-        let me = self.me.upgrade().ok_or_else(|| Ok(Exception::new(EX_ILLEGAL_STATE, "media_session gone")))?;
+        let session_info = session_info
+            .map(|i| KeptBundle::new(i, &self.host.process))
+            .transpose()
+            .map_err(|_| Ok(Exception::illegal_argument("a parcel that does not read")))?;
+        let me = self
+            .me
+            .upgrade()
+            .ok_or_else(|| Ok(Exception::new(EX_ILLEGAL_STATE, "media_session gone")))?;
         let record = Record::new(&me, &self.host, (uid, user), package, cb, tag, session_info);
         let mut effects = Vec::new();
         {
             let mut s = self.sessions.lock().unwrap();
             let u = s.users.get_mut(&user).expect("made above");
             *u.session_counts.entry(uid).or_insert(0) += 1;
-            let change = u.stack.add(record.clone(), &mut self.host.playback.lock().unwrap().monitor);
+            let change = u.stack.add(
+                record.clone(),
+                &mut self.host.playback.lock().unwrap().monitor,
+            );
             self.media_button_session_changed(&mut s, user, change, &mut effects);
         }
         effects.push(Effect::SessionsChanged(user));
@@ -643,7 +826,13 @@ impl MediaSession {
     }
 
     /// `FullUserRecord.onMediaButtonSessionChanged`.
-    fn media_button_session_changed(&self, s: &mut Sessions, user: i32, change: Option<ButtonChange<Record>>, effects: &mut Vec<Effect>) {
+    fn media_button_session_changed(
+        &self,
+        s: &mut Sessions,
+        user: i32,
+        change: Option<ButtonChange<Record>>,
+        effects: &mut Vec<Effect>,
+    ) {
         let Some((old, new)) = change else { return };
         if let Some(old) = old {
             effects.push(Effect::SessionsChanged(old.user));
@@ -656,10 +845,23 @@ impl MediaSession {
     }
 
     /// `rememberMediaButtonReceiverLocked`.
-    fn remember_media_button_receiver(&self, s: &mut Sessions, user: i32, record: &Record, effects: &mut Vec<Effect>) {
-        let Some(u) = s.users.get_mut(&user) else { return };
+    fn remember_media_button_receiver(
+        &self,
+        s: &mut Sessions,
+        user: i32,
+        record: &Record,
+        effects: &mut Vec<Effect>,
+    ) {
+        let Some(u) = s.users.get_mut(&user) else {
+            return;
+        };
         u.last_receiver = record.media_button_receiver();
-        effects.push(Effect::Remember(user, u.last_receiver.as_ref().map_or_else(String::new, ReceiverHolder::flatten)));
+        effects.push(Effect::Remember(
+            user,
+            u.last_receiver
+                .as_ref()
+                .map_or_else(String::new, ReceiverHolder::flatten),
+        ));
     }
 
     /// `getMediaButtonSessionLocked`.
@@ -667,7 +869,9 @@ impl MediaSession {
         if Self::is_global_priority_active(s) {
             return s.global_priority.clone();
         }
-        s.users.get(&user).and_then(|u| u.stack.media_button_session.clone())
+        s.users
+            .get(&user)
+            .and_then(|u| u.stack.media_button_session.clone())
     }
 
     fn is_global_priority_active(s: &Sessions) -> bool {
@@ -681,7 +885,11 @@ impl MediaSession {
         if let Some(session) = Self::media_button_session(s, user) {
             return Effect::Addressed(user, session.package.clone(), Some(session.token()));
         }
-        match s.users.get(&CURRENT_USER).and_then(|u| u.last_receiver.as_ref()) {
+        match s
+            .users
+            .get(&CURRENT_USER)
+            .and_then(|u| u.last_receiver.as_ref())
+        {
             Some(holder) => Effect::Addressed(user, holder.package.clone(), None),
             None => Effect::Addressed(user, String::new(), None),
         }
@@ -693,19 +901,53 @@ impl MediaSession {
             match effect {
                 Effect::SessionsChanged(user) => self.post_sessions_changed(user),
                 Effect::Remember(user, info) => {
-                    let caller = Caller { uid: SYSTEM_UID, package: Some("android".into()) };
-                    let extras = HashMap::from([("_user".to_string(), Value::Int(user)), ("value".to_string(), Value::String(Some(info)))]);
-                    if let Err(e) = self.settings.call(&caller, "PUT_secure", Some(MEDIA_BUTTON_RECEIVER), &extras, None) {
-                        eprintln!("app host: media_session: {MEDIA_BUTTON_RECEIVER}: {}", e.message);
+                    let caller = Caller {
+                        uid: SYSTEM_UID,
+                        package: Some("android".into()),
+                    };
+                    let extras = HashMap::from([
+                        ("_user".to_string(), Value::Int(user)),
+                        ("value".to_string(), Value::String(Some(info))),
+                    ]);
+                    if let Err(e) = self.settings.call(
+                        &caller,
+                        "PUT_secure",
+                        Some(MEDIA_BUTTON_RECEIVER),
+                        &extras,
+                        None,
+                    ) {
+                        eprintln!(
+                            "app host: media_session: {MEDIA_BUTTON_RECEIVER}: {}",
+                            e.message
+                        );
                     }
                 }
                 Effect::Addressed(user, package, token) => {
-                    let handles: Vec<u32> = self.listeners.lock().unwrap().key_event_session.keys().filter(|(u, _)| *u == user).map(|(_, h)| *h).collect();
+                    let handles: Vec<u32> = self
+                        .listeners
+                        .lock()
+                        .unwrap()
+                        .key_event_session
+                        .keys()
+                        .filter(|(u, _)| *u == user)
+                        .map(|(_, h)| *h)
+                        .collect();
                     let mut p = Parcel::new();
-                    key_listener::OnMediaKeyEventSessionChanged { package_name: Some(package), media_key_event_session_token: token }.write(&mut p);
+                    key_listener::OnMediaKeyEventSessionChanged {
+                        package_name: Some(package),
+                        media_key_event_session_token: token,
+                    }
+                    .write(&mut p);
                     for handle in handles {
-                        if let Err(e) = self.host.process.transact(handle, key_listener::ON_MEDIA_KEY_EVENT_SESSION_CHANGED, &p, true) {
-                            eprintln!("app host: media_session: Failed to pushAddressedPlayerChangedLocked: {e}");
+                        if let Err(e) = self.host.process.transact(
+                            handle,
+                            key_listener::ON_MEDIA_KEY_EVENT_SESSION_CHANGED,
+                            &p,
+                            true,
+                        ) {
+                            eprintln!(
+                                "app host: media_session: Failed to pushAddressedPlayerChangedLocked: {e}"
+                            );
                         }
                     }
                 }
@@ -738,18 +980,40 @@ impl MediaSession {
         let tokens = {
             let mut s = self.sessions.lock().unwrap();
             if !s.users.contains_key(&user) {
-                eprintln!("app host: media_session: pushSession1ChangedOnHandler failed. No user with id={user}");
+                eprintln!(
+                    "app host: media_session: pushSession1ChangedOnHandler failed. No user with id={user}"
+                );
                 return;
             }
-            Self::active_sessions(&mut s, user).iter().map(|r| Some(r.token())).collect::<Vec<_>>()
+            Self::active_sessions(&mut s, user)
+                .iter()
+                .map(|r| Some(r.token()))
+                .collect::<Vec<_>>()
         };
-        let handles: Vec<u32> =
-            self.listeners.lock().unwrap().sessions.iter().filter(|(_, k)| k.user == USER_ALL || k.user == user).map(|(h, _)| *h).collect();
+        let handles: Vec<u32> = self
+            .listeners
+            .lock()
+            .unwrap()
+            .sessions
+            .iter()
+            .filter(|(_, k)| k.user == USER_ALL || k.user == user)
+            .map(|(h, _)| *h)
+            .collect();
         let mut p = Parcel::new();
-        active_listener::OnActiveSessionsChanged { sessions: Some(tokens) }.write(&mut p);
+        active_listener::OnActiveSessionsChanged {
+            sessions: Some(tokens),
+        }
+        .write(&mut p);
         for handle in handles {
-            if let Err(e) = self.host.process.transact(handle, active_listener::ON_ACTIVE_SESSIONS_CHANGED, &p, true) {
-                eprintln!("app host: media_session: Dead ActiveSessionsListener in pushSessionsChanged, removing: {e}");
+            if let Err(e) = self.host.process.transact(
+                handle,
+                active_listener::ON_ACTIVE_SESSIONS_CHANGED,
+                &p,
+                true,
+            ) {
+                eprintln!(
+                    "app host: media_session: Dead ActiveSessionsListener in pushSessionsChanged, removing: {e}"
+                );
                 self.forget(&handle, sessions);
             }
         }
@@ -784,8 +1048,12 @@ impl MediaSession {
         let mut effects = Vec::new();
         {
             let mut s = self.sessions.lock().unwrap();
-            let Some(u) = s.users.get_mut(&user) else { return };
-            let change = u.stack.update_media_button_session_if_needed(&mut self.host.playback.lock().unwrap().monitor);
+            let Some(u) = s.users.get_mut(&user) else {
+                return;
+            };
+            let change = u.stack.update_media_button_session_if_needed(
+                &mut self.host.playback.lock().unwrap().monitor,
+            );
             self.media_button_session_changed(&mut s, user, change, &mut effects);
         }
         self.apply(effects);
@@ -821,7 +1089,10 @@ impl MediaSession {
     /// `setGlobalPrioritySession`.
     pub(super) fn set_global_priority_session(&self, record: &Arc<Record>) {
         let mut s = self.sessions.lock().unwrap();
-        if s.global_priority.as_ref().is_some_and(|g| Arc::ptr_eq(g, record)) {
+        if s.global_priority
+            .as_ref()
+            .is_some_and(|g| Arc::ptr_eq(g, record))
+        {
             return;
         }
         s.global_priority = Some(record.clone());
@@ -835,13 +1106,23 @@ impl MediaSession {
     }
 
     /// `onSessionPlaybackStateChanged`.
-    pub(super) fn on_session_playback_state_changed(&self, record: &Arc<Record>, update_priority: bool) {
+    pub(super) fn on_session_playback_state_changed(
+        &self,
+        record: &Arc<Record>,
+        update_priority: bool,
+    ) {
         let mut effects = Vec::new();
         {
             let mut s = self.sessions.lock().unwrap();
             let user = record.user;
-            let Some(u) = s.users.get_mut(&user).filter(|u| u.stack.contains(record)) else { return };
-            let change = u.stack.on_playback_state_changed(record, update_priority, &self.host.playback.lock().unwrap().monitor);
+            let Some(u) = s.users.get_mut(&user).filter(|u| u.stack.contains(record)) else {
+                return;
+            };
+            let change = u.stack.on_playback_state_changed(
+                record,
+                update_priority,
+                &self.host.playback.lock().unwrap().monitor,
+            );
             self.media_button_session_changed(&mut s, user, change, &mut effects);
             let engaged = record.is_user_engaged();
             self.report_media_interaction_event(&mut s, record, engaged);
@@ -861,7 +1142,11 @@ impl MediaSession {
         {
             let mut s = self.sessions.lock().unwrap();
             let user = record.user;
-            let is_button_session = s.users.get(&user).and_then(|u| u.stack.media_button_session.as_ref()).is_some_and(|b| Arc::ptr_eq(b, record));
+            let is_button_session = s
+                .users
+                .get(&user)
+                .and_then(|u| u.stack.media_button_session.as_ref())
+                .is_some_and(|b| Arc::ptr_eq(b, record));
             if is_button_session {
                 self.remember_media_button_receiver(&mut s, user, record, &mut effects);
             }
@@ -882,12 +1167,17 @@ impl MediaSession {
             if let Some(u) = s.users.get_mut(&user) {
                 let count = u.session_counts.entry(record.owner_uid).or_insert(0);
                 if *count <= 0 {
-                    eprintln!("app host: media_session: destroySessionLocked: sessionCount should be positive. sessionCount={count}");
+                    eprintln!(
+                        "app host: media_session: destroySessionLocked: sessionCount should be positive. sessionCount={count}"
+                    );
                 } else {
                     *count -= 1;
                 }
             }
-            if s.global_priority.as_ref().is_some_and(|g| Arc::ptr_eq(g, record)) {
+            if s.global_priority
+                .as_ref()
+                .is_some_and(|g| Arc::ptr_eq(g, record))
+            {
                 s.global_priority = None;
                 if record.is_active() && s.users.contains_key(&user) {
                     effects.push(self.addressed(&s, user));
@@ -906,7 +1196,12 @@ impl MediaSession {
     /// `reportMediaInteractionEvent`: the uid's engaged sessions tracked;
     /// its first and its last are the start and stop of a usage event,
     /// which is not recorded (#1723).
-    fn report_media_interaction_event(&self, s: &mut Sessions, record: &Arc<Record>, engaged: bool) {
+    fn report_media_interaction_event(
+        &self,
+        s: &mut Sessions,
+        record: &Arc<Record>,
+        engaged: bool,
+    ) {
         let uid = record.owner_uid;
         let action = if engaged {
             let records = s.engaged_for_usage.entry(uid).or_default();
@@ -916,7 +1211,9 @@ impl MediaSession {
             }
             first.then_some("start")
         } else {
-            let Some(records) = s.engaged_for_usage.get_mut(&uid) else { return };
+            let Some(records) = s.engaged_for_usage.get_mut(&uid) else {
+                return;
+            };
             records.retain(|r| !Arc::ptr_eq(r, record));
             if !records.is_empty() {
                 return;
@@ -925,7 +1222,10 @@ impl MediaSession {
             Some("stop")
         };
         if let Some(action) = action {
-            eprintln!("app host: media_session: reportUserInteractionEvent(android.media, {action}) of {} not recorded (#1723)", record.package);
+            eprintln!(
+                "app host: media_session: reportUserInteractionEvent(android.media, {action}) of {} not recorded (#1723)",
+                record.package
+            );
         }
     }
 
@@ -955,10 +1255,21 @@ impl MediaSession {
                 }),
             )
         });
-        pick(&mut self.listeners.lock().unwrap()).insert(key, Kept { strong, death, user });
+        pick(&mut self.listeners.lock().unwrap()).insert(
+            key,
+            Kept {
+                strong,
+                death,
+                user,
+            },
+        );
     }
 
-    fn forget<K: Eq + std::hash::Hash>(&self, key: &K, pick: fn(&mut Listeners) -> &mut HashMap<K, Kept>) {
+    fn forget<K: Eq + std::hash::Hash>(
+        &self,
+        key: &K,
+        pick: fn(&mut Listeners) -> &mut HashMap<K, Kept>,
+    ) {
         let kept = pick(&mut self.listeners.lock().unwrap()).remove(key);
         if let Some(kept) = kept
             && let Some(death) = kept.death
@@ -969,16 +1280,26 @@ impl MediaSession {
 
     /// `getMediaKeyEventSession`'s and `getMediaKeyEventSessionPackageName`'s
     /// checks, then the user's media button session and last receiver.
-    fn key_event_session(&self, uid: i32, package: Option<&str>) -> Result<Option<(Option<Arc<Record>>, Option<String>)>, Exception> {
+    fn key_event_session(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+    ) -> Result<Option<(Option<Arc<Record>>, Option<String>)>, Exception> {
         let user = uid / PER_USER_RANGE as i32;
         self.enforce_package_name(package, uid)?;
         self.enforce_media_permissions(package, uid, user)?;
         if self.full_user(user)?.is_none() {
-            eprintln!("app host: media_session: No matching user record to get the media key event session, userId={user}");
+            eprintln!(
+                "app host: media_session: No matching user record to get the media key event session, userId={user}"
+            );
             return Ok(None);
         }
         let s = self.sessions.lock().unwrap();
-        let last = s.users.get(&user).and_then(|u| u.last_receiver.as_ref()).map(|h| h.package.clone());
+        let last = s
+            .users
+            .get(&user)
+            .and_then(|u| u.last_receiver.as_ref())
+            .map(|h| h.package.clone());
         Ok(Some((Self::media_button_session(&s, user), last)))
     }
 }
@@ -1005,12 +1326,18 @@ impl Service for MediaSession {
         let mut p = Parcel::new();
         let result = match call.code {
             sm::CREATE_SESSION => {
-                let a = sm::CreateSession::<RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    sm::CreateSession::<RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let created = (|| {
-                    self.enforce_package_name(a.package_name.as_deref(), uid).map_err(Ok)?;
-                    let user = self.incoming_user(uid, a.user_id, a.package_name.as_deref()).map_err(Ok)?;
+                    self.enforce_package_name(a.package_name.as_deref(), uid)
+                        .map_err(Ok)?;
+                    let user = self
+                        .incoming_user(uid, a.user_id, a.package_name.as_deref())
+                        .map_err(Ok)?;
                     let Some(Binder::Handle(cb)) = a.session_cb else {
-                        return Err(Ok(Exception::illegal_argument("Controller callback cannot be null")));
+                        return Err(Ok(Exception::illegal_argument(
+                            "Controller callback cannot be null",
+                        )));
                     };
                     let package = a.package_name.clone().unwrap_or_default();
                     self.create_session(uid, user, package, cb, a.tag, a.session_info)
@@ -1021,29 +1348,40 @@ impl Service for MediaSession {
                         Ok(())
                     }
                     Err(Ok(e)) => {
-                        eprintln!("app host: media_session: Exception in creating a new session: {}", e.message);
+                        eprintln!(
+                            "app host: media_session: Exception in creating a new session: {}",
+                            e.message
+                        );
                         Err(e)
                     }
                     Err(Err(message)) => {
-                        eprintln!("app host: media_session: Exception in creating a new session: java.lang.RuntimeException: {message}");
+                        eprintln!(
+                            "app host: media_session: Exception in creating a new session: java.lang.RuntimeException: {message}"
+                        );
                         return Err(UNKNOWN_ERROR);
                     }
                 }
             }
             sm::GET_SESSIONS => {
-                let a = sm::GetSessions::<ComponentName>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.verify_sessions_request(a.comp_name.as_ref(), a.user_id, uid).and_then(|user| {
-                    if user != USER_ALL {
-                        self.full_user(user)?;
-                    }
-                    let tokens: Vec<Option<Token>> =
-                        Self::active_sessions(&mut self.sessions.lock().unwrap(), user).iter().map(|r| Some(r.token())).collect();
-                    sm::write_get_sessions_reply(&mut p, Some(&tokens));
-                    Ok(())
-                })
+                let a = sm::GetSessions::<ComponentName>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.verify_sessions_request(a.comp_name.as_ref(), a.user_id, uid)
+                    .and_then(|user| {
+                        if user != USER_ALL {
+                            self.full_user(user)?;
+                        }
+                        let tokens: Vec<Option<Token>> =
+                            Self::active_sessions(&mut self.sessions.lock().unwrap(), user)
+                                .iter()
+                                .map(|r| Some(r.token()))
+                                .collect();
+                        sm::write_get_sessions_reply(&mut p, Some(&tokens));
+                        Ok(())
+                    })
             }
             sm::ADD_SESSIONS_LISTENER => {
-                let a = sm::AddSessionsListener::<ComponentName>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = sm::AddSessionsListener::<ComponentName>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
                     let Some(Binder::Handle(handle)) = a.listener else {
                         eprintln!("app host: media_session: addSessionsListener: listener is null, ignoring");
@@ -1069,24 +1407,31 @@ impl Service for MediaSession {
             }
             sm::GET_MEDIA_KEY_EVENT_SESSION => {
                 let a = sm::GetMediaKeyEventSession::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.key_event_session(uid, a.package_name.as_deref()).map(|found| {
-                    let token = found.and_then(|(session, _)| session).map(|s| s.token());
-                    sm::write_get_media_key_event_session_reply(&mut p, token.as_ref());
-                })
+                self.key_event_session(uid, a.package_name.as_deref())
+                    .map(|found| {
+                        let token = found.and_then(|(session, _)| session).map(|s| s.token());
+                        sm::write_get_media_key_event_session_reply(&mut p, token.as_ref());
+                    })
             }
             sm::GET_MEDIA_KEY_EVENT_SESSION_PACKAGE_NAME => {
-                let a = sm::GetMediaKeyEventSessionPackageName::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.key_event_session(uid, a.package_name.as_deref()).map(|found| {
-                    let package = match found {
-                        Some((Some(session), _)) => session.package.clone(),
-                        Some((None, Some(last))) => last,
-                        _ => String::new(),
-                    };
-                    sm::write_get_media_key_event_session_package_name_reply(&mut p, &Some(package));
-                })
+                let a = sm::GetMediaKeyEventSessionPackageName::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.key_event_session(uid, a.package_name.as_deref())
+                    .map(|found| {
+                        let package = match found {
+                            Some((Some(session), _)) => session.package.clone(),
+                            Some((None, Some(last))) => last,
+                            _ => String::new(),
+                        };
+                        sm::write_get_media_key_event_session_package_name_reply(
+                            &mut p,
+                            &Some(package),
+                        );
+                    })
             }
             sm::ADD_ON_MEDIA_KEY_EVENT_SESSION_CHANGED_LISTENER => {
-                let a = sm::AddOnMediaKeyEventSessionChangedListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = sm::AddOnMediaKeyEventSessionChangedListener::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
                     let Some(Binder::Handle(handle)) = a.listener else {
                         eprintln!("app host: media_session: addOnMediaKeyEventSessionChangedListener: listener is null, ignoring");
@@ -1105,7 +1450,8 @@ impl Service for MediaSession {
                 .map(|()| sm::write_add_on_media_key_event_session_changed_listener_reply(&mut p))
             }
             sm::REMOVE_ON_MEDIA_KEY_EVENT_SESSION_CHANGED_LISTENER => {
-                let a = sm::RemoveOnMediaKeyEventSessionChangedListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = sm::RemoveOnMediaKeyEventSessionChangedListener::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
                     let Some(Binder::Handle(handle)) = a.listener else {
                         eprintln!("app host: media_session: removeOnMediaKeyEventSessionChangedListener: listener is null, ignoring");
@@ -1122,7 +1468,8 @@ impl Service for MediaSession {
                 .map(|()| sm::write_remove_on_media_key_event_session_changed_listener_reply(&mut p))
             }
             sm::ADD_SESSION2TOKENS_LISTENER => {
-                let a = sm::AddSession2TokensListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    sm::AddSession2TokensListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
                     let Some(Binder::Handle(handle)) = a.listener else {
                         eprintln!("app host: media_session: addSession2TokensListener: listener is null, ignoring");
@@ -1139,7 +1486,8 @@ impl Service for MediaSession {
                 .map(|()| sm::write_add_session2tokens_listener_reply(&mut p))
             }
             sm::REMOVE_SESSION2TOKENS_LISTENER => {
-                let a = sm::RemoveSession2TokensListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = sm::RemoveSession2TokensListener::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 if let Some(Binder::Handle(handle)) = a.listener {
                     self.forget(&handle, session2_tokens);
                 }
@@ -1153,8 +1501,13 @@ impl Service for MediaSession {
                 Ok(())
             }
             code => {
-                let name = sm::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
-                Err(self.host.unimplemented_named("media_session", &format!("{name} (#1793)")))
+                let name = sm::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
+                Err(self
+                    .host
+                    .unimplemented_named("media_session", &format!("{name} (#1793)")))
             }
         };
         reply(result.map(|()| p))
@@ -1173,17 +1526,44 @@ mod tests {
     fn media_button_receivers_unflatten_as_the_holder_does() {
         let unflatten = |s: &str| unflatten_receiver(Some(s), |_| Ok(COMPONENT_TYPE_ACTIVITY));
         let r = unflatten("com.example/.Receiver,0").unwrap().unwrap();
-        assert_eq!((r.package.as_str(), r.component.as_ref().unwrap().class.as_str(), r.kind), ("com.example", "com.example.Receiver", COMPONENT_TYPE_ACTIVITY));
+        assert_eq!(
+            (
+                r.package.as_str(),
+                r.component.as_ref().unwrap().class.as_str(),
+                r.kind
+            ),
+            (
+                "com.example",
+                "com.example.Receiver",
+                COMPONENT_TYPE_ACTIVITY
+            )
+        );
         assert_eq!(r.flatten(), "com.example/com.example.Receiver,0,2");
-        let r = unflatten("com.example/com.example.Service,10,3").unwrap().unwrap();
+        let r = unflatten("com.example/com.example.Service,10,3")
+            .unwrap()
+            .unwrap();
         assert_eq!((r.user, r.kind), (10, COMPONENT_TYPE_SERVICE));
         assert!(unflatten("com.example/.Receiver").unwrap().is_none());
         assert!(unflatten("com.example,0").unwrap().is_none());
         assert!(unflatten("a/b,0,1,2").unwrap().is_none());
-        assert!(unflatten_receiver(Some(""), |_| unreachable!()).unwrap().is_none());
-        assert!(unflatten_receiver(None, |_| unreachable!()).unwrap().is_none());
+        assert!(
+            unflatten_receiver(Some(""), |_| unreachable!())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            unflatten_receiver(None, |_| unreachable!())
+                .unwrap()
+                .is_none()
+        );
         assert!(unflatten("com.example/.Receiver,x").is_err());
-        let broadcast = ReceiverHolder::broadcast(0, ComponentName { package: "p".into(), class: "p.R".into() });
+        let broadcast = ReceiverHolder::broadcast(
+            0,
+            ComponentName {
+                package: "p".into(),
+                class: "p.R".into(),
+            },
+        );
         assert_eq!(broadcast.flatten(), "p/p.R,0,1");
     }
 
@@ -1248,7 +1628,11 @@ mod tests {
     }
 
     fn fake(uid: i32, active: bool, playing: bool) -> Arc<Fake> {
-        Arc::new(Fake { uid, active: AtomicBool::new(active), playing: AtomicBool::new(playing) })
+        Arc::new(Fake {
+            uid,
+            active: AtomicBool::new(active),
+            playing: AtomicBool::new(playing),
+        })
     }
 
     fn uids(list: &[Arc<Fake>]) -> Vec<i32> {
@@ -1262,7 +1646,12 @@ mod tests {
     fn the_priority_list_puts_playing_sessions_first() {
         let mut stack = Stack::default();
         let mut monitor = FakeMonitor::default();
-        let (a, b, c, d) = (fake(1, true, false), fake(2, false, false), fake(3, true, true), fake(4, true, true));
+        let (a, b, c, d) = (
+            fake(1, true, false),
+            fake(2, false, false),
+            fake(3, true, true),
+            fake(4, true, true),
+        );
         for s in [&a, &b, &c, &d] {
             assert!(stack.add(s.clone(), &mut monitor).is_none());
         }
@@ -1271,7 +1660,11 @@ mod tests {
         // A playback change without a priority change keeps the cache.
         c.playing.store(false, Ordering::Relaxed);
         assert_eq!(uids(&stack.active_sessions(0)), [3, 4, 1]);
-        assert!(stack.on_playback_state_changed(&a, true, &monitor).is_none());
+        assert!(
+            stack
+                .on_playback_state_changed(&a, true, &monitor)
+                .is_none()
+        );
         assert_eq!(uids(&stack.active_sessions(0)), [4, 1, 3]);
         assert!(stack.remove(&d).is_none());
         assert_eq!(uids(&stack.active_sessions(0)), [1, 3]);
@@ -1284,17 +1677,30 @@ mod tests {
     #[test]
     fn the_media_button_session_follows_audio_playback() {
         let mut stack = Stack::default();
-        let mut monitor = FakeMonitor { sorted: vec![7, 2], active: vec![2], cleaned: Vec::new() };
+        let mut monitor = FakeMonitor {
+            sorted: vec![7, 2],
+            active: vec![2],
+            cleaned: Vec::new(),
+        };
         let (paused, playing) = (fake(2, true, false), fake(2, true, true));
         let (old, new) = stack.add(paused.clone(), &mut monitor).unwrap();
         assert!(old.is_none() && Arc::ptr_eq(new.as_ref().unwrap(), &paused));
         let (old, new) = stack.add(playing.clone(), &mut monitor).unwrap();
-        assert!(Arc::ptr_eq(old.as_ref().unwrap(), &paused) && Arc::ptr_eq(new.as_ref().unwrap(), &playing));
+        assert!(
+            Arc::ptr_eq(old.as_ref().unwrap(), &paused)
+                && Arc::ptr_eq(new.as_ref().unwrap(), &playing)
+        );
         assert_eq!(monitor.cleaned, [2, 2]);
-        assert!(stack.update_media_button_session_if_needed(&mut monitor).is_none());
+        assert!(
+            stack
+                .update_media_button_session_if_needed(&mut monitor)
+                .is_none()
+        );
         // Its uid's playback stopping finds the paused one again.
         monitor.active.clear();
-        let (_, new) = stack.on_playback_state_changed(&playing, false, &monitor).unwrap();
+        let (_, new) = stack
+            .on_playback_state_changed(&playing, false, &monitor)
+            .unwrap();
         assert!(Arc::ptr_eq(new.as_ref().unwrap(), &paused));
         let (old, new) = stack.remove(&paused).unwrap();
         assert!(Arc::ptr_eq(old.as_ref().unwrap(), &paused) && new.is_none());

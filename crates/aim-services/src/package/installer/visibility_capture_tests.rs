@@ -1,38 +1,466 @@
 use super::SigningScan;
-use crate::package::{installer::environment::capture_visibility_checked,libraries::Policy,owner::{seinfo,usage::Usage},pkg::AndroidPackage,scan::LoadedPackage,scan_snapshot::Store,settings::{Package,Settings},sign::SigningDetails,system_config::SystemConfig};
-use std::{collections::BTreeMap,sync::{Arc,Barrier},cell::Cell};
-fn fixture()->Arc<Store>{
- let packages=vec![Package{name:"target.fixture".into(),app_id:10101,code_path:"/data/app/target".into(),version_code:1,domain_set_id:Some("00000000-0000-0000-0000-000000000001".into()),..Default::default()},Package{name:"background.fixture".into(),app_id:10102,code_path:"/data/app/background".into(),version_code:1,domain_set_id:Some("00000000-0000-0000-0000-000000000002".into()),..Default::default()}];
- let settings=Settings{packages,..Default::default()};let mut owner=SigningScan::new(&SystemConfig::default(),&settings,29).unwrap();
- for setting in &settings.packages{let signing=SigningDetails{unknown:false,signatures:vec![vec![1]],scheme_version:2,public_keys:Some(vec![]),..SigningDetails::unknown()};let package=AndroidPackage{feature_flag_state:Some(vec![]),package_name:setting.name.clone(),path:Some(setting.code_path.clone()),base_apk_path:Some(format!("{}/base.apk",setting.code_path)),uid:setting.app_id,version_code:1,target_sdk_version:35,signing_details:signing.package_details().unwrap(),..Default::default()};owner.loaded.insert(setting.name.clone(),Arc::new(LoadedPackage::new(package,signing).unwrap()));owner.scanned_users.insert(setting.name.clone(),[(0,Default::default())].into());}
- owner.assign_seinfo_at_boot(&seinfo::Policy::unread(),&mut|package|Ok(package.target_sdk_version)).unwrap();owner.complete_library_dependencies(&|_,_|Ok(Policy::pinned(true))).unwrap();let usage=Usage::new(["target.fixture","background.fixture"]);owner.complete_runtime_at_boot(&usage,BTreeMap::new()).unwrap();owner.settings.shared_users=owner.identities.ordered_shared_users().unwrap().into_iter().map(|(name,group)|crate::package::settings::SharedUser{name:name.into(),app_id:group.app_id,flags:0,signatures:group.signatures.clone()}).collect();let legacy=owner.settings.packages.iter().map(|package|((package.name.clone(),false),crate::package::owner::legacy_permissions::Migration::default())).collect();let shared=owner.identities.shared_users.keys().map(|name|(name.clone(),Default::default())).collect();owner.capture_legacy_permissions(&[0],legacy,shared).unwrap();let fixed=owner.settings.packages.iter().map(|package|((package.name.clone(),false),false)).collect();owner.capture_install_permissions_fixed(fixed).unwrap();owner.rebuild_shared_processes_from_native_members().unwrap();Arc::new(Store::new_replica(owner,usage).unwrap())
+use crate::package::{
+    installer::environment::capture_visibility_checked,
+    libraries::Policy,
+    owner::{seinfo, usage::Usage},
+    pkg::AndroidPackage,
+    scan::LoadedPackage,
+    scan_snapshot::Store,
+    settings::{Package, Settings},
+    sign::SigningDetails,
+    system_config::SystemConfig,
+};
+use std::{
+    cell::Cell,
+    collections::BTreeMap,
+    sync::{Arc, Barrier},
+};
+fn fixture() -> Arc<Store> {
+    let packages = vec![
+        Package {
+            name: "target.fixture".into(),
+            app_id: 10101,
+            code_path: "/data/app/target".into(),
+            version_code: 1,
+            domain_set_id: Some("00000000-0000-0000-0000-000000000001".into()),
+            ..Default::default()
+        },
+        Package {
+            name: "background.fixture".into(),
+            app_id: 10102,
+            code_path: "/data/app/background".into(),
+            version_code: 1,
+            domain_set_id: Some("00000000-0000-0000-0000-000000000002".into()),
+            ..Default::default()
+        },
+    ];
+    let settings = Settings {
+        packages,
+        ..Default::default()
+    };
+    let mut owner = SigningScan::new(&SystemConfig::default(), &settings, 29).unwrap();
+    for setting in &settings.packages {
+        let signing = SigningDetails {
+            unknown: false,
+            signatures: vec![vec![1]],
+            scheme_version: 2,
+            public_keys: Some(vec![]),
+            ..SigningDetails::unknown()
+        };
+        let package = AndroidPackage {
+            feature_flag_state: Some(vec![]),
+            package_name: setting.name.clone(),
+            path: Some(setting.code_path.clone()),
+            base_apk_path: Some(format!("{}/base.apk", setting.code_path)),
+            uid: setting.app_id,
+            version_code: 1,
+            target_sdk_version: 35,
+            signing_details: signing.package_details().unwrap(),
+            ..Default::default()
+        };
+        owner.loaded.insert(
+            setting.name.clone(),
+            Arc::new(LoadedPackage::new(package, signing).unwrap()),
+        );
+        owner
+            .scanned_users
+            .insert(setting.name.clone(), [(0, Default::default())].into());
+    }
+    owner
+        .assign_seinfo_at_boot(&seinfo::Policy::unread(), &mut |package| {
+            Ok(package.target_sdk_version)
+        })
+        .unwrap();
+    owner
+        .complete_library_dependencies(&|_, _| Ok(Policy::pinned(true)))
+        .unwrap();
+    let usage = Usage::new(["target.fixture", "background.fixture"]);
+    owner
+        .complete_runtime_at_boot(&usage, BTreeMap::new())
+        .unwrap();
+    owner.settings.shared_users = owner
+        .identities
+        .ordered_shared_users()
+        .unwrap()
+        .into_iter()
+        .map(|(name, group)| crate::package::settings::SharedUser {
+            name: name.into(),
+            app_id: group.app_id,
+            flags: 0,
+            signatures: group.signatures.clone(),
+        })
+        .collect();
+    let legacy = owner
+        .settings
+        .packages
+        .iter()
+        .map(|package| {
+            (
+                (package.name.clone(), false),
+                crate::package::owner::legacy_permissions::Migration::default(),
+            )
+        })
+        .collect();
+    let shared = owner
+        .identities
+        .shared_users
+        .keys()
+        .map(|name| (name.clone(), Default::default()))
+        .collect();
+    owner
+        .capture_legacy_permissions(&[0], legacy, shared)
+        .unwrap();
+    let fixed = owner
+        .settings
+        .packages
+        .iter()
+        .map(|package| ((package.name.clone(), false), false))
+        .collect();
+    owner.capture_install_permissions_fixed(fixed).unwrap();
+    owner
+        .rebuild_shared_processes_from_native_members()
+        .unwrap();
+    Arc::new(Store::new_replica(owner, usage).unwrap())
 }
-fn publish_state(store:&Store,name:&str,protected:bool){let prior=store.capture();let mut owner=prior.owner().clone();let mut state=owner.scanned_user_states(name).unwrap()[&0].clone();if protected{state.enabled=2;}else{state.hidden=true;}owner.set_user_state(name,0,state).unwrap();let mut usage=prior.usage().clone();usage.notify(name,1,91);owner.update_replica_usage(prior.usage(),&usage).unwrap();store.publish(&prior,owner,usage).unwrap();}
-fn publish_usage(store:&Store,name:&str){let prior=store.capture();let mut owner=prior.owner().clone();let mut usage=prior.usage().clone();usage.notify(name,1,91);owner.update_replica_usage(prior.usage(),&usage).unwrap();store.publish(&prior,owner,usage).unwrap();}
-fn publish_hidden(store:&Store,name:&str,hidden:bool){let prior=store.capture();let mut owner=prior.owner().clone();let mut state=owner.scanned_user_states(name).unwrap()[&0].clone();state.hidden=hidden;owner.set_user_state(name,0,state).unwrap();store.publish(&prior,owner,prior.usage().clone()).unwrap();}
-#[test]
-fn interleaved_visibility_recaptures_latest_policy_and_preserves_original_base(){
- let store=fixture();let base=store.capture();let start=Arc::new(Barrier::new(2));let done=Arc::new(Barrier::new(2));let writer=store.clone();let a=start.clone();let b=done.clone();let thread=std::thread::spawn(move||{a.wait();publish_state(&writer,"background.fixture",false);b.wait();});let calls=Cell::new(0);
- let values=capture_visibility_checked(&base,&store,&["target.fixture".into()],||Ok(vec![0]),|setting,users|{assert_eq!(setting.app_id,10101);assert_eq!(users,[0]);let captured=store.capture();calls.set(calls.get()+1);let hidden=captured.owner().scanned_user_states("background.fixture").unwrap()[&0].hidden;if calls.get()==1{start.wait();done.wait();}Ok((captured.metadata_revision(),if hidden{vec![0,0]}else{vec![0,1,10102]}))}).unwrap();thread.join().unwrap();assert_eq!(calls.get(),2);assert_eq!(values,[vec![0,0]]);assert!(!base.owner().scanned_user_states("background.fixture").unwrap()[&0].hidden);assert!(store.capture().owner().scanned_user_states("background.fixture").unwrap()[&0].hidden);assert_eq!(store.capture().usage().times("background.fixture").unwrap()[1],91);
+fn publish_state(store: &Store, name: &str, protected: bool) {
+    let prior = store.capture();
+    let mut owner = prior.owner().clone();
+    let mut state = owner.scanned_user_states(name).unwrap()[&0].clone();
+    if protected {
+        state.enabled = 2;
+    } else {
+        state.hidden = true;
+    }
+    owner.set_user_state(name, 0, state).unwrap();
+    let mut usage = prior.usage().clone();
+    usage.notify(name, 1, 91);
+    owner.update_replica_usage(prior.usage(), &usage).unwrap();
+    store.publish(&prior, owner, usage).unwrap();
+}
+fn publish_usage(store: &Store, name: &str) {
+    let prior = store.capture();
+    let mut owner = prior.owner().clone();
+    let mut usage = prior.usage().clone();
+    usage.notify(name, 1, 91);
+    owner.update_replica_usage(prior.usage(), &usage).unwrap();
+    store.publish(&prior, owner, usage).unwrap();
+}
+fn publish_hidden(store: &Store, name: &str, hidden: bool) {
+    let prior = store.capture();
+    let mut owner = prior.owner().clone();
+    let mut state = owner.scanned_user_states(name).unwrap()[&0].clone();
+    state.hidden = hidden;
+    owner.set_user_state(name, 0, state).unwrap();
+    store.publish(&prior, owner, prior.usage().clone()).unwrap();
 }
 #[test]
-fn usage_only_lag_keeps_the_same_visibility_metadata_generation(){let store=fixture();let base=store.capture();let calls=Cell::new(0);let values=capture_visibility_checked(&base,&store,&["target.fixture".into()],||Ok(vec![0]),|_,_|{let captured=store.capture();calls.set(calls.get()+1);publish_usage(&store,"background.fixture");Ok((captured.metadata_revision(),vec![0,1,10102]))}).unwrap();let latest=store.capture();assert_eq!(calls.get(),1);assert!(latest.version()>base.version());assert_eq!(latest.metadata_revision(),base.metadata_revision());assert_eq!(values,[vec![0,1,10102]]);}
+fn interleaved_visibility_recaptures_latest_policy_and_preserves_original_base() {
+    let store = fixture();
+    let base = store.capture();
+    let start = Arc::new(Barrier::new(2));
+    let done = Arc::new(Barrier::new(2));
+    let writer = store.clone();
+    let a = start.clone();
+    let b = done.clone();
+    let thread = std::thread::spawn(move || {
+        a.wait();
+        publish_state(&writer, "background.fixture", false);
+        b.wait();
+    });
+    let calls = Cell::new(0);
+    let values = capture_visibility_checked(
+        &base,
+        &store,
+        &["target.fixture".into()],
+        || Ok(vec![0]),
+        |setting, users| {
+            assert_eq!(setting.app_id, 10101);
+            assert_eq!(users, [0]);
+            let captured = store.capture();
+            calls.set(calls.get() + 1);
+            let hidden = captured
+                .owner()
+                .scanned_user_states("background.fixture")
+                .unwrap()[&0]
+                .hidden;
+            if calls.get() == 1 {
+                start.wait();
+                done.wait();
+            }
+            Ok((
+                captured.metadata_revision(),
+                if hidden {
+                    vec![0, 0]
+                } else {
+                    vec![0, 1, 10102]
+                },
+            ))
+        },
+    )
+    .unwrap();
+    thread.join().unwrap();
+    assert_eq!(calls.get(), 2);
+    assert_eq!(values, [vec![0, 0]]);
+    assert!(
+        !base
+            .owner()
+            .scanned_user_states("background.fixture")
+            .unwrap()[&0]
+            .hidden
+    );
+    assert!(
+        store
+            .capture()
+            .owner()
+            .scanned_user_states("background.fixture")
+            .unwrap()[&0]
+            .hidden
+    );
+    assert_eq!(
+        store.capture().usage().times("background.fixture").unwrap()[1],
+        91
+    );
+}
 #[test]
-fn callback_capture_from_newer_coherent_metadata_is_accepted(){let store=fixture();let base=store.capture();let calls=Cell::new(0);let values=capture_visibility_checked(&base,&store,&["target.fixture".into()],||Ok(vec![0]),|_,_|{calls.set(calls.get()+1);publish_hidden(&store,"background.fixture",true);let captured=store.capture();Ok((captured.metadata_revision(),vec![0,0]))}).unwrap();assert_eq!(calls.get(),1);assert!(store.capture().metadata_revision()>base.metadata_revision());assert_eq!(values,[vec![0,0]]);}
+fn usage_only_lag_keeps_the_same_visibility_metadata_generation() {
+    let store = fixture();
+    let base = store.capture();
+    let calls = Cell::new(0);
+    let values = capture_visibility_checked(
+        &base,
+        &store,
+        &["target.fixture".into()],
+        || Ok(vec![0]),
+        |_, _| {
+            let captured = store.capture();
+            calls.set(calls.get() + 1);
+            publish_usage(&store, "background.fixture");
+            Ok((captured.metadata_revision(), vec![0, 1, 10102]))
+        },
+    )
+    .unwrap();
+    let latest = store.capture();
+    assert_eq!(calls.get(), 1);
+    assert!(latest.version() > base.version());
+    assert_eq!(latest.metadata_revision(), base.metadata_revision());
+    assert_eq!(values, [vec![0, 1, 10102]]);
+}
 #[test]
-fn interleaved_protected_target_change_rejects_instead_of_reusing_visibility(){let store=fixture();let base=store.capture();let calls=Cell::new(0);let result=capture_visibility_checked(&base,&store,&["target.fixture".into()],||Ok(vec![0]),|_,_|{let captured=store.capture();calls.set(calls.get()+1);publish_state(&store,"target.fixture",true);Ok((captured.metadata_revision(),vec![0,1,10102]))});assert!(result.is_err());assert_eq!(calls.get(),1);assert_eq!(store.capture().owner().scanned_user_states("target.fixture").unwrap()[&0].enabled,2);}
+fn callback_capture_from_newer_coherent_metadata_is_accepted() {
+    let store = fixture();
+    let base = store.capture();
+    let calls = Cell::new(0);
+    let values = capture_visibility_checked(
+        &base,
+        &store,
+        &["target.fixture".into()],
+        || Ok(vec![0]),
+        |_, _| {
+            calls.set(calls.get() + 1);
+            publish_hidden(&store, "background.fixture", true);
+            let captured = store.capture();
+            Ok((captured.metadata_revision(), vec![0, 0]))
+        },
+    )
+    .unwrap();
+    assert_eq!(calls.get(), 1);
+    assert!(store.capture().metadata_revision() > base.metadata_revision());
+    assert_eq!(values, [vec![0, 0]]);
+}
 #[test]
-fn stale_original_visibility_capability_is_never_accepted(){let store=fixture();let base=store.capture();let calls=Cell::new(0);let result=capture_visibility_checked(&base,&store,&["target.fixture".into()],||Ok(vec![0]),|_,_|{calls.set(calls.get()+1);Ok((base.metadata_revision()+1,vec![0,1,10102]))});assert!(result.is_err());assert_eq!(calls.get(),8);assert!(Arc::ptr_eq(&base,&store.capture()));}
+fn interleaved_protected_target_change_rejects_instead_of_reusing_visibility() {
+    let store = fixture();
+    let base = store.capture();
+    let calls = Cell::new(0);
+    let result = capture_visibility_checked(
+        &base,
+        &store,
+        &["target.fixture".into()],
+        || Ok(vec![0]),
+        |_, _| {
+            let captured = store.capture();
+            calls.set(calls.get() + 1);
+            publish_state(&store, "target.fixture", true);
+            Ok((captured.metadata_revision(), vec![0, 1, 10102]))
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(calls.get(), 1);
+    assert_eq!(
+        store
+            .capture()
+            .owner()
+            .scanned_user_states("target.fixture")
+            .unwrap()[&0]
+            .enabled,
+        2
+    );
+}
 #[test]
-fn continuous_metadata_changes_never_accept_a_stale_original_capture(){let store=fixture();let base=store.capture();let calls=Cell::new(0);let result=capture_visibility_checked(&base,&store,&["target.fixture".into()],||Ok(vec![0]),|_,_|{let captured=store.capture();let call=calls.get()+1;calls.set(call);publish_hidden(&store,"background.fixture",call%2!=0);Ok((captured.metadata_revision(),vec![0,1,10102]))});assert!(result.is_err());assert_eq!(calls.get(),8);assert!(store.capture().version()>base.version());assert!(!base.owner().scanned_user_states("background.fixture").unwrap()[&0].hidden);}
+fn stale_original_visibility_capability_is_never_accepted() {
+    let store = fixture();
+    let base = store.capture();
+    let calls = Cell::new(0);
+    let result = capture_visibility_checked(
+        &base,
+        &store,
+        &["target.fixture".into()],
+        || Ok(vec![0]),
+        |_, _| {
+            calls.set(calls.get() + 1);
+            Ok((base.metadata_revision() + 1, vec![0, 1, 10102]))
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(calls.get(), 8);
+    assert!(Arc::ptr_eq(&base, &store.capture()));
+}
 #[test]
-fn mixed_original_metadata_generations_are_rejected(){let store=fixture();let base=store.capture();let calls=Cell::new(0);let result=capture_visibility_checked(&base,&store,&["target.fixture".into(),"background.fixture".into()],||Ok(vec![0]),|setting,_|{calls.set(calls.get()+1);let generation=base.metadata_revision()+u64::from(setting.name=="background.fixture");Ok((generation,vec![0,0]))});assert!(result.is_err());assert_eq!(calls.get(),16);}
+fn continuous_metadata_changes_never_accept_a_stale_original_capture() {
+    let store = fixture();
+    let base = store.capture();
+    let calls = Cell::new(0);
+    let result = capture_visibility_checked(
+        &base,
+        &store,
+        &["target.fixture".into()],
+        || Ok(vec![0]),
+        |_, _| {
+            let captured = store.capture();
+            let call = calls.get() + 1;
+            calls.set(call);
+            publish_hidden(&store, "background.fixture", call % 2 != 0);
+            Ok((captured.metadata_revision(), vec![0, 1, 10102]))
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(calls.get(), 8);
+    assert!(store.capture().version() > base.version());
+    assert!(
+        !base
+            .owner()
+            .scanned_user_states("background.fixture")
+            .unwrap()[&0]
+            .hidden
+    );
+}
 #[test]
-fn install_user_changes_still_prevent_visibility_reuse(){let store=fixture();let base=store.capture();let user_calls=Cell::new(0);let captures=Cell::new(0);let result=capture_visibility_checked(&base,&store,&["target.fixture".into()],||{let call=user_calls.get();user_calls.set(call+1);Ok(if call%2==0{vec![0]}else{vec![10]})},|_,_|{captures.set(captures.get()+1);Ok((base.metadata_revision(),vec![0,0]))});assert!(result.is_err());assert_eq!(captures.get(),8);}
+fn mixed_original_metadata_generations_are_rejected() {
+    let store = fixture();
+    let base = store.capture();
+    let calls = Cell::new(0);
+    let result = capture_visibility_checked(
+        &base,
+        &store,
+        &["target.fixture".into(), "background.fixture".into()],
+        || Ok(vec![0]),
+        |setting, _| {
+            calls.set(calls.get() + 1);
+            let generation =
+                base.metadata_revision() + u64::from(setting.name == "background.fixture");
+            Ok((generation, vec![0, 0]))
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(calls.get(), 16);
+}
 #[test]
-fn protected_code_change_rejects_before_calling_visibility_owner(){
- let store=fixture();let base=store.capture();let mut owner=base.owner().clone();owner.settings.packages.iter_mut().find(|p|p.name=="target.fixture").unwrap().code_path="/data/app/target-replaced".into();let package=&mut Arc::make_mut(owner.loaded.get_mut("target.fixture").unwrap()).package;package.path=Some("/data/app/target-replaced".into());package.base_apk_path=Some("/data/app/target-replaced/base.apk".into());owner.assign_seinfo_at_boot(&seinfo::Policy::unread(),&mut|package|Ok(package.target_sdk_version)).unwrap();owner.complete_library_dependencies(&|_,_|Ok(Policy::pinned(true))).unwrap();crate::package::installer::permission_prepare::complete_candidate_runtime(&mut owner,&base,base.usage()).unwrap();store.publish(&base,owner,base.usage().clone()).unwrap();let calls=Cell::new(0);let result=capture_visibility_checked(&base,&store,&["target.fixture".into()],||Ok(vec![0]),|_,_|{calls.set(calls.get()+1);Ok((store.capture().metadata_revision(),vec![0,0]))});assert!(result.is_err());assert_eq!(calls.get(),0);assert_eq!(store.capture().owner().settings.packages.iter().find(|p|p.name=="target.fixture").unwrap().code_path,"/data/app/target-replaced");
+fn install_user_changes_still_prevent_visibility_reuse() {
+    let store = fixture();
+    let base = store.capture();
+    let user_calls = Cell::new(0);
+    let captures = Cell::new(0);
+    let result = capture_visibility_checked(
+        &base,
+        &store,
+        &["target.fixture".into()],
+        || {
+            let call = user_calls.get();
+            user_calls.set(call + 1);
+            Ok(if call % 2 == 0 { vec![0] } else { vec![10] })
+        },
+        |_, _| {
+            captures.set(captures.get() + 1);
+            Ok((base.metadata_revision(), vec![0, 0]))
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(captures.get(), 8);
+}
+#[test]
+fn protected_code_change_rejects_before_calling_visibility_owner() {
+    let store = fixture();
+    let base = store.capture();
+    let mut owner = base.owner().clone();
+    owner
+        .settings
+        .packages
+        .iter_mut()
+        .find(|p| p.name == "target.fixture")
+        .unwrap()
+        .code_path = "/data/app/target-replaced".into();
+    let package = &mut Arc::make_mut(owner.loaded.get_mut("target.fixture").unwrap()).package;
+    package.path = Some("/data/app/target-replaced".into());
+    package.base_apk_path = Some("/data/app/target-replaced/base.apk".into());
+    owner
+        .assign_seinfo_at_boot(&seinfo::Policy::unread(), &mut |package| {
+            Ok(package.target_sdk_version)
+        })
+        .unwrap();
+    owner
+        .complete_library_dependencies(&|_, _| Ok(Policy::pinned(true)))
+        .unwrap();
+    crate::package::installer::permission_prepare::complete_candidate_runtime(
+        &mut owner,
+        &base,
+        base.usage(),
+    )
+    .unwrap();
+    store.publish(&base, owner, base.usage().clone()).unwrap();
+    let calls = Cell::new(0);
+    let result = capture_visibility_checked(
+        &base,
+        &store,
+        &["target.fixture".into()],
+        || Ok(vec![0]),
+        |_, _| {
+            calls.set(calls.get() + 1);
+            Ok((store.capture().metadata_revision(), vec![0, 0]))
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(calls.get(), 0);
+    assert_eq!(
+        store
+            .capture()
+            .owner()
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == "target.fixture")
+            .unwrap()
+            .code_path,
+        "/data/app/target-replaced"
+    );
 }
 
 #[test]
-fn identical_package_inventory_from_another_store_epoch_is_rejected(){let original=fixture();let foreign=fixture();let base=original.capture();assert_eq!(base.owner().settings,foreign.capture().owner().settings);let calls=Cell::new(0);let result=capture_visibility_checked(&base,&foreign,&["target.fixture".into()],||Ok(vec![0]),|_,_|{calls.set(calls.get()+1);Ok((foreign.capture().metadata_revision(),vec![0,0]))});assert!(result.unwrap_err().message.contains("lineage"));assert_eq!(calls.get(),0);}
+fn identical_package_inventory_from_another_store_epoch_is_rejected() {
+    let original = fixture();
+    let foreign = fixture();
+    let base = original.capture();
+    assert_eq!(base.owner().settings, foreign.capture().owner().settings);
+    let calls = Cell::new(0);
+    let result = capture_visibility_checked(
+        &base,
+        &foreign,
+        &["target.fixture".into()],
+        || Ok(vec![0]),
+        |_, _| {
+            calls.set(calls.get() + 1);
+            Ok((foreign.capture().metadata_revision(), vec![0, 0]))
+        },
+    );
+    assert!(result.unwrap_err().message.contains("lineage"));
+    assert_eq!(calls.get(), 0);
+}

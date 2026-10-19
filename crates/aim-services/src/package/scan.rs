@@ -9,8 +9,8 @@ use super::{
 };
 use std::collections::BTreeMap;
 
-mod loading;
 mod code_projection;
+mod loading;
 pub use code_projection::Projection as CodeProjection;
 mod apex;
 mod apex_image;
@@ -57,11 +57,11 @@ pub use disabled::{
     UpdatedSystemSource,
 };
 pub use updated_boot::{UpdatedSystemBootInputs, UpdatedSystemBootOutcome};
+pub mod boot_compressed;
 mod hidden_api;
 mod legacy;
-pub mod live_install;
-pub mod boot_compressed;
 mod libraries;
+pub mod live_install;
 mod removal;
 mod seinfo;
 mod setting;
@@ -107,7 +107,13 @@ pub struct LoadedPackage {
 /// by address before its fields.
 impl PartialEq for LoadedPackage {
     fn eq(&self, other: &Self) -> bool {
-        let Self { package, collected_signing, disabled_binding, runtime_view, projection } = self;
+        let Self {
+            package,
+            collected_signing,
+            disabled_binding,
+            runtime_view,
+            projection,
+        } = self;
         std::ptr::eq(self, other)
             || (*package == other.package
                 && *collected_signing == other.collected_signing
@@ -190,7 +196,7 @@ impl LoadedPackage {
     }
 
     pub fn facade_entry(&self) -> Result<std::sync::Arc<super::pkg::FacadeEntry>, String> {
-        self.code_projection().map(|value|value.facade)
+        self.code_projection().map(|value| value.facade)
     }
 }
 

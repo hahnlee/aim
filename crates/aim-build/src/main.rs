@@ -141,8 +141,10 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
                 if parsed.template_boot_timeout.is_some() {
                     return Err("duplicate --boot-timeout".into());
                 }
-                let seconds = value(&arg)?.parse::<u64>()
-                    .ok().filter(|seconds| (1..=3600).contains(seconds))
+                let seconds = value(&arg)?
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|seconds| (1..=3600).contains(seconds))
                     .ok_or("--boot-timeout needs seconds in 1..=3600")?;
                 parsed.template_boot_timeout = Some(Duration::from_secs(seconds));
             }
@@ -214,8 +216,16 @@ mod template_timeout_tests {
         assert_eq!(default.template_boot_timeout, None);
         assert_eq!(nodes::userdata::DEFAULT_BOOT_TIMEOUT.as_secs(), 300);
         for seconds in [1, 600, 3600] {
-            let parsed = parse(arguments(&["template", "--boot-timeout", &seconds.to_string()])).unwrap();
-            assert_eq!(parsed.template_boot_timeout, Some(Duration::from_secs(seconds)));
+            let parsed = parse(arguments(&[
+                "template",
+                "--boot-timeout",
+                &seconds.to_string(),
+            ]))
+            .unwrap();
+            assert_eq!(
+                parsed.template_boot_timeout,
+                Some(Duration::from_secs(seconds))
+            );
         }
         for value in ["0", "-1", "3601", "1.5", "invalid", "18446744073709551616"] {
             assert!(parse(arguments(&["template", "--boot-timeout", value])).is_err());
@@ -225,8 +235,25 @@ mod template_timeout_tests {
     #[test]
     fn template_boot_timeout_rejects_missing_duplicate_and_graph_options() {
         assert!(parse(arguments(&["template", "--boot-timeout"])).is_err());
-        assert!(parse(arguments(&["template", "--boot-timeout", "600", "--boot-timeout", "300"])).is_err());
-        assert!(parse(arguments(&["build", "userdata/template", "--boot-timeout", "600"])).is_err());
+        assert!(
+            parse(arguments(&[
+                "template",
+                "--boot-timeout",
+                "600",
+                "--boot-timeout",
+                "300"
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse(arguments(&[
+                "build",
+                "userdata/template",
+                "--boot-timeout",
+                "600"
+            ]))
+            .is_err()
+        );
     }
 }
 
@@ -270,18 +297,31 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
     let options = Options { jobs: args.jobs };
     match args.command.as_str() {
         "check-service-java" => {
-            if args.names.len() != 2 { return Err("check-service-java requires DEX STUB_DEX".into()); }
+            if args.names.len() != 2 {
+                return Err("check-service-java requires DEX STUB_DEX".into());
+            }
             let image = aim_paths::original_image();
             let _image_lease = aim_storage::system::ImageLease::read_root(&image)?;
             use aim_android_image::classpath::{self, BOOTCLASSPATH, SYSTEMSERVERCLASSPATH};
             let mut jars = classpath::jars(&image, "bootclasspath.pb", BOOTCLASSPATH)?;
-            jars.extend(classpath::jars(&image, "systemserverclasspath.pb", SYSTEMSERVERCLASSPATH)?);
-            nodes::java::check_linkage(&image, &jars, Some(Path::new(&args.names[1])), Path::new(&args.names[0]))?;
+            jars.extend(classpath::jars(
+                &image,
+                "systemserverclasspath.pb",
+                SYSTEMSERVERCLASSPATH,
+            )?);
+            nodes::java::check_linkage(
+                &image,
+                &jars,
+                Some(Path::new(&args.names[1])),
+                Path::new(&args.names[0]),
+            )?;
             nodes::service_aidl::check_own_stubs(Path::new(&args.names[0]))?;
             Ok(ExitCode::SUCCESS)
         }
         "generate-service-aidl" => {
-            if !args.names.is_empty() { return Err("generate-service-aidl takes no targets".into()); }
+            if !args.names.is_empty() {
+                return Err("generate-service-aidl takes no targets".into());
+            }
             let _lock = lock()?;
             let image = aim_paths::original_image();
             let _image_lease = aim_storage::system::ImageLease::read_root(&image)?;
@@ -290,26 +330,39 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
                 let contract = lockfile::Lock::read(&lock_path)?;
                 let mut paths = vec![lock_path.clone()];
                 for entry in contract.array("OWN_INTERFACES") {
-                    let file = entry.split('|').nth(1).ok_or("invalid own-interface input")?;
+                    let file = entry
+                        .split('|')
+                        .nth(1)
+                        .ok_or("invalid own-interface input")?;
                     paths.push(aim_paths::root().join(file));
                 }
-                paths.into_iter().map(|path| {
-                    let hash = hash::sha256_file(&path).map_err(|error| error.to_string())?;
-                    Ok((path.display().to_string(), hash))
-                }).collect()
+                paths
+                    .into_iter()
+                    .map(|path| {
+                        let hash = hash::sha256_file(&path).map_err(|error| error.to_string())?;
+                        Ok((path.display().to_string(), hash))
+                    })
+                    .collect()
             };
             let before = inputs()?;
-            let mut log = log::Log::create(aim_paths::cache().join("logs/service-aidl-direct.log"), args.verbose)?;
+            let mut log = log::Log::create(
+                aim_paths::cache().join("logs/service-aidl-direct.log"),
+                args.verbose,
+            )?;
             nodes::service_aidl::run(&mut log)?;
-            if inputs()? != before { return Err("service AIDL inputs changed during generation".into()); }
+            if inputs()? != before {
+                return Err("service AIDL inputs changed during generation".into());
+            }
             let output = nodes::service_aidl::out().join("lib.rs");
             let receipt = serde_json::json!({
                 "original_image": image, "inputs": before,
                 "output": output, "output_sha256": hash::sha256_file(&output).map_err(|error| error.to_string())?
             });
-            fs::write(nodes::service_aidl::out().join("direct-provenance.json"),
-                serde_json::to_vec_pretty(&receipt).map_err(|error| error.to_string())?)
-                .map_err(|error| error.to_string())?;
+            fs::write(
+                nodes::service_aidl::out().join("direct-provenance.json"),
+                serde_json::to_vec_pretty(&receipt).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
             Ok(ExitCode::SUCCESS)
         }
         "template" => {
@@ -325,7 +378,8 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
                 host_runtime: input("--host-runtime")?,
                 display: input("--display-bin")?,
                 empty: input("--empty-template")?,
-                boot_timeout: args.template_boot_timeout
+                boot_timeout: args
+                    .template_boot_timeout
                     .unwrap_or(nodes::userdata::DEFAULT_BOOT_TIMEOUT),
             };
             let (_, ctx) = load(args.verbose)?;

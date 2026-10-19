@@ -34,15 +34,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aim_android_xml::{Element, Node, Value};
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{
-    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception, Parcel, Reader,
-    Result as ParcelResult,
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception,
+    Parcel, Reader, Result as ParcelResult,
 };
 use aim_service_aidl::android_app_iurigrantsmanager as ugm;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
 use super::content_service::ParcelUri;
 use super::kept::RawIntent;
-use super::{AppHost, GET_URI_PERMISSION_PATTERNS, MATCH_DIRECT_BOOT_AUTO, PER_USER_RANGE, is_isolated, reply};
+use super::{
+    AppHost, GET_URI_PERMISSION_PATTERNS, MATCH_DIRECT_BOOT_AUTO, PER_USER_RANGE, is_isolated,
+    reply,
+};
 use crate::clip::{self, ClipDescription};
 use crate::package::apps_filter::{NotModelled, should_filter_application};
 use crate::package::info::{ProviderInfo, java_hash};
@@ -84,8 +87,10 @@ const USER_NULL: i32 = -10000;
 /// `ContentResolver.SCHEME_CONTENT`.
 const SCHEME_CONTENT: &str = "content";
 const GET_APP_GRANTED_URI_PERMISSIONS: &str = "android.permission.GET_APP_GRANTED_URI_PERMISSIONS";
-const CLEAR_APP_GRANTED_URI_PERMISSIONS: &str = "android.permission.CLEAR_APP_GRANTED_URI_PERMISSIONS";
-const FORCE_PERSISTABLE_URI_PERMISSIONS: &str = "android.permission.FORCE_PERSISTABLE_URI_PERMISSIONS";
+const CLEAR_APP_GRANTED_URI_PERMISSIONS: &str =
+    "android.permission.CLEAR_APP_GRANTED_URI_PERMISSIONS";
+const FORCE_PERSISTABLE_URI_PERMISSIONS: &str =
+    "android.permission.FORCE_PERSISTABLE_URI_PERMISSIONS";
 const INTERACT_ACROSS_USERS: &str = "android.permission.INTERACT_ACROSS_USERS";
 const INTERACT_ACROSS_USERS_FULL: &str = "android.permission.INTERACT_ACROSS_USERS_FULL";
 const MANAGE_DOCUMENTS: &str = "android.permission.MANAGE_DOCUMENTS";
@@ -118,26 +123,41 @@ struct GrantUri {
 impl PartialEq for GrantUri {
     /// `GrantUri.equals`, of the URIs' strings (`Uri.equals`).
     fn eq(&self, other: &GrantUri) -> bool {
-        self.uri.as_str() == other.uri.as_str() && self.source_user == other.source_user && self.prefix == other.prefix
+        self.uri.as_str() == other.uri.as_str()
+            && self.source_user == other.source_user
+            && self.prefix == other.prefix
     }
 }
 
 impl std::fmt::Display for GrantUri {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} [user {}]{}", self.uri.as_str(), self.source_user, if self.prefix { " [prefix]" } else { "" })
+        write!(
+            f,
+            "{} [user {}]{}",
+            self.uri.as_str(),
+            self.source_user,
+            if self.prefix { " [prefix]" } else { "" }
+        )
     }
 }
 
 impl GrantUri {
     fn new(source_user: i32, uri: Uri, modes: i32) -> GrantUri {
-        GrantUri { source_user, uri, prefix: modes & FLAG_GRANT_PREFIX_URI_PERMISSION != 0 }
+        GrantUri {
+            source_user,
+            uri,
+            prefix: modes & FLAG_GRANT_PREFIX_URI_PERMISSION != 0,
+        }
     }
 
     /// `GrantUri.hashCode`, which orders a uid's grants (`ArrayMap`).
     fn hash(&self) -> i32 {
         let hash = 31i32.wrapping_add(self.source_user);
-        let hash = hash.wrapping_mul(31).wrapping_add(java_hash(self.uri.as_str()));
-        hash.wrapping_mul(31).wrapping_add(if self.prefix { 1231 } else { 1237 })
+        let hash = hash
+            .wrapping_mul(31)
+            .wrapping_add(java_hash(self.uri.as_str()));
+        hash.wrapping_mul(31)
+            .wrapping_add(if self.prefix { 1231 } else { 1237 })
     }
 
     /// `GrantUri.resolve`: a content URI in the user its authority names
@@ -148,11 +168,16 @@ impl GrantUri {
             return GrantUri::new(default_user, uri, modes);
         }
         let authority = uri.authority();
-        let user = match authority.as_deref().and_then(|a| a.rfind('@').map(|end| &a[..end])) {
+        let user = match authority
+            .as_deref()
+            .and_then(|a| a.rfind('@').map(|end| &a[..end]))
+        {
             Some(user) => parse_int(user).unwrap_or(USER_NULL),
             None => default_user,
         };
-        let without = authority.as_deref().map(|a| uri::encode(&a[a.rfind('@').map_or(0, |end| end + 1)..]));
+        let without = authority
+            .as_deref()
+            .map(|a| uri::encode(&a[a.rfind('@').map_or(0, |end| end + 1)..]));
         GrantUri::new(user, uri.with_encoded_authority(without.as_deref()), modes)
     }
 }
@@ -160,10 +185,15 @@ impl GrantUri {
 /// `ContentProvider.maybeAddUserId`: a content URI with no user names
 /// `user` (unless it is `USER_CURRENT`).
 fn maybe_add_user_id(uri: &Uri, user: i32) -> Uri {
-    if user == USER_CURRENT || uri.scheme() != Some(SCHEME_CONTENT) || uri.user_info().is_some_and(|u| !u.is_empty()) {
+    if user == USER_CURRENT
+        || uri.scheme() != Some(SCHEME_CONTENT)
+        || uri.user_info().is_some_and(|u| !u.is_empty())
+    {
         return uri.clone();
     }
-    let authority = uri.authority().map_or("null".to_string(), |a| uri::encode(&a));
+    let authority = uri
+        .authority()
+        .map_or("null".to_string(), |a| uri::encode(&a));
     uri.with_encoded_authority(Some(&format!("{user}@{authority}")))
 }
 
@@ -188,7 +218,12 @@ struct UriPermission {
 }
 
 impl UriPermission {
-    fn new(source_package: &str, target_package: &str, target_uid: i32, uri: GrantUri) -> UriPermission {
+    fn new(
+        source_package: &str,
+        target_package: &str,
+        target_uid: i32,
+        uri: GrantUri,
+    ) -> UriPermission {
         UriPermission {
             source_package: source_package.to_string(),
             target_package: target_package.to_string(),
@@ -209,8 +244,16 @@ impl UriPermission {
 
     /// `ownedModeFlags`.
     fn owned(&self) -> i32 {
-        let read = if self.read_owners.is_empty() { 0 } else { FLAG_GRANT_READ_URI_PERMISSION };
-        read | if self.write_owners.is_empty() { 0 } else { FLAG_GRANT_WRITE_URI_PERMISSION }
+        let read = if self.read_owners.is_empty() {
+            0
+        } else {
+            FLAG_GRANT_READ_URI_PERMISSION
+        };
+        read | if self.write_owners.is_empty() {
+            0
+        } else {
+            FLAG_GRANT_WRITE_URI_PERMISSION
+        }
     }
 
     /// `modeFlags`.
@@ -234,7 +277,10 @@ impl UriPermission {
         match owner {
             None => self.global |= modes & ACCESS_MODES,
             Some(owner) => {
-                for (flag, owners) in [(FLAG_GRANT_READ_URI_PERMISSION, &mut self.read_owners), (FLAG_GRANT_WRITE_URI_PERMISSION, &mut self.write_owners)] {
+                for (flag, owners) in [
+                    (FLAG_GRANT_READ_URI_PERMISSION, &mut self.read_owners),
+                    (FLAG_GRANT_WRITE_URI_PERMISSION, &mut self.write_owners),
+                ] {
                     if modes & flag != 0 && !owners.contains(&owner) {
                         owners.push(owner);
                     }
@@ -247,7 +293,10 @@ impl UriPermission {
     fn take_persistable_modes(&mut self, modes: i32, now: i64) -> bool {
         let modes = modes & ACCESS_MODES;
         if modes & self.persistable != modes {
-            eprintln!("app host: Requested flags 0x{modes:x}, but only 0x{:x} are allowed", self.persistable);
+            eprintln!(
+                "app host: Requested flags 0x{modes:x}, but only 0x{:x} are allowed",
+                self.persistable
+            );
             return false;
         }
         let before = self.persisted;
@@ -274,7 +323,10 @@ impl UriPermission {
     fn revoke_modes(&mut self, modes: i32, including_owners: bool) -> bool {
         let persistable = modes & FLAG_GRANT_PERSISTABLE_URI_PERMISSION != 0;
         let before = self.persisted;
-        for (flag, owners) in [(FLAG_GRANT_READ_URI_PERMISSION, &mut self.read_owners), (FLAG_GRANT_WRITE_URI_PERMISSION, &mut self.write_owners)] {
+        for (flag, owners) in [
+            (FLAG_GRANT_READ_URI_PERMISSION, &mut self.read_owners),
+            (FLAG_GRANT_WRITE_URI_PERMISSION, &mut self.write_owners),
+        ] {
             if modes & flag == 0 {
                 continue;
             }
@@ -309,7 +361,11 @@ impl UriPermission {
 
     /// `buildPersistedPublicApiObject`.
     fn persisted_public(&self) -> PublicUriPermission {
-        PublicUriPermission { uri: self.uri.uri.clone(), modes: self.persisted, persisted_time: self.persisted_time }
+        PublicUriPermission {
+            uri: self.uri.uri.clone(),
+            modes: self.persisted,
+            persisted_time: self.persisted_time,
+        }
     }
 
     /// Its `<uri-grant>` (`writeGrantedUriPermissions`).
@@ -317,14 +373,27 @@ impl UriPermission {
         let attrs = vec![
             ("sourceUserId".to_string(), Value::Int(self.uri.source_user)),
             ("targetUserId".to_string(), Value::Int(self.target_user())),
-            ("sourcePkg".to_string(), Value::Interned(self.source_package.clone())),
-            ("targetPkg".to_string(), Value::Interned(self.target_package.clone())),
-            ("uri".to_string(), Value::String(self.uri.uri.as_str().to_string())),
+            (
+                "sourcePkg".to_string(),
+                Value::Interned(self.source_package.clone()),
+            ),
+            (
+                "targetPkg".to_string(),
+                Value::Interned(self.target_package.clone()),
+            ),
+            (
+                "uri".to_string(),
+                Value::String(self.uri.uri.as_str().to_string()),
+            ),
             ("prefix".to_string(), Value::Bool(self.uri.prefix)),
             ("modeFlags".to_string(), Value::Int(self.persisted)),
             ("createdTime".to_string(), Value::Long(self.persisted_time)),
         ];
-        Element { name: "uri-grant".into(), attrs, content: Vec::new() }
+        Element {
+            name: "uri-grant".into(),
+            attrs,
+            content: Vec::new(),
+        }
     }
 }
 
@@ -344,14 +413,23 @@ impl Grants {
     }
 
     /// `findOrCreateUriPermissionLocked`.
-    fn find_or_create(&mut self, source: &str, target: &str, target_uid: i32, uri: &GrantUri) -> &mut UriPermission {
+    fn find_or_create(
+        &mut self,
+        source: &str,
+        target: &str,
+        target_uid: i32,
+        uri: &GrantUri,
+    ) -> &mut UriPermission {
         let perms = self.0.entry(target_uid).or_default();
         let at = match perms.iter().position(|p| p.uri == *uri) {
             Some(at) => at,
             None => {
                 let hash = uri.hash();
                 let at = perms.partition_point(|p| p.uri.hash() <= hash);
-                perms.insert(at, UriPermission::new(source, target, target_uid, uri.clone()));
+                perms.insert(
+                    at,
+                    UriPermission::new(source, target, target_uid, uri.clone()),
+                );
                 at
             }
         };
@@ -361,7 +439,9 @@ impl Grants {
     /// `removeUriPermissionIfNeededLocked`: the grant of `uri` to `uid`
     /// goes when it has no modes left.
     fn remove_if_needed(&mut self, uid: i32, uri: &GrantUri) {
-        let Some(perms) = self.0.get_mut(&uid) else { return };
+        let Some(perms) = self.0.get_mut(&uid) else {
+            return;
+        };
         perms.retain(|p| p.uri != *uri || p.modes() != 0);
         if perms.is_empty() {
             self.0.remove(&uid);
@@ -372,15 +452,27 @@ impl Grants {
     /// by its grant or a prefix one, persistable ones only with
     /// `FLAG_GRANT_PERSISTABLE_URI_PERMISSION`.
     fn check(&self, uri: &GrantUri, uid: i32, modes: i32) -> bool {
-        let min = if modes & FLAG_GRANT_PERSISTABLE_URI_PERMISSION != 0 { STRENGTH_PERSISTABLE } else { STRENGTH_OWNED };
+        let min = if modes & FLAG_GRANT_PERSISTABLE_URI_PERMISSION != 0 {
+            STRENGTH_PERSISTABLE
+        } else {
+            STRENGTH_OWNED
+        };
         if uid == ROOT_UID {
             return true;
         }
-        let Some(perms) = self.0.get(&uid) else { return false };
-        if perms.iter().find(|p| p.uri == *uri).is_some_and(|p| p.strength(modes) >= min) {
+        let Some(perms) = self.0.get(&uid) else {
+            return false;
+        };
+        if perms
+            .iter()
+            .find(|p| p.uri == *uri)
+            .is_some_and(|p| p.strength(modes) >= min)
+        {
             return true;
         }
-        perms.iter().any(|p| p.uri.prefix && is_path_prefix_match(&uri.uri, &p.uri.uri) && p.strength(modes) >= min)
+        perms.iter().any(|p| {
+            p.uri.prefix && is_path_prefix_match(&uri.uri, &p.uri.uri) && p.strength(modes) >= min
+        })
     }
 
     /// `UriPermissionOwner.removeUriPermissions`: `owner`'s modes go, and
@@ -400,13 +492,22 @@ impl Grants {
     /// of `uid` beyond `MAX_PERSISTED_URI_GRANTS` released; whether any
     /// was.
     fn prune_persisted(&mut self, uid: i32) -> bool {
-        let Some(perms) = self.0.get_mut(&uid) else { return false };
+        let Some(perms) = self.0.get_mut(&uid) else {
+            return false;
+        };
         if perms.len() < MAX_PERSISTED_URI_GRANTS {
             return false;
         }
-        let mut persisted: Vec<(i64, GrantUri)> =
-            perms.iter().filter(|p| p.persisted != 0).map(|p| (p.persisted_time, p.uri.clone())).collect();
-        let Some(trim) = persisted.len().checked_sub(MAX_PERSISTED_URI_GRANTS).filter(|&n| n > 0) else {
+        let mut persisted: Vec<(i64, GrantUri)> = perms
+            .iter()
+            .filter(|p| p.persisted != 0)
+            .map(|p| (p.persisted_time, p.uri.clone()))
+            .collect();
+        let Some(trim) = persisted
+            .len()
+            .checked_sub(MAX_PERSISTED_URI_GRANTS)
+            .filter(|&n| n > 0)
+        else {
             return false;
         };
         persisted.sort_by_key(|(time, _)| *time);
@@ -423,7 +524,14 @@ impl Grants {
     /// below it (to `target`, if named) revoked; of all its grants when
     /// the caller holds it by the provider's permissions, else of its own
     /// grants, not those owned. Whether what persists changed.
-    fn revoke(&mut self, target: Option<&str>, calling_uid: i32, uri: &GrantUri, modes: i32, caller_holds: bool) -> bool {
+    fn revoke(
+        &mut self,
+        target: Option<&str>,
+        calling_uid: i32,
+        uri: &GrantUri,
+        modes: i32,
+        caller_holds: bool,
+    ) -> bool {
         let mut changed = false;
         let including_owners = caller_holds && target.is_none();
         for (uid, perms) in self.0.iter_mut().rev() {
@@ -434,8 +542,13 @@ impl Grants {
                 if target.is_some_and(|t| t != p.target_package) {
                     continue;
                 }
-                if p.uri.source_user == uri.source_user && is_path_prefix_match(&p.uri.uri, &uri.uri) {
-                    changed |= p.revoke_modes(modes | FLAG_GRANT_PERSISTABLE_URI_PERMISSION, including_owners);
+                if p.uri.source_user == uri.source_user
+                    && is_path_prefix_match(&p.uri.uri, &uri.uri)
+                {
+                    changed |= p.revoke_modes(
+                        modes | FLAG_GRANT_PERSISTABLE_URI_PERMISSION,
+                        including_owners,
+                    );
                 }
             }
             perms.retain(|p| p.modes() != 0);
@@ -469,11 +582,16 @@ impl Grants {
     /// of one of `cpi`'s authorities in `user` (in any, unless
     /// `check_user`).
     fn authority_granted(&self, uid: i32, cpi: &ProviderInfo, user: i32, check_user: bool) -> bool {
-        let Some(authorities) = cpi.authority.as_deref() else { return false };
+        let Some(authorities) = cpi.authority.as_deref() else {
+            return false;
+        };
         self.0.get(&uid).is_some_and(|perms| {
             perms.iter().rev().any(|p| {
                 (p.uri.source_user == user || !check_user)
-                    && p.uri.uri.authority().is_some_and(|a| authorities.split(';').any(|c| c == a))
+                    && p.uri
+                        .uri
+                        .authority()
+                        .is_some_and(|a| authorities.split(';').any(|c| c == a))
             })
         })
     }
@@ -481,8 +599,18 @@ impl Grants {
     /// The document `writeGrantedUriPermissions` writes: the persisted
     /// grants.
     fn document(&self) -> Element {
-        let grants = self.0.values().flatten().filter(|p| p.persisted != 0).map(|p| Node::Element(p.element())).collect();
-        Element { name: "uri-grants".into(), attrs: Vec::new(), content: grants }
+        let grants = self
+            .0
+            .values()
+            .flatten()
+            .filter(|p| p.persisted != 0)
+            .map(|p| Node::Element(p.element()))
+            .collect();
+        Element {
+            name: "uri-grants".into(),
+            attrs: Vec::new(),
+            content: grants,
+        }
     }
 }
 
@@ -506,7 +634,11 @@ fn persisted(root: &Element, now: i64) -> Result<Vec<Persisted>, String> {
     let mut out = Vec::new();
     for e in root.children().filter(|e| e.name == "uri-grant") {
         let handle = e.int("userHandle")?;
-        let (Some(source), Some(target), Some(uri)) = (e.string("sourcePkg"), e.string("targetPkg"), e.string("uri")) else {
+        let (Some(source), Some(target), Some(uri)) = (
+            e.string("sourcePkg"),
+            e.string("targetPkg"),
+            e.string("uri"),
+        ) else {
             continue;
         };
         out.push(Persisted {
@@ -567,8 +699,16 @@ fn carried(r: &mut Reader<'_>) -> ParcelResult<Carried> {
     if r.read_i32()? != 0 {
         clip::intent(r)?; // selector
     }
-    let clip = if r.read_i32()? != 0 { Some(clip_items(r)?) } else { None };
-    Ok(Carried { content_user: r.read_i32()?, data, clip })
+    let clip = if r.read_i32()? != 0 {
+        Some(clip_items(r)?)
+    } else {
+        None
+    };
+    Ok(Carried {
+        content_user: r.read_i32()?,
+        data,
+        clip,
+    })
 }
 
 /// `ClipData(Parcel)`: of each item, its URI, else its intent.
@@ -592,7 +732,11 @@ fn clip_items(r: &mut Reader<'_>) -> ParcelResult<Vec<ClipItem>> {
         if r.read_i32()? != 0 {
             r.read_binder()?; // IntentSender
         }
-        let uri = if r.read_i32()? != 0 { Uri::read(r, &mut Plain)? } else { None };
+        let uri = if r.read_i32()? != 0 {
+            Uri::read(r, &mut Plain)?
+        } else {
+            None
+        };
         if r.read_i32()? != 0 {
             return Err(BAD_VALUE); // ActivityInfo
         }
@@ -667,7 +811,9 @@ fn is_content_with_access_modes(uri: &GrantUri, modes: i32) -> bool {
 /// `Preconditions.checkFlagsArgument`.
 fn check_flags(modes: i32, allowed: i32) -> Result<(), Exception> {
     if modes & allowed != modes {
-        return Err(Exception::illegal_argument(format!("Requested flags 0x{modes:x}, but only 0x{allowed:x} are allowed")));
+        return Err(Exception::illegal_argument(format!(
+            "Requested flags 0x{modes:x}, but only 0x{allowed:x} are allowed"
+        )));
     }
     Ok(())
 }
@@ -675,13 +821,17 @@ fn check_flags(modes: i32, allowed: i32) -> Result<(), Exception> {
 /// `enforceNotIsolatedCaller`.
 fn not_isolated(call: &Call<'_>, method: &str) -> Result<(), Exception> {
     if is_isolated(call.sender_euid as i32) {
-        return Err(Exception::security(format!("Isolated process not allowed to call {method}")));
+        return Err(Exception::security(format!(
+            "Isolated process not allowed to call {method}"
+        )));
     }
     Ok(())
 }
 
 fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 /// `AttributionSource(uid, package, null).writeToParcel`: its
@@ -708,12 +858,21 @@ fn write(data: &Path, document: &Element) -> std::io::Result<()> {
     let bytes = aim_android_xml::abx::write(document).map_err(std::io::Error::other)?;
     let path = data.join("system/urigrants.xml");
     let new = data.join("system/urigrants.xml.new");
-    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&new)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&new)?;
     std::io::Write::write_all(&mut file, &bytes)?;
     crate::fsync(&file)?;
     aim_storage::guest_inode::record(
         &new,
-        aim_storage::guest_inode::GuestInode { uid: Some(1000), gid: Some(1000), mode: Some(0o600) },
+        aim_storage::guest_inode::GuestInode {
+            uid: Some(1000),
+            gid: Some(1000),
+            mode: Some(0o600),
+        },
     )?;
     std::fs::rename(&new, path)
 }
@@ -725,32 +884,57 @@ impl AppHost {
     fn read_grants(&self) -> Result<Grants, Exception> {
         let path = self.data()?.join("system/urigrants.xml");
         let mut grants = Grants::default();
-        let read = std::fs::read(&path).map_err(|e| (e.kind() != std::io::ErrorKind::NotFound).then(|| e.to_string()));
-        let found = read.and_then(|bytes| aim_android_xml::read(&bytes).and_then(|root| persisted(&root, now_ms())).map_err(Some));
+        let read = std::fs::read(&path)
+            .map_err(|e| (e.kind() != std::io::ErrorKind::NotFound).then(|| e.to_string()));
+        let found = read.and_then(|bytes| {
+            aim_android_xml::read(&bytes)
+                .and_then(|root| persisted(&root, now_ms()))
+                .map_err(Some)
+        });
         let found = match found {
             Ok(found) => found,
             Err(None) => return Ok(grants),
             Err(Some(e)) => {
-                eprintln!("app host: Failed reading Uri grants: {}: {e}", path.display());
+                eprintln!(
+                    "app host: Failed reading Uri grants: {}: {e}",
+                    path.display()
+                );
                 return Ok(grants);
             }
         };
         for g in found {
             let uri = Uri::parse(&g.uri);
             let authority = uri.authority();
-            let provider = self.grant_provider(authority.as_deref(), g.source_user, MATCH_DIRECT_BOOT_AWARE_UNAWARE, SYSTEM_UID)?;
-            let source = provider.as_ref().and_then(|p| p.info.item.package_name.as_deref());
+            let provider = self.grant_provider(
+                authority.as_deref(),
+                g.source_user,
+                MATCH_DIRECT_BOOT_AWARE_UNAWARE,
+                SYSTEM_UID,
+            )?;
+            let source = provider
+                .as_ref()
+                .and_then(|p| p.info.item.package_name.as_deref());
             if source != Some(g.source_package.as_str()) {
-                eprintln!("app host: Persisted grant for {} had source {} but instead found {source:?}", g.uri, g.source_package);
+                eprintln!(
+                    "app host: Persisted grant for {} had source {} but instead found {source:?}",
+                    g.uri, g.source_package
+                );
                 continue;
             }
-            let target_uid = self.package_uid(&g.target_package, MATCH_UNINSTALLED_PACKAGES, g.target_user)?;
+            let target_uid =
+                self.package_uid(&g.target_package, MATCH_UNINSTALLED_PACKAGES, g.target_user)?;
             if target_uid == -1 {
                 continue;
             }
-            let modes = if g.prefix { FLAG_GRANT_PREFIX_URI_PERMISSION } else { 0 };
+            let modes = if g.prefix {
+                FLAG_GRANT_PREFIX_URI_PERMISSION
+            } else {
+                0
+            };
             let uri = GrantUri::new(g.source_user, uri, modes);
-            grants.find_or_create(&g.source_package, &g.target_package, target_uid, &uri).init_persisted_modes(g.modes, g.created);
+            grants
+                .find_or_create(&g.source_package, &g.target_package, target_uid, &uri)
+                .init_persisted_modes(g.modes, g.created);
         }
         Ok(grants)
     }
@@ -780,7 +964,11 @@ impl AppHost {
 
     /// A new owner for a service start's grants.
     pub(super) fn new_start_owner(&self) -> Owner {
-        Owner::Start(self.uri_grants.next_start_owner.fetch_add(1, Ordering::Relaxed))
+        Owner::Start(
+            self.uri_grants
+                .next_start_owner
+                .fetch_add(1, Ordering::Relaxed),
+        )
     }
 
     /// `UriPermissionOwner.removeUriPermissions`: what `owner` was granted
@@ -793,29 +981,55 @@ impl AppHost {
 
     /// `PackageManagerInternal.getPackageUid` of `package` in `user`; -1
     /// for none.
-    pub(super) fn package_uid(&self, package: &str, flags: i64, user: i32) -> Result<i32, Exception> {
+    pub(super) fn package_uid(
+        &self,
+        package: &str,
+        flags: i64,
+        user: i32,
+    ) -> Result<i32, Exception> {
         let (state, resolution) = self.packages()?;
-        let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
+        let query = Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: SYSTEM_UID,
+        };
         query
             .package_uid_internal(package, flags, user, SYSTEM_UID)
-            .map_err(|NotModelled(reason)| Exception::new(EX_UNSUPPORTED_OPERATION, format!("getPackageUid: {reason}")))
+            .map_err(|NotModelled(reason)| {
+                Exception::new(EX_UNSUPPORTED_OPERATION, format!("getPackageUid: {reason}"))
+            })
     }
 
     /// `getProviderInfo`: the provider of `authority` in `user`, with its
     /// URI permission patterns, as `uid` may see it.
-    fn grant_provider(&self, authority: Option<&str>, user: i32, flags: i64, uid: i32) -> Result<Option<ProviderInfo>, Exception> {
+    fn grant_provider(
+        &self,
+        authority: Option<&str>,
+        user: i32,
+        flags: i64,
+        uid: i32,
+    ) -> Result<Option<ProviderInfo>, Exception> {
         match authority {
-            Some(authority) => self.resolve_provider_as(authority, GET_URI_PERMISSION_PATTERNS | flags, user, uid),
+            Some(authority) => {
+                self.resolve_provider_as(authority, GET_URI_PERMISSION_PATTERNS | flags, user, uid)
+            }
             None => Ok(None),
         }
     }
 
     /// `PackageManagerInternal.filterAppAccess(package, uid, user)`.
-    pub(super) fn filter_package_access(&self, package: &str, uid: i32, user: i32) -> Result<bool, Exception> {
+    pub(super) fn filter_package_access(
+        &self,
+        package: &str,
+        uid: i32,
+        user: i32,
+    ) -> Result<bool, Exception> {
         let (state, resolution) = self.packages()?;
         let ps = state.packages.get(package);
         should_filter_application(&state, &resolution.apps_filter, ps, uid, user, true, true)
-            .map_err(|NotModelled(reason)| Exception::new(EX_ILLEGAL_STATE, format!("filterAppAccess: {reason}")))
+            .map_err(|NotModelled(reason)| {
+                Exception::new(EX_ILLEGAL_STATE, format!("filterAppAccess: {reason}"))
+            })
     }
 
     /// `PackageManagerInternal.filterAppAccess`: whether the app of `uid`
@@ -825,15 +1039,32 @@ impl AppHost {
         let (state, resolution) = self.packages()?;
         let user = uid / PER_USER_RANGE as i32;
         let app_id = uid.rem_euclid(PER_USER_RANGE as i32);
-        let mut packages = state.packages.values().filter(|ps| ps.app_id == app_id).peekable();
+        let mut packages = state
+            .packages
+            .values()
+            .filter(|ps| ps.app_id == app_id)
+            .peekable();
         if packages.peek().is_none() {
             return Ok(true);
         }
         for ps in packages {
-            match should_filter_application(&state, &resolution.apps_filter, Some(ps), calling_uid, user, true, true) {
+            match should_filter_application(
+                &state,
+                &resolution.apps_filter,
+                Some(ps),
+                calling_uid,
+                user,
+                true,
+                true,
+            ) {
                 Ok(true) => {}
                 Ok(false) => return Ok(false),
-                Err(NotModelled(reason)) => return Err(Exception::new(EX_ILLEGAL_STATE, format!("filterAppAccess: {reason}"))),
+                Err(NotModelled(reason)) => {
+                    return Err(Exception::new(
+                        EX_ILLEGAL_STATE,
+                        format!("filterAppAccess: {reason}"),
+                    ));
+                }
             }
         }
         Ok(true)
@@ -842,22 +1073,38 @@ impl AppHost {
     /// `checkUriPermission` of `uri` in `user` for `uid` with `modes`
     /// (`checkUriPermissionLocked`): granted to root, else by a grant to
     /// the uid of the URI or of a prefix of it.
-    pub(super) fn check_uri_permission(&self, call: &Call<'_>, uri: Uri, uid: i32, modes: i32, user: i32) -> Result<i32, Exception> {
+    pub(super) fn check_uri_permission(
+        &self,
+        call: &Call<'_>,
+        uri: Uri,
+        uid: i32,
+        modes: i32,
+        user: i32,
+    ) -> Result<i32, Exception> {
         const GRANTED: i32 = 0;
         const DENIED: i32 = -1;
         not_isolated(call, "checkUriPermission")?;
         if uid != ROOT_UID && self.filter_app_access(uid, call.sender_euid as i32)? {
             return Ok(DENIED);
         }
-        let granted = self.with_grants(|g| g.check(&GrantUri::new(user, uri, modes), uid, modes))?;
+        let granted =
+            self.with_grants(|g| g.check(&GrantUri::new(user, uri, modes), uid, modes))?;
         Ok(if granted { GRANTED } else { DENIED })
     }
 
     /// `checkHoldingPermissionsUnlocked`: whether `uid` may use `uri` with
     /// `modes` by `pi`'s permissions; across users only with
     /// `INTERACT_ACROSS_USERS`.
-    fn holds_permissions(&self, pi: &ProviderInfo, uri: &GrantUri, uid: i32, modes: i32) -> Result<bool, Exception> {
-        if uid / PER_USER_RANGE as i32 != uri.source_user && !self.check_component_permission(Some(INTERACT_ACROSS_USERS), uid, -1, true)? {
+    fn holds_permissions(
+        &self,
+        pi: &ProviderInfo,
+        uri: &GrantUri,
+        uid: i32,
+        modes: i32,
+    ) -> Result<bool, Exception> {
+        if uid / PER_USER_RANGE as i32 != uri.source_user
+            && !self.check_component_permission(Some(INTERACT_ACROSS_USERS), uid, -1, true)?
+        {
             return Ok(false);
         }
         self.holds_permissions_internal(pi, uri, uid, modes, true)
@@ -868,14 +1115,23 @@ impl AppHost {
     /// path permissions matching the URI (the uid's permissions only with
     /// `consider_uid_permissions`), and the provider's own check when it
     /// forces URI permissions.
-    fn holds_permissions_internal(&self, pi: &ProviderInfo, uri: &GrantUri, uid: i32, modes: i32, consider_uid_permissions: bool) -> Result<bool, Exception> {
+    fn holds_permissions_internal(
+        &self,
+        pi: &ProviderInfo,
+        uri: &GrantUri,
+        uid: i32,
+        modes: i32,
+        consider_uid_permissions: bool,
+    ) -> Result<bool, Exception> {
         if pi.info.application_info.uid == uid {
             return Ok(true);
         }
         if !pi.info.exported {
             return Ok(false);
         }
-        let holds = |permission: &str| -> Result<bool, Exception> { Ok(consider_uid_permissions && self.check_permission(Some(permission), uid)? == 0) };
+        let holds = |permission: &str| -> Result<bool, Exception> {
+            Ok(consider_uid_permissions && self.check_permission(Some(permission), uid)? == 0)
+        };
         let mut read_met = modes & FLAG_GRANT_READ_URI_PERMISSION == 0;
         let mut write_met = modes & FLAG_GRANT_WRITE_URI_PERMISSION == 0;
         if !read_met && let Some(p) = &pi.read_permission {
@@ -917,7 +1173,8 @@ impl AppHost {
         // another user's.
         let force_met = if pi.force_uri_permissions {
             let provider_user = pi.info.application_info.uid / PER_USER_RANGE as i32;
-            provider_user == uid / PER_USER_RANGE as i32 && self.provider_uri_permission(&uri.uri, provider_user, uid, modes)
+            provider_user == uid / PER_USER_RANGE as i32
+                && self.provider_uri_permission(&uri.uri, provider_user, uid, modes)
         } else {
             true
         };
@@ -928,14 +1185,20 @@ impl AppHost {
     /// provider's own `checkUriPermission` of `uri` in `user` for `uid`,
     /// asked as the system; denied when it fails.
     fn provider_uri_permission(&self, uri: &Uri, user: i32, uid: i32, modes: i32) -> bool {
-        let Some(authority) = uri.authority() else { return false };
+        let Some(authority) = uri.authority() else {
+            return false;
+        };
         let handle = match self.provider(None, SYSTEM_UID, &authority, user, true) {
             Ok(holder) => match holder.and_then(|h| h.provider) {
                 Some(Binder::Handle(handle)) => handle,
                 _ => return false,
             },
             Err(e) => {
-                eprintln!("app host: Exception while determining type of {}: {}", uri.as_str(), e.message);
+                eprintln!(
+                    "app host: Exception while determining type of {}: {}",
+                    uri.as_str(),
+                    e.message
+                );
                 return false;
             }
         };
@@ -945,13 +1208,19 @@ impl AppHost {
         uri.write(&mut p);
         p.write_i32(uid);
         p.write_i32(modes);
-        match self.process.transact(handle, CHECK_URI_PERMISSION_TRANSACTION, &p, false) {
+        match self
+            .process
+            .transact(handle, CHECK_URI_PERMISSION_TRANSACTION, &p, false)
+        {
             Ok(reply) => {
                 let mut r = reply.reader();
                 r.read_i32() == Ok(0) && r.read_i32() == Ok(0)
             }
             Err(status) => {
-                eprintln!("app host: Content provider dead retrieving {}: {status}", uri.as_str());
+                eprintln!(
+                    "app host: Content provider dead retrieving {}: {status}",
+                    uri.as_str()
+                );
                 false
             }
         }
@@ -960,8 +1229,21 @@ impl AppHost {
     /// `UriGrantsManagerInternal.checkGrantUriPermission` of `uri` in its
     /// user, `user` unless it names one: the uid to grant, -1 for none
     /// needed, or a `SecurityException`.
-    pub(super) fn check_grant_uri_permission(&self, calling_uid: i32, target: &str, uri: Uri, modes: i32, user: i32) -> Result<i32, Exception> {
-        self.check_grant(calling_uid, Some(target), &GrantUri::resolve(user, uri, modes), modes, -1)
+    pub(super) fn check_grant_uri_permission(
+        &self,
+        calling_uid: i32,
+        target: &str,
+        uri: Uri,
+        modes: i32,
+        user: i32,
+    ) -> Result<i32, Exception> {
+        self.check_grant(
+            calling_uid,
+            Some(target),
+            &GrantUri::resolve(user, uri, modes),
+            modes,
+            -1,
+        )
     }
 
     /// `checkGrantUriPermissionUnlocked`: the uid of `target` (or
@@ -969,27 +1251,53 @@ impl AppHost {
     /// `uri` with `modes` and it needs the grant; -1 when there is none to
     /// make. A `SecurityException` when the provider or the caller does
     /// not allow it.
-    fn check_grant(&self, calling_uid: i32, target: Option<&str>, uri: &GrantUri, modes: i32, last_target_uid: i32) -> Result<i32, Exception> {
+    fn check_grant(
+        &self,
+        calling_uid: i32,
+        target: Option<&str>,
+        uri: &GrantUri,
+        modes: i32,
+        last_target_uid: i32,
+    ) -> Result<i32, Exception> {
         if !is_content_with_access_modes(uri, modes) {
             return Ok(-1);
         }
         let authority = uri.uri.authority();
         // The system grants only on behalf of someone.
-        if matches!(calling_uid.rem_euclid(PER_USER_RANGE as i32), SYSTEM_UID | ROOT_UID)
-            && !matches!(authority.as_deref(), Some("com.android.settings.files" | "com.android.settings.module_licenses"))
-        {
-            eprintln!("app host: For security reasons, the system cannot issue a Uri permission grant to {uri}; use startActivityAsCaller() instead");
+        if matches!(
+            calling_uid.rem_euclid(PER_USER_RANGE as i32),
+            SYSTEM_UID | ROOT_UID
+        ) && !matches!(
+            authority.as_deref(),
+            Some("com.android.settings.files" | "com.android.settings.module_licenses")
+        ) {
+            eprintln!(
+                "app host: For security reasons, the system cannot issue a Uri permission grant to {uri}; use startActivityAsCaller() instead"
+            );
             return Ok(-1);
         }
-        let Some(pi) = self.grant_provider(authority.as_deref(), uri.source_user, MATCH_DIRECT_BOOT_AUTO, calling_uid)? else {
-            eprintln!("app host: No content provider found for permission check: {}", uri.uri.as_str());
+        let Some(pi) = self.grant_provider(
+            authority.as_deref(),
+            uri.source_user,
+            MATCH_DIRECT_BOOT_AUTO,
+            calling_uid,
+        )?
+        else {
+            eprintln!(
+                "app host: No content provider found for permission check: {}",
+                uri.uri.as_str()
+            );
             return Ok(-1);
         };
         let mut target_uid = last_target_uid;
         if target_uid < 0
             && let Some(target) = target
         {
-            target_uid = self.package_uid(target, MATCH_DEBUG_TRIAGED_MISSING, calling_uid / PER_USER_RANGE as i32)?;
+            target_uid = self.package_uid(
+                target,
+                MATCH_DEBUG_TRIAGED_MISSING,
+                calling_uid / PER_USER_RANGE as i32,
+            )?;
             if target_uid < 0 {
                 return Ok(-1);
             }
@@ -1001,9 +1309,17 @@ impl AppHost {
             // No target: whether anyone may use it.
             let read = modes & FLAG_GRANT_READ_URI_PERMISSION != 0;
             let write = modes & FLAG_GRANT_WRITE_URI_PERMISSION != 0;
-            let mut allowed = pi.info.exported && !(read && pi.read_permission.is_some()) && !(write && pi.write_permission.is_some());
-            if let Some(pp) = pi.path_permissions.iter().flatten().find(|pp| pp.pattern.matches(path.as_deref())) {
-                allowed &= !(read && pp.read_permission.is_some() || write && pp.write_permission.is_some());
+            let mut allowed = pi.info.exported
+                && !(read && pi.read_permission.is_some())
+                && !(write && pi.write_permission.is_some());
+            if let Some(pp) = pi
+                .path_permissions
+                .iter()
+                .flatten()
+                .find(|pp| pp.pattern.matches(path.as_deref()))
+            {
+                allowed &= !(read && pp.read_permission.is_some()
+                    || write && pp.write_permission.is_some());
             }
             allowed
         };
@@ -1011,7 +1327,8 @@ impl AppHost {
         if pi.force_uri_permissions {
             target_holds = false;
         }
-        let basic = modes & (FLAG_GRANT_PERSISTABLE_URI_PERMISSION | FLAG_GRANT_PREFIX_URI_PERMISSION) == 0;
+        let basic =
+            modes & (FLAG_GRANT_PERSISTABLE_URI_PERMISSION | FLAG_GRANT_PREFIX_URI_PERMISSION) == 0;
         if basic && target_holds {
             return Ok(-1);
         }
@@ -1020,28 +1337,44 @@ impl AppHost {
         let special_cross_user = target_uid >= 0
             && target_uid / PER_USER_RANGE as i32 != uri.source_user
             && self.holds_permissions_internal(&pi, uri, calling_uid, modes, false)?;
-        let grant_allowed = match pi.uri_permission_patterns.as_deref().filter(|p| !p.is_empty()) {
+        let grant_allowed = match pi
+            .uri_permission_patterns
+            .as_deref()
+            .filter(|p| !p.is_empty())
+        {
             Some(patterns) => patterns.iter().any(|p| p.matches(path.as_deref())),
             None => pi.grant_uri_permissions,
         };
         if !grant_allowed {
-            let name = format!("{}/{}", pi.info.item.package_name.as_deref().unwrap_or("null"), pi.info.item.name.as_deref().unwrap_or("null"));
+            let name = format!(
+                "{}/{}",
+                pi.info.item.package_name.as_deref().unwrap_or("null"),
+                pi.info.item.name.as_deref().unwrap_or("null")
+            );
             if !special_cross_user {
-                return Err(Exception::security(format!("Provider {name} does not allow granting of Uri permissions (uri {uri})")));
+                return Err(Exception::security(format!(
+                    "Provider {name} does not allow granting of Uri permissions (uri {uri})"
+                )));
             }
             if !basic {
-                return Err(Exception::security(format!("Provider {name} does not allow granting of advanced Uri permissions (uri {uri})")));
+                return Err(Exception::security(format!(
+                    "Provider {name} does not allow granting of advanced Uri permissions (uri {uri})"
+                )));
             }
         }
         // The caller itself must hold it, by the provider's permissions or
         // a grant strong enough.
-        if !self.holds_permissions(&pi, uri, calling_uid, modes)? && !self.with_grants(|g| g.check(uri, calling_uid, modes))? {
+        if !self.holds_permissions(&pi, uri, calling_uid, modes)?
+            && !self.with_grants(|g| g.check(uri, calling_uid, modes))?
+        {
             let hint = if pi.read_permission.as_deref() == Some(MANAGE_DOCUMENTS) {
                 "; you could obtain access using ACTION_OPEN_DOCUMENT or related APIs"
             } else {
                 ""
             };
-            return Err(Exception::security(format!("UID {calling_uid} does not have permission to {uri}{hint}")));
+            return Err(Exception::security(format!(
+                "UID {calling_uid} does not have permission to {uri}{hint}"
+            )));
         }
         Ok(target_uid)
     }
@@ -1050,18 +1383,44 @@ impl AppHost {
     /// `target` in `target_user` over its data and its ClipData's URIs
     /// and intents, checked for `calling_uid`; none when the target needs
     /// nothing.
-    pub(super) fn check_grant_from_intent(&self, intent: &RawIntent, calling_uid: i32, target: &str, target_user: i32) -> Result<Option<NeededUriGrants>, Exception> {
-        let carried = carried(&mut intent.parcel().reader()).map_err(|_| Exception::new(EX_ILLEGAL_STATE, "an intent read again"))?;
+    pub(super) fn check_grant_from_intent(
+        &self,
+        intent: &RawIntent,
+        calling_uid: i32,
+        target: &str,
+        target_user: i32,
+    ) -> Result<Option<NeededUriGrants>, Exception> {
+        let carried = carried(&mut intent.parcel().reader())
+            .map_err(|_| Exception::new(EX_ILLEGAL_STATE, "an intent read again"))?;
         let mut needed = None;
-        self.check_carried(calling_uid, target, &carried, intent.intent.flags, &mut needed, target_user)?;
+        self.check_carried(
+            calling_uid,
+            target,
+            &carried,
+            intent.intent.flags,
+            &mut needed,
+            target_user,
+        )?;
         Ok(needed)
     }
 
     /// `checkGrantUriPermissionFromIntentUnlocked` of `intent` with `mode`:
     /// its data, then its ClipData's items in order (a URI, else an
     /// intent), added to `needed`.
-    fn check_carried(&self, calling_uid: i32, target: &str, intent: &Carried, mode: i32, needed: &mut Option<NeededUriGrants>, target_user: i32) -> Result<(), Exception> {
-        let user = if intent.content_user == USER_CURRENT { calling_uid / PER_USER_RANGE as i32 } else { intent.content_user };
+    fn check_carried(
+        &self,
+        calling_uid: i32,
+        target: &str,
+        intent: &Carried,
+        mode: i32,
+        needed: &mut Option<NeededUriGrants>,
+        target_user: i32,
+    ) -> Result<(), Exception> {
+        let user = if intent.content_user == USER_CURRENT {
+            calling_uid / PER_USER_RANGE as i32
+        } else {
+            intent.content_user
+        };
         if intent.data.is_none() && intent.clip.is_none() {
             return Ok(());
         }
@@ -1073,12 +1432,30 @@ impl AppHost {
             return Ok(());
         }
         if let Some(data) = &intent.data {
-            self.check_carried_uri(calling_uid, target, data, user, mode, &mut target_uid, needed)?;
+            self.check_carried_uri(
+                calling_uid,
+                target,
+                data,
+                user,
+                mode,
+                &mut target_uid,
+                needed,
+            )?;
         }
         for item in intent.clip.iter().flatten() {
             match item {
-                ClipItem::Uri(uri) => self.check_carried_uri(calling_uid, target, uri, user, mode, &mut target_uid, needed)?,
-                ClipItem::Intent(nested) => self.check_carried(calling_uid, target, nested, mode, needed, target_user)?,
+                ClipItem::Uri(uri) => self.check_carried_uri(
+                    calling_uid,
+                    target,
+                    uri,
+                    user,
+                    mode,
+                    &mut target_uid,
+                    needed,
+                )?,
+                ClipItem::Intent(nested) => {
+                    self.check_carried(calling_uid, target, nested, mode, needed, target_user)?
+                }
             }
         }
         Ok(())
@@ -1100,7 +1477,12 @@ impl AppHost {
         let uri = GrantUri::resolve(user, uri.clone(), mode);
         *target_uid = self.check_grant(calling_uid, Some(target), &uri, mode, *target_uid)?;
         if *target_uid > 0 {
-            let n = needed.get_or_insert_with(|| NeededUriGrants { target_package: target.to_string(), target_uid: *target_uid, flags: mode, uris: Vec::new() });
+            let n = needed.get_or_insert_with(|| NeededUriGrants {
+                target_package: target.to_string(),
+                target_uid: *target_uid,
+                flags: mode,
+                uris: Vec::new(),
+            });
             if !n.uris.contains(&uri) {
                 n.uris.push(uri);
             }
@@ -1111,22 +1493,42 @@ impl AppHost {
     /// `grantUriPermissionUnchecked`: `target` (`target_uid`) gets `modes`
     /// of `uri` from the provider's package, owned by `owner` (by nobody,
     /// if none).
-    fn grant_unchecked(&self, target_uid: i32, target: &str, uri: &GrantUri, modes: i32, owner: Option<Owner>) -> Result<(), Exception> {
+    fn grant_unchecked(
+        &self,
+        target_uid: i32,
+        target: &str,
+        uri: &GrantUri,
+        modes: i32,
+        owner: Option<Owner>,
+    ) -> Result<(), Exception> {
         if modes & ACCESS_MODES == 0 {
             return Ok(());
         }
         let authority = uri.uri.authority();
-        let Some(pi) = self.grant_provider(authority.as_deref(), uri.source_user, MATCH_DEBUG_TRIAGED_MISSING, SYSTEM_UID)? else {
+        let Some(pi) = self.grant_provider(
+            authority.as_deref(),
+            uri.source_user,
+            MATCH_DEBUG_TRIAGED_MISSING,
+            SYSTEM_UID,
+        )?
+        else {
             eprintln!("app host: No content provider found for grant: {uri}");
             return Ok(());
         };
         let source = pi.info.item.package_name.unwrap_or_default();
-        self.with_grants(|g| g.find_or_create(&source, target, target_uid, uri).grant_modes(modes, owner))
+        self.with_grants(|g| {
+            g.find_or_create(&source, target, target_uid, uri)
+                .grant_modes(modes, owner)
+        })
     }
 
     /// `grantUriPermissionUncheckedFromIntent`: what `needed` grants,
     /// owned by `owner` (by nobody, if none).
-    pub(super) fn grant_from_intent(&self, needed: Option<&NeededUriGrants>, owner: Option<Owner>) -> Result<(), Exception> {
+    pub(super) fn grant_from_intent(
+        &self,
+        needed: Option<&NeededUriGrants>,
+        owner: Option<Owner>,
+    ) -> Result<(), Exception> {
         let Some(n) = needed else { return Ok(()) };
         for uri in &n.uris {
             self.grant_unchecked(n.target_uid, &n.target_package, uri, n.flags, owner)?;
@@ -1137,26 +1539,48 @@ impl AppHost {
     /// `checkAuthorityGrants` (`ContentProviderHelper
     /// .checkContentProviderPermission`): whether `uid` holds a grant of a
     /// URI of `cpi` in `user`.
-    pub(super) fn authority_granted(&self, uid: i32, cpi: &ProviderInfo, user: i32) -> Result<bool, Exception> {
+    pub(super) fn authority_granted(
+        &self,
+        uid: i32,
+        cpi: &ProviderInfo,
+        user: i32,
+    ) -> Result<bool, Exception> {
         self.with_grants(|g| g.authority_granted(uid, cpi, user, true))
     }
 
     /// `ActivityManagerService.grantUriPermission`: the caller's process
     /// grants `target` `modes` of `uri` in `user`, owned by nobody.
-    pub(super) fn grant_uri_permission(&self, call: &Call<'_>, caller: Option<Binder>, target: Option<String>, uri: Option<Uri>, modes: i32, user: i32) -> Result<(), Exception> {
+    pub(super) fn grant_uri_permission(
+        &self,
+        call: &Call<'_>,
+        caller: Option<Binder>,
+        target: Option<String>,
+        uri: Option<Uri>,
+        modes: i32,
+        user: i32,
+    ) -> Result<(), Exception> {
         not_isolated(call, "grantUriPermission")?;
         let Some((_, _, uid, _)) = self.app_of_thread(caller) else {
             let uri = uri.as_ref().map_or("null", Uri::as_str);
-            return Err(Exception::security(format!("Unable to find app for caller when granting permission to uri {uri} [user {user}]")));
+            return Err(Exception::security(format!(
+                "Unable to find app for caller when granting permission to uri {uri} [user {user}]"
+            )));
         };
         let target = target.ok_or_else(|| Exception::illegal_argument("null target"))?;
         let calling_user = uid / PER_USER_RANGE as i32;
         if self.filter_package_access(&target, uid, calling_user)? {
             return Ok(());
         }
-        check_flags(modes, ACCESS_MODES | FLAG_GRANT_PERSISTABLE_URI_PERMISSION | FLAG_GRANT_PREFIX_URI_PERMISSION)?;
+        check_flags(
+            modes,
+            ACCESS_MODES | FLAG_GRANT_PERSISTABLE_URI_PERMISSION | FLAG_GRANT_PREFIX_URI_PERMISSION,
+        )?;
         // An intent of the URI with `user` in it, the modes its flags.
-        let intent = Carried { content_user: USER_CURRENT, data: uri.map(|uri| maybe_add_user_id(&uri, user)), clip: None };
+        let intent = Carried {
+            content_user: USER_CURRENT,
+            data: uri.map(|uri| maybe_add_user_id(&uri, user)),
+            clip: None,
+        };
         let mut needed = None;
         self.check_carried(uid, &target, &intent, modes, &mut needed, calling_user)?;
         self.grant_from_intent(needed.as_ref(), None)
@@ -1165,11 +1589,21 @@ impl AppHost {
     /// `ActivityManagerService.revokeUriPermission`: the caller's process
     /// revokes `modes` of `uri` in `user` and below it, from `target` or
     /// from all.
-    pub(super) fn revoke_uri_permission(&self, call: &Call<'_>, caller: Option<Binder>, target: Option<String>, uri: Option<Uri>, modes: i32, user: i32) -> Result<(), Exception> {
+    pub(super) fn revoke_uri_permission(
+        &self,
+        call: &Call<'_>,
+        caller: Option<Binder>,
+        target: Option<String>,
+        uri: Option<Uri>,
+        modes: i32,
+        user: i32,
+    ) -> Result<(), Exception> {
         not_isolated(call, "revokeUriPermission")?;
         let Some((_, _, uid, _)) = self.app_of_thread(caller) else {
             let uri = uri.as_ref().map_or("null", Uri::as_str);
-            return Err(Exception::security(format!("Unable to find app for caller when revoking permission to uri {uri}")));
+            return Err(Exception::security(format!(
+                "Unable to find app for caller when revoking permission to uri {uri}"
+            )));
         };
         let Some(uri) = uri else {
             eprintln!("app host: revokeUriPermission: null uri");
@@ -1181,8 +1615,17 @@ impl AppHost {
         let authority = uri.authority();
         // `UriGrantsManagerService.revokeUriPermission`, with the provider
         // as the caller sees it.
-        let Some(pi) = self.grant_provider(authority.as_deref(), user, MATCH_DIRECT_BOOT_AWARE_UNAWARE, uid)? else {
-            eprintln!("app host: No content provider found for permission revoke: {}", uri.as_str());
+        let Some(pi) = self.grant_provider(
+            authority.as_deref(),
+            user,
+            MATCH_DIRECT_BOOT_AWARE_UNAWARE,
+            uid,
+        )?
+        else {
+            eprintln!(
+                "app host: No content provider found for permission revoke: {}",
+                uri.as_str()
+            );
             return Ok(());
         };
         let uri = GrantUri::new(user, uri, modes);
@@ -1196,8 +1639,17 @@ pub struct UriGrantsManager(pub Arc<AppHost>);
 
 impl UriGrantsManager {
     /// `enforceCallingPermission`.
-    fn enforce_calling_permission(&self, call: &Call<'_>, permission: &str, method: &str) -> Result<(), Exception> {
-        if self.0.check_permission(Some(permission), call.sender_euid as i32)? != 0 {
+    fn enforce_calling_permission(
+        &self,
+        call: &Call<'_>,
+        permission: &str,
+        method: &str,
+    ) -> Result<(), Exception> {
+        if self
+            .0
+            .check_permission(Some(permission), call.sender_euid as i32)?
+            != 0
+        {
             return Err(Exception::security(format!(
                 "Permission Denial: {method} from pid={}, uid={} requires {permission}",
                 call.sender_pid, call.sender_euid
@@ -1208,7 +1660,13 @@ impl UriGrantsManager {
 
     /// The uid whose persistable grants `method` takes or releases: of
     /// `package`, for a caller that may force it, else the caller's.
-    fn persistable_uid(&self, call: &Call<'_>, package: Option<&str>, user: i32, method: &str) -> Result<i32, Exception> {
+    fn persistable_uid(
+        &self,
+        call: &Call<'_>,
+        package: Option<&str>,
+        user: i32,
+        method: &str,
+    ) -> Result<i32, Exception> {
         match package {
             Some(package) => {
                 self.enforce_calling_permission(call, FORCE_PERSISTABLE_URI_PERMISSIONS, method)?;
@@ -1224,17 +1682,35 @@ impl UriGrantsManager {
     /// `takePersistableUriPermission`: the persistable `modes` of the
     /// grant of `uri` and of a prefix one persisted, the oldest beyond the
     /// most a uid keeps released.
-    fn take_persistable(&self, call: &Call<'_>, uri: Uri, modes: i32, package: Option<String>, user: i32) -> Result<(), Exception> {
-        let uid = self.persistable_uid(call, package.as_deref(), user, "takePersistableUriPermission")?;
+    fn take_persistable(
+        &self,
+        call: &Call<'_>,
+        uri: Uri,
+        modes: i32,
+        package: Option<String>,
+        user: i32,
+    ) -> Result<(), Exception> {
+        let uid = self.persistable_uid(
+            call,
+            package.as_deref(),
+            user,
+            "takePersistableUriPermission",
+        )?;
         check_flags(modes, ACCESS_MODES)?;
         let now = now_ms();
         let exact = GrantUri::new(user, uri.clone(), 0);
         let prefix = GrantUri::new(user, uri, FLAG_GRANT_PREFIX_URI_PERMISSION);
         self.0.change_grants(|g| {
-            let valid = |g: &Grants, u: &GrantUri| g.find(uid, u).is_some_and(|p| modes & p.persistable == modes);
+            let valid = |g: &Grants, u: &GrantUri| {
+                g.find(uid, u)
+                    .is_some_and(|p| modes & p.persistable == modes)
+            };
             let (exact_valid, prefix_valid) = (valid(g, &exact), valid(g, &prefix));
             if !exact_valid && !prefix_valid {
-                let message = format!("No persistable permission grants found for UID {uid} and Uri {}", exact.uri.as_str());
+                let message = format!(
+                    "No persistable permission grants found for UID {uid} and Uri {}",
+                    exact.uri.as_str()
+                );
                 return (Err(Exception::security(message)), false);
             }
             let mut changed = false;
@@ -1250,14 +1726,30 @@ impl UriGrantsManager {
 
     /// `releasePersistableUriPermission`: `modes` of the grant of `uri`
     /// and of a prefix one no longer persisted.
-    fn release_persistable(&self, call: &Call<'_>, uri: Uri, modes: i32, package: Option<String>, user: i32) -> Result<(), Exception> {
-        let uid = self.persistable_uid(call, package.as_deref(), user, "releasePersistableUriPermission")?;
+    fn release_persistable(
+        &self,
+        call: &Call<'_>,
+        uri: Uri,
+        modes: i32,
+        package: Option<String>,
+        user: i32,
+    ) -> Result<(), Exception> {
+        let uid = self.persistable_uid(
+            call,
+            package.as_deref(),
+            user,
+            "releasePersistableUriPermission",
+        )?;
         check_flags(modes, ACCESS_MODES)?;
         let exact = GrantUri::new(user, uri.clone(), 0);
         let prefix = GrantUri::new(user, uri, FLAG_GRANT_PREFIX_URI_PERMISSION);
         self.0.change_grants(|g| {
-            if g.find(uid, &exact).is_none() && g.find(uid, &prefix).is_none() && package.is_none() {
-                let message = format!("No permission grants found for UID {uid} and Uri {}", exact.uri.as_str());
+            if g.find(uid, &exact).is_none() && g.find(uid, &prefix).is_none() && package.is_none()
+            {
+                let message = format!(
+                    "No permission grants found for UID {uid} and Uri {}",
+                    exact.uri.as_str()
+                );
                 return (Err(Exception::security(message)), false);
             }
             let mut changed = false;
@@ -1274,54 +1766,122 @@ impl UriGrantsManager {
     /// `clearGrantedUriPermissions`: every grant to `package` (to any, if
     /// none) in `user` revoked.
     fn clear(&self, call: &Call<'_>, package: Option<String>, user: i32) -> Result<(), Exception> {
-        self.enforce_calling_permission(call, CLEAR_APP_GRANTED_URI_PERMISSIONS, "clearGrantedUriPermissions")?;
+        self.enforce_calling_permission(
+            call,
+            CLEAR_APP_GRANTED_URI_PERMISSIONS,
+            "clearGrantedUriPermissions",
+        )?;
         if user == USER_ALL && package.is_none() {
-            return Err(Exception::illegal_argument("Must narrow by either package or user"));
+            return Err(Exception::illegal_argument(
+                "Must narrow by either package or user",
+            ));
         }
-        self.0.change_grants(|g| ((), g.clear(package.as_deref(), user)))
+        self.0
+            .change_grants(|g| ((), g.clear(package.as_deref(), user)))
     }
 
     /// `grantUriPermissionFromOwner`: a grant held by `owner`, a token of
     /// `newUriPermissionOwner`, of which the app host hands out none.
-    fn grant_from_owner(&self, call: &Call<'_>, owner: Option<Binder>, target_user: i32) -> Result<(), Exception> {
-        self.0.handle_incoming_user(call.sender_euid as i32, target_user, false, true, Some("grantUriPermissionFromOwner"))?;
+    fn grant_from_owner(
+        &self,
+        call: &Call<'_>,
+        owner: Option<Binder>,
+        target_user: i32,
+    ) -> Result<(), Exception> {
+        self.0.handle_incoming_user(
+            call.sender_euid as i32,
+            target_user,
+            false,
+            true,
+            Some("grantUriPermissionFromOwner"),
+        )?;
         let owner = owner.map_or("null".to_string(), |b| format!("{b:?}"));
-        Err(Exception::illegal_argument(format!("Unknown owner: {owner}")))
+        Err(Exception::illegal_argument(format!(
+            "Unknown owner: {owner}"
+        )))
     }
 
     /// `checkGrantUriPermission_ignoreNonSystem`: for the system or a
     /// caller across users, the target's uid when `source_uid` may grant
     /// it `uri` and it needs the grant, else -1.
-    fn check_grant_for(&self, call: &Call<'_>, source_uid: i32, target: Option<String>, uri: Uri, modes: i32, user: i32) -> Result<i32, Exception> {
+    fn check_grant_for(
+        &self,
+        call: &Call<'_>,
+        source_uid: i32,
+        target: Option<String>,
+        uri: Uri,
+        modes: i32,
+        user: i32,
+    ) -> Result<i32, Exception> {
         let calling = call.sender_euid as i32;
-        if calling != SYSTEM_UID && calling != ROOT_UID && !self.0.check_component_permission(Some(INTERACT_ACROSS_USERS_FULL), calling, -1, true)? {
+        if calling != SYSTEM_UID
+            && calling != ROOT_UID
+            && !self.0.check_component_permission(
+                Some(INTERACT_ACROSS_USERS_FULL),
+                calling,
+                -1,
+                true,
+            )?
+        {
             return Ok(INVALID_UID);
         }
-        self.0.check_grant(source_uid, target.as_deref(), &GrantUri::new(user, uri, modes), modes, -1)
+        self.0.check_grant(
+            source_uid,
+            target.as_deref(),
+            &GrantUri::new(user, uri, modes),
+            modes,
+            -1,
+        )
     }
 
     /// `getUriPermissions`: the grants `package`, the caller's, was given
     /// (`incoming`) or gave, the persisted ones only if asked.
-    fn uri_permissions(&self, call: &Call<'_>, package: Option<String>, incoming: bool, persisted_only: bool) -> Result<Vec<PublicUriPermission>, Exception> {
+    fn uri_permissions(
+        &self,
+        call: &Call<'_>,
+        package: Option<String>,
+        incoming: bool,
+        persisted_only: bool,
+    ) -> Result<Vec<PublicUriPermission>, Exception> {
         let calling_uid = call.sender_euid as i32;
         not_isolated(call, "getUriPermissions")?;
         let package = package.ok_or_else(|| Exception::new(EX_NULL_POINTER, "packageName"))?;
         let user = calling_uid / PER_USER_RANGE as i32;
         let (state, resolution) = self.0.packages()?;
-        let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: SYSTEM_UID };
+        let query = Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: SYSTEM_UID,
+        };
         let package_uid = query
             .package_uid(&package, MATCH_DIRECT_BOOT_AWARE_UNAWARE, user)
-            .map_err(|NotModelled(reason)| Exception::new(EX_UNSUPPORTED_OPERATION, format!("uri_grants: {reason}")))??;
+            .map_err(|NotModelled(reason)| {
+                Exception::new(EX_UNSUPPORTED_OPERATION, format!("uri_grants: {reason}"))
+            })??;
         if package_uid != calling_uid {
-            return Err(Exception::security(format!("Package {package} does not belong to calling UID {calling_uid}")));
+            return Err(Exception::security(format!(
+                "Package {package} does not belong to calling UID {calling_uid}"
+            )));
         }
         let listed = |p: &&UriPermission| !persisted_only || p.persisted != 0;
         self.0.with_grants(|g| {
             if !incoming {
-                return g.0.values().flatten().filter(|p| p.source_package == package).filter(listed).map(UriPermission::persisted_public).collect();
+                return g
+                    .0
+                    .values()
+                    .flatten()
+                    .filter(|p| p.source_package == package)
+                    .filter(listed)
+                    .map(UriPermission::persisted_public)
+                    .collect();
             }
             match g.0.get(&calling_uid) {
-                Some(perms) => perms.iter().filter(|p| p.target_package == package).filter(listed).map(UriPermission::persisted_public).collect(),
+                Some(perms) => perms
+                    .iter()
+                    .filter(|p| p.target_package == package)
+                    .filter(listed)
+                    .map(UriPermission::persisted_public)
+                    .collect(),
                 None => {
                     eprintln!("app host: No permission grants found for {package}");
                     Vec::new()
@@ -1332,14 +1892,30 @@ impl UriGrantsManager {
 
     /// `getGrantedUriPermissions`: the persisted grants to `package` (to
     /// all, if none) in `user`.
-    fn granted_uri_permissions(&self, call: &Call<'_>, package: Option<String>, user: i32) -> Result<Vec<GrantedUriPermission>, Exception> {
-        self.enforce_calling_permission(call, GET_APP_GRANTED_URI_PERMISSIONS, "getGrantedUriPermissions")?;
+    fn granted_uri_permissions(
+        &self,
+        call: &Call<'_>,
+        package: Option<String>,
+        user: i32,
+    ) -> Result<Vec<GrantedUriPermission>, Exception> {
+        self.enforce_calling_permission(
+            call,
+            GET_APP_GRANTED_URI_PERMISSIONS,
+            "getGrantedUriPermissions",
+        )?;
         self.0.with_grants(|g| {
             g.0.values()
                 .flatten()
-                .filter(|p| package.as_ref().is_none_or(|package| *package == p.target_package))
+                .filter(|p| {
+                    package
+                        .as_ref()
+                        .is_none_or(|package| *package == p.target_package)
+                })
                 .filter(|p| p.target_user() == user && p.persisted != 0)
-                .map(|p| GrantedUriPermission { uri: p.uri.uri.clone(), package: p.target_package.clone() })
+                .map(|p| GrantedUriPermission {
+                    uri: p.uri.uri.clone(),
+                    package: p.target_package.clone(),
+                })
                 .collect()
         })
     }
@@ -1365,43 +1941,81 @@ impl Service for UriGrantsManager {
         match call.code {
             ugm::GET_URI_PERMISSIONS => {
                 let a = ugm::GetUriPermissions::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let listed = self.uri_permissions(call, a.package_name, a.incoming, a.persisted_only);
+                let listed =
+                    self.uri_permissions(call, a.package_name, a.incoming, a.persisted_only);
                 reply(listed.map(|listed| {
-                    let slice = Slice::new(self.0.process.clone(), "android.content.UriPermission", listed);
+                    let slice = Slice::new(
+                        self.0.process.clone(),
+                        "android.content.UriPermission",
+                        listed,
+                    );
                     ugm::write_get_uri_permissions_reply(&mut p, Some(&slice));
                     p
                 }))
             }
             ugm::GET_GRANTED_URI_PERMISSIONS => {
-                let a = ugm::GetGrantedUriPermissions::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    ugm::GetGrantedUriPermissions::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let listed = self.granted_uri_permissions(call, a.package_name, a.user_id);
                 reply(listed.map(|listed| {
-                    let slice = Slice::new(self.0.process.clone(), "android.app.GrantedUriPermission", listed);
+                    let slice = Slice::new(
+                        self.0.process.clone(),
+                        "android.app.GrantedUriPermission",
+                        listed,
+                    );
                     ugm::write_get_granted_uri_permissions_reply(&mut p, Some(&slice));
                     p
                 }))
             }
             ugm::TAKE_PERSISTABLE_URI_PERMISSION => {
-                let a = ugm::TakePersistableUriPermission::<ParcelUri>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let taken = a.uri.ok_or_else(null_uri).and_then(|ParcelUri(uri)| self.take_persistable(call, uri, a.mode_flags, a.to_package, a.user_id));
+                let a = ugm::TakePersistableUriPermission::<ParcelUri>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let taken = a.uri.ok_or_else(null_uri).and_then(|ParcelUri(uri)| {
+                    self.take_persistable(call, uri, a.mode_flags, a.to_package, a.user_id)
+                });
                 done(taken, ugm::write_take_persistable_uri_permission_reply)
             }
             ugm::RELEASE_PERSISTABLE_URI_PERMISSION => {
-                let a = ugm::ReleasePersistableUriPermission::<ParcelUri>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let released = a.uri.ok_or_else(null_uri).and_then(|ParcelUri(uri)| self.release_persistable(call, uri, a.mode_flags, a.to_package, a.user_id));
-                done(released, ugm::write_release_persistable_uri_permission_reply)
+                let a = ugm::ReleasePersistableUriPermission::<ParcelUri>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let released = a.uri.ok_or_else(null_uri).and_then(|ParcelUri(uri)| {
+                    self.release_persistable(call, uri, a.mode_flags, a.to_package, a.user_id)
+                });
+                done(
+                    released,
+                    ugm::write_release_persistable_uri_permission_reply,
+                )
             }
             ugm::GRANT_URI_PERMISSION_FROM_OWNER => {
-                let a = ugm::GrantUriPermissionFromOwner::<ParcelUri>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                done(self.grant_from_owner(call, a.owner, a.target_user_id), ugm::write_grant_uri_permission_from_owner_reply)
+                let a = ugm::GrantUriPermissionFromOwner::<ParcelUri>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                done(
+                    self.grant_from_owner(call, a.owner, a.target_user_id),
+                    ugm::write_grant_uri_permission_from_owner_reply,
+                )
             }
             ugm::CLEAR_GRANTED_URI_PERMISSIONS => {
-                let a = ugm::ClearGrantedUriPermissions::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                done(self.clear(call, a.package_name, a.user_id), ugm::write_clear_granted_uri_permissions_reply)
+                let a =
+                    ugm::ClearGrantedUriPermissions::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                done(
+                    self.clear(call, a.package_name, a.user_id),
+                    ugm::write_clear_granted_uri_permissions_reply,
+                )
             }
             ugm::CHECK_GRANT_URI_PERMISSION_IGNORE_NON_SYSTEM => {
-                let a = ugm::CheckGrantUriPermissionIgnoreNonSystem::<ParcelUri>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let checked = a.uri.ok_or_else(null_uri).and_then(|ParcelUri(uri)| self.check_grant_for(call, a.source_uid, a.target_pkg, uri, a.mode_flags, a.user_id));
+                let a =
+                    ugm::CheckGrantUriPermissionIgnoreNonSystem::<ParcelUri>::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
+                let checked = a.uri.ok_or_else(null_uri).and_then(|ParcelUri(uri)| {
+                    self.check_grant_for(
+                        call,
+                        a.source_uid,
+                        a.target_pkg,
+                        uri,
+                        a.mode_flags,
+                        a.user_id,
+                    )
+                });
                 reply(checked.map(|uid| {
                     ugm::write_check_grant_uri_permission_ignore_non_system_reply(&mut p, uid);
                     p
@@ -1426,17 +2040,30 @@ mod tests {
     /// Grants of `uri` to uid 10001 of `modes`, owned by `owner`.
     fn granted(uri: &GrantUri, modes: i32, owner: Option<Owner>) -> Grants {
         let mut g = Grants::default();
-        g.find_or_create("p.provider", "p.target", 10_001, uri).grant_modes(modes, owner);
+        g.find_or_create("p.provider", "p.target", 10_001, uri)
+            .grant_modes(modes, owner);
         g
     }
 
     #[test]
     fn a_prefix_matches_its_descendants_only() {
         let prefix = Uri::parse("content://a.b/x/y");
-        assert!(is_path_prefix_match(&Uri::parse("content://a.b/x/y/z"), &prefix));
-        assert!(is_path_prefix_match(&Uri::parse("content://a.b/x/y"), &prefix));
-        assert!(!is_path_prefix_match(&Uri::parse("content://a.b/x/yz"), &prefix));
-        assert!(!is_path_prefix_match(&Uri::parse("content://a.c/x/y/z"), &prefix));
+        assert!(is_path_prefix_match(
+            &Uri::parse("content://a.b/x/y/z"),
+            &prefix
+        ));
+        assert!(is_path_prefix_match(
+            &Uri::parse("content://a.b/x/y"),
+            &prefix
+        ));
+        assert!(!is_path_prefix_match(
+            &Uri::parse("content://a.b/x/yz"),
+            &prefix
+        ));
+        assert!(!is_path_prefix_match(
+            &Uri::parse("content://a.c/x/y/z"),
+            &prefix
+        ));
     }
 
     #[test]
@@ -1455,7 +2082,11 @@ mod tests {
 
     #[test]
     fn grants_are_checked_exactly_or_by_prefix() {
-        let g = granted(&grant_uri("content://a.b/x", FLAG_GRANT_PREFIX_URI_PERMISSION), READ, None);
+        let g = granted(
+            &grant_uri("content://a.b/x", FLAG_GRANT_PREFIX_URI_PERMISSION),
+            READ,
+            None,
+        );
         assert!(g.check(&grant_uri("content://a.b/x/y", 0), 10_001, READ));
         assert!(!g.check(&grant_uri("content://a.b/x/y", 0), 10_001, WRITE));
         assert!(!g.check(&grant_uri("content://a.b/y", 0), 10_001, READ));
@@ -1463,7 +2094,11 @@ mod tests {
         assert!(g.check(&grant_uri("content://a.b/x/y", 0), ROOT_UID, WRITE));
         // A grant not offered for persisting is too weak for a check that
         // asks for one.
-        assert!(!g.check(&grant_uri("content://a.b/x/y", 0), 10_001, READ | FLAG_GRANT_PERSISTABLE_URI_PERMISSION));
+        assert!(!g.check(
+            &grant_uri("content://a.b/x/y", 0),
+            10_001,
+            READ | FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+        ));
         let g = granted(&grant_uri("content://a.b/x", 0), READ, None);
         assert!(g.check(&grant_uri("content://a.b/x", 0), 10_001, READ));
         assert!(!g.check(&grant_uri("content://a.b/x/y", 0), 10_001, READ));
@@ -1473,14 +2108,16 @@ mod tests {
     fn an_owners_grants_go_with_it() {
         let uri = grant_uri("content://a.b/x", 0);
         let mut g = granted(&uri, READ | WRITE, Some(Owner::Activity(7)));
-        g.find_or_create("p.provider", "p.target", 10_001, &uri).grant_modes(READ, Some(Owner::Start(1)));
+        g.find_or_create("p.provider", "p.target", 10_001, &uri)
+            .grant_modes(READ, Some(Owner::Start(1)));
         g.release(Owner::Activity(7));
         assert!(g.check(&uri, 10_001, READ) && !g.check(&uri, 10_001, WRITE));
         g.release(Owner::Start(1));
         assert!(g.0.is_empty());
         // A grant also made with no owner stays.
         let mut g = granted(&uri, READ, Some(Owner::Activity(7)));
-        g.find_or_create("p.provider", "p.target", 10_001, &uri).grant_modes(READ, None);
+        g.find_or_create("p.provider", "p.target", 10_001, &uri)
+            .grant_modes(READ, None);
         g.release(Owner::Activity(7));
         assert!(g.check(&uri, 10_001, READ));
     }
@@ -1491,7 +2128,8 @@ mod tests {
         // A caller without the provider's permission revokes only its own
         // grants not owned by others.
         let mut g = granted(&uri, READ, Some(Owner::Activity(7)));
-        g.find_or_create("p.provider", "p.target", 10_001, &uri).grant_modes(READ, None);
+        g.find_or_create("p.provider", "p.target", 10_001, &uri)
+            .grant_modes(READ, None);
         assert!(!g.revoke(None, 10_001, &grant_uri("content://a.b/x", 0), READ, false));
         assert!(g.check(&uri, 10_001, READ));
         // One that holds it revokes them all, owned ones too.
@@ -1499,14 +2137,24 @@ mod tests {
         assert!(g.0.is_empty());
         // Of another target only when it names none.
         let mut g = granted(&uri, READ, None);
-        g.revoke(Some("other"), 10_005, &grant_uri("content://a.b/x", 0), READ, true);
+        g.revoke(
+            Some("other"),
+            10_005,
+            &grant_uri("content://a.b/x", 0),
+            READ,
+            true,
+        );
         assert!(g.check(&uri, 10_001, READ));
     }
 
     #[test]
     fn persisted_grants_are_taken_released_and_pruned() {
         let uri = grant_uri("content://a.b/x", 0);
-        let mut g = granted(&uri, READ | FLAG_GRANT_PERSISTABLE_URI_PERMISSION, Some(Owner::Activity(1)));
+        let mut g = granted(
+            &uri,
+            READ | FLAG_GRANT_PERSISTABLE_URI_PERMISSION,
+            Some(Owner::Activity(1)),
+        );
         let p = g.find_mut(10_001, &uri).unwrap();
         assert!(!p.take_persistable_modes(WRITE, 5));
         assert!(p.take_persistable_modes(READ, 5));
@@ -1528,7 +2176,10 @@ mod tests {
         assert!(g.prune_persisted(10_001));
         assert_eq!(g.0[&10_001].len(), MAX_PERSISTED_URI_GRANTS);
         let last = MAX_PERSISTED_URI_GRANTS + 1;
-        assert!(g.find(10_001, &grant_uri(&format!("content://a.b/{last}"), 0)).is_none());
+        assert!(
+            g.find(10_001, &grant_uri(&format!("content://a.b/{last}"), 0))
+                .is_none()
+        );
         assert!(g.find(10_001, &grant_uri("content://a.b/0", 0)).is_some());
     }
 
@@ -1536,9 +2187,16 @@ mod tests {
     fn persisted_grants_are_written_and_read_back() {
         let mut g = Grants::default();
         let uri = grant_uri("content://a.b/x", FLAG_GRANT_PREFIX_URI_PERMISSION);
-        g.find_or_create("p.provider", "p.target", 10_001, &uri).init_persisted_modes(READ | WRITE, 42);
+        g.find_or_create("p.provider", "p.target", 10_001, &uri)
+            .init_persisted_modes(READ | WRITE, 42);
         // Not persisted: not written.
-        g.find_or_create("p.provider", "p.target", 10_001, &grant_uri("content://a.b/y", 0)).grant_modes(READ, None);
+        g.find_or_create(
+            "p.provider",
+            "p.target",
+            10_001,
+            &grant_uri("content://a.b/y", 0),
+        )
+        .grant_modes(READ, None);
         let bytes = aim_android_xml::abx::write(&g.document()).unwrap();
         assert!(bytes.starts_with(aim_android_xml::abx::MAGIC));
         let read = persisted(&aim_android_xml::read(&bytes).unwrap(), 0).unwrap();
@@ -1558,24 +2216,51 @@ mod tests {
         // A file of an older release names one user for both.
         let root = aim_android_xml::read(br#"<uri-grants><uri-grant userHandle="10" sourcePkg="s" targetPkg="t" uri="content://a/b" modeFlags="1" /></uri-grants>"#).unwrap();
         let read = persisted(&root, 9).unwrap();
-        assert_eq!((read[0].source_user, read[0].target_user, read[0].created, read[0].prefix), (10, 10, 9, false));
+        assert_eq!(
+            (
+                read[0].source_user,
+                read[0].target_user,
+                read[0].created,
+                read[0].prefix
+            ),
+            (10, 10, 9, false)
+        );
     }
 
     #[test]
     fn a_grant_uri_hashes_as_java_does() {
-        let uri = Uri::parse("content://com.android.externalstorage.documents/tree/primary%3AAlarms");
-        assert_eq!(GrantUri { source_user: 0, uri, prefix: false }.hash(), 1780322610);
+        let uri =
+            Uri::parse("content://com.android.externalstorage.documents/tree/primary%3AAlarms");
+        assert_eq!(
+            GrantUri {
+                source_user: 0,
+                uri,
+                prefix: false
+            }
+            .hash(),
+            1780322610
+        );
     }
 
     #[test]
     fn a_content_uri_names_its_user() {
-        let g = GrantUri::resolve(0, Uri::parse("content://10@a.b/x"), FLAG_GRANT_PREFIX_URI_PERMISSION);
-        assert_eq!((g.source_user, g.uri.as_str(), g.prefix), (10, "content://a.b/x", true));
+        let g = GrantUri::resolve(
+            0,
+            Uri::parse("content://10@a.b/x"),
+            FLAG_GRANT_PREFIX_URI_PERMISSION,
+        );
+        assert_eq!(
+            (g.source_user, g.uri.as_str(), g.prefix),
+            (10, "content://a.b/x", true)
+        );
         let g = GrantUri::resolve(3, Uri::parse("content://a.b/x"), 0);
         assert_eq!((g.source_user, g.uri.as_str()), (3, "content://a.b/x"));
         let g = GrantUri::resolve(3, Uri::parse("file:///x"), 0);
         assert_eq!((g.source_user, g.uri.as_str()), (3, "file:///x"));
-        assert_eq!(GrantUri::resolve(0, Uri::parse("content://me@a.b/x"), 0).source_user, USER_NULL);
+        assert_eq!(
+            GrantUri::resolve(0, Uri::parse("content://me@a.b/x"), 0).source_user,
+            USER_NULL
+        );
         // `grantUriPermission`'s user goes in and comes out again.
         let added = maybe_add_user_id(&Uri::parse("content://a.b/x"), 10);
         assert_eq!(added.as_str(), "content://10@a.b/x");
@@ -1646,17 +2331,25 @@ mod tests {
     fn an_intent_carries_its_data_and_clip() {
         let p = intent_with_clip();
         let c = carried(&mut p.reader()).unwrap();
-        assert_eq!((c.content_user, c.data.as_ref().map(Uri::as_str)), (10, Some("content://a.b/data")));
+        assert_eq!(
+            (c.content_user, c.data.as_ref().map(Uri::as_str)),
+            (10, Some("content://a.b/data"))
+        );
         let clip = c.clip.unwrap();
         assert_eq!(clip.len(), 2);
         assert!(matches!(&clip[0], ClipItem::Uri(u) if u.as_str() == "content://a.b/clip"));
-        assert!(matches!(&clip[1], ClipItem::Intent(i) if i.data.as_ref().map(Uri::as_str) == Some("content://a.b/nested") && i.content_user == USER_CURRENT));
+        assert!(
+            matches!(&clip[1], ClipItem::Intent(i) if i.data.as_ref().map(Uri::as_str) == Some("content://a.b/nested") && i.content_user == USER_CURRENT)
+        );
     }
 
     #[test]
     fn grants_keep_the_original_order() {
         let mut g = Grants::default();
-        let uris: Vec<GrantUri> = ["content://a/1", "content://a/2", "content://a/3"].iter().map(|u| grant_uri(u, 0)).collect();
+        let uris: Vec<GrantUri> = ["content://a/1", "content://a/2", "content://a/3"]
+            .iter()
+            .map(|u| grant_uri(u, 0))
+            .collect();
         for uri in &uris {
             g.find_or_create("s", "t", 10_001, uri);
         }
@@ -1666,13 +2359,23 @@ mod tests {
 
     #[test]
     fn a_uri_permission_parcels_as_the_original() {
-        let permission = PublicUriPermission { uri: Uri::parse("content://a.b/x"), modes: READ, persisted_time: 7 };
+        let permission = PublicUriPermission {
+            uri: Uri::parse("content://a.b/x"),
+            modes: READ,
+            persisted_time: 7,
+        };
         let mut p = Parcel::new();
         permission.write_to(&mut p);
         let mut r = p.reader();
-        assert_eq!(r.read_string16().unwrap().as_deref(), Some("android.net.Uri$StringUri"));
+        assert_eq!(
+            r.read_string16().unwrap().as_deref(),
+            Some("android.net.Uri$StringUri")
+        );
         assert_eq!(r.read_i32().unwrap(), 1); // `Uri.StringUri.TYPE_ID`
-        assert_eq!(r.read_string8().unwrap().as_deref(), Some("content://a.b/x"));
+        assert_eq!(
+            r.read_string8().unwrap().as_deref(),
+            Some("content://a.b/x")
+        );
         assert_eq!(r.read_i32().unwrap(), READ);
         assert_eq!(r.read_i64().unwrap(), 7);
     }

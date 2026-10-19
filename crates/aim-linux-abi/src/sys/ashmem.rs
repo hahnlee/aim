@@ -74,7 +74,10 @@ pub fn open(guest: &str, flags: u64) -> Option<i64> {
             return Some(-(e as i64));
         }
         super::fdtab::set_flags(fd, false, flags & O_CLOEXEC != 0);
-        if let Err(error)=super::fdtab::publish_typed_guest(fd){libc::close(fd);return Some(-(error as i64));}
+        if let Err(error) = super::fdtab::publish_typed_guest(fd) {
+            libc::close(fd);
+            return Some(-(error as i64));
+        }
         fd as i64
     })
 }
@@ -399,7 +402,14 @@ mod tests {
         assert_eq!(before_mmap(fd, 4096, 1), None);
         // SAFETY: a read-only shared mapping of the region, unmapped below.
         let base = unsafe {
-            libc::mmap(std::ptr::null_mut(), 4096, libc::PROT_READ, libc::MAP_SHARED, fd, 0)
+            libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            )
         };
         assert_ne!(base, libc::MAP_FAILED);
         file.write_all_at(&7i32.to_le_bytes(), 8).unwrap();

@@ -35,7 +35,7 @@ pub(super) fn replace(original: &Element, scan: &SigningScan) -> Result<Element,
             signatures: group.signatures.clone(),
         })
         .collect();
-    let mut root = super::verifier::replace(original,scan.settings.verifier.as_deref());
+    let mut root = super::verifier::replace(original, scan.settings.verifier.as_deref());
     let mut seen = BTreeSet::new();
     for child in original.children().filter(|e| {
         matches!(
@@ -537,20 +537,44 @@ impl super::Store {
     /// write ownership is transferred to runtime PM. Saved boot reconciliation
     /// is a new complete owner; first-boot-only persistence leaves disk stale.
     pub fn commit_completed_boot_scan(
-        &mut self, snapshot:&crate::package::scan_snapshot::Snapshot, first_boot:bool,
-    )->Result<(),super::WriteError>{
+        &mut self,
+        snapshot: &crate::package::scan_snapshot::Snapshot,
+        first_boot: bool,
+    ) -> Result<(), super::WriteError> {
         self.commit_scan_settings(snapshot)?;
-        let users=self.state().users.iter().map(|(id,_)|*id).collect::<Vec<_>>();
+        let users = self
+            .state()
+            .users
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
         for user in users {
-            let result=if first_boot {
-                self.claim_unread_restrictions(user).map_err(super::WriteError::before)
-                    .and_then(|()|self.commit_initial_scan_restrictions(snapshot.owner(),user,
-                        crate::package::restrictions::PINNED_CROSS_USER_SUSPENSIONS,
-                        aim_android_xml::Element{name:"package-restrictions".into(),attrs:vec![],content:vec![]}))
-            }else{
-                self.commit_updated_scan_restrictions(snapshot.owner(),user,crate::package::restrictions::PINNED_CROSS_USER_SUSPENSIONS)
+            let result = if first_boot {
+                self.claim_unread_restrictions(user)
+                    .map_err(super::WriteError::before)
+                    .and_then(|()| {
+                        self.commit_initial_scan_restrictions(
+                            snapshot.owner(),
+                            user,
+                            crate::package::restrictions::PINNED_CROSS_USER_SUSPENSIONS,
+                            aim_android_xml::Element {
+                                name: "package-restrictions".into(),
+                                attrs: vec![],
+                                content: vec![],
+                            },
+                        )
+                    })
+            } else {
+                self.commit_updated_scan_restrictions(
+                    snapshot.owner(),
+                    user,
+                    crate::package::restrictions::PINNED_CROSS_USER_SUSPENSIONS,
+                )
             };
-            if let Err(mut error)=result {error.committed=true;return Err(error);}
+            if let Err(mut error) = result {
+                error.committed = true;
+                return Err(error);
+            }
         }
         self.validate_committed_scan(snapshot.owner())
     }

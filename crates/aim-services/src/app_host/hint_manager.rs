@@ -13,7 +13,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
-use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader, Result as ParcelResult};
+use aim_binder_host::parcel::{
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader,
+    Result as ParcelResult,
+};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_os_ihintmanager as hm;
 
@@ -96,7 +99,11 @@ fn parcelable_words(r: &mut Reader<'_>) -> ParcelResult<Vec<i32>> {
 }
 
 /// A call of the HAL: its reply's status, then what `read` reads.
-fn hal_call<T>(hal: &Strong, code: u32, read: impl FnOnce(&mut Reader<'_>) -> ParcelResult<T>) -> Result<Result<T, Exception>, Exception> {
+fn hal_call<T>(
+    hal: &Strong,
+    code: u32,
+    read: impl FnOnce(&mut Reader<'_>) -> ParcelResult<T>,
+) -> Result<Result<T, Exception>, Exception> {
     hal_call_with(hal, code, |_| {}, read)
 }
 
@@ -106,7 +113,12 @@ fn hal_call_with<T>(
     write: impl FnOnce(&mut Parcel),
     read: impl FnOnce(&mut Reader<'_>) -> ParcelResult<T>,
 ) -> Result<Result<T, Exception>, Exception> {
-    let failed = |s| Exception::new(EX_ILLEGAL_STATE, format!("Could not contact PowerHAL! (#{code}: status {s})"));
+    let failed = |s| {
+        Exception::new(
+            EX_ILLEGAL_STATE,
+            format!("Could not contact PowerHAL! (#{code}: status {s})"),
+        )
+    };
     let mut data = Parcel::new();
     data.write_interface_token(POWER_DESCRIPTOR);
     write(&mut data);
@@ -127,14 +139,22 @@ pub struct HintManager {
 
 impl HintManager {
     pub fn new(host: Arc<AppHost>) -> Self {
-        HintManager { host, data: OnceLock::new(), integrated_event_flag: AtomicBool::new(false) }
+        HintManager {
+            host,
+            data: OnceLock::new(),
+            integrated_event_flag: AtomicBool::new(false),
+        }
     }
 
     /// Whether the FMQ channel is in use: a HAL from version 5 and the
     /// flag on.
     fn uses_channel(&self) -> Result<bool, Exception> {
         let (state, _) = self.host.packages()?;
-        let flag = state.system.flags.iter().any(|(n, on)| n == ADPF_USE_FMQ_CHANNEL && *on);
+        let flag = state
+            .system
+            .flags
+            .iter()
+            .any(|(n, on)| n == ADPF_USE_FMQ_CHANNEL && *on);
         Ok(self.client_data()?.power_hal_version >= 5 && flag)
     }
 
@@ -148,7 +168,8 @@ impl HintManager {
         if token.is_none() {
             return Err(Exception::new(EX_NULL_POINTER, "token"));
         }
-        let hal = super::display::check_service(&self.host.process, POWER).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        let hal = super::display::check_service(&self.host.process, POWER)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
         let ids = |p: &mut Parcel| {
             p.write_i32(tgid);
             p.write_i32(uid);
@@ -158,9 +179,15 @@ impl HintManager {
         let mut data = Parcel::new();
         data.write_interface_token(POWER_DESCRIPTOR);
         ids(&mut data);
-        hal.transact(CLOSE_SESSION_CHANNEL, &data, true).map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("closeSessionChannel: status {s}")))?;
+        hal.transact(CLOSE_SESSION_CHANNEL, &data, true)
+            .map_err(|s| {
+                Exception::new(EX_ILLEGAL_STATE, format!("closeSessionChannel: status {s}"))
+            })?;
         if event_flag {
-            return Err(self.host.unimplemented_named("performance_hint", "a session channel with an event flag (#1689)"));
+            return Err(self.host.unimplemented_named(
+                "performance_hint",
+                "a session channel with an event flag (#1689)",
+            ));
         }
         self.integrated_event_flag.store(true, Ordering::Release);
         Ok(())
@@ -172,11 +199,16 @@ impl HintManager {
         if let Some(d) = self.data.get() {
             return Ok(d.clone());
         }
-        let hal = super::display::check_service(&self.host.process, POWER).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
-        let preferred_rate_nanos = hal_call(&hal, GET_HINT_SESSION_PREFERRED_RATE, |r| r.read_i64())?.unwrap_or(-1);
+        let hal = super::display::check_service(&self.host.process, POWER)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        let preferred_rate_nanos =
+            hal_call(&hal, GET_HINT_SESSION_PREFERRED_RATE, |r| r.read_i64())?.unwrap_or(-1);
         let power_hal_version = hal_call(&hal, GET_INTERFACE_VERSION, |r| r.read_i32())??;
         if power_hal_version < 6 {
-            return Err(self.host.unimplemented_named("performance_hint", "the support info of a Power HAL before version 6 (#1689)"));
+            return Err(self.host.unimplemented_named(
+                "performance_hint",
+                "the support info of a Power HAL before version 6 (#1689)",
+            ));
         }
         let support_info = hal_call(&hal, GET_SUPPORT_INFO, |r| {
             if r.read_i32()? == 0 {
@@ -184,7 +216,14 @@ impl HintManager {
             }
             parcelable_words(r)
         })??;
-        Ok(self.data.get_or_init(|| ClientData { power_hal_version, preferred_rate_nanos, support_info }).clone())
+        Ok(self
+            .data
+            .get_or_init(|| ClientData {
+                power_hal_version,
+                preferred_rate_nanos,
+                support_info,
+            })
+            .clone())
     }
 }
 
@@ -198,22 +237,30 @@ impl Service for HintManager {
         let result = match call.code {
             hm::REGISTER_CLIENT => {
                 hm::RegisterClient::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.client_data().map(|d| hm::write_register_client_reply(&mut p, Some(&d)))
+                self.client_data()
+                    .map(|d| hm::write_register_client_reply(&mut p, Some(&d)))
             }
             hm::GET_SESSION_CHANNEL => {
                 let a = hm::GetSessionChannel::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.session_channel(call.sender_pid, call.sender_euid as i32, a.token).map(|()| hm::write_get_session_channel_reply::<ClientData>(&mut p, None))
+                self.session_channel(call.sender_pid, call.sender_euid as i32, a.token)
+                    .map(|()| hm::write_get_session_channel_reply::<ClientData>(&mut p, None))
             }
             // A channel is never kept open, so there is none to close
             // (`removeChannelItem`).
             hm::CLOSE_SESSION_CHANNEL => Ok(()),
             hm::GET_CLIENT_DATA => {
                 hm::GetClientData::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.client_data().map(|d| hm::write_get_client_data_reply(&mut p, Some(&d)))
+                self.client_data()
+                    .map(|d| hm::write_get_client_data_reply(&mut p, Some(&d)))
             }
             code => {
-                let name = hm::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
-                Err(self.host.unimplemented_named("performance_hint", &format!("{name} (#1689)")))
+                let name = hm::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
+                Err(self
+                    .host
+                    .unimplemented_named("performance_hint", &format!("{name} (#1689)")))
             }
         };
         reply(result.map(|()| p))
@@ -228,12 +275,23 @@ mod tests {
     /// order, and the support info as the HAL wrote it.
     #[test]
     fn client_data_parcels_as_the_original() {
-        let d = ClientData { power_hal_version: 6, preferred_rate_nanos: 1_000_000, support_info: vec![12, 1, 0] };
+        let d = ClientData {
+            power_hal_version: 6,
+            preferred_rate_nanos: 1_000_000,
+            support_info: vec![12, 1, 0],
+        };
         let mut p = Parcel::new();
         d.write_to(&mut p);
         let mut r = p.reader();
         assert_eq!(r.read_i32().unwrap(), 4 * 4 + 8 + 4 + 12);
-        assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap(), r.read_i32().unwrap()), (6, 5, 5));
+        assert_eq!(
+            (
+                r.read_i32().unwrap(),
+                r.read_i32().unwrap(),
+                r.read_i32().unwrap()
+            ),
+            (6, 5, 5)
+        );
         assert_eq!(r.read_i64().unwrap(), 1_000_000);
         assert_eq!(r.read_i32().unwrap(), 1);
         let mut words = Reader::new(&p.data()[r.position()..], &[]);

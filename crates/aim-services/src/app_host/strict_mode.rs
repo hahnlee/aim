@@ -38,7 +38,9 @@ pub(super) type BalCallbacks = Arc<Mutex<HashMap<(i32, u32), (Strong, u64)>>>;
 impl AppHost {
     /// `registerStrictModeCallback` of the process `pid`.
     pub(super) fn register_strict_mode_callback(&self, pid: i32, callback: Option<Binder>) {
-        let Some(Binder::Handle(handle)) = callback else { return };
+        let Some(Binder::Handle(handle)) = callback else {
+            return;
+        };
         let strong = self.process.strong(handle);
         let callbacks = Arc::downgrade(&self.strict_mode_callbacks);
         let process = self.process.clone();
@@ -52,15 +54,27 @@ impl AppHost {
                 }
             }),
         );
-        if let Some((old, old_death)) = self.strict_mode_callbacks.lock().unwrap().insert(pid, (strong, death)) {
+        if let Some((old, old_death)) = self
+            .strict_mode_callbacks
+            .lock()
+            .unwrap()
+            .insert(pid, (strong, death))
+        {
             self.process.clear_death(&old, old_death);
         }
     }
 
     /// `addStrictModeCallback` of `uid`: false if it was added already.
     pub(super) fn add_bal_strict_mode_callback(&self, uid: i32, callback: Option<Binder>) -> bool {
-        let Some(Binder::Handle(handle)) = callback else { return false };
-        if self.bal_strict_mode_callbacks.lock().unwrap().contains_key(&(uid, handle)) {
+        let Some(Binder::Handle(handle)) = callback else {
+            return false;
+        };
+        if self
+            .bal_strict_mode_callbacks
+            .lock()
+            .unwrap()
+            .contains_key(&(uid, handle))
+        {
             return false;
         }
         let strong = self.process.strong(handle);
@@ -76,14 +90,21 @@ impl AppHost {
                 }
             }),
         );
-        self.bal_strict_mode_callbacks.lock().unwrap().insert((uid, handle), (strong, death));
+        self.bal_strict_mode_callbacks
+            .lock()
+            .unwrap()
+            .insert((uid, handle), (strong, death));
         true
     }
 
     /// `removeStrictModeCallback` of `uid`.
     pub(super) fn remove_bal_strict_mode_callback(&self, uid: i32, callback: Option<Binder>) {
         if let Some(Binder::Handle(handle)) = callback
-            && let Some((strong, death)) = self.bal_strict_mode_callbacks.lock().unwrap().remove(&(uid, handle))
+            && let Some((strong, death)) = self
+                .bal_strict_mode_callbacks
+                .lock()
+                .unwrap()
+                .remove(&(uid, handle))
         {
             self.process.clear_death(&strong, death);
         }
@@ -91,12 +112,25 @@ impl AppHost {
 
     /// `triggerUnsafeIntentStrictMode` of each event of a start of
     /// `intent` by the process `pid`, if it registered a callback.
-    pub(super) fn report_unsafe_intent(&self, pid: Option<i32>, intent: &RawIntent, events: Vec<(i32, bool)>) {
+    pub(super) fn report_unsafe_intent(
+        &self,
+        pid: Option<i32>,
+        intent: &RawIntent,
+        events: Vec<(i32, bool)>,
+    ) {
         let Some(pid) = pid else { return };
         if events.is_empty() {
             return;
         }
-        let Some(handle) = self.strict_mode_callbacks.lock().unwrap().get(&pid).map(|(s, _)| s.handle) else { return };
+        let Some(handle) = self
+            .strict_mode_callbacks
+            .lock()
+            .unwrap()
+            .get(&pid)
+            .map(|(s, _)| s.handle)
+        else {
+            return;
+        };
         let filter = match intent.clone_filter() {
             Ok(filter) => filter,
             Err(e) => return eprintln!("app host: strict mode: cloneFilter: {e:?}"),
@@ -107,8 +141,12 @@ impl AppHost {
             p.write_i32(event);
             p.write_i32(1);
             filter.write_to(&mut p);
-            if self.process.transact(handle, ON_UNSAFE_INTENT, &p, true).is_err()
-                && let Some((strong, death)) = self.strict_mode_callbacks.lock().unwrap().remove(&pid)
+            if self
+                .process
+                .transact(handle, ON_UNSAFE_INTENT, &p, true)
+                .is_err()
+                && let Some((strong, death)) =
+                    self.strict_mode_callbacks.lock().unwrap().remove(&pid)
             {
                 self.process.clear_death(&strong, death);
                 return;

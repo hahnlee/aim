@@ -24,7 +24,8 @@ use std::time::{Duration, Instant};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
-    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_SECURITY, EX_UNSUPPORTED_OPERATION, Exception, Parcel, Reader, UNKNOWN_TRANSACTION,
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_SECURITY, EX_UNSUPPORTED_OPERATION, Exception, Parcel,
+    Reader, UNKNOWN_TRANSACTION,
 };
 use aim_binder_host::server::RetainedFd;
 use aim_service_aidl::android_app_iapplicationthread as thread;
@@ -32,7 +33,10 @@ use aim_service_aidl::android_content_icontentprovider as cp;
 use aim_service_aidl::android_os_iremotecallback as remote_callback;
 
 use super::uri_grants::write_attribution_source;
-use super::{AppHost, GET_URI_PERMISSION_PATTERNS, MATCH_DIRECT_BOOT_AUTO, PER_USER_RANGE, STOCK_PM_FLAGS, activity, exit_info, field};
+use super::{
+    AppHost, GET_URI_PERMISSION_PATTERNS, MATCH_DIRECT_BOOT_AUTO, PER_USER_RANGE, STOCK_PM_FLAGS,
+    activity, exit_info, field,
+};
 use crate::bundle::{self, Value};
 use crate::package;
 use crate::package::info::ProviderInfo;
@@ -116,7 +120,13 @@ pub(super) fn process_name(info: &package::info::ComponentInfo) -> String {
 /// `ContentProviderRecord.noReleaseNeeded`: a provider of root or the
 /// system.
 fn no_release_needed(info: &ProviderInfo) -> bool {
-    matches!(info.info.application_info.uid.rem_euclid(PER_USER_RANGE as i32), 0 | 1000)
+    matches!(
+        info.info
+            .application_info
+            .uid
+            .rem_euclid(PER_USER_RANGE as i32),
+        0 | 1000
+    )
 }
 
 /// What a wait for a provider does next.
@@ -133,28 +143,43 @@ enum Next {
 fn system_process_provider(p: &ProviderInfo) -> bool {
     p.info.application_info.flags & crate::package::settings::FLAG_SYSTEM != 0
         && p.info.item.package_name.as_deref() != Some(super::SYSTEM_PACKAGE)
-        && !p.authority.as_deref().is_some_and(|a| a.split(';').any(|a| a == super::SETTINGS_AUTHORITY))
+        && !p
+            .authority
+            .as_deref()
+            .is_some_and(|a| a.split(';').any(|a| a == super::SETTINGS_AUTHORITY))
 }
 
 impl AppHost {
     /// `generateApplicationProvidersLocked`: the providers of the process
     /// `process` of `uid`.
-    pub(super) fn process_providers(&self, process: &str, uid: u32) -> Result<Vec<ProviderInfo>, Exception> {
+    pub(super) fn process_providers(
+        &self,
+        process: &str,
+        uid: u32,
+    ) -> Result<Vec<ProviderInfo>, Exception> {
         let (model, resolution) = self.packages()?;
-        let query = crate::package::query::Query { state: &model, filter: &resolution.apps_filter, calling_uid: 1000 };
+        let query = crate::package::query::Query {
+            state: &model,
+            filter: &resolution.apps_filter,
+            calling_uid: 1000,
+        };
         let flags = STOCK_PM_FLAGS | GET_URI_PERMISSION_PATTERNS | MATCH_DIRECT_BOOT_AUTO;
         match query.query_content_providers(Some(process), uid as i32, flags, None) {
             // The system process's are `installSystemProviders`' (its
             // system apps'): the app host serves `settings` itself, and the
             // `android` package's code it cannot load (#1518).
             Ok(Ok(providers)) if process == super::SYSTEM_PROCESS && uid == super::SYSTEM_UID => {
-                Ok(providers.into_iter().filter(system_process_provider).collect())
+                Ok(providers
+                    .into_iter()
+                    .filter(system_process_provider)
+                    .collect())
             }
             Ok(Ok(providers)) => Ok(providers),
             Ok(Err(e)) => Err(e),
-            Err(crate::package::apps_filter::NotModelled(reason)) => {
-                Err(Exception::new(EX_UNSUPPORTED_OPERATION, format!("queryContentProviders: {reason}")))
-            }
+            Err(crate::package::apps_filter::NotModelled(reason)) => Err(Exception::new(
+                EX_UNSUPPORTED_OPERATION,
+                format!("queryContentProviders: {reason}"),
+            )),
         }
     }
 
@@ -169,8 +194,12 @@ impl AppHost {
             .iter()
             .find(|(_, a)| a.pid == call.sender_pid && a.uid == call.sender_euid)
             .map(|(seq, a)| (*seq, a.providers.clone()))
-            .ok_or_else(|| Exception::security("publishContentProviders from an unknown process"))?;
-        call.data.enforce_interface(super::am::DESCRIPTOR).map_err(|_| bad())?;
+            .ok_or_else(|| {
+                Exception::security("publishContentProviders from an unknown process")
+            })?;
+        call.data
+            .enforce_interface(super::am::DESCRIPTOR)
+            .map_err(|_| bad())?;
         call.data.read_binder().map_err(|_| bad())?;
         let n = call.data.read_i32().map_err(|_| bad())?;
         let mut state = self.providers.state.lock().unwrap();
@@ -186,13 +215,30 @@ impl AppHost {
             call.data.read_i32().map_err(|_| bad())?;
             call.data.read_i32().map_err(|_| bad())?;
             let name = field(&info, "name");
-            let (Some(name), Some(Binder::Handle(handle))) = (name, provider) else { continue };
-            let Some(ours) = ours.iter().find(|p| p.info.item.name.as_deref() == Some(name)) else { continue };
+            let (Some(name), Some(Binder::Handle(handle))) = (name, provider) else {
+                continue;
+            };
+            let Some(ours) = ours
+                .iter()
+                .find(|p| p.info.item.name.as_deref() == Some(name))
+            else {
+                continue;
+            };
             for authority in ours.authority.iter().flat_map(|a| a.split(';')) {
                 let provider = self.process.strong(handle);
-                state.published.insert(authority.to_string(), Published { start_seq, info: ours.clone(), provider });
+                state.published.insert(
+                    authority.to_string(),
+                    Published {
+                        start_seq,
+                        info: ours.clone(),
+                        provider,
+                    },
+                );
             }
-            eprintln!("app host: {name} published ({})", ours.authority.as_deref().unwrap_or(""));
+            eprintln!(
+                "app host: {name} published ({})",
+                ours.authority.as_deref().unwrap_or("")
+            );
         }
         self.providers.changed.notify_all();
         Ok(())
@@ -202,7 +248,14 @@ impl AppHost {
     /// process of `client` (none for an external reference): the provider,
     /// its process started and its publish waited for; none when no
     /// provider has the authority, or when it was not published in time.
-    pub(super) fn provider(&self, client: Option<i64>, uid: i32, name: &str, user: i32, stable: bool) -> Result<Option<Holder>, Exception> {
+    pub(super) fn provider(
+        &self,
+        client: Option<i64>,
+        uid: i32,
+        name: &str,
+        user: i32,
+        stable: bool,
+    ) -> Result<Option<Holder>, Exception> {
         let flags = STOCK_PM_FLAGS | GET_URI_PERMISSION_PATTERNS;
         let Some(cpi) = self.resolve_provider(name, flags, user)? else {
             return Ok(None);
@@ -215,12 +268,24 @@ impl AppHost {
         let class = cpi.info.item.name.clone().unwrap_or_default();
         let release = no_release_needed(&cpi);
         // `canRunHere`: the client instantiates it itself.
-        let client_app = client.and_then(|seq| self.apps.lock().unwrap().get(&seq).map(|a| (a.process.clone(), a.uid)));
+        let client_app = client.and_then(|seq| {
+            self.apps
+                .lock()
+                .unwrap()
+                .get(&seq)
+                .map(|a| (a.process.clone(), a.uid))
+        });
         if let Some((client_process, client_uid)) = client_app
             && (cpi.multiprocess || client_process == process)
             && client_uid == owner
         {
-            return Ok(Some(Holder { info: cpi, provider: None, connection: None, no_release_needed: release, local: true }));
+            return Ok(Some(Holder {
+                info: cpi,
+                provider: None,
+                connection: None,
+                no_release_needed: release,
+                local: true,
+            }));
         }
         let deadline = Instant::now() + WAIT_TIMEOUT;
         let mut launched = false;
@@ -228,29 +293,61 @@ impl AppHost {
             let next = {
                 let mut state = self.providers.state.lock().unwrap();
                 if let Some(p) = state.published.get(name) {
-                    let (info, provider, provider_seq) = (p.info.clone(), p.provider.binder(), p.start_seq);
+                    let (info, provider, provider_seq) =
+                        (p.info.clone(), p.provider.binder(), p.start_seq);
                     let connection = client.map(|client| {
                         // `incProviderCountLocked`.
-                        let found = state.connections.iter_mut().find(|c| c.client == client && c.provider_seq == provider_seq && c.class == class);
+                        let found = state.connections.iter_mut().find(|c| {
+                            c.client == client && c.provider_seq == provider_seq && c.class == class
+                        });
                         let c = match found {
                             Some(c) => c,
                             None => {
-                                let token = self.process.add_service(std::sync::Arc::new(activity::Token));
-                                state.connections.push(Connection { token, client, provider_seq, class: class.clone(), provider, stable: 0, unstable: 0 });
+                                let token = self
+                                    .process
+                                    .add_service(std::sync::Arc::new(activity::Token));
+                                state.connections.push(Connection {
+                                    token,
+                                    client,
+                                    provider_seq,
+                                    class: class.clone(),
+                                    provider,
+                                    stable: 0,
+                                    unstable: 0,
+                                });
                                 state.connections.last_mut().unwrap()
                             }
                         };
-                        if stable { c.stable += 1 } else { c.unstable += 1 }
+                        if stable {
+                            c.stable += 1
+                        } else {
+                            c.unstable += 1
+                        }
                         c.token
                     });
-                    return Ok(Some(Holder { info, provider: Some(provider), connection, no_release_needed: release, local: false }));
+                    return Ok(Some(Holder {
+                        info,
+                        provider: Some(provider),
+                        connection,
+                        no_release_needed: release,
+                        local: false,
+                    }));
                 }
                 match self.running_process(&process, owner) {
                     None if launched => {
-                        eprintln!("app host: unable to launch {process} for provider {name}: process is gone");
+                        eprintln!(
+                            "app host: unable to launch {process} for provider {name}: process is gone"
+                        );
                         return Ok(None);
                     }
-                    None => Next::Start(cpi.info.application_info.item.package_name.clone().unwrap_or_default()),
+                    None => Next::Start(
+                        cpi.info
+                            .application_info
+                            .item
+                            .package_name
+                            .clone()
+                            .unwrap_or_default(),
+                    ),
                     Some((seq, true)) if !self.handed(seq, &class) => Next::Install(seq),
                     Some(_) => {
                         let wait = deadline.saturating_duration_since(Instant::now());
@@ -275,8 +372,12 @@ impl AppHost {
                         app.providers.push(cpi.clone());
                     }
                     let mut p = Parcel::new();
-                    thread::ScheduleInstallProvider { provider: Some(cpi.clone()) }.write(&mut p);
-                    self.call_thread(seq, thread::SCHEDULE_INSTALL_PROVIDER, &p).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+                    thread::ScheduleInstallProvider {
+                        provider: Some(cpi.clone()),
+                    }
+                    .write(&mut p);
+                    self.call_thread(seq, thread::SCHEDULE_INSTALL_PROVIDER, &p)
+                        .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
                     launched = true;
                 }
                 Next::Wait => {}
@@ -286,12 +387,21 @@ impl AppHost {
 
     /// Whether the process of `start_seq` was handed the provider `class`.
     fn handed(&self, start_seq: i64, class: &str) -> bool {
-        self.apps.lock().unwrap().get(&start_seq).is_some_and(|a| a.providers.iter().any(|p| p.info.item.name.as_deref() == Some(class)))
+        self.apps.lock().unwrap().get(&start_seq).is_some_and(|a| {
+            a.providers
+                .iter()
+                .any(|p| p.info.item.name.as_deref() == Some(class))
+        })
     }
 
     /// `refContentProvider`: the connection's counts adjusted; whether it
     /// is still alive.
-    pub(super) fn ref_provider(&self, connection: Option<Binder>, stable: i32, unstable: i32) -> Result<bool, Exception> {
+    pub(super) fn ref_provider(
+        &self,
+        connection: Option<Binder>,
+        stable: i32,
+        unstable: i32,
+    ) -> Result<bool, Exception> {
         let token = Self::connection(connection, "refContentProvider")?;
         let mut state = self.providers.state.lock().unwrap();
         let Some(c) = state.connections.iter_mut().find(|c| c.token == token) else {
@@ -301,7 +411,11 @@ impl AppHost {
         if c.stable + stable < 0 || c.unstable + unstable < 0 {
             return Err(Exception::new(
                 EX_ILLEGAL_STATE,
-                format!("stableCount < 0: {} or unstableCount < 0: {}", c.stable + stable, c.unstable + unstable),
+                format!(
+                    "stableCount < 0: {} or unstableCount < 0: {}",
+                    c.stable + stable,
+                    c.unstable + unstable
+                ),
             ));
         }
         c.stable += stable;
@@ -311,11 +425,19 @@ impl AppHost {
 
     /// `removeContentProvider` (`decProviderCountLocked`): one reference
     /// less, the connection gone with its last.
-    pub(super) fn remove_provider(&self, connection: Option<Binder>, stable: bool) -> Result<(), Exception> {
+    pub(super) fn remove_provider(
+        &self,
+        connection: Option<Binder>,
+        stable: bool,
+    ) -> Result<(), Exception> {
         let token = Self::connection(connection, "removeContentProvider")?;
         let mut state = self.providers.state.lock().unwrap();
         if let Some(c) = state.connections.iter_mut().find(|c| c.token == token) {
-            if stable { c.stable -= 1 } else { c.unstable -= 1 }
+            if stable {
+                c.stable -= 1
+            } else {
+                c.unstable -= 1
+            }
             if c.stable <= 0 && c.unstable <= 0 {
                 state.connections.retain(|c| c.token != token);
             }
@@ -328,8 +450,13 @@ impl AppHost {
     fn connection(connection: Option<Binder>, method: &str) -> Result<Binder, Exception> {
         match connection {
             Some(b @ Binder::Local(_)) => Ok(b),
-            Some(_) => Err(Exception::illegal_argument(format!("{method}: not a ContentProviderConnection"))),
-            None => Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "connection is null")),
+            Some(_) => Err(Exception::illegal_argument(format!(
+                "{method}: not a ContentProviderConnection"
+            ))),
+            None => Err(Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "connection is null",
+            )),
         }
     }
 
@@ -340,32 +467,58 @@ impl AppHost {
         // Its providers are held until their clients are told of them.
         let (gone, dying) = {
             let mut state = self.providers.state.lock().unwrap();
-            let gone: Vec<Published> = state.published.extract_if(|_, p| p.start_seq == start_seq).map(|(_, p)| p).collect();
+            let gone: Vec<Published> = state
+                .published
+                .extract_if(|_, p| p.start_seq == start_seq)
+                .map(|(_, p)| p)
+                .collect();
             state.connections.retain(|c| c.client != start_seq);
-            let (dying, kept) = std::mem::take(&mut state.connections).into_iter().partition::<Vec<_>, _>(|c| c.provider_seq == start_seq);
+            let (dying, kept) = std::mem::take(&mut state.connections)
+                .into_iter()
+                .partition::<Vec<_>, _>(|c| c.provider_seq == start_seq);
             state.connections = kept;
             (gone, dying)
         };
         self.providers.changed.notify_all();
         for c in dying {
             if c.stable > 0 {
-                eprintln!("app host: killing start {} as it depends on provider {} in dying start {start_seq}", c.client, c.class);
+                eprintln!(
+                    "app host: killing start {} as it depends on provider {} in dying start {start_seq}",
+                    c.client, c.class
+                );
                 // `killLocked`'s description: the provider's
                 // `flattenToShortString` and its process, whose adj is the
                 // top's (`FOREGROUND_APP_ADJ`).
-                let dying = gone.iter().find(|p| p.info.info.item.name.as_deref() == Some(c.class.as_str()));
-                let name = dying.and_then(|p| p.info.info.item.package_name.clone()).map_or(c.class.clone(), |package| {
-                    let short = c.class.strip_prefix(package.as_str()).filter(|r| r.starts_with('.')).unwrap_or(&c.class);
-                    format!("{package}/{short}")
-                });
+                let dying = gone
+                    .iter()
+                    .find(|p| p.info.info.item.name.as_deref() == Some(c.class.as_str()));
+                let name = dying
+                    .and_then(|p| p.info.info.item.package_name.clone())
+                    .map_or(c.class.clone(), |package| {
+                        let short = c
+                            .class
+                            .strip_prefix(package.as_str())
+                            .filter(|r| r.starts_with('.'))
+                            .unwrap_or(&c.class);
+                        format!("{package}/{short}")
+                    });
                 let process = dying.map_or("??".to_string(), |p| process_name(&p.info.info));
-                let description = format!("depends on provider {name} in dying proc {process} (adj 0)");
-                if let Err(e) = self.kill_process(c.client, exit_info::REASON_DEPENDENCY_DIED, exit_info::SUBREASON_UNKNOWN, &description) {
+                let description =
+                    format!("depends on provider {name} in dying proc {process} (adj 0)");
+                if let Err(e) = self.kill_process(
+                    c.client,
+                    exit_info::REASON_DEPENDENCY_DIED,
+                    exit_info::SUBREASON_UNKNOWN,
+                    &description,
+                ) {
                     eprintln!("app host: kill start {}: {e}", c.client);
                 }
             } else {
                 let mut p = Parcel::new();
-                thread::UnstableProviderDied { provider: Some(c.provider) }.write(&mut p);
+                thread::UnstableProviderDied {
+                    provider: Some(c.provider),
+                }
+                .write(&mut p);
                 if let Err(e) = self.call_thread(c.client, thread::UNSTABLE_PROVIDER_DIED, &p) {
                     eprintln!("app host: unstableProviderDied to start {}: {e}", c.client);
                 }
@@ -388,8 +541,13 @@ impl Service for ResultCallback {
             return Err(UNKNOWN_TRANSACTION);
         }
         let r = &mut call.data;
-        r.enforce_interface(remote_callback::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
-        let result = if r.read_i32().map_err(|_| BAD_VALUE)? != 0 { bundle::read(r).map_err(|_| BAD_VALUE)? } else { None };
+        r.enforce_interface(remote_callback::DESCRIPTOR)
+            .map_err(|_| BAD_VALUE)?;
+        let result = if r.read_i32().map_err(|_| BAD_VALUE)? != 0 {
+            bundle::read(r).map_err(|_| BAD_VALUE)?
+        } else {
+            None
+        };
         let _ = self.0.lock().unwrap().send(result.unwrap_or_default());
         Ok(Parcel::new())
     }
@@ -410,11 +568,17 @@ impl Read for ProviderInput {
         let Some(remaining) = self.remaining else {
             return self.fd.read(buffer);
         };
-        let len = buffer.len().min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        let len = buffer
+            .len()
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
         if len == 0 {
             return Ok(0);
         }
-        let n = if self.seekable { self.fd.read_at(&mut buffer[..len], self.offset)? } else { self.fd.read(&mut buffer[..len])? };
+        let n = if self.seekable {
+            self.fd.read_at(&mut buffer[..len], self.offset)?
+        } else {
+            self.fd.read(&mut buffer[..len])?
+        };
         self.offset += n as u64;
         self.remaining = Some(remaining - n as u64);
         Ok(n)
@@ -434,7 +598,10 @@ fn provider_status(r: &mut Reader<'_>) -> Result<Result<(), String>, i32> {
             11 => "android.os.OperationCanceledException",
             _ => "android.database.sqlite.SQLiteException",
         };
-        return Ok(Err(format!("{class}: {}", r.read_string16()?.unwrap_or_default())));
+        return Ok(Err(format!(
+            "{class}: {}",
+            r.read_string16()?.unwrap_or_default()
+        )));
     }
     r.set_position(start);
     Ok(r.read_exception()?.map_err(|e| e.message))
@@ -459,19 +626,26 @@ impl AppHost {
     /// the app, `getTypeAnonymous` without GET_ANY_PROVIDER_TYPE. A failure
     /// is a type of none, as the resolver logs it.
     pub(super) fn provider_type(&self, uri: &Uri, uid: i32) -> Result<Option<String>, Exception> {
-        let Some((name, user)) = authority_and_user(uri).filter(|_| uri.scheme() == Some("content")) else {
+        let Some((name, user)) =
+            authority_and_user(uri).filter(|_| uri.scheme() == Some("content"))
+        else {
             return Ok(None);
         };
         let system = uid.rem_euclid(PER_USER_RANGE as i32) == SYSTEM_UID;
         let holder = match self.provider(None, SYSTEM_UID, &name, user, true) {
             Ok(holder) => holder,
             Err(e) if e.code == EX_SECURITY => {
-                eprintln!("app host: Failed to get type for: {} ({})", uri.as_str(), e.message);
+                eprintln!(
+                    "app host: Failed to get type for: {} ({})",
+                    uri.as_str(),
+                    e.message
+                );
                 return Ok(None);
             }
             Err(e) => return Err(e),
         };
-        let Some((Some(Binder::Handle(handle)), info)) = holder.map(|h| (h.provider, h.info)) else {
+        let Some((Some(Binder::Handle(handle)), info)) = holder.map(|h| (h.provider, h.info))
+        else {
             return Ok(None);
         };
         // `isHolderVisibleToCaller`.
@@ -480,7 +654,9 @@ impl AppHost {
             return Ok(None);
         }
         let (sender, results) = mpsc::channel();
-        let callback = self.process.add_service(Arc::new(ResultCallback(Mutex::new(sender))));
+        let callback = self
+            .process
+            .add_service(Arc::new(ResultCallback(Mutex::new(sender))));
         let mut p = Parcel::new();
         p.write_interface_token(cp::DESCRIPTOR);
         let code = if system || self.check_permission(Some(GET_ANY_PROVIDER_TYPE), uid)? == 0 {
@@ -490,13 +666,25 @@ impl AppHost {
             cp::GET_TYPE_ANONYMOUS_ASYNC_TRANSACTION
         };
         // AMS asks of the URI without its user (`getUriWithoutUserId`).
-        if system { uri.clone() } else { uri.with_encoded_authority(Some(&name)) }.write(&mut p);
+        if system {
+            uri.clone()
+        } else {
+            uri.with_encoded_authority(Some(&name))
+        }
+        .write(&mut p);
         p.write_binder(Some(callback));
         if let Err(status) = self.process.transact(handle, code, &p, true) {
-            eprintln!("app host: Failed to get type for: {} (binder status {status})", uri.as_str());
+            eprintln!(
+                "app host: Failed to get type for: {} (binder status {status})",
+                uri.as_str()
+            );
             return Ok(None);
         }
-        let timeout = if system { CONTENT_PROVIDER_TIMEOUT } else { REMOTE_CONTENT_PROVIDER_TIMEOUT };
+        let timeout = if system {
+            CONTENT_PROVIDER_TIMEOUT
+        } else {
+            REMOTE_CONTENT_PROVIDER_TIMEOUT
+        };
         let Ok(result) = results.recv_timeout(timeout) else {
             return Ok(None);
         };
@@ -511,9 +699,18 @@ impl AppHost {
     /// any type, read as its `AssetFileDescriptor` says; else the
     /// exception thrown, as it prints.
     pub(super) fn open_provider_input(&self, uri: &Uri) -> Result<ProviderInput, String> {
-        let not_found = || format!("java.io.FileNotFoundException: No content provider: {}", uri.as_str());
-        let (name, user) = authority_and_user(uri).filter(|_| uri.scheme() == Some("content")).ok_or_else(not_found)?;
-        let holder = self.provider(None, SYSTEM_UID, &name, user, false).map_err(|e| e.message)?;
+        let not_found = || {
+            format!(
+                "java.io.FileNotFoundException: No content provider: {}",
+                uri.as_str()
+            )
+        };
+        let (name, user) = authority_and_user(uri)
+            .filter(|_| uri.scheme() == Some("content"))
+            .ok_or_else(not_found)?;
+        let holder = self
+            .provider(None, SYSTEM_UID, &name, user, false)
+            .map_err(|e| e.message)?;
         let Some(Binder::Handle(handle)) = holder.and_then(|h| h.provider) else {
             return Err(not_found());
         };
@@ -556,7 +753,11 @@ impl AppHost {
             seekable: !(file_type.is_fifo() || file_type.is_socket()),
         };
         if input.remaining.is_some() && !input.seekable {
-            std::io::copy(&mut (&mut input.fd).take(input.offset), &mut std::io::sink()).map_err(io)?;
+            std::io::copy(
+                &mut (&mut input.fd).take(input.offset),
+                &mut std::io::sink(),
+            )
+            .map_err(io)?;
         }
         Ok(input)
     }
@@ -573,10 +774,16 @@ mod tests {
         let mut p = Parcel::new();
         p.write_i32(1);
         p.write_string16(Some("No such file"));
-        assert_eq!(provider_status(&mut Reader::new(p.data(), &[])), Ok(Err("java.io.FileNotFoundException: No such file".into())));
+        assert_eq!(
+            provider_status(&mut Reader::new(p.data(), &[])),
+            Ok(Err("java.io.FileNotFoundException: No such file".into()))
+        );
         let mut p = Parcel::new();
         p.write_exception(&Exception::security("denied"));
-        assert_eq!(provider_status(&mut Reader::new(p.data(), &[])), Ok(Err("denied".into())));
+        assert_eq!(
+            provider_status(&mut Reader::new(p.data(), &[])),
+            Ok(Err("denied".into()))
+        );
         let mut p = Parcel::new();
         p.write_no_exception();
         p.write_i32(7);
@@ -587,7 +794,13 @@ mod tests {
 
     #[test]
     fn users_of_authorities() {
-        assert_eq!(authority_and_user(&Uri::parse("content://media/internal/audio/media/1")), Some(("media".into(), 0)));
-        assert_eq!(authority_and_user(&Uri::parse("content://10@media/x")), Some(("media".into(), 10)));
+        assert_eq!(
+            authority_and_user(&Uri::parse("content://media/internal/audio/media/1")),
+            Some(("media".into(), 0))
+        );
+        assert_eq!(
+            authority_and_user(&Uri::parse("content://10@media/x")),
+            Some(("media".into(), 10))
+        );
     }
 }

@@ -1,11 +1,11 @@
 //! First native system scan with integrity-verified original APKs. No original
 //! image, parser feed or persisted PackageSettings is changed or consulted.
 mod common {
-    pub mod seinfo;
     pub mod java;
-    pub mod runtime;
-    pub mod snapshot_oracle;
     pub mod query_projection;
+    pub mod runtime;
+    pub mod seinfo;
+    pub mod snapshot_oracle;
 }
 
 use aim_services::package::{
@@ -1965,7 +1965,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 expecting_better: &empty_packages,
                 new_domain_id: &domain_ids,
                 completion: ScanMetadataCompletion {
-            scan_as_instant_app:false,
+                    scan_as_instant_app: false,
                     seinfo: common::seinfo::scan(),
                     abi_policy: &abi_policy,
                     native_environment: &native_environment,
@@ -2741,7 +2741,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         canonical_source: None,
     };
     let completion = || ScanMetadataCompletion {
-            scan_as_instant_app:false,
+        scan_as_instant_app: false,
         seinfo: common::seinfo::scan(),
         abi_policy: &abi_policy,
         native_environment: &environment,

@@ -47,7 +47,8 @@ fn init_caught_signal_mask() -> std::io::Result<u64> {
         let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
         if unsafe { libc::sigaction(host_signal, std::ptr::null(), &mut action) } < 0 {
             return Err(std::io::Error::other(format!(
-                "init signal {host_signal} disposition: {}", std::io::Error::last_os_error()
+                "init signal {host_signal} disposition: {}",
+                std::io::Error::last_os_error()
             )));
         }
         if action.sa_sigaction != libc::SIG_DFL && action.sa_sigaction != libc::SIG_IGN {
@@ -372,11 +373,13 @@ fn start_native_services(
     data: &std::path::Path,
     properties: &std::path::Path,
     server: &Arc<Server>,
-    guest_pid:i32,
+    guest_pid: i32,
     constructor_capture: Option<&std::path::Path>,
 ) -> Result<Option<Arc<NativeServices>>, String> {
     let Ok(list) = image.read(NATIVE_SERVICES) else {
-        if constructor_capture.is_some(){return Err("original package constructor capture capability unavailable".into());}
+        if constructor_capture.is_some() {
+            return Err("original package constructor capture capability unavailable".into());
+        }
         return Ok(None);
     };
     let names: Vec<String> = parse_native_services(&String::from_utf8_lossy(&list))
@@ -387,12 +390,17 @@ fn start_native_services(
     if constructor_capture.is_some() && !names.iter().any(|name| name == "package") {
         return Err("constructor capture requires native package owner; original constructor capture unavailable".into());
     }
-    let services = NativeServices::new_for_namespace(server.driver(), &names,guest_pid).map_err(|e| format!("native services: {e}"))?;
+    let services = NativeServices::new_for_namespace(server.driver(), &names, guest_pid)
+        .map_err(|e| format!("native services: {e}"))?;
     if names.iter().any(|name| name == "package") {
-        if let Some(path)=constructor_capture { services.configure_package_constructor_capture(path)?; }
-        services.configure_package_image(image.root(), data, &[])
+        if let Some(path) = constructor_capture {
+            services.configure_package_constructor_capture(path)?;
+        }
+        services
+            .configure_package_image(image.root(), data, &[])
             .map_err(|error| format!("native package image: {error}"))?;
-        services.configure_package_property_area(properties)
+        services
+            .configure_package_property_area(properties)
             .map_err(|error| format!("native package properties: {error}"))?;
     }
     Ok(Some(Arc::new(services)))
@@ -410,7 +418,11 @@ fn start_native_services(
 /// A call of `captures` (interface, code) also leaves its whole data in
 /// `<file>.data/<at>-<sender pid>-<code>.bin`, `<at>` its first column,
 /// and its reply's in `...<code>.reply.bin`.
-fn trace_binder(server: &Arc<Server>, file: &std::path::Path, captures: &[(String, u32)]) -> Result<(), String> {
+fn trace_binder(
+    server: &Arc<Server>,
+    file: &std::path::Path,
+    captures: &[(String, u32)],
+) -> Result<(), String> {
     use std::io::Write;
     let mut out = std::fs::File::create(file).map_err(|e| format!("{}: {e}", file.display()))?;
     let mut pending_path = file.as_os_str().to_os_string();
@@ -600,13 +612,24 @@ impl Boot {
         layout.prepare_runtime().map_err(|e| e.to_string())?;
         let verity_control = if options.mode == RunMode::Run {
             data_mount.borrow_mut().mount()?;
-            let store = Arc::new(aim_storage::fsverity::Store::new(
-                &layout.data.join("fs-verity"), &layout.runtime.join("fs-verity-leases"),
-            ).map_err(|error| format!("verity store: {error:?}"))?);
-            let owner = aim_storage::verity_control::RunningServer::start_private_with_store(Duration::from_secs(5), store)
-                .map_err(|error| format!("native verity control startup: {error}"))?;
-            aim_storage::verity_control::OwnerConfig { endpoint:owner.endpoint().to_path_buf(), process: owner.process }
-                .write(&layout.runtime.join("verity-control-owner")).map_err(|error| format!("native verity owner locator: {error}"))?;
+            let store = Arc::new(
+                aim_storage::fsverity::Store::new(
+                    &layout.data.join("fs-verity"),
+                    &layout.runtime.join("fs-verity-leases"),
+                )
+                .map_err(|error| format!("verity store: {error:?}"))?,
+            );
+            let owner = aim_storage::verity_control::RunningServer::start_private_with_store(
+                Duration::from_secs(5),
+                store,
+            )
+            .map_err(|error| format!("native verity control startup: {error}"))?;
+            aim_storage::verity_control::OwnerConfig {
+                endpoint: owner.endpoint().to_path_buf(),
+                process: owner.process,
+            }
+            .write(&layout.runtime.join("verity-control-owner"))
+            .map_err(|error| format!("native verity owner locator: {error}"))?;
             Some(owner)
         } else {
             None
@@ -615,27 +638,71 @@ impl Boot {
         std::fs::write(layout.path_map_file(), map.to_file_text()).map_err(|e| e.to_string())?;
         let mut init_registration = None;
         if options.mode == RunMode::Run {
-            let process = aim_storage::process_namespace::ProcessIdentity::running(unsafe { libc::getpid() })
+            let process =
+                aim_storage::process_namespace::ProcessIdentity::running(unsafe { libc::getpid() })
+                    .map_err(|error| error.to_string())?;
+            let namespace = format!(
+                "init-{}-{}-{}",
+                process.host_pid, process.start_seconds, process.start_microseconds
+            );
+            aim_storage::mount_namespace::Namespace::open(
+                layout
+                    .path_map_file()
+                    .parent()
+                    .ok_or("path-map has no owner directory")?,
+                &namespace,
+            )
+            .and_then(|owner| owner.initialize(&map.to_file_text()))
+            .map_err(|error| error.to_string())?;
+            let registration = aim_storage::process_namespace::InitRegistration::register(
+                &layout.identity_dir().join("by-pid"),
+                process,
+                &namespace,
+            )
+            .map_err(|error| error.to_string())?;
+            let identity = crate::identity::Identity {
+                service: "init".into(),
+                uid: 0,
+                gid: 0,
+                groups: Vec::new(),
+                capabilities: crate::identity::Capabilities::for_service(0, None),
+                seclabel: "u:r:init:s0".into(),
+                priority: 0,
+                oom_score_adjust: 0,
+                rlimits: Vec::new(),
+            };
+            let identity_file = layout.identity_dir().join("init.identity");
+            std::fs::write(&identity_file, identity.to_file_text())
                 .map_err(|error| error.to_string())?;
-            let namespace = format!("init-{}-{}-{}",process.host_pid,process.start_seconds,process.start_microseconds);
-            aim_storage::mount_namespace::Namespace::open(layout.path_map_file().parent().ok_or("path-map has no owner directory")?,&namespace)
-                .and_then(|owner| owner.initialize(&map.to_file_text())).map_err(|error|error.to_string())?;
-            let registration = aim_storage::process_namespace::InitRegistration::register(&layout.identity_dir().join("by-pid"),process,&namespace)
-                .map_err(|error| error.to_string())?;
-            let identity=crate::identity::Identity{service:"init".into(),uid:0,gid:0,groups:Vec::new(),
-                capabilities:crate::identity::Capabilities::for_service(0,None),seclabel:"u:r:init:s0".into(),priority:0,oom_score_adjust:0,rlimits:Vec::new()};
-            let identity_file=layout.identity_dir().join("init.identity");
-            std::fs::write(&identity_file,identity.to_file_text()).map_err(|error|error.to_string())?;
-            std::os::unix::fs::symlink(&identity_file,layout.identity_dir().join("by-pid").join(process.host_pid.to_string())).map_err(|error|error.to_string())?;
-            aim_storage::process_namespace::register_mount_namespace(&layout.identity_dir().join("by-pid"),process,&namespace).map_err(|error|error.to_string())?;
+            std::os::unix::fs::symlink(
+                &identity_file,
+                layout
+                    .identity_dir()
+                    .join("by-pid")
+                    .join(process.host_pid.to_string()),
+            )
+            .map_err(|error| error.to_string())?;
+            aim_storage::process_namespace::register_mount_namespace(
+                &layout.identity_dir().join("by-pid"),
+                process,
+                &namespace,
+            )
+            .map_err(|error| error.to_string())?;
             let caught = init_caught_signal_mask().map_err(|error| error.to_string())?;
-            aim_storage::process_namespace::register_init_signals(&layout.identity_dir().join("by-pid"),process,caught).map_err(|error|error.to_string())?;
+            aim_storage::process_namespace::register_init_signals(
+                &layout.identity_dir().join("by-pid"),
+                process,
+                caught,
+            )
+            .map_err(|error| error.to_string())?;
             // Publish only after the actual init, mount owner and signal
             // dispositions are registered, before any native or guest service.
-            registration.activate_pid_mapping(&layout.identity_dir().join("by-pid")).map_err(|error|error.to_string())?;
+            registration
+                .activate_pid_mapping(&layout.identity_dir().join("by-pid"))
+                .map_err(|error| error.to_string())?;
             aim_storage::boot_id::BootId::generate(process)
-                .and_then(|boot_id|boot_id.publish(&layout.runtime))
-                .map_err(|error|format!("boot generation identity: {error}"))?;
+                .and_then(|boot_id| boot_id.publish(&layout.runtime))
+                .map_err(|error| format!("boot generation identity: {error}"))?;
             init_registration = Some(registration);
         }
         mark("runtime layout prepared");
@@ -695,14 +762,20 @@ impl Boot {
         let xml = apex::apex_info_list_xml(&apexes);
         std::fs::write(layout.apex_info_list(), &xml).map_err(|e| e.to_string())?;
         apex::write_bootstrap(&layout.bootstrap_apex_dir(), &apexes).map_err(|e| e.to_string())?;
-        let mount_namespaces=if options.mode==RunMode::Run{
+        let mount_namespaces = if options.mode == RunMode::Run {
             // The pinned original apexd bootstrap vector includes virt
             // (RELEASE_AVF_ENABLE_EARLY_VM, original ELF proof in #1228).
-            let(owner,bootstrap)=crate::mount_namespace::MountNamespaces::setup(&layout,&map,&apexes,true)?;
-            let(ids_bootstrap,ids_default)=owner.namespace_ids();
-            report.log.push(format!("native mount owners: bootstrap={ids_bootstrap}, default={ids_default}"));
-            map=bootstrap;Some(owner)
-        }else{None};
+            let (owner, bootstrap) =
+                crate::mount_namespace::MountNamespaces::setup(&layout, &map, &apexes, true)?;
+            let (ids_bootstrap, ids_default) = owner.namespace_ids();
+            report.log.push(format!(
+                "native mount owners: bootstrap={ids_bootstrap}, default={ids_default}"
+            ));
+            map = bootstrap;
+            Some(owner)
+        } else {
+            None
+        };
         mark("APEX list written");
 
         let ids = IdResolver::from_image(&image, &properties);
@@ -731,40 +804,91 @@ impl Boot {
 
         // The owners' endpoints are one boot's: a reboot (or another boot)
         // in this process names new ones.
-        static BOOTS:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
-        let boot_number=BOOTS.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
-        let posix_control=if options.mode==RunMode::Run {
-            let process=aim_storage::process_namespace::ProcessIdentity::running(std::process::id()as i32).map_err(|error|error.to_string())?;
-            let endpoint=format!("dev.aim.posix.{}.{}.{}.{boot_number}",process.host_pid,process.start_seconds,process.start_microseconds);
-            let holder=std::fs::canonicalize(linux_run_binary.with_file_name("aim-lock-holder")).map_err(|error|format!("configured POSIX lock holder: {error}"))?;
-            let controller=Arc::new(aim_storage::posix_broker::Controller::start(aim_storage::posix_broker::Config{endpoint,holder,startup_timeout:Duration::from_secs(5)}).map_err(|error|error.to_string())?);
-            let table=std::fs::canonicalize(layout.identity_dir().join("by-pid")).map_err(|error|error.to_string())?;
-            for entry in map.entries(){
-                let host=match std::fs::canonicalize(&entry.host){Ok(host)=>host,Err(error)if error.kind()==std::io::ErrorKind::NotFound=>entry.host.clone(),Err(error)=>return Err(error.to_string())};
-                if table.starts_with(&host)||layout.runtime.join("posix-control-owner").starts_with(&host){return Err("native POSIX identity receipts or locator overlap a guest mount".into());}
+        static BOOTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let boot_number = BOOTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let posix_control = if options.mode == RunMode::Run {
+            let process =
+                aim_storage::process_namespace::ProcessIdentity::running(std::process::id() as i32)
+                    .map_err(|error| error.to_string())?;
+            let endpoint = format!(
+                "dev.aim.posix.{}.{}.{}.{boot_number}",
+                process.host_pid, process.start_seconds, process.start_microseconds
+            );
+            let holder = std::fs::canonicalize(linux_run_binary.with_file_name("aim-lock-holder"))
+                .map_err(|error| format!("configured POSIX lock holder: {error}"))?;
+            let controller = Arc::new(
+                aim_storage::posix_broker::Controller::start(aim_storage::posix_broker::Config {
+                    endpoint,
+                    holder,
+                    startup_timeout: Duration::from_secs(5),
+                })
+                .map_err(|error| error.to_string())?,
+            );
+            let table = std::fs::canonicalize(layout.identity_dir().join("by-pid"))
+                .map_err(|error| error.to_string())?;
+            for entry in map.entries() {
+                let host = match std::fs::canonicalize(&entry.host) {
+                    Ok(host) => host,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        entry.host.clone()
+                    }
+                    Err(error) => return Err(error.to_string()),
+                };
+                if table.starts_with(&host)
+                    || layout
+                        .runtime
+                        .join("posix-control-owner")
+                        .starts_with(&host)
+                {
+                    return Err(
+                        "native POSIX identity receipts or locator overlap a guest mount".into(),
+                    );
+                }
             }
-            let init=aim_storage::process_namespace::InitRegistration::read(&table).map_err(|error|error.to_string())?;
-            controller.bind_namespace(&table,&init).map_err(|error|error.to_string())?;
-            controller.register_guest(aim_storage::posix_control::Owner{process,guest_pid:1}).map_err(|error|error.to_string())?;
-            controller.owner_config().and_then(|owner|owner.write(&layout.runtime.join("posix-control-owner"))).map_err(|error|error.to_string())?;
+            let init = aim_storage::process_namespace::InitRegistration::read(&table)
+                .map_err(|error| error.to_string())?;
+            controller
+                .bind_namespace(&table, &init)
+                .map_err(|error| error.to_string())?;
+            controller
+                .register_guest(aim_storage::posix_control::Owner {
+                    process,
+                    guest_pid: 1,
+                })
+                .map_err(|error| error.to_string())?;
+            controller
+                .owner_config()
+                .and_then(|owner| owner.write(&layout.runtime.join("posix-control-owner")))
+                .map_err(|error| error.to_string())?;
             Some(controller)
-        }else{None};
+        } else {
+            None
+        };
         let pty_owner = if options.mode == RunMode::Run {
             use std::os::unix::fs::PermissionsExt;
             let runtime = layout.runtime.join("pty-pairs");
-            std::fs::create_dir(&runtime).map_err(|error| format!("PTY owner directory: {error}"))?;
+            std::fs::create_dir(&runtime)
+                .map_err(|error| format!("PTY owner directory: {error}"))?;
             std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))
                 .map_err(|error| error.to_string())?;
             let runtime = std::fs::canonicalize(runtime).map_err(|error| error.to_string())?;
             let endpoint = format!("dev.aim.pty.{}.{boot_number}", std::process::id());
-            let owner = aim_storage::pty_owner::transport::RunningServer::start_with_credentials(&endpoint, &runtime,&layout.identity_dir().join("by-pid"))
-                .map_err(|error| format!("PTY owner: {error}"))?;
-            owner.config.write(&layout.runtime.join("pty-control-owner"))
+            let owner = aim_storage::pty_owner::transport::RunningServer::start_with_credentials(
+                &endpoint,
+                &runtime,
+                &layout.identity_dir().join("by-pid"),
+            )
+            .map_err(|error| format!("PTY owner: {error}"))?;
+            owner
+                .config
+                .write(&layout.runtime.join("pty-control-owner"))
                 .map_err(|error| format!("PTY owner locator: {error}"))?;
             aim_binder_host::pty_file::install_owner(&owner.config)
                 .map_err(|error| format!("PTY transport owner: {error}"))?;
             Some(owner)
-        } else { None };
+        } else {
+            None
+        };
         // The binder driver is kernel state, so the init role hosts it
         // (ADR 0012 item 7): one per boot, named for this process.
         let binder_name = format!("dev.aim.guest-init.{}.binder", std::process::id());
@@ -774,17 +898,23 @@ impl Boot {
             }
             _ => None,
         };
-        let table=layout.identity_dir().join("by-pid");
-        let ready=match std::fs::read(table.join("namespace-pid-ready")){
-            Ok(bytes)if bytes==b"AIMNS-PID-READY1\n"=>true,
-            Ok(_)=>return Err("invalid native init PID readiness record".into()),
-            Err(error)if error.kind()==std::io::ErrorKind::NotFound=>false,
-            Err(error)=>return Err(error.to_string()),
+        let table = layout.identity_dir().join("by-pid");
+        let ready = match std::fs::read(table.join("namespace-pid-ready")) {
+            Ok(bytes) if bytes == b"AIMNS-PID-READY1\n" => true,
+            Ok(_) => return Err("invalid native init PID readiness record".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.to_string()),
         };
-        let native_pid=if ready{
-            let init=aim_storage::process_namespace::InitRegistration::read(&table).map_err(|error|error.to_string())?;
-            if init.process.host_pid!=unsafe{libc::getpid()}{return Err("native init registration names another process".into());}1
-        }else{unsafe{libc::getpid()}};
+        let native_pid = if ready {
+            let init = aim_storage::process_namespace::InitRegistration::read(&table)
+                .map_err(|error| error.to_string())?;
+            if init.process.host_pid != unsafe { libc::getpid() } {
+                return Err("native init registration names another process".into());
+            }
+            1
+        } else {
+            unsafe { libc::getpid() }
+        };
         let mut native_services = None;
         // The properties the host sets while the guest runs: the Mac's
         // settings (`mac::watch`) and the app host's.
@@ -794,16 +924,36 @@ impl Boot {
             if let Some(file) = &options.binder_trace {
                 trace_binder(server, file, &options.binder_capture)?;
             }
-            native_services = start_native_services(&image, &layout.data.join("data"), &layout.properties_dir(), server,native_pid,options.package_constructor_capture.as_deref())?;
+            native_services = start_native_services(
+                &image,
+                &layout.data.join("data"),
+                &layout.properties_dir(),
+                server,
+                native_pid,
+                options.package_constructor_capture.as_deref(),
+            )?;
             if let Some(services) = &native_services {
                 let properties_dir = layout.properties_dir();
                 let socket_dir = layout.socket_dir();
                 let sets = std::sync::Mutex::new(host_properties.clone());
-                services.configure_app_host(image.root(), &layout.data.join("data"), &layout.bpf_dir(),
-                    Box::new(move |name| read_property(&properties_dir, name)),
-                    Box::new(move |name, value| drop(sets.lock().unwrap().send((name.to_string(), value.to_string())))),
-                    Box::new(move || crate::unixsock::connect_at(&socket_dir, APP_HOST_ZYGOTE_RELAY)),
-                    options.display.as_deref())
+                services
+                    .configure_app_host(
+                        image.root(),
+                        &layout.data.join("data"),
+                        &layout.bpf_dir(),
+                        Box::new(move |name| read_property(&properties_dir, name)),
+                        Box::new(move |name, value| {
+                            drop(
+                                sets.lock()
+                                    .unwrap()
+                                    .send((name.to_string(), value.to_string())),
+                            )
+                        }),
+                        Box::new(move || {
+                            crate::unixsock::connect_at(&socket_dir, APP_HOST_ZYGOTE_RELAY)
+                        }),
+                        options.display.as_deref(),
+                    )
                     .map_err(|e| format!("app host: {e}"))?;
             }
             if let Some((names, log)) = &options.binder_shadow {
@@ -832,10 +982,14 @@ impl Boot {
                 );
                 // The Mac's Now Playing and screen capture consent, from
                 // the original media session and projection services.
-                aim_services::media::Bridge::start_for_namespace(server.driver(), display,native_pid);
+                aim_services::media::Bridge::start_for_namespace(
+                    server.driver(),
+                    display,
+                    native_pid,
+                );
             }
             // Android's media volume is the Mac's output volume.
-            aim_services::volume::start_for_namespace(server.driver(),native_pid);
+            aim_services::volume::start_for_namespace(server.driver(), native_pid);
             mark("binder host and native services started");
         }
         let linux_run = LinuxRun {
@@ -857,7 +1011,12 @@ impl Boot {
         }
         let launcher: Box<dyn Launcher> = match options.mode {
             RunMode::DryRun => Box::new(DryRunLauncher::new(linux_run.clone())),
-            RunMode::Run => Box::new(HostLauncher::new(linux_run.clone(), layout.clone()).with_posix(posix_control.as_ref().unwrap().clone(),layout.runtime.join("posix-control-owner"))),
+            RunMode::Run => Box::new(
+                HostLauncher::new(linux_run.clone(), layout.clone()).with_posix(
+                    posix_control.as_ref().unwrap().clone(),
+                    layout.runtime.join("posix-control-owner"),
+                ),
+            ),
         };
         let planner = Planner {
             layout: layout.clone(),
@@ -870,7 +1029,9 @@ impl Boot {
         };
         let mut fs = FsOps::new(map, layout.fs_attrs_file(), options.mode == RunMode::Run);
         fs.set_path_map_file(layout.path_map_file());
-        if let Some(owner)=mount_namespaces{fs.set_mount_namespaces(owner);}
+        if let Some(owner) = mount_namespaces {
+            fs.set_mount_namespaces(owner);
+        }
         let cgroup2 = cgroup2_hierarchy(&image);
         for root in cgroup_mount_points(&image)
             .iter()
@@ -1356,7 +1517,9 @@ impl Boot {
             if let Some(registration) = self.init_registration.take()
                 && let Err(error) = registration.remove(&self.layout.identity_dir().join("by-pid"))
             {
-                self.executor.fatal.get_or_insert_with(|| format!("init namespace retirement: {error}"));
+                self.executor
+                    .fatal
+                    .get_or_insert_with(|| format!("init namespace retirement: {error}"));
             }
             self.executor
                 .supervisor
@@ -1365,18 +1528,26 @@ impl Boot {
             // HostLauncher reaps the guest children and retires their
             // corresponding owner records.
             if let Some(controller) = self.posix_control.take()
-                && let Err(error) = controller.shutdown() {
-                self.executor.fatal.get_or_insert(format!("POSIX controller shutdown: {error}"));
+                && let Err(error) = controller.shutdown()
+            {
+                self.executor
+                    .fatal
+                    .get_or_insert(format!("POSIX controller shutdown: {error}"));
             }
             match self.executor.reap_all_processes() {
                 Ok(()) => {
                     self.sweep_memfds();
                     if let Some(services) = self.native_services.take()
-                        && let Err(error) = services.shutdown() {
+                        && let Err(error) = services.shutdown()
+                    {
                         self.executor.fatal.get_or_insert(error);
                     }
                 }
-                Err(error) => {self.executor.fatal.get_or_insert(format!("child reap during shutdown: {error}"));}
+                Err(error) => {
+                    self.executor
+                        .fatal
+                        .get_or_insert(format!("child reap during shutdown: {error}"));
+                }
             }
         }
         self.report.fatal = self.executor.fatal.clone();
@@ -1429,8 +1600,14 @@ mod androidboot_options_tests {
         assert_eq!(caught & ((1 << (9 - 1)) | (1 << (19 - 1))), 0);
         for signal in [libc::SIGKILL, libc::SIGSTOP] {
             let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-            assert_eq!(unsafe { libc::sigaction(signal, std::ptr::null(), &mut action) }, -1);
-            assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EINVAL));
+            assert_eq!(
+                unsafe { libc::sigaction(signal, std::ptr::null(), &mut action) },
+                -1
+            );
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EINVAL)
+            );
         }
     }
 
@@ -1438,11 +1615,30 @@ mod androidboot_options_tests {
     fn explicit_debug_port_preserves_device_hardware_and_hardware_override_is_unique() {
         let mut options = BootOptions::new(PathBuf::new(), PathBuf::new(), RunMode::DryRun);
         options.merge_androidboot(vec![("aim.adb.port".into(), "5627".into())]);
-        assert!(options.androidboot.contains(&("hardware".into(), "aim".into())));
-        assert!(options.androidboot.contains(&("aim.adb.port".into(), "5627".into())));
+        assert!(
+            options
+                .androidboot
+                .contains(&("hardware".into(), "aim".into()))
+        );
+        assert!(
+            options
+                .androidboot
+                .contains(&("aim.adb.port".into(), "5627".into()))
+        );
         options.merge_androidboot(vec![("hardware".into(), "test-device".into())]);
-        assert_eq!(options.androidboot.iter().filter(|(name, _)| name == "hardware").count(), 1);
-        assert!(options.androidboot.contains(&("hardware".into(), "test-device".into())));
+        assert_eq!(
+            options
+                .androidboot
+                .iter()
+                .filter(|(name, _)| name == "hardware")
+                .count(),
+            1
+        );
+        assert!(
+            options
+                .androidboot
+                .contains(&("hardware".into(), "test-device".into()))
+        );
     }
 }
 
@@ -1452,15 +1648,36 @@ mod capability_boot_tests {
     #[test]
     fn failed_capability_query_returns_before_data_and_service_creation() {
         use std::os::unix::fs::PermissionsExt;
-        let root=std::env::temp_dir().join(format!("aim-capability-boot-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        let image=root.join("image");let rc=image.join("system/etc/init/hw/init.rc");
+        let root = std::env::temp_dir().join(format!(
+            "aim-capability-boot-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let image = root.join("image");
+        let rc = image.join("system/etc/init/hw/init.rc");
         std::fs::create_dir_all(rc.parent().unwrap()).unwrap();
-        std::fs::write(rc,include_bytes!("../../aim-android-init/tests/golden/image/system/etc/init/hw/init.rc")).unwrap();
-        let helper=root.join("failed-helper");std::fs::write(&helper,b"#!/bin/sh\nkill -KILL $$\n").unwrap();
-        std::fs::set_permissions(&helper,std::fs::Permissions::from_mode(0o700)).unwrap();
-        let data=root.join("data");let mut options=BootOptions::new(image,data.clone(),RunMode::Run);options.linux_run=Some(helper);
-        let error=Boot::prepare(options).err().unwrap();assert!(error.contains("capability query") && error.contains("signal"),"{error}");
-        assert!(!data.exists());assert!(!root.join("data.asif").exists());assert!(!root.join("data.run").exists());
+        std::fs::write(
+            rc,
+            include_bytes!("../../aim-android-init/tests/golden/image/system/etc/init/hw/init.rc"),
+        )
+        .unwrap();
+        let helper = root.join("failed-helper");
+        std::fs::write(&helper, b"#!/bin/sh\nkill -KILL $$\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let data = root.join("data");
+        let mut options = BootOptions::new(image, data.clone(), RunMode::Run);
+        options.linux_run = Some(helper);
+        let error = Boot::prepare(options).err().unwrap();
+        assert!(
+            error.contains("capability query") && error.contains("signal"),
+            "{error}"
+        );
+        assert!(!data.exists());
+        assert!(!root.join("data.asif").exists());
+        assert!(!root.join("data.run").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -1,34 +1,91 @@
 //! Persist Settings.removePackageAndAppIdLPw, android-16.0.0_r1 (#798/#822).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
-use super::{attribute, install_sources::Installers, canonical_persistent_settings as persisted};
+use super::{attribute, canonical_persistent_settings as persisted, install_sources::Installers};
 use crate::package::settings::Settings;
 use aim_android_xml::{Element, Node, Value};
 use std::collections::BTreeMap;
 
 fn settings_difference(before: &Settings, after: &Settings) -> String {
     let mut fields = Vec::new();
-    for (kind, old, new) in [("active", &before.packages, &after.packages),
-        ("factory", &before.disabled_system_packages, &after.disabled_system_packages)] {
-        let old_order = old.iter().map(|package| package.name.as_str()).collect::<Vec<_>>();
-        let new_order = new.iter().map(|package| package.name.as_str()).collect::<Vec<_>>();
+    for (kind, old, new) in [
+        ("active", &before.packages, &after.packages),
+        (
+            "factory",
+            &before.disabled_system_packages,
+            &after.disabled_system_packages,
+        ),
+    ] {
+        let old_order = old
+            .iter()
+            .map(|package| package.name.as_str())
+            .collect::<Vec<_>>();
+        let new_order = new
+            .iter()
+            .map(|package| package.name.as_str())
+            .collect::<Vec<_>>();
         if old_order != new_order {
-            fields.push(format!("{kind} inventory/order {} -> {}; first differing position {:?}",old.len(),new.len(),old_order.iter().zip(&new_order).position(|(a,b)|a!=b)));
+            fields.push(format!(
+                "{kind} inventory/order {} -> {}; first differing position {:?}",
+                old.len(),
+                new.len(),
+                old_order.iter().zip(&new_order).position(|(a, b)| a != b)
+            ));
         }
         for package in old {
             let Some(candidate) = new.iter().find(|value| value.name == package.name) else {
-                fields.push(format!("{kind} missing {}", package.name)); continue;
+                fields.push(format!("{kind} missing {}", package.name));
+                continue;
             };
-            if package == candidate { continue; }
+            if package == candidate {
+                continue;
+            }
             let mut changed = Vec::new();
             macro_rules! compare {($($field:ident),*) => {$(if package.$field != candidate.$field {changed.push(stringify!($field));})*};}
-            compare!(install_permissions_fixed,transient,real_name,code_path,legacy_native_library_path,
-                primary_cpu_abi,secondary_cpu_abi,cpu_abi_override,flags,private_flags,last_modified_time,
-                last_update_time,legacy_first_install_time,version_code,target_sdk_version,restrict_update_hash,
-                scanned_as_stopped_system_app,app_id,shared_user,shared_user_app_id,is_sdk_library,
-                install_source,volume_uuid,category_hint,update_available,force_queryable,pending_restore,
-                debuggable,leaving_shared_user,old_paths,base_revision_code,page_size_compat,loading_progress,
-                loading_completed_time,domain_set_id,app_metadata_file_path,app_metadata_source,
-                uses_sdk_libraries,uses_static_libraries,signatures,key_set_data,mime_groups,split_versions);
+            compare!(
+                install_permissions_fixed,
+                transient,
+                real_name,
+                code_path,
+                legacy_native_library_path,
+                primary_cpu_abi,
+                secondary_cpu_abi,
+                cpu_abi_override,
+                flags,
+                private_flags,
+                last_modified_time,
+                last_update_time,
+                legacy_first_install_time,
+                version_code,
+                target_sdk_version,
+                restrict_update_hash,
+                scanned_as_stopped_system_app,
+                app_id,
+                shared_user,
+                shared_user_app_id,
+                is_sdk_library,
+                install_source,
+                volume_uuid,
+                category_hint,
+                update_available,
+                force_queryable,
+                pending_restore,
+                debuggable,
+                leaving_shared_user,
+                old_paths,
+                base_revision_code,
+                page_size_compat,
+                loading_progress,
+                loading_completed_time,
+                domain_set_id,
+                app_metadata_file_path,
+                app_metadata_source,
+                uses_sdk_libraries,
+                uses_static_libraries,
+                signatures,
+                key_set_data,
+                mime_groups,
+                split_versions
+            );
             fields.push(format!("{kind} {} fields={changed:?}; identity {:?} -> {:?}; timestamps {:?} -> {:?}; transient {:?} -> {:?}",package.name,
                 (package.app_id,&package.code_path,package.version_code),(candidate.app_id,&candidate.code_path,candidate.version_code),
                 (package.last_modified_time,package.last_update_time,package.legacy_first_install_time),
@@ -36,13 +93,36 @@ fn settings_difference(before: &Settings, after: &Settings) -> String {
         }
     }
     if before.shared_users != after.shared_users {
-        let summarize = |values: &[crate::package::settings::SharedUser]| values.iter()
-            .map(|group| (group.name.clone(),group.app_id,group.flags,group.signatures.as_ref().map(|s|s.signatures.len())))
-            .collect::<Vec<_>>();
-        fields.push(format!("shared UID records {:?} -> {:?}",summarize(&before.shared_users),summarize(&after.shared_users)));
+        let summarize = |values: &[crate::package::settings::SharedUser]| {
+            values
+                .iter()
+                .map(|group| {
+                    (
+                        group.name.clone(),
+                        group.app_id,
+                        group.flags,
+                        group.signatures.as_ref().map(|s| s.signatures.len()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        fields.push(format!(
+            "shared UID records {:?} -> {:?}",
+            summarize(&before.shared_users),
+            summarize(&after.shared_users)
+        ));
     }
     macro_rules! globals {($($field:ident),*) => {$(if before.$field != after.$field {fields.push(format!("{} differs",stringify!($field)));})*};}
-    globals!(versions,verifier,permission_trees,permissions,renamed_packages,key_sets,domain_verification,legacy_domain_info);
+    globals!(
+        versions,
+        verifier,
+        permission_trees,
+        permissions,
+        renamed_packages,
+        key_sets,
+        domain_verification,
+        legacy_domain_info
+    );
     fields.join("; ")
 }
 
@@ -95,7 +175,10 @@ pub(super) fn replace(
         let allowed = persisted(allowed);
         let desired = persisted(desired.clone());
         if allowed != desired {
-            return Err(format!("setting removal changed unrelated settings: {}", settings_difference(&allowed, &desired)));
+            return Err(format!(
+                "setting removal changed unrelated settings: {}",
+                settings_difference(&allowed, &desired)
+            ));
         }
     }
     let mut root = original.clone();

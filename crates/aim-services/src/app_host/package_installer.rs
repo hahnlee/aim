@@ -34,16 +34,29 @@ pub struct PackageInstaller {
 
 impl PackageInstaller {
     pub fn new(host: Arc<AppHost>) -> Self {
-        PackageInstaller { host, callbacks: Default::default() }
+        PackageInstaller {
+            host,
+            callbacks: Default::default(),
+        }
     }
 
     /// `enforceCrossUserPermission(uid, user, true, false, message)`.
     fn enforce_cross_user(&self, uid: i32, user: i32, message: &str) -> Result<(), Exception> {
         if user < 0 {
-            return Err(Exception::illegal_argument(format!("Invalid userId {user}")));
+            return Err(Exception::illegal_argument(format!(
+                "Invalid userId {user}"
+            )));
         }
-        if user != uid / PER_USER_RANGE as i32 && !matches!(uid % PER_USER_RANGE as i32, 0 | 1000) && self.host.check_permission(Some("android.permission.INTERACT_ACROSS_USERS_FULL"), uid)? != 0 {
-            return Err(Exception::security(format!("{message} requires android.permission.INTERACT_ACROSS_USERS_FULL")));
+        if user != uid / PER_USER_RANGE as i32
+            && !matches!(uid % PER_USER_RANGE as i32, 0 | 1000)
+            && self
+                .host
+                .check_permission(Some("android.permission.INTERACT_ACROSS_USERS_FULL"), uid)?
+                != 0
+        {
+            return Err(Exception::security(format!(
+                "{message} requires android.permission.INTERACT_ACROSS_USERS_FULL"
+            )));
         }
         Ok(())
     }
@@ -51,11 +64,16 @@ impl PackageInstaller {
     /// The persisted sessions, of which there must be none.
     fn no_sessions(&self) -> Result<(), Exception> {
         let path = self.host.data()?.join("system/install_sessions.xml");
-        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
-        let Some(bytes) = super::device_policy::read_atomic_bytes(&path).map_err(state)? else { return Ok(()) };
+        let state =
+            |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+        let Some(bytes) = super::device_policy::read_atomic_bytes(&path).map_err(state)? else {
+            return Ok(());
+        };
         let root = aim_android_xml::read_next_optional(&bytes).map_err(state)?;
         if root.is_some_and(|r| r.children().next().is_some()) {
-            return Err(self.host.unimplemented_named("package_installer", "persisted install sessions (#1757)"));
+            return Err(self
+                .host
+                .unimplemented_named("package_installer", "persisted install sessions (#1757)"));
         }
         Ok(())
     }
@@ -67,7 +85,10 @@ impl PackageInstaller {
     fn register(&self, uid: i32, callback: Option<Binder>, user: i32) -> Result<(), Exception> {
         self.enforce_cross_user(uid, user, "registerCallback")?;
         let Some(Binder::Handle(handle)) = callback else {
-            return Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "callback"));
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "callback",
+            ));
         };
         let strong = self.host.process.strong(handle);
         let callbacks = Arc::downgrade(&self.callbacks);
@@ -82,7 +103,12 @@ impl PackageInstaller {
                 }
             }),
         );
-        if let Some((old, old_death, _)) = self.callbacks.lock().unwrap().insert(handle, (strong, death, user)) {
+        if let Some((old, old_death, _)) = self
+            .callbacks
+            .lock()
+            .unwrap()
+            .insert(handle, (strong, death, user))
+        {
             self.host.process.clear_death(&old, old_death);
         }
         Ok(())
@@ -111,7 +137,10 @@ impl Service for PackageInstaller {
                     // `AppOpsManager.checkPackage`.
                     let package = a.installer_package_name.as_deref();
                     if !package.is_some_and(|p| self.host.owns_package(uid, p).unwrap_or(false)) {
-                        return Err(Exception::security(format!("Package {} does not belong to {uid}", package.unwrap_or("null"))));
+                        return Err(Exception::security(format!(
+                            "Package {} does not belong to {uid}",
+                            package.unwrap_or("null")
+                        )));
                     }
                     self.no_sessions()?;
                     pi::write_get_my_sessions_reply(&mut p, Some(&self.empty()));
@@ -120,15 +149,18 @@ impl Service for PackageInstaller {
             }
             pi::GET_STAGED_SESSIONS => {
                 pi::GetStagedSessions::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.no_sessions().map(|()| pi::write_get_staged_sessions_reply(&mut p, Some(&self.empty())))
+                self.no_sessions()
+                    .map(|()| pi::write_get_staged_sessions_reply(&mut p, Some(&self.empty())))
             }
             pi::GET_SESSION_INFO => {
                 pi::GetSessionInfo::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.no_sessions().map(|()| pi::write_get_session_info_reply::<NoSession>(&mut p, None))
+                self.no_sessions()
+                    .map(|()| pi::write_get_session_info_reply::<NoSession>(&mut p, None))
             }
             pi::REGISTER_CALLBACK => {
                 let a = pi::RegisterCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.register(uid, a.callback, a.user_id).map(|()| pi::write_register_callback_reply(&mut p))
+                self.register(uid, a.callback, a.user_id)
+                    .map(|()| pi::write_register_callback_reply(&mut p))
             }
             pi::UNREGISTER_CALLBACK => {
                 let a = pi::UnregisterCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -141,8 +173,13 @@ impl Service for PackageInstaller {
                 Ok(())
             }
             code => {
-                let name = pi::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
-                Err(self.host.unimplemented_named("package_installer", &format!("{name} (#1757)")))
+                let name = pi::METHODS
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map_or("an unknown call", |(_, n)| n);
+                Err(self
+                    .host
+                    .unimplemented_named("package_installer", &format!("{name} (#1757)")))
             }
         };
         reply(result.map(|()| p))

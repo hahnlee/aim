@@ -209,8 +209,14 @@ impl Image {
             // outcome (and the first error) is the sequential one.
             let parsed = parse_all(&candidates, |(name, host)| {
                 let path = format!("{}/{name}", directory.path);
-                let flags = Location { path: path.clone(), ..directory.clone() }.parse_flags();
-                let entry = cache.as_ref().and_then(|cache| cache.entry(host, &path, flags));
+                let flags = Location {
+                    path: path.clone(),
+                    ..directory.clone()
+                }
+                .parse_flags();
+                let entry = cache
+                    .as_ref()
+                    .and_then(|cache| cache.entry(host, &path, flags));
                 if let Some(cached) = entry.as_ref().and_then(|entry| fs::read(entry).ok()) {
                     if let Ok(parsed) = AndroidPackage::read_cache_entry(&cached) {
                         return Ok(Ok(parsed));
@@ -231,7 +237,11 @@ impl Image {
                 };
                 let parsed = match parsed {
                     Ok(parsed) => parsed,
-                    Err(parse::Error::Parse(reason) | parse::Error::Status(_, reason) | parse::Error::OlderSdk(reason)) => {
+                    Err(
+                        parse::Error::Parse(reason)
+                        | parse::Error::Status(_, reason)
+                        | parse::Error::OlderSdk(reason),
+                    ) => {
                         image.rejected.push(Rejected { location, reason });
                         continue;
                     }
@@ -243,14 +253,13 @@ impl Image {
                         ));
                     }
                 };
-                let parsed = parsed
-                    .map_err(|e| {
-                        fail(
-                            &location.path,
-                            "parse",
-                            format!("native parcel does not read: {e}"),
-                        )
-                    })?;
+                let parsed = parsed.map_err(|e| {
+                    fail(
+                        &location.path,
+                        "parse",
+                        format!("native parcel does not read: {e}"),
+                    )
+                })?;
                 let signing = match signing(&parsed, &location) {
                     Ok(signing) => signing,
                     Err((_, ApkSigningError::Invalid(error)))
@@ -302,21 +311,28 @@ impl Image {
 /// Applies `parse` to every item on up to `available_parallelism` threads,
 /// returning the results in item order.
 pub(crate) fn parse_all<T: Sync, R: Send>(items: &[T], parse: impl Fn(&T) -> R + Sync) -> Vec<R> {
-    let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).min(items.len().max(1));
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(items.len().max(1));
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut results: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
     let slots = std::sync::Mutex::new(&mut results);
     std::thread::scope(|scope| {
         for _ in 0..workers {
-            scope.spawn(|| loop {
-                let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some(item) = items.get(index) else { break };
-                let result = parse(item);
-                slots.lock().unwrap()[index] = Some(result);
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(item) = items.get(index) else { break };
+                    let result = parse(item);
+                    slots.lock().unwrap()[index] = Some(result);
+                }
             });
         }
     });
-    results.into_iter().map(|result| result.expect("every item parsed")).collect()
+    results
+        .into_iter()
+        .map(|result| result.expect("every item parsed"))
+        .collect()
 }
 
 impl Image<()> {

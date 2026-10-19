@@ -48,13 +48,20 @@ pub fn secure() -> Result<bool, isize> {
             if context.is_null() {
                 return Err(0);
             }
-            let can: unsafe extern "C" fn(Id, Sel, isize, *mut Id) -> bool = std::mem::transmute(objc_msgSend());
+            let can: unsafe extern "C" fn(Id, Sel, isize, *mut Id) -> bool =
+                std::mem::transmute(objc_msgSend());
             let mut error: Id = std::ptr::null_mut();
-            let ok = can(context, selector(c"canEvaluatePolicy:error:"), LA_POLICY_DEVICE_OWNER_AUTHENTICATION, &mut error);
+            let ok = can(
+                context,
+                selector(c"canEvaluatePolicy:error:"),
+                LA_POLICY_DEVICE_OWNER_AUTHENTICATION,
+                &mut error,
+            );
             let code = if ok || error.is_null() {
                 0
             } else {
-                let code: unsafe extern "C" fn(Id, Sel) -> isize = std::mem::transmute(objc_msgSend());
+                let code: unsafe extern "C" fn(Id, Sel) -> isize =
+                    std::mem::transmute(objc_msgSend());
                 code(error, selector(c"code"))
             };
             send0(context, selector(c"release"));

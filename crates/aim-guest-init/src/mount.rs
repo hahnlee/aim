@@ -119,8 +119,12 @@ impl DataMount {
     /// exec or exit. The next exec generation, or aimctl after exit, performs
     /// the normal exact-image detach.
     pub fn handoff_detach(&mut self) -> Result<(), String> {
-        if self.pending.is_some() { return Err("DATA detach handoff before mount".into()); }
-        if let Some(image) = self.image.as_mut() { image.handoff_detach()?; }
+        if self.pending.is_some() {
+            return Err("DATA detach handoff before mount".into());
+        }
+        if let Some(image) = self.image.as_mut() {
+            image.handoff_detach()?;
+        }
         Ok(())
     }
 }

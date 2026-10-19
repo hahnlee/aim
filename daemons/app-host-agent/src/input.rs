@@ -53,7 +53,6 @@ impl Target {
     }
 }
 
-
 /// The windows, back to front, and the display's size in pixels.
 #[derive(Default)]
 struct Windows {
@@ -70,7 +69,10 @@ pub struct Dispatcher {
 
 impl Dispatcher {
     pub fn new() -> Arc<Dispatcher> {
-        let dispatcher = Arc::new(Dispatcher { windows: Mutex::new(Windows::default()), next_seq: Mutex::new((0, 0)) });
+        let dispatcher = Arc::new(Dispatcher {
+            windows: Mutex::new(Windows::default()),
+            next_seq: Mutex::new((0, 0)),
+        });
         let reader = dispatcher.clone();
         std::thread::spawn(move || reader.read_touchscreen());
         dispatcher
@@ -87,7 +89,13 @@ impl Dispatcher {
     /// The channel `index` of a window of `region` on a display of
     /// `display` pixels was made: the window comes to the front and takes
     /// the focus. It goes when the app closes its end.
-    pub fn add_window(self: &Arc<Self>, index: i32, channel: OwnedFd, display: (i32, i32), region: Region) {
+    pub fn add_window(
+        self: &Arc<Self>,
+        index: i32,
+        channel: OwnedFd,
+        display: (i32, i32),
+        region: Region,
+    ) {
         let channel = Arc::new(channel);
         let drained = channel.clone();
         let dispatcher = self.clone();
@@ -97,14 +105,20 @@ impl Dispatcher {
         });
         let mut windows = self.windows.lock().unwrap();
         windows.display = (display.0 as f32, display.1 as f32);
-        windows.stack.push(Target { index, channel, region });
+        windows.stack.push(Target {
+            index,
+            channel,
+            region,
+        });
         self.refocus(&mut windows, None);
     }
 
     /// The window of channel `index` comes to the front and takes the focus.
     pub fn focus_window(&self, index: i32) -> bool {
         let mut windows = self.windows.lock().unwrap();
-        let Some(at) = windows.stack.iter().position(|t| t.index == index) else { return false };
+        let Some(at) = windows.stack.iter().position(|t| t.index == index) else {
+            return false;
+        };
         let previous = windows.stack.last().map(|t| t.index);
         let target = windows.stack.remove(at);
         windows.stack.push(target);
@@ -115,7 +129,12 @@ impl Dispatcher {
     /// The window of channel `index` has `region` now.
     pub fn set_region(&self, index: i32, region: Region) -> bool {
         let mut windows = self.windows.lock().unwrap();
-        windows.stack.iter_mut().find(|t| t.index == index).map(|t| t.region = region).is_some()
+        windows
+            .stack
+            .iter_mut()
+            .find(|t| t.index == index)
+            .map(|t| t.region = region)
+            .is_some()
     }
 
     fn remove_window(&self, index: i32) {
@@ -140,7 +159,10 @@ impl Dispatcher {
         for target in &windows.stack {
             if Some(target.index) == previous || Some(target.index) == front {
                 let (seq, id) = self.ids();
-                send(&target.channel, &focus(seq, id, Some(target.index) == front));
+                send(
+                    &target.channel,
+                    &focus(seq, id, Some(target.index) == front),
+                );
             }
         }
     }
@@ -164,10 +186,15 @@ impl Dispatcher {
             for t in outside.into_iter().map(|i| &windows.stack[i]) {
                 let (seq, id) = self.ids();
                 let own = Some(t.region.owner) == owner;
-                send(&t.channel, &motion.outside(own).message(seq, id, t.origin()));
+                send(
+                    &t.channel,
+                    &motion.outside(own).message(seq, id, t.origin()),
+                );
             }
         }
-        let target = windows.gesture.and_then(|index| windows.stack.iter().find(|t| t.index == index));
+        let target = windows
+            .gesture
+            .and_then(|index| windows.stack.iter().find(|t| t.index == index));
         if let Some(target) = target {
             let (seq, id) = self.ids();
             send(&target.channel, &motion.message(seq, id, target.origin()));
@@ -204,7 +231,10 @@ impl Dispatcher {
                     if !std::mem::take(&mut dropped) {
                         let time = sec * 1_000_000_000 + usec * 1_000;
                         let mut windows = self.windows.lock().unwrap();
-                        let scale = (windows.display.0 / x_axis.1 as f32, windows.display.1 / y_axis.1 as f32);
+                        let scale = (
+                            windows.display.0 / x_axis.1 as f32,
+                            windows.display.1 / y_axis.1 as f32,
+                        );
                         for motion in touch.report(time, x_axis.0, y_axis.0, scale) {
                             self.dispatch(&mut windows, &motion);
                         }
@@ -223,7 +253,11 @@ impl Dispatcher {
 fn open_touchscreen() -> std::io::Result<Option<(File, (i32, i32), (i32, i32))>> {
     let mut paths: Vec<_> = std::fs::read_dir("/dev/input")?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("event")))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("event"))
+        })
         .collect();
     paths.sort();
     for path in paths {
@@ -252,7 +286,11 @@ fn open_touchscreen() -> std::io::Result<Option<(File, (i32, i32), (i32, i32))>>
             return Err(std::io::Error::last_os_error());
         }
         log::info!("touchscreen {}", path.display());
-        return Ok(Some((device, axis(ABS_MT_POSITION_X)?, axis(ABS_MT_POSITION_Y)?)));
+        return Ok(Some((
+            device,
+            axis(ABS_MT_POSITION_X)?,
+            axis(ABS_MT_POSITION_Y)?,
+        )));
     }
     Ok(None)
 }
@@ -261,7 +299,14 @@ fn open_touchscreen() -> std::io::Result<Option<(File, (i32, i32), (i32, i32))>>
 fn send(channel: &OwnedFd, message: &[u8]) {
     loop {
         // SAFETY: a packet from a live buffer on a socket this process owns.
-        let n = unsafe { libc::send(channel.as_raw_fd(), message.as_ptr().cast(), message.len(), libc::MSG_NOSIGNAL) };
+        let n = unsafe {
+            libc::send(
+                channel.as_raw_fd(),
+                message.as_ptr().cast(),
+                message.len(),
+                libc::MSG_NOSIGNAL,
+            )
+        };
         if n >= 0 {
             return;
         }
@@ -277,10 +322,18 @@ fn drain(channel: &OwnedFd) {
     let mut buffer = [0u8; 256];
     loop {
         // SAFETY: a receive into a local buffer.
-        let n = unsafe { libc::recv(channel.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len(), 0) };
-        if n == 0 || (n < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted) {
+        let n = unsafe {
+            libc::recv(
+                channel.as_raw_fd(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                0,
+            )
+        };
+        if n == 0
+            || (n < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted)
+        {
             return;
         }
     }
 }
-

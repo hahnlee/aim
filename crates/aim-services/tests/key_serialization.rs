@@ -99,9 +99,13 @@ fn public_keys_match_and_deserialize_on_the_original_runtime() {
         .arg(&classes)
         .args(["PublicKeySerialization", "generate"])
         .arg(&inputs));
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
+    let boot = Boot::new(
+        aim_paths::root().join("target/release/aimctl"),
+        data.0.join("g"),
+    );
     run(boot.start_command().args(["start", "--windows"]));
-    boot.wait_ready(Duration::from_secs(300)).expect("key_serialization oracle boot readiness");
+    boot.wait_ready(Duration::from_secs(300))
+        .expect("key_serialization oracle boot readiness");
     let guest = boot.data.join("data/local/tmp/key-serialization");
     fs::create_dir(&guest).unwrap();
     fs::copy(dex.join("classes.dex"), guest.join("keys.dex")).unwrap();

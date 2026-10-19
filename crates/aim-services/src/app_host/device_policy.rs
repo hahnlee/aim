@@ -19,7 +19,9 @@ use std::sync::Arc;
 
 use aim_android_xml::Element;
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader};
+use aim_binder_host::parcel::{
+    BAD_VALUE, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader,
+};
 use aim_service_aidl::android_app_admin_idevicepolicymanager as dp;
 
 use super::account_service::UserHandle;
@@ -50,17 +52,20 @@ const KEYGUARD_DISABLE_FEATURES_NONE: i32 = 0;
 const STATE_USER_UNMANAGED: i32 = 0;
 
 const MANAGE_USERS: &str = "android.permission.MANAGE_USERS";
-const MANAGE_PROFILE_AND_DEVICE_OWNERS: &str = "android.permission.MANAGE_PROFILE_AND_DEVICE_OWNERS";
+const MANAGE_PROFILE_AND_DEVICE_OWNERS: &str =
+    "android.permission.MANAGE_PROFILE_AND_DEVICE_OWNERS";
 const INTERACT_ACROSS_USERS: &str = "android.permission.INTERACT_ACROSS_USERS";
 const INTERACT_ACROSS_USERS_FULL: &str = "android.permission.INTERACT_ACROSS_USERS_FULL";
 const QUERY_ADMIN_POLICY: &str = "android.permission.QUERY_ADMIN_POLICY";
 const MANAGE_DEVICE_POLICY_CAMERA: &str = "android.permission.MANAGE_DEVICE_POLICY_CAMERA";
 /// `CROSS_USER_PERMISSIONS`' permission of `MANAGE_DEVICE_POLICY_CAMERA`.
-const MANAGE_DEVICE_POLICY_ACROSS_USERS: &str = "android.permission.MANAGE_DEVICE_POLICY_ACROSS_USERS";
+const MANAGE_DEVICE_POLICY_ACROSS_USERS: &str =
+    "android.permission.MANAGE_DEVICE_POLICY_ACROSS_USERS";
 const SET_TIME: &str = "android.permission.SET_TIME";
 const SET_TIME_ZONE: &str = "android.permission.SET_TIME_ZONE";
 /// The aconfig flags the service reads.
-const SET_AUTO_TIME_ENABLED_COEXISTENCE: &str = "android.app.admin.flags.set_auto_time_enabled_coexistence";
+const SET_AUTO_TIME_ENABLED_COEXISTENCE: &str =
+    "android.app.admin.flags.set_auto_time_enabled_coexistence";
 const SET_AUTO_TIME_ZONE_ENABLED_COEXISTENCE: &str =
     "android.app.admin.flags.set_auto_time_zone_enabled_coexistence";
 
@@ -103,7 +108,10 @@ struct UserData {
 
 impl Default for UserData {
     fn default() -> Self {
-        UserData { setup_complete: false, provisioning_state: STATE_USER_UNMANAGED }
+        UserData {
+            setup_complete: false,
+            provisioning_state: STATE_USER_UNMANAGED,
+        }
     }
 }
 
@@ -131,9 +139,15 @@ impl Policies {
         let system = data.join("system");
         let owners = read_atomic(&system.join(DEVICE_OWNER_XML))?;
         let mut policies = Policies {
-            owned: owners.as_ref().is_some_and(|root| names_owner(root, "device-owner", DEVICE_OWNER_TAGS)),
+            owned: owners
+                .as_ref()
+                .is_some_and(|root| names_owner(root, "device-owner", DEVICE_OWNER_TAGS)),
             system_update_policy: owners.as_ref().is_some_and(|root| {
-                root.name == "root" && root.children().take_while(|e| DEVICE_OWNER_TAGS.contains(&e.name.as_str())).any(|e| e.name == "system-update-policy")
+                root.name == "root"
+                    && root
+                        .children()
+                        .take_while(|e| DEVICE_OWNER_TAGS.contains(&e.name.as_str()))
+                        .any(|e| e.name == "system-update-policy")
             }),
             ..Default::default()
         };
@@ -141,12 +155,20 @@ impl Policies {
         // `/data/system`, the others' in their user directories.
         let mut files = vec![(0, system.join(DEVICE_POLICIES_XML))];
         let users = match fs::read_dir(system.join("users")) {
-            Ok(entries) => entries.collect::<Result<Vec<_>, _>>().map_err(|e| format!("system/users: {e}"))?,
+            Ok(entries) => entries
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("system/users: {e}"))?,
             Err(e) if e.kind() == ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(format!("system/users: {e}")),
         };
         for entry in users {
-            let Some(user) = entry.file_name().to_str().and_then(|n| n.parse::<i32>().ok()) else { continue };
+            let Some(user) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<i32>().ok())
+            else {
+                continue;
+            };
             if read_atomic(&entry.path().join(PROFILE_OWNER_XML))?
                 .is_some_and(|root| names_owner(&root, "profile-owner", PROFILE_OWNER_TAGS))
             {
@@ -157,20 +179,28 @@ impl Policies {
             }
         }
         for (user, file) in files {
-            let Some(root) = read_journaled(&file)? else { continue };
+            let Some(root) = read_journaled(&file)? else {
+                continue;
+            };
             // `DevicePolicyData.load`: a document of another root is not read.
             if root.name != "policies" {
                 continue;
             }
-            let provisioning_state = root.int("provisioning-state").map_err(|e| format!("{}: {e}", file.display()))?;
+            let provisioning_state = root
+                .int("provisioning-state")
+                .map_err(|e| format!("{}: {e}", file.display()))?;
             policies.users.insert(
                 user,
                 UserData {
                     setup_complete: root.string("setup-complete").as_deref() == Some("true"),
-                    provisioning_state: provisioning_state.filter(|s| *s != -1).unwrap_or(STATE_USER_UNMANAGED),
+                    provisioning_state: provisioning_state
+                        .filter(|s| *s != -1)
+                        .unwrap_or(STATE_USER_UNMANAGED),
                 },
             );
-            policies.admins |= root.children().any(|e| e.name == "admin" || e.name == "delegation");
+            policies.admins |= root
+                .children()
+                .any(|e| e.name == "admin" || e.name == "delegation");
         }
         // `DevicePoliciesReaderWriter.readFromFileLocked`: nothing without
         // the file itself; its entries are each a root.
@@ -191,7 +221,9 @@ impl Policies {
             for e in root.children() {
                 match e.name.as_str() {
                     "drawable-style-entry" | "drawable-source-entry" => {}
-                    "string-entry" => policies.updated_strings.extend(e.string("source-id").map(|s| s.into_owned())),
+                    "string-entry" => policies
+                        .updated_strings
+                        .extend(e.string("source-id").map(|s| s.into_owned())),
                     _ => break,
                 }
             }
@@ -256,7 +288,9 @@ fn read_journaled(path: &Path) -> Result<Option<Element>, String> {
 }
 
 fn read_document(path: &Path, bytes: Option<Vec<u8>>) -> Result<Option<Element>, String> {
-    bytes.map(|b| aim_android_xml::read(&b).map_err(|e| format!("{}: {e}", path.display()))).transpose()
+    bytes
+        .map(|b| aim_android_xml::read(&b).map_err(|e| format!("{}: {e}", path.display())))
+        .transpose()
 }
 
 /// `FileReadWriter.readFromFileLocked` of an owners file: under a `root`
@@ -365,12 +399,18 @@ impl<D: Device> Caller<'_, D> {
 
     /// `hasFullCrossUsersPermission`.
     fn full_cross_users(&self, user: i32) -> Result<bool, Exception> {
-        Ok(user == self.user() || self.system_or_root() || self.permitted(INTERACT_ACROSS_USERS_FULL)?)
+        Ok(user == self.user()
+            || self.system_or_root()
+            || self.permitted(INTERACT_ACROSS_USERS_FULL)?)
     }
 
     /// `hasCrossUsersPermission`.
     fn cross_users(&self, user: i32) -> Result<bool, Exception> {
-        Ok(user == self.user() || self.system_or_root() || self.permitted(INTERACT_ACROSS_USERS)?)
+        Ok(
+            user == self.user()
+                || self.system_or_root()
+                || self.permitted(INTERACT_ACROSS_USERS)?,
+        )
     }
 
     /// `canManageUsers`.
@@ -386,16 +426,26 @@ impl<D: Device> Caller<'_, D> {
     /// `isCallingFromPackage`.
     fn is_package(&self, package: &str) -> Result<bool, Exception> {
         let user = self.user();
-        Ok(self.device.app_id(package, user)?.is_some_and(|id| self.uid == user * PER_USER_RANGE as i32 + id))
+        Ok(self
+            .device
+            .app_id(package, user)?
+            .is_some_and(|id| self.uid == user * PER_USER_RANGE as i32 + id))
     }
 
     /// `getCallerIdentity(who, package)`: the package, the caller's, and the
     /// admin, which no user has.
-    fn identity<'p>(&self, who: Option<&ComponentName>, package: Option<&'p str>) -> Result<Option<&'p str>, Exception> {
+    fn identity<'p>(
+        &self,
+        who: Option<&ComponentName>,
+        package: Option<&'p str>,
+    ) -> Result<Option<&'p str>, Exception> {
         if let Some(package) = package
             && !self.is_package(package)?
         {
-            return Err(Exception::security(format!("Caller with uid {} is not {package}", self.uid)));
+            return Err(Exception::security(format!(
+                "Caller with uid {} is not {package}",
+                self.uid
+            )));
         }
         match who {
             Some(who) => Err(self.not_admin(who)),
@@ -422,8 +472,15 @@ impl<D: Device> Caller<'_, D> {
 
     /// `hasPermission(permission, package, user)`, with the permission
     /// `CROSS_USER_PERMISSIONS` gives it for another user.
-    fn has_permission_on(&self, permission: &str, across: &str, package: Option<&str>, user: i32) -> Result<bool, Exception> {
-        Ok(self.has_permission(permission, package)? && (self.user() == user || self.has_permission(across, package)?))
+    fn has_permission_on(
+        &self,
+        permission: &str,
+        across: &str,
+        package: Option<&str>,
+        user: i32,
+    ) -> Result<bool, Exception> {
+        Ok(self.has_permission(permission, package)?
+            && (self.user() == user || self.has_permission(across, package)?))
     }
 }
 
@@ -436,7 +493,9 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
     let unmanaged = || -> Result<(), Exception> {
         let policies = device.policies()?;
         match feature()? && (policies.owned || policies.admins || policies.policies) {
-            true => Err(device.unimplemented("a device with a device or profile owner, active admins or policies (#1521)")),
+            true => Err(device.unimplemented(
+                "a device with a device or profile owner, active admins or policies (#1521)",
+            )),
             false => Ok(()),
         }
     };
@@ -451,7 +510,10 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                     // A system caller may ask about a particular admin.
                     authorize(match &a.who {
                         None => true,
-                        Some(who) => caller.is_package(&who.package)? || caller.permitted(QUERY_ADMIN_POLICY)?,
+                        Some(who) => {
+                            caller.is_package(&who.package)?
+                                || caller.permitted(QUERY_ADMIN_POLICY)?
+                        }
                     })?;
                 }
                 // The strictest of no admins.
@@ -466,7 +528,9 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                 caller.identity(None, a.caller_package.as_deref())?;
                 authorize(caller.full_cross_users(a.user_handle)?)?;
                 let installed = match &a.caller_package {
-                    Some(package) if device.app_id(package, a.user_handle)?.is_some() => device.target_sdk(package)?,
+                    Some(package) if device.app_id(package, a.user_handle)?.is_some() => {
+                        device.target_sdk(package)?
+                    }
                     _ => None,
                 };
                 let target_sdk = installed.ok_or_else(|| {
@@ -475,7 +539,8 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                         "Attempt to read from field 'int android.content.pm.ApplicationInfo.targetSdkVersion' on a null object reference",
                     )
                 })?;
-                let status = encryption_status(device.property("ro.crypto.type").as_deref(), target_sdk);
+                let status =
+                    encryption_status(device.property("ro.crypto.type").as_deref(), target_sdk);
                 dp::write_get_storage_encryption_status_reply(&mut p, status);
                 Ok(())
             })()
@@ -485,7 +550,8 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
             (|| {
                 if feature()? {
                     unmanaged()?;
-                    let package = caller.identity(a.who.as_ref(), a.caller_package_name.as_deref())?;
+                    let package =
+                        caller.identity(a.who.as_ref(), a.caller_package_name.as_deref())?;
                     authorize(
                         caller.full_cross_users(a.user_handle)?
                             || app_id(uid) == CAMERASERVER_UID
@@ -504,7 +570,8 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
             })()
         }
         dp::GET_SCREEN_CAPTURE_DISABLED => {
-            let a = dp::GetScreenCaptureDisabled::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
+            let a =
+                dp::GetScreenCaptureDisabled::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
             (|| {
                 if feature()? {
                     unmanaged()?;
@@ -519,7 +586,8 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
             })()
         }
         dp::IS_COMMON_CRITERIA_MODE_ENABLED => {
-            let a = dp::IsCommonCriteriaModeEnabled::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
+            let a =
+                dp::IsCommonCriteriaModeEnabled::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
             (|| {
                 // Only a device owner or an organization-owned device's
                 // profile owner turns it on; there is none.
@@ -532,7 +600,8 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
             })()
         }
         dp::GET_KEYGUARD_DISABLED_FEATURES => {
-            let a = dp::GetKeyguardDisabledFeatures::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
+            let a =
+                dp::GetKeyguardDisabledFeatures::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
             (|| {
                 if feature()? {
                     unmanaged()?;
@@ -543,7 +612,10 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                         Some(who) => caller.is_package(&who.package)? || app_id(uid) == SYSTEM_UID,
                     })?;
                 }
-                dp::write_get_keyguard_disabled_features_reply(&mut p, KEYGUARD_DISABLE_FEATURES_NONE);
+                dp::write_get_keyguard_disabled_features_reply(
+                    &mut p,
+                    KEYGUARD_DISABLE_FEATURES_NONE,
+                );
                 Ok(())
             })()
         }
@@ -663,14 +735,18 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                 if feature()? {
                     unmanaged()?;
                     valid_user(a.user_handle)?;
-                    authorize(caller.cross_users(a.user_handle)? || caller.full_cross_users(a.user_handle)?)?;
+                    authorize(
+                        caller.cross_users(a.user_handle)?
+                            || caller.full_cross_users(a.user_handle)?,
+                    )?;
                 }
                 dp::write_get_profile_owner_as_user_reply::<Component>(&mut p, None);
                 Ok(())
             })()
         }
         dp::GET_PROFILE_OWNER_OR_DEVICE_OWNER_SUPERVISION_COMPONENT => {
-            let a = dp::GetProfileOwnerOrDeviceOwnerSupervisionComponent::<UserHandle>::read(r).map_err(|_| BAD_VALUE)?;
+            let a = dp::GetProfileOwnerOrDeviceOwnerSupervisionComponent::<UserHandle>::read(r)
+                .map_err(|_| BAD_VALUE)?;
             (|| {
                 if feature()? {
                     unmanaged()?;
@@ -682,7 +758,9 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                     }
                 }
                 // No owner to be the supervision component.
-                dp::write_get_profile_owner_or_device_owner_supervision_component_reply::<Component>(&mut p, None);
+                dp::write_get_profile_owner_or_device_owner_supervision_component_reply::<Component>(
+                    &mut p, None,
+                );
                 Ok(())
             })()
         }
@@ -695,7 +773,10 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                     // `getProfileOwnerNameUnchecked` asks
                     // `getProfileOwnerAsUser`, with its checks.
                     valid_user(a.user_handle)?;
-                    authorize(caller.cross_users(a.user_handle)? || caller.full_cross_users(a.user_handle)?)?;
+                    authorize(
+                        caller.cross_users(a.user_handle)?
+                            || caller.full_cross_users(a.user_handle)?,
+                    )?;
                 }
                 dp::write_get_profile_owner_name_reply(&mut p, &None);
                 Ok(())
@@ -713,7 +794,8 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
             })()
         }
         dp::GET_PERMITTED_ACCESSIBILITY_SERVICES => {
-            let a = dp::GetPermittedAccessibilityServices::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
+            let a = dp::GetPermittedAccessibilityServices::<ComponentName>::read(r)
+                .map_err(|_| BAD_VALUE)?;
             (|| {
                 // Only an owner, by its admin, asks.
                 if feature()? {
@@ -738,7 +820,8 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
             })()
         }
         dp::GET_PERMITTED_INPUT_METHODS => {
-            let a = dp::GetPermittedInputMethods::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
+            let a =
+                dp::GetPermittedInputMethods::<ComponentName>::read(r).map_err(|_| BAD_VALUE)?;
             (|| {
                 if feature()? {
                     unmanaged()?;
@@ -767,9 +850,12 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                     dp::GetCrossProfileCallerIdDisabled::<ComponentName>::read(r).map(|a| a.who)
                 }
                 dp::GET_CROSS_PROFILE_CONTACTS_SEARCH_DISABLED => {
-                    dp::GetCrossProfileContactsSearchDisabled::<ComponentName>::read(r).map(|a| a.who)
+                    dp::GetCrossProfileContactsSearchDisabled::<ComponentName>::read(r)
+                        .map(|a| a.who)
                 }
-                _ => dp::GetBluetoothContactSharingDisabled::<ComponentName>::read(r).map(|a| a.who),
+                _ => {
+                    dp::GetBluetoothContactSharingDisabled::<ComponentName>::read(r).map(|a| a.who)
+                }
             }
             .map_err(|_| BAD_VALUE)?;
             (|| {
@@ -784,7 +870,8 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                 Ok(())
             })()
         }
-        dp::GET_CROSS_PROFILE_CALLER_ID_DISABLED_FOR_USER | dp::GET_CROSS_PROFILE_CONTACTS_SEARCH_DISABLED_FOR_USER => {
+        dp::GET_CROSS_PROFILE_CALLER_ID_DISABLED_FOR_USER
+        | dp::GET_CROSS_PROFILE_CONTACTS_SEARCH_DISABLED_FOR_USER => {
             let user = match code {
                 dp::GET_CROSS_PROFILE_CALLER_ID_DISABLED_FOR_USER => {
                     dp::GetCrossProfileCallerIdDisabledForUser::read(r).map(|a| a.user_id)
@@ -814,14 +901,20 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
         }
         dp::GET_AUTO_TIME_ENABLED | dp::GET_AUTO_TIME_ZONE_ENABLED => {
             let (flag, permission, setting) = match code {
-                dp::GET_AUTO_TIME_ENABLED => (SET_AUTO_TIME_ENABLED_COEXISTENCE, SET_TIME, "auto_time"),
-                _ => (SET_AUTO_TIME_ZONE_ENABLED_COEXISTENCE, SET_TIME_ZONE, "auto_time_zone"),
+                dp::GET_AUTO_TIME_ENABLED => {
+                    (SET_AUTO_TIME_ENABLED_COEXISTENCE, SET_TIME, "auto_time")
+                }
+                _ => (
+                    SET_AUTO_TIME_ZONE_ENABLED_COEXISTENCE,
+                    SET_TIME_ZONE,
+                    "auto_time_zone",
+                ),
             };
             let (who, package) = match code {
-                dp::GET_AUTO_TIME_ENABLED => {
-                    dp::GetAutoTimeEnabled::<ComponentName>::read(r).map(|a| (a.who, a.caller_package_name))
-                }
-                _ => dp::GetAutoTimeZoneEnabled::<ComponentName>::read(r).map(|a| (a.who, a.caller_package_name)),
+                dp::GET_AUTO_TIME_ENABLED => dp::GetAutoTimeEnabled::<ComponentName>::read(r)
+                    .map(|a| (a.who, a.caller_package_name)),
+                _ => dp::GetAutoTimeZoneEnabled::<ComponentName>::read(r)
+                    .map(|a| (a.who, a.caller_package_name)),
             }
             .map_err(|_| BAD_VALUE)?;
             (|| {
@@ -860,7 +953,10 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                     true => {
                         authorize(caller.manages_owners()?)?;
                         if a.user_handle != caller.user() {
-                            authorize(caller.manages_users()? || caller.permitted(INTERACT_ACROSS_USERS)?)?;
+                            authorize(
+                                caller.manages_users()?
+                                    || caller.permitted(INTERACT_ACROSS_USERS)?,
+                            )?;
                         }
                         device.policies()?.user(a.user_handle).provisioning_state
                     }
@@ -902,7 +998,8 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                 if feature()? {
                     let updated = &device.policies()?.updated_strings;
                     if a.string_id.as_ref().is_some_and(|id| updated.contains(id)) {
-                        return Err(device.unimplemented("an updated device policy resource string (#1521)"));
+                        return Err(device
+                            .unimplemented("an updated device policy resource string (#1521)"));
                     }
                 }
                 dp::write_get_string_reply::<ParcelableResource>(&mut p, None);
@@ -918,7 +1015,10 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
             })()
         }
         code => {
-            let name = dp::METHODS.iter().find(|(c, _)| *c == code).map_or("an unknown call", |(_, n)| n);
+            let name = dp::METHODS
+                .iter()
+                .find(|(c, _)| *c == code)
+                .map_or("an unknown call", |(_, n)| n);
             Err(device.unimplemented(&format!("{name} (#1521)")))
         }
     };
@@ -938,7 +1038,11 @@ impl DevicePolicy {
 impl Device for DevicePolicy {
     fn feature(&self) -> Result<bool, Exception> {
         let (state, _) = self.host.packages()?;
-        Ok(state.system.features.iter().any(|(n, v)| n == FEATURE_DEVICE_ADMIN && *v >= 0))
+        Ok(state
+            .system
+            .features
+            .iter()
+            .any(|(n, v)| n == FEATURE_DEVICE_ADMIN && *v >= 0))
     }
 
     fn policies(&self) -> Result<&Policies, Exception> {
@@ -960,7 +1064,12 @@ impl Device for DevicePolicy {
     }
 
     fn target_sdk(&self, package: &str) -> Result<Option<i32>, Exception> {
-        Ok(self.host.inputs()?.packages.application_info(package, 0).map(|ai| ai.target_sdk_version))
+        Ok(self
+            .host
+            .inputs()?
+            .packages
+            .application_info(package, 0)
+            .map(|ai| ai.target_sdk_version))
     }
 
     fn flag(&self, name: &str) -> Result<bool, Exception> {
@@ -999,7 +1108,8 @@ mod tests {
 
     /// A guest `/data` of its own, empty.
     fn data(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("aim-device-policy-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("aim-device-policy-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("system/users/0")).unwrap();
         dir
@@ -1008,7 +1118,10 @@ mod tests {
     fn element(name: &str, attrs: &[(&str, Value)], children: Vec<Element>) -> Element {
         Element {
             name: name.into(),
-            attrs: attrs.iter().map(|(n, v)| (n.to_string(), v.clone())).collect(),
+            attrs: attrs
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.clone()))
+                .collect(),
             content: children.into_iter().map(Node::Element).collect(),
         }
     }
@@ -1028,7 +1141,10 @@ mod tests {
         let dir = data("resources");
         let entry = |id: &str| element("string-entry", &[("source-id", string(id))], vec![]);
         let unknown = element("other", &[], vec![]);
-        write(&dir.join("system").join(UPDATED_RESOURCES_XML), &element("root", &[], vec![entry("a"), unknown, entry("b")]));
+        write(
+            &dir.join("system").join(UPDATED_RESOURCES_XML),
+            &element("root", &[], vec![entry("a"), unknown, entry("b")]),
+        );
         assert_eq!(Policies::load(&dir).unwrap().updated_strings, ["a"]);
     }
 
@@ -1039,36 +1155,75 @@ mod tests {
     fn owners_are_read_as_owners_data_reads_them() {
         let dir = data("owners");
         assert!(!Policies::load(&dir).unwrap().owned());
-        let migration = element("policy-engine-migration", &[("migratedToPolicyEngine", Value::Bool(true))], vec![]);
+        let migration = element(
+            "policy-engine-migration",
+            &[("migratedToPolicyEngine", Value::Bool(true))],
+            vec![],
+        );
         let owner_file = dir.join("system").join(DEVICE_OWNER_XML);
         write(&owner_file, &element("root", &[], vec![migration.clone()]));
         assert!(!Policies::load(&dir).unwrap().owned());
-        let owner = element("device-owner", &[("component", string("com.example.dpc/.Admin"))], vec![]);
-        write(&owner_file, &element("root", &[], vec![migration, owner.clone()]));
+        let owner = element(
+            "device-owner",
+            &[("component", string("com.example.dpc/.Admin"))],
+            vec![],
+        );
+        write(
+            &owner_file,
+            &element("root", &[], vec![migration, owner.clone()]),
+        );
         assert!(Policies::load(&dir).unwrap().owned());
         // An unknown tag ends the read; a component that does not unflatten
         // is no owner.
         let unknown = element("something-else", &[], vec![]);
-        write(&owner_file, &element("root", &[], vec![unknown, owner.clone()]));
+        write(
+            &owner_file,
+            &element("root", &[], vec![unknown, owner.clone()]),
+        );
         assert!(!Policies::load(&dir).unwrap().owned());
-        let unparsable = element("device-owner", &[("component", string("com.example.dpc"))], vec![]);
+        let unparsable = element(
+            "device-owner",
+            &[("component", string("com.example.dpc"))],
+            vec![],
+        );
         write(&owner_file, &element("root", &[], vec![unparsable]));
         assert!(!Policies::load(&dir).unwrap().owned());
         // `AtomicFile`'s legacy backup is read in the file's place.
-        write(&suffixed(&owner_file, ".bak"), &element("root", &[], vec![owner]));
+        write(
+            &suffixed(&owner_file, ".bak"),
+            &element("root", &[], vec![owner]),
+        );
         assert!(Policies::load(&dir).unwrap().owned());
         fs::remove_file(suffixed(&owner_file, ".bak")).unwrap();
         // `mSystemUpdatePolicy`, with or without an owner, while no
         // unknown tag ends the read before it.
-        let update = element("system-update-policy", &[("policy_type", Value::Int(1))], vec![]);
+        let update = element(
+            "system-update-policy",
+            &[("policy_type", Value::Int(1))],
+            vec![],
+        );
         write(&owner_file, &element("root", &[], vec![update.clone()]));
         assert!(Policies::load(&dir).unwrap().system_update_policy);
-        write(&owner_file, &element("root", &[], vec![element("something-else", &[], vec![]), update]));
+        write(
+            &owner_file,
+            &element(
+                "root",
+                &[],
+                vec![element("something-else", &[], vec![]), update],
+            ),
+        );
         assert!(!Policies::load(&dir).unwrap().system_update_policy);
         fs::remove_file(&owner_file).unwrap();
-        let profile = element("profile-owner", &[("component", string("com.example.dpc/.Admin"))], vec![]);
+        let profile = element(
+            "profile-owner",
+            &[("component", string("com.example.dpc/.Admin"))],
+            vec![],
+        );
         fs::create_dir_all(dir.join("system/users/10")).unwrap();
-        write(&dir.join("system/users/10").join(PROFILE_OWNER_XML), &element("root", &[], vec![profile]));
+        write(
+            &dir.join("system/users/10").join(PROFILE_OWNER_XML),
+            &element("root", &[], vec![profile]),
+        );
         assert!(Policies::load(&dir).unwrap().owned());
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -1080,32 +1235,75 @@ mod tests {
     fn user_data_and_policies_are_read_as_the_original_reads_them() {
         let dir = data("users");
         let policies = Policies::load(&dir).unwrap();
-        assert_eq!(policies.user(0), UserData { setup_complete: false, provisioning_state: STATE_USER_UNMANAGED });
+        assert_eq!(
+            policies.user(0),
+            UserData {
+                setup_complete: false,
+                provisioning_state: STATE_USER_UNMANAGED
+            }
+        );
         assert!(!policies.admins && !policies.policies);
         let root = element(
             "policies",
-            &[("setup-complete", Value::Bool(true)), ("provisioning-state", Value::Int(3))],
-            vec![element("failed-password-attempts", &[("value", Value::Int(0))], vec![])],
+            &[
+                ("setup-complete", Value::Bool(true)),
+                ("provisioning-state", Value::Int(3)),
+            ],
+            vec![element(
+                "failed-password-attempts",
+                &[("value", Value::Int(0))],
+                vec![],
+            )],
         );
         write(&dir.join("system").join(DEVICE_POLICIES_XML), &root);
         fs::create_dir_all(dir.join("system/users/10")).unwrap();
         let text = "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<policies setup-complete=\"true\" />\n";
-        fs::write(suffixed(&dir.join("system/users/10").join(DEVICE_POLICIES_XML), ".tmp"), text).unwrap();
+        fs::write(
+            suffixed(
+                &dir.join("system/users/10").join(DEVICE_POLICIES_XML),
+                ".tmp",
+            ),
+            text,
+        )
+        .unwrap();
         let policies = Policies::load(&dir).unwrap();
-        assert_eq!(policies.user(0), UserData { setup_complete: true, provisioning_state: 3 });
-        assert_eq!(policies.user(10), UserData { setup_complete: true, provisioning_state: STATE_USER_UNMANAGED });
+        assert_eq!(
+            policies.user(0),
+            UserData {
+                setup_complete: true,
+                provisioning_state: 3
+            }
+        );
+        assert_eq!(
+            policies.user(10),
+            UserData {
+                setup_complete: true,
+                provisioning_state: STATE_USER_UNMANAGED
+            }
+        );
         assert_eq!(policies.user(11), UserData::default());
         assert!(!policies.admins);
         let admin = element("admin", &[("name", string("com.example/.Admin"))], vec![]);
-        write(&dir.join("system").join(DEVICE_POLICIES_XML), &element("policies", &[], vec![admin]));
+        write(
+            &dir.join("system").join(DEVICE_POLICIES_XML),
+            &element("policies", &[], vec![admin]),
+        );
         assert!(Policies::load(&dir).unwrap().admins);
         // An empty engine keeps only its size limit.
         let engine = dir.join("system").join(DEVICE_POLICY_STATE_XML);
         let limit = element("max-policy-size-limit", &[("size", Value::Int(-1))], vec![]);
-        fs::write(&engine, aim_android_xml::abx::write_sequence(std::slice::from_ref(&limit)).unwrap()).unwrap();
+        fs::write(
+            &engine,
+            aim_android_xml::abx::write_sequence(std::slice::from_ref(&limit)).unwrap(),
+        )
+        .unwrap();
         assert!(!Policies::load(&dir).unwrap().policies);
         let entry = element("global-policy-entry", &[], vec![]);
-        fs::write(&engine, aim_android_xml::abx::write_sequence(&[entry, limit]).unwrap()).unwrap();
+        fs::write(
+            &engine,
+            aim_android_xml::abx::write_sequence(&[entry, limit]).unwrap(),
+        )
+        .unwrap();
         assert!(Policies::load(&dir).unwrap().policies);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -1116,7 +1314,10 @@ mod tests {
         assert!(unflattens("/C"));
         assert!(!unflattens("p/"));
         assert!(!unflattens("p"));
-        let c = ComponentName { package: "p".into(), class: "p.C".into() };
+        let c = ComponentName {
+            package: "p".into(),
+            class: "p.C".into(),
+        };
         assert_eq!(component_string(&c), "ComponentInfo{p/p.C}");
     }
 
@@ -1124,10 +1325,16 @@ mod tests {
     /// active for apps of M and before.
     #[test]
     fn encryption_status_follows_the_crypto_type() {
-        assert_eq!(encryption_status(Some("file"), 34), ENCRYPTION_STATUS_ACTIVE_PER_USER);
+        assert_eq!(
+            encryption_status(Some("file"), 34),
+            ENCRYPTION_STATUS_ACTIVE_PER_USER
+        );
         assert_eq!(encryption_status(Some("file"), M), ENCRYPTION_STATUS_ACTIVE);
         assert_eq!(encryption_status(None, 34), ENCRYPTION_STATUS_UNSUPPORTED);
-        assert_eq!(encryption_status(Some("block"), 34), ENCRYPTION_STATUS_UNSUPPORTED);
+        assert_eq!(
+            encryption_status(Some("block"), 34),
+            ENCRYPTION_STATUS_UNSUPPORTED
+        );
     }
 
     const APP: i32 = 10100;
@@ -1145,7 +1352,13 @@ mod tests {
 
     impl Default for Fake {
         fn default() -> Self {
-            Fake { feature: true, policies: Policies::default(), permissions: vec![], settings: vec![], flags: true }
+            Fake {
+                feature: true,
+                policies: Policies::default(),
+                permissions: vec![],
+                settings: vec![],
+                flags: true,
+            }
         }
     }
 
@@ -1175,7 +1388,11 @@ mod tests {
         }
 
         fn setting(&self, _table: Table, name: &str) -> Result<Option<String>, Exception> {
-            Ok(self.settings.iter().find(|(n, _)| *n == name).map(|(_, v)| v.to_string()))
+            Ok(self
+                .settings
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| v.to_string()))
         }
 
         fn property(&self, name: &str) -> Option<String> {
@@ -1207,13 +1424,20 @@ mod tests {
     #[test]
     fn the_system_update_policy_is_none_unless_persisted() {
         let mut device = Fake::default();
-        let r = call(&device, APP, dp::GET_SYSTEM_UPDATE_POLICY, |p| dp::GetSystemUpdatePolicy {}.write(p));
+        let r = call(&device, APP, dp::GET_SYSTEM_UPDATE_POLICY, |p| {
+            dp::GetSystemUpdatePolicy {}.write(p)
+        });
         let mut reader = r.reader();
         assert!(reader.read_exception().unwrap().is_ok());
         assert_eq!(reader.read_i32().unwrap(), 0);
         device.policies.system_update_policy = true;
-        let r = call(&device, APP, dp::GET_SYSTEM_UPDATE_POLICY, |p| dp::GetSystemUpdatePolicy {}.write(p));
-        assert_eq!(exception(&r).code, aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION);
+        let r = call(&device, APP, dp::GET_SYSTEM_UPDATE_POLICY, |p| {
+            dp::GetSystemUpdatePolicy {}.write(p)
+        });
+        assert_eq!(
+            exception(&r).code,
+            aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION
+        );
     }
 
     /// An app's reads of its own user on a device without owners, admins
@@ -1223,71 +1447,151 @@ mod tests {
     fn an_unmanaged_device_answers_the_defaults() {
         let device = Fake::default();
         let r = call(&device, APP, dp::GET_PASSWORD_QUALITY, |p| {
-            dp::GetPasswordQuality::<Component> { who: None, user_handle: 0, parent: false }.write(p)
+            dp::GetPasswordQuality::<Component> {
+                who: None,
+                user_handle: 0,
+                parent: false,
+            }
+            .write(p)
         });
-        assert_eq!(dp::read_get_password_quality_reply(&mut r.reader()).unwrap(), Ok(PASSWORD_QUALITY_UNSPECIFIED));
+        assert_eq!(
+            dp::read_get_password_quality_reply(&mut r.reader()).unwrap(),
+            Ok(PASSWORD_QUALITY_UNSPECIFIED)
+        );
         let r = call(&device, APP, dp::GET_CAMERA_DISABLED, |p| {
             let package = Some("com.example".into());
-            dp::GetCameraDisabled::<Component> { who: None, caller_package_name: package, user_handle: 0, parent: false }
-                .write(p)
+            dp::GetCameraDisabled::<Component> {
+                who: None,
+                caller_package_name: package,
+                user_handle: 0,
+                parent: false,
+            }
+            .write(p)
         });
-        assert_eq!(dp::read_get_camera_disabled_reply(&mut r.reader()).unwrap(), Ok(false));
+        assert_eq!(
+            dp::read_get_camera_disabled_reply(&mut r.reader()).unwrap(),
+            Ok(false)
+        );
         let r = call(&device, APP, dp::GET_KEYGUARD_DISABLED_FEATURES, |p| {
-            dp::GetKeyguardDisabledFeatures::<Component> { who: None, user_handle: 0, parent: false }.write(p)
+            dp::GetKeyguardDisabledFeatures::<Component> {
+                who: None,
+                user_handle: 0,
+                parent: false,
+            }
+            .write(p)
         });
-        assert_eq!(dp::read_get_keyguard_disabled_features_reply(&mut r.reader()).unwrap(), Ok(0));
-        let r = call(&device, APP, dp::GET_ACTIVE_ADMINS, |p| dp::GetActiveAdmins { user_handle: 0 }.write(p));
-        let admins = dp::read_get_active_admins_reply::<ComponentName>(&mut r.reader()).unwrap().unwrap();
+        assert_eq!(
+            dp::read_get_keyguard_disabled_features_reply(&mut r.reader()).unwrap(),
+            Ok(0)
+        );
+        let r = call(&device, APP, dp::GET_ACTIVE_ADMINS, |p| {
+            dp::GetActiveAdmins { user_handle: 0 }.write(p)
+        });
+        let admins = dp::read_get_active_admins_reply::<ComponentName>(&mut r.reader())
+            .unwrap()
+            .unwrap();
         assert!(admins.is_none());
         let r = call(&device, APP, dp::IS_ADMIN_ACTIVE, |p| {
             let who = Some(Component("com.example", "com.example.Admin"));
-            dp::IsAdminActive::<Component> { policy_receiver: who, user_handle: 0 }.write(p)
+            dp::IsAdminActive::<Component> {
+                policy_receiver: who,
+                user_handle: 0,
+            }
+            .write(p)
         });
-        assert_eq!(dp::read_is_admin_active_reply(&mut r.reader()).unwrap(), Ok(false));
+        assert_eq!(
+            dp::read_is_admin_active_reply(&mut r.reader()).unwrap(),
+            Ok(false)
+        );
         let r = call(&device, APP, dp::GET_DEVICE_OWNER_COMPONENT, |p| {
-            dp::GetDeviceOwnerComponent { calling_user_only: true }.write(p)
+            dp::GetDeviceOwnerComponent {
+                calling_user_only: true,
+            }
+            .write(p)
         });
-        let owner = dp::read_get_device_owner_component_reply::<ComponentName>(&mut r.reader()).unwrap().unwrap();
+        let owner = dp::read_get_device_owner_component_reply::<ComponentName>(&mut r.reader())
+            .unwrap()
+            .unwrap();
         assert!(owner.is_none());
         let r = call(&device, APP, dp::GET_PROFILE_OWNER_AS_USER, |p| {
             dp::GetProfileOwnerAsUser { user_handle: 0 }.write(p)
         });
-        let owner = dp::read_get_profile_owner_as_user_reply::<ComponentName>(&mut r.reader()).unwrap().unwrap();
+        let owner = dp::read_get_profile_owner_as_user_reply::<ComponentName>(&mut r.reader())
+            .unwrap()
+            .unwrap();
         assert!(owner.is_none());
         let r = call(&device, APP, dp::GET_STORAGE_ENCRYPTION_STATUS, |p| {
-            dp::GetStorageEncryptionStatus { caller_package: Some("com.example".into()), user_handle: 0 }.write(p)
+            dp::GetStorageEncryptionStatus {
+                caller_package: Some("com.example".into()),
+                user_handle: 0,
+            }
+            .write(p)
         });
         let status = dp::read_get_storage_encryption_status_reply(&mut r.reader()).unwrap();
         assert_eq!(status, Ok(ENCRYPTION_STATUS_ACTIVE_PER_USER));
         let r = call(&device, APP, dp::GET_PERMITTED_INPUT_METHODS, |p| {
             let package = Some("com.example".into());
-            dp::GetPermittedInputMethods::<Component> { admin: None, caller_package_name: package, parent: false }.write(p)
+            dp::GetPermittedInputMethods::<Component> {
+                admin: None,
+                caller_package_name: package,
+                parent: false,
+            }
+            .write(p)
         });
-        assert_eq!(dp::read_get_permitted_input_methods_reply(&mut r.reader()).unwrap(), Ok(None));
-        let r = call(&device, APP, dp::IS_ORGANIZATION_OWNED_DEVICE_WITH_MANAGED_PROFILE, |p| {
-            dp::IsOrganizationOwnedDeviceWithManagedProfile {}.write(p)
-        });
-        let owned = dp::read_is_organization_owned_device_with_managed_profile_reply(&mut r.reader()).unwrap();
+        assert_eq!(
+            dp::read_get_permitted_input_methods_reply(&mut r.reader()).unwrap(),
+            Ok(None)
+        );
+        let r = call(
+            &device,
+            APP,
+            dp::IS_ORGANIZATION_OWNED_DEVICE_WITH_MANAGED_PROFILE,
+            |p| dp::IsOrganizationOwnedDeviceWithManagedProfile {}.write(p),
+        );
+        let owned =
+            dp::read_is_organization_owned_device_with_managed_profile_reply(&mut r.reader())
+                .unwrap();
         assert_eq!(owned, Ok(false));
-        let r = call(&device, APP, dp::GET_CROSS_PROFILE_CALLER_ID_DISABLED_FOR_USER, |p| {
-            dp::GetCrossProfileCallerIdDisabledForUser { user_id: 0 }.write(p)
-        });
-        let disabled = dp::read_get_cross_profile_caller_id_disabled_for_user_reply(&mut r.reader()).unwrap();
+        let r = call(
+            &device,
+            APP,
+            dp::GET_CROSS_PROFILE_CALLER_ID_DISABLED_FOR_USER,
+            |p| dp::GetCrossProfileCallerIdDisabledForUser { user_id: 0 }.write(p),
+        );
+        let disabled =
+            dp::read_get_cross_profile_caller_id_disabled_for_user_reply(&mut r.reader()).unwrap();
         assert_eq!(disabled, Ok(false));
-        let r = call(&device, APP, dp::GET_AUTO_TIME_REQUIRED, |p| dp::GetAutoTimeRequired {}.write(p));
-        assert_eq!(dp::read_get_auto_time_required_reply(&mut r.reader()).unwrap(), Ok(false));
+        let r = call(&device, APP, dp::GET_AUTO_TIME_REQUIRED, |p| {
+            dp::GetAutoTimeRequired {}.write(p)
+        });
+        assert_eq!(
+            dp::read_get_auto_time_required_reply(&mut r.reader()).unwrap(),
+            Ok(false)
+        );
     }
 
     /// Without `FEATURE_DEVICE_ADMIN` the original answers before its
     /// checks: an empty list of admins, not none.
     #[test]
     fn without_the_feature_the_defaults_come_unchecked() {
-        let device = Fake { feature: false, ..Default::default() };
-        let r = call(&device, APP, dp::GET_ACTIVE_ADMINS, |p| dp::GetActiveAdmins { user_handle: 10 }.write(p));
-        let admins = dp::read_get_active_admins_reply::<ComponentName>(&mut r.reader()).unwrap().unwrap();
+        let device = Fake {
+            feature: false,
+            ..Default::default()
+        };
+        let r = call(&device, APP, dp::GET_ACTIVE_ADMINS, |p| {
+            dp::GetActiveAdmins { user_handle: 10 }.write(p)
+        });
+        let admins = dp::read_get_active_admins_reply::<ComponentName>(&mut r.reader())
+            .unwrap()
+            .unwrap();
         assert_eq!(admins.map(|a| a.len()), Some(0));
-        let r = call(&device, APP, dp::GET_DEVICE_OWNER_USER_ID, |p| dp::GetDeviceOwnerUserId {}.write(p));
-        assert_eq!(dp::read_get_device_owner_user_id_reply(&mut r.reader()).unwrap(), Ok(USER_NULL));
+        let r = call(&device, APP, dp::GET_DEVICE_OWNER_USER_ID, |p| {
+            dp::GetDeviceOwnerUserId {}.write(p)
+        });
+        assert_eq!(
+            dp::read_get_device_owner_user_id_reply(&mut r.reader()).unwrap(),
+            Ok(USER_NULL)
+        );
     }
 
     /// The checks: another user's state takes INTERACT_ACROSS_USERS_FULL,
@@ -1299,46 +1603,120 @@ mod tests {
     fn the_original_checks_are_made() {
         let mut device = Fake::default();
         let other_user = |p: &mut Parcel| dp::GetActiveAdmins { user_handle: 10 }.write(p);
-        assert_eq!(exception(&call(&device, APP, dp::GET_ACTIVE_ADMINS, other_user)), not_authorized());
-        let negative = |p: &mut Parcel| dp::PackageHasActiveAdmins { package_name: None, user_handle: -1 }.write(p);
+        assert_eq!(
+            exception(&call(&device, APP, dp::GET_ACTIVE_ADMINS, other_user)),
+            not_authorized()
+        );
+        let negative = |p: &mut Parcel| {
+            dp::PackageHasActiveAdmins {
+                package_name: None,
+                user_handle: -1,
+            }
+            .write(p)
+        };
         let r = call(&device, APP, dp::PACKAGE_HAS_ACTIVE_ADMINS, negative);
         assert_eq!(exception(&r), Exception::illegal_argument("Invalid userId"));
         let has_owner = |p: &mut Parcel| dp::HasDeviceOwner {}.write(p);
-        assert_eq!(exception(&call(&device, APP, dp::HAS_DEVICE_OWNER, has_owner)), not_authorized());
+        assert_eq!(
+            exception(&call(&device, APP, dp::HAS_DEVICE_OWNER, has_owner)),
+            not_authorized()
+        );
         let r = call(&device, SYSTEM_UID, dp::HAS_DEVICE_OWNER, has_owner);
-        assert_eq!(dp::read_has_device_owner_reply(&mut r.reader()).unwrap(), Ok(false));
-        let any_user = |p: &mut Parcel| dp::GetDeviceOwnerComponent { calling_user_only: false }.write(p);
-        assert_eq!(exception(&call(&device, APP, dp::GET_DEVICE_OWNER_COMPONENT, any_user)), not_authorized());
-        device.permissions.push((APP, MANAGE_PROFILE_AND_DEVICE_OWNERS));
+        assert_eq!(
+            dp::read_has_device_owner_reply(&mut r.reader()).unwrap(),
+            Ok(false)
+        );
+        let any_user = |p: &mut Parcel| {
+            dp::GetDeviceOwnerComponent {
+                calling_user_only: false,
+            }
+            .write(p)
+        };
+        assert_eq!(
+            exception(&call(
+                &device,
+                APP,
+                dp::GET_DEVICE_OWNER_COMPONENT,
+                any_user
+            )),
+            not_authorized()
+        );
+        device
+            .permissions
+            .push((APP, MANAGE_PROFILE_AND_DEVICE_OWNERS));
         let r = call(&device, APP, dp::GET_DEVICE_OWNER_COMPONENT, any_user);
-        assert!(dp::read_get_device_owner_component_reply::<ComponentName>(&mut r.reader()).unwrap().unwrap().is_none());
+        assert!(
+            dp::read_get_device_owner_component_reply::<ComponentName>(&mut r.reader())
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
         device.permissions.push((APP, INTERACT_ACROSS_USERS_FULL));
         let r = call(&device, APP, dp::GET_ACTIVE_ADMINS, other_user);
-        assert!(dp::read_get_active_admins_reply::<ComponentName>(&mut r.reader()).unwrap().unwrap().is_none());
+        assert!(
+            dp::read_get_active_admins_reply::<ComponentName>(&mut r.reader())
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
         let not_its_package = |p: &mut Parcel| {
-            dp::GetStorageEncryptionStatus { caller_package: Some("com.other".into()), user_handle: 0 }.write(p)
+            dp::GetStorageEncryptionStatus {
+                caller_package: Some("com.other".into()),
+                user_handle: 0,
+            }
+            .write(p)
         };
-        let r = call(&device, APP, dp::GET_STORAGE_ENCRYPTION_STATUS, not_its_package);
-        assert_eq!(exception(&r), Exception::security("Caller with uid 10100 is not com.other"));
+        let r = call(
+            &device,
+            APP,
+            dp::GET_STORAGE_ENCRYPTION_STATUS,
+            not_its_package,
+        );
+        assert_eq!(
+            exception(&r),
+            Exception::security("Caller with uid 10100 is not com.other")
+        );
         let admin = |p: &mut Parcel| {
             let who = Some(Component("com.example", "com.example.Admin"));
-            dp::GetScreenCaptureDisabled::<Component> { who, user_handle: 0, parent: false }.write(p)
+            dp::GetScreenCaptureDisabled::<Component> {
+                who,
+                user_handle: 0,
+                parent: false,
+            }
+            .write(p)
         };
         let r = call(&device, APP, dp::GET_SCREEN_CAPTURE_DISABLED, admin);
         let refused = "Admin ComponentInfo{com.example/com.example.Admin} does not exist or is not owned by uid 10100";
         assert_eq!(exception(&r), Exception::security(refused));
         let no_admin = |p: &mut Parcel| dp::IsManagedProfile::<Component> { admin: None }.write(p);
         let r = call(&device, APP, dp::IS_MANAGED_PROFILE, no_admin);
-        assert_eq!(exception(&r), Exception::new(EX_NULL_POINTER, "ComponentName is null"));
+        assert_eq!(
+            exception(&r),
+            Exception::new(EX_NULL_POINTER, "ComponentName is null")
+        );
         let parent = |p: &mut Parcel| {
-            dp::GetScreenCaptureDisabled::<Component> { who: None, user_handle: 0, parent: true }.write(p)
+            dp::GetScreenCaptureDisabled::<Component> {
+                who: None,
+                user_handle: 0,
+                parent: true,
+            }
+            .write(p)
         };
-        assert_eq!(exception(&call(&device, APP, dp::GET_SCREEN_CAPTURE_DISABLED, parent)), not_authorized());
+        assert_eq!(
+            exception(&call(&device, APP, dp::GET_SCREEN_CAPTURE_DISABLED, parent)),
+            not_authorized()
+        );
         let owner_type = |p: &mut Parcel| {
-            dp::GetDeviceOwnerType::<Component> { admin: Some(Component("com.example", "com.example.Admin")) }.write(p)
+            dp::GetDeviceOwnerType::<Component> {
+                admin: Some(Component("com.example", "com.example.Admin")),
+            }
+            .write(p)
         };
         let r = call(&device, APP, dp::GET_DEVICE_OWNER_TYPE, owner_type);
-        assert_eq!(exception(&r), Exception::new(EX_ILLEGAL_STATE, "there is no device owner"));
+        assert_eq!(
+            exception(&r),
+            Exception::new(EX_ILLEGAL_STATE, "there is no device owner")
+        );
     }
 
     /// The camera: the caller's own user, the camera server, or
@@ -1351,94 +1729,218 @@ mod tests {
         let ask = |package: Option<&str>, user| {
             let package = package.map(str::to_string);
             move |p: &mut Parcel| {
-                dp::GetCameraDisabled::<Component> { who: None, caller_package_name: package, user_handle: user, parent: false }
-                    .write(p)
+                dp::GetCameraDisabled::<Component> {
+                    who: None,
+                    caller_package_name: package,
+                    user_handle: user,
+                    parent: false,
+                }
+                .write(p)
             }
         };
-        let r = call(&device, CAMERASERVER_UID, dp::GET_CAMERA_DISABLED, ask(None, 10));
-        assert_eq!(dp::read_get_camera_disabled_reply(&mut r.reader()).unwrap(), Ok(false));
+        let r = call(
+            &device,
+            CAMERASERVER_UID,
+            dp::GET_CAMERA_DISABLED,
+            ask(None, 10),
+        );
+        assert_eq!(
+            dp::read_get_camera_disabled_reply(&mut r.reader()).unwrap(),
+            Ok(false)
+        );
         let r = call(&device, APP, dp::GET_CAMERA_DISABLED, ask(None, 10));
-        assert_eq!(exception(&r), Exception::new(EX_NULL_POINTER, "callerPackageName is null"));
-        let r = call(&device, APP, dp::GET_CAMERA_DISABLED, ask(Some("com.example"), 10));
+        assert_eq!(
+            exception(&r),
+            Exception::new(EX_NULL_POINTER, "callerPackageName is null")
+        );
+        let r = call(
+            &device,
+            APP,
+            dp::GET_CAMERA_DISABLED,
+            ask(Some("com.example"), 10),
+        );
         assert_eq!(exception(&r), not_authorized());
         device.permissions.push((APP, MANAGE_DEVICE_POLICY_CAMERA));
-        let r = call(&device, APP, dp::GET_CAMERA_DISABLED, ask(Some("com.example"), 10));
+        let r = call(
+            &device,
+            APP,
+            dp::GET_CAMERA_DISABLED,
+            ask(Some("com.example"), 10),
+        );
         assert_eq!(exception(&r), not_authorized());
-        device.permissions.push((APP, MANAGE_DEVICE_POLICY_ACROSS_USERS));
-        let r = call(&device, APP, dp::GET_CAMERA_DISABLED, ask(Some("com.example"), 10));
-        assert_eq!(dp::read_get_camera_disabled_reply(&mut r.reader()).unwrap(), Ok(false));
+        device
+            .permissions
+            .push((APP, MANAGE_DEVICE_POLICY_ACROSS_USERS));
+        let r = call(
+            &device,
+            APP,
+            dp::GET_CAMERA_DISABLED,
+            ask(Some("com.example"), 10),
+        );
+        assert_eq!(
+            dp::read_get_camera_disabled_reply(&mut r.reader()).unwrap(),
+            Ok(false)
+        );
         // Another app is not the package.
-        let r = call(&device, OTHER_APP, dp::GET_CAMERA_DISABLED, ask(Some("com.example"), 0));
-        assert_eq!(exception(&r), Exception::security("Caller with uid 10101 is not com.example"));
+        let r = call(
+            &device,
+            OTHER_APP,
+            dp::GET_CAMERA_DISABLED,
+            ask(Some("com.example"), 0),
+        );
+        assert_eq!(
+            exception(&r),
+            Exception::security("Caller with uid 10101 is not com.example")
+        );
     }
 
     /// Auto time with the coexistence flag: SET_TIME, then the global
     /// setting; without it, only an owner's admin asks.
     #[test]
     fn auto_time_reads_the_setting_for_set_time() {
-        let mut device = Fake { settings: vec![("auto_time", "1"), ("auto_time_zone", "x")], ..Default::default() };
-        let ask = |p: &mut Parcel| {
-            dp::GetAutoTimeEnabled::<Component> { who: None, caller_package_name: Some("com.example".into()) }.write(p)
+        let mut device = Fake {
+            settings: vec![("auto_time", "1"), ("auto_time_zone", "x")],
+            ..Default::default()
         };
-        assert_eq!(exception(&call(&device, APP, dp::GET_AUTO_TIME_ENABLED, ask)), not_authorized());
-        device.permissions.extend([(APP, SET_TIME), (APP, SET_TIME_ZONE)]);
+        let ask = |p: &mut Parcel| {
+            dp::GetAutoTimeEnabled::<Component> {
+                who: None,
+                caller_package_name: Some("com.example".into()),
+            }
+            .write(p)
+        };
+        assert_eq!(
+            exception(&call(&device, APP, dp::GET_AUTO_TIME_ENABLED, ask)),
+            not_authorized()
+        );
+        device
+            .permissions
+            .extend([(APP, SET_TIME), (APP, SET_TIME_ZONE)]);
         let r = call(&device, APP, dp::GET_AUTO_TIME_ENABLED, ask);
-        assert_eq!(dp::read_get_auto_time_enabled_reply(&mut r.reader()).unwrap(), Ok(true));
+        assert_eq!(
+            dp::read_get_auto_time_enabled_reply(&mut r.reader()).unwrap(),
+            Ok(true)
+        );
         let zone = |p: &mut Parcel| {
-            dp::GetAutoTimeZoneEnabled::<Component> { who: None, caller_package_name: Some("com.example".into()) }.write(p)
+            dp::GetAutoTimeZoneEnabled::<Component> {
+                who: None,
+                caller_package_name: Some("com.example".into()),
+            }
+            .write(p)
         };
         let r = call(&device, APP, dp::GET_AUTO_TIME_ZONE_ENABLED, zone);
-        assert_eq!(dp::read_get_auto_time_zone_enabled_reply(&mut r.reader()).unwrap(), Ok(false));
+        assert_eq!(
+            dp::read_get_auto_time_zone_enabled_reply(&mut r.reader()).unwrap(),
+            Ok(false)
+        );
         device.flags = false;
         let r = call(&device, APP, dp::GET_AUTO_TIME_ENABLED, ask);
-        assert_eq!(exception(&r), Exception::new(EX_NULL_POINTER, "ComponentName is null"));
+        assert_eq!(
+            exception(&r),
+            Exception::new(EX_NULL_POINTER, "ComponentName is null")
+        );
     }
 
     /// Provisioning: the persisted setup, or the setting the original takes
     /// it from at boot; the user's provisioning state.
     #[test]
     fn provisioning_is_the_users_data() {
-        let mut device = Fake { permissions: vec![(APP, MANAGE_USERS)], ..Default::default() };
+        let mut device = Fake {
+            permissions: vec![(APP, MANAGE_USERS)],
+            ..Default::default()
+        };
         let provisioned = |p: &mut Parcel| dp::IsDeviceProvisioned {}.write(p);
         let r = call(&device, APP, dp::IS_DEVICE_PROVISIONED, provisioned);
-        assert_eq!(dp::read_is_device_provisioned_reply(&mut r.reader()).unwrap(), Ok(false));
+        assert_eq!(
+            dp::read_is_device_provisioned_reply(&mut r.reader()).unwrap(),
+            Ok(false)
+        );
         device.settings.push(("user_setup_complete", "1"));
         let r = call(&device, APP, dp::IS_DEVICE_PROVISIONED, provisioned);
-        assert_eq!(dp::read_is_device_provisioned_reply(&mut r.reader()).unwrap(), Ok(true));
+        assert_eq!(
+            dp::read_is_device_provisioned_reply(&mut r.reader()).unwrap(),
+            Ok(true)
+        );
         device.settings.clear();
-        device.policies.users.insert(0, UserData { setup_complete: true, provisioning_state: 3 });
+        device.policies.users.insert(
+            0,
+            UserData {
+                setup_complete: true,
+                provisioning_state: 3,
+            },
+        );
         let r = call(&device, APP, dp::IS_DEVICE_PROVISIONED, provisioned);
-        assert_eq!(dp::read_is_device_provisioned_reply(&mut r.reader()).unwrap(), Ok(true));
+        assert_eq!(
+            dp::read_is_device_provisioned_reply(&mut r.reader()).unwrap(),
+            Ok(true)
+        );
         let state = |p: &mut Parcel| dp::GetUserProvisioningState { user_handle: 0 }.write(p);
         let r = call(&device, APP, dp::GET_USER_PROVISIONING_STATE, state);
-        assert_eq!(dp::read_get_user_provisioning_state_reply(&mut r.reader()).unwrap(), Ok(3));
-        assert_eq!(exception(&call(&device, APP + 1, dp::IS_DEVICE_PROVISIONED, provisioned)), not_authorized());
+        assert_eq!(
+            dp::read_get_user_provisioning_state_reply(&mut r.reader()).unwrap(),
+            Ok(3)
+        );
+        assert_eq!(
+            exception(&call(
+                &device,
+                APP + 1,
+                dp::IS_DEVICE_PROVISIONED,
+                provisioned
+            )),
+            not_authorized()
+        );
     }
 
     /// A device with an owner, admins or policies is not served, and
     /// neither is a method left out.
     #[test]
     fn a_managed_device_is_not_implemented() {
-        let unimplemented = "a device with a device or profile owner, active admins or policies (#1521)";
+        let unimplemented =
+            "a device with a device or profile owner, active admins or policies (#1521)";
         for policies in [
-            Policies { owned: true, ..Default::default() },
-            Policies { admins: true, ..Default::default() },
-            Policies { policies: true, ..Default::default() },
+            Policies {
+                owned: true,
+                ..Default::default()
+            },
+            Policies {
+                admins: true,
+                ..Default::default()
+            },
+            Policies {
+                policies: true,
+                ..Default::default()
+            },
         ] {
-            let device = Fake { policies, ..Default::default() };
-            let r = call(&device, SYSTEM_UID, dp::HAS_DEVICE_OWNER, |p| dp::HasDeviceOwner {}.write(p));
+            let device = Fake {
+                policies,
+                ..Default::default()
+            };
+            let r = call(&device, SYSTEM_UID, dp::HAS_DEVICE_OWNER, |p| {
+                dp::HasDeviceOwner {}.write(p)
+            });
             assert_eq!(exception(&r).message, unimplemented);
             let r = call(&device, APP, dp::GET_CAMERA_DISABLED, |p| {
                 let package = Some("com.example".into());
-                dp::GetCameraDisabled::<Component> { who: None, caller_package_name: package, user_handle: 0, parent: false }
-                    .write(p)
+                dp::GetCameraDisabled::<Component> {
+                    who: None,
+                    caller_package_name: package,
+                    user_handle: 0,
+                    parent: false,
+                }
+                .write(p)
             });
             assert_eq!(exception(&r).message, unimplemented);
         }
         let device = Fake::default();
         let mut data = Parcel::new();
         data.write_interface_token(dp::DESCRIPTOR);
-        let r = answer(&device, APP, dp::GET_PASSWORD_MINIMUM_LENGTH, &mut data.reader()).unwrap();
+        let r = answer(
+            &device,
+            APP,
+            dp::GET_PASSWORD_MINIMUM_LENGTH,
+            &mut data.reader(),
+        )
+        .unwrap();
         assert_eq!(exception(&r).message, "getPasswordMinimumLength (#1521)");
     }
 }

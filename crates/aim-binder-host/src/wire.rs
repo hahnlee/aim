@@ -25,10 +25,10 @@ pub const REJECT_DELIVERY: i32 = 0x6264_000b;
 pub const INTERRUPT: i32 = 0x6264_0006;
 pub const FILES: i32 = 0x6264_0007;
 pub const FILE_CLASS: i32 = 0x6264_0009;
-pub const SOCKET_SCM_CHANNEL:i32=0x6264_0011;
-pub const CREATE_REGULAR_SCM:i32=0x6264_000c;
-pub const RESOLVE_REGULAR_SCM:i32=0x6264_000d;
-pub const DRAIN_REGULAR_SCM:i32=0x6264_000e;
+pub const SOCKET_SCM_CHANNEL: i32 = 0x6264_0011;
+pub const CREATE_REGULAR_SCM: i32 = 0x6264_000c;
+pub const RESOLVE_REGULAR_SCM: i32 = 0x6264_000d;
+pub const DRAIN_REGULAR_SCM: i32 = 0x6264_000e;
 pub const CREATE_PATH: i32 = 0x6264_000a;
 pub const REPLY: i32 = 0x6264_0100;
 
@@ -44,42 +44,94 @@ pub struct RegularMetadata {
 }
 impl RegularMetadata {
     pub(crate) fn encode(&self, writer: &mut Writer) {
-        writer.u64(self.flags).u32(self.uid).u32(self.gid).bytes(&self.identity).u32(self.writer as u32);
+        writer
+            .u64(self.flags)
+            .u32(self.uid)
+            .u32(self.gid)
+            .bytes(&self.identity)
+            .u32(self.writer as u32);
     }
     pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, Errno> {
         let flags = reader.u64()?;
         let uid = reader.u32()?;
         let gid = reader.u32()?;
         let identity = reader.bytes()?.try_into().map_err(|_| EPROTO)?;
-        let writer = match reader.u32()? { 0 => false, 1 => true, _ => return Err(EPROTO) };
-        Ok(Self { flags, uid, gid, identity, writer })
+        let writer = match reader.u32()? {
+            0 => false,
+            1 => true,
+            _ => return Err(EPROTO),
+        };
+        Ok(Self {
+            flags,
+            uid,
+            gid,
+            identity,
+            writer,
+        })
     }
 }
 fn valid_class(class: u32) -> bool {
-    matches!(class, 0 | crate::proxy_file::CLASS | crate::path_file::CLASS | crate::regular_file::CLASS | crate::socket_scm::CLASS | crate::pty_file::CLASS)
+    matches!(
+        class,
+        0 | crate::proxy_file::CLASS
+            | crate::path_file::CLASS
+            | crate::regular_file::CLASS
+            | crate::socket_scm::CLASS
+            | crate::pty_file::CLASS
+    )
 }
-fn validate_metadata(classes: &[u32], regular: &[Option<RegularMetadata>], sockets: &[Option<aim_storage::socket_inode::Receipt>], count: usize) -> Result<(), Errno> {
-    if classes.len() != count || regular.len() != count || sockets.len() != count { return Err(EPROTO); }
+fn validate_metadata(
+    classes: &[u32],
+    regular: &[Option<RegularMetadata>],
+    sockets: &[Option<aim_storage::socket_inode::Receipt>],
+    count: usize,
+) -> Result<(), Errno> {
+    if classes.len() != count || regular.len() != count || sockets.len() != count {
+        return Err(EPROTO);
+    }
     for ((class, regular), socket) in classes.iter().zip(regular).zip(sockets) {
-        if !valid_class(*class) || (*class == crate::regular_file::CLASS) != regular.is_some() || (*class == crate::socket_scm::CLASS) != socket.is_some() { return Err(EPROTO); }
-        if regular.as_ref().is_some_and(|metadata| matches!(metadata.flags & 3, 1 | 2) != metadata.writer) { return Err(EPROTO); }
+        if !valid_class(*class)
+            || (*class == crate::regular_file::CLASS) != regular.is_some()
+            || (*class == crate::socket_scm::CLASS) != socket.is_some()
+        {
+            return Err(EPROTO);
+        }
+        if regular
+            .as_ref()
+            .is_some_and(|metadata| matches!(metadata.flags & 3, 1 | 2) != metadata.writer)
+        {
+            return Err(EPROTO);
+        }
     }
     Ok(())
 }
 fn encode_regular(writer: &mut Writer, class: u32, regular: Option<&RegularMetadata>) {
     if class == crate::regular_file::CLASS {
         // All production CLASS3 producers provide this sealed receipt.
-        if let Some(regular) = regular { regular.encode(writer); }
+        if let Some(regular) = regular {
+            regular.encode(writer);
+        }
     }
 }
 fn decode_regular(reader: &mut Reader<'_>, class: u32) -> Result<Option<RegularMetadata>, Errno> {
-    if class == crate::regular_file::CLASS { RegularMetadata::decode(reader).map(Some) } else { Ok(None) }
+    if class == crate::regular_file::CLASS {
+        RegularMetadata::decode(reader).map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
-fn decode_socket(reader:&mut Reader<'_>,class:u32)->Result<Option<aim_storage::socket_inode::Receipt>,Errno>{
-    if class==crate::socket_scm::CLASS{
-        aim_storage::socket_inode::Receipt::from_bytes(reader.bytes()?).map(Some).map_err(|_|EPROTO)
-    }else{Ok(None)}
+fn decode_socket(
+    reader: &mut Reader<'_>,
+    class: u32,
+) -> Result<Option<aim_storage::socket_inode::Receipt>, Errno> {
+    if class == crate::socket_scm::CLASS {
+        aim_storage::socket_inode::Receipt::from_bytes(reader.bytes()?)
+            .map(Some)
+            .map_err(|_| EPROTO)
+    } else {
+        Ok(None)
+    }
 }
 
 /// A file whose pages the daemon's process shares as a memory object
@@ -131,7 +183,9 @@ impl<'a> Reader<'a> {
     pub fn new(b: &'a [u8]) -> Self {
         Self(b)
     }
-    pub fn remaining(&self)->usize{self.0.len()}
+    pub fn remaining(&self) -> usize {
+        self.0.len()
+    }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], Errno> {
         if self.0.len() < n {
@@ -184,7 +238,14 @@ pub struct Ioctl {
 }
 
 impl Ioctl {
-    pub fn validate(&self) -> Result<(), Errno> { validate_metadata(&self.file_classes, &self.regular, &self.sockets, self.fds.len()) }
+    pub fn validate(&self) -> Result<(), Errno> {
+        validate_metadata(
+            &self.file_classes,
+            &self.regular,
+            &self.sockets,
+            self.fds.len(),
+        )
+    }
     pub fn encode(&self) -> Vec<u8> {
         let segments: usize = self.segments.iter().map(|(_, b)| 12 + b.len()).sum();
         let fds = 4 * (self.fds.len() + self.reserved.len());
@@ -198,8 +259,14 @@ impl Ioctl {
         for (index, fd) in self.fds.iter().enumerate() {
             w.u32(*fd)
                 .u32(self.file_classes.get(index).copied().unwrap_or(0));
-            encode_regular(&mut w, self.file_classes.get(index).copied().unwrap_or(0), self.regular.get(index).and_then(Option::as_ref));
-            if let Some(receipt)=self.sockets.get(index).copied().flatten(){w.bytes(&receipt.to_bytes());}
+            encode_regular(
+                &mut w,
+                self.file_classes.get(index).copied().unwrap_or(0),
+                self.regular.get(index).and_then(Option::as_ref),
+            );
+            if let Some(receipt) = self.sockets.get(index).copied().flatten() {
+                w.bytes(&receipt.to_bytes());
+            }
         }
         w.u32(self.reserved.len() as u32);
         for fd in &self.reserved {
@@ -230,14 +297,20 @@ impl Ioctl {
             }
             io.file_classes.push(class);
             io.regular.push(decode_regular(&mut r, class)?);
-            io.sockets.push(decode_socket(&mut r,class)?);
+            io.sockets.push(decode_socket(&mut r, class)?);
         }
         for _ in 0..r.u32()? {
             io.reserved.push(r.u32()?);
         }
-        io.grow = match r.u32()? { 0 => false, 1 => true, _ => return Err(EPROTO) };
+        io.grow = match r.u32()? {
+            0 => false,
+            1 => true,
+            _ => return Err(EPROTO),
+        };
         io.validate()?;
-        if r.remaining()!=0{return Err(EPROTO);}
+        if r.remaining() != 0 {
+            return Err(EPROTO);
+        }
         Ok(io)
     }
 }
@@ -268,7 +341,14 @@ pub struct IoctlReply {
 }
 
 impl IoctlReply {
-    pub fn validate(&self) -> Result<(), Errno> { validate_metadata(&self.file_classes, &self.regular, &self.sockets, self.installs.len()) }
+    pub fn validate(&self) -> Result<(), Errno> {
+        validate_metadata(
+            &self.file_classes,
+            &self.regular,
+            &self.sockets,
+            self.installs.len(),
+        )
+    }
     pub fn encode(&self) -> Vec<u8> {
         let writes: usize = self.writes.iter().map(|(_, b)| 12 + b.len()).sum();
         let fds = 4 * (self.installs.len() + self.closes.len());
@@ -282,8 +362,14 @@ impl IoctlReply {
         for (index, fd) in self.installs.iter().enumerate() {
             w.u32(*fd)
                 .u32(self.file_classes.get(index).copied().unwrap_or(0));
-            encode_regular(&mut w, self.file_classes.get(index).copied().unwrap_or(0), self.regular.get(index).and_then(Option::as_ref));
-            if let Some(receipt)=self.sockets.get(index).copied().flatten(){w.bytes(&receipt.to_bytes());}
+            encode_regular(
+                &mut w,
+                self.file_classes.get(index).copied().unwrap_or(0),
+                self.regular.get(index).and_then(Option::as_ref),
+            );
+            if let Some(receipt) = self.sockets.get(index).copied().flatten() {
+                w.bytes(&receipt.to_bytes());
+            }
         }
         w.u32(self.closes.len() as u32);
         for fd in &self.closes {
@@ -318,7 +404,7 @@ impl IoctlReply {
             }
             rep.file_classes.push(class);
             rep.regular.push(decode_regular(&mut r, class)?);
-            rep.sockets.push(decode_socket(&mut r,class)?);
+            rep.sockets.push(decode_socket(&mut r, class)?);
         }
         for _ in 0..r.u32()? {
             rep.closes.push(r.u32()?);
@@ -329,7 +415,9 @@ impl IoctlReply {
             rep.deliveries.push((r.u64()?, r.u64()?));
         }
         rep.validate()?;
-        if r.remaining()!=0{return Err(EPROTO);}
+        if r.remaining() != 0 {
+            return Err(EPROTO);
+        }
         Ok(rep)
     }
 }
@@ -339,22 +427,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn socket_receipt_codec_requires_exact_class_and_rejects_trailing_or_missing_bytes(){
-        let receipt=aim_storage::socket_inode::Receipt{identity:aim_storage::socket_inode::Identity{inode:23u64.wrapping_mul(0x9e3779b97f4a7c15).rotate_left(23),cookie:23},generation:[3;16]};
-        let mut io=Ioctl{fds:vec![7],file_classes:vec![crate::socket_scm::CLASS],regular:vec![None],sockets:vec![Some(receipt)],..Default::default()};
-        assert_eq!(Ioctl::decode(&io.encode()).unwrap(),io);
-        let mut reply=IoctlReply{installs:vec![9],file_classes:vec![crate::socket_scm::CLASS],regular:vec![None],sockets:vec![Some(receipt)],..Default::default()};
-        assert_eq!(IoctlReply::decode(&reply.encode()).unwrap(),reply);
-        let mut bytes=reply.encode();bytes.push(0);assert_eq!(IoctlReply::decode(&bytes),Err(EPROTO));
-        let mut bytes=io.encode();bytes.push(0);assert_eq!(Ioctl::decode(&bytes),Err(EPROTO));
-        io.sockets[0]=None;assert_eq!(io.validate(),Err(EPROTO));assert!(Ioctl::decode(&io.encode()).is_err());
-        reply.file_classes[0]=0;assert_eq!(reply.validate(),Err(EPROTO));
-        reply.file_classes[0]=99;assert_eq!(reply.validate(),Err(EPROTO));
+    fn socket_receipt_codec_requires_exact_class_and_rejects_trailing_or_missing_bytes() {
+        let receipt = aim_storage::socket_inode::Receipt {
+            identity: aim_storage::socket_inode::Identity {
+                inode: 23u64.wrapping_mul(0x9e3779b97f4a7c15).rotate_left(23),
+                cookie: 23,
+            },
+            generation: [3; 16],
+        };
+        let mut io = Ioctl {
+            fds: vec![7],
+            file_classes: vec![crate::socket_scm::CLASS],
+            regular: vec![None],
+            sockets: vec![Some(receipt)],
+            ..Default::default()
+        };
+        assert_eq!(Ioctl::decode(&io.encode()).unwrap(), io);
+        let mut reply = IoctlReply {
+            installs: vec![9],
+            file_classes: vec![crate::socket_scm::CLASS],
+            regular: vec![None],
+            sockets: vec![Some(receipt)],
+            ..Default::default()
+        };
+        assert_eq!(IoctlReply::decode(&reply.encode()).unwrap(), reply);
+        let mut bytes = reply.encode();
+        bytes.push(0);
+        assert_eq!(IoctlReply::decode(&bytes), Err(EPROTO));
+        let mut bytes = io.encode();
+        bytes.push(0);
+        assert_eq!(Ioctl::decode(&bytes), Err(EPROTO));
+        io.sockets[0] = None;
+        assert_eq!(io.validate(), Err(EPROTO));
+        assert!(Ioctl::decode(&io.encode()).is_err());
+        reply.file_classes[0] = 0;
+        assert_eq!(reply.validate(), Err(EPROTO));
+        reply.file_classes[0] = 99;
+        assert_eq!(reply.validate(), Err(EPROTO));
     }
     #[test]
     fn regular_receipts_preserve_one_guest_fd_and_reject_missing_or_foreign_metadata() {
-        let metadata = RegularMetadata { flags: 2, uid: 1000, gid: 1001, identity: [7;36], writer: true };
-        let mut io = Ioctl { fds: vec![5], file_classes: vec![crate::regular_file::CLASS], regular: vec![Some(metadata.clone())], sockets:vec![None], ..Default::default() };
+        let metadata = RegularMetadata {
+            flags: 2,
+            uid: 1000,
+            gid: 1001,
+            identity: [7; 36],
+            writer: true,
+        };
+        let mut io = Ioctl {
+            fds: vec![5],
+            file_classes: vec![crate::regular_file::CLASS],
+            regular: vec![Some(metadata.clone())],
+            sockets: vec![None],
+            ..Default::default()
+        };
         assert!(io.validate().is_ok());
         let decoded = Ioctl::decode(&io.encode()).unwrap();
         assert_eq!(decoded, io);
@@ -367,13 +493,27 @@ mod tests {
     }
     #[test]
     fn existing_path_class_round_trips_and_version_three_is_rejected() {
-        let io = Ioctl { fds: vec![7], file_classes: vec![crate::path_file::CLASS], regular: vec![None], sockets:vec![None], ..Default::default() };
+        let io = Ioctl {
+            fds: vec![7],
+            file_classes: vec![crate::path_file::CLASS],
+            regular: vec![None],
+            sockets: vec![None],
+            ..Default::default()
+        };
         assert_eq!(Ioctl::decode(&io.encode()).unwrap(), io);
-        let reply = IoctlReply { installs: vec![7], file_classes: vec![crate::path_file::CLASS], regular: vec![None], sockets:vec![None], ..Default::default() };
+        let reply = IoctlReply {
+            installs: vec![7],
+            file_classes: vec![crate::path_file::CLASS],
+            regular: vec![None],
+            sockets: vec![None],
+            ..Default::default()
+        };
         assert_eq!(IoctlReply::decode(&reply.encode()).unwrap(), reply);
-        let mut old = io.encode(); old[..4].copy_from_slice(&3u32.to_le_bytes());
+        let mut old = io.encode();
+        old[..4].copy_from_slice(&3u32.to_le_bytes());
         assert_eq!(Ioctl::decode(&old), Err(EPROTO));
-        let mut old = reply.encode(); old[..4].copy_from_slice(&3u32.to_le_bytes());
+        let mut old = reply.encode();
+        old[..4].copy_from_slice(&3u32.to_le_bytes());
         assert_eq!(IoctlReply::decode(&old), Err(EPROTO));
     }
     #[test]
@@ -385,7 +525,7 @@ mod tests {
             fds: vec![3, 4],
             file_classes: vec![0, 0],
             regular: vec![None, None],
-            sockets:vec![None,None],
+            sockets: vec![None, None],
             reserved: vec![9],
             grow: true,
         };
@@ -397,7 +537,7 @@ mod tests {
             installs: vec![9],
             file_classes: vec![0],
             regular: vec![None],
-            sockets:vec![None],
+            sockets: vec![None],
             closes: vec![7],
             drain: 1,
             want_fds: 12,
@@ -412,7 +552,7 @@ mod tests {
             installs: vec![7],
             file_classes: vec![crate::proxy_file::CLASS],
             regular: vec![None],
-            sockets:vec![None],
+            sockets: vec![None],
             ..Default::default()
         };
         assert_eq!(IoctlReply::decode(&reply.encode()).unwrap(), reply);

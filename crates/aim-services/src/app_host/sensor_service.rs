@@ -32,15 +32,21 @@ impl Service for SensorService {
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         // `CHECK_INTERFACE`.
-        call.data.enforce_interface(DESCRIPTOR).map_err(|_| PERMISSION_DENIED)?;
+        call.data
+            .enforce_interface(DESCRIPTOR)
+            .map_err(|_| PERMISSION_DENIED)?;
         let mut p = Parcel::new();
         match call.code {
             // No sensors, whoever asks: the list's count.
             GET_SENSOR_LIST | GET_DYNAMIC_SENSOR_LIST | GET_RUNTIME_SENSOR_LIST => p.write_u32(0),
             // `isDataInjectionEnabled` and the replay modes: the service
             // stays in `NORMAL`.
-            ENABLE_DATA_INJECTION | ENABLE_REPLAY_DATA_INJECTION | ENABLE_HAL_BYPASS_REPLAY_DATA_INJECTION => p.write_i32(0),
-            code @ (CREATE_SENSOR_EVENT_CONNECTION | CREATE_SENSOR_DIRECT_CONNECTION | SET_OPERATION_PARAMETER) => {
+            ENABLE_DATA_INJECTION
+            | ENABLE_REPLAY_DATA_INJECTION
+            | ENABLE_HAL_BYPASS_REPLAY_DATA_INJECTION => p.write_i32(0),
+            code @ (CREATE_SENSOR_EVENT_CONNECTION
+            | CREATE_SENSOR_DIRECT_CONNECTION
+            | SET_OPERATION_PARAMETER) => {
                 eprintln!("app host: sensorservice#{code} (#1692) not implemented");
                 return Err(INVALID_OPERATION);
             }

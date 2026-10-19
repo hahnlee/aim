@@ -135,17 +135,37 @@ impl AppHost {
     /// a process of the app host or a display that does not exist; else
     /// the context registered on the display area its type goes in, which
     /// in the app host (no decor) has the display's configuration.
-    fn attach_window_context(&self, call: &Call<'_>, thread: Option<Binder>, token: Option<Binder>, display: i32) -> Result<Option<Configuration>, Exception> {
+    fn attach_window_context(
+        &self,
+        call: &Call<'_>,
+        thread: Option<Binder>,
+        token: Option<Binder>,
+        display: i32,
+    ) -> Result<Option<Configuration>, Exception> {
         let (Some(thread), Some(Binder::Handle(token))) = (thread, token) else {
-            return Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "attachWindowContextToDisplayArea"));
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "attachWindowContextToDisplayArea",
+            ));
         };
-        let start_seq = self.apps.lock().unwrap().iter().find(|(_, a)| a.thread.as_ref().is_some_and(|t| t.binder() == thread)).map(|(s, _)| *s);
+        let start_seq = self
+            .apps
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, a)| a.thread.as_ref().is_some_and(|t| t.binder() == thread))
+            .map(|(s, _)| *s);
         let Some(start_seq) = start_seq else {
-            eprintln!("app host: attachWindowContextToDisplayArea: calling from non-existing process pid={} uid={}", call.sender_pid, call.sender_euid);
+            eprintln!(
+                "app host: attachWindowContextToDisplayArea: calling from non-existing process pid={} uid={}",
+                call.sender_pid, call.sender_euid
+            );
             return Ok(None);
         };
         if display != 0 {
-            eprintln!("app host: attachWindowContextToDisplayArea: trying to attach to a non-existing display:{display}");
+            eprintln!(
+                "app host: attachWindowContextToDisplayArea: trying to attach to a non-existing display:{display}"
+            );
             return Ok(None);
         }
         let config = self.global_configuration()?;
@@ -160,7 +180,16 @@ impl AppHost {
                 }
             }),
         );
-        let old = self.window_contexts.lock().unwrap().insert(token, WindowContext { start_seq, token: strong, death, uid: call.sender_euid, reported: config.clone() });
+        let old = self.window_contexts.lock().unwrap().insert(
+            token,
+            WindowContext {
+                start_seq,
+                token: strong,
+                death,
+                uid: call.sender_euid,
+                reported: config.clone(),
+            },
+        );
         if let Some(old) = old {
             self.process.clear_death(&old.token, old.death);
         }
@@ -171,16 +200,22 @@ impl AppHost {
     /// that may manage app tokens (`assertCallerCanModifyListener`).
     fn detach_window_context(&self, uid: u32, token: Option<Binder>) -> Result<(), Exception> {
         let Some(Binder::Handle(token)) = token else {
-            return Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "clientToken"));
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "clientToken",
+            ));
         };
-        let manage = self.check_permission(Some("android.permission.MANAGE_APP_TOKENS"), uid as i32)? == 0;
+        let manage =
+            self.check_permission(Some("android.permission.MANAGE_APP_TOKENS"), uid as i32)? == 0;
         let mut contexts = self.window_contexts.lock().unwrap();
         match contexts.get(&token) {
             Some(c) if c.uid == uid || manage => {
                 let c = contexts.remove(&token).unwrap();
                 self.process.clear_death(&c.token, c.death);
             }
-            Some(_) => eprintln!("app host: Uid mismatch. Caller uid is {uid}, while the listener's owner is from another uid"),
+            Some(_) => eprintln!(
+                "app host: Uid mismatch. Caller uid is {uid}, while the listener's owner is from another uid"
+            ),
             None => {}
         }
         Ok(())
@@ -193,7 +228,13 @@ impl AppHost {
         for context in self.window_contexts.lock().unwrap().values_mut() {
             if context.reported != *global {
                 context.reported = global.clone();
-                items.push((context.start_seq, Box::new(WindowContextInfoChangeItem { token: context.token.binder(), config: global.clone() })));
+                items.push((
+                    context.start_seq,
+                    Box::new(WindowContextInfoChangeItem {
+                        token: context.token.binder(),
+                        config: global.clone(),
+                    }),
+                ));
             }
         }
         items
@@ -223,8 +264,15 @@ impl Service for WindowManager {
             wm::GET_CURRENT_ANIMATOR_SCALE => {
                 wm::GetCurrentAnimatorScale::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 // `Settings.Global.ANIMATOR_DURATION_SCALE`, 1 by default.
-                let scale = self.0.inputs().ok()
-                    .and_then(|i| i.settings.get(super::settings::Table::Global, "animator_duration_scale").and_then(|v| v.parse().ok()))
+                let scale = self
+                    .0
+                    .inputs()
+                    .ok()
+                    .and_then(|i| {
+                        i.settings
+                            .get(super::settings::Table::Global, "animator_duration_scale")
+                            .and_then(|v| v.parse().ok())
+                    })
                     .unwrap_or(1.0);
                 wm::write_get_current_animator_scale_reply(&mut p, scale);
             }
@@ -256,15 +304,27 @@ impl Service for WindowManager {
                 );
             }
             wm::ATTACH_WINDOW_CONTEXT_TO_DISPLAY_AREA => {
-                let a = wm::AttachWindowContextToDisplayArea::<super::kept::RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                match self.0.attach_window_context(call, a.app_thread, a.client_token, a.display_id) {
-                    Ok(config) => wm::write_attach_window_context_to_display_area_reply(&mut p, config.as_ref().map(|c| WindowContextInfoBody(c)).as_ref()),
+                let a = wm::AttachWindowContextToDisplayArea::<super::kept::RawBundle>::read(
+                    &mut call.data,
+                )
+                .map_err(|_| BAD_VALUE)?;
+                match self
+                    .0
+                    .attach_window_context(call, a.app_thread, a.client_token, a.display_id)
+                {
+                    Ok(config) => wm::write_attach_window_context_to_display_area_reply(
+                        &mut p,
+                        config.as_ref().map(|c| WindowContextInfoBody(c)).as_ref(),
+                    ),
                     Err(e) => return reply(Err(e)),
                 }
             }
             wm::DETACH_WINDOW_CONTEXT => {
                 let a = wm::DetachWindowContext::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                if let Err(e) = self.0.detach_window_context(call.sender_euid, a.client_token) {
+                if let Err(e) = self
+                    .0
+                    .detach_window_context(call.sender_euid, a.client_token)
+                {
                     return reply(Err(e));
                 }
                 wm::write_detach_window_context_reply(&mut p);
@@ -292,7 +352,9 @@ impl Session {
     /// The window of a call whose first argument is its `IWindow`, and the
     /// call's trailing `int`s (after the layout parameters).
     fn window_and_tail(call: &mut Call<'_>, tail: usize) -> Result<(u32, Vec<i32>), i32> {
-        call.data.enforce_interface(ws::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+        call.data
+            .enforce_interface(ws::DESCRIPTOR)
+            .map_err(|_| BAD_VALUE)?;
         let Some(Binder::Handle(window)) = call.data.read_binder().map_err(|_| BAD_VALUE)? else {
             return Err(BAD_VALUE);
         };
@@ -300,7 +362,10 @@ impl Session {
         let end = r.position() + r.remaining();
         let start = end.checked_sub(4 * tail).ok_or(BAD_VALUE)?;
         r.set_position(start);
-        let ints = (0..tail).map(|_| r.read_i32()).collect::<Result<Vec<_>, _>>().map_err(|_| BAD_VALUE)?;
+        let ints = (0..tail)
+            .map(|_| r.read_i32())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| BAD_VALUE)?;
         Ok((window, ints))
     }
 
@@ -323,9 +388,11 @@ impl Session {
         let (parent, parent_activity, attached) = match attrs.token {
             Some(Binder::Handle(h)) if attrs.is_sub_window() => {
                 let windows = self.host.windows.windows.lock().unwrap();
-                let p = windows
-                    .get(&h)
-                    .ok_or_else(|| Exception::illegal_argument("Attempted to add window with token that is not a window"))?;
+                let p = windows.get(&h).ok_or_else(|| {
+                    Exception::illegal_argument(
+                        "Attempted to add window with token that is not a window",
+                    )
+                })?;
                 (Some(h), p.activity, Some(p.frames.frame))
             }
             _ => (None, None, None),
@@ -334,8 +401,18 @@ impl Session {
             Some(Binder::Local(token)) => Some(token),
             _ => parent_activity,
         };
-        let of_activity = activity.and_then(|t| self.host.activities.records.lock().unwrap().get(&t).map(|r| format!("{}/{}", r.package, r.class)));
-        let name = of_activity.or_else(|| self.host.activities.top_component(self.uid)).ok_or_else(|| state("no activity of the window's app".into()))?;
+        let of_activity = activity.and_then(|t| {
+            self.host
+                .activities
+                .records
+                .lock()
+                .unwrap()
+                .get(&t)
+                .map(|r| format!("{}/{}", r.package, r.class))
+        });
+        let name = of_activity
+            .or_else(|| self.host.activities.top_component(self.uid))
+            .ok_or_else(|| state("no activity of the window's app".into()))?;
         let id = {
             let mut next = self.host.windows.next.lock().unwrap();
             *next += 1;
@@ -343,13 +420,31 @@ impl Session {
         };
         let channel_name = format!("{id:07x} {name}");
         let display = self.host.display()?.0.clone();
-        let task = activity.and_then(|t| self.host.activities.records.lock().unwrap().get(&t).map(|r| r.task)).or_else(|| self.host.tasks.of_uid(self.uid));
+        let task = activity
+            .and_then(|t| {
+                self.host
+                    .activities
+                    .records
+                    .lock()
+                    .unwrap()
+                    .get(&t)
+                    .map(|r| r.task)
+            })
+            .or_else(|| self.host.tasks.of_uid(self.uid));
         let freeform = task.and_then(|id| self.host.tasks.freeform_bounds(id));
-        let bounds = freeform.unwrap_or(Rect { left: 0, top: 0, right: display.width, bottom: display.height });
+        let bounds = freeform.unwrap_or(Rect {
+            left: 0,
+            top: 0,
+            right: display.width,
+            bottom: display.height,
+        });
         let requested = (UNSPECIFIED_LENGTH, UNSPECIFIED_LENGTH);
-        let frames = window_layout::compute_frames(&attrs, bounds, attached, freeform.is_some(), requested);
+        let frames =
+            window_layout::compute_frames(&attrs, bounds, attached, freeform.is_some(), requested);
         let input = Input::of(&attrs, frames.frame, bounds, self.uid);
-        let (index, channel) = self.host.open_input_channel(&channel_name, (display.width, display.height), &input)?;
+        let (index, channel) =
+            self.host
+                .open_input_channel(&channel_name, (display.width, display.height), &input)?;
         let mut p = Parcel::new();
         p.write_no_exception();
         p.write_i32(ADDED);
@@ -360,8 +455,14 @@ impl Session {
         let size_at = p.position();
         p.write_i32(-1);
         p.write_string16(Some(&channel_name));
-        channel.append_from(super::AGENT_CHANNEL_FD, &mut p).map_err(|s| state(format!("input channel: {s}")))?;
-        p.write_binder(Some(self.host.process.add_service(Arc::new(super::activity::Token))));
+        channel
+            .append_from(super::AGENT_CHANNEL_FD, &mut p)
+            .map_err(|s| state(format!("input channel: {s}")))?;
+        p.write_binder(Some(
+            self.host
+                .process
+                .add_service(Arc::new(super::activity::Token)),
+        ));
         p.set_i32_at(size_at, (p.position() - size_at) as i32);
         p.write_i32(1);
         write_insets_state(&mut p, display.width, display.height, FIRST_SEQ);
@@ -369,7 +470,12 @@ impl Session {
         p.write_i32(-1); // no insets source controls
         p.write_i32(FIRST_SEQ);
         p.write_i32(1);
-        let attached = attached.unwrap_or(Rect { left: 0, top: 0, right: -1, bottom: -1 });
+        let attached = attached.unwrap_or(Rect {
+            left: 0,
+            top: 0,
+            right: -1,
+            bottom: -1,
+        });
         for v in [attached.left, attached.top, attached.right, attached.bottom] {
             p.write_i32(v);
         }
@@ -405,26 +511,53 @@ impl Session {
     /// `relayout`: the window's frames, configuration, surface and
     /// insets; its layer is made the first time it is visible, and placed
     /// and its input region set where its frame is.
-    fn relayout(&self, window: u32, attrs: Option<LayoutParams>, requested: (i32, i32), view_visibility: i32) -> Result<Parcel, Exception> {
+    fn relayout(
+        &self,
+        window: u32,
+        attrs: Option<LayoutParams>,
+        requested: (i32, i32),
+        view_visibility: i32,
+    ) -> Result<Parcel, Exception> {
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
         let display = self.host.display()?.0.clone();
-        let global = self.host.global_config(self.uid).ok_or_else(|| state("relayout of an unbound app".into()))?;
+        let global = self
+            .host
+            .global_config(self.uid)
+            .ok_or_else(|| state("relayout of an unbound app".into()))?;
         let mut windows = self.host.windows.windows.lock().unwrap();
         let attached = windows
             .get(&window)
             .and_then(|w| w.parent)
             .and_then(|p| windows.get(&p))
             .map(|p| p.frames.frame);
-        let w = windows.get_mut(&window).ok_or_else(|| Exception::illegal_argument("relayout of an unknown window"))?;
+        let w = windows
+            .get_mut(&window)
+            .ok_or_else(|| Exception::illegal_argument("relayout of an unknown window"))?;
         let mut result = 0;
-        let task = w.task.and_then(|id| self.host.tasks.bounds(id).map(|bounds| (id, bounds)));
+        let task = w
+            .task
+            .and_then(|id| self.host.tasks.bounds(id).map(|bounds| (id, bounds)));
         let freeform = w.task.and_then(|id| self.host.tasks.freeform_bounds(id));
         if let Some(attrs) = attrs {
             w.attrs = attrs;
         }
         w.requested = requested;
-        let bounds = task.map_or(Rect { left: 0, top: 0, right: display.width, bottom: display.height }, |(_, bounds)| bounds);
-        let frames = window_layout::compute_frames(&w.attrs, bounds, attached, freeform.is_some(), requested);
+        let bounds = task.map_or(
+            Rect {
+                left: 0,
+                top: 0,
+                right: display.width,
+                bottom: display.height,
+            },
+            |(_, bounds)| bounds,
+        );
+        let frames = window_layout::compute_frames(
+            &w.attrs,
+            bounds,
+            attached,
+            freeform.is_some(),
+            requested,
+        );
         let moved = frames.frame != w.frames.frame;
         w.frames = frames;
         // A window that is not visible has no surface
@@ -437,14 +570,30 @@ impl Session {
         if view_visibility == VISIBLE && w.layer.is_none() {
             let composer = self.host.composer()?;
             if w.container.is_none() {
-                let create = |parent: Option<&Layer>| composer.create_surface(&self.host.process, &w.name, surface::CONTAINER, parent, &[]);
+                let create = |parent: Option<&Layer>| {
+                    composer.create_surface(
+                        &self.host.process,
+                        &w.name,
+                        surface::CONTAINER,
+                        parent,
+                        &[],
+                    )
+                };
                 let container = match task {
                     Some((id, _)) => self.host.task_layer(id, |parent| create(Some(parent))),
                     None => create(None),
                 }
                 .map_err(state)?;
                 // A later window is in front of an earlier one.
-                composer.apply(&[(&container, surface::Change { z: Some(w.id as i32), ..Default::default() })]).map_err(state)?;
+                composer
+                    .apply(&[(
+                        &container,
+                        surface::Change {
+                            z: Some(w.id as i32),
+                            ..Default::default()
+                        },
+                    )])
+                    .map_err(state)?;
                 w.container = Some(container);
             }
             let metadata = [
@@ -453,7 +602,13 @@ impl Session {
                 (surface::METADATA_OWNER_UID, w.uid as i32),
             ];
             let layer = composer
-                .create_surface(&self.host.process, &w.name, surface::BUFFER_STATE, w.container.as_ref(), &metadata)
+                .create_surface(
+                    &self.host.process,
+                    &w.name,
+                    surface::BUFFER_STATE,
+                    w.container.as_ref(),
+                    &metadata,
+                )
                 .map_err(state)?;
             eprintln!("app host: window {} has layer {}", w.name, layer.name);
             w.layer = Some(layer);
@@ -505,14 +660,23 @@ impl Session {
         p.write_i32(-1); // no sync requested
         p.write_i32(1);
         // `ActivityWindowInfo`: not embedded, the task's bounds.
-        ActivityWindowInfo { embedded: false, task_bounds: frame, task_fragment_bounds: frame }.write(&mut p);
+        ActivityWindowInfo {
+            embedded: false,
+            task_bounds: frame,
+            task_fragment_bounds: frame,
+        }
+        .write(&mut p);
         Ok(p)
     }
 }
 
 /// `ClientWindowFrames`: the frames, unscaled, of sequence number `seq`.
 fn write_frames(p: &mut Parcel, frames: &Frames, seq: i32) {
-    let write = |p: &mut Parcel, r: Rect| [r.left, r.top, r.right, r.bottom].iter().for_each(|v| p.write_i32(*v));
+    let write = |p: &mut Parcel, r: Rect| {
+        [r.left, r.top, r.right, r.bottom]
+            .iter()
+            .for_each(|v| p.write_i32(*v))
+    };
     write(p, frames.frame);
     write(p, frames.display);
     write(p, frames.parent);
@@ -587,7 +751,12 @@ impl Item for WindowStateResizeItem {
         p.write_i32(-1); // no sync
         p.write_bool(false); // not drag resizing
         p.write_i32(1);
-        ActivityWindowInfo { embedded: false, task_bounds: self.task, task_fragment_bounds: self.task }.write(p);
+        ActivityWindowInfo {
+            embedded: false,
+            task_bounds: self.task,
+            task_fragment_bounds: self.task,
+        }
+        .write(p);
     }
 }
 
@@ -597,12 +766,17 @@ impl super::AppHost {
     pub(super) fn raise_windows_of(&self, id: i32) -> Result<(), String> {
         let channels: Vec<i32> = {
             let windows = self.windows.windows.lock().unwrap();
-            let mut of_task: Vec<_> = windows.values().filter(|w| w.task == Some(id)).map(|w| (w.id, w.channel)).collect();
+            let mut of_task: Vec<_> = windows
+                .values()
+                .filter(|w| w.task == Some(id))
+                .map(|w| (w.id, w.channel))
+                .collect();
             of_task.sort();
             of_task.into_iter().map(|(_, channel)| channel).collect()
         };
         for channel in channels {
-            self.focus_input_channel(channel).map_err(|e| format!("{e:?}"))?;
+            self.focus_input_channel(channel)
+                .map_err(|e| format!("{e:?}"))?;
         }
         Ok(())
     }
@@ -610,16 +784,29 @@ impl super::AppHost {
     /// The windows of task `id` laid out again in its bounds `task`,
     /// parents before their sub-windows: each one's `IWindow`, frames, uid
     /// and pid.
-    fn relayout_windows_of(&self, id: i32, task: Rect) -> Result<Vec<(u32, Frames, u32, i32)>, String> {
+    fn relayout_windows_of(
+        &self,
+        id: i32,
+        task: Rect,
+    ) -> Result<Vec<(u32, Frames, u32, i32)>, String> {
         let freeform = self.tasks.window_mode();
         let mut windows = self.windows.windows.lock().unwrap();
-        let mut of_task: Vec<(u32, u32)> = windows.iter().filter(|(_, w)| w.task == Some(id)).map(|(h, w)| (w.id, *h)).collect();
+        let mut of_task: Vec<(u32, u32)> = windows
+            .iter()
+            .filter(|(_, w)| w.task == Some(id))
+            .map(|(h, w)| (w.id, *h))
+            .collect();
         of_task.sort();
         let mut laid = Vec::new();
         for (_, handle) in of_task {
-            let attached = windows.get(&handle).and_then(|w| w.parent).and_then(|p| windows.get(&p)).map(|p| p.frames.frame);
+            let attached = windows
+                .get(&handle)
+                .and_then(|w| w.parent)
+                .and_then(|p| windows.get(&p))
+                .map(|p| p.frames.frame);
             let w = windows.get_mut(&handle).unwrap();
-            w.frames = window_layout::compute_frames(&w.attrs, task, attached, freeform, w.requested);
+            w.frames =
+                window_layout::compute_frames(&w.attrs, task, attached, freeform, w.requested);
             self.place_window(w, task)?;
             laid.push((handle, w.frames, w.uid, w.pid));
         }
@@ -634,10 +821,20 @@ impl super::AppHost {
     /// The items that tell the windows of task `id` it took `frame`, each
     /// on a display of its uid's global configuration in `globals`, each
     /// with its process's start.
-    pub(super) fn resize_windows(&self, id: i32, globals: &HashMap<u32, Configuration>, frame: Rect) -> Result<ProcessItems, String> {
+    pub(super) fn resize_windows(
+        &self,
+        id: i32,
+        globals: &HashMap<u32, Configuration>,
+        frame: Rect,
+    ) -> Result<ProcessItems, String> {
         let display = self.display().map_err(|e| format!("{e:?}"))?.0.clone();
         let laid = self.relayout_windows_of(id, frame)?;
-        let laid: Vec<_> = laid.into_iter().filter_map(|(window, frames, uid, pid)| Some((window, frames, globals.get(&uid)?, self.start_of_pid(pid)?))).collect();
+        let laid: Vec<_> = laid
+            .into_iter()
+            .filter_map(|(window, frames, uid, pid)| {
+                Some((window, frames, globals.get(&uid)?, self.start_of_pid(pid)?))
+            })
+            .collect();
         let mut windows = self.windows.windows.lock().unwrap();
         Ok(laid
             .into_iter()
@@ -647,16 +844,19 @@ impl super::AppHost {
                 w.insets_seq += 1;
                 let mut config = global.of_freeform_task(frame);
                 config.window.activity_type = 1;
-                Some((start_seq, Box::new(WindowStateResizeItem {
-                    window: Binder::Handle(window),
-                    frames,
-                    task: frame,
-                    display: (display.width, display.height),
-                    frames_seq: w.frames_seq,
-                    insets_seq: w.insets_seq,
-                    global: global.clone(),
-                    config,
-                }) as Box<dyn Item>))
+                Some((
+                    start_seq,
+                    Box::new(WindowStateResizeItem {
+                        window: Binder::Handle(window),
+                        frames,
+                        task: frame,
+                        display: (display.width, display.height),
+                        frames_seq: w.frames_seq,
+                        insets_seq: w.insets_seq,
+                        global: global.clone(),
+                        config,
+                    }) as Box<dyn Item>,
+                ))
             })
             .collect())
     }
@@ -668,21 +868,37 @@ impl super::AppHost {
     fn place_window(&self, w: &Window, bounds: Rect) -> Result<(), String> {
         let frame = w.frames.frame;
         if let Some(layer) = &w.container {
-            let origin = if w.task.is_some() { (bounds.left, bounds.top) } else { (0, 0) };
+            let origin = if w.task.is_some() {
+                (bounds.left, bounds.top)
+            } else {
+                (0, 0)
+            };
             let [inset_left, inset_top, ..] = w.attrs.surface_insets;
-            let position = ((frame.left - origin.0 - inset_left) as f32, (frame.top - origin.1 - inset_top) as f32);
-            self.composer()
-                .map_err(|e| format!("{e:?}"))?
-                .apply(&[(layer, surface::Change { position: Some(position), ..Default::default() })])?;
+            let position = (
+                (frame.left - origin.0 - inset_left) as f32,
+                (frame.top - origin.1 - inset_top) as f32,
+            );
+            self.composer().map_err(|e| format!("{e:?}"))?.apply(&[(
+                layer,
+                surface::Change {
+                    position: Some(position),
+                    ..Default::default()
+                },
+            )])?;
         }
-        self.set_input_frame(w.channel, &Input::of(&w.attrs, frame, bounds, w.uid)).map_err(|e| format!("{e:?}"))
+        self.set_input_frame(w.channel, &Input::of(&w.attrs, frame, bounds, w.uid))
+            .map_err(|e| format!("{e:?}"))
     }
 
     /// The windows of the activity `token`, earlier first: each one's
     /// `IWindow` and input channel.
     pub(super) fn windows_of_activity(&self, token: u64) -> Vec<(u32, i32)> {
         let windows = self.windows.windows.lock().unwrap();
-        let mut of: Vec<_> = windows.iter().filter(|(_, w)| w.activity == Some(token)).map(|(h, w)| (w.id, *h, w.channel)).collect();
+        let mut of: Vec<_> = windows
+            .iter()
+            .filter(|(_, w)| w.activity == Some(token))
+            .map(|(h, w)| (w.id, *h, w.channel))
+            .collect();
         of.sort();
         of.into_iter().map(|(_, h, c)| (h, c)).collect()
     }
@@ -705,8 +921,22 @@ impl super::AppHost {
         if layers.is_empty() {
             return;
         }
-        let changes: Vec<_> = layers.iter().map(|l| (l, surface::Change { remove: true, ..Default::default() })).collect();
-        if let Err(e) = self.composer().and_then(|c| c.apply(&changes).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))) {
+        let changes: Vec<_> = layers
+            .iter()
+            .map(|l| {
+                (
+                    l,
+                    surface::Change {
+                        remove: true,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        if let Err(e) = self.composer().and_then(|c| {
+            c.apply(&changes)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))
+        }) {
             eprintln!("app host: removing layers: {e:?}");
         }
     }
@@ -716,9 +946,15 @@ impl Session {
     /// `getWindowId`: the window's `IWindowId`, the same each time.
     fn window_id(&self, window: u32) -> Result<Binder, Exception> {
         let mut windows = self.host.windows.windows.lock().unwrap();
-        let w = windows.get_mut(&window).ok_or_else(|| Exception::illegal_argument("getWindowId of an unknown window"))?;
+        let w = windows
+            .get_mut(&window)
+            .ok_or_else(|| Exception::illegal_argument("getWindowId of an unknown window"))?;
         Ok(*w.window_id.get_or_insert_with(|| {
-            self.host.process.add_service(Arc::new(WindowId { host: self.host.clone(), window, observers: Mutex::new(Vec::new()) }))
+            self.host.process.add_service(Arc::new(WindowId {
+                host: self.host.clone(),
+                window,
+                observers: Mutex::new(Vec::new()),
+            }))
         }))
     }
 }
@@ -735,8 +971,14 @@ impl WindowId {
     /// `WindowState.isFocused`: the latest window of the focused app.
     fn focused(&self) -> bool {
         let windows = self.host.windows.windows.lock().unwrap();
-        let Some(w) = windows.get(&self.window) else { return false };
-        self.host.activities.uid_focused(w.uid) && windows.values().filter(|o| o.uid == w.uid).all(|o| o.id <= w.id)
+        let Some(w) = windows.get(&self.window) else {
+            return false;
+        };
+        self.host.activities.uid_focused(w.uid)
+            && windows
+                .values()
+                .filter(|o| o.uid == w.uid)
+                .all(|o| o.id <= w.id)
     }
 }
 
@@ -749,13 +991,18 @@ impl Service for WindowId {
         let mut p = Parcel::new();
         match call.code {
             wid::REGISTER_FOCUS_OBSERVER => {
-                let args = wid::RegisterFocusObserver::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args =
+                    wid::RegisterFocusObserver::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.observers.lock().unwrap().extend(args.observer);
                 wid::write_register_focus_observer_reply(&mut p);
             }
             wid::UNREGISTER_FOCUS_OBSERVER => {
-                let args = wid::UnregisterFocusObserver::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.observers.lock().unwrap().retain(|o| Some(*o) != args.observer);
+                let args =
+                    wid::UnregisterFocusObserver::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.observers
+                    .lock()
+                    .unwrap()
+                    .retain(|o| Some(*o) != args.observer);
                 wid::write_unregister_focus_observer_reply(&mut p);
             }
             wid::IS_FOCUSED => {
@@ -790,7 +1037,9 @@ fn write_insets_state(p: &mut Parcel, width: i32, height: i32, seq: i32) {
     (0..4).for_each(|_| p.write_i32(0));
     p.write_i32(0);
     p.write_i32(1); // the display's shape
-    p.write_string8(Some(&format!("M0,0 L{width},0 L{width},{height} L0,{height} Z")));
+    p.write_string8(Some(&format!(
+        "M0,0 L{width},0 L{width},{height} L0,{height} Z"
+    )));
     p.write_i32(width);
     p.write_i32(height);
     p.write_f32(1.0);
@@ -832,7 +1081,8 @@ impl Service for Session {
             ws::REMOVE => {
                 let (window, _) = Self::window_and_tail(call, 0)?;
                 let removed = self.host.windows.windows.lock().unwrap().remove(&window);
-                self.host.remove_layers(removed.and_then(|w| w.container).into_iter().collect());
+                self.host
+                    .remove_layers(removed.and_then(|w| w.container).into_iter().collect());
                 let mut p = Parcel::new();
                 p.write_no_exception();
                 Ok(p)
@@ -858,7 +1108,9 @@ impl Service for Session {
             // Oneway: kept as `WindowState.setRequestedVisibleTypes` keeps
             // it; no inset source (the input method's) has a window here.
             ws::UPDATE_REQUESTED_VISIBLE_TYPES => {
-                call.data.enforce_interface(ws::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                call.data
+                    .enforce_interface(ws::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
                 let window = call.data.read_binder().map_err(|_| BAD_VALUE)?;
                 let types = call.data.read_i32().map_err(|_| BAD_VALUE)?;
                 if let Some(Binder::Handle(window)) = window
@@ -870,7 +1122,9 @@ impl Service for Session {
             }
             ws::GET_WINDOW_ID => {
                 let args = ws::GetWindowId::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let Some(Binder::Handle(window)) = args.window else { return Err(BAD_VALUE) };
+                let Some(Binder::Handle(window)) = args.window else {
+                    return Err(BAD_VALUE);
+                };
                 reply(self.window_id(window).map(|id| {
                     let mut p = Parcel::new();
                     ws::write_get_window_id_reply(&mut p, Some(id));
@@ -899,7 +1153,11 @@ mod tests {
     fn window_context_changes_are_written_as_the_item_writes_them() {
         let config = Configuration::default();
         let mut p = Parcel::new();
-        WindowContextInfoChangeItem { token: Binder::Handle(5), config: config.clone() }.write_fields(&mut p);
+        WindowContextInfoChangeItem {
+            token: Binder::Handle(5),
+            config: config.clone(),
+        }
+        .write_fields(&mut p);
         let mut expected = Parcel::new();
         expected.write_binder(Some(Binder::Handle(5)));
         expected.write_i32(1);

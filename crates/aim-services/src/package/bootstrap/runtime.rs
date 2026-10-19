@@ -175,9 +175,11 @@ mod tests {
             assert_eq!(rows[0].name.as_deref(), Some("saved.permission"));
             assert!(rows[0].granted);
             assert_eq!(rows[0].flags, 0x23);
-            assert!(persisted_permissions(&state, app_id, 10)
-                .unwrap()
-                .is_empty());
+            assert!(
+                persisted_permissions(&state, app_id, 10)
+                    .unwrap()
+                    .is_empty()
+            );
             assert!(persisted_permissions(&state, app_id, 11).is_err());
             assert!(persisted_permissions(&state, 10101, 0).is_err());
             let fresh = Migration::default().project(app_id, &[0]).unwrap();

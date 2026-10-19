@@ -1,11 +1,7 @@
 //! Compare the native XML owner with the pinned original SuspendDialogInfo.
 use aim_android_xml::{Element, Value};
 use aim_services::package::restrictions::dialog::DialogInfo;
-use std::{
-    fs,
-    process::Command,
-    time::Duration,
-};
+use std::{fs, process::Command, time::Duration};
 mod common {
     pub mod java;
     pub mod runtime;
@@ -76,9 +72,13 @@ fn suspension_parameters_match_original_xml_owners() {
         &["/system/framework/services.jar"],
     )
     .unwrap();
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
+    let boot = Boot::new(
+        aim_paths::root().join("target/release/aimctl"),
+        data.0.join("g"),
+    );
     run(boot.start_command().args(["start", "--windows"]));
-    boot.wait_ready(Duration::from_secs(300)).expect("suspension oracle boot readiness");
+    boot.wait_ready(Duration::from_secs(300))
+        .expect("suspension oracle boot readiness");
     let directory = boot.data.join("data/local/tmp/suspension-dialogs");
     fs::create_dir(&directory).unwrap();
     fs::copy(dex.join("classes.dex"), directory.join("oracle.dex")).unwrap();

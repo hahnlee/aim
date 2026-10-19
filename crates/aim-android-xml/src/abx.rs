@@ -193,13 +193,15 @@ pub fn write(root: &Element) -> Result<Vec<u8>, String> {
 }
 
 /// Android TypedXmlSerializer also emits independent sibling root sections.
-pub fn write_sequence(roots:&[Element])->Result<Vec<u8>,String> {
+pub fn write_sequence(roots: &[Element]) -> Result<Vec<u8>, String> {
     let mut w = Writer {
         out: MAGIC.to_vec(),
         interned: HashMap::new(),
     };
     w.out.push(START_DOCUMENT | TYPE_NULL);
-    for root in roots {w.element(root)?;}
+    for root in roots {
+        w.element(root)?;
+    }
     w.out.push(END_DOCUMENT | TYPE_NULL);
     Ok(w.out)
 }
@@ -402,11 +404,21 @@ mod tests {
 
     #[test]
     fn sibling_roots_read_in_sequence() {
-        let root = |name: &str| Element { name: name.into(), attrs: Vec::new(), content: Vec::new() };
+        let root = |name: &str| Element {
+            name: name.into(),
+            attrs: Vec::new(),
+            content: Vec::new(),
+        };
         let bytes = write_sequence(&[root("settings"), root("namespaceHashes")]).unwrap();
         let roots = read_sequence(&bytes).unwrap();
-        assert_eq!(roots.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["settings", "namespaceHashes"]);
-        assert_eq!(read_optional(&bytes).unwrap_err(), "ABX: a second root element");
+        assert_eq!(
+            roots.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["settings", "namespaceHashes"]
+        );
+        assert_eq!(
+            read_optional(&bytes).unwrap_err(),
+            "ABX: a second root element"
+        );
     }
 
     #[test]

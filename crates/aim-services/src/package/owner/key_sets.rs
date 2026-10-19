@@ -262,7 +262,9 @@ mod tests {
             },
             ..Default::default()
         };
-        settings.packages[0].key_set_data.add_defined_key_set(99, Some("absent".into()));
+        settings.packages[0]
+            .key_set_data
+            .add_defined_key_set(99, Some("absent".into()));
         clear_package(&mut settings, "a").unwrap();
         assert_eq!(settings.key_sets.key_sets, [(1, vec![1])]);
         assert_eq!(settings.key_sets.public_keys, [(1, vec![1])]);
@@ -314,34 +316,72 @@ impl super::Store {
     /// unchanged native baseline has an older allocation history, retain the
     /// complete current durable pool owner after exact pool/role validation.
     pub(crate) fn rebase_unchanged_key_set_metadata(
-        &self, baseline:&Settings, candidate:&mut Settings,
-    )->Result<bool,super::WriteError>{
-        if candidate.key_sets!=baseline.key_sets {
-            return Err(super::WriteError::before("metadata mutation changed keyset pool owner"));
+        &self,
+        baseline: &Settings,
+        candidate: &mut Settings,
+    ) -> Result<bool, super::WriteError> {
+        if candidate.key_sets != baseline.key_sets {
+            return Err(super::WriteError::before(
+                "metadata mutation changed keyset pool owner",
+            ));
         }
-        let roles=|settings:&Settings|settings.packages.iter().filter(|package|package.app_id>0)
-            .map(|package|((package.name.clone(),false),package.key_set_data.clone()))
-            .chain(settings.disabled_system_packages.iter().filter(|package|package.app_id>0).map(|package|((package.name.clone(),true),package.key_set_data.clone())))
-            .collect::<BTreeMap<_,_>>();
-        if roles(candidate)!=roles(baseline){return Err(super::WriteError::before("metadata mutation changed keyset roles"));}
-        let current=&self.state().settings;
-        if baseline.key_sets==current.key_sets { return Ok(false); }
-        let pools_equal=baseline.key_sets.versioned==current.key_sets.versioned
-            &&baseline.key_sets.public_keys==current.key_sets.public_keys&&baseline.key_sets.key_sets==current.key_sets.key_sets;
-        let roles_equal=roles(baseline)==roles(current);
-        let history_forward=current.key_sets.last_issued_key_id>=baseline.key_sets.last_issued_key_id
-            &&current.key_sets.last_issued_key_set_id>=baseline.key_sets.last_issued_key_set_id;
-        if baseline.key_sets!=current.key_sets {
-            eprintln!("native/durable keyset baseline: native=({},{}), durable=({},{}), pools_equal={}, roles_equal={}, history_forward={}",
-                baseline.key_sets.last_issued_key_id,baseline.key_sets.last_issued_key_set_id,current.key_sets.last_issued_key_id,current.key_sets.last_issued_key_set_id,pools_equal,roles_equal,history_forward);
+        let roles = |settings: &Settings| {
+            settings
+                .packages
+                .iter()
+                .filter(|package| package.app_id > 0)
+                .map(|package| ((package.name.clone(), false), package.key_set_data.clone()))
+                .chain(
+                    settings
+                        .disabled_system_packages
+                        .iter()
+                        .filter(|package| package.app_id > 0)
+                        .map(|package| {
+                            ((package.name.clone(), true), package.key_set_data.clone())
+                        }),
+                )
+                .collect::<BTreeMap<_, _>>()
+        };
+        if roles(candidate) != roles(baseline) {
+            return Err(super::WriteError::before(
+                "metadata mutation changed keyset roles",
+            ));
         }
-        if !pools_equal||!roles_equal||!history_forward {
-            return Err(super::WriteError::before(format!("metadata keyset owner differs: native=({},{}), durable=({},{}), pools_equal={pools_equal}, roles_equal={roles_equal}, history_forward={history_forward}",
-                baseline.key_sets.last_issued_key_id,baseline.key_sets.last_issued_key_set_id,current.key_sets.last_issued_key_id,current.key_sets.last_issued_key_set_id)));
+        let current = &self.state().settings;
+        if baseline.key_sets == current.key_sets {
+            return Ok(false);
+        }
+        let pools_equal = baseline.key_sets.versioned == current.key_sets.versioned
+            && baseline.key_sets.public_keys == current.key_sets.public_keys
+            && baseline.key_sets.key_sets == current.key_sets.key_sets;
+        let roles_equal = roles(baseline) == roles(current);
+        let history_forward = current.key_sets.last_issued_key_id
+            >= baseline.key_sets.last_issued_key_id
+            && current.key_sets.last_issued_key_set_id >= baseline.key_sets.last_issued_key_set_id;
+        if baseline.key_sets != current.key_sets {
+            eprintln!(
+                "native/durable keyset baseline: native=({},{}), durable=({},{}), pools_equal={}, roles_equal={}, history_forward={}",
+                baseline.key_sets.last_issued_key_id,
+                baseline.key_sets.last_issued_key_set_id,
+                current.key_sets.last_issued_key_id,
+                current.key_sets.last_issued_key_set_id,
+                pools_equal,
+                roles_equal,
+                history_forward
+            );
+        }
+        if !pools_equal || !roles_equal || !history_forward {
+            return Err(super::WriteError::before(format!(
+                "metadata keyset owner differs: native=({},{}), durable=({},{}), pools_equal={pools_equal}, roles_equal={roles_equal}, history_forward={history_forward}",
+                baseline.key_sets.last_issued_key_id,
+                baseline.key_sets.last_issued_key_set_id,
+                current.key_sets.last_issued_key_id,
+                current.key_sets.last_issued_key_set_id
+            )));
         }
         validated_sets(current).map_err(super::WriteError::before)?;
-        let changed=candidate.key_sets!=current.key_sets;
-        candidate.key_sets=current.key_sets.clone();
+        let changed = candidate.key_sets != current.key_sets;
+        candidate.key_sets = current.key_sets.clone();
         Ok(changed)
     }
 }

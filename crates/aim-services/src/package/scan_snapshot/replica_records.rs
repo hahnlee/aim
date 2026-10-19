@@ -52,7 +52,10 @@ impl Records {
         ] {
             for setting in settings {
                 let name = setting.name.as_str();
-                packages.insert((name.to_owned(), factory), package(snapshot, name, factory)?);
+                packages.insert(
+                    (name.to_owned(), factory),
+                    package(snapshot, name, factory)?,
+                );
             }
         }
         let mut shared = BTreeMap::new();
@@ -89,8 +92,8 @@ fn package(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Package, St
         record.write_to(&mut parcel);
         parcel.data().to_vec()
     };
-    let mut signing = endpoint::PackageSigningState::captured(snapshot, name, factory)?
-        .ok_or_else(missing)?;
+    let mut signing =
+        endpoint::PackageSigningState::captured(snapshot, name, factory)?.ok_or_else(missing)?;
     signing.version = 0;
     let mut transient =
         endpoint::PackageTransientState::captured(snapshot, name, factory).ok_or_else(missing)?;
@@ -108,9 +111,8 @@ fn package(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Package, St
         policy.to_le_bytes().to_vec(),
     ];
     for user in user_record::ids(snapshot, name, factory)?.ok_or_else(missing)? {
-        records.push(
-            user_record::captured_at(snapshot, 0, name, factory, user)?.ok_or_else(missing)?,
-        );
+        records
+            .push(user_record::captured_at(snapshot, 0, name, factory, user)?.ok_or_else(missing)?);
     }
     Ok(Package {
         records,

@@ -19,8 +19,8 @@ use super::model::{PackageState, SharedUser, State};
 use super::pkg::{AndroidPackage, booleans};
 use super::uri::Uri;
 
-pub mod logging;
 mod implicit;
+pub mod logging;
 pub use implicit::ImplicitAccess;
 
 /// A path of the original that depends on state the model does not
@@ -317,7 +317,12 @@ impl AppsFilter {
     /// `AppsFilterBase.getVisibilityAllowList` for `user`: the app ids of
     /// the applications that may see `target`, ascending; `None` when
     /// every one may (it is force queryable).
-    pub fn visibility_allow_list(&self, state: &State, target: &PackageState, user: i32) -> Option<Vec<i32>> {
+    pub fn visibility_allow_list(
+        &self,
+        state: &State,
+        target: &PackageState,
+        user: i32,
+    ) -> Option<Vec<i32>> {
         if self.is_force_queryable(target.app_id) {
             return None;
         }
@@ -338,7 +343,8 @@ impl AppsFilter {
     pub fn latest(
         state: &Arc<State>,
         config: &Config,
-    ) -> std::result::Result<Arc<AppsFilter>, super::domain_verification::uri_parcel::MatchError> {
+    ) -> std::result::Result<Arc<AppsFilter>, super::domain_verification::uri_parcel::MatchError>
+    {
         static LATEST: Mutex<Option<(Arc<State>, Arc<AppsFilter>)>> = Mutex::new(None);
         let mut latest = LATEST.lock().unwrap();
         if let Some((before, filter)) = &*latest {
@@ -358,26 +364,32 @@ impl AppsFilter {
             && a.system.force_queryable_packages == b.system.force_queryable_packages
             && a.system.named_actors == b.system.named_actors
             && a.packages.len() == b.packages.len()
-            && a.packages.iter().zip(&b.packages).all(|((an, a), (bn, b))| {
-                an == bn
-                    && a.app_id == b.app_id
-                    && a.is.system == b.is.system
-                    && a.is.force_queryable_override == b.is.force_queryable_override
-                    && a.filter_application_query == b.filter_application_query
-                    && a.target_sdk_version == b.target_sdk_version
-                    && a.signatures == b.signatures
-                    && a.install_source == b.install_source
-                    && match (&a.pkg, &b.pkg) {
-                        (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
-                        (None, None) => true,
-                        _ => false,
-                    }
-            })
+            && a.packages
+                .iter()
+                .zip(&b.packages)
+                .all(|((an, a), (bn, b))| {
+                    an == bn
+                        && a.app_id == b.app_id
+                        && a.is.system == b.is.system
+                        && a.is.force_queryable_override == b.is.force_queryable_override
+                        && a.filter_application_query == b.filter_application_query
+                        && a.target_sdk_version == b.target_sdk_version
+                        && a.signatures == b.signatures
+                        && a.install_source == b.install_source
+                        && match (&a.pkg, &b.pkg) {
+                            (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
+                            (None, None) => true,
+                            _ => false,
+                        }
+                })
     }
 
     /// The relations of every package in `state`, as `addPackage` of each
     /// and the recomputation at boot completion leave them.
-    pub fn new(state: &State, config: &Config) -> std::result::Result<AppsFilter, super::domain_verification::uri_parcel::MatchError> {
+    pub fn new(
+        state: &State,
+        config: &Config,
+    ) -> std::result::Result<AppsFilter, super::domain_verification::uri_parcel::MatchError> {
         let mut f = AppsFilter::default();
         let packages: Vec<(&PackageState, &AndroidPackage)> = state
             .packages
@@ -422,7 +434,8 @@ impl AppsFilter {
                 }
                 let pair = (qs.app_id, ts.app_id);
                 if !f.force_queryable.contains(&ts.app_id) {
-                    if !requests_query_all_packages(q) && can_query_via_components(q, t, &protected)?
+                    if !requests_query_all_packages(q)
+                        && can_query_via_components(q, t, &protected)?
                     {
                         f.queries_via_component.insert(pair);
                     }
@@ -491,7 +504,14 @@ impl AppsFilter {
         // FeatureConfig's DeviceConfig flag. The original's cache keeps
         // what it computed before the flag changed until something
         // recomputes it; the model follows the flag at once.
-        if state.platform.settings_owner.as_ref().map_or(state.platform.query_filtering_disabled,|owner|owner.cached_filtering_disabled()) {
+        if state
+            .platform
+            .settings_owner
+            .as_ref()
+            .map_or(state.platform.query_filtering_disabled, |owner| {
+                owner.cached_filtering_disabled()
+            })
+        {
             return false;
         }
         let Some(calling) = setting(state, calling_app_id) else {
@@ -585,16 +605,35 @@ pub fn is_caller_same_app(state: &State, package: Option<&str>, uid: i32) -> Res
 /// the caller. With `filter_uninstall`, a package not installed for the
 /// user is hidden too, an archived one unless `filter_archived` is off.
 pub fn should_filter_application(
-    state: &State, filter: &AppsFilter, ps: Option<&PackageState>, calling_uid: i32,
-    user: i32, filter_uninstall: bool, filter_archived: bool,
+    state: &State,
+    filter: &AppsFilter,
+    ps: Option<&PackageState>,
+    calling_uid: i32,
+    user: i32,
+    filter_uninstall: bool,
+    filter_archived: bool,
 ) -> Result<bool> {
-    should_filter_application_with_permission(state, filter, ps, calling_uid, calling_uid,
-        user, filter_uninstall, filter_archived)
+    should_filter_application_with_permission(
+        state,
+        filter,
+        ps,
+        calling_uid,
+        calling_uid,
+        user,
+        filter_uninstall,
+        filter_archived,
+    )
 }
 
 pub fn should_filter_application_with_permission(
-    state: &State, filter: &AppsFilter, ps: Option<&PackageState>, mut calling_uid: i32,
-    permission_uid: i32, user: i32, filter_uninstall: bool, filter_archived: bool,
+    state: &State,
+    filter: &AppsFilter,
+    ps: Option<&PackageState>,
+    mut calling_uid: i32,
+    permission_uid: i32,
+    user: i32,
+    filter_uninstall: bool,
+    filter_archived: bool,
 ) -> Result<bool> {
     if is_sdk_sandbox(calling_uid) {
         if ps.is_some_and(|target| {
@@ -630,14 +669,31 @@ pub fn should_filter_application_with_permission(
         return Ok(false);
     }
     if caller_is_instant {
-        if us.instant_app { return Ok(true); }
-        return ps.pkg.as_deref().map(|package| package.booleans & booleans::VISIBLE_TO_INSTANT_APPS == 0)
-            .ok_or(NotModelled("instant visibility parsed target package unavailable"));
+        if us.instant_app {
+            return Ok(true);
+        }
+        return ps
+            .pkg
+            .as_deref()
+            .map(|package| package.booleans & booleans::VISIBLE_TO_INSTANT_APPS == 0)
+            .ok_or(NotModelled(
+                "instant visibility parsed target package unavailable",
+            ));
     }
     if us.instant_app {
-        let query = super::query::Query { state, filter, calling_uid: permission_uid };
-        if query.internal_can_view_instant(calling_uid, user)? { return Ok(false); }
-        let access = state.system.instant_access.as_ref().ok_or(NotModelled("native instant access snapshot unavailable"))?;
+        let query = super::query::Query {
+            state,
+            filter,
+            calling_uid: permission_uid,
+        };
+        if query.internal_can_view_instant(calling_uid, user)? {
+            return Ok(false);
+        }
+        let access = state
+            .system
+            .instant_access
+            .as_ref()
+            .ok_or(NotModelled("native instant access snapshot unavailable"))?;
         return Ok(!access.granted(user, app_id(calling_uid), ps.app_id));
     }
     Ok(filter.should_filter(state, calling_uid, ps, user))
@@ -781,15 +837,27 @@ mod tests {
     fn relations_depend_on_packages_not_user_states() {
         let before = state();
         let mut after = before.clone();
-        after.packages.get_mut("a").unwrap().users.insert(0, PackageUserState::default());
+        after
+            .packages
+            .get_mut("a")
+            .unwrap()
+            .users
+            .insert(0, PackageUserState::default());
         assert!(AppsFilter::same_inputs(&before, &after));
 
         let mut installer = before.clone();
-        installer.packages.get_mut("a").unwrap().install_source.installer = Some("b".into());
+        installer
+            .packages
+            .get_mut("a")
+            .unwrap()
+            .install_source
+            .installer = Some("b".into());
         assert!(!AppsFilter::same_inputs(&before, &installer));
         let mut updated = before.clone();
-        updated.packages.get_mut("a").unwrap().pkg =
-            Some(Arc::new(AndroidPackage { queries_packages: vec!["z".into()], ..AndroidPackage::clone(before.packages["a"].pkg.as_ref().unwrap()) }));
+        updated.packages.get_mut("a").unwrap().pkg = Some(Arc::new(AndroidPackage {
+            queries_packages: vec!["z".into()],
+            ..AndroidPackage::clone(before.packages["a"].pkg.as_ref().unwrap())
+        }));
         assert!(!AppsFilter::same_inputs(&before, &updated));
         let mut removed = before.clone();
         removed.packages.remove("k");

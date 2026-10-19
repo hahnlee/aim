@@ -36,17 +36,26 @@ pub enum Role {
 #[derive(Clone)]
 pub struct BrowserSource(Arc<super::bootstrap::Bridge>);
 impl BrowserSource {
-    pub fn original(bridge: Arc<super::bootstrap::Bridge>) -> Self { Self(bridge) }
+    pub fn original(bridge: Arc<super::bootstrap::Bridge>) -> Self {
+        Self(bridge)
+    }
     fn get(&self, user: i32) -> Result<Option<String>, super::apps_filter::NotModelled> {
-        self.0.preferred_role_holder("android.app.role.BROWSER", user)
-            .map_err(|_| super::apps_filter::NotModelled("actual DefaultAppProvider browser read failed"))
+        self.0
+            .preferred_role_holder("android.app.role.BROWSER", user)
+            .map_err(|_| {
+                super::apps_filter::NotModelled("actual DefaultAppProvider browser read failed")
+            })
     }
 }
 impl std::fmt::Debug for BrowserSource {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { formatter.write_str("DefaultAppProvider") }
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DefaultAppProvider")
+    }
 }
 impl PartialEq for BrowserSource {
-    fn eq(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) }
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -61,11 +70,19 @@ impl Owner {
     /// None is the boot scan's deferred phase; Some(None) is an authoritative
     /// selection with no setup wizard. No package name is inferred here.
     #[cfg(test)]
-    pub(crate) fn priority_fixture(wizard:Option<String>)->Arc<Self>{
-        Arc::new(Self{frozen:[(Role::SetupWizard,wizard)].into(),live:Default::default(),known:None,browsers:Default::default(),browser_source:None})
+    pub(crate) fn priority_fixture(wizard: Option<String>) -> Arc<Self> {
+        Arc::new(Self {
+            frozen: [(Role::SetupWizard, wizard)].into(),
+            live: Default::default(),
+            known: None,
+            browsers: Default::default(),
+            browser_source: None,
+        })
     }
-    pub(crate) fn setup_wizard_priority_owner(&self)->Option<Option<&str>> {
-        self.frozen.get(&Role::SetupWizard).map(|name|name.as_deref())
+    pub(crate) fn setup_wizard_priority_owner(&self) -> Option<Option<&str>> {
+        self.frozen
+            .get(&Role::SetupWizard)
+            .map(|name| name.as_deref())
     }
 
     /// Called at the full native constructor gate using the applied resource configuration.
@@ -413,7 +430,9 @@ impl Owner {
         match kind {
             0 => return Ok(vec![Some("android".into())]),
             5 => {
-                if let Some(source) = &self.browser_source { return source.get(user).map(|name| vec![name]); }
+                if let Some(source) = &self.browser_source {
+                    return source.get(user).map(|name| vec![name]);
+                }
                 return self
                     .browsers
                     .get(&user)
@@ -574,59 +593,180 @@ mod tests {
     }
     #[test]
     fn instant_visibility_requires_permission_and_home_or_prediction_identity() {
-        use crate::package::preferred::{self, registry::{Actions, ActionError, Captured, Handle, Identity, IdentityProvider, Registry}};
+        use crate::package::preferred::{
+            self,
+            registry::{
+                ActionError, Actions, Captured, Handle, Identity, IdentityProvider, Registry,
+            },
+        };
         struct Identities;
         impl IdentityProvider for Identities {
-            fn allocate(&self, _: preferred::records::Record<'_>) -> Result<Identity, String> { panic!("no preferred records") }
+            fn allocate(&self, _: preferred::records::Record<'_>) -> Result<Identity, String> {
+                panic!("no preferred records")
+            }
         }
         struct Home;
         impl Actions for Home {
-            fn default_home(&self, user: i32) -> Result<Option<String>, ActionError> { Ok((user == 0).then(|| "factory".into())) }
-            fn context_permission(&self, _: i32, _: &str) -> Result<bool, ActionError> { panic!("unexpected permission mutation") }
-            fn commit_after_selection(&self, _: i32, _: &preferred::Mutation, _: i32) -> Result<bool, ActionError> { panic!("unexpected mutation") }
-            fn commit_mutation(&self, _: i32, _: u64, _: &preferred::Mutation, _: i32) -> Result<bool, ActionError> { panic!("unexpected mutation") }
-            fn cross_access(&self, _: i32, _: i32, _: i32, _: bool) -> Result<i32, ActionError> { panic!("unexpected cross access") }
-            fn cross_accessible(&self, _: i32, _: i32, _: i32) -> Result<bool, ActionError> { panic!("unexpected cross access") }
-            fn enforce_shell_restriction(&self, _: i32, _: i32) -> Result<(), ActionError> { panic!("unexpected shell restriction") }
-            fn reconcile_home(&self, _: i32, _: i32) -> Result<bool, ActionError> { panic!("unexpected reconcile") }
-            fn commit_home_selection(&self, _: i32, _: u64, _: &preferred::Selection) -> Result<(), ActionError> { panic!("unexpected selection mutation") }
-            fn default_browser(&self, _: i32) -> Result<Option<String>, ActionError> { panic!("unexpected browser") }
-            fn restore_browser(&self, _: i32, _: &str, _: bool) -> Result<(), ActionError> { panic!("unexpected browser restore") }
-            fn default_preferences(&self, _: i32) -> Result<Vec<preferred::PreferredActivity>, ActionError> { panic!("unexpected defaults") }
+            fn default_home(&self, user: i32) -> Result<Option<String>, ActionError> {
+                Ok((user == 0).then(|| "factory".into()))
+            }
+            fn context_permission(&self, _: i32, _: &str) -> Result<bool, ActionError> {
+                panic!("unexpected permission mutation")
+            }
+            fn commit_after_selection(
+                &self,
+                _: i32,
+                _: &preferred::Mutation,
+                _: i32,
+            ) -> Result<bool, ActionError> {
+                panic!("unexpected mutation")
+            }
+            fn commit_mutation(
+                &self,
+                _: i32,
+                _: u64,
+                _: &preferred::Mutation,
+                _: i32,
+            ) -> Result<bool, ActionError> {
+                panic!("unexpected mutation")
+            }
+            fn cross_access(&self, _: i32, _: i32, _: i32, _: bool) -> Result<i32, ActionError> {
+                panic!("unexpected cross access")
+            }
+            fn cross_accessible(&self, _: i32, _: i32, _: i32) -> Result<bool, ActionError> {
+                panic!("unexpected cross access")
+            }
+            fn enforce_shell_restriction(&self, _: i32, _: i32) -> Result<(), ActionError> {
+                panic!("unexpected shell restriction")
+            }
+            fn reconcile_home(&self, _: i32, _: i32) -> Result<bool, ActionError> {
+                panic!("unexpected reconcile")
+            }
+            fn commit_home_selection(
+                &self,
+                _: i32,
+                _: u64,
+                _: &preferred::Selection,
+            ) -> Result<(), ActionError> {
+                panic!("unexpected selection mutation")
+            }
+            fn default_browser(&self, _: i32) -> Result<Option<String>, ActionError> {
+                panic!("unexpected browser")
+            }
+            fn restore_browser(&self, _: i32, _: &str, _: bool) -> Result<(), ActionError> {
+                panic!("unexpected browser restore")
+            }
+            fn default_preferences(
+                &self,
+                _: i32,
+            ) -> Result<Vec<preferred::PreferredActivity>, ActionError> {
+                panic!("unexpected defaults")
+            }
         }
         let mut state = (*state()).clone();
         state.system.system_permissions = Some(BTreeMap::new());
         let factory = state.packages.get_mut("factory").unwrap();
         factory.users.insert(10, PackageUserState::default());
-        for user in factory.users.values_mut() { user.granted_permissions.push("android.permission.VIEW_INSTANT_APPS".into()); }
+        for user in factory.users.values_mut() {
+            user.granted_permissions
+                .push("android.permission.VIEW_INSTANT_APPS".into());
+        }
         let pkg = Arc::make_mut(factory.pkg.as_mut().unwrap());
         let mut filter = crate::package::intent_filter::IntentFilter::default();
-        filter.add_action("android.intent.action.MAIN"); filter.add_category("android.intent.category.HOME"); filter.add_category("android.intent.category.DEFAULT");
+        filter.add_action("android.intent.action.MAIN");
+        filter.add_category("android.intent.category.HOME");
+        filter.add_category("android.intent.category.DEFAULT");
         let mut activity = crate::package::pkg::Activity::default();
-        activity.main.component.package_name = "factory".into(); activity.main.component.name = "factory.Home".into();
-        activity.main.component.intents.push(crate::package::intent_filter::ParsedIntentInfo { filter, has_default: true, ..Default::default() });
-        activity.main.enabled = true; activity.main.exported = true; pkg.activities.push(activity);
+        activity.main.component.package_name = "factory".into();
+        activity.main.component.name = "factory.Home".into();
+        activity
+            .main
+            .component
+            .intents
+            .push(crate::package::intent_filter::ParsedIntentInfo {
+                filter,
+                has_default: true,
+                ..Default::default()
+            });
+        activity.main.enabled = true;
+        activity.main.exported = true;
+        pkg.activities.push(activity);
         let registry = Registry::new(Arc::new(Identities));
-        registry.insert_user(0, preferred::Preferred::default()).unwrap(); registry.insert_user(10, preferred::Preferred::default()).unwrap();
+        registry
+            .insert_user(0, preferred::Preferred::default())
+            .unwrap();
+        registry
+            .insert_user(10, preferred::Preferred::default())
+            .unwrap();
         let captured: Captured = registry.capture().unwrap();
-        state.system.preferred_owner = Some(Arc::new(Handle::new(Arc::new(captured), Arc::new(|_, _, _| panic!("unexpected commit")), Arc::new(Home))));
-        state.system.roles = Some(Arc::new(Owner { frozen: [(Role::AppPrediction, None)].into(), live: BTreeMap::new(), known: None, browsers: BTreeMap::new(), browser_source: None }));
+        state.system.preferred_owner = Some(Arc::new(Handle::new(
+            Arc::new(captured),
+            Arc::new(|_, _, _| panic!("unexpected commit")),
+            Arc::new(Home),
+        )));
+        state.system.roles = Some(Arc::new(Owner {
+            frozen: [(Role::AppPrediction, None)].into(),
+            live: BTreeMap::new(),
+            known: None,
+            browsers: BTreeMap::new(),
+            browser_source: None,
+        }));
         let query_filter = AppsFilter::new(&state, &FilterConfig::default()).unwrap();
-        let query = Query { state: &state, filter: &query_filter, calling_uid: 10100 };
+        let query = Query {
+            state: &state,
+            filter: &query_filter,
+            calling_uid: 10100,
+        };
         assert!(query.internal_can_view_instant(10100, 0).unwrap());
         assert!(!query.internal_can_view_instant(10199, 0).unwrap());
         drop(query);
         state.users.clear();
-        state.users.insert(10, User { id: 10, unlocking_or_unlocked: true, ..Default::default() });
-        state.packages.get_mut("factory").unwrap().users.get_mut(&10).unwrap()
-            .granted_permissions.push("android.permission.INTERACT_ACROSS_USERS_FULL".into());
-        state.packages.get_mut("factory").unwrap().pkg.as_mut().map(Arc::make_mut).unwrap().activities.clear();
-        state.system.roles = Some(Arc::new(Owner { frozen: [(Role::AppPrediction, Some("factory".into()))].into(), live: BTreeMap::new(), known: None, browsers: BTreeMap::new(), browser_source: None }));
+        state.users.insert(
+            10,
+            User {
+                id: 10,
+                unlocking_or_unlocked: true,
+                ..Default::default()
+            },
+        );
+        state
+            .packages
+            .get_mut("factory")
+            .unwrap()
+            .users
+            .get_mut(&10)
+            .unwrap()
+            .granted_permissions
+            .push("android.permission.INTERACT_ACROSS_USERS_FULL".into());
+        state
+            .packages
+            .get_mut("factory")
+            .unwrap()
+            .pkg
+            .as_mut()
+            .map(Arc::make_mut)
+            .unwrap()
+            .activities
+            .clear();
+        state.system.roles = Some(Arc::new(Owner {
+            frozen: [(Role::AppPrediction, Some("factory".into()))].into(),
+            live: BTreeMap::new(),
+            known: None,
+            browsers: BTreeMap::new(),
+            browser_source: None,
+        }));
         let query_filter = AppsFilter::new(&state, &FilterConfig::default()).unwrap();
-        let query = Query { state: &state, filter: &query_filter, calling_uid: 1010100 };
+        let query = Query {
+            state: &state,
+            filter: &query_filter,
+            calling_uid: 1010100,
+        };
         assert!(query.internal_can_view_instant(1010100, 10).unwrap());
         assert!(!query.internal_can_view_instant(1010199, 10).unwrap());
-        let unprivileged = Query { calling_uid: 1010199, ..query };
+        let unprivileged = Query {
+            calling_uid: 1010199,
+            ..query
+        };
         assert!(!unprivileged.internal_can_view_instant(1010100, 10).unwrap());
     }
 

@@ -80,14 +80,24 @@ impl Raw {
     /// The bytes with `start..end` replaced by `with`, its objects and
     /// files after them moved along (none is between).
     pub(crate) fn splice(&self, start: usize, end: usize, with: &[u8]) -> Raw {
-        let shift = |at: u64| if at as usize >= end { at + with.len() as u64 - (end - start) as u64 } else { at };
+        let shift = |at: u64| {
+            if at as usize >= end {
+                at + with.len() as u64 - (end - start) as u64
+            } else {
+                at
+            }
+        };
         let mut bytes = self.bytes[..start].to_vec();
         bytes.extend_from_slice(with);
         bytes.extend_from_slice(&self.bytes[end..]);
         Raw {
             bytes,
             objects: self.objects.iter().map(|&at| shift(at)).collect(),
-            files: self.files.iter().map(|(at, f)| (shift(*at), f.clone())).collect(),
+            files: self
+                .files
+                .iter()
+                .map(|(at, f)| (shift(*at), f.clone()))
+                .collect(),
         }
     }
 
@@ -100,16 +110,30 @@ impl Raw {
         let mut bytes = self.bytes[..start].to_vec();
         bytes.extend_from_slice(with.data());
         bytes.extend_from_slice(&self.bytes[end..]);
-        let mut objects: Vec<u64> = self.objects.iter().copied().filter(|&at| at < start64).collect();
+        let mut objects: Vec<u64> = self
+            .objects
+            .iter()
+            .copied()
+            .filter(|&at| at < start64)
+            .collect();
         objects.extend(with.objects().iter().map(|at| start64 + at));
-        objects.extend(self.objects.iter().filter(|&&at| at >= end64).map(|&at| shift(at)));
+        objects.extend(
+            self.objects
+                .iter()
+                .filter(|&&at| at >= end64)
+                .map(|&at| shift(at)),
+        );
         let files = self
             .files
             .iter()
             .filter(|(at, _)| *at < start64 || *at >= end64)
             .map(|(at, f)| (if *at >= end64 { shift(*at) } else { *at }, f.clone()))
             .collect();
-        Raw { bytes, objects, files }
+        Raw {
+            bytes,
+            objects,
+            files,
+        }
     }
 
     /// The bytes of `start..end`, with their objects and files.
@@ -117,8 +141,18 @@ impl Raw {
         let (s, e) = (start as u64, end as u64);
         Raw {
             bytes: self.bytes[start..end].to_vec(),
-            objects: self.objects.iter().filter(|&&at| at >= s && at < e).map(|at| at - s).collect(),
-            files: self.files.iter().filter(|(at, _)| *at >= s && *at < e).map(|(at, f)| (at - s, f.clone())).collect(),
+            objects: self
+                .objects
+                .iter()
+                .filter(|&&at| at >= s && at < e)
+                .map(|at| at - s)
+                .collect(),
+            files: self
+                .files
+                .iter()
+                .filter(|(at, _)| *at >= s && *at < e)
+                .map(|(at, f)| (at - s, f.clone()))
+                .collect(),
         }
     }
 
@@ -129,7 +163,8 @@ impl Raw {
             let base = raw.bytes.len() as u64;
             raw.bytes.extend_from_slice(&part.bytes);
             raw.objects.extend(part.objects.iter().map(|at| base + at));
-            raw.files.extend(part.files.iter().map(|(at, f)| (base + at, f.clone())));
+            raw.files
+                .extend(part.files.iter().map(|(at, f)| (base + at, f.clone())));
         }
         raw
     }
@@ -148,7 +183,9 @@ impl Raw {
 
     /// Whether it carries an fd object (`Parcel.hasFileDescriptors`).
     pub(crate) fn has_fds(&self) -> bool {
-        self.objects.iter().any(|&at| self.object(at).kind == BINDER_TYPE_FD)
+        self.objects
+            .iter()
+            .any(|&at| self.object(at).kind == BINDER_TYPE_FD)
     }
 
     fn object(&self, at: u64) -> FlatBinderObject {
@@ -233,7 +270,12 @@ impl ClipData {
                 classification_status: CLASSIFICATION_NOT_PERFORMED,
                 confidences: Raw::of(&empty),
             },
-            items: vec![Item { text: text.map(Into::into), uri: None, intent_data: None, raw: Raw::of(&item) }],
+            items: vec![Item {
+                text: text.map(Into::into),
+                uri: None,
+                intent_data: None,
+                raw: Raw::of(&item),
+            }],
         }
     }
 

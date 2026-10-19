@@ -49,7 +49,9 @@ fn write_validated_owner(
     owner: &crate::package::scan::SigningScan,
     name: &str,
 ) -> Result<Option<Vec<u8>>, String> {
-    let Some(group) = owner.identities.shared_users.get(name) else { return Ok(None); };
+    let Some(group) = owner.identities.shared_users.get(name) else {
+        return Ok(None);
+    };
     let members: Vec<_> = group.package_names().collect();
     let signing = group
         .signatures

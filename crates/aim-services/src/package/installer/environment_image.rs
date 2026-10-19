@@ -181,7 +181,11 @@ pub struct Services {
     pub factory_test: bool,
     pub library_compatibility: Arc<scan::LibraryCompatibility>,
     pub vendor_sdk: i32,
-    pub remove_test_base: Arc<dyn Fn(&crate::package::pkg::AndroidPackage, bool) -> Result<Option<bool>, String> + Send + Sync>,
+    pub remove_test_base: Arc<
+        dyn Fn(&crate::package::pkg::AndroidPackage, bool) -> Result<Option<bool>, String>
+            + Send
+            + Sync,
+    >,
     pub app_data_flags: environment::AppDataFlags,
     pub labeler: environment::Labeler,
     pub metadata: environment::Metadata,

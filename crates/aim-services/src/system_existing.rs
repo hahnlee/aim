@@ -153,36 +153,77 @@ impl System {
             .ok_or_else(|| error("existing install generation changed"))?;
         disk.validate_committed_scan(capture.scan().owner())
             .map_err(|e| error(e.to_string()))?;
-        let current_resolution=resolver.resolution(capture.state()).map_err(|e|error(format!("existing install locked resolution: {e:?}")))?;
+        let current_resolution = resolver
+            .resolution(capture.state())
+            .map_err(|e| error(format!("existing install locked resolution: {e:?}")))?;
         let Some(package) = capture
             .state()
             .packages
             .get(&name)
             .filter(|p| p.pkg.is_some())
         else {
-            drop(bootstrap); drop(disk); return owner.complete_immediate(request, -3);
+            drop(bootstrap);
+            drop(disk);
+            return owner.complete_immediate(request, -3);
         };
         let instant = request.flags & 0x800 != 0;
         let full = request.flags & 0x4000 != 0;
         if instant && (package.is.system || package.is.updated_system_app || admin || protected) {
-            drop(bootstrap); drop(disk); return owner.complete_immediate(request, -3);
+            drop(bootstrap);
+            drop(disk);
+            return owner.complete_immediate(request, -3);
         }
         // The original clears Binder identity before canViewInstantApps;
         // its Context permission checks see the system, while same-app checks
         // keep the explicitly captured caller UID.
-        let privileged=crate::package::query::Query{state:capture.state(),filter:&current_resolution.apps_filter,calling_uid:1000};
-        let can_view=if uid<10000 || policy::permission(&privileged,"android.permission.ACCESS_INSTANT_APPS")? {true}
-            else if policy::permission(&privileged,"android.permission.VIEW_INSTANT_APPS")? {
-                let home=crate::package::query::preferred::default_home_for_instant(&privileged,apps_filter::user_id(uid)).map_err(|e|error(e.0))?;
-                let home_matches=apps_filter::is_caller_same_app(capture.state(),home.as_ref().map(|home|home.package.as_str()),uid).map_err(|e|error(e.0))?;
-                if home_matches {true} else {
-                    let prediction=capture.state().system.roles.as_ref().ok_or_else(||error("existing install prediction owner absent"))?
-                        .package(crate::package::roles::Role::AppPrediction,&privileged)?;
-                    apps_filter::is_caller_same_app(capture.state(),prediction.as_deref(),uid).map_err(|e|error(e.0))?
-                }
-            } else {false};
-        if !can_view && capture.state().users.keys().all(|user|package.users.get(user).is_some_and(|state|state.instant_app)) {
-            drop(bootstrap); drop(disk); return owner.complete_immediate(request,-3);
+        let privileged = crate::package::query::Query {
+            state: capture.state(),
+            filter: &current_resolution.apps_filter,
+            calling_uid: 1000,
+        };
+        let can_view = if uid < 10000
+            || policy::permission(&privileged, "android.permission.ACCESS_INSTANT_APPS")?
+        {
+            true
+        } else if policy::permission(&privileged, "android.permission.VIEW_INSTANT_APPS")? {
+            let home = crate::package::query::preferred::default_home_for_instant(
+                &privileged,
+                apps_filter::user_id(uid),
+            )
+            .map_err(|e| error(e.0))?;
+            let home_matches = apps_filter::is_caller_same_app(
+                capture.state(),
+                home.as_ref().map(|home| home.package.as_str()),
+                uid,
+            )
+            .map_err(|e| error(e.0))?;
+            if home_matches {
+                true
+            } else {
+                let prediction = capture
+                    .state()
+                    .system
+                    .roles
+                    .as_ref()
+                    .ok_or_else(|| error("existing install prediction owner absent"))?
+                    .package(crate::package::roles::Role::AppPrediction, &privileged)?;
+                apps_filter::is_caller_same_app(capture.state(), prediction.as_deref(), uid)
+                    .map_err(|e| error(e.0))?
+            }
+        } else {
+            false
+        };
+        if !can_view
+            && capture.state().users.keys().all(|user| {
+                package
+                    .users
+                    .get(user)
+                    .is_some_and(|state| state.instant_app)
+            })
+        {
+            drop(bootstrap);
+            drop(disk);
+            return owner.complete_immediate(request, -3);
         }
         let mut scan = capture.scan().owner().clone();
         let original_user_state = scan
@@ -241,14 +282,15 @@ impl System {
             .prepare_package_update(scan.clone())
             .map_err(error)?;
         let write = if changed {
-            disk.commit_scan_settings(update.capture.scan()).and_then(|_| {
-                disk.commit_live_install_restrictions(
-                    &scan,
-                    request.user as u32,
-                    &[name.clone()].into(),
-                    true,
-                )
-            })
+            disk.commit_scan_settings(update.capture.scan())
+                .and_then(|_| {
+                    disk.commit_live_install_restrictions(
+                        &scan,
+                        request.user as u32,
+                        &[name.clone()].into(),
+                        true,
+                    )
+                })
         } else {
             Ok(())
         };
@@ -315,11 +357,18 @@ impl System {
         record.write_string16(Some(seinfo));
         record.write_bool(newly_installed && original_user_state.archive_state.is_some());
         self.check_package_bootstrap(&owner.bridge)?;
-        let input=crate::package::installer::existing::Record::new(record.data().to_vec());
-        let binder=self.process.add_service(input.clone());
-        let preparation=owner.bridge.existing_package_installed(binder,request.user,request.flags);
+        let input = crate::package::installer::existing::Record::new(record.data().to_vec());
+        let binder = self.process.add_service(input.clone());
+        let preparation =
+            owner
+                .bridge
+                .existing_package_installed(binder, request.user, request.flags);
         input.revoke();
-        let inodes=preparation.map_err(|e|error(format!("existing install committed; preparation owner: {e:?}")))?;
+        let inodes = preparation.map_err(|e| {
+            error(format!(
+                "existing install committed; preparation owner: {e:?}"
+            ))
+        })?;
         self.commit_existing_data_inodes(&owner.bridge, &name, request.user, inodes)?;
         let resolution = resolver
             .resolution(installed.state())
@@ -390,13 +439,24 @@ impl System {
                 .map_err(|e| error(format!("existing install browser restore: {e:?}")))?;
             let mut disk = persistence.lock().unwrap();
             let published = self.package_queries.lock().unwrap();
-            if !published.bridge.as_ref().and_then(std::sync::Weak::upgrade)
+            if !published
+                .bridge
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
                 .is_some_and(|current| Arc::ptr_eq(&current, bridge))
-                || !published.capture.as_ref().is_some_and(|current| current.state().system.preferred_owner.as_ref()
-                    .is_some_and(|owner| Arc::ptr_eq(owner, &preferred))) {
+                || !published.capture.as_ref().is_some_and(|current| {
+                    current
+                        .state()
+                        .system
+                        .preferred_owner
+                        .as_ref()
+                        .is_some_and(|owner| Arc::ptr_eq(owner, &preferred))
+                })
+            {
                 return Err(error("existing install preference generation changed"));
             }
-            disk.take_matching_pending_browser(user as u32, name).map_err(error)?;
+            disk.take_matching_pending_browser(user as u32, name)
+                .map_err(error)?;
         }
         self.check_package_bootstrap(bridge)?;
         preferred

@@ -24,32 +24,87 @@ impl System {
     fn internal_isolated_owner_change(&self, isolated: i32, owner: Option<i32>) -> Result<()> {
         use crate::package::scan_snapshot::Error;
         loop {
-            let (bridge,snapshots,capture,canonical)={
-                let state=self.package_bootstrap.lock().unwrap();
-                let current=state.current.as_ref().ok_or_else(||event_error("isolated owner bootstrap unavailable"))?;
-                let snapshots=current.snapshots.clone().ok_or_else(||event_error("isolated canonical store unavailable"))?;
-                let canonical=snapshots.capture();
-                (current.bridge.clone(),snapshots,current.queries.clone().ok_or_else(||event_error("isolated owner capture unavailable"))?,canonical)
+            let (bridge, snapshots, capture, canonical) = {
+                let state = self.package_bootstrap.lock().unwrap();
+                let current = state
+                    .current
+                    .as_ref()
+                    .ok_or_else(|| event_error("isolated owner bootstrap unavailable"))?;
+                let snapshots = current
+                    .snapshots
+                    .clone()
+                    .ok_or_else(|| event_error("isolated canonical store unavailable"))?;
+                let canonical = snapshots.capture();
+                (
+                    current.bridge.clone(),
+                    snapshots,
+                    current
+                        .queries
+                        .clone()
+                        .ok_or_else(|| event_error("isolated owner capture unavailable"))?,
+                    canonical,
+                )
             };
             self.check_package_bootstrap(&bridge)?;
-            let coherent=Arc::ptr_eq(capture.scan(),&canonical);
-            let delta=if coherent{None}else{Some(capture.with_isolated_owner_delta(isolated,owner).map_err(event_error)?)};
-            let prepared=if coherent{Some(capture.prepare_isolated_owner_delta(isolated,owner).map_err(event_error)?)}else{None};
-            let mut state=self.package_bootstrap.lock().unwrap();
-            let current=state.current.as_mut().filter(|current|Arc::ptr_eq(&current.bridge,&bridge))
-                .ok_or_else(||event_error("isolated owner bootstrap retired"))?;
-            if !current.snapshots.as_ref().is_some_and(|latest|Arc::ptr_eq(latest,&snapshots))
-                || !current.queries.as_ref().is_some_and(|latest|Arc::ptr_eq(latest,&capture)){continue;}
-            if let Some(update)=prepared{
-                match snapshots.publish_validated_store_after(&canonical,&update.store){Err(Error::Stale)=>continue,
-                    Err(error)=>return Err(event_error(format!("isolated canonical publication: {error:?}"))),Ok(_)=>{}}
-                let version=update.capture.scan().version();current.set_queries(Some(update.capture));
-                if let Some(page)=&current.version_page{page.publish(version);}state.version=version;
-            }else{
+            let coherent = Arc::ptr_eq(capture.scan(), &canonical);
+            let delta = if coherent {
+                None
+            } else {
+                Some(
+                    capture
+                        .with_isolated_owner_delta(isolated, owner)
+                        .map_err(event_error)?,
+                )
+            };
+            let prepared = if coherent {
+                Some(
+                    capture
+                        .prepare_isolated_owner_delta(isolated, owner)
+                        .map_err(event_error)?,
+                )
+            } else {
+                None
+            };
+            let mut state = self.package_bootstrap.lock().unwrap();
+            let current = state
+                .current
+                .as_mut()
+                .filter(|current| Arc::ptr_eq(&current.bridge, &bridge))
+                .ok_or_else(|| event_error("isolated owner bootstrap retired"))?;
+            if !current
+                .snapshots
+                .as_ref()
+                .is_some_and(|latest| Arc::ptr_eq(latest, &snapshots))
+                || !current
+                    .queries
+                    .as_ref()
+                    .is_some_and(|latest| Arc::ptr_eq(latest, &capture))
+            {
+                continue;
+            }
+            if let Some(update) = prepared {
+                match snapshots.publish_validated_store_after(&canonical, &update.store) {
+                    Err(Error::Stale) => continue,
+                    Err(error) => {
+                        return Err(event_error(format!(
+                            "isolated canonical publication: {error:?}"
+                        )));
+                    }
+                    Ok(_) => {}
+                }
+                let version = update.capture.scan().version();
+                current.set_queries(Some(update.capture));
+                if let Some(page) = &current.version_page {
+                    page.publish(version);
+                }
+                state.version = version;
+            } else {
                 // Context-only delta: preserve the actual durable/new-code scan.
                 // The install Context builder sees this changed query base and
                 // must retry its projection before publishing the full capture.
-                if !Arc::ptr_eq(&snapshots.capture(),&canonical){continue;}
+                if !Arc::ptr_eq(&snapshots.capture(), &canonical) {
+                    continue;
+                }
                 current.set_queries(delta);
             }
             return Ok(());
@@ -67,25 +122,49 @@ impl System {
         let time = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
             Ok(after) => i64::try_from(after.as_millis()),
             Err(before) => i64::try_from(before.duration().as_millis()).map(|time| -time),
-        }.map_err(|_| event_error("usage clock overflow"))?;
+        }
+        .map_err(|_| event_error("usage clock overflow"))?;
         self.publish_package_usage(package_name.as_deref(), reason, time)
     }
 
-    pub(super) fn publish_package_usage(&self, package_name: Option<&str>, reason: i32, time: i64) -> Result<()> {
+    pub(super) fn publish_package_usage(
+        &self,
+        package_name: Option<&str>,
+        reason: i32,
+        time: i64,
+    ) -> Result<()> {
         use crate::package::scan_snapshot::{Error, Store};
         loop {
             let (bridge, snapshots, capture, base) = {
                 let state = self.package_bootstrap.lock().unwrap();
-                let current = state.current.as_ref().ok_or_else(|| event_error("usage bootstrap unavailable"))?;
-                let snapshots = current.snapshots.clone().ok_or_else(|| event_error("usage scan owner unavailable"))?;
+                let current = state
+                    .current
+                    .as_ref()
+                    .ok_or_else(|| event_error("usage bootstrap unavailable"))?;
+                let snapshots = current
+                    .snapshots
+                    .clone()
+                    .ok_or_else(|| event_error("usage scan owner unavailable"))?;
                 let base = snapshots.capture();
-                (current.bridge.clone(), snapshots, current.queries.clone().ok_or_else(|| event_error("usage capture unavailable"))?, base)
+                (
+                    current.bridge.clone(),
+                    snapshots,
+                    current
+                        .queries
+                        .clone()
+                        .ok_or_else(|| event_error("usage capture unavailable"))?,
+                    base,
+                )
             };
             self.check_package_bootstrap(&bridge)?;
-            let Some(name) = package_name.filter(|name| base.usage().times(name).is_some()) else { return Ok(()); };
+            let Some(name) = package_name.filter(|name| base.usage().times(name).is_some()) else {
+                return Ok(());
+            };
             let mut usage = base.usage().clone();
             usage.notify(name, reason, time);
-            if usage == *base.usage() { return Ok(()); }
+            if usage == *base.usage() {
+                return Ok(());
+            }
             // AMS holds its own locks here. Prepare outside the coordinator and
             // never wait for the install gate. If a user/install transition owns
             // that gate, advance only the canonical usage owner. That transition
@@ -98,29 +177,61 @@ impl System {
                 }
             };
             let projected = if projection.is_some() && Arc::ptr_eq(capture.scan(), &base) {
-                Some(capture.prepare_usage_update(usage.clone()).map_err(event_error)?)
-            } else { None };
-            let candidate = if projected.is_some() {
-                None
+                Some(
+                    capture
+                        .prepare_usage_update(usage.clone())
+                        .map_err(event_error)?,
+                )
             } else {
-                Some(Store::prepare_usage_store(&base, usage)
-                    .map_err(|error| event_error(format!("usage canonical replica: {error:?}")))?)
+                None
             };
+            let candidate =
+                if projected.is_some() {
+                    None
+                } else {
+                    Some(Store::prepare_usage_store(&base, usage).map_err(|error| {
+                        event_error(format!("usage canonical replica: {error:?}"))
+                    })?)
+                };
             let mut state = self.package_bootstrap.lock().unwrap();
-            let current = state.current.as_mut().filter(|current| Arc::ptr_eq(&current.bridge, &bridge))
+            let current = state
+                .current
+                .as_mut()
+                .filter(|current| Arc::ptr_eq(&current.bridge, &bridge))
                 .ok_or_else(|| event_error("usage bootstrap retired during preparation"))?;
-            if !current.snapshots.as_ref().is_some_and(|latest| Arc::ptr_eq(latest, &snapshots)) { continue; }
-            if !current.queries.as_ref().is_some_and(|latest| Arc::ptr_eq(latest, &capture)) { continue; }
-            let candidate = projected.as_ref().map(|update| &update.store).unwrap_or_else(|| candidate.as_ref().unwrap());
+            if !current
+                .snapshots
+                .as_ref()
+                .is_some_and(|latest| Arc::ptr_eq(latest, &snapshots))
+            {
+                continue;
+            }
+            if !current
+                .queries
+                .as_ref()
+                .is_some_and(|latest| Arc::ptr_eq(latest, &capture))
+            {
+                continue;
+            }
+            let candidate = projected
+                .as_ref()
+                .map(|update| &update.store)
+                .unwrap_or_else(|| candidate.as_ref().unwrap());
             match snapshots.publish_validated_store_after(&base, candidate) {
                 Err(Error::Stale) => continue,
-                Err(error) => return Err(event_error(format!("usage canonical publication: {error:?}"))),
+                Err(error) => {
+                    return Err(event_error(format!(
+                        "usage canonical publication: {error:?}"
+                    )));
+                }
                 Ok(_) => {}
             }
             if let Some(update) = projected {
                 let version = update.capture.scan().version();
                 current.set_queries(Some(update.capture));
-                if let Some(page) = &current.version_page { page.publish(version); }
+                if let Some(page) = &current.version_page {
+                    page.publish(version);
+                }
                 state.version = version;
             }
             return Ok(());
@@ -138,9 +249,18 @@ impl System {
     ) -> Result<()> {
         let (bridge, capture, dependencies) = {
             let state = self.package_bootstrap.lock().unwrap();
-            let current = state.current.as_ref().ok_or_else(||event_error("component usage bootstrap unavailable"))?;
-            (current.bridge.clone(), current.queries.clone().ok_or_else(||event_error("component usage capture unavailable"))?,
-                current.mutations.clone())
+            let current = state
+                .current
+                .as_ref()
+                .ok_or_else(|| event_error("component usage bootstrap unavailable"))?;
+            (
+                current.bridge.clone(),
+                current
+                    .queries
+                    .clone()
+                    .ok_or_else(|| event_error("component usage capture unavailable"))?,
+                current.mutations.clone(),
+            )
         };
         self.check_package_bootstrap(&bridge)?;
         let Some(name) = package_name.filter(|name| {
@@ -168,11 +288,16 @@ impl System {
         // ActiveServices calls this while holding the AMS monitor. An already
         // active package has no stopped-state mutation to serialize and must
         // not wait behind install policy reads which can reenter that monitor.
-        if capture.state().packages.get(&name).is_some_and(|package|
-            !crate::package::info::user_state(package,user_id).stopped) {
+        if capture
+            .state()
+            .packages
+            .get(&name)
+            .is_some_and(|package| !crate::package::info::user_state(package, user_id).stopped)
+        {
             return Ok(());
         }
-        let dependencies=dependencies.ok_or_else(||event_error("component usage mutation owner unavailable"))?;
+        let dependencies = dependencies
+            .ok_or_else(|| event_error("component usage mutation owner unavailable"))?;
         let resolver = crate::package::resolve::Resolver::default();
         let resolution = resolver
             .resolution(capture.state())
@@ -196,17 +321,32 @@ impl System {
             sender_euid: calling_uid as u32,
             data: Reader::new(parcel.data(), parcel.objects()),
         };
-        let prepared = crate::package::mutation_dispatch::prepare(call.code, &mut call.data, &query, calling_pid, &dependencies)
-            .ok_or_else(||event_error("component usage stopped-state owner unavailable"))??;
+        let prepared = crate::package::mutation_dispatch::prepare(
+            call.code,
+            &mut call.data,
+            &query,
+            calling_pid,
+            &dependencies,
+        )
+        .ok_or_else(|| event_error("component usage stopped-state owner unavailable"))??;
         // Preserve the same rule for any no-op resolved by the full policy.
         if !prepared.changes_state() {
-            prepared.finish(&dependencies,capture.state(),capture.state(),calling_uid)?;
-            let mut reader=Reader::new(prepared.reply.data(),prepared.reply.objects());
-            reader.read_exception().map_err(|status|event_error(format!("component usage reply {status}")))??;
+            prepared.finish(&dependencies, capture.state(), capture.state(), calling_uid)?;
+            let mut reader = Reader::new(prepared.reply.data(), prepared.reply.objects());
+            reader
+                .read_exception()
+                .map_err(|status| event_error(format!("component usage reply {status}")))??;
             return Ok(());
         }
         let install = self.package_install_guard();
-        let reply = self.publish_prepared_package_mutation_guarded(&bridge, &capture, prepared, &dependencies, calling_uid, install)?;
+        let reply = self.publish_prepared_package_mutation_guarded(
+            &bridge,
+            &capture,
+            prepared,
+            &dependencies,
+            calling_uid,
+            install,
+        )?;
         let mut reader = Reader::new(reply.data(), reply.objects());
         reader
             .read_exception()
@@ -285,7 +425,12 @@ impl System {
         self.check_package_bootstrap(&bridge)?;
         Ok((bridge, Arc::new(node)))
     }
-    fn internal_event_allowlist(&self, bridge: &Arc<crate::package::bootstrap::Bridge>, name: &str, user: i32) -> Result<Option<Vec<i32>>> {
+    fn internal_event_allowlist(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        name: &str,
+        user: i32,
+    ) -> Result<Option<Vec<i32>>> {
         let capture = self.capture_package_queries_for(bridge)?;
         let resolver = crate::package::resolve::Resolver::default();
         let resolution = resolver
@@ -551,44 +696,102 @@ impl System {
 #[cfg(test)]
 mod component_use_concurrency_tests {
     use super::*;
-    use crate::package::{scan::SigningScan, scan_snapshot::Store, owner::usage::Usage,
-        settings::{Settings,Package},restrictions::UserState,write::mutation::{Plan,Change}};
+    use crate::package::{
+        owner::usage::Usage,
+        restrictions::UserState,
+        scan::SigningScan,
+        scan_snapshot::Store,
+        settings::{Package, Settings},
+        write::mutation::{Change, Plan},
+    };
     use std::collections::BTreeMap;
     #[test]
     fn component_use_prepares_after_concurrent_app_data_publication() {
-        use aim_binder_driver::{Driver,Device,Credentials};
+        use aim_binder_driver::{Credentials, Device, Driver};
         use aim_binder_host::local::LocalProcess;
-        let driver=Driver::new();
-        let process=LocalProcess::open(&driver,Device::Binder,Credentials{pid:98001,euid:1000,security_context:None});
-        let system=System::new(process,&[]);
-        let mut owner=SigningScan::new(&Default::default(),&Settings{packages:vec![Package{name:"p".into(),app_id:10100,..Default::default()}],..Default::default()},36).unwrap();
-        owner.capture_user_states(BTreeMap::from([(("p".into(),false),crate::package::scan::CapturedUsers{
-            states:BTreeMap::from([(0,UserState{stopped:true,not_launched:true,..Default::default()})]),active_aliases:Default::default(),
-        })])).unwrap();
-        let store=Arc::new(Store::new(owner,Usage::new(["p"])).unwrap());
-        let old=store.capture();
-        let app_data_gate=system.package_install_guard();
-        let (started,ready)=std::sync::mpsc::channel();
-        let component_system=system.clone();let component_store=store.clone();
-        let component=std::thread::spawn(move||{
+        let driver = Driver::new();
+        let process = LocalProcess::open(
+            &driver,
+            Device::Binder,
+            Credentials {
+                pid: 98001,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let system = System::new(process, &[]);
+        let mut owner = SigningScan::new(
+            &Default::default(),
+            &Settings {
+                packages: vec![Package {
+                    name: "p".into(),
+                    app_id: 10100,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            36,
+        )
+        .unwrap();
+        owner
+            .capture_user_states(BTreeMap::from([(
+                ("p".into(), false),
+                crate::package::scan::CapturedUsers {
+                    states: BTreeMap::from([(
+                        0,
+                        UserState {
+                            stopped: true,
+                            not_launched: true,
+                            ..Default::default()
+                        },
+                    )]),
+                    active_aliases: Default::default(),
+                },
+            )]))
+            .unwrap();
+        let store = Arc::new(Store::new(owner, Usage::new(["p"])).unwrap());
+        let old = store.capture();
+        let app_data_gate = system.package_install_guard();
+        let (started, ready) = std::sync::mpsc::channel();
+        let component_system = system.clone();
+        let component_store = store.clone();
+        let component = std::thread::spawn(move || {
             started.send(()).unwrap();
-            let _gate=component_system.package_install_guard();
-            let base=component_store.capture();
-            assert_eq!(base.version(),2);
-            let mut owner=base.owner().clone();
-            Plan{package:"p".into(),user:Some(0),change:Change::Stopped{stopped:false,not_launched:false,first_launch_installer:None,was_stopped:true}}.apply_scan(&mut owner).unwrap();
-            component_store.publish(&base,owner,base.usage().clone()).unwrap()
+            let _gate = component_system.package_install_guard();
+            let base = component_store.capture();
+            assert_eq!(base.version(), 2);
+            let mut owner = base.owner().clone();
+            Plan {
+                package: "p".into(),
+                user: Some(0),
+                change: Change::Stopped {
+                    stopped: false,
+                    not_launched: false,
+                    first_launch_installer: None,
+                    was_stopped: true,
+                },
+            }
+            .apply_scan(&mut owner)
+            .unwrap();
+            component_store
+                .publish(&base, owner, base.usage().clone())
+                .unwrap()
         });
         ready.recv().unwrap();
-        let mut owner=old.owner().clone();
-        let mut user=owner.scanned_user_states("p").unwrap()[&0].clone();user.ce_data_inode=77;user.de_data_inode=88;
-        owner.set_user_state("p",0,user).unwrap();store.publish(&old,owner,old.usage().clone()).unwrap();
+        let mut owner = old.owner().clone();
+        let mut user = owner.scanned_user_states("p").unwrap()[&0].clone();
+        user.ce_data_inode = 77;
+        user.de_data_inode = 88;
+        owner.set_user_state("p", 0, user).unwrap();
+        store.publish(&old, owner, old.usage().clone()).unwrap();
         drop(app_data_gate);
-        let current=component.join().unwrap();
-        let state=&current.owner().scanned_user_states("p").unwrap()[&0];
-        assert!(!state.stopped);assert!(!state.not_launched);
-        assert_eq!(state.ce_data_inode,77);assert_eq!(state.de_data_inode,88);
+        let current = component.join().unwrap();
+        let state = &current.owner().scanned_user_states("p").unwrap()[&0];
+        assert!(!state.stopped);
+        assert!(!state.not_launched);
+        assert_eq!(state.ce_data_inode, 77);
+        assert_eq!(state.de_data_inode, 88);
         assert!(old.owner().scanned_user_states("p").unwrap()[&0].stopped);
-        assert_eq!(current.version(),3);
+        assert_eq!(current.version(), 3);
     }
 }

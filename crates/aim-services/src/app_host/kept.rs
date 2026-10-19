@@ -39,7 +39,11 @@ impl RawIntent {
 
     /// `new Intent()` (no action) or `new Intent(action)`, with `flags`
     /// and the extras `extras`.
-    pub fn of(action: Option<&str>, flags: i32, extras: &[(&str, crate::bundle::Value)]) -> RawIntent {
+    pub fn of(
+        action: Option<&str>,
+        flags: i32,
+        extras: &[(&str, crate::bundle::Value)],
+    ) -> RawIntent {
         Self::with_data(action, None, None, flags, extras)
     }
 
@@ -87,7 +91,10 @@ impl RawIntent {
         let (start, end) = self.component;
         RawIntent {
             intent: Intent {
-                component: Some(crate::package::intent::ComponentName { package: package.into(), class: class.into() }),
+                component: Some(crate::package::intent::ComponentName {
+                    package: package.into(),
+                    class: class.into(),
+                }),
                 ..self.intent.clone()
             },
             raw: self.raw.splice(start, end, p.data()),
@@ -103,7 +110,10 @@ impl RawIntent {
         p.write_string8(Some(package));
         let shift = |at: usize| at + p.data().len() - (end - start);
         Ok(RawIntent {
-            intent: Intent { package: Some(package.into()), ..self.intent.clone() },
+            intent: Intent {
+                package: Some(package.into()),
+                ..self.intent.clone()
+            },
             raw: self.raw.splice(start, end, p.data()),
             flags_at: self.flags_at,
             component: (shift(self.component.0), shift(self.component.1)),
@@ -175,7 +185,9 @@ impl Spans {
     fn of(raw: &Raw) -> Result<Spans> {
         let p = raw.parcel();
         let mut r = p.reader();
-        let span = |r: &mut Reader<'_>, read: &dyn Fn(&mut Reader<'_>) -> Result<()>| -> Result<(usize, usize)> {
+        let span = |r: &mut Reader<'_>,
+                    read: &dyn Fn(&mut Reader<'_>) -> Result<()>|
+         -> Result<(usize, usize)> {
             let start = r.position();
             read(r)?;
             Ok((start, r.position()))
@@ -221,7 +233,21 @@ impl Spans {
         r.read_i32()?;
         let extras = span(&mut r, &|r| clip::bundle(r).map(drop))?;
         let rest = (r.position(), p.data().len());
-        Ok(Spans { action, data, ty, identifier, package, component, bounds, categories, selector, clip, content_user, extras, rest })
+        Ok(Spans {
+            action,
+            data,
+            ty,
+            identifier,
+            package,
+            component,
+            bounds,
+            categories,
+            selector,
+            clip,
+            content_user,
+            extras,
+            rest,
+        })
     }
 }
 
@@ -252,7 +278,10 @@ type Entries = (i32, Vec<(String, Raw)>, bool);
 /// `ArrayMap` order, and whether it holds an intent.
 fn bundle_of(magic: i32, parts: Vec<(String, Raw)>, has_intent: bool) -> Raw {
     let count = parts.len();
-    let parts: Vec<Raw> = crate::package::info::array_order(parts, |(k, _)| k.as_str()).into_iter().map(|(_, r)| r).collect();
+    let parts: Vec<Raw> = crate::package::info::array_order(parts, |(k, _)| k.as_str())
+        .into_iter()
+        .map(|(_, r)| r)
+        .collect();
     let body = Raw::concat(&parts);
     let mut head = Parcel::new();
     head.write_i32((4 + body.parcel().data().len()) as i32);
@@ -297,18 +326,33 @@ impl RawIntent {
         let (sa, sb) = (Spans::of(a)?, Spans::of(b)?);
         let (mine, theirs) = (&self.intent, &other.intent);
         let mut changes = 0;
-        let pick = |take: bool, sa: (usize, usize), sb: (usize, usize)| if take { b.slice(sb.0, sb.1) } else { a.slice(sa.0, sa.1) };
-        let action = theirs.action.is_some() && (mine.action.is_none() || flags & FILL_IN_ACTION != 0);
+        let pick = |take: bool, sa: (usize, usize), sb: (usize, usize)| {
+            if take {
+                b.slice(sb.0, sb.1)
+            } else {
+                a.slice(sa.0, sa.1)
+            }
+        };
+        let action =
+            theirs.action.is_some() && (mine.action.is_none() || flags & FILL_IN_ACTION != 0);
         changes |= if action { FILL_IN_ACTION } else { 0 };
-        let data = (theirs.data.is_some() || theirs.ty.is_some()) && ((mine.data.is_none() && mine.ty.is_none()) || flags & FILL_IN_DATA != 0);
+        let data = (theirs.data.is_some() || theirs.ty.is_some())
+            && ((mine.data.is_none() && mine.ty.is_none()) || flags & FILL_IN_DATA != 0);
         changes |= if data { FILL_IN_DATA } else { 0 };
-        let identifier = theirs.identifier.is_some() && (mine.identifier.is_none() || flags & FILL_IN_IDENTIFIER != 0);
+        let identifier = theirs.identifier.is_some()
+            && (mine.identifier.is_none() || flags & FILL_IN_IDENTIFIER != 0);
         changes |= if identifier { FILL_IN_IDENTIFIER } else { 0 };
-        let categories = theirs.categories.is_some() && (mine.categories.is_none() || flags & FILL_IN_CATEGORIES != 0);
+        let categories = theirs.categories.is_some()
+            && (mine.categories.is_none() || flags & FILL_IN_CATEGORIES != 0);
         changes |= if categories { FILL_IN_CATEGORIES } else { 0 };
-        let package = theirs.package.is_some() && (mine.package.is_none() || flags & FILL_IN_PACKAGE != 0) && mine.selector.is_none();
+        let package = theirs.package.is_some()
+            && (mine.package.is_none() || flags & FILL_IN_PACKAGE != 0)
+            && mine.selector.is_none();
         changes |= if package { FILL_IN_PACKAGE } else { 0 };
-        let selector = theirs.selector.is_some() && flags & FILL_IN_SELECTOR != 0 && mine.package.is_none() && !package;
+        let selector = theirs.selector.is_some()
+            && flags & FILL_IN_SELECTOR != 0
+            && mine.package.is_none()
+            && !package;
         if selector {
             changes |= FILL_IN_SELECTOR;
         }
@@ -316,18 +360,21 @@ impl RawIntent {
         changes |= if clip { FILL_IN_CLIP_DATA } else { 0 };
         let component = theirs.component.is_some() && flags & FILL_IN_COMPONENT != 0;
         changes |= if component { FILL_IN_COMPONENT } else { 0 };
-        let bounds = present(b, sb.bounds) && (!present(a, sa.bounds) || flags & FILL_IN_SOURCE_BOUNDS != 0);
+        let bounds =
+            present(b, sb.bounds) && (!present(a, sa.bounds) || flags & FILL_IN_SOURCE_BOUNDS != 0);
         changes |= if bounds { FILL_IN_SOURCE_BOUNDS } else { 0 };
         // The other's creator token's nested intent keys
         // (`fillInCreatorTokenInfo`) are not merged.
         if has_creator_token(b, sb.rest.0)? {
             return Err(aim_binder_host::parcel::BAD_VALUE);
         }
-        let int = |v: i32| Raw::of(&{
-            let mut p = Parcel::new();
-            p.write_i32(v);
-            p
-        });
+        let int = |v: i32| {
+            Raw::of(&{
+                let mut p = Parcel::new();
+                p.write_i32(v);
+                p
+            })
+        };
         // Extras: the other's, then this one's over them (`putAll`).
         let extras = match (entries(a, sa.extras)?, entries(b, sb.extras)?) {
             (None, None) => int(-1),
@@ -338,7 +385,10 @@ impl RawIntent {
                     return Err(aim_binder_host::parcel::BAD_VALUE);
                 }
                 // A new Bundle of the other's, `putAll` of this one's.
-                let mut parts: Vec<_> = eb.into_iter().filter(|(k, _)| !ea.iter().any(|(m, _)| m == k)).collect();
+                let mut parts: Vec<_> = eb
+                    .into_iter()
+                    .filter(|(k, _)| !ea.iter().any(|(m, _)| m == k))
+                    .collect();
                 parts.extend(ea);
                 bundle_of(ma, parts, ia || ib)
             }
@@ -346,10 +396,22 @@ impl RawIntent {
         let mut flags_raw = Parcel::new();
         flags_raw.write_i32(mine.flags | theirs.flags);
         flags_raw.write_i32(mine.extended_flags | theirs.extended_flags);
-        let user_a = i32::from_le_bytes(a.parcel().data()[sa.content_user..sa.content_user + 4].try_into().unwrap());
-        let user_b = i32::from_le_bytes(b.parcel().data()[sb.content_user..sb.content_user + 4].try_into().unwrap());
+        let user_a = i32::from_le_bytes(
+            a.parcel().data()[sa.content_user..sa.content_user + 4]
+                .try_into()
+                .unwrap(),
+        );
+        let user_b = i32::from_le_bytes(
+            b.parcel().data()[sb.content_user..sb.content_user + 4]
+                .try_into()
+                .unwrap(),
+        );
         let copied_uris = data || clip || present(b, sb.extras);
-        let user = if copied_uris && user_a == USER_CURRENT && user_b != USER_CURRENT { user_b } else { user_a };
+        let user = if copied_uris && user_a == USER_CURRENT && user_b != USER_CURRENT {
+            user_b
+        } else {
+            user_a
+        };
         let selector_part = if selector {
             b.slice(sb.selector.0, sb.selector.1)
         } else {
@@ -383,11 +445,13 @@ impl RawIntent {
     pub fn clone_filter(&self) -> Result<RawIntent> {
         let a = &self.raw;
         let s = Spans::of(a)?;
-        let int = |v: i32| Raw::of(&{
-            let mut p = Parcel::new();
-            p.write_i32(v);
-            p
-        });
+        let int = |v: i32| {
+            Raw::of(&{
+                let mut p = Parcel::new();
+                p.write_i32(v);
+                p
+            })
+        };
         let raw = Raw::concat(&[
             a.slice(s.action.0, s.identifier.1),
             int(0), // flags
@@ -440,8 +504,12 @@ impl RawIntent {
             r.read_string16()?;
             let kind = r.read_i32()?;
             match key.as_str() {
-                "android.intent.extra.client_intent" => intent = kind == crate::bundle::VAL_PARCELABLE,
-                "android.intent.extra.client_label" if kind == crate::bundle::VAL_INTEGER => label = r.read_i32()?,
+                "android.intent.extra.client_intent" => {
+                    intent = kind == crate::bundle::VAL_PARCELABLE
+                }
+                "android.intent.extra.client_label" if kind == crate::bundle::VAL_INTEGER => {
+                    label = r.read_i32()?
+                }
                 _ => {}
             }
         }
@@ -468,7 +536,12 @@ impl ReadParcelable for RawIntent {
         let component = (component_at, r.position() - start);
         r.set_position(start);
         let intent = Intent::read(r, &mut Plain)?;
-        Ok(RawIntent { intent, raw: Raw::capture(r, start), flags_at, component })
+        Ok(RawIntent {
+            intent,
+            raw: Raw::capture(r, start),
+            flags_at,
+            component,
+        })
     }
 }
 
@@ -502,13 +575,21 @@ impl RawBundle {
 
     /// The bundle with `key` removed (`Bundle.remove`).
     pub fn without(&self, key: &str) -> Result<RawBundle> {
-        let Some((magic, parts, has_intent)) = self.entries()? else { return Ok(self.clone()) };
-        Ok(RawBundle(bundle_of(magic, parts.into_iter().filter(|(k, _)| k != key).collect(), has_intent)))
+        let Some((magic, parts, has_intent)) = self.entries()? else {
+            return Ok(self.clone());
+        };
+        Ok(RawBundle(bundle_of(
+            magic,
+            parts.into_iter().filter(|(k, _)| k != key).collect(),
+            has_intent,
+        )))
     }
 
     /// The bundle with the ints of `values` put (`Bundle.putInt`).
     pub fn with_ints(&self, values: &[(&str, i32)]) -> Result<RawBundle> {
-        let (magic, mut parts, has_intent) = self.entries()?.unwrap_or((crate::bundle::MAGIC, Vec::new(), false));
+        let (magic, mut parts, has_intent) =
+            self.entries()?
+                .unwrap_or((crate::bundle::MAGIC, Vec::new(), false));
         for (key, value) in values {
             let mut p = Parcel::new();
             p.write_string16(Some(key));
@@ -522,7 +603,9 @@ impl RawBundle {
 
     /// The bundle with `key` put as null (`Bundle.putString(key, null)`).
     pub fn with_null(&self, key: &str) -> Result<RawBundle> {
-        let (magic, mut parts, has_intent) = self.entries()?.unwrap_or((crate::bundle::MAGIC, Vec::new(), false));
+        let (magic, mut parts, has_intent) =
+            self.entries()?
+                .unwrap_or((crate::bundle::MAGIC, Vec::new(), false));
         let mut p = Parcel::new();
         p.write_string16(Some(key));
         p.write_i32(VAL_NULL);
@@ -533,8 +616,12 @@ impl RawBundle {
 
     /// The string `key` holds (`getString`); none for another type.
     pub fn string(&self, key: &str) -> Result<Option<String>> {
-        let Some((_, parts, _)) = self.entries()? else { return Ok(None) };
-        let Some((_, entry)) = parts.iter().find(|(k, _)| k == key) else { return Ok(None) };
+        let Some((_, parts, _)) = self.entries()? else {
+            return Ok(None);
+        };
+        let Some((_, entry)) = parts.iter().find(|(k, _)| k == key) else {
+            return Ok(None);
+        };
         let p = entry.parcel();
         let mut r = p.reader();
         r.read_string16()?;
@@ -547,8 +634,12 @@ impl RawBundle {
     /// The intent the parcelable `key` holds (`getParcelable(key,
     /// Intent.class)`): its creator's class and itself; none without one.
     pub fn intent(&self, key: &str) -> Result<Option<(String, RawIntent)>> {
-        let Some((_, parts, _)) = self.entries()? else { return Ok(None) };
-        let Some((_, entry)) = parts.iter().find(|(k, _)| k == key) else { return Ok(None) };
+        let Some((_, parts, _)) = self.entries()? else {
+            return Ok(None);
+        };
+        let Some((_, entry)) = parts.iter().find(|(k, _)| k == key) else {
+            return Ok(None);
+        };
         let p = entry.parcel();
         let mut r = p.reader();
         r.read_string16()?;
@@ -556,15 +647,25 @@ impl RawBundle {
             return Ok(None);
         }
         r.read_i32()?; // its length
-        let Some(class) = r.read_string16()? else { return Ok(None) };
+        let Some(class) = r.read_string16()? else {
+            return Ok(None);
+        };
         let start = r.position();
         let intent = RawIntent::read_from(&mut r)?;
-        Ok(Some((class, RawIntent { raw: entry.slice(start, r.position()), ..intent })))
+        Ok(Some((
+            class,
+            RawIntent {
+                raw: entry.slice(start, r.position()),
+                ..intent
+            },
+        )))
     }
 
     /// The bundle with `intent` put as `key` (`putParcelable`).
     pub fn with_intent(&self, key: &str, intent: &RawIntent) -> Result<RawBundle> {
-        let (magic, mut parts, _) = self.entries()?.unwrap_or((crate::bundle::MAGIC, Vec::new(), false));
+        let (magic, mut parts, _) =
+            self.entries()?
+                .unwrap_or((crate::bundle::MAGIC, Vec::new(), false));
         let mut head = Parcel::new();
         head.write_string16(Some(key));
         head.write_i32(VAL_PARCELABLE);
@@ -608,8 +709,15 @@ pub struct KeptIntent {
 
 impl KeptIntent {
     pub fn new(intent: RawIntent, process: &LocalProcess) -> KeptIntent {
-        let binders = intent.handles().into_iter().map(|h| process.strong(h)).collect();
-        KeptIntent { intent, _binders: std::sync::Arc::new(binders) }
+        let binders = intent
+            .handles()
+            .into_iter()
+            .map(|h| process.strong(h))
+            .collect();
+        KeptIntent {
+            intent,
+            _binders: std::sync::Arc::new(binders),
+        }
     }
 }
 
@@ -625,7 +733,10 @@ impl KeptBundle {
     pub fn new(mut bundle: RawBundle, process: &LocalProcess) -> Result<KeptBundle> {
         bundle.0.keep_files(&|fd| process.file(fd))?;
         let binders = bundle.0.handles().map(|h| process.strong(h)).collect();
-        Ok(KeptBundle { bundle, _binders: std::sync::Arc::new(binders) })
+        Ok(KeptBundle {
+            bundle,
+            _binders: std::sync::Arc::new(binders),
+        })
     }
 }
 
@@ -648,9 +759,22 @@ mod tests {
         let set = intent.with_package("q").unwrap();
         assert_eq!(set.intent.package.as_deref(), Some("q"));
         let back = RawIntent::read_from(&mut Reader::new(set.raw.parcel().data(), &[])).unwrap();
-        assert_eq!((back.intent.package.as_deref(), back.intent.action.as_deref(), back.intent.flags), (Some("q"), Some("a.b"), 0x10));
+        assert_eq!(
+            (
+                back.intent.package.as_deref(),
+                back.intent.action.as_deref(),
+                back.intent.flags
+            ),
+            (Some("q"), Some("a.b"), 0x10)
+        );
         assert_eq!(back.intent.component.map(|c| c.class), Some("p.C".into()));
-        assert_eq!(set.with_component("r", "r.D").intent.component.map(|c| c.package), Some("r".into()));
+        assert_eq!(
+            set.with_component("r", "r.D")
+                .intent
+                .component
+                .map(|c| c.package),
+            Some("r".into())
+        );
     }
 
     /// An intent with an action, a data URI and an extra, as
@@ -680,10 +804,18 @@ mod tests {
     #[test]
     fn a_new_intent_has_its_action_and_extras() {
         let i = RawIntent::new("a.B", 0x10, &[("k", crate::bundle::Value::Int(3))]);
-        assert_eq!((i.intent.action.as_deref(), i.intent.flags), (Some("a.B"), 0x10));
+        assert_eq!(
+            (i.intent.action.as_deref(), i.intent.flags),
+            (Some("a.B"), 0x10)
+        );
         let mut p = Parcel::new();
         i.write_to(&mut p);
-        assert_eq!(RawIntent::read_from(&mut Reader::new(p.data(), &[])).unwrap().intent, i.intent);
+        assert_eq!(
+            RawIntent::read_from(&mut Reader::new(p.data(), &[]))
+                .unwrap()
+                .intent,
+            i.intent
+        );
     }
 
     #[test]
@@ -702,7 +834,10 @@ mod tests {
         let mut out = Parcel::new();
         explicit.write_to(&mut out);
         let read = RawIntent::read_from(&mut Reader::new(out.data(), &[])).unwrap();
-        assert_eq!(read.intent.component.map(|c| c.class).as_deref(), Some("p.Main"));
+        assert_eq!(
+            read.intent.component.map(|c| c.class).as_deref(),
+            Some("p.Main")
+        );
         assert_eq!(read.intent.action.as_deref(), Some("a.ACTION"));
         kept.set_flags(0x30, 1);
         let mut flagged = Parcel::new();
@@ -727,27 +862,49 @@ mod tests {
         use crate::bundle::Value;
         let sent = intent();
         let mine = RawIntent::read_from(&mut Reader::new(sent.data(), &[])).unwrap();
-        let other = RawIntent::new("other.ACTION", 0x4, &[("k", Value::Int(1)), ("x", Value::Int(2))]).with_component("q", "q.C");
+        let other = RawIntent::new(
+            "other.ACTION",
+            0x4,
+            &[("k", Value::Int(1)), ("x", Value::Int(2))],
+        )
+        .with_component("q", "q.C");
         let (filled, changes) = mine.fill_in(&other, 0).unwrap();
         assert_eq!(changes, 0);
         assert_eq!(filled.intent.action.as_deref(), Some("a.ACTION"));
         assert_eq!(filled.intent.flags, 0x14);
         assert!(filled.intent.component.is_none());
         let e = extras(&filled);
-        assert_eq!((e.get("k"), e.get("x")), (Some(&Value::Int(7)), Some(&Value::Int(2))));
-        let (filled, changes) = mine.fill_in(&other, FILL_IN_ACTION | FILL_IN_COMPONENT).unwrap();
+        assert_eq!(
+            (e.get("k"), e.get("x")),
+            (Some(&Value::Int(7)), Some(&Value::Int(2)))
+        );
+        let (filled, changes) = mine
+            .fill_in(&other, FILL_IN_ACTION | FILL_IN_COMPONENT)
+            .unwrap();
         assert_eq!(changes, FILL_IN_ACTION | FILL_IN_COMPONENT);
         assert_eq!(filled.intent.action.as_deref(), Some("other.ACTION"));
-        assert_eq!(filled.intent.component.map(|c| c.class).as_deref(), Some("q.C"));
+        assert_eq!(
+            filled.intent.component.map(|c| c.class).as_deref(),
+            Some("q.C")
+        );
         // An intent without extras or action takes the other's.
         let bare = RawIntent::of(None, 0, &[]);
         let (filled, _) = bare.fill_in(&other, 0).unwrap();
         assert_eq!(extras(&filled).len(), 2);
         // Merged extras keep their `ArrayMap` order, as an alarm's count
         // filled into its intent does.
-        let count = RawIntent::of(None, 0, &[("android.intent.extra.ALARM_COUNT", Value::Int(1)), ("type", Value::Int(2))]);
+        let count = RawIntent::of(
+            None,
+            0,
+            &[
+                ("android.intent.extra.ALARM_COUNT", Value::Int(1)),
+                ("type", Value::Int(2)),
+            ],
+        );
         let (filled, _) = mine.fill_in(&count, 0).unwrap();
-        let (_, keys, _) = entries(&filled.raw, Spans::of(&filled.raw).unwrap().extras).unwrap().unwrap();
+        let (_, keys, _) = entries(&filled.raw, Spans::of(&filled.raw).unwrap().extras)
+            .unwrap()
+            .unwrap();
         let keys: Vec<&str> = keys.iter().map(|(k, _)| k.as_str()).collect();
         let mut sorted = keys.clone();
         sorted.sort_by_key(|k| crate::package::info::java_hash(k));
@@ -759,12 +916,20 @@ mod tests {
     #[test]
     fn a_filter_clone_drops_flags_and_extras() {
         let sent = intent();
-        let i = RawIntent::read_from(&mut Reader::new(sent.data(), &[])).unwrap().with_component("p", "p.S");
+        let i = RawIntent::read_from(&mut Reader::new(sent.data(), &[]))
+            .unwrap()
+            .with_component("p", "p.S");
         let filter = i.clone_filter().unwrap();
         let mut p = Parcel::new();
         filter.write_to(&mut p);
         let read = RawIntent::read_from(&mut Reader::new(p.data(), &[])).unwrap();
-        assert_eq!(read.intent, crate::package::intent::Intent { flags: 0, ..i.intent.clone() });
+        assert_eq!(
+            read.intent,
+            crate::package::intent::Intent {
+                flags: 0,
+                ..i.intent.clone()
+            }
+        );
         assert!(extras(&read).is_empty());
         assert!(!present(&read.raw, Spans::of(&read.raw).unwrap().extras));
     }
@@ -799,7 +964,14 @@ mod tests {
         let mut out = Parcel::new();
         kept.write_to(&mut out);
         let read = RawIntent::read_from(&mut Reader::new(out.data(), &[])).unwrap();
-        assert_eq!(read.intent, crate::package::intent::Intent { selector: None, source_bounds: None, ..i.intent.clone() });
+        assert_eq!(
+            read.intent,
+            crate::package::intent::Intent {
+                selector: None,
+                source_bounds: None,
+                ..i.intent.clone()
+            }
+        );
         let spans = Spans::of(&read.raw).unwrap();
         assert!(!present(&read.raw, spans.bounds));
         assert_eq!(extras(&read).len(), 1);
@@ -810,12 +982,37 @@ mod tests {
     #[test]
     fn client_labels_need_a_client_intent() {
         use crate::bundle::Value;
-        let pending = || Value::Parcelable { class: "android.app.PendingIntent".into(), data: vec![0; 4] };
-        let label = |extras: &[(&str, Value)]| RawIntent::of(None, 0, extras).client_label().unwrap();
-        assert_eq!(label(&[("android.intent.extra.client_intent", pending()), ("android.intent.extra.client_label", Value::Int(17))]), 17);
-        assert_eq!(label(&[("android.intent.extra.client_label", Value::Int(17))]), 0);
-        assert_eq!(label(&[("android.intent.extra.client_intent", Value::Null), ("android.intent.extra.client_label", Value::Int(17))]), 0);
-        assert_eq!(label(&[("android.intent.extra.client_intent", pending()), ("android.intent.extra.client_label", Value::Long(17))]), 0);
+        let pending = || Value::Parcelable {
+            class: "android.app.PendingIntent".into(),
+            data: vec![0; 4],
+        };
+        let label =
+            |extras: &[(&str, Value)]| RawIntent::of(None, 0, extras).client_label().unwrap();
+        assert_eq!(
+            label(&[
+                ("android.intent.extra.client_intent", pending()),
+                ("android.intent.extra.client_label", Value::Int(17))
+            ]),
+            17
+        );
+        assert_eq!(
+            label(&[("android.intent.extra.client_label", Value::Int(17))]),
+            0
+        );
+        assert_eq!(
+            label(&[
+                ("android.intent.extra.client_intent", Value::Null),
+                ("android.intent.extra.client_label", Value::Int(17))
+            ]),
+            0
+        );
+        assert_eq!(
+            label(&[
+                ("android.intent.extra.client_intent", pending()),
+                ("android.intent.extra.client_label", Value::Long(17))
+            ]),
+            0
+        );
         assert_eq!(label(&[]), 0);
     }
 
@@ -825,23 +1022,44 @@ mod tests {
     #[test]
     fn bundles_keep_their_entries_as_one_is_changed() {
         let i = RawIntent::read_from(&mut intent().reader()).unwrap();
-        let bundle = RawBundle::empty().with_ints(&[("errorCode", 0)]).unwrap().with_intent("intent", &i).unwrap();
+        let bundle = RawBundle::empty()
+            .with_ints(&[("errorCode", 0)])
+            .unwrap()
+            .with_intent("intent", &i)
+            .unwrap();
         let (class, read) = bundle.intent("intent").unwrap().unwrap();
         assert_eq!(class, "android.content.Intent");
         assert_eq!(read.intent, i.intent);
         let clipped = read.with_plain_clip_data_if_none().unwrap();
         assert!(present(&clipped.raw, Spans::of(&clipped.raw).unwrap().clip));
-        assert_eq!(clipped.with_plain_clip_data_if_none().unwrap().parcel().data(), clipped.parcel().data());
+        assert_eq!(
+            clipped
+                .with_plain_clip_data_if_none()
+                .unwrap()
+                .parcel()
+                .data(),
+            clipped.parcel().data()
+        );
         let resolved = clipped.with_component("p", "p.Login");
-        let bundle = bundle.with_intent("intent", &resolved).unwrap().with_ints(&[("callerUid", 10001), ("callerPid", 7)]).unwrap();
+        let bundle = bundle
+            .with_intent("intent", &resolved)
+            .unwrap()
+            .with_ints(&[("callerUid", 10001), ("callerPid", 7)])
+            .unwrap();
         let (_, back) = bundle.intent("intent").unwrap().unwrap();
-        assert_eq!(back.intent.component.as_ref().map(|c| c.class.as_str()), Some("p.Login"));
+        assert_eq!(
+            back.intent.component.as_ref().map(|c| c.class.as_str()),
+            Some("p.Login")
+        );
         let mut p = Parcel::new();
         bundle.without("errorCode").unwrap().write_to(&mut p);
         let entries = crate::bundle::read(&mut p.reader()).unwrap().unwrap();
         let mut keys: Vec<&str> = entries.keys().map(String::as_str).collect();
         keys.sort();
         assert_eq!(keys, ["callerPid", "callerUid", "intent"]);
-        assert!(matches!(entries["callerUid"], crate::bundle::Value::Int(10001)));
+        assert!(matches!(
+            entries["callerUid"],
+            crate::bundle::Value::Int(10001)
+        ));
     }
 }

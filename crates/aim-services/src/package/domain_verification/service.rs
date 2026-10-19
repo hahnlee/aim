@@ -20,7 +20,9 @@ enum UriUpdateError {
     Transport(aim_binder_host::parcel::StatusCode),
 }
 impl From<Exception> for UriUpdateError {
-    fn from(error: Exception) -> Self {Self::Exception(error)}
+    fn from(error: Exception) -> Self {
+        Self::Exception(error)
+    }
 }
 
 impl DomainQueries {
@@ -77,7 +79,7 @@ impl DomainQueries {
                 code: aim_binder_host::parcel::EX_SERVICE_SPECIFIC,
                 message: String::new(),
                 service_specific: 1,
-                    parcelable: None,
+                parcelable: None,
             };
             if !visible {
                 return Err(missing());
@@ -331,7 +333,7 @@ impl DomainQueries {
             code: aim_binder_host::parcel::EX_SERVICE_SPECIFIC,
             message: String::new(),
             service_specific: 1,
-                    parcelable: None,
+            parcelable: None,
         };
         if !allowed {
             return Err(missing());
@@ -642,21 +644,44 @@ impl DomainQueries {
             let result = (|| {
                 for entry in entries {
                     let domain = entry.key.as_deref().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "Attempt to invoke virtual method 'int java.lang.String.length()' on a null object reference"))?;
-                    if !super::uri_groups::valid_domain(domain).map_err(|_| UriUpdateError::Transport(UNKNOWN_TRANSACTION))? {
+                    if !super::uri_groups::valid_domain(domain)
+                        .map_err(|_| UriUpdateError::Transport(UNKNOWN_TRANSACTION))?
+                    {
                         continue;
                     }
-                    let parcels = entry.groups_with_classes(domains.classes()).map_err(|error| {
-                        use super::uri_bundle::GroupError;
-                        match error {
-                            GroupError::Transport(status) => UriUpdateError::Transport(status),
-                            GroupError::BadParcelable(message) => UriUpdateError::Exception(Exception::new(aim_binder_host::parcel::EX_BAD_PARCELABLE, message)),
-                            GroupError::Parcel(status) => UriUpdateError::Exception(Exception::new(EX_ILLEGAL_STATE, format!("URI group list: {status}"))),
-                            GroupError::Unavailable => UriUpdateError::Exception(Exception::new(EX_UNSUPPORTED_OPERATION, "Parcelable class metadata/creator is unavailable")),
-                        }
-                    })?;
-                    let groups = super::uri_parcel::groups_to_model(parcels).map_err(|message| {
-                        Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, message)
-                    })?;
+                    let parcels =
+                        entry
+                            .groups_with_classes(domains.classes())
+                            .map_err(|error| {
+                                use super::uri_bundle::GroupError;
+                                match error {
+                                    GroupError::Transport(status) => {
+                                        UriUpdateError::Transport(status)
+                                    }
+                                    GroupError::BadParcelable(message) => {
+                                        UriUpdateError::Exception(Exception::new(
+                                            aim_binder_host::parcel::EX_BAD_PARCELABLE,
+                                            message,
+                                        ))
+                                    }
+                                    GroupError::Parcel(status) => {
+                                        UriUpdateError::Exception(Exception::new(
+                                            EX_ILLEGAL_STATE,
+                                            format!("URI group list: {status}"),
+                                        ))
+                                    }
+                                    GroupError::Unavailable => {
+                                        UriUpdateError::Exception(Exception::new(
+                                            EX_UNSUPPORTED_OPERATION,
+                                            "Parcelable class metadata/creator is unavailable",
+                                        ))
+                                    }
+                                }
+                            })?;
+                    let groups =
+                        super::uri_parcel::groups_to_model(parcels).map_err(|message| {
+                            Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, message)
+                        })?;
                     owner
                         .set_uri_groups(name, &[(domain.to_owned(), Some(groups))])
                         .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
@@ -706,7 +731,9 @@ impl Service for DomainQueries {
             ) {
                 Ok(()) => api::write_set_uri_relative_filter_groups_reply(&mut reply),
                 Err(UriUpdateError::Transport(status)) => return Err(status),
-                Err(UriUpdateError::Exception(error)) if error.code == aim_binder_host::parcel::EX_SERVICE_SPECIFIC => {
+                Err(UriUpdateError::Exception(error))
+                    if error.code == aim_binder_host::parcel::EX_SERVICE_SPECIFIC =>
+                {
                     reply.write_exception_message(&error, None)
                 }
                 Err(UriUpdateError::Exception(error)) => reply.write_exception(&error),

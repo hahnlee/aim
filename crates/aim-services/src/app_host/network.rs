@@ -234,7 +234,9 @@ impl NetworkCapabilities {
     /// (`NetworkCapabilitiesUtils.inferRestrictedCapability`).
     pub fn mark_restricted(&mut self) {
         let c = self.capabilities;
-        if c & FORCE_RESTRICTED_CAPABILITIES != 0 || (c & UNRESTRICTED_CAPABILITIES == 0 && c & RESTRICTED_CAPABILITIES != 0) {
+        if c & FORCE_RESTRICTED_CAPABILITIES != 0
+            || (c & UNRESTRICTED_CAPABILITIES == 0 && c & RESTRICTED_CAPABILITIES != 0)
+        {
             self.remove(NOT_RESTRICTED);
         }
     }

@@ -1,7 +1,7 @@
 //! Complete unparsed shared-setting instance, distinct from the current name owner.
 use crate::package::owner::{app_ids::DetachedSetting, shared_users::SharedUser};
 use aim_binder_host::parcel::Parcel;
-use aim_service_aidl::{write_byte_array, WriteParcelable};
+use aim_service_aidl::{WriteParcelable, write_byte_array};
 
 pub(super) fn captured(
     version: u64,

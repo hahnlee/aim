@@ -14,7 +14,9 @@ use std::os::unix::fs::FileExt;
 use std::sync::{Arc, Mutex, Weak};
 
 use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
-use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_NULL_POINTER, Exception, Parcel, UNKNOWN_TRANSACTION};
+use aim_binder_host::parcel::{
+    BAD_VALUE, Binder, EX_NULL_POINTER, Exception, Parcel, UNKNOWN_TRANSACTION,
+};
 
 use crate::bundle;
 
@@ -90,8 +92,9 @@ impl Window {
         if self.size == self.inflated_size {
             return false;
         }
-        let region = aim_ashmem::read_only_region(format!("CursorWindow: {}", self.name).as_bytes())
-            .and_then(|f| f.set_len(self.inflated_size as u64).map(|()| f));
+        let region =
+            aim_ashmem::read_only_region(format!("CursorWindow: {}", self.name).as_bytes())
+                .and_then(|f| f.set_len(self.inflated_size as u64).map(|()| f));
         match region {
             Ok(region) => {
                 self.region = Some(region);
@@ -111,7 +114,8 @@ impl Window {
         if !(fits(self) || self.inflate() && fits(self)) {
             return false;
         }
-        self.slots.extend(std::iter::repeat_n([0; SLOT_SIZE], self.columns));
+        self.slots
+            .extend(std::iter::repeat_n([0; SLOT_SIZE], self.columns));
         self.rows += 1;
         true
     }
@@ -158,7 +162,9 @@ impl Window {
             }
             // `putNull` leaves the slot `allocRow` zeroed.
             let put = |w: &mut Window, (column, value): (usize, &Option<String>)| {
-                value.as_ref().is_none_or(|v| w.put_string(row, column, &jni_utf(v)))
+                value
+                    .as_ref()
+                    .is_none_or(|v| w.put_string(row, column, &jni_utf(v)))
             };
             if !values.iter().enumerate().all(|v| put(self, v)) {
                 self.free_last_row();
@@ -181,9 +187,19 @@ impl Window {
                 let written = region
                     .write_all_at(&self.heap, 0)
                     .and_then(|()| region.write_all_at(&slots, self.slots_offset() as u64));
-                written.map_err(|e| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, format!("cursor window: {e}")))?;
-                let file = aim_binder_host::server::file_from_fd(region.as_fd())
-                    .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "cursor window: no fileport"))?;
+                written.map_err(|e| {
+                    Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        format!("cursor window: {e}"),
+                    )
+                })?;
+                let file =
+                    aim_binder_host::server::file_from_fd(region.as_fd()).ok_or_else(|| {
+                        Exception::new(
+                            aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                            "cursor window: no fileport",
+                        )
+                    })?;
                 p.write_u32(self.size as u32);
                 p.write_bool(true);
                 p.write_file(file);
@@ -251,7 +267,10 @@ impl BulkCursor {
             this: this.clone(),
             provider: provider.to_string(),
             window_size,
-            state: Mutex::new(Adaptor { cursor: Some(cursor), ..Default::default() }),
+            state: Mutex::new(Adaptor {
+                cursor: Some(cursor),
+                ..Default::default()
+            }),
         });
         adaptor.register_observer(&mut adaptor.state.lock().unwrap(), observer)?;
         Ok(adaptor)
@@ -262,7 +281,9 @@ impl BulkCursor {
     /// of its own and wants no move calls.
     pub fn write_descriptor(&self, binder: Binder, p: &mut Parcel) -> Result<(), i32> {
         let state = self.state.lock().unwrap();
-        let Some(cursor) = &state.cursor else { return closed(&state) };
+        let Some(cursor) = &state.cursor else {
+            return closed(&state);
+        };
         p.write_binder(Some(binder));
         p.write_i32(cursor.columns.len() as i32);
         for column in &cursor.columns {
@@ -276,9 +297,16 @@ impl BulkCursor {
 
     /// `createAndRegisterObserverProxyLocked`: the observer is linked to
     /// death, which disposes of the cursor (`binderDied`).
-    fn register_observer(&self, state: &mut Adaptor, observer: Option<Binder>) -> Result<(), Exception> {
+    fn register_observer(
+        &self,
+        state: &mut Adaptor,
+        observer: Option<Binder>,
+    ) -> Result<(), Exception> {
         match observer {
-            None => Err(Exception::new(EX_NULL_POINTER, "Attempt to invoke interface method 'android.os.IBinder android.database.IContentObserver.asBinder()' on a null object reference")),
+            None => Err(Exception::new(
+                EX_NULL_POINTER,
+                "Attempt to invoke interface method 'android.os.IBinder android.database.IContentObserver.asBinder()' on a null object reference",
+            )),
             Some(Binder::Handle(handle)) => {
                 let strong = self.process.strong(handle);
                 let this = self.this.clone();
@@ -316,11 +344,16 @@ impl BulkCursor {
     fn window<'a>(&self, state: &'a mut Adaptor, position: i32) -> Option<&'a Window> {
         let cursor = state.cursor.as_ref()?;
         // `moveToPosition`.
-        let Some(position) = usize::try_from(position).ok().filter(|&p| p < cursor.rows.len()) else {
+        let Some(position) = usize::try_from(position)
+            .ok()
+            .filter(|&p| p < cursor.rows.len())
+        else {
             state.filled = None;
             return None;
         };
-        let window = state.filled.get_or_insert_with(|| Window::new(&self.provider, self.window_size));
+        let window = state
+            .filled
+            .get_or_insert_with(|| Window::new(&self.provider, self.window_size));
         window.fill(cursor, position);
         Some(window)
     }
@@ -415,7 +448,10 @@ mod tests {
     fn rows(values: &[&[Option<&str>]]) -> Rows {
         Rows {
             columns: vec!["name".into(), "value".into()],
-            rows: values.iter().map(|r| r.iter().map(|v| v.map(str::to_string)).collect()).collect(),
+            rows: values
+                .iter()
+                .map(|r| r.iter().map(|v| v.map(str::to_string)).collect())
+                .collect(),
         }
     }
 
@@ -428,7 +464,10 @@ mod tests {
         let mut r = Reader::new(p.data(), p.objects());
         let start = r.read_i32().unwrap();
         let name = r.read_string8().unwrap().unwrap();
-        let (rows, columns) = (r.read_u32().unwrap() as usize, r.read_u32().unwrap() as usize);
+        let (rows, columns) = (
+            r.read_u32().unwrap() as usize,
+            r.read_u32().unwrap() as usize,
+        );
         let size = r.read_u32().unwrap() as usize;
         assert!(!r.read_bool().unwrap());
         let at = r.position();
@@ -438,7 +477,9 @@ mod tests {
                 (0..columns)
                     .map(|column| {
                         let slot = size - SLOT_SIZE - (row * columns + column) * SLOT_SIZE;
-                        let int = |o: usize| u32::from_le_bytes(data[slot + o..slot + o + 4].try_into().unwrap());
+                        let int = |o: usize| {
+                            u32::from_le_bytes(data[slot + o..slot + o + 4].try_into().unwrap())
+                        };
                         let (offset, len) = (int(4) as usize, int(8) as usize);
                         (int(0) as i32, data[offset..offset + len].to_vec())
                     })
@@ -478,7 +519,10 @@ mod tests {
     #[test]
     fn a_window_inflates_then_stops_at_its_size() {
         let value = "v".repeat(1000);
-        let cursor = Rows { columns: vec!["value".into()], rows: vec![vec![Some(value)]; 40] };
+        let cursor = Rows {
+            columns: vec!["value".into()],
+            rows: vec![vec![Some(value)]; 40],
+        };
         // 1004 bytes and a slot a row: 16 fit inline, 24 in 24 KiB.
         let mut window = Window::new("P", 24 * 1024);
         window.fill(&cursor, 0);
@@ -496,24 +540,40 @@ mod tests {
     #[test]
     fn the_adaptor_serves_its_windows() {
         let driver = aim_binder_driver::Driver::new();
-        let credentials = aim_binder_driver::Credentials { pid: 97_201, euid: 1000, security_context: None };
+        let credentials = aim_binder_driver::Credentials {
+            pid: 97_201,
+            euid: 1000,
+            security_context: None,
+        };
         let process = LocalProcess::open(&driver, aim_binder_driver::Device::Binder, credentials);
         let cursor = rows(&[&[Some("a"), Some("1")], &[Some("b"), Some("2")]]);
-        let adaptor = BulkCursor::new(process, cursor, Some(Binder::Local(0x10)), "P", 1 << 20).unwrap();
+        let adaptor =
+            BulkCursor::new(process, cursor, Some(Binder::Local(0x10)), "P", 1 << 20).unwrap();
         let mut p = Parcel::new();
-        adaptor.write_descriptor(Binder::Local(0x20), &mut p).unwrap();
+        adaptor
+            .write_descriptor(Binder::Local(0x20), &mut p)
+            .unwrap();
         let mut r = Reader::new(p.data(), p.objects());
         assert_eq!(r.read_binder(), Ok(Some(Binder::Local(0x20))));
         assert_eq!(r.read_i32(), Ok(2));
         assert_eq!(r.read_string16().unwrap().as_deref(), Some("name"));
         assert_eq!(r.read_string16().unwrap().as_deref(), Some("value"));
         // No move calls, two rows, no window of its own.
-        assert_eq!((r.read_i32(), r.read_i32(), r.read_i32()), (Ok(0), Ok(2), Ok(0)));
+        assert_eq!(
+            (r.read_i32(), r.read_i32(), r.read_i32()),
+            (Ok(0), Ok(2), Ok(0))
+        );
         let window = |code, position: i32| {
             let mut data = Parcel::new();
             data.write_interface_token(DESCRIPTOR);
             data.write_i32(position);
-            let mut call = Call { code, flags: 0, sender_pid: 1, sender_euid: 10_050, data: Reader::new(data.data(), &[]) };
+            let mut call = Call {
+                code,
+                flags: 0,
+                sender_pid: 1,
+                sender_euid: 10_050,
+                data: Reader::new(data.data(), &[]),
+            };
             adaptor.transact(&mut call)
         };
         let reply = window(GET_CURSOR_WINDOW_TRANSACTION, 1).unwrap();
@@ -527,7 +587,10 @@ mod tests {
         let reply = window(GET_CURSOR_WINDOW_TRANSACTION, 2).unwrap();
         assert_eq!(&reply.data()[reply.data().len() - 8..], [0; 8]);
         assert!(window(CLOSE_TRANSACTION, 0).is_ok());
-        assert_eq!(window(GET_CURSOR_WINDOW_TRANSACTION, 0).err(), Some(UNKNOWN_TRANSACTION));
+        assert_eq!(
+            window(GET_CURSOR_WINDOW_TRANSACTION, 0).err(),
+            Some(UNKNOWN_TRANSACTION)
+        );
     }
 
     #[test]

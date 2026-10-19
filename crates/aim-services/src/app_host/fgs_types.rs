@@ -146,11 +146,23 @@ const fn policy(
     enforced: bool,
     foreground_only: bool,
 ) -> Policy {
-    Policy { ty, deprecation: changes.0, disabled: changes.1, all_of, any_of, enforced, foreground_only, custom: None }
+    Policy {
+        ty,
+        deprecation: changes.0,
+        disabled: changes.1,
+        all_of,
+        any_of,
+        enforced,
+        foreground_only,
+        custom: None,
+    }
 }
 
 const NO_CHANGES: (i64, i64) = (INVALID_CHANGE_ID, INVALID_CHANGE_ID);
-const TYPE_NONE_CHANGES: (i64, i64) = (FGS_TYPE_NONE_DEPRECATION_CHANGE_ID, FGS_TYPE_NONE_DISABLED_CHANGE_ID);
+const TYPE_NONE_CHANGES: (i64, i64) = (
+    FGS_TYPE_NONE_DEPRECATION_CHANGE_ID,
+    FGS_TYPE_NONE_DISABLED_CHANGE_ID,
+);
 
 const HEALTH_ANY_OF: &[Permission] = &[
     Regular("android.permission.ACTIVITY_RECOGNITION"),
@@ -173,7 +185,10 @@ static POLICIES: &[Policy] = &[
     policy(TYPE_NONE, TYPE_NONE_CHANGES, None, None, false, false),
     policy(
         TYPE_DATA_SYNC,
-        (FGS_TYPE_DATA_SYNC_DEPRECATION_CHANGE_ID, FGS_TYPE_DATA_SYNC_DISABLED_CHANGE_ID),
+        (
+            FGS_TYPE_DATA_SYNC_DEPRECATION_CHANGE_ID,
+            FGS_TYPE_DATA_SYNC_DISABLED_CHANGE_ID,
+        ),
         Some(&[Regular("android.permission.FOREGROUND_SERVICE_DATA_SYNC")]),
         None,
         true,
@@ -182,7 +197,9 @@ static POLICIES: &[Policy] = &[
     policy(
         TYPE_MEDIA_PLAYBACK,
         NO_CHANGES,
-        Some(&[Regular("android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK")]),
+        Some(&[Regular(
+            "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        )]),
         None,
         true,
         false,
@@ -191,7 +208,10 @@ static POLICIES: &[Policy] = &[
         TYPE_PHONE_CALL,
         NO_CHANGES,
         Some(&[Regular("android.permission.FOREGROUND_SERVICE_PHONE_CALL")]),
-        Some(&[Regular("android.permission.MANAGE_OWN_CALLS"), Role("android.app.role.DIALER")]),
+        Some(&[
+            Regular("android.permission.MANAGE_OWN_CALLS"),
+            Role("android.app.role.DIALER"),
+        ]),
         true,
         false,
     ),
@@ -199,14 +219,19 @@ static POLICIES: &[Policy] = &[
         TYPE_LOCATION,
         NO_CHANGES,
         Some(&[Regular("android.permission.FOREGROUND_SERVICE_LOCATION")]),
-        Some(&[Regular("android.permission.ACCESS_COARSE_LOCATION"), Regular("android.permission.ACCESS_FINE_LOCATION")]),
+        Some(&[
+            Regular("android.permission.ACCESS_COARSE_LOCATION"),
+            Regular("android.permission.ACCESS_FINE_LOCATION"),
+        ]),
         true,
         true,
     ),
     policy(
         TYPE_CONNECTED_DEVICE,
         NO_CHANGES,
-        Some(&[Regular("android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE")]),
+        Some(&[Regular(
+            "android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE",
+        )]),
         Some(&[
             Regular("android.permission.BLUETOOTH_ADVERTISE"),
             Regular("android.permission.BLUETOOTH_CONNECT"),
@@ -229,8 +254,13 @@ static POLICIES: &[Policy] = &[
         ..policy(
             TYPE_MEDIA_PROJECTION,
             NO_CHANGES,
-            Some(&[Regular("android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION")]),
-            Some(&[Regular("android.permission.CAPTURE_VIDEO_OUTPUT"), AppOp(OP_PROJECT_MEDIA, "android:project_media")]),
+            Some(&[Regular(
+                "android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION",
+            )]),
+            Some(&[
+                Regular("android.permission.CAPTURE_VIDEO_OUTPUT"),
+                AppOp(OP_PROJECT_MEDIA, "android:project_media"),
+            ]),
             true,
             false,
         )
@@ -239,7 +269,10 @@ static POLICIES: &[Policy] = &[
         TYPE_CAMERA,
         NO_CHANGES,
         Some(&[Regular("android.permission.FOREGROUND_SERVICE_CAMERA")]),
-        Some(&[Regular("android.permission.CAMERA"), Regular("android.permission.SYSTEM_CAMERA")]),
+        Some(&[
+            Regular("android.permission.CAMERA"),
+            Regular("android.permission.SYSTEM_CAMERA"),
+        ]),
         true,
         true,
     ),
@@ -269,7 +302,9 @@ static POLICIES: &[Policy] = &[
     policy(
         TYPE_REMOTE_MESSAGING,
         NO_CHANGES,
-        Some(&[Regular("android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING")]),
+        Some(&[Regular(
+            "android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING",
+        )]),
         None,
         true,
         false,
@@ -279,7 +314,9 @@ static POLICIES: &[Policy] = &[
         ..policy(
             TYPE_SYSTEM_EXEMPTED,
             NO_CHANGES,
-            Some(&[Regular("android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED")]),
+            Some(&[Regular(
+                "android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED",
+            )]),
             Some(&[
                 Regular("android.permission.SCHEDULE_EXACT_ALARM"),
                 Regular("android.permission.USE_EXACT_ALARM"),
@@ -293,7 +330,9 @@ static POLICIES: &[Policy] = &[
     policy(
         TYPE_FILE_MANAGEMENT,
         NO_CHANGES,
-        Some(&[Regular("android.permission.FOREGROUND_SERVICE_FILE_MANAGEMENT")]),
+        Some(&[Regular(
+            "android.permission.FOREGROUND_SERVICE_FILE_MANAGEMENT",
+        )]),
         None,
         false,
         false,
@@ -301,7 +340,9 @@ static POLICIES: &[Policy] = &[
     policy(
         TYPE_MEDIA_PROCESSING,
         NO_CHANGES,
-        Some(&[Regular("android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING")]),
+        Some(&[Regular(
+            "android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING",
+        )]),
         None,
         true,
         false,
@@ -320,9 +361,9 @@ static POLICIES: &[Policy] = &[
 /// `default_to`.
 pub(super) fn policy_of(ty: i32, default_to: i32) -> Result<&'static Policy, Exception> {
     let find = |t: i32| POLICIES.iter().find(|p| p.ty == t);
-    find(ty)
-        .or_else(|| find(default_to))
-        .ok_or_else(|| Exception::illegal_argument(format!("Invalid default fgs type {default_to}")))
+    find(ty).or_else(|| find(default_to)).ok_or_else(|| {
+        Exception::illegal_argument(format!("Invalid default fgs type {default_to}"))
+    })
 }
 
 /// `checkForegroundServiceTypePolicy`'s result codes.
@@ -355,7 +396,9 @@ fn granted(p: &Permission, c: &impl Checker, wiu: bool) -> Result<bool, Exceptio
         Regular(name) => c.regular(name, wiu),
         AppOp(op, _) => c.app_op(op, wiu),
         Role(_) => Err(c.unimplemented("a foreground service type's role permission")),
-        UsbDevice | UsbAccessory => Err(c.unimplemented("a foreground service type's USB permission")),
+        UsbDevice | UsbAccessory => {
+            Err(c.unimplemented("a foreground service type's USB permission"))
+        }
     }
 }
 
@@ -377,7 +420,11 @@ pub(super) fn check(policy: &Policy, c: &impl Checker, wiu: bool) -> Result<Chec
     if ok {
         let mut check_custom = true;
         if let Some(any) = policy.any_of {
-            let any = if policy.ty == TYPE_HEALTH && c.flag(REPLACE_BODY_SENSOR)? { HEALTH_CONNECT_ANY_OF } else { any };
+            let any = if policy.ty == TYPE_HEALTH && c.flag(REPLACE_BODY_SENSOR)? {
+                HEALTH_CONNECT_ANY_OF
+            } else {
+                any
+            };
             ok = false;
             for p in any {
                 if granted(p, c, wiu)? {
@@ -388,15 +435,20 @@ pub(super) fn check(policy: &Policy, c: &impl Checker, wiu: bool) -> Result<Chec
             check_custom = !ok;
         }
         if check_custom && policy.custom.is_some() {
-            return Err(c.unimplemented(&format!("the custom permission of foreground service type {}", label(policy.ty))));
+            return Err(c.unimplemented(&format!(
+                "the custom permission of foreground service type {}",
+                label(policy.ty)
+            )));
         }
     }
     if !ok {
-        return Ok(if policy.enforced && c.change_enabled(FGS_TYPE_PERMISSION_CHANGE_ID)? {
-            Check::PermissionDeniedEnforced
-        } else {
-            Check::PermissionDeniedPermissive
-        });
+        return Ok(
+            if policy.enforced && c.change_enabled(FGS_TYPE_PERMISSION_CHANGE_ID)? {
+                Check::PermissionDeniedEnforced
+            } else {
+                Check::PermissionDeniedPermissive
+            },
+        );
     }
     if policy.deprecation != INVALID_CHANGE_ID && c.change_enabled(policy.deprecation)? {
         return Ok(Check::Deprecated);
@@ -428,62 +480,143 @@ mod tests {
             Ok(false)
         }
         fn unimplemented(&self, what: &str) -> Exception {
-            Exception::new(aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION, what.to_string())
+            Exception::new(
+                aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION,
+                what.to_string(),
+            )
         }
     }
 
-    const U: [i64; 3] = [FGS_TYPE_PERMISSION_CHANGE_ID, FGS_TYPE_NONE_DEPRECATION_CHANGE_ID, FGS_TYPE_NONE_DISABLED_CHANGE_ID];
+    const U: [i64; 3] = [
+        FGS_TYPE_PERMISSION_CHANGE_ID,
+        FGS_TYPE_NONE_DEPRECATION_CHANGE_ID,
+        FGS_TYPE_NONE_DISABLED_CHANGE_ID,
+    ];
 
     #[test]
     fn a_type_needs_its_permission_enforced_from_u() {
         let special = policy_of(TYPE_SPECIAL_USE, TYPE_NONE).unwrap();
-        let held = Fake { held: vec!["android.permission.FOREGROUND_SERVICE_SPECIAL_USE"], changes: U.to_vec() };
+        let held = Fake {
+            held: vec!["android.permission.FOREGROUND_SERVICE_SPECIAL_USE"],
+            changes: U.to_vec(),
+        };
         assert_eq!(check(special, &held, true).unwrap(), Check::Ok);
-        let missing = Fake { held: vec![], changes: U.to_vec() };
-        assert_eq!(check(special, &missing, true).unwrap(), Check::PermissionDeniedEnforced);
+        let missing = Fake {
+            held: vec![],
+            changes: U.to_vec(),
+        };
+        assert_eq!(
+            check(special, &missing, true).unwrap(),
+            Check::PermissionDeniedEnforced
+        );
         // Before U the missing permission is only logged.
-        let old = Fake { held: vec![], changes: vec![] };
-        assert_eq!(check(special, &old, true).unwrap(), Check::PermissionDeniedPermissive);
+        let old = Fake {
+            held: vec![],
+            changes: vec![],
+        };
+        assert_eq!(
+            check(special, &old, true).unwrap(),
+            Check::PermissionDeniedPermissive
+        );
         // fileManagement's is never enforced.
         let files = policy_of(TYPE_FILE_MANAGEMENT, TYPE_NONE).unwrap();
-        assert_eq!(check(files, &missing, true).unwrap(), Check::PermissionDeniedPermissive);
+        assert_eq!(
+            check(files, &missing, true).unwrap(),
+            Check::PermissionDeniedPermissive
+        );
     }
 
     #[test]
     fn no_type_is_disabled_from_u_and_deprecated_before() {
         let none = policy_of(TYPE_NONE, TYPE_NONE).unwrap();
-        assert_eq!(check(none, &Fake { held: vec![], changes: U.to_vec() }, true).unwrap(), Check::Disabled);
-        let deprecated = Fake { held: vec![], changes: vec![FGS_TYPE_NONE_DEPRECATION_CHANGE_ID] };
+        assert_eq!(
+            check(
+                none,
+                &Fake {
+                    held: vec![],
+                    changes: U.to_vec()
+                },
+                true
+            )
+            .unwrap(),
+            Check::Disabled
+        );
+        let deprecated = Fake {
+            held: vec![],
+            changes: vec![FGS_TYPE_NONE_DEPRECATION_CHANGE_ID],
+        };
         assert_eq!(check(none, &deprecated, true).unwrap(), Check::Deprecated);
-        assert_eq!(check(none, &Fake { held: vec![], changes: vec![] }, true).unwrap(), Check::Ok);
+        assert_eq!(
+            check(
+                none,
+                &Fake {
+                    held: vec![],
+                    changes: vec![]
+                },
+                true
+            )
+            .unwrap(),
+            Check::Ok
+        );
         // shortService needs nothing.
         let short = policy_of(TYPE_SHORT_SERVICE, TYPE_NONE).unwrap();
-        assert_eq!(check(short, &Fake { held: vec![], changes: U.to_vec() }, true).unwrap(), Check::Ok);
+        assert_eq!(
+            check(
+                short,
+                &Fake {
+                    held: vec![],
+                    changes: U.to_vec()
+                },
+                true
+            )
+            .unwrap(),
+            Check::Ok
+        );
     }
 
     #[test]
     fn any_of_one_permission_suffices_and_custom_ones_are_not_checked() {
         let exempted = policy_of(TYPE_SYSTEM_EXEMPTED, TYPE_NONE).unwrap();
         let alarm = Fake {
-            held: vec!["android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED", "android.permission.USE_EXACT_ALARM"],
+            held: vec![
+                "android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED",
+                "android.permission.USE_EXACT_ALARM",
+            ],
             changes: U.to_vec(),
         };
         assert_eq!(check(exempted, &alarm, true).unwrap(), Check::Ok);
-        let neither = Fake { held: vec!["android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED"], changes: U.to_vec() };
+        let neither = Fake {
+            held: vec!["android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED"],
+            changes: U.to_vec(),
+        };
         assert!(check(exempted, &neither, true).is_err());
         // Without the type's own permission, none of the others is asked.
-        let none = Fake { held: vec![], changes: U.to_vec() };
-        assert_eq!(check(exempted, &none, true).unwrap(), Check::PermissionDeniedEnforced);
+        let none = Fake {
+            held: vec![],
+            changes: U.to_vec(),
+        };
+        assert_eq!(
+            check(exempted, &none, true).unwrap(),
+            Check::PermissionDeniedEnforced
+        );
     }
 
     #[test]
     fn an_unknown_type_takes_the_default_and_labels_as_the_original() {
-        assert_eq!(policy_of(1 << 20, TYPE_SPECIAL_USE).unwrap().ty, TYPE_SPECIAL_USE);
+        assert_eq!(
+            policy_of(1 << 20, TYPE_SPECIAL_USE).unwrap().ty,
+            TYPE_SPECIAL_USE
+        );
         assert!(policy_of(1 << 20, TYPE_NONE).unwrap().ty == TYPE_NONE);
         assert!(policy_of(1 << 20, 1 << 21).is_err());
-        assert_eq!((label(TYPE_SPECIAL_USE), label(TYPE_MANIFEST), label(3)), ("specialUse", "manifest", "unknown"));
         assert_eq!(
-            policy_of(TYPE_MEDIA_PLAYBACK, TYPE_NONE).unwrap().permission_string(),
+            (label(TYPE_SPECIAL_USE), label(TYPE_MANIFEST), label(3)),
+            ("specialUse", "manifest", "unknown")
+        );
+        assert_eq!(
+            policy_of(TYPE_MEDIA_PLAYBACK, TYPE_NONE)
+                .unwrap()
+                .permission_string(),
             "all of the permissions allOf=true [android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK] "
         );
     }

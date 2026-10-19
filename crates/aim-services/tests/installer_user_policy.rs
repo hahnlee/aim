@@ -87,7 +87,8 @@ fn installer_user_policy_record_matches_original_parcel() {
     .unwrap();
     let boot = Boot::new(repo.join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
-    boot.wait_ready(Duration::from_secs(300)).expect("installer_user_policy oracle boot readiness");
+    boot.wait_ready(Duration::from_secs(300))
+        .expect("installer_user_policy oracle boot readiness");
     let guest = boot.data.join("data/local/tmp/installer-user-policy");
     fs::create_dir(&guest).unwrap();
     aim_storage::guest_inode::record(

@@ -10,8 +10,10 @@
 //! Activity priorities are adjusted at registration using the captured privilege,
 //! factory activity filters and authoritative setup wizard selection.
 
-#[path="component_resolver/raw.rs"] mod raw;
-#[path="component_resolver/priority.rs"] mod priority;
+#[path = "component_resolver/priority.rs"]
+mod priority;
+#[path = "component_resolver/raw.rs"]
+mod raw;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -24,7 +26,7 @@ use super::info::{
     generate_application_info, generate_provider_info, generate_service_info,
     is_enabled_and_matches, user_state,
 };
-use super::intent::{Intent,ComponentName};
+use super::intent::{ComponentName, Intent};
 use super::intent_filter::{CATEGORY_BROWSABLE, IntentFilter};
 use super::intent_resolver::{Build, Entry, IntentResolver, query_from_list};
 use super::model::{PackageState, PackageUserState, State};
@@ -80,9 +82,12 @@ pub enum Info {
     Provider(ProviderInfo),
 }
 
-#[derive(Clone,Debug,PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Auxiliary {
-    pub failure:Option<ComponentName>,pub package:String,pub version:i64,pub split:String,
+    pub failure: Option<ComponentName>,
+    pub package: String,
+    pub version: i64,
+    pub split: String,
 }
 /// `android.content.pm.ResolveInfo`.
 #[derive(Clone, Debug, PartialEq)]
@@ -267,10 +272,16 @@ pub enum MimeGroupError {
 impl MimeGroupError {
     pub fn reply(self) -> aim_binder_host::parcel::Result<Parcel> {
         let mut reply = Parcel::new();
-        use aim_binder_host::parcel::{EX_NULL_POINTER, UNKNOWN_TRANSACTION, Exception};
+        use aim_binder_host::parcel::{EX_NULL_POINTER, Exception, UNKNOWN_TRANSACTION};
         let exception = match self {
-            Self::MissingGroup => Exception::new(EX_NULL_POINTER, "missing MIME group during component registration"),
-            Self::NullType => Exception::new(EX_NULL_POINTER, "null MIME type during component registration"),
+            Self::MissingGroup => Exception::new(
+                EX_NULL_POINTER,
+                "missing MIME group during component registration",
+            ),
+            Self::NullType => Exception::new(
+                EX_NULL_POINTER,
+                "null MIME type during component registration",
+            ),
             Self::UriMatching(error) => error.binder_exception().ok_or(UNKNOWN_TRANSACTION)?,
         };
         reply.write_exception(&exception);
@@ -281,7 +292,9 @@ impl MimeGroupError {
 impl ComponentResolver {
     /// `new` of `state`, shared with the last state that gave it the same
     /// inputs: most versions change only usage or user state.
-    pub fn latest(state: &Arc<State>) -> std::result::Result<Arc<ComponentResolver>, MimeGroupError> {
+    pub fn latest(
+        state: &Arc<State>,
+    ) -> std::result::Result<Arc<ComponentResolver>, MimeGroupError> {
         static LATEST: Mutex<Option<(Arc<State>, Arc<ComponentResolver>)>> = Mutex::new(None);
         let mut latest = LATEST.lock().unwrap();
         if let Some((before, resolver)) = &*latest
@@ -304,20 +317,30 @@ impl ComponentResolver {
             _ => false,
         };
         let wizard = |state: &State| {
-            state.system.roles.as_ref().and_then(|owner| owner.setup_wizard_priority_owner().map(|name| name.map(str::to_owned)))
+            state.system.roles.as_ref().and_then(|owner| {
+                owner
+                    .setup_wizard_priority_owner()
+                    .map(|name| name.map(str::to_owned))
+            })
         };
         a.packages.len() == b.packages.len()
-            && a.packages.iter().zip(&b.packages).all(|((an, a), (bn, b))| {
-                an == bn
-                    && same_code(a, b)
-                    && a.is.privileged == b.is.privileged
-                    && a.mime_groups == b.mime_groups
-                    && a.syncable_authorities == b.syncable_authorities
-            })
+            && a.packages
+                .iter()
+                .zip(&b.packages)
+                .all(|((an, a), (bn, b))| {
+                    an == bn
+                        && same_code(a, b)
+                        && a.is.privileged == b.is.privileged
+                        && a.mime_groups == b.mime_groups
+                        && a.syncable_authorities == b.syncable_authorities
+                })
             && a.disabled_system_packages.len() == b.disabled_system_packages.len()
-            && a.disabled_system_packages.iter().zip(&b.disabled_system_packages).all(|((an, a), (bn, b))| {
-                an == bn && same_code(a, b) && a.is.privileged == b.is.privileged
-            })
+            && a.disabled_system_packages
+                .iter()
+                .zip(&b.disabled_system_packages)
+                .all(|((an, a), (bn, b))| {
+                    an == bn && same_code(a, b) && a.is.privileged == b.is.privileged
+                })
             && wizard(a) == wizard(b)
     }
 
@@ -402,9 +425,18 @@ impl ComponentResolver {
         let main = main_of(pkg, kind, component);
         for (intent, info) in main.component.intents.iter().enumerate() {
             let mut filter = info.filter.clone();
-            if kind==Kind::Activity {
-                filter.priority=priority::adjust(ps,state.disabled_system_packages.get(&ps.name),
-                    &pkg.activities[component],&filter,state.system.roles.as_ref().and_then(|owner|owner.setup_wizard_priority_owner()));
+            if kind == Kind::Activity {
+                filter.priority = priority::adjust(
+                    ps,
+                    state.disabled_system_packages.get(&ps.name),
+                    &pkg.activities[component],
+                    &filter,
+                    state
+                        .system
+                        .roles
+                        .as_ref()
+                        .and_then(|owner| owner.setup_wizard_priority_owner()),
+                );
             }
             for group in filter.mime_groups.clone().iter().flatten().rev() {
                 let (_, types) = ps
@@ -658,7 +690,10 @@ impl ComponentResolver {
         intent: &Intent,
         resolved_type: Option<&str>,
         package: Option<&str>,
-    ) -> std::result::Result<Option<Vec<ResolveInfo>>, super::domain_verification::uri_parcel::MatchError> {
+    ) -> std::result::Result<
+        Option<Vec<ResolveInfo>>,
+        super::domain_verification::uri_parcel::MatchError,
+    > {
         if !results.state.users.contains_key(&results.user) {
             return Ok(None);
         }

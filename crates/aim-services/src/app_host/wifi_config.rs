@@ -38,8 +38,23 @@ mod key_mgmt {
     pub const DPP: u32 = 17;
     /// `KeyMgmt.strings`.
     pub const STRINGS: [&str; 18] = [
-        "NONE", "WPA_PSK", "WPA_EAP", "IEEE8021X", "WPA2_PSK", "OSEN", "FT_PSK", "FT_EAP", "SAE", "OWE",
-        "SUITE_B_192", "WPA_PSK_SHA256", "WPA_EAP_SHA256", "WAPI_PSK", "WAPI_CERT", "FILS_SHA256", "FILS_SHA384",
+        "NONE",
+        "WPA_PSK",
+        "WPA_EAP",
+        "IEEE8021X",
+        "WPA2_PSK",
+        "OSEN",
+        "FT_PSK",
+        "FT_EAP",
+        "SAE",
+        "OWE",
+        "SUITE_B_192",
+        "WPA_PSK_SHA256",
+        "WPA_EAP_SHA256",
+        "WAPI_PSK",
+        "WAPI_CERT",
+        "FILS_SHA256",
+        "FILS_SHA384",
         "DPP",
     ];
 }
@@ -94,8 +109,11 @@ pub const RANDOMIZATION_NONE: i32 = 0;
 const RANDOMIZATION_PERSISTENT: i32 = 1;
 const RANDOMIZATION_AUTO: i32 = 3;
 /// `NetworkSelectionStatus`.
-const NETWORK_SELECTION_STATUS: [&str; 3] =
-    ["NETWORK_SELECTION_ENABLED", "NETWORK_SELECTION_TEMPORARY_DISABLED", "NETWORK_SELECTION_PERMANENTLY_DISABLED"];
+const NETWORK_SELECTION_STATUS: [&str; 3] = [
+    "NETWORK_SELECTION_ENABLED",
+    "NETWORK_SELECTION_TEMPORARY_DISABLED",
+    "NETWORK_SELECTION_PERMANENTLY_DISABLED",
+];
 const NETWORK_SELECTION_ENABLED: i32 = 0;
 const NETWORK_SELECTION_TEMPORARY_DISABLED: i32 = 1;
 const NETWORK_SELECTION_PERMANENTLY_DISABLED: i32 = 2;
@@ -220,7 +238,13 @@ impl SecurityParams {
     fn of(kind: i32) -> Result<SecurityParams, LoadError> {
         use key_mgmt::*;
         let (key_mgmt, protocols, pairwise, group, require_pmf) = match kind {
-            SECURITY_TYPE_OPEN => (Bits::of(&[NONE]), Bits::of(&[PROTOCOL_RSN, PROTOCOL_WPA]), Bits::default(), Bits::default(), false),
+            SECURITY_TYPE_OPEN => (
+                Bits::of(&[NONE]),
+                Bits::of(&[PROTOCOL_RSN, PROTOCOL_WPA]),
+                Bits::default(),
+                Bits::default(),
+                false,
+            ),
             SECURITY_TYPE_PSK => (
                 Bits::of(&[WPA_PSK]),
                 Bits::of(&[PROTOCOL_RSN, PROTOCOL_WPA]),
@@ -242,12 +266,21 @@ impl SecurityParams {
                 Bits::of(&[GROUP_CCMP, GROUP_GCMP_128, GROUP_GCMP_256]),
                 true,
             ),
-            SECURITY_TYPE_WAPI_PSK => {
-                (Bits::of(&[WAPI_PSK]), Bits::of(&[PROTOCOL_WAPI]), Bits::of(&[PAIRWISE_SMS4]), Bits::of(&[GROUP_SMS4]), false)
-            }
+            SECURITY_TYPE_WAPI_PSK => (
+                Bits::of(&[WAPI_PSK]),
+                Bits::of(&[PROTOCOL_WAPI]),
+                Bits::of(&[PAIRWISE_SMS4]),
+                Bits::of(&[GROUP_SMS4]),
+                false,
+            ),
             SECURITY_TYPE_WEP => return Err(LoadError::Unmodelled("WEP networks")),
-            SECURITY_TYPE_EAP | SECURITY_TYPE_EAP_WPA3_ENTERPRISE | SECURITY_TYPE_EAP_WPA3_ENTERPRISE_192_BIT
-            | SECURITY_TYPE_WAPI_CERT | SECURITY_TYPE_OSEN | 11 | 12 => {
+            SECURITY_TYPE_EAP
+            | SECURITY_TYPE_EAP_WPA3_ENTERPRISE
+            | SECURITY_TYPE_EAP_WPA3_ENTERPRISE_192_BIT
+            | SECURITY_TYPE_WAPI_CERT
+            | SECURITY_TYPE_OSEN
+            | 11
+            | 12 => {
                 return Err(LoadError::Unmodelled("enterprise and Passpoint networks"));
             }
             SECURITY_TYPE_DPP => return Err(LoadError::Unmodelled("DPP networks")),
@@ -280,7 +313,15 @@ impl WriteParcelable for SecurityParams {
     fn write_to(&self, p: &mut Parcel) {
         p.write_i32(self.kind);
         p.write_i32(self.enabled as i32);
-        for bits in [self.key_mgmt, self.protocols, self.auth, self.pairwise, self.group, self.group_mgmt, self.suite_b] {
+        for bits in [
+            self.key_mgmt,
+            self.protocols,
+            self.auth,
+            self.pairwise,
+            self.group,
+            self.group_mgmt,
+            self.suite_b,
+        ] {
             bits.write(p);
         }
         p.write_i32(self.require_pmf as i32);
@@ -448,9 +489,26 @@ impl Default for WifiConfiguration {
 impl WifiConfiguration {
     /// `updateLegacySecurityParams`: the first params' sets.
     fn update_legacy_security(&mut self) {
-        let Some(p) = self.security.first() else { return };
-        (self.key_mgmt, self.protocols, self.auth, self.pairwise, self.group, self.group_mgmt, self.suite_b) =
-            (p.key_mgmt, p.protocols, p.auth, p.pairwise, p.group, p.group_mgmt, p.suite_b);
+        let Some(p) = self.security.first() else {
+            return;
+        };
+        (
+            self.key_mgmt,
+            self.protocols,
+            self.auth,
+            self.pairwise,
+            self.group,
+            self.group_mgmt,
+            self.suite_b,
+        ) = (
+            p.key_mgmt,
+            p.protocols,
+            p.auth,
+            p.pairwise,
+            p.group,
+            p.group_mgmt,
+            p.suite_b,
+        );
         self.require_pmf = p.require_pmf;
     }
 
@@ -506,7 +564,13 @@ impl WifiConfiguration {
             SECURITY_TYPE_OSEN
         } else if k.get(WPA2_PSK) || k.get(WPA_PSK_SHA256) || k.get(FT_PSK) {
             SECURITY_TYPE_PSK
-        } else if k.get(WPA_EAP) || k.get(FT_EAP) || k.get(IEEE8021X) || k.get(WPA_EAP_SHA256) || k.get(FILS_SHA256) || k.get(FILS_SHA384) {
+        } else if k.get(WPA_EAP)
+            || k.get(FT_EAP)
+            || k.get(IEEE8021X)
+            || k.get(WPA_EAP_SHA256)
+            || k.get(FILS_SHA256)
+            || k.get(FILS_SHA384)
+        {
             SECURITY_TYPE_EAP
         } else if k.get(WPA_PSK) {
             SECURITY_TYPE_PSK
@@ -519,16 +583,31 @@ impl WifiConfiguration {
 
     /// `needsPreSharedKey`.
     fn needs_pre_shared_key(&self) -> bool {
-        self.security.iter().any(|p| matches!(p.kind, SECURITY_TYPE_PSK | SECURITY_TYPE_SAE | SECURITY_TYPE_WAPI_PSK))
+        self.security.iter().any(|p| {
+            matches!(
+                p.kind,
+                SECURITY_TYPE_PSK | SECURITY_TYPE_SAE | SECURITY_TYPE_WAPI_PSK
+            )
+        })
     }
 
     /// `getDefaultSecurityType`, with no WEP key.
     fn default_security_type(&self) -> &'static str {
         use key_mgmt::*;
         let k = self.key_mgmt;
-        let found = [WPA_PSK, WPA_EAP, OWE, SAE, SUITE_B_192, WAPI_PSK, WAPI_CERT, OSEN, DPP]
-            .into_iter()
-            .find(|&i| k.get(i) || (i == WPA_EAP && k.get(IEEE8021X)));
+        let found = [
+            WPA_PSK,
+            WPA_EAP,
+            OWE,
+            SAE,
+            SUITE_B_192,
+            WAPI_PSK,
+            WAPI_CERT,
+            OSEN,
+            DPP,
+        ]
+        .into_iter()
+        .find(|&i| k.get(i) || (i == WPA_EAP && k.get(IEEE8021X)));
         STRINGS[found.unwrap_or(NONE) as usize]
     }
 
@@ -550,7 +629,12 @@ impl WifiConfiguration {
     /// `now`, the wall clock in ms: the password masked, the randomized MAC
     /// address but to the Wi-Fi stack, the system and the creator, and no
     /// randomization where it is not supported.
-    pub fn external(&self, target_uid: i32, mac_randomization_supported: bool, now: i64) -> WifiConfiguration {
+    pub fn external(
+        &self,
+        target_uid: i32,
+        mac_randomization_supported: bool,
+        now: i64,
+    ) -> WifiConfiguration {
         let mut c = self.clone();
         if c.pre_shared_key.as_deref().is_some_and(|k| !k.is_empty()) {
             c.pre_shared_key = Some(PASSWORD_MASK.into());
@@ -590,7 +674,15 @@ impl WriteParcelable for WifiConfiguration {
         p.write_i32(self.hidden_ssid as i32);
         p.write_i32(self.require_pmf as i32);
         p.write_string16(None); // updateIdentifier
-        for bits in [self.key_mgmt, self.protocols, self.auth, self.pairwise, self.group, self.group_mgmt, self.suite_b] {
+        for bits in [
+            self.key_mgmt,
+            self.protocols,
+            self.auth,
+            self.pairwise,
+            self.group,
+            self.group_mgmt,
+            self.suite_b,
+        ] {
             bits.write(p);
         }
         p.write_i32(self.security.len() as i32);
@@ -711,23 +803,40 @@ fn value(e: &Element) -> Result<Value, LoadError> {
     Ok(match e.name.as_str() {
         "null" => Value::Null,
         "string" => Value::Str(text(e)),
-        "int" => Value::Int(attr("value")?.parse().map_err(|_| corrupt("invalid int".into()))?),
-        "long" => Value::Long(attr("value")?.parse().map_err(|_| corrupt("invalid long".into()))?),
+        "int" => Value::Int(
+            attr("value")?
+                .parse()
+                .map_err(|_| corrupt("invalid int".into()))?,
+        ),
+        "long" => Value::Long(
+            attr("value")?
+                .parse()
+                .map_err(|_| corrupt("invalid long".into()))?,
+        ),
         // `Boolean.parseBoolean`.
         "boolean" => Value::Bool(attr("value")?.eq_ignore_ascii_case("true")),
         "byte-array" => {
             let hex = text(e);
-            let num: usize = attr("num")?.parse().map_err(|_| corrupt("invalid num".into()))?;
+            let num: usize = attr("num")?
+                .parse()
+                .map_err(|_| corrupt("invalid num".into()))?;
             if hex.len() != num * 2 {
                 return Err(corrupt("invalid byte-array length".into()));
             }
             Value::Bytes(
-                (0..num).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)).collect::<Result<_, _>>().map_err(|_| corrupt("invalid hex".into()))?,
+                (0..num)
+                    .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16))
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| corrupt("invalid hex".into()))?,
             )
         }
         "long-array" => Value::Longs(
             e.children()
-                .map(|item| item.string("value").and_then(|v| v.parse().ok()).ok_or_else(|| corrupt("invalid item".into())))
+                .map(|item| {
+                    item.string("value")
+                        .and_then(|v| v.parse().ok())
+                        .ok_or_else(|| corrupt("invalid item".into()))
+                })
                 .collect::<Result<_, _>>()?,
         ),
         _ => Value::Other,
@@ -774,15 +883,29 @@ fn as_bits(v: Value, name: &str) -> Result<Bits, LoadError> {
 fn parse_security_params(e: &Element) -> Result<Option<SecurityParams>, LoadError> {
     let mut params: Option<SecurityParams> = None;
     for child in e.children() {
-        let name = child.string("name").map(|n| n.into_owned()).ok_or_else(|| LoadError::Corrupt("Missing value name".into()))?;
+        let name = child
+            .string("name")
+            .map(|n| n.into_owned())
+            .ok_or_else(|| LoadError::Corrupt("Missing value name".into()))?;
         let v = value(child)?;
         let missing = || LoadError::Corrupt("Missing security type.".into());
         match name.as_str() {
             "SecurityType" => params = Some(SecurityParams::of(as_int(v, &name)?)?),
-            "IsEnabled" => params.as_mut().ok_or_else(|| LoadError::Skip("IsEnabled before SecurityType".into()))?.enabled = as_bool(v, &name)?,
-            "SaeIsH2eOnlyMode" => params.as_mut().ok_or_else(missing)?.sae_h2e_only = as_bool(v, &name)?,
-            "SaeIsPkOnlyMode" => params.as_mut().ok_or_else(missing)?.sae_pk_only = as_bool(v, &name)?,
-            "IsAddedByAutoUpgrade" => params.as_mut().ok_or_else(missing)?.added_by_auto_upgrade = as_bool(v, &name)?,
+            "IsEnabled" => {
+                params
+                    .as_mut()
+                    .ok_or_else(|| LoadError::Skip("IsEnabled before SecurityType".into()))?
+                    .enabled = as_bool(v, &name)?
+            }
+            "SaeIsH2eOnlyMode" => {
+                params.as_mut().ok_or_else(missing)?.sae_h2e_only = as_bool(v, &name)?
+            }
+            "SaeIsPkOnlyMode" => {
+                params.as_mut().ok_or_else(missing)?.sae_pk_only = as_bool(v, &name)?
+            }
+            "IsAddedByAutoUpgrade" => {
+                params.as_mut().ok_or_else(missing)?.added_by_auto_upgrade = as_bool(v, &name)?
+            }
             "AllowedSuiteBCiphers" => {
                 let bits = as_bits(v, &name)?;
                 let p = params.as_mut().ok_or_else(missing)?;
@@ -807,15 +930,19 @@ fn parse_configuration(e: &Element) -> Result<WifiConfiguration, LoadError> {
         let Some(name) = child.string("name").map(|n| n.into_owned()) else {
             match child.name.as_str() {
                 "SecurityParamsList" => {
-                    let list =
-                        child.children().filter(|s| s.name == "SecurityParams").map(parse_security_params).collect::<Result<Vec<_>, _>>()?;
+                    let list = child
+                        .children()
+                        .filter(|s| s.name == "SecurityParams")
+                        .map(parse_security_params)
+                        .collect::<Result<Vec<_>, _>>()?;
                     let list: Vec<SecurityParams> = list.into_iter().flatten().collect();
                     if !list.is_empty() {
                         c.security = list;
                         c.update_legacy_security();
                     }
                 }
-                "PreSharedKey" | "WEPKeys" | "DppPrivateEcKey" | "DppConnector" | "DppCSignKey" | "DppNetAccessKey" => {
+                "PreSharedKey" | "WEPKeys" | "DppPrivateEcKey" | "DppConnector" | "DppCSignKey"
+                | "DppNetAccessKey" => {
                     return Err(LoadError::Unmodelled("encrypted credentials"));
                 }
                 "VendorDataList" => return Err(LoadError::Unmodelled("vendor data")),
@@ -847,8 +974,14 @@ fn parse_configuration(e: &Element) -> Result<WifiConfiguration, LoadError> {
             "AllowedSuiteBCiphers" => c.suite_b = as_bits(v, &name)?,
             "Shared" => c.shared = as_bool(v, &name)?,
             // A network CURRENT before the reboot is restored ENABLED.
-            "Status" => c.status = Some(as_int(v, &name)?).filter(|&s| s != STATUS_CURRENT).unwrap_or(STATUS_ENABLED),
-            "FQDN" | "ProviderFriendlyName" if v != Value::Null => return Err(LoadError::Unmodelled("Passpoint networks")),
+            "Status" => {
+                c.status = Some(as_int(v, &name)?)
+                    .filter(|&s| s != STATUS_CURRENT)
+                    .unwrap_or(STATUS_ENABLED)
+            }
+            "FQDN" | "ProviderFriendlyName" if v != Value::Null => {
+                return Err(LoadError::Unmodelled("Passpoint networks"));
+            }
             "FQDN" | "ProviderFriendlyName" => {}
             // Not parceled.
             "LinkedNetworksList" | "NumRebootsSinceLastUse" | "IsMostRecentlyConnected" => {}
@@ -874,8 +1007,10 @@ fn parse_configuration(e: &Element) -> Result<WifiConfiguration, LoadError> {
                 _ => return Err(skip(&name)),
             },
             "RandomizedMacAddress" => {
-                let mac = as_string(v, &name)?.ok_or_else(|| LoadError::Skip("null RandomizedMacAddress".into()))?;
-                c.randomized_mac = mac_from_string(&mac).ok_or_else(|| LoadError::Skip(format!("invalid MAC address {mac}")))?;
+                let mac = as_string(v, &name)?
+                    .ok_or_else(|| LoadError::Skip("null RandomizedMacAddress".into()))?;
+                c.randomized_mac = mac_from_string(&mac)
+                    .ok_or_else(|| LoadError::Skip(format!("invalid MAC address {mac}")))?;
             }
             "MacRandomizationSetting" => {
                 c.mac_randomization_setting = as_int(v, &name)?;
@@ -892,7 +1027,9 @@ fn parse_configuration(e: &Element) -> Result<WifiConfiguration, LoadError> {
             "DeletionPriority" => {
                 let priority = as_int(v, &name)?;
                 if priority < 0 {
-                    return Err(LoadError::Skip("Deletion priority must be non-negative".into()));
+                    return Err(LoadError::Skip(
+                        "Deletion priority must be non-negative".into(),
+                    ));
                 }
                 c.deletion_priority = priority;
             }
@@ -912,7 +1049,10 @@ fn parse_configuration(e: &Element) -> Result<WifiConfiguration, LoadError> {
                 _ => return Err(skip(&name)),
             },
             "DppConnector" | "DppCSignKey" | "DppNetAccessKey" => {
-                let at = ["DppConnector", "DppCSignKey", "DppNetAccessKey"].iter().position(|n| *n == name).unwrap();
+                let at = ["DppConnector", "DppCSignKey", "DppNetAccessKey"]
+                    .iter()
+                    .position(|n| *n == name)
+                    .unwrap();
                 dpp_keys[at] = match v {
                     Value::Bytes(b) => Some(b),
                     Value::Null => None,
@@ -932,7 +1072,8 @@ fn parse_configuration(e: &Element) -> Result<WifiConfiguration, LoadError> {
     c.convert_legacy_fields()?;
     if !send_dhcp_hostname_exists {
         // Legacy configs send the DHCP hostname for secure networks only.
-        c.send_dhcp_hostname = !c.is_security_type(SECURITY_TYPE_OPEN) && !c.is_security_type(SECURITY_TYPE_OWE);
+        c.send_dhcp_hostname =
+            !c.is_security_type(SECURITY_TYPE_OPEN) && !c.is_security_type(SECURITY_TYPE_OWE);
     }
     // `setDppConnectionKeys`: all three, or none.
     if let [Some(a), Some(b), Some(d)] = &dpp_keys
@@ -949,7 +1090,9 @@ fn mac_from_string(s: &str) -> Option<u64> {
     if bytes.len() != 6 {
         return None;
     }
-    bytes.iter().try_fold(0u64, |a, b| Some(a << 8 | u64::from(u8::from_str_radix(b, 16).ok()?)))
+    bytes.iter().try_fold(0u64, |a, b| {
+        Some(a << 8 | u64::from(u8::from_str_radix(b, 16).ok()?))
+    })
 }
 
 /// `NetworkSelectionStatusXmlUtil.parseFromXml`.
@@ -960,7 +1103,10 @@ fn parse_selection_status(e: &Element) -> Result<NetworkSelectionStatus, LoadErr
     s.ever_validated_internet_access = true;
     let (mut status, mut reason) = (String::new(), String::new());
     for child in e.children() {
-        let name = child.string("name").map(|n| n.into_owned()).ok_or_else(|| LoadError::Corrupt("Missing value name".into()))?;
+        let name = child
+            .string("name")
+            .map(|n| n.into_owned())
+            .ok_or_else(|| LoadError::Corrupt("Missing value name".into()))?;
         let v = value(child)?;
         match name.as_str() {
             "SelectionStatus" => status = as_string(v, &name)?.unwrap_or_default(),
@@ -969,12 +1115,20 @@ fn parse_selection_status(e: &Element) -> Result<NetworkSelectionStatus, LoadErr
             "ConnectChoiceRssi" => s.connect_choice_rssi = as_int(v, &name)?,
             "HasEverConnected" => s.has_ever_connected = as_bool(v, &name)?,
             "CaptivePortalNeverDetected" => s.never_detected_captive_portal = as_bool(v, &name)?,
-            "HasEverValidatedInternetAccess" => s.ever_validated_internet_access = as_bool(v, &name)?,
+            "HasEverValidatedInternetAccess" => {
+                s.ever_validated_internet_access = as_bool(v, &name)?
+            }
             _ => {}
         }
     }
-    let status = NETWORK_SELECTION_STATUS.iter().position(|n| *n == status).map(|i| i as i32);
-    let reason = DISABLE_REASONS.iter().position(|n| *n == reason).map(|i| i as i32);
+    let status = NETWORK_SELECTION_STATUS
+        .iter()
+        .position(|n| *n == status)
+        .map(|i| i as i32);
+    let reason = DISABLE_REASONS
+        .iter()
+        .position(|n| *n == reason)
+        .map(|i| i as i32);
     // Temporary disables are not kept across reboots.
     let (status, reason) = match (status, reason) {
         (Some(s), Some(r)) if s != NETWORK_SELECTION_TEMPORARY_DISABLED => (s, r),
@@ -992,43 +1146,74 @@ fn parse_selection_status(e: &Element) -> Result<NetworkSelectionStatus, LoadErr
 /// proxy.
 fn parse_ip_configuration(e: &Element) -> Result<(), LoadError> {
     let field = |name: &str| -> Result<String, LoadError> {
-        let v = e.children().find(|c| c.string("name").as_deref() == Some(name)).ok_or_else(|| LoadError::Corrupt(format!("Missing {name}")))?;
+        let v = e
+            .children()
+            .find(|c| c.string("name").as_deref() == Some(name))
+            .ok_or_else(|| LoadError::Corrupt(format!("Missing {name}")))?;
         as_string(value(v)?, name)?.ok_or_else(|| LoadError::Skip(format!("null {name}")))
     };
     match field("IpAssignment")?.as_str() {
         "DHCP" => {}
-        "STATIC" | "UNASSIGNED" => return Err(LoadError::Unmodelled("static or unassigned IP configurations")),
-        other => return Err(LoadError::Skip(format!("No enum constant IpAssignment.{other}"))),
+        "STATIC" | "UNASSIGNED" => {
+            return Err(LoadError::Unmodelled(
+                "static or unassigned IP configurations",
+            ));
+        }
+        other => {
+            return Err(LoadError::Skip(format!(
+                "No enum constant IpAssignment.{other}"
+            )));
+        }
     }
     match field("ProxySettings")?.as_str() {
         "NONE" => Ok(()),
         "STATIC" | "PAC" | "UNASSIGNED" => Err(LoadError::Unmodelled("proxy settings")),
-        other => Err(LoadError::Skip(format!("No enum constant ProxySettings.{other}"))),
+        other => Err(LoadError::Skip(format!(
+            "No enum constant ProxySettings.{other}"
+        ))),
     }
 }
 
 /// `NetworkListStoreData.parseNetwork`: the network, `creator` naming its
 /// creator's uid as `getNameForUid` does.
-fn parse_network(e: &Element, creator: &dyn Fn(i32) -> Result<Option<String>, LoadError>) -> Result<WifiConfiguration, LoadError> {
+fn parse_network(
+    e: &Element,
+    creator: &dyn Fn(i32) -> Result<Option<String>, LoadError>,
+) -> Result<WifiConfiguration, LoadError> {
     let mut config = None;
     let mut status = None;
     let mut ip = false;
     for section in e.children() {
         match section.name.as_str() {
-            "WifiConfiguration" if config.is_some() => return Err(LoadError::Corrupt("Detected duplicate tag for: WifiConfiguration".into())),
+            "WifiConfiguration" if config.is_some() => {
+                return Err(LoadError::Corrupt(
+                    "Detected duplicate tag for: WifiConfiguration".into(),
+                ));
+            }
             "WifiConfiguration" => config = Some(parse_configuration(section)?),
-            "NetworkStatus" if status.is_some() => return Err(LoadError::Corrupt("Detected duplicate tag for: NetworkStatus".into())),
+            "NetworkStatus" if status.is_some() => {
+                return Err(LoadError::Corrupt(
+                    "Detected duplicate tag for: NetworkStatus".into(),
+                ));
+            }
             "NetworkStatus" => status = Some(parse_selection_status(section)?),
-            "IpConfiguration" if ip => return Err(LoadError::Corrupt("Detected duplicate tag for: IpConfiguration".into())),
+            "IpConfiguration" if ip => {
+                return Err(LoadError::Corrupt(
+                    "Detected duplicate tag for: IpConfiguration".into(),
+                ));
+            }
             "IpConfiguration" => {
                 parse_ip_configuration(section)?;
                 ip = true;
             }
-            "WifiEnterpriseConfiguration" => return Err(LoadError::Unmodelled("enterprise networks")),
+            "WifiEnterpriseConfiguration" => {
+                return Err(LoadError::Unmodelled("enterprise networks"));
+            }
             _ => {}
         }
     }
-    let mut c = config.ok_or_else(|| LoadError::Corrupt("XML parsing of wifi configuration failed".into()))?;
+    let mut c = config
+        .ok_or_else(|| LoadError::Corrupt("XML parsing of wifi configuration failed".into()))?;
     c.convert_legacy_fields()?;
     if c.pre_shared_key.is_some() && !c.needs_pre_shared_key() {
         c.set_security(SecurityParams::of(SECURITY_TYPE_PSK)?);
@@ -1043,13 +1228,20 @@ fn parse_network(e: &Element, creator: &dyn Fn(i32) -> Result<Option<String>, Lo
     }
     // A missing status fails validation; an IP configuration defaults
     // to unassigned, which is not modelled.
-    let Some(status) = status else { return Err(LoadError::Skip("no NetworkStatus".into())) };
+    let Some(status) = status else {
+        return Err(LoadError::Skip("no NetworkStatus".into()));
+    };
     c.selection = status;
     if !ip {
-        return Err(LoadError::Unmodelled("static or unassigned IP configurations"));
+        return Err(LoadError::Unmodelled(
+            "static or unassigned IP configurations",
+        ));
     }
     // `addUpgradableSecurityTypeIfNecessary`: logged when it fails.
-    for (from, to) in [(SECURITY_TYPE_OPEN, SECURITY_TYPE_OWE), (SECURITY_TYPE_PSK, SECURITY_TYPE_SAE)] {
+    for (from, to) in [
+        (SECURITY_TYPE_OPEN, SECURITY_TYPE_OWE),
+        (SECURITY_TYPE_PSK, SECURITY_TYPE_SAE),
+    ] {
         if c.is_security_type(from) && !c.is_security_type(to) {
             let mut params = SecurityParams::of(to)?;
             params.added_by_auto_upgrade = true;
@@ -1087,10 +1279,20 @@ fn valid_password(password: Option<&str>, sae: bool, wapi: bool) -> bool {
         return false;
     }
     if let Some(inner) = p.strip_prefix('"') {
-        let min = if sae { SAE_ASCII_MIN_LEN } else { PSK_ASCII_MIN_LEN };
-        return p.is_ascii() && (min..=PSK_SAE_ASCII_MAX_LEN).contains(&p.len()) && inner.ends_with('"');
+        let min = if sae {
+            SAE_ASCII_MIN_LEN
+        } else {
+            PSK_ASCII_MIN_LEN
+        };
+        return p.is_ascii()
+            && (min..=PSK_SAE_ASCII_MAX_LEN).contains(&p.len())
+            && inner.ends_with('"');
     }
-    let length_ok = if wapi { p.len() <= 100 } else { p.len() == PSK_SAE_HEX_LEN };
+    let length_ok = if wapi {
+        p.len() <= 100
+    } else {
+        p.len() == PSK_SAE_HEX_LEN
+    };
     length_ok && p.len() % 2 == 0 && p.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -1098,8 +1300,14 @@ fn valid_password(password: Option<&str>, sae: bool, wapi: bool) -> bool {
 /// is modelled.
 fn validate(c: &mut WifiConfiguration) -> bool {
     use key_mgmt::*;
-    let Some(ssid) = c.ssid.as_deref() else { return false };
-    let max = if ssid.starts_with('"') { SSID_PLAINTEXT_MAX_LEN } else { SSID_HEX_MAX_LEN };
+    let Some(ssid) = c.ssid.as_deref() else {
+        return false;
+    };
+    let max = if ssid.starts_with('"') {
+        SSID_PLAINTEXT_MAX_LEN
+    } else {
+        SSID_HEX_MAX_LEN
+    };
     if ssid.is_empty() || ssid.chars().count() > max || !ssid_bytes_nonempty(ssid) {
         return false;
     }
@@ -1115,7 +1323,9 @@ fn validate(c: &mut WifiConfiguration) -> bool {
         return false;
     }
     let k = c.key_mgmt;
-    if k.cardinality() == 0 || (k.cardinality() > 1 && !(k.cardinality() <= 3 && k.get(WPA_EAP) && k.get(IEEE8021X))) {
+    if k.cardinality() == 0
+        || (k.cardinality() > 1 && !(k.cardinality() <= 3 && k.get(WPA_EAP) && k.get(IEEE8021X)))
+    {
         return false;
     }
     let mut kinds = Vec::new();
@@ -1125,12 +1335,19 @@ fn validate(c: &mut WifiConfiguration) -> bool {
         }
         kinds.push(p.kind);
     }
-    if c.selection.connect_choice.as_deref().is_some_and(|s| s.encode_utf16().count() > MAX_STRING_LENGTH) {
+    if c.selection
+        .connect_choice
+        .as_deref()
+        .is_some_and(|s| s.encode_utf16().count() > MAX_STRING_LENGTH)
+    {
         return false;
     }
-    if c.is_security_type(SECURITY_TYPE_PSK) && !valid_password(c.pre_shared_key.as_deref(), false, false)
-        || c.is_security_type(SECURITY_TYPE_SAE) && !valid_password(c.pre_shared_key.as_deref(), true, false)
-        || c.is_security_type(SECURITY_TYPE_WAPI_PSK) && !valid_password(c.pre_shared_key.as_deref(), false, true)
+    if c.is_security_type(SECURITY_TYPE_PSK)
+        && !valid_password(c.pre_shared_key.as_deref(), false, false)
+        || c.is_security_type(SECURITY_TYPE_SAE)
+            && !valid_password(c.pre_shared_key.as_deref(), true, false)
+        || c.is_security_type(SECURITY_TYPE_WAPI_PSK)
+            && !valid_password(c.pre_shared_key.as_deref(), false, true)
     {
         return false;
     }
@@ -1147,12 +1364,16 @@ pub fn read_network_list(
     root: &Element,
     creator: &dyn Fn(i32) -> Result<Option<String>, LoadError>,
 ) -> Result<Vec<WifiConfiguration>, LoadError> {
-    let Some(list) = root.children().find(|e| e.name == "NetworkList") else { return Ok(Vec::new()) };
+    let Some(list) = root.children().find(|e| e.name == "NetworkList") else {
+        return Ok(Vec::new());
+    };
     let mut networks = Vec::new();
     for network in list.children().filter(|e| e.name == "Network") {
         match parse_network(network, creator) {
             Ok(c) => networks.push(c),
-            Err(LoadError::Skip(e)) => eprintln!("app host: wifi: Failed to parse network config. Skipping...: {e}"),
+            Err(LoadError::Skip(e)) => {
+                eprintln!("app host: wifi: Failed to parse network config. Skipping...: {e}")
+            }
             Err(e) => return Err(e),
         }
     }
@@ -1162,19 +1383,29 @@ pub fn read_network_list(
 /// `loadInternalData`: the shared then the user networks, each valid one
 /// numbered in turn; one with the profile key of another merges into it,
 /// which is not modelled.
-pub fn load(shared: Vec<WifiConfiguration>, user: Vec<WifiConfiguration>) -> Result<Vec<WifiConfiguration>, LoadError> {
+pub fn load(
+    shared: Vec<WifiConfiguration>,
+    user: Vec<WifiConfiguration>,
+) -> Result<Vec<WifiConfiguration>, LoadError> {
     let mut networks: Vec<WifiConfiguration> = Vec::new();
     for mut c in shared.into_iter().chain(user) {
         if !validate(&mut c) {
-            eprintln!("app host: wifi: Skipping malformed network from store: {:?}", c.ssid);
+            eprintln!(
+                "app host: wifi: Skipping malformed network from store: {:?}",
+                c.ssid
+            );
             continue;
         }
         if networks.iter().any(|n| n.profile_key() == c.profile_key()) {
-            return Err(LoadError::Unmodelled("merging a stored network into another"));
+            return Err(LoadError::Unmodelled(
+                "merging a stored network into another",
+            ));
         }
         // `generateRandomizedMacAddresses`.
         if c.randomized_mac == DEFAULT_MAC_ADDRESS {
-            return Err(LoadError::Unmodelled("a network without a persisted randomized MAC address"));
+            return Err(LoadError::Unmodelled(
+                "a network without a persisted randomized MAC address",
+            ));
         }
         c.network_id = networks.len() as i32;
         networks.push(c);
@@ -1185,7 +1416,11 @@ pub fn load(shared: Vec<WifiConfiguration>, user: Vec<WifiConfiguration>) -> Res
 /// `convertMultiTypeConfigsToLegacyConfigs(configs, ignoreDisabledType)`,
 /// `omit` telling the auto-upgrade params `shouldOmitAutoUpgradeParams`
 /// omits.
-pub fn legacy_configs(configs: &[WifiConfiguration], ignore_disabled: bool, omit: &dyn Fn(&SecurityParams) -> bool) -> Vec<WifiConfiguration> {
+pub fn legacy_configs(
+    configs: &[WifiConfiguration],
+    ignore_disabled: bool,
+    omit: &dyn Fn(&SecurityParams) -> bool,
+) -> Vec<WifiConfiguration> {
     let mut out = Vec::new();
     for c in configs {
         for params in &c.security {
@@ -1329,14 +1564,32 @@ mod tests {
         let c = &networks[0];
         assert_eq!((c.network_id, c.status), (0, STATUS_ENABLED));
         assert_eq!(c.ssid.as_deref(), Some("\"AndroidWifi\""));
-        assert_eq!(c.security.iter().map(|p| (p.kind, p.added_by_auto_upgrade)).collect::<Vec<_>>(), [(0, false), (6, true)]);
-        assert_eq!((c.key_mgmt, c.protocols), (Bits::of(&[key_mgmt::NONE]), Bits::of(&[PROTOCOL_WPA, PROTOCOL_RSN])));
+        assert_eq!(
+            c.security
+                .iter()
+                .map(|p| (p.kind, p.added_by_auto_upgrade))
+                .collect::<Vec<_>>(),
+            [(0, false), (6, true)]
+        );
+        assert_eq!(
+            (c.key_mgmt, c.protocols),
+            (
+                Bits::of(&[key_mgmt::NONE]),
+                Bits::of(&[PROTOCOL_WPA, PROTOCOL_RSN])
+            )
+        );
         assert_eq!(c.randomized_mac, 0x6e53_d6a0_fc69);
         assert_eq!(c.mac_randomization_setting, RANDOMIZATION_AUTO);
         assert!(c.dpp_configurator);
-        assert_eq!(c.creator_name.as_deref(), Some("com.google.android.googlesdksetup"));
+        assert_eq!(
+            c.creator_name.as_deref(),
+            Some("com.google.android.googlesdksetup")
+        );
         assert_eq!(c.profile_key(), "\"AndroidWifi\"NONE");
-        assert!(c.selection.never_detected_captive_portal && !c.selection.ever_validated_internet_access);
+        assert!(
+            c.selection.never_detected_captive_portal
+                && !c.selection.ever_validated_internet_access
+        );
     }
 
     /// `convertMultiTypeConfigsToLegacyConfigs`: one config per params,
@@ -1377,12 +1630,24 @@ mod tests {
         assert_eq!(s(&mut r).as_deref(), Some("\"AndroidWifi\""));
         assert_eq!(s(&mut r), None); // BSSID
         assert_eq!((int(&mut r), int(&mut r)), (0, 0)); // apBand, apChannel
-        assert_eq!((s(&mut r), s(&mut r), int(&mut r), int(&mut r)), (None, None, 0, 0));
+        assert_eq!(
+            (s(&mut r), s(&mut r), int(&mut r), int(&mut r)),
+            (None, None, 0, 0)
+        );
         assert_eq!(s(&mut r), None); // psk
         for _ in 0..4 {
             assert_eq!(s(&mut r), None);
         }
-        assert_eq!((int(&mut r), int(&mut r), int(&mut r), int(&mut r), int(&mut r)), (0, 0, 0, 0, 0));
+        assert_eq!(
+            (
+                int(&mut r),
+                int(&mut r),
+                int(&mut r),
+                int(&mut r),
+                int(&mut r)
+            ),
+            (0, 0, 0, 0, 0)
+        );
         assert_eq!(s(&mut r), None); // updateIdentifier
         // The seven bit sets: NONE; WPA and RSN; then empty.
         assert_eq!((int(&mut r), int(&mut r)), (1, 0));
@@ -1392,7 +1657,10 @@ mod tests {
         }
         assert_eq!(int(&mut r), 2); // security params
         for kind in [0, 6] {
-            assert_eq!(s(&mut r).as_deref(), Some("android.net.wifi.SecurityParams"));
+            assert_eq!(
+                s(&mut r).as_deref(),
+                Some("android.net.wifi.SecurityParams")
+            );
             assert_eq!((int(&mut r), int(&mut r)), (kind, 1));
             for _ in 0..7 {
                 let n = int(&mut r);
@@ -1400,10 +1668,19 @@ mod tests {
                     int(&mut r);
                 }
             }
-            assert_eq!((int(&mut r), int(&mut r), int(&mut r), int(&mut r)), ((kind == 6) as i32, (kind == 6) as i32, 0, 0));
+            assert_eq!(
+                (int(&mut r), int(&mut r), int(&mut r), int(&mut r)),
+                ((kind == 6) as i32, (kind == 6) as i32, 0, 0)
+            );
         }
-        assert_eq!(s(&mut r).as_deref(), Some("android.net.wifi.WifiEnterpriseConfig"));
-        assert_eq!((int(&mut r), int(&mut r), int(&mut r), int(&mut r)), (0, -1, 0, 0));
+        assert_eq!(
+            s(&mut r).as_deref(),
+            Some("android.net.wifi.WifiEnterpriseConfig")
+        );
+        assert_eq!(
+            (int(&mut r), int(&mut r), int(&mut r), int(&mut r)),
+            (0, -1, 0, 0)
+        );
         assert_eq!(s(&mut r), None);
         assert_eq!(int(&mut r), 0);
         assert_eq!(s(&mut r), None);
@@ -1411,19 +1688,45 @@ mod tests {
             assert_eq!(int(&mut r), 0);
         }
         assert_eq!(s(&mut r).as_deref(), Some("android.net.IpConfiguration"));
-        assert_eq!((s(&mut r).as_deref(), s(&mut r).as_deref(), s(&mut r), s(&mut r)), (Some("DHCP"), Some("NONE"), None, None));
+        assert_eq!(
+            (
+                s(&mut r).as_deref(),
+                s(&mut r).as_deref(),
+                s(&mut r),
+                s(&mut r)
+            ),
+            (Some("DHCP"), Some("NONE"), None, None)
+        );
         assert_eq!((s(&mut r), s(&mut r)), (None, None)); // dhcpServer, default gateway
         // validatedInternetAccess .. useExternalScores.
-        assert_eq!((0..13).map(|_| int(&mut r)).collect::<Vec<_>>(), [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!((int(&mut r), int(&mut r), int(&mut r)), (10181, 10181, 10181));
-        assert_eq!(s(&mut r).as_deref(), Some("com.google.android.googlesdksetup"));
-        assert_eq!(s(&mut r).as_deref(), Some("com.google.android.googlesdksetup"));
-        assert_eq!((0..7).map(|_| int(&mut r)).collect::<Vec<_>>(), [0, 0, 0, 1, 0, 0, 1]);
+        assert_eq!(
+            (0..13).map(|_| int(&mut r)).collect::<Vec<_>>(),
+            [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            (int(&mut r), int(&mut r), int(&mut r)),
+            (10181, 10181, 10181)
+        );
+        assert_eq!(
+            s(&mut r).as_deref(),
+            Some("com.google.android.googlesdksetup")
+        );
+        assert_eq!(
+            s(&mut r).as_deref(),
+            Some("com.google.android.googlesdksetup")
+        );
+        assert_eq!(
+            (0..7).map(|_| int(&mut r)).collect::<Vec<_>>(),
+            [0, 0, 0, 1, 0, 0, 1]
+        );
         assert_eq!(s(&mut r), None); // Passpoint management object tree
         assert_eq!((int(&mut r), r.read_i64().unwrap()), (0, 0));
         assert_eq!(s(&mut r).as_deref(), Some("android.net.MacAddress"));
         assert_eq!(r.read_i64().unwrap(), DEFAULT_MAC_ADDRESS as i64); // masked
-        assert_eq!((int(&mut r), int(&mut r), int(&mut r)), (RANDOMIZATION_NONE, 1, 0));
+        assert_eq!(
+            (int(&mut r), int(&mut r), int(&mut r)),
+            (RANDOMIZATION_NONE, 1, 0)
+        );
         assert_eq!((r.read_i64().unwrap(), r.read_i64().unwrap()), (0, 42));
         assert_eq!(int(&mut r), -1); // carrierId
         assert_eq!(s(&mut r), None);
@@ -1443,8 +1746,17 @@ mod tests {
         c.pre_shared_key = Some("\"password\"".into());
         assert_eq!(c.external(10181, true, 1).randomized_mac, 0x6e53_d6a0_fc69);
         assert_eq!(c.external(1010, true, 1).randomized_mac, 0x6e53_d6a0_fc69);
-        assert_eq!(c.external(10100, true, 1).randomized_mac, DEFAULT_MAC_ADDRESS);
-        assert_eq!(c.external(10100, true, 1).pre_shared_key.as_deref(), Some(PASSWORD_MASK));
-        assert_eq!(c.external(10100, true, 1).mac_randomization_setting, RANDOMIZATION_AUTO);
+        assert_eq!(
+            c.external(10100, true, 1).randomized_mac,
+            DEFAULT_MAC_ADDRESS
+        );
+        assert_eq!(
+            c.external(10100, true, 1).pre_shared_key.as_deref(),
+            Some(PASSWORD_MASK)
+        );
+        assert_eq!(
+            c.external(10100, true, 1).mac_randomization_setting,
+            RANDOMIZATION_AUTO
+        );
     }
 }

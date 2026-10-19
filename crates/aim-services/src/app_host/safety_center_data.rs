@@ -24,7 +24,10 @@ use aim_binder_host::local::{LocalProcess, Strong};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, Parcel, Reader, Result as ParcelResult};
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
-use super::safety_center_config::{SafetyCenterConfig, SafetySource, SafetySourcesGroup, TYPE_DYNAMIC, TYPE_ISSUE_ONLY, TYPE_STATIC};
+use super::safety_center_config::{
+    SafetyCenterConfig, SafetySource, SafetySourcesGroup, TYPE_DYNAMIC, TYPE_ISSUE_ONLY,
+    TYPE_STATIC,
+};
 use crate::clip::{char_sequence, write_char_sequence};
 
 /// `SafetySourceData.SEVERITY_LEVEL_*`.
@@ -58,7 +61,9 @@ pub const ISSUES_FILE: &str = "misc/apexdata/com.android.permission/safety_cente
 const ISSUES_VERSION: i32 = 2;
 
 fn now_millis() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 /// A `writeTypedObject`'s null marker: whether a value follows.
@@ -68,12 +73,17 @@ fn present(r: &mut Reader<'_>) -> ParcelResult<bool> {
 
 /// `createTypedArrayList`: a null list, or one with a null element, is
 /// refused as the creators refuse it (`requireNonNull`).
-fn typed_list<T>(r: &mut Reader<'_>, item: impl Fn(&mut Reader<'_>) -> ParcelResult<T>) -> ParcelResult<Vec<T>> {
+fn typed_list<T>(
+    r: &mut Reader<'_>,
+    item: impl Fn(&mut Reader<'_>) -> ParcelResult<T>,
+) -> ParcelResult<Vec<T>> {
     let n = r.read_i32()?;
     if n < 0 {
         return Err(BAD_VALUE);
     }
-    (0..n).map(|_| if present(r)? { item(r) } else { Err(BAD_VALUE) }).collect()
+    (0..n)
+        .map(|_| if present(r)? { item(r) } else { Err(BAD_VALUE) })
+        .collect()
 }
 
 fn write_typed_list<T>(p: &mut Parcel, items: &[T], item: impl Fn(&mut Parcel, &T)) {
@@ -86,7 +96,11 @@ fn write_typed_list<T>(p: &mut Parcel, items: &[T], item: impl Fn(&mut Parcel, &
 
 /// A `PendingIntent` as a typed object: its `IIntentSender`.
 fn pending_intent(r: &mut Reader<'_>) -> ParcelResult<Option<Binder>> {
-    if present(r)? { r.read_binder()?.map(Some).ok_or(BAD_VALUE) } else { Ok(None) }
+    if present(r)? {
+        r.read_binder()?.map(Some).ok_or(BAD_VALUE)
+    } else {
+        Ok(None)
+    }
 }
 
 fn write_pending_intent(p: &mut Parcel, target: &Option<Binder>) {
@@ -188,7 +202,11 @@ fn action(r: &mut Reader<'_>) -> ParcelResult<Action> {
         pending_intent: pending_intent(r)?,
         will_resolve: r.read_bool()?,
         success_message: text(r)?,
-        confirmation: if present(r)? { Some([text(r)?, text(r)?, text(r)?, text(r)?]) } else { None },
+        confirmation: if present(r)? {
+            Some([text(r)?, text(r)?, text(r)?, text(r)?])
+        } else {
+            None
+        },
     })
 }
 
@@ -217,7 +235,11 @@ impl ReadParcelable for SourceData {
                 summary: text(r)?,
                 severity: r.read_i32()?,
                 pending_intent: pending_intent(r)?,
-                icon_action: if present(r)? { Some((r.read_i32()?, pending_intent(r)?)) } else { None },
+                icon_action: if present(r)? {
+                    Some((r.read_i32()?, pending_intent(r)?))
+                } else {
+                    None
+                },
                 enabled: r.read_bool()?,
             })
         } else {
@@ -235,7 +257,11 @@ impl ReadParcelable for SourceData {
                 on_dismiss: pending_intent(r)?,
                 type_id: r.read_string16()?,
                 notification: if present(r)? {
-                    Some(Notification { title: text(r)?, text: text(r)?, actions: typed_list(r, action)? })
+                    Some(Notification {
+                        title: text(r)?,
+                        text: text(r)?,
+                        actions: typed_list(r, action)?,
+                    })
                 } else {
                     None
                 },
@@ -255,7 +281,11 @@ impl ReadParcelable for SourceData {
             r.read_bool()?;
         }
         let (bytes, objects) = r.since(start);
-        Ok(SourceData { status, issues, extras: (bytes.to_vec(), !objects.is_empty()) })
+        Ok(SourceData {
+            status,
+            issues,
+            extras: (bytes.to_vec(), !objects.is_empty()),
+        })
     }
 }
 
@@ -324,7 +354,9 @@ impl SourceData {
             && max > SEVERITY_INFORMATION
             && status.severity < max
         {
-            return Err("Safety source data cannot have issues that are more severe than its status".into());
+            return Err(
+                "Safety source data cannot have issues that are more severe than its status".into(),
+            );
         }
         Ok(())
     }
@@ -346,12 +378,20 @@ impl SourceData {
         for i in &self.issues {
             targets.push(&i.on_dismiss);
             let notification = i.notification.iter().flat_map(|n| &n.actions);
-            targets.extend(i.actions.iter().chain(notification).map(|a| &a.pending_intent));
+            targets.extend(
+                i.actions
+                    .iter()
+                    .chain(notification)
+                    .map(|a| &a.pending_intent),
+            );
         }
-        targets.into_iter().filter_map(|t| match t {
-            Some(Binder::Handle(h)) => Some(process.strong(*h)),
-            _ => None,
-        }).collect()
+        targets
+            .into_iter()
+            .filter_map(|t| match t {
+                Some(Binder::Handle(h)) => Some(process.strong(*h)),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -366,7 +406,12 @@ pub struct Event {
 
 impl ReadParcelable for Event {
     fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
-        Ok(Event { kind: r.read_i32()?, refresh_broadcast_id: r.read_string16()?, issue_id: r.read_string16()?, action_id: r.read_string16()? })
+        Ok(Event {
+            kind: r.read_i32()?,
+            refresh_broadcast_id: r.read_string16()?,
+            issue_id: r.read_string16()?,
+            action_id: r.read_string16()?,
+        })
     }
 }
 
@@ -401,7 +446,9 @@ impl Flags<'_> {
 
     /// `DeviceConfig.getLong`: the default for a value not a long.
     fn long(&self, name: &str, default: i64) -> i64 {
-        (self.privacy)(name).and_then(|v| v.parse().ok()).unwrap_or(default)
+        (self.privacy)(name)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
     }
 
     fn boolean(&self, name: &str, default: bool) -> bool {
@@ -409,7 +456,10 @@ impl Flags<'_> {
     }
 
     fn comma_separated(&self, name: &str) -> HashSet<String> {
-        self.string(name, "").split(',').map(str::to_string).collect()
+        self.string(name, "")
+            .split(',')
+            .map(str::to_string)
+            .collect()
     }
 
     pub fn notifications_enabled(&self) -> bool {
@@ -427,21 +477,29 @@ impl Flags<'_> {
 
     /// `isIssueCategoryAllowedForSource`.
     fn issue_category_allowed(&self, category: i32, source: &str) -> bool {
-        let lists = self.string("safety_center_issue_category_allowlists", self.issue_category_allowlist_default);
+        let lists = self.string(
+            "safety_center_issue_category_allowlists",
+            self.issue_category_allowlist_default,
+        );
         let list = mapping(&lists, &category.to_string());
         list.is_none_or(|l| l.split('|').any(|s| s == source))
     }
 
     /// `getActionsToOverrideWithDefaultIntentForSource`.
     pub fn actions_to_override(&self, source: &str) -> Vec<String> {
-        let lists = self.string("safety_center_actions_to_override_with_default_intent", self.actions_to_override_default);
-        mapping(&lists, source).map_or_else(Vec::new, |l| l.split('|').map(str::to_string).collect())
+        let lists = self.string(
+            "safety_center_actions_to_override_with_default_intent",
+            self.actions_to_override_default,
+        );
+        mapping(&lists, source)
+            .map_or_else(Vec::new, |l| l.split('|').map(str::to_string).collect())
     }
 
     /// `getAdditionalAllowedPackageCerts`.
     pub fn additional_package_certs(&self, package: &str) -> Vec<String> {
         let lists = self.string("safety_center_additional_allow_package_certs", "");
-        mapping(&lists, package).map_or_else(Vec::new, |l| l.split('|').map(str::to_string).collect())
+        mapping(&lists, package)
+            .map_or_else(Vec::new, |l| l.split('|').map(str::to_string).collect())
     }
 
     fn severity_long(&self, name: &str, default: &str, severity: i32) -> Option<i64> {
@@ -449,11 +507,17 @@ impl Flags<'_> {
     }
 
     fn resurface_max_count(&self, severity: i32) -> i64 {
-        self.severity_long("safety_center_resurface_issue_max_counts", RESURFACE_ISSUE_MAX_COUNT_DEFAULT, severity).unwrap_or(0)
+        self.severity_long(
+            "safety_center_resurface_issue_max_counts",
+            RESURFACE_ISSUE_MAX_COUNT_DEFAULT,
+            severity,
+        )
+        .unwrap_or(0)
     }
 
     fn resurface_delay(&self, severity: i32) -> i64 {
-        self.severity_long("safety_center_resurface_issue_delays_millis", "", severity).unwrap_or(RESURFACE_ISSUE_DELAY_DEFAULT_MILLIS)
+        self.severity_long("safety_center_resurface_issue_delays_millis", "", severity)
+            .unwrap_or(RESURFACE_ISSUE_DELAY_DEFAULT_MILLIS)
     }
 
     fn notification_resurface_interval(&self) -> Option<i64> {
@@ -492,37 +556,62 @@ impl External<'_> {
 /// `getExternalSafetySource` of the configuration (no test override).
 pub fn external<'c>(config: &'c SafetyCenterConfig, id: &str) -> Option<External<'c>> {
     config.groups.iter().find_map(|g| {
-        g.sources.iter().find(|s| s.id == id && s.kind != TYPE_STATIC).map(|s| External { source: s, group: g })
+        g.sources
+            .iter()
+            .find(|s| s.id == id && s.kind != TYPE_STATIC)
+            .map(|s| External {
+                source: s,
+                group: g,
+            })
     })
 }
 
 /// `SafetySourceDataValidator.validateRequest` past its calling package's
 /// checks: an `IllegalArgumentException`'s message for a request refused.
-pub fn validate(data: Option<&SourceData>, external: &External<'_>, flags: &Flags<'_>) -> Result<(), String> {
+pub fn validate(
+    data: Option<&SourceData>,
+    external: &External<'_>,
+    flags: &Flags<'_>,
+) -> Result<(), String> {
     let source = external.source;
     let id = &source.id;
     let Some(data) = data else { return Ok(()) };
     if source.kind == TYPE_ISSUE_ONLY && data.status.is_some() {
-        return Err(format!("Unexpected status for issue only safety source: {id}"));
+        return Err(format!(
+            "Unexpected status for issue only safety source: {id}"
+        ));
     }
-    if source.kind == TYPE_DYNAMIC && source.initial_display_state != DISPLAY_HIDDEN && data.status.is_none() {
+    if source.kind == TYPE_DYNAMIC
+        && source.initial_display_state != DISPLAY_HIDDEN
+        && data.status.is_none()
+    {
         return Err(format!("Missing status for dynamic safety source: {id}"));
     }
     if let Some(status) = &data.status {
         let level = status.severity;
         if external.in_stateless_group() && level != SEVERITY_UNSPECIFIED {
-            return Err(format!("Safety source: {id} is in a stateless group but specified a severity level: {level}"));
+            return Err(format!(
+                "Safety source: {id} is in a stateless group but specified a severity level: {level}"
+            ));
         }
         if level > SEVERITY_INFORMATION.max(source.max_severity_level) {
-            return Err(format!("Unexpected severity level: {level}, for safety source: {id}"));
+            return Err(format!(
+                "Unexpected severity level: {level}, for safety source: {id}"
+            ));
         }
     }
     for issue in &data.issues {
         if issue.severity > source.max_severity_level {
-            return Err(format!("Unexpected severity level: {}, for issue in safety source: {id}", issue.severity));
+            return Err(format!(
+                "Unexpected severity level: {}, for issue in safety source: {id}",
+                issue.severity
+            ));
         }
         if !flags.issue_category_allowed(issue.category, id) {
-            return Err(format!("Unexpected issue category: {}, for issue in safety source: {id}", issue.category));
+            return Err(format!(
+                "Unexpected issue category: {}, for issue in safety source: {id}",
+                issue.category
+            ));
         }
     }
     Ok(())
@@ -548,13 +637,22 @@ impl IssueKey {
         }
         b.push(0x18);
         varint(&mut b, self.user as i64 as u64);
-        aim_android_xml::base64::encode(&b).replace('+', "-").replace('/', "_")
+        aim_android_xml::base64::encode(&b)
+            .replace('+', "-")
+            .replace('/', "_")
     }
 
     /// `issueKeyFromString`.
     fn decode(s: &str) -> Option<IssueKey> {
         let b = aim_android_xml::base64::decode(&s.replace('-', "+").replace('_', "/"))?;
-        let (mut at, mut key) = (0, IssueKey { source: String::new(), issue: String::new(), user: 0 });
+        let (mut at, mut key) = (
+            0,
+            IssueKey {
+                source: String::new(),
+                issue: String::new(),
+                user: 0,
+            },
+        );
         while at < b.len() {
             let tag = b[at];
             at += 1;
@@ -563,7 +661,11 @@ impl IssueKey {
                     let len = read_varint(&b, &mut at)? as usize;
                     let s = String::from_utf8(b.get(at..at.checked_add(len)?)?.to_vec()).ok()?;
                     at += len;
-                    if tag == 0x0a { key.source = s } else { key.issue = s }
+                    if tag == 0x0a {
+                        key.source = s
+                    } else {
+                        key.issue = s
+                    }
                 }
                 0x18 => key.user = read_varint(&b, &mut at)? as i32,
                 _ => return None,
@@ -607,7 +709,14 @@ struct IssueData {
 
 impl IssueData {
     fn new(first_seen_at: i64) -> Self {
-        IssueData { first_seen_at, dismissed_at: None, dismiss_count: 0, notification_dismissed_at: None, hidden: false, resurface_timer_start: None }
+        IssueData {
+            first_seen_at,
+            dismissed_at: None,
+            dismiss_count: 0,
+            notification_dismissed_at: None,
+            hidden: false,
+            resurface_timer_start: None,
+        }
     }
 }
 
@@ -633,7 +742,9 @@ pub struct Data {
 
 /// `SafetyCenterIssuesPersistence.read`: the persisted issues, an error for
 /// a file it refuses.
-pub fn read_issues(bytes: &[u8]) -> Result<Vec<(String, i64, Option<i64>, i32, Option<i64>)>, String> {
+pub fn read_issues(
+    bytes: &[u8],
+) -> Result<Vec<(String, i64, Option<i64>, i32, Option<i64>)>, String> {
     let root = aim_android_xml::read(bytes)?;
     if root.name != "issues" {
         return Err("Element issues missing".into());
@@ -654,14 +765,23 @@ pub fn read_issues(bytes: &[u8]) -> Result<Vec<(String, i64, Option<i64>, i32, O
         if issue.name != "issue" {
             return Err("Element issues not closed".into());
         }
-        let (mut key, mut first_seen, mut dismissed, mut count, mut notification) = (None, None, None, None, None);
+        let (mut key, mut first_seen, mut dismissed, mut count, mut notification) =
+            (None, None, None, None, None);
         for (name, _) in &issue.attrs {
-            let long = |n: &str| issue.long(n).map_err(|_| format!("Attribute value for {n} invalid"));
+            let long = |n: &str| {
+                issue
+                    .long(n)
+                    .map_err(|_| format!("Attribute value for {n} invalid"))
+            };
             match name.as_str() {
                 "key" => key = issue.string("key").map(|k| k.into_owned()),
                 "first_seen_at_epoch_millis" => first_seen = long(name)?,
                 "dismissed_at_epoch_millis" => dismissed = long(name)?,
-                "dismiss_count" => count = issue.int(name).map_err(|_| format!("Attribute value for {name} invalid"))?,
+                "dismiss_count" => {
+                    count = issue
+                        .int(name)
+                        .map_err(|_| format!("Attribute value for {name} invalid"))?
+                }
                 "notification_dismissed_at_epoch_millis" => notification = long(name)?,
                 other => return Err(format!("Unexpected attribute {other}")),
             }
@@ -695,7 +815,11 @@ fn issues_document(issues: &[(IssueKey, IssueData)]) -> String {
     }
     s.push('>');
     for (key, d) in issues {
-        s.push_str(&format!("\r\n  <issue key=\"{}\" first_seen_at_epoch_millis=\"{}\"", key.encode(), d.first_seen_at));
+        s.push_str(&format!(
+            "\r\n  <issue key=\"{}\" first_seen_at_epoch_millis=\"{}\"",
+            key.encode(),
+            d.first_seen_at
+        ));
         if let Some(at) = d.dismissed_at {
             s.push_str(&format!(" dismissed_at_epoch_millis=\"{at}\""));
         }
@@ -714,7 +838,11 @@ fn issues_document(issues: &[(IssueKey, IssueData)]) -> String {
 impl Data {
     /// `loadStateFromFile`'s `load`: only the issues of real external
     /// sources; whether some were dropped.
-    pub fn load(&mut self, persisted: Vec<(String, i64, Option<i64>, i32, Option<i64>)>, config: &SafetyCenterConfig) -> Result<bool, String> {
+    pub fn load(
+        &mut self,
+        persisted: Vec<(String, i64, Option<i64>, i32, Option<i64>)>,
+        config: &SafetyCenterConfig,
+    ) -> Result<bool, String> {
         self.issues.clear();
         let mut dropped = false;
         for (key, first_seen, dismissed, count, notification) in persisted {
@@ -723,7 +851,12 @@ impl Data {
                 dropped = true;
                 continue;
             }
-            let data = IssueData { dismissed_at: dismissed, dismiss_count: count, notification_dismissed_at: notification, ..IssueData::new(first_seen) };
+            let data = IssueData {
+                dismissed_at: dismissed,
+                dismiss_count: count,
+                notification_dismissed_at: notification,
+                ..IssueData::new(first_seen)
+            };
             self.issues.push((key, data));
         }
         Ok(dropped)
@@ -739,7 +872,10 @@ impl Data {
     }
 
     fn issue_mut(&mut self, key: &IssueKey) -> Option<&mut IssueData> {
-        self.issues.iter_mut().find(|(k, _)| k == key).map(|(_, d)| d)
+        self.issues
+            .iter_mut()
+            .find(|(k, _)| k == key)
+            .map(|(_, d)| d)
     }
 
     pub fn source_data(&self, id: &str, user: i32) -> Option<&SourceData> {
@@ -749,13 +885,21 @@ impl Data {
     /// `SafetySourceDataRepository.setSafetySourceData`, with the issues it
     /// tracks for dismissal: whether the data changed, and whether the
     /// issues' file should be written.
-    pub fn set(&mut self, id: &str, user: i32, data: Option<(SourceData, Vec<Strong>)>) -> (bool, bool) {
+    pub fn set(
+        &mut self,
+        id: &str,
+        user: i32,
+        data: Option<(SourceData, Vec<Strong>)>,
+    ) -> (bool, bool) {
         let key = (id.to_string(), user);
         let differs = data.as_ref().map(|(d, _)| d) != self.sources.get(&key).map(|(d, _)| d);
         let removed_error = self.errors.remove(&key);
         let mut write = false;
         if differs {
-            let ids: Vec<String> = data.iter().flat_map(|(d, _)| d.issues.iter().filter_map(|i| i.id.clone())).collect();
+            let ids: Vec<String> = data
+                .iter()
+                .flat_map(|(d, _)| d.issues.iter().filter_map(|i| i.id.clone()))
+                .collect();
             match data {
                 Some(d) => {
                     self.sources.insert(key, d);
@@ -771,7 +915,10 @@ impl Data {
 
     /// `reportSafetySourceError` of the repository: whether it changed.
     pub fn set_error(&mut self, id: &str, user: i32, event: &Event) -> bool {
-        if matches!(event.kind, EVENT_RESOLVING_ACTION_FAILED | EVENT_RESOLVING_ACTION_SUCCEEDED) {
+        if matches!(
+            event.kind,
+            EVENT_RESOLVING_ACTION_FAILED | EVENT_RESOLVING_ACTION_SUCCEEDED
+        ) {
             return false;
         }
         let key = (id.to_string(), user);
@@ -783,11 +930,16 @@ impl Data {
     /// `updateIssuesForSource`: whether the issues changed.
     fn update_issues_for_source(&mut self, ids: &[String], source: &str, user: i32) -> bool {
         let before = self.issues.len();
-        self.issues.retain(|(k, _)| k.user != user || k.source != source || ids.contains(&k.issue));
+        self.issues
+            .retain(|(k, _)| k.user != user || k.source != source || ids.contains(&k.issue));
         let mut changed = self.issues.len() != before;
         let now = now_millis();
         for id in ids {
-            let key = IssueKey { source: source.to_string(), issue: id.clone(), user };
+            let key = IssueKey {
+                source: source.to_string(),
+                issue: id.clone(),
+                user,
+            };
             if self.issue(&key).is_none() {
                 self.issues.push((key, IssueData::new(now)));
                 changed = true;
@@ -798,8 +950,12 @@ impl Data {
 
     /// `isIssueDismissed`.
     fn dismissed(&self, key: &IssueKey, severity: i32, flags: &Flags<'_>, now: i64) -> bool {
-        let Some(d) = self.issue(key) else { return false };
-        let Some(at) = d.dismissed_at else { return false };
+        let Some(d) = self.issue(key) else {
+            return false;
+        };
+        let Some(at) = d.dismissed_at else {
+            return false;
+        };
         if i64::from(d.dismiss_count) > flags.resurface_max_count(severity) {
             return true;
         }
@@ -807,22 +963,39 @@ impl Data {
     }
 
     /// `isNotificationDismissedNow`.
-    fn notification_dismissed(&self, key: &IssueKey, severity: i32, flags: &Flags<'_>, now: i64) -> bool {
+    fn notification_dismissed(
+        &self,
+        key: &IssueKey,
+        severity: i32,
+        flags: &Flags<'_>,
+        now: i64,
+    ) -> bool {
         if self.dismissed(key, severity, flags, now) {
             return true;
         }
-        let Some(at) = self.issue(key).and_then(|d| d.notification_dismissed_at) else { return false };
-        flags.notification_resurface_interval().is_none_or(|delay| now < at + delay)
+        let Some(at) = self.issue(key).and_then(|d| d.notification_dismissed_at) else {
+            return false;
+        };
+        flags
+            .notification_resurface_interval()
+            .is_none_or(|delay| now < at + delay)
     }
 
     /// `isIssueHidden`, resurfacing an issue whose timer ran out.
     fn hidden(&mut self, key: &IssueKey, flags: &Flags<'_>, now: i64) -> bool {
-        let delay = flags.long("safety_center_temp_hidden_issue_resurface_delay_millis", TEMP_HIDDEN_RESURFACE_DELAY_DEFAULT_MILLIS);
-        let Some(d) = self.issue_mut(key) else { return false };
+        let delay = flags.long(
+            "safety_center_temp_hidden_issue_resurface_delay_millis",
+            TEMP_HIDDEN_RESURFACE_DELAY_DEFAULT_MILLIS,
+        );
+        let Some(d) = self.issue_mut(key) else {
+            return false;
+        };
         if !d.hidden {
             return false;
         }
-        let Some(start) = d.resurface_timer_start else { return true };
+        let Some(start) = d.resurface_timer_start else {
+            return true;
+        };
         if now - start >= delay {
             d.hidden = false;
             d.resurface_timer_start = None;
@@ -835,7 +1008,12 @@ impl Data {
     /// external sources, by severity, deduplicated
     /// (`SafetyCenterIssueDeduplicator`); whether the issues' file should
     /// be written.
-    pub fn update_issues<'c>(&mut self, user: i32, config: &'c SafetyCenterConfig, flags: &Flags<'_>) -> bool {
+    pub fn update_issues<'c>(
+        &mut self,
+        user: i32,
+        config: &'c SafetyCenterConfig,
+        flags: &Flags<'_>,
+    ) -> bool {
         let mut issues = self.stored_issues(user, config);
         // `List.sort` is stable.
         issues.sort_by(|a, b| b.issue.severity.cmp(&a.issue.severity));
@@ -843,7 +1021,12 @@ impl Data {
         // Buckets of (deduplication group, deduplication id), each sorted.
         let mut buckets: Vec<((String, String), Vec<&IssueInfo<'c>>)> = Vec::new();
         for info in &issues {
-            let (Some(group), Some(id)) = (&info.source.deduplication_group, &info.issue.deduplication_id) else { continue };
+            let (Some(group), Some(id)) = (
+                &info.source.deduplication_group,
+                &info.issue.deduplication_id,
+            ) else {
+                continue;
+            };
             let key = (group.clone(), id.clone());
             match buckets.iter_mut().find(|(k, _)| *k == key) {
                 Some((_, bucket)) => bucket.push(info),
@@ -854,17 +1037,22 @@ impl Data {
         let mut filtered_out = HashSet::new();
         // `alignAllDismissals`.
         for (_, bucket) in buckets.iter().filter(|(_, b)| b.len() >= 2) {
-            let top_dismissed = bucket.iter().find(|i| self.dismissed(&i.key, i.issue.severity, flags, now));
+            let top_dismissed = bucket
+                .iter()
+                .find(|i| self.dismissed(&i.key, i.issue.severity, flags, now));
             if let Some(top) = top_dismissed {
                 for r in recipients(top, bucket) {
                     let from = self.issue(&top.key).cloned();
                     if let (Some(from), Some(to)) = (from, self.issue_mut(&r)) {
-                        (to.dismissed_at, to.dismiss_count) = (from.dismissed_at, from.dismiss_count);
+                        (to.dismissed_at, to.dismiss_count) =
+                            (from.dismissed_at, from.dismiss_count);
                         write = true;
                     }
                 }
             }
-            let top_notification = bucket.iter().find(|i| self.notification_dismissed(&i.key, i.issue.severity, flags, now));
+            let top_notification = bucket
+                .iter()
+                .find(|i| self.notification_dismissed(&i.key, i.issue.severity, flags, now));
             if let Some(top) = top_notification {
                 for r in recipients(top, bucket) {
                     let from = self.issue(&top.key).cloned();
@@ -909,10 +1097,21 @@ impl Data {
         let mut out = Vec::new();
         for group in &config.groups {
             for source in group.sources.iter().filter(|s| s.kind != TYPE_STATIC) {
-                let Some(data) = self.source_data(&source.id, user) else { continue };
+                let Some(data) = self.source_data(&source.id, user) else {
+                    continue;
+                };
                 for issue in &data.issues {
-                    let key = IssueKey { source: source.id.clone(), issue: issue.id.clone().unwrap_or_default(), user };
-                    out.push(IssueInfo { key, issue: issue.clone(), source, group });
+                    let key = IssueKey {
+                        source: source.id.clone(),
+                        issue: issue.id.clone().unwrap_or_default(),
+                        user,
+                    };
+                    out.push(IssueInfo {
+                        key,
+                        issue: issue.clone(),
+                        source,
+                        group,
+                    });
                 }
             }
         }
@@ -922,19 +1121,30 @@ impl Data {
     /// `SafetyCenterNotificationSender.getIssuesToNotify`: the user's
     /// deduplicated, not hidden issues notifications are allowed for, not
     /// dismissed, and due.
-    pub fn issues_to_notify<'c>(&mut self, user: i32, config: &'c SafetyCenterConfig, flags: &Flags<'_>) -> Vec<IssueInfo<'c>> {
+    pub fn issues_to_notify<'c>(
+        &mut self,
+        user: i32,
+        config: &'c SafetyCenterConfig,
+        flags: &Flags<'_>,
+    ) -> Vec<IssueInfo<'c>> {
         let now = now_millis();
         let all = self.stored_issues(user, config);
         let keys = self.deduplicated.get(&user).cloned().unwrap_or_default();
         let allowed = flags.notifications_allowed_sources();
-        let immediate = flags.comma_separated("safety_center_notifications_immediate_behavior_issues");
-        let min_delay = flags.long("safety_center_notifications_min_delay", NOTIFICATIONS_MIN_DELAY_DEFAULT_MILLIS);
+        let immediate =
+            flags.comma_separated("safety_center_notifications_immediate_behavior_issues");
+        let min_delay = flags.long(
+            "safety_center_notifications_min_delay",
+            NOTIFICATIONS_MIN_DELAY_DEFAULT_MILLIS,
+        );
         let mut out = Vec::new();
         for key in keys {
             if self.hidden(&key, flags, now) {
                 continue;
             }
-            let Some(info) = all.iter().find(|i| i.key == key) else { continue };
+            let Some(info) = all.iter().find(|i| i.key == key) else {
+                continue;
+            };
             if !info.source.notifications_allowed && !allowed.contains(&info.source.id) {
                 continue;
             }
@@ -943,14 +1153,24 @@ impl Data {
             }
             let behavior = match info.issue.notification_behavior {
                 BEHAVIOR_UNSPECIFIED => {
-                    let flag = format!("{}/{}", key.source, info.issue.type_id.as_deref().unwrap_or("null"));
-                    if immediate.contains(&flag) { BEHAVIOR_IMMEDIATELY } else { 0 }
+                    let flag = format!(
+                        "{}/{}",
+                        key.source,
+                        info.issue.type_id.as_deref().unwrap_or("null")
+                    );
+                    if immediate.contains(&flag) {
+                        BEHAVIOR_IMMEDIATELY
+                    } else {
+                        0
+                    }
                 }
                 b => b,
             };
             let due = match behavior {
                 BEHAVIOR_IMMEDIATELY => true,
-                BEHAVIOR_DELAYED => self.issue(&key).is_some_and(|d| d.first_seen_at < now - min_delay),
+                BEHAVIOR_DELAYED => self
+                    .issue(&key)
+                    .is_some_and(|d| d.first_seen_at < now - min_delay),
                 _ => false,
             };
             if due {
@@ -964,7 +1184,11 @@ impl Data {
 /// `getRecipientKeys`: the other issues of the bucket no more severe than
 /// `top`.
 fn recipients(top: &IssueInfo<'_>, bucket: &[&IssueInfo<'_>]) -> Vec<IssueKey> {
-    bucket.iter().filter(|i| i.key != top.key && i.issue.severity <= top.issue.severity).map(|i| i.key.clone()).collect()
+    bucket
+        .iter()
+        .filter(|i| i.key != top.key && i.issue.severity <= top.issue.severity)
+        .map(|i| i.key.clone())
+        .collect()
 }
 
 /// `SafetySources.supportsProfileType` of the primary profile, and of
@@ -979,10 +1203,22 @@ pub fn write_issues_file(data: &Path, document: &str) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let path = data.join(ISSUES_FILE);
     let new = data.join(format!("{ISSUES_FILE}.new"));
-    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&new)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&new)?;
     std::io::Write::write_all(&mut file, document.as_bytes())?;
     crate::fsync(&file)?;
-    aim_storage::guest_inode::record(&new, aim_storage::guest_inode::GuestInode { uid: Some(1000), gid: Some(1000), mode: Some(0o600) })?;
+    aim_storage::guest_inode::record(
+        &new,
+        aim_storage::guest_inode::GuestInode {
+            uid: Some(1000),
+            gid: Some(1000),
+            mode: Some(0o600),
+        },
+    )?;
     std::fs::rename(&new, path)
 }
 
@@ -1004,11 +1240,20 @@ mod tests {
                 pending_intent: Some(Binder::Local(0x40)),
                 will_resolve: true,
                 success_message: Some("Done".into()),
-                confirmation: Some([Some("T".into()), Some("X".into()), Some("Yes".into()), Some("No".into())]),
+                confirmation: Some([
+                    Some("T".into()),
+                    Some("X".into()),
+                    Some("Yes".into()),
+                    Some("No".into()),
+                ]),
             }],
             on_dismiss: None,
             type_id: Some("type".into()),
-            notification: Some(Notification { title: Some("N".into()), text: Some("Body".into()), actions: vec![] }),
+            notification: Some(Notification {
+                title: Some("N".into()),
+                text: Some("Body".into()),
+                actions: vec![],
+            }),
             notification_behavior: 0,
             attribution_title: None,
             deduplication_id: None,
@@ -1017,8 +1262,19 @@ mod tests {
     }
 
     fn data(issues: Vec<Issue>) -> SourceData {
-        let status = Status { title: Some("Title".into()), summary: Some("Summary".into()), severity: 300, pending_intent: Some(Binder::Local(0x50)), icon_action: Some((100, Some(Binder::Local(0x60)))), enabled: true };
-        SourceData { status: Some(status), issues, extras: (vec![0, 0, 0, 0], false) }
+        let status = Status {
+            title: Some("Title".into()),
+            summary: Some("Summary".into()),
+            severity: 300,
+            pending_intent: Some(Binder::Local(0x50)),
+            icon_action: Some((100, Some(Binder::Local(0x60)))),
+            enabled: true,
+        };
+        SourceData {
+            status: Some(status),
+            issues,
+            extras: (vec![0, 0, 0, 0], false),
+        }
     }
 
     /// `SafetySourceData.writeToParcel`, read back by its creator to the
@@ -1043,8 +1299,18 @@ mod tests {
     #[test]
     fn data_is_built_as_the_builder_builds_it() {
         assert!(data(vec![issue("i", 300)]).build().is_ok());
-        assert!(data(vec![issue("i", 300), issue("i", 200)]).build().unwrap_err().contains("duplicate"));
-        assert!(data(vec![issue("i", 400)]).build().unwrap_err().contains("more severe"));
+        assert!(
+            data(vec![issue("i", 300), issue("i", 200)])
+                .build()
+                .unwrap_err()
+                .contains("duplicate")
+        );
+        assert!(
+            data(vec![issue("i", 400)])
+                .build()
+                .unwrap_err()
+                .contains("more severe")
+        );
     }
 
     fn source(id: &str, kind: i32) -> SafetySource {
@@ -1070,8 +1336,23 @@ mod tests {
     }
 
     fn config() -> SafetyCenterConfig {
-        let group = |kind, sources| SafetySourcesGroup { kind, id: "group".into(), title: 0, summary: 0, stateless_icon_type: 0, sources };
-        SafetyCenterConfig { groups: vec![group(0, vec![source("A", TYPE_DYNAMIC), source("B", TYPE_DYNAMIC)]), group(GROUP_STATELESS, vec![source("C", TYPE_DYNAMIC)])] }
+        let group = |kind, sources| SafetySourcesGroup {
+            kind,
+            id: "group".into(),
+            title: 0,
+            summary: 0,
+            stateless_icon_type: 0,
+            sources,
+        };
+        SafetyCenterConfig {
+            groups: vec![
+                group(
+                    0,
+                    vec![source("A", TYPE_DYNAMIC), source("B", TYPE_DYNAMIC)],
+                ),
+                group(GROUP_STATELESS, vec![source("C", TYPE_DYNAMIC)]),
+            ],
+        }
     }
 
     fn no_flags(_: &str) -> Option<String> {
@@ -1079,7 +1360,12 @@ mod tests {
     }
 
     fn flags<'a>(privacy: &'a dyn Fn(&str) -> Option<String>) -> Flags<'a> {
-        Flags { privacy, issue_category_allowlist_default: "", actions_to_override_default: "", odad_notifications_supported: true }
+        Flags {
+            privacy,
+            issue_category_allowlist_default: "",
+            actions_to_override_default: "",
+            odad_notifications_supported: true,
+        }
     }
 
     /// `validateRequest`'s checks of the data against its source.
@@ -1087,18 +1373,47 @@ mod tests {
     fn data_is_validated_against_its_source() {
         let config = config();
         let f = flags(&no_flags);
-        assert!(validate(Some(&data(vec![issue("i", 300)])), &external(&config, "A").unwrap(), &f).is_ok());
-        let critical = validate(Some(&data(vec![issue("i", 400)])), &external(&config, "A").unwrap(), &f);
-        assert_eq!(critical.unwrap_err(), "Unexpected severity level: 400, for issue in safety source: A");
+        assert!(
+            validate(
+                Some(&data(vec![issue("i", 300)])),
+                &external(&config, "A").unwrap(),
+                &f
+            )
+            .is_ok()
+        );
+        let critical = validate(
+            Some(&data(vec![issue("i", 400)])),
+            &external(&config, "A").unwrap(),
+            &f,
+        );
+        assert_eq!(
+            critical.unwrap_err(),
+            "Unexpected severity level: 400, for issue in safety source: A"
+        );
         let stateless = validate(Some(&data(vec![])), &external(&config, "C").unwrap(), &f);
-        assert_eq!(stateless.unwrap_err(), "Safety source: C is in a stateless group but specified a severity level: 300");
+        assert_eq!(
+            stateless.unwrap_err(),
+            "Safety source: C is in a stateless group but specified a severity level: 300"
+        );
         let mut missing = data(vec![]);
         missing.status = None;
-        assert_eq!(validate(Some(&missing), &external(&config, "A").unwrap(), &f).unwrap_err(), "Missing status for dynamic safety source: A");
-        let allowlists = |n: &str| (n == "safety_center_issue_category_allowlists").then(|| "100:B|C".to_string());
+        assert_eq!(
+            validate(Some(&missing), &external(&config, "A").unwrap(), &f).unwrap_err(),
+            "Missing status for dynamic safety source: A"
+        );
+        let allowlists = |n: &str| {
+            (n == "safety_center_issue_category_allowlists").then(|| "100:B|C".to_string())
+        };
         let f = flags(&allowlists);
-        let refused = validate(Some(&data(vec![issue("i", 300)])), &external(&config, "A").unwrap(), &f);
-        assert_eq!(refused.unwrap_err(), "Unexpected issue category: 100, for issue in safety source: A");
+        let refused = validate(
+            Some(&data(vec![issue("i", 300)])),
+            &external(&config, "A").unwrap(),
+            &f,
+        );
+        assert_eq!(
+            refused.unwrap_err(),
+            "Unexpected issue category: 100, for issue in safety source: A"
+        );
     }
 
     /// The repository: a change and its tracked issues, the same data
@@ -1114,13 +1429,29 @@ mod tests {
         a.notification_behavior = BEHAVIOR_IMMEDIATELY;
         let mut b = a.clone();
         b.severity = 200;
-        assert_eq!(d.set("A", 0, Some((data(vec![a.clone()]), vec![]))), (true, true));
+        assert_eq!(
+            d.set("A", 0, Some((data(vec![a.clone()]), vec![]))),
+            (true, true)
+        );
         assert_eq!(d.set("A", 0, Some((data(vec![a]), vec![]))), (false, false));
         assert_eq!(d.set("B", 0, Some((data(vec![b]), vec![]))), (true, true));
         d.update_issues(0, &config, &f);
-        let notified: Vec<String> = d.issues_to_notify(0, &config, &f).iter().map(|i| i.key.source.clone()).collect();
+        let notified: Vec<String> = d
+            .issues_to_notify(0, &config, &f)
+            .iter()
+            .map(|i| i.key.source.clone())
+            .collect();
         assert_eq!(notified, ["A"]);
-        assert!(d.set_error("A", 0, &Event { kind: 100, refresh_broadcast_id: None, issue_id: None, action_id: None }));
+        assert!(d.set_error(
+            "A",
+            0,
+            &Event {
+                kind: 100,
+                refresh_broadcast_id: None,
+                issue_id: None,
+                action_id: None
+            }
+        ));
         assert!(d.source_data("A", 0).is_none());
         // Clearing it clears the error alone: the data is already none.
         assert_eq!(d.set("A", 0, None), (true, false));
@@ -1133,12 +1464,22 @@ mod tests {
         let file = "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\r\n<issues version=\"2\">\r\n  <issue key=\"ChJHb29nbGVGaW5kTXlEZXZpY2USFE5vR29vZ2xlQWNjb3VudElzc3VlGAA=\" first_seen_at_epoch_millis=\"1792319637127\" />\r\n</issues>";
         let issues = read_issues(file.as_bytes()).unwrap();
         let key = IssueKey::decode(&issues[0].0).unwrap();
-        assert_eq!(key, IssueKey { source: "GoogleFindMyDevice".into(), issue: "NoGoogleAccountIssue".into(), user: 0 });
+        assert_eq!(
+            key,
+            IssueKey {
+                source: "GoogleFindMyDevice".into(),
+                issue: "NoGoogleAccountIssue".into(),
+                user: 0
+            }
+        );
         let mut config = config();
         config.groups[0].sources[0].id = "GoogleFindMyDevice".into();
         let mut d = Data::default();
         assert!(!d.load(issues, &config).unwrap());
         assert_eq!(d.issues_file(), file);
-        assert_eq!(Data::default().issues_file(), "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\r\n<issues version=\"2\" />");
+        assert_eq!(
+            Data::default().issues_file(),
+            "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\r\n<issues version=\"2\" />"
+        );
     }
 }

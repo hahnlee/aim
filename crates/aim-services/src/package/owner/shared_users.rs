@@ -59,18 +59,39 @@ impl SharedUser {
         self.packages
             .keys()
             .chain(self.retained.keys())
-            .chain(self.retained_instances.iter().map(|value| &value.package.name))
+            .chain(
+                self.retained_instances
+                    .iter()
+                    .map(|value| &value.package.name),
+            )
             .map(String::as_str)
     }
     pub(in crate::package) fn has_package(&self, name: &str) -> bool {
-        self.packages.contains_key(name) || self.retained_instances.iter().any(|value|value.package.name==name)
+        self.packages.contains_key(name)
+            || self
+                .retained_instances
+                .iter()
+                .any(|value| value.package.name == name)
     }
     /// Native member insertion slots survive updates and active-to-retained
     /// transfers. Process aggregation visits these slots backwards.
     pub(in crate::package) fn ordered_process_members(&self) -> Result<&[(String, bool)], String> {
         if self.member_order.len() != self.member_count()
-            || self.member_order.iter().filter(|(_,retained)| !retained).map(|(name,_)|name).collect::<BTreeSet<_>>() != self.packages.keys().collect()
-            || self.member_order.iter().filter(|(_,retained)| *retained).map(|(name,_)|name.as_str()).collect::<BTreeSet<_>>() != self.retained_settings().map(|(name,_)|name).collect() {
+            || self
+                .member_order
+                .iter()
+                .filter(|(_, retained)| !retained)
+                .map(|(name, _)| name)
+                .collect::<BTreeSet<_>>()
+                != self.packages.keys().collect()
+            || self
+                .member_order
+                .iter()
+                .filter(|(_, retained)| *retained)
+                .map(|(name, _)| name.as_str())
+                .collect::<BTreeSet<_>>()
+                != self.retained_settings().map(|(name, _)| name).collect()
+        {
             return Err("shared process insertion slots differ from member owners".into());
         }
         Ok(&self.member_order)
@@ -85,10 +106,18 @@ impl SharedUser {
         self.retained
             .iter()
             .map(|(name, setting)| (name.as_str(), setting.as_ref()))
-            .chain(self.retained_instances.iter().map(|setting|(setting.package.name.as_str(),setting.as_ref())))
+            .chain(
+                self.retained_instances
+                    .iter()
+                    .map(|setting| (setting.package.name.as_str(), setting.as_ref())),
+            )
     }
     pub(in crate::package) fn apply_retained_primary_abi(&mut self, primary: &Option<String>) {
-        for value in self.retained.values_mut().chain(self.retained_instances.iter_mut()) {
+        for value in self
+            .retained
+            .values_mut()
+            .chain(self.retained_instances.iter_mut())
+        {
             if value.package.primary_cpu_abi.is_none() && primary.is_some() {
                 std::sync::Arc::make_mut(value).package.primary_cpu_abi = primary.clone();
             }
@@ -123,7 +152,10 @@ impl SharedUser {
             return Err("retained shared setting differs from its member owner".into());
         }
         self.packages.remove(&value.package.name);
-        let slot = self.member_order.iter_mut().find(|(name, retained)| name == &value.package.name && !*retained)
+        let slot = self
+            .member_order
+            .iter_mut()
+            .find(|(name, retained)| name == &value.package.name && !*retained)
             .ok_or("retained shared setting insertion slot missing")?;
         slot.1 = true;
         self.retained
@@ -131,16 +163,29 @@ impl SharedUser {
         Ok(())
     }
 
-    pub(in crate::package) fn retain_read_instance(&mut self,value:super::app_ids::DetachedSetting)->Result<(),String>{
-        if !value.package.shared_user || value.package.shared_app_id()!=Some(self.app_id)
-            || value.users.keys().any(|user|*user<0)
-            || !value.user_aliases.iter().all(|user|value.users.contains_key(user))
-            || value.legacy.as_ref().is_some_and(|state|state.app_id()!=value.package.app_id){
+    pub(in crate::package) fn retain_read_instance(
+        &mut self,
+        value: super::app_ids::DetachedSetting,
+    ) -> Result<(), String> {
+        if !value.package.shared_user
+            || value.package.shared_app_id() != Some(self.app_id)
+            || value.users.keys().any(|user| *user < 0)
+            || !value
+                .user_aliases
+                .iter()
+                .all(|user| value.users.contains_key(user))
+            || value
+                .legacy
+                .as_ref()
+                .is_some_and(|state| state.app_id() != value.package.app_id)
+        {
             return Err("retained read instance differs from shared UID owner".into());
         }
-        self.flags|=value.package.flags;self.private_flags|=value.package.private_flags;
+        self.flags |= value.package.flags;
+        self.private_flags |= value.package.private_flags;
         self.member_order.push((value.package.name.clone(), true));
-        self.retained_instances.push(std::sync::Arc::new(value));Ok(())
+        self.retained_instances.push(std::sync::Arc::new(value));
+        Ok(())
     }
     pub(in crate::package) fn update_user_aliases(
         &mut self,
@@ -150,18 +195,39 @@ impl SharedUser {
         if let Some(value) = self.retained.get_mut(name) {
             std::sync::Arc::make_mut(value).update_user_aliases(users);
         }
-        for value in self.retained_instances.iter_mut().filter(|value|value.package.name==name){std::sync::Arc::make_mut(value).update_user_aliases(users);}
+        for value in self
+            .retained_instances
+            .iter_mut()
+            .filter(|value| value.package.name == name)
+        {
+            std::sync::Arc::make_mut(value).update_user_aliases(users);
+        }
     }
 
     pub(in crate::package) fn detach_user_aliases(&mut self, name: &str) {
         if let Some(value) = self.retained.get_mut(name) {
             std::sync::Arc::make_mut(value).user_aliases.clear();
         }
-        for value in self.retained_instances.iter_mut().filter(|value|value.package.name==name){std::sync::Arc::make_mut(value).user_aliases.clear();}
+        for value in self
+            .retained_instances
+            .iter_mut()
+            .filter(|value| value.package.name == name)
+        {
+            std::sync::Arc::make_mut(value).user_aliases.clear();
+        }
     }
 
     pub(in crate::package) fn validate_retained(&self) -> Result<(), String> {
-        for (name, value) in self.retained.iter().map(|(name,value)|(name,value)).chain(self.retained_instances.iter().map(|value|(&value.package.name,value))) {
+        for (name, value) in self
+            .retained
+            .iter()
+            .map(|(name, value)| (name, value))
+            .chain(
+                self.retained_instances
+                    .iter()
+                    .map(|value| (&value.package.name, value)),
+            )
+        {
             if value.package.name != *name
                 || !value.package.shared_user
                 || value.package.shared_app_id() != Some(self.app_id)
@@ -251,14 +317,15 @@ impl SharedUser {
         let Some((flags, private_flags)) = self.packages.remove(name) else {
             return false;
         };
-        self.member_order.retain(|(member, retained)| member != name || *retained);
+        self.member_order
+            .retain(|(member, retained)| member != name || *retained);
         if self.flags & flags != 0 {
             self.flags = self
                 .packages
                 .values()
                 .map(|p| p.0)
                 .chain(self.retained.values().map(|p| p.package.flags))
-                .chain(self.retained_instances.iter().map(|p|p.package.flags))
+                .chain(self.retained_instances.iter().map(|p| p.package.flags))
                 .fold(self.uid_flags, |v, flags| v | flags);
         }
         if self.private_flags & private_flags != 0 {
@@ -267,7 +334,11 @@ impl SharedUser {
                 .values()
                 .map(|p| p.1)
                 .chain(self.retained.values().map(|p| p.package.private_flags))
-                .chain(self.retained_instances.iter().map(|p|p.package.private_flags))
+                .chain(
+                    self.retained_instances
+                        .iter()
+                        .map(|p| p.package.private_flags),
+                )
                 .fold(self.uid_private_flags, |v, flags| v | flags);
         }
         true
@@ -494,19 +565,39 @@ impl Bootstrap {
     /// groups also advances the original runtime allocation cursor.
     pub fn prune_unused(&mut self, settings: &Settings) -> Vec<String> {
         let active: BTreeSet<_> = settings.packages.iter().map(|p| p.name.as_str()).collect();
-        let disabled: BTreeSet<_> = settings.disabled_system_packages.iter()
-            .filter_map(|p| p.shared_app_id()).collect();
+        let disabled: BTreeSet<_> = settings
+            .disabled_system_packages
+            .iter()
+            .filter_map(|p| p.shared_app_id())
+            .collect();
         for group in self.shared_users.values_mut() {
-            group.packages.retain(|name, _| active.contains(name.as_str()));
-            group.retained.retain(|name, _| active.contains(name.as_str()));
-            group.retained_instances.retain(|value| active.contains(value.package.name.as_str()));
-            group.member_order.retain(|(name, retained)| if *retained {
-                group.retained.contains_key(name) || group.retained_instances.iter().any(|v| v.package.name == *name)
-            } else { group.packages.contains_key(name) });
+            group
+                .packages
+                .retain(|name, _| active.contains(name.as_str()));
+            group
+                .retained
+                .retain(|name, _| active.contains(name.as_str()));
+            group
+                .retained_instances
+                .retain(|value| active.contains(value.package.name.as_str()));
+            group.member_order.retain(|(name, retained)| {
+                if *retained {
+                    group.retained.contains_key(name)
+                        || group
+                            .retained_instances
+                            .iter()
+                            .any(|v| v.package.name == *name)
+                } else {
+                    group.packages.contains_key(name)
+                }
+            });
         }
-        let used = self.shared_users.values().filter(|group|
-            group.member_count() != 0 || disabled.contains(&group.app_id))
-            .map(|group| group.app_id).collect();
+        let used = self
+            .shared_users
+            .values()
+            .filter(|group| group.member_count() != 0 || disabled.contains(&group.app_id))
+            .map(|group| group.app_id)
+            .collect();
         self.prune_unreferenced(&used)
     }
 
@@ -876,27 +967,56 @@ mod tests {
 
     #[test]
     fn system_pruning_keeps_retained_member_when_current_same_name_has_another_uid() {
-        let original = Package {name:"same.name".into(),app_id:10050,shared_user:true,..Default::default()};
-        let mut settings = Settings {packages:vec![original.clone()],shared_users:vec![SavedGroup {
-            name:"retained.group".into(),app_id:10050,flags:0,signatures:None,
-        }],..Default::default()};
+        let original = Package {
+            name: "same.name".into(),
+            app_id: 10050,
+            shared_user: true,
+            ..Default::default()
+        };
+        let mut settings = Settings {
+            packages: vec![original.clone()],
+            shared_users: vec![SavedGroup {
+                name: "retained.group".into(),
+                app_id: 10050,
+                flags: 0,
+                signatures: None,
+            }],
+            ..Default::default()
+        };
         let mut boot = Bootstrap::restore(&Default::default(), &settings).unwrap();
-        boot.shared_users.get_mut("retained.group").unwrap().retain_unparsed_setting(
-            crate::package::owner::app_ids::DetachedSetting {package:original,users:Default::default(),
-                user_aliases:Default::default(),legacy:None,install_fixed:None,runtime:None}).unwrap();
-        settings.packages[0].shared_user=false;
-        settings.packages[0].app_id=10051;
-        boot.ids.register_existing(10051,Owner::Package("same.name".into())).unwrap();
-        let retained=boot.shared_users["retained.group"].clone();
-        let previous=boot.clone();
-        let removed=boot.prune_unused(&settings);
+        boot.shared_users
+            .get_mut("retained.group")
+            .unwrap()
+            .retain_unparsed_setting(crate::package::owner::app_ids::DetachedSetting {
+                package: original,
+                users: Default::default(),
+                user_aliases: Default::default(),
+                legacy: None,
+                install_fixed: None,
+                runtime: None,
+            })
+            .unwrap();
+        settings.packages[0].shared_user = false;
+        settings.packages[0].app_id = 10051;
+        boot.ids
+            .register_existing(10051, Owner::Package("same.name".into()))
+            .unwrap();
+        let retained = boot.shared_users["retained.group"].clone();
+        let previous = boot.clone();
+        let removed = boot.prune_unused(&settings);
         assert!(!removed.contains(&"retained.group".into()));
-        assert_eq!(boot.shared_users["retained.group"],retained);
-        assert_eq!(boot.ids.get(10050),Some(&Owner::SharedUser("retained.group".into())));
-        assert_eq!(boot.ids.get(10051),Some(&Owner::Package("same.name".into())));
-        assert_eq!(previous.shared_users["retained.group"],retained);
+        assert_eq!(boot.shared_users["retained.group"], retained);
+        assert_eq!(
+            boot.ids.get(10050),
+            Some(&Owner::SharedUser("retained.group".into()))
+        );
+        assert_eq!(
+            boot.ids.get(10051),
+            Some(&Owner::Package("same.name".into()))
+        );
+        assert_eq!(previous.shared_users["retained.group"], retained);
         settings.packages.clear();
-        assert_eq!(boot.prune_unused(&settings),["retained.group"]);
+        assert_eq!(boot.prune_unused(&settings), ["retained.group"]);
         assert!(boot.ids.get(10050).is_none());
     }
 

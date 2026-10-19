@@ -318,10 +318,21 @@ mod tests {
         let mut group = super::super::intent_filter::UriRelativeFilterGroup::new(0);
         group.add_nullable(0, 0, None);
         filter.add_uri_relative_filter_group(group);
-        let mut resolver = IntentResolver::default(); resolver.add(F("nullable", filter));
-        let mut build = Names {once: false, stopped: &[]};
-        assert_eq!(resolver.query(&intent("VIEW", Some("https://x/path")), None, false, &mut build),
-            Err(super::super::domain_verification::uri_parcel::MatchError::NullPattern(0)));
+        let mut resolver = IntentResolver::default();
+        resolver.add(F("nullable", filter));
+        let mut build = Names {
+            once: false,
+            stopped: &[],
+        };
+        assert_eq!(
+            resolver.query(
+                &intent("VIEW", Some("https://x/path")),
+                None,
+                false,
+                &mut build
+            ),
+            Err(super::super::domain_verification::uri_parcel::MatchError::NullPattern(0))
+        );
     }
 
     #[test]
@@ -378,7 +389,10 @@ mod tests {
             once: false,
             stopped: &["a"],
         };
-        assert_eq!(r.query(&i, Some("image/png"), false, &mut b).unwrap(), ["b", "c"]);
+        assert_eq!(
+            r.query(&i, Some("image/png"), false, &mut b).unwrap(),
+            ["b", "c"]
+        );
         // A filter in two cuts is kept once.
         let mut r = IntentResolver::default();
         let mut f = filter(&["VIEW"], &["image/png"], &["content"], false);
@@ -389,12 +403,18 @@ mod tests {
             once: true,
             stopped: &[],
         };
-        assert_eq!(r.query(&i, Some("image/png"), false, &mut b).unwrap(), ["x"]);
+        assert_eq!(
+            r.query(&i, Some("image/png"), false, &mut b).unwrap(),
+            ["x"]
+        );
         let mut b = Names {
             once: false,
             stopped: &[],
         };
-        assert_eq!(r.query(&i, Some("image/png"), false, &mut b).unwrap(), ["x", "x"]);
+        assert_eq!(
+            r.query(&i, Some("image/png"), false, &mut b).unwrap(),
+            ["x", "x"]
+        );
     }
 
     #[test]

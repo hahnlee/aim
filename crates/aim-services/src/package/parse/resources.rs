@@ -579,7 +579,10 @@ impl Table {
     /// `getResourceName`'s package id, type and entry of `id`.
     pub fn entry_name(&self, id: u32) -> Option<(u8, &str, &str)> {
         let pid = (id >> 24) as u8;
-        let p = self.packages.iter().find(|p| p.id == pid || (p.id == 0 && pid == SHARED_LIBRARY_ID))?;
+        let p = self
+            .packages
+            .iter()
+            .find(|p| p.id == pid || (p.id == 0 && pid == SHARED_LIBRARY_ID))?;
         let ty = p.type_names.get(&((id >> 16) as u8))?;
         let name = p.names.get(&(((id >> 16) as u8), id as u16))?;
         Some((pid, ty.as_str(), name.as_str()))
@@ -712,7 +715,9 @@ fn package(c: &[u8], header: usize) -> Result<Package> {
                     // first one's.
                     ids.entry((type_name.clone(), name.to_owned()))
                         .or_insert(rid);
-                    names.entry((type_id, entry)).or_insert_with(|| name.to_owned());
+                    names
+                        .entry((type_id, entry))
+                        .or_insert_with(|| name.to_owned());
                 }
             }
         }
@@ -936,8 +941,15 @@ impl Resources<'_> {
             let (table, Entry::Bag(parent, items), flags) = self.find(style)? else {
                 return None;
             };
-            if let Some(&(_, kind, data)) = items.iter().find(|(key, ..)| runtime_id(*key) == attr) {
-                return Some(Selected { kind, data, table: Some(table), resid: 0, flags });
+            if let Some(&(_, kind, data)) = items.iter().find(|(key, ..)| runtime_id(*key) == attr)
+            {
+                return Some(Selected {
+                    kind,
+                    data,
+                    table: Some(table),
+                    resid: 0,
+                    flags,
+                });
             }
             if *parent == 0 {
                 return None;
@@ -953,7 +965,9 @@ impl Resources<'_> {
     /// through the theme, then a reference to its value.
     pub fn styled_attr(&self, style: u32, theme: u32, attr: u32) -> Option<Selected> {
         const TYPE_DYNAMIC_ATTRIBUTE: u8 = 0x08;
-        let mut value = self.bag_value(style, attr).or_else(|| self.bag_value(theme, attr))?;
+        let mut value = self
+            .bag_value(style, attr)
+            .or_else(|| self.bag_value(theme, attr))?;
         for _ in 0..20 {
             if !matches!(value.kind, TYPE_ATTRIBUTE | TYPE_DYNAMIC_ATTRIBUTE) {
                 break;
@@ -1004,7 +1018,9 @@ impl Resources<'_> {
 
     /// `getIdentifier(name, kind, package)` over the tables.
     pub fn identifier(&self, package: &str, kind: &str, name: &str) -> Option<u32> {
-        self.tables.iter().find_map(|t| t.identifier(package, kind, name))
+        self.tables
+            .iter()
+            .find_map(|t| t.identifier(package, kind, name))
     }
 
     /// `getString`: a string resource's string.
@@ -1074,10 +1090,26 @@ mod tests {
     #[test]
     fn styled_attributes_follow_parents_then_the_theme() {
         const BOOLEAN: u8 = TYPE_INT_BOOLEAN;
-        let (own, parents, through, themes, none) = (0x0101_0001, 0x0101_0002, 0x0101_0003, 0x0101_0004, 0x0101_0005);
+        let (own, parents, through, themes, none) = (
+            0x0101_0001,
+            0x0101_0002,
+            0x0101_0003,
+            0x0101_0004,
+            0x0101_0005,
+        );
         let bags = [
             (0, Entry::Bag(0x7f02_0001, vec![(own, BOOLEAN, u32::MAX)])),
-            (1, Entry::Bag(0, vec![(parents, BOOLEAN, 1), (own, BOOLEAN, 0), (through, TYPE_ATTRIBUTE, themes)])),
+            (
+                1,
+                Entry::Bag(
+                    0,
+                    vec![
+                        (parents, BOOLEAN, 1),
+                        (own, BOOLEAN, 0),
+                        (through, TYPE_ATTRIBUTE, themes),
+                    ],
+                ),
+            ),
             (2, Entry::Bag(0, vec![(themes, BOOLEAN, 1)])),
         ];
         let t = Table {
@@ -1086,15 +1118,32 @@ mod tests {
             packages: vec![Package {
                 id: 0x7f,
                 name: String::new(),
-                types: [(2, TypeGroup { spec_flags: vec![0; 3], types: vec![Type { config: Config::default(), entries: bags.into() }] })].into(),
+                types: [(
+                    2,
+                    TypeGroup {
+                        spec_flags: vec![0; 3],
+                        types: vec![Type {
+                            config: Config::default(),
+                            entries: bags.into(),
+                        }],
+                    },
+                )]
+                .into(),
                 overlayables: Vec::new(),
                 type_names: HashMap::new(),
                 ids: HashMap::new(),
                 names: HashMap::new(),
             }],
         };
-        let res = Resources { tables: vec![&t], overlays: &[], config: Config::default() };
-        let value = |attr| res.styled_attr(0x7f02_0000, 0x7f02_0002, attr).map(|v| (v.kind, v.data));
+        let res = Resources {
+            tables: vec![&t],
+            overlays: &[],
+            config: Config::default(),
+        };
+        let value = |attr| {
+            res.styled_attr(0x7f02_0000, 0x7f02_0002, attr)
+                .map(|v| (v.kind, v.data))
+        };
         assert_eq!(value(own), Some((BOOLEAN, u32::MAX)));
         assert_eq!(value(parents), Some((BOOLEAN, 1)));
         assert_eq!(value(through), Some((BOOLEAN, 1)));

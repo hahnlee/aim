@@ -101,7 +101,6 @@ pub const UNSAFE_INTENT_EXPLICIT_INTENT_FILTER_UNMATCH: i32 = 3;
 /// blocked. None for a resolution not for a start.
 pub type UnsafeIntentReport<'a> = Option<&'a RefCell<Vec<(i32, bool)>>>;
 
-
 /// Resolution over one version of the state.
 #[derive(Clone)]
 pub struct Resolution {
@@ -122,13 +121,24 @@ impl Resolution {
         config: &apps_filter::Config,
     ) -> std::result::Result<Resolution, MimeGroupError> {
         let preferred = if let Some(owner) = &state.system.preferred_owner {
-            owner.captured.user_states().into_iter()
-                .map(|(user, preferred)| (user, preferred.as_ref().clone())).collect()
+            owner
+                .captured
+                .user_states()
+                .into_iter()
+                .map(|(user, preferred)| (user, preferred.as_ref().clone()))
+                .collect()
         } else {
-            state.users.iter().map(|(&id, user)| {
-                let preferred = Preferred::parse(user.preferred_activities.as_deref(), user.restrictions.as_deref());
-                (id, preferred)
-            }).collect()
+            state
+                .users
+                .iter()
+                .map(|(&id, user)| {
+                    let preferred = Preferred::parse(
+                        user.preferred_activities.as_deref(),
+                        user.restrictions.as_deref(),
+                    );
+                    (id, preferred)
+                })
+                .collect()
         };
         let legacy = state
             .users
@@ -188,7 +198,10 @@ impl Resolution {
 
     /// The original query cross-user permission check, without the shell check.
     fn enforce_cross_user(&self, calling_uid: i32, user: i32) -> Result<()> {
-        match self.query(calling_uid).enforce_cross_user(user, false, false, "query intent")? {
+        match self
+            .query(calling_uid)
+            .enforce_cross_user(user, false, false, "query intent")?
+        {
             Ok(()) => Ok(()),
             Err(_) => Err(NotModelled("query cross-user permission denied").into()),
         }
@@ -197,7 +210,9 @@ impl Resolution {
     /// `ComputerEngine.updateFlags`: the direct boot match flags of the
     /// user's state unless the caller chose.
     fn update_flags(&self, flags: i64, user: i32) -> Result<i64> {
-        self.query(1000).update_flags(flags,user).map_err(Into::into)
+        self.query(1000)
+            .update_flags(flags, user)
+            .map_err(Into::into)
     }
 
     /// `updateFlagsForResolve`.
@@ -222,7 +237,9 @@ impl Resolution {
             let want_match_instant = flags & MATCH_INSTANT != 0;
             let allow_match_instant = want_instant_apps
                 || (want_match_instant
-                    && self.query(calling_uid).internal_can_view_instant(calling_uid, user)?);
+                    && self
+                        .query(calling_uid)
+                        .internal_can_view_instant(calling_uid, user)?);
             flags &= !(MATCH_VISIBLE_TO_INSTANT_APP_ONLY | MATCH_EXPLICITLY_VISIBLE_ONLY);
             if !allow_match_instant {
                 flags &= !MATCH_INSTANT;
@@ -303,13 +320,28 @@ impl Resolution {
         user: i32,
         calling_uid: i32,
     ) -> Result<Vec<ResolveInfo>> {
-        self.query_activities_with_splits(intent, resolved_type, flags | MATCH_QUARANTINED_COMPONENTS,
-            user, calling_uid, true, None)
+        self.query_activities_with_splits(
+            intent,
+            resolved_type,
+            flags | MATCH_QUARANTINED_COMPONENTS,
+            user,
+            calling_uid,
+            true,
+            None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn query_activities_with_splits(&self, intent: &Intent, resolved_type: Option<&str>, flags: i64,
-        user: i32, calling_uid: i32, allow_dynamic_splits: bool, report: UnsafeIntentReport<'_>) -> Result<Vec<ResolveInfo>> {
+    fn query_activities_with_splits(
+        &self,
+        intent: &Intent,
+        resolved_type: Option<&str>,
+        flags: i64,
+        user: i32,
+        calling_uid: i32,
+        allow_dynamic_splits: bool,
+        report: UnsafeIntentReport<'_>,
+    ) -> Result<Vec<ResolveInfo>> {
         if !self.user_exists(user) {
             return Ok(Vec::new());
         }
@@ -336,7 +368,15 @@ impl Resolution {
                     .query(calling_uid)
                     .activity_info(comp, flags, calling_uid, user);
                 if let Some(ai) = thrown(found)?
-                    && !self.block_activity(&ai, comp, flags, instant_pkg, calling_uid, user, None)?
+                    && !self.block_activity(
+                        &ai,
+                        comp,
+                        flags,
+                        instant_pkg,
+                        calling_uid,
+                        user,
+                        None,
+                    )?
                 {
                     let mut ri = ResolveInfo::new(Info::Activity(ai));
                     ri.user_handle = user;
@@ -375,7 +415,14 @@ impl Resolution {
                 report,
             )?;
         }
-        self.apply_post_resolution_filter(list, instant_pkg, allow_dynamic_splits, calling_uid, user, intent)
+        self.apply_post_resolution_filter(
+            list,
+            instant_pkg,
+            allow_dynamic_splits,
+            calling_uid,
+            user,
+            intent,
+        )
     }
 
     /// The explicit component's instant-app and visibility blocks; for a
@@ -405,7 +452,9 @@ impl Resolution {
         // package.
         let start_non_exported = start.is_some_and(|package| {
             !ai.info.exported
-                && !package.and_then(|p| self.state.packages.get(p)).is_some_and(|ps| ps.app_id == app_id(calling_uid))
+                && !package
+                    .and_then(|p| self.state.packages.get(p))
+                    .is_some_and(|ps| ps.app_id == app_id(calling_uid))
         });
         let block_normal = (start.is_none() || start_non_exported)
             && !target_instant
@@ -536,13 +585,22 @@ impl Resolution {
         // A missing policy matters only for results that actually consult it;
         // ordinary full-app results do not acquire an unrelated owner dependency.
         let block_instant = || -> Result<bool> {
-            if !intent.is_web_intent() { return Ok(false); }
-            Ok(self.state.system.web_instant_policy.as_ref()
-                .ok_or(NotModelled("captured web instant policy unavailable"))?.is_disabled(user))
+            if !intent.is_web_intent() {
+                return Ok(false);
+            }
+            Ok(self
+                .state
+                .system
+                .web_instant_policy
+                .as_ref()
+                .ok_or(NotModelled("captured web instant policy unavailable"))?
+                .is_disabled(user))
         };
         let mut kept = Vec::with_capacity(list.len());
         for info in list.drain(..).rev() {
-            if info.is_instant_app_available && block_instant()? { continue; }
+            if info.is_instant_app_available && block_instant()? {
+                continue;
+            }
             if let Info::Activity(ai) = &info.info
                 && allow_dynamic_splits
                 && let Some(split) = &ai.info.split_name
@@ -555,24 +613,53 @@ impl Resolution {
                     .flatten()
                     .any(|s| s == split)
             {
-                let installer = self.state.system.instant_components.as_ref()
+                let installer = self
+                    .state
+                    .system
+                    .instant_components
+                    .as_ref()
                     .ok_or(NotModelled("captured instant installer owner unavailable"))?;
-                let Some(template) = installer.installer_resolve_info() else { continue; };
-                let package = ai.info.item.package_name.as_deref()
+                let Some(template) = installer.installer_resolve_info() else {
+                    continue;
+                };
+                let package = ai
+                    .info
+                    .item
+                    .package_name
+                    .as_deref()
                     .ok_or(NotModelled("split activity package identity unavailable"))?;
-                if self.state.packages.get(package)
+                if self
+                    .state
+                    .packages
+                    .get(package)
                     .is_some_and(|package| super::info::user_state(package, user).instant_app)
-                    && block_instant()? { continue; }
+                    && block_instant()?
+                {
+                    continue;
+                }
                 let mut replacement = template.clone();
                 replacement.auxiliary = Some(super::component_resolver::Auxiliary {
                     failure: self.find_install_failure_activity(package, calling_uid, user)?,
-                    package: package.into(), version: ai.info.application_info.long_version_code,
+                    package: package.into(),
+                    version: ai.info.application_info.long_version_code,
                     split: split.clone(),
                 });
                 replacement.filter = Some(IntentFilter::default());
                 replacement.resolve_package_name = Some(package.into());
-                replacement.label_res = if info.label_res != 0 {info.label_res} else if ai.info.item.label_res != 0 {ai.info.item.label_res} else {ai.info.application_info.item.label_res};
-                replacement.icon = if info.icon != 0 {info.icon} else if ai.info.item.icon != 0 {ai.info.item.icon} else {ai.info.application_info.item.icon};
+                replacement.label_res = if info.label_res != 0 {
+                    info.label_res
+                } else if ai.info.item.label_res != 0 {
+                    ai.info.item.label_res
+                } else {
+                    ai.info.application_info.item.label_res
+                };
+                replacement.icon = if info.icon != 0 {
+                    info.icon
+                } else if ai.info.item.icon != 0 {
+                    ai.info.item.icon
+                } else {
+                    ai.info.application_info.item.icon
+                };
                 replacement.is_instant_app_available = true;
                 // The original returns its installer before AppsFilter checks.
                 kept.push(replacement);
@@ -583,7 +670,9 @@ impl Resolution {
                 let exposed_full_app = matches!(&info.info, Info::Activity(activity)
                     if activity.flags & FLAG_VISIBLE_TO_INSTANT_APP != 0
                         && activity.info.application_info.private_flags & PRIVATE_FLAG_INSTANT == 0);
-                if caller == package || exposed_full_app { kept.push(info); }
+                if caller == package || exposed_full_app {
+                    kept.push(info);
+                }
                 continue;
             }
             let target = self.state.packages.get(package);
@@ -601,14 +690,25 @@ impl Resolution {
         Ok(kept)
     }
 
-    fn find_install_failure_activity(&self, package: &str, caller: i32, user: i32) -> Result<Option<ComponentName>> {
-        let intent = Intent { action: Some("android.intent.action.INSTALL_FAILURE".into()),
-            package: Some(package.into()), ..Default::default() };
-        let matches = self.query_activities_with_splits(&intent, None, 0, user, caller, false, None)?;
+    fn find_install_failure_activity(
+        &self,
+        package: &str,
+        caller: i32,
+        user: i32,
+    ) -> Result<Option<ComponentName>> {
+        let intent = Intent {
+            action: Some("android.intent.action.INSTALL_FAILURE".into()),
+            package: Some(package.into()),
+            ..Default::default()
+        };
+        let matches =
+            self.query_activities_with_splits(&intent, None, 0, user, caller, false, None)?;
         Ok(matches.into_iter().find_map(|result| match result.info {
             Info::Activity(activity) if activity.info.split_name.is_none() => Some(ComponentName {
-                package: package.into(), class: activity.info.item.name?,
-            }), _ => None,
+                package: package.into(),
+                class: activity.info.item.name?,
+            }),
+            _ => None,
         }))
     }
 
@@ -681,9 +781,13 @@ impl Resolution {
             let block = enforce && ((null_action && !allow_null_action) || !matches);
             if let Some(report) = report {
                 if null_action {
-                    report.borrow_mut().push((UNSAFE_INTENT_NULL_ACTION_MATCH, block));
+                    report
+                        .borrow_mut()
+                        .push((UNSAFE_INTENT_NULL_ACTION_MATCH, block));
                 } else if !matches {
-                    report.borrow_mut().push((UNSAFE_INTENT_EXPLICIT_INTENT_FILTER_UNMATCH, block));
+                    report
+                        .borrow_mut()
+                        .push((UNSAFE_INTENT_EXPLICIT_INTENT_FILTER_UNMATCH, block));
                 }
             }
             !block
@@ -698,15 +802,27 @@ impl Resolution {
     /// start, each component with filters matched by an intent with no
     /// action is reported; none is blocked, as the
     /// `block_null_action_intents` flag is off on this image.
-    fn block_null_action(&self, kind: Kind, intent: &Intent, calling_uid: i32, list: &[ResolveInfo], report: UnsafeIntentReport<'_>) {
+    fn block_null_action(
+        &self,
+        kind: Kind,
+        intent: &Intent,
+        calling_uid: i32,
+        list: &[ResolveInfo],
+        report: UnsafeIntentReport<'_>,
+    ) {
         let Some(report) = report else { return };
         if intent.action.is_some() || matches!(app_id(calling_uid), 0 | SYSTEM_UID) {
             return;
         }
         for ri in list.iter().rev() {
             let (package, class) = ri.component();
-            if self.main_component(kind, package, class).is_some_and(|m| !m.component.intents.is_empty()) {
-                report.borrow_mut().push((UNSAFE_INTENT_NULL_ACTION_MATCH, false));
+            if self
+                .main_component(kind, package, class)
+                .is_some_and(|m| !m.component.intents.is_empty())
+            {
+                report
+                    .borrow_mut()
+                    .push((UNSAFE_INTENT_NULL_ACTION_MATCH, false));
             }
         }
     }
@@ -795,33 +911,74 @@ impl Resolution {
     }
 
     /// ResolveIntentHelper's specific activity options and generic action deduplication.
-    pub fn query_activity_options(&self, caller: Option<&ComponentName>,
-        specifics: Option<&[Option<Intent>]>, specific_types: Option<&[Option<String>]>,
-        intent: &Intent, resolved_type: Option<&str>, flags: i64, user: i32,
-        calling_uid: i32) -> Result<Vec<ResolveInfo>> {
+    pub fn query_activity_options(
+        &self,
+        caller: Option<&ComponentName>,
+        specifics: Option<&[Option<Intent>]>,
+        specific_types: Option<&[Option<String>]>,
+        intent: &Intent,
+        resolved_type: Option<&str>,
+        flags: i64,
+        user: i32,
+        calling_uid: i32,
+    ) -> Result<Vec<ResolveInfo>> {
         use super::component_resolver::GET_RESOLVED_FILTER;
-        if !self.user_exists(user) { return Ok(Vec::new()); }
+        if !self.user_exists(user) {
+            return Ok(Vec::new());
+        }
         let capture = self.implicit_image_capture(intent, user, resolved_type, flags)?;
-        let flags = self.update_flags_for_resolve(flags, user, calling_uid, false, false, capture)?;
+        let flags =
+            self.update_flags_for_resolve(flags, user, calling_uid, false, false, capture)?;
         self.enforce_cross_user(calling_uid, user)?;
-        let mut results = self.query_intent_activities(intent, resolved_type,
-            flags | GET_RESOLVED_FILTER, user, calling_uid)?;
+        let mut results = self.query_intent_activities(
+            intent,
+            resolved_type,
+            flags | GET_RESOLVED_FILTER,
+            user,
+            calling_uid,
+        )?;
         let mut position = 0;
         for (index, specific) in specifics.unwrap_or_default().iter().enumerate() {
-            let Some(specific) = specific else { continue; };
-            let action = specific.action.as_deref().filter(|action| intent.action.as_deref() != Some(*action));
+            let Some(specific) = specific else {
+                continue;
+            };
+            let action = specific
+                .action
+                .as_deref()
+                .filter(|action| intent.action.as_deref() != Some(*action));
             let (mut selected, activity, component) = if let Some(component) = &specific.component {
-                let Some(activity) = thrown(self.query(calling_uid).activity_info(component, flags, calling_uid, user))? else { continue; };
+                let Some(activity) = thrown(self.query(calling_uid).activity_info(
+                    component,
+                    flags,
+                    calling_uid,
+                    user,
+                ))?
+                else {
+                    continue;
+                };
                 (None, activity, component.clone())
             } else {
                 let ty = match specific_types {
-                    Some(types) => types.get(index).ok_or(NotModelled("specific activity type array index outside original Java array"))?.as_deref(),
+                    Some(types) => types
+                        .get(index)
+                        .ok_or(NotModelled(
+                            "specific activity type array index outside original Java array",
+                        ))?
+                        .as_deref(),
                     None => None,
                 };
-                let Some(selected) = self.resolve_intent(specific, ty, flags, user, calling_uid)? else { continue; };
-                let Info::Activity(activity) = &selected.info else { return Err(NotModelled("specific result is not an activity").into()); };
+                let Some(selected) = self.resolve_intent(specific, ty, flags, user, calling_uid)?
+                else {
+                    continue;
+                };
+                let Info::Activity(activity) = &selected.info else {
+                    return Err(NotModelled("specific result is not an activity").into());
+                };
                 let (package, class) = selected.component();
-                let component = ComponentName { package: package.into(), class: class.into() };
+                let component = ComponentName {
+                    package: package.into(),
+                    class: class.into(),
+                };
                 (Some(selected.clone()), activity.clone(), component)
             };
             let mut cursor = position;
@@ -829,27 +986,48 @@ impl Resolution {
                 let result = &results[cursor];
                 let (package, class) = result.component();
                 let duplicate = package == component.package && class == component.class
-                    || action.is_some_and(|action| result.filter.as_ref().is_some_and(|filter| filter.actions.iter().any(|entry| entry == action)));
+                    || action.is_some_and(|action| {
+                        result.filter.as_ref().is_some_and(|filter| {
+                            filter.actions.iter().any(|entry| entry == action)
+                        })
+                    });
                 if duplicate {
                     let removed = results.remove(cursor);
-                    if selected.is_none() { selected = Some(removed); }
-                } else { cursor += 1; }
+                    if selected.is_none() {
+                        selected = Some(removed);
+                    }
+                } else {
+                    cursor += 1;
+                }
             }
-            let mut selected = selected.unwrap_or_else(|| ResolveInfo::new(Info::Activity(activity)));
+            let mut selected =
+                selected.unwrap_or_else(|| ResolveInfo::new(Info::Activity(activity)));
             selected.specific_index = index as i32;
             results.insert(position, selected);
             position += 1;
         }
         let mut index = position;
         while index + 1 < results.len() {
-            let actions = results[index].filter.as_ref().map(|filter| filter.actions.clone()).unwrap_or_default();
+            let actions = results[index]
+                .filter
+                .as_ref()
+                .map(|filter| filter.actions.clone())
+                .unwrap_or_default();
             for action in actions {
-                if intent.action.as_deref() == Some(action.as_str()) { continue; }
+                if intent.action.as_deref() == Some(action.as_str()) {
+                    continue;
+                }
                 let mut cursor = index + 1;
                 while cursor < results.len() {
-                    if results[cursor].filter.as_ref().is_some_and(|filter| filter.actions.contains(&action)) {
+                    if results[cursor]
+                        .filter
+                        .as_ref()
+                        .is_some_and(|filter| filter.actions.contains(&action))
+                    {
                         results.remove(cursor);
-                    } else { cursor += 1; }
+                    } else {
+                        cursor += 1;
+                    }
                 }
             }
             index += 1;
@@ -858,59 +1036,156 @@ impl Resolution {
             if let Some(index) = results.iter().position(|entry| {
                 let (package, class) = entry.component();
                 package == caller.package && class == caller.class
-            }) { results.remove(index); }
+            }) {
+                results.remove(index);
+            }
         }
         if flags & GET_RESOLVED_FILTER == 0 {
-            for entry in &mut results { entry.filter = None; }
+            for entry in &mut results {
+                entry.filter = None;
+            }
         }
         Ok(results)
     }
 
-    pub fn can_forward_to(&self, intent: &Intent, resolved_type: Option<&str>, source: i32, target: i32,
-        calling_uid: i32) -> Result<bool> {
-        fn reachable(resolution: &Resolution, intent: &Intent, ty: Option<&str>, source: i32, target: i32,
-            visited: &mut HashSet<i32>) -> Result<bool> {
-            if source == target { return Ok(true); }
+    pub fn can_forward_to(
+        &self,
+        intent: &Intent,
+        resolved_type: Option<&str>,
+        source: i32,
+        target: i32,
+        calling_uid: i32,
+    ) -> Result<bool> {
+        fn reachable(
+            resolution: &Resolution,
+            intent: &Intent,
+            ty: Option<&str>,
+            source: i32,
+            target: i32,
+            visited: &mut HashSet<i32>,
+        ) -> Result<bool> {
+            if source == target {
+                return Ok(true);
+            }
             visited.insert(source);
-            let Some(owner) = resolution.preferred(source) else { return Ok(false); };
-            let matches = preferred::query(&owner.cross_profile, intent, ty, false).map_err(ResolutionError::UriMatching)?;
+            let Some(owner) = resolution.preferred(source) else {
+                return Ok(false);
+            };
+            let matches = preferred::query(&owner.cross_profile, intent, ty, false)
+                .map_err(ResolutionError::UriMatching)?;
             for filter in matches {
-                if filter.target_user_id == target { return Ok(true); }
-                if visited.contains(&filter.target_user_id) { continue; }
+                if filter.target_user_id == target {
+                    return Ok(true);
+                }
+                if visited.contains(&filter.target_user_id) {
+                    continue;
+                }
                 if filter.flags & 0x10 != 0 {
                     visited.insert(filter.target_user_id);
-                    if reachable(resolution, intent, ty, filter.target_user_id, target, visited)? { return Ok(true); }
+                    if reachable(
+                        resolution,
+                        intent,
+                        ty,
+                        filter.target_user_id,
+                        target,
+                        visited,
+                    )? {
+                        return Ok(true);
+                    }
                 }
             }
             Ok(false)
         }
-        if reachable(self, intent, resolved_type, source, target, &mut HashSet::new())? { return Ok(true); }
-        if !intent.has_web_uri() { return Ok(false); }
-        let policy = self.state.system.user_policy.as_ref().ok_or(NotModelled("actual UserManager cross-profile owner unavailable"))?;
-        let Some(parent) = policy.profile_parent(source).map_err(ResolutionError::Original)? else { return Ok(false); };
+        if reachable(
+            self,
+            intent,
+            resolved_type,
+            source,
+            target,
+            &mut HashSet::new(),
+        )? {
+            return Ok(true);
+        }
+        if !intent.has_web_uri() {
+            return Ok(false);
+        }
+        let policy = self.state.system.user_policy.as_ref().ok_or(NotModelled(
+            "actual UserManager cross-profile owner unavailable",
+        ))?;
+        let Some(parent) = policy
+            .profile_parent(source)
+            .map_err(ResolutionError::Original)?
+        else {
+            return Ok(false);
+        };
         let capture = self.implicit_image_capture(intent, parent, resolved_type, 0)?;
-        let flags = self.update_flags_for_resolve(0, parent, calling_uid, false, false, capture)? | MATCH_DEFAULT_ONLY;
-        if !policy.parent_app_linking(source).map_err(ResolutionError::Original)? { return Ok(false); }
-        let matches = self.find(Kind::Activity, intent, resolved_type, flags, parent, None)?.unwrap_or_default();
-        let Some(host) = intent.data.as_ref().and_then(|data| data.host()) else { return Ok(false); };
+        let flags = self.update_flags_for_resolve(0, parent, calling_uid, false, false, capture)?
+            | MATCH_DEFAULT_ONLY;
+        if !policy
+            .parent_app_linking(source)
+            .map_err(ResolutionError::Original)?
+        {
+            return Ok(false);
+        }
+        let matches = self
+            .find(Kind::Activity, intent, resolved_type, flags, parent, None)?
+            .unwrap_or_default();
+        let Some(host) = intent.data.as_ref().and_then(|data| data.host()) else {
+            return Ok(false);
+        };
         for matched in matches {
-            if matched.handle_all_web_data_uri { continue; }
+            if matched.handle_all_web_data_uri {
+                continue;
+            }
             let (package, _) = matched.component();
             if let Some(package) = self.state.packages.get(package) {
-                let groups = package.uri_relative_filter_groups.iter().find(|(domain, _)| domain == &host)
+                let groups = package
+                    .uri_relative_filter_groups
+                    .iter()
+                    .find(|(domain, _)| domain == &host)
                     .map_or(&[][..], |(_, groups)| groups.as_slice());
-                if !groups.is_empty() && !super::intent_filter::UriRelativeFilterGroup::match_groups(groups, intent.data.as_ref().unwrap())
-                    .map_err(ResolutionError::UriMatching)? { continue; }
-                if self.approval_level(package, &host, parent)? > 0 { return Ok(true); }
+                if !groups.is_empty()
+                    && !super::intent_filter::UriRelativeFilterGroup::match_groups(
+                        groups,
+                        intent.data.as_ref().unwrap(),
+                    )
+                    .map_err(ResolutionError::UriMatching)?
+                {
+                    continue;
+                }
+                if self.approval_level(package, &host, parent)? > 0 {
+                    return Ok(true);
+                }
             }
         }
         Ok(false)
     }
 
-    pub(crate) fn launch_candidates(&self, package: &str, category: &str, user: i32, caller: i32) -> std::result::Result<Vec<ResolveInfo>, NotModelled> {
-        if !self.user_exists(user) || !self.has_code(package) { return Ok(Vec::new()); }
-        let intent = Intent { action: Some("android.intent.action.MAIN".into()), categories: Some(vec![category.into()]), package: Some(package.into()), ..Default::default() };
-        let flags = self.update_flags_for_resolve(MATCH_QUARANTINED_COMPONENTS, user, caller, false, true, false)
+    pub(crate) fn launch_candidates(
+        &self,
+        package: &str,
+        category: &str,
+        user: i32,
+        caller: i32,
+    ) -> std::result::Result<Vec<ResolveInfo>, NotModelled> {
+        if !self.user_exists(user) || !self.has_code(package) {
+            return Ok(Vec::new());
+        }
+        let intent = Intent {
+            action: Some("android.intent.action.MAIN".into()),
+            categories: Some(vec![category.into()]),
+            package: Some(package.into()),
+            ..Default::default()
+        };
+        let flags = self
+            .update_flags_for_resolve(
+                MATCH_QUARANTINED_COMPONENTS,
+                user,
+                caller,
+                false,
+                true,
+                false,
+            )
             .map_err(|_| NotModelled("launch resolution flag owner unavailable"))?;
         // ResolveIntentHelper uses resolveForStart=true and allowDynamicSplits=false:
         // the native component match is retained without application-query filtering.
@@ -1099,7 +1374,14 @@ impl Resolution {
         calling_uid: i32,
         report: &RefCell<Vec<(i32, bool)>>,
     ) -> Result<Option<ResolveInfo>> {
-        self.resolve_service_reporting(intent, resolved_type, flags, user, calling_uid, Some(report))
+        self.resolve_service_reporting(
+            intent,
+            resolved_type,
+            flags,
+            user,
+            calling_uid,
+            Some(report),
+        )
     }
 
     fn resolve_service_reporting(
@@ -1115,7 +1397,8 @@ impl Resolution {
             return Ok(None);
         }
         let flags = self.update_flags_for_resolve(flags, user, calling_uid, false, false, false)?;
-        let mut list = self.query_services(intent, resolved_type, flags, user, calling_uid, report)?;
+        let mut list =
+            self.query_services(intent, resolved_type, flags, user, calling_uid, report)?;
         Ok((!list.is_empty()).then(|| list.swap_remove(0)))
     }
 
@@ -1289,8 +1572,14 @@ impl Resolution {
     ) -> Result<Option<ProviderInfo>> {
         self.resolve_content_provider_for_query(name, flags, user, calling_uid, calling_uid)
     }
-    pub fn resolve_content_provider_for_query(&self, name: &str, flags: i64, user: i32,
-        calling_uid: i32, actual_uid: i32) -> Result<Option<ProviderInfo>> {
+    pub fn resolve_content_provider_for_query(
+        &self,
+        name: &str,
+        flags: i64,
+        user: i32,
+        calling_uid: i32,
+        actual_uid: i32,
+    ) -> Result<Option<ProviderInfo>> {
         if !self.user_exists(user) {
             return Ok(None);
         }
@@ -1315,10 +1604,16 @@ impl Resolution {
 
         let package = match native {
             Some(Some(row)) => row.package.as_str(),
-            Some(None) => { self.enforce_provider_scope(authority, calling_uid, user, None)?; return Ok(None); },
+            Some(None) => {
+                self.enforce_provider_scope(authority, calling_uid, user, None)?;
+                return Ok(None);
+            }
             None => match legacy {
                 Some(row) => row.package.as_str(),
-                None => { self.enforce_provider_scope(authority, calling_uid, user, None)?; return Ok(None); },
+                None => {
+                    self.enforce_provider_scope(authority, calling_uid, user, None)?;
+                    return Ok(None);
+                }
             },
         };
         let Some(ps) = self.state.packages.get(package) else {
@@ -1356,31 +1651,71 @@ impl Resolution {
             return Ok(None);
         };
         self.enforce_provider_scope(authority, calling_uid, user, Some(&pi))?;
-        if !is_enabled_and_matches(ps, &provider.main, flags, user) { return Ok(None); }
-        let component = ComponentName { package: package.into(), class: provider.main.component.name.clone() };
-        let query = Query { state: &self.state, filter: &self.apps_filter, calling_uid: actual_uid };
-        if query.filtered_component(Some(ps), &component, 4, calling_uid, user)? { return Ok(None); }
+        if !is_enabled_and_matches(ps, &provider.main, flags, user) {
+            return Ok(None);
+        }
+        let component = ComponentName {
+            package: package.into(),
+            class: provider.main.component.name.clone(),
+        };
+        let query = Query {
+            state: &self.state,
+            filter: &self.apps_filter,
+            calling_uid: actual_uid,
+        };
+        if query.filtered_component(Some(ps), &component, 4, calling_uid, user)? {
+            return Ok(None);
+        }
         Ok(Some(pi))
     }
-    fn enforce_provider_scope(&self, authority: &str, calling_uid: i32, user: i32,
-        provider: Option<&ProviderInfo>) -> Result<()> {
+    fn enforce_provider_scope(
+        &self,
+        authority: &str,
+        calling_uid: i32,
+        user: i32,
+        provider: Option<&ProviderInfo>,
+    ) -> Result<()> {
         let cross_user = user != user_id(calling_uid);
         let checked = if let Some(provider) = provider.filter(|_| cross_user) {
-            self.state.system.uri_access.as_ref().ok_or(NotModelled("native provider URI grants owner unavailable"))?
-                .check(calling_uid, provider, user).map_err(ResolutionError::Original)?
-        } else { false };
-        if checked { return Ok(()); }
+            self.state
+                .system
+                .uri_access
+                .as_ref()
+                .ok_or(NotModelled("native provider URI grants owner unavailable"))?
+                .check(calling_uid, provider, user)
+                .map_err(ResolutionError::Original)?
+        } else {
+            false
+        };
+        if checked {
+            return Ok(());
+        }
         let redirected = if cross_user {
-            self.state.system.uri_access.as_ref().ok_or(NotModelled("native clone provider redirection owner unavailable"))?
-                .clone_redirected(authority, calling_uid, user).map_err(ResolutionError::Original)?
-        } else { false };
+            self.state
+                .system
+                .uri_access
+                .as_ref()
+                .ok_or(NotModelled(
+                    "native clone provider redirection owner unavailable",
+                ))?
+                .clone_redirected(authority, calling_uid, user)
+                .map_err(ResolutionError::Original)?
+        } else {
+            false
+        };
         if !redirected {
-            if let Err(exception) = self.query(calling_uid).internal_enforce_cross_user(calling_uid,
-                user, false, false, "resolveContentProvider")? { return Err(ResolutionError::Original(exception)); }
+            if let Err(exception) = self.query(calling_uid).internal_enforce_cross_user(
+                calling_uid,
+                user,
+                false,
+                false,
+                "resolveContentProvider",
+            )? {
+                return Err(ResolutionError::Original(exception));
+            }
         }
         Ok(())
     }
-
 }
 
 impl Resolver {
@@ -1581,19 +1916,28 @@ pub struct Resolver {
 impl Resolver {
     /// Only the dynamic implicit-access owner changed; package relations,
     /// components, preferences and domains remain the same validated inputs.
-    pub(crate) fn implicit_access_view(&self, before: &Arc<State>, state: Arc<State>)
-        -> std::result::Result<Self, MimeGroupError> {
+    pub(crate) fn implicit_access_view(
+        &self,
+        before: &Arc<State>,
+        state: Arc<State>,
+    ) -> std::result::Result<Self, MimeGroupError> {
         let mut resolution = (*self.resolution(before)?).clone();
         resolution.state = state;
-        Ok(Self { latest: Mutex::new(Some(Arc::new(resolution))), reported: Mutex::new(HashSet::new()) })
+        Ok(Self {
+            latest: Mutex::new(Some(Arc::new(resolution))),
+            reported: Mutex::new(HashSet::new()),
+        })
     }
 
     /// Only packages' user states changed from `before` to `state` (an
     /// enabled setting): the components, relations, preferences and
     /// domains of `before`'s resolution serve `state`, whose user states
     /// queries read.
-    pub(crate) fn user_states_changed(&self, before: &Arc<State>, state: Arc<State>)
-        -> std::result::Result<(), MimeGroupError> {
+    pub(crate) fn user_states_changed(
+        &self,
+        before: &Arc<State>,
+        state: Arc<State>,
+    ) -> std::result::Result<(), MimeGroupError> {
         let mut resolution = (*self.resolution(before)?).clone();
         resolution.state = state;
         *self.latest.lock().unwrap() = Some(Arc::new(resolution));
@@ -1632,7 +1976,11 @@ impl Resolver {
                 Err(QueryError::NotModelled(NotModelled(reason))) => {
                     self.not_modelled(call.code, reason)
                 }
-                Err(QueryError::Original(error)) => { let mut reply = Parcel::new(); reply.write_exception(&error); Answer::Reply(reply) },
+                Err(QueryError::Original(error)) => {
+                    let mut reply = Parcel::new();
+                    reply.write_exception(&error);
+                    Answer::Reply(reply)
+                }
                 Err(QueryError::Transport(status)) => Answer::Status(status),
             })
     }
@@ -1647,23 +1995,25 @@ impl Resolver {
         uid: i32,
         data: &mut Reader<'_>,
     ) -> Option<std::result::Result<Parcel, QueryError>> {
-        if !super::query::preferred::MUTATION_METHODS.contains(&code) && !matches!(
-            code,
-            pm::QUERY_INTENT_ACTIVITIES
-                | pm::QUERY_INTENT_SERVICES
-                | pm::QUERY_INTENT_RECEIVERS
-                | pm::QUERY_INTENT_CONTENT_PROVIDERS
-                | pm::RESOLVE_INTENT
-                | pm::RESOLVE_SERVICE
-                | pm::RESOLVE_CONTENT_PROVIDER
-                | pm::RESOLVE_CONTENT_PROVIDER_FOR_UID
-                | pm::GET_ALL_INTENT_FILTERS
-                | pm::FIND_PERSISTENT_PREFERRED_ACTIVITY
-                | pm::QUERY_INTENT_ACTIVITY_OPTIONS
-                | pm::CAN_FORWARD_TO
-                | pm::GET_LAST_CHOSEN_ACTIVITY
-                | pm::GET_HOME_ACTIVITIES
-        ) {
+        if !super::query::preferred::MUTATION_METHODS.contains(&code)
+            && !matches!(
+                code,
+                pm::QUERY_INTENT_ACTIVITIES
+                    | pm::QUERY_INTENT_SERVICES
+                    | pm::QUERY_INTENT_RECEIVERS
+                    | pm::QUERY_INTENT_CONTENT_PROVIDERS
+                    | pm::RESOLVE_INTENT
+                    | pm::RESOLVE_SERVICE
+                    | pm::RESOLVE_CONTENT_PROVIDER
+                    | pm::RESOLVE_CONTENT_PROVIDER_FOR_UID
+                    | pm::GET_ALL_INTENT_FILTERS
+                    | pm::FIND_PERSISTENT_PREFERRED_ACTIVITY
+                    | pm::QUERY_INTENT_ACTIVITY_OPTIONS
+                    | pm::CAN_FORWARD_TO
+                    | pm::GET_LAST_CHOSEN_ACTIVITY
+                    | pm::GET_HOME_ACTIVITIES
+            )
+        {
             return None;
         }
         let r = match self.resolution(state) {
@@ -1672,20 +2022,29 @@ impl Resolver {
         };
         if super::query::preferred::MUTATION_METHODS.contains(&code) {
             let Some(owner) = state.system.preferred_owner.as_deref() else {
-                return Some(Err(NotModelled("native preferred action owners unavailable").into()));
+                return Some(Err(NotModelled(
+                    "native preferred action owners unavailable",
+                )
+                .into()));
             };
             return super::query::preferred::mutation(&r.query(uid), &r, code, data, owner);
         }
         if code == pm::GET_HOME_ACTIVITIES {
             return Some((|| {
-                let owner = state.system.preferred_owner.as_deref()
+                let owner = state
+                    .system
+                    .preferred_owner
+                    .as_deref()
                     .ok_or(NotModelled("native preferred home owner unavailable"))?;
                 super::query::preferred::home_activities(&r.query(uid), &r, data, owner)
             })());
         }
         if code == pm::GET_LAST_CHOSEN_ACTIVITY {
             return Some((|| {
-                let owner = state.system.preferred_owner.as_deref()
+                let owner = state
+                    .system
+                    .preferred_owner
+                    .as_deref()
                     .ok_or(NotModelled("native preferred owner unavailable"))?;
                 super::query::preferred::last_chosen(&r.query(uid), &r, data, owner)
             })());
@@ -1693,22 +2052,47 @@ impl Resolver {
         if code == pm::CAN_FORWARD_TO {
             return Some((|| {
                 let a = pm::CanForwardTo::<Intent>::read(data).map_err(QueryError::Transport)?;
-                if data.remaining() != 0 { return Err(QueryError::Transport(BAD_VALUE)); }
-                let query = r.query(uid); let mut reply = Parcel::new();
-                if !query.uid_has_permission(uid, "android.permission.INTERACT_ACROSS_USERS_FULL")? {
-                    reply.write_exception(&Exception::security("android.permission.INTERACT_ACROSS_USERS_FULL required")); return Ok(reply);
+                if data.remaining() != 0 {
+                    return Err(QueryError::Transport(BAD_VALUE));
+                }
+                let query = r.query(uid);
+                let mut reply = Parcel::new();
+                if !query
+                    .uid_has_permission(uid, "android.permission.INTERACT_ACROSS_USERS_FULL")?
+                {
+                    reply.write_exception(&Exception::security(
+                        "android.permission.INTERACT_ACROSS_USERS_FULL required",
+                    ));
+                    return Ok(reply);
                 }
                 if a.source_user_id == a.target_user_id {
-                    pm::write_can_forward_to_reply(&mut reply, true); return Ok(reply);
+                    pm::write_can_forward_to_reply(&mut reply, true);
+                    return Ok(reply);
                 }
-                let Some(intent) = a.intent.as_ref() else { reply.write_exception(&Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "intent is null")); return Ok(reply); };
-                match r.can_forward_to(intent, a.resolved_type.as_deref(), a.source_user_id, a.target_user_id, uid) {
+                let Some(intent) = a.intent.as_ref() else {
+                    reply.write_exception(&Exception::new(
+                        aim_binder_host::parcel::EX_NULL_POINTER,
+                        "intent is null",
+                    ));
+                    return Ok(reply);
+                };
+                match r.can_forward_to(
+                    intent,
+                    a.resolved_type.as_deref(),
+                    a.source_user_id,
+                    a.target_user_id,
+                    uid,
+                ) {
                     Ok(value) => pm::write_can_forward_to_reply(&mut reply, value),
                     Err(ResolutionError::Original(exception)) => reply.write_exception(&exception),
                     Err(ResolutionError::NotModelled(error)) => return Err(error.into()),
                     Err(ResolutionError::UriMatching(error)) => match error.binder_exception() {
                         Some(exception) => reply.write_exception(&exception),
-                        None => return Err(QueryError::Transport(aim_binder_host::parcel::UNKNOWN_TRANSACTION)),
+                        None => {
+                            return Err(QueryError::Transport(
+                                aim_binder_host::parcel::UNKNOWN_TRANSACTION,
+                            ));
+                        }
                     },
                 }
                 Ok(reply)
@@ -1716,17 +2100,26 @@ impl Resolver {
         }
         if code == pm::RESOLVE_CONTENT_PROVIDER_FOR_UID {
             return Some((|| {
-                let a = pm::ResolveContentProviderForUid::read(data).map_err(QueryError::Transport)?;
-                if data.remaining() != 0 { return Err(QueryError::Transport(BAD_VALUE)); }
+                let a =
+                    pm::ResolveContentProviderForUid::read(data).map_err(QueryError::Transport)?;
+                if data.remaining() != 0 {
+                    return Err(QueryError::Transport(BAD_VALUE));
+                }
                 let query = r.query(uid);
                 let mut reply = Parcel::new();
                 if !matches!(app_id(uid), 0 | SYSTEM_UID)
-                    && !query.uid_has_permission(uid, "android.permission.RESOLVE_COMPONENT_FOR_UID")? {
+                    && !query
+                        .uid_has_permission(uid, "android.permission.RESOLVE_COMPONENT_FOR_UID")?
+                {
                     reply.write_exception(&Exception::security("resolveContentProviderForUid: requires android.permission.RESOLVE_COMPONENT_FOR_UID"));
                     return Ok(reply);
                 }
-                if let Err(error) = query.enforce_cross_user(user_id(a.calling_uid), false, false,
-                    "resolveContentProviderForUid")? {
+                if let Err(error) = query.enforce_cross_user(
+                    user_id(a.calling_uid),
+                    false,
+                    false,
+                    "resolveContentProviderForUid",
+                )? {
                     reply.write_exception(&error);
                     return Ok(reply);
                 }
@@ -1735,34 +2128,64 @@ impl Resolver {
                     uid != filter_uid
                 } else {
                     match apps_filter::setting(state, app_id(filter_uid)) {
-                        Some(apps_filter::Setting::Package(package)) => query.filtered_including_uninstalled(Some(package), user_id(filter_uid))?,
-                        Some(apps_filter::Setting::Shared(shared)) => query.shared_filtered(shared, user_id(filter_uid), true)?,
+                        Some(apps_filter::Setting::Package(package)) => query
+                            .filtered_including_uninstalled(Some(package), user_id(filter_uid))?,
+                        Some(apps_filter::Setting::Shared(shared)) => {
+                            query.shared_filtered(shared, user_id(filter_uid), true)?
+                        }
                         None => true,
                     }
                 };
                 if hidden {
-                    pm::write_resolve_content_provider_for_uid_reply::<ProviderInfo>(&mut reply, None);
+                    pm::write_resolve_content_provider_for_uid_reply::<ProviderInfo>(
+                        &mut reply, None,
+                    );
                     return Ok(reply);
                 }
                 let Some(name) = a.authority.as_deref() else {
-                    reply.write_exception(&Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "name is null"));
+                    reply.write_exception(&Exception::new(
+                        aim_binder_host::parcel::EX_NULL_POINTER,
+                        "name is null",
+                    ));
                     return Ok(reply);
                 };
                 macro_rules! provider_result {
-                    ($expression:expr) => { match $expression {
-                        Ok(value) => value,
-                        Err(ResolutionError::Original(exception)) => { reply.write_exception(&exception); return Ok(reply); },
-                        Err(ResolutionError::NotModelled(error)) => return Err(error.into()),
-                        Err(ResolutionError::UriMatching(error)) => {
-                            if let Some(exception) = error.binder_exception() { reply.write_exception(&exception); return Ok(reply); }
-                            return Err(QueryError::Transport(aim_binder_host::parcel::UNKNOWN_TRANSACTION));
+                    ($expression:expr) => {
+                        match $expression {
+                            Ok(value) => value,
+                            Err(ResolutionError::Original(exception)) => {
+                                reply.write_exception(&exception);
+                                return Ok(reply);
+                            }
+                            Err(ResolutionError::NotModelled(error)) => return Err(error.into()),
+                            Err(ResolutionError::UriMatching(error)) => {
+                                if let Some(exception) = error.binder_exception() {
+                                    reply.write_exception(&exception);
+                                    return Ok(reply);
+                                }
+                                return Err(QueryError::Transport(
+                                    aim_binder_host::parcel::UNKNOWN_TRANSACTION,
+                                ));
+                            }
                         }
-                    } }
+                    };
                 }
-                let first = provider_result!(r.resolve_content_provider_for_query(name, a.flags, a.user_id, filter_uid, uid));
-                let second = if first.is_some() { provider_result!(r.resolve_content_provider_for_query(name, a.flags, a.user_id, uid, uid)) } else { None };
-                let result = first.filter(|first| second.as_ref().is_some_and(|second|
-                    first.info.item.name == second.info.item.name && first.authority == second.authority));
+                let first = provider_result!(
+                    r.resolve_content_provider_for_query(name, a.flags, a.user_id, filter_uid, uid)
+                );
+                let second = if first.is_some() {
+                    provider_result!(
+                        r.resolve_content_provider_for_query(name, a.flags, a.user_id, uid, uid)
+                    )
+                } else {
+                    None
+                };
+                let result = first.filter(|first| {
+                    second.as_ref().is_some_and(|second| {
+                        first.info.item.name == second.info.item.name
+                            && first.authority == second.authority
+                    })
+                });
                 pm::write_resolve_content_provider_for_uid_reply(&mut reply, result.as_ref());
                 Ok(reply)
             })());
@@ -1771,45 +2194,70 @@ impl Resolver {
             return Some((|| {
                 let a = pm::FindPersistentPreferredActivity::<Intent>::read(data)
                     .map_err(QueryError::Transport)?;
-                if data.remaining() != 0 { return Err(QueryError::Transport(BAD_VALUE)); }
+                if data.remaining() != 0 {
+                    return Err(QueryError::Transport(BAD_VALUE));
+                }
                 let mut reply = Parcel::new();
                 if app_id(uid) != SYSTEM_UID {
-                    reply.write_exception(&Exception::security("findPersistentPreferredActivity can only be run by the system"));
+                    reply.write_exception(&Exception::security(
+                        "findPersistentPreferredActivity can only be run by the system",
+                    ));
                     return Ok(reply);
                 }
                 if !state.users.contains_key(&a.user_id) {
-                    pm::write_find_persistent_preferred_activity_reply::<ResolveInfo>(&mut reply, None);
+                    pm::write_find_persistent_preferred_activity_reply::<ResolveInfo>(
+                        &mut reply, None,
+                    );
                     return Ok(reply);
                 }
                 let Some(intent) = a.intent.as_ref() else {
-                    reply.write_exception(&Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "intent is null"));
+                    reply.write_exception(&Exception::new(
+                        aim_binder_host::parcel::EX_NULL_POINTER,
+                        "intent is null",
+                    ));
                     return Ok(reply);
                 };
                 let intent = intent.selector.as_deref().unwrap_or(intent);
-                if intent.ty.is_none() && intent.data.as_ref().and_then(|data| data.scheme()) == Some("content") {
-                    return Err(NotModelled("persistent preferred content-provider MIME owner").into());
+                if intent.ty.is_none()
+                    && intent.data.as_ref().and_then(|data| data.scheme()) == Some("content")
+                {
+                    return Err(
+                        NotModelled("persistent preferred content-provider MIME owner").into(),
+                    );
                 }
-                let resolved = if intent.component.is_some() { None } else { intent.ty.as_deref() };
+                let resolved = if intent.component.is_some() {
+                    None
+                } else {
+                    intent.ty.as_deref()
+                };
                 macro_rules! resolved {
                     ($expression:expr) => {
                         match $expression {
                             Ok(value) => value,
-                            Err(ResolutionError::Original(exception)) => { reply.write_exception(&exception); return Ok(reply); }
+                            Err(ResolutionError::Original(exception)) => {
+                                reply.write_exception(&exception);
+                                return Ok(reply);
+                            }
                             Err(ResolutionError::NotModelled(error)) => return Err(error.into()),
                             Err(ResolutionError::UriMatching(error)) => {
                                 let Some(exception) = error.binder_exception() else {
-                                    return Err(QueryError::Transport(aim_binder_host::parcel::UNKNOWN_TRANSACTION));
+                                    return Err(QueryError::Transport(
+                                        aim_binder_host::parcel::UNKNOWN_TRANSACTION,
+                                    ));
                                 };
                                 reply.write_exception(&exception);
                                 return Ok(reply);
                             }
                         }
-                    }
+                    };
                 }
                 let capture = resolved!(r.implicit_image_capture(intent, a.user_id, resolved, 0));
-                let flags = resolved!(r.update_flags_for_resolve(0, a.user_id, uid, false, false, capture));
-                let entries = resolved!(r.query_intent_activities(intent, resolved, flags, a.user_id, uid));
-                let chosen = resolved!(r.find_persistent(intent, resolved, flags, &entries, a.user_id, uid));
+                let flags =
+                    resolved!(r.update_flags_for_resolve(0, a.user_id, uid, false, false, capture));
+                let entries =
+                    resolved!(r.query_intent_activities(intent, resolved, flags, a.user_id, uid));
+                let chosen =
+                    resolved!(r.find_persistent(intent, resolved, flags, &entries, a.user_id, uid));
                 pm::write_find_persistent_preferred_activity_reply(&mut reply, chosen.as_ref());
                 Ok(reply)
             })());
@@ -1859,16 +2307,26 @@ impl Resolver {
         };
         let done: Result<()> = match code {
             pm::QUERY_INTENT_ACTIVITY_OPTIONS => {
-                let Ok(a) = pm::QueryIntentActivityOptions::<ComponentName, Intent>::read(data) else {
+                let Ok(a) = pm::QueryIntentActivityOptions::<ComponentName, Intent>::read(data)
+                else {
                     return Some(Err(NotModelled("malformed activity options query").into()));
                 };
                 let Some(intent) = a.intent.as_ref() else {
                     return Some(Err(NotModelled("null activity options intent").into()));
                 };
-                r.query_activity_options(a.caller.as_ref(), a.specifics.as_deref(),
-                    a.specific_types.as_deref(), intent, a.resolved_type.as_deref(), a.flags,
-                    a.user_id, uid).map(|items| pm::write_query_intent_activity_options_reply(&mut p,
-                        Some(&slice(items))))
+                r.query_activity_options(
+                    a.caller.as_ref(),
+                    a.specifics.as_deref(),
+                    a.specific_types.as_deref(),
+                    intent,
+                    a.resolved_type.as_deref(),
+                    a.flags,
+                    a.user_id,
+                    uid,
+                )
+                .map(|items| {
+                    pm::write_query_intent_activity_options_reply(&mut p, Some(&slice(items)))
+                })
             }
             pm::QUERY_INTENT_ACTIVITIES
             | pm::QUERY_INTENT_SERVICES
@@ -1926,7 +2384,9 @@ impl Resolver {
         Some(match done {
             Ok(()) => Ok(p),
             Err(ResolutionError::Original(exception)) => {
-                let mut reply = Parcel::new(); reply.write_exception(&exception); Ok(reply)
+                let mut reply = Parcel::new();
+                reply.write_exception(&exception);
+                Ok(reply)
             }
             Err(ResolutionError::NotModelled(error)) => Err(QueryError::NotModelled(error)),
             Err(ResolutionError::UriMatching(error)) => {
@@ -1956,14 +2416,14 @@ impl Resolver {
 }
 
 mod chooser;
+mod domains;
 mod internal_records;
 pub mod policy;
 pub mod settings;
-mod domains;
 pub(crate) use domains::is_domain_name;
 
 #[cfg(test)]
 mod tests;
 
-pub mod preferred_owner;
 mod facade;
+pub mod preferred_owner;

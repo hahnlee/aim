@@ -166,11 +166,27 @@ fn real_image_dry_run_boot() {
     assert!(!launched.contains("ueventd"));
     assert!(!launched.contains("apexd-bootstrap"));
     // Each perform_apex_config generates the selected namespace's config.
-    let helpers=boot.executor.launches.iter().filter(|launch|launch.helper).collect::<Vec<_>>();
-    assert_eq!(helpers.len(),2);
-    for helper in helpers{
-        assert_eq!(helper.spec.argv.iter().map(String::as_str).collect::<Vec<_>>(),
-            ["/apex/com.android.runtime/bin/linkerconfig","--target","/linkerconfig"]);
+    let helpers = boot
+        .executor
+        .launches
+        .iter()
+        .filter(|launch| launch.helper)
+        .collect::<Vec<_>>();
+    assert_eq!(helpers.len(), 2);
+    for helper in helpers {
+        assert_eq!(
+            helper
+                .spec
+                .argv
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "/apex/com.android.runtime/bin/linkerconfig",
+                "--target",
+                "/linkerconfig"
+            ]
+        );
     }
     assert_eq!(boot.property("apexd.status").as_deref(), Some("ready"));
     // apex.all.ready is the replaced apexd's to set once it serves; a dry

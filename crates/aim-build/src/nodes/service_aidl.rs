@@ -493,11 +493,14 @@ fn kind(ty: &Type) -> Result<Kind, String> {
         {
             Kind::Plain("Option<Binder>", "r.read_binder()?", "p.write_binder({v});")
         }
-        (b, false) if b != "List" && b != "Map"
-            && b.chars().next().is_some_and(char::is_uppercase) => {
+        (b, false)
+            if b != "List" && b != "Map" && b.chars().next().is_some_and(char::is_uppercase) =>
+        {
             // Generic Java parcelables retain their own Parcelable wire format.
             // Their type arguments do not turn them into inline typed arrays.
-            for argument in &ty.args { kind(argument)?; }
+            for argument in &ty.args {
+                kind(argument)?;
+            }
             Kind::Parcelable(b.to_string())
         }
         (b, true) if ty.args.is_empty() && b.chars().next().is_some_and(char::is_uppercase) => {
@@ -577,9 +580,17 @@ fn method_code(m: &Method) -> Result<String, String> {
                 // the descriptor's object alone, never null, with no
                 // presence word.
                 let (ty, read, write) = if t == "FileDescriptor" {
-                    (t.clone(), format!("{t}::read_from(r)?"), "{v}.write_to(p);".into())
+                    (
+                        t.clone(),
+                        format!("{t}::read_from(r)?"),
+                        "{v}.write_to(p);".into(),
+                    )
                 } else {
-                    (format!("Option<{t}>"), "read_typed(r)?".into(), "write_typed(p, {v}.as_ref());".into())
+                    (
+                        format!("Option<{t}>"),
+                        "read_typed(r)?".into(),
+                        "write_typed(p, {v}.as_ref());".into(),
+                    )
                 };
                 fields.push((snake(&p.name), ty, read, write));
             }
@@ -1210,7 +1221,9 @@ fn own_interfaces(lock: &Lock) -> Result<Vec<(Interface, Vec<String>, String)>, 
             return Err(format!("{LOCK}: bad OWN_INTERFACES entry `{entry}`"));
         };
         if !descriptors.insert(descriptor) {
-            return Err(format!("{LOCK}: duplicate OWN_INTERFACES descriptor `{descriptor}`"));
+            return Err(format!(
+                "{LOCK}: duplicate OWN_INTERFACES descriptor `{descriptor}`"
+            ));
         }
         let path = aim_paths::root().join(file);
         let text = fs::read_to_string(&path).map_err(|e| format!("{file}: {e}"))?;
@@ -1470,7 +1483,18 @@ interface IClipboard {
         assert!(code.contains("read_applications_reply<ParceledListSlice: ReadParcelable>"));
         assert!(code.contains("write_typed(p, result);"));
         assert!(!code.contains("write_typed_list"));
-        assert!(kind(&Type { name: "Map".into(), args: vec![Type { name: "Foo".into(), args: vec![], array: false }], array: false }).is_err());
+        assert!(
+            kind(&Type {
+                name: "Map".into(),
+                args: vec![Type {
+                    name: "Foo".into(),
+                    args: vec![],
+                    array: false
+                }],
+                array: false
+            })
+            .is_err()
+        );
     }
 
     #[test]

@@ -12,7 +12,9 @@ pub struct Snapshot {
 }
 impl Snapshot {
     /// Original WatchedSparseBooleanArray.get(user) defaults to false.
-    pub fn is_disabled(&self, user: i32) -> bool { self.disabled.get(&user).copied().unwrap_or(false) }
+    pub fn is_disabled(&self, user: i32) -> bool {
+        self.disabled.get(&user).copied().unwrap_or(false)
+    }
 
     pub fn read(bytes: &[u8]) -> Result<Self, String> {
         let mut reader = Reader::new(bytes, &[]);
@@ -145,8 +147,16 @@ impl aim_binder_host::local::Service for Changed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::package::{bootstrap::{ApexInventory, ScanUsers}, model, owner::usage::Usage,
-        scan::SigningScan, scan_snapshot::{Store, query_state::{Capture, Context}}};
+    use crate::package::{
+        bootstrap::{ApexInventory, ScanUsers},
+        model,
+        owner::usage::Usage,
+        scan::SigningScan,
+        scan_snapshot::{
+            Store,
+            query_state::{Capture, Context},
+        },
+    };
     use aim_binder_host::parcel::Parcel;
 
     fn record(epoch: i64, entries: &[(i32, bool)]) -> Vec<u8> {
@@ -154,7 +164,10 @@ mod tests {
         parcel.write_i32(1);
         parcel.write_i64(epoch);
         parcel.write_i32(entries.len() as i32);
-        for &(user, disabled) in entries { parcel.write_i32(user); parcel.write_bool(disabled); }
+        for &(user, disabled) in entries {
+            parcel.write_i32(user);
+            parcel.write_bool(disabled);
+        }
         parcel.data().to_vec()
     }
 
@@ -167,50 +180,177 @@ mod tests {
         assert!(Snapshot::read(&record(0, &[(0, false)])).is_err());
         assert!(Snapshot::read(&record(1, &[])).is_err());
         let mut owner = SigningScan::new(&Default::default(), &Default::default(), 36).unwrap();
-        let groups = owner.identities.shared_users.keys().map(|name| (name.clone(), Default::default())).collect();
-        owner.capture_legacy_permissions(&[0, 10], Default::default(), groups).unwrap();
-        let orders = owner.identities.shared_users.keys().map(|name| (name.clone(), vec![])).collect();
+        let groups = owner
+            .identities
+            .shared_users
+            .keys()
+            .map(|name| (name.clone(), Default::default()))
+            .collect();
+        owner
+            .capture_legacy_permissions(&[0, 10], Default::default(), groups)
+            .unwrap();
+        let orders = owner
+            .identities
+            .shared_users
+            .keys()
+            .map(|name| (name.clone(), vec![]))
+            .collect();
         owner.complete_shared_processes(orders).unwrap();
         let store = Store::new_replica(owner, Usage::new(std::iter::empty::<&str>())).unwrap();
         let scan = store.capture();
-        let capture = Capture::new(scan.clone(), Context {
-            scan_version: scan.version(), native_domains: None, boot_classes: None, nonce: None,
-            system: model::System {sdk_sandbox_package: Some(None), ..Default::default()},
-            platform: Default::default(),
-            users: [(0, model::User {id: 0, ..Default::default()}), (10, model::User {id: 10, ..Default::default()})].into(),
-            apex_inventory: ApexInventory {packages: Some(vec![]), active: vec![]},
-            scan_users: ScanUsers {users: Some([0, 10].into_iter().map(|id| crate::package::scan::User {id, pre_created: false, adb_install_disallowed: false}).collect())}, cross_user_suspensions: true,
-            packages: Default::default(), retained_packages: Default::default(),
-        }).unwrap();
+        let capture = Capture::new(
+            scan.clone(),
+            Context {
+                scan_version: scan.version(),
+                native_domains: None,
+                boot_classes: None,
+                nonce: None,
+                system: model::System {
+                    sdk_sandbox_package: Some(None),
+                    ..Default::default()
+                },
+                platform: Default::default(),
+                users: [
+                    (
+                        0,
+                        model::User {
+                            id: 0,
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        10,
+                        model::User {
+                            id: 10,
+                            ..Default::default()
+                        },
+                    ),
+                ]
+                .into(),
+                apex_inventory: ApexInventory {
+                    packages: Some(vec![]),
+                    active: vec![],
+                },
+                scan_users: ScanUsers {
+                    users: Some(
+                        [0, 10]
+                            .into_iter()
+                            .map(|id| crate::package::scan::User {
+                                id,
+                                pre_created: false,
+                                adb_install_disallowed: false,
+                            })
+                            .collect(),
+                    ),
+                },
+                cross_user_suspensions: true,
+                packages: Default::default(),
+                retained_packages: Default::default(),
+            },
+        )
+        .unwrap();
         let seeded = capture.prepare_web_instant_policy(initial).unwrap().capture;
         let published = Arc::new(Mutex::new(seeded.clone()));
         let target = published.clone();
-        let policy = Owner::new(&constructor, Arc::new(move |snapshot| {
-            let mut current = target.lock().unwrap();
-            let update = current.prepare_web_instant_policy(snapshot)
-                .map_err(|message| Exception::new(EX_ILLEGAL_STATE, message))?;
-            *current = update.capture;
-            Ok(())
-        })).unwrap();
+        let policy = Owner::new(
+            &constructor,
+            Arc::new(move |snapshot| {
+                let mut current = target.lock().unwrap();
+                let update = current
+                    .prepare_web_instant_policy(snapshot)
+                    .map_err(|message| Exception::new(EX_ILLEGAL_STATE, message))?;
+                *current = update.capture;
+                Ok(())
+            }),
+        )
+        .unwrap();
         // The callback may not publish a partial or foreign live UM snapshot.
-        assert!(seeded.prepare_web_instant_policy(Snapshot::read(&record(1, &[(0, true)])).unwrap()).is_err());
-        assert!(seeded.prepare_web_instant_policy(Snapshot::read(&record(1, &[(0, false), (11, false)])).unwrap()).is_err());
+        assert!(
+            seeded
+                .prepare_web_instant_policy(Snapshot::read(&record(1, &[(0, true)])).unwrap())
+                .is_err()
+        );
+        assert!(
+            seeded
+                .prepare_web_instant_policy(
+                    Snapshot::read(&record(1, &[(0, false), (11, false)])).unwrap()
+                )
+                .is_err()
+        );
         assert!(policy.changed(&constructor).is_err());
-        assert_eq!(published.lock().unwrap().scan().version(), seeded.scan().version());
-        policy.changed(&record(1, &[(0, true), (10, false)])).unwrap();
+        assert_eq!(
+            published.lock().unwrap().scan().version(),
+            seeded.scan().version()
+        );
+        policy
+            .changed(&record(1, &[(0, true), (10, false)]))
+            .unwrap();
         let ready = published.lock().unwrap().clone();
         assert!(ready.scan().version() > seeded.scan().version());
-        assert!(!seeded.state().system.web_instant_policy.as_ref().unwrap().is_disabled(0));
-        assert!(ready.state().system.web_instant_policy.as_ref().unwrap().is_disabled(0));
-        assert!(!ready.state().system.web_instant_policy.as_ref().unwrap().is_disabled(10));
-        assert!(policy.changed(&record(1, &[(0, false), (10, true)])).is_err());
-        assert_eq!(published.lock().unwrap().scan().version(), ready.scan().version());
-        policy.changed(&record(2, &[(0, false), (10, true)])).unwrap();
+        assert!(
+            !seeded
+                .state()
+                .system
+                .web_instant_policy
+                .as_ref()
+                .unwrap()
+                .is_disabled(0)
+        );
+        assert!(
+            ready
+                .state()
+                .system
+                .web_instant_policy
+                .as_ref()
+                .unwrap()
+                .is_disabled(0)
+        );
+        assert!(
+            !ready
+                .state()
+                .system
+                .web_instant_policy
+                .as_ref()
+                .unwrap()
+                .is_disabled(10)
+        );
+        assert!(
+            policy
+                .changed(&record(1, &[(0, false), (10, true)]))
+                .is_err()
+        );
+        assert_eq!(
+            published.lock().unwrap().scan().version(),
+            ready.scan().version()
+        );
+        policy
+            .changed(&record(2, &[(0, false), (10, true)]))
+            .unwrap();
         let changed = published.lock().unwrap().clone();
         assert!(changed.scan().version() > ready.scan().version());
-        assert!(!changed.state().system.web_instant_policy.as_ref().unwrap().is_disabled(0));
-        assert!(changed.state().system.web_instant_policy.as_ref().unwrap().is_disabled(10));
+        assert!(
+            !changed
+                .state()
+                .system
+                .web_instant_policy
+                .as_ref()
+                .unwrap()
+                .is_disabled(0)
+        );
+        assert!(
+            changed
+                .state()
+                .system
+                .web_instant_policy
+                .as_ref()
+                .unwrap()
+                .is_disabled(10)
+        );
         assert_eq!(policy.snapshot().unwrap().epoch, 2);
-        assert!(changed.prepare_web_instant_policy(Snapshot::read(&constructor).unwrap()).is_err());
+        assert!(
+            changed
+                .prepare_web_instant_policy(Snapshot::read(&constructor).unwrap())
+                .is_err()
+        );
     }
 }

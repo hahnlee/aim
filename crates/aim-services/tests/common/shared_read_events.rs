@@ -52,7 +52,13 @@ pub fn read(bytes: &[u8]) -> Settings {
     let mut settings = Settings::default();
     let mut ids = AppIds::default();
     let mut attempt = PackageReadAttempt::default();
-    let result = settings.read_owned_document(bytes, &mut ids, &mut attempt, true, &mut ProjectionOwners::default());
+    let result = settings.read_owned_document(
+        bytes,
+        &mut ids,
+        &mut attempt,
+        true,
+        &mut ProjectionOwners::default(),
+    );
     if result.is_err() {
         // failRead re-enters with an empty reserve and clears attempt tables.
         attempt = PackageReadAttempt::default();
@@ -82,17 +88,37 @@ pub fn trace(settings: &Settings) -> String {
 
 // This projection deliberately excludes external legacy/user/global owners.
 #[derive(Default)]
-struct ProjectionOwners { headers: aim_services::package::settings::native_read::NativeRead }
+struct ProjectionOwners {
+    headers: aim_services::package::settings::native_read::NativeRead,
+}
 impl ReadOwners for ProjectionOwners {
-    fn package_header(&mut self, package: &Package, start: &aim_android_xml::Element) -> Result<(), ReadError> {
+    fn package_header(
+        &mut self,
+        package: &Package,
+        start: &aim_android_xml::Element,
+    ) -> Result<(), ReadError> {
         self.headers.package_header(package, start)
     }
-    fn factory_record(&mut self, _: &mut Settings, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element, _: &AppIds) -> Result<(), ReadError> { panic!("factory outside projection") }
+    fn factory_record(
+        &mut self,
+        _: &mut Settings,
+        _: &mut aim_android_xml::pull::Reader<'_>,
+        _: &aim_android_xml::Element,
+        _: &AppIds,
+    ) -> Result<(), ReadError> {
+        panic!("factory outside projection")
+    }
 
-    fn start_attempt(&mut self, _: &Settings, _: &[Package]) -> Result<(), ReadError> { Ok(()) }
+    fn start_attempt(&mut self, _: &Settings, _: &[Package]) -> Result<(), ReadError> {
+        Ok(())
+    }
 
-    fn package_registered(&mut self, _: &Package, _: bool) -> Result<(), ReadError> { Ok(()) }
-    fn shared_registered(&mut self, _: &SharedUser, _: bool) -> Result<(), ReadError> { Ok(()) }
+    fn package_registered(&mut self, _: &Package, _: bool) -> Result<(), ReadError> {
+        Ok(())
+    }
+    fn shared_registered(&mut self, _: &SharedUser, _: bool) -> Result<(), ReadError> {
+        Ok(())
+    }
 
     fn package_child(
         &mut self,

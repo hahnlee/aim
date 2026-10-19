@@ -83,7 +83,8 @@ impl Migration {
         let bytes = aim_android_xml::abx::write(root)?;
         let mut reader = aim_android_xml::pull::Reader::new(&bytes)?;
         reader.next()?;
-        self.read_install_events(&mut reader, users).map_err(|error| error.to_string())
+        self.read_install_events(&mut reader, users)
+            .map_err(|error| error.to_string())
     }
 
     /// Consume an already opened perms container. Each item mutates every
@@ -93,15 +94,16 @@ impl Migration {
         reader: &mut aim_android_xml::pull::Reader<'_>,
         users: &[i32],
     ) -> Result<(), crate::package::settings::ReadError> {
-        use aim_android_xml::pull::Event;
         use crate::package::settings::ReadError;
+        use aim_android_xml::pull::Event;
         let outer = reader.depth();
         loop {
             match reader.next()? {
                 Event::Start(item) if item.name == "item" => {
                     let permission = xml_permission(&item, false);
                     for &user in users {
-                        self.put(user, permission.clone()).map_err(ReadError::Owner)?;
+                        self.put(user, permission.clone())
+                            .map_err(ReadError::Owner)?;
                     }
                 }
                 Event::Start(_) => crate::package::settings::skip(reader)?,
@@ -185,12 +187,27 @@ mod tests {
         migration.set_missing(10, true).unwrap();
         let mut reader = aim_android_xml::pull::Reader::new(b"<perms><item name='first' flags='17'/><item name='outer'><item name='inner'/></item><unknown><item name='ignored'/><").unwrap();
         reader.next().unwrap();
-        assert!(matches!(migration.read_install_events(&mut reader, &[10, 0]), Err(crate::package::settings::ReadError::File(_))));
+        assert!(matches!(
+            migration.read_install_events(&mut reader, &[10, 0]),
+            Err(crate::package::settings::ReadError::File(_))
+        ));
         for user in [10, 0] {
-            assert_eq!(migration.permission(user, Some("first")).unwrap().unwrap().flags, 0x17);
+            assert_eq!(
+                migration
+                    .permission(user, Some("first"))
+                    .unwrap()
+                    .unwrap()
+                    .flags,
+                0x17
+            );
             assert!(migration.permission(user, Some("outer")).unwrap().is_some());
             assert!(migration.permission(user, Some("inner")).unwrap().is_some());
-            assert!(migration.permission(user, Some("ignored")).unwrap().is_none());
+            assert!(
+                migration
+                    .permission(user, Some("ignored"))
+                    .unwrap()
+                    .is_none()
+            );
         }
         assert!(migration.is_missing(10).unwrap());
     }

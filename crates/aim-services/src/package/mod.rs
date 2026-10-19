@@ -8,75 +8,69 @@
 //! original builds them at its scan (#707). Sources are read at
 //! `android-16.0.0_r1`.
 
-pub mod apps_filter;
-pub mod application_data;
-pub mod install_verification;
-pub mod legacy_domain_mutation;
-pub mod legacy_domain_routes;
-pub mod bootstrap;
-pub mod component_resolver;
-pub mod domain_verification;
-pub mod diagnostics;
-pub mod dump;
-pub mod dexopt_completion;
-pub mod diagnostics_storage;
-pub mod feed;
-pub mod info;
-pub(crate) mod list_slice;
-pub mod installer;
-pub mod installer_attribution;
-pub mod instant_components;
-pub mod instant;
-pub mod uri_access;
-pub mod user_policy;
-pub mod security_policy;
-pub mod archive;
-pub mod permission_groups;
-pub mod hold_lock;
-pub mod launch;
 pub mod apk_checksums;
 pub mod app_metadata;
-pub mod lifecycle;
+pub mod application_data;
+pub mod apps_filter;
+pub mod archive;
+pub mod boot_captures;
+pub mod boot_configuration;
+pub mod boot_image;
+pub mod boot_session;
+pub mod bootstrap;
+pub mod changes;
+pub mod component_resolver;
+pub mod customization;
+pub mod dexopt_completion;
+pub mod diagnostic_inputs;
+pub mod diagnostics;
+pub mod diagnostics_storage;
+pub mod domain_verification;
+pub mod dump;
+pub mod early_user_operations;
+pub mod effects;
+pub mod feed;
+pub mod hold_lock;
+pub mod info;
+pub mod install_verification;
+pub mod installer;
+pub mod installer_attribution;
+pub mod instant;
+pub mod instant_components;
 pub mod intent;
-pub mod intent_uri;
 pub mod intent_filter;
 pub mod intent_resolver;
+pub mod intent_uri;
+pub mod internal_host;
+pub mod internal_mutation_apply;
+pub mod internal_mutation_record;
+pub mod kernel_mappings;
 pub mod keysets;
+pub mod launch;
+pub mod legacy_domain_mutation;
+pub mod legacy_domain_routes;
 pub mod libraries;
 mod library_parcel;
+pub mod lifecycle;
 pub mod list;
+pub(crate) mod list_slice;
 pub mod model;
-pub mod moves;
-pub mod move_package;
 pub mod module_metadata;
-pub mod mutations;
-pub mod user_operations;
-pub mod internal_host;
-pub mod internal_mutation_record;
-pub mod internal_mutation_apply;
-pub mod mutation_reservation;
-pub mod diagnostic_inputs;
-pub mod observers;
-pub mod boot_captures;
-pub mod boot_image;
-pub mod boot_configuration;
-pub mod boot_session;
-pub mod web_instant_state;
-pub mod early_user_operations;
-pub mod kernel_mappings;
+pub mod move_package;
+pub mod moves;
+pub mod mutation_dispatch;
 pub mod mutation_producers;
+pub mod mutation_reservation;
+pub mod mutations;
+pub mod observers;
 pub mod owner;
 pub mod page_size_compat;
 pub mod parse;
+pub mod permission_groups;
 pub mod permissions;
 pub mod pkg;
-pub mod preferred;
 pub mod policies;
-pub mod effects;
-pub mod changes;
-pub mod customization;
-pub mod suspension;
-pub mod mutation_dispatch;
+pub mod preferred;
 pub mod query;
 pub mod registry;
 pub mod reply;
@@ -86,13 +80,19 @@ pub mod restrictions;
 pub mod roles;
 pub mod scan;
 pub mod scan_snapshot;
+pub mod security_policy;
 pub mod service;
 pub mod settings;
 pub mod sign;
+pub mod suspension;
 pub mod system_config;
 pub mod timsort;
 pub mod uri;
+pub mod uri_access;
+pub mod user_operations;
+pub mod user_policy;
 pub mod users;
+pub mod web_instant_state;
 pub mod write;
 
 use std::borrow::Cow;
@@ -164,9 +164,14 @@ impl State {
         Self::read_related_mode(data, users, settings, true)
     }
 
-    pub fn read_related_seeded(data:&Path,users:&[u32],settings:Settings,restore_package_users:bool,
-        seed:&settings::native_read::NativeRead)->Result<State,String>{
-        Self::read_related_native(data,users,settings,restore_package_users,Some(seed))
+    pub fn read_related_seeded(
+        data: &Path,
+        users: &[u32],
+        settings: Settings,
+        restore_package_users: bool,
+        seed: &settings::native_read::NativeRead,
+    ) -> Result<State, String> {
+        Self::read_related_native(data, users, settings, restore_package_users, Some(seed))
     }
     fn read_related_mode(
         data: &Path,
@@ -174,10 +179,15 @@ impl State {
         settings: Settings,
         restore_package_users: bool,
     ) -> Result<State, String> {
-        Self::read_related_native(data,users,settings,restore_package_users,None)
+        Self::read_related_native(data, users, settings, restore_package_users, None)
     }
-    fn read_related_native(data:&Path,users:&[u32],settings:Settings,restore_package_users:bool,
-        seed:Option<&settings::native_read::NativeRead>)->Result<State,String>{
+    fn read_related_native(
+        data: &Path,
+        users: &[u32],
+        settings: Settings,
+        restore_package_users: bool,
+        seed: Option<&settings::native_read::NativeRead>,
+    ) -> Result<State, String> {
         let system = data.join("system");
         let list = journaled(&system.join("packages.list"))?
             .map(|text| list::parse(&text))
@@ -192,7 +202,13 @@ impl State {
             .map(|&user| {
                 Ok((
                     user,
-                    read_user(data, user, &settings, restore_package_users, seed.filter(|_| user == 0))?,
+                    read_user(
+                        data,
+                        user,
+                        &settings,
+                        restore_package_users,
+                        seed.filter(|_| user == 0),
+                    )?,
                 ))
             })
             .collect::<Result<_, String>>()?;
@@ -227,7 +243,9 @@ fn read_user(
     // the settings' legacy one.
     let legacy_times = file.is_some();
     let mut restrictions = file.unwrap_or_default();
-    if restrictions.default_browser.is_none(){restrictions.default_browser=seed.and_then(|seed|seed.default_browser_user_zero.clone());}
+    if restrictions.default_browser.is_none() {
+        restrictions.default_browser = seed.and_then(|seed| seed.default_browser_user_zero.clone());
+    }
     restrictions
         .legacy_domain_states
         .retain(|(name, _)| settings.packages.iter().any(|p| &p.name == name));
@@ -237,7 +255,9 @@ fn read_user(
         .iter()
         .map(|p| {
             let mut state = states.remove(&p.name).unwrap_or_else(|| {
-                if let Some(state)=seed.and_then(|seed|seed.legacy_user_zero.get(&p.name)){return state.clone();}
+                if let Some(state) = seed.and_then(|seed| seed.legacy_user_zero.get(&p.name)) {
+                    return state.clone();
+                }
                 if legacy_times {
                     UserState::default()
                 } else if restore_package_users {
@@ -785,16 +805,15 @@ pub mod staging;
 
 pub mod permission_mutation;
 
-
 pub mod verifier;
 
 pub mod events;
 
 pub mod shell;
 
-pub(crate) mod shell_profile;
-pub(crate) mod shell_read;
 pub(crate) mod shell_install;
 pub(crate) mod shell_mutation;
+pub(crate) mod shell_profile;
+pub(crate) mod shell_read;
 
 pub(crate) mod shell_user;

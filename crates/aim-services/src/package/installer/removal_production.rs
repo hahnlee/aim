@@ -52,74 +52,79 @@ pub fn build(inputs: Inputs) -> Result<Arc<Controller>, Exception> {
     let roles = inputs.roles.clone();
     let removal_roles = roles.clone();
     let user_policy = inputs.user_policy;
-    let admission = Arc::new(move |query: &crate::package::query::Query<'_>, request: &super::Request| {
-        let device = user_policy(request.uid, request.pid, request.user)?;
-        let same = |name: Option<&str>| {
-            apps_filter::is_caller_same_app(query.state, name, query.calling_uid)
-                .map_err(|error| fail(error.0))
-        };
-        let caller = request.caller_package.as_deref();
-        let privileged_identity = matches!(request.uid, 0 | 2000)
-            || apps_filter::app_id(request.uid as i32) == 1000;
-        Ok(AdmissionPolicy {
-            device,
-            can_silently_install: !privileged_identity && external.silent(request.uid, caller)?,
-            emergency_installer: same(roles.emergency_installer.as_deref())?,
-            system_protection_role: same(roles.system_protection.as_deref())?,
-            pinned: !request.package.is_empty() && external.pinned(&request.package)?,
-            verifier_packages: roles.verifier_packages.clone(),
-            uninstaller_package: roles.uninstaller.clone(),
-            storage_manager_package: roles.storage_manager.clone(),
-            keep_uninstalled: roles.keep_uninstalled.contains(&request.package),
-        })
-    });
+    let admission = Arc::new(
+        move |query: &crate::package::query::Query<'_>, request: &super::Request| {
+            let device = user_policy(request.uid, request.pid, request.user)?;
+            let same = |name: Option<&str>| {
+                apps_filter::is_caller_same_app(query.state, name, query.calling_uid)
+                    .map_err(|error| fail(error.0))
+            };
+            let caller = request.caller_package.as_deref();
+            let privileged_identity =
+                matches!(request.uid, 0 | 2000) || apps_filter::app_id(request.uid as i32) == 1000;
+            Ok(AdmissionPolicy {
+                device,
+                can_silently_install: !privileged_identity
+                    && external.silent(request.uid, caller)?,
+                emergency_installer: same(roles.emergency_installer.as_deref())?,
+                system_protection_role: same(roles.system_protection.as_deref())?,
+                pinned: !request.package.is_empty() && external.pinned(&request.package)?,
+                verifier_packages: roles.verifier_packages.clone(),
+                uninstaller_package: roles.uninstaller.clone(),
+                storage_manager_package: roles.storage_manager.clone(),
+                keep_uninstalled: roles.keep_uninstalled.contains(&request.package),
+            })
+        },
+    );
     let external = inputs.external.clone();
     let effects = inputs.effects.clone();
-    let removal = Arc::new(move |_: &crate::package::query::Query<'_>, request: &super::Request| {
-        let users = external.users()?;
-        if users.iter().any(|user| *user < 0)
-            || users.iter().collect::<BTreeSet<_>>().len() != users.len()
-        {
-            return Err(fail("Removal UserManager inventory malformed"));
-        }
-        let mut child_users = BTreeMap::new();
-        let mut admins = BTreeSet::new();
-        let mut protected = BTreeSet::new();
-        let mut restricted = BTreeSet::new();
-        let mut targets = users.clone();
-        if !targets.contains(&request.user) {
-            targets.push(request.user);
-        }
-        for user in targets {
-            child_users.insert(user, external.children(user)?);
-            if !request.package.is_empty() {
-                if external.call(
-                    super::external_api::HAS_ACTIVE_ADMIN,
-                    |p| {
-                        p.write_string16(Some(&request.package));
-                        p.write_i32(user);
-                    },
-                    |reader| reader.read_bool(),
-                )? {
-                    admins.insert(user);
+    let removal = Arc::new(
+        move |_: &crate::package::query::Query<'_>, request: &super::Request| {
+            let users = external.users()?;
+            if users.iter().any(|user| *user < 0)
+                || users.iter().collect::<BTreeSet<_>>().len() != users.len()
+            {
+                return Err(fail("Removal UserManager inventory malformed"));
+            }
+            let mut child_users = BTreeMap::new();
+            let mut admins = BTreeSet::new();
+            let mut protected = BTreeSet::new();
+            let mut restricted = BTreeSet::new();
+            let mut targets = users.clone();
+            if !targets.contains(&request.user) {
+                targets.push(request.user);
+            }
+            for user in targets {
+                child_users.insert(user, external.children(user)?);
+                if !request.package.is_empty() {
+                    if external.call(
+                        super::external_api::HAS_ACTIVE_ADMIN,
+                        |p| {
+                            p.write_string16(Some(&request.package));
+                            p.write_i32(user);
+                        },
+                        |reader| reader.read_bool(),
+                    )? {
+                        admins.insert(user);
+                    }
+                    if effects.state_protected(&request.package, user)? {
+                        protected.insert(user);
+                    }
                 }
-                if effects.state_protected(&request.package, user)? {
-                    protected.insert(user);
+                if external.restricted(user)? {
+                    restricted.insert(user);
                 }
             }
-            if external.restricted(user)? {
-                restricted.insert(user);
-            }
-        }
-        Ok(RemovalPolicy {
-            admins,
-            protected,
-            uninstall_restricted: restricted,
-            users,
-            child_users,
-            sdk_library_independence: removal_roles.sdk_library_independence,
-        })
-    });
+            Ok(RemovalPolicy {
+                admins,
+                protected,
+                uninstall_restricted: restricted,
+                users,
+                child_users,
+                sdk_library_independence: removal_roles.sdk_library_independence,
+            })
+        },
+    );
     let policy = PolicySource { admission, removal };
     let factory = inputs.factory;
     let restore: RestoreFactory = Arc::new(move |plan| factory.restore(plan));
@@ -176,18 +181,24 @@ impl Factory {
             .cloned()
             .ok_or_else(|| fail("System update user owner absent"))?;
         let apexes = if factory.code_path.starts_with("/apex/") {
-            self.bridge.apex_inventory()
+            self.bridge
+                .apex_inventory()
                 .map_err(|error| fail(format!("Factory APEX inventory: {error:?}")))?
                 .scan_apexes()
         } else {
             Vec::new()
         };
         let location = system_location(&factory.code_path, &apexes)?;
-        let mut parsed = self.image.apks
+        let mut parsed = self
+            .image
+            .apks
             .parsed_path(&factory.code_path, location.parse_flags())
             .map_err(fail)?;
         let signing = self.image.apks.signing_details(&parsed).map_err(fail)?;
-        let platform = base.owner().loaded_packages().get("android")
+        let platform = base
+            .owner()
+            .loaded_packages()
+            .get("android")
             .ok_or_else(|| fail("Platform signing owner unavailable"))?;
         let mut policy = scan::ScanPolicy::for_location(&location);
         policy.adjust_shared_uid_privilege(
@@ -197,15 +208,17 @@ impl Factory {
             &base.owner().identities,
             self.image.vendor_sdk,
         );
-        policy.apply(
-            &mut parsed,
-            &signing,
-            Some(&platform.collected_signing),
-            false,
-            &self.image.apks,
-            &self.image.library_compatibility,
-            None,
-        ).map_err(fail)?;
+        policy
+            .apply(
+                &mut parsed,
+                &signing,
+                Some(&platform.collected_signing),
+                false,
+                &self.image.apks,
+                &self.image.library_compatibility,
+                None,
+            )
+            .map_err(fail)?;
         let code = scan::Code {
             location,
             parsed,
@@ -242,21 +255,20 @@ impl Factory {
             .bridge
             .new_domain_id()
             .map_err(|error| fail(format!("Factory domain identity: {error:?}")))?;
-        let install_users = crate::package::installer::environment::current_install_users(
-            &self.image,
-            &base,
-        )
-        .map_err(|error| fail(error.message))?;
+        let install_users =
+            crate::package::installer::environment::current_install_users(&self.image, &base)
+                .map_err(|error| fail(error.message))?;
         let mut next = base.owner().clone();
         next.withdraw_for_live_factory(&active.name).map_err(fail)?;
         let restored = next
             .enable_system_setting(&active.name, domain)
             .ok_or_else(|| fail("Factory UID reservation failed"))?;
-        let restored_domain = restored.domain_set_id.as_deref()
+        let restored_domain = restored
+            .domain_set_id
+            .as_deref()
             .ok_or_else(|| fail("Factory domain identity absent"))
             .and_then(|id| domain_bytes(id).map_err(fail))?;
-        validate_factory_identity(&next, &active.name, None, "enabled")
-            .map_err(fail)?;
+        validate_factory_identity(&next, &active.name, None, "enabled").map_err(fail)?;
         let host = (self.image.apks.files)(&factory.code_path)
             .ok_or_else(|| fail("Factory VFS mapping unavailable"))?;
         let native = scan::NativeLibraryEnvironment {
@@ -410,19 +422,22 @@ impl Factory {
         }
         let latest = self.store.snapshots.capture();
         let targets = std::collections::BTreeSet::from([active.name.clone()]);
-        let conflict = match crate::package::scan_snapshot::install_context::install_user_rebase_conflict(
-            &base,
-            &latest,
-            &mut admission.owner,
-            &targets,
-        ) {
-            Ok(conflict) => conflict,
-            Err(error) => return with_cleanup(
-                Err(fail(error)),
-                (self.image.release_permissions)(&factory.code_path, false),
-                "Factory permission rollback",
-            ),
-        };
+        let conflict =
+            match crate::package::scan_snapshot::install_context::install_user_rebase_conflict(
+                &base,
+                &latest,
+                &mut admission.owner,
+                &targets,
+            ) {
+                Ok(conflict) => conflict,
+                Err(error) => {
+                    return with_cleanup(
+                        Err(fail(error)),
+                        (self.image.release_permissions)(&factory.code_path, false),
+                        "Factory permission rollback",
+                    );
+                }
+            };
         if let Some(reason) = conflict {
             return with_cleanup(
                 Err(fail(format!("Factory permission base changed: {reason}"))),
@@ -430,8 +445,11 @@ impl Factory {
                 "Factory permission rollback",
             );
         }
-        if base.usage() != latest.usage() && admission.owner.has_replica_runtime()
-            && let Err(error) = admission.owner.update_replica_usage(base.usage(), latest.usage())
+        if base.usage() != latest.usage()
+            && admission.owner.has_replica_runtime()
+            && let Err(error) = admission
+                .owner
+                .update_replica_usage(base.usage(), latest.usage())
         {
             return with_cleanup(
                 Err(fail(error)),
@@ -527,20 +545,32 @@ fn validate_factory_identity(
     path: Option<&str>,
     phase: &str,
 ) -> Result<(), String> {
-    let setting = owner.settings.packages.iter().find(|setting| setting.name == name)
+    let setting = owner
+        .settings
+        .packages
+        .iter()
+        .find(|setting| setting.name == name)
         .ok_or_else(|| format!("factory restoration {phase} setting missing"))?;
     if path.is_some_and(|path| setting.code_path != path)
         || setting.flags & crate::package::settings::FLAG_SYSTEM == 0
         || setting.flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP != 0
         || setting.transient.updated_system_app
-        || owner.settings.disabled_system_packages.iter().any(|setting| setting.name == name)
+        || owner
+            .settings
+            .disabled_system_packages
+            .iter()
+            .any(|setting| setting.name == name)
     {
         return Err(format!(
             "factory restoration {phase} identity differs: path={} expected={path:?} flags={} transient_updated={} disabled={}",
             setting.code_path,
             setting.flags,
             setting.transient.updated_system_app,
-            owner.settings.disabled_system_packages.iter().any(|setting| setting.name == name),
+            owner
+                .settings
+                .disabled_system_packages
+                .iter()
+                .any(|setting| setting.name == name),
         ));
     }
     Ok(())
@@ -548,12 +578,20 @@ fn validate_factory_identity(
 
 fn domain_bytes(id: &str) -> Result<[u8; 16], String> {
     let normalized = crate::package::domain_verification::uuid::parse(id, true)?;
-    let hex = normalized.bytes().filter(|byte| *byte != b'-').collect::<Vec<_>>();
-    if hex.len() != 32 { return Err("factory domain identity length differs".into()); }
+    let hex = normalized
+        .bytes()
+        .filter(|byte| *byte != b'-')
+        .collect::<Vec<_>>();
+    if hex.len() != 32 {
+        return Err("factory domain identity length differs".into());
+    }
     let mut bytes = [0u8; 16];
     for (at, pair) in hex.chunks_exact(2).enumerate() {
-        bytes[at] = u8::from_str_radix(std::str::from_utf8(pair).map_err(|error| error.to_string())?, 16)
-            .map_err(|error| error.to_string())?;
+        bytes[at] = u8::from_str_radix(
+            std::str::from_utf8(pair).map_err(|error| error.to_string())?,
+            16,
+        )
+        .map_err(|error| error.to_string())?;
     }
     Ok(bytes)
 }
@@ -567,7 +605,9 @@ fn with_cleanup<T>(
         (Ok(_), Err(error)) => Err(error),
         (Err(error), Ok(())) => Err(error),
         (Err(mut error), Err(cleanup)) => {
-            error.message.push_str(&format!("; {context}: {}", cleanup.message));
+            error
+                .message
+                .push_str(&format!("; {context}: {}", cleanup.message));
             Err(error)
         }
     }
@@ -579,24 +619,45 @@ fn publication_error(error: crate::package::scan::live_install::PublicationFailu
         }
     }
 }
-fn system_location(path: &str, apexes: &[crate::package::scan::Apex]) -> Result<crate::package::scan::Location, Exception> {
+fn system_location(
+    path: &str,
+    apexes: &[crate::package::scan::Apex],
+) -> Result<crate::package::scan::Location, Exception> {
     use crate::package::scan::{Kind, Location, Partition};
     if path.starts_with("/apex/") {
-        let apex = apexes.iter().filter(|apex| {
-            path.strip_prefix(&apex.mount_path).is_some_and(|rest| rest.starts_with('/'))
-        }).max_by_key(|apex| apex.mount_path.len())
+        let apex = apexes
+            .iter()
+            .filter(|apex| {
+                path.strip_prefix(&apex.mount_path)
+                    .is_some_and(|rest| rest.starts_with('/'))
+            })
+            .max_by_key(|apex| apex.mount_path.len())
             .ok_or_else(|| fail("Factory APEX code has no original active origin"))?;
         if apex.partition == Partition::Data {
             return Err(fail("Factory APEX has no preinstalled partition"));
         }
         let relative = &path[apex.mount_path.len() + 1..];
-        let kind = if relative.starts_with("priv-app/") { Kind::PrivApp }
-            else if relative.starts_with("app/") { Kind::App }
-            else { return Err(fail("Factory APEX code is outside its application directories")); };
-        if relative.split('/').any(|component| component.is_empty() || matches!(component, "." | "..")) {
+        let kind = if relative.starts_with("priv-app/") {
+            Kind::PrivApp
+        } else if relative.starts_with("app/") {
+            Kind::App
+        } else {
+            return Err(fail(
+                "Factory APEX code is outside its application directories",
+            ));
+        };
+        if relative
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+        {
             return Err(fail("Factory APEX code path is not canonical"));
         }
-        return Ok(Location { path: path.into(), partition: apex.partition, kind, apex: Some(apex.clone()) });
+        return Ok(Location {
+            path: path.into(),
+            partition: apex.partition,
+            kind,
+            apex: Some(apex.clone()),
+        });
     }
     let (partition, prefix) = if path.starts_with("/system_ext/") {
         (Partition::SystemExt, "/system_ext/")
@@ -663,46 +724,92 @@ impl Drop for PreparedData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::package::{parse, scan::{Apex, Kind, Partition}};
+    use crate::package::{
+        parse,
+        scan::{Apex, Kind, Partition},
+    };
     #[test]
     fn factory_restore_uses_original_apex_origin_and_parse_policy() {
-        let apex = Apex { module_name: Some("vendor.module".into()), mount_path: "/apex/vendor.module".into(), partition: Partition::Product, factory: true, active_changed: false };
+        let apex = Apex {
+            module_name: Some("vendor.module".into()),
+            mount_path: "/apex/vendor.module".into(),
+            partition: Partition::Product,
+            factory: true,
+            active_changed: false,
+        };
         let path = "/apex/vendor.module/priv-app/Factory/base.apk";
         let location = system_location(path, &[apex.clone()]).unwrap();
         assert_eq!(location.partition, Partition::Product);
         assert_eq!(location.kind, Kind::PrivApp);
         assert_eq!(location.apex.as_ref(), Some(&apex));
-        assert_eq!(location.parse_flags(), parse::PARSE_IS_SYSTEM_DIR | parse::PARSE_APK_IN_APEX);
+        assert_eq!(
+            location.parse_flags(),
+            parse::PARSE_IS_SYSTEM_DIR | parse::PARSE_APK_IN_APEX
+        );
         assert!(location.privileged());
-        let app = system_location("/apex/vendor.module/app/Factory/base.apk", &[apex.clone()]).unwrap();
-        assert_eq!(app.kind, Kind::App); assert!(!app.privileged());
-        for path in ["/apex/vendor.module-other/priv-app/F", "/apex/vendor.module/priv-app/../F", "/apex/vendor.module/bin/F", "/apex/unknown/priv-app/F"] {
+        let app =
+            system_location("/apex/vendor.module/app/Factory/base.apk", &[apex.clone()]).unwrap();
+        assert_eq!(app.kind, Kind::App);
+        assert!(!app.privileged());
+        for path in [
+            "/apex/vendor.module-other/priv-app/F",
+            "/apex/vendor.module/priv-app/../F",
+            "/apex/vendor.module/bin/F",
+            "/apex/unknown/priv-app/F",
+        ] {
             assert!(system_location(path, &[apex.clone()]).is_err(), "{path}");
         }
-        let mut data = apex; data.partition = Partition::Data;
+        let mut data = apex;
+        data.partition = Partition::Data;
         assert!(system_location("/apex/vendor.module/app/F", &[data]).is_err());
         let ordinary = system_location("/system_ext/priv-app/F/base.apk", &[]).unwrap();
-        assert_eq!(ordinary.partition, Partition::SystemExt); assert_eq!(ordinary.apex, None);
+        assert_eq!(ordinary.partition, Partition::SystemExt);
+        assert_eq!(ordinary.apex, None);
         assert_eq!(ordinary.parse_flags(), parse::PARSE_IS_SYSTEM_DIR);
     }
     #[test]
     fn factory_restore_identity_rejects_updated_or_retained_factory_state() {
-        use crate::package::{scan::SigningScan, settings::{Package, Settings, FLAG_SYSTEM}};
-        let package = Package { name: "factory".into(), code_path: "/system/app/Factory".into(),
-            app_id: 10001, flags: FLAG_SYSTEM, ..Default::default() };
-        let mut owner = SigningScan::new(&Default::default(), &Settings { packages: vec![package.clone()], ..Default::default() }, 36).unwrap();
+        use crate::package::{
+            scan::SigningScan,
+            settings::{FLAG_SYSTEM, Package, Settings},
+        };
+        let package = Package {
+            name: "factory".into(),
+            code_path: "/system/app/Factory".into(),
+            app_id: 10001,
+            flags: FLAG_SYSTEM,
+            ..Default::default()
+        };
+        let mut owner = SigningScan::new(
+            &Default::default(),
+            &Settings {
+                packages: vec![package.clone()],
+                ..Default::default()
+            },
+            36,
+        )
+        .unwrap();
         validate_factory_identity(&owner, "factory", Some(&package.code_path), "test").unwrap();
         owner.settings.packages[0].transient.updated_system_app = true;
-        assert!(validate_factory_identity(&owner, "factory", Some(&package.code_path), "test").is_err());
+        assert!(
+            validate_factory_identity(&owner, "factory", Some(&package.code_path), "test").is_err()
+        );
         owner.settings.packages[0].transient.updated_system_app = false;
         owner.settings.packages[0].flags |= crate::package::info::FLAG_UPDATED_SYSTEM_APP;
-        assert!(validate_factory_identity(&owner, "factory", Some(&package.code_path), "test").is_err());
+        assert!(
+            validate_factory_identity(&owner, "factory", Some(&package.code_path), "test").is_err()
+        );
     }
     #[test]
     fn factory_restore_reuses_the_active_domain_identity() {
         let id = "f8cf4bdb-015d-4960-804f-8c9d74376cab";
-        assert_eq!(domain_bytes(id).unwrap(), [0xf8,0xcf,0x4b,0xdb,0x01,0x5d,0x49,0x60,
-            0x80,0x4f,0x8c,0x9d,0x74,0x37,0x6c,0xab]);
+        assert_eq!(
+            domain_bytes(id).unwrap(),
+            [
+                0xf8, 0xcf, 0x4b, 0xdb, 0x01, 0x5d, 0x49, 0x60, 0x80, 0x4f, 0x8c, 0x9d, 0x74, 0x37,
+                0x6c, 0xab
+            ]
+        );
     }
     #[test]
     fn factory_permission_cleanup_preserves_the_primary_failure() {

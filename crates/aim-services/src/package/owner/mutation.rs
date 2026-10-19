@@ -66,22 +66,40 @@ impl Store {
     /// One Settings write for a complete batch, after its native scan changes
     /// were prepared atomically. Retained resolver/role sections stay intact.
     pub fn commit_updated_scan_restrictions(
-        &mut self, scan: &crate::package::scan::SigningScan, user: u32,
+        &mut self,
+        scan: &crate::package::scan::SigningScan,
+        user: u32,
         cross_user_suspension: bool,
     ) -> Result<(), WriteError> {
         self.validate_committed_scan(scan)?;
-        if self.unread_restrictions.contains(&user) { return Err(WriteError::before("package restrictions not restored")); }
-        let mut root = self.restrictions.get(&user).cloned().ok_or_else(|| WriteError::before("mutation user absent"))?;
-        self.ensure_default_apps_owner(&mut root,user)?;
-        root.content.retain(|node| !matches!(node, Node::Element(entry) if entry.name == "pkg"));
+        if self.unread_restrictions.contains(&user) {
+            return Err(WriteError::before("package restrictions not restored"));
+        }
+        let mut root = self
+            .restrictions
+            .get(&user)
+            .cloned()
+            .ok_or_else(|| WriteError::before("mutation user absent"))?;
+        self.ensure_default_apps_owner(&mut root, user)?;
+        root.content
+            .retain(|node| !matches!(node, Node::Element(entry) if entry.name == "pkg"));
         let mut states = Vec::new();
         for package in &scan.settings.packages {
-            let users = scan.scanned_user_states(&package.name).ok_or_else(|| WriteError::before("mutation package user owner absent"))?;
+            let users = scan
+                .scanned_user_states(&package.name)
+                .ok_or_else(|| WriteError::before("mutation package user owner absent"))?;
             let state = users.get(&(user as i32)).cloned().unwrap_or_default();
-            root.content.push(Node::Element(super::initial_user::initial_package(&package.name, &state, user as i32, cross_user_suspension)?));
+            root.content
+                .push(Node::Element(super::initial_user::initial_package(
+                    &package.name,
+                    &state,
+                    user as i32,
+                    cross_user_suspension,
+                )?));
             states.push((package.name.clone(), state));
         }
-        let mut parsed = crate::package::restrictions::Restrictions::parse(&root).map_err(WriteError::before)?;
+        let mut parsed =
+            crate::package::restrictions::Restrictions::parse(&root).map_err(WriteError::before)?;
         parsed.packages = states;
         let bytes = abx::write(&root).map_err(WriteError::before)?;
         let dir = self.data.join("system/users").join(user.to_string());
@@ -92,12 +110,22 @@ impl Store {
         if result.is_ok() || result.as_ref().is_err_and(|error| error.committed) {
             self.durable_restrictions.insert(user, root.clone());
             self.restrictions.insert(user, root);
-            self.state.users.iter_mut().find(|(id, _)| *id == user).unwrap().1.restrictions = parsed;
+            self.state
+                .users
+                .iter_mut()
+                .find(|(id, _)| *id == user)
+                .unwrap()
+                .1
+                .restrictions = parsed;
         }
         result
     }
-    pub fn commit_scan_settings_owner(&mut self, scan: &crate::package::scan::SigningScan) -> Result<(), WriteError> {
-        let root = super::scan_settings::replace(&self.settings_document, scan).map_err(WriteError::before)?;
+    pub fn commit_scan_settings_owner(
+        &mut self,
+        scan: &crate::package::scan::SigningScan,
+    ) -> Result<(), WriteError> {
+        let root = super::scan_settings::replace(&self.settings_document, scan)
+            .map_err(WriteError::before)?;
         self.commit_package_document(root)
     }
 
@@ -200,12 +228,29 @@ impl Store {
                 attribute(entry, "stopped", (*stopped).then_some(Value::Bool(true)));
                 attribute(entry, "nl", (*not_launched).then_some(Value::Bool(true)));
             }
-            Change::Distraction(value) => attribute(entry, "distraction_flags", (*value != 0).then_some(Value::Int(*value))),
+            Change::Distraction(value) => attribute(
+                entry,
+                "distraction_flags",
+                (*value != 0).then_some(Value::Int(*value)),
+            ),
             Change::Suspensions(values) => {
-                entry.content.retain(|node| !matches!(node, Node::Element(child) if child.name == "suspend-params"));
-                let raw = crate::package::restrictions::UserState { suspensions: values.clone(), ..Default::default() };
-                let serialized = super::initial_user::initial_package(&plan.package, &raw, user as i32, false)?;
-                attribute(entry, "suspended", values.as_ref().is_some_and(|values| !values.is_empty()).then_some(Value::Bool(true)));
+                entry.content.retain(
+                    |node| !matches!(node, Node::Element(child) if child.name == "suspend-params"),
+                );
+                let raw = crate::package::restrictions::UserState {
+                    suspensions: values.clone(),
+                    ..Default::default()
+                };
+                let serialized =
+                    super::initial_user::initial_package(&plan.package, &raw, user as i32, false)?;
+                attribute(
+                    entry,
+                    "suspended",
+                    values
+                        .as_ref()
+                        .is_some_and(|values| !values.is_empty())
+                        .then_some(Value::Bool(true)),
+                );
                 entry.content.extend(serialized.content);
             }
             Change::Hidden(hidden) => {

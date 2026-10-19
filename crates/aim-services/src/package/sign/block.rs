@@ -500,7 +500,8 @@ impl Merkle {
             self.block.extend_from_slice(&data[..take]);
             data = &data[take..];
             if self.block.len() == VERITY_BLOCK {
-                self.hashes.extend_from_slice(&salted(self.salt, &self.block));
+                self.hashes
+                    .extend_from_slice(&salted(self.salt, &self.block));
                 self.block.clear();
             }
         }
@@ -510,7 +511,8 @@ impl Merkle {
     fn finish(mut self) -> Vec<u8> {
         if !self.block.is_empty() {
             self.block.resize(VERITY_BLOCK, 0);
-            self.hashes.extend_from_slice(&salted(self.salt, &self.block));
+            self.hashes
+                .extend_from_slice(&salted(self.salt, &self.block));
         }
         self.hashes
     }

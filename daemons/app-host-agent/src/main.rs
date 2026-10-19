@@ -28,8 +28,12 @@ use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 
-use binder::binder_impl::{AssociateClass, BorrowedParcel, IBinderInternal, Remotable, TransactionCode};
-use binder::{BinderFeatures, Interface, ParcelFileDescriptor, Status, StatusCode, declare_binder_interface};
+use binder::binder_impl::{
+    AssociateClass, BorrowedParcel, IBinderInternal, Remotable, TransactionCode,
+};
+use binder::{
+    BinderFeatures, Interface, ParcelFileDescriptor, Status, StatusCode, declare_binder_interface,
+};
 
 mod effects;
 mod input;
@@ -114,7 +118,11 @@ fn relay(host: UnixStream) {
     let mut commands = BufReader::new(host);
     let mut zygote: Option<UnixStream> = None;
     let mut child: Option<String> = None;
-    if commands.fill_buf().map(|b| b.first() == Some(&b'@')).unwrap_or(false) {
+    if commands
+        .fill_buf()
+        .map(|b| b.first() == Some(&b'@'))
+        .unwrap_or(false)
+    {
         let mut line = String::new();
         if let Err(error) = commands.read_line(&mut line) {
             return log::error!("host target: {error}");
@@ -130,14 +138,20 @@ fn relay(host: UnixStream) {
         if zygote.is_none() {
             match connect_zygote(child.as_deref()) {
                 Ok(stream) => zygote = Some(stream),
-                Err(error) => return log::error!("{}: {error}", child.as_deref().unwrap_or(ZYGOTE)),
+                Err(error) => {
+                    return log::error!("{}: {error}", child.as_deref().unwrap_or(ZYGOTE));
+                }
             }
         }
         let session = zygote.as_mut().unwrap();
         // `preloadApp` reads an `int`; a start, the pid and a `boolean`.
         let preload = command.split(|&b| b == b'\n').nth(1) == Some(b"--preload-app");
         let mut reply = [0u8; 5];
-        let reply = if preload { &mut reply[..4] } else { &mut reply[..] };
+        let reply = if preload {
+            &mut reply[..4]
+        } else {
+            &mut reply[..]
+        };
         if let Err(error) = session
             .write_all(&command)
             .and_then(|()| session.read_exact(reply))
@@ -160,13 +174,16 @@ fn connect_zygote(child: Option<&str>) -> std::io::Result<UnixStream> {
     let deadline = std::time::Instant::now() + ZYGOTE_CONNECT_TIMEOUT;
     loop {
         let connected = match child {
-            Some(name) => std::os::unix::net::SocketAddr::from_abstract_name(name).and_then(|a| UnixStream::connect_addr(&a)),
+            Some(name) => std::os::unix::net::SocketAddr::from_abstract_name(name)
+                .and_then(|a| UnixStream::connect_addr(&a)),
             None => UnixStream::connect(ZYGOTE),
         };
         match connected {
             Err(error)
-                if matches!(error.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound)
-                    && std::time::Instant::now() < deadline =>
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) && std::time::Instant::now() < deadline =>
             {
                 std::thread::sleep(ZYGOTE_CONNECT_RETRY_DELAY)
             }
@@ -182,9 +199,10 @@ fn read_command(from: &mut impl BufRead) -> std::io::Result<Option<Vec<u8>>> {
     if from.read_line(&mut line)? == 0 {
         return Ok(None);
     }
-    let count: usize = line.trim_end().parse().map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, "argument count")
-    })?;
+    let count: usize = line
+        .trim_end()
+        .parse()
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "argument count"))?;
     let mut command = line.into_bytes();
     for _ in 0..count {
         let mut argument = Vec::new();
@@ -209,12 +227,22 @@ declare_binder_interface! {
 impl IAppHost for BpAppHost {}
 impl IAppHost for binder::binder_impl::Binder<BnAppHost> {}
 
-fn no_calls(_: &dyn IAppHost, _: TransactionCode, _: &BorrowedParcel<'_>, _: &mut BorrowedParcel<'_>) -> Result<(), StatusCode> {
+fn no_calls(
+    _: &dyn IAppHost,
+    _: TransactionCode,
+    _: &BorrowedParcel<'_>,
+    _: &mut BorrowedParcel<'_>,
+) -> Result<(), StatusCode> {
     Err(StatusCode::UNKNOWN_TRANSACTION)
 }
 
 pub trait IAppHostAgent: Interface {
-    fn open_input_channel(&self, name: &str, display: (i32, i32), region: input::Region) -> std::io::Result<(i32, OwnedFd)>;
+    fn open_input_channel(
+        &self,
+        name: &str,
+        display: (i32, i32),
+        region: input::Region,
+    ) -> std::io::Result<(i32, OwnedFd)>;
     fn focus_input_channel(&self, index: i32) -> bool;
     fn set_input_channel_frame(&self, index: i32, region: input::Region) -> bool;
     fn play_sound_effect(&self, path: &str, gain: f32) -> Result<(), String>;
@@ -229,7 +257,12 @@ declare_binder_interface! {
 }
 
 impl IAppHostAgent for BpAppHostAgent {
-    fn open_input_channel(&self, _: &str, _: (i32, i32), _: input::Region) -> std::io::Result<(i32, OwnedFd)> {
+    fn open_input_channel(
+        &self,
+        _: &str,
+        _: (i32, i32),
+        _: input::Region,
+    ) -> std::io::Result<(i32, OwnedFd)> {
         Err(std::io::ErrorKind::Unsupported.into())
     }
     fn focus_input_channel(&self, _: i32) -> bool {
@@ -245,7 +278,12 @@ impl IAppHostAgent for BpAppHostAgent {
 }
 
 impl IAppHostAgent for binder::binder_impl::Binder<BnAppHostAgent> {
-    fn open_input_channel(&self, name: &str, display: (i32, i32), region: input::Region) -> std::io::Result<(i32, OwnedFd)> {
+    fn open_input_channel(
+        &self,
+        name: &str,
+        display: (i32, i32),
+        region: input::Region,
+    ) -> std::io::Result<(i32, OwnedFd)> {
         self.0.open_input_channel(name, display, region)
     }
     fn focus_input_channel(&self, index: i32) -> bool {
@@ -299,7 +337,10 @@ fn on_transact(
             reply.write(&if known {
                 Status::ok()
             } else {
-                Status::new_exception_str(binder::ExceptionCode::ILLEGAL_ARGUMENT, Some(format!("no input channel {index}")))
+                Status::new_exception_str(
+                    binder::ExceptionCode::ILLEGAL_ARGUMENT,
+                    Some(format!("no input channel {index}")),
+                )
             })?;
             Ok(())
         }
@@ -329,12 +370,17 @@ fn on_transact(
             let action: i32 = data.read()?;
             let (down_time, time): (i64, i64) = (data.read()?, data.read()?);
             let (x, y, pressure): (f32, f32, f32) = (data.read()?, data.read()?, data.read()?);
-            reply.write(&match aim_input_transport::Motion::injected(action, down_time, time, x, y, pressure) {
+            reply.write(&match aim_input_transport::Motion::injected(
+                action, down_time, time, x, y, pressure,
+            ) {
                 Some(motion) => {
                     agent.inject_motion(&motion);
                     Status::ok()
                 }
-                None => Status::new_exception_str(binder::ExceptionCode::ILLEGAL_ARGUMENT, Some(format!("injected action {action}"))),
+                None => Status::new_exception_str(
+                    binder::ExceptionCode::ILLEGAL_ARGUMENT,
+                    Some(format!("injected action {action}")),
+                ),
             })?;
             Ok(())
         }
@@ -345,7 +391,10 @@ fn on_transact(
                 Status::ok()
             } else {
                 let error = std::io::Error::last_os_error();
-                Status::new_exception_str(binder::ExceptionCode::ILLEGAL_STATE, Some(format!("kill {pid}: {error}")))
+                Status::new_exception_str(
+                    binder::ExceptionCode::ILLEGAL_STATE,
+                    Some(format!("kill {pid}: {error}")),
+                )
             };
             reply.write(&status)?;
             Ok(())
@@ -383,13 +432,21 @@ impl IAppHostAgent for Agent {
     /// `InputChannel::openInputChannelPair`: a sequenced-packet socket
     /// pair with 32 KiB buffers each way; the window, the latest, comes to
     /// the front and takes the focus.
-    fn open_input_channel(&self, _name: &str, display: (i32, i32), region: input::Region) -> std::io::Result<(i32, OwnedFd)> {
+    fn open_input_channel(
+        &self,
+        _name: &str,
+        display: (i32, i32),
+        region: input::Region,
+    ) -> std::io::Result<(i32, OwnedFd)> {
         let mut pair = [0; 2];
         // SAFETY: a socket pair into a local array; both ends are owned below.
-        if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, pair.as_mut_ptr()) } != 0 {
+        if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, pair.as_mut_ptr()) }
+            != 0
+        {
             return Err(std::io::Error::last_os_error());
         }
-        let (server, client) = unsafe { (OwnedFd::from_raw_fd(pair[0]), OwnedFd::from_raw_fd(pair[1])) };
+        let (server, client) =
+            unsafe { (OwnedFd::from_raw_fd(pair[0]), OwnedFd::from_raw_fd(pair[1])) };
         for fd in [&server, &client] {
             for option in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
                 // SAFETY: an int option of a socket this function owns.
@@ -404,7 +461,9 @@ impl IAppHostAgent for Agent {
                 };
             }
         }
-        let index = self.channels.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let index = self
+            .channels
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.input.add_window(index, server, display, region);
         Ok((index, client))
     }
@@ -427,7 +486,14 @@ impl IAppHostAgent for Agent {
 
 /// Attaches the agent to the app host, which waits for it.
 fn attach() {
-    let agent = BnAppHostAgent::new_binder(Agent { input: input::Dispatcher::new(), channels: Default::default(), effects: Default::default() }, BinderFeatures::default());
+    let agent = BnAppHostAgent::new_binder(
+        Agent {
+            input: input::Dispatcher::new(),
+            channels: Default::default(),
+            effects: Default::default(),
+        },
+        BinderFeatures::default(),
+    );
     let Some(mut host) = binder::wait_for_service(APP_HOST) else {
         return log::error!("{APP_HOST}: not found");
     };

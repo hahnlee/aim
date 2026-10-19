@@ -500,14 +500,22 @@ pub(crate) fn send(fd: RawFd, bytes: &[u8], reply: RawFd) -> io::Result<()> {
 fn receive(fd: RawFd, bytes: &mut [u8]) -> io::Result<(usize, Option<OwnedFd>)> {
     receive_flags(fd, bytes, 0)
 }
-pub(crate) fn receive_flags(fd: RawFd, bytes: &mut [u8], flags: i32) -> io::Result<(usize, Option<OwnedFd>)> {
+pub(crate) fn receive_flags(
+    fd: RawFd,
+    bytes: &mut [u8],
+    flags: i32,
+) -> io::Result<(usize, Option<OwnedFd>)> {
     receive_flags_phase(fd, bytes, flags).map_err(|failure| failure.error)
 }
 pub(crate) struct ReceiveFailure {
     pub error: io::Error,
     pub consumed: bool,
 }
-pub(crate) fn receive_flags_phase(fd: RawFd, bytes: &mut [u8], flags: i32) -> Result<(usize, Option<OwnedFd>), ReceiveFailure> {
+pub(crate) fn receive_flags_phase(
+    fd: RawFd,
+    bytes: &mut [u8],
+    flags: i32,
+) -> Result<(usize, Option<OwnedFd>), ReceiveFailure> {
     let mut control = [0usize; 4];
     let mut iov = libc::iovec {
         iov_base: bytes.as_mut_ptr().cast(),
@@ -522,11 +530,14 @@ pub(crate) fn receive_flags_phase(fd: RawFd, bytes: &mut [u8], flags: i32) -> Re
         msg.msg_controllen = std::mem::size_of_val(&control) as u32;
         let n = libc::recvmsg(fd, &mut msg, flags);
         if n <= 0 {
-            return Err(ReceiveFailure { error: if n < 0 {
-                io::Error::last_os_error()
-            } else {
-                io::Error::from_raw_os_error(libc::ECONNRESET)
-            }, consumed: false });
+            return Err(ReceiveFailure {
+                error: if n < 0 {
+                    io::Error::last_os_error()
+                } else {
+                    io::Error::from_raw_os_error(libc::ECONNRESET)
+                },
+                consumed: false,
+            });
         }
         let mut descriptors = Vec::new();
         let mut c = libc::CMSG_FIRSTHDR(&msg);
@@ -546,9 +557,16 @@ pub(crate) fn receive_flags_phase(fd: RawFd, bytes: &mut [u8], flags: i32) -> Re
         for descriptor in &descriptors {
             let fd_flags = libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFD);
             if fd_flags < 0
-                || libc::fcntl(descriptor.as_raw_fd(), libc::F_SETFD, fd_flags | libc::FD_CLOEXEC) < 0
+                || libc::fcntl(
+                    descriptor.as_raw_fd(),
+                    libc::F_SETFD,
+                    fd_flags | libc::FD_CLOEXEC,
+                ) < 0
             {
-                return Err(ReceiveFailure { error: io::Error::last_os_error(), consumed: true });
+                return Err(ReceiveFailure {
+                    error: io::Error::last_os_error(),
+                    consumed: true,
+                });
             }
         }
         let reply = if descriptors.len() == 1

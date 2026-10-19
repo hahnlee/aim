@@ -200,7 +200,9 @@ pub fn signaled(timestamp_ns: i64, status: i32) -> io::Result<OwnedFd> {
 /// Hand a sync_file to the guest: its fd number from now on.
 pub fn give_to_guest(file: OwnedFd) -> Result<RawFd, i32> {
     let fd = file.as_raw_fd();
-    if let Some(h) = HOOKS.get() { (h.adopt)(fd)?; }
+    if let Some(h) = HOOKS.get() {
+        (h.adopt)(fd)?;
+    }
     Ok(file.into_raw_fd())
 }
 

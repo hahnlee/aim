@@ -163,9 +163,13 @@ pub fn export(directory: &Path) {
 }
 
 #[derive(Default)]
-pub(crate) struct Remaining { headers: aim_services::package::settings::native_read::NativeRead }
+pub(crate) struct Remaining {
+    headers: aim_services::package::settings::native_read::NativeRead,
+}
 impl ReadOwners for Remaining {
-    fn package_header(&mut self, package: &Package, start: &Element) -> Result<(), ReadError> { self.headers.package_header(package, start) }
+    fn package_header(&mut self, package: &Package, start: &Element) -> Result<(), ReadError> {
+        self.headers.package_header(package, start)
+    }
     fn factory_record(
         &mut self,
         _: &mut Settings,

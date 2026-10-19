@@ -24,20 +24,20 @@ mod mirror;
 mod nonces;
 pub mod notifications;
 pub mod package;
-pub mod statusbar;
 mod pasteboard;
 mod service_host;
 mod settings;
 pub mod shadow;
 mod shell;
+pub mod statusbar;
 mod system;
 pub use system::System;
-pub use system::package_runtime::BootFacts as PackageBootFacts;
 pub use system::package_lifecycle as system_package_lifecycle;
+pub use system::package_runtime::BootFacts as PackageBootFacts;
 pub mod system_package_installer_init;
 pub mod system_package_lifecycle_init;
-pub mod system_package_users_init;
 pub mod system_package_persistence_init;
+pub mod system_package_users_init;
 pub use system::package_boot_inputs as system_package_boot_inputs;
 pub mod thermal;
 pub mod tzdata;
@@ -66,7 +66,11 @@ const SYSTEM_SERVER_CONTEXT: &str = "u:r:system_server:s0";
 pub(crate) fn fsync(file: &std::fs::File) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
     // SAFETY: plain fsync of an open descriptor.
-    if unsafe { libc::fsync(file.as_raw_fd()) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 /// `SystemServer.sMaxBinderThreads`.
@@ -89,41 +93,76 @@ struct Shutdown {
     errors: Vec<String>,
 }
 
-enum ShutdownPhase { Open, Closing, Closed(Result<(),String>) }
+enum ShutdownPhase {
+    Open,
+    Closing,
+    Closed(Result<(), String>),
+}
 
 impl Shutdown {
-    fn open()->Self{Self{phase:ShutdownPhase::Open,package:false,runtime:false,errors:Vec::new()}}
+    fn open() -> Self {
+        Self {
+            phase: ShutdownPhase::Open,
+            package: false,
+            runtime: false,
+            errors: Vec::new(),
+        }
+    }
 }
 
 impl NativeServices {
-    pub fn configure_package_constructor_capture(&self,path:&std::path::Path)->Result<(),String> {
+    pub fn configure_package_constructor_capture(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<(), String> {
         self.system.configure_package_constructor_capture(path)
     }
 
-    pub fn configure_package_image(&self, image: &std::path::Path, data: &std::path::Path,
+    pub fn configure_package_image(
+        &self,
+        image: &std::path::Path,
+        data: &std::path::Path,
         original_roots: &[std::path::PathBuf],
     ) -> Result<(), String> {
-        self.system.configure_native_package_image(image, data, original_roots)
+        self.system
+            .configure_native_package_image(image, data, original_roots)
             .map_err(|error| error.message)
     }
-    pub fn configure_package_boot(&self, policy: system::package_boot_inputs::Cli,
+    pub fn configure_package_boot(
+        &self,
+        policy: system::package_boot_inputs::Cli,
         resources: package::parse::resources::Config,
-        persistence: system_package_persistence_init::Inputs, facts: system::package_runtime::BootFacts,
+        persistence: system_package_persistence_init::Inputs,
+        facts: system::package_runtime::BootFacts,
     ) -> Result<(), String> {
-        self.system.configure_native_package_boot_policy(policy, resources).map_err(|error| error.message)?;
-        self.system.configure_native_package_persistence(persistence).map_err(|error| error.message)?;
-        self.system.configure_native_package_runtime_facts(facts).map_err(|error| error.message)
+        self.system
+            .configure_native_package_boot_policy(policy, resources)
+            .map_err(|error| error.message)?;
+        self.system
+            .configure_native_package_persistence(persistence)
+            .map_err(|error| error.message)?;
+        self.system
+            .configure_native_package_runtime_facts(facts)
+            .map_err(|error| error.message)
     }
     pub fn configure_package_property_area(&self, path: &std::path::Path) -> Result<(), String> {
-        self.system.configure_native_package_property_area(path).map_err(|error| error.message)
+        self.system
+            .configure_native_package_property_area(path)
+            .map_err(|error| error.message)
     }
     /// Creates the services named `names` (the binder names of
     /// `image/native-services`) as nodes of a new binder process.
     pub fn new(driver: &Arc<Driver>, names: &[String]) -> Result<Self, String> {
-        Self::new_for_namespace(driver,names,std::process::id() as i32)
+        Self::new_for_namespace(driver, names, std::process::id() as i32)
     }
-    pub fn new_for_namespace(driver:&Arc<Driver>,names:&[String],guest_pid:i32)->Result<Self,String>{
-        if guest_pid<=0{return Err("invalid native service process identifier".into());}
+    pub fn new_for_namespace(
+        driver: &Arc<Driver>,
+        names: &[String],
+        guest_pid: i32,
+    ) -> Result<Self, String> {
+        if guest_pid <= 0 {
+            return Err("invalid native service process identifier".into());
+        }
         let process = LocalProcess::open(
             driver,
             Device::Binder,
@@ -198,9 +237,14 @@ impl NativeServices {
                 )],
                 // Package endpoints are published only by the completed C boot
                 // session. The explicit image name enables its configuration.
-                "package" => { system.request_native_package_manager(); Vec::new() },
+                "package" => {
+                    system.request_native_package_manager();
+                    Vec::new()
+                }
                 // The app host image's ActivityManager (docs/app-host.md).
-                "activity" => app_host.get_or_insert_with(|| app_host::AppHost::new(process.clone())).services(),
+                "activity" => app_host
+                    .get_or_insert_with(|| app_host::AppHost::new(process.clone()))
+                    .services(),
                 other => return Err(format!("no native implementation of `{other}`")),
             };
             for (name, service) in published {
@@ -215,18 +259,31 @@ impl NativeServices {
             }));
         }
         process.start();
-        Ok(Self { system, services, package_runtime: std::sync::Mutex::new(None),
+        Ok(Self {
+            system,
+            services,
+            package_runtime: std::sync::Mutex::new(None),
             package_constructing: std::sync::atomic::AtomicBool::new(false),
-            shutdown: std::sync::Mutex::new(Shutdown::open()), app_host })
+            shutdown: std::sync::Mutex::new(Shutdown::open()),
+            app_host,
+        })
     }
 
     /// The app host's inputs (`app_host::AppHost::configure`), when
     /// `activity` is native.
-    pub fn configure_app_host(&self, root: &std::path::Path, data: &std::path::Path, bpf: &std::path::Path,
-        properties: app_host::Properties, set_property: app_host::SetProperty, connect: app_host::Connect,
+    pub fn configure_app_host(
+        &self,
+        root: &std::path::Path,
+        data: &std::path::Path,
+        bpf: &std::path::Path,
+        properties: app_host::Properties,
+        set_property: app_host::SetProperty,
+        connect: app_host::Connect,
         display: Option<&std::path::Path>,
     ) -> Result<(), String> {
-        let Some(host) = &self.app_host else { return Ok(()) };
+        let Some(host) = &self.app_host else {
+            return Ok(());
+        };
         host.configure(root, data, bpf, properties, set_property, connect)?;
         // Window mode is the display server's (`FN_WINDOWS`).
         if let Some(display) = display {
@@ -262,25 +319,48 @@ impl NativeServices {
         Ok(())
     }
 
-    pub fn initialize_package_runtime(&self, bridge: &Arc<package::bootstrap::Bridge>,
+    pub fn initialize_package_runtime(
+        &self,
+        bridge: &Arc<package::bootstrap::Bridge>,
         inputs: system::package_runtime::Inputs,
     ) -> Result<(Binder, Binder), String> {
-        if self.package_constructing.compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire).is_err() { return Err("native package construction already running".into()); }
+        if self
+            .package_constructing
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return Err("native package construction already running".into());
+        }
         struct Construction<'a>(&'a std::sync::atomic::AtomicBool);
         impl Drop for Construction<'_> {
-            fn drop(&mut self) { self.0.store(false, std::sync::atomic::Ordering::Release); }
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Release);
+            }
         }
         let _construction = Construction(&self.package_constructing);
-        if self.package_runtime.lock().unwrap().is_some() { return Err("native package runtime already initialized".into()); }
-        let runtime = self.system.initialize_native_package_runtime(bridge, inputs)
+        if self.package_runtime.lock().unwrap().is_some() {
+            return Err("native package runtime already initialized".into());
+        }
+        let runtime = self
+            .system
+            .initialize_native_package_runtime(bridge, inputs)
             .map_err(|error| format!("native package runtime: {}", error.message))?;
         let mut slot = self.package_runtime.lock().unwrap();
-        if slot.is_some() { return Err("native package runtime initialized concurrently".into()); }
+        if slot.is_some() {
+            return Err("native package runtime initialized concurrently".into());
+        }
         let runtime = Arc::new(runtime);
         *slot = Some(runtime.clone());
         drop(slot);
-        let endpoints = match self.system.publish_native_package_services(bridge, &runtime) {
+        let endpoints = match self
+            .system
+            .publish_native_package_services(bridge, &runtime)
+        {
             Ok(endpoints) => endpoints,
             Err(error) => {
                 if let Err(cleanup) = self.system.detach_package_bootstrap(bridge) {
@@ -299,37 +379,62 @@ impl NativeServices {
     /// even when another holder still retains this facade.
     pub fn shutdown(&self) -> Result<(), String> {
         let mut shutdown = self.shutdown.lock().unwrap();
-        if let ShutdownPhase::Closed(result)=&shutdown.phase{return result.clone();}
-        shutdown.phase=ShutdownPhase::Closing;
+        if let ShutdownPhase::Closed(result) = &shutdown.phase {
+            return result.clone();
+        }
+        shutdown.phase = ShutdownPhase::Closing;
         if !shutdown.package {
             if let Ok(bridge) = self.system.package_bootstrap() {
                 if let Err(error) = self.system.close_package_boot_session(&bridge) {
-                    shutdown.errors.push(format!("native package session shutdown cleanup: {}", error.message));
+                    shutdown.errors.push(format!(
+                        "native package session shutdown cleanup: {}",
+                        error.message
+                    ));
                 }
                 if let Err(error) = self.system.detach_package_bootstrap(&bridge) {
-                    shutdown.errors.push(format!("native package shutdown cleanup: {}", error.message));
+                    shutdown.errors.push(format!(
+                        "native package shutdown cleanup: {}",
+                        error.message
+                    ));
                 }
             }
-            shutdown.package=true;
+            shutdown.package = true;
         }
-        if !shutdown.runtime {self.package_runtime.lock().unwrap().take();shutdown.runtime=true;}
+        if !shutdown.runtime {
+            self.package_runtime.lock().unwrap().take();
+            shutdown.runtime = true;
+        }
         if let Err(error) = self.system.process().shutdown() {
-            if error.raw_os_error()==Some(libc::EDEADLK) {
-                shutdown.phase=ShutdownPhase::Open;
-                let current=format!("native Binder shutdown: {error}");
-                return Err(shutdown.errors.iter().cloned().chain(std::iter::once(current)).collect::<Vec<_>>().join("; "));
+            if error.raw_os_error() == Some(libc::EDEADLK) {
+                shutdown.phase = ShutdownPhase::Open;
+                let current = format!("native Binder shutdown: {error}");
+                return Err(shutdown
+                    .errors
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(current))
+                    .collect::<Vec<_>>()
+                    .join("; "));
             }
-            shutdown.errors.push(format!("native Binder shutdown: {error}"));
+            shutdown
+                .errors
+                .push(format!("native Binder shutdown: {error}"));
         }
-        let result=if shutdown.errors.is_empty(){Ok(())}else{Err(shutdown.errors.join("; "))};
-        shutdown.phase=ShutdownPhase::Closed(result.clone());
+        let result = if shutdown.errors.is_empty() {
+            Ok(())
+        } else {
+            Err(shutdown.errors.join("; "))
+        };
+        shutdown.phase = ShutdownPhase::Closed(result.clone());
         result
     }
 }
 
 impl Drop for NativeServices {
     fn drop(&mut self) {
-        if let Err(error) = self.shutdown() { eprintln!("{error}"); }
+        if let Err(error) = self.shutdown() {
+            eprintln!("{error}");
+        }
     }
 }
 
@@ -340,8 +445,13 @@ mod shutdown_tests {
 
     struct DataKeeper(Arc<fs::File>);
     impl aim_binder_host::local::Service for DataKeeper {
-        fn descriptor(&self) -> &str { "test.IDataKeeper" }
-        fn transact(&self, _: &mut aim_binder_host::local::Call<'_>) -> aim_binder_host::local::Reply {
+        fn descriptor(&self) -> &str {
+            "test.IDataKeeper"
+        }
+        fn transact(
+            &self,
+            _: &mut aim_binder_host::local::Call<'_>,
+        ) -> aim_binder_host::local::Reply {
             let _ = self.0.metadata().unwrap();
             Ok(aim_binder_host::parcel::Parcel::new())
         }
@@ -349,20 +459,24 @@ mod shutdown_tests {
 
     #[test]
     fn native_services_shutdown_releases_registered_data_file_while_retained() {
-        let path = std::env::temp_dir().join(format!("aim-native-services-stop-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("aim-native-services-stop-{}", std::process::id()));
         fs::write(&path, b"owned service data").unwrap();
         let file = Arc::new(fs::File::open(&path).unwrap());
         let fd = file.as_raw_fd();
         let weak = Arc::downgrade(&file);
         let services = Arc::new(NativeServices::new(&Driver::new(), &[]).unwrap());
         let retained = services.clone();
-        services.system.process().add_service(Arc::new(DataKeeper(file)));
+        services
+            .system
+            .process()
+            .add_service(Arc::new(DataKeeper(file)));
         assert!(unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0);
         services.shutdown().unwrap();
         assert_eq!(Arc::strong_count(&retained), 2);
-        let shutdown=retained.shutdown.lock().unwrap();
-        assert!(shutdown.package&&shutdown.runtime);
-        assert!(matches!(&shutdown.phase,ShutdownPhase::Closed(Ok(()))));
+        let shutdown = retained.shutdown.lock().unwrap();
+        assert!(shutdown.package && shutdown.runtime);
+        assert!(matches!(&shutdown.phase, ShutdownPhase::Closed(Ok(()))));
         drop(shutdown);
         assert!(weak.upgrade().is_none());
         assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);

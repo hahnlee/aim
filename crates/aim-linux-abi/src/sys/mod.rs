@@ -5,7 +5,6 @@
 
 mod arena;
 mod ashmem;
-mod dma_heap;
 mod attrs;
 mod binder;
 mod bpf;
@@ -15,32 +14,35 @@ mod copy;
 pub mod cred;
 mod dhcp;
 mod dir;
+mod display;
+mod dma_heap;
 mod epoll;
 mod evdev;
 mod event;
 mod exec;
 mod exec_fd_receipt;
-pub(crate) mod fdtab;
 mod fd_visibility;
-pub(crate) mod regular_file;
-pub(crate) mod verified_source;
+pub(crate) mod fdtab;
 mod fork;
 mod fs;
-mod display;
-mod host_descriptors;
-mod fsverity_ioctl;
 mod fsops;
+mod fsverity_ioctl;
 mod futex;
 mod genfs;
+mod host_descriptors;
 mod inotify;
 mod itimer;
 mod jit;
 mod knob;
 mod mem;
+pub(crate) mod regular_file;
+pub(crate) mod verified_source;
 mod verity_pager;
-pub(crate) use verity_pager::{register_segment as verity_segment,Derivative as VerityDerivative,RewritePages as VerityRewritePages,ComposedPages as VerityComposedPages,register_composed as verity_composed};
-pub(crate) mod verity_control;
-pub(crate) mod posix_locks;
+pub(crate) use verity_pager::{
+    ComposedPages as VerityComposedPages, Derivative as VerityDerivative,
+    RewritePages as VerityRewritePages, register_composed as verity_composed,
+    register_segment as verity_segment,
+};
 mod memfd;
 mod misc;
 mod mount;
@@ -52,12 +54,14 @@ mod packet;
 mod park;
 mod pidns;
 mod poll;
+pub(crate) mod posix_locks;
 mod process;
 mod procfs;
 mod procrec;
 mod proxy_file;
 mod pstate;
 mod pty_owner;
+pub(crate) mod verity_control;
 pub(crate) use pstate::initialize_umask;
 mod ptimer;
 mod ptrace;
@@ -67,17 +71,17 @@ mod sharedfile;
 mod sigframe;
 mod signal;
 mod smaps;
-pub(crate) use signal::initialize_verity_fault_slot;
 pub(crate) use signal::die as die_process;
+pub(crate) use signal::initialize_verity_fault_slot;
+pub(crate) mod close_effects;
 pub(crate) mod space;
 mod sync_file;
 mod thread;
 mod tmpfile;
 pub(crate) mod tty;
 mod uevent;
-pub(crate) mod user_memory;
-pub(crate) mod close_effects;
 mod uplink;
+pub(crate) mod user_memory;
 mod vmmap;
 mod wait;
 pub mod window;
@@ -95,7 +99,7 @@ pub use dir::synthesized_path as synthesized_dir_path;
 pub use exec::{ExecState, init as init_exec, interpret as interpret_script};
 pub use fdtab::adopt as adopt_fd;
 pub use fdtab::init as init_fds;
-pub use fdtab::{inherit as inherit_fds,open_fds,parse_guest_fds,parse_socket_receipts};
+pub use fdtab::{inherit as inherit_fds, open_fds, parse_guest_fds, parse_socket_receipts};
 pub use fork::spawn::{child_main as become_fork_child, reserve_fds as reserve_fork_fds};
 pub(crate) use fork::state as fork_state;
 pub use mem::init_brk;
@@ -175,9 +179,9 @@ pub fn dispatch(ctx: &mut GuestContext) {
                 line.push_str(", ");
             }
             if path_arg(nr) == Some(i) && nr != 17 {
-                match guest_cstr(*v){
-                    Ok(path)=>line.push_str(&format!("\"{}\"",String::from_utf8_lossy(&path))),
-                    Err(error)=>line.push_str(&format!("<errno {error}>")),
+                match guest_cstr(*v) {
+                    Ok(path) => line.push_str(&format!("\"{}\"", String::from_utf8_lossy(&path))),
+                    Err(error) => line.push_str(&format!("<errno {error}>")),
                 }
             } else if (*v as i64) < 0 && (*v as i64) > -4096 {
                 line.push_str(&format!("{}", *v as i64));
@@ -191,9 +195,9 @@ pub fn dispatch(ctx: &mut GuestContext) {
     // A syscall a host signal interrupted is restarted when no guest
     // handler is to run for it.
     let r = loop {
-        let release=close_effects::release_checkpoint();
+        let release = close_effects::release_checkpoint();
         let r = handle(ctx, nr, a);
-        let r=close_effects::after_release(release,r);
+        let r = close_effects::after_release(release, r);
         if !signal::after_syscall(ctx, nr, &a, r) {
             break r;
         }
@@ -203,7 +207,11 @@ pub fn dispatch(ctx: &mut GuestContext) {
     }
     if let Some((pid, tid, call)) = trace {
         if (-4095..0).contains(&r) {
-            crate::diag!("{line} = -{} ({}) [pid={pid} tid={tid} call={call} leave]", -r, names::errno_name(-r as i32));
+            crate::diag!(
+                "{line} = -{} ({}) [pid={pid} tid={tid} call={call} leave]",
+                -r,
+                names::errno_name(-r as i32)
+            );
         } else if !(0..=0xffff).contains(&r) {
             crate::diag!("{line} = {r:#x} [pid={pid} tid={tid} call={call} leave]");
         } else {

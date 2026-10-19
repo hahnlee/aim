@@ -68,7 +68,8 @@ impl PackageCode {
             && self.disabled == other.disabled
             && (Arc::ptr_eq(&self.entry, &other.entry)
                 || (self.entry.cache.bytes == other.entry.cache.bytes
-                    && self.entry.past_signing_certificates == other.entry.past_signing_certificates))
+                    && self.entry.past_signing_certificates
+                        == other.entry.past_signing_certificates))
     }
 }
 
@@ -361,25 +362,38 @@ struct ComputerLease {
     process: std::sync::Weak<aim_binder_host::local::LocalProcess>,
 }
 
-fn comparisons() -> &'static Mutex<BTreeMap<u64,std::sync::Weak<Snapshot>>> {
-    static REGISTRY: std::sync::OnceLock<Mutex<BTreeMap<u64,std::sync::Weak<Snapshot>>>>=std::sync::OnceLock::new();
-    REGISTRY.get_or_init(||Mutex::new(BTreeMap::new()))
+fn comparisons() -> &'static Mutex<BTreeMap<u64, std::sync::Weak<Snapshot>>> {
+    static REGISTRY: std::sync::OnceLock<Mutex<BTreeMap<u64, std::sync::Weak<Snapshot>>>> =
+        std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 /// The owners whose records in `current` differ from `before`'s, written for
 /// the replica; None requires a full capture. Records compare by content, so
 /// any two captures compare, such as an install's candidate and the canonical one.
-fn changed_owners(before:&Snapshot,current:&Snapshot)->Result<Option<Vec<u8>>,String>{
-    if !before.replica_validated||!current.replica_validated
-        ||before.usage().historical_available()!=current.usage().historical_available(){return Ok(None);}
-    let changes=current.replica_records()?.changed_since(before.replica_records()?);
-    let mut record=Parcel::new();
-    record.write_i64(current.version() as i64);record.write_i64(current.metadata_revision() as i64);
+fn changed_owners(before: &Snapshot, current: &Snapshot) -> Result<Option<Vec<u8>>, String> {
+    if !before.replica_validated
+        || !current.replica_validated
+        || before.usage().historical_available() != current.usage().historical_available()
+    {
+        return Ok(None);
+    }
+    let changes = current
+        .replica_records()?
+        .changed_since(before.replica_records()?);
+    let mut record = Parcel::new();
+    record.write_i64(current.version() as i64);
+    record.write_i64(current.metadata_revision() as i64);
     record.write_i32(changes.packages.len() as i32);
-    for (name,factory) in changes.packages{record.write_string16(Some(name));record.write_bool(factory);}
+    for (name, factory) in changes.packages {
+        record.write_string16(Some(name));
+        record.write_bool(factory);
+    }
     record.write_i32(changes.shared.len() as i32);
-    for name in changes.shared{record.write_string16(Some(name));}
-    Ok(Some(record.data().to_vec()).filter(|bytes|bytes.len()<=MAX_CHUNK))
+    for name in changes.shared {
+        record.write_string16(Some(name));
+    }
+    Ok(Some(record.data().to_vec()).filter(|bytes| bytes.len() <= MAX_CHUNK))
 }
 
 pub struct Endpoint {
@@ -389,9 +403,11 @@ pub struct Endpoint {
 }
 
 impl Drop for Endpoint {
-    fn drop(&mut self){
-        let lease=self.lease.get_mut().unwrap();
-        if let Some(id)=lease.comparison_id.take(){comparisons().lock().unwrap().remove(&id);}
+    fn drop(&mut self) {
+        let lease = self.lease.get_mut().unwrap();
+        if let Some(id) = lease.comparison_id.take() {
+            comparisons().lock().unwrap().remove(&id);
+        }
     }
 }
 
@@ -415,15 +431,21 @@ impl Endpoint {
     }
     /// Actual constructor metadata before the original live permission owner
     /// initializes. No query Context or Computer capability is fabricated.
-    pub fn raw_metadata(snapshot:Arc<Snapshot>)->Self{
-        let mut endpoint=Self::new(snapshot);endpoint.raw_metadata=true;endpoint
+    pub fn raw_metadata(snapshot: Arc<Snapshot>) -> Self {
+        let mut endpoint = Self::new(snapshot);
+        endpoint.raw_metadata = true;
+        endpoint
     }
-    pub fn close_lease(&self){
-        let comparison_id={
-            let mut lease=self.lease.lock().unwrap();
-            lease.snapshot.take();lease.records.clear();lease.comparison_id.take()
+    pub fn close_lease(&self) {
+        let comparison_id = {
+            let mut lease = self.lease.lock().unwrap();
+            lease.snapshot.take();
+            lease.records.clear();
+            lease.comparison_id.take()
         };
-        if let Some(id)=comparison_id{comparisons().lock().unwrap().remove(&id);}
+        if let Some(id) = comparison_id {
+            comparisons().lock().unwrap().remove(&id);
+        }
         self.computer.lock().unwrap().take();
     }
     pub fn new(snapshot: Arc<Snapshot>) -> Self {
@@ -623,46 +645,102 @@ impl Service for Endpoint {
             ));
             return Ok(reply);
         };
-        if self.raw_metadata && call.code==api::GET_COMPUTER {
+        if self.raw_metadata && call.code == api::GET_COMPUTER {
             api::GetComputer::read(&mut call.data)?;
-            if call.data.remaining()!=0{return Err(aim_binder_host::parcel::BAD_VALUE);}
-            reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,"live permission query capture is not initialized"));
+            if call.data.remaining() != 0 {
+                return Err(aim_binder_host::parcel::BAD_VALUE);
+            }
+            reply.write_exception(&Exception::new(
+                EX_ILLEGAL_STATE,
+                "live permission query capture is not initialized",
+            ));
             return Ok(reply);
         }
         match call.code {
             api::GET_METADATA_COMPARISON_ID => {
                 api::GetMetadataComparisonId::read(&mut call.data)?;
-                if call.data.remaining()!=0{return Err(aim_binder_host::parcel::BAD_VALUE);}
-                let mut lease=self.lease.lock().unwrap();
-                if !lease.snapshot.as_ref().is_some_and(|current|Arc::ptr_eq(current,&snapshot)){
-                    reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,"package scan snapshot is closed"));return Ok(reply);
+                if call.data.remaining() != 0 {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
                 }
-                if lease.comparison_id.is_none(){
-                    static NEXT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(1);
-                    let id=match NEXT.fetch_update(std::sync::atomic::Ordering::Relaxed,std::sync::atomic::Ordering::Relaxed,|id|id.checked_add(1).filter(|next|*next<=i64::MAX as u64)){
-                        Ok(id)=>id,Err(_)=>{reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,"metadata capability IDs exhausted"));return Ok(reply);}
+                let mut lease = self.lease.lock().unwrap();
+                if !lease
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &snapshot))
+                {
+                    reply.write_exception(&Exception::new(
+                        EX_ILLEGAL_STATE,
+                        "package scan snapshot is closed",
+                    ));
+                    return Ok(reply);
+                }
+                if lease.comparison_id.is_none() {
+                    static NEXT: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(1);
+                    let id = match NEXT.fetch_update(
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                        |id| id.checked_add(1).filter(|next| *next <= i64::MAX as u64),
+                    ) {
+                        Ok(id) => id,
+                        Err(_) => {
+                            reply.write_exception(&Exception::new(
+                                EX_ILLEGAL_STATE,
+                                "metadata capability IDs exhausted",
+                            ));
+                            return Ok(reply);
+                        }
                     };
-                    let mut registry=comparisons().lock().unwrap();registry.retain(|_,value|value.strong_count()!=0);
-                    registry.insert(id,Arc::downgrade(&snapshot));lease.comparison_id=Some(id);
+                    let mut registry = comparisons().lock().unwrap();
+                    registry.retain(|_, value| value.strong_count() != 0);
+                    registry.insert(id, Arc::downgrade(&snapshot));
+                    lease.comparison_id = Some(id);
                 }
-                api::write_get_metadata_comparison_id_reply(&mut reply,lease.comparison_id.unwrap() as i64);
+                api::write_get_metadata_comparison_id_reply(
+                    &mut reply,
+                    lease.comparison_id.unwrap() as i64,
+                );
             }
             api::GET_CHANGED_OWNERS_FOR_METADATA_BASE => {
-                let args=api::GetChangedOwnersForMetadataBase::read(&mut call.data)?;
-                if call.data.remaining()!=0{return Err(aim_binder_host::parcel::BAD_VALUE);}
-                if args.comparison_id<=0{reply.write_exception(&Exception::illegal_argument("invalid metadata comparison capability"));}
-                else{
-                    let before={let mut registry=comparisons().lock().unwrap();registry.retain(|_,value|value.strong_count()!=0);registry.get(&(args.comparison_id as u64)).and_then(std::sync::Weak::upgrade)};
-                    let bytes=match before.as_ref().map(|before|changed_owners(before,&snapshot)).transpose(){
-                        Ok(bytes)=>bytes.flatten(),Err(error)=>{reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,error));return Ok(reply);}
+                let args = api::GetChangedOwnersForMetadataBase::read(&mut call.data)?;
+                if call.data.remaining() != 0 {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
+                if args.comparison_id <= 0 {
+                    reply.write_exception(&Exception::illegal_argument(
+                        "invalid metadata comparison capability",
+                    ));
+                } else {
+                    let before = {
+                        let mut registry = comparisons().lock().unwrap();
+                        registry.retain(|_, value| value.strong_count() != 0);
+                        registry
+                            .get(&(args.comparison_id as u64))
+                            .and_then(std::sync::Weak::upgrade)
                     };
-                    api::write_get_changed_owners_for_metadata_base_reply(&mut reply,&bytes);
+                    let bytes = match before
+                        .as_ref()
+                        .map(|before| changed_owners(before, &snapshot))
+                        .transpose()
+                    {
+                        Ok(bytes) => bytes.flatten(),
+                        Err(error) => {
+                            reply.write_exception(&Exception::new(EX_ILLEGAL_STATE, error));
+                            return Ok(reply);
+                        }
+                    };
+                    api::write_get_changed_owners_for_metadata_base_reply(&mut reply, &bytes);
                 }
             }
             api::GET_METADATA_VERSION => {
                 api::GetMetadataVersion::read(&mut call.data)?;
-                if call.data.remaining()!=0{return Err(aim_binder_host::parcel::BAD_VALUE);}
-                api::write_get_metadata_version_reply(&mut reply,snapshot.metadata_revision() as i64);
+                if call.data.remaining() != 0 {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
+                api::write_get_metadata_version_reply(
+                    &mut reply,
+                    snapshot.metadata_revision() as i64,
+                );
             }
             api::GET_USAGE_RECORDS_LENGTH | api::GET_USAGE_RECORDS_CHUNK => {
                 let chunk = if call.code == api::GET_USAGE_RECORDS_CHUNK {

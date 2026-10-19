@@ -54,7 +54,9 @@ const REQUEST_FINISH: u32 = 1;
 pub struct ProfilerInfo;
 
 impl aim_service_aidl::ReadParcelable for ProfilerInfo {
-    fn read_from(r: &mut aim_binder_host::parcel::Reader<'_>) -> aim_binder_host::parcel::Result<Self> {
+    fn read_from(
+        r: &mut aim_binder_host::parcel::Reader<'_>,
+    ) -> aim_binder_host::parcel::Result<Self> {
         r.read_string16()?;
         if r.read_i32()? != 0 {
             r.read_fd()?;
@@ -151,35 +153,64 @@ impl Activities {
     /// (`WindowManagerInternal.isUidFocused`).
     pub fn uid_focused(&self, uid: u32) -> bool {
         let top = self.stack.lock().unwrap().focused_top().map(|a| a.token);
-        top.is_some_and(|t| self.records.lock().unwrap().get(&t).is_some_and(|r| r.uid == uid))
+        top.is_some_and(|t| {
+            self.records
+                .lock()
+                .unwrap()
+                .get(&t)
+                .is_some_and(|r| r.uid == uid)
+        })
     }
 
     /// The start of the process of the focused task's top activity
     /// (`getTopApp`).
     pub fn front_start(&self) -> Option<i64> {
-        self.stack.lock().unwrap().focused_top().map(|a| a.start_seq)
+        self.stack
+            .lock()
+            .unwrap()
+            .focused_top()
+            .map(|a| a.start_seq)
     }
 
     /// The component (`package/class`) of `uid`'s latest activity, a
     /// window's name.
     pub fn top_component(&self, uid: u32) -> Option<String> {
         let records = self.records.lock().unwrap();
-        records.values().filter(|r| r.uid == uid).max_by_key(|r| r.started).map(|r| format!("{}/{}", r.package, r.class))
+        records
+            .values()
+            .filter(|r| r.uid == uid)
+            .max_by_key(|r| r.started)
+            .map(|r| format!("{}/{}", r.package, r.class))
     }
 
     /// Whether the process of `start_seq` has activities.
     pub fn has_start(&self, start_seq: i64) -> bool {
-        self.records.lock().unwrap().values().any(|r| r.start_seq == start_seq)
+        self.records
+            .lock()
+            .unwrap()
+            .values()
+            .any(|r| r.start_seq == start_seq)
     }
 
     /// The activities of the process of `start_seq` are gone with it:
     /// their tokens, and what the stack does then; their results never
     /// sent go too.
     pub fn remove_start(&self, start_seq: i64) -> (Vec<u64>, Vec<super::activity_stack::Command>) {
-        let gone = self.records.lock().unwrap().extract_if(|_, r| r.start_seq == start_seq).map(|(token, _)| token).collect();
+        let gone = self
+            .records
+            .lock()
+            .unwrap()
+            .extract_if(|_, r| r.start_seq == start_seq)
+            .map(|(token, _)| token)
+            .collect();
         let mut stack = self.stack.lock().unwrap();
         let mut payloads = self.payloads.lock().unwrap();
-        for result in stack.activities.iter().filter(|a| a.start_seq == start_seq).filter_map(|a| a.result) {
+        for result in stack
+            .activities
+            .iter()
+            .filter(|a| a.start_seq == start_seq)
+            .filter_map(|a| a.result)
+        {
             payloads.remove(&result);
         }
         drop(payloads);
@@ -205,21 +236,48 @@ impl AppHost {
     /// `AttributeCache` has no entry for it.
     pub(super) fn window_style(&self, info: &ActivityInfo) -> WindowStyle {
         let app = &info.info.application_info;
-        let theme = if info.theme != 0 { info.theme } else { app.theme } as u32;
+        let theme = if info.theme != 0 {
+            info.theme
+        } else {
+            app.theme
+        } as u32;
         let read = || -> Result<(String, Result<WindowStyle, String>), Exception> {
             let (state, _) = self.packages()?;
             let package = app.item.package_name.as_deref().unwrap_or_default();
-            let pkg = state.packages.get(package).and_then(|ps| ps.pkg.clone()).ok_or_else(|| Exception::illegal_argument(format!("no package {package}")))?;
+            let pkg = state
+                .packages
+                .get(package)
+                .and_then(|ps| ps.pkg.clone())
+                .ok_or_else(|| Exception::illegal_argument(format!("no package {package}")))?;
             let apk = pkg.base_apk_path.clone().unwrap_or_default();
-            if let Some(style) = self.activities.styles.lock().unwrap().get(&(apk.clone(), theme)) {
+            if let Some(style) = self
+                .activities
+                .styles
+                .lock()
+                .unwrap()
+                .get(&(apk.clone(), theme))
+            {
                 return Ok((apk, Ok(*style)));
             }
             let inputs = self.inputs()?;
-            Ok((apk, inputs.packages.window_style(self.root()?, &inputs.data, &pkg, theme, app.target_sdk_version)))
+            Ok((
+                apk,
+                inputs.packages.window_style(
+                    self.root()?,
+                    &inputs.data,
+                    &pkg,
+                    theme,
+                    app.target_sdk_version,
+                ),
+            ))
         };
         match read() {
             Ok((apk, Ok(style))) => {
-                self.activities.styles.lock().unwrap().insert((apk, theme), style);
+                self.activities
+                    .styles
+                    .lock()
+                    .unwrap()
+                    .insert((apk, theme), style);
                 style
             }
             Ok((_, Err(e))) => {
@@ -227,7 +285,10 @@ impl AppHost {
                 WindowStyle::default()
             }
             Err(e) => {
-                eprintln!("app host: the window style of theme {theme:#x}: {}", e.message);
+                eprintln!(
+                    "app host: the window style of theme {theme:#x}: {}",
+                    e.message
+                );
                 WindowStyle::default()
             }
         }
@@ -244,8 +305,14 @@ pub struct Launch<'a> {
 impl AppHost {
     /// `realStartActivityLocked`: the items that launch and resume the
     /// activity of `token`.
-    pub(super) fn launch_items(&self, token: Binder, launch: Launch<'_>) -> Option<Vec<Box<dyn Item>>> {
-        let Binder::Local(ptr) = token else { return None };
+    pub(super) fn launch_items(
+        &self,
+        token: Binder,
+        launch: Launch<'_>,
+    ) -> Option<Vec<Box<dyn Item>>> {
+        let Binder::Local(ptr) = token else {
+            return None;
+        };
         let mut records = self.activities.records.lock().unwrap();
         let record = records.get_mut(&ptr)?;
         let assist = self.process.add_service(Arc::new(Token));
@@ -266,7 +333,12 @@ impl AppHost {
         let intent: Box<dyn WriteParcelable> = match &record.intent {
             super::activity_start::LaunchIntent::Component => Box::new(Intent {
                 component: (record.package.clone(), record.class.clone()),
-                flags: FLAG_ACTIVITY_NEW_TASK | if record.info.flags & FLAG_EXCLUDE_FROM_RECENTS != 0 { FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS } else { 0 },
+                flags: FLAG_ACTIVITY_NEW_TASK
+                    | if record.info.flags & FLAG_EXCLUDE_FROM_RECENTS != 0 {
+                        FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+                    } else {
+                        0
+                    },
                 extended_flags: EXTENDED_FLAG_MISSING_CREATOR_OR_INVALID_TOKEN,
                 content_user_hint: USER_CURRENT,
             }),
@@ -306,15 +378,28 @@ impl AppHost {
     /// configuration in `globals`: the items that tell them, each with its
     /// process's start, and whether one relaunches (its windows are not
     /// told they resized).
-    pub(super) fn reconfigure_activities(&self, task: i32, globals: &HashMap<u32, Configuration>, bounds: config::Rect) -> (ProcessItems, bool) {
-        self.reconfigure(|r| r.task == task, |uid| globals.get(&uid), |_| Some(bounds))
+    pub(super) fn reconfigure_activities(
+        &self,
+        task: i32,
+        globals: &HashMap<u32, Configuration>,
+        bounds: config::Rect,
+    ) -> (ProcessItems, bool) {
+        self.reconfigure(
+            |r| r.task == task,
+            |uid| globals.get(&uid),
+            |_| Some(bounds),
+        )
     }
 
     /// `ensureActivityConfiguration` of every activity once the global
     /// configuration became `global` (`RootWindowContainer
     /// .onConfigurationChanged`): each in its freeform task's bounds
     /// (`freeform`), else the display's.
-    pub(super) fn reconfigure_all_activities(&self, global: &Configuration, freeform: impl Fn(i32) -> Option<config::Rect>) -> ProcessItems {
+    pub(super) fn reconfigure_all_activities(
+        &self,
+        global: &Configuration,
+        freeform: impl Fn(i32) -> Option<config::Rect>,
+    ) -> ProcessItems {
         self.reconfigure(|_| true, |_| Some(global), freeform).0
     }
 
@@ -332,18 +417,26 @@ impl AppHost {
         let mut relaunching = false;
         for (&ptr, record) in records.iter_mut().filter(|(_, r)| pick(r)) {
             let token = Binder::Local(ptr);
-            let Some(global) = global_of(record.uid) else { continue };
+            let Some(global) = global_of(record.uid) else {
+                continue;
+            };
             let mut new = match freeform(record.task) {
                 Some(bounds) => global.of_freeform_task(bounds),
                 None => global.clone(),
             };
             new.window.activity_type = ACTIVITY_TYPE_STANDARD;
-            let Some(old) = record.reported.replace(new.clone()) else { continue };
+            let Some(old) = record.reported.replace(new.clone()) else {
+                continue;
+            };
             if old == new {
                 continue;
             }
             let bounds = new.window.bounds;
-            let window = ActivityWindowInfo { embedded: false, task_bounds: bounds, task_fragment_bounds: bounds };
+            let window = ActivityWindowInfo {
+                embedded: false,
+                task_bounds: bounds,
+                task_fragment_bounds: bounds,
+            };
             // `getConfigurationChanges`: the size changes its buckets
             // matter for; a window configuration change alone is none.
             let mut changes = old.diff(&new);
@@ -356,26 +449,49 @@ impl AppHost {
             // every change.
             let handled = record.config_changes;
             if changes & !handled == 0 || handled & config::CONFIG_RESOURCES_UNUSED != 0 {
-                items.push((record.start_seq, Box::new(ActivityConfigurationChangeItem { token, config: new, window })));
+                items.push((
+                    record.start_seq,
+                    Box::new(ActivityConfigurationChangeItem {
+                        token,
+                        config: new,
+                        window,
+                    }),
+                ));
                 continue;
             }
             // `relaunchActivityLocked`: a resize alone keeps the window.
-            let resize = config::CONFIG_SCREEN_SIZE | config::CONFIG_SMALLEST_SCREEN_SIZE | config::CONFIG_ORIENTATION | config::CONFIG_SCREEN_LAYOUT;
+            let resize = config::CONFIG_SCREEN_SIZE
+                | config::CONFIG_SMALLEST_SCREEN_SIZE
+                | config::CONFIG_ORIENTATION
+                | config::CONFIG_SCREEN_LAYOUT;
             relaunching = true;
-            items.push((record.start_seq, Box::new(ActivityRelaunchItem {
-                token,
-                global: global.clone(),
-                config: new,
-                window,
-                changes,
-                preserve_window: changes & !resize == 0,
-            })));
-            items.push((record.start_seq, Box::new(if record.resumed {
-                Lifecycle::Resume(ResumeActivityItem { token, proc_state: PROCESS_STATE_UNKNOWN, forward: false })
-            } else {
-                Lifecycle::Pause(token)
-            })));
-            eprintln!("app host: relaunching {}/{} for changes {changes:#x}", record.package, record.class);
+            items.push((
+                record.start_seq,
+                Box::new(ActivityRelaunchItem {
+                    token,
+                    global: global.clone(),
+                    config: new,
+                    window,
+                    changes,
+                    preserve_window: changes & !resize == 0,
+                }),
+            ));
+            items.push((
+                record.start_seq,
+                Box::new(if record.resumed {
+                    Lifecycle::Resume(ResumeActivityItem {
+                        token,
+                        proc_state: PROCESS_STATE_UNKNOWN,
+                        forward: false,
+                    })
+                } else {
+                    Lifecycle::Pause(token)
+                }),
+            ));
+            eprintln!(
+                "app host: relaunching {}/{} for changes {changes:#x}",
+                record.package, record.class
+            );
         }
         (items, relaunching)
     }
@@ -383,7 +499,11 @@ impl AppHost {
 
 /// `ResumeActivityItem` of a resumed activity coming back.
 pub(super) fn resume_item(token: Binder) -> Box<dyn Item> {
-    Box::new(ResumeActivityItem { token, proc_state: PROCESS_STATE_UNKNOWN, forward: false })
+    Box::new(ResumeActivityItem {
+        token,
+        proc_state: PROCESS_STATE_UNKNOWN,
+        forward: false,
+    })
 }
 
 /// `TopResumedActivityChangeItem`.
@@ -585,7 +705,9 @@ impl Item for Lifecycle {
             // not reported, not entering PiP.
             Lifecycle::Pause(token) => {
                 p.write_binder(Some(*token));
-                [false, false, true, false].iter().for_each(|v| p.write_bool(*v));
+                [false, false, true, false]
+                    .iter()
+                    .for_each(|v| p.write_bool(*v));
             }
         }
     }
@@ -666,9 +788,13 @@ impl Service for ActivityTaskManager {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         match call.code {
             atm::START_ACTIVITY => {
-                let a = atm::StartActivity::<RawIntent, ProfilerInfo, RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    atm::StartActivity::<RawIntent, ProfilerInfo, RawBundle>::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
                 if a.profiler_info.is_some() {
-                    return reply(Err(self.0.unimplemented_named("activity_task", "a start with a profiler")));
+                    return reply(Err(self
+                        .0
+                        .unimplemented_named("activity_task", "a start with a profiler")));
                 }
                 let args = super::activity_start::StartArgs {
                     caller: a.caller,
@@ -688,14 +814,20 @@ impl Service for ActivityTaskManager {
             // sends it, with the caller's result target and flags. Its
             // options are not applied (#1493).
             atm::START_ACTIVITY_INTENT_SENDER => {
-                let a = atm::StartActivityIntentSender::<RawIntent, RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    atm::StartActivityIntentSender::<RawIntent, RawBundle>::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
                 let uid = call.sender_euid as i32;
                 reply((|| {
                     if super::is_isolated(uid) {
-                        return Err(Exception::security("Isolated process not allowed to call startActivityIntentSender"));
+                        return Err(Exception::security(
+                            "Isolated process not allowed to call startActivityIntentSender",
+                        ));
                     }
                     if a.fill_in_intent.as_ref().is_some_and(RawIntent::has_fds) {
-                        return Err(Exception::illegal_argument("File descriptors passed in Intent"));
+                        return Err(Exception::illegal_argument(
+                            "File descriptors passed in Intent",
+                        ));
                     }
                     let Some(target @ Binder::Local(_)) = a.target else {
                         return Err(Exception::illegal_argument("Bad PendingIntent object"));
@@ -707,7 +839,16 @@ impl Service for ActivityTaskManager {
                         flags_mask: a.flags_mask,
                         flags_values: a.flags_values,
                     };
-                    let code = self.0.send_record(a.caller, target, 0, a.fill_in_intent, a.resolved_type, None, None, sent)?;
+                    let code = self.0.send_record(
+                        a.caller,
+                        target,
+                        0,
+                        a.fill_in_intent,
+                        a.resolved_type,
+                        None,
+                        None,
+                        sent,
+                    )?;
                     let mut p = Parcel::new();
                     atm::write_start_activity_intent_sender_reply(&mut p, code);
                     Ok(p)
@@ -717,34 +858,53 @@ impl Service for ActivityTaskManager {
             // tasks (`task_info::running_tasks`).
             atm::GET_TASKS => {
                 let a = atm::GetTasks::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(self.0.get_tasks(call.sender_euid as i32, a.max_num, a.keep_intent_extra, a.display_id).map(|list| {
-                    let mut p = Parcel::new();
-                    atm::write_get_tasks_reply(&mut p, Some(&list));
-                    p
-                }))
+                reply(
+                    self.0
+                        .get_tasks(
+                            call.sender_euid as i32,
+                            a.max_num,
+                            a.keep_intent_extra,
+                            a.display_id,
+                        )
+                        .map(|list| {
+                            let mut p = Parcel::new();
+                            atm::write_get_tasks_reply(&mut p, Some(&list));
+                            p
+                        }),
+                )
             }
             // `List<IBinder> getAppTasks(String callingPackage)`, read and
             // written by hand (`writeBinderList`).
             atm::GET_APP_TASKS => {
-                call.data.enforce_interface(atm::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                call.data
+                    .enforce_interface(atm::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
                 let package = call.data.read_string16().map_err(|_| BAD_VALUE)?;
-                reply(self.0.app_tasks(call.sender_euid as i32, package.as_deref()).map(|tasks| {
-                    let mut p = Parcel::new();
-                    p.write_no_exception();
-                    p.write_i32(tasks.len() as i32);
-                    for task in tasks {
-                        p.write_binder(Some(task));
-                    }
-                    p
-                }))
+                reply(
+                    self.0
+                        .app_tasks(call.sender_euid as i32, package.as_deref())
+                        .map(|tasks| {
+                            let mut p = Parcel::new();
+                            p.write_no_exception();
+                            p.write_i32(tasks.len() as i32);
+                            for task in tasks {
+                                p.write_binder(Some(task));
+                            }
+                            p
+                        }),
+                )
             }
             atm::GET_DEVICE_CONFIGURATION_INFO => {
                 atm::GetDeviceConfigurationInfo::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(self.0.device_configuration_info(call.sender_pid).map(|info| {
-                    let mut p = Parcel::new();
-                    atm::write_get_device_configuration_info_reply(&mut p, Some(&info));
-                    p
-                }))
+                reply(
+                    self.0
+                        .device_configuration_info(call.sender_pid)
+                        .map(|info| {
+                            let mut p = Parcel::new();
+                            atm::write_get_device_configuration_info_reply(&mut p, Some(&info));
+                            p
+                        }),
+                )
             }
             // `LockTaskController.getLockTaskModeState`: the app host starts
             // no lock task or screen pinning, so none is on.
@@ -761,15 +921,20 @@ impl Service for ActivityTaskManager {
                 Ok(p)
             }
             atm::REGISTER_BACKGROUND_ACTIVITY_START_CALLBACK => {
-                let a = atm::RegisterBackgroundActivityStartCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                let added = self.0.add_bal_strict_mode_callback(call.sender_euid as i32, a.binder);
+                let a = atm::RegisterBackgroundActivityStartCallback::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let added = self
+                    .0
+                    .add_bal_strict_mode_callback(call.sender_euid as i32, a.binder);
                 let mut p = Parcel::new();
                 atm::write_register_background_activity_start_callback_reply(&mut p, added);
                 Ok(p)
             }
             atm::UNREGISTER_BACKGROUND_ACTIVITY_START_CALLBACK => {
-                let a = atm::UnregisterBackgroundActivityStartCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.0.remove_bal_strict_mode_callback(call.sender_euid as i32, a.binder);
+                let a = atm::UnregisterBackgroundActivityStartCallback::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.0
+                    .remove_bal_strict_mode_callback(call.sender_euid as i32, a.binder);
                 let mut p = Parcel::new();
                 atm::write_unregister_background_activity_start_callback_reply(&mut p);
                 Ok(p)
@@ -834,7 +999,13 @@ impl AppHost {
         const NAVIGATION_TRACKBALL: i32 = 3;
         const INPUT_FEATURE_HARD_KEYBOARD: i32 = 0x1;
         const INPUT_FEATURE_FIVE_WAY_NAV: i32 = 0x2;
-        let bound = self.apps.lock().unwrap().values().find(|a| a.pid == pid && a.thread.is_some()).and_then(|a| a.config.clone());
+        let bound = self
+            .apps
+            .lock()
+            .unwrap()
+            .values()
+            .find(|a| a.pid == pid && a.thread.is_some())
+            .and_then(|a| a.config.clone());
         let config = match bound {
             Some(config) => config,
             None => self.global_configuration()?,
@@ -851,7 +1022,10 @@ impl AppHost {
             keyboard_type: config.keyboard,
             navigation: config.navigation,
             input_features,
-            gl_es_version: self.property("ro.opengles.version").and_then(|v| parse_int(&v)).unwrap_or(0),
+            gl_es_version: self
+                .property("ro.opengles.version")
+                .and_then(|v| parse_int(&v))
+                .unwrap_or(0),
         })
     }
 }
@@ -912,14 +1086,22 @@ impl Service for ActivityClientController {
             // `ActivityMetricsLogger.notifyFullyDrawn`: its launch's first
             // report is logged (one-way).
             acc::REPORT_ACTIVITY_FULLY_DRAWN => {
-                let a = acc::ReportActivityFullyDrawn::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                if self.0.activities.with(a.token, |r| !std::mem::replace(&mut r.fully_drawn, true)) == Some(true) {
+                let a =
+                    acc::ReportActivityFullyDrawn::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if self
+                    .0
+                    .activities
+                    .with(a.token, |r| !std::mem::replace(&mut r.fully_drawn, true))
+                    == Some(true)
+                {
                     self.report(a.token, "fully drawn", |_| {});
                 }
                 Ok(Parcel::new())
             }
             acc::ACTIVITY_TOP_RESUMED_STATE_LOST => {
-                call.data.enforce_interface(acc::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                call.data
+                    .enforce_interface(acc::DESCRIPTOR)
+                    .map_err(|_| BAD_VALUE)?;
                 self.0.top_resumed_lost();
                 empty()
             }
@@ -975,7 +1157,8 @@ impl Service for ActivityClientController {
                 let token = Self::token(call)?;
                 self.report(token, "paused", |r| r.resumed = false);
                 if let Some(Binder::Local(t)) = token {
-                    self.0.activity_usage(t, super::app_standby::Event::ActivityPaused);
+                    self.0
+                        .activity_usage(t, super::app_standby::Event::ActivityPaused);
                 }
                 self.0.activity_reported(token, Report::Paused);
                 empty()
@@ -984,16 +1167,34 @@ impl Service for ActivityClientController {
                 let token = Self::token(call)?;
                 let stopped = call.code == acc::ACTIVITY_STOPPED;
                 self.report(token, if stopped { "stopped" } else { "destroyed" }, |_| {});
-                self.0.activity_reported(token, if stopped { Report::Stopped } else { Report::Destroyed });
+                self.0.activity_reported(
+                    token,
+                    if stopped {
+                        Report::Stopped
+                    } else {
+                        Report::Destroyed
+                    },
+                );
                 empty()
             }
             acc::FINISH_ACTIVITY => {
-                let a = acc::FinishActivity::<RawIntent>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                reply(self.0.finish_activity(call.sender_euid as i32, a.token, a.code, a.data, a.finish_task).map(|finished| {
-                    let mut p = Parcel::new();
-                    acc::write_finish_activity_reply(&mut p, finished);
-                    p
-                }))
+                let a = acc::FinishActivity::<RawIntent>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                reply(
+                    self.0
+                        .finish_activity(
+                            call.sender_euid as i32,
+                            a.token,
+                            a.code,
+                            a.data,
+                            a.finish_task,
+                        )
+                        .map(|finished| {
+                            let mut p = Parcel::new();
+                            acc::write_finish_activity_reply(&mut p, finished);
+                            p
+                        }),
+                )
             }
             acc::GET_CALLING_ACTIVITY | acc::GET_CALLING_PACKAGE => {
                 let token = Self::token(call)?;
@@ -1013,7 +1214,10 @@ impl Service for ActivityClientController {
             acc::ON_BACK_PRESSED => {
                 let a = acc::OnBackPressed::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 if self.0.launcher_root(a.activity_token) {
-                    let _ = self.0.unimplemented_named("activity client controller", "a task to the back (#1486)");
+                    let _ = self.0.unimplemented_named(
+                        "activity client controller",
+                        "a task to the back (#1486)",
+                    );
                 } else if let Some(Binder::Handle(callback)) = a.callback {
                     let mut p = Parcel::new();
                     p.write_interface_token(REQUEST_FINISH_DESCRIPTOR);
@@ -1023,11 +1227,16 @@ impl Service for ActivityClientController {
                 }
                 Ok(Parcel::new())
             }
-            acc::MOVE_ACTIVITY_TASK_TO_BACK => reply(Err(self.0.unimplemented_named("activity client controller", "a task to the back (#1486)"))),
+            acc::MOVE_ACTIVITY_TASK_TO_BACK => reply(Err(self
+                .0
+                .unimplemented_named("activity client controller", "a task to the back (#1486)"))),
             // The size buckets decide which size changes relaunch it.
             acc::REPORT_SIZE_CONFIGURATIONS => {
-                let args = acc::ReportSizeConfigurations::<SizeBuckets>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.0.activities.with(args.token, |r| r.size_buckets = args.size_configurations);
+                let args = acc::ReportSizeConfigurations::<SizeBuckets>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.0
+                    .activities
+                    .with(args.token, |r| r.size_buckets = args.size_configurations);
                 empty()
             }
             acc::GET_DISPLAY_ID => {
@@ -1044,18 +1253,28 @@ impl Service for ActivityClientController {
             acc::CONVERT_FROM_TRANSLUCENT => {
                 let a = acc::ConvertFromTranslucent::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let mut p = Parcel::new();
-                acc::write_convert_from_translucent_reply(&mut p, self.0.set_occludes_parent(a.token, true));
+                acc::write_convert_from_translucent_reply(
+                    &mut p,
+                    self.0.set_occludes_parent(a.token, true),
+                );
                 Ok(p)
             }
             // The options are a scene transition's to return to the
             // activity below, which the app host does not run (#1587).
             acc::CONVERT_TO_TRANSLUCENT => {
-                let a = acc::ConvertToTranslucent::<RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = acc::ConvertToTranslucent::<RawBundle>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 if a.options.is_some() {
-                    return reply(Err(self.0.unimplemented_named("activity client controller", "convertToTranslucent with a scene transition (#1587)")));
+                    return reply(Err(self.0.unimplemented_named(
+                        "activity client controller",
+                        "convertToTranslucent with a scene transition (#1587)",
+                    )));
                 }
                 let mut p = Parcel::new();
-                acc::write_convert_to_translucent_reply(&mut p, self.0.set_occludes_parent(a.token, false));
+                acc::write_convert_to_translucent_reply(
+                    &mut p,
+                    self.0.set_occludes_parent(a.token, false),
+                );
                 Ok(p)
             }
             // The task's description is the Mac window's once activities
@@ -1066,7 +1285,10 @@ impl Service for ActivityClientController {
                 let top = match token {
                     Some(Binder::Local(t)) => {
                         let stack = self.0.activities.stack.lock().unwrap();
-                        stack.get(t).and_then(|a| stack.top(a.task)).is_some_and(|a| a.token == t)
+                        stack
+                            .get(t)
+                            .and_then(|a| stack.top(a.task))
+                            .is_some_and(|a| a.token == t)
                     }
                     _ => false,
                 };

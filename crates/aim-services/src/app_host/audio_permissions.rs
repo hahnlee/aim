@@ -51,18 +51,31 @@ impl AppHost {
     pub(super) fn populate_audio_permissions(&self, controller: &Strong) -> Result<(), String> {
         let packages = {
             let (state, _) = self.packages().map_err(|e| format!("{e:?}"))?;
-            package_mappings(state.packages.values().map(|ps| (ps.app_id, ps.name.clone())))
+            package_mappings(
+                state
+                    .packages
+                    .values()
+                    .map(|ps| (ps.app_id, ps.name.clone())),
+            )
         };
         let mut data = Parcel::new();
         data.write_interface_token(DESCRIPTOR);
         write_package_states(&mut data, &packages);
-        call(controller, POPULATE_PACKAGES_FOR_UIDS, "populatePackagesForUids", &data)?;
+        call(
+            controller,
+            POPULATE_PACKAGES_FOR_UIDS,
+            "populatePackagesForUids",
+            &data,
+        )?;
         for (perm, name) in MONITORED_PERMS.iter().enumerate() {
             let mut uids = Vec::new();
             for user in USERS {
                 for &app_id in packages.keys() {
                     let uid = user * super::PER_USER_RANGE as i32 + app_id;
-                    if self.check_component_permission(Some(name), uid, -1, true).map_err(|e| format!("{e:?}"))? {
+                    if self
+                        .check_component_permission(Some(name), uid, -1, true)
+                        .map_err(|e| format!("{e:?}"))?
+                    {
                         uids.push(uid);
                     }
                 }
@@ -76,7 +89,12 @@ impl AppHost {
             for uid in uids {
                 data.write_i32(uid);
             }
-            call(controller, POPULATE_PERMISSION_STATE, "populatePermissionState", &data)?;
+            call(
+                controller,
+                POPULATE_PERMISSION_STATE,
+                "populatePermissionState",
+                &data,
+            )?;
         }
         Ok(())
     }
@@ -113,7 +131,9 @@ fn write_package_states(p: &mut Parcel, packages: &BTreeMap<i32, Vec<String>>) {
 }
 
 fn call(controller: &Strong, code: u32, name: &str, data: &Parcel) -> Result<(), String> {
-    let reply = controller.transact(code, data, false).map_err(|s| format!("{name}: {s}"))?;
+    let reply = controller
+        .transact(code, data, false)
+        .map_err(|s| format!("{name}: {s}"))?;
     match reply.reader().read_exception() {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(format!("{name}: {e:?}")),
@@ -127,7 +147,14 @@ mod tests {
 
     #[test]
     fn packages_group_by_app_id() {
-        let map = package_mappings([(10_001, "a".into()), (10_002, "b".into()), (10_001, "c".into())].into_iter());
+        let map = package_mappings(
+            [
+                (10_001, "a".into()),
+                (10_002, "b".into()),
+                (10_001, "c".into()),
+            ]
+            .into_iter(),
+        );
         assert_eq!(map[&10_001], ["a", "c"]);
         let mut p = Parcel::new();
         write_package_states(&mut p, &map);

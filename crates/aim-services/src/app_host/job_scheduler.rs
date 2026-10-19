@@ -33,7 +33,9 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
-use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel};
+use aim_binder_host::parcel::{
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel,
+};
 use aim_service_aidl::android_app_job_ijobcallback as cb;
 use aim_service_aidl::android_app_job_ijobscheduler as js;
 use aim_service_aidl::android_app_job_ijobservice as job_service;
@@ -42,11 +44,13 @@ use super::alarm_service::{elapsed_ms, wall_ms};
 use super::content_service::LocalObserver;
 use super::job_content::{self, JobContent, ObserverKey};
 use super::job_info::{
-    self, BACKOFF_POLICY_EXPONENTIAL, BACKOFF_POLICY_LINEAR, BIAS_DEFAULT, CONSTRAINT_FLAG_BATTERY_NOT_LOW,
-    CONSTRAINT_FLAG_CHARGING, CONSTRAINT_FLAG_DEVICE_IDLE, CONSTRAINT_FLAG_STORAGE_NOT_LOW, FLAG_EXEMPT_FROM_APP_STANDBY,
-    FLAG_GRANT_URI_PERMISSIONS, FLAG_WILL_BE_FOREGROUND, INTERNAL_STOP_REASON_UNKNOWN, JobInfo, JobParameters,
-    JobWorkItem, MAX_BACKOFF_DELAY_MILLIS, MIN_BACKOFF_MILLIS, MIN_FLEX_MILLIS, MIN_PERIOD_MILLIS, NETWORK_BYTES_UNKNOWN,
-    PRIORITY_DEFAULT, PRIORITY_HIGH, PRIORITY_LOW, PRIORITY_MAX, PRIORITY_MIN, ReadWorkItem, STOP_REASON_UNDEFINED,
+    self, BACKOFF_POLICY_EXPONENTIAL, BACKOFF_POLICY_LINEAR, BIAS_DEFAULT,
+    CONSTRAINT_FLAG_BATTERY_NOT_LOW, CONSTRAINT_FLAG_CHARGING, CONSTRAINT_FLAG_DEVICE_IDLE,
+    CONSTRAINT_FLAG_STORAGE_NOT_LOW, FLAG_EXEMPT_FROM_APP_STANDBY, FLAG_GRANT_URI_PERMISSIONS,
+    FLAG_WILL_BE_FOREGROUND, INTERNAL_STOP_REASON_UNKNOWN, JobInfo, JobParameters, JobWorkItem,
+    MAX_BACKOFF_DELAY_MILLIS, MIN_BACKOFF_MILLIS, MIN_FLEX_MILLIS, MIN_PERIOD_MILLIS,
+    NETWORK_BYTES_UNKNOWN, PRIORITY_DEFAULT, PRIORITY_HIGH, PRIORITY_LOW, PRIORITY_MAX,
+    PRIORITY_MIN, ReadWorkItem, STOP_REASON_UNDEFINED,
 };
 use super::job_store::{self, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, Stored};
 use super::network::{self, Network, NetworkCapabilities};
@@ -76,8 +80,10 @@ const CONSTRAINTS_OF_INTEREST: i32 = CONSTRAINT_CHARGING
     | CONSTRAINT_CONTENT_TRIGGER
     | CONSTRAINT_PREFETCH;
 /// The device-wide constraints, read from the Mac.
-const DEVICE_CONSTRAINTS: i32 =
-    CONSTRAINT_CHARGING | CONSTRAINT_BATTERY_NOT_LOW | CONSTRAINT_STORAGE_NOT_LOW | CONSTRAINT_CONNECTIVITY;
+const DEVICE_CONSTRAINTS: i32 = CONSTRAINT_CHARGING
+    | CONSTRAINT_BATTERY_NOT_LOW
+    | CONSTRAINT_STORAGE_NOT_LOW
+    | CONSTRAINT_CONNECTIVITY;
 /// `JobStatus.INTERNAL_FLAG_DEMOTED_BY_USER`, `_BY_SYSTEM_UIJ`.
 const INTERNAL_FLAG_DEMOTED_BY_USER: i32 = 1 << 1;
 const INTERNAL_FLAG_DEMOTED_BY_SYSTEM_UIJ: i32 = 1 << 2;
@@ -165,7 +171,8 @@ const OVERRIDE_HANDLE_ABANDONED_JOBS: i64 = 372_529_068;
 const FLAG_ENFORCE_MINIMUM_TIME_WINDOWS: &str = "android.app.job.enforce_minimum_time_windows";
 const FLAG_HANDLE_ABANDONED_JOBS: &str = "android.app.job.handle_abandoned_jobs";
 const FLAG_GET_PENDING_JOB_REASONS_API: &str = "android.app.job.get_pending_job_reasons_api";
-const FLAG_ENFORCE_SCHEDULE_LIMIT_TO_PROXY_JOBS: &str = "com.android.server.job.enforce_schedule_limit_to_proxy_jobs";
+const FLAG_ENFORCE_SCHEDULE_LIMIT_TO_PROXY_JOBS: &str =
+    "com.android.server.job.enforce_schedule_limit_to_proxy_jobs";
 const FLAG_BATCH_ACTIVE_BUCKET_JOBS: &str = "com.android.server.job.batch_active_bucket_jobs";
 
 /// What the controllers read of the Mac.
@@ -253,7 +260,9 @@ impl JobStatus {
         latest: i64,
         binders: Arc<Vec<Strong>>,
     ) -> JobStatus {
-        job.network = job.network.map(|n| job_info::request_for_uid(&n, source.uid));
+        job.network = job
+            .network
+            .map(|n| job_info::request_for_uid(&n, source.uid));
         let mut required = job.constraint_flags;
         if job.network.is_some() {
             required |= CONSTRAINT_CONNECTIVITY;
@@ -332,7 +341,10 @@ impl JobStatus {
     }
 
     fn matches(&self, uid: i32, namespace: Option<&str>, id: i32) -> bool {
-        self.tracked && self.calling_uid == uid && self.namespace.as_deref() == namespace && self.job.id == id
+        self.tracked
+            && self.calling_uid == uid
+            && self.namespace.as_deref() == namespace
+            && self.job.id == id
     }
 
     fn has_deadline(&self) -> bool {
@@ -358,12 +370,19 @@ impl JobStatus {
 
     /// `getMaxJobExecutionTimeMs`: its guaranteed runtime.
     fn max_execution_ms(&self) -> i64 {
-        if self.expedited() { RUNTIME_MIN_GUARANTEE_MS } else { RUNTIME_FREE_QUOTA_MAX_LIMIT_MS }
+        if self.expedited() {
+            RUNTIME_MIN_GUARANTEE_MS
+        } else {
+            RUNTIME_FREE_QUOTA_MAX_LIMIT_MS
+        }
     }
 
     /// `getFractionRunTime`: how far into its window it is.
     fn fraction_run_time(&self, now: i64) -> f64 {
-        match (self.earliest == NO_EARLIEST_RUNTIME, self.latest == NO_LATEST_RUNTIME) {
+        match (
+            self.earliest == NO_EARLIEST_RUNTIME,
+            self.latest == NO_LATEST_RUNTIME,
+        ) {
             (true, true) => 1.0,
             (true, false) => (now >= self.latest) as i32 as f64,
             (false, true) => (now >= self.earliest) as i32 as f64,
@@ -381,19 +400,26 @@ impl JobStatus {
     /// match only differs on a metered network). The Mac's network is
     /// Ethernet, so signal strength never holds a job back.
     fn network_satisfied(&self, now: i64, device: &Device, top: bool) -> bool {
-        let (Some(request), Some((_, nc))) = (&self.job.network, &device.network) else { return false };
+        let (Some(request), Some((_, nc))) = (&self.job.network, &device.network) else {
+            return false;
+        };
         if !nc.has(network::NOT_SUSPENDED) {
             return false;
         }
         let max = self.max_execution_ms();
-        let too_long = |bytes: i64, kbps: i32| bytes != NETWORK_BYTES_UNKNOWN && kbps > 0 && bytes * 1000 / (kbps as i64 * 1000 / 8) > max;
+        let too_long = |bytes: i64, kbps: i32| {
+            bytes != NETWORK_BYTES_UNKNOWN
+                && kbps > 0
+                && bytes * 1000 / (kbps as i64 * 1000 / 8) > max
+        };
         let chunk = self.job.minimum_network_chunk_bytes;
         let insane = if chunk != NETWORK_BYTES_UNKNOWN {
             too_long(chunk, nc.link_down_kbps) || too_long(chunk, nc.link_up_kbps)
         } else if nc.has(network::NOT_METERED) && device.charging {
             false
         } else {
-            too_long(self.job.network_download_bytes, nc.link_down_kbps) || too_long(self.job.network_upload_bytes, nc.link_up_kbps)
+            too_long(self.job.network_download_bytes, nc.link_down_kbps)
+                || too_long(self.job.network_upload_bytes, nc.link_up_kbps)
         };
         if insane {
             return false;
@@ -406,7 +432,9 @@ impl JobStatus {
         if !metered_allowed {
             return false;
         }
-        if !nc.has(network::NOT_CONGESTED) && self.fraction_run_time(now) < CONN_CONGESTION_DELAY_FRAC {
+        if !nc.has(network::NOT_CONGESTED)
+            && self.fraction_run_time(now) < CONN_CONGESTION_DELAY_FRAC
+        {
             return false;
         }
         request.caps.satisfied_by(nc)
@@ -421,8 +449,12 @@ impl JobStatus {
     /// `getEffectivePriority`.
     fn effective_priority(&self) -> i32 {
         let demoted = self.internal_flags & INTERNAL_FLAG_DEMOTED_BY_USER != 0
-            || (self.job.is_user_initiated() && self.internal_flags & INTERNAL_FLAG_DEMOTED_BY_SYSTEM_UIJ != 0);
-        let raw = self.job.priority.min(if demoted { PRIORITY_HIGH } else { PRIORITY_MAX });
+            || (self.job.is_user_initiated()
+                && self.internal_flags & INTERNAL_FLAG_DEMOTED_BY_SYSTEM_UIJ != 0);
+        let raw = self
+            .job
+            .priority
+            .min(if demoted { PRIORITY_HIGH } else { PRIORITY_MAX });
         if self.num_failures < 2 {
             return raw;
         }
@@ -478,7 +510,10 @@ impl JobStatus {
             // `TimeController`.
             (CONSTRAINT_TIMING_DELAY, now >= self.earliest),
             (CONSTRAINT_DEADLINE, now >= self.latest),
-            (CONSTRAINT_CONNECTIVITY, self.network_satisfied(now, device, top)),
+            (
+                CONSTRAINT_CONNECTIVITY,
+                self.network_satisfied(now, device, top),
+            ),
             // `ContentObserverController`'s.
             (CONSTRAINT_CONTENT_TRIGGER, self.content.satisfied),
         ] {
@@ -489,7 +524,13 @@ impl JobStatus {
         // `BackgroundJobsController`: battery saver restricts the jobs of
         // apps not active, but expedited ones.
         let restricted = device.battery_saver && !top && !self.expedited();
-        let ready = is_ready(satisfied, self.required, self.job.periodic, restricted, self.process.is_some());
+        let ready = is_ready(
+            satisfied,
+            self.required,
+            self.job.periodic,
+            restricted,
+            self.process.is_some(),
+        );
         if self.ready && !ready {
             let lost = self.satisfied & !satisfied & self.required;
             self.reason_unready = if !self.restricted && restricted {
@@ -512,9 +553,17 @@ impl JobStatus {
         if self.restricted {
             reasons.push(PENDING_JOB_REASON_DEVICE_STATE);
         }
-        reasons.extend(constraints_to_pending_reasons(!self.satisfied & self.required, self.required, api_reasons));
+        reasons.extend(constraints_to_pending_reasons(
+            !self.satisfied & self.required,
+            self.required,
+            api_reasons,
+        ));
         if reasons.is_empty() {
-            reasons.push(if self.process.is_some() { PENDING_JOB_REASON_APP } else { PENDING_JOB_REASON_UNDEFINED });
+            reasons.push(if self.process.is_some() {
+                PENDING_JOB_REASON_APP
+            } else {
+                PENDING_JOB_REASON_UNDEFINED
+            });
         }
         reasons
     }
@@ -534,7 +583,12 @@ impl JobStatus {
             cumulative_execution: self.cumulative_execution,
             earliest: self.earliest,
             latest: self.latest,
-            work: self.executing_work.iter().chain(&self.pending_work).cloned().collect(),
+            work: self
+                .executing_work
+                .iter()
+                .chain(&self.pending_work)
+                .cloned()
+                .collect(),
         }
     }
 }
@@ -543,21 +597,49 @@ impl JobStatus {
 /// constraints, not dozing (the app host keeps no quota, standby or doze);
 /// not restricted in the background, its service present; and its
 /// deadline passed (not for a periodic job) or its constraints satisfied.
-fn is_ready(satisfied: i32, required: i32, periodic: bool, restricted: bool, has_process: bool) -> bool {
+fn is_ready(
+    satisfied: i32,
+    required: i32,
+    periodic: bool,
+    restricted: bool,
+    has_process: bool,
+) -> bool {
     let interest = required & CONSTRAINTS_OF_INTEREST;
-    let deadline = !periodic && required & CONSTRAINT_DEADLINE != 0 && satisfied & CONSTRAINT_DEADLINE != 0;
+    let deadline =
+        !periodic && required & CONSTRAINT_DEADLINE != 0 && satisfied & CONSTRAINT_DEADLINE != 0;
     !restricted && has_process && (deadline || satisfied & interest == interest)
 }
 
 /// `constraintToStopReason` of the first of `lost` it maps.
 fn stop_reason_of(lost: i32, required: i32) -> i32 {
-    let explicit = |c: i32, reason: i32| if required & c != 0 { reason } else { STOP_REASON_APP_STANDBY };
+    let explicit = |c: i32, reason: i32| {
+        if required & c != 0 {
+            reason
+        } else {
+            STOP_REASON_APP_STANDBY
+        }
+    };
     for (constraint, reason) in [
-        (CONSTRAINT_BATTERY_NOT_LOW, explicit(CONSTRAINT_BATTERY_NOT_LOW, STOP_REASON_CONSTRAINT_BATTERY_NOT_LOW)),
-        (CONSTRAINT_CHARGING, explicit(CONSTRAINT_CHARGING, STOP_REASON_CONSTRAINT_CHARGING)),
+        (
+            CONSTRAINT_BATTERY_NOT_LOW,
+            explicit(
+                CONSTRAINT_BATTERY_NOT_LOW,
+                STOP_REASON_CONSTRAINT_BATTERY_NOT_LOW,
+            ),
+        ),
+        (
+            CONSTRAINT_CHARGING,
+            explicit(CONSTRAINT_CHARGING, STOP_REASON_CONSTRAINT_CHARGING),
+        ),
         (CONSTRAINT_CONNECTIVITY, STOP_REASON_CONSTRAINT_CONNECTIVITY),
-        (CONSTRAINT_IDLE, explicit(CONSTRAINT_IDLE, STOP_REASON_CONSTRAINT_DEVICE_IDLE)),
-        (CONSTRAINT_STORAGE_NOT_LOW, STOP_REASON_CONSTRAINT_STORAGE_NOT_LOW),
+        (
+            CONSTRAINT_IDLE,
+            explicit(CONSTRAINT_IDLE, STOP_REASON_CONSTRAINT_DEVICE_IDLE),
+        ),
+        (
+            CONSTRAINT_STORAGE_NOT_LOW,
+            STOP_REASON_CONSTRAINT_STORAGE_NOT_LOW,
+        ),
     ] {
         if lost & constraint != 0 {
             return reason;
@@ -575,20 +657,39 @@ fn constraints_to_pending_reasons(unsatisfied: i32, required: i32, api_reasons: 
         }
     };
     for (c, explicit) in [
-        (CONSTRAINT_BATTERY_NOT_LOW, PENDING_JOB_REASON_CONSTRAINT_BATTERY_NOT_LOW),
+        (
+            CONSTRAINT_BATTERY_NOT_LOW,
+            PENDING_JOB_REASON_CONSTRAINT_BATTERY_NOT_LOW,
+        ),
         (CONSTRAINT_CHARGING, PENDING_JOB_REASON_CONSTRAINT_CHARGING),
         (CONSTRAINT_IDLE, PENDING_JOB_REASON_CONSTRAINT_DEVICE_IDLE),
     ] {
         if unsatisfied & c != 0 {
-            add(if required & c != 0 { explicit } else { PENDING_JOB_REASON_APP_STANDBY });
+            add(if required & c != 0 {
+                explicit
+            } else {
+                PENDING_JOB_REASON_APP_STANDBY
+            });
         }
     }
     for (c, r) in [
-        (CONSTRAINT_CONNECTIVITY, PENDING_JOB_REASON_CONSTRAINT_CONNECTIVITY),
-        (CONSTRAINT_CONTENT_TRIGGER, PENDING_JOB_REASON_CONSTRAINT_CONTENT_TRIGGER),
+        (
+            CONSTRAINT_CONNECTIVITY,
+            PENDING_JOB_REASON_CONSTRAINT_CONNECTIVITY,
+        ),
+        (
+            CONSTRAINT_CONTENT_TRIGGER,
+            PENDING_JOB_REASON_CONSTRAINT_CONTENT_TRIGGER,
+        ),
         (CONSTRAINT_PREFETCH, PENDING_JOB_REASON_CONSTRAINT_PREFETCH),
-        (CONSTRAINT_STORAGE_NOT_LOW, PENDING_JOB_REASON_CONSTRAINT_STORAGE_NOT_LOW),
-        (CONSTRAINT_TIMING_DELAY, PENDING_JOB_REASON_CONSTRAINT_MINIMUM_LATENCY),
+        (
+            CONSTRAINT_STORAGE_NOT_LOW,
+            PENDING_JOB_REASON_CONSTRAINT_STORAGE_NOT_LOW,
+        ),
+        (
+            CONSTRAINT_TIMING_DELAY,
+            PENDING_JOB_REASON_CONSTRAINT_MINIMUM_LATENCY,
+        ),
     ] {
         if unsatisfied & c != 0 {
             add(r);
@@ -620,9 +721,15 @@ fn backoff_delay(policy: i32, initial: i64, attempts: i32) -> Option<i64> {
 /// `getRescheduleJobForPeriodic`'s next window, earliest and latest, of a
 /// job of `interval` and `flex` whose window ended at `original_latest`.
 fn periodic_window(interval: i64, flex: i64, original_latest: i64, now: i64) -> (i64, i64) {
-    let period = interval.clamp(MIN_PERIOD_MILLIS, MAX_ALLOWED_PERIOD_MS).max(MIN_PERIOD_MILLIS);
+    let period = interval
+        .clamp(MIN_PERIOD_MILLIS, MAX_ALLOWED_PERIOD_MS)
+        .max(MIN_PERIOD_MILLIS);
     let flex = flex.min(period).max(MIN_FLEX_MILLIS);
-    let olrte = if original_latest < 0 || original_latest == NO_LATEST_RUNTIME { now } else { original_latest };
+    let olrte = if original_latest < 0 || original_latest == NO_LATEST_RUNTIME {
+        now
+    } else {
+        original_latest
+    };
     let diff = (now - olrte).abs();
     let mut buffer = 0;
     let latest = if now > olrte {
@@ -651,7 +758,13 @@ fn default_concurrency_limit() -> usize {
     let mut len = std::mem::size_of::<u64>();
     // SAFETY: a u64 out-parameter of its size.
     unsafe {
-        libc::sysctlbyname(c"hw.memsize".as_ptr(), (&mut bytes as *mut u64).cast(), &mut len, std::ptr::null_mut(), 0)
+        libc::sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&mut bytes as *mut u64).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
     };
     let gb = 1_000_000_000;
     match bytes {
@@ -696,7 +809,11 @@ struct Context {
 /// The handler's messages.
 enum Message {
     /// `ServiceConnection`'s calls for the context of `callback`.
-    Connected { callback: u64, service: Option<Binder>, dead: bool },
+    Connected {
+        callback: u64,
+        service: Option<Binder>,
+        dead: bool,
+    },
     /// `MSG_CHECK_JOB`.
     Check,
     /// The store's write scheduled (`postDelayed(mWriteRunnable)`): the
@@ -749,7 +866,11 @@ struct Connection {
 impl HostConnection for Connection {
     fn connected(&self, service: Option<Binder>, dead: bool) {
         if let Some(s) = self.scheduler.upgrade() {
-            s.post(Message::Connected { callback: self.callback, service, dead });
+            s.post(Message::Connected {
+                callback: self.callback,
+                service,
+                dead,
+            });
         }
     }
 }
@@ -779,7 +900,10 @@ struct TriggerObserver {
 impl LocalObserver for TriggerObserver {
     fn on_change(&self, _self_change: bool, uris: &[Uri], _flags: i32, _user: i32) {
         if let Some(s) = self.scheduler.upgrade() {
-            s.post(Message::ContentChanged { key: self.key.clone(), uris: uris.to_vec() });
+            s.post(Message::ContentChanged {
+                key: self.key.clone(),
+                uris: uris.to_vec(),
+            });
         }
     }
 }
@@ -790,8 +914,16 @@ struct Registrar<'a>(&'a JobScheduler);
 
 impl job_content::Observe for Registrar<'_> {
     fn register(&self, uri: &Uri, descendants: bool, key: &ObserverKey) -> Result<u64, Exception> {
-        let content = self.0.host.content_service.get().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "content"))?;
-        let observer = Arc::new(TriggerObserver { scheduler: self.0.me.clone(), key: key.clone() });
+        let content = self
+            .0
+            .host
+            .content_service
+            .get()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "content"))?;
+        let observer = Arc::new(TriggerObserver {
+            scheduler: self.0.me.clone(),
+            key: key.clone(),
+        });
         content.register_local(uri, descendants, key.user, observer)
     }
 
@@ -813,7 +945,9 @@ impl JobScheduler {
             limit: default_concurrency_limit(),
         });
         let weak = Arc::downgrade(&scheduler);
-        let _ = std::thread::Builder::new().name("jobs".into()).spawn(move || run(weak));
+        let _ = std::thread::Builder::new()
+            .name("jobs".into())
+            .spawn(move || run(weak));
         scheduler
     }
 
@@ -846,13 +980,21 @@ impl JobScheduler {
 
     /// Whether `uid` has a process: the app host's processes are all top.
     fn is_top(&self, uid: i32) -> bool {
-        self.host.apps.lock().unwrap().values().any(|a| a.uid as i32 == uid)
+        self.host
+            .apps
+            .lock()
+            .unwrap()
+            .values()
+            .any(|a| a.uid as i32 == uid)
     }
 
     /// `PackageManagerInternal.getPackageUid(package, 0, user)`.
     fn package_uid(&self, package: &str, user: i32) -> Result<Option<i32>, Exception> {
         let (state, _) = self.host.packages()?;
-        Ok(state.packages.get(package).map(|ps| user * PER_USER_RANGE as i32 + ps.app_id))
+        Ok(state
+            .packages
+            .get(package)
+            .map(|ps| user * PER_USER_RANGE as i32 + ps.app_id))
     }
 
     /// `getServiceInfo(service, MATCH_DIRECT_BOOT_AWARE | UNAWARE)` in
@@ -864,22 +1006,36 @@ impl JobScheduler {
         uid: i32,
     ) -> Result<Option<crate::package::info::ServiceInfo>, Exception> {
         let (state, resolution) = self.host.packages()?;
-        let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: uid };
-        let component =
-            crate::package::intent::ComponentName { package: service.0.clone(), class: service.1.clone() };
+        let query = crate::package::query::Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: uid,
+        };
+        let component = crate::package::intent::ComponentName {
+            package: service.0.clone(),
+            class: service.1.clone(),
+        };
         match query.service_info(&component, MATCH_DIRECT_BOOT_ANY, user) {
             Ok(Ok(info)) => Ok(info),
             Ok(Err(e)) => Err(e),
-            Err(crate::package::apps_filter::NotModelled(reason)) => {
-                Err(Exception::new(EX_ILLEGAL_STATE, format!("getServiceInfo: {reason}")))
-            }
+            Err(crate::package::apps_filter::NotModelled(reason)) => Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("getServiceInfo: {reason}"),
+            )),
         }
     }
 
     /// The process of a job's service (`serviceProcessName`), if it has one.
     fn process_of(&self, j: &JobStatus) -> Option<String> {
-        let info = self.service_info(&j.job.service, j.user(), 1000).ok().flatten()?;
-        Some(info.info.process_name.unwrap_or_else(|| j.job.service.0.clone()))
+        let info = self
+            .service_info(&j.job.service, j.user(), 1000)
+            .ok()
+            .flatten()?;
+        Some(
+            info.info
+                .process_name
+                .unwrap_or_else(|| j.job.service.0.clone()),
+        )
     }
 
     /// The Mac's battery, storage and battery saver, read each
@@ -899,22 +1055,36 @@ impl JobScheduler {
     /// DeviceStorageMonitorService's low storage of the volume of `/data`,
     /// battery saver, and ConnectivityService's default network.
     fn read_device(&self) -> Device {
-        let (plugged, low) = self.host.battery_service.get().map_or((false, false), |b| b.powered_and_low());
-        let battery_saver = self.host.power_service.get().is_some_and(|p| p.power_save_mode().unwrap_or(false));
+        let (plugged, low) = self
+            .host
+            .battery_service
+            .get()
+            .map_or((false, false), |b| b.powered_and_low());
+        let battery_saver = self
+            .host
+            .power_service
+            .get()
+            .is_some_and(|p| p.power_save_mode().unwrap_or(false));
         Device {
             power_connected: plugged,
             charging: plugged,
             battery_not_low: !low,
             storage_not_low: self.storage_not_low(),
             battery_saver,
-            network: self.host.connectivity_service.get().and_then(|c| c.default_network()),
+            network: self
+                .host
+                .connectivity_service
+                .get()
+                .and_then(|c| c.default_network()),
         }
     }
 
     /// `StorageManager.getStorageLowBytes` of the data volume against what
     /// it has free.
     fn storage_not_low(&self) -> bool {
-        self.host.data_space().is_ok_and(|(total, usable)| usable > self.host.storage_low_bytes(total))
+        self.host
+            .data_space()
+            .is_ok_and(|(total, usable)| usable > self.host.storage_low_bytes(total))
     }
 
     /// The JobStore read, once (`JobStore.initAndGet`).
@@ -939,9 +1109,22 @@ impl JobScheduler {
                 && let Some(package) = s.source_package
                 && let Some(source_uid) = self.package_uid(&package, s.source_user)?
             {
-                source = Source { package, user: s.source_user, uid: source_uid, tag: s.source_tag };
+                source = Source {
+                    package,
+                    user: s.source_user,
+                    uid: source_uid,
+                    tag: s.source_tag,
+                };
             }
-            let mut j = JobStatus::new(s.job, uid, source, s.namespace, s.earliest, s.latest, Arc::new(Vec::new()));
+            let mut j = JobStatus::new(
+                s.job,
+                uid,
+                source,
+                s.namespace,
+                s.earliest,
+                s.latest,
+                Arc::new(Vec::new()),
+            );
             j.last_successful_run = s.last_successful_run;
             j.last_failed_run = s.last_failed_run;
             j.cumulative_execution = s.cumulative_execution;
@@ -971,7 +1154,8 @@ impl JobScheduler {
         // A user-initiated job (only read from the store: `schedule`
         // refuses them) is kept, not run.
         j.process = if j.job.is_user_initiated() {
-            self.host.unimplemented_named("jobscheduler", "user-initiated jobs (#1490)");
+            self.host
+                .unimplemented_named("jobscheduler", "user-initiated jobs (#1490)");
             None
         } else {
             self.process_of(&j)
@@ -982,8 +1166,15 @@ impl JobScheduler {
         let registrar = Registrar(self);
         let started = if j.has_content_trigger() {
             let (triggers, user, update_delay, max_delay) = j.content_spec();
-            let spec = job_content::Spec { triggers: &triggers, user, update_delay, max_delay };
-            state.content.start_tracking(key, &spec, &mut j.content, &registrar)
+            let spec = job_content::Spec {
+                triggers: &triggers,
+                user,
+                update_delay,
+                max_delay,
+            };
+            state
+                .content
+                .start_tracking(key, &spec, &mut j.content, &registrar)
         } else {
             Ok(())
         };
@@ -998,9 +1189,18 @@ impl JobScheduler {
 
     /// `stopTrackingJobLocked`: its work handed to `incoming`, removed from
     /// the store; whether it was tracked.
-    fn stop_tracking(&self, state: &mut State, key: u64, incoming: Option<&mut JobStatus>, write: bool, now: i64) -> bool {
+    fn stop_tracking(
+        &self,
+        state: &mut State,
+        key: u64,
+        incoming: Option<&mut JobStatus>,
+        write: bool,
+        now: i64,
+    ) -> bool {
         let running = state.contexts.iter().any(|c| c.key == key);
-        let Some(j) = state.jobs.get_mut(&key) else { return false };
+        let Some(j) = state.jobs.get_mut(&key) else {
+            return false;
+        };
         let registrar = Registrar(self);
         // `JobStatus.stopTrackingJobLocked`, and `ContentObserverController`'s.
         if let Some(incoming) = incoming {
@@ -1009,11 +1209,15 @@ impl JobScheduler {
             }
             incoming.pending_work.append(&mut j.pending_work);
             incoming.next_work_id = j.next_work_id;
-            state.content.stop_tracking(&mut j.content, Some(&mut incoming.content), &registrar);
+            state
+                .content
+                .stop_tracking(&mut j.content, Some(&mut incoming.content), &registrar);
         } else {
             j.pending_work.clear();
             j.executing_work.clear();
-            state.content.stop_tracking(&mut j.content, None, &registrar);
+            state
+                .content
+                .stop_tracking(&mut j.content, None, &registrar);
         }
         let was = std::mem::replace(&mut j.tracked, false);
         let persisted = j.job.persisted.then_some(j.calling_uid);
@@ -1021,7 +1225,10 @@ impl JobScheduler {
             state.jobs.remove(&key);
         }
         state.pending.retain(|k| *k != key);
-        if was && write && let Some(uid) = persisted {
+        if was
+            && write
+            && let Some(uid) = persisted
+        {
             self.persist(state, uid, now);
         }
         was
@@ -1029,7 +1236,12 @@ impl JobScheduler {
 
     /// `JobStore.touchJob` of a job whose work changed.
     fn touch(&self, state: &mut State, key: u64, now: i64) {
-        if let Some(uid) = state.jobs.get(&key).filter(|j| j.tracked && j.job.persisted).map(|j| j.calling_uid) {
+        if let Some(uid) = state
+            .jobs
+            .get(&key)
+            .filter(|j| j.tracked && j.job.persisted)
+            .map(|j| j.calling_uid)
+        {
             self.persist(state, uid, now);
         }
     }
@@ -1045,7 +1257,11 @@ impl JobScheduler {
     }
 
     fn find(state: &State, uid: i32, namespace: Option<&str>, id: i32) -> Option<u64> {
-        state.jobs.iter().find(|(_, j)| j.matches(uid, namespace, id)).map(|(k, _)| *k)
+        state
+            .jobs
+            .iter()
+            .find(|(_, j)| j.matches(uid, namespace, id))
+            .map(|(k, _)| *k)
     }
 
     /// `JobStubs.enforceValidJobRequest`.
@@ -1058,21 +1274,31 @@ impl JobScheduler {
             )));
         };
         if si.info.application_info.uid != uid {
-            return Err(Exception::illegal_argument(format!("uid {uid} cannot schedule job in {package}")));
+            return Err(Exception::illegal_argument(format!(
+                "uid {uid} cannot schedule job in {package}"
+            )));
         }
         if si.permission.as_deref() != Some("android.permission.BIND_JOB_SERVICE") {
             return Err(Exception::illegal_argument(format!(
                 "Scheduled service {name} does not require android.permission.BIND_JOB_SERVICE permission"
             )));
         }
-        if job.persisted && self.host.check_permission(Some("android.permission.RECEIVE_BOOT_COMPLETED"), uid)? != 0 {
+        if job.persisted
+            && self
+                .host
+                .check_permission(Some("android.permission.RECEIVE_BOOT_COMPLETED"), uid)?
+                != 0
+        {
             return Err(Exception::illegal_argument(
                 "Requested job cannot be persisted without holding android.permission.RECEIVE_BOOT_COMPLETED permission",
             ));
         }
         if job.network.is_some()
             && self.change(REQUIRE_NETWORK_PERMISSIONS_FOR_CONNECTIVITY_JOBS, uid)?
-            && self.host.check_permission(Some("android.permission.ACCESS_NETWORK_STATE"), uid)? != 0
+            && self
+                .host
+                .check_permission(Some("android.permission.ACCESS_NETWORK_STATE"), uid)?
+                != 0
         {
             return Err(Exception::security(
                 "android.permission.ACCESS_NETWORK_STATE required for jobs with a connectivity constraint",
@@ -1082,16 +1308,25 @@ impl JobScheduler {
     }
 
     /// `JobStubs.validateJob`.
-    fn validate_job(&self, job: &mut JobInfo, uid: i32, work: Option<&JobWorkItem>) -> Result<(), Exception> {
+    fn validate_job(
+        &self,
+        job: &mut JobInfo,
+        uid: i32,
+        work: Option<&JobWorkItem>,
+    ) -> Result<(), Exception> {
         let reject_negative = self.change(REJECT_NEGATIVE_NETWORK_ESTIMATES, uid)?;
         job.enforce_validity(
             self.change(DISALLOW_DEADLINES_FOR_PREFETCH_JOBS, uid)?,
             reject_negative,
-            self.change(ENFORCE_MINIMUM_TIME_WINDOWS, uid)? && self.flag(FLAG_ENFORCE_MINIMUM_TIME_WINDOWS)?,
+            self.change(ENFORCE_MINIMUM_TIME_WINDOWS, uid)?
+                && self.flag(FLAG_ENFORCE_MINIMUM_TIME_WINDOWS)?,
             self.change(REJECT_NEGATIVE_DELAYS_AND_DEADLINES, uid)?,
         )?;
         if job.flags & FLAG_WILL_BE_FOREGROUND != 0
-            && self.host.check_permission(Some("android.permission.CONNECTIVITY_INTERNAL"), uid)? != 0
+            && self
+                .host
+                .check_permission(Some("android.permission.CONNECTIVITY_INTERNAL"), uid)?
+                != 0
         {
             return Err(Exception::security(format!(
                 "JobScheduler: Neither user {uid} nor current process has android.permission.CONNECTIVITY_INTERNAL."
@@ -1101,11 +1336,17 @@ impl JobScheduler {
             return Err(Exception::security("Job has invalid flags"));
         }
         if job.is_user_initiated() {
-            return Err(self.host.unimplemented_named("jobscheduler", "user-initiated jobs (#1490)"));
+            return Err(self
+                .host
+                .unimplemented_named("jobscheduler", "user-initiated jobs (#1490)"));
         }
         if let Some(work) = work {
             work.enforce_validity(reject_negative)?;
-            let bytes = [work.network_download_bytes, work.network_upload_bytes, work.minimum_chunk_bytes];
+            let bytes = [
+                work.network_download_bytes,
+                work.network_upload_bytes,
+                work.minimum_chunk_bytes,
+            ];
             if bytes.iter().any(|b| *b != NETWORK_BYTES_UNKNOWN) && job.network.is_none() {
                 let message = "JobWorkItem implies network usage but job doesn't specify a network constraint";
                 if self.change(REQUIRE_NETWORK_CONSTRAINT_FOR_NETWORK_JOB_WORK_ITEMS, uid)? {
@@ -1114,7 +1355,9 @@ impl JobScheduler {
                 eprintln!("app host: jobs: {message}");
             }
             if job.persisted && work.intent.is_some() {
-                return Err(Exception::illegal_argument("Cannot persist JobWorkItems with Intents"));
+                return Err(Exception::illegal_argument(
+                    "Cannot persist JobWorkItems with Intents",
+                ));
             }
         }
         Ok(())
@@ -1138,15 +1381,25 @@ impl JobScheduler {
             ));
         };
         let mut job = job.map_err(|u| {
-            self.host.unimplemented_named("jobscheduler", &format!("a job's network request with {} (#1490)", u.0))
+            self.host.unimplemented_named(
+                "jobscheduler",
+                &format!("a job's network request with {} (#1490)", u.0),
+            )
         })?;
         let user = uid / PER_USER_RANGE as i32;
         let proxy = match proxy {
             Some((None, ..)) => {
-                return Err(Exception::new(EX_NULL_POINTER, "Must specify a package for scheduleAsPackage()"));
+                return Err(Exception::new(
+                    EX_NULL_POINTER,
+                    "Must specify a package for scheduleAsPackage()",
+                ));
             }
             Some((Some(package), user, tag)) => {
-                if self.host.check_permission(Some("android.permission.UPDATE_DEVICE_STATS"), uid)? != 0 {
+                if self
+                    .host
+                    .check_permission(Some("android.permission.UPDATE_DEVICE_STATS"), uid)?
+                    != 0
+                {
                     return Err(Exception::security(format!(
                         "Caller uid {uid} not permitted to schedule jobs for other apps"
                     )));
@@ -1160,7 +1413,9 @@ impl JobScheduler {
             Some(None) => return Err(Exception::new(EX_NULL_POINTER, "work is null")),
             Some(Some(w)) => {
                 if w.has_fds() {
-                    return Err(Exception::illegal_argument("File descriptors passed in Intent"));
+                    return Err(Exception::illegal_argument(
+                        "File descriptors passed in Intent",
+                    ));
                 }
                 Some(w.keep(&self.host.process))
             }
@@ -1168,28 +1423,50 @@ impl JobScheduler {
         };
         self.validate_job(&mut job, uid, work.as_ref())?;
         // `prepareLocked` and `enqueueWorkLocked` grant URIs.
-        if job.clip.as_ref().is_some_and(|(_, grants)| grants & FLAG_GRANT_URI_PERMISSIONS != 0)
-            || work.as_ref().and_then(JobWorkItem::intent_flags).is_some_and(|f| f & FLAG_GRANT_URI_PERMISSIONS != 0)
+        if job
+            .clip
+            .as_ref()
+            .is_some_and(|(_, grants)| grants & FLAG_GRANT_URI_PERMISSIONS != 0)
+            || work
+                .as_ref()
+                .and_then(JobWorkItem::intent_flags)
+                .is_some_and(|f| f & FLAG_GRANT_URI_PERMISSIONS != 0)
         {
-            return Err(self.host.unimplemented_named("jobscheduler", "a job's URI grants (#1573)"));
+            return Err(self
+                .host
+                .unimplemented_named("jobscheduler", "a job's URI grants (#1573)"));
         }
         // `validateNamespace`.
         let namespace = match namespace.map(|n| n.trim().to_string()) {
-            Some(n) if n.is_empty() => return Err(Exception::illegal_argument("namespace cannot be empty")),
+            Some(n) if n.is_empty() => {
+                return Err(Exception::illegal_argument("namespace cannot be empty"));
+            }
             Some(n) if n.encode_utf16().count() > 1000 => {
-                return Err(Exception::illegal_argument("namespace cannot be more than 1000 characters"));
+                return Err(Exception::illegal_argument(
+                    "namespace cannot be more than 1000 characters",
+                ));
             }
             n => n,
         };
         // `enforceBuilderApiPermissions`.
-        if job.bias != BIAS_DEFAULT && self.host.check_permission(Some("android.permission.UPDATE_DEVICE_STATS"), uid)? != 0 {
+        if job.bias != BIAS_DEFAULT
+            && self
+                .host
+                .check_permission(Some("android.permission.UPDATE_DEVICE_STATS"), uid)?
+                != 0
+        {
             if self.change(THROW_ON_UNSUPPORTED_BIAS_USAGE, uid)? {
                 return Err(Exception::security("Apps may not call setBias()"));
             }
             eprintln!("app host: jobs: uid {uid} set bias on its job");
             job.bias = BIAS_DEFAULT;
         }
-        let binders = Arc::new(job.handles().into_iter().map(|h| self.host.process.strong(h)).collect());
+        let binders = Arc::new(
+            job.handles()
+                .into_iter()
+                .map(|h| self.host.process.strong(h))
+                .collect(),
+        );
         let mut state = self.state.lock().unwrap();
         self.ensure_loaded(&mut state)?;
         let now = elapsed_ms();
@@ -1201,8 +1478,14 @@ impl JobScheduler {
                 || proxy_package.as_ref().is_none_or(|p| *p == service_package))
         {
             let package = proxy_package.unwrap_or_else(|| service_package.clone());
-            let calls = state.schedule_calls.entry((user, package.clone())).or_default();
-            while calls.front().is_some_and(|t| now - t >= API_QUOTA_SCHEDULE_WINDOW_MS) {
+            let calls = state
+                .schedule_calls
+                .entry((user, package.clone()))
+                .or_default();
+            while calls
+                .front()
+                .is_some_and(|t| now - t >= API_QUOTA_SCHEDULE_WINDOW_MS)
+            {
                 calls.pop_front();
             }
             if calls.len() >= API_QUOTA_SCHEDULE_COUNT {
@@ -1232,7 +1515,9 @@ impl JobScheduler {
                 if j.work_count() >= MAX_NUM_PERSISTED_JOB_WORK_ITEMS && j.job.persisted {
                     return Err(Exception::new(
                         EX_ILLEGAL_STATE,
-                        format!("Apps may not persist more than {MAX_NUM_PERSISTED_JOB_WORK_ITEMS} JobWorkItems per job"),
+                        format!(
+                            "Apps may not persist more than {MAX_NUM_PERSISTED_JOB_WORK_ITEMS} JobWorkItems per job"
+                        ),
                     ));
                 }
                 j.enqueue_work(work.clone());
@@ -1242,25 +1527,53 @@ impl JobScheduler {
         }
         // `JobStatus.createFromJobInfo`.
         let (earliest, latest) = if job.periodic {
-            let period = job.interval.clamp(MIN_PERIOD_MILLIS, MAX_ALLOWED_PERIOD_MS).max(MIN_PERIOD_MILLIS);
+            let period = job
+                .interval
+                .clamp(MIN_PERIOD_MILLIS, MAX_ALLOWED_PERIOD_MS)
+                .max(MIN_PERIOD_MILLIS);
             let latest = now + period;
             (latest - job.flex.min(period).max(MIN_FLEX_MILLIS), latest)
         } else {
             (
-                if job.has_early_constraint { now + job.min_latency } else { NO_EARLIEST_RUNTIME },
-                if job.has_late_constraint { now + job.max_execution_delay } else { NO_LATEST_RUNTIME },
+                if job.has_early_constraint {
+                    now + job.min_latency
+                } else {
+                    NO_EARLIEST_RUNTIME
+                },
+                if job.has_late_constraint {
+                    now + job.max_execution_delay
+                } else {
+                    NO_LATEST_RUNTIME
+                },
             )
         };
-        let mut source = Source { package: service_package, user, uid, tag: None };
+        let mut source = Source {
+            package: service_package,
+            user,
+            uid,
+            tag: None,
+        };
         if let Some((package, source_user, tag)) = &proxy
             && *source_user != -1
             && let Some(source_uid) = self.package_uid(package, *source_user)?
         {
-            source = Source { package: package.clone(), user: *source_user, uid: source_uid, tag: tag.clone() };
+            source = Source {
+                package: package.clone(),
+                user: *source_user,
+                uid: source_uid,
+                tag: tag.clone(),
+            };
         }
         let mut j = JobStatus::new(job, uid, source, namespace, earliest, latest, binders);
         // Jobs on behalf of others do not count toward the app's limit.
-        if proxy.is_none() && state.jobs.values().filter(|j| j.tracked && j.calling_uid == uid).count() > MAX_JOBS_PER_APP {
+        if proxy.is_none()
+            && state
+                .jobs
+                .values()
+                .filter(|j| j.tracked && j.calling_uid == uid)
+                .count()
+                > MAX_JOBS_PER_APP
+        {
             return Err(Exception::new(
                 EX_ILLEGAL_STATE,
                 format!("Apps may not schedule more than {MAX_JOBS_PER_APP} distinct jobs"),
@@ -1268,14 +1581,27 @@ impl JobScheduler {
         }
         if let Some(key) = existing {
             let old = &state.jobs[&key];
-            if work.is_some() && old.job.persisted && old.work_count() >= MAX_NUM_PERSISTED_JOB_WORK_ITEMS {
+            if work.is_some()
+                && old.job.persisted
+                && old.work_count() >= MAX_NUM_PERSISTED_JOB_WORK_ITEMS
+            {
                 return Err(Exception::new(
                     EX_ILLEGAL_STATE,
-                    format!("Apps may not persist more than {MAX_NUM_PERSISTED_JOB_WORK_ITEMS} JobWorkItems per job"),
+                    format!(
+                        "Apps may not persist more than {MAX_NUM_PERSISTED_JOB_WORK_ITEMS} JobWorkItems per job"
+                    ),
                 ));
             }
             // The job replaces the one of its id.
-            self.cancel_impl(&mut state, key, Some(&mut j), STOP_REASON_CANCELLED_BY_APP, INTERNAL_STOP_REASON_CANCELED, "job rescheduled by app", now);
+            self.cancel_impl(
+                &mut state,
+                key,
+                Some(&mut j),
+                STOP_REASON_CANCELLED_BY_APP,
+                INTERNAL_STOP_REASON_CANCELED,
+                "job rescheduled by app",
+                now,
+            );
         }
         if let Some(work) = work {
             j.enqueue_work(work);
@@ -1317,13 +1643,26 @@ impl JobScheduler {
     ) {
         self.stop_tracking(state, key, incoming, true, now);
         if let Some(i) = state.contexts.iter().position(|c| c.key == key) {
-            self.cancel_context(state, i, StopReason { reason, internal, debug: Some(debug.into()) });
+            self.cancel_context(
+                state,
+                i,
+                StopReason {
+                    reason,
+                    internal,
+                    debug: Some(debug.into()),
+                },
+            );
         }
     }
 
     /// `cancelJobsForUid` of jobs the uid scheduled (in `namespace` only, if
     /// asked).
-    fn cancel_for_uid(&self, uid: i32, namespace: Option<Option<String>>, debug: &str) -> Result<(), Exception> {
+    fn cancel_for_uid(
+        &self,
+        uid: i32,
+        namespace: Option<Option<String>>,
+        debug: &str,
+    ) -> Result<(), Exception> {
         if uid == 1000 && namespace.as_ref().is_none_or(Option::is_none) {
             eprintln!("app host: jobs: can't cancel all jobs for system uid");
             return Ok(());
@@ -1339,7 +1678,15 @@ impl JobScheduler {
             .map(|(k, _)| *k)
             .collect();
         for key in keys {
-            self.cancel_impl(&mut state, key, None, STOP_REASON_CANCELLED_BY_APP, INTERNAL_STOP_REASON_CANCELED, debug, now);
+            self.cancel_impl(
+                &mut state,
+                key,
+                None,
+                STOP_REASON_CANCELLED_BY_APP,
+                INTERNAL_STOP_REASON_CANCELED,
+                debug,
+                now,
+            );
         }
         Ok(())
     }
@@ -1351,9 +1698,14 @@ impl JobScheduler {
             return false;
         }
         let device = self.device(state, now);
-        let Some(j) = state.jobs.get_mut(&key) else { return false };
+        let Some(j) = state.jobs.get_mut(&key) else {
+            return false;
+        };
         let top = self.is_top(j.source_uid);
-        j.tracked && j.evaluate(now, &device, top) && !state.pending.contains(&key) && !state.contexts.iter().any(|c| c.key == key)
+        j.tracked
+            && j.evaluate(now, &device, top)
+            && !state.pending.contains(&key)
+            && !state.contexts.iter().any(|c| c.key == key)
     }
 
     /// `maybeQueueReadyJobsForExecutionLocked`: running jobs no longer
@@ -1386,7 +1738,11 @@ impl JobScheduler {
             }
             // `shouldForceBatchJob`, for jobs of no network (which never
             // run here) and no standby buckets (all are active).
-            let until_deadline = if j.has_deadline() { j.latest - now } else { i64::MAX };
+            let until_deadline = if j.has_deadline() {
+                j.latest - now
+            } else {
+                i64::MAX
+            };
             let force_batch = !j.expedited()
                 && j.num_failures + j.num_system_stops == 0
                 && batch_flag
@@ -1394,12 +1750,17 @@ impl JobScheduler {
                 && until_deadline > MAX_CPU_ONLY_JOB_BATCH_DELAY_MS / 2
                 && !top
                 && j.job.flags & FLAG_EXEMPT_FROM_APP_STANDBY == 0
-                && !(j.first_force_batched > 0 && now - j.first_force_batched >= MAX_CPU_ONLY_JOB_BATCH_DELAY_MS);
+                && !(j.first_force_batched > 0
+                    && now - j.first_force_batched >= MAX_CPU_ONLY_JOB_BATCH_DELAY_MS);
             if force_batch && j.first_force_batched == 0 {
                 j.first_force_batched = now;
             }
             if running.is_none() {
-                if force_batch { batched.push(key) } else { unbatched.push(key) }
+                if force_batch {
+                    batched.push(key)
+                } else {
+                    unbatched.push(key)
+                }
             }
         }
         for (i, reason) in stops {
@@ -1449,10 +1810,13 @@ impl JobScheduler {
                     .map(|c| &state.jobs[&c.key])
                     .filter(|r| !self.is_top(r.source_uid))
                     .collect();
-                let same_package =
-                    running.iter().filter(|r| r.source_package == j.source_package && r.expedited() == expedited).count();
+                let same_package = running
+                    .iter()
+                    .filter(|r| r.source_package == j.source_package && r.expedited() == expedited)
+                    .count();
                 let package_limit = if expedited { 3 } else { self.limit / 2 };
-                if (!expedited && running.len() >= self.limit / 2) || same_package >= package_limit {
+                if (!expedited && running.len() >= self.limit / 2) || same_package >= package_limit
+                {
                     left.push(key);
                     continue;
                 }
@@ -1476,15 +1840,30 @@ impl JobScheduler {
         };
         state.next_callback += 1;
         let id = state.next_callback;
-        let callback = Arc::new(JobCallback { scheduler: self.me.clone(), id, stopped: Mutex::new(None) });
+        let callback = Arc::new(JobCallback {
+            scheduler: self.me.clone(),
+            id,
+            stopped: Mutex::new(None),
+        });
         let callback_binder = self.host.process.add_service(callback.clone());
-        let conn: Arc<dyn HostConnection> = Arc::new(Connection { scheduler: self.me.clone(), callback: id });
+        let conn: Arc<dyn HostConnection> = Arc::new(Connection {
+            scheduler: self.me.clone(),
+            callback: id,
+        });
         let j = &state.jobs[&key];
         let expedited = j.expedited();
-        let min_guarantee = if expedited { RUNTIME_MIN_EJ_GUARANTEE_MS } else { RUNTIME_MIN_GUARANTEE_MS };
+        let min_guarantee = if expedited {
+            RUNTIME_MIN_EJ_GUARANTEE_MS
+        } else {
+            RUNTIME_MIN_GUARANTEE_MS
+        };
         let max = j.max_execution_ms();
         let mut flags = BIND_AUTO_CREATE | BIND_NOT_APP_COMPONENT_USAGE | BIND_NOT_FOREGROUND;
-        flags |= if expedited { BIND_ALMOST_PERCEPTIBLE } else { BIND_NOT_PERCEPTIBLE };
+        flags |= if expedited {
+            BIND_ALMOST_PERCEPTIBLE
+        } else {
+            BIND_NOT_PERCEPTIBLE
+        };
         let (package, class) = j.job.service.clone();
         let user = j.user();
         let context = Context {
@@ -1495,7 +1874,11 @@ impl JobScheduler {
             verb: Verb::Binding,
             service: None,
             cancelled: false,
-            stop: StopReason { reason: STOP_REASON_UNDEFINED, internal: INTERNAL_STOP_REASON_UNKNOWN, debug: None },
+            stop: StopReason {
+                reason: STOP_REASON_UNDEFINED,
+                internal: INTERNAL_STOP_REASON_UNKNOWN,
+                debug: None,
+            },
             override_deadline_expired: j.has_deadline() && j.latest < now,
             expedited,
             execution_start: now,
@@ -1507,15 +1890,29 @@ impl JobScheduler {
             network,
         };
         state.contexts.push(context);
-        let bound = self.host.bind_service_from_host(None, &package, &class, FLAG_FROM_BACKGROUND, flags, user, conn.clone());
+        let bound = self.host.bind_service_from_host(
+            None,
+            &package,
+            &class,
+            FLAG_FROM_BACKGROUND,
+            flags,
+            user,
+            conn.clone(),
+        );
         match bound {
             Ok(true) => {
-                eprintln!("app host: jobs: running {package}/{class} #{}", state.jobs[&key].job.id);
+                eprintln!(
+                    "app host: jobs: running {package}/{class} #{}",
+                    state.jobs[&key].job.id
+                );
                 true
             }
             other => {
                 if let Err(e) = other {
-                    eprintln!("app host: jobs: job service {package}/{class} cannot be executed: {}", e.message);
+                    eprintln!(
+                        "app host: jobs: job service {package}/{class} cannot be executed: {}",
+                        e.message
+                    );
                 }
                 self.host.unbind_service_from_host(&conn);
                 state.contexts.retain(|c| c.key != key);
@@ -1530,8 +1927,21 @@ impl JobScheduler {
 
     /// `onServiceConnected`, `onServiceDisconnected`, `onBindingDied` and
     /// `onNullBinding` of the context of `callback`.
-    fn connected(&self, state: &mut State, callback: u64, service: Option<Binder>, dead: bool, now: i64) {
-        let Some(i) = state.contexts.iter().position(|c| c.callback.id == callback) else { return };
+    fn connected(
+        &self,
+        state: &mut State,
+        callback: u64,
+        service: Option<Binder>,
+        dead: bool,
+        now: i64,
+    ) {
+        let Some(i) = state
+            .contexts
+            .iter()
+            .position(|c| c.callback.id == callback)
+        else {
+            return;
+        };
         match service {
             Some(Binder::Handle(h)) => {
                 let strong = self.host.process.strong(h);
@@ -1542,7 +1952,13 @@ impl JobScheduler {
                     return self.close(state, i, false, Some("started job not pending"), now);
                 }
                 if c.cancelled {
-                    return self.close(state, i, true, Some("cancelled while waiting for bind"), now);
+                    return self.close(
+                        state,
+                        i,
+                        true,
+                        Some("cancelled while waiting for bind"),
+                        now,
+                    );
                 }
                 c.verb = Verb::Starting;
                 c.timeout_at = now + OP_TIMEOUT_MILLIS;
@@ -1573,12 +1989,21 @@ impl JobScheduler {
         };
         let mut p = Parcel::new();
         if code == job_service::START_JOB {
-            job_service::StartJob { job_params: Some(params) }.write(&mut p);
+            job_service::StartJob {
+                job_params: Some(params),
+            }
+            .write(&mut p);
         } else {
-            job_service::StopJob { job_params: Some(params) }.write(&mut p);
+            job_service::StopJob {
+                job_params: Some(params),
+            }
+            .write(&mut p);
         }
         if let Some(Err(s)) = c.service.as_ref().map(|s| s.transact(code, &p, true)) {
-            eprintln!("app host: jobs: {}/{}: call {code}: status {s}", j.job.service.0, j.job.service.1);
+            eprintln!(
+                "app host: jobs: {}/{}: call {code}: status {s}",
+                j.job.service.0, j.job.service.1
+            );
         }
     }
 
@@ -1620,12 +2045,23 @@ impl JobScheduler {
     fn executing_timeout(c: &Context, now: i64) -> i64 {
         let earliest = c.execution_start + c.min_guarantee;
         let latest = c.execution_start + c.max_execution;
-        let until = if now < earliest { earliest - now } else { latest - now };
+        let until = if now < earliest {
+            earliest - now
+        } else {
+            latest - now
+        };
         now + until.min(EXECUTION_DURATION_STAMP_PERIOD_MILLIS)
     }
 
     /// `doCallbackLocked`: a start acknowledged, or the job finished.
-    fn callback_done(&self, state: &mut State, i: usize, reschedule: bool, reason: Option<&str>, now: i64) {
+    fn callback_done(
+        &self,
+        state: &mut State,
+        i: usize,
+        reschedule: bool,
+        reason: Option<&str>,
+        now: i64,
+    ) {
         match state.contexts[i].verb {
             // `handleStartedLocked`.
             Verb::Starting => {
@@ -1646,7 +2082,11 @@ impl JobScheduler {
 
     /// `handleOpTimeoutLocked` of context `i`.
     fn op_timeout(&self, state: &mut State, i: usize, now: i64) {
-        let anr = |debug: &str| StopReason { reason: STOP_REASON_UNDEFINED, internal: INTERNAL_STOP_REASON_ANR, debug: Some(debug.into()) };
+        let anr = |debug: &str| StopReason {
+            reason: STOP_REASON_UNDEFINED,
+            internal: INTERNAL_STOP_REASON_ANR,
+            debug: Some(debug.into()),
+        };
         match state.contexts[i].verb {
             Verb::Binding => {
                 state.contexts[i].stop = anr("timed out while binding");
@@ -1668,23 +2108,45 @@ impl JobScheduler {
                     }
                 }
                 let c = &state.contexts[i];
-                let (earliest, latest) = (c.execution_start + c.min_guarantee, c.execution_start + c.max_execution);
+                let (earliest, latest) = (
+                    c.execution_start + c.min_guarantee,
+                    c.execution_start + c.max_execution,
+                );
                 if now >= latest {
                     let j = &state.jobs[&key];
                     let abandoned = j.abandoned
                         && self.flag(FLAG_HANDLE_ABANDONED_JOBS).unwrap_or(false)
-                        && !self.change(OVERRIDE_HANDLE_ABANDONED_JOBS, j.source_uid).unwrap_or(true);
+                        && !self
+                            .change(OVERRIDE_HANDLE_ABANDONED_JOBS, j.source_uid)
+                            .unwrap_or(true);
                     let (reason, internal, suffix) = if abandoned {
-                        (STOP_REASON_TIMEOUT_ABANDONED, INTERNAL_STOP_REASON_TIMEOUT_ABANDONED, " and maybe abandoned")
+                        (
+                            STOP_REASON_TIMEOUT_ABANDONED,
+                            INTERNAL_STOP_REASON_TIMEOUT_ABANDONED,
+                            " and maybe abandoned",
+                        )
                     } else {
                         (STOP_REASON_TIMEOUT, INTERNAL_STOP_REASON_TIMEOUT, "")
                     };
-                    state.contexts[i].stop =
-                        StopReason { reason, internal, debug: Some(format!("client timed out{suffix}")) };
-                    self.send_stop(state, i, Some(format!("timeout while executing{suffix}")), now);
-                } else if now >= earliest && let Some(why) = self.should_stop(state, i) {
-                    state.contexts[i].stop =
-                        StopReason { reason: STOP_REASON_DEVICE_STATE, internal: INTERNAL_STOP_REASON_TIMEOUT, debug: Some(why.clone()) };
+                    state.contexts[i].stop = StopReason {
+                        reason,
+                        internal,
+                        debug: Some(format!("client timed out{suffix}")),
+                    };
+                    self.send_stop(
+                        state,
+                        i,
+                        Some(format!("timeout while executing{suffix}")),
+                        now,
+                    );
+                } else if now >= earliest
+                    && let Some(why) = self.should_stop(state, i)
+                {
+                    state.contexts[i].stop = StopReason {
+                        reason: STOP_REASON_DEVICE_STATE,
+                        internal: INTERNAL_STOP_REASON_TIMEOUT,
+                        debug: Some(why.clone()),
+                    };
                     self.send_stop(state, i, Some(why), now);
                 } else {
                     // Its execution time stamped.
@@ -1712,8 +2174,16 @@ impl JobScheduler {
             return Some("too many jobs running".into());
         }
         let expedited = state.contexts[i].expedited;
-        let blocked = state.pending.iter().any(|k| !expedited || state.jobs[k].expedited());
-        blocked.then(|| format!("blocking {} queue", if expedited { "EJ" } else { "regular" }))
+        let blocked = state
+            .pending
+            .iter()
+            .any(|k| !expedited || state.jobs[k].expedited());
+        blocked.then(|| {
+            format!(
+                "blocking {} queue",
+                if expedited { "EJ" } else { "regular" }
+            )
+        })
     }
 
     /// `closeAndCleanupJobLocked`, then `onJobCompletedLocked` and the
@@ -1721,21 +2191,45 @@ impl JobScheduler {
     fn close(&self, state: &mut State, i: usize, reschedule: bool, reason: Option<&str>, now: i64) {
         let c = state.contexts.remove(i);
         c.callback.stopped_because(reason.map(str::to_string), now);
-        c.callback.finished(c.stop.internal == INTERNAL_STOP_REASON_SUCCESSFUL_FINISH, now);
+        c.callback.finished(
+            c.stop.internal == INTERNAL_STOP_REASON_SUCCESSFUL_FINISH,
+            now,
+        );
         if let Some(j) = state.jobs.get_mut(&c.key) {
             j.cumulative_execution += now - c.last_stamp;
         }
         self.host.unbind_service_from_host(&c.conn);
-        self.completed(state, c.key, c.stop.reason, c.stop.internal, reschedule, now);
+        self.completed(
+            state,
+            c.key,
+            c.stop.reason,
+            c.stop.internal,
+            reschedule,
+            now,
+        );
         self.run_pending(state, now);
     }
 
     /// `onJobCompletedLocked`: a failed job rescheduled with back-off, a
     /// periodic one for its next window.
-    fn completed(&self, state: &mut State, key: u64, stop: i32, internal: i32, reschedule: bool, now: i64) {
-        let Some(j) = state.jobs.get(&key) else { return };
+    fn completed(
+        &self,
+        state: &mut State,
+        key: u64,
+        stop: i32,
+        internal: i32,
+        reschedule: bool,
+        now: i64,
+    ) {
+        let Some(j) = state.jobs.get(&key) else {
+            return;
+        };
         let (tracked, periodic) = (j.tracked, j.job.periodic);
-        let mut next = if reschedule { Some(self.reschedule_for_failure(j, stop, internal, now)) } else { None };
+        let mut next = if reschedule {
+            Some(self.reschedule_for_failure(j, stop, internal, now))
+        } else {
+            None
+        };
         if !tracked {
             // Cancelled while it ran; a job of its id may wait to run.
             state.jobs.remove(&key);
@@ -1743,7 +2237,8 @@ impl JobScheduler {
             return;
         }
         if next.is_none() && periodic {
-            let (earliest, latest) = periodic_window(j.job.interval, j.job.flex, j.original_latest, now);
+            let (earliest, latest) =
+                periodic_window(j.job.interval, j.job.flex, j.original_latest, now);
             let mut n = j.rescheduled(earliest, latest);
             n.last_successful_run = wall_ms();
             n.last_failed_run = j.last_failed_run;
@@ -1761,12 +2256,25 @@ impl JobScheduler {
     }
 
     /// `getRescheduleJobForFailureLocked`.
-    fn reschedule_for_failure(&self, j: &JobStatus, stop: i32, internal: i32, now: i64) -> JobStatus {
+    fn reschedule_for_failure(
+        &self,
+        j: &JobStatus,
+        stop: i32,
+        internal: i32,
+        now: i64,
+    ) -> JobStatus {
         let handle_abandoned = self.flag(FLAG_HANDLE_ABANDONED_JOBS).unwrap_or(false)
-            && !self.change(OVERRIDE_HANDLE_ABANDONED_JOBS, j.source_uid).unwrap_or(true);
-        let (mut failures, mut abandoned, mut system_stops) = (j.num_failures, j.num_abandoned_failures, j.num_system_stops);
-        if matches!(internal, INTERNAL_STOP_REASON_SUCCESSFUL_FINISH | INTERNAL_STOP_REASON_TIMEOUT | INTERNAL_STOP_REASON_ANR)
-            || stop == STOP_REASON_USER
+            && !self
+                .change(OVERRIDE_HANDLE_ABANDONED_JOBS, j.source_uid)
+                .unwrap_or(true);
+        let (mut failures, mut abandoned, mut system_stops) =
+            (j.num_failures, j.num_abandoned_failures, j.num_system_stops);
+        if matches!(
+            internal,
+            INTERNAL_STOP_REASON_SUCCESSFUL_FINISH
+                | INTERNAL_STOP_REASON_TIMEOUT
+                | INTERNAL_STOP_REASON_ANR
+        ) || stop == STOP_REASON_USER
         {
             failures += 1;
         } else if handle_abandoned && internal == INTERNAL_STOP_REASON_TIMEOUT_ABANDONED {
@@ -1780,7 +2288,8 @@ impl JobScheduler {
             policy = BACKOFF_POLICY_EXPONENTIAL;
         }
         let attempts = failures + system_stops / SYSTEM_STOP_TO_FAILURE_RATIO;
-        let earliest = backoff_delay(policy, j.job.initial_backoff, attempts).map_or(NO_EARLIEST_RUNTIME, |d| now + d);
+        let earliest = backoff_delay(policy, j.job.initial_backoff, attempts)
+            .map_or(NO_EARLIEST_RUNTIME, |d| now + d);
         let mut n = j.rescheduled(earliest, NO_LATEST_RUNTIME);
         n.num_failures = failures;
         n.num_abandoned_failures = abandoned;
@@ -1802,7 +2311,12 @@ impl JobScheduler {
     }
 
     /// `getPendingJobReasonsLocked`.
-    fn pending_reasons(&self, uid: i32, namespace: Option<&str>, id: i32) -> Result<Vec<i32>, Exception> {
+    fn pending_reasons(
+        &self,
+        uid: i32,
+        namespace: Option<&str>,
+        id: i32,
+    ) -> Result<Vec<i32>, Exception> {
         let api = self.flag(FLAG_GET_PENDING_JOB_REASONS_API)?;
         let mut guard = self.state.lock().unwrap();
         let state = &mut *guard;
@@ -1823,7 +2337,11 @@ impl JobScheduler {
         if state.pending.contains(&key) {
             return Ok(vec![PENDING_JOB_REASON_DEVICE_STATE]);
         }
-        Ok(vec![if j.process.is_some() { PENDING_JOB_REASON_UNDEFINED } else { PENDING_JOB_REASON_APP }])
+        Ok(vec![if j.process.is_some() {
+            PENDING_JOB_REASON_UNDEFINED
+        } else {
+            PENDING_JOB_REASON_APP
+        }])
     }
 
     /// The tracked jobs `uid` scheduled.
@@ -1841,7 +2359,10 @@ impl JobScheduler {
     /// `checkRunUserInitiatedJobsPermission`: `RUN_USER_INITIATED_JOBS`, an
     /// install-time permission without an app op.
     fn can_run_user_initiated(&self, uid: i32) -> Result<bool, Exception> {
-        Ok(self.host.check_permission(Some("android.permission.RUN_USER_INITIATED_JOBS"), uid)? == 0)
+        Ok(self
+            .host
+            .check_permission(Some("android.permission.RUN_USER_INITIATED_JOBS"), uid)?
+            == 0)
     }
 
     /// `IJobCallback`'s calls of `callback`; the data transfer reports
@@ -1850,7 +2371,10 @@ impl JobScheduler {
     fn callback_call(&self, callback: &JobCallback, call: &mut Call<'_>) -> Reply {
         let mut state = self.state.lock().unwrap();
         let now = elapsed_ms();
-        let current = state.contexts.iter().position(|c| c.callback.id == callback.id);
+        let current = state
+            .contexts
+            .iter()
+            .position(|c| c.callback.id == callback.id);
         let mut p = Parcel::new();
         match call.code {
             cb::ACKNOWLEDGE_START_MESSAGE => {
@@ -1875,7 +2399,13 @@ impl JobScheduler {
                         internal: INTERNAL_STOP_REASON_SUCCESSFUL_FINISH,
                         debug: Some("app called jobFinished".into()),
                     };
-                    self.callback_done(&mut state, i, a.reschedule, Some("app called jobFinished"), now);
+                    self.callback_done(
+                        &mut state,
+                        i,
+                        a.reschedule,
+                        Some("app called jobFinished"),
+                        now,
+                    );
                 }
                 cb::write_job_finished_reply(&mut p);
             }
@@ -1896,7 +2426,13 @@ impl JobScheduler {
                                 internal: INTERNAL_STOP_REASON_SUCCESSFUL_FINISH,
                                 debug: Some("last work dequeued".into()),
                             };
-                            self.callback_done(&mut state, i, false, Some("last work dequeued"), now);
+                            self.callback_done(
+                                &mut state,
+                                i,
+                                false,
+                                Some("last work dequeued"),
+                                now,
+                            );
                         } else if work.is_some() {
                             self.touch(&mut state, key, now);
                         }
@@ -1944,7 +2480,11 @@ impl JobScheduler {
     /// The handler's message `m`.
     fn handle(&self, state: &mut State, m: Message, now: i64) {
         match m {
-            Message::Connected { callback, service, dead } => self.connected(state, callback, service, dead, now),
+            Message::Connected {
+                callback,
+                service,
+                dead,
+            } => self.connected(state, callback, service, dead, now),
             Message::Check => self.check(state, now),
             Message::Persist => {}
             Message::ContentChanged { key, uris } => {
@@ -1975,8 +2515,12 @@ impl JobScheduler {
         // evaluation.
         changed |= state.jobs.values().any(|j| {
             j.tracked
-                && ((j.required & CONSTRAINT_TIMING_DELAY != 0 && j.satisfied & CONSTRAINT_TIMING_DELAY == 0 && now >= j.earliest)
-                    || (j.required & CONSTRAINT_DEADLINE != 0 && j.satisfied & CONSTRAINT_DEADLINE == 0 && now >= j.latest))
+                && ((j.required & CONSTRAINT_TIMING_DELAY != 0
+                    && j.satisfied & CONSTRAINT_TIMING_DELAY == 0
+                    && now >= j.earliest)
+                    || (j.required & CONSTRAINT_DEADLINE != 0
+                        && j.satisfied & CONSTRAINT_DEADLINE == 0
+                        && now >= j.latest))
         });
         // `ContentObserverController`'s triggers come due
         // (`setContentTriggerConstraintSatisfied`, reported if it changed).
@@ -2051,7 +2595,9 @@ fn run(scheduler: Weak<JobScheduler>) {
         if writes.is_empty() {
             continue;
         }
-        let Ok(inputs) = s.host.inputs() else { continue };
+        let Ok(inputs) = s.host.inputs() else {
+            continue;
+        };
         let dir = inputs.data.join("system/job");
         let wall = wall_ms();
         for (uid, jobs) in writes {
@@ -2071,13 +2617,21 @@ impl JobCallback {
     fn stopped_because(&self, reason: Option<String>, now: i64) {
         let mut stopped = self.stopped.lock().unwrap();
         if reason.is_some() && stopped.as_ref().is_none_or(|s| s.reason.is_none()) {
-            *stopped = Some(Stopped { reason, at: now, successful: false });
+            *stopped = Some(Stopped {
+                reason,
+                at: now,
+                successful: false,
+            });
         }
     }
 
     fn finished(&self, successful: bool, now: i64) {
         let mut stopped = self.stopped.lock().unwrap();
-        let s = stopped.get_or_insert(Stopped { reason: None, at: now, successful });
+        let s = stopped.get_or_insert(Stopped {
+            reason: None,
+            at: now,
+            successful,
+        });
         s.successful = successful;
         s.at = now;
     }
@@ -2090,11 +2644,19 @@ impl JobCallback {
             return Ok(current);
         }
         let stopped = self.stopped.lock().unwrap();
-        if stopped.as_ref().is_some_and(|s| !s.successful && now - s.at < 15_000) {
+        if stopped
+            .as_ref()
+            .is_some_and(|s| !s.successful && now - s.at < 15_000)
+        {
             return Ok(None);
         }
         let mut message = "Caller no longer running".to_string();
-        if let Some(Stopped { reason: Some(reason), at, .. }) = stopped.as_ref() {
+        if let Some(Stopped {
+            reason: Some(reason),
+            at,
+            ..
+        }) = stopped.as_ref()
+        {
             message += &format!(", last stopped +{}ms because: {reason}", now - at);
         }
         Err(Exception::security(message))
@@ -2107,7 +2669,9 @@ impl Service for JobCallback {
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
-        let Some(scheduler) = self.scheduler.upgrade() else { return Err(BAD_VALUE) };
+        let Some(scheduler) = self.scheduler.upgrade() else {
+            return Err(BAD_VALUE);
+        };
         scheduler.callback_call(self, call)
     }
 }
@@ -2129,39 +2693,52 @@ impl Service for JobScheduler {
         // read apart.
         struct Job(job_info::Read);
         impl aim_service_aidl::ReadParcelable for Job {
-            fn read_from(r: &mut aim_binder_host::parcel::Reader<'_>) -> aim_binder_host::parcel::Result<Self> {
+            fn read_from(
+                r: &mut aim_binder_host::parcel::Reader<'_>,
+            ) -> aim_binder_host::parcel::Result<Self> {
                 JobInfo::read(r).map(Job)
             }
         }
         let validated = |n: Option<String>| match n.map(|n| n.trim().to_string()) {
-            Some(n) if n.is_empty() => Err(Exception::illegal_argument("namespace cannot be empty")),
+            Some(n) if n.is_empty() => {
+                Err(Exception::illegal_argument("namespace cannot be empty"))
+            }
             n => Ok(n),
         };
         match call.code {
             js::SCHEDULE => {
                 let a = js::Schedule::<Job>::read(&mut call.data).map_err(bad)?;
-                reply(self.schedule(uid, a.namespace, a.job.map(|j| j.0), None, None).map(|r| {
-                    let mut p = Parcel::new();
-                    js::write_schedule_reply(&mut p, r);
-                    p
-                }))
+                reply(
+                    self.schedule(uid, a.namespace, a.job.map(|j| j.0), None, None)
+                        .map(|r| {
+                            let mut p = Parcel::new();
+                            js::write_schedule_reply(&mut p, r);
+                            p
+                        }),
+                )
             }
             js::ENQUEUE => {
                 let a = js::Enqueue::<Job, ReadWorkItem>::read(&mut call.data).map_err(bad)?;
-                reply(self.schedule(uid, a.namespace, a.job.map(|j| j.0), Some(a.work), None).map(|r| {
-                    let mut p = Parcel::new();
-                    js::write_enqueue_reply(&mut p, r);
-                    p
-                }))
+                reply(
+                    self.schedule(uid, a.namespace, a.job.map(|j| j.0), Some(a.work), None)
+                        .map(|r| {
+                            let mut p = Parcel::new();
+                            js::write_enqueue_reply(&mut p, r);
+                            p
+                        }),
+                )
             }
             js::SCHEDULE_AS_PACKAGE => {
                 let a = js::ScheduleAsPackage::<Job>::read(&mut call.data).map_err(bad)?;
                 let proxy = Some((a.package_name, a.user_id, a.tag));
-                reply(self.schedule(uid, a.namespace, a.job.map(|j| j.0), None, proxy).map(|r| {
-                    let mut p = Parcel::new();
-                    js::write_schedule_as_package_reply(&mut p, r);
-                    p
-                }))
+                reply(
+                    self.schedule(uid, a.namespace, a.job.map(|j| j.0), None, proxy)
+                        .map(|r| {
+                            let mut p = Parcel::new();
+                            js::write_schedule_as_package_reply(&mut p, r);
+                            p
+                        }),
+                )
             }
             js::CANCEL => {
                 let a = js::Cancel::read(&mut call.data).map_err(bad)?;
@@ -2170,8 +2747,19 @@ impl Service for JobScheduler {
                     let mut state = self.state.lock().unwrap();
                     self.ensure_loaded(&mut state)?;
                     if let Some(key) = Self::find(&state, uid, namespace.as_deref(), a.job_id) {
-                        let debug = format!("cancel() called by app, callingUid={uid} uid={uid} jobId={}", a.job_id);
-                        self.cancel_impl(&mut state, key, None, STOP_REASON_CANCELLED_BY_APP, INTERNAL_STOP_REASON_CANCELED, &debug, elapsed_ms());
+                        let debug = format!(
+                            "cancel() called by app, callingUid={uid} uid={uid} jobId={}",
+                            a.job_id
+                        );
+                        self.cancel_impl(
+                            &mut state,
+                            key,
+                            None,
+                            STOP_REASON_CANCELLED_BY_APP,
+                            INTERNAL_STOP_REASON_CANCELED,
+                            &debug,
+                            elapsed_ms(),
+                        );
                     }
                     let mut p = Parcel::new();
                     js::write_cancel_reply(&mut p);
@@ -2180,16 +2768,27 @@ impl Service for JobScheduler {
             }
             js::CANCEL_ALL => {
                 js::CancelAll::read(&mut call.data).map_err(bad)?;
-                reply(self.cancel_for_uid(uid, None, &format!("cancelAll() called by app, callingUid={uid}")).map(|()| {
-                    let mut p = Parcel::new();
-                    js::write_cancel_all_reply(&mut p);
-                    p
-                }))
+                reply(
+                    self.cancel_for_uid(
+                        uid,
+                        None,
+                        &format!("cancelAll() called by app, callingUid={uid}"),
+                    )
+                    .map(|()| {
+                        let mut p = Parcel::new();
+                        js::write_cancel_all_reply(&mut p);
+                        p
+                    }),
+                )
             }
             js::CANCEL_ALL_IN_NAMESPACE => {
                 let a = js::CancelAllInNamespace::read(&mut call.data).map_err(bad)?;
                 reply(validated(a.namespace).and_then(|n| {
-                    self.cancel_for_uid(uid, Some(n), &format!("cancelAllInNamespace() called by app, callingUid={uid}"))?;
+                    self.cancel_for_uid(
+                        uid,
+                        Some(n),
+                        &format!("cancelAllInNamespace() called by app, callingUid={uid}"),
+                    )?;
                     let mut p = Parcel::new();
                     js::write_cancel_all_in_namespace_reply(&mut p);
                     Ok(p)
@@ -2220,16 +2819,28 @@ impl Service for JobScheduler {
             js::GET_ALL_PENDING_JOBS_IN_NAMESPACE => {
                 let a = js::GetAllPendingJobsInNamespace::read(&mut call.data).map_err(bad)?;
                 reply(validated(a.namespace).and_then(|namespace| {
-                    let jobs = self.jobs_of(uid)?.into_iter().filter(|(n, _)| *n == namespace).map(|(_, j)| j).collect();
+                    let jobs = self
+                        .jobs_of(uid)?
+                        .into_iter()
+                        .filter(|(n, _)| *n == namespace)
+                        .map(|(_, j)| j)
+                        .collect();
                     let mut p = Parcel::new();
-                    js::write_get_all_pending_jobs_in_namespace_reply(&mut p, Some(&slice(&self.host, jobs)));
+                    js::write_get_all_pending_jobs_in_namespace_reply(
+                        &mut p,
+                        Some(&slice(&self.host, jobs)),
+                    );
                     Ok(p)
                 }))
             }
             js::GET_PENDING_JOB => {
                 let a = js::GetPendingJob::read(&mut call.data).map_err(bad)?;
                 reply(validated(a.namespace).and_then(|namespace| {
-                    let job = self.jobs_of(uid)?.into_iter().find(|(n, j)| *n == namespace && j.id == a.job_id).map(|(_, j)| j);
+                    let job = self
+                        .jobs_of(uid)?
+                        .into_iter()
+                        .find(|(n, j)| *n == namespace && j.id == a.job_id)
+                        .map(|(_, j)| j);
                     let mut p = Parcel::new();
                     js::write_get_pending_job_reply(&mut p, job.as_ref());
                     Ok(p)
@@ -2264,7 +2875,10 @@ impl Service for JobScheduler {
                         )));
                     }
                     let mut p = Parcel::new();
-                    js::write_can_run_user_initiated_jobs_reply(&mut p, self.can_run_user_initiated(uid)?);
+                    js::write_can_run_user_initiated_jobs_reply(
+                        &mut p,
+                        self.can_run_user_initiated(uid)?,
+                    );
                     Ok(p)
                 })())
             }
@@ -2280,7 +2894,10 @@ impl Service for JobScheduler {
                         )));
                     }
                     let mut p = Parcel::new();
-                    js::write_has_run_user_initiated_jobs_permission_reply(&mut p, self.can_run_user_initiated(package_uid)?);
+                    js::write_has_run_user_initiated_jobs_permission_reply(
+                        &mut p,
+                        self.can_run_user_initiated(package_uid)?,
+                    );
                     Ok(p)
                 })())
             }
@@ -2288,11 +2905,17 @@ impl Service for JobScheduler {
                 js::GetStartedJobs::read(&mut call.data).map_err(bad)?;
                 reply((|| {
                     if uid != 1000 {
-                        return Err(Exception::security("getStartedJobs() is system internal use only."));
+                        return Err(Exception::security(
+                            "getStartedJobs() is system internal use only.",
+                        ));
                     }
                     let state = self.state.lock().unwrap();
-                    let jobs: Vec<Option<JobInfo>> =
-                        state.contexts.iter().rev().map(|c| Some(state.jobs[&c.key].job.clone())).collect();
+                    let jobs: Vec<Option<JobInfo>> = state
+                        .contexts
+                        .iter()
+                        .rev()
+                        .map(|c| Some(state.jobs[&c.key].job.clone()))
+                        .collect();
                     let mut p = Parcel::new();
                     js::write_get_started_jobs_reply(&mut p, Some(jobs.as_slice()));
                     Ok(p)
@@ -2307,8 +2930,14 @@ impl Service for JobScheduler {
 mod tests {
     use super::*;
 
-    const PLUGGED: Device =
-        Device { power_connected: true, charging: true, battery_not_low: true, storage_not_low: true, battery_saver: false, network: None };
+    const PLUGGED: Device = Device {
+        power_connected: true,
+        charging: true,
+        battery_not_low: true,
+        storage_not_low: true,
+        battery_saver: false,
+        network: None,
+    };
 
     fn job(build: impl FnOnce(&mut JobInfo)) -> JobInfo {
         let mut j = JobInfo::persisted_builder(1, "com.example".into(), "com.example.Job".into());
@@ -2318,8 +2947,21 @@ mod tests {
     }
 
     fn status(info: JobInfo, earliest: i64, latest: i64) -> JobStatus {
-        let source = Source { package: "com.example".into(), user: 0, uid: 10123, tag: None };
-        let mut j = JobStatus::new(info, 10123, source, None, earliest, latest, Arc::new(Vec::new()));
+        let source = Source {
+            package: "com.example".into(),
+            user: 0,
+            uid: 10123,
+            tag: None,
+        };
+        let mut j = JobStatus::new(
+            info,
+            10123,
+            source,
+            None,
+            earliest,
+            latest,
+            Arc::new(Vec::new()),
+        );
         j.process = Some("com.example".into());
         j
     }
@@ -2328,11 +2970,25 @@ mod tests {
     /// it passes; a deadline makes a one-off job ready whatever else.
     #[test]
     fn time_constraints_decide_readiness() {
-        let mut delayed = status(job(|j| j.constraint_flags = CONSTRAINT_FLAG_DEVICE_IDLE), 1000, NO_LATEST_RUNTIME);
+        let mut delayed = status(
+            job(|j| j.constraint_flags = CONSTRAINT_FLAG_DEVICE_IDLE),
+            1000,
+            NO_LATEST_RUNTIME,
+        );
         assert!(!delayed.evaluate(999, &PLUGGED, false));
-        assert_eq!(delayed.pending_reasons(true), [PENDING_JOB_REASON_CONSTRAINT_DEVICE_IDLE, PENDING_JOB_REASON_CONSTRAINT_MINIMUM_LATENCY]);
+        assert_eq!(
+            delayed.pending_reasons(true),
+            [
+                PENDING_JOB_REASON_CONSTRAINT_DEVICE_IDLE,
+                PENDING_JOB_REASON_CONSTRAINT_MINIMUM_LATENCY
+            ]
+        );
         assert!(!delayed.evaluate(1000, &PLUGGED, false));
-        let mut deadline = status(job(|j| j.constraint_flags = CONSTRAINT_FLAG_DEVICE_IDLE), NO_EARLIEST_RUNTIME, 5000);
+        let mut deadline = status(
+            job(|j| j.constraint_flags = CONSTRAINT_FLAG_DEVICE_IDLE),
+            NO_EARLIEST_RUNTIME,
+            5000,
+        );
         assert!(!deadline.evaluate(4999, &PLUGGED, false));
         assert!(deadline.evaluate(5000, &PLUGGED, false));
         // A periodic job's deadline does not override its constraints.
@@ -2356,7 +3012,10 @@ mod tests {
         let triggered = || job(|j| j.trigger_content_uris = Some(crate::clip::Raw::of(&none)));
         let mut j = status(triggered(), NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME);
         assert!(!j.evaluate(0, &PLUGGED, true));
-        assert_eq!(j.pending_reasons(true), [PENDING_JOB_REASON_CONSTRAINT_CONTENT_TRIGGER]);
+        assert_eq!(
+            j.pending_reasons(true),
+            [PENDING_JOB_REASON_CONSTRAINT_CONTENT_TRIGGER]
+        );
         j.content.satisfied = true;
         assert!(j.evaluate(0, &PLUGGED, true));
         let mut deadline = status(triggered(), NO_EARLIEST_RUNTIME, 5000);
@@ -2367,20 +3026,38 @@ mod tests {
     /// `BatteryController`, the storage controller and battery saver.
     #[test]
     fn device_constraints_decide_readiness() {
-        let charging = |j: &mut JobInfo| j.constraint_flags = CONSTRAINT_FLAG_CHARGING | CONSTRAINT_FLAG_STORAGE_NOT_LOW;
+        let charging = |j: &mut JobInfo| {
+            j.constraint_flags = CONSTRAINT_FLAG_CHARGING | CONSTRAINT_FLAG_STORAGE_NOT_LOW
+        };
         let mut j = status(job(charging), NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME);
         assert!(j.evaluate(0, &PLUGGED, false));
-        let unplugged = Device { power_connected: false, charging: false, ..PLUGGED };
+        let unplugged = Device {
+            power_connected: false,
+            charging: false,
+            ..PLUGGED
+        };
         assert!(!j.evaluate(0, &unplugged, false));
         assert_eq!(j.reason_unready, STOP_REASON_CONSTRAINT_CHARGING);
-        assert_eq!(j.pending_reasons(true), [PENDING_JOB_REASON_CONSTRAINT_CHARGING]);
+        assert_eq!(
+            j.pending_reasons(true),
+            [PENDING_JOB_REASON_CONSTRAINT_CHARGING]
+        );
         // A top app's job needs power only, battery low or not.
-        let low = Device { battery_not_low: false, ..PLUGGED };
+        let low = Device {
+            battery_not_low: false,
+            ..PLUGGED
+        };
         assert!(j.evaluate(0, &low, true));
         assert!(!j.evaluate(0, &low, false));
-        let full = Device { storage_not_low: false, ..PLUGGED };
+        let full = Device {
+            storage_not_low: false,
+            ..PLUGGED
+        };
         assert!(!j.evaluate(0, &full, true));
-        let saver = Device { battery_saver: true, ..PLUGGED };
+        let saver = Device {
+            battery_saver: true,
+            ..PLUGGED
+        };
         assert!(j.evaluate(0, &saver, true));
         assert!(!j.evaluate(0, &saver, false));
         assert_eq!(j.pending_reasons(true), [PENDING_JOB_REASON_DEVICE_STATE]);
@@ -2392,18 +3069,37 @@ mod tests {
         let network = job(|j| j.network = Some(job_info::restored_request(&[12, 11], &[], &[])));
         let mut j = status(network, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME);
         assert!(!j.evaluate(0, &PLUGGED, true));
-        assert_eq!(j.pending_reasons(true), [PENDING_JOB_REASON_CONSTRAINT_CONNECTIVITY]);
+        assert_eq!(
+            j.pending_reasons(true),
+            [PENDING_JOB_REASON_CONSTRAINT_CONNECTIVITY]
+        );
         let mut caps = NetworkCapabilities::default();
-        for c in [network::INTERNET, network::NOT_METERED, network::NOT_SUSPENDED, network::NOT_CONGESTED, network::VALIDATED] {
+        for c in [
+            network::INTERNET,
+            network::NOT_METERED,
+            network::NOT_SUSPENDED,
+            network::NOT_CONGESTED,
+            network::VALIDATED,
+        ] {
             caps.add(c);
         }
         caps.link_down_kbps = 100_000;
         caps.link_up_kbps = 100_000;
-        let online = Device { network: Some((Network(100), caps.clone())), ..PLUGGED };
+        let online = Device {
+            network: Some((Network(100), caps.clone())),
+            ..PLUGGED
+        };
         assert!(j.evaluate(0, &online, true));
         // Unmetered was asked for.
         caps.remove(network::NOT_METERED);
-        assert!(!j.evaluate(0, &Device { network: Some((Network(100), caps)), ..PLUGGED }, true));
+        assert!(!j.evaluate(
+            0,
+            &Device {
+                network: Some((Network(100), caps)),
+                ..PLUGGED
+            },
+            true
+        ));
     }
 
     /// `isInsane`: transfers that cannot finish in the job's runtime.
@@ -2415,21 +3111,42 @@ mod tests {
         });
         let mut j = status(big, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME);
         let mut caps = NetworkCapabilities::default();
-        for c in [network::INTERNET, network::NOT_SUSPENDED, network::NOT_CONGESTED] {
+        for c in [
+            network::INTERNET,
+            network::NOT_SUSPENDED,
+            network::NOT_CONGESTED,
+        ] {
             caps.add(c);
         }
         caps.link_down_kbps = 1_000;
-        assert!(!j.evaluate(0, &Device { network: Some((Network(100), caps)), charging: false, ..PLUGGED }, true));
+        assert!(!j.evaluate(
+            0,
+            &Device {
+                network: Some((Network(100), caps)),
+                charging: false,
+                ..PLUGGED
+            },
+            true
+        ));
     }
 
     /// `getRescheduleJobForFailureLocked`'s delays.
     #[test]
     fn back_off_is_the_originals() {
         assert_eq!(backoff_delay(BACKOFF_POLICY_EXPONENTIAL, 30_000, 0), None);
-        assert_eq!(backoff_delay(BACKOFF_POLICY_EXPONENTIAL, 30_000, 1), Some(30_000));
-        assert_eq!(backoff_delay(BACKOFF_POLICY_EXPONENTIAL, 30_000, 3), Some(120_000));
+        assert_eq!(
+            backoff_delay(BACKOFF_POLICY_EXPONENTIAL, 30_000, 1),
+            Some(30_000)
+        );
+        assert_eq!(
+            backoff_delay(BACKOFF_POLICY_EXPONENTIAL, 30_000, 3),
+            Some(120_000)
+        );
         assert_eq!(backoff_delay(BACKOFF_POLICY_LINEAR, 5_000, 3), Some(30_000));
-        assert_eq!(backoff_delay(BACKOFF_POLICY_EXPONENTIAL, 30_000, 40), Some(MAX_BACKOFF_DELAY_MILLIS));
+        assert_eq!(
+            backoff_delay(BACKOFF_POLICY_EXPONENTIAL, 30_000, 40),
+            Some(MAX_BACKOFF_DELAY_MILLIS)
+        );
     }
 
     /// `getRescheduleJobForPeriodic`: the next window, a buffer after one
@@ -2439,11 +3156,20 @@ mod tests {
         let hour = 60 * MINUTE;
         // Ran at the end of its window: the next starts a sixth of a
         // period later.
-        assert_eq!(periodic_window(hour, hour, 10 * hour, 10 * hour), (10 * hour + 10 * MINUTE, 11 * hour));
+        assert_eq!(
+            periodic_window(hour, hour, 10 * hour, 10 * hour),
+            (10 * hour + 10 * MINUTE, 11 * hour)
+        );
         // Ran 5 minutes before its window ended: a buffer of 5 minutes.
-        assert_eq!(periodic_window(hour, hour, 10 * hour, 10 * hour - 5 * MINUTE), (10 * hour + 5 * MINUTE, 11 * hour));
+        assert_eq!(
+            periodic_window(hour, hour, 10 * hour, 10 * hour - 5 * MINUTE),
+            (10 * hour + 5 * MINUTE, 11 * hour)
+        );
         // Ran 2.5 periods late.
-        assert_eq!(periodic_window(hour, hour, 10 * hour, 12 * hour + 30 * MINUTE), (12 * hour, 13 * hour));
+        assert_eq!(
+            periodic_window(hour, hour, 10 * hour, 12 * hour + 30 * MINUTE),
+            (12 * hour, 13 * hour)
+        );
         // A flex window of 15 minutes run too close to the next.
         let (_, latest) = periodic_window(hour, 15 * MINUTE, 10 * hour, 10 * hour + 44 * MINUTE);
         assert_eq!(latest, 12 * hour);

@@ -26,7 +26,13 @@ const KEYBOARD_TYPE_ALPHABETIC: i32 = 2;
 const DISPLAY_NONE: i32 = -1;
 /// The input device configuration directories, in the order
 /// `getInputDeviceConfigurationFilePathByName` searches them.
-const CONFIGURATION_DIRS: &[&str] = &["product/usr", "system_ext/usr", "odm/usr", "vendor/usr", "system/usr"];
+const CONFIGURATION_DIRS: &[&str] = &[
+    "product/usr",
+    "system_ext/usr",
+    "odm/usr",
+    "vendor/usr",
+    "system/usr",
+];
 
 /// `DeviceConfig.NAMESPACE_INPUT_NATIVE_BOOT`,
 /// `InputManagerService.VELOCITYTRACKER_STRATEGY_PROPERTY`.
@@ -90,7 +96,11 @@ pub struct InputManager {
 
 impl InputManager {
     pub fn new(host: Arc<AppHost>) -> Self {
-        InputManager { host, virtual_keyboard: OnceLock::new(), listeners: Mutex::new(Vec::new()) }
+        InputManager {
+            host,
+            virtual_keyboard: OnceLock::new(),
+            listeners: Mutex::new(Vec::new()),
+        }
     }
 
     /// The virtual keyboard: `Virtual.kcm` from the image, as
@@ -107,7 +117,8 @@ impl InputManager {
                 std::fs::read(root.join(&path[1..])).ok().map(|c| (path, c))
             })
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no Virtual.kcm"))?;
-        let map = KeyCharacterMap::load(&path, &contents).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        let map = KeyCharacterMap::load(&path, &contents)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
         let device = Arc::new(InputDevice {
             id: VIRTUAL_KEYBOARD_ID,
             generation: 1,
@@ -142,7 +153,9 @@ impl Service for InputManager {
                     Ok(inputs) => inputs,
                     Err(e) => return reply(Err(e)),
                 };
-                let strategy = inputs.settings.device_config(NAMESPACE_INPUT_NATIVE_BOOT, VELOCITYTRACKER_STRATEGY);
+                let strategy = inputs
+                    .settings
+                    .device_config(NAMESPACE_INPUT_NATIVE_BOOT, VELOCITYTRACKER_STRATEGY);
                 im::write_get_velocity_tracker_strategy_reply(&mut p, &strategy);
             }
             im::GET_INPUT_DEVICE_IDS => {
@@ -162,14 +175,18 @@ impl Service for InputManager {
             }
             // The devices do not change: listeners are kept, never called.
             im::REGISTER_INPUT_DEVICES_CHANGED_LISTENER => {
-                let args = im::RegisterInputDevicesChangedListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let args = im::RegisterInputDevicesChangedListener::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 self.listeners.lock().unwrap().extend(args.listener);
                 im::write_register_input_devices_changed_listener_reply(&mut p);
             }
             crate::shell::SHELL_COMMAND_TRANSACTION => {
-                let mut command = crate::shell::ShellCommand::read(&self.host.process, &mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut command =
+                    crate::shell::ShellCommand::read(&self.host.process, &mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
                 if command.has_output() {
-                    let result = super::input_shell::run(&self.host, call.sender_euid as i32, &mut command);
+                    let result =
+                        super::input_shell::run(&self.host, call.sender_euid as i32, &mut command);
                     command.finish(result);
                 }
                 p.write_no_exception();
@@ -187,6 +204,9 @@ mod tests {
     #[test]
     fn the_virtual_keyboard_has_the_original_descriptor() {
         // The pinned image's virtual keyboard (`getInputDevice(-1)`).
-        assert_eq!(descriptor("<virtual>", "Virtual"), "a718a782d34bc767f4689c232d64d527998ea7fd");
+        assert_eq!(
+            descriptor("<virtual>", "Virtual"),
+            "a718a782d34bc767f4689c232d64d527998ea7fd"
+        );
     }
 }

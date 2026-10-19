@@ -41,7 +41,10 @@ const FEATURES: [&str; 3] = [
 const TRANSFER_REASON_FALLBACK: i32 = 0;
 const USER_NULL: i32 = -10000;
 const MODIFY_AUDIO_ROUTING: &str = "android.permission.MODIFY_AUDIO_ROUTING";
-const BLUETOOTH_PERMISSIONS_FOR_SYSTEM_ROUTING: [&str; 2] = ["android.permission.BLUETOOTH_CONNECT", "android.permission.BLUETOOTH_SCAN"];
+const BLUETOOTH_PERMISSIONS_FOR_SYSTEM_ROUTING: [&str; 2] = [
+    "android.permission.BLUETOOTH_CONNECT",
+    "android.permission.BLUETOOTH_SCAN",
+];
 
 /// A `MediaRoute2Info` of the system provider.
 #[derive(Clone)]
@@ -135,7 +138,9 @@ pub(super) struct Preference {
 }
 
 impl aim_service_aidl::ReadParcelable for Preference {
-    fn read_from(r: &mut aim_binder_host::parcel::Reader<'_>) -> aim_binder_host::parcel::Result<Self> {
+    fn read_from(
+        r: &mut aim_binder_host::parcel::Reader<'_>,
+    ) -> aim_binder_host::parcel::Result<Self> {
         let list = |r: &mut aim_binder_host::parcel::Reader<'_>| -> aim_binder_host::parcel::Result<Vec<String>> {
             let n = r.read_i32()?;
             (0..n.max(0)).map(|_| Ok(r.read_string16()?.unwrap_or_default())).collect()
@@ -145,7 +150,10 @@ impl aim_service_aidl::ReadParcelable for Preference {
         list(r)?; // allowed packages
         let active_scan = r.read_bool()?;
         crate::clip::bundle(r)?; // extras
-        Ok(Preference { features, active_scan })
+        Ok(Preference {
+            features,
+            active_scan,
+        })
     }
 }
 
@@ -167,10 +175,16 @@ impl AppHost {
     /// speaker route, at the music stream's volume.
     fn device_route(&self) -> Result<Route, Exception> {
         let inputs = self.inputs()?;
-        let name = inputs.packages.framework_string("default_audio_route_name").unwrap_or_default();
+        let name = inputs
+            .packages
+            .framework_string("default_audio_route_name")
+            .unwrap_or_default();
         // `getBuiltInSpeakerSuitabilityStatus`: the configured status, if
         // a known one.
-        let suitability = match inputs.packages.framework_integer("config_mediaRouter_builtInSpeakerSuitability") {
+        let suitability = match inputs
+            .packages
+            .framework_integer("config_mediaRouter_builtInSpeakerSuitability")
+        {
             Some(s @ 0..=2) => s,
             _ => SUITABILITY_STATUS_SUITABLE_FOR_DEFAULT_TRANSFER,
         };
@@ -180,7 +194,11 @@ impl AppHost {
             name,
             is_system: false,
             provider_package: None,
-            volume_handling: if fixed { PLAYBACK_VOLUME_FIXED } else { PLAYBACK_VOLUME_VARIABLE },
+            volume_handling: if fixed {
+                PLAYBACK_VOLUME_FIXED
+            } else {
+                PLAYBACK_VOLUME_VARIABLE
+            },
             volume_max,
             volume,
             suitability,
@@ -191,8 +209,20 @@ impl AppHost {
     /// (`setUniqueId` and `setSystemRouteProvider`), and its default route.
     pub(super) fn media_router2_system_route_forms(&self) -> Result<(Route, Route), Exception> {
         let route = self.device_route()?;
-        let default = Route { id: ROUTE_ID_DEFAULT, is_system: true, ..route };
-        Ok((Route { id: ROUTE_ID_DEVICE, is_system: true, provider_package: Some(PROVIDER_PACKAGE), ..default.clone() }, default))
+        let default = Route {
+            id: ROUTE_ID_DEFAULT,
+            is_system: true,
+            ..route
+        };
+        Ok((
+            Route {
+                id: ROUTE_ID_DEVICE,
+                is_system: true,
+                provider_package: Some(PROVIDER_PACKAGE),
+                ..default.clone()
+            },
+            default,
+        ))
     }
 
     /// `getSystemRoutes(callerPackageName, false)`: the system provider's
@@ -200,25 +230,49 @@ impl AppHost {
     /// permissions, else its default route.
     pub(super) fn media_router2_system_routes(&self, uid: i32) -> Result<Vec<Route>, Exception> {
         let (privileged, default) = self.media_router2_system_route_forms()?;
-        Ok(vec![if self.has_system_routing_permissions(uid)? { privileged } else { default }])
+        Ok(vec![if self.has_system_routing_permissions(uid)? {
+            privileged
+        } else {
+            default
+        }])
     }
 
     /// `notifyRouterRegistered`'s routes and system session for a router
     /// of `uid`: the system provider's (its session, client package
     /// empty) with system routing permissions, its default route and
     /// session else.
-    pub(super) fn media_router2_registered_state(&self, uid: i32) -> Result<(Vec<Route>, Session), Exception> {
+    pub(super) fn media_router2_registered_state(
+        &self,
+        uid: i32,
+    ) -> Result<(Vec<Route>, Session), Exception> {
         let routes = self.media_router2_system_routes(uid)?;
-        let selected = if self.has_system_routing_permissions(uid)? { ROUTE_ID_DEVICE } else { ROUTE_ID_DEFAULT };
-        Ok((routes, Session { client_package: Some(String::new()), selected }))
+        let selected = if self.has_system_routing_permissions(uid)? {
+            ROUTE_ID_DEVICE
+        } else {
+            ROUTE_ID_DEFAULT
+        };
+        Ok((
+            routes,
+            Session {
+                client_package: Some(String::new()),
+                selected,
+            },
+        ))
     }
 
     /// `getSystemSessionInfo(null, null, false)`: the system session for
     /// a caller with system routing permissions, its default session
     /// (selecting the default route) else, with no client package.
     pub(super) fn media_router2_system_session(&self, uid: i32) -> Result<Session, Exception> {
-        let selected = if self.has_system_routing_permissions(uid)? { ROUTE_ID_DEVICE } else { ROUTE_ID_DEFAULT };
-        Ok(Session { client_package: None, selected })
+        let selected = if self.has_system_routing_permissions(uid)? {
+            ROUTE_ID_DEVICE
+        } else {
+            ROUTE_ID_DEFAULT
+        };
+        Ok(Session {
+            client_package: None,
+            selected,
+        })
     }
 }
 
@@ -232,18 +286,34 @@ mod tests {
     #[test]
     fn the_default_session_is_written_as_the_original_writes_it() {
         let mut p = Parcel::new();
-        Session { client_package: None, selected: ROUTE_ID_DEFAULT }.write_to(&mut p);
+        Session {
+            client_package: None,
+            selected: ROUTE_ID_DEFAULT,
+        }
+        .write_to(&mut p);
         let mut r = p.reader();
-        assert_eq!(r.read_string16().unwrap().as_deref(), Some(SYSTEM_SESSION_ID));
+        assert_eq!(
+            r.read_string16().unwrap().as_deref(),
+            Some(SYSTEM_SESSION_ID)
+        );
         assert_eq!(crate::clip::char_sequence(&mut r).unwrap(), None);
-        assert_eq!((r.read_string16().unwrap(), r.read_string16().unwrap()), (None, None));
+        assert_eq!(
+            (r.read_string16().unwrap(), r.read_string16().unwrap()),
+            (None, None)
+        );
         assert_eq!(r.read_string16().unwrap().as_deref(), Some(PROVIDER_ID));
         assert_eq!(r.read_i32().unwrap(), 1);
-        assert_eq!(r.read_string16().unwrap().as_deref(), Some("com.android.server.media/.SystemMediaRoute2Provider:DEFAULT_ROUTE"));
+        assert_eq!(
+            r.read_string16().unwrap().as_deref(),
+            Some("com.android.server.media/.SystemMediaRoute2Provider:DEFAULT_ROUTE")
+        );
         let rest: Vec<i32> = (0..7).map(|_| r.read_i32().unwrap()).collect();
         assert_eq!(rest, [0, 0, 0, PLAYBACK_VOLUME_FIXED, 0, 0, -1]);
         assert!(r.read_bool().unwrap());
-        assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap()), (TRANSFER_REASON_FALLBACK, USER_NULL));
+        assert_eq!(
+            (r.read_i32().unwrap(), r.read_i32().unwrap()),
+            (TRANSFER_REASON_FALLBACK, USER_NULL)
+        );
         assert_eq!(r.read_string16().unwrap(), None);
         assert_eq!(r.remaining(), 0);
     }

@@ -31,7 +31,10 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
-use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel, Reader, Result as ParcelResult, StatusCode};
+use aim_binder_host::parcel::{
+    BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel, Reader, Result as ParcelResult,
+    StatusCode,
+};
 use aim_service_aidl::android_os_ipendingintentref as pir;
 use aim_service_aidl::android_os_istatscompanionservice as companion;
 use aim_service_aidl::android_os_istatsd as statsd;
@@ -73,7 +76,8 @@ const EXTRA_STATS_CONFIG_UID: &str = "android.app.extra.STATS_CONFIG_UID";
 const EXTRA_STATS_CONFIG_KEY: &str = "android.app.extra.STATS_CONFIG_KEY";
 const EXTRA_STATS_SUBSCRIPTION_ID: &str = "android.app.extra.STATS_SUBSCRIPTION_ID";
 const EXTRA_STATS_SUBSCRIPTION_RULE_ID: &str = "android.app.extra.STATS_SUBSCRIPTION_RULE_ID";
-const EXTRA_STATS_BROADCAST_SUBSCRIBER_COOKIES: &str = "android.app.extra.STATS_BROADCAST_SUBSCRIBER_COOKIES";
+const EXTRA_STATS_BROADCAST_SUBSCRIBER_COOKIES: &str =
+    "android.app.extra.STATS_BROADCAST_SUBSCRIBER_COOKIES";
 const EXTRA_STATS_DIMENSIONS_VALUE: &str = "android.app.extra.STATS_DIMENSIONS_VALUE";
 const EXTRA_STATS_ACTIVE_CONFIG_KEYS: &str = "android.app.extra.STATS_ACTIVE_CONFIG_KEYS";
 const EXTRA_STATS_RESTRICTED_METRIC_IDS: &str = "android.app.extra.STATS_RESTRICTED_METRIC_IDS";
@@ -101,7 +105,8 @@ impl JavaHash for i64 {
 
 /// `String.hashCode`, over its UTF-16 units.
 fn string_hash(s: &str) -> i32 {
-    s.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
+    s.encode_utf16()
+        .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
 }
 
 /// `Objects.hash(a, b)`.
@@ -126,7 +131,11 @@ impl<K: JavaHash + PartialEq, V> ArrayMap<K, V> {
             return;
         }
         let hash = key.java_hash();
-        let at = self.0.iter().position(|(k, _)| k.java_hash() > hash).unwrap_or(self.0.len());
+        let at = self
+            .0
+            .iter()
+            .position(|(k, _)| k.java_hash() > hash)
+            .unwrap_or(self.0.len());
         self.0.insert(at, (key, value));
     }
 
@@ -170,7 +179,10 @@ struct ConfigKeyWithPackage {
 
 impl JavaHash for ConfigKeyWithPackage {
     fn java_hash(&self) -> i32 {
-        objects_hash(self.package.as_deref().map_or(0, string_hash), self.config_id.java_hash())
+        objects_hash(
+            self.package.as_deref().map_or(0, string_hash),
+            self.config_id.java_hash(),
+        )
     }
 }
 
@@ -210,12 +222,36 @@ struct Registered {
 /// One registration with statsd, as `sayHiToStatsd` makes them.
 #[derive(Debug, PartialEq)]
 enum Registration {
-    Puller { uid: i32, atom: i32, cool_down_millis: i64, timeout_millis: i64, additive_fields: Option<Vec<i32>>, callback: Option<Binder> },
+    Puller {
+        uid: i32,
+        atom: i32,
+        cool_down_millis: i64,
+        timeout_millis: i64,
+        additive_fields: Option<Vec<i32>>,
+        callback: Option<Binder>,
+    },
     AllPullersFromBootRegistered,
-    DataFetch { config_id: i64, pir: Binder, uid: i32 },
-    ActiveConfigsChanged { pir: Binder, uid: i32 },
-    BroadcastSubscriber { config_id: i64, subscriber_id: i64, pir: Binder, uid: i32 },
-    RestrictedMetricsChanged { config_id: i64, package: Option<String>, pir: Binder, uid: i32 },
+    DataFetch {
+        config_id: i64,
+        pir: Binder,
+        uid: i32,
+    },
+    ActiveConfigsChanged {
+        pir: Binder,
+        uid: i32,
+    },
+    BroadcastSubscriber {
+        config_id: i64,
+        subscriber_id: i64,
+        pir: Binder,
+        uid: i32,
+    },
+    RestrictedMetricsChanged {
+        config_id: i64,
+        package: Option<String>,
+        pir: Binder,
+        uid: i32,
+    },
 }
 
 impl Registered {
@@ -237,19 +273,36 @@ impl Registered {
         }
         all.push(Registration::AllPullersFromBootRegistered);
         for (k, pir) in self.data_fetch.iter() {
-            all.push(Registration::DataFetch { config_id: k.config_id, pir: *pir, uid: k.uid });
+            all.push(Registration::DataFetch {
+                config_id: k.config_id,
+                pir: *pir,
+                uid: k.uid,
+            });
         }
         for (uid, pir) in self.active_configs.iter() {
-            all.push(Registration::ActiveConfigsChanged { pir: *pir, uid: *uid });
+            all.push(Registration::ActiveConfigsChanged {
+                pir: *pir,
+                uid: *uid,
+            });
         }
         for (k, subscribers) in self.broadcast_subscribers.iter() {
             for (subscriber_id, pir) in subscribers.iter() {
-                all.push(Registration::BroadcastSubscriber { config_id: k.config_id, subscriber_id: *subscriber_id, pir: *pir, uid: k.uid });
+                all.push(Registration::BroadcastSubscriber {
+                    config_id: k.config_id,
+                    subscriber_id: *subscriber_id,
+                    pir: *pir,
+                    uid: k.uid,
+                });
             }
         }
         for (k, uids) in self.restricted_metrics.iter() {
             for (uid, pir) in uids.iter() {
-                all.push(Registration::RestrictedMetricsChanged { config_id: k.config_id, package: k.package.clone(), pir: *pir, uid: *uid });
+                all.push(Registration::RestrictedMetricsChanged {
+                    config_id: k.config_id,
+                    package: k.package.clone(),
+                    pir: *pir,
+                    uid: *uid,
+                });
             }
         }
         all
@@ -270,14 +323,22 @@ impl From<StatusCode> for Failure {
 }
 
 /// A call to statsd, its reply read with `read`.
-fn two_way<T>(statsd: &Strong, code: u32, data: &Parcel, read: impl FnOnce(&mut Reader<'_>) -> ParcelResult<Returned<T>>) -> Result<T, Failure> {
+fn two_way<T>(
+    statsd: &Strong,
+    code: u32,
+    data: &Parcel,
+    read: impl FnOnce(&mut Reader<'_>) -> ParcelResult<Returned<T>>,
+) -> Result<T, Failure> {
     let received = statsd.transact(code, data, false)?;
     read(&mut received.reader())?.map_err(Failure::Thrown)
 }
 
 /// A one-way call to statsd.
 fn oneway(statsd: &Strong, code: u32, data: &Parcel) -> Result<(), Failure> {
-    statsd.transact(code, data, true).map(|_| ()).map_err(Failure::from)
+    statsd
+        .transact(code, data, true)
+        .map(|_| ())
+        .map_err(Failure::from)
 }
 
 /// A `PendingIntent` as it is parcelled: its `IIntentSender`.
@@ -401,7 +462,9 @@ impl Stats {
             pirs: Default::default(),
         });
         let weak = Arc::downgrade(&stats);
-        let _ = std::thread::Builder::new().name("stats alarms".into()).spawn(move || run_alarms(weak));
+        let _ = std::thread::Builder::new()
+            .name("stats alarms".into())
+            .spawn(move || run_alarms(weak));
         stats
     }
 
@@ -415,7 +478,9 @@ impl Stats {
     /// `StatsCompanionService.bootCompleted`.
     pub(super) fn boot_completed(&self) {
         self.boot_completed.store(true, Ordering::SeqCst);
-        let Some(statsd) = self.companion_statsd() else { return };
+        let Some(statsd) = self.companion_statsd() else {
+            return;
+        };
         let mut p = Parcel::new();
         statsd::BootCompleted {}.write(&mut p);
         if oneway(&statsd, statsd::BOOT_COMPLETED, &p).is_err() {
@@ -426,22 +491,35 @@ impl Stats {
     /// `StatsCompanionService.getStatsdNonblocking`.
     fn companion_statsd(&self) -> Option<Strong> {
         let companion = self.companion.lock().unwrap();
-        companion.statsd.as_ref().map(|l| self.host.process.strong(l.statsd.handle))
+        companion
+            .statsd
+            .as_ref()
+            .map(|l| self.host.process.strong(l.statsd.handle))
     }
 
     /// `StatsManagerService.getStatsdNonblocking`.
     fn statsd_nonblocking(&self) -> Option<Strong> {
         let registered = self.registered.lock().unwrap();
-        registered.statsd.as_ref().map(|s| self.host.process.strong(s.handle))
+        registered
+            .statsd
+            .as_ref()
+            .map(|s| self.host.process.strong(s.handle))
     }
 
     /// `StatsManagerService.waitForStatsd`.
     fn wait_for_statsd(&self) -> Option<Strong> {
         let mut registered = self.registered.lock().unwrap();
         if registered.statsd.is_none() {
-            registered = self.statsd_ready.wait_timeout(registered, STATSD_TIMEOUT).unwrap().0;
+            registered = self
+                .statsd_ready
+                .wait_timeout(registered, STATSD_TIMEOUT)
+                .unwrap()
+                .0;
         }
-        registered.statsd.as_ref().map(|s| self.host.process.strong(s.handle))
+        registered
+            .statsd
+            .as_ref()
+            .map(|s| self.host.process.strong(s.handle))
     }
 
     /// `StatsCompanionService.sayHiToStatsd`: an exception statsd threw
@@ -449,15 +527,22 @@ impl Stats {
     fn say_hi_to_statsd(&self) -> Result<(), Exception> {
         let statsd = {
             let mut companion = self.companion.lock().unwrap();
-            if companion.statsd.as_ref().is_some_and(|l| !l.dead.load(Ordering::SeqCst)) {
+            if companion
+                .statsd
+                .as_ref()
+                .is_some_and(|l| !l.dead.load(Ordering::SeqCst))
+            {
                 eprintln!("app host: statscompanion: statsd has already been fetched before");
                 return Ok(());
             }
-            let Ok(statsd) = super::display::check_service(&self.host.process, STATSD_SERVICE) else {
+            let Ok(statsd) = super::display::check_service(&self.host.process, STATSD_SERVICE)
+            else {
                 if let Some(old) = companion.statsd.take() {
                     self.host.process.clear_death(&old.statsd, old.death);
                 }
-                eprintln!("app host: statscompanion: Could not yet find statsd to tell it that StatsCompanion is alive.");
+                eprintln!(
+                    "app host: statscompanion: Could not yet find statsd to tell it that StatsCompanion is alive."
+                );
                 return Ok(());
             };
             let dead = Arc::new(AtomicBool::new(false));
@@ -473,7 +558,11 @@ impl Stats {
                 }),
             );
             let fetched = self.host.process.strong(statsd.handle);
-            if let Some(old) = companion.statsd.replace(Linked { statsd, death, dead }) {
+            if let Some(old) = companion.statsd.replace(Linked {
+                statsd,
+                death,
+                dead,
+            }) {
                 self.host.process.clear_death(&old.statsd, old.death);
             }
             fetched
@@ -483,27 +572,44 @@ impl Stats {
         self.statsd_ready(self.host.process.strong(statsd.handle))?;
         let mut p = Parcel::new();
         statsd::StatsCompanionReady {}.write(&mut p);
-        match two_way(&statsd, statsd::STATS_COMPANION_READY, &p, statsd::read_stats_companion_ready_reply) {
+        match two_way(
+            &statsd,
+            statsd::STATS_COMPANION_READY,
+            &p,
+            statsd::read_stats_companion_ready_reply,
+        ) {
             Ok(()) => {}
             Err(Failure::Remote(e)) => {
-                eprintln!("app host: statscompanion: Failed to inform statsd that statscompanion is ready: {e}");
+                eprintln!(
+                    "app host: statscompanion: Failed to inform statsd that statscompanion is ready: {e}"
+                );
                 return Ok(());
             }
             Err(Failure::Thrown(e)) => return Err(e),
         }
-        let _ = self.host.unimplemented_named("statscompanion", "the app, user and shutdown receivers (#1765)");
+        let _ = self.host.unimplemented_named(
+            "statscompanion",
+            "the app, user and shutdown receivers (#1765)",
+        );
         if let Err(e) = self.update_properties(&statsd) {
-            eprintln!("app host: statscompanion: the statsd_java properties: {}", e.message);
+            eprintln!(
+                "app host: statscompanion: the statsd_java properties: {}",
+                e.message
+            );
         }
         if self.boot_completed.load(Ordering::SeqCst) {
             let mut p = Parcel::new();
             statsd::BootCompleted {}.write(&mut p);
             if oneway(&statsd, statsd::BOOT_COMPLETED, &p).is_err() {
-                eprintln!("app host: statscompanion: Failed to inform statsd that statscompanion is ready");
+                eprintln!(
+                    "app host: statscompanion: Failed to inform statsd that statscompanion is ready"
+                );
                 return Ok(());
             }
         }
-        let _ = self.host.unimplemented_named("statscompanion", "informAllUids (#1765)");
+        let _ = self
+            .host
+            .unimplemented_named("statscompanion", "informAllUids (#1765)");
         eprintln!("app host: statscompanion: Told statsd that StatsCompanionService is alive.");
         Ok(())
     }
@@ -517,15 +623,25 @@ impl Stats {
             .settings
             .list(Table::Config, &prefix)
             .into_iter()
-            .map(|(name, value)| Some(PropertyParcel { property: name[prefix.len()..].to_string(), value }))
+            .map(|(name, value)| {
+                Some(PropertyParcel {
+                    property: name[prefix.len()..].to_string(),
+                    value,
+                })
+            })
             .collect();
         if properties.is_empty() {
             return Ok(());
         }
         let mut p = Parcel::new();
-        statsd::UpdateProperties { properties: Some(properties) }.write(&mut p);
+        statsd::UpdateProperties {
+            properties: Some(properties),
+        }
+        .write(&mut p);
         if oneway(statsd, statsd::UPDATE_PROPERTIES, &p).is_err() {
-            eprintln!("app host: statscompanion: Failed to inform statsd of updated statsd_java properties");
+            eprintln!(
+                "app host: statscompanion: Failed to inform statsd of updated statsd_java properties"
+            );
         }
         Ok(())
     }
@@ -534,7 +650,9 @@ impl Stats {
     /// ten deaths in a day, and statsd forgotten if it is still the one
     /// fetched.
     fn statsd_died(&self, handle: u32) {
-        eprintln!("app host: statscompanion: Statsd is dead - erase all my knowledge, except pullers");
+        eprintln!(
+            "app host: statscompanion: Statsd is dead - erase all my knowledge, except pullers"
+        );
         let mut companion = self.companion.lock().unwrap();
         let now = super::alarm_service::elapsed_ms();
         companion.deaths.retain(|&t| now - t <= MILLIS_IN_A_DAY);
@@ -542,13 +660,19 @@ impl Stats {
         if companion.deaths.len() >= DEATH_THRESHOLD {
             companion.deaths.clear();
             if let Ok(dir) = self.host.data().map(|d| d.join(CONFIG_DIR))
-                && let Some(Ok(first)) = std::fs::read_dir(dir).ok().and_then(|mut entries| entries.next())
+                && let Some(Ok(first)) = std::fs::read_dir(dir)
+                    .ok()
+                    .and_then(|mut entries| entries.next())
                 && let Err(e) = std::fs::remove_file(first.path())
             {
                 eprintln!("app host: statscompanion: {}: {e}", first.path().display());
             }
         }
-        if companion.statsd.as_ref().is_some_and(|l| l.statsd.handle == handle) {
+        if companion
+            .statsd
+            .as_ref()
+            .is_some_and(|l| l.statsd.handle == handle)
+        {
             companion.statsd = None;
             self.registered.lock().unwrap().statsd = None;
         }
@@ -571,7 +695,9 @@ impl Stats {
             if let Err(e) = register(&statsd, registration) {
                 match e {
                     Failure::Remote(_) => {
-                        eprintln!("app host: statsmanager: StatsManager failed to (re-)register data with statsd");
+                        eprintln!(
+                            "app host: statsmanager: StatsManager failed to (re-)register data with statsd"
+                        );
                         return Ok(());
                     }
                     Failure::Thrown(e) => return Err(e),
@@ -583,8 +709,14 @@ impl Stats {
 
     /// `StatsHelper.sendStatsdReadyBroadcast`.
     fn send_statsd_ready_broadcast(&self) {
-        let intent = RawIntent::of(Some(ACTION_STATSD_STARTED), FLAG_RECEIVER_INCLUDE_BACKGROUND, &[]);
-        self.host.broadcasts.send_from_system_with_permission(&self.host, intent, 0, DUMP);
+        let intent = RawIntent::of(
+            Some(ACTION_STATSD_STARTED),
+            FLAG_RECEIVER_INCLUDE_BACKGROUND,
+            &[],
+        );
+        self.host
+            .broadcasts
+            .send_from_system_with_permission(&self.host, intent, 0, DUMP);
     }
 
     /// `cancelPullingAlarm`, `cancelAlarmForSubscriberTriggering`.
@@ -623,7 +755,11 @@ impl Stats {
             Some(Binder::Handle(h)) => Some(self.host.process.strong(h)),
             _ => None,
         };
-        let pir = self.host.process.add_service(Arc::new(PendingIntentRef { host: self.host.clone(), target, _kept: kept }));
+        let pir = self.host.process.add_service(Arc::new(PendingIntentRef {
+            host: self.host.clone(),
+            target,
+            _kept: kept,
+        }));
         if let Some(t) = target {
             pirs.push((t, pir));
         }
@@ -632,24 +768,41 @@ impl Stats {
 
     /// `enforceDumpAndUsageStatsPermission`; no caller is the app host
     /// itself (`Process.myPid()`).
-    fn enforce_dump_and_usage_stats(&self, uid: i32, pid: i32, package: Option<&str>) -> Result<(), Exception> {
+    fn enforce_dump_and_usage_stats(
+        &self,
+        uid: i32,
+        pid: i32,
+        package: Option<&str>,
+    ) -> Result<(), Exception> {
         for permission in [DUMP, PACKAGE_USAGE_STATS] {
             if self.host.check_permission(Some(permission), uid)? != 0 {
-                return Err(Exception::security(format!("uid {uid} does not have {permission}.")));
+                return Err(Exception::security(format!(
+                    "uid {uid} does not have {permission}."
+                )));
             }
         }
-        let Some(package) = package else { return Ok(()) };
+        let Some(package) = package else {
+            return Ok(());
+        };
         match super::appops_service::note(&self.host, OP_GET_USAGE_STATS, uid, Some(package))? {
             super::appops_service::MODE_ALLOWED | super::appops_service::MODE_DEFAULT => Ok(()),
             // `noteOp` throws for an errored op.
-            super::appops_service::MODE_ERRORED => Err(Exception::security(format!("{package} from uid {uid} not allowed to perform GET_USAGE_STATS"))),
-            _ => Err(Exception::security(format!("UID {uid} / PID {pid} lacks app-op {USAGE_STATS_PERMISSION_OPS}"))),
+            super::appops_service::MODE_ERRORED => Err(Exception::security(format!(
+                "{package} from uid {uid} not allowed to perform GET_USAGE_STATS"
+            ))),
+            _ => Err(Exception::security(format!(
+                "UID {uid} / PID {pid} lacks app-op {USAGE_STATS_PERMISSION_OPS}"
+            ))),
         }
     }
 
     /// `enforceRegisterStatsPullAtomPermission`.
     fn enforce_register_pull_atom(&self, uid: i32) -> Result<(), Exception> {
-        if self.host.check_permission(Some(REGISTER_STATS_PULL_ATOM), uid)? != 0 {
+        if self
+            .host
+            .check_permission(Some(REGISTER_STATS_PULL_ATOM), uid)?
+            != 0
+        {
             return Err(Exception::security(format!(
                 "Need REGISTER_STATS_PULL_ATOM permission.: Neither user {uid} nor current process has {REGISTER_STATS_PULL_ATOM}."
             )));
@@ -659,16 +812,28 @@ impl Stats {
 
     /// `enforceRestrictedStatsPermission`.
     fn enforce_restricted_stats(&self, uid: i32) -> Result<(), Exception> {
-        if self.host.check_permission(Some(READ_RESTRICTED_STATS), uid)? != 0 {
-            return Err(Exception::security(format!("uid {uid} does not have {READ_RESTRICTED_STATS}.")));
+        if self
+            .host
+            .check_permission(Some(READ_RESTRICTED_STATS), uid)?
+            != 0
+        {
+            return Err(Exception::security(format!(
+                "uid {uid} does not have {READ_RESTRICTED_STATS}."
+            )));
         }
         Ok(())
     }
 
     /// A forwarded call the original makes only to a statsd it has
     /// (`getStatsdNonblocking`), logging a `RemoteException` as `failed`.
-    fn if_ready<T>(&self, failed: &str, f: impl FnOnce(&Strong) -> Result<T, Failure>) -> Result<Option<T>, Exception> {
-        let Some(statsd) = self.statsd_nonblocking() else { return Ok(None) };
+    fn if_ready<T>(
+        &self,
+        failed: &str,
+        f: impl FnOnce(&Strong) -> Result<T, Failure>,
+    ) -> Result<Option<T>, Exception> {
+        let Some(statsd) = self.statsd_nonblocking() else {
+            return Ok(None);
+        };
         match f(&statsd) {
             Ok(v) => Ok(Some(v)),
             Err(Failure::Remote(_)) => {
@@ -681,9 +846,16 @@ impl Stats {
 
     /// A forwarded call the original waits for statsd for
     /// (`waitForStatsd`), failing with IllegalStateException without one.
-    fn waiting<T>(&self, what: &str, f: impl FnOnce(&Strong) -> Result<T, Failure>) -> Result<T, Exception> {
+    fn waiting<T>(
+        &self,
+        what: &str,
+        f: impl FnOnce(&Strong) -> Result<T, Failure>,
+    ) -> Result<T, Exception> {
         let Some(statsd) = self.wait_for_statsd() else {
-            return Err(Exception::new(EX_ILLEGAL_STATE, format!("Failed to connect to statsd to {what}")));
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("Failed to connect to statsd to {what}"),
+            ));
         };
         f(&statsd).map_err(|e| match e {
             Failure::Remote(message) => Exception::new(EX_ILLEGAL_STATE, message),
@@ -693,13 +865,31 @@ impl Stats {
 
     /// `getDataFdFromStatsd` into the caller's `fd`: statsd writes the
     /// report's size, then the report, into a pipe, copied as it comes.
-    fn get_data_fd(&self, statsd: &Strong, key: i64, uid: i32, fd: &mut impl Write) -> Result<(), Exception> {
-        let state = |what: &str, e: std::io::Error| Exception::new(EX_ILLEGAL_STATE, format!("{what}: {e}"));
-        let (read_end, write_end) = std::io::pipe().map_err(|e| state("Failed to create a pipe to receive reports.", e))?;
-        let file = aim_binder_host::server::file_from_fd(write_end.as_fd())
-            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "Failed to create a pipe to receive reports."))?;
+    fn get_data_fd(
+        &self,
+        statsd: &Strong,
+        key: i64,
+        uid: i32,
+        fd: &mut impl Write,
+    ) -> Result<(), Exception> {
+        let state = |what: &str, e: std::io::Error| {
+            Exception::new(EX_ILLEGAL_STATE, format!("{what}: {e}"))
+        };
+        let (read_end, write_end) =
+            std::io::pipe().map_err(|e| state("Failed to create a pipe to receive reports.", e))?;
+        let file = aim_binder_host::server::file_from_fd(write_end.as_fd()).ok_or_else(|| {
+            Exception::new(
+                EX_ILLEGAL_STATE,
+                "Failed to create a pipe to receive reports.",
+            )
+        })?;
         let mut p = Parcel::new();
-        statsd::GetDataFd { key, calling_uid: uid, fd: Some(SentFd(file)) }.write(&mut p);
+        statsd::GetDataFd {
+            key,
+            calling_uid: uid,
+            fd: Some(SentFd(file)),
+        }
+        .write(&mut p);
         oneway(statsd, statsd::GET_DATA_FD, &p).map_err(|e| match e {
             Failure::Remote(message) => Exception::new(EX_ILLEGAL_STATE, message),
             Failure::Thrown(e) => e,
@@ -736,29 +926,101 @@ fn copy_report(mut from: impl Read, to: &mut impl Write) -> std::io::Result<()> 
 fn register(statsd: &Strong, registration: Registration) -> Result<(), Failure> {
     let mut p = Parcel::new();
     match registration {
-        Registration::Puller { uid, atom, cool_down_millis, timeout_millis, additive_fields, callback } => {
-            statsd::RegisterPullAtomCallback { uid, atom_tag: atom, cool_down_millis, timeout_millis, additive_fields, puller_callback: callback }.write(&mut p);
+        Registration::Puller {
+            uid,
+            atom,
+            cool_down_millis,
+            timeout_millis,
+            additive_fields,
+            callback,
+        } => {
+            statsd::RegisterPullAtomCallback {
+                uid,
+                atom_tag: atom,
+                cool_down_millis,
+                timeout_millis,
+                additive_fields,
+                puller_callback: callback,
+            }
+            .write(&mut p);
             oneway(statsd, statsd::REGISTER_PULL_ATOM_CALLBACK, &p)
         }
         Registration::AllPullersFromBootRegistered => {
             statsd::AllPullersFromBootRegistered {}.write(&mut p);
             oneway(statsd, statsd::ALL_PULLERS_FROM_BOOT_REGISTERED, &p)
         }
-        Registration::DataFetch { config_id, pir, uid } => {
-            statsd::SetDataFetchOperation { config_id, pending_intent_ref: Some(pir), calling_uid: uid }.write(&mut p);
-            two_way(statsd, statsd::SET_DATA_FETCH_OPERATION, &p, statsd::read_set_data_fetch_operation_reply)
+        Registration::DataFetch {
+            config_id,
+            pir,
+            uid,
+        } => {
+            statsd::SetDataFetchOperation {
+                config_id,
+                pending_intent_ref: Some(pir),
+                calling_uid: uid,
+            }
+            .write(&mut p);
+            two_way(
+                statsd,
+                statsd::SET_DATA_FETCH_OPERATION,
+                &p,
+                statsd::read_set_data_fetch_operation_reply,
+            )
         }
         Registration::ActiveConfigsChanged { pir, uid } => {
-            statsd::SetActiveConfigsChangedOperation { pending_intent_ref: Some(pir), calling_uid: uid }.write(&mut p);
-            two_way(statsd, statsd::SET_ACTIVE_CONFIGS_CHANGED_OPERATION, &p, statsd::read_set_active_configs_changed_operation_reply).map(|_| ())
+            statsd::SetActiveConfigsChangedOperation {
+                pending_intent_ref: Some(pir),
+                calling_uid: uid,
+            }
+            .write(&mut p);
+            two_way(
+                statsd,
+                statsd::SET_ACTIVE_CONFIGS_CHANGED_OPERATION,
+                &p,
+                statsd::read_set_active_configs_changed_operation_reply,
+            )
+            .map(|_| ())
         }
-        Registration::BroadcastSubscriber { config_id, subscriber_id, pir, uid } => {
-            statsd::SetBroadcastSubscriber { config_id, subscriber_id, pir: Some(pir), calling_uid: uid }.write(&mut p);
-            two_way(statsd, statsd::SET_BROADCAST_SUBSCRIBER, &p, statsd::read_set_broadcast_subscriber_reply)
+        Registration::BroadcastSubscriber {
+            config_id,
+            subscriber_id,
+            pir,
+            uid,
+        } => {
+            statsd::SetBroadcastSubscriber {
+                config_id,
+                subscriber_id,
+                pir: Some(pir),
+                calling_uid: uid,
+            }
+            .write(&mut p);
+            two_way(
+                statsd,
+                statsd::SET_BROADCAST_SUBSCRIBER,
+                &p,
+                statsd::read_set_broadcast_subscriber_reply,
+            )
         }
-        Registration::RestrictedMetricsChanged { config_id, package, pir, uid } => {
-            statsd::SetRestrictedMetricsChangedOperation { config_key: config_id, config_package: package, pir: Some(pir), calling_uid: uid }.write(&mut p);
-            two_way(statsd, statsd::SET_RESTRICTED_METRICS_CHANGED_OPERATION, &p, statsd::read_set_restricted_metrics_changed_operation_reply).map(|_| ())
+        Registration::RestrictedMetricsChanged {
+            config_id,
+            package,
+            pir,
+            uid,
+        } => {
+            statsd::SetRestrictedMetricsChangedOperation {
+                config_key: config_id,
+                config_package: package,
+                pir: Some(pir),
+                calling_uid: uid,
+            }
+            .write(&mut p);
+            two_way(
+                statsd,
+                statsd::SET_RESTRICTED_METRICS_CHANGED_OPERATION,
+                &p,
+                statsd::read_set_restricted_metrics_changed_operation_reply,
+            )
+            .map(|_| ())
         }
     }
 }
@@ -771,21 +1033,34 @@ fn run_alarms(stats: Weak<Stats>) {
         let Some(s) = stats.upgrade() else { return };
         let mut alarms = s.alarms.lock().unwrap();
         let now = super::alarm_service::elapsed_ms();
-        let pull = alarms.pull.filter(|&at| at <= now).inspect(|_| alarms.pull = None);
-        let periodic = alarms.periodic.filter(|&at| at <= now).inspect(|_| alarms.periodic = None);
+        let pull = alarms
+            .pull
+            .filter(|&at| at <= now)
+            .inspect(|_| alarms.pull = None);
+        let periodic = alarms
+            .periodic
+            .filter(|&at| at <= now)
+            .inspect(|_| alarms.periodic = None);
         if pull.is_none() && periodic.is_none() {
             let next = [alarms.pull, alarms.periodic].into_iter().flatten().min();
-            let wait = next.map_or(Duration::from_secs(60), |at| Duration::from_millis((at - now).max(0) as u64));
+            let wait = next.map_or(Duration::from_secs(60), |at| {
+                Duration::from_millis((at - now).max(0) as u64)
+            });
             drop(s.alarms_changed.wait_timeout(alarms, wait).unwrap());
             continue;
         }
         drop(alarms);
-        for (fired, what) in [(pull.is_some(), "pulling"), (periodic.is_some(), "periodic")] {
+        for (fired, what) in [
+            (pull.is_some(), "pulling"),
+            (periodic.is_some(), "periodic"),
+        ] {
             if !fired {
                 continue;
             }
             let Some(statsd) = s.companion_statsd() else {
-                eprintln!("app host: statscompanion: Could not access statsd to inform it of {what} alarm firing.");
+                eprintln!(
+                    "app host: statscompanion: Could not access statsd to inform it of {what} alarm firing."
+                );
                 continue;
             };
             let _ = std::thread::Builder::new().name("stats alarm".into()).spawn(move || {
@@ -832,84 +1107,157 @@ impl Service for StatsManagerService {
         let mut p = Parcel::new();
         let result: Result<(), Exception> = match call.code {
             manager::SET_DATA_FETCH_OPERATION => {
-                let a = manager::SetDataFetchOperation::<PendingIntent>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = manager::SetDataFetchOperation::<PendingIntent>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
                     s.enforce_dump_and_usage_stats(uid, pid, a.package_name.as_deref())?;
                     let pir = s.pending_intent_ref(a.pending_intent);
-                    let key = ConfigKey { uid, config_id: a.config_id };
+                    let key = ConfigKey {
+                        uid,
+                        config_id: a.config_id,
+                    };
                     s.registered.lock().unwrap().data_fetch.put(key, pir);
-                    s.if_ready("Failed to setDataFetchOperation with statsd", |statsd| register(statsd, Registration::DataFetch { config_id: a.config_id, pir, uid }))?;
+                    s.if_ready("Failed to setDataFetchOperation with statsd", |statsd| {
+                        register(
+                            statsd,
+                            Registration::DataFetch {
+                                config_id: a.config_id,
+                                pir,
+                                uid,
+                            },
+                        )
+                    })?;
                     manager::write_set_data_fetch_operation_reply(&mut p);
                     Ok(())
                 })()
             }
             manager::REMOVE_DATA_FETCH_OPERATION => {
-                let a = manager::RemoveDataFetchOperation::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = manager::RemoveDataFetchOperation::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
                     s.enforce_dump_and_usage_stats(uid, pid, a.package_name.as_deref())?;
-                    s.registered.lock().unwrap().data_fetch.remove(&ConfigKey { uid, config_id: a.config_id });
+                    s.registered.lock().unwrap().data_fetch.remove(&ConfigKey {
+                        uid,
+                        config_id: a.config_id,
+                    });
                     s.if_ready("Failed to removeDataFetchOperation with statsd", |statsd| {
                         let mut d = Parcel::new();
-                        statsd::RemoveDataFetchOperation { config_id: a.config_id, calling_uid: uid }.write(&mut d);
-                        two_way(statsd, statsd::REMOVE_DATA_FETCH_OPERATION, &d, statsd::read_remove_data_fetch_operation_reply)
+                        statsd::RemoveDataFetchOperation {
+                            config_id: a.config_id,
+                            calling_uid: uid,
+                        }
+                        .write(&mut d);
+                        two_way(
+                            statsd,
+                            statsd::REMOVE_DATA_FETCH_OPERATION,
+                            &d,
+                            statsd::read_remove_data_fetch_operation_reply,
+                        )
                     })?;
                     manager::write_remove_data_fetch_operation_reply(&mut p);
                     Ok(())
                 })()
             }
             manager::SET_ACTIVE_CONFIGS_CHANGED_OPERATION => {
-                let a = manager::SetActiveConfigsChangedOperation::<PendingIntent>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = manager::SetActiveConfigsChangedOperation::<PendingIntent>::read(
+                    &mut call.data,
+                )
+                .map_err(|_| BAD_VALUE)?;
                 (|| {
                     s.enforce_dump_and_usage_stats(uid, pid, a.package_name.as_deref())?;
                     let pir = s.pending_intent_ref(a.pending_intent);
                     s.registered.lock().unwrap().active_configs.put(uid, pir);
-                    let ids = s.if_ready("Failed to setActiveConfigsChangedOperation with statsd", |statsd| {
-                        let mut d = Parcel::new();
-                        statsd::SetActiveConfigsChangedOperation { pending_intent_ref: Some(pir), calling_uid: uid }.write(&mut d);
-                        two_way(statsd, statsd::SET_ACTIVE_CONFIGS_CHANGED_OPERATION, &d, statsd::read_set_active_configs_changed_operation_reply)
-                    })?;
-                    manager::write_set_active_configs_changed_operation_reply(&mut p, &Some(ids.flatten().unwrap_or_default()));
+                    let ids = s.if_ready(
+                        "Failed to setActiveConfigsChangedOperation with statsd",
+                        |statsd| {
+                            let mut d = Parcel::new();
+                            statsd::SetActiveConfigsChangedOperation {
+                                pending_intent_ref: Some(pir),
+                                calling_uid: uid,
+                            }
+                            .write(&mut d);
+                            two_way(
+                                statsd,
+                                statsd::SET_ACTIVE_CONFIGS_CHANGED_OPERATION,
+                                &d,
+                                statsd::read_set_active_configs_changed_operation_reply,
+                            )
+                        },
+                    )?;
+                    manager::write_set_active_configs_changed_operation_reply(
+                        &mut p,
+                        &Some(ids.flatten().unwrap_or_default()),
+                    );
                     Ok(())
                 })()
             }
             manager::REMOVE_ACTIVE_CONFIGS_CHANGED_OPERATION => {
-                let a = manager::RemoveActiveConfigsChangedOperation::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = manager::RemoveActiveConfigsChangedOperation::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
                     s.enforce_dump_and_usage_stats(uid, pid, a.package_name.as_deref())?;
                     s.registered.lock().unwrap().active_configs.remove(&uid);
-                    s.if_ready("Failed to removeActiveConfigsChangedOperation with statsd", |statsd| {
-                        let mut d = Parcel::new();
-                        statsd::RemoveActiveConfigsChangedOperation { calling_uid: uid }.write(&mut d);
-                        two_way(statsd, statsd::REMOVE_ACTIVE_CONFIGS_CHANGED_OPERATION, &d, statsd::read_remove_active_configs_changed_operation_reply)
-                    })?;
+                    s.if_ready(
+                        "Failed to removeActiveConfigsChangedOperation with statsd",
+                        |statsd| {
+                            let mut d = Parcel::new();
+                            statsd::RemoveActiveConfigsChangedOperation { calling_uid: uid }
+                                .write(&mut d);
+                            two_way(
+                                statsd,
+                                statsd::REMOVE_ACTIVE_CONFIGS_CHANGED_OPERATION,
+                                &d,
+                                statsd::read_remove_active_configs_changed_operation_reply,
+                            )
+                        },
+                    )?;
                     manager::write_remove_active_configs_changed_operation_reply(&mut p);
                     Ok(())
                 })()
             }
             manager::SET_BROADCAST_SUBSCRIBER => {
-                let a = manager::SetBroadcastSubscriber::<PendingIntent>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = manager::SetBroadcastSubscriber::<PendingIntent>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
                     s.enforce_dump_and_usage_stats(uid, pid, a.package_name.as_deref())?;
                     let pir = s.pending_intent_ref(a.pending_intent);
-                    let key = ConfigKey { uid, config_id: a.config_key };
+                    let key = ConfigKey {
+                        uid,
+                        config_id: a.config_key,
+                    };
                     {
                         let mut registered = s.registered.lock().unwrap();
-                        let mut inner = registered.broadcast_subscribers.remove(&key).unwrap_or_default();
+                        let mut inner = registered
+                            .broadcast_subscribers
+                            .remove(&key)
+                            .unwrap_or_default();
                         inner.put(a.subscriber_id, pir);
                         registered.broadcast_subscribers.put(key, inner);
                     }
                     s.if_ready("Failed to setBroadcastSubscriber with statsd", |statsd| {
-                        register(statsd, Registration::BroadcastSubscriber { config_id: a.config_key, subscriber_id: a.subscriber_id, pir, uid })
+                        register(
+                            statsd,
+                            Registration::BroadcastSubscriber {
+                                config_id: a.config_key,
+                                subscriber_id: a.subscriber_id,
+                                pir,
+                                uid,
+                            },
+                        )
                     })?;
                     manager::write_set_broadcast_subscriber_reply(&mut p);
                     Ok(())
                 })()
             }
             manager::UNSET_BROADCAST_SUBSCRIBER => {
-                let a = manager::UnsetBroadcastSubscriber::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = manager::UnsetBroadcastSubscriber::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
                     s.enforce_dump_and_usage_stats(uid, pid, a.package_name.as_deref())?;
-                    let key = ConfigKey { uid, config_id: a.config_key };
+                    let key = ConfigKey {
+                        uid,
+                        config_id: a.config_key,
+                    };
                     {
                         let mut registered = s.registered.lock().unwrap();
                         if let Some(inner) = registered.broadcast_subscribers.get_mut(&key) {
@@ -921,8 +1269,18 @@ impl Service for StatsManagerService {
                     }
                     s.if_ready("Failed to unsetBroadcastSubscriber with statsd", |statsd| {
                         let mut d = Parcel::new();
-                        statsd::UnsetBroadcastSubscriber { config_id: a.config_key, subscriber_id: a.subscriber_id, calling_uid: uid }.write(&mut d);
-                        two_way(statsd, statsd::UNSET_BROADCAST_SUBSCRIBER, &d, statsd::read_unset_broadcast_subscriber_reply)
+                        statsd::UnsetBroadcastSubscriber {
+                            config_id: a.config_key,
+                            subscriber_id: a.subscriber_id,
+                            calling_uid: uid,
+                        }
+                        .write(&mut d);
+                        two_way(
+                            statsd,
+                            statsd::UNSET_BROADCAST_SUBSCRIBER,
+                            &d,
+                            statsd::read_unset_broadcast_subscriber_reply,
+                        )
                     })?;
                     manager::write_unset_broadcast_subscriber_reply(&mut p);
                     Ok(())
@@ -935,7 +1293,12 @@ impl Service for StatsManagerService {
                     let ids = s.waiting("registerExperimentIds", |statsd| {
                         let mut d = Parcel::new();
                         statsd::GetRegisteredExperimentIds {}.write(&mut d);
-                        two_way(statsd, statsd::GET_REGISTERED_EXPERIMENT_IDS, &d, statsd::read_get_registered_experiment_ids_reply)
+                        two_way(
+                            statsd,
+                            statsd::GET_REGISTERED_EXPERIMENT_IDS,
+                            &d,
+                            statsd::read_get_registered_experiment_ids_reply,
+                        )
                     })?;
                     manager::write_get_registered_experiment_ids_reply(&mut p, &ids);
                     Ok(())
@@ -948,7 +1311,12 @@ impl Service for StatsManagerService {
                     let metadata = s.waiting("getMetadata", |statsd| {
                         let mut d = Parcel::new();
                         statsd::GetMetadata {}.write(&mut d);
-                        two_way(statsd, statsd::GET_METADATA, &d, statsd::read_get_metadata_reply)
+                        two_way(
+                            statsd,
+                            statsd::GET_METADATA,
+                            &d,
+                            statsd::read_get_metadata_reply,
+                        )
                     })?;
                     manager::write_get_metadata_reply(&mut p, &metadata);
                     Ok(())
@@ -960,7 +1328,11 @@ impl Service for StatsManagerService {
                     s.enforce_dump_and_usage_stats(uid, pid, a.package_name.as_deref())?;
                     let data = s.waiting("getData", |statsd| {
                         let mut d = Parcel::new();
-                        statsd::GetData { key: a.key, calling_uid: uid }.write(&mut d);
+                        statsd::GetData {
+                            key: a.key,
+                            calling_uid: uid,
+                        }
+                        .write(&mut d);
                         two_way(statsd, statsd::GET_DATA, &d, statsd::read_get_data_reply)
                     })?;
                     manager::write_get_data_reply(&mut p, &data);
@@ -968,15 +1340,20 @@ impl Service for StatsManagerService {
                 })()
             }
             manager::GET_DATA_FD => {
-                let a = manager::GetDataFd::<ReceivedFd>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = manager::GetDataFd::<ReceivedFd>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 let file = a.fd.as_ref().and_then(|fd| s.host.process.file(fd.0));
                 let result = (|| {
                     s.enforce_dump_and_usage_stats(uid, pid, a.package_name.as_deref())?;
                     let mut out = file
                         .as_ref()
                         .and_then(aim_binder_host::server::file_fd)
-                        .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "writeFd"))?;
-                    s.waiting("getDataFd", |statsd| Ok(s.get_data_fd(statsd, a.key, uid, &mut out)))?
+                        .ok_or_else(|| {
+                            Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "writeFd")
+                        })?;
+                    s.waiting("getDataFd", |statsd| {
+                        Ok(s.get_data_fd(statsd, a.key, uid, &mut out))
+                    })?
                 })();
                 // One-way: what it throws reaches no one.
                 if let Err(e) = result {
@@ -990,36 +1367,68 @@ impl Service for StatsManagerService {
                     s.enforce_dump_and_usage_stats(uid, pid, a.package_name.as_deref())?;
                     s.waiting("addConfig", |statsd| {
                         let mut d = Parcel::new();
-                        statsd::AddConfiguration { config_id: a.config_id, config: a.config.clone(), calling_uid: uid }.write(&mut d);
-                        two_way(statsd, statsd::ADD_CONFIGURATION, &d, statsd::read_add_configuration_reply)
+                        statsd::AddConfiguration {
+                            config_id: a.config_id,
+                            config: a.config.clone(),
+                            calling_uid: uid,
+                        }
+                        .write(&mut d);
+                        two_way(
+                            statsd,
+                            statsd::ADD_CONFIGURATION,
+                            &d,
+                            statsd::read_add_configuration_reply,
+                        )
                     })?;
                     manager::write_add_configuration_reply(&mut p);
                     Ok(())
                 })()
             }
             manager::REMOVE_CONFIGURATION => {
-                let a = manager::RemoveConfiguration::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a =
+                    manager::RemoveConfiguration::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 (|| {
                     s.enforce_dump_and_usage_stats(uid, pid, a.package_name.as_deref())?;
                     s.waiting("removeConfig", |statsd| {
                         let mut d = Parcel::new();
-                        statsd::RemoveConfiguration { config_id: a.config_id, calling_uid: uid }.write(&mut d);
-                        two_way(statsd, statsd::REMOVE_CONFIGURATION, &d, statsd::read_remove_configuration_reply)
+                        statsd::RemoveConfiguration {
+                            config_id: a.config_id,
+                            calling_uid: uid,
+                        }
+                        .write(&mut d);
+                        two_way(
+                            statsd,
+                            statsd::REMOVE_CONFIGURATION,
+                            &d,
+                            statsd::read_remove_configuration_reply,
+                        )
                     })?;
                     manager::write_remove_configuration_reply(&mut p);
                     Ok(())
                 })()
             }
             manager::REGISTER_PULL_ATOM_CALLBACK => {
-                let a = manager::RegisterPullAtomCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = manager::RegisterPullAtomCallback::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 let result = (|| -> Result<(), Exception> {
                     s.enforce_register_pull_atom(uid)?;
                     let Some(callback) = a.puller_callback else {
-                        eprintln!("app host: statsmanager: Puller callback is null for atom {}", a.atom_tag);
+                        eprintln!(
+                            "app host: statsmanager: Puller callback is null for atom {}",
+                            a.atom_tag
+                        );
                         return Ok(());
                     };
-                    let key = PullerKey { uid, atom: a.atom_tag };
-                    let puller = Puller { cool_down_millis: a.cool_down_millis, timeout_millis: a.timeout_millis, additive_fields: a.additive_fields, callback: Some(callback) };
+                    let key = PullerKey {
+                        uid,
+                        atom: a.atom_tag,
+                    };
+                    let puller = Puller {
+                        cool_down_millis: a.cool_down_millis,
+                        timeout_millis: a.timeout_millis,
+                        additive_fields: a.additive_fields,
+                        callback: Some(callback),
+                    };
                     let registration = Registration::Puller {
                         uid,
                         atom: a.atom_tag,
@@ -1029,28 +1438,54 @@ impl Service for StatsManagerService {
                         callback: Some(callback),
                     };
                     s.registered.lock().unwrap().pullers.put(key, puller);
-                    s.if_ready(&format!("Failed to access statsd to register puller for atom {}", a.atom_tag), |statsd| register(statsd, registration))?;
+                    s.if_ready(
+                        &format!(
+                            "Failed to access statsd to register puller for atom {}",
+                            a.atom_tag
+                        ),
+                        |statsd| register(statsd, registration),
+                    )?;
                     Ok(())
                 })();
                 if let Err(e) = result {
-                    eprintln!("app host: statsmanager: registerPullAtomCallback: {}", e.message);
+                    eprintln!(
+                        "app host: statsmanager: registerPullAtomCallback: {}",
+                        e.message
+                    );
                 }
                 return Ok(Parcel::new());
             }
             manager::UNREGISTER_PULL_ATOM_CALLBACK => {
-                let a = manager::UnregisterPullAtomCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = manager::UnregisterPullAtomCallback::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 let result = (|| -> Result<(), Exception> {
                     s.enforce_register_pull_atom(uid)?;
-                    s.registered.lock().unwrap().pullers.remove(&PullerKey { uid, atom: a.atom_tag });
-                    s.if_ready(&format!("Failed to access statsd to unregister puller for atom {}", a.atom_tag), |statsd| {
-                        let mut d = Parcel::new();
-                        statsd::UnregisterPullAtomCallback { uid, atom_tag: a.atom_tag }.write(&mut d);
-                        oneway(statsd, statsd::UNREGISTER_PULL_ATOM_CALLBACK, &d)
-                    })?;
+                    s.registered.lock().unwrap().pullers.remove(&PullerKey {
+                        uid,
+                        atom: a.atom_tag,
+                    });
+                    s.if_ready(
+                        &format!(
+                            "Failed to access statsd to unregister puller for atom {}",
+                            a.atom_tag
+                        ),
+                        |statsd| {
+                            let mut d = Parcel::new();
+                            statsd::UnregisterPullAtomCallback {
+                                uid,
+                                atom_tag: a.atom_tag,
+                            }
+                            .write(&mut d);
+                            oneway(statsd, statsd::UNREGISTER_PULL_ATOM_CALLBACK, &d)
+                        },
+                    )?;
                     Ok(())
                 })();
                 if let Err(e) = result {
-                    eprintln!("app host: statsmanager: unregisterPullAtomCallback: {}", e.message);
+                    eprintln!(
+                        "app host: statsmanager: unregisterPullAtomCallback: {}",
+                        e.message
+                    );
                 }
                 return Ok(Parcel::new());
             }
@@ -1076,10 +1511,18 @@ impl Service for StatsManagerService {
                         // `queryCallback.sendFailure`.
                         None => {
                             let Some(Binder::Handle(h)) = a.query_callback else {
-                                return Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "queryCallback"));
+                                return Err(Exception::new(
+                                    aim_binder_host::parcel::EX_NULL_POINTER,
+                                    "queryCallback",
+                                ));
                             };
                             let mut d = Parcel::new();
-                            query::SendFailure { error: Some("Could not connect to statsd from system server".into()) }.write(&mut d);
+                            query::SendFailure {
+                                error: Some(
+                                    "Could not connect to statsd from system server".into(),
+                                ),
+                            }
+                            .write(&mut d);
                             oneway(&s.host.process.strong(h), query::SEND_FAILURE, &d)
                         }
                     };
@@ -1094,31 +1537,61 @@ impl Service for StatsManagerService {
                 return Ok(Parcel::new());
             }
             manager::SET_RESTRICTED_METRICS_CHANGED_OPERATION => {
-                let a = manager::SetRestrictedMetricsChangedOperation::<PendingIntent>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = manager::SetRestrictedMetricsChangedOperation::<PendingIntent>::read(
+                    &mut call.data,
+                )
+                .map_err(|_| BAD_VALUE)?;
                 (|| {
                     s.enforce_restricted_stats(uid)?;
                     let pir = s.pending_intent_ref(a.pending_intent);
-                    let key = ConfigKeyWithPackage { package: a.config_package.clone(), config_id: a.config_key };
+                    let key = ConfigKeyWithPackage {
+                        package: a.config_package.clone(),
+                        config_id: a.config_key,
+                    };
                     {
                         let mut registered = s.registered.lock().unwrap();
-                        let mut inner = registered.restricted_metrics.remove(&key).unwrap_or_default();
+                        let mut inner = registered
+                            .restricted_metrics
+                            .remove(&key)
+                            .unwrap_or_default();
                         inner.put(uid, pir);
                         registered.restricted_metrics.put(key, inner);
                     }
-                    let ids = s.if_ready("Failed to setRestrictedMetricsChangedOperation with statsd", |statsd| {
-                        let mut d = Parcel::new();
-                        statsd::SetRestrictedMetricsChangedOperation { config_key: a.config_key, config_package: a.config_package.clone(), pir: Some(pir), calling_uid: uid }.write(&mut d);
-                        two_way(statsd, statsd::SET_RESTRICTED_METRICS_CHANGED_OPERATION, &d, statsd::read_set_restricted_metrics_changed_operation_reply)
-                    })?;
-                    manager::write_set_restricted_metrics_changed_operation_reply(&mut p, &Some(ids.flatten().unwrap_or_default()));
+                    let ids = s.if_ready(
+                        "Failed to setRestrictedMetricsChangedOperation with statsd",
+                        |statsd| {
+                            let mut d = Parcel::new();
+                            statsd::SetRestrictedMetricsChangedOperation {
+                                config_key: a.config_key,
+                                config_package: a.config_package.clone(),
+                                pir: Some(pir),
+                                calling_uid: uid,
+                            }
+                            .write(&mut d);
+                            two_way(
+                                statsd,
+                                statsd::SET_RESTRICTED_METRICS_CHANGED_OPERATION,
+                                &d,
+                                statsd::read_set_restricted_metrics_changed_operation_reply,
+                            )
+                        },
+                    )?;
+                    manager::write_set_restricted_metrics_changed_operation_reply(
+                        &mut p,
+                        &Some(ids.flatten().unwrap_or_default()),
+                    );
                     Ok(())
                 })()
             }
             manager::REMOVE_RESTRICTED_METRICS_CHANGED_OPERATION => {
-                let a = manager::RemoveRestrictedMetricsChangedOperation::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = manager::RemoveRestrictedMetricsChangedOperation::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 (|| {
                     s.enforce_restricted_stats(uid)?;
-                    let key = ConfigKeyWithPackage { package: a.config_package.clone(), config_id: a.config_key };
+                    let key = ConfigKeyWithPackage {
+                        package: a.config_package.clone(),
+                        config_id: a.config_key,
+                    };
                     {
                         let mut registered = s.registered.lock().unwrap();
                         if let Some(inner) = registered.restricted_metrics.get_mut(&key) {
@@ -1128,11 +1601,24 @@ impl Service for StatsManagerService {
                             }
                         }
                     }
-                    s.if_ready("Failed to removeRestrictedMetricsChangedOperation with statsd", |statsd| {
-                        let mut d = Parcel::new();
-                        statsd::RemoveRestrictedMetricsChangedOperation { config_key: a.config_key, config_package: a.config_package.clone(), calling_uid: uid }.write(&mut d);
-                        two_way(statsd, statsd::REMOVE_RESTRICTED_METRICS_CHANGED_OPERATION, &d, statsd::read_remove_restricted_metrics_changed_operation_reply)
-                    })?;
+                    s.if_ready(
+                        "Failed to removeRestrictedMetricsChangedOperation with statsd",
+                        |statsd| {
+                            let mut d = Parcel::new();
+                            statsd::RemoveRestrictedMetricsChangedOperation {
+                                config_key: a.config_key,
+                                config_package: a.config_package.clone(),
+                                calling_uid: uid,
+                            }
+                            .write(&mut d);
+                            two_way(
+                                statsd,
+                                statsd::REMOVE_RESTRICTED_METRICS_CHANGED_OPERATION,
+                                &d,
+                                statsd::read_remove_restricted_metrics_changed_operation_reply,
+                            )
+                        },
+                    )?;
                     manager::write_remove_restricted_metrics_changed_operation_reply(&mut p);
                     Ok(())
                 })()
@@ -1182,27 +1668,42 @@ impl Service for StatsCompanionService {
                 companion::CancelPullingAlarm::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 match enforce_statsd_calling_uid(uid) {
                     Ok(()) => s.cancel_alarms(true, false),
-                    Err(e) => eprintln!("app host: statscompanion: cancelPullingAlarm: {}", e.message),
+                    Err(e) => eprintln!(
+                        "app host: statscompanion: cancelPullingAlarm: {}",
+                        e.message
+                    ),
                 }
             }
             companion::SET_ALARM_FOR_SUBSCRIBER_TRIGGERING => {
-                let a = companion::SetAlarmForSubscriberTriggering::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = companion::SetAlarmForSubscriberTriggering::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 match enforce_statsd_calling_uid(uid) {
                     Ok(()) => s.set_alarm(false, a.timestamp_ms),
-                    Err(e) => eprintln!("app host: statscompanion: setAlarmForSubscriberTriggering: {}", e.message),
+                    Err(e) => eprintln!(
+                        "app host: statscompanion: setAlarmForSubscriberTriggering: {}",
+                        e.message
+                    ),
                 }
             }
             companion::CANCEL_ALARM_FOR_SUBSCRIBER_TRIGGERING => {
-                companion::CancelAlarmForSubscriberTriggering::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                companion::CancelAlarmForSubscriberTriggering::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 match enforce_statsd_calling_uid(uid) {
                     Ok(()) => s.cancel_alarms(false, true),
-                    Err(e) => eprintln!("app host: statscompanion: cancelAlarmForSubscriberTriggering: {}", e.message),
+                    Err(e) => eprintln!(
+                        "app host: statscompanion: cancelAlarmForSubscriberTriggering: {}",
+                        e.message
+                    ),
                 }
             }
             companion::CHECK_PERMISSION => {
                 let a = companion::CheckPermission::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let result = enforce_statsd_calling_uid(uid)
-                    .and_then(|()| a.permission.as_deref().ok_or_else(|| Exception::illegal_argument("permission is null")))
+                    .and_then(|()| {
+                        a.permission
+                            .as_deref()
+                            .ok_or_else(|| Exception::illegal_argument("permission is null"))
+                    })
                     .and_then(|permission| s.host.check_permission(Some(permission), a.uid))
                     .map(|granted| companion::write_check_permission_reply(&mut p, granted == 0));
                 return reply(result.map(|()| p));
@@ -1228,10 +1729,23 @@ impl PendingIntentRef {
     /// `CanceledException`.
     fn send(&self, extras: &[(&str, Value)], what: &str) -> Result<(), Exception> {
         let Some(target) = self.target else {
-            return Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "pendingIntent"));
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "pendingIntent",
+            ));
         };
         let intent = RawIntent::of(None, 0, extras);
-        let res = self.host.send_intent_sender(1000, None, Some(target), PIR_CODE, Some(intent), None, None, None, None)?;
+        let res = self.host.send_intent_sender(
+            1000,
+            None,
+            Some(target),
+            PIR_CODE,
+            Some(intent),
+            None,
+            None,
+            None,
+            None,
+        )?;
         if res < 0 {
             eprintln!("app host: statsmanager: {what}");
         }
@@ -1249,20 +1763,29 @@ impl Service for PendingIntentRef {
         let result = match call.code {
             pir::SEND_DATA_BROADCAST => {
                 let a = pir::SendDataBroadcast::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                enforce_statsd_calling_uid(uid)
-                    .and_then(|()| self.send(&[(EXTRA_LAST_REPORT_TIME, Value::Long(a.last_report_time_ns))], "Unable to send PendingIntent"))
-            }
-            pir::SEND_ACTIVE_CONFIGS_CHANGED_BROADCAST => {
-                let a = pir::SendActiveConfigsChangedBroadcast::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 enforce_statsd_calling_uid(uid).and_then(|()| {
                     self.send(
-                        &[(EXTRA_STATS_ACTIVE_CONFIG_KEYS, Value::LongArray(a.config_ids.unwrap_or_default()))],
+                        &[(EXTRA_LAST_REPORT_TIME, Value::Long(a.last_report_time_ns))],
+                        "Unable to send PendingIntent",
+                    )
+                })
+            }
+            pir::SEND_ACTIVE_CONFIGS_CHANGED_BROADCAST => {
+                let a = pir::SendActiveConfigsChangedBroadcast::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                enforce_statsd_calling_uid(uid).and_then(|()| {
+                    self.send(
+                        &[(
+                            EXTRA_STATS_ACTIVE_CONFIG_KEYS,
+                            Value::LongArray(a.config_ids.unwrap_or_default()),
+                        )],
                         "Unable to send active configs changed broadcast using PendingIntent",
                     )
                 })
             }
             pir::SEND_SUBSCRIBER_BROADCAST => {
-                let a = pir::SendSubscriberBroadcast::<DimensionsValue>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = pir::SendSubscriberBroadcast::<DimensionsValue>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 enforce_statsd_calling_uid(uid).and_then(|()| {
                     let Some(dimensions) = a.dimensions_value_parcel else {
                         return Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "dimensionsValueParcel"));
@@ -1282,10 +1805,14 @@ impl Service for PendingIntentRef {
                 })
             }
             pir::SEND_RESTRICTED_METRICS_CHANGED_BROADCAST => {
-                let a = pir::SendRestrictedMetricsChangedBroadcast::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let a = pir::SendRestrictedMetricsChangedBroadcast::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
                 enforce_statsd_calling_uid(uid).and_then(|()| {
                     self.send(
-                        &[(EXTRA_STATS_RESTRICTED_METRIC_IDS, Value::LongArray(a.metric_ids.unwrap_or_default()))],
+                        &[(
+                            EXTRA_STATS_RESTRICTED_METRIC_IDS,
+                            Value::LongArray(a.metric_ids.unwrap_or_default()),
+                        )],
                         "Unable to send restricted metrics changed broadcast using PendingIntent",
                     )
                 })
@@ -1315,7 +1842,14 @@ mod tests {
         assert_eq!((-1i64).java_hash(), 0);
         assert_eq!(0x1_0000_0002i64.java_hash(), 3);
         assert_eq!(objects_hash(1, 2), 994);
-        assert_eq!(ConfigKey { uid: 10_150, config_id: 7 }.java_hash(), objects_hash(10_150, 7));
+        assert_eq!(
+            ConfigKey {
+                uid: 10_150,
+                config_id: 7
+            }
+            .java_hash(),
+            objects_hash(10_150, 7)
+        );
     }
 
     /// An `ArrayMap` keeps its keys by hash, a new key after equal hashes,
@@ -1326,12 +1860,18 @@ mod tests {
         for (k, v) in [(30i32, 'a'), (10, 'b'), (20, 'c'), (10, 'd'), (-5, 'e')] {
             map.put(k, v);
         }
-        assert_eq!(map.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>(), [(-5, 'e'), (10, 'd'), (20, 'c'), (30, 'a')]);
+        assert_eq!(
+            map.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>(),
+            [(-5, 'e'), (10, 'd'), (20, 'c'), (30, 'a')]
+        );
         // Two keys of one hash: `(1, 32)` and `(2, 1)` both hash to 1024.
         let mut pullers = ArrayMap::default();
         pullers.put(PullerKey { uid: 2, atom: 1 }, 'x');
         pullers.put(PullerKey { uid: 1, atom: 32 }, 'y');
-        assert_eq!(PullerKey { uid: 2, atom: 1 }.java_hash(), PullerKey { uid: 1, atom: 32 }.java_hash());
+        assert_eq!(
+            PullerKey { uid: 2, atom: 1 }.java_hash(),
+            PullerKey { uid: 1, atom: 32 }.java_hash()
+        );
         assert_eq!(pullers.iter().map(|(_, v)| *v).collect::<String>(), "xy");
         assert_eq!(map.remove(&10), Some('d'));
         assert_eq!(map.remove(&10), None);
@@ -1344,20 +1884,49 @@ mod tests {
     fn registrations_follow_say_hi_to_statsd() {
         let mut r = Registered::default();
         let pir = |n: u64| Binder::Local(n << 4);
-        r.restricted_metrics.put(ConfigKeyWithPackage { package: Some("p".into()), config_id: 1 }, {
-            let mut m = ArrayMap::default();
-            m.put(10_100, pir(5));
-            m
-        });
-        r.broadcast_subscribers.put(ConfigKey { uid: 10_100, config_id: 2 }, {
-            let mut m = ArrayMap::default();
-            m.put(9i64, pir(4));
-            m.put(3i64, pir(3));
-            m
-        });
+        r.restricted_metrics.put(
+            ConfigKeyWithPackage {
+                package: Some("p".into()),
+                config_id: 1,
+            },
+            {
+                let mut m = ArrayMap::default();
+                m.put(10_100, pir(5));
+                m
+            },
+        );
+        r.broadcast_subscribers.put(
+            ConfigKey {
+                uid: 10_100,
+                config_id: 2,
+            },
+            {
+                let mut m = ArrayMap::default();
+                m.put(9i64, pir(4));
+                m.put(3i64, pir(3));
+                m
+            },
+        );
         r.active_configs.put(10_101, pir(2));
-        r.data_fetch.put(ConfigKey { uid: 10_100, config_id: 1 }, pir(1));
-        r.pullers.put(PullerKey { uid: 10_100, atom: 10_000 }, Puller { cool_down_millis: 1, timeout_millis: 2, additive_fields: None, callback: None });
+        r.data_fetch.put(
+            ConfigKey {
+                uid: 10_100,
+                config_id: 1,
+            },
+            pir(1),
+        );
+        r.pullers.put(
+            PullerKey {
+                uid: 10_100,
+                atom: 10_000,
+            },
+            Puller {
+                cool_down_millis: 1,
+                timeout_millis: 2,
+                additive_fields: None,
+                callback: None,
+            },
+        );
         let kinds: Vec<_> = r
             .registrations()
             .into_iter()
@@ -1366,13 +1935,23 @@ mod tests {
                 Registration::AllPullersFromBootRegistered => "all pullers".into(),
                 Registration::DataFetch { config_id, .. } => format!("fetch {config_id}"),
                 Registration::ActiveConfigsChanged { uid, .. } => format!("active {uid}"),
-                Registration::BroadcastSubscriber { subscriber_id, .. } => format!("subscriber {subscriber_id}"),
+                Registration::BroadcastSubscriber { subscriber_id, .. } => {
+                    format!("subscriber {subscriber_id}")
+                }
                 Registration::RestrictedMetricsChanged { uid, .. } => format!("restricted {uid}"),
             })
             .collect();
         assert_eq!(
             kinds,
-            ["puller 10000", "all pullers", "fetch 1", "active 10101", "subscriber 3", "subscriber 9", "restricted 10100"]
+            [
+                "puller 10000",
+                "all pullers",
+                "fetch 1",
+                "active 10101",
+                "subscriber 3",
+                "subscriber 9",
+                "restricted 10100"
+            ]
         );
     }
 

@@ -163,7 +163,9 @@ impl SigningScan {
     ) -> Result<(), String> {
         let mut candidate = self.clone();
         let abi = candidate.reconcile_shared_user_abis()?;
-        for mismatch in &abi.mismatches { eprintln!("shared UID ABI mismatch at boot: {mismatch:?}"); }
+        for mismatch in &abi.mismatches {
+            eprintln!("shared UID ABI mismatch at boot: {mismatch:?}");
+        }
         candidate.fix_shared_seinfo_target_sdks_at_boot()?;
         let inputs = inputs(&candidate)?;
         let mut labels = BTreeMap::new();
@@ -236,7 +238,11 @@ impl SigningScan {
         let current = inputs(self)?;
         if let Some(assigned) = &mut self.seinfo {
             for (name, input) in &current {
-                if assigned.inputs.get(name).is_none_or(|previous| !same_setting(previous, input)) {
+                if assigned
+                    .inputs
+                    .get(name)
+                    .is_none_or(|previous| !same_setting(previous, input))
+                {
                     return Err(format!("remaining removal seInfo identity differs: {name}"));
                 }
             }
@@ -275,7 +281,10 @@ impl SigningScan {
 
     /// Internal batch accessor: caller has validated the complete seInfo owner
     /// and holds an immutable borrow for the entire batch.
-    pub(in crate::package) fn validated_seinfo_state(&self, name: &str) -> Result<Option<&SeInfoState>, String> {
+    pub(in crate::package) fn validated_seinfo_state(
+        &self,
+        name: &str,
+    ) -> Result<Option<&SeInfoState>, String> {
         let assignments = self
             .seinfo
             .as_ref()

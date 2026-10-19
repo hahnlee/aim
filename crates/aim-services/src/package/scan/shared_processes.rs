@@ -238,7 +238,15 @@ impl SigningScan {
     pub fn rebuild_shared_processes_from_native_members(&mut self) -> Result<(), String> {
         let mut orders = BTreeMap::new();
         for (name, group) in &self.identities.shared_users {
-            orders.insert(name.clone(), group.ordered_process_members()?.iter().rev().cloned().collect());
+            orders.insert(
+                name.clone(),
+                group
+                    .ordered_process_members()?
+                    .iter()
+                    .rev()
+                    .cloned()
+                    .collect(),
+            );
         }
         let assignments = build(self, orders, None)?;
         self.shared_processes = Some(assignments);
@@ -932,23 +940,56 @@ mod tests {
         let mut scan = SigningScan::new(&Default::default(), &Default::default(), 36).unwrap();
         scan.rebuild_shared_processes_from_native_members().unwrap();
         let old = scan.clone();
-        let id = scan.identities.get_shared_user("new.group", 0, 0, true).unwrap().unwrap().app_id;
+        let id = scan
+            .identities
+            .get_shared_user("new.group", 0, 0, true)
+            .unwrap()
+            .unwrap()
+            .app_id;
         for name in ["first", "second"] {
-            scan.settings.packages.push(crate::package::settings::Package { name: name.into(), app_id: id, shared_user: true, code_path: format!("/data/app/{name}"), version_code: 1, ..Default::default() });
-            scan.identities.shared_users.get_mut("new.group").unwrap().add_package_with_code(name, 0, 0, Some(36));
+            scan.settings
+                .packages
+                .push(crate::package::settings::Package {
+                    name: name.into(),
+                    app_id: id,
+                    shared_user: true,
+                    code_path: format!("/data/app/{name}"),
+                    version_code: 1,
+                    ..Default::default()
+                });
+            scan.identities
+                .shared_users
+                .get_mut("new.group")
+                .unwrap()
+                .add_package_with_code(name, 0, 0, Some(36));
             load(&mut scan, name, 0);
             let loaded = std::sync::Arc::make_mut(scan.loaded.get_mut(name).unwrap());
             loaded.package.uid = id;
             loaded.package.processes = None;
             assert!(scan.validate_shared_processes().is_err());
             scan.rebuild_shared_processes_from_native_members().unwrap();
-            assert!(scan.shared_processes("new.group").unwrap().unwrap().records().is_empty());
-            assert_eq!(scan.shared_processes.as_ref().unwrap().inputs["new.group"].1.len(), if name=="first" {1} else {2});
+            assert!(
+                scan.shared_processes("new.group")
+                    .unwrap()
+                    .unwrap()
+                    .records()
+                    .is_empty()
+            );
+            assert_eq!(
+                scan.shared_processes.as_ref().unwrap().inputs["new.group"]
+                    .1
+                    .len(),
+                if name == "first" { 1 } else { 2 }
+            );
         }
         assert!(old.validate_shared_processes().is_ok());
         assert!(!old.identities.shared_users.contains_key("new.group"));
         let valid = scan.clone();
-        scan.identities.shared_users.get_mut("new.group").unwrap().add_package("foreign", 0, 0);
+        scan.identities
+            .shared_users
+            .get_mut("new.group")
+            .unwrap()
+            .add_package("foreign", 0, 0);
         let assignment = scan.shared_processes.clone();
         assert!(scan.rebuild_shared_processes_from_native_members().is_err());
         assert_eq!(scan.shared_processes, assignment);
@@ -958,15 +999,27 @@ mod tests {
     #[test]
     fn native_process_rebuild_uses_member_slots_not_name_sorting() {
         let mut scan = scan();
-        load(&mut scan, "a", 1); load(&mut scan, "b", 0);
+        load(&mut scan, "a", 1);
+        load(&mut scan, "b", 0);
         scan.rebuild_shared_processes_from_native_members().unwrap();
-        assert_eq!(scan.shared_processes("fixture").unwrap().unwrap().records()[0].gwp_asan_mode, 1);
+        assert_eq!(
+            scan.shared_processes("fixture").unwrap().unwrap().records()[0].gwp_asan_mode,
+            1
+        );
         let group = scan.identities.shared_users.get_mut("fixture").unwrap();
-        group.remove_package("a"); group.add_package("a", 0, 0);
+        group.remove_package("a");
+        group.add_package("a", 0, 0);
         scan.rebuild_shared_processes_from_native_members().unwrap();
-        assert_eq!(scan.shared_processes("fixture").unwrap().unwrap().records()[0].gwp_asan_mode, 0);
+        assert_eq!(
+            scan.shared_processes("fixture").unwrap().unwrap().records()[0].gwp_asan_mode,
+            0
+        );
         let retained = scan.clone();
-        scan.identities.shared_users.get_mut("fixture").unwrap().add_package("foreign", 0, 0);
+        scan.identities
+            .shared_users
+            .get_mut("fixture")
+            .unwrap()
+            .add_package("foreign", 0, 0);
         assert!(scan.rebuild_shared_processes_from_native_members().is_err());
         assert_eq!(scan.shared_processes, retained.shared_processes);
     }

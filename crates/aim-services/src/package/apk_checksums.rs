@@ -92,7 +92,12 @@ impl WriteParcelable for ApkChecksum {
 
 /// `getChecksums` then `processRequiredChecksums`: every file's checksums,
 /// each file's by type.
-pub fn checksums(files: &[ApkFile], optional: i32, required: i32, build: &Build) -> Vec<ApkChecksum> {
+pub fn checksums(
+    files: &[ApkFile],
+    optional: i32,
+    required: i32,
+    build: &Build,
+) -> Vec<ApkChecksum> {
     let mut all = Vec::new();
     for file in files {
         let mut found = BTreeMap::new();
@@ -121,18 +126,33 @@ fn available(file: &ApkFile, types: i32, build: &Build, found: &mut BTreeMap<i32
     if is_required(TYPE_WHOLE_MERKLE_ROOT_4K_SHA256, types, found)
         && let Some(digest) = &file.fs_verity_digest
     {
-        found.insert(TYPE_WHOLE_MERKLE_ROOT_4K_SHA256, ApkChecksum::new(&file.split, TYPE_WHOLE_MERKLE_ROOT_4K_SHA256, digest.clone()));
+        found.insert(
+            TYPE_WHOLE_MERKLE_ROOT_4K_SHA256,
+            ApkChecksum::new(
+                &file.split,
+                TYPE_WHOLE_MERKLE_ROOT_4K_SHA256,
+                digest.clone(),
+            ),
+        );
     }
     // `extractHashFromV2V3Signature`.
-    if is_required(TYPE_PARTIAL_MERKLE_ROOT_1M_SHA256, types, found) || is_required(TYPE_PARTIAL_MERKLE_ROOT_1M_SHA512, types, found) {
+    if is_required(TYPE_PARTIAL_MERKLE_ROOT_1M_SHA256, types, found)
+        || is_required(TYPE_PARTIAL_MERKLE_ROOT_1M_SHA512, types, found)
+    {
         let digests = FileSource::open(&file.path)
             .map_err(|e| e.to_string())
             .and_then(|apk| sign::signed_content_digests(&apk, build));
         match digests {
             Ok(Some(digests)) => {
                 for (kind, algorithm) in [
-                    (TYPE_PARTIAL_MERKLE_ROOT_1M_SHA256, sign::CONTENT_DIGEST_CHUNKED_SHA256),
-                    (TYPE_PARTIAL_MERKLE_ROOT_1M_SHA512, sign::CONTENT_DIGEST_CHUNKED_SHA512),
+                    (
+                        TYPE_PARTIAL_MERKLE_ROOT_1M_SHA256,
+                        sign::CONTENT_DIGEST_CHUNKED_SHA256,
+                    ),
+                    (
+                        TYPE_PARTIAL_MERKLE_ROOT_1M_SHA512,
+                        sign::CONTENT_DIGEST_CHUNKED_SHA512,
+                    ),
                 ] {
                     if types & kind != 0
                         && let Some(digest) = digests.get(&algorithm)
@@ -156,12 +176,24 @@ fn computed(file: &ApkFile, required: i32, found: &mut BTreeMap<i32, ApkChecksum
         match hash {
             Ok((size, root)) => {
                 let value = verity_hash_for_file(size, &root);
-                found.insert(TYPE_WHOLE_MERKLE_ROOT_4K_SHA256, ApkChecksum::new(&file.split, TYPE_WHOLE_MERKLE_ROOT_4K_SHA256, value));
+                found.insert(
+                    TYPE_WHOLE_MERKLE_ROOT_4K_SHA256,
+                    ApkChecksum::new(&file.split, TYPE_WHOLE_MERKLE_ROOT_4K_SHA256, value),
+                );
             }
-            Err(e) => log(&file.path, "Error calculating WHOLE_MERKLE_ROOT_4K_SHA256", e),
+            Err(e) => log(
+                &file.path,
+                "Error calculating WHOLE_MERKLE_ROOT_4K_SHA256",
+                e,
+            ),
         }
     }
-    for kind in [TYPE_WHOLE_MD5, TYPE_WHOLE_SHA1, TYPE_WHOLE_SHA256, TYPE_WHOLE_SHA512] {
+    for kind in [
+        TYPE_WHOLE_MD5,
+        TYPE_WHOLE_SHA1,
+        TYPE_WHOLE_SHA256,
+        TYPE_WHOLE_SHA512,
+    ] {
         if required & kind != 0 && !found.contains_key(&kind) {
             match whole_file_digest(&file.path, kind) {
                 Ok(value) => {
@@ -182,11 +214,23 @@ fn partial(file: &ApkFile, required: i32, found: &mut BTreeMap<i32, ApkChecksum>
     let algorithms: &[(i32, i32)] = match (sha256, sha512) {
         (false, false) => return,
         (true, true) => &[
-            (sign::CONTENT_DIGEST_CHUNKED_SHA256, TYPE_PARTIAL_MERKLE_ROOT_1M_SHA256),
-            (sign::CONTENT_DIGEST_CHUNKED_SHA512, TYPE_PARTIAL_MERKLE_ROOT_1M_SHA512),
+            (
+                sign::CONTENT_DIGEST_CHUNKED_SHA256,
+                TYPE_PARTIAL_MERKLE_ROOT_1M_SHA256,
+            ),
+            (
+                sign::CONTENT_DIGEST_CHUNKED_SHA512,
+                TYPE_PARTIAL_MERKLE_ROOT_1M_SHA512,
+            ),
         ],
-        (true, false) => &[(sign::CONTENT_DIGEST_CHUNKED_SHA256, TYPE_PARTIAL_MERKLE_ROOT_1M_SHA256)],
-        (false, true) => &[(sign::CONTENT_DIGEST_CHUNKED_SHA512, TYPE_PARTIAL_MERKLE_ROOT_1M_SHA512)],
+        (true, false) => &[(
+            sign::CONTENT_DIGEST_CHUNKED_SHA256,
+            TYPE_PARTIAL_MERKLE_ROOT_1M_SHA256,
+        )],
+        (false, true) => &[(
+            sign::CONTENT_DIGEST_CHUNKED_SHA512,
+            TYPE_PARTIAL_MERKLE_ROOT_1M_SHA512,
+        )],
     };
     let ids: Vec<i32> = algorithms.iter().map(|(id, _)| *id).collect();
     let digests = FileSource::open(&file.path)
@@ -216,7 +260,11 @@ fn whole_file_digest(path: &Path, kind: i32) -> Result<Vec<u8>, String> {
     let mut offset = 0;
     while offset < file.size() {
         let len = (file.size() - offset).min(buffer);
-        digest.update(&file.read_vec(offset, len as usize).map_err(|e| e.to_string())?);
+        digest.update(
+            &file
+                .read_vec(offset, len as usize)
+                .map_err(|e| e.to_string())?,
+        );
         offset += len;
     }
     Ok(digest.finalize().into_vec())

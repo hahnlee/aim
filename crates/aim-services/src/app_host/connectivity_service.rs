@@ -649,7 +649,10 @@ pub struct ConnectivityService {
     shared: Arc<Shared>,
     /// netd and DnsResolver, once registered, and the network they were
     /// last given.
-    native: Mutex<(Option<network_native::Native>, Option<network_native::NativeNetwork>)>,
+    native: Mutex<(
+        Option<network_native::Native>,
+        Option<network_native::NativeNetwork>,
+    )>,
 }
 
 struct Shared {
@@ -668,7 +671,13 @@ impl ConnectivityService {
     /// callers see them (JobScheduler's `ConnectivityController`); none
     /// while the Mac has no network.
     pub(super) fn default_network(&self) -> Option<(Network, NetworkCapabilities)> {
-        self.shared.state.lock().unwrap().network.as_ref().map(|n| (Network(n.id), network_capabilities()))
+        self.shared
+            .state
+            .lock()
+            .unwrap()
+            .network
+            .as_ref()
+            .map(|n| (Network(n.id), network_capabilities()))
     }
 
     /// Whether netd has registered and been given its interface
@@ -700,32 +709,45 @@ impl ConnectivityService {
             .name("connectivity-timeouts".into())
             .spawn(move || timeouts(weak, s));
         let weak = Arc::downgrade(&host);
-        let _ = std::thread::Builder::new().name("connectivity-netd".into()).spawn(move || {
-            // netd registers itself and the DnsResolver it hosts once the
-            // BPF programs are loaded.
-            let service = |name: &str| loop {
-                let host = weak.upgrade()?;
-                if let Ok(s) = super::display::check_service(&host.process, name) {
-                    return Some(s);
+        let _ = std::thread::Builder::new()
+            .name("connectivity-netd".into())
+            .spawn(move || {
+                // netd registers itself and the DnsResolver it hosts once the
+                // BPF programs are loaded.
+                let service = |name: &str| loop {
+                    let host = weak.upgrade()?;
+                    if let Ok(s) = super::display::check_service(&host.process, name) {
+                        return Some(s);
+                    }
+                    drop(host);
+                    std::thread::sleep(Duration::from_millis(200));
+                };
+                let (Some(netd), Some(resolver)) = (service("netd"), service("dnsresolver")) else {
+                    return;
+                };
+                let Some(cs) = weak
+                    .upgrade()
+                    .and_then(|h| h.connectivity_service.get().cloned())
+                else {
+                    return;
+                };
+                let native = network_native::Native { netd, resolver };
+                if let Err(e) = native.set_interface_up(INTERFACE) {
+                    eprintln!("app host: connectivity: netd: {e}");
                 }
-                drop(host);
-                std::thread::sleep(Duration::from_millis(200));
-            };
-            let (Some(netd), Some(resolver)) = (service("netd"), service("dnsresolver")) else { return };
-            let Some(cs) = weak.upgrade().and_then(|h| h.connectivity_service.get().cloned()) else { return };
-            let native = network_native::Native { netd, resolver };
-            if let Err(e) = native.set_interface_up(INTERFACE) {
-                eprintln!("app host: connectivity: netd: {e}");
-            }
-            cs.native.lock().unwrap().0 = Some(native);
-            // The settings the network's description reads are loaded once
-            // the guest's properties are set.
-            while cs.host.inputs().is_err() {
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            cs.sync_native();
-        });
-        ConnectivityService { host, shared, native: Mutex::new((None, None)) }
+                cs.native.lock().unwrap().0 = Some(native);
+                // The settings the network's description reads are loaded once
+                // the guest's properties are set.
+                while cs.host.inputs().is_err() {
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                cs.sync_native();
+            });
+        ConnectivityService {
+            host,
+            shared,
+            native: Mutex::new((None, None)),
+        }
     }
 
     /// Follows the Mac's network.
@@ -755,7 +777,9 @@ impl ConnectivityService {
             Err(e) => return eprintln!("app host: connectivity: {e:?}"),
         };
         let mut native = self.native.lock().unwrap();
-        let (Some(services), configured) = &mut *native else { return };
+        let (Some(services), configured) = &mut *native else {
+            return;
+        };
         if *configured == wanted {
             return;
         }
@@ -784,7 +808,10 @@ impl ConnectivityService {
         let settings = &self.host.inputs()?.settings;
         let global = |name: &str| settings.get(Table::Global, name).filter(|v| !v.is_empty());
         // `getPrivateDnsMode`: off, opportunistic (the default) or strict.
-        let private_dns = match global("private_dns_mode").or_else(|| global("private_dns_default_mode")).as_deref() {
+        let private_dns = match global("private_dns_mode")
+            .or_else(|| global("private_dns_default_mode"))
+            .as_deref()
+        {
             Some("off") => None,
             Some("hostname") => Some(global("private_dns_specifier")),
             _ => Some(None),
@@ -797,7 +824,9 @@ impl ConnectivityService {
             dns: net.dns.clone(),
             private_dns,
             transports: vec![TRANSPORT_ETHERNET as i32],
-            settings: network_native::ResolverSettings::read(|name| global(name).and_then(|v| v.parse().ok())),
+            settings: network_native::ResolverSettings::read(|name| {
+                global(name).and_then(|v| v.parse().ok())
+            }),
         })
     }
 
@@ -1029,8 +1058,7 @@ impl ConnectivityService {
         let settings = &self.host.inputs()?.settings;
         let global = |name| settings.get(Table::Global, name).filter(|v| !v.is_empty());
         let mode = global("private_dns_mode").or_else(|| global("private_dns_default_mode"));
-        let strict =
-            (mode.as_deref() == Some("hostname")).then(|| global("private_dns_specifier"));
+        let strict = (mode.as_deref() == Some("hostname")).then(|| global("private_dns_specifier"));
         Ok(link_properties(&net.uplink, &net.dns, strict))
     }
 
@@ -1532,10 +1560,15 @@ impl ConnectivityService {
             .get(Table::Global, "default_restrict_background_data")
             .as_deref()
             == Some("1");
-        Ok(NetPolicy::read(bytes.as_deref(), default).unwrap_or_else(|e| {
-            eprintln!("app host: connectivity: problem reading {}: {e}", path.display());
-            NetPolicy::default()
-        }))
+        Ok(
+            NetPolicy::read(bytes.as_deref(), default).unwrap_or_else(|e| {
+                eprintln!(
+                    "app host: connectivity: problem reading {}: {e}",
+                    path.display()
+                );
+                NetPolicy::default()
+            }),
+        )
     }
 
     /// `getEnabledConnectivityManagerFeatures`: each feature not switched
@@ -1737,7 +1770,8 @@ impl Service for ConnectivityService {
             // callbacks, which none registers; one that disagrees revalidates
             // the network, which is not implemented.
             cm::REPORT_NETWORK_CONNECTIVITY => {
-                let a = cm::ReportNetworkConnectivity::<Network>::read(&mut call.data).map_err(bad)?;
+                let a =
+                    cm::ReportNetworkConnectivity::<Network>::read(&mut call.data).map_err(bad)?;
                 (|| {
                     self.enforce_access(uid)?;
                     if !self.has(uid, INTERNET_PERMISSION)? {
@@ -1747,10 +1781,19 @@ impl Service for ConnectivityService {
                     }
                     let known = match a.network.as_ref() {
                         None => self.default_network().is_some(),
-                        Some(_) => self.shared.state.lock().unwrap().net(a.network.as_ref()).is_some(),
+                        Some(_) => self
+                            .shared
+                            .state
+                            .lock()
+                            .unwrap()
+                            .net(a.network.as_ref())
+                            .is_some(),
                     };
                     if known && !a.has_connectivity {
-                        return Err(self.host.unimplemented_named("connectivity", "revalidating a network an app reports without connectivity (#1509)"));
+                        return Err(self.host.unimplemented_named(
+                            "connectivity",
+                            "revalidating a network an app reports without connectivity (#1509)",
+                        ));
                     }
                     cm::write_report_network_connectivity_reply(&mut p);
                     Ok(())

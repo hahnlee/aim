@@ -25,7 +25,16 @@ const ACTION_UP: i32 = 1;
 const ACTION_MOVE: i32 = 2;
 /// `InputShellCommand`'s `SOURCES`.
 const SOURCES: &[&str] = &[
-    "keyboard", "dpad", "gamepad", "touchscreen", "mouse", "stylus", "trackball", "touchpad", "touchnavigation", "joystick",
+    "keyboard",
+    "dpad",
+    "gamepad",
+    "touchscreen",
+    "mouse",
+    "stylus",
+    "trackball",
+    "touchpad",
+    "touchnavigation",
+    "joystick",
     "rotaryencoder",
 ];
 const INVALID_ARGUMENTS: &str = "Error: Invalid arguments for command: ";
@@ -60,14 +69,19 @@ fn on_command(host: &AppHost, uid: i32, c: &mut ShellCommand) -> Result<(), Stri
     }
     if arg == "-d" {
         let display = c.next_arg_required()?;
-        if !matches!(display.as_str(), "0" | "DEFAULT_DISPLAY" | "INVALID_DISPLAY" | "-1") {
+        if !matches!(
+            display.as_str(),
+            "0" | "DEFAULT_DISPLAY" | "INVALID_DISPLAY" | "-1"
+        ) {
             return Err(unimplemented(host, &format!("display {display}")));
         }
         arg = c.next_arg_required()?;
     }
     let float = |c: &mut ShellCommand, arg: &str| -> Result<f32, String> {
         let v = c.next_arg_required()?;
-        v.trim().parse::<f32>().map_err(|_| format!("java.lang.IllegalArgumentException: {INVALID_ARGUMENTS}{arg}"))
+        v.trim()
+            .parse::<f32>()
+            .map_err(|_| format!("java.lang.IllegalArgumentException: {INVALID_ARGUMENTS}{arg}"))
     };
     match arg.as_str() {
         // `sendTap`.
@@ -79,12 +93,23 @@ fn on_command(host: &AppHost, uid: i32, c: &mut ShellCommand) -> Result<(), Stri
         }
         // `sendSwipe`: moves at most at SWIPE_EVENT_HZ, interpolated.
         "swipe" => {
-            let (x1, y1, x2, y2) = (float(c, &arg)?, float(c, &arg)?, float(c, &arg)?, float(c, &arg)?);
+            let (x1, y1, x2, y2) = (
+                float(c, &arg)?,
+                float(c, &arg)?,
+                float(c, &arg)?,
+                float(c, &arg)?,
+            );
             let duration = match c.next_arg() {
-                Some(d) => d.trim().parse::<i32>().map_err(|_| format!("java.lang.IllegalArgumentException: {INVALID_ARGUMENTS}{arg}"))? as i64,
+                Some(d) => d.trim().parse::<i32>().map_err(|_| {
+                    format!("java.lang.IllegalArgumentException: {INVALID_ARGUMENTS}{arg}")
+                })? as i64,
                 None => -1,
             };
-            let duration = if duration < 0 { SWIPE_DURATION_MS } else { duration };
+            let duration = if duration < 0 {
+                SWIPE_DURATION_MS
+            } else {
+                duration
+            };
             let down = uptime_ms();
             inject(host, uid, ACTION_DOWN, down, down, x1, y1, 1.0)?;
             let mut now = uptime_ms();
@@ -102,7 +127,16 @@ fn on_command(host: &AppHost, uid: i32, c: &mut ShellCommand) -> Result<(), Stri
                 }
                 now = uptime_ms();
                 let alpha = (now - down) as f32 / duration as f32;
-                inject(host, uid, ACTION_MOVE, down, now, x1 + (x2 - x1) * alpha, y1 + (y2 - y1) * alpha, 1.0)?;
+                inject(
+                    host,
+                    uid,
+                    ACTION_MOVE,
+                    down,
+                    now,
+                    x1 + (x2 - x1) * alpha,
+                    y1 + (y2 - y1) * alpha,
+                    1.0,
+                )?;
                 injected += 1;
                 now = uptime_ms();
             }
@@ -120,9 +154,32 @@ fn unimplemented(host: &AppHost, what: &str) -> String {
 /// `injectMotionEvent` into the default display, as
 /// `InputManagerService.injectInputEvent` takes it.
 #[allow(clippy::too_many_arguments)]
-fn inject(host: &AppHost, uid: i32, action: i32, down_ms: i64, when_ms: i64, x: f32, y: f32, pressure: f32) -> Result<(), String> {
-    let thrown = |e: Exception| format!("java.lang.{}: {}", if e.code == aim_binder_host::parcel::EX_SECURITY { "SecurityException" } else { "IllegalStateException" }, e.message);
-    if host.check_permission(Some(INJECT_EVENTS), uid).map_err(thrown)? != 0 {
+fn inject(
+    host: &AppHost,
+    uid: i32,
+    action: i32,
+    down_ms: i64,
+    when_ms: i64,
+    x: f32,
+    y: f32,
+    pressure: f32,
+) -> Result<(), String> {
+    let thrown = |e: Exception| {
+        format!(
+            "java.lang.{}: {}",
+            if e.code == aim_binder_host::parcel::EX_SECURITY {
+                "SecurityException"
+            } else {
+                "IllegalStateException"
+            },
+            e.message
+        )
+    };
+    if host
+        .check_permission(Some(INJECT_EVENTS), uid)
+        .map_err(thrown)?
+        != 0
+    {
         return Err(thrown(Exception::security(
             "Injecting input events requires the caller (or the source of the instrumentation, if any) to have the INJECT_EVENTS permission.",
         )));

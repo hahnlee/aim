@@ -12,8 +12,8 @@ use aim_service_aidl::{ReadParcelable, WriteParcelable};
 use super::kept::{KeptIntent, RawIntent};
 use super::network::{Network, NetworkCapabilities, NetworkRequest, RequestType};
 use crate::clip::{self, Raw};
-use crate::package::uri::Uri;
 use crate::package::restrictions::persistable::Bundle;
+use crate::package::uri::Uri;
 
 /// `JobInfo.NETWORK_BYTES_UNKNOWN`.
 pub const NETWORK_BYTES_UNKNOWN: i64 = -1;
@@ -91,7 +91,9 @@ fn read_persistable(r: &mut Reader<'_>) -> Result<Bundle> {
 
 fn write_persistable(p: &mut Parcel, b: &Bundle) {
     // Bundles read from a parcel or from XML have no duplicate keys.
-    let bytes = b.parcel().expect("a persistable bundle that was read writes");
+    let bytes = b
+        .parcel()
+        .expect("a persistable bundle that was read writes");
     p.write_raw(bytes.data(), &[]);
 }
 
@@ -117,20 +119,38 @@ fn read_request(r: &mut Reader<'_>) -> Result<std::result::Result<NetworkRequest
 /// The request `JobStore` rebuilds from what it persisted:
 /// `new NetworkRequest.Builder().clearCapabilities()`, the capabilities,
 /// forbidden capabilities and transports added, then `build()`.
-pub fn restored_request(capabilities: &[i32], forbidden: &[i32], transports: &[i32]) -> NetworkRequest {
+pub fn restored_request(
+    capabilities: &[i32],
+    forbidden: &[i32],
+    transports: &[i32],
+) -> NetworkRequest {
     let mut caps = NetworkCapabilities::cleared();
     // Invalid capabilities and transports are logged and dropped.
-    for &c in capabilities.iter().filter(|&&c| (0..=MAX_NET_CAPABILITY as i32).contains(&c)) {
+    for &c in capabilities
+        .iter()
+        .filter(|&&c| (0..=MAX_NET_CAPABILITY as i32).contains(&c))
+    {
         caps.add(c as u32);
     }
-    for &c in forbidden.iter().filter(|&&c| (0..=MAX_NET_CAPABILITY as i32).contains(&c)) {
+    for &c in forbidden
+        .iter()
+        .filter(|&&c| (0..=MAX_NET_CAPABILITY as i32).contains(&c))
+    {
         caps.forbid(c as u32);
     }
-    for &t in transports.iter().filter(|&&t| (0..=MAX_TRANSPORT as i32).contains(&t)) {
+    for &t in transports
+        .iter()
+        .filter(|&&t| (0..=MAX_TRANSPORT as i32).contains(&t))
+    {
         caps.transports |= 1 << t;
     }
     caps.mark_restricted();
-    NetworkRequest { caps, legacy_type: TYPE_NONE, request_id: REQUEST_ID_UNSET, kind: RequestType::None }
+    NetworkRequest {
+        caps,
+        legacy_type: TYPE_NONE,
+        request_id: REQUEST_ID_UNSET,
+        kind: RequestType::None,
+    }
 }
 
 /// `JobStatus`'s copy of `request` for its source uid: `new
@@ -139,7 +159,12 @@ pub fn request_for_uid(request: &NetworkRequest, uid: i32) -> NetworkRequest {
     let mut caps = request.caps.clone();
     caps.uids = Some(vec![(uid, uid)]);
     caps.mark_restricted();
-    NetworkRequest { caps, legacy_type: TYPE_NONE, request_id: REQUEST_ID_UNSET, kind: RequestType::None }
+    NetworkRequest {
+        caps,
+        legacy_type: TYPE_NONE,
+        request_id: REQUEST_ID_UNSET,
+        kind: RequestType::None,
+    }
 }
 
 /// `JobInfo`.
@@ -202,7 +227,10 @@ impl JobInfo {
         if r.read_string16()?.as_deref() != Some(COMPONENT_NAME) {
             return Err(BAD_VALUE);
         }
-        let service = (r.read_string16()?.ok_or(BAD_VALUE)?, r.read_string16()?.ok_or(BAD_VALUE)?);
+        let service = (
+            r.read_string16()?.ok_or(BAD_VALUE)?,
+            r.read_string16()?.ok_or(BAD_VALUE)?,
+        );
         let constraint_flags = r.read_i32()?;
         let start = r.position();
         let n = r.read_i32()?;
@@ -210,7 +238,10 @@ impl JobInfo {
         for _ in 0..n.max(0) {
             triggers.push(if r.read_i32()? != 0 {
                 let uri = Uri::read(r, &mut crate::package::intent_filter::Plain)?;
-                Some(TriggerContentUri { uri, flags: r.read_i32()? })
+                Some(TriggerContentUri {
+                    uri,
+                    flags: r.read_i32()?,
+                })
             } else {
                 None
             });
@@ -338,7 +369,11 @@ impl JobInfo {
     /// Whether its transient extras are empty (`Bundle.isEmpty`): a
     /// parcelled bundle has a length only when it has entries.
     fn transient_extras_empty(&self) -> bool {
-        self.transient_extras.parcel().reader().read_i32().is_ok_and(|n| n <= 0)
+        self.transient_extras
+            .parcel()
+            .reader()
+            .read_i32()
+            .is_ok_and(|n| n <= 0)
     }
 
     /// The handles of the binders among its parcelled parts.
@@ -397,10 +432,15 @@ impl JobInfo {
         reject_negative_delays_and_deadlines: bool,
     ) -> std::result::Result<(), Exception> {
         let fail = |m: String| Err(Exception::illegal_argument(m));
-        let (down, up, chunk) =
-            (self.network_download_bytes, self.network_upload_bytes, self.minimum_network_chunk_bytes);
+        let (down, up, chunk) = (
+            self.network_download_bytes,
+            self.network_upload_bytes,
+            self.minimum_network_chunk_bytes,
+        );
         if (down > 0 || up > 0 || chunk > 0) && self.network.is_none() {
-            return fail("Can't provide estimated network usage without requiring a network".into());
+            return fail(
+                "Can't provide estimated network usage without requiring a network".into(),
+            );
         }
         if self.network.is_some() && reject_negative_network_estimates {
             if up != NETWORK_BYTES_UNKNOWN && up < 0 {
@@ -416,7 +456,10 @@ impl JobInfo {
                 return fail(format!("Minimum latency is negative: {}", self.min_latency));
             }
             if self.max_execution_delay < 0 {
-                return fail(format!("Override deadline is negative: {}", self.max_execution_delay));
+                return fail(format!(
+                    "Override deadline is negative: {}",
+                    self.max_execution_delay
+                ));
             }
         }
         let has_deadline = self.max_execution_delay != 0;
@@ -460,15 +503,25 @@ impl JobInfo {
             PRIORITY_MAX if !(expedited || user_initiated) => {
                 return fail("Only expedited or user-initiated jobs can have max priority".into());
             }
-            PRIORITY_HIGH if self.is_prefetch() => return fail("Prefetch jobs cannot be high priority".into()),
-            PRIORITY_HIGH if self.periodic => return fail("Periodic jobs cannot be high priority".into()),
+            PRIORITY_HIGH if self.is_prefetch() => {
+                return fail("Prefetch jobs cannot be high priority".into());
+            }
+            PRIORITY_HIGH if self.periodic => {
+                return fail("Periodic jobs cannot be high priority".into());
+            }
             PRIORITY_MAX | PRIORITY_HIGH | PRIORITY_DEFAULT | PRIORITY_LOW | PRIORITY_MIN => {}
             p => return fail(format!("Invalid priority level provided: {p}")),
         }
         let functional = self.network.is_some() || self.constraint_flags != 0 || has_triggers;
         if self.has_late_constraint && !self.periodic && functional {
-            let start = if self.has_early_constraint { self.min_latency } else { 0 };
-            if self.max_execution_delay - start < MIN_ALLOWED_TIME_WINDOW_MILLIS && enforce_minimum_time_windows {
+            let start = if self.has_early_constraint {
+                self.min_latency
+            } else {
+                0
+            };
+            if self.max_execution_delay - start < MIN_ALLOWED_TIME_WINDOW_MILLIS
+                && enforce_minimum_time_windows
+            {
                 let (package, class) = &self.service;
                 return fail(format!(
                     "Time window too short. Constraints unlikely to be satisfied. Increase deadline to a reasonable duration. Job '{package}/{class}#{}' has delay={start}, deadline={}",
@@ -495,7 +548,9 @@ impl JobInfo {
             if self.constraint_flags & !CONSTRAINT_FLAG_STORAGE_NOT_LOW != 0
                 || self.flags & !(FLAG_EXPEDITED | FLAG_EXEMPT_FROM_APP_STANDBY) != 0
             {
-                return fail("An expedited job can only have network and storage-not-low constraints".into());
+                return fail(
+                    "An expedited job can only have network and storage-not-low constraints".into(),
+                );
             }
             if has_triggers {
                 return fail("Can't call addTriggerContentUri() on an expedited job".into());
@@ -524,7 +579,9 @@ impl JobInfo {
                 return fail("Can't call addTriggerContentUri() on a user-initiated job".into());
             }
             if self.network.is_none() {
-                return fail("A user-initiated data transfer job must specify a valid network type".into());
+                return fail(
+                    "A user-initiated data transfer job must specify a valid network type".into(),
+                );
             }
         }
         if self.debug_tags.len() > MAX_NUM_DEBUG_TAGS {
@@ -548,13 +605,21 @@ fn check_chunk(down: i64, up: i64, chunk: i64) -> std::result::Result<(), Except
     let transfer = if up == NETWORK_BYTES_UNKNOWN {
         down
     } else {
-        up + if down == NETWORK_BYTES_UNKNOWN { 0 } else { down }
+        up + if down == NETWORK_BYTES_UNKNOWN {
+            0
+        } else {
+            down
+        }
     };
     if chunk != NETWORK_BYTES_UNKNOWN && transfer != NETWORK_BYTES_UNKNOWN && chunk > transfer {
-        return Err(Exception::illegal_argument("Minimum chunk size can't be greater than estimated network usage"));
+        return Err(Exception::illegal_argument(
+            "Minimum chunk size can't be greater than estimated network usage",
+        ));
     }
     if chunk != NETWORK_BYTES_UNKNOWN && chunk <= 0 {
-        return Err(Exception::illegal_argument("Minimum chunk size must be positive"));
+        return Err(Exception::illegal_argument(
+            "Minimum chunk size must be positive",
+        ));
     }
     Ok(())
 }
@@ -586,7 +651,9 @@ fn validate_trace_tag(tag: Option<&str>) -> std::result::Result<(), Exception> {
         )));
     }
     if tag.contains(['|', '\n', '\0']) {
-        return Err(Exception::illegal_argument("Trace tag cannot contain |, \\n, or \\0"));
+        return Err(Exception::illegal_argument(
+            "Trace tag cannot contain |, \\n, or \\0",
+        ));
     }
     Ok(())
 }
@@ -670,7 +737,11 @@ pub struct ReadWorkItem {
 
 impl ReadParcelable for ReadWorkItem {
     fn read_from(r: &mut Reader<'_>) -> Result<Self> {
-        let intent = if r.read_i32()? != 0 { Some(RawIntent::read_from(r)?) } else { None };
+        let intent = if r.read_i32()? != 0 {
+            Some(RawIntent::read_from(r)?)
+        } else {
+            None
+        };
         Ok(ReadWorkItem {
             intent,
             extras: read_persistable(r)?,
@@ -705,7 +776,13 @@ impl ReadWorkItem {
 
 impl JobWorkItem {
     /// `JobWorkItem.Builder().build()` of what `JobStore` persisted.
-    pub fn persisted(extras: Bundle, delivery_count: i32, down: i64, up: i64, chunk: i64) -> JobWorkItem {
+    pub fn persisted(
+        extras: Bundle,
+        delivery_count: i32,
+        down: i64,
+        up: i64,
+        chunk: i64,
+    ) -> JobWorkItem {
         JobWorkItem {
             intent: None,
             extras,
@@ -718,14 +795,21 @@ impl JobWorkItem {
     }
 
     /// `JobWorkItem.enforceValidity`.
-    pub fn enforce_validity(&self, reject_negative_network_estimates: bool) -> std::result::Result<(), Exception> {
+    pub fn enforce_validity(
+        &self,
+        reject_negative_network_estimates: bool,
+    ) -> std::result::Result<(), Exception> {
         let (down, up) = (self.network_download_bytes, self.network_upload_bytes);
         if reject_negative_network_estimates {
             if up != NETWORK_BYTES_UNKNOWN && up < 0 {
-                return Err(Exception::illegal_argument(format!("Invalid network upload bytes: {up}")));
+                return Err(Exception::illegal_argument(format!(
+                    "Invalid network upload bytes: {up}"
+                )));
             }
             if down != NETWORK_BYTES_UNKNOWN && down < 0 {
-                return Err(Exception::illegal_argument(format!("Invalid network download bytes: {down}")));
+                return Err(Exception::illegal_argument(format!(
+                    "Invalid network download bytes: {down}"
+                )));
             }
         }
         check_chunk(down, up, self.minimum_chunk_bytes)
@@ -836,7 +920,9 @@ mod tests {
     fn written() -> Parcel {
         let mut p = Parcel::new();
         p.write_i32(7);
-        let extras = Bundle { entries: vec![(Some("count".into()), Value::Int(3))] };
+        let extras = Bundle {
+            entries: vec![(Some("count".into()), Value::Int(3))],
+        };
         p.write_raw(extras.parcel().unwrap().data(), &[]);
         p.write_i32(0); // transient extras: Bundle.EMPTY
         p.write_i32(0); // no clip
@@ -875,7 +961,13 @@ mod tests {
         p.write_i32(TYPE_NONE);
         p.write_i32(REQUEST_ID_UNSET);
         p.write_string16(Some("NONE"));
-        for v in [NETWORK_BYTES_UNKNOWN, NETWORK_BYTES_UNKNOWN, NETWORK_BYTES_UNKNOWN, 0, 0] {
+        for v in [
+            NETWORK_BYTES_UNKNOWN,
+            NETWORK_BYTES_UNKNOWN,
+            NETWORK_BYTES_UNKNOWN,
+            0,
+            0,
+        ] {
             p.write_i64(v);
         }
         p.write_i32(1); // periodic
@@ -899,11 +991,19 @@ mod tests {
     fn job_info_reads_and_writes_as_the_original() {
         let p = written();
         let mut r = p.reader();
-        let Ok(job) = JobInfo::read(&mut r).unwrap() else { panic!("not read") };
+        let Ok(job) = JobInfo::read(&mut r).unwrap() else {
+            panic!("not read")
+        };
         assert_eq!(r.remaining(), 0);
-        assert_eq!((job.id, job.service.0.as_str(), job.constraint_flags), (7, "com.example", CONSTRAINT_FLAG_CHARGING));
+        assert_eq!(
+            (job.id, job.service.0.as_str(), job.constraint_flags),
+            (7, "com.example", CONSTRAINT_FLAG_CHARGING)
+        );
         assert!(job.periodic && job.has_early_constraint && !job.persisted);
-        assert_eq!(job.extras.entries, vec![(Some("count".into()), Value::Int(3))]);
+        assert_eq!(
+            job.extras.entries,
+            vec![(Some("count".into()), Value::Int(3))]
+        );
         let network = job.network.as_ref().unwrap();
         assert_eq!(unpack_bits(network.caps.capabilities), [12, 14, 16, 28]);
         assert_eq!(job.debug_tags, ["sync"]);
@@ -922,7 +1022,10 @@ mod tests {
         p.write_i32(0);
         p.write_i32(0);
         p.write_string16(Some("android.net.wifi.WifiNetworkSpecifier"));
-        assert!(matches!(read_request(&mut p.reader()), Ok(Err(Unsupported(_)))));
+        assert!(matches!(
+            read_request(&mut p.reader()),
+            Ok(Err(Unsupported(_)))
+        ));
     }
 
     /// `JobStore`'s rebuilt request: what was persisted, with
@@ -931,25 +1034,41 @@ mod tests {
     fn a_persisted_request_is_rebuilt_as_the_builder_builds_it() {
         let r = restored_request(&[12, 13, 16], &[15], &[1]);
         assert_eq!(unpack_bits(r.caps.capabilities), [12, 13, 16]);
-        assert_eq!((unpack_bits(r.caps.forbidden), unpack_bits(r.caps.transports)), (vec![15], vec![1]));
+        assert_eq!(
+            (
+                unpack_bits(r.caps.forbidden),
+                unpack_bits(r.caps.transports)
+            ),
+            (vec![15], vec![1])
+        );
         assert_eq!(r.caps.uids, None);
         let ims = restored_request(&[4, 13], &[], &[]);
         assert_eq!(unpack_bits(ims.caps.capabilities), [4]);
-        assert_eq!(request_for_uid(&r, 10123).caps.uids, Some(vec![(10123, 10123)]));
+        assert_eq!(
+            request_for_uid(&r, 10123).caps.uids,
+            Some(vec![(10123, 10123)])
+        );
     }
 
     #[test]
     fn validity_is_enforced_as_the_original_enforces_it() {
         let p = written();
-        let Ok(mut job) = JobInfo::read(&mut p.reader()).unwrap() else { panic!() };
+        let Ok(mut job) = JobInfo::read(&mut p.reader()).unwrap() else {
+            panic!()
+        };
         assert!(job.enforce_validity(true, true, true, true).is_ok());
         job.max_execution_delay = 1;
         let e = job.enforce_validity(true, true, true, true).unwrap_err();
-        assert_eq!(e.message, "Can't call setOverrideDeadline() on a periodic job.");
+        assert_eq!(
+            e.message,
+            "Can't call setOverrideDeadline() on a periodic job."
+        );
         let mut job = JobInfo::persisted_builder(1, "p".into(), "p.S".into());
         job.flags = FLAG_EXPEDITED;
         assert_eq!(
-            job.enforce_validity(true, true, true, true).unwrap_err().message,
+            job.enforce_validity(true, true, true, true)
+                .unwrap_err()
+                .message,
             "An expedited job must be high or max priority. Don't use expedited jobs for unimportant tasks."
         );
         job.priority = PRIORITY_HIGH;
@@ -982,7 +1101,14 @@ mod tests {
         let mut r = p.reader();
         assert_eq!(r.read_i32().unwrap(), 4);
         assert_eq!(r.read_string16().unwrap().as_deref(), Some("ns"));
-        assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap(), r.read_i32().unwrap()), (0, 0, 0));
+        assert_eq!(
+            (
+                r.read_i32().unwrap(),
+                r.read_i32().unwrap(),
+                r.read_i32().unwrap()
+            ),
+            (0, 0, 0)
+        );
         assert_eq!(r.read_binder().unwrap(), Some(Binder::Local(0x10)));
         let ints: Vec<i32> = (0..9).map(|_| r.read_i32().unwrap()).collect();
         assert_eq!(ints, [1, 0, 0, -1, -1, 1, 101, 0, -1]);
@@ -1022,10 +1148,15 @@ mod tests {
             r.read_i32().unwrap();
         });
         assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap()), (1, 1));
-        let uri = Uri::read(&mut r, &mut crate::package::intent_filter::Plain).unwrap().unwrap();
+        let uri = Uri::read(&mut r, &mut crate::package::intent_filter::Plain)
+            .unwrap()
+            .unwrap();
         assert_eq!(uri.as_str(), "content://com.android.contacts/contacts/7");
         assert_eq!(r.read_i32().unwrap(), 1);
-        assert_eq!(r.read_string16().unwrap().as_deref(), Some("com.android.contacts"));
+        assert_eq!(
+            r.read_string16().unwrap().as_deref(),
+            Some("com.android.contacts")
+        );
     }
 
     #[test]

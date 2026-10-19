@@ -79,8 +79,8 @@ impl System {
         }
         let bridge = self.package_bootstrap()?;
         self.check_package_bootstrap(&bridge)?;
-        let owner =
-            self.package_bootstrap_binder_leaf(&bridge, bootstrap::GET_PACKAGE_SHELL_POLICY_BRIDGE)?;
+        let owner = self
+            .package_bootstrap_binder_leaf(&bridge, bootstrap::GET_PACKAGE_SHELL_POLICY_BRIDGE)?;
         let mut request = Parcel::new();
         user::HandleCreateUserCommand {
             input: Some(Descriptor(input.into_file_owner())),
@@ -110,8 +110,8 @@ impl System {
         }
         let bridge = self.package_bootstrap()?;
         self.check_package_bootstrap(&bridge)?;
-        let owner =
-            self.package_bootstrap_binder_leaf(&bridge, bootstrap::GET_PACKAGE_SHELL_POLICY_BRIDGE)?;
+        let owner = self
+            .package_bootstrap_binder_leaf(&bridge, bootstrap::GET_PACKAGE_SHELL_POLICY_BRIDGE)?;
         let mut request = Parcel::new();
         user::HandleListUsersCommand {
             input: Some(Descriptor(input.into_file_owner())),
@@ -139,8 +139,8 @@ impl System {
         }
         let bridge = self.package_bootstrap()?;
         self.check_package_bootstrap(&bridge)?;
-        let owner =
-            self.package_bootstrap_binder_leaf(&bridge, bootstrap::GET_PACKAGE_SHELL_POLICY_BRIDGE)?;
+        let owner = self
+            .package_bootstrap_binder_leaf(&bridge, bootstrap::GET_PACKAGE_SHELL_POLICY_BRIDGE)?;
         let mut request = Parcel::new();
         user::HandleRemoveUserCommand {
             input: Some(Descriptor(input.into_file_owner())),
@@ -150,7 +150,8 @@ impl System {
         }
         .write(&mut request);
         // As create-user: the original checks Binder.getCallingUid itself.
-        let reply = self.process
+        let reply = self
+            .process
             .transact_preserving_inbound(owner.handle, user::HANDLE_REMOVE_USER_COMMAND, &request)
             .map_err(|status| failure(format!("User removal shell transport: {status}")))?;
         let mut reader = reply.reader();
@@ -163,7 +164,6 @@ impl System {
         Ok(result)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -204,10 +204,7 @@ mod tests {
             assert_eq!(call.data.remaining(), 0);
             assert_eq!(
                 request.arguments,
-                Some(vec![
-                    Some("create-user".into()),
-                    Some("fixture".into())
-                ])
+                Some(vec![Some("create-user".into()), Some("fixture".into())])
             );
             let process = self.process.upgrade().unwrap();
             for fd in [request.input.unwrap().0, request.error.unwrap().0] {
@@ -234,7 +231,8 @@ mod tests {
                 security_context: None,
             },
         );
-        let path = std::env::temp_dir().join(format!("aim-create-user-shell-fd-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("aim-create-user-shell-fd-{}", std::process::id()));
         let output = std::fs::OpenOptions::new()
             .create_new(true)
             .read(true)
@@ -247,10 +245,7 @@ mod tests {
             input: Some(Descriptor(file.clone())),
             output: Some(Descriptor(file.clone())),
             error: Some(Descriptor(file)),
-            arguments: Some(vec![
-                Some("create-user".into()),
-                Some("fixture".into()),
-            ]),
+            arguments: Some(vec![Some("create-user".into()), Some("fixture".into())]),
         }
         .write(&mut request);
         let held = Arc::new(Mutex::new(None));
@@ -310,7 +305,9 @@ mod tests {
         user::write_handle_list_users_command_reply(&mut reply, 0);
         reply.write_i32(7);
         assert_eq!(
-            read_list_users_reply(&mut reply.reader()).unwrap_err().message,
+            read_list_users_reply(&mut reply.reader())
+                .unwrap_err()
+                .message,
             "User listing shell reply tail"
         );
     }

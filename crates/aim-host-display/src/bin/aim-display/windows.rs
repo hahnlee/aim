@@ -993,7 +993,13 @@ pub fn locate(
 
 /// The task `view` shows, if it is a task window's.
 pub fn task_of_view(view: Id) -> Option<i32> {
-    with(|s| s.tasks.iter().find(|(_, tw)| tw.view == view).map(|(&task, _)| task)).flatten()
+    with(|s| {
+        s.tasks
+            .iter()
+            .find(|(_, tw)| tw.view == view)
+            .map(|(&task, _)| task)
+    })
+    .flatten()
 }
 
 /// Whether `view` is a task window's.

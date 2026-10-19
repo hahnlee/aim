@@ -3,7 +3,11 @@
 //! runtime build, platform inputs and package files it was parsed from.
 use super::super::write::Apks;
 use sha2::{Digest, Sha256};
-use std::{fs, os::unix::fs::MetadataExt, path::{Path, PathBuf}};
+use std::{
+    fs,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
+};
 
 const DIRECTORY: &str = "/data/system/aim_package_cache";
 
@@ -22,7 +26,12 @@ impl Cache {
         let mut base = Sha256::new();
         base.update(b"AIMPARSE1\0");
         base.update(&image);
-        base.update(format!("{}:{}:{}\0", exe.ino(), exe.size(), exe.mtime_nsec() + exe.mtime() * 1_000_000_000));
+        base.update(format!(
+            "{}:{}:{}\0",
+            exe.ino(),
+            exe.size(),
+            exe.mtime_nsec() + exe.mtime() * 1_000_000_000
+        ));
         let mut features: Vec<_> = platform.features.iter().collect();
         features.sort();
         let mut extensions: Vec<_> = platform.sdk_extensions.iter().flatten().collect();
@@ -62,7 +71,14 @@ impl Cache {
             files.push((Default::default(), meta));
         }
         for (name, meta) in files {
-            key.update(format!("{name:?}:{}:{}:{}:{}.{}\0", meta.dev(), meta.ino(), meta.size(), meta.mtime(), meta.mtime_nsec()));
+            key.update(format!(
+                "{name:?}:{}:{}:{}:{}.{}\0",
+                meta.dev(),
+                meta.ino(),
+                meta.size(),
+                meta.mtime(),
+                meta.mtime_nsec()
+            ));
         }
         Some(self.dir.join(hex(&key.finalize())))
     }
@@ -90,7 +106,10 @@ mod tests {
         let package = root.join("app");
         fs::create_dir_all(&package).unwrap();
         fs::write(package.join("base.apk"), b"one").unwrap();
-        let cache = Cache { dir: root.join("cache"), base: Sha256::new() };
+        let cache = Cache {
+            dir: root.join("cache"),
+            base: Sha256::new(),
+        };
         fs::create_dir_all(&cache.dir).unwrap();
         let first = cache.entry(&package, "/system/app/app", 16).unwrap();
         assert_eq!(cache.entry(&package, "/system/app/app", 16).unwrap(), first);

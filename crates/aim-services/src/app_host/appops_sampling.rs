@@ -36,8 +36,14 @@ impl Config {
     /// What the service answers: valid for an hour from now, by the wall
     /// clock (`Instant.now().plus(1, HOURS).toEpochMilli()`).
     fn new(sampled_op: i32, acceptable_left_distance: i32) -> Self {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
-        Config { sampled_op, acceptable_left_distance, expiration_millis: now + 3_600_000 }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        Config {
+            sampled_op,
+            acceptable_left_distance,
+            expiration_millis: now + 3_600_000,
+        }
     }
 }
 
@@ -146,14 +152,22 @@ impl Sampling {
             return;
         }
         let pick_op = random_float() < 0.5;
-        self.strategy = if pick_op { SAMPLING_STRATEGY_UNIFORM } else { SAMPLING_STRATEGY_UNIFORM_OPS };
+        self.strategy = if pick_op {
+            SAMPLING_STRATEGY_UNIFORM
+        } else {
+            SAMPLING_STRATEGY_UNIFORM_OPS
+        };
         let package = packages[random_below(packages.len() as u32) as usize].clone();
         self.resample_op_for_package(package, pick_op);
     }
 
     /// `resampleAppOpForPackageLocked`.
     fn resample_op_for_package(&mut self, package: String, pick_op: bool) {
-        self.op = if pick_op { random_below(NUM_OP as u32) as i32 } else { OP_NONE };
+        self.op = if pick_op {
+            random_below(NUM_OP as u32) as i32
+        } else {
+            OP_NONE
+        };
         self.acceptable_left_distance = NUM_OP - 1;
         self.package = Some(package);
     }
@@ -162,7 +176,9 @@ impl Sampling {
     /// seen narrows what is watched.
     fn report_internal(&mut self, op: i32) {
         let distance = left_circular_distance(op, self.op, NUM_OP);
-        if self.strategy != SAMPLING_STRATEGY_UNIFORM_OPS && distance < self.acceptable_left_distance {
+        if self.strategy != SAMPLING_STRATEGY_UNIFORM_OPS
+            && distance < self.acceptable_left_distance
+        {
             self.acceptable_left_distance = distance;
         }
     }
@@ -180,11 +196,22 @@ mod tests {
         s.resample_op_for_package("a".into(), true);
         s.strategy = SAMPLING_STRATEGY_BOOT_TIME_SAMPLING;
         let other = s.report("b", None, None, Vec::new).unwrap();
-        assert_eq!((other.sampled_op, other.acceptable_left_distance), (OP_NONE, 0));
+        assert_eq!(
+            (other.sampled_op, other.acceptable_left_distance),
+            (OP_NONE, 0)
+        );
         let op = (s.op + 3) % NUM_OP;
-        let config = s.report("a", Some(&Noted { op }), Some("trace"), Vec::new).unwrap();
-        assert_eq!((config.sampled_op, config.acceptable_left_distance), (s.op, NUM_OP - 3));
-        assert_eq!(s.report("a", None, Some("trace"), Vec::new), Err("notedAppOp"));
+        let config = s
+            .report("a", Some(&Noted { op }), Some("trace"), Vec::new)
+            .unwrap();
+        assert_eq!(
+            (config.sampled_op, config.acceptable_left_distance),
+            (s.op, NUM_OP - 3)
+        );
+        assert_eq!(
+            s.report("a", None, Some("trace"), Vec::new),
+            Err("notedAppOp")
+        );
     }
 
     #[test]

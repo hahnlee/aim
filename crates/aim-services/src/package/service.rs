@@ -48,18 +48,27 @@ enum Source {
     Fixture(Arc<RwLock<Arc<State>>>),
 }
 impl PackageQueries {
-    pub fn from_bootstrap(system: &Arc<crate::system::System>, bridge: &Arc<super::bootstrap::Bridge>) -> (Arc<Self>, Arc<Self>) {
+    pub fn from_bootstrap(
+        system: &Arc<crate::system::System>,
+        bridge: &Arc<super::bootstrap::Bridge>,
+    ) -> (Arc<Self>, Arc<Self>) {
         let (public, native) = Self::from_system(system);
         let attach = |owner: &Arc<Self>| {
             let parent = Arc::downgrade(system);
             let bridge = bridge.clone();
             Arc::new(Self {
                 source: Source::Native(Arc::new(move || {
-                    let system = parent.upgrade().ok_or_else(|| Exception::new(
-                        aim_binder_host::parcel::EX_ILLEGAL_STATE, "package endpoint system stopped"))?;
+                    let system = parent.upgrade().ok_or_else(|| {
+                        Exception::new(
+                            aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                            "package endpoint system stopped",
+                        )
+                    })?;
                     system.capture_package_queries_for(&bridge)
                 })),
-                resolver: owner.resolver.clone(), native: owner.native, system: owner.system.clone(),
+                resolver: owner.resolver.clone(),
+                native: owner.native,
+                system: owner.system.clone(),
             })
         };
         (attach(&public), attach(&native))
@@ -131,14 +140,18 @@ impl PackageQueries {
         {
             return Ok(None);
         }
-        let system = self.system.as_ref().and_then(|owner| owner.upgrade())
+        let system = self
+            .system
+            .as_ref()
+            .and_then(|owner| owner.upgrade())
             .ok_or(QueryError::NotModelled(NotModelled(
-                "live permission owner unavailable")))?;
-        let full = system.check_permission_uncached(
-            "android.permission.INTERACT_ACROSS_USERS_FULL", pid, uid)
+                "live permission owner unavailable",
+            )))?;
+        let full = system
+            .check_permission_uncached("android.permission.INTERACT_ACROSS_USERS_FULL", pid, uid)
             .map_err(QueryError::Original)?;
-        let partial = system.check_permission_uncached(
-            "android.permission.INTERACT_ACROSS_USERS", pid, uid)
+        let partial = system
+            .check_permission_uncached("android.permission.INTERACT_ACROSS_USERS", pid, uid)
             .map_err(QueryError::Original)?;
         Ok(Some((full, partial)))
     }
@@ -150,7 +163,8 @@ impl PackageQueries {
         query: &Query<'_>,
     ) -> Option<Result<Parcel, QueryError>> {
         if call.code == pm::CLEAR_PACKAGE_PREFERRED_ACTIVITIES
-            && query.state.system.preferred_owner.is_some() {
+            && query.state.system.preferred_owner.is_some()
+        {
             return None;
         }
         if call.code == pm::SET_BLOCK_UNINSTALL_FOR_USER {
@@ -308,7 +322,9 @@ impl PackageQueries {
 }
 
 impl Service for PackageQueries {
-    fn accepts_fds(&self) -> bool { true }
+    fn accepts_fds(&self) -> bool {
+        true
+    }
     fn descriptor(&self) -> &str {
         if self.native {
             native::DESCRIPTOR
@@ -319,20 +335,34 @@ impl Service for PackageQueries {
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         if !self.native && call.code == super::dump::DUMP_TRANSACTION {
-            let system = self.system.as_ref().and_then(|owner| owner.upgrade()).ok_or(UNKNOWN_TRANSACTION)?;
+            let system = self
+                .system
+                .as_ref()
+                .and_then(|owner| owner.upgrade())
+                .ok_or(UNKNOWN_TRANSACTION)?;
             return super::dump::run(&system, call, || match &self.source {
                 Source::Native(source) => source().map(|capture| capture.state().clone()),
                 #[cfg(test)]
                 Source::Fixture(state) => Ok(state.read().unwrap().clone()),
             });
         }
-        if !self.native && call.code==crate::shell::SHELL_COMMAND_TRANSACTION {
-            let mut reply=Parcel::new();
-            if !matches!(call.sender_euid,0|2000){reply.write_exception(&Exception::security("Shell commands are only callable by ADB"));return Ok(reply);}
-            let system=self.system.as_ref().and_then(|owner|owner.upgrade()).ok_or(UNKNOWN_TRANSACTION)?;
-            let context=super::shell::Context::new(&system,self,call)?;
+        if !self.native && call.code == crate::shell::SHELL_COMMAND_TRANSACTION {
+            let mut reply = Parcel::new();
+            if !matches!(call.sender_euid, 0 | 2000) {
+                reply.write_exception(&Exception::security(
+                    "Shell commands are only callable by ADB",
+                ));
+                return Ok(reply);
+            }
+            let system = self
+                .system
+                .as_ref()
+                .and_then(|owner| owner.upgrade())
+                .ok_or(UNKNOWN_TRANSACTION)?;
+            let context = super::shell::Context::new(&system, self, call)?;
             super::shell::dispatch(context);
-            reply.write_no_exception();return Ok(reply);
+            reply.write_no_exception();
+            return Ok(reply);
         }
         let methods = if self.native {
             native::METHODS
@@ -366,119 +396,230 @@ impl Service for PackageQueries {
             (Source::Fixture(state), _) => state.read().unwrap().clone(),
             _ => unreachable!(),
         };
-        let live_uid_packages = if !self.native && capture.is_some() && call.code == pm::GET_PACKAGES_FOR_UID {
+        let live_uid_packages =
+            if !self.native && capture.is_some() && call.code == pm::GET_PACKAGES_FOR_UID {
+                Some((|| -> Result<Parcel, QueryError> {
+                    let args = pm::GetPackagesForUid::read(&mut call.data)
+                        .map_err(QueryError::Transport)?;
+                    if call.data.remaining() != 0 {
+                        return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                    }
+                    let system = self
+                        .system
+                        .as_ref()
+                        .and_then(|owner| owner.upgrade())
+                        .ok_or(QueryError::NotModelled(NotModelled(
+                            "live permission owner unavailable",
+                        )))?;
+                    let full = system
+                        .check_permission_uncached(
+                            "android.permission.INTERACT_ACROSS_USERS_FULL",
+                            call.sender_pid,
+                            call.sender_euid as i32,
+                        )
+                        .map_err(QueryError::Original)?;
+                    let partial = system
+                        .check_permission_uncached(
+                            "android.permission.INTERACT_ACROSS_USERS",
+                            call.sender_pid,
+                            call.sender_euid as i32,
+                        )
+                        .map_err(QueryError::Original)?;
+                    let resolution = match capture.as_ref().unwrap().resolution() {
+                        Ok(resolution) => resolution,
+                        Err(error) => return error.reply().map_err(QueryError::Transport),
+                    };
+                    let query = Query {
+                        state: &state,
+                        filter: &resolution.apps_filter,
+                        calling_uid: uid,
+                    };
+                    let mut reply = Parcel::new();
+                    match query
+                        .packages_for_uid_checked_with_grants(args.uid, Some((full, partial)))
+                        .map_err(QueryError::NotModelled)?
+                    {
+                        Ok(value) => pm::write_get_packages_for_uid_reply(&mut reply, &value),
+                        Err(error) => reply.write_exception(&error),
+                    }
+                    Ok(reply)
+                })())
+            } else {
+                None
+            };
+        let live_package_identity = if !self.native
+            && capture.is_some()
+            && matches!(call.code, pm::GET_PACKAGE_UID | pm::GET_PACKAGE_GIDS)
+        {
             Some((|| -> Result<Parcel, QueryError> {
-                let args = pm::GetPackagesForUid::read(&mut call.data).map_err(QueryError::Transport)?;
-                if call.data.remaining() != 0 {
-                    return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
-                }
-                let system = self.system.as_ref().and_then(|owner| owner.upgrade())
-                    .ok_or(QueryError::NotModelled(NotModelled("live permission owner unavailable")))?;
-                let full = system.check_permission_uncached(
-                    "android.permission.INTERACT_ACROSS_USERS_FULL", call.sender_pid,
-                    call.sender_euid as i32).map_err(QueryError::Original)?;
-                let partial = system.check_permission_uncached(
-                    "android.permission.INTERACT_ACROSS_USERS", call.sender_pid,
-                    call.sender_euid as i32).map_err(QueryError::Original)?;
                 let resolution = match capture.as_ref().unwrap().resolution() {
                     Ok(resolution) => resolution,
                     Err(error) => return error.reply().map_err(QueryError::Transport),
                 };
-                let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: uid };
-                let mut reply = Parcel::new();
-                match query.packages_for_uid_checked_with_grants(args.uid, Some((full, partial)))
-                    .map_err(QueryError::NotModelled)? {
-                    Ok(value) => pm::write_get_packages_for_uid_reply(&mut reply, &value),
-                    Err(error) => reply.write_exception(&error),
-                }
-                Ok(reply)
-            })())
-        } else { None };
-        let live_package_identity = if !self.native && capture.is_some()
-            && matches!(call.code, pm::GET_PACKAGE_UID | pm::GET_PACKAGE_GIDS) {
-            Some((|| -> Result<Parcel, QueryError> {
-                let resolution = match capture.as_ref().unwrap().resolution() {
-                    Ok(resolution) => resolution,
-                    Err(error) => return error.reply().map_err(QueryError::Transport),
+                let query = Query {
+                    state: &state,
+                    filter: &resolution.apps_filter,
+                    calling_uid: uid,
                 };
-                let query = Query { state: &state, filter: &resolution.apps_filter, calling_uid: uid };
                 let mut reply = Parcel::new();
                 if call.code == pm::GET_PACKAGE_UID {
-                    let args = pm::GetPackageUid::read(&mut call.data).map_err(QueryError::Transport)?;
+                    let args =
+                        pm::GetPackageUid::read(&mut call.data).map_err(QueryError::Transport)?;
                     if call.data.remaining() != 0 {
                         return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
                     }
                     let grants = self.live_cross_user_grants(
-                        &query, args.flags, args.user_id, call.sender_pid, uid)?;
-                    match query.package_uid_with_grants(
-                        args.package_name.as_deref().unwrap_or_default(),
+                        &query,
                         args.flags,
                         args.user_id,
-                        grants,
-                    ).map_err(QueryError::NotModelled)? {
+                        call.sender_pid,
+                        uid,
+                    )?;
+                    match query
+                        .package_uid_with_grants(
+                            args.package_name.as_deref().unwrap_or_default(),
+                            args.flags,
+                            args.user_id,
+                            grants,
+                        )
+                        .map_err(QueryError::NotModelled)?
+                    {
                         Ok(value) => pm::write_get_package_uid_reply(&mut reply, value),
                         Err(error) => reply.write_exception(&error),
                     }
                 } else {
-                    let args = pm::GetPackageGids::read(&mut call.data).map_err(QueryError::Transport)?;
+                    let args =
+                        pm::GetPackageGids::read(&mut call.data).map_err(QueryError::Transport)?;
                     if call.data.remaining() != 0 {
                         return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
                     }
                     let grants = self.live_cross_user_grants(
-                        &query, args.flags, args.user_id, call.sender_pid, uid)?;
-                    match query.package_gids_with_grants(
-                        args.package_name.as_deref().unwrap_or_default(),
+                        &query,
                         args.flags,
                         args.user_id,
-                        grants,
-                    ).map_err(QueryError::NotModelled)? {
+                        call.sender_pid,
+                        uid,
+                    )?;
+                    match query
+                        .package_gids_with_grants(
+                            args.package_name.as_deref().unwrap_or_default(),
+                            args.flags,
+                            args.user_id,
+                            grants,
+                        )
+                        .map_err(QueryError::NotModelled)?
+                    {
                         Ok(value) => pm::write_get_package_gids_reply(&mut reply, &value),
                         Err(error) => reply.write_exception(&error),
                     }
                 }
                 Ok(reply)
             })())
-        } else { None };
-        let paged = if !self.native && capture.is_some()
-            && matches!(call.code, pm::GET_INSTALLED_APPLICATIONS | pm::GET_INSTALLED_PACKAGES) {
+        } else {
+            None
+        };
+        let paged = if !self.native
+            && capture.is_some()
+            && matches!(
+                call.code,
+                pm::GET_INSTALLED_APPLICATIONS | pm::GET_INSTALLED_PACKAGES
+            ) {
             Some((|| -> Result<Parcel, QueryError> {
                 use aim_service_aidl::ReadParcelable;
-                let process=self.system.as_ref().and_then(|owner|owner.upgrade())
-                    .ok_or(NotModelled("native list Binder process unavailable"))?.binder_process();
-                let resolution=match capture.as_ref().unwrap().resolution() {
-                    Ok(resolution)=>resolution,
-                    Err(error)=>return error.reply().map_err(QueryError::Transport),
+                let process = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(NotModelled("native list Binder process unavailable"))?
+                    .binder_process();
+                let resolution = match capture.as_ref().unwrap().resolution() {
+                    Ok(resolution) => resolution,
+                    Err(error) => return error.reply().map_err(QueryError::Transport),
                 };
-                let query=Query{state:&state,filter:&resolution.apps_filter,calling_uid:uid};
-                let mut reply=Parcel::new();
-                if call.code==pm::GET_INSTALLED_APPLICATIONS {
-                    let args=pm::GetInstalledApplications::read(&mut call.data).map_err(QueryError::Transport)?;
-                    if call.data.remaining()!=0{return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));}
-                    let grants=self.live_cross_user_grants(
-                        &query,args.flags,args.user_id,call.sender_pid,uid)?;
+                let query = Query {
+                    state: &state,
+                    filter: &resolution.apps_filter,
+                    calling_uid: uid,
+                };
+                let mut reply = Parcel::new();
+                if call.code == pm::GET_INSTALLED_APPLICATIONS {
+                    let args = pm::GetInstalledApplications::read(&mut call.data)
+                        .map_err(QueryError::Transport)?;
+                    if call.data.remaining() != 0 {
+                        return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                    }
+                    let grants = self.live_cross_user_grants(
+                        &query,
+                        args.flags,
+                        args.user_id,
+                        call.sender_pid,
+                        uid,
+                    )?;
                     match query.internal_installed_applications_with_grants(
-                        args.flags,args.user_id,uid,false,grants)? {
-                        Ok(items)=>{let slice=super::list_slice::Slice::new(process,"android.content.pm.ApplicationInfo",items);pm::write_get_installed_applications_reply(&mut reply,Some(&slice));},
-                        Err(error)=>reply.write_exception(&error),
+                        args.flags,
+                        args.user_id,
+                        uid,
+                        false,
+                        grants,
+                    )? {
+                        Ok(items) => {
+                            let slice = super::list_slice::Slice::new(
+                                process,
+                                "android.content.pm.ApplicationInfo",
+                                items,
+                            );
+                            pm::write_get_installed_applications_reply(&mut reply, Some(&slice));
+                        }
+                        Err(error) => reply.write_exception(&error),
                     }
                 } else {
-                    let args=pm::GetInstalledPackages::read(&mut call.data).map_err(QueryError::Transport)?;
-                    if call.data.remaining()!=0{return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));}
-                    let grants=self.live_cross_user_grants(
-                        &query,args.flags,args.user_id,call.sender_pid,uid)?;
-                    match query.installed_packages_with_grants(args.flags,args.user_id,grants)? {
-                        Ok(items)=>{let slice=super::list_slice::Slice::new(process,"android.content.pm.PackageInfo",items);pm::write_get_installed_packages_reply(&mut reply,Some(&slice));},
-                        Err(error)=>reply.write_exception(&error),
+                    let args = pm::GetInstalledPackages::read(&mut call.data)
+                        .map_err(QueryError::Transport)?;
+                    if call.data.remaining() != 0 {
+                        return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                    }
+                    let grants = self.live_cross_user_grants(
+                        &query,
+                        args.flags,
+                        args.user_id,
+                        call.sender_pid,
+                        uid,
+                    )?;
+                    match query.installed_packages_with_grants(args.flags, args.user_id, grants)? {
+                        Ok(items) => {
+                            let slice = super::list_slice::Slice::new(
+                                process,
+                                "android.content.pm.PackageInfo",
+                                items,
+                            );
+                            pm::write_get_installed_packages_reply(&mut reply, Some(&slice));
+                        }
+                        Err(error) => reply.write_exception(&error),
                     }
                 }
                 Ok(reply)
             })())
-        } else {None};
-        let resolved = live_uid_packages.or(live_package_identity).or(paged).or_else(|| (!self.native)
-            .then(|| capture.as_ref().map_or(&*self.resolver,|capture|capture.resolver()).query(&state, call.code, uid, &mut call.data))
-            .flatten());
+        } else {
+            None
+        };
+        let resolved = live_uid_packages
+            .or(live_package_identity)
+            .or(paged)
+            .or_else(|| {
+                (!self.native)
+                    .then(|| {
+                        capture
+                            .as_ref()
+                            .map_or(&*self.resolver, |capture| capture.resolver())
+                            .query(&state, call.code, uid, &mut call.data)
+                    })
+                    .flatten()
+            });
         let answer = resolved.unwrap_or_else(|| {
-            let resolution = match capture.as_ref().map_or_else(||self.resolver.resolution(&state),|capture|capture.resolution()) {
+            let resolution = match capture.as_ref().map_or_else(
+                || self.resolver.resolution(&state),
+                |capture| capture.resolution(),
+            ) {
                 Ok(resolution) => resolution,
                 Err(error) => return error.reply().map_err(QueryError::Transport),
             };
@@ -487,209 +628,463 @@ impl Service for PackageQueries {
                 filter: &resolution.apps_filter,
                 calling_uid: uid,
             };
-            if !self.native && matches!(call.code, pm::VERIFY_INTENT_FILTER | pm::UPDATE_INTENT_VERIFICATION_STATUS) {
-                let system = self.system.as_ref().and_then(|owner| owner.upgrade())
-                    .ok_or(QueryError::NotModelled(NotModelled("legacy domain system unavailable")))?;
-                return super::legacy_domain_routes::dispatch(&system, call.sender_pid, uid, call.code, &mut call.data)
-                    .ok_or(QueryError::Transport(UNKNOWN_TRANSACTION))
-                    .and_then(|reply| reply.map_err(QueryError::Transport));
+            if !self.native
+                && matches!(
+                    call.code,
+                    pm::VERIFY_INTENT_FILTER | pm::UPDATE_INTENT_VERIFICATION_STATUS
+                )
+            {
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled(
+                        "legacy domain system unavailable",
+                    )))?;
+                return super::legacy_domain_routes::dispatch(
+                    &system,
+                    call.sender_pid,
+                    uid,
+                    call.code,
+                    &mut call.data,
+                )
+                .ok_or(QueryError::Transport(UNKNOWN_TRANSACTION))
+                .and_then(|reply| reply.map_err(QueryError::Transport));
             }
-            if !self.native && matches!(call.code, pm::DELETE_PACKAGE_VERSIONED | pm::DELETE_EXISTING_PACKAGE_AS_USER | pm::DELETE_PACKAGE_AS_USER) {
-                let system = self.system.as_ref().and_then(|owner| owner.upgrade())
-                    .ok_or(QueryError::NotModelled(NotModelled("public removal system unavailable")))?;
+            if !self.native
+                && matches!(
+                    call.code,
+                    pm::DELETE_PACKAGE_VERSIONED
+                        | pm::DELETE_EXISTING_PACKAGE_AS_USER
+                        | pm::DELETE_PACKAGE_AS_USER
+                )
+            {
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled(
+                        "public removal system unavailable",
+                    )))?;
                 let owner = match system.public_package_removal() {
                     Ok(owner) => owner,
-                    Err(error) => { let mut reply = Parcel::new(); reply.write_exception(&error); return Ok(reply); }
+                    Err(error) => {
+                        let mut reply = Parcel::new();
+                        reply.write_exception(&error);
+                        return Ok(reply);
+                    }
                 };
-                return owner.dispatch(call.sender_euid, call.sender_pid, call.code, &mut call.data)
+                return owner
+                    .dispatch(call.sender_euid, call.sender_pid, call.code, &mut call.data)
                     .ok_or(QueryError::Transport(UNKNOWN_TRANSACTION))
                     .and_then(|reply| reply.map_err(QueryError::Transport));
             }
             if !self.native && call.code == pm::SET_INSTALLER_PACKAGE_NAME {
-                let request = super::installer_attribution::Request::read(&mut call.data).map_err(QueryError::Transport)?;
-                let system = self.system.as_ref().and_then(|owner| owner.upgrade())
-                    .ok_or(QueryError::NotModelled(NotModelled("installer attribution system unavailable")))?;
+                let request = super::installer_attribution::Request::read(&mut call.data)
+                    .map_err(QueryError::Transport)?;
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled(
+                        "installer attribution system unavailable",
+                    )))?;
                 let mut reply = Parcel::new();
                 match system.set_native_installer_attribution(request, call.sender_pid, uid) {
-                    Ok(()) => reply.write_no_exception(), Err(error) => reply.write_exception(&error),
+                    Ok(()) => reply.write_no_exception(),
+                    Err(error) => reply.write_exception(&error),
                 }
                 return Ok(reply);
             }
-            if !self.native && matches!(call.code, pm::FLUSH_PACKAGE_RESTRICTIONS_AS_USER
-                | pm::NOTIFY_PACKAGES_REPLACED_RECEIVED | pm::SET_KEEP_UNINSTALLED_PACKAGES) {
-                let system = self.system.as_ref().and_then(|owner| owner.upgrade())
-                    .ok_or(QueryError::NotModelled(NotModelled("package customization system unavailable")))?;
+            if !self.native
+                && matches!(
+                    call.code,
+                    pm::FLUSH_PACKAGE_RESTRICTIONS_AS_USER
+                        | pm::NOTIFY_PACKAGES_REPLACED_RECEIVED
+                        | pm::SET_KEEP_UNINSTALLED_PACKAGES
+                )
+            {
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled(
+                        "package customization system unavailable",
+                    )))?;
                 let result = if call.code == pm::FLUSH_PACKAGE_RESTRICTIONS_AS_USER {
-                    let args = pm::FlushPackageRestrictionsAsUser::read(&mut call.data).map_err(QueryError::Transport)?;
-                    if call.data.remaining() != 0 { return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
-                    let base = capture.as_ref().ok_or(QueryError::NotModelled(NotModelled("restriction capture unavailable")))?;
+                    let args = pm::FlushPackageRestrictionsAsUser::read(&mut call.data)
+                        .map_err(QueryError::Transport)?;
+                    if call.data.remaining() != 0 {
+                        return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                    }
+                    let base = capture.as_ref().ok_or(QueryError::NotModelled(NotModelled(
+                        "restriction capture unavailable",
+                    )))?;
                     system.flush_native_package_restrictions(&query, args.user_id, base)
                 } else if call.code == pm::SET_KEEP_UNINSTALLED_PACKAGES {
-                    let args = pm::SetKeepUninstalledPackages::read(&mut call.data).map_err(QueryError::Transport)?;
-                    if call.data.remaining() != 0 { return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
+                    let args = pm::SetKeepUninstalledPackages::read(&mut call.data)
+                        .map_err(QueryError::Transport)?;
+                    if call.data.remaining() != 0 {
+                        return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                    }
                     system.set_native_keep_uninstalled_packages(&query, args.package_list)
                 } else {
-                    let args = pm::NotifyPackagesReplacedReceived::read(&mut call.data).map_err(QueryError::Transport)?;
-                    if call.data.remaining() != 0 { return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
-                    system.package_customization().and_then(|owner| owner.notify_replaced(&query, args.packages))
+                    let args = pm::NotifyPackagesReplacedReceived::read(&mut call.data)
+                        .map_err(QueryError::Transport)?;
+                    if call.data.remaining() != 0 {
+                        return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                    }
+                    system
+                        .package_customization()
+                        .and_then(|owner| owner.notify_replaced(&query, args.packages))
                 };
                 let mut reply = Parcel::new();
-                match result { Ok(()) => reply.write_no_exception(), Err(error) => reply.write_exception(&error) }
+                match result {
+                    Ok(()) => reply.write_no_exception(),
+                    Err(error) => reply.write_exception(&error),
+                }
                 return Ok(reply);
             }
             if !self.native && call.code == pm::SET_PAGE_SIZE_APP_COMPAT_FLAGS_SETTINGS_OVERRIDE {
-                let args = pm::SetPageSizeAppCompatFlagsSettingsOverride::read(&mut call.data).map_err(QueryError::Transport)?;
-                if call.data.remaining() != 0 { return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
-                let system = self.system.as_ref().and_then(|owner| owner.upgrade())
-                    .ok_or(QueryError::NotModelled(NotModelled("page size system unavailable")))?;
+                let args = pm::SetPageSizeAppCompatFlagsSettingsOverride::read(&mut call.data)
+                    .map_err(QueryError::Transport)?;
+                if call.data.remaining() != 0 {
+                    return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                }
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled(
+                        "page size system unavailable",
+                    )))?;
                 let mut reply = Parcel::new();
-                match system.set_package_page_size_override(args.package_name.as_deref(), args.enabled, uid) {
-                    Ok(()) => reply.write_no_exception(), Err(error) => reply.write_exception(&error),
+                match system.set_package_page_size_override(
+                    args.package_name.as_deref(),
+                    args.enabled,
+                    uid,
+                ) {
+                    Ok(()) => reply.write_no_exception(),
+                    Err(error) => reply.write_exception(&error),
                 }
                 return Ok(reply);
             }
-            if !self.native && matches!(call.code, pm::OVERRIDE_LABEL_AND_ICON | pm::RESTORE_LABEL_AND_ICON) {
-                let request = super::customization::Label::read(call.code, &mut call.data).map_err(QueryError::Transport)?;
-                if call.data.remaining() != 0 { return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
-                let system = self.system.as_ref().and_then(|owner| owner.upgrade())
-                    .ok_or(QueryError::NotModelled(NotModelled("label override system unavailable")))?;
-                let base = capture.as_ref().ok_or(QueryError::NotModelled(NotModelled("label capture unavailable")))?;
+            if !self.native
+                && matches!(
+                    call.code,
+                    pm::OVERRIDE_LABEL_AND_ICON | pm::RESTORE_LABEL_AND_ICON
+                )
+            {
+                let request = super::customization::Label::read(call.code, &mut call.data)
+                    .map_err(QueryError::Transport)?;
+                if call.data.remaining() != 0 {
+                    return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                }
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled(
+                        "label override system unavailable",
+                    )))?;
+                let base = capture.as_ref().ok_or(QueryError::NotModelled(NotModelled(
+                    "label capture unavailable",
+                )))?;
                 let mut reply = Parcel::new();
                 match system.apply_package_label_override(&query, request, base) {
-                    Ok(()) => reply.write_no_exception(), Err(error) => reply.write_exception(&error),
+                    Ok(()) => reply.write_no_exception(),
+                    Err(error) => reply.write_exception(&error),
                 }
                 return Ok(reply);
             }
-            if !self.native && matches!(call.code, pm::VERIFY_PENDING_INSTALL | pm::EXTEND_VERIFICATION_TIMEOUT) {
-                let system = self.system.as_ref().and_then(|owner| owner.upgrade())
-                    .ok_or(QueryError::NotModelled(NotModelled("verification system unavailable")))?;
+            if !self.native
+                && matches!(
+                    call.code,
+                    pm::VERIFY_PENDING_INSTALL | pm::EXTEND_VERIFICATION_TIMEOUT
+                )
+            {
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled(
+                        "verification system unavailable",
+                    )))?;
                 let mut reply = Parcel::new();
                 let result = if call.code == pm::VERIFY_PENDING_INSTALL {
-                    let args = pm::VerifyPendingInstall::read(&mut call.data).map_err(QueryError::Transport)?;
-                    if call.data.remaining() != 0 { return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
-                    let permitted = args.id < 0 || query.uid_has_permission(uid, "android.permission.PACKAGE_VERIFICATION_AGENT")
-                        .map_err(QueryError::NotModelled)?;
+                    let args = pm::VerifyPendingInstall::read(&mut call.data)
+                        .map_err(QueryError::Transport)?;
+                    if call.data.remaining() != 0 {
+                        return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                    }
+                    let permitted = args.id < 0
+                        || query
+                            .uid_has_permission(
+                                uid,
+                                "android.permission.PACKAGE_VERIFICATION_AGENT",
+                            )
+                            .map_err(QueryError::NotModelled)?;
                     if args.id >= 0 && !permitted {
-                        Err(Exception::security("Only package verification agents can verify applications"))
+                        Err(Exception::security(
+                            "Only package verification agents can verify applications",
+                        ))
                     } else {
-                        system.pending_package_verification().and_then(|owner|
-                            owner.verify(args.id, args.verification_code, uid, permitted))
+                        system.pending_package_verification().and_then(|owner| {
+                            owner.verify(args.id, args.verification_code, uid, permitted)
+                        })
                     }
                 } else {
-                    let args = pm::ExtendVerificationTimeout::read(&mut call.data).map_err(QueryError::Transport)?;
-                    if call.data.remaining() != 0 { return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
-                    let permitted = args.id < 0 || query.uid_has_permission(uid, "android.permission.PACKAGE_VERIFICATION_AGENT")
-                        .map_err(QueryError::NotModelled)?;
+                    let args = pm::ExtendVerificationTimeout::read(&mut call.data)
+                        .map_err(QueryError::Transport)?;
+                    if call.data.remaining() != 0 {
+                        return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                    }
+                    let permitted = args.id < 0
+                        || query
+                            .uid_has_permission(
+                                uid,
+                                "android.permission.PACKAGE_VERIFICATION_AGENT",
+                            )
+                            .map_err(QueryError::NotModelled)?;
                     if args.id >= 0 && !permitted {
-                        Err(Exception::security("Only package verification agents can extend verification timeouts"))
+                        Err(Exception::security(
+                            "Only package verification agents can extend verification timeouts",
+                        ))
                     } else {
-                        system.pending_package_verification().and_then(|owner|
-                            owner.extend(args.id, args.verification_code_at_timeout, args.milliseconds_to_delay, uid, permitted))
+                        system.pending_package_verification().and_then(|owner| {
+                            owner.extend(
+                                args.id,
+                                args.verification_code_at_timeout,
+                                args.milliseconds_to_delay,
+                                uid,
+                                permitted,
+                            )
+                        })
                     }
                 };
-                match result { Ok(()) => reply.write_no_exception(), Err(error) => reply.write_exception(&error) }
+                match result {
+                    Ok(()) => reply.write_no_exception(),
+                    Err(error) => reply.write_exception(&error),
+                }
                 return Ok(reply);
             }
-            if !self.native && matches!(call.code, pm::GET_DOMAIN_VERIFICATION_AGENT
-                | pm::GET_DOMAIN_VERIFICATION_BACKUP | pm::RESTORE_DOMAIN_VERIFICATION) {
-                let system = self.system.as_ref().and_then(|owner| owner.upgrade())
-                    .ok_or(QueryError::NotModelled(NotModelled("native verification system unavailable")))?;
+            if !self.native
+                && matches!(
+                    call.code,
+                    pm::GET_DOMAIN_VERIFICATION_AGENT
+                        | pm::GET_DOMAIN_VERIFICATION_BACKUP
+                        | pm::RESTORE_DOMAIN_VERIFICATION
+                )
+            {
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled(
+                        "native verification system unavailable",
+                    )))?;
                 let mut reply = Parcel::new();
                 match call.code {
                     pm::GET_DOMAIN_VERIFICATION_AGENT => {
-                        let args = pm::GetDomainVerificationAgent::read(&mut call.data).map_err(QueryError::Transport)?;
-                        if call.data.remaining() != 0 { return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
+                        let args = pm::GetDomainVerificationAgent::read(&mut call.data)
+                            .map_err(QueryError::Transport)?;
+                        if call.data.remaining() != 0 {
+                            return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                        }
                         match system.get_native_domain_verification_agent(uid, args.user_id) {
                             Ok(value) => {
                                 let component = value.as_ref().map(DomainAgentComponent);
-                                pm::write_get_domain_verification_agent_reply(&mut reply, component.as_ref());
+                                pm::write_get_domain_verification_agent_reply(
+                                    &mut reply,
+                                    component.as_ref(),
+                                );
                             }
                             Err(error) => reply.write_exception(&error),
                         }
                     }
                     pm::GET_DOMAIN_VERIFICATION_BACKUP => {
-                        let args = pm::GetDomainVerificationBackup::read(&mut call.data).map_err(QueryError::Transport)?;
-                        if call.data.remaining() != 0 { return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
+                        let args = pm::GetDomainVerificationBackup::read(&mut call.data)
+                            .map_err(QueryError::Transport)?;
+                        if call.data.remaining() != 0 {
+                            return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                        }
                         match system.get_native_domain_backup(uid, args.user_id) {
-                            Ok(value) => pm::write_get_domain_verification_backup_reply(&mut reply, &value),
+                            Ok(value) => {
+                                pm::write_get_domain_verification_backup_reply(&mut reply, &value)
+                            }
                             Err(error) => reply.write_exception(&error),
                         }
                     }
                     _ => {
-                        let args = pm::RestoreDomainVerification::read(&mut call.data).map_err(QueryError::Transport)?;
-                        if call.data.remaining() != 0 { return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
-                        match system.restore_native_domain_backup(uid, args.backup.as_deref(), args.user_id) {
-                            Ok(()) => reply.write_no_exception(), Err(error) => reply.write_exception(&error),
+                        let args = pm::RestoreDomainVerification::read(&mut call.data)
+                            .map_err(QueryError::Transport)?;
+                        if call.data.remaining() != 0 {
+                            return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                        }
+                        match system.restore_native_domain_backup(
+                            uid,
+                            args.backup.as_deref(),
+                            args.user_id,
+                        ) {
+                            Ok(()) => reply.write_no_exception(),
+                            Err(error) => reply.write_exception(&error),
                         }
                     }
                 }
                 return Ok(reply);
             }
-            if !self.native && matches!(call.code, pm::CLEAR_APPLICATION_USER_DATA
-                | pm::DELETE_PRELOADS_FILE_CACHE | pm::SEND_DEVICE_CUSTOMIZATION_READY_BROADCAST) {
-                let system = self.system.as_ref().and_then(|owner| owner.upgrade())
-                    .ok_or(QueryError::NotModelled(NotModelled("application data system unavailable")))?;
+            if !self.native
+                && matches!(
+                    call.code,
+                    pm::CLEAR_APPLICATION_USER_DATA
+                        | pm::DELETE_PRELOADS_FILE_CACHE
+                        | pm::SEND_DEVICE_CUSTOMIZATION_READY_BROADCAST
+                )
+            {
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled(
+                        "application data system unavailable",
+                    )))?;
                 let result = (|| {
                     let owner = system.package_application_data()?;
                     match call.code {
                         pm::CLEAR_APPLICATION_USER_DATA => {
-                            let args = pm::ClearApplicationUserData::read(&mut call.data).map_err(|status|
-                                Exception::new(aim_binder_host::parcel::EX_BAD_PARCELABLE, format!("clear data parcel: {status}")))?;
-                            if call.data.remaining() != 0 { return Err(Exception::new(aim_binder_host::parcel::EX_BAD_PARCELABLE, "trailing clear data arguments")); }
+                            let args = pm::ClearApplicationUserData::read(&mut call.data).map_err(
+                                |status| {
+                                    Exception::new(
+                                        aim_binder_host::parcel::EX_BAD_PARCELABLE,
+                                        format!("clear data parcel: {status}"),
+                                    )
+                                },
+                            )?;
+                            if call.data.remaining() != 0 {
+                                return Err(Exception::new(
+                                    aim_binder_host::parcel::EX_BAD_PARCELABLE,
+                                    "trailing clear data arguments",
+                                ));
+                            }
                             let bridge = system.package_bootstrap()?;
                             let effects = system.package_effects_owner(&bridge)?;
-                            owner.clear(args.package_name, args.user_id, call.sender_pid, uid, args.observer,
-                                effects.as_ref())
+                            owner.clear(
+                                args.package_name,
+                                args.user_id,
+                                call.sender_pid,
+                                uid,
+                                args.observer,
+                                effects.as_ref(),
+                            )
                         }
                         pm::DELETE_PRELOADS_FILE_CACHE => {
-                            pm::DeletePreloadsFileCache::read(&mut call.data).map_err(|status|
-                                Exception::new(aim_binder_host::parcel::EX_BAD_PARCELABLE, format!("preload parcel: {status}")))?;
-                            if call.data.remaining() != 0 { return Err(Exception::new(aim_binder_host::parcel::EX_BAD_PARCELABLE, "trailing preload arguments")); }
+                            pm::DeletePreloadsFileCache::read(&mut call.data).map_err(
+                                |status| {
+                                    Exception::new(
+                                        aim_binder_host::parcel::EX_BAD_PARCELABLE,
+                                        format!("preload parcel: {status}"),
+                                    )
+                                },
+                            )?;
+                            if call.data.remaining() != 0 {
+                                return Err(Exception::new(
+                                    aim_binder_host::parcel::EX_BAD_PARCELABLE,
+                                    "trailing preload arguments",
+                                ));
+                            }
                             owner.delete_preloads(call.sender_pid, uid)
                         }
                         _ => {
-                            pm::SendDeviceCustomizationReadyBroadcast::read(&mut call.data).map_err(|status|
-                                Exception::new(aim_binder_host::parcel::EX_BAD_PARCELABLE, format!("customization parcel: {status}")))?;
-                            if call.data.remaining() != 0 { return Err(Exception::new(aim_binder_host::parcel::EX_BAD_PARCELABLE, "trailing customization arguments")); }
+                            pm::SendDeviceCustomizationReadyBroadcast::read(&mut call.data)
+                                .map_err(|status| {
+                                    Exception::new(
+                                        aim_binder_host::parcel::EX_BAD_PARCELABLE,
+                                        format!("customization parcel: {status}"),
+                                    )
+                                })?;
+                            if call.data.remaining() != 0 {
+                                return Err(Exception::new(
+                                    aim_binder_host::parcel::EX_BAD_PARCELABLE,
+                                    "trailing customization arguments",
+                                ));
+                            }
                             owner.customization_ready(call.sender_pid, uid)
                         }
                     }
                 })();
                 let mut reply = Parcel::new();
-                match result { Ok(()) => reply.write_no_exception(), Err(error) => reply.write_exception(&error) }
+                match result {
+                    Ok(()) => reply.write_no_exception(),
+                    Err(error) => reply.write_exception(&error),
+                }
                 return Ok(reply);
             }
             if !self.native && call.code == pm::MOVE_PACKAGE {
                 let args = pm::MovePackage::read(&mut call.data).map_err(QueryError::Transport)?;
-                if call.data.remaining() != 0 { return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
-                let system = self.system.as_ref().and_then(|owner| owner.upgrade())
-                    .ok_or(QueryError::NotModelled(NotModelled("native relocation system unavailable")))?;
+                if call.data.remaining() != 0 {
+                    return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                }
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled(
+                        "native relocation system unavailable",
+                    )))?;
                 let mut reply = Parcel::new();
-                let result = system.package_relocation_owner().and_then(|owner|
-                    owner.move_package(args.package_name, args.volume_uuid, call.sender_euid, super::apps_filter::user_id(uid)));
-                match result { Ok(id) => pm::write_move_package_reply(&mut reply, id), Err(error) => reply.write_exception(&error) }
+                let result = system.package_relocation_owner().and_then(|owner| {
+                    owner.move_package(
+                        args.package_name,
+                        args.volume_uuid,
+                        call.sender_euid,
+                        super::apps_filter::user_id(uid),
+                    )
+                });
+                match result {
+                    Ok(id) => pm::write_move_package_reply(&mut reply, id),
+                    Err(error) => reply.write_exception(&error),
+                }
                 return Ok(reply);
             }
             if !self.native {
-                if let (Some(capture), Some(system)) = (capture.as_ref(),
-                    self.system.as_ref().and_then(|owner| owner.upgrade())) {
+                if let (Some(capture), Some(system)) = (
+                    capture.as_ref(),
+                    self.system.as_ref().and_then(|owner| owner.upgrade()),
+                ) {
                     if let Some(result) = system.dispatch_package_mutation(call, &query, capture) {
                         return Ok(match result {
                             Ok(reply) => reply,
-                            Err(error) => { let mut reply = Parcel::new(); reply.write_exception(&error); reply },
+                            Err(error) => {
+                                let mut reply = Parcel::new();
+                                reply.write_exception(&error);
+                                reply
+                            }
                         });
                     }
                 }
             }
             if !self.native && call.code == pm::MOVE_PRIMARY_STORAGE {
-                let args = pm::MovePrimaryStorage::read(&mut call.data).map_err(QueryError::Transport)?;
-                if call.data.remaining() != 0 { return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
+                let args =
+                    pm::MovePrimaryStorage::read(&mut call.data).map_err(QueryError::Transport)?;
+                if call.data.remaining() != 0 {
+                    return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                }
                 let mut reply = Parcel::new();
-                if !query.uid_has_permission(uid, "android.permission.MOVE_PACKAGE").map_err(QueryError::NotModelled)? {
-                    reply.write_exception(&Exception::security("Requires android.permission.MOVE_PACKAGE"));
+                if !query
+                    .uid_has_permission(uid, "android.permission.MOVE_PACKAGE")
+                    .map_err(QueryError::NotModelled)?
+                {
+                    reply.write_exception(&Exception::security(
+                        "Requires android.permission.MOVE_PACKAGE",
+                    ));
                 } else {
-                    let system = self.system.as_ref().and_then(|owner| owner.upgrade())
-                        .ok_or(QueryError::NotModelled(NotModelled("native move system unavailable")))?;
+                    let system = self
+                        .system
+                        .as_ref()
+                        .and_then(|owner| owner.upgrade())
+                        .ok_or(QueryError::NotModelled(NotModelled(
+                            "native move system unavailable",
+                        )))?;
                     match system.package_move_primary(args.volume_uuid) {
                         Ok(id) => pm::write_move_primary_storage_reply(&mut reply, id),
                         Err(error) => reply.write_exception(&error),
@@ -697,56 +1092,94 @@ impl Service for PackageQueries {
                 }
                 return Ok(reply);
             }
-            if !self.native && matches!(call.code,
-                pm::GET_MOVE_STATUS | pm::REGISTER_MOVE_CALLBACK | pm::UNREGISTER_MOVE_CALLBACK) {
-                let permitted = query.uid_has_permission(uid, "android.permission.MOUNT_UNMOUNT_FILESYSTEMS")
+            if !self.native
+                && matches!(
+                    call.code,
+                    pm::GET_MOVE_STATUS | pm::REGISTER_MOVE_CALLBACK | pm::UNREGISTER_MOVE_CALLBACK
+                )
+            {
+                let permitted = query
+                    .uid_has_permission(uid, "android.permission.MOUNT_UNMOUNT_FILESYSTEMS")
                     .map_err(QueryError::NotModelled)?;
                 if !permitted {
                     let mut reply = Parcel::new();
-                    reply.write_exception(&Exception::security("Requires android.permission.MOUNT_UNMOUNT_FILESYSTEMS"));
+                    reply.write_exception(&Exception::security(
+                        "Requires android.permission.MOUNT_UNMOUNT_FILESYSTEMS",
+                    ));
                     return Ok(reply);
                 }
-                let system = self.system.as_ref().and_then(|owner| owner.upgrade())
-                    .ok_or(QueryError::NotModelled(NotModelled("native move system unavailable")))?;
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled(
+                        "native move system unavailable",
+                    )))?;
                 let owner = match system.package_moves() {
                     Ok(owner) => owner,
-                    Err(error) => { let mut reply = Parcel::new(); reply.write_exception(&error); return Ok(reply); }
+                    Err(error) => {
+                        let mut reply = Parcel::new();
+                        reply.write_exception(&error);
+                        return Ok(reply);
+                    }
                 };
                 let mut reply = Parcel::new();
                 match call.code {
                     pm::GET_MOVE_STATUS => {
-                        let args = pm::GetMoveStatus::read(&mut call.data).map_err(QueryError::Transport)?;
-                        if call.data.remaining() != 0 { return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
+                        let args = pm::GetMoveStatus::read(&mut call.data)
+                            .map_err(QueryError::Transport)?;
+                        if call.data.remaining() != 0 {
+                            return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                        }
                         match owner.status(args.move_id) {
                             Ok(status) => pm::write_get_move_status_reply(&mut reply, status),
                             Err(error) => reply.write_exception(&error),
                         }
                     }
                     pm::REGISTER_MOVE_CALLBACK => {
-                        let args = pm::RegisterMoveCallback::read(&mut call.data).map_err(QueryError::Transport)?;
-                        if call.data.remaining() != 0 { return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
+                        let args = pm::RegisterMoveCallback::read(&mut call.data)
+                            .map_err(QueryError::Transport)?;
+                        if call.data.remaining() != 0 {
+                            return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                        }
                         match owner.register(args.callback) {
-                            Ok(()) => reply.write_no_exception(), Err(error) => reply.write_exception(&error),
+                            Ok(()) => reply.write_no_exception(),
+                            Err(error) => reply.write_exception(&error),
                         }
                     }
                     _ => {
-                        let args = pm::UnregisterMoveCallback::read(&mut call.data).map_err(QueryError::Transport)?;
-                        if call.data.remaining() != 0 { return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
+                        let args = pm::UnregisterMoveCallback::read(&mut call.data)
+                            .map_err(QueryError::Transport)?;
+                        if call.data.remaining() != 0 {
+                            return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                        }
                         match owner.unregister(args.callback) {
-                            Ok(()) => reply.write_no_exception(), Err(error) => reply.write_exception(&error),
+                            Ok(()) => reply.write_no_exception(),
+                            Err(error) => reply.write_exception(&error),
                         }
                     }
                 }
                 return Ok(reply);
             }
             if !self.native && super::diagnostics::Runtime::handles(call.code) {
-                let system = self.system.as_ref().and_then(|owner| owner.upgrade())
-                    .ok_or(QueryError::NotModelled(NotModelled("maintenance system unavailable")))?;
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled(
+                        "maintenance system unavailable",
+                    )))?;
                 let owner = match system.package_maintenance_owner() {
                     Ok(owner) => owner,
-                    Err(error) => { let mut reply = Parcel::new(); reply.write_exception(&error); return Ok(reply); }
+                    Err(error) => {
+                        let mut reply = Parcel::new();
+                        reply.write_exception(&error);
+                        return Ok(reply);
+                    }
                 };
-                return owner.answer(call, &query).ok_or(QueryError::Transport(UNKNOWN_TRANSACTION))
+                return owner
+                    .answer(call, &query)
+                    .ok_or(QueryError::Transport(UNKNOWN_TRANSACTION))
                     .and_then(|reply| reply.map_err(QueryError::Transport));
             }
             if !self.native
@@ -968,51 +1401,120 @@ impl Service for PackageQueries {
                     return answer;
                 }
             }
-            if !self.native && matches!(call.code,pm::WAIT_FOR_HANDLER|pm::REGISTER_PACKAGE_MONITOR_CALLBACK|pm::UNREGISTER_PACKAGE_MONITOR_CALLBACK) {
-                enum Action {Wait(i64,bool),Register(Option<aim_binder_host::parcel::Binder>,i32),Unregister(Option<aim_binder_host::parcel::Binder>)}
-                let action=match call.code {
-                    pm::WAIT_FOR_HANDLER=>{let args=pm::WaitForHandler::read(&mut call.data).map_err(QueryError::Transport)?;Action::Wait(args.timeout_millis,args.for_background_handler)}
-                    pm::REGISTER_PACKAGE_MONITOR_CALLBACK=>{let args=pm::RegisterPackageMonitorCallback::read(&mut call.data).map_err(QueryError::Transport)?;Action::Register(args.callback,args.user_id)}
-                    _=>{let args=pm::UnregisterPackageMonitorCallback::read(&mut call.data).map_err(QueryError::Transport)?;Action::Unregister(args.callback)}
+            if !self.native
+                && matches!(
+                    call.code,
+                    pm::WAIT_FOR_HANDLER
+                        | pm::REGISTER_PACKAGE_MONITOR_CALLBACK
+                        | pm::UNREGISTER_PACKAGE_MONITOR_CALLBACK
+                )
+            {
+                enum Action {
+                    Wait(i64, bool),
+                    Register(Option<aim_binder_host::parcel::Binder>, i32),
+                    Unregister(Option<aim_binder_host::parcel::Binder>),
+                }
+                let action = match call.code {
+                    pm::WAIT_FOR_HANDLER => {
+                        let args = pm::WaitForHandler::read(&mut call.data)
+                            .map_err(QueryError::Transport)?;
+                        Action::Wait(args.timeout_millis, args.for_background_handler)
+                    }
+                    pm::REGISTER_PACKAGE_MONITOR_CALLBACK => {
+                        let args = pm::RegisterPackageMonitorCallback::read(&mut call.data)
+                            .map_err(QueryError::Transport)?;
+                        Action::Register(args.callback, args.user_id)
+                    }
+                    _ => {
+                        let args = pm::UnregisterPackageMonitorCallback::read(&mut call.data)
+                            .map_err(QueryError::Transport)?;
+                        Action::Unregister(args.callback)
+                    }
                 };
-                if call.data.remaining()!=0 {return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));}
-                let system=self.system.as_ref().and_then(|owner|owner.upgrade())
-                    .ok_or(QueryError::NotModelled(NotModelled("package events system owner unavailable")))?;
-                let mut reply=Parcel::new();let result=match action {
-                    Action::Wait(timeout,background)=>system.package_wait_for_handler(timeout,background)
-                        .map(|value|pm::write_wait_for_handler_reply(&mut reply,value)),
-                    Action::Register(callback,user)=>system.package_register_monitor(callback,uid,call.sender_pid,user)
-                        .map(|()|pm::write_register_package_monitor_callback_reply(&mut reply)),
-                    Action::Unregister(callback)=>system.package_unregister_monitor(callback)
-                        .map(|()|pm::write_unregister_package_monitor_callback_reply(&mut reply)),
+                if call.data.remaining() != 0 {
+                    return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                }
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled(
+                        "package events system owner unavailable",
+                    )))?;
+                let mut reply = Parcel::new();
+                let result = match action {
+                    Action::Wait(timeout, background) => system
+                        .package_wait_for_handler(timeout, background)
+                        .map(|value| pm::write_wait_for_handler_reply(&mut reply, value)),
+                    Action::Register(callback, user) => system
+                        .package_register_monitor(callback, uid, call.sender_pid, user)
+                        .map(|()| pm::write_register_package_monitor_callback_reply(&mut reply)),
+                    Action::Unregister(callback) => system
+                        .package_unregister_monitor(callback)
+                        .map(|()| pm::write_unregister_package_monitor_callback_reply(&mut reply)),
                 };
-                if let Err(error)=result{reply.write_exception(&error);}return Ok(reply);
-            }
-            if !self.native && call.code == pm::LOG_APP_PROCESS_START_IF_NEEDED {
-                let args=pm::LogAppProcessStartIfNeeded::read(&mut call.data).map_err(QueryError::Transport)?;
-                if call.data.remaining()!=0 {return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));}
-                let system=self.system.as_ref().and_then(|owner|owner.upgrade())
-                    .ok_or(QueryError::NotModelled(NotModelled("process logging system owner unavailable")))?;
-                let mut reply=Parcel::new();match system.package_log_process_start(uid,args) {
-                    Ok(())=>pm::write_log_app_process_start_if_needed_reply(&mut reply),Err(error)=>reply.write_exception(&error) }
+                if let Err(error) = result {
+                    reply.write_exception(&error);
+                }
                 return Ok(reply);
             }
-            if !self.native && call.code==pm::NOTIFY_PACKAGE_USE {
-                let args=pm::NotifyPackageUse::read(&mut call.data).map_err(QueryError::Transport)?;
-                if call.data.remaining()!=0 {return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));}
-                let system=self.system.as_ref().and_then(|owner|owner.upgrade())
-                    .ok_or(QueryError::NotModelled(NotModelled("package usage system owner unavailable")))?;
-                let mut reply=Parcel::new();if let Err(error)=system.package_notify_use(uid,args.package_name,args.reason){reply.write_exception(&error);}
+            if !self.native && call.code == pm::LOG_APP_PROCESS_START_IF_NEEDED {
+                let args = pm::LogAppProcessStartIfNeeded::read(&mut call.data)
+                    .map_err(QueryError::Transport)?;
+                if call.data.remaining() != 0 {
+                    return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                }
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled(
+                        "process logging system owner unavailable",
+                    )))?;
+                let mut reply = Parcel::new();
+                match system.package_log_process_start(uid, args) {
+                    Ok(()) => pm::write_log_app_process_start_if_needed_reply(&mut reply),
+                    Err(error) => reply.write_exception(&error),
+                }
+                return Ok(reply);
+            }
+            if !self.native && call.code == pm::NOTIFY_PACKAGE_USE {
+                let args =
+                    pm::NotifyPackageUse::read(&mut call.data).map_err(QueryError::Transport)?;
+                if call.data.remaining() != 0 {
+                    return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                }
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled(
+                        "package usage system owner unavailable",
+                    )))?;
+                let mut reply = Parcel::new();
+                if let Err(error) = system.package_notify_use(uid, args.package_name, args.reason) {
+                    reply.write_exception(&error);
+                }
                 return Ok(reply);
             }
             if !self.native && call.code == pm::GET_VERIFIER_DEVICE_IDENTITY {
-                pm::GetVerifierDeviceIdentity::read(&mut call.data).map_err(QueryError::Transport)?;
-                if call.data.remaining() != 0 { return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
-                let system = self.system.as_ref().and_then(|owner| owner.upgrade())
-                    .ok_or(QueryError::NotModelled(NotModelled("verifier system owner unavailable")))?;
+                pm::GetVerifierDeviceIdentity::read(&mut call.data)
+                    .map_err(QueryError::Transport)?;
+                if call.data.remaining() != 0 {
+                    return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                }
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|owner| owner.upgrade())
+                    .ok_or(QueryError::NotModelled(NotModelled(
+                        "verifier system owner unavailable",
+                    )))?;
                 let mut reply = Parcel::new();
                 match system.package_verifier_identity(uid, &self.resolver)? {
-                    Ok(identity) => pm::write_get_verifier_device_identity_reply(&mut reply, Some(&identity)),
+                    Ok(identity) => {
+                        pm::write_get_verifier_device_identity_reply(&mut reply, Some(&identity))
+                    }
                     Err(error) => reply.write_exception(&error),
                 }
                 return Ok(reply);
@@ -1193,7 +1695,11 @@ impl Service for PackageQueries {
         Ok(match answer {
             Ok(reply) => reply,
             Err(QueryError::Transport(status)) => return Err(status),
-            Err(QueryError::Original(error)) => { let mut reply = Parcel::new(); reply.write_exception(&error); reply },
+            Err(QueryError::Original(error)) => {
+                let mut reply = Parcel::new();
+                reply.write_exception(&error);
+                reply
+            }
             Err(QueryError::NotModelled(NotModelled(reason))) => {
                 let mut reply = Parcel::new();
                 reply.write_exception(&Exception::new(EX_UNSUPPORTED_OPERATION, reason));

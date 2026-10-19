@@ -295,8 +295,14 @@ impl Driver {
     /// to return, even while duplicates or in-flight ioctl references remain.
     pub fn flush(&self, proc: ProcHandle) -> Result<(), Errno> {
         let mut st = self.lock();
-        let tids: Vec<Tid> = st.procs.get(&proc.0).ok_or(errno::EBADF)?
-            .threads.keys().copied().collect();
+        let tids: Vec<Tid> = st
+            .procs
+            .get(&proc.0)
+            .ok_or(errno::EBADF)?
+            .threads
+            .keys()
+            .copied()
+            .collect();
         for tid in tids {
             st.thread(proc.0, tid).unwrap().looper_need_return = true;
             st.wake_waiter(proc.0, tid);

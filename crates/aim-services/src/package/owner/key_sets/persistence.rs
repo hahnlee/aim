@@ -2,7 +2,7 @@
 //! KeySetManagerService.writeKeySetManagerServiceLPr, android-16.0.0_r1.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use super::{Settings, validated_sets};
-use crate::package::owner::{attribute, element, canonical_persistent_settings as persisted};
+use crate::package::owner::{attribute, canonical_persistent_settings as persisted, element};
 use aim_android_xml::{Element, Node, Value};
 use std::collections::BTreeSet;
 
@@ -11,27 +11,77 @@ fn unrelated_fields(left: &Settings, right: &Settings) -> String {
     macro_rules! global {
         ($($field:ident),* $(,)?) => { $(if left.$field != right.$field { fields.push(stringify!($field).to_owned()); })* };
     }
-    global!(versions, verifier, permission_trees, permissions, packages, disabled_system_packages,
-        shared_users, renamed_packages, key_sets, domain_verification, legacy_domain_info);
+    global!(
+        versions,
+        verifier,
+        permission_trees,
+        permissions,
+        packages,
+        disabled_system_packages,
+        shared_users,
+        renamed_packages,
+        key_sets,
+        domain_verification,
+        legacy_domain_info
+    );
     let before = &left.domain_verification;
     let after = &right.domain_verification;
-    if before.legacy != after.legacy { fields.push("domain.legacy".into()); }
-    for (section, before, after) in [("active", &before.active, &after.active), ("restored", &before.restored, &after.restored)] {
-        if before.len() != after.len() { fields.push(format!("domain.{section}.count={}/{}", before.len(), after.len())); }
+    if before.legacy != after.legacy {
+        fields.push("domain.legacy".into());
+    }
+    for (section, before, after) in [
+        ("active", &before.active, &after.active),
+        ("restored", &before.restored, &after.restored),
+    ] {
+        if before.len() != after.len() {
+            fields.push(format!(
+                "domain.{section}.count={}/{}",
+                before.len(),
+                after.len()
+            ));
+        }
         for package in before {
-            if let Some(next) = after.iter().find(|candidate| candidate.name == package.name) {
+            if let Some(next) = after
+                .iter()
+                .find(|candidate| candidate.name == package.name)
+            {
                 macro_rules! domain_fields {
                     ($($field:ident),*) => { $(if package.$field != next.$field { fields.push(format!("domain.{section}.{}:{}", package.name, stringify!($field))); })* };
                 }
-                domain_fields!(id, has_auto_verify_domains, signature, domains, users, uri_relative_filter_groups);
-                if package.users != next.users { fields.push(format!("domain.{section}.{}.users={}/{}", package.name, package.users.len(), next.users.len())); }
-            } else { fields.push(format!("domain.{section}.{}:missing", package.name)); }
+                domain_fields!(
+                    id,
+                    has_auto_verify_domains,
+                    signature,
+                    domains,
+                    users,
+                    uri_relative_filter_groups
+                );
+                if package.users != next.users {
+                    fields.push(format!(
+                        "domain.{section}.{}.users={}/{}",
+                        package.name,
+                        package.users.len(),
+                        next.users.len()
+                    ));
+                }
+            } else {
+                fields.push(format!("domain.{section}.{}:missing", package.name));
+            }
         }
     }
-    for (kind, before, after) in [("packages", &left.packages, &right.packages),
-            ("disabled", &left.disabled_system_packages, &right.disabled_system_packages)] {
+    for (kind, before, after) in [
+        ("packages", &left.packages, &right.packages),
+        (
+            "disabled",
+            &left.disabled_system_packages,
+            &right.disabled_system_packages,
+        ),
+    ] {
         for package in before {
-            let Some(next) = after.iter().find(|candidate| candidate.name == package.name) else {
+            let Some(next) = after
+                .iter()
+                .find(|candidate| candidate.name == package.name)
+            else {
                 fields.push(format!("{kind}:{}:missing", package.name));
                 continue;
             };
@@ -39,13 +89,67 @@ fn unrelated_fields(left: &Settings, right: &Settings) -> String {
             macro_rules! package_fields {
                 ($($field:ident),* $(,)?) => { $(if package.$field != next.$field { changed.push(stringify!($field)); })* };
             }
-            package_fields!(install_permissions_fixed, transient, name, real_name, code_path, legacy_native_library_path, primary_cpu_abi, secondary_cpu_abi, cpu_abi_override, flags, private_flags, last_modified_time, last_update_time, legacy_first_install_time, version_code, target_sdk_version, restrict_update_hash, scanned_as_stopped_system_app, app_id, shared_user, shared_user_app_id, is_sdk_library, install_source, volume_uuid, category_hint, update_available, force_queryable, pending_restore, debuggable, leaving_shared_user, old_paths, base_revision_code, page_size_compat, loading_progress, loading_completed_time, domain_set_id, app_metadata_file_path, app_metadata_source, uses_sdk_libraries, uses_static_libraries, signatures, key_set_data, mime_groups, split_versions);
-            if !changed.is_empty() { fields.push(format!("{kind}:{}:{}", package.name, changed.join(","))); }
+            package_fields!(
+                install_permissions_fixed,
+                transient,
+                name,
+                real_name,
+                code_path,
+                legacy_native_library_path,
+                primary_cpu_abi,
+                secondary_cpu_abi,
+                cpu_abi_override,
+                flags,
+                private_flags,
+                last_modified_time,
+                last_update_time,
+                legacy_first_install_time,
+                version_code,
+                target_sdk_version,
+                restrict_update_hash,
+                scanned_as_stopped_system_app,
+                app_id,
+                shared_user,
+                shared_user_app_id,
+                is_sdk_library,
+                install_source,
+                volume_uuid,
+                category_hint,
+                update_available,
+                force_queryable,
+                pending_restore,
+                debuggable,
+                leaving_shared_user,
+                old_paths,
+                base_revision_code,
+                page_size_compat,
+                loading_progress,
+                loading_completed_time,
+                domain_set_id,
+                app_metadata_file_path,
+                app_metadata_source,
+                uses_sdk_libraries,
+                uses_static_libraries,
+                signatures,
+                key_set_data,
+                mime_groups,
+                split_versions
+            );
+            if !changed.is_empty() {
+                fields.push(format!("{kind}:{}:{}", package.name, changed.join(",")));
+            }
         }
     }
-    format!("{}; counts packages={}/{}, disabled={}/{}, shared={}/{}", fields.join(";"),
-        left.packages.len(), right.packages.len(), left.disabled_system_packages.len(), right.disabled_system_packages.len(),
-        left.shared_users.len(), right.shared_users.len())
+    format!(
+        "{}; counts packages={}/{}, disabled={}/{}, shared={}/{}",
+        fields.join(";"),
+        left.packages.len(),
+        right.packages.len(),
+        left.disabled_system_packages.len(),
+        right.disabled_system_packages.len(),
+        left.shared_users.len(),
+        right.shared_users.len()
+    )
 }
 
 pub(in crate::package::owner) fn replace_registered(
@@ -106,8 +210,10 @@ pub(in crate::package::owner) fn replace_for_scan(
     let allowed = persisted(allowed);
     let restored_projection = persisted(restored.clone());
     if allowed != restored_projection {
-        return Err(format!("keyset commit changed unrelated settings (#798): {}",
-            unrelated_fields(&allowed, &restored_projection)));
+        return Err(format!(
+            "keyset commit changed unrelated settings (#798): {}",
+            unrelated_fields(&allowed, &restored_projection)
+        ));
     }
     let mut root = original.clone();
     let mut seen = BTreeSet::new();
