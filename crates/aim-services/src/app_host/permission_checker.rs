@@ -39,9 +39,9 @@ use crate::package::query::Query;
 
 /// `PermissionCheckerManager.PERMISSION_GRANTED`, `PERMISSION_SOFT_DENIED`,
 /// `PERMISSION_HARD_DENIED`.
-const GRANTED: i32 = 0;
+pub(super) const GRANTED: i32 = 0;
 const SOFT_DENIED: i32 = 1;
-const HARD_DENIED: i32 = 2;
+pub(super) const HARD_DENIED: i32 = 2;
 /// `AppOpsManager.OP_NONE`, `MODE_ALLOWED`, `MODE_IGNORED`,
 /// `MODE_ERRORED`, `MODE_DEFAULT`, `MODE_FOREGROUND`.
 const OP_NONE: i32 = -1;
@@ -927,6 +927,29 @@ pub(super) fn data_delivery(host: &AppHost, permission: &str, source: &Attributi
     let permissions = PermissionManager::new(me.clone());
     let system = Host { host: &me, permissions: &permissions, caller: SYSTEM_UID, message: None };
     Ok(Checks(&system).check_permission(permission, &chain(source)?, true, false, false, OP_NONE)? == GRANTED)
+}
+
+/// `PermissionManager.checkPermissionForDataDeliveryFromDataSource` of
+/// `permission` for a system service, a datasource, on behalf of the chain
+/// of `source`: the result (`PERMISSION_GRANTED`, `_SOFT_DENIED`,
+/// `_HARD_DENIED`).
+pub(super) fn data_delivery_from_datasource(host: &AppHost, permission: &str, source: &AttributionSourceState) -> Result<i32, Exception> {
+    let me = host.me.upgrade().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "app host gone"))?;
+    let permissions = PermissionManager::new(me.clone());
+    let system = Host { host: &me, permissions: &permissions, caller: SYSTEM_UID, message: None };
+    let datasource = AttributionSourceState {
+        pid: -1,
+        uid: SYSTEM_UID,
+        device_id: DEVICE_ID_DEFAULT,
+        package: Some("android".into()),
+        tag: None,
+        token: None,
+        renounced: None,
+        next: None,
+    };
+    let mut links = vec![&datasource];
+    links.extend(chain(source)?);
+    Checks(&system).check_permission(permission, &links, true, false, true, OP_NONE)
 }
 
 /// `ForegroundServiceTypePolicy.RegularPermission.checkPermission` of

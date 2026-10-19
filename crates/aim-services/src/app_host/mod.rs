@@ -28,7 +28,9 @@ pub mod audio_service;
 pub mod battery_service;
 pub mod battery_stats;
 pub mod bind;
+pub mod bluetooth_manager;
 pub mod broadcasts;
+pub mod companion_device;
 pub mod compat;
 pub mod config;
 pub mod connectivity_service;
@@ -424,6 +426,7 @@ pub struct AppHost {
     connectivity_service: OnceLock<Arc<connectivity_service::ConnectivityService>>,
     job_scheduler: OnceLock<Arc<job_scheduler::JobScheduler>>,
     stats: OnceLock<Arc<stats_manager::Stats>>,
+    bluetooth: OnceLock<Arc<bluetooth_manager::BluetoothManager>>,
     /// What DevicePolicyManagerService persisted, read once.
     device_policies: OnceLock<device_policy::Policies>,
     services: services::Services,
@@ -496,6 +499,7 @@ impl AppHost {
             connectivity_service: OnceLock::new(),
             job_scheduler: OnceLock::new(),
             stats: OnceLock::new(),
+            bluetooth: OnceLock::new(),
             device_policies: OnceLock::new(),
             services: Default::default(),
             pending_intents: Default::default(),
@@ -552,6 +556,7 @@ impl AppHost {
         let permission_manager = self.permission_manager.get_or_init(|| Arc::new(permission_manager::PermissionManager::new(self.clone()))).clone();
         // Published together, as `StatsCompanion.Lifecycle` publishes them.
         let stats = self.stats.get_or_init(|| stats_manager::Stats::new(self.clone())).clone();
+        let bluetooth = self.bluetooth.get_or_init(|| bluetooth_manager::BluetoothManager::new(self.clone(), settings.clone())).clone();
         vec![
             (
                 "activity",
@@ -656,6 +661,8 @@ impl AppHost {
             ("statusbar", Arc::new(status_bar::StatusBar::new(self.clone()))),
             ("statscompanion", Arc::new(stats_manager::StatsCompanionService(stats.clone()))),
             ("statsmanager", Arc::new(stats_manager::StatsManagerService(stats))),
+            ("bluetooth_manager", Arc::new(bluetooth_manager::BluetoothManagerService(bluetooth))),
+            ("companiondevice", Arc::new(companion_device::CompanionDevice::new(self.clone()))),
             (
                 "activity_task",
                 Arc::new(activity::ActivityTaskManager(
@@ -3469,6 +3476,12 @@ impl Service for Control {
                 if let Some(stats) = host.stats.get() {
                     stats.system_ready();
                     stats.boot_completed();
+                }
+                // BluetoothService's `onUserStarting` and `onUserUnlocking`
+                // of the system user, once apps' storage is mounted.
+                if let Some(bluetooth) = host.bluetooth.get() {
+                    bluetooth.on_user_starting();
+                    bluetooth.on_user_unlocking();
                 }
             });
             let mut p = Parcel::new();

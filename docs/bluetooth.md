@@ -230,6 +230,19 @@ because constructors of its HIDL dependencies wait for
   | Bluetooth app CPU | 0.38 s | 0.08 s |
   | HAL CPU | 0.31 s | 0.16 s |
 
+## In the app host
+
+The app host (docs/app-host.md) starts the HAL among its services
+(`image/app-host/services`) and plays BluetoothManagerService natively
+(`crates/aim-services/src/app_host/bluetooth_manager.rs`): at its start it
+binds the Bluetooth app's AdapterService as the original does and drives
+its states, and hands its IBluetooth to apps. The app's AdapterService
+also needs a `companiondevice` manager, published by the app host. On
+2026-10-19 (desktop Mac, a disposable data directory) the stack started
+and reported BLE_TURNING_ON, then the app crashed on
+`BatteryStatsManager.reportBleScanReset` (#1513), so apps see the
+adapter off.
+
 ## Not done
 
 - BR/EDR (classic audio needs a USB controller path, ADR 0012).
