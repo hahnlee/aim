@@ -45,6 +45,7 @@ pub mod device_policy;
 pub mod display;
 pub mod display_service;
 pub mod domain_verification;
+pub mod enhanced_confirmation;
 pub mod exit_info;
 pub mod fgs_types;
 pub mod freeform;
@@ -886,6 +887,14 @@ impl AppHost {
             (
                 "companiondevice",
                 Arc::new(companion_device::CompanionDevice::new(self.clone())),
+            ),
+            // SystemServer starts it with
+            // `enhanced_confirmation_mode_apis_enabled`, on in the image.
+            (
+                "ecm_enhanced_confirmation",
+                Arc::new(enhanced_confirmation::EnhancedConfirmation::new(
+                    self.clone(),
+                )),
             ),
             (
                 "activity_task",

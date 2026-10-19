@@ -434,4 +434,9 @@ pub struct System {
     pub force_queryable_packages: Vec<String>,
     /// SystemConfig's named actors: namespace, actor name and package.
     pub named_actors: Vec<(String, String, String)>,
+    /// `getEnhancedConfirmationTrustedPackages`,
+    /// `getEnhancedConfirmationTrustedInstallers`: package and SHA-256
+    /// certificate digest.
+    pub ecm_trusted_packages: Vec<(String, Vec<u8>)>,
+    pub ecm_trusted_installers: Vec<(String, Vec<u8>)>,
 }
