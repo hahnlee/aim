@@ -93,12 +93,14 @@ and opens and draws web pages (its renderers in isolated processes);
 YouTube Music gets its system routes and registers its router, and
 stops when its discovery would bind Play services' route provider
 (#1663); Messages draws its
-welcome page in WebView, its renderer started by the WebView zygote; the
-Google apps stop at Play services (#1673, #1623, #1504). Play services'
-persistent process now gets its installed modules, its Wi-Fi scan results
-(none, the Mac's radio being off), statsd through the stats manager and
-its app op mode watches, and then restarts over and over on DeviceConfig
-writes (#1526).
+welcome page in WebView, its renderer started by the WebView zygote;
+Contacts draws its empty contact list (appwidget, content trigger jobs);
+Drive and Play Store reach their sign-in pages (Play Store's own sign-in
+button does not answer yet). Play services' persistent process gets its
+installed modules, Wi-Fi scan results (none, the Mac's radio being off),
+statsd, DeviceConfig writes, usb, Safety Center and app op mode watches;
+it still restarts on nearby's start while the Bluetooth adapter is not
+served (#1762) and its other processes fail on AppSearch (#1761).
 
 ## Native system services (2026-09-29, ADR 0013)
 
