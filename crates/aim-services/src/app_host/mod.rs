@@ -17,6 +17,7 @@ pub mod activity_stack;
 pub mod activity_start;
 pub mod alarm_service;
 pub mod apex_manager;
+pub mod app_widget;
 mod app_op_infos;
 pub mod appops_sampling;
 pub mod appops_service;
@@ -594,6 +595,7 @@ impl AppHost {
             ("domain_verification", Arc::new(domain_verification::DomainVerification::new(self.clone()))),
             ("usb", Arc::new(usb_service::UsbService::new(self.clone()))),
             ("safety_center", Arc::new(safety_center::SafetyCenter::new(self.clone()))),
+            ("appwidget", Arc::new(app_widget::AppWidgetService::new(self.clone()))),
             ("restrictions", Arc::new(restrictions_service::RestrictionsManager::new(self.clone()))),
             ("legacy_permission", Arc::new(legacy_permission::LegacyPermissionManager::new(self.clone()))),
             ("device_identifiers", Arc::new(device_identifiers::DeviceIdentifiers::new(self.clone()))),
