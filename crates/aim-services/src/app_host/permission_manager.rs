@@ -24,6 +24,7 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::os::unix::fs::OpenOptionsExt;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use aim_binder_host::local::{Call, Reply, Service};
@@ -1236,18 +1237,21 @@ impl PermissionManager {
         let root =
             permissions::with_app_id_permissions(root, &state.app_id_permissions).map_err(fail)?;
         let bytes = aim_android_xml::abx::write(&root).map_err(fail)?;
-        let owner = aim_storage::guest_inode::read(read)
-            .map_err(|e| fail(e.to_string()))?
-            .unwrap_or(aim_storage::guest_inode::GuestInode {
-                uid: Some(SYSTEM_UID as u32),
-                gid: Some(SYSTEM_UID as u32),
-                mode: Some(0o600),
-            });
+        // New files of the system's, under system_server's umask (077).
+        let owner = aim_storage::guest_inode::GuestInode {
+            uid: Some(SYSTEM_UID as u32),
+            gid: Some(SYSTEM_UID as u32),
+            mode: Some(0o600),
+        };
         let write = |to: &std::path::Path| -> std::io::Result<()> {
+            match std::fs::remove_file(to) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
-                .create(true)
-                .truncate(true)
+                .create_new(true)
+                .mode(0o600)
                 .open(to)?;
             std::io::Write::write_all(&mut file, &bytes)?;
             crate::fsync(&file)?;
@@ -1391,6 +1395,16 @@ impl PermissionManager {
         };
         Ok(int("user_setup_complete") == Some(0)
             || int("user_setup_personalization_state") == Some(USER_SETUP_PERSONALIZATION_STARTED))
+    }
+
+    /// The user restrictions a caller's writes are checked against: the
+    /// shell's only (`hasUserRestriction` in
+    /// `enforceCallingOrSelfCrossUserPermission`).
+    fn shell_restrictions(&self, caller: i32) -> Result<BTreeSet<String>, Exception> {
+        if apps_filter::app_id(caller) != SHELL_UID {
+            return Ok(BTreeSet::new());
+        }
+        Ok(self.host.user_restrictions()?.clone())
     }
 
     /// `Context.checkPermission(permission, INVALID_PID, uid)` in the
@@ -1664,7 +1678,7 @@ impl Service for PermissionManager {
                     let package = non_null(package.as_deref(), method, "packageName")?;
                     let permission = non_null(permission.as_deref(), method, "permissionName")?;
                     self.default_device(non_null(device.as_deref(), method, "deviceId")?)?;
-                    let restrictions = self.host.user_restrictions()?.clone();
+                    let restrictions = self.shell_restrictions(caller)?;
                     let granted = reason.is_none();
                     // A revocation's reason, else the default one.
                     let kill = reason
@@ -1702,7 +1716,7 @@ impl Service for PermissionManager {
                         METHOD,
                         "deviceId",
                     )?)?;
-                    let restrictions = self.host.user_restrictions()?.clone();
+                    let restrictions = self.shell_restrictions(caller)?;
                     self.mutate(Some(KILL_APP_REASON_PERMISSIONS_REVOKED), |access, new| {
                         access.update_permission_flags(
                             new,
