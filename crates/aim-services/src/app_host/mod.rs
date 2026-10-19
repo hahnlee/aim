@@ -87,6 +87,7 @@ pub mod settings_service;
 pub mod settings_validators;
 pub mod status_bar;
 pub mod storage;
+mod strict_mode;
 pub mod surface;
 pub mod task_info;
 pub mod tasks;
@@ -402,6 +403,8 @@ pub struct AppHost {
     alarm_service: OnceLock<Arc<alarm_service::AlarmManager>>,
     battery_service: OnceLock<Arc<battery_service::BatteryService>>,
     battery_stats: OnceLock<Arc<battery_stats::BatteryStats>>,
+    /// `mStrictModeCallbacks`.
+    strict_mode_callbacks: strict_mode::Callbacks,
     connectivity_service: OnceLock<Arc<connectivity_service::ConnectivityService>>,
     job_scheduler: OnceLock<Arc<job_scheduler::JobScheduler>>,
     /// What DevicePolicyManagerService persisted, read once.
@@ -471,6 +474,7 @@ impl AppHost {
             alarm_service: OnceLock::new(),
             battery_service: OnceLock::new(),
             battery_stats: OnceLock::new(),
+            strict_mode_callbacks: Default::default(),
             connectivity_service: OnceLock::new(),
             job_scheduler: OnceLock::new(),
             device_policies: OnceLock::new(),
@@ -2727,7 +2731,7 @@ impl Service for Activity {
                     return reply(Err(Exception::illegal_argument("service intent is null")));
                 };
                 let uid = call.sender_euid as i32;
-                let started = self.0.start_service(a.caller, uid, intent, a.resolved_type, a.require_foreground, a.calling_package.as_deref(), a.user_id);
+                let started = self.0.start_service(a.caller, uid, Some(call.sender_pid), intent, a.resolved_type, a.require_foreground, a.calling_package.as_deref(), a.user_id);
                 reply(started.map(|name| {
                     let mut p = Parcel::new();
                     am::write_start_service_reply(&mut p, name.as_ref().map(|(p, c)| activity_start::Component(p, c)).as_ref());
@@ -2739,7 +2743,7 @@ impl Service for Activity {
                 let Some(intent) = a.service else {
                     return reply(Err(Exception::illegal_argument("service intent is null")));
                 };
-                reply(self.0.stop_service(call.sender_euid as i32, intent, a.resolved_type, a.user_id).map(|r| {
+                reply(self.0.stop_service(call.sender_euid as i32, call.sender_pid, intent, a.resolved_type, a.user_id).map(|r| {
                     let mut p = Parcel::new();
                     am::write_stop_service_reply(&mut p, r);
                     p
@@ -2793,7 +2797,7 @@ impl Service for Activity {
                 };
                 reply(
                     self.0
-                        .bind_service(a.caller, call.sender_euid as i32, a.token, intent, a.resolved_type, a.connection, a.flags, a.instance_name, a.calling_package, a.user_id)
+                        .bind_service(a.caller, call.sender_euid as i32, call.sender_pid, a.token, intent, a.resolved_type, a.connection, a.flags, a.instance_name, a.calling_package, a.user_id)
                         .map(|r| {
                             let mut p = Parcel::new();
                             am::write_bind_service_instance_reply(&mut p, r);
@@ -3330,10 +3334,13 @@ impl Service for Activity {
                     p
                 }))
             }
-            // A Java proxy reads an empty reply as success with zero
-            // results (a granted permission), so a method the app host
-            // does not implement throws.
-            am::REGISTER_STRICT_MODE_CALLBACK => reply(Err(self.0.unimplemented_named("activity", "registerStrictModeCallback: unsafe intent launches (#1715)"))),
+            am::REGISTER_STRICT_MODE_CALLBACK => {
+                let a = am::RegisterStrictModeCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.0.register_strict_mode_callback(call.sender_pid, a.binder);
+                let mut p = Parcel::new();
+                am::write_register_strict_mode_callback_reply(&mut p);
+                Ok(p)
+            }
             code => reply(Err(self.0.unimplemented("activity", code))),
         }
     }

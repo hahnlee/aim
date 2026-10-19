@@ -584,7 +584,7 @@ impl AppHost {
             }
             INTENT_SENDER_SERVICE | INTENT_SENDER_FOREGROUND_SERVICE => {
                 let foreground = kind == INTENT_SENDER_FOREGROUND_SERVICE;
-                if let Err(e) = self.start_service(None, uid, final_intent.clone(), resolved, foreground, Some(&package), user) {
+                if let Err(e) = self.start_service(None, uid, None, final_intent.clone(), resolved, foreground, Some(&package), user) {
                     eprintln!(
                         "app host: a PendingIntent's service of {package}: {}",
                         e.message

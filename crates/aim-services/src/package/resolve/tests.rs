@@ -1255,7 +1255,7 @@ fn dynamic_split_state(installer: bool) -> Arc<State> {
 }
 
 fn missing_split_info(resolution: &Resolution) -> ResolveInfo {
-    resolution.query_activities_with_splits(&Intent {action:Some("SPLIT_TEST".into()),package:Some("a.viewer".into()),..Default::default()},None,0,0,10001,false).unwrap().remove(0)
+    resolution.query_activities_with_splits(&Intent {action:Some("SPLIT_TEST".into()),package:Some("a.viewer".into()),..Default::default()},None,0,0,10001,false,None).unwrap().remove(0)
 }
 
 #[test]
@@ -1431,4 +1431,37 @@ fn instant_missing_split_replacement_still_precedes_caller_post_filter() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].component(), ("installer.owner", "InstallerActivity"));
     assert_eq!(results[0].auxiliary.as_ref().unwrap().package, "a.viewer");
+}
+
+/// A start reports an explicit intent another app's filters do not
+/// match, and one with no action, without blocking either for a component
+/// that does not enforce its filters, even one the caller cannot see; the
+/// service a start resolves too; a query (not for a start) reports
+/// nothing.
+#[test]
+fn starts_report_unsafe_intents() {
+    let r = Resolution::new(state(), &Default::default()).unwrap();
+    let explicit = |action: Option<&str>, package: &str, class: &str| Intent {
+        action: action.map(Into::into),
+        component: Some(ComponentName { package: package.into(), class: class.into() }),
+        ..Intent::default()
+    };
+    let report = std::cell::RefCell::new(Vec::new());
+    let found = r
+        .resolve_intent_for_start(&explicit(Some(SEND), "c.high", "c.high.Open"), None, 0, 0, 10004, true, &report)
+        .unwrap();
+    assert_eq!(found.map(|f| f.component().1.to_owned()).as_deref(), Some("c.high.Open"));
+    assert_eq!(report.take(), [(UNSAFE_INTENT_EXPLICIT_INTENT_FILTER_UNMATCH, false)]);
+    r.resolve_intent_for_start(&explicit(None, "c.high", "c.high.Open"), None, 0, 0, 10004, true, &report).unwrap();
+    assert_eq!(report.take(), [(UNSAFE_INTENT_NULL_ACTION_MATCH, false)]);
+    // The caller's own component and the system's starts report nothing.
+    r.resolve_intent_for_start(&explicit(Some(SEND), "c.high", "c.high.Open"), None, 0, 0, SYSTEM_UID, true, &report).unwrap();
+    assert!(report.take().is_empty());
+    let service = r
+        .resolve_service_for_start(&explicit(None, "b.gallery", "b.gallery.Sync"), None, 0, 0, 10005, &report)
+        .unwrap();
+    assert!(service.is_some());
+    assert_eq!(report.take(), [(UNSAFE_INTENT_NULL_ACTION_MATCH, false)]);
+    r.resolve_service(&explicit(None, "b.gallery", "b.gallery.Sync"), None, 0, 0, 10005).unwrap();
+    assert!(report.take().is_empty());
 }

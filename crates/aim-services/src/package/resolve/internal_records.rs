@@ -1,7 +1,8 @@
 //! Private Computer/ResolveIntentHelper queries, android-16.0.0_r1.
 use super::*;
 impl Resolution {
-    fn internal_activities(&self,intent:&Intent,resolved_type:Option<&str>,flags:i64,user:i32,calling_uid:i32,actual_uid:i32,resolve_for_start:bool,allow_dynamic_splits:bool)->Result<Vec<ResolveInfo>> {
+    #[allow(clippy::too_many_arguments)]
+    fn internal_activities(&self,intent:&Intent,resolved_type:Option<&str>,flags:i64,user:i32,calling_uid:i32,actual_uid:i32,resolve_for_start:bool,allow_dynamic_splits:bool,report:super::UnsafeIntentReport<'_>)->Result<Vec<ResolveInfo>> {
         if !self.user_exists(user) {
             return Ok(Vec::new());
         }
@@ -25,11 +26,13 @@ impl Resolution {
         let mut list = match comp {
             Some(comp) => {
                 let mut list = Vec::new();
+                // `getActivityInfo(comp, flags, userId)`: as the binder
+                // caller.
                 let found = self
                     .query(actual_uid)
-                    .activity_info(comp, flags, calling_uid, user);
+                    .activity_info(comp, flags, actual_uid, user);
                 if let Some(ai) = thrown(found)?
-                    && !self.block_activity(&ai, comp, flags, instant_pkg, calling_uid, user)?
+                    && !self.block_activity(&ai, comp, flags, instant_pkg, calling_uid, user, resolve_for_start.then_some(package))?
                 {
                     let mut ri = ResolveInfo::new(Info::Activity(ai));
                     ri.user_handle = user;
@@ -40,21 +43,24 @@ impl Resolution {
                         resolved_type,
                         calling_uid,
                         &mut list,
+                        report,
                     )?;
                 }
                 list
             }
-            None => self.query_activities_body(
-                intent,
-                resolved_type,
-                flags,
-                calling_uid,
-                user,
-                package,
-            )?,
+            None => {
+                let list = self.query_activities_body(
+                    intent,
+                    resolved_type,
+                    flags,
+                    calling_uid,
+                    user,
+                    package,
+                )?;
+                self.block_null_action(Kind::Activity, intent, calling_uid, &list, report);
+                list
+            }
         };
-        // blockNullAction only reports unless the block_null_action_intents
-        // flag is on, which it is not on this image.
         if let Some(original) = original {
             self.enforce_intent_filter_matching(
                 Kind::Activity,
@@ -62,6 +68,7 @@ impl Resolution {
                 resolved_type,
                 calling_uid,
                 &mut list,
+                report,
             )?;
         }
         self.internal_post_activities(list,instant_pkg,allow_dynamic_splits,calling_uid,resolve_for_start,user,intent)
@@ -115,6 +122,7 @@ impl Resolution {
                             resolved_type,
                             calling_uid,
                             &mut list,
+                            None,
                         )?;
                     }
                 }
@@ -143,6 +151,7 @@ impl Resolution {
                 resolved_type,
                 calling_uid,
                 &mut list,
+                None,
             )?;
         }
         Ok(list)
@@ -193,6 +202,7 @@ impl Resolution {
                             resolved_type,
                             calling_uid,
                             &mut list,
+                            None,
                         )?;
                     }
                 }
@@ -233,6 +243,7 @@ impl Resolution {
                 resolved_type,
                 calling_uid,
                 &mut list,
+                None,
             )?;
         }
         self.apply_post_resolution_filter(list, instant_pkg, false, calling_uid, user, intent)
@@ -271,7 +282,7 @@ impl Resolution {
                             if block&&activity.info.application_info.private_flags&PRIVATE_FLAG_INSTANT!=0 {continue;}
                             let package=info.component().0.to_owned();
                             let failure_intent=Intent {action:Some("android.intent.action.INSTALL_FAILURE".into()),package:Some(package.clone()),..Default::default()};
-                            let failures=self.internal_activities(&failure_intent,None,0,user,uid,uid,false,false)?;
+                            let failures=self.internal_activities(&failure_intent,None,0,user,uid,uid,false,false,None)?;
                             let failure=failures.iter().find_map(|entry|match &entry.info {Info::Activity(activity) if activity.info.split_name.is_none()=>Some(ComponentName {package:entry.component().0.into(),class:entry.component().1.into()}),_=>None});
                             let mut replacement=installer.clone();
                             replacement.auxiliary=Some(super::super::component_resolver::Auxiliary {failure,package:package.clone(),version:activity.info.application_info.long_version_code,split:split.clone()});
@@ -296,7 +307,7 @@ impl Resolution {
         Ok(result)
     }
     pub fn query_activities_internal_record(&self,intent:Option<&Intent>,resolved:Option<&str>,flags:i64,private:i64,filter_uid:i32,filter_pid:i32,user:i32,start:bool,dynamic:bool,actual_uid:i32,actual_pid:i32)->std::result::Result<Vec<u8>,QueryError> {
-        let result=required(intent).and_then(|intent|self.internal_activities(intent,resolved,flags,user,filter_uid,actual_uid,start,dynamic));
+        let result=required(intent).and_then(|intent|self.internal_activities(intent,resolved,flags,user,filter_uid,actual_uid,start,dynamic,None));
         let _=(private,filter_pid,actual_pid);record_list(result)
     }
     pub fn query_services_internal_record(&self,intent:Option<&Intent>,resolved:Option<&str>,flags:i64,user:i32,filter_uid:i32,filter_pid:i32,include:bool,start:bool,actual_uid:i32,actual_pid:i32)->std::result::Result<Vec<u8>,QueryError> {
@@ -308,13 +319,42 @@ impl Resolution {
     pub fn resolve_service_internal_record(&self,intent:Option<&Intent>,resolved:Option<&str>,flags:i64,user:i32,filter_uid:i32,filter_pid:i32,start:bool,actual_uid:i32,actual_pid:i32)->std::result::Result<Option<Vec<u8>>,QueryError> {
         let _=(filter_pid,actual_pid);record_one(required(intent).and_then(|intent|self.internal_services(intent,resolved,flags,user,filter_uid,actual_uid,false,start).map(|mut list|(!list.is_empty()).then(||list.remove(0)))))
     }
+    /// `ResolveIntentHelper.resolveIntentInternal` for a start by
+    /// `calling_uid`: its unsafe intent events reported to `report`, and
+    /// `filterNonExportedComponents` dropping the components an implicit
+    /// intent may not reach when `only_exported` (the caller's
+    /// IMPLICIT_INTENTS_ONLY_MATCH_EXPORTED_COMPONENTS change) is on,
+    /// reporting the match either way.
+    pub fn resolve_intent_for_start(&self,intent:&Intent,resolved:Option<&str>,flags:i64,user:i32,calling_uid:i32,only_exported:bool,report:&std::cell::RefCell<Vec<(i32,bool)>>)->Result<Option<ResolveInfo>> {
+        if !self.user_exists(user) {return Ok(None);}
+        let flags=self.update_flags_for_resolve(flags,user,calling_uid,true,false,self.implicit_image_capture(intent,user,resolved,flags)?)?;
+        // `ActivityTaskSupervisor.resolveIntent` asks with the system's
+        // identity, filtering for the caller.
+        let mut list=self.internal_activities(intent,resolved,flags,user,calling_uid,1000,true,true,Some(report))?;
+        if intent.package.is_none()&&intent.component.is_none()&&!matches!(app_id(calling_uid),0|1000) {
+            let exported=|info:&ResolveInfo| match &info.info {Info::Activity(activity)=>activity.info.exported,_=>true};
+            if list.iter().any(|info|!exported(info)) {
+                report.borrow_mut().push((super::UNSAFE_INTENT_INTERNAL_NON_EXPORTED_COMPONENT_MATCH,only_exported));
+                if only_exported {list.retain(exported);}
+            }
+        }
+        Ok(match list.len() {
+            0=>None,1=>list.pop(),_=> {
+                let (first,second)=(&list[0],&list[1]);
+                if first.priority!=second.priority||first.preferred_order!=second.preferred_order||first.is_default!=second.is_default {Some(list.remove(0))}
+                else if let Some(preferred)=self.find_preferred_activity(intent,resolved,flags,&list,user,calling_uid)? {Some(preferred)}
+                else {Some(self.chooser(intent,&list,user)?)}
+            }
+        })
+    }
+
     pub fn resolve_intent_internal_record(&self,intent:Option<&Intent>,resolved:Option<&str>,flags:i64,private:i64,user:i32,start:bool,filter_uid:i32,filter_pid:i32,actual_uid:i32,actual_pid:i32)->std::result::Result<Option<Vec<u8>>,QueryError> {
         let _=(filter_pid,actual_pid);
         record_one(required(intent).and_then(|intent| {
             if !self.user_exists(user) {return Ok(None);}
             let flags=self.update_flags_for_resolve(flags,user,filter_uid,start,false,self.implicit_image_capture(intent,user,resolved,flags)?)?;
             self.enforce_cross_user(actual_uid,user)?;
-            let mut list=self.internal_activities(intent,resolved,flags,user,filter_uid,actual_uid,start,true)?;
+            let mut list=self.internal_activities(intent,resolved,flags,user,filter_uid,actual_uid,start,true,None)?;
             if start {list.retain(|info| match &info.info {Info::Activity(activity)=>activity.info.exported||activity.info.application_info.uid==filter_uid||matches!(filter_uid,0|1000),_=>false});}
             let selected=match list.len() {
                 0=>None,1=>list.pop(),_=> {

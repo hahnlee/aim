@@ -740,20 +740,26 @@ enum Lookup {
 
 impl AppHost {
     /// `retrieveServiceLocked`: the service `intent` resolves to for
-    /// `uid`, and whether the caller may reach it.
+    /// `uid`, and whether the caller may reach it; the unsafe intent events
+    /// of a caller's start, bind or stop told to its process `pid`'s
+    /// strict mode callback.
+    #[allow(clippy::too_many_arguments)]
     fn retrieve_service(
         &self,
         intent: &RawIntent,
         resolved_type: Option<&str>,
         uid: i32,
+        pid: Option<i32>,
         user: i32,
         instance: Option<&str>,
         external: Option<&str>,
     ) -> Result<Lookup, Exception> {
         let (_, resolution) = self.packages()?;
+        let report = std::cell::RefCell::new(Vec::new());
         let found = resolution
-            .resolve_service(&intent.intent, resolved_type, STOCK_PM_FLAGS, user, uid)
+            .resolve_service_for_start(&intent.intent, resolved_type, STOCK_PM_FLAGS, user, uid, &report)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("resolveService: {e:?}")))?;
+        self.report_unsafe_intent(pid, intent, report.into_inner());
         let Some(crate::package::component_resolver::Info::Service(mut info)) = found.map(|r| r.info)
         else {
             return Ok(Lookup::None);
@@ -866,10 +872,12 @@ impl AppHost {
     /// service's name, `!` (or `!!`) and why if it may not be started, none
     /// if there is no such service or a foreground one is silently not.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn start_service(
         &self,
         caller: Option<Binder>,
         uid: i32,
+        pid: Option<i32>,
         intent: RawIntent,
         resolved_type: Option<String>,
         mut fg_required: bool,
@@ -888,7 +896,7 @@ impl AppHost {
         }
         let user = self.incoming_user(uid, user, false)?;
         let info =
-            match self.retrieve_service(&intent, resolved_type.as_deref(), uid, user, None, None)? {
+            match self.retrieve_service(&intent, resolved_type.as_deref(), uid, pid, user, None, None)? {
                 Lookup::None => return Ok(None),
                 Lookup::Denied(why) => {
                     return Ok(Some((
@@ -964,6 +972,7 @@ impl AppHost {
     pub(super) fn stop_service(
         &self,
         uid: i32,
+        pid: i32,
         intent: RawIntent,
         resolved_type: Option<String>,
         user: i32,
@@ -975,7 +984,7 @@ impl AppHost {
         }
         let user = self.incoming_user(uid, user, false)?;
         let info =
-            match self.retrieve_service(&intent, resolved_type.as_deref(), uid, user, None, None)? {
+            match self.retrieve_service(&intent, resolved_type.as_deref(), uid, Some(pid), user, None, None)? {
                 Lookup::Found(info) => info,
                 Lookup::Denied(why) => {
                     return Err(Exception::security(format!(
@@ -1047,6 +1056,7 @@ impl AppHost {
         &self,
         caller: Option<Binder>,
         uid: i32,
+        pid: i32,
         activity: Option<Binder>,
         intent: RawIntent,
         resolved_type: Option<String>,
@@ -1095,6 +1105,7 @@ impl AppHost {
             &intent,
             resolved_type.as_deref(),
             uid,
+            Some(pid),
             user,
             instance.as_deref(),
             external.then_some(calling_package.as_deref().unwrap_or_default()),
@@ -1123,7 +1134,7 @@ impl AppHost {
         conn: Arc<dyn HostConnection>,
     ) -> Result<bool, Exception> {
         let intent = RawIntent::of(action, flags, &[]).with_component(package, class);
-        let info = match self.retrieve_service(&intent, None, 1000, user, None, None)? {
+        let info = match self.retrieve_service(&intent, None, 1000, None, user, None, None)? {
             Lookup::Found(info) => *info,
             Lookup::None | Lookup::Denied(_) => return Ok(false),
         };
