@@ -94,7 +94,11 @@ YouTube Music gets its system routes and registers its router, and
 stops when its discovery would bind Play services' route provider
 (#1663); Messages draws its
 welcome page in WebView, its renderer started by the WebView zygote; the
-Google apps stop at Play services (#1673, #1623, #1504).
+Google apps stop at Play services (#1673, #1623, #1504). Play services'
+persistent process now gets its installed modules, its Wi-Fi scan results
+(none, the Mac's radio being off), statsd through the stats manager and
+its app op mode watches, and then restarts over and over on DeviceConfig
+writes (#1526).
 
 ## Native system services (2026-09-29, ADR 0013)
 
