@@ -1637,18 +1637,15 @@ impl AppHost {
     }
 
     /// `UserController.handleIncomingUser`: `USER_CURRENT` as user 0,
-    /// another user than the caller's only with `INTERACT_ACROSS_USERS_FULL`
-    /// (or, if `allow_non_full`, `INTERACT_ACROSS_USERS`).
+    /// another user than the caller's, `USER_ALL` among them, only with
+    /// `INTERACT_ACROSS_USERS_FULL` (or, if `allow_non_full`,
+    /// `INTERACT_ACROSS_USERS`).
     fn incoming_user(&self, uid: i32, user: i32, allow_non_full: bool) -> Result<i32, Exception> {
         const USER_ALL: i32 = -1;
         const USER_CURRENT: i32 = -2;
         let user = if user == USER_CURRENT { 0 } else { user };
         let has = |p: &str| self.check_permission(Some(p), uid).map(|r| r == 0);
-        if user == USER_ALL {
-            if !has("android.permission.INTERACT_ACROSS_USERS_FULL")? {
-                return Err(Exception::security("No access: INTERACT_ACROSS_USERS_FULL"));
-            }
-        } else if user < 0 {
+        if user < 0 && user != USER_ALL {
             return Err(Exception::new(EX_ILLEGAL_ARGUMENT, format!("Invalid user: {user}")));
         } else if user != uid / PER_USER_RANGE as i32
             && !has("android.permission.INTERACT_ACROSS_USERS_FULL")?
