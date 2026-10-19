@@ -162,6 +162,20 @@ impl Service for PackageService {
             filter: &resolution.apps_filter,
             calling_uid: call.sender_euid as i32,
         };
+        if call.code == pm::REQUEST_PACKAGE_CHECKSUMS {
+            let request = crate::package::query::checksums::Request::read(&mut call.data)?;
+            let mut reply = Parcel::new();
+            match request.prepare(&query) {
+                Err(crate::package::apps_filter::NotModelled(reason)) => return self.unmodelled(call.code, reason),
+                Ok(Err(e)) => reply.write_exception(&e),
+                Ok(Ok(prepared)) => match super::package_checksums::request(&self.host, prepared) {
+                    Ok(()) => pm::write_request_package_checksums_reply(&mut reply),
+                    Err(super::package_checksums::Refused::NotModelled(reason)) => return self.unmodelled(call.code, reason),
+                    Err(super::package_checksums::Refused::Exception(e)) => reply.write_exception(&e),
+                },
+            }
+            return Ok(reply);
+        }
         if let Some(reply) = self.write(call, &query) {
             return reply;
         }

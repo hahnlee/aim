@@ -7,7 +7,7 @@ use super::asn1::Certificate;
 use super::block::{self, Buf, ContentDigests, SignatureInfo};
 use super::{Fail, crypto};
 
-const APK_SIGNATURE_SCHEME_V2_BLOCK_ID: u32 = 0x7109871a;
+pub(super) const APK_SIGNATURE_SCHEME_V2_BLOCK_ID: u32 = 0x7109871a;
 /// The ID of this scheme in a JAR signature's `X-Android-APK-Signed`.
 pub(super) const SF_ATTRIBUTE_ANDROID_APK_SIGNED_ID: i32 = 2;
 const MAX_V2_SIGNERS: usize = 10;

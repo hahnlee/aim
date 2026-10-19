@@ -82,9 +82,7 @@ impl Store{
   Ok(Admission{store:self.clone(),inode,admission})
  }
  fn path(&self,identity:Identity)->PathBuf{self.directory.join(hex(&binding(identity)))}
- pub fn lookup(&self,identity:Identity)->Result<Option<Metadata>>{
-  match Metadata::open(&self.path(identity),&binding(identity)){Ok(metadata)=>Ok(Some(metadata)),Err(Error::Io(error))if error.kind()==std::io::ErrorKind::NotFound=>Ok(None),Err(error)=>Err(error)}
- }
+ pub fn lookup(&self,identity:Identity)->Result<Option<Metadata>>{lookup_in(&self.directory,identity)}
  /// Publish the already validated, immutable prepared inode without copying
  /// or reconstructing any descriptor/tree/signature bytes.
  fn publish_with_sync(&self,identity:Identity,prepared:&Prepared,sync:impl FnOnce(&Path)->std::io::Result<()>)->Result<Metadata>{
@@ -107,6 +105,11 @@ impl Store{
 fn nonce()->Result<String>{
  static NEXT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
  Ok(format!("{}-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_|Error::Linux(EIO))?.as_nanos(),NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed)))
+}
+/// The proof of `identity` in the store `directory`, read only: what a
+/// store there finds (`Store::lookup`), for a reader that takes no leases.
+pub fn lookup_in(directory:&Path,identity:Identity)->Result<Option<Metadata>>{
+ match Metadata::open(&directory.join(hex(&binding(identity))),&binding(identity)){Ok(metadata)=>Ok(Some(metadata)),Err(Error::Io(error))if error.kind()==std::io::ErrorKind::NotFound=>Ok(None),Err(error)=>Err(error)}
 }
 fn hex(bytes:&[u8])->String{bytes.iter().map(|byte|format!("{byte:02x}")).collect()}
 fn binding(identity:Identity)->[u8;36]{identity.to_bytes()}

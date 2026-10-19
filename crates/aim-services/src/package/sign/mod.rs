@@ -469,3 +469,57 @@ fn verify_v4(apk: &Apk, full: bool, build: &Build) -> Result<Result<SigningDetai
         lineage,
     ))
 }
+
+/// `ContentDigestAlgorithm` ids: SHA-256 and SHA-512 over 1 MB chunks.
+pub(crate) const CONTENT_DIGEST_CHUNKED_SHA256: i32 = block::CONTENT_DIGEST_CHUNKED_SHA256;
+pub(crate) const CONTENT_DIGEST_CHUNKED_SHA512: i32 = block::CONTENT_DIGEST_CHUNKED_SHA512;
+
+/// `verifySignaturesInternal(apk, SIGNING_BLOCK_V2, verifyFull: false)`'s
+/// content digests, of an APK not on IncFS (so with no v4 signature): the
+/// v3 signer's, else the v2 signers'; none if neither scheme signs it
+/// (`SignatureNotFoundException`), an error if one does not verify.
+pub(crate) fn signed_content_digests(
+    apk: &dyn ReadAt,
+    build: &Build,
+) -> Result<Option<std::collections::BTreeMap<i32, Vec<u8>>>, String> {
+    match v3::verify(apk, false, build) {
+        Ok(v) => return Ok(Some(v.content_digests)),
+        Err(Fail::Invalid(e)) => return Err(e),
+        Err(Fail::NotFound(_)) => {}
+    }
+    match v2::verify(apk, false) {
+        Ok(v) => Ok(Some(v.content_digests)),
+        Err(Fail::Invalid(e)) => Err(e),
+        Err(Fail::NotFound(_)) => Ok(None),
+    }
+}
+
+/// `computeContentDigestsPer1MbChunk` of `algorithms` over the sections
+/// the v3 block (`ApkSignatureSchemeV3Verifier.findSignature`), else the
+/// v2 block, leaves; none without either.
+pub(crate) fn chunked_content_digests(
+    apk: &dyn ReadAt,
+    algorithms: &[i32],
+) -> Result<Option<Vec<Vec<u8>>>, String> {
+    let info = match block::find_signature(apk, v3::APK_SIGNATURE_SCHEME_V3_BLOCK_ID) {
+        Ok(info) => info,
+        Err(Fail::Invalid(e)) => return Err(e),
+        Err(Fail::NotFound(_)) => match block::find_signature(apk, v2::APK_SIGNATURE_SCHEME_V2_BLOCK_ID) {
+            Ok(info) => info,
+            Err(Fail::Invalid(e)) => return Err(e),
+            Err(Fail::NotFound(_)) => return Ok(None),
+        },
+    };
+    block::chunked_digests(algorithms, apk, &info).map(Some)
+}
+
+/// Whether `bytes` are an X.509 certificate's encoding
+/// (`CertificateFactory.generateCertificate`).
+pub(crate) fn is_certificate(bytes: &[u8]) -> bool {
+    asn1::Certificate::parse(bytes).is_ok()
+}
+
+/// `VerityBuilder.generateFsVerityRootHash(path, null)`.
+pub(crate) fn fs_verity_root_hash(file: &dyn ReadAt) -> Result<Vec<u8>, String> {
+    block::fs_verity_root_hash(file)
+}
