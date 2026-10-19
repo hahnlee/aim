@@ -8,6 +8,7 @@ public class UserManager {
     public static final String DISALLOW_INSTALL_APPS = "no_install_apps";
     public static final String DISALLOW_DEBUGGING_FEATURES = "no_debugging_features";
     public java.util.List<android.content.pm.UserInfo> getUsers(){throw new RuntimeException("stub");}
+    public android.content.pm.UserInfo getUserInfo(int userId){throw new RuntimeException("stub");}
  public static boolean isHeadlessSystemUserMode(){throw new RuntimeException("stub");}
  public static final String DISALLOW_UNINSTALL_APPS="no_uninstall_apps";
  public boolean hasUserRestriction(String restriction,UserHandle user){throw new RuntimeException("stub");}

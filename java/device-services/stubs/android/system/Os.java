@@ -3,6 +3,7 @@ package android.system;
 public final class Os {
     private Os() { throw new RuntimeException("stub"); }
     public static int geteuid() { throw new RuntimeException("stub"); }
+    public static int umask(int mask) { throw new RuntimeException("stub"); }
     public static void seteuid(int uid) throws ErrnoException { throw new RuntimeException("stub"); }
     public static void link(String oldPath, String newPath) throws ErrnoException { throw new RuntimeException("stub"); }
     public static void chmod(String path, int mode) throws ErrnoException { throw new RuntimeException("stub"); }

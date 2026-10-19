@@ -10,7 +10,9 @@
 # apps' names on the network the connectivity service gives it, once
 # bpfloader has marked the BPF programs loaded; statsd takes the atoms apps
 # log and serves the stats manager's calls; the Bluetooth HAL is the
-# controller the Bluetooth app's stack drives over the Mac's CoreBluetooth.
+# controller the Bluetooth app's stack drives over the Mac's CoreBluetooth;
+# aim-appsearch runs the original AppSearch module, which only system_server
+# would run.
 apexd-bootstrap
 apexd
 keystore2
@@ -49,4 +51,5 @@ cameraserver
 vendor.camera-provider-aim
 vendor.bluetooth-aim
 statsd
+aim-appsearch
 aim-app-host-agent
