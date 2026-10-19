@@ -192,6 +192,8 @@ const COMMON_SERVICES: &[&str] = &[
     "connectivity",
     "network_management",
 ];
+/// Those of them an isolated process gets.
+const ISOLATED_COMMON_SERVICES: &[&str] = &["package", "permissionmgr"];
 /// `PackageManager.GET_SHARED_LIBRARY_FILES | MATCH_DEBUG_TRIAGED_MISSING`,
 /// `ActivityManagerService.STOCK_PM_FLAGS`.
 const STOCK_PM_FLAGS: i64 = 0x400 | 0x1000_0000;
@@ -2184,8 +2186,11 @@ impl AppHost {
         let core_settings =
             bind::core_settings(&inputs.settings, analog_clock_fps).map_err(state)?;
         let published = self.published.lock().unwrap();
+        // An isolated process gets only those it may use (`getCommonServicesLocked`).
+        let isolated = is_isolated(app.uid as i32);
         let services: Vec<(ParcelValue, ParcelValue)> = COMMON_SERVICES
             .iter()
+            .filter(|name| !isolated || ISOLATED_COMMON_SERVICES.contains(name))
             .filter_map(|name| published.iter().find(|(n, _)| n == name))
             .map(|(name, binder)| {
                 (
