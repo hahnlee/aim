@@ -1187,6 +1187,15 @@ impl Service for ActivityClientController {
                 );
                 empty()
             }
+            acc::FINISH_ACTIVITY_AFFINITY => {
+                let a = acc::FinishActivityAffinity::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                acc::write_finish_activity_affinity_reply(
+                    &mut p,
+                    self.0.finish_activity_affinity(a.token),
+                );
+                Ok(p)
+            }
             acc::FINISH_ACTIVITY => {
                 let a = acc::FinishActivity::<RawIntent>::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;

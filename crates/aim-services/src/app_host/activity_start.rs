@@ -590,6 +590,7 @@ impl AppHost {
             activity.occludes_parent,
             activity.no_history,
         ) = (result, style.occludes_parent(), no_history);
+        activity.affinity = affinity.clone();
         let identity = stack::Identity {
             component: &real,
             intent: &intent,
@@ -998,6 +999,18 @@ impl AppHost {
         }
         self.run(commands);
         Ok(finished)
+    }
+
+    /// `finishActivityAffinity`: whether the token's activity is there;
+    /// the app host has no lock task mode to block it
+    /// (`activityBlockedFromFinish`).
+    pub(super) fn finish_activity_affinity(self: &Arc<Self>, token: Option<Binder>) -> bool {
+        let Some(Binder::Local(token)) = token else {
+            return false;
+        };
+        let (found, commands) = self.activities.stack.lock().unwrap().finish_affinity(token);
+        self.run(commands);
+        found
     }
 
     /// `activityTopResumedStateLost`: the activity told it lost the top
