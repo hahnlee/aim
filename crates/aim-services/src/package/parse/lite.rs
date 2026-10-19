@@ -307,6 +307,7 @@ mod tests {
                 })
                 .collect(),
             children,
+            text: String::new(),
         }
     }
     fn environment() -> Environment {

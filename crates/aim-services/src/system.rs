@@ -190,8 +190,9 @@ impl ServiceOwner {
 
 /// The services whose originals are added with `allowIsolated` at
 /// `android-16.0.0_r1`: `activity` (`ActivityManagerService
-/// .setSystemProcess`), `display` (`DisplayManagerService.onStart`).
-const ALLOW_ISOLATED: &[&str] = &["activity", "display"];
+/// .setSystemProcess`), `display` (`DisplayManagerService.onStart`),
+/// `webviewupdate` (`WebViewUpdateService.onStart`).
+const ALLOW_ISOLATED: &[&str] = &["activity", "display", "webviewupdate"];
 
 pub struct System {
     diagnostic_self: Weak<Self>,
