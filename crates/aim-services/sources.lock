@@ -263,7 +263,7 @@ INTERFACES=(
   "android.media.IMediaRouterService|system/framework/framework.jar|registerClientAsUser,unregisterClient,registerClientGroupId,getState,isPlaybackActive,setDiscoveryRequest,setSelectedRoute"
   "android.app.IGameManagerService|system/framework/framework.jar|getGameMode,notifyGraphicsEnvironmentSetup"
   "android.os.IHintManager|system/framework/framework.jar|getSessionChannel,closeSessionChannel,registerClient,getClientData"
-  "android.net.INetworkPolicyManager|system/framework/framework.jar|getUidPolicy,getUidsWithPolicy,registerListener,unregisterListener,getRestrictBackground,getRestrictBackgroundByCaller,getRestrictBackgroundStatus"
+  "android.net.INetworkPolicyManager|system/framework/framework.jar|getNetworkPolicies,getUidPolicy,getUidsWithPolicy,registerListener,unregisterListener,getRestrictBackground,getRestrictBackgroundByCaller,getRestrictBackgroundStatus"
   "com.android.internal.telephony.ITelephonyRegistry|system/framework/framework.jar|addOnSubscriptionsChangedListener,addOnOpportunisticSubscriptionsChangedListener,removeOnSubscriptionsChangedListener,listenWithEventList"
   "android.net.IVpnManager|system/framework/framework.jar|getVpnConfig"
   "android.os.INetworkManagementService|system/framework/framework.jar|setUidCleartextNetworkPolicy,isBandwidthControlEnabled"

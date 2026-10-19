@@ -1,7 +1,9 @@
 //! `netpolicy`: NetworkPolicyManagerService for the app host
 //! (`android-16.0.0_r1`): Data Saver (restrict background) and the uids'
 //! policies, as `readPolicyAL` read them from `netpolicy.xml` at the start
-//! (else from `default_restrict_background_data`). Nothing changes them
+//! (else from `default_restrict_background_data`), and the network
+//! policies, of which a device without carriers has none unless the file
+//! holds some (reading those is #1711). Nothing changes them
 //! while the app host runs, so the listeners apps register are never told
 //! of a change. Battery saver's Data Saver policy is #1489.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
@@ -21,6 +23,11 @@ const ACCESS_NETWORK_STATE: &str = "android.permission.ACCESS_NETWORK_STATE";
 const CONNECTIVITY_INTERNAL: &str = "android.permission.CONNECTIVITY_INTERNAL";
 const OBSERVE_NETWORK_POLICY: &str = "android.permission.OBSERVE_NETWORK_POLICY";
 const NETWORK_STACK: &str = "android.permission.NETWORK_STACK";
+const READ_PHONE_STATE: &str = "android.permission.READ_PHONE_STATE";
+const READ_PRIVILEGED_PHONE_STATE: &str = "android.permission.READ_PRIVILEGED_PHONE_STATE";
+/// `AppOpsManager.OP_READ_PHONE_STATE`, `MODE_ALLOWED`.
+const OP_READ_PHONE_STATE: i32 = 51;
+const MODE_ALLOWED: i32 = 0;
 const MAINLINE_NETWORK_STACK: &str = "android.permission.MAINLINE_NETWORK_STACK";
 /// `NetworkPolicyManager.POLICY_*`.
 const POLICY_NONE: i32 = 0;
@@ -47,6 +54,8 @@ fn is_app(uid: i32) -> bool {
 struct Policy {
     restrict_background: bool,
     uid_policy: BTreeMap<i32, i32>,
+    /// How many network policies (`<network-policy>`) it holds.
+    network_policies: usize,
 }
 
 impl Policy {
@@ -56,10 +65,12 @@ impl Policy {
         let mut p = Policy {
             restrict_background: version >= VERSION_ADDED_RESTRICT_BACKGROUND && root.bool("restrictBackground")?.unwrap_or(false),
             uid_policy: BTreeMap::new(),
+            network_policies: 0,
         };
         let mut allowed = Vec::new();
         for e in root.children().chain(elements[1..].iter()) {
             match e.name.as_str() {
+                "network-policy" => p.network_policies += 1,
                 "uid-policy" => p.set(e.int("uid")?.unwrap_or(0), e.int("policy")?.unwrap_or(0)),
                 // Of user 0.
                 "app-policy" => p.set(e.int("appId")?.unwrap_or(0), e.int("policy")?.unwrap_or(0)),
@@ -129,6 +140,7 @@ impl NetworkPolicy {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Policy {
                 restrict_background: self.host.inputs()?.settings.get(Table::Global, "default_restrict_background_data").as_deref() == Some("1"),
                 uid_policy: BTreeMap::new(),
+                network_policies: 0,
             },
             Err(e) => return Err(state(e.to_string())),
         };
@@ -136,6 +148,26 @@ impl NetworkPolicy {
             return Err(self.host.unimplemented_named("netpolicy", "battery saver's Data Saver (#1489)"));
         }
         Ok(self.policy.get_or_init(|| policy))
+    }
+
+    /// `getNetworkPolicies`: MANAGE_NETWORK_POLICY, then
+    /// READ_PRIVILEGED_PHONE_STATE, else READ_PHONE_STATE with its app op
+    /// (none if denied); no carrier adds a policy without telephony.
+    fn network_policies(&self, uid: i32, package: Option<&str>) -> Result<usize, Exception> {
+        self.enforce(uid, MANAGE_NETWORK_POLICY)?;
+        if self.host.check_permission(Some(READ_PRIVILEGED_PHONE_STATE), uid)? != 0 {
+            if self.host.check_permission(Some(READ_PHONE_STATE), uid)? != 0 {
+                return Err(Exception::security(format!("NetworkPolicy: Neither user {uid} nor current process has {READ_PHONE_STATE}.")));
+            }
+            if super::appops_service::note(&self.host, OP_READ_PHONE_STATE, uid, package)? != MODE_ALLOWED {
+                return Ok(0);
+            }
+        }
+        let n = self.policy()?.network_policies;
+        if n > 0 {
+            return Err(self.host.unimplemented_named("netpolicy", "network policies of netpolicy.xml (#1711)"));
+        }
+        Ok(0)
     }
 
     /// `@EnforcePermission`.
@@ -184,6 +216,13 @@ impl Service for NetworkPolicy {
                 self.enforce_any(uid, &[NETWORK_STACK, MAINLINE_NETWORK_STACK])
                     .and_then(|()| self.policy())
                     .map(|policy| np::write_get_restrict_background_status_reply(&mut p, policy.status(a.uid)))
+            }
+            np::GET_NETWORK_POLICIES => {
+                let a = np::GetNetworkPolicies::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.network_policies(uid, a.calling_package.as_deref()).map(|_| {
+                    p.write_no_exception();
+                    p.write_i32(0);
+                })
             }
             np::GET_UID_POLICY => {
                 let a = np::GetUidPolicy::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -252,7 +291,8 @@ mod tests {
         let p = Policy::read(&aim_android_xml::read_sequence(image).unwrap()).unwrap();
         assert!(!p.restrict_background);
         assert_eq!(p.uid_policy, BTreeMap::from([(10103, 4), (10150, 4), (10191, 4), (10212, 4)]));
-        let off = Policy { restrict_background: false, uid_policy: BTreeMap::new() };
+        assert_eq!(p.network_policies, 0);
+        let off = Policy { restrict_background: false, uid_policy: BTreeMap::new(), network_policies: 0 };
         assert_eq!(off.status(10300), RESTRICT_BACKGROUND_STATUS_DISABLED);
     }
 }
