@@ -47,6 +47,8 @@ const RESULT_CANCELED: i32 = 0;
 const TOP_RESUMED_STATE_LOSS_TIMEOUT: Duration = Duration::from_millis(500);
 /// `PackageManager.MATCH_DEFAULT_ONLY`.
 const MATCH_DEFAULT_ONLY: i64 = 0x1_0000;
+/// `SaferIntentUtils.IMPLICIT_INTENTS_ONLY_MATCH_EXPORTED_COMPONENTS`.
+const IMPLICIT_INTENTS_ONLY_MATCH_EXPORTED_COMPONENTS: i64 = 229_362_273;
 /// `ActivityManager.FINISH_TASK_WITH_ROOT_ACTIVITY`, `FINISH_TASK_WITH_ACTIVITY`.
 const FINISH_TASK_WITH_ROOT_ACTIVITY: i32 = 1;
 const FINISH_TASK_WITH_ACTIVITY: i32 = 2;
@@ -509,9 +511,12 @@ impl AppHost {
         }
         // `ActivityTaskSupervisor.resolveIntent`.
         let (_, resolution) = self.packages()?;
+        let only_exported = self.change_enabled(IMPLICIT_INTENTS_ONLY_MATCH_EXPORTED_COMPONENTS, uid)?;
+        let report = std::cell::RefCell::new(Vec::new());
         let found = resolution
-            .resolve_intent(&intent.intent, args.resolved_type.as_deref(), super::STOCK_PM_FLAGS | MATCH_DEFAULT_ONLY, uid / PER_USER_RANGE as i32, uid)
+            .resolve_intent_for_start(&intent.intent, args.resolved_type.as_deref(), super::STOCK_PM_FLAGS | MATCH_DEFAULT_ONLY, uid / PER_USER_RANGE as i32, uid, only_exported, &report)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("resolveIntent: {e:?}")))?;
+        self.report_unsafe_intent(Some(caller_pid), &intent, report.into_inner());
         let info = match found.map(|r| r.info) {
             Some(crate::package::component_resolver::Info::Activity(info)) => info,
             _ => return Ok(if intent.intent.component.is_some() { START_CLASS_NOT_FOUND } else { START_INTENT_NOT_RESOLVED }),

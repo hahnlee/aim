@@ -11,6 +11,7 @@
 //! (#727), other profiles and persistent preferred activities (#715).
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -89,6 +90,17 @@ const FLAG_SYSTEM_USER_ONLY: i32 = 0x2000_0000;
 const PRIVATE_FLAG_INSTANT: i32 = 1 << 7;
 /// `UserHandle.USER_SYSTEM`.
 const USER_SYSTEM: i32 = 0;
+
+/// `UnsafeIntentEventReported`'s event types (`SaferIntentUtils`).
+pub const UNSAFE_INTENT_NULL_ACTION_MATCH: i32 = 1;
+pub const UNSAFE_INTENT_INTERNAL_NON_EXPORTED_COMPONENT_MATCH: i32 = 2;
+pub const UNSAFE_INTENT_EXPLICIT_INTENT_FILTER_UNMATCH: i32 = 3;
+
+/// Where a resolution for a start reports its unsafe intent events
+/// (`IntentArgs.reportEvent`): each event and whether the intent was
+/// blocked. None for a resolution not for a start.
+pub type UnsafeIntentReport<'a> = Option<&'a RefCell<Vec<(i32, bool)>>>;
+
 
 /// Resolution over one version of the state.
 #[derive(Clone)]
@@ -292,11 +304,12 @@ impl Resolution {
         calling_uid: i32,
     ) -> Result<Vec<ResolveInfo>> {
         self.query_activities_with_splits(intent, resolved_type, flags | MATCH_QUARANTINED_COMPONENTS,
-            user, calling_uid, true)
+            user, calling_uid, true, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn query_activities_with_splits(&self, intent: &Intent, resolved_type: Option<&str>, flags: i64,
-        user: i32, calling_uid: i32, allow_dynamic_splits: bool) -> Result<Vec<ResolveInfo>> {
+        user: i32, calling_uid: i32, allow_dynamic_splits: bool, report: UnsafeIntentReport<'_>) -> Result<Vec<ResolveInfo>> {
         if !self.user_exists(user) {
             return Ok(Vec::new());
         }
@@ -323,7 +336,7 @@ impl Resolution {
                     .query(calling_uid)
                     .activity_info(comp, flags, calling_uid, user);
                 if let Some(ai) = thrown(found)?
-                    && !self.block_activity(&ai, comp, flags, instant_pkg, calling_uid, user)?
+                    && !self.block_activity(&ai, comp, flags, instant_pkg, calling_uid, user, None)?
                 {
                     let mut ri = ResolveInfo::new(Info::Activity(ai));
                     ri.user_handle = user;
@@ -334,21 +347,24 @@ impl Resolution {
                         resolved_type,
                         calling_uid,
                         &mut list,
+                        report,
                     )?;
                 }
                 list
             }
-            None => self.query_activities_body(
-                intent,
-                resolved_type,
-                flags,
-                calling_uid,
-                user,
-                package,
-            )?,
+            None => {
+                let list = self.query_activities_body(
+                    intent,
+                    resolved_type,
+                    flags,
+                    calling_uid,
+                    user,
+                    package,
+                )?;
+                self.block_null_action(Kind::Activity, intent, calling_uid, &list, report);
+                list
+            }
         };
-        // blockNullAction only reports unless the block_null_action_intents
-        // flag is on, which it is not on this image.
         if let Some(original) = original {
             self.enforce_intent_filter_matching(
                 Kind::Activity,
@@ -356,12 +372,16 @@ impl Resolution {
                 resolved_type,
                 calling_uid,
                 &mut list,
+                report,
             )?;
         }
         self.apply_post_resolution_filter(list, instant_pkg, allow_dynamic_splits, calling_uid, user, intent)
     }
 
-    /// The explicit component's instant-app and visibility blocks.
+    /// The explicit component's instant-app and visibility blocks; for a
+    /// start (`start`: the intent's package), visibility blocks only a
+    /// component not exported to another app.
+    #[allow(clippy::too_many_arguments)]
     fn block_activity(
         &self,
         ai: &ActivityInfo,
@@ -370,6 +390,7 @@ impl Resolution {
         instant_pkg: Option<&str>,
         calling_uid: i32,
         user: i32,
+        start: Option<Option<&str>>,
     ) -> Result<bool> {
         let caller_instant = instant_pkg.is_some();
         let target_instant = ai.info.application_info.private_flags & PRIVATE_FLAG_INSTANT != 0;
@@ -380,7 +401,14 @@ impl Resolution {
         let block_instant = instant_pkg != Some(comp.package.as_str())
             && ((flags & MATCH_INSTANT == 0 && !caller_instant && target_instant)
                 || (flags & MATCH_VISIBLE_TO_INSTANT_APP_ONLY != 0 && caller_instant && hidden));
-        let block_normal = !target_instant
+        // `resolveForStartNonExported`: `isCallerSameApp` of the intent's
+        // package.
+        let start_non_exported = start.is_some_and(|package| {
+            !ai.info.exported
+                && !package.and_then(|p| self.state.packages.get(p)).is_some_and(|ps| ps.app_id == app_id(calling_uid))
+        });
+        let block_normal = (start.is_none() || start_non_exported)
+            && !target_instant
             && !caller_instant
             && should_filter_application(
                 &self.state,
@@ -576,7 +604,7 @@ impl Resolution {
     fn find_install_failure_activity(&self, package: &str, caller: i32, user: i32) -> Result<Option<ComponentName>> {
         let intent = Intent { action: Some("android.intent.action.INSTALL_FAILURE".into()),
             package: Some(package.into()), ..Default::default() };
-        let matches = self.query_activities_with_splits(&intent, None, 0, user, caller, false)?;
+        let matches = self.query_activities_with_splits(&intent, None, 0, user, caller, false, None)?;
         Ok(matches.into_iter().find_map(|result| match result.info {
             Info::Activity(activity) if activity.info.split_name.is_none() => Some(ComponentName {
                 package: package.into(), class: activity.info.item.name?,
@@ -586,7 +614,8 @@ impl Resolution {
 
     /// `SaferIntentUtils.enforceIntentFilterMatching` with intent matching
     /// flags (`enable_intent_matching_flags` is on): a component that asks
-    /// for it drops an intent none of its filters match.
+    /// for it drops an intent none of its filters match; for a start, an
+    /// intent with no action or one its filters do not match is reported.
     fn enforce_intent_filter_matching(
         &self,
         kind: Kind,
@@ -594,6 +623,7 @@ impl Resolution {
         resolved_type: Option<&str>,
         calling_uid: i32,
         list: &mut Vec<ResolveInfo>,
+        report: UnsafeIntentReport<'_>,
     ) -> Result<()> {
         /// `ParsedMainComponentImpl.INTENT_MATCHING_FLAGS_*`.
         const NONE: i32 = 1;
@@ -607,12 +637,12 @@ impl Resolution {
             if failure.is_some() {
                 return false;
             }
-            let Info::Activity(ai) = &ri.info else {
-                return true;
+            let uid = match &ri.info {
+                Info::Activity(ai) => ai.info.application_info.uid,
+                Info::Service(si) => si.info.application_info.uid,
+                _ => return true,
             };
-            if app_id(ai.info.application_info.uid) == app_id(calling_uid)
-                && user_id(ai.info.application_info.uid) == user_id(calling_uid)
-            {
+            if app_id(uid) == app_id(calling_uid) && user_id(uid) == user_id(calling_uid) {
                 return true;
             }
             let (package, class) = ri.component();
@@ -624,9 +654,7 @@ impl Resolution {
             }
             let flags = main.intent_matching_flags;
             let enforce = flags != 0 && flags & NONE != NONE && flags & ENFORCE_INTENT_FILTER != 0;
-            if !enforce {
-                return true;
-            }
+            let allow_null_action = flags & ALLOW_NULL_ACTION == ALLOW_NULL_ACTION;
             let null_action = intent.action.is_none();
             let matches = main.component.intents.iter().any(|i| {
                 if failure.is_some() {
@@ -650,12 +678,37 @@ impl Resolution {
                         |matched| matched >= 0,
                     )
             });
-            !((null_action && flags & ALLOW_NULL_ACTION == 0) || !matches)
+            let block = enforce && ((null_action && !allow_null_action) || !matches);
+            if let Some(report) = report {
+                if null_action {
+                    report.borrow_mut().push((UNSAFE_INTENT_NULL_ACTION_MATCH, block));
+                } else if !matches {
+                    report.borrow_mut().push((UNSAFE_INTENT_EXPLICIT_INTENT_FILTER_UNMATCH, block));
+                }
+            }
+            !block
         });
         if let Some(error) = failure {
             return Err(ResolutionError::UriMatching(error));
         }
         Ok(())
+    }
+
+    /// `SaferIntentUtils.blockNullAction` of an implicit intent: for a
+    /// start, each component with filters matched by an intent with no
+    /// action is reported; none is blocked, as the
+    /// `block_null_action_intents` flag is off on this image.
+    fn block_null_action(&self, kind: Kind, intent: &Intent, calling_uid: i32, list: &[ResolveInfo], report: UnsafeIntentReport<'_>) {
+        let Some(report) = report else { return };
+        if intent.action.is_some() || matches!(app_id(calling_uid), 0 | SYSTEM_UID) {
+            return;
+        }
+        for ri in list.iter().rev() {
+            let (package, class) = ri.component();
+            if self.main_component(kind, package, class).is_some_and(|m| !m.component.intents.is_empty()) {
+                report.borrow_mut().push((UNSAFE_INTENT_NULL_ACTION_MATCH, false));
+            }
+        }
     }
 
     /// A component by kind, package and class (`infoToComponent`).
@@ -876,6 +929,19 @@ impl Resolution {
         user: i32,
         calling_uid: i32,
     ) -> Result<Vec<ResolveInfo>> {
+        self.query_services(intent, resolved_type, flags, user, calling_uid, None)
+    }
+
+    /// `queryIntentServicesInternal`, reporting to `report` for a start.
+    fn query_services(
+        &self,
+        intent: &Intent,
+        resolved_type: Option<&str>,
+        flags: i64,
+        user: i32,
+        calling_uid: i32,
+        report: UnsafeIntentReport<'_>,
+    ) -> Result<Vec<ResolveInfo>> {
         if !self.user_exists(user) {
             return Ok(Vec::new());
         }
@@ -923,6 +989,7 @@ impl Resolution {
                             resolved_type,
                             calling_uid,
                             &mut list,
+                            report,
                         )?;
                     }
                 }
@@ -935,12 +1002,14 @@ impl Resolution {
                 } else {
                     let found =
                         self.find(Kind::Service, intent, resolved_type, flags, user, package)?;
-                    self.post_filter_others(
+                    let list = self.post_filter_others(
                         found.unwrap_or_default(),
                         instant_pkg,
                         calling_uid,
                         user,
-                    )?
+                    )?;
+                    self.block_null_action(Kind::Service, intent, calling_uid, &list, report);
+                    list
                 }
             }
         };
@@ -951,6 +1020,7 @@ impl Resolution {
                 resolved_type,
                 calling_uid,
                 &mut list,
+                report,
             )?;
         }
         Ok(list)
@@ -1015,12 +1085,37 @@ impl Resolution {
         user: i32,
         calling_uid: i32,
     ) -> Result<Option<ResolveInfo>> {
+        self.resolve_service_reporting(intent, resolved_type, flags, user, calling_uid, None)
+    }
+
+    /// `PackageManagerInternal.resolveService` for a start of a service
+    /// by `calling_uid`: its unsafe intent events reported to `report`.
+    pub fn resolve_service_for_start(
+        &self,
+        intent: &Intent,
+        resolved_type: Option<&str>,
+        flags: i64,
+        user: i32,
+        calling_uid: i32,
+        report: &RefCell<Vec<(i32, bool)>>,
+    ) -> Result<Option<ResolveInfo>> {
+        self.resolve_service_reporting(intent, resolved_type, flags, user, calling_uid, Some(report))
+    }
+
+    fn resolve_service_reporting(
+        &self,
+        intent: &Intent,
+        resolved_type: Option<&str>,
+        flags: i64,
+        user: i32,
+        calling_uid: i32,
+        report: UnsafeIntentReport<'_>,
+    ) -> Result<Option<ResolveInfo>> {
         if !self.user_exists(user) {
             return Ok(None);
         }
         let flags = self.update_flags_for_resolve(flags, user, calling_uid, false, false, false)?;
-        let mut list =
-            self.query_intent_services(intent, resolved_type, flags, user, calling_uid)?;
+        let mut list = self.query_services(intent, resolved_type, flags, user, calling_uid, report)?;
         Ok((!list.is_empty()).then(|| list.swap_remove(0)))
     }
 
@@ -1077,6 +1172,7 @@ impl Resolution {
                             resolved_type,
                             calling_uid,
                             &mut list,
+                            None,
                         )?;
                     }
                 }
@@ -1117,6 +1213,7 @@ impl Resolution {
                 resolved_type,
                 calling_uid,
                 &mut list,
+                None,
             )?;
         }
         self.apply_post_resolution_filter(list, instant_pkg, false, calling_uid, user, intent)
