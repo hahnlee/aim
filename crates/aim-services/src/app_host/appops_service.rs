@@ -2033,6 +2033,14 @@ impl Service for AppOps {
                 }
                 appops::write_start_watching_mode_with_flags_reply(&mut p);
             }
+            appops::STOP_WATCHING_MODE => {
+                // `mModeWatchers.remove(callback.asBinder())`.
+                let args = appops::StopWatchingMode::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Some(callback) = args.callback {
+                    self.watchers.lock().unwrap().retain(|(_, watcher)| *watcher != callback);
+                }
+                appops::write_stop_watching_mode_reply(&mut p);
+            }
             appops::START_WATCHING_ACTIVE => {
                 let args = appops::StartWatchingActive::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 if let Err(e) = self.start_watching(Watch::Active, caller, args.ops, args.callback) {
