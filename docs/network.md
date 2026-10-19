@@ -261,9 +261,10 @@ sockets. What it takes, below the original stack:
   asking once); without it the HAL reports a hidden network. On the guest
   side the framework already requires ACCESS_FINE_LOCATION for scan
   results.
-- **Features and HAL declarations.** The image already declares
-  `android.hardware.wifi` (and Direct and Passpoint, which ours would not
-  back: they go); the vintf manifest gains the Wi-Fi and supplicant HALs.
+- **Features and HAL declarations.** The image declares
+  `android.hardware.wifi`; Direct and Passpoint, which ours would not
+  back, are removed (`image/overlay.toml`); the vintf manifest gains the
+  Wi-Fi and supplicant HALs.
   EthernetService keeps `eth0` for wired Macs.
 
 ## Open
