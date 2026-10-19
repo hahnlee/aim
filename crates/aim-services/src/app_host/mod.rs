@@ -235,8 +235,12 @@ const PERSISTENT_MASK: i32 = 0x1 | 0x8;
 /// `PackageManager.GET_URI_PERMISSION_PATTERNS`, `MATCH_DIRECT_BOOT_AUTO`.
 const GET_URI_PERMISSION_PATTERNS: i64 = 0x800;
 const MATCH_DIRECT_BOOT_AUTO: i64 = 0x1000_0000;
-/// `ActivityManager.PROCESS_STATE_TOP`.
+/// `ActivityManager.PROCESS_STATE_TOP`, `PROCESS_STATE_NONEXISTENT`.
 const PROCESS_STATE_TOP: i32 = 2;
+const PROCESS_STATE_NONEXISTENT: i32 = 20;
+/// `AppOpsManager.OP_GET_USAGE_STATS`.
+const OP_GET_USAGE_STATS: i32 = 43;
+const PACKAGE_USAGE_STATS: &str = "android.permission.PACKAGE_USAGE_STATS";
 /// `Build.VERSION_CODES.P`: from it, apps get `Build.UNKNOWN` as the serial.
 const P: i32 = 28;
 
@@ -331,6 +335,22 @@ struct App {
     /// milliseconds (`ProcessProfileRecord.mLastMemInfo`,
     /// `mLastMemInfoTime`).
     last_mem_info: Option<(i64, memory_info::ProcessMemoryInfo)>,
+}
+
+/// `getPackageProcessState` over the processes, each its package (its
+/// package list), its package dependencies and the state set on it: the
+/// lowest state of one whose package list or dependencies hold `package`.
+fn package_process_state<'a>(
+    processes: impl Iterator<Item = (&'a str, &'a [String], i32)>,
+    package: Option<&str>,
+) -> i32 {
+    let Some(package) = package else {
+        return PROCESS_STATE_NONEXISTENT;
+    };
+    processes
+        .filter(|(p, deps, _)| *p == package || deps.iter().any(|d| d == package))
+        .map(|(_, _, state)| state)
+        .fold(PROCESS_STATE_NONEXISTENT, i32::min)
 }
 
 /// `Process.SYSTEM_UID`.
@@ -2042,6 +2062,53 @@ impl AppHost {
             }
         }
         Ok(())
+    }
+
+    /// `getPackageProcessState`: the lowest state a process running
+    /// `package` or depending on it was set to (`getSetProcState`), for a
+    /// caller allowed usage stats or holding PACKAGE_USAGE_STATS. The app
+    /// host sets each process it binds to PROCESS_STATE_TOP; a process not
+    /// yet bound, or one running an isolated entry point, was set none.
+    fn package_process_state(
+        &self,
+        call: &Call<'_>,
+        package: Option<&str>,
+        calling_package: Option<&str>,
+    ) -> Result<i32, Exception> {
+        let uid = call.sender_euid as i32;
+        if !self.has_usage_stats_permission(uid, calling_package)?
+            && self.check_permission(Some(PACKAGE_USAGE_STATS), uid)? != 0
+        {
+            return Err(Exception::security(format!(
+                "Permission Denial: getPackageProcessState from pid={}, uid={uid} requires {PACKAGE_USAGE_STATS}",
+                call.sender_pid
+            )));
+        }
+        let apps = self.apps.lock().unwrap();
+        let processes = apps.values().map(|a| {
+            let set = if a.thread.is_some() && a.entry_point.is_none() {
+                PROCESS_STATE_TOP
+            } else {
+                PROCESS_STATE_NONEXISTENT
+            };
+            (a.package.as_str(), a.package_deps.as_slice(), set)
+        });
+        Ok(package_process_state(processes, package))
+    }
+
+    /// `hasUsageStatsPermission`: OP_GET_USAGE_STATS noted for the caller's
+    /// package, by default PACKAGE_USAGE_STATS.
+    fn has_usage_stats_permission(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+    ) -> Result<bool, Exception> {
+        match appops_service::note(self, OP_GET_USAGE_STATS, uid, package)? {
+            appops_service::MODE_DEFAULT => {
+                Ok(self.check_permission(Some(PACKAGE_USAGE_STATS), uid)? == 0)
+            }
+            mode => Ok(mode == appops_service::MODE_ALLOWED),
+        }
     }
 
     /// `isBackgroundRestricted` of the caller's own `package`: whether its
@@ -4042,6 +4109,22 @@ impl Service for Activity {
                 am::write_is_user_a_monkey_reply(&mut p, false);
                 Ok(p)
             }
+            am::GET_PACKAGE_PROCESS_STATE => {
+                let a = am::GetPackageProcessState::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(
+                    self.0
+                        .package_process_state(
+                            call,
+                            a.package_name.as_deref(),
+                            a.calling_package.as_deref(),
+                        )
+                        .map(|state| {
+                            let mut p = Parcel::new();
+                            am::write_get_package_process_state_reply(&mut p, state);
+                            p
+                        }),
+                )
+            }
             am::ADD_PACKAGE_DEPENDENCY => {
                 let a = am::AddPackageDependency::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply(
@@ -4701,6 +4784,22 @@ mod tests {
         uids.used.extend(99_000..=99_999);
         assert_eq!(uids.allocate(0), None);
         assert_eq!(uids.allocate(10), Some(1_099_002));
+    }
+
+    #[test]
+    fn a_package_s_state_is_its_lowest_process_s() {
+        let deps = vec!["com.lib".to_string()];
+        let processes = [
+            ("com.a", &[][..], PROCESS_STATE_NONEXISTENT),
+            ("com.b", &deps[..], PROCESS_STATE_TOP),
+            ("com.c", &[][..], 6),
+        ];
+        let state = |package| package_process_state(processes.iter().copied(), package);
+        assert_eq!(state(Some("com.lib")), PROCESS_STATE_TOP);
+        assert_eq!(state(Some("com.c")), 6);
+        assert_eq!(state(Some("com.a")), PROCESS_STATE_NONEXISTENT);
+        assert_eq!(state(Some("com.none")), PROCESS_STATE_NONEXISTENT);
+        assert_eq!(state(None), PROCESS_STATE_NONEXISTENT);
     }
 
     #[test]
