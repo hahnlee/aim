@@ -588,7 +588,7 @@ fn back_off(
     } else if started.is_none_or(|t| now > t + reset) {
         (1, min)
     } else {
-        (count, (delay * SERVICE_RESTART_DURATION_FACTOR).max(min))
+        (count, delay.checked_mul(SERVICE_RESTART_DURATION_FACTOR).unwrap_or(Duration::MAX).max(min))
     }
 }
 
@@ -669,10 +669,11 @@ impl State {
     fn stagger(&self, token: Binder, mut at: Instant) -> Instant {
         loop {
             let near = self.records.iter().filter(|r| r.token != token).filter_map(|r| r.next_restart_time.filter(|_| r.app.is_none())).find(|t| {
-                at + SERVICE_MIN_RESTART_TIME_BETWEEN > *t && at < *t + SERVICE_MIN_RESTART_TIME_BETWEEN
+                at.checked_add(SERVICE_MIN_RESTART_TIME_BETWEEN).is_none_or(|a| a > *t)
+                    && t.checked_add(SERVICE_MIN_RESTART_TIME_BETWEEN).is_none_or(|b| at < b)
             });
-            match near {
-                Some(t) => at = t + SERVICE_MIN_RESTART_TIME_BETWEEN,
+            match near.and_then(|t| t.checked_add(SERVICE_MIN_RESTART_TIME_BETWEEN)) {
+                Some(later) => at = later,
                 None => return at,
             }
         }
@@ -1692,9 +1693,17 @@ impl AppHost {
             for c in state.connections.iter().filter(|c| c.service == token) {
                 connected(&c.conn, &package, &class, None, true);
             }
-            match delay {
-                Some(delay) => {
-                    let at = state.stagger(token, now + delay);
+            // A back-off past what an `Instant` holds (a service that kept
+            // crashing) is a restart that never comes.
+            match delay.map(|d| (d, now.checked_add(d))) {
+                Some((delay, None)) => {
+                    let r = state.record(token).unwrap();
+                    r.restart_delay = delay;
+                    r.next_restart_time = None;
+                    eprintln!("app host: not restarting crashed service {package}/{class}: its back-off is {delay:?}");
+                }
+                Some((_, Some(at))) => {
+                    let at = state.stagger(token, at);
                     let r = state.record(token).unwrap();
                     r.restart_delay = at - now;
                     r.next_restart_time = Some(at);
@@ -2516,6 +2525,9 @@ mod tests {
         assert_eq!(back_off(1, min * 4, 0, soon, min, reset, now), (1, min * 16));
         assert_eq!(back_off(3, min * 16, 0, Some(now - reset * 2), min, reset, now), (1, min));
         assert_eq!(back_off(1, min, 3, soon, min, reset, now), (1, BOUND_SERVICE_CRASH_RESTART_DURATION * 2));
+        // A service that keeps crashing soon after its start backs off
+        // without overflowing.
+        assert_eq!(back_off(30, Duration::MAX / 2, 1, soon, min, reset, now), (30, Duration::MAX));
     }
 
     /// `RunningServiceInfo.writeToParcel`.
