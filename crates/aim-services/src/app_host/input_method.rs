@@ -140,6 +140,19 @@ fn objects_after(r: &Reader<'_>) -> Vec<usize> {
     found
 }
 
+impl InputMethodManager {
+    /// `enforceCallingOrSelfPermission(INTERACT_ACROSS_USERS_FULL)`.
+    fn enforce_across_users(&self, uid: i32) -> Result<(), aim_binder_host::parcel::Exception> {
+        const INTERACT_ACROSS_USERS_FULL: &str = "android.permission.INTERACT_ACROSS_USERS_FULL";
+        if self.host.check_permission(Some(INTERACT_ACROSS_USERS_FULL), uid)? != 0 {
+            return Err(aim_binder_host::parcel::Exception::security(format!(
+                "Neither user {uid} nor current process has {INTERACT_ACROSS_USERS_FULL}."
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl Service for InputMethodManager {
     fn descriptor(&self) -> &str {
         imm::DESCRIPTOR
@@ -169,6 +182,30 @@ impl Service for InputMethodManager {
                 call.data.enforce_interface(imm::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
                 let mut p = Parcel::new();
                 imm::write_show_soft_input_reply(&mut p, false);
+                Ok(p)
+            }
+            // The device has no Android input method: to Android it is
+            // one with a physical keyboard, the Mac's input method behind
+            // it (the owner's choice, 2026-10-19). The lists are empty,
+            // asked across users with INTERACT_ACROSS_USERS_FULL.
+            imm::GET_INPUT_METHOD_LIST | imm::GET_ENABLED_INPUT_METHOD_LIST | imm::GET_INPUT_METHOD_LIST_LEGACY | imm::GET_ENABLED_INPUT_METHOD_LIST_LEGACY => {
+                let r = &mut call.data;
+                r.enforce_interface(imm::DESCRIPTOR).map_err(|_| BAD_VALUE)?;
+                let user = r.read_i32().map_err(|_| BAD_VALUE)?;
+                if user != (call.sender_euid / super::PER_USER_RANGE) as i32
+                    && let Err(e) = self.enforce_across_users(call.sender_euid as i32)
+                {
+                    return reply(Err(e));
+                }
+                let mut p = Parcel::new();
+                p.write_no_exception();
+                if matches!(call.code, imm::GET_INPUT_METHOD_LIST | imm::GET_ENABLED_INPUT_METHOD_LIST) {
+                    // `InputMethodInfoSafeList.empty()`: a null blob.
+                    p.write_i32(1);
+                    p.write_i32(-1);
+                } else {
+                    p.write_i32(0);
+                }
                 Ok(p)
             }
             imm::GET_IME_TRACKER_SERVICE => {
