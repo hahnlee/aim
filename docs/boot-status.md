@@ -84,7 +84,9 @@ the Linux layer's socket accounting fills): Maps gets past its terms
 (WebView) and its sign-in page to its Explore screen, whose map draws no
 tiles (#1743); the AOSP Camera app fails on a Mac without a camera, which
 no longer declares one (#646). Gmail draws its welcome page and its
-add-an-address page; Chrome draws its first-run screen with its renderer in an
+add-an-address page; Calendar its month view (Play services' account
+sign-in starts from its add-account session and stops at a forwarded
+result, #1485); Chrome draws its first-run screen with its renderer in an
 isolated process, and past it starts its tabbed activity, which publishes
 its dynamic shortcut, draws its new tab page with its Discover feed,
 and opens and draws web pages (its renderers in isolated processes);

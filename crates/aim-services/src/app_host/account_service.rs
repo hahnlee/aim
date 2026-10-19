@@ -40,6 +40,9 @@ use crate::package::query::Query;
 use crate::package::settings::Signatures;
 
 const SYSTEM_UID: i32 = 1000;
+/// `UserManager.DISALLOW_MODIFY_ACCOUNTS`; `AccountManager.ERROR_CODE_USER_RESTRICTED`.
+const DISALLOW_MODIFY_ACCOUNTS: &str = "no_modify_accounts";
+const ERROR_CODE_USER_RESTRICTED: i32 = 100;
 /// `AccountManager.VISIBILITY_*`.
 const VISIBILITY_UNDEFINED: i32 = 0;
 const VISIBILITY_VISIBLE: i32 = 1;
@@ -225,7 +228,7 @@ fn signatures_match_exactly(a: &Signatures, b: &Signatures) -> bool {
 
 /// `PackageManagerInternal.hasSignatureCapability(server, client, AUTH)`:
 /// `checkCapability` or `hasAncestorOrSelf`.
-fn has_auth_capability(state: &State, server_uid: i32, client_uid: i32) -> bool {
+pub(super) fn has_auth_capability(state: &State, server_uid: i32, client_uid: i32) -> bool {
     let (Some(server), Some(client)) = (signing(state, server_uid), signing(state, client_uid)) else {
         return false;
     };
@@ -706,6 +709,7 @@ impl AccountManager {
             return Err(Exception::illegal_argument("response is null"));
         };
         let kind = a.account_type.ok_or_else(|| Exception::illegal_argument("accountType is null"))?;
+        let kind_name = kind.clone();
         let user = user_of(uid);
         let response = self.host.process.strong(response);
         let respond = |accounts: Vec<Account>| {
@@ -736,20 +740,59 @@ impl AccountManager {
             respond(self.accounts_from_cache(&accounts, user, Some(&kind), uid, package.as_deref(), false)?);
             return Ok(());
         }
-        let authenticators = self.authenticators(user)?;
-        let component = authenticators.iter().find(|au| au.description.kind == kind).map(|au| (au.description.package.clone(), au.class.clone()));
         let me = self.me.clone();
         let accounts_of_type: super::account_session::AccountsOfType = Box::new(move || {
             let me = me.upgrade().ok_or("account service gone")?;
             let accounts = me.user_accounts(user).map_err(|e| Failure::exception(e).message)?;
             me.accounts_from_cache(&accounts, user, Some(&kind), uid, package.as_deref(), false).map_err(|e| e.message)
         });
-        let session = super::account_session::FeaturesSession::new(self.host.clone(), response, features, accounts_of_type);
+        let kind = super::account_session::Kind { account_type: kind_name, user, expect_activity_launch: false, strip_auth_token: true };
+        let session = super::account_session::Session::new(self.host.clone(), response, kind, super::account_session::Work::features(features, accounts_of_type));
+        self.bind_session(&session, user)
+    }
+
+    /// `bindToAuthenticator` of `session`'s type for `user`.
+    fn bind_session(&self, session: &super::account_session::Session, user: i32) -> Result<(), Exception> {
+        let authenticators = self.authenticators(user)?;
+        let component = authenticators.iter().find(|au| au.description.kind == session.account_type()).map(|au| (au.description.package.clone(), au.class.clone()));
         if component.is_none() {
-            eprintln!("app host: accounts: there is no authenticator for the type, bailing out");
+            eprintln!("app host: accounts: there is no authenticator for {}, bailing out", session.account_type());
         }
-        session.bind(component.as_ref().map(|(p, c)| (p.as_str(), c.as_str())), user);
+        session.bind(component.as_ref().map(|(p, c)| (p.as_str(), c.as_str())));
         Ok(())
+    }
+
+    /// `addAccount`: the user may modify accounts and accounts of the
+    /// type, then a session asking the type's authenticator to add one
+    /// (`addAccountAndLogMetrics`), with the caller's uid and pid in the
+    /// options.
+    fn add_account(&self, uid: i32, pid: i32, a: am::AddAccount<super::kept::RawBundle>) -> Result<(), Exception> {
+        let Some(aim_binder_host::parcel::Binder::Handle(response)) = a.response else {
+            return Err(Exception::illegal_argument("response is null"));
+        };
+        let kind = a.account_type.ok_or_else(|| Exception::illegal_argument("accountType is null"))?;
+        let user = user_of(uid);
+        let response = self.host.process.strong(response);
+        let error = |code: i32, message: &str| {
+            let mut p = Parcel::new();
+            aim_service_aidl::android_accounts_iaccountmanagerresponse::OnError { error_code: code, error_message: Some(message.into()) }.write(&mut p);
+            let _ = response.transact(aim_service_aidl::android_accounts_iaccountmanagerresponse::ON_ERROR, &p, true);
+        };
+        // `canUserModifyAccounts`, `canUserModifyAccountsForType` (no device
+        // policy disables a type without admins); `showCantAddAccount`
+        // starts an activity the app host does not run.
+        if !self.is_profile_owner()? && self.host.user_restrictions()?.contains(DISALLOW_MODIFY_ACCOUNTS) {
+            error(ERROR_CODE_USER_RESTRICTED, "User is not allowed to add an account!");
+            return Err(self.host.unimplemented_named("account", "showCantAddAccount (#1504)"));
+        }
+        let options = a.options.unwrap_or_else(super::kept::RawBundle::empty);
+        let options = options
+            .with_ints(&[("callerUid", uid), ("callerPid", pid)])
+            .map_err(|e| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, format!("accounts: options: {e:?}")))?;
+        let session_kind = super::account_session::Kind { account_type: kind, user, expect_activity_launch: a.expect_activity_launch, strip_auth_token: true };
+        let work = super::account_session::Work::AddAccount { auth_token_type: a.auth_token_type, required_features: a.required_features, options };
+        let session = super::account_session::Session::new(self.host.clone(), response, session_kind, work);
+        self.bind_session(&session, user)
     }
 
     /// `getAccountsAsUserForPackage`.
@@ -999,6 +1042,14 @@ impl Service for AccountManager {
                     );
                     Ok(p)
                 })())
+            }
+            am::ADD_ACCOUNT => {
+                let a = am::AddAccount::<super::kept::RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.add_account(uid, call.sender_pid, a).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_add_account_reply(&mut p);
+                    p
+                }))
             }
             am::GET_ACCOUNTS_BY_FEATURES => {
                 let a = am::GetAccountsByFeatures::read(&mut call.data).map_err(|_| BAD_VALUE)?;

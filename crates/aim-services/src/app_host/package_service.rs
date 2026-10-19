@@ -21,6 +21,8 @@ use crate::shadow::{Answer, ShadowCall};
 
 pub struct PackageService {
     host: Arc<AppHost>,
+    /// The installer `getPackageInstaller` hands out (`mInstallerService`).
+    installer: aim_binder_host::parcel::Binder,
     reported: Mutex<HashSet<(u32, &'static str)>>,
     writes: Arc<Writes>,
 }
@@ -28,7 +30,8 @@ pub struct PackageService {
 impl PackageService {
     pub fn new(host: Arc<AppHost>) -> Self {
         let writes = Writes::new(host.clone());
-        PackageService { host, reported: Mutex::new(HashSet::new()), writes }
+        let installer = host.process.add_service(Arc::new(super::package_installer::PackageInstaller::new(host.clone())));
+        PackageService { host, installer, reported: Mutex::new(HashSet::new()), writes }
     }
 
     fn unmodelled(&self, code: u32, reason: &'static str) -> Reply {
@@ -121,6 +124,12 @@ impl Service for PackageService {
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
+        if call.code == pm::GET_PACKAGE_INSTALLER {
+            pm::GetPackageInstaller::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+            let mut reply = Parcel::new();
+            pm::write_get_package_installer_reply(&mut reply, Some(self.installer));
+            return Ok(reply);
+        }
         let (state, resolution) = match self.host.packages() {
             Ok(packages) => packages,
             Err(e) => {

@@ -684,6 +684,35 @@ impl Service for ActivityTaskManager {
                     p
                 }))
             }
+            // `startActivityIntentSender`: the record sent as `sendInner`
+            // sends it, with the caller's result target and flags. Its
+            // options are not applied (#1493).
+            atm::START_ACTIVITY_INTENT_SENDER => {
+                let a = atm::StartActivityIntentSender::<RawIntent, RawBundle>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let uid = call.sender_euid as i32;
+                reply((|| {
+                    if super::is_isolated(uid) {
+                        return Err(Exception::security("Isolated process not allowed to call startActivityIntentSender"));
+                    }
+                    if a.fill_in_intent.as_ref().is_some_and(RawIntent::has_fds) {
+                        return Err(Exception::illegal_argument("File descriptors passed in Intent"));
+                    }
+                    let Some(target @ Binder::Local(_)) = a.target else {
+                        return Err(Exception::illegal_argument("Bad PendingIntent object"));
+                    };
+                    let sent = super::pending_intents::Sent {
+                        result_to: a.result_to,
+                        result_who: a.result_who,
+                        request_code: a.request_code,
+                        flags_mask: a.flags_mask,
+                        flags_values: a.flags_values,
+                    };
+                    let code = self.0.send_record(a.caller, target, 0, a.fill_in_intent, a.resolved_type, None, None, sent)?;
+                    let mut p = Parcel::new();
+                    atm::write_start_activity_intent_sender_reply(&mut p, code);
+                    Ok(p)
+                })())
+            }
             // `filterOnlyVisibleRecents` filters none of the app host's
             // tasks (`task_info::running_tasks`).
             atm::GET_TASKS => {

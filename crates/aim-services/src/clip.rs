@@ -209,6 +209,34 @@ pub struct ClipData {
 impl ClipData {
     /// A clip of the Mac's text, as EmulatorClipboardMonitor makes the
     /// host's: labelled "host clipboard", with no clipboard overlay.
+    /// `ClipData.newPlainText(label, text)`: no extras, no timestamp.
+    pub fn new_plain_text(label: Option<&str>, text: Option<&str>) -> ClipData {
+        let mut label_raw = Parcel::new();
+        write_char_sequence(&mut label_raw, label);
+        let mut extras = Parcel::new();
+        extras.write_i32(-1); // `writePersistableBundle(null)`
+        let mut empty = Parcel::new();
+        bundles::write(&mut empty, &[]);
+        let mut item = Parcel::new();
+        write_char_sequence(&mut item, text);
+        item.write_string8(None); // html
+        for _ in 0..5 {
+            item.write_i32(0); // intent, sender, uri, activity info, links
+        }
+        ClipData {
+            description: ClipDescription {
+                label: Raw::of(&label_raw),
+                mime_types: Some(vec![Some(MIMETYPE_TEXT_PLAIN.into())]),
+                extras: Raw::of(&extras),
+                timestamp: 0,
+                is_styled_text: false,
+                classification_status: CLASSIFICATION_NOT_PERFORMED,
+                confidences: Raw::of(&empty),
+            },
+            items: vec![Item { text: text.map(Into::into), uri: None, intent_data: None, raw: Raw::of(&item) }],
+        }
+    }
+
     pub fn host_text(text: &str, timestamp: i64) -> ClipData {
         let mut label = Parcel::new();
         write_char_sequence(&mut label, Some("host clipboard"));
