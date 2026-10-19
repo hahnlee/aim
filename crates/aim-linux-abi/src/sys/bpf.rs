@@ -13,8 +13,9 @@
 //! of the path map and `BPF_OBJ_GET` an open, and any process that holds
 //! the fd (by fork, SCM_RIGHTS or binder) reaches the same object. A map
 //! file is its data (at offset 0, so a ring buffer's mmap sees the kernel
-//! layout) followed by a header; processes map it shared and serialize
-//! updates with a spin lock in the header.
+//! layout) followed by a header (`aim_storage::bpf_object`, which host
+//! services read too); processes map it shared and serialize updates with
+//! a spin lock in the header.
 //!
 //! Supported map types: arrays and hashes, with their per-CPU and LRU
 //! variants (an LRU hash fails with E2BIG when full), maps of programs,
@@ -33,6 +34,7 @@ use crate::errno::{self, E2BIG, EBADF, EEXIST, EFAULT, EINVAL, ENOENT, EPERM};
 use crate::vfs::{self, LINUX_AT_FDCWD};
 use super::fdtab;
 use std::os::fd::{AsRawFd,FromRawFd};
+use aim_storage::bpf_object::*;
 use aim_storage::private_fd::PrivateFile;
 
 const MAP_CREATE: u64 = 0;
@@ -50,214 +52,8 @@ const BTF_LOAD: u64 = 18;
 const MAP_FREEZE: u64 = 22;
 const LINK_CREATE: u64 = 28;
 
-const HASH: u32 = 1;
-const ARRAY: u32 = 2;
-const PROG_ARRAY: u32 = 3;
-const PERCPU_HASH: u32 = 5;
-const PERCPU_ARRAY: u32 = 6;
-const LRU_HASH: u32 = 9;
-const LRU_PERCPU_HASH: u32 = 10;
-const LPM_TRIE: u32 = 11;
-const ARRAY_OF_MAPS: u32 = 12;
-const HASH_OF_MAPS: u32 = 13;
-const DEVMAP: u32 = 14;
-const DEVMAP_HASH: u32 = 25;
-const RINGBUF: u32 = 27;
-
-const BPF_NOEXIST: u64 = 1;
-const BPF_EXIST: u64 = 2;
-
-const MAGIC: u64 = u64::from_le_bytes(*b"LXBPFOBJ");
-const KIND_MAP: u32 = 1;
-const KIND_PROG: u32 = 2;
-const KIND_BTF: u32 = 3;
-const HEADER: usize = 128;
-const SLOT_EMPTY: u32 = 0;
-const SLOT_USED: u32 = 1;
-const SLOT_DELETED: u32 = 2;
-
-/// The header at the end of an object file.
-#[repr(C)]
-struct Header {
-    magic: u64,
-    kind: u32,
-    /// Map type, or program type.
-    ty: u32,
-    key_size: u32,
-    value_size: u32,
-    max_entries: u32,
-    flags: u32,
-    id: u32,
-    lock: AtomicU32,
-    count: AtomicU32,
-    frozen: u32,
-    name: [u8; 16],
-    /// Bytes of data before the header.
-    data_len: u64,
-    _pad: [u8; 56],
-}
-const _: () = assert!(std::mem::size_of::<Header>() == HEADER);
-
-fn round8(n: u32) -> usize {
-    (n as usize).div_ceil(8) * 8
-}
-
-fn percpu(ty: u32) -> bool {
-    matches!(ty, PERCPU_HASH | PERCPU_ARRAY | LRU_PERCPU_HASH)
-}
-
-/// Maps keyed by content. An LPM trie is kept as an exact-match hash
-/// (userspace sets and reads its entries; longest-prefix lookups are the
-/// programs').
-fn hashed(ty: u32) -> bool {
-    matches!(
-        ty,
-        HASH | PERCPU_HASH | LRU_HASH | LRU_PERCPU_HASH | LPM_TRIE | HASH_OF_MAPS | DEVMAP_HASH
-    )
-}
-
-/// Maps indexed by a u32 key. Maps of programs, maps and devices hold
-/// what userspace stored (fds, ifindexes).
-fn arrayed(ty: u32) -> bool {
-    matches!(
-        ty,
-        ARRAY | PERCPU_ARRAY | PROG_ARRAY | ARRAY_OF_MAPS | DEVMAP
-    )
-}
-
-fn ncpu() -> usize {
-    std::thread::available_parallelism().map_or(1, |n| n.get())
-}
-
-/// A map mapped into this process.
-#[derive(Clone, Copy)]
-struct Map {
-    base: u64,
-    header: *const Header,
-}
-
-// SAFETY: the mapping lives for the process; access goes through the
-// header's lock.
-unsafe impl Send for Map {}
-
+/// Maps mapped into this process, by file.
 static MAPPED: Mutex<Option<HashMap<(u64, u64), Map>>> = Mutex::new(None);
-
-impl Map {
-    fn h(&self) -> &Header {
-        // SAFETY: a live shared mapping of a checked object file.
-        unsafe { &*self.header }
-    }
-
-    /// Bytes of one value as userspace sees it.
-    fn value_len(&self) -> usize {
-        let h = self.h();
-        if percpu(h.ty) {
-            round8(h.value_size) * ncpu()
-        } else {
-            h.value_size as usize
-        }
-    }
-
-    fn slot_len(&self) -> usize {
-        8 + round8(self.h().key_size) + round8(self.value_len() as u32)
-    }
-
-    fn lock(&self) -> Guard<'_> {
-        let l = &self.h().lock;
-        while l
-            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            std::thread::yield_now();
-        }
-        Guard(l)
-    }
-
-    fn slot(&self, i: usize) -> *mut u8 {
-        (self.base as usize + i * self.slot_len()) as *mut u8
-    }
-
-    /// The array element or hash slot value for `key`, if present.
-    fn find(&self, key: &[u8]) -> Option<*mut u8> {
-        let h = self.h();
-        if !hashed(h.ty) {
-            let i = u32::from_ne_bytes(key.try_into().ok()?) as usize;
-            if i >= h.max_entries as usize {
-                return None;
-            }
-            return Some((self.base as usize + i * round8(self.value_len() as u32)) as *mut u8);
-        }
-        self.probe(key).ok().map(|i| self.value_of(i))
-    }
-
-    fn value_of(&self, i: usize) -> *mut u8 {
-        // SAFETY: inside slot i.
-        unsafe { self.slot(i).add(8 + round8(self.h().key_size)) }
-    }
-
-    /// The slot to store `key` in under `flags`, taking a free one for a
-    /// new key. Under the lock.
-    fn claim(&self, key: &[u8], flags: u64) -> Result<usize, i64> {
-        let h = self.h();
-        match self.probe(key) {
-            Ok(_) if flags == BPF_NOEXIST => Err(-(EEXIST as i64)),
-            Ok(i) => Ok(i),
-            Err(_) if flags == BPF_EXIST => Err(-(ENOENT as i64)),
-            Err(Some(i)) if h.count.load(Ordering::Relaxed) < h.max_entries => {
-                let s = self.slot(i);
-                // SAFETY: a free slot of the mapping.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(key.as_ptr(), s.add(8), key.len());
-                    (s as *mut u32).write(SLOT_USED);
-                }
-                h.count.fetch_add(1, Ordering::Relaxed);
-                Ok(i)
-            }
-            Err(_) => Err(-(E2BIG as i64)),
-        }
-    }
-
-    /// The slot of `key` (Ok), or the first free slot on its probe path.
-    fn probe(&self, key: &[u8]) -> Result<usize, Option<usize>> {
-        let n = self.h().max_entries as usize;
-        let start = fnv(key) as usize % n;
-        let mut free = None;
-        for step in 0..n {
-            let i = (start + step) % n;
-            let s = self.slot(i);
-            // SAFETY: slot i of the mapping.
-            let state = unsafe { (s as *const u32).read() };
-            match state {
-                SLOT_EMPTY => return Err(free.or(Some(i))),
-                SLOT_DELETED => {
-                    free.get_or_insert(i);
-                }
-                _ => {
-                    // SAFETY: the key follows the 8-byte slot header.
-                    let k = unsafe { std::slice::from_raw_parts(s.add(8), key.len()) };
-                    if k == key {
-                        return Ok(i);
-                    }
-                }
-            }
-        }
-        Err(free)
-    }
-}
-
-struct Guard<'a>(&'a AtomicU32);
-
-impl Drop for Guard<'_> {
-    fn drop(&mut self) {
-        self.0.store(0, Ordering::Release);
-    }
-}
-
-fn fnv(b: &[u8]) -> u64 {
-    b.iter().fold(0xcbf2_9ce4_8422_2325, |h, &c| {
-        (h ^ c as u64).wrapping_mul(0x100_0000_01b3)
-    })
-}
 
 /// Where the object files of this boot live.
 fn objects_dir() -> PathBuf {
@@ -366,10 +162,9 @@ fn mapped(fd: i32) -> Result<Map, i64> {
                 return Err(-(errno::last() as i64));
             }
             let header = (base as usize + h.data_len as usize) as *const Header;
-            e.insert(Map {
-                base: base as u64,
-                header,
-            })
+            // SAFETY: the mapping of the whole checked file, kept for the
+            // process.
+            e.insert(unsafe { Map::from_raw(base as u64, header) })
         }
     };
     Ok(*map)
@@ -562,7 +357,11 @@ fn elem(cmd: u64, a: &[u64]) -> i64 {
                     unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), v, vlen) };
                     return Ok(0);
                 }
-                let slot = m.claim(&key, flags)?;
+                let slot = m.claim(&key, flags).map_err(|e| match e {
+                    NoSlot::Exists => -(EEXIST as i64),
+                    NoSlot::Missing => -(ENOENT as i64),
+                    NoSlot::Full => -(E2BIG as i64),
+                })?;
                 // SAFETY: the slot's value.
                 unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), m.value_of(slot), vlen) };
                 Ok(0)
