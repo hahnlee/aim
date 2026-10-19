@@ -199,6 +199,12 @@ impl Policies {
         self.owned
     }
 
+    /// Whether a user has an active admin or a delegation, or the policy
+    /// engine a policy.
+    pub fn has_admins_or_policies(&self) -> bool {
+        self.admins || self.policies
+    }
+
     /// `getUserData(user)`: a user without a file has the defaults.
     fn user(&self, user: i32) -> UserData {
         self.users.get(&user).copied().unwrap_or_default()

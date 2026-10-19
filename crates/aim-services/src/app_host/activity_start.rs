@@ -326,6 +326,7 @@ impl AppHost {
         match command {
             Command::Launch(t) => {
                 let (start_seq, uid) = start_of(t).ok_or("no activity to launch")?;
+                self.activity_usage(t, super::app_standby::Event::ActivityResumed);
                 let global = self.global_config(uid).ok_or("launch before bind")?;
                 let task = self.activities.records.lock().unwrap().get(&t).map(|r| r.task);
                 let bounds = task.and_then(|id| self.tasks.freeform_bounds(id));
@@ -338,6 +339,7 @@ impl AppHost {
                 send(token, vec![Box::new(PauseActivityItem { token: token_of(token), finishing, user_leaving })])
             }
             Command::Resume { token, results, new_intents } => {
+                self.activity_usage(token, super::app_standby::Event::ActivityResumed);
                 let mut items: Vec<Box<dyn Item>> = Vec::new();
                 if !results.is_empty() {
                     items.push(Box::new(PayloadItem {

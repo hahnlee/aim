@@ -415,6 +415,9 @@ pub struct System {
     pub app_data_isolation_allowlist: Vec<String>,
     /// `SystemConfig.getAllowImplicitBroadcasts`.
     pub allow_implicit_broadcasts: std::collections::BTreeSet<String>,
+    /// `SystemConfig.getAllowInPowerSaveExceptIdle`, `getAllowInPowerSave`.
+    pub allow_in_power_save_except_idle: std::collections::BTreeSet<String>,
+    pub allow_in_power_save: std::collections::BTreeSet<String>,
     /// `ParsingPackageUtils.sUseRoundIcon`.
     pub use_round_icon: bool,
     /// `ParsingPackageUtils.sCompatibilityModeEnabled`.

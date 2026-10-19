@@ -924,6 +924,9 @@ impl Service for ActivityClientController {
             acc::ACTIVITY_PAUSED => {
                 let token = Self::token(call)?;
                 self.report(token, "paused", |r| r.resumed = false);
+                if let Some(Binder::Local(t)) = token {
+                    self.0.activity_usage(t, super::app_standby::Event::ActivityPaused);
+                }
                 self.0.activity_reported(token, Report::Paused);
                 empty()
             }
