@@ -243,7 +243,7 @@ pub fn mmap(mut a: [u64; 6]) -> i64 {
         (Some(client), Some(identity)) => match client.admission(identity.to_bytes()) {
             Ok(admission) => Some(admission),
             Err(error) => {
-                eprintln!(
+                crate::diag!(
                     "[mmap-owner] stage=verity-admission guest_fd={guest_fd} native_fd={} error={error}",
                     held.descriptor().as_raw_fd()
                 );
@@ -258,14 +258,6 @@ pub fn mmap(mut a: [u64; 6]) -> i64 {
     }
     a[4] = held.descriptor().as_raw_fd() as u64;
     let result = mmap_pinned(a, &held);
-    if result < 0 {
-        eprintln!(
-            "[mmap-owner] stage=pinned guest_fd={guest_fd} native_fd={} prot={:#x} flags={:#x} result={result}",
-            held.descriptor().as_raw_fd(),
-            a[2],
-            a[3]
-        );
-    }
     if let Some(admission) = admission {
         let finish = if result >= 0 {
             super::verity_pager::publish_membership(identity.unwrap(), admission)
@@ -376,7 +368,7 @@ fn mmap_pinned(a: [u64; 6], held: &super::fdtab::Pinned) -> i64 {
         let cache = match super::verity_pager::MappingCache::runtime() {
             Ok(cache) => cache,
             Err(error) => {
-                eprintln!(
+                crate::diag!(
                     "[mmap-owner] stage=mapping-cache native_fd={} error={error}",
                     held.descriptor().as_raw_fd()
                 );
@@ -673,13 +665,13 @@ fn mmap_kernel(a: [u64; 6]) -> i64 {
 pub fn exec_reset() {
     let _epoch = super::verity_pager::mutation();
     if let Err(error) = super::verity_pager::clear() {
-        eprintln!("verity mapping retirement before exec failed: {error}");
+        crate::diag!("verity mapping retirement before exec failed: {error}");
     }
     if let Err(error) = super::fuse_cache::shutdown_writeback() {
-        eprintln!("FUSE writeback before exec failed: {error}");
+        crate::diag!("FUSE writeback before exec failed: {error}");
     }
     if let Err(error) = super::fuse_cache::flush_range(arena::LO, arena::HI - arena::LO) {
-        eprintln!("FUSE mapped writeback on exec failed: {error}");
+        crate::diag!("FUSE mapped writeback on exec failed: {error}");
     }
     super::fuse_cache::forget(arena::LO, arena::HI - arena::LO);
     // SAFETY: nothing of the old image is used from here on.
@@ -755,18 +747,18 @@ pub fn run_deferred_unmaps() -> usize {
         let v = std::mem::take(&mut *d.borrow_mut());
         for &(addr, len) in &v {
             if let Err(error) = super::verity_pager::forget(addr, len) {
-                eprintln!("verity deferred mapping retirement failed: {error}");
+                crate::diag!("verity deferred mapping retirement failed: {error}");
                 continue;
             }
             if let Err(error) = super::fuse_cache::flush_range(addr, len) {
-                eprintln!("FUSE deferred unmap writeback failed: {error}");
+                crate::diag!("FUSE deferred unmap writeback failed: {error}");
             }
             super::fuse_cache::forget(addr, len);
             // SAFETY: the guest asked for this unmap; its thread is exiting.
             unsafe { libc::munmap(addr as *mut _, len as usize) };
         }
         if let Err(error) = super::verity_pager::reconcile_memberships() {
-            eprintln!("verity deferred membership retirement failed: {error}");
+            crate::diag!("verity deferred membership retirement failed: {error}");
         }
         v.len()
     })
