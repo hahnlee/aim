@@ -48,6 +48,7 @@ pub mod job_info;
 pub mod job_scheduler;
 pub mod job_store;
 pub mod keychars;
+pub mod locale_manager;
 pub mod media_router;
 pub mod memory_info;
 pub mod kept;
@@ -563,6 +564,7 @@ impl AppHost {
             ("wifi", Arc::new(wifi_service::WifiService::new(self.clone()))),
             ("usagestats", Arc::new(usage_stats::UsageStats::new(self.clone()))),
             ("webviewupdate", Arc::new(webview_update::WebViewUpdate::new(self.clone()))),
+            ("locale", Arc::new(locale_manager::LocaleManager::new(self.clone()))),
             ("netpolicy", Arc::new(netpolicy_service::NetworkPolicy::new(self.clone()))),
             ("telephony.registry", Arc::new(telephony_registry::TelephonyRegistry::new(self.clone()))),
             ("network_management", Arc::new(network_management::NetworkManagement::new(self.clone()))),
