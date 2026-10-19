@@ -5,7 +5,7 @@
 //! jitter). Its `inOutputTime` is the refresh a frame started now would be
 //! shown at, from the link's model of the display's timing, exact to the
 //! host tick. The vsync reported is the model's last refresh before the
-//! callback: `inOutputTime` minus whole periods. Host ticks
+//! callback: `inOutputTime` minus whole periods, once per refresh. Host ticks
 //! (`mach_absolute_time`) are the guest's `CLOCK_MONOTONIC`.
 //!
 //! The link runs only while a client has vsync enabled, as a display
@@ -135,6 +135,14 @@ extern "C" fn on_refresh(
     let timestamp_ns = shown - period * (shown - now + period - 1).div_euclid(period);
     let started_ns = {
         let mut l = LINK.lock().unwrap();
+        // A callback late in a refresh and the next one early in it report
+        // the same refresh, the model's times for it a microsecond apart:
+        // it is one vsync.
+        if let Some((last, _)) = l.last
+            && (timestamp_ns - last).abs() < period / 2
+        {
+            return 0;
+        }
         l.last = Some((timestamp_ns, period));
         (!std::mem::replace(&mut l.ticked, true))
             .then_some(l.started_ns)

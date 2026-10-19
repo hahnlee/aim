@@ -228,11 +228,17 @@ device. A sync_file is an `AF_UNIX` datagram socket pair made by
   driver failed.
 - **Wait.** A datagram socket reports `POLLIN`, and no `POLLHUP`, once the
   record is queued, so `poll`, `epoll` and `select` wait for the fence
-  unchanged. The record is only ever peeked.
+  unchanged. The record is only ever peeked; a peek that finds another
+  holder's peek in progress (`EAGAIN` on a readable socket) peeks again.
 - **Share.** The fd is a real host descriptor, so binder, `SCM_RIGHTS` and
   fork carry it like any fd. Its `SO_LINGER` time marks it (`0x5346`), so
   a sync_file arriving from another process is recognized. A fork child
-  closes the writers it inherited (they are the parent's to signal).
+  closes the writers it inherited (they are the parent's to signal). A
+  sender keeps a fence it sent open while the receiver may still be
+  receiving it: Darwin's unix domain socket collector can take a socket
+  whose only reference is in flight for garbage and flush it, which reads
+  as a failed fence. The composer module holds a frame's acquire fence
+  until the frame's present fence signals.
 - **The syscall layer** (`sys/sync_file.rs`) adds the rest of its Linux
   behaviour: `SYNC_IOC_MERGE` (signaled at the later time, with the first
   error; a merge of pending fences is signaled by one host thread per

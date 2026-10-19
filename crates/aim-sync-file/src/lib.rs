@@ -236,28 +236,40 @@ pub fn is_sync_file(fd: BorrowedFd) -> bool {
 
 /// The fence's state, without waiting.
 pub fn state(fd: BorrowedFd) -> State {
-    let mut r = Record::default();
-    // SAFETY: a peek into a local record.
-    let n = unsafe {
-        libc::recv(
-            fd.as_raw_fd(),
-            (&mut r as *mut Record).cast(),
-            size_of::<Record>(),
-            libc::MSG_PEEK | libc::MSG_DONTWAIT,
-        )
-    };
-    if n == size_of::<Record>() as isize {
-        return State::Signaled {
-            timestamp_ns: r.timestamp_ns,
-            status: r.status,
+    loop {
+        let mut r = Record::default();
+        // SAFETY: a peek into a local record.
+        let n = unsafe {
+            libc::recv(
+                fd.as_raw_fd(),
+                (&mut r as *mut Record).cast(),
+                size_of::<Record>(),
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            )
         };
-    }
-    match io::Error::last_os_error().raw_os_error() {
-        Some(libc::EAGAIN) if n < 0 => State::Active,
-        _ => State::Signaled {
-            timestamp_ns: 0,
-            status: -EPIPE,
-        },
+        if n == size_of::<Record>() as isize {
+            return State::Signaled {
+                timestamp_ns: r.timestamp_ns,
+                status: r.status,
+            };
+        }
+        match io::Error::last_os_error().raw_os_error() {
+            // A nonblocking receive fails with EAGAIN also while another
+            // holder's peek has the receive buffer locked (Darwin's
+            // `sblock`); the fence is active only if it is not readable.
+            Some(libc::EAGAIN) if n < 0 => {
+                if !wait(fd, 0) {
+                    return State::Active;
+                }
+            }
+            Some(libc::EINTR) if n < 0 => {}
+            _ => {
+                return State::Signaled {
+                    timestamp_ns: 0,
+                    status: -EPIPE,
+                };
+            }
+        }
     }
 }
 
@@ -537,6 +549,27 @@ mod tests {
         }
         let dup = file.try_clone().unwrap();
         assert!(matches!(state(dup.as_fd()), State::Signaled { .. }));
+    }
+
+    /// Holders reading a fence's state at the same time (the waiter's copy
+    /// and its owner's) all see it signaled.
+    #[test]
+    fn a_signaled_fence_reads_as_signaled_while_others_read_it() {
+        let file = signaled(42, 1).unwrap();
+        let signaled = State::Signaled {
+            timestamp_ns: 42,
+            status: 1,
+        };
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                let dup = file.try_clone().unwrap();
+                s.spawn(move || {
+                    for _ in 0..20_000 {
+                        assert_eq!(state(dup.as_fd()), signaled);
+                    }
+                });
+            }
+        });
     }
 
     #[test]
