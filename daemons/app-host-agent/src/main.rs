@@ -68,6 +68,9 @@ const PLAY_SOUND_EFFECT: u32 = 6;
 /// eventTimeNanos, float x, float y, float pressure)`: a one-finger
 /// touchscreen motion in the display's pixels.
 const INJECT_MOTION: u32 = 7;
+/// `IAppHostAgent.readSmaps(int pid)`: the process's `/proc/<pid>/smaps`,
+/// null when it cannot be opened (the process is gone).
+const READ_SMAPS: u32 = 8;
 /// `InputTransport.cpp`'s `SOCKET_BUFFER_SIZE`.
 const SOCKET_BUFFER_SIZE: libc::c_int = 32 * 1024;
 
@@ -397,6 +400,15 @@ fn on_transact(
                 )
             };
             reply.write(&status)?;
+            Ok(())
+        }
+        // Read as system_server reads it for `Debug.getMemoryInfo`, with
+        // CAP_SYS_PTRACE.
+        READ_SMAPS => {
+            let pid: i32 = data.read()?;
+            let smaps = std::fs::read_to_string(format!("/proc/{pid}/smaps")).ok();
+            reply.write(&Status::ok())?;
+            reply.write(&smaps)?;
             Ok(())
         }
         _ => Err(StatusCode::UNKNOWN_TRANSACTION),
