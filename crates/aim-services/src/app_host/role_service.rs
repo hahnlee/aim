@@ -21,6 +21,10 @@ use crate::package::info::array_order;
 
 /// `UserHandle.USER_ALL`, `USER_SYSTEM`.
 const USER_ALL: i32 = -1;
+/// `com.android.permission.flags.Flags.crossUserRoleEnabled`, and
+/// `TEST_ROLES`' one role.
+const CROSS_USER_ROLE_ENABLED: &str = "com.android.permission.flags.cross_user_role_enabled";
+const ROLE_RESERVED_FOR_TESTING_PROFILE_GROUP_EXCLUSIVITY: &str = "android.app.role.RESERVED_FOR_TESTING_PROFILE_GROUP_EXCLUSIVITY";
 const USER_SYSTEM: i32 = 0;
 /// `RoleManager.ROLE_BROWSER`, `ROLE_SMS`, `ROLE_EMERGENCY`.
 const ROLE_BROWSER: &str = "android.app.role.BROWSER";
@@ -350,6 +354,27 @@ impl Service for RoleManager {
                         held = roles.roles.iter().filter(|(_, h)| h.contains(&package)).map(|(n, _)| Some(n.clone())).collect();
                     }
                     rm::write_get_held_roles_from_controller_as_user_reply(&mut p, &Some(held));
+                    Ok(())
+                })()
+            }
+            rm::IS_ROLE_VISIBLE_FOR_TEST_AS_USER => {
+                let a = rm::IsRoleVisibleForTestAsUser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                (|| {
+                    // `RoleFlags.isProfileGroupExclusivityAvailable`.
+                    let (state, _) = self.host.packages()?;
+                    if !state.system.flags.iter().any(|(n, on)| n == CROSS_USER_ROLE_ENABLED && *on) {
+                        return Err(Exception::new(EX_ILLEGAL_STATE, "isRoleVisibleForTest not available"));
+                    }
+                    self.enforce(uid, "android.permission.MANAGE_ROLE_HOLDERS", "isRoleVisibleForTest")?;
+                    let role = Self::not_empty(a.role_name, "roleName cannot be null or empty")?;
+                    if role != ROLE_RESERVED_FOR_TESTING_PROFILE_GROUP_EXCLUSIVITY {
+                        return Err(Exception::illegal_argument(format!(
+                            "{role}is not supported [{ROLE_RESERVED_FOR_TESTING_PROFILE_GROUP_EXCLUSIVITY}]"
+                        )));
+                    }
+                    // `mRolesVisibleForTest`, which only `setRoleVisibleForTest`
+                    // (not taken, #1657) fills.
+                    rm::write_is_role_visible_for_test_as_user_reply(&mut p, false);
                     Ok(())
                 })()
             }
