@@ -99,8 +99,10 @@ Drive and Play Store reach their sign-in pages (Play Store's own sign-in
 button does not answer yet). Play services' persistent process gets its
 installed modules, Wi-Fi scan results (none, the Mac's radio being off),
 statsd, DeviceConfig writes, usb, Safety Center and app op mode watches;
-it still restarts on nearby's start while the Bluetooth adapter is not
-served (#1762) and its other processes fail on AppSearch (#1761).
+its other processes fail on AppSearch (#1761). The original Bluetooth app
+runs under the app host: the native `bluetooth_manager` binds its
+AdapterService, which brings the stack up over the Bluetooth HAL to
+STATE_ON (media sessions serve its AVRCP target and media browser).
 
 ## Native system services (2026-09-29, ADR 0013)
 
