@@ -1419,7 +1419,7 @@ impl JobScheduler {
             pending_stop: None,
         };
         state.contexts.push(context);
-        let bound = self.host.bind_service_from_host(&package, &class, FLAG_FROM_BACKGROUND, flags, user, conn.clone());
+        let bound = self.host.bind_service_from_host(None, &package, &class, FLAG_FROM_BACKGROUND, flags, user, conn.clone());
         match bound {
             Ok(true) => {
                 eprintln!("app host: jobs: running {package}/{class} #{}", state.jobs[&key].job.id);

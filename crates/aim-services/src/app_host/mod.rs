@@ -10,6 +10,7 @@
 
 pub mod account_authenticators;
 pub mod account_service;
+mod account_session;
 pub mod accounts_db;
 pub mod activity;
 pub mod activity_stack;
@@ -614,7 +615,7 @@ impl AppHost {
                 "jobscheduler",
                 self.job_scheduler.get_or_init(|| job_scheduler::JobScheduler::new(self.clone())).clone(),
             ),
-            ("account", Arc::new(account_service::AccountManager::new(self.clone()))),
+            ("account", account_service::AccountManager::new(self.clone())),
             ("device_policy", Arc::new(device_policy::DevicePolicy::new(self.clone()))),
             (
                 "connectivity",

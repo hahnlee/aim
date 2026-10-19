@@ -75,6 +75,8 @@ impl ReadParcelable for AuthenticatorDescription {
 pub struct Authenticator {
     pub description: AuthenticatorDescription,
     pub uid: i32,
+    /// Its service's class.
+    pub class: String,
 }
 
 /// `generateServicesMap(null, user)`: `user`'s authenticators, the
@@ -129,7 +131,7 @@ pub fn generate(host: &AppHost, user: i32) -> Result<Vec<Authenticator>, Excepti
         };
         match parsed.and_then(|r| r) {
             Ok(Some(description)) => {
-                services.push(Authenticator { description, uid: si.info.application_info.uid })
+                services.push(Authenticator { description, uid: si.info.application_info.uid, class: si.info.item.name.clone().unwrap_or_default() })
             }
             Ok(None) => eprintln!("app host: accounts: unable to load service info {package}/{name}"),
             Err(e) => eprintln!("app host: accounts: unable to load service info {package}/{name}: {e}"),
@@ -269,6 +271,7 @@ mod tests {
                 custom_tokens: true,
             },
             uid,
+            class: "Authenticator".into(),
         }
     }
 

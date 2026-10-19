@@ -371,6 +371,7 @@ impl Accounts {
 }
 
 pub struct AccountManager {
+    me: std::sync::Weak<AccountManager>,
     host: Arc<AppHost>,
     /// `mAuthenticatorCache`'s services, by user.
     authenticators: Mutex<HashMap<i32, Arc<Vec<Authenticator>>>>,
@@ -378,8 +379,8 @@ pub struct AccountManager {
 }
 
 impl AccountManager {
-    pub fn new(host: Arc<AppHost>) -> AccountManager {
-        AccountManager { host, authenticators: Mutex::default(), users: Mutex::default() }
+    pub fn new(host: Arc<AppHost>) -> Arc<AccountManager> {
+        Arc::new_cyclic(|me| AccountManager { me: me.clone(), host, authenticators: Mutex::default(), users: Mutex::default() })
     }
 
     /// `mAuthenticatorCache.getAllServices(user)`.
@@ -695,6 +696,62 @@ impl AccountManager {
         Ok(visible)
     }
 
+    /// `getAccountsByFeatures`: the caller's response told the accounts of
+    /// a type it may see that have the features, as the type's
+    /// authenticator answers for each (`GetAccountsByTypeAndFeatureSession`);
+    /// none for a type it may not see.
+    fn accounts_by_features(&self, uid: i32, a: am::GetAccountsByFeatures) -> Result<(), Exception> {
+        self.check_package(uid, a.op_package_name.as_deref())?;
+        let Some(aim_binder_host::parcel::Binder::Handle(response)) = a.response else {
+            return Err(Exception::illegal_argument("response is null"));
+        };
+        let kind = a.account_type.ok_or_else(|| Exception::illegal_argument("accountType is null"))?;
+        let user = user_of(uid);
+        let response = self.host.process.strong(response);
+        let respond = |accounts: Vec<Account>| {
+            let items = accounts
+                .iter()
+                .map(|a| {
+                    let mut p = Parcel::new();
+                    a.write_to(&mut p);
+                    ("android.accounts.Account".to_string(), p.data().to_vec())
+                })
+                .collect();
+            let mut p = Parcel::new();
+            p.write_interface_token(aim_service_aidl::android_accounts_iaccountmanagerresponse::DESCRIPTOR);
+            p.write_i32(1);
+            crate::bundle::write(&mut p, &[("accounts", crate::bundle::Value::ParcelableArray(items))]);
+            if let Err(e) = response.transact(aim_service_aidl::android_accounts_iaccountmanagerresponse::ON_RESULT, &p, true) {
+                eprintln!("app host: accounts: Cannot respond to caller do to exception. {e:?}");
+            }
+        };
+        if !self.types_for_caller(uid, user, true)?.contains(&kind) {
+            respond(Vec::new());
+            return Ok(());
+        }
+        let features: Vec<String> = a.features.unwrap_or_default().into_iter().flatten().collect();
+        let package = a.op_package_name.clone();
+        if features.is_empty() {
+            let accounts = self.user_accounts(user).map_err(Failure::exception)?;
+            respond(self.accounts_from_cache(&accounts, user, Some(&kind), uid, package.as_deref(), false)?);
+            return Ok(());
+        }
+        let authenticators = self.authenticators(user)?;
+        let component = authenticators.iter().find(|au| au.description.kind == kind).map(|au| (au.description.package.clone(), au.class.clone()));
+        let me = self.me.clone();
+        let accounts_of_type: super::account_session::AccountsOfType = Box::new(move || {
+            let me = me.upgrade().ok_or("account service gone")?;
+            let accounts = me.user_accounts(user).map_err(|e| Failure::exception(e).message)?;
+            me.accounts_from_cache(&accounts, user, Some(&kind), uid, package.as_deref(), false).map_err(|e| e.message)
+        });
+        let session = super::account_session::FeaturesSession::new(self.host.clone(), response, features, accounts_of_type);
+        if component.is_none() {
+            eprintln!("app host: accounts: there is no authenticator for the type, bailing out");
+        }
+        session.bind(component.as_ref().map(|(p, c)| (p.as_str(), c.as_str())), user);
+        Ok(())
+    }
+
     /// `getAccountsAsUserForPackage`.
     #[allow(clippy::too_many_arguments)]
     fn accounts_as_user_for_package(
@@ -942,6 +999,14 @@ impl Service for AccountManager {
                     );
                     Ok(p)
                 })())
+            }
+            am::GET_ACCOUNTS_BY_FEATURES => {
+                let a = am::GetAccountsByFeatures::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.accounts_by_features(uid, a).map(|()| {
+                    let mut p = Parcel::new();
+                    am::write_get_accounts_by_features_reply(&mut p);
+                    p
+                }))
             }
             am::GET_ACCOUNTS_AS_USER => {
                 let a = am::GetAccountsAsUser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
