@@ -87,7 +87,9 @@ a Mac without a camera (#646). Gmail stops at `getAccountsByFeatures`
 isolated process, and past it starts its tabbed activity, which publishes
 its dynamic shortcut, draws its new tab page with its Discover feed,
 and opens and draws web pages (its renderers in isolated processes);
-Messages draws its
+YouTube Music gets its system routes and registers its router, and
+stops when its discovery would bind Play services' route provider
+(#1663); Messages draws its
 welcome page in WebView, its renderer started by the WebView zygote; the
 Google apps stop at Play services (#1673, #1623, #1504).
 

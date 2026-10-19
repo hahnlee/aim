@@ -50,6 +50,7 @@ pub mod job_store;
 pub mod keychars;
 pub mod locale_manager;
 pub mod media_router;
+mod media_router2;
 pub mod memory_info;
 pub mod kept;
 pub mod netpolicy_service;
