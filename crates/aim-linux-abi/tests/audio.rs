@@ -221,7 +221,13 @@ fn audioserver_and_the_hal_play_through_coreaudio() {
     )
     .unwrap();
     assert!((5.0..200.0).contains(&latency), "latency {latency} ms");
-    assert!(field(&stdout, "input read", "read").unwrap() >= 48000.0);
+    // The microphone is recorded if the Mac has an input device; without
+    // one the HAL declares no input port.
+    if aim_host_audio::devices().input.present != 0 {
+        assert!(field(&stdout, "input read", "read").unwrap() >= 48000.0);
+    } else {
+        assert!(stdout.contains("input ports none"), "{stdout}");
+    }
     // What CoreAudio's render callback saw.
     let hal = guest.log(HAL_TAG);
     let standby = hal

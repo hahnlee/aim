@@ -281,7 +281,13 @@ fn play(module: &Strong<dyn IModule>, ports: &[AudioPort], ms: i64) {
     module.resetAudioPortConfig(config.id).unwrap();
 }
 
+/// Records `ms` from the microphone, or reports that the HAL declares no
+/// input, as it does on a Mac with no input device.
 fn record(module: &Strong<dyn IModule>, ports: &[AudioPort], ms: i64) {
+    if !ports.iter().any(|p| matches!(p.flags, AudioIoFlags::Input(_))) {
+        println!("input ports none");
+        return;
+    }
     let (mix, mic) = (find_port(ports, true, true), find_port(ports, true, false));
     let rate = mix
         .profiles
