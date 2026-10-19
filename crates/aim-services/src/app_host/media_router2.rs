@@ -9,12 +9,8 @@
 //! selects the device route and has nothing to transfer to.
 //!
 //! Routers (`registerRouter2`) are told the routes and system session they
-//! may see (`notifyRouterRegistered`); with no route provider bound, those
-//! are the system provider's. Their discovery preferences make the composite
-//! one each provider service is told; a provider that would then bind
-//! (`MediaRoute2ProviderServiceProxy.shouldBind`) is not implemented
-//! (#1663). Every router is active, as the app host's processes are all
-//! top (#1738) and the display is on.
+//! may see (`notifyRouterRegistered`): the route providers' routes
+//! (`media_route_providers`), then the system provider's.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use aim_binder_host::parcel::{Exception, Parcel};
@@ -48,6 +44,7 @@ const MODIFY_AUDIO_ROUTING: &str = "android.permission.MODIFY_AUDIO_ROUTING";
 const BLUETOOTH_PERMISSIONS_FOR_SYSTEM_ROUTING: [&str; 2] = ["android.permission.BLUETOOTH_CONNECT", "android.permission.BLUETOOTH_SCAN"];
 
 /// A `MediaRoute2Info` of the system provider.
+#[derive(Clone)]
 pub(super) struct Route {
     id: &'static str,
     name: String,
@@ -57,6 +54,13 @@ pub(super) struct Route {
     volume_max: i32,
     volume: i32,
     suitability: i32,
+}
+
+impl Route {
+    /// `getId`.
+    pub(super) fn unique_id(&self) -> String {
+        format!("{PROVIDER_ID}:{}", self.id)
+    }
 }
 
 impl WriteParcelable for Route {
@@ -122,12 +126,6 @@ impl WriteParcelable for Session {
     }
 }
 
-/// `MediaRoute2ProviderService.SERVICE_INTERFACE`, `CATEGORY_SELF_SCAN_ONLY`.
-const PROVIDER_SERVICE: &str = "android.media.MediaRoute2ProviderService";
-const CATEGORY_SELF_SCAN_ONLY: &str = "android.media.MediaRoute2ProviderService.SELF_SCAN_ONLY";
-/// `PackageManager.GET_RESOLVED_FILTER`.
-const GET_RESOLVED_FILTER: i64 = 0x40;
-
 /// A `RouteDiscoveryPreference`: its preferred features and whether it
 /// asks for an active scan.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -152,35 +150,8 @@ impl aim_service_aidl::ReadParcelable for Preference {
 }
 
 impl AppHost {
-    /// `updateDiscoveryPreferenceOnHandler` with the routers' preferences
-    /// (`buildCompositeDiscoveryPreference`, every router active): an
-    /// error if a provider service would bind (`shouldBind`: an app scans
-    /// for features, and the provider is not self-scan-only or its package
-    /// scans actively).
-    pub(super) fn media_router2_discover(&self, user: i32, routers: &[(String, Preference)]) -> Result<(), Exception> {
-        let scanning = routers.iter().any(|(_, p)| !p.features.is_empty());
-        if !scanning {
-            return Ok(());
-        }
-        let actively: Vec<&str> = routers.iter().filter(|(_, p)| p.active_scan && !p.features.is_empty()).map(|(package, _)| package.as_str()).collect();
-        let (_, resolution) = self.packages()?;
-        let intent = crate::package::intent::Intent { action: Some(PROVIDER_SERVICE.into()), ..Default::default() };
-        let found = resolution
-            .query_intent_services(&intent, None, GET_RESOLVED_FILTER, user, 1000)
-            .map_err(|e| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, format!("media_router: queryIntentServices: {e:?}")))?;
-        for r in found {
-            let crate::package::component_resolver::Info::Service(si) = &r.info else { continue };
-            let self_scan_only = r.filter.as_ref().and_then(|f| f.categories.as_ref()).is_some_and(|c| c.iter().any(|c| c == CATEGORY_SELF_SCAN_ONLY));
-            let package = si.info.item.package_name.as_deref().unwrap_or_default();
-            if !self_scan_only || actively.contains(&package) {
-                return Err(self.unimplemented_named("media_router", &format!("binding the route provider of {package} (#1663)")));
-            }
-        }
-        Ok(())
-    }
-
     /// `checkCallerHasSystemRoutingPermissions`.
-    fn has_system_routing_permissions(&self, uid: i32) -> Result<bool, Exception> {
+    pub(super) fn has_system_routing_permissions(&self, uid: i32) -> Result<bool, Exception> {
         if self.check_permission(Some(MODIFY_AUDIO_ROUTING), uid)? == 0 {
             return Ok(true);
         }
@@ -216,17 +187,20 @@ impl AppHost {
         })
     }
 
+    /// The system provider's route as `setProviderState` gives it
+    /// (`setUniqueId` and `setSystemRouteProvider`), and its default route.
+    pub(super) fn media_router2_system_route_forms(&self) -> Result<(Route, Route), Exception> {
+        let route = self.device_route()?;
+        let default = Route { id: ROUTE_ID_DEFAULT, is_system: true, ..route };
+        Ok((Route { id: ROUTE_ID_DEVICE, is_system: true, provider_package: Some(PROVIDER_PACKAGE), ..default.clone() }, default))
+    }
+
     /// `getSystemRoutes(callerPackageName, false)`: the system provider's
     /// routes (its device route) for a caller with system routing
     /// permissions, else its default route.
     pub(super) fn media_router2_system_routes(&self, uid: i32) -> Result<Vec<Route>, Exception> {
-        let route = self.device_route()?;
-        Ok(vec![if self.has_system_routing_permissions(uid)? {
-            // `setProviderState`'s `setUniqueId` and `setSystemRouteProvider`.
-            Route { is_system: true, provider_package: Some(PROVIDER_PACKAGE), ..route }
-        } else {
-            Route { id: ROUTE_ID_DEFAULT, is_system: true, ..route }
-        }])
+        let (privileged, default) = self.media_router2_system_route_forms()?;
+        Ok(vec![if self.has_system_routing_permissions(uid)? { privileged } else { default }])
     }
 
     /// `notifyRouterRegistered`'s routes and system session for a router

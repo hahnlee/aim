@@ -5,18 +5,21 @@
 //! providers (`RemoteDisplayProviderWatcher`), which are bound only once a
 //! trusted client asks to discover remote displays
 //! (`RemoteDisplayProviderProxy.shouldBind`); until then they publish
-//! none. Binding them, and `MediaRouter2` and its managers, are not
+//! none. Binding them, and `MediaRouter2`'s managers and requests, are not
 //! implemented (#1663).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_UNSUPPORTED_OPERATION, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
+use aim_service_aidl::android_media_imediarouter2 as router2;
 use aim_service_aidl::android_media_imediarouterservice as mr;
 
+use super::media_route_providers::{Providers, Told, visible};
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::package::component_resolver::Info;
 use crate::package::intent::Intent;
@@ -52,29 +55,37 @@ struct Client {
 }
 
 /// `MediaRouter2ServiceImpl.RouterRecord`.
-struct Router {
-    binder: Strong,
+#[derive(Clone)]
+pub(super) struct Router {
+    pub binder: Arc<Strong>,
     death: u64,
-    package: String,
+    /// Its `UserRecord`'s user, and its place in `mRouterRecords`.
+    pub user: i32,
+    pub seq: u64,
+    pub package: String,
+    /// `mHasSystemRoutingPermission`.
+    pub system_routing: bool,
     /// `mDiscoveryPreference`.
-    preference: super::media_router2::Preference,
+    pub preference: super::media_router2::Preference,
 }
 
-/// `IMediaRouter2`'s descriptor and `notifyRouterRegistered`.
-const IMEDIA_ROUTER2: &str = "android.media.IMediaRouter2";
-const NOTIFY_ROUTER_REGISTERED: u32 = 1;
+/// `mAllRouterRecords`, by handle.
+pub(super) type Routers = Arc<Mutex<HashMap<u32, Router>>>;
 
 pub struct MediaRouter {
     host: Arc<AppHost>,
     /// `mAllClientRecords`, by handle.
     clients: Arc<Mutex<HashMap<u32, Client>>>,
-    /// `mAllRouterRecords`, by handle.
-    routers: Arc<Mutex<HashMap<u32, Router>>>,
+    routers: Routers,
+    providers: Arc<Providers>,
+    next_router: AtomicU64,
 }
 
 impl MediaRouter {
     pub fn new(host: Arc<AppHost>) -> Self {
-        MediaRouter { host, clients: Arc::new(Mutex::new(HashMap::new())), routers: Arc::new(Mutex::new(HashMap::new())) }
+        let routers = Routers::default();
+        let providers = Providers::new(host.clone(), routers.clone());
+        MediaRouter { host, clients: Arc::new(Mutex::new(HashMap::new())), routers, providers, next_router: AtomicU64::new(0) }
     }
 
     /// `RemoteDisplayProviderWatcher.scanPackages`: the services of
@@ -143,8 +154,10 @@ impl MediaRouter {
         Ok(())
     }
 
-    /// `registerRouter2`: the router kept until it dies or unregisters, and
-    /// told what it may see (`notifyRouterRegistered`).
+    /// `registerRouter2`: the router kept until it dies or unregisters, its
+    /// user's handler started, told what it may see
+    /// (`notifyRouterRegistered`: the providers' routes, then the system
+    /// provider's) and the discovery preference updated.
     fn register_router(&self, uid: i32, router: Option<Binder>, package: Option<String>) -> Result<(), Exception> {
         let Some(Binder::Handle(handle)) = router else {
             return Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "router must not be null"));
@@ -152,13 +165,17 @@ impl MediaRouter {
         if package.as_deref().is_none_or(str::is_empty) {
             return Err(Exception::illegal_argument("packageName must not be empty"));
         }
+        let package = package.unwrap_or_default();
         if self.routers.lock().unwrap().contains_key(&handle) {
-            eprintln!("app host: media_router: registerRouter2Locked: Same router already exists. packageName={}", package.unwrap_or_default());
+            eprintln!("app host: media_router: registerRouter2Locked: Same router already exists. packageName={package}");
             return Ok(());
         }
-        let (routes, session) = self.host.media_router2_registered_state(uid)?;
-        let binder = self.host.process.strong(handle);
+        let user = uid / PER_USER_RANGE as i32;
+        let system_routing = self.host.has_system_routing_permissions(uid)?;
+        let (system_routes, session) = self.host.media_router2_registered_state(uid)?;
+        let binder = Arc::new(self.host.process.strong(handle));
         let routers = Arc::downgrade(&self.routers);
+        let providers = Arc::downgrade(&self.providers);
         let process = self.host.process.clone();
         let death = self.host.process.link_to_death(
             &binder,
@@ -168,29 +185,31 @@ impl MediaRouter {
                     && let Some(r) = routers.lock().unwrap().remove(&handle)
                 {
                     process.clear_death(&r.binder, r.death);
+                    if let Some(providers) = providers.upgrade() {
+                        providers.update_discovery(r.user);
+                    }
                 }
             }),
         );
+        self.providers.start(user);
+        let seq = self.next_router.fetch_add(1, Ordering::Relaxed);
+        let record = Router { binder, death, user, seq, package, system_routing, preference: Default::default() };
+        self.routers.lock().unwrap().insert(handle, record.clone());
+        let provider_routes = self.providers.registered_routes(user);
+        let routes = provider_routes.iter().map(Told::Provider).chain(system_routes.iter().map(Told::System));
         let mut p = Parcel::new();
-        p.write_interface_token(IMEDIA_ROUTER2);
-        p.write_i32(routes.len() as i32);
-        for route in &routes {
-            p.write_i32(1);
-            route.write_to(&mut p);
-        }
-        p.write_i32(1);
-        session.write_to(&mut p);
-        if let Err(e) = binder.transact(NOTIFY_ROUTER_REGISTERED, &p, true) {
+        router2::NotifyRouterRegistered { current_routes: Some(visible(routes, &record.package)), current_system_session_info: Some(session) }
+            .write(&mut p);
+        if let Err(e) = record.binder.transact(router2::NOTIFY_ROUTER_REGISTERED, &p, true) {
             eprintln!("app host: media_router: notifyRegistered: {e:?}");
         }
-        let package = package.unwrap_or_default();
-        self.routers.lock().unwrap().insert(handle, Router { binder, death, package, preference: Default::default() });
+        self.providers.update_discovery(user);
         Ok(())
     }
 
     /// `setDiscoveryRequestWithRouter2`: the router's preference, then the
     /// composite one for the providers (`updateDiscoveryPreferenceOnHandler`).
-    fn set_router_discovery(&self, uid: i32, router: Option<Binder>, preference: Option<super::media_router2::Preference>) -> Result<(), Exception> {
+    fn set_router_discovery(&self, router: Option<Binder>, preference: Option<super::media_router2::Preference>) -> Result<(), Exception> {
         let (Some(h), Some(preference)) = (handle(&router), preference) else {
             return Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "router and preference must not be null"));
         };
@@ -199,24 +218,18 @@ impl MediaRouter {
             eprintln!("app host: media_router: setDiscoveryRequestWithRouter2: Ignoring unknown router.");
             return Ok(());
         };
-        if r.preference == preference {
-            return Ok(());
+        if r.preference != preference {
+            r.preference = preference;
+            self.providers.update_discovery(r.user);
         }
-        let previous = std::mem::replace(&mut r.preference, preference);
-        let all: Vec<_> = routers.values().map(|r| (r.package.clone(), r.preference.clone())).collect();
-        let result = self.host.media_router2_discover(uid / PER_USER_RANGE as i32, &all);
-        if result.is_err()
-            && let Some(r) = routers.get_mut(&h)
-        {
-            r.preference = previous;
-        }
-        result
+        Ok(())
     }
 
     /// `unregisterRouter2`.
     fn unregister_router(&self, handle: u32) {
         if let Some(r) = self.routers.lock().unwrap().remove(&handle) {
             self.host.process.clear_death(&r.binder, r.death);
+            self.providers.update_discovery(r.user);
         }
     }
 
@@ -362,7 +375,7 @@ impl Service for MediaRouter {
             }
             mr::SET_DISCOVERY_REQUEST_WITH_ROUTER2 => {
                 let a = mr::SetDiscoveryRequestWithRouter2::<super::media_router2::Preference>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.set_router_discovery(call.sender_euid as i32, a.router, a.preference).map(|()| p.write_no_exception())
+                self.set_router_discovery(a.router, a.preference).map(|()| p.write_no_exception())
             }
             mr::UNREGISTER_ROUTER2 => {
                 let a = mr::UnregisterRouter2::read(&mut call.data).map_err(|_| BAD_VALUE)?;

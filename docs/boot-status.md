@@ -90,9 +90,10 @@ sign-in page); Chrome draws its first-run screen with its renderer in an
 isolated process, and past it starts its tabbed activity, which publishes
 its dynamic shortcut, draws its new tab page with its Discover feed,
 and opens and draws web pages (its renderers in isolated processes);
-YouTube Music gets its system routes and registers its router, and
-stops when its discovery would bind Play services' route provider
-(#1663); Messages draws its
+YouTube Music gets its system routes and registers its router, and its
+discovery binds Play services' route provider, which the app host now
+serves but has not yet been run with YouTube Music (#1663); Messages
+draws its
 welcome page in WebView, its renderer started by the WebView zygote;
 Contacts draws its empty contact list (appwidget, content trigger jobs);
 Drive and Play Store reach their sign-in pages (Play Store's own sign-in
