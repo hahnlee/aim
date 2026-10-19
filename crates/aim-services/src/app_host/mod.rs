@@ -106,6 +106,7 @@ pub mod shortcut_service;
 pub mod stats_manager;
 pub mod status_bar;
 pub mod storage;
+pub mod storage_stats;
 mod strict_mode;
 pub mod surface;
 pub mod task_info;
@@ -713,6 +714,10 @@ impl AppHost {
                 Arc::new(domain_verification::DomainVerification::new(self.clone())),
             ),
             ("usb", Arc::new(usb_service::UsbService::new(self.clone()))),
+            (
+                "storagestats",
+                Arc::new(storage_stats::StorageStatsService::new(self.clone())),
+            ),
             (
                 "media_session",
                 media_session::MediaSession::new(self.clone(), settings.clone()),

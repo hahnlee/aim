@@ -283,7 +283,7 @@ impl AppHost {
 
     /// `StorageManager.findPathForUuid`: internal storage only, the app
     /// host's volumes having no other file system UUID.
-    fn find_path_for_uuid(uuid: Option<&str>) -> Result<(), Exception> {
+    pub(super) fn find_path_for_uuid(uuid: Option<&str>) -> Result<(), Exception> {
         match uuid {
             None => Ok(()),
             Some(uuid) => Err(parcelable_io(
@@ -922,7 +922,7 @@ impl WriteParcelable for StorageVolume {
 }
 
 /// A `ParcelableException` of `class` (`ParcelableException.writeToParcel`).
-fn parcelable_io(class: &str, message: &str) -> Exception {
+pub(super) fn parcelable_io(class: &str, message: &str) -> Exception {
     let mut payload = Parcel::new();
     payload.write_string16(Some("android.os.ParcelableException"));
     payload.write_string16(Some(class));
@@ -931,7 +931,7 @@ fn parcelable_io(class: &str, message: &str) -> Exception {
         .expect("an exception of strings")
 }
 
-fn io_exception(message: &str) -> Exception {
+pub(super) fn io_exception(message: &str) -> Exception {
     parcelable_io("java.io.IOException", message)
 }
 
