@@ -32,6 +32,7 @@ const VAL_OBJECTARRAY: i32 = 17;
 const VAL_INTARRAY: i32 = 18;
 const VAL_LONGARRAY: i32 = 19;
 const VAL_SERIALIZABLE: i32 = 21;
+const VAL_PERSISTABLEBUNDLE: i32 = 25;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -69,6 +70,8 @@ pub enum Value {
         class: String,
         data: Vec<u8>,
     },
+    /// A `PersistableBundle` (`writePersistableBundle`) of entries.
+    PersistableBundle(Vec<(String, Value)>),
     /// A `MemoryIntArray` (`writeParcelable`): its shared memory, as the
     /// `ParcelFileDescriptor` its `writeToParcel` writes.
     MemoryIntArray(SharedFile),
@@ -168,6 +171,14 @@ impl Value {
                 p.write_string16(Some(class));
                 aim_service_aidl::write_byte_array(p, Some(data));
             }),
+            Value::PersistableBundle(entries) => {
+                p.write_i32(VAL_PERSISTABLEBUNDLE);
+                let entries: Vec<(&str, Value)> = entries
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.clone()))
+                    .collect();
+                write(p, &entries);
+            }
             Value::Lazy { .. } => unreachable!("lazy values are only read"),
         }
     }

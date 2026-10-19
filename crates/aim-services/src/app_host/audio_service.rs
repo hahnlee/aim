@@ -31,6 +31,7 @@ use super::audio_focus::{self, Focus, FocusInfo, Request};
 use super::audio_policy::AudioPolicy;
 use super::kept::RawBundle;
 use super::kept::RawIntent;
+use super::loudness::{CodecInfo, Loudness, Params as LoudnessParams};
 use super::playback::{self, Attributes, Playback, PlayerIdCard};
 use super::settings::Table;
 use super::volume::{self, Absolute, Config, DeviceAttributes, Effects, VolumeInfo, Volumes};
@@ -154,10 +155,8 @@ pub struct AudioService {
     /// `mModeDispatchers`: told of a mode change, which the app host's
     /// `MODE_NORMAL` never has.
     mode_dispatchers: Arc<Mutex<HashMap<u32, (Strong, u64)>>>,
-    /// `LoudnessCodecHelper.mLoudnessUpdateDispatchers`: told of the
-    /// loudness parameters of the codecs apps start updates for
-    /// (`startLoudnessCodecUpdates`).
-    loudness_dispatchers: Arc<Mutex<HashMap<u32, (Strong, u64)>>>,
+    /// `mLoudnessCodecHelper`.
+    loudness: Arc<Loudness>,
 }
 
 /// `AudioRoutesInfo`: `AudioDeviceInventory.mCurAudioRoutes`, which the
@@ -178,6 +177,7 @@ impl AudioService {
         let native = host
             .process
             .add_service(Arc::new(AudioManagerNative(host.clone())));
+        let loudness = Self::loudness(&host);
         AudioService {
             host,
             navigation_repeat: AtomicBool::new(false),
@@ -188,8 +188,31 @@ impl AudioService {
             routes_observers: Arc::new(Mutex::new(HashMap::new())),
             comm_dev_dispatchers: Arc::new(Mutex::new(HashMap::new())),
             mode_dispatchers: Arc::new(Mutex::new(HashMap::new())),
-            loudness_dispatchers: Arc::new(Mutex::new(HashMap::new())),
+            loudness,
         }
+    }
+
+    /// The loudness codec helper, which follows the players' changes as
+    /// AudioService's own playback callback does: asynchronously, off the
+    /// playback monitor's lock (`onPlaybackConfigChanged`).
+    fn loudness(host: &Arc<AppHost>) -> Arc<Loudness> {
+        let loudness = Arc::new(Loudness::default());
+        let (changes, changed) = std::sync::mpsc::channel::<Vec<playback::PlayerDevice>>();
+        let (me, helper) = (Arc::downgrade(host), loudness.clone());
+        std::thread::spawn(move || {
+            for players in changed {
+                let Some(host) = me.upgrade() else { return };
+                helper.players_changed(&host, &players);
+            }
+        });
+        let changes = Mutex::new(changes);
+        host.playback
+            .lock()
+            .unwrap()
+            .set_configs_listener(Box::new(move |players| {
+                let _ = changes.lock().unwrap().send(players);
+            }));
+        loudness
     }
 
     /// `startWatchingRoutes`' `mRoutesObservers.register`: kept until dead,
@@ -1428,7 +1451,7 @@ impl Service for AudioService {
                 let args = audio::RegisterLoudnessCodecUpdatesDispatcher::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
                 if let Some(Binder::Handle(dispatcher)) = args.dispatcher {
-                    self.keep(&self.loudness_dispatchers, dispatcher);
+                    self.loudness.register(host, dispatcher, call.sender_pid);
                 }
                 audio::write_register_loudness_codec_updates_dispatcher_reply(&mut p);
             }
@@ -1436,9 +1459,54 @@ impl Service for AudioService {
                 let args = audio::UnregisterLoudnessCodecUpdatesDispatcher::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
                 if let Some(Binder::Handle(dispatcher)) = args.dispatcher {
-                    self.let_go(&self.loudness_dispatchers, dispatcher);
+                    self.loudness.unregister(host, dispatcher);
                 }
                 audio::write_unregister_loudness_codec_updates_dispatcher_reply(&mut p);
+            }
+            audio::START_LOUDNESS_CODEC_UPDATES => {
+                let args = audio::StartLoudnessCodecUpdates::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.loudness.start(host, args.session_id, call.sender_pid);
+                audio::write_start_loudness_codec_updates_reply(&mut p);
+            }
+            audio::STOP_LOUDNESS_CODEC_UPDATES => {
+                let args =
+                    audio::StopLoudnessCodecUpdates::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.loudness.stop(args.session_id, call.sender_pid);
+                audio::write_stop_loudness_codec_updates_reply(&mut p);
+            }
+            audio::ADD_LOUDNESS_CODEC_INFO => {
+                let args = audio::AddLoudnessCodecInfo::<CodecInfo>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let added = self.loudness.add(
+                    host,
+                    args.session_id,
+                    args.media_codec_hash,
+                    args.codec_info,
+                    call.sender_pid,
+                );
+                if let Err(e) = added {
+                    return reply(Err(e));
+                }
+                audio::write_add_loudness_codec_info_reply(&mut p);
+            }
+            audio::REMOVE_LOUDNESS_CODEC_INFO => {
+                let args = audio::RemoveLoudnessCodecInfo::<CodecInfo>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.loudness
+                    .remove(args.session_id, args.codec_info, call.sender_pid);
+                audio::write_remove_loudness_codec_info_reply(&mut p);
+            }
+            audio::GET_LOUDNESS_PARAMS => {
+                let args = audio::GetLoudnessParams::<CodecInfo>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                match self.loudness.params(host, args.codec_info) {
+                    Ok(params) => audio::write_get_loudness_params_reply(
+                        &mut p,
+                        Some(&LoudnessParams(params)),
+                    ),
+                    Err(e) => return reply(Err(e)),
+                }
             }
             audio::IS_STREAM_AFFECTED_BY_MUTE => {
                 let args =
