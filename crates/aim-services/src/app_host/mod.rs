@@ -327,6 +327,10 @@ struct App {
     /// The packages it loaded code of (`ProcessRecord.getPkgDeps`): a
     /// change of one kills it.
     package_deps: Vec<String>,
+    /// Its last `Debug.MemoryInfo` and when it was taken, uptime
+    /// milliseconds (`ProcessProfileRecord.mLastMemInfo`,
+    /// `mLastMemInfoTime`).
+    last_mem_info: Option<(i64, memory_info::ProcessMemoryInfo)>,
 }
 
 /// `Process.SYSTEM_UID`.
@@ -1135,6 +1139,7 @@ impl AppHost {
                 last_activity: 0,
                 persistent: false,
                 package_deps: Vec::new(),
+                last_mem_info: None,
             },
         );
         Ok(pid)
@@ -1241,6 +1246,7 @@ impl AppHost {
                 last_activity: 0,
                 persistent: false,
                 package_deps: Vec::new(),
+                last_mem_info: None,
             },
         );
         Ok((start_seq, pid))
@@ -1510,6 +1516,7 @@ impl AppHost {
                     && app_info.flags & PERSISTENT_MASK == PERSISTENT_MASK
                     && app_info.process_name.as_deref() == Some(process),
                 package_deps: Vec::new(),
+                last_mem_info: None,
             },
         );
         Ok((start_seq, pid))

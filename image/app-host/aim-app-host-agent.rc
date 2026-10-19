@@ -5,10 +5,12 @@
 # makes them; it kills the processes of removed tasks, as system_server
 # does with the same capability; it serves the emulated storage's FUSE
 # connection by a process as MediaProvider's uid and groups, as zygote
-# starts the FUSE daemon with the same capabilities.
+# starts the FUSE daemon with the same capabilities; it reads processes'
+# smaps for `getProcessMemoryInfo`, as system_server does with
+# CAP_SYS_PTRACE.
 service aim-app-host-agent /system_ext/bin/aim-app-host-agent
     class main
     user system
     group system
-    capabilities KILL SETUID SETGID
+    capabilities KILL SETUID SETGID SYS_PTRACE
     socket aim_zygote_relay stream 0660 root system
