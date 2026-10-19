@@ -87,6 +87,7 @@ pub mod trust_service;
 pub mod user_service;
 pub mod volume;
 pub mod vpn_manager;
+pub mod wifi_service;
 pub mod window_layout;
 pub mod window_manager;
 pub mod zen_config;
@@ -495,6 +496,7 @@ impl AppHost {
             ("game", Arc::new(game_service::GameManager::new(self.clone()))),
             ("performance_hint", Arc::new(hint_manager::HintManager::new(self.clone()))),
             ("sensorservice", Arc::new(sensor_service::SensorService)),
+            ("wifi", Arc::new(wifi_service::WifiService::new(self.clone()))),
             ("role", self.role_service.get_or_init(|| Arc::new(role_service::RoleManager::new(self.clone()))).clone()),
             ("settings", Arc::new(settings_service::SettingsService::new(self.clone(), settings))),
             (
