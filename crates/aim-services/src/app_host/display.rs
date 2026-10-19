@@ -4,7 +4,7 @@
 //! which DisplayManager and WindowManager build their display info and
 //! configuration from.
 
-use aim_binder_host::local::{LocalProcess, Strong};
+use aim_binder_host::local::{LocalProcess, Received, Strong};
 use aim_binder_host::parcel::{Binder, Parcel, Reader, Result as ParcelResult};
 use aim_service_aidl::android_os_iservicemanager as sm;
 
@@ -292,6 +292,20 @@ pub(super) fn check_service(process: &LocalProcess, name: &str) -> Result<Strong
         Ok(Some(Binder::Handle(handle))) => Ok(process.strong(handle)),
         _ => Err(format!("no {name}")),
     }
+}
+
+/// A call to the service `name` as `ServiceManager.getService` finds it:
+/// another process's, or a node of this process itself.
+pub(super) fn transact_service(process: &LocalProcess, name: &str, code: u32, data: &Parcel) -> Result<Received, String> {
+    let mut lookup = Parcel::new();
+    sm::CheckService { name: Some(name.into()) }.write(&mut lookup);
+    let reply = process.transact(0, sm::CHECK_SERVICE, &lookup, false).map_err(|s| format!("servicemanager: {s}"))?;
+    let called = match sm::read_check_service_reply(&mut reply.reader()).map_err(|s| format!("{name}: {s}"))? {
+        Ok(Some(Binder::Handle(handle))) => process.transact(handle, code, data, false),
+        Ok(Some(Binder::Local(ptr))) => process.local_service(ptr).ok_or_else(|| format!("{name}: no local node"))?.transact(code, data, false),
+        _ => return Err(format!("no {name}")),
+    };
+    called.map_err(|s| format!("{name}#{code}: {s}"))
 }
 
 /// A call and its reply: the status, then what `read` reads.

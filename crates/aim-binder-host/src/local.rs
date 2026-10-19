@@ -309,6 +309,15 @@ impl Drop for CallingIdentity {
     }
 }
 
+/// `Binder.clearCallingIdentity`: until the guard is dropped, this thread's
+/// calls to this process's own services come from the process itself.
+pub fn clear_calling_identity() -> ClearedIdentity {
+    ClearedIdentity(CallingIdentity(CALLER.replace(None)))
+}
+
+/// The caller `clear_calling_identity` restores when dropped.
+pub struct ClearedIdentity(CallingIdentity);
+
 /// A retained node of this process, dispatched like libbinder's BBinder.
 pub struct LocalService {
     process: Arc<LocalProcess>,
@@ -1385,6 +1394,16 @@ mod tests {
             let mut reader = reply.reader();
             assert_eq!(reader.read_i32().unwrap(), 992);
             assert_eq!(reader.read_i32().unwrap(), 19001);
+            // `clearCallingIdentity`: the process itself calls until the
+            // guard drops.
+            {
+                let _system = clear_calling_identity();
+                let reply = service.transact(0, &request, false).unwrap();
+                let mut reader = reply.reader();
+                assert_eq!(reader.read_i32().unwrap(), 991);
+                assert_eq!(reader.read_i32().unwrap(), 1000);
+            }
+            assert_eq!(CALLER.get(), Some((992, 19001)));
         }
         assert!(CALLER.get().is_none());
         assert_eq!(

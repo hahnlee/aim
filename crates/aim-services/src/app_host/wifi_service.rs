@@ -185,10 +185,13 @@ impl WifiService {
     /// `WifiPermissionsUtil.isLocationModeEnabled`: the location service's
     /// answer for the current user, else its `LOCATION_MODE` setting.
     fn location_mode_enabled(&self) -> Result<bool, Exception> {
-        let asked = super::display::check_service(&self.host.process, "location").and_then(|location| {
-            let mut data = Parcel::new();
-            lm::IsLocationEnabledForUser { user_id: CURRENT_USER }.write(&mut data);
-            let reply = location.transact(lm::IS_LOCATION_ENABLED_FOR_USER, &data, false).map_err(|s| s.to_string())?;
+        let mut data = Parcel::new();
+        lm::IsLocationEnabledForUser { user_id: CURRENT_USER }.write(&mut data);
+        let asked = {
+            let _system = aim_binder_host::local::clear_calling_identity();
+            super::display::transact_service(&self.host.process, "location", lm::IS_LOCATION_ENABLED_FOR_USER, &data)
+        }
+        .and_then(|reply| {
             lm::read_is_location_enabled_for_user_reply(&mut reply.reader()).map_err(|s| s.to_string())?.map_err(|e| format!("{e:?}"))
         });
         match asked {
