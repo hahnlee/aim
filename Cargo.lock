@@ -225,6 +225,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aim-host-wifi"
+version = "0.1.0"
+dependencies = [
+ "aim-hostcall",
+]
+
+[[package]]
 name = "aim-hostcall"
 version = "0.1.0"
 
@@ -298,6 +305,7 @@ dependencies = [
  "aim-host-location",
  "aim-host-memory",
  "aim-host-sensors",
+ "aim-host-wifi",
  "aim-hostcall",
  "aim-paths",
  "aim-service-aidl",

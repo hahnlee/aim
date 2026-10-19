@@ -1,0 +1,10 @@
+[package]
+license.workspace = true
+name = "aim-host-wifi"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The Mac's Wi-Fi as Android's wifi service sees it: its interface and whether its radio is on, through CoreWLAN"
+
+[dependencies]
+aim-hostcall.workspace = true
