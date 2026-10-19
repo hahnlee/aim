@@ -309,6 +309,11 @@ impl Packages {
         &self.domains
     }
 
+    /// What the APK signature verifier depends on of the platform.
+    pub fn signing_build(&self) -> package::sign::Build {
+        package::sign::Build::of(&self.platform)
+    }
+
     /// A package context's resources (`createPackageContext`): the
     /// framework's, then the package's `table`, in the device's
     /// configuration.
@@ -646,7 +651,7 @@ pub(super) fn permission_granted(flags: i32) -> bool {
 
 /// Where the guest's `path` is on the host: below `data` for `/data`,
 /// else below the image.
-fn host_path(root: &Path, data: &Path, path: &str) -> Result<PathBuf, String> {
+pub(super) fn host_path(root: &Path, data: &Path, path: &str) -> Result<PathBuf, String> {
     let relative = path
         .strip_prefix('/')
         .ok_or_else(|| format!("relative code path {path}"))?;

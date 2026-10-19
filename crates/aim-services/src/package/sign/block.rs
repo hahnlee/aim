@@ -354,7 +354,7 @@ impl Section<'_> {
 /// `computeContentDigestsPer1MbChunk`: each section's 1 MB chunks digested
 /// with a prefix of 0xa5 and their size, then the chunks' digests with a
 /// prefix of 0x5a and their count.
-fn chunked_digests(
+pub(super) fn chunked_digests(
     algorithms: &[i32],
     apk: &dyn ReadAt,
     info: &SignatureInfo,
@@ -436,7 +436,7 @@ fn apk_verity_root_hash(apk: &dyn ReadAt, info: &SignatureInfo) -> Result<Vec<u8
     {
         return Err("APK Signing Block is not page aligned".into());
     }
-    let mut leaves = Merkle::default();
+    let mut leaves = Merkle::new(&VERITY_SALT);
     for section in sections(apk, info) {
         let mut offset = 0;
         while offset < section.size() {
@@ -445,34 +445,62 @@ fn apk_verity_root_hash(apk: &dyn ReadAt, info: &SignatureInfo) -> Result<Vec<u8
             offset += len;
         }
     }
-    let mut level = leaves.finish();
+    Ok(merkle_root(leaves.finish(), &VERITY_SALT))
+}
+
+/// `VerityBuilder.generateFsVerityRootHash` with no salt: the root of the
+/// fs-verity Merkle tree over the whole file.
+pub(super) fn fs_verity_root_hash(file: &dyn ReadAt) -> Result<Vec<u8>, String> {
+    let mut leaves = Merkle::new(&[]);
+    let mut offset = 0;
+    while offset < file.size() {
+        let len = (file.size() - offset).min(CHUNK_SIZE_BYTES);
+        let chunk = file
+            .read_vec(offset, len as usize)
+            .map_err(|e| e.to_string())?;
+        leaves.update(&chunk);
+        offset += len;
+    }
+    Ok(merkle_root(leaves.finish(), &[]))
+}
+
+/// The levels above `level`, each the digests of the one below, up to one
+/// block, whose digest is the root.
+fn merkle_root(mut level: Vec<u8>, salt: &'static [u8]) -> Vec<u8> {
     loop {
         if level.len() <= VERITY_BLOCK {
-            let mut padded = level;
-            padded.resize(VERITY_BLOCK, 0);
-            return Ok(salted(&padded));
+            level.resize(VERITY_BLOCK, 0);
+            return salted(salt, &level);
         }
-        let mut next = Merkle::default();
+        let mut next = Merkle::new(salt);
         next.update(&level);
         level = next.finish();
     }
 }
 
 /// A level of a Merkle tree: the salted SHA-256 of each block of its input.
-#[derive(Default)]
 struct Merkle {
+    salt: &'static [u8],
     block: Vec<u8>,
     hashes: Vec<u8>,
 }
 
 impl Merkle {
+    fn new(salt: &'static [u8]) -> Merkle {
+        Merkle {
+            salt,
+            block: Vec::new(),
+            hashes: Vec::new(),
+        }
+    }
+
     fn update(&mut self, mut data: &[u8]) {
         while !data.is_empty() {
             let take = (VERITY_BLOCK - self.block.len()).min(data.len());
             self.block.extend_from_slice(&data[..take]);
             data = &data[take..];
             if self.block.len() == VERITY_BLOCK {
-                self.hashes.extend_from_slice(&salted(&self.block));
+                self.hashes.extend_from_slice(&salted(self.salt, &self.block));
                 self.block.clear();
             }
         }
@@ -482,15 +510,15 @@ impl Merkle {
     fn finish(mut self) -> Vec<u8> {
         if !self.block.is_empty() {
             self.block.resize(VERITY_BLOCK, 0);
-            self.hashes.extend_from_slice(&salted(&self.block));
+            self.hashes.extend_from_slice(&salted(self.salt, &self.block));
         }
         self.hashes
     }
 }
 
-fn salted(block: &[u8]) -> Vec<u8> {
+fn salted(salt: &[u8], block: &[u8]) -> Vec<u8> {
     let mut h = Hash::Sha256.hasher();
-    h.update(&VERITY_SALT);
+    h.update(salt);
     h.update(block);
     h.finalize().into_vec()
 }

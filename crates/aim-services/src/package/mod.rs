@@ -34,6 +34,7 @@ pub mod archive;
 pub mod permission_groups;
 pub mod hold_lock;
 pub mod launch;
+pub mod apk_checksums;
 pub mod app_metadata;
 pub mod lifecycle;
 pub mod intent;

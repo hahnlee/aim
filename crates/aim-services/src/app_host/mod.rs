@@ -70,6 +70,7 @@ mod network_native;
 pub mod notification_channels;
 pub mod notification_service;
 pub mod overlay_service;
+mod package_checksums;
 pub mod package_installer;
 pub mod package_service;
 mod package_writes;

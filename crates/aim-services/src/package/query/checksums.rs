@@ -16,13 +16,16 @@ pub struct Request {
     listener: Option<Binder>,
     user: i32,
 }
+/// A request the checks passed: each file (split name, none for the base,
+/// and code path), the installer, the masks, the trusted installers and
+/// the listener (`requestChecksumsInternal`).
 pub struct Prepared {
-    files: Vec<(Option<String>, String)>,
-    installer: Option<String>,
-    optional: i32,
-    required: i32,
-    trusted: Option<Vec<u8>>,
-    listener: Option<Binder>,
+    pub(crate) files: Vec<(Option<String>, String)>,
+    pub(crate) installer: Option<String>,
+    pub(crate) optional: i32,
+    pub(crate) required: i32,
+    pub(crate) trusted: TrustedInstallers,
+    pub(crate) listener: Option<Binder>,
 }
 impl Prepared {
     pub fn send(self, owner: &Files) -> Result<(), Exception> {
@@ -31,7 +34,7 @@ impl Prepared {
             self.installer,
             self.optional,
             self.required,
-            self.trusted,
+            self.trusted.certificates(),
             self.listener,
         )
     }
@@ -126,7 +129,7 @@ impl Request {
             installer,
             optional: self.optional,
             required: self.required,
-            trusted: self.trusted.certificates(),
+            trusted: self.trusted.clone(),
             listener: self.listener,
         }))
     }
