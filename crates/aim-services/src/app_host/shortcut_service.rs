@@ -3,8 +3,8 @@
 //! persisted (`/data/system_ce/<user>/shortcut_service`: `shortcuts.xml`
 //! and `packages/<package>.xml`), the limits, and the throttling state
 //! (`/data/system/shortcut_service.xml`), each kept as the original keeps
-//! it; and the dynamic shortcut writes (set, add, remove, disable and
-//! enable), saved as `ShortcutPackage.saveToXml` saves them. A state that needs its packages
+//! it; and the dynamic shortcut writes (set, add, update, remove, disable
+//! and enable), saved as `ShortcutPackage.saveToXml` saves them. A state that needs its packages
 //! rescanned (a package gone, updated, or new with manifest shortcuts; a
 //! new OS build or locale), a package's first shortcuts, bitmap and URI
 //! icons, persons and capability bindings, the other writes and the
@@ -335,7 +335,10 @@ const FLAG_STRINGS_RESOLVED: i32 = 1 << 7;
 const FLAG_IMMUTABLE: i32 = 1 << 8;
 const FLAG_ADAPTIVE_BITMAP: i32 = 1 << 9;
 const FLAG_LONG_LIVED: i32 = 1 << 13;
+const FLAG_ICON_FILE_PENDING_SAVE: i32 = 1 << 11;
 const FLAG_HAS_ICON_URI: i32 = 1 << 15;
+/// `ShortcutInfo.RANK_NOT_SET`.
+const RANK_NOT_SET: i32 = i32::MAX;
 const RANK_CHANGED_BIT: i32 = i32::MIN;
 const IMPLICIT_RANK_MASK: i32 = i32::MAX;
 const SURFACE_LAUNCHER: i32 = 1;
@@ -353,11 +356,12 @@ const UNLIMITED_SHORTCUTS_API_CALLS: &str = "android.permission.UNLIMITED_SHORTC
 const ACTION_MAIN: &str = "android.intent.action.MAIN";
 const CATEGORY_LAUNCHER: &str = "android.intent.category.LAUNCHER";
 
-/// `ShortcutService.OPERATION_SET`, `OPERATION_ADD`.
+/// `ShortcutService.OPERATION_SET`, `OPERATION_ADD`, `OPERATION_UPDATE`.
 #[derive(Clone, Copy, PartialEq)]
 enum Operation {
     Set,
     Add,
+    Update,
 }
 
 /// No file of a parcel is read: a bitmap icon in shared memory is not
@@ -756,6 +760,100 @@ impl Shortcut {
     fn touched(&mut self) {
         self.element = None;
     }
+
+    /// `hasStringResources`.
+    fn has_string_resources(&self) -> bool {
+        self.title_res_id != 0 || self.text_res_id != 0 || self.disabled_message_res_id != 0
+    }
+
+    /// `ShortcutBitmapSaver.removeIcon`: its bitmap file left for the
+    /// dangling files' cleanup.
+    fn remove_icon(&mut self) {
+        self.icon_res_id = 0;
+        self.icon_res_name = None;
+        self.bitmap_path = None;
+        self.icon_uri = None;
+        self.flags &= !(FLAG_HAS_ICON_FILE
+            | FLAG_ADAPTIVE_BITMAP
+            | FLAG_HAS_ICON_RES
+            | FLAG_ICON_FILE_PENDING_SAVE
+            | FLAG_HAS_ICON_URI);
+    }
+
+    /// `copyNonNullFieldsFrom` of `source` (`with_icon` when it has an
+    /// icon, `with_intents` when its intents are set). Persons and
+    /// capability bindings are refused before (#1669).
+    fn copy_non_null_fields_from(
+        &mut self,
+        source: &Shortcut,
+        with_icon: bool,
+        with_intents: bool,
+    ) {
+        if source.activity.is_some() {
+            self.activity = source.activity.clone();
+        }
+        if with_icon {
+            self.icon_res_id = 0;
+            self.icon_res_name = None;
+            self.bitmap_path = None;
+            self.icon_uri = None;
+        }
+        let strings = [
+            (
+                &mut self.title,
+                &mut self.title_res_id,
+                &mut self.title_res_name,
+            ),
+            (
+                &mut self.text,
+                &mut self.text_res_id,
+                &mut self.text_res_name,
+            ),
+            (
+                &mut self.disabled_message,
+                &mut self.disabled_message_res_id,
+                &mut self.disabled_message_res_name,
+            ),
+        ];
+        let sources = [
+            (&source.title, source.title_res_id),
+            (&source.text, source.text_res_id),
+            (&source.disabled_message, source.disabled_message_res_id),
+        ];
+        for ((value, res_id, res_name), (from, from_res_id)) in strings.into_iter().zip(sources) {
+            if from.is_some() {
+                *value = from.clone();
+                *res_id = 0;
+                *res_name = None;
+            } else if from_res_id != 0 {
+                *value = None;
+                *res_id = from_res_id;
+                *res_name = None;
+            }
+        }
+        if source.categories.is_some() {
+            self.categories = source.categories.clone();
+        }
+        if with_intents {
+            self.intents = source.intents.clone();
+        }
+        if source.rank != RANK_NOT_SET {
+            self.rank = source.rank;
+        }
+        if source.extras.is_some() {
+            self.extras = source.extras.clone();
+        }
+        if source.locus_id.is_some() {
+            self.locus_id = source.locus_id.clone();
+        }
+        if source
+            .splash_theme
+            .as_deref()
+            .is_some_and(|t| !t.is_empty())
+        {
+            self.splash_theme = source.splash_theme.clone();
+        }
+    }
 }
 
 /// A `ShortcutPackage`: its document (written back as read, its counters
@@ -1052,14 +1150,23 @@ impl Package {
             }
         }
         for n in new.iter().rev() {
+            // An update may leave the activity as it is.
             let Some(activity) = n.shortcut.activity.as_ref() else {
                 continue;
             };
-            if let Some(original) = self.find(&n.shortcut.id)
-                && operation != Operation::Set
-                && !original.is_floating()
-            {
-                add(original.activity.as_ref(), -1);
+            match self.find(&n.shortcut.id) {
+                // An update has no target to count.
+                None if operation == Operation::Update => continue,
+                None => {}
+                // Updating a floating shortcut does not change the count.
+                Some(original) if original.is_floating() && operation == Operation::Update => {
+                    continue;
+                }
+                Some(original) => {
+                    if operation != Operation::Set && !original.is_floating() {
+                        add(original.activity.as_ref(), -1);
+                    }
+                }
             }
             add(Some(activity), 1);
         }
@@ -1130,6 +1237,54 @@ struct User {
     file: PathBuf,
     root: Element,
     packages: HashMap<String, Package>,
+}
+
+/// `saveIconAndFixUpShortcutLocked` of `icon` for the shortcut of
+/// `owner`: a resource icon only (the others are refused before, #1669).
+fn save_resource_icon(
+    shortcut: &mut Shortcut,
+    icon: (i32, crate::notifications::parcels::Icon, bool),
+    owner: &str,
+) -> Result<(), Exception> {
+    let (_, crate::notifications::parcels::Icon::Resource { package, id }, _) = icon else {
+        unreachable!("refused by verify_incoming")
+    };
+    // `injectValidateIconResPackage`.
+    if package != owner {
+        return Err(Exception::illegal_argument(
+            "Icon resource must reside in shortcut owner package",
+        ));
+    }
+    shortcut.icon_res_id = id;
+    shortcut.flags |= FLAG_HAS_ICON_RES;
+    Ok(())
+}
+
+/// `updateShortcuts`' change of the visible `target` by the fixed-up
+/// `source`: the warnings for what an update cannot change, the rank it
+/// sets for `adjustRanks`, its icon removed for the new one, its fields
+/// copied (`copyNonNullFieldsFrom`) and its timestamp.
+fn update_shortcut(target: &mut Shortcut, n: &Incoming) {
+    let source = &n.shortcut;
+    if (target.flags & FLAG_DISABLED) != (source.flags & FLAG_DISABLED) {
+        eprintln!(
+            "app host: shortcut: ShortcutInfo.enabled cannot be changed with updateShortcuts()"
+        );
+    }
+    if (target.flags & FLAG_LONG_LIVED) != (source.flags & FLAG_LONG_LIVED) {
+        eprintln!(
+            "app host: shortcut: ShortcutInfo.longLived cannot be changed with updateShortcuts()"
+        );
+    }
+    // `setRankChanged`, `setImplicitRank`.
+    if source.rank != RANK_NOT_SET {
+        target.implicit_rank = RANK_CHANGED_BIT | (source.implicit_rank & IMPLICIT_RANK_MASK);
+    }
+    if n.icon.is_some() {
+        target.remove_icon();
+    }
+    target.copy_non_null_fields_from(source, n.icon.is_some(), n.has_intents);
+    target.timestamp = now_ms();
 }
 
 /// `ResilientAtomicFile.openRead` of `file`: its reserve copy when it
@@ -1338,41 +1493,8 @@ impl ShortcutManager {
         operation: Operation,
     ) -> Result<bool, Exception> {
         let package = self.verify_caller(uid, package, user)?;
-        let unlimited = self
-            .host
-            .check_permission(Some(UNLIMITED_SHORTCUTS_API_CALLS), uid)?
-            == 0;
-        for n in &new {
-            // `verifyShortcutInfoPackage`.
-            if n.package.as_deref() != Some(package.as_str()) {
-                return Err(Exception::security("Shortcut package name mismatch"));
-            }
-            if uid / PER_USER_RANGE as i32 != n.user {
-                return Err(Exception::security(
-                    "UserId in shortcut doesn't match the caller",
-                ));
-            }
-            if let Some(what) = n.unsupported {
-                return Err(self
-                    .host
-                    .unimplemented_named("shortcut", &format!("{what} (#1669)")));
-            }
-            if let Some((
-                ty @ (TYPE_BITMAP | TYPE_ADAPTIVE_BITMAP | TYPE_URI | TYPE_URI_ADAPTIVE_BITMAP),
-                _,
-                _,
-            )) = n.icon
-            {
-                let what = if ty == TYPE_BITMAP || ty == TYPE_ADAPTIVE_BITMAP {
-                    "a bitmap icon"
-                } else {
-                    "an icon URI's grant check"
-                };
-                return Err(self
-                    .host
-                    .unimplemented_named("shortcut", &format!("{what} (#1669)")));
-            }
-        }
+        let unlimited = self.unlimited(uid)?;
+        self.verify_incoming(uid, &package, &new)?;
         let max_shortcuts = self
             .constant("max_shortcuts", DEFAULT_MAX_SHORTCUTS_PER_ACTIVITY)?
             .max(0);
@@ -1429,7 +1551,7 @@ impl ShortcutManager {
                 rank(p, &mut new);
             }
             for n in &mut new {
-                self.fix_up_incoming(&package, n, user)?;
+                self.fix_up_incoming(&package, n, user, false)?;
             }
             if operation == Operation::Set {
                 p.delete_all_dynamic();
@@ -1446,8 +1568,150 @@ impl ShortcutManager {
         })
     }
 
-    /// `fixUpIncomingShortcutInfo(shortcut, false)`.
-    fn fix_up_incoming(&self, package: &str, n: &mut Incoming, user: i32) -> Result<(), Exception> {
+    /// `injectHasUnlimitedShortcutsApiCallsPermission`.
+    fn unlimited(&self, uid: i32) -> Result<bool, Exception> {
+        Ok(self
+            .host
+            .check_permission(Some(UNLIMITED_SHORTCUTS_API_CALLS), uid)?
+            == 0)
+    }
+
+    /// `verifyShortcutInfoPackages`, and what of the shortcuts the app
+    /// host does not keep (#1669): their persons and capability bindings,
+    /// bitmap icons (`saveIconAndFixUpShortcutLocked`) and the grant check
+    /// of URI icons (`validateIconURI`).
+    fn verify_incoming(&self, uid: i32, package: &str, new: &[Incoming]) -> Result<(), Exception> {
+        for n in new {
+            // `verifyShortcutInfoPackage`.
+            if n.package.as_deref() != Some(package) {
+                return Err(Exception::security("Shortcut package name mismatch"));
+            }
+            if uid / PER_USER_RANGE as i32 != n.user {
+                return Err(Exception::security(
+                    "UserId in shortcut doesn't match the caller",
+                ));
+            }
+            if let Some(what) = n.unsupported {
+                return Err(self
+                    .host
+                    .unimplemented_named("shortcut", &format!("{what} (#1669)")));
+            }
+            if let Some((
+                ty @ (TYPE_BITMAP | TYPE_ADAPTIVE_BITMAP | TYPE_URI | TYPE_URI_ADAPTIVE_BITMAP),
+                _,
+                _,
+            )) = n.icon
+            {
+                let what = if ty == TYPE_BITMAP || ty == TYPE_ADAPTIVE_BITMAP {
+                    "a bitmap icon"
+                } else {
+                    "an icon URI's grant check"
+                };
+                return Err(self
+                    .host
+                    .unimplemented_named("shortcut", &format!("{what} (#1669)")));
+            }
+        }
+        Ok(())
+    }
+
+    /// `ShortcutService.updateShortcuts`: whether the call was within the
+    /// rate limit. Each shortcut the caller can see is updated with the
+    /// fields it sets; one it cannot, or none of its ID, is left alone.
+    fn update(
+        &self,
+        uid: i32,
+        package: Option<&str>,
+        mut new: Vec<Incoming>,
+        user: i32,
+    ) -> Result<bool, Exception> {
+        let package = self.verify_caller(uid, package, user)?;
+        let unlimited = self.unlimited(uid)?;
+        self.verify_incoming(uid, &package, &new)?;
+        let max_shortcuts = self
+            .constant("max_shortcuts", DEFAULT_MAX_SHORTCUTS_PER_ACTIVITY)?
+            .max(0);
+        let max_updates = self
+            .constant("max_updates_per_interval", DEFAULT_MAX_UPDATES_PER_INTERVAL)?
+            .max(0);
+        self.with_user(|u| {
+            self.on_called_by_publisher(u, &package)?;
+            let p = u
+                .packages
+                .get_mut(&package)
+                .ok_or_else(|| not_modelled("a package's first shortcut state"))?;
+            for n in new.iter().rev() {
+                p.ensure_not_immutable(&n.shortcut.id)?;
+            }
+            // `ensureNoBitmapIconIfShortcutIsLongLived`: logged once.
+            if let Some(n) = new.iter().rev().find(|n| {
+                n.shortcut.flags & FLAG_LONG_LIVED != 0
+                    && match &n.icon {
+                        Some((ty, _, _)) => *ty == TYPE_BITMAP || *ty == TYPE_ADAPTIVE_BITMAP,
+                        None => n.shortcut.flags & FLAG_HAS_ICON_FILE != 0,
+                    }
+            }) {
+                eprintln!(
+                    "app host: shortcut: Invalid icon type in shortcut {}. Bitmaps are not allowed in long-lived shortcuts. Use Resource icons, or Uri-based icons instead.",
+                    n.shortcut.id
+                );
+            }
+            // `ensureAllShortcutsVisibleToLauncher`.
+            if let Some(n) = new
+                .iter()
+                .find(|n| n.shortcut.excluded_surfaces & SURFACE_LAUNCHER != 0)
+            {
+                return Err(Exception::illegal_argument(format!(
+                    "Shortcut ID={} is hidden from launcher and may not be manipulated via APIs",
+                    n.shortcut.id
+                )));
+            }
+            p.enforce_counts(&new, Operation::Update, max_shortcuts)?;
+            if self.api_call_count(p, uid, unlimited)? >= max_updates {
+                return Ok(false);
+            }
+            let count = p.attr_long("call-count");
+            p.set_attr_long("call-count", count + 1);
+            // `clearAllImplicitRanks`, `assignImplicitRanks`.
+            p.shortcuts.iter_mut().for_each(|s| s.implicit_rank = 0);
+            for (i, n) in new.iter_mut().enumerate() {
+                n.shortcut.implicit_rank =
+                    (n.shortcut.implicit_rank & RANK_CHANGED_BIT) | (i as i32 & IMPLICIT_RANK_MASK);
+            }
+            for mut n in new {
+                self.fix_up_incoming(&package, &mut n, user, true)?;
+                let Some(target) = p.shortcuts.iter_mut().find(|s| s.id == n.shortcut.id) else {
+                    continue;
+                };
+                // Invisible shortcuts can't be updated.
+                if !target.is_visible_to_publisher() {
+                    continue;
+                }
+                update_shortcut(target, &n);
+                let replacing_icon = n.icon.is_some();
+                if let Some(icon) = n.icon {
+                    save_resource_icon(target, icon, &package)?;
+                }
+                if replacing_icon || n.shortcut.has_string_resources() {
+                    self.fix_up_resource_names_and_values(target, &package)?;
+                }
+                target.touched();
+            }
+            p.adjust_ranks();
+            p.save()?;
+            Ok(true)
+        })
+    }
+
+    /// `fixUpIncomingShortcutInfo(shortcut, for_update)`: an update's
+    /// mandatory fields are not enforced.
+    fn fix_up_incoming(
+        &self,
+        package: &str,
+        n: &mut Incoming,
+        user: i32,
+        for_update: bool,
+    ) -> Result<(), Exception> {
         let s = &mut n.shortcut;
         if s.flags & FLAG_RETURNED_BY_SERVICE != 0 {
             eprintln!(
@@ -1477,22 +1741,24 @@ impl ShortcutManager {
             }
         }
         // `enforceMandatoryFields(false)`.
-        if s.activity.is_none() {
-            return Err(Exception::new(EX_NULL_POINTER, "Activity must be provided"));
-        }
-        if s.title.is_none() && s.title_res_id == 0 {
-            return Err(Exception::illegal_argument("Short label must be provided"));
-        }
-        if !n.has_intents {
-            return Err(Exception::new(
-                EX_NULL_POINTER,
-                "Shortcut Intent must be provided",
-            ));
-        }
-        if s.intents.is_empty() {
-            return Err(Exception::illegal_argument(
-                "Shortcut Intent must be provided",
-            ));
+        if !for_update {
+            if s.activity.is_none() {
+                return Err(Exception::new(EX_NULL_POINTER, "Activity must be provided"));
+            }
+            if s.title.is_none() && s.title_res_id == 0 {
+                return Err(Exception::illegal_argument("Short label must be provided"));
+            }
+            if !n.has_intents {
+                return Err(Exception::new(
+                    EX_NULL_POINTER,
+                    "Shortcut Intent must be provided",
+                ));
+            }
+            if s.intents.is_empty() {
+                return Err(Exception::illegal_argument(
+                    "Shortcut Intent must be provided",
+                ));
+            }
         }
         // `validateIcon`.
         if let Some((ty, _, tinted)) = &n.icon {
@@ -1544,25 +1810,18 @@ impl ShortcutManager {
             return Ok(());
         }
         p.force_delete(&shortcut.id);
-        // `saveIconAndFixUpShortcutLocked`: a resource icon only (the
-        // others are refused before).
         shortcut.icon_res_id = 0;
         shortcut.icon_res_name = None;
         shortcut.bitmap_path = None;
         shortcut.icon_uri = None;
         shortcut.flags &=
             !(FLAG_HAS_ICON_FILE | FLAG_ADAPTIVE_BITMAP | FLAG_HAS_ICON_RES | FLAG_HAS_ICON_URI);
-        if let Some((_, icon, _)) = icon {
-            let crate::notifications::parcels::Icon::Resource { package, id } = icon else {
-                unreachable!("refused by publish")
-            };
-            if package != p.root.string("name").as_deref().unwrap_or_default() {
-                return Err(Exception::illegal_argument(
-                    "Icon resource must reside in shortcut owner package",
-                ));
-            }
-            shortcut.icon_res_id = id;
-            shortcut.flags |= FLAG_HAS_ICON_RES;
+        if let Some(icon) = icon {
+            save_resource_icon(
+                &mut shortcut,
+                icon,
+                p.root.string("name").as_deref().unwrap_or_default(),
+            )?;
         }
         self.fix_up_resource_names_and_values(
             &mut shortcut,
@@ -2207,6 +2466,11 @@ impl ShortcutManager {
                 self.publish(uid, package.as_deref(), list, user, operation)
                     .map(|ok| ss::write_set_dynamic_shortcuts_reply(p, ok))
             }
+            ss::UPDATE_SHORTCUTS => {
+                let (package, list, user) = self.read_list_call(call).map_err(|_| BAD_VALUE)?;
+                self.update(uid, package.as_deref(), list, user)
+                    .map(|ok| ss::write_update_shortcuts_reply(p, ok))
+            }
             ss::REMOVE_DYNAMIC_SHORTCUTS => {
                 let a = ss::RemoveDynamicShortcuts::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.remove(
@@ -2470,6 +2734,133 @@ mod tests {
         assert_eq!(
             ranks,
             [("a", 0), ("b", 2), ("last", 3), ("m", 0), ("new", 1)]
+        );
+    }
+
+    fn bare(id: &str) -> Shortcut {
+        let mut s = Shortcut::parse(
+            &aim_android_xml::read(format!(r#"<shortcut id="{id}" />"#).as_bytes()).unwrap(),
+        )
+        .unwrap();
+        s.element = None;
+        s
+    }
+
+    fn incoming(shortcut: Shortcut) -> Incoming {
+        Incoming {
+            shortcut,
+            user: 0,
+            package: Some("com.example".into()),
+            key_only: false,
+            icon: None,
+            has_intents: false,
+            unsupported: None,
+        }
+    }
+
+    /// `updateShortcuts`' `copyNonNullFieldsFrom`: what the source sets
+    /// replaces the target's (a string by a resource, an icon by a new
+    /// one), what it leaves unset is kept, and a rank it sets is marked
+    /// changed for `adjustRanks`.
+    #[test]
+    fn updates_copy_the_fields_the_source_sets() {
+        let mut target = bare("s");
+        (target.title, target.title_res_name) = (Some("Old".into()), None);
+        (target.text, target.rank, target.flags) = (Some("Text".into()), 2, FLAG_DYNAMIC);
+        (target.icon_res_id, target.icon_res_name) = (5, Some("drawable/old".into()));
+        target.flags |= FLAG_HAS_ICON_RES;
+        target.categories = Some(vec!["x".into()]);
+        let mut source = bare("s");
+        (source.title_res_id, source.text) = (0x7f01_0003, Some("New".into()));
+        (source.rank, source.implicit_rank) = (RANK_NOT_SET, 4);
+        let mut n = incoming(source);
+        n.icon = Some((
+            TYPE_RESOURCE,
+            crate::notifications::parcels::Icon::Resource {
+                package: "com.example".into(),
+                id: 0x7f02_0001,
+            },
+            false,
+        ));
+        update_shortcut(&mut target, &n);
+        save_resource_icon(&mut target, n.icon.take().unwrap(), "com.example").unwrap();
+        assert_eq!(
+            (target.title.as_deref(), target.title_res_id),
+            (None, 0x7f01_0003)
+        );
+        assert_eq!(
+            (target.text.as_deref(), target.text_res_id),
+            (Some("New"), 0)
+        );
+        assert_eq!(
+            (
+                target.rank,
+                target.implicit_rank,
+                target.categories.as_deref()
+            ),
+            (2, 0, Some(&["x".to_string()][..]))
+        );
+        assert_eq!(
+            (target.icon_res_id, target.icon_res_name.as_deref()),
+            (0x7f02_0001, None)
+        );
+        assert_eq!(target.flags, FLAG_DYNAMIC | FLAG_HAS_ICON_RES);
+
+        let mut ranked = bare("s");
+        (ranked.rank, ranked.implicit_rank) = (0, 4);
+        update_shortcut(&mut target, &incoming(ranked));
+        assert_eq!(
+            (target.rank, target.implicit_rank),
+            (0, RANK_CHANGED_BIT | 4)
+        );
+        // An icon from another package is refused.
+        let other = crate::notifications::parcels::Icon::Resource {
+            package: "com.other".into(),
+            id: 1,
+        };
+        assert!(
+            save_resource_icon(&mut target, (TYPE_RESOURCE, other, false), "com.example").is_err()
+        );
+    }
+
+    /// `enforceShortcutCountsBeforeOperation(OPERATION_UPDATE)`: an update
+    /// of no shortcut, of a floating one, or one leaving its activity is
+    /// not counted; one moving a shortcut to a full activity is refused.
+    #[test]
+    fn updates_count_only_the_activities_they_move_to() {
+        let root = aim_android_xml::read(
+            br#"<package name="com.example"><package-info version="1" /></package>"#,
+        )
+        .unwrap();
+        let mut p = Package::load(PathBuf::from("p.xml"), root).unwrap();
+        let activity = |class: &str| ComponentName {
+            package: "com.example".into(),
+            class: class.into(),
+        };
+        let shortcut = |id: &str, class: &str, flags| {
+            let mut s = bare(id);
+            (s.activity, s.flags) = (Some(activity(class)), flags);
+            s
+        };
+        p.put(shortcut("a", "Main", FLAG_DYNAMIC));
+        p.put(shortcut("b", "Main", FLAG_DYNAMIC));
+        p.put(shortcut("c", "Other", FLAG_DYNAMIC));
+        p.put(shortcut("pinned", "Other", FLAG_PINNED));
+        let update = |id: &str, class: Option<&str>| {
+            let mut s = bare(id);
+            s.activity = class.map(activity);
+            incoming(s)
+        };
+        let ok = [
+            update("a", Some("Main")),
+            update("b", None),
+            update("none", Some("Main")),
+            update("pinned", Some("Main")),
+        ];
+        assert!(p.enforce_counts(&ok, Operation::Update, 2).is_ok());
+        assert!(
+            p.enforce_counts(&[update("c", Some("Main"))], Operation::Update, 2)
+                .is_err()
         );
     }
 
