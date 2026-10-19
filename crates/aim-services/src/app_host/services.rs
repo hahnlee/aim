@@ -12,7 +12,9 @@
 //! does (`bindServiceAsUser` from system_server, a connection of its
 //! own). A service runs in its process (`android:process`), started for
 //! it when it does not run. An isolated service runs in an isolated process
-//! of its own; external services and shared isolated processes are #1492.
+//! of its own (the WebView provider's started by the WebView zygote); an
+//! external one (`BIND_EXTERNAL_SERVICE`) runs under its client's package
+//! and uid. Shared isolated processes and the app zygote are #1492.
 //! `getServices` lists them as `getRunningServiceInfoLocked` does.
 //!
 //! A service becomes foreground (`setServiceForegroundLocked`) with the
@@ -58,8 +60,9 @@ use crate::package::list_slice::Slice;
 const BIND_AUTO_CREATE: i64 = 0x1;
 const BIND_EXTERNAL_SERVICE: i64 = 0x8000_0000;
 const BIND_EXTERNAL_SERVICE_LONG: i64 = 1 << 62;
-/// `ServiceInfo.FLAG_ISOLATED_PROCESS`.
+/// `ServiceInfo.FLAG_ISOLATED_PROCESS`, `FLAG_EXTERNAL_SERVICE`.
 const FLAG_ISOLATED_PROCESS: i32 = 0x2;
+const FLAG_EXTERNAL_SERVICE: i32 = 0x4;
 /// `Context.BIND_SHARED_ISOLATED_PROCESS`, `BIND_PACKAGE_ISOLATED_PROCESS`.
 const BIND_SHARED_ISOLATED_PROCESS: i64 = 0x2000;
 const BIND_PACKAGE_ISOLATED_PROCESS: i64 = 1 << 14;
@@ -745,15 +748,46 @@ impl AppHost {
         uid: i32,
         user: i32,
         instance: Option<&str>,
+        external: Option<&str>,
     ) -> Result<Lookup, Exception> {
         let (_, resolution) = self.packages()?;
         let found = resolution
             .resolve_service(&intent.intent, resolved_type, STOCK_PM_FLAGS, user, uid)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("resolveService: {e:?}")))?;
-        let Some(crate::package::component_resolver::Info::Service(info)) = found.map(|r| r.info)
+        let Some(crate::package::component_resolver::Info::Service(mut info)) = found.map(|r| r.info)
         else {
             return Ok(Lookup::None);
         };
+        let name = || format!("ComponentInfo{{{}/{}}}", info.info.item.package_name.as_deref().unwrap_or_default(), info.info.item.name.as_deref().unwrap_or_default());
+        // An external service runs under its client's application: its
+        // package name and uid (with the defining package's code).
+        match (info.flags & FLAG_EXTERNAL_SERVICE != 0, external) {
+            (true, Some(calling_package)) => {
+                let class = info.info.item.name.clone().unwrap_or_default();
+                if !info.info.exported {
+                    return Err(Exception::security(format!("BIND_EXTERNAL_SERVICE failed, {class} is not exported")));
+                }
+                if info.flags & FLAG_ISOLATED_PROCESS == 0 {
+                    return Err(Exception::security(format!("BIND_EXTERNAL_SERVICE failed, {class} is not an isolatedProcess")));
+                }
+                if !self.owns_package(uid, calling_package)? {
+                    return Err(Exception::security("BIND_EXTERNAL_SERVICE failed, calling package not owned by calling UID "));
+                }
+                let (state, _) = self.packages()?;
+                let query = crate::package::query::Query { state: &state, filter: &resolution.apps_filter, calling_uid: 1000 };
+                let client = query
+                    .application_info(calling_package, STOCK_PM_FLAGS, user)
+                    .map_err(|e| self.unimplemented_named("activity", &format!("an external service's client: {} (#1492)", e.0)))??
+                    .ok_or_else(|| Exception::security(format!("BIND_EXTERNAL_SERVICE failed, could not resolve client package {calling_package}")))?;
+                let mut app = (*info.info.application_info).clone();
+                app.item.package_name = client.item.package_name.clone();
+                app.uid = client.uid;
+                info.info.application_info = Arc::new(app);
+            }
+            (true, None) => return Err(Exception::security(format!("BIND_EXTERNAL_SERVICE required for {}", name()))),
+            (false, Some(_)) => return Err(Exception::security(format!("BIND_EXTERNAL_SERVICE failed, {} is not an externalService", name()))),
+            (false, None) => {}
+        }
         if instance.is_some() && info.flags & FLAG_ISOLATED_PROCESS == 0 {
             return Err(Exception::illegal_argument(format!(
                 "Can't use instance name '{}' with non-isolated service '{}'",
@@ -854,7 +888,7 @@ impl AppHost {
         }
         let user = self.incoming_user(uid, user, false)?;
         let info =
-            match self.retrieve_service(&intent, resolved_type.as_deref(), uid, user, None)? {
+            match self.retrieve_service(&intent, resolved_type.as_deref(), uid, user, None, None)? {
                 Lookup::None => return Ok(None),
                 Lookup::Denied(why) => {
                     return Ok(Some((
@@ -941,7 +975,7 @@ impl AppHost {
         }
         let user = self.incoming_user(uid, user, false)?;
         let info =
-            match self.retrieve_service(&intent, resolved_type.as_deref(), uid, user, None)? {
+            match self.retrieve_service(&intent, resolved_type.as_deref(), uid, user, None, None)? {
                 Lookup::Found(info) => info,
                 Lookup::Denied(why) => {
                     return Err(Exception::security(format!(
@@ -1019,6 +1053,7 @@ impl AppHost {
         connection: Option<Binder>,
         flags: i64,
         instance: Option<String>,
+        calling_package: Option<String>,
         user: i32,
     ) -> Result<i32, Exception> {
         if intent.has_fds() {
@@ -1049,11 +1084,7 @@ impl AppHost {
         let bad = |e| Exception::new(EX_BAD_PARCELABLE, format!("bindService: intent: {e:?}"));
         let client_label = if client_uid == SYSTEM_UID { intent.client_label().map_err(bad)? } else { 0 };
         let intent = if client_label != 0 { intent.clone_filter().map_err(bad)? } else { intent };
-        if flags & (BIND_EXTERNAL_SERVICE | BIND_EXTERNAL_SERVICE_LONG) != 0 {
-            return Err(
-                self.unimplemented_named("activity", "an external service's binding (#1492)")
-            );
-        }
+        let external = flags & (BIND_EXTERNAL_SERVICE | BIND_EXTERNAL_SERVICE_LONG) != 0;
         if flags & (BIND_SHARED_ISOLATED_PROCESS | BIND_PACKAGE_ISOLATED_PROCESS) != 0 {
             return Err(
                 self.unimplemented_named("activity", "a binding into a shared isolated process (#1492)")
@@ -1066,6 +1097,7 @@ impl AppHost {
             uid,
             user,
             instance.as_deref(),
+            external.then_some(calling_package.as_deref().unwrap_or_default()),
         )? {
             Lookup::None => return Ok(0),
             Lookup::Denied(_) => return Ok(-1),
@@ -1089,7 +1121,7 @@ impl AppHost {
         conn: Arc<dyn HostConnection>,
     ) -> Result<bool, Exception> {
         let intent = RawIntent::of(None, flags, &[]).with_component(package, class);
-        let info = match self.retrieve_service(&intent, None, 1000, user, None)? {
+        let info = match self.retrieve_service(&intent, None, 1000, user, None, None)? {
             Lookup::Found(info) => *info,
             Lookup::None | Lookup::Denied(_) => return Ok(false),
         };
@@ -1342,7 +1374,14 @@ impl AppHost {
         // new isolated process named after it.
         if r.info.flags & FLAG_ISOLATED_PROCESS != 0 {
             let process = format!("{process}:{}", r.class);
-            let (seq, _) = self.start_isolated_process(&package, &process)?;
+            // The WebView provider's services start by the WebView zygote
+            // (`HostingRecord.byWebviewZygote`).
+            let defining = r.info.info.item.package_name.as_deref();
+            let (seq, _) = if defining.is_some() && self.webview_zygote_package().as_deref() == defining {
+                self.start_webview_service_process(r.info.info.application_info.clone(), &process)?
+            } else {
+                self.start_isolated_process(&package, &process)?
+            };
             state.record(token).unwrap().app = Some(seq);
             return Ok(());
         }

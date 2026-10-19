@@ -7,8 +7,11 @@
 //!   there, in zygote's own framing (the argument count, then each
 //!   argument, one per line: `attemptZygoteSendArgsAndGetResult`), goes to
 //!   zygote over one kept session, and zygote's reply (the pid, a
-//!   big-endian `int`, and whether a wrapper started it, a `boolean`) goes
-//!   back unchanged.
+//!   big-endian `int`, and whether a wrapper started it, a `boolean`; an
+//!   `int` alone for `--preload-app`) goes back unchanged. A connection
+//!   whose first line is `@` and a name talks to the child zygote listening
+//!   on that abstract socket instead (`ZygoteProcess.startChildZygote`'s,
+//!   as `ChildZygoteProcess` does).
 //! - A window's input channel is a guest socket pair, as
 //!   `InputChannel::openInputChannelPair` makes it: the agent makes it,
 //!   hands the client's end to the host (`dev.aim.IAppHostAgent`, which it
@@ -110,6 +113,14 @@ fn relay(host: UnixStream) {
     };
     let mut commands = BufReader::new(host);
     let mut zygote: Option<UnixStream> = None;
+    let mut child: Option<String> = None;
+    if commands.fill_buf().map(|b| b.first() == Some(&b'@')).unwrap_or(false) {
+        let mut line = String::new();
+        if let Err(error) = commands.read_line(&mut line) {
+            return log::error!("host target: {error}");
+        }
+        child = Some(line[1..].trim_end().to_string());
+    }
     loop {
         let command = match read_command(&mut commands) {
             Ok(Some(command)) => command,
@@ -117,33 +128,42 @@ fn relay(host: UnixStream) {
             Err(error) => return log::error!("host command: {error}"),
         };
         if zygote.is_none() {
-            match connect_zygote() {
+            match connect_zygote(child.as_deref()) {
                 Ok(stream) => zygote = Some(stream),
-                Err(error) => return log::error!("{ZYGOTE}: {error}"),
+                Err(error) => return log::error!("{}: {error}", child.as_deref().unwrap_or(ZYGOTE)),
             }
         }
         let session = zygote.as_mut().unwrap();
+        // `preloadApp` reads an `int`; a start, the pid and a `boolean`.
+        let preload = command.split(|&b| b == b'\n').nth(1) == Some(b"--preload-app");
         let mut reply = [0u8; 5];
+        let reply = if preload { &mut reply[..4] } else { &mut reply[..] };
         if let Err(error) = session
             .write_all(&command)
-            .and_then(|()| session.read_exact(&mut reply))
+            .and_then(|()| session.read_exact(reply))
         {
             // The host sees its connection close, as ZygoteProcess sees
             // the zygote's.
             return log::error!("zygote session: {error}");
         }
-        if let Err(error) = reply_to.write_all(&reply) {
+        if let Err(error) = reply_to.write_all(reply) {
             return log::error!("host reply: {error}");
         }
     }
 }
 
-/// A session with zygote, waiting for it to listen as
-/// `ZygoteProcess.waitForConnectionToZygote` does.
-fn connect_zygote() -> std::io::Result<UnixStream> {
+/// A session with zygote, or the child zygote on abstract socket `child`,
+/// waiting for it to listen as `ZygoteProcess.waitForConnectionToZygote`
+/// does.
+fn connect_zygote(child: Option<&str>) -> std::io::Result<UnixStream> {
+    use std::os::android::net::SocketAddrExt;
     let deadline = std::time::Instant::now() + ZYGOTE_CONNECT_TIMEOUT;
     loop {
-        match UnixStream::connect(ZYGOTE) {
+        let connected = match child {
+            Some(name) => std::os::unix::net::SocketAddr::from_abstract_name(name).and_then(|a| UnixStream::connect_addr(&a)),
+            None => UnixStream::connect(ZYGOTE),
+        };
+        match connected {
             Err(error)
                 if matches!(error.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound)
                     && std::time::Instant::now() < deadline =>

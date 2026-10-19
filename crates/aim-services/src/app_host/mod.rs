@@ -89,6 +89,7 @@ pub mod uid_observers;
 pub mod uri_grants;
 pub mod usage_stats;
 pub mod webview_update;
+mod webview_zygote;
 mod app_standby;
 pub mod trust_service;
 pub mod user_service;
@@ -265,6 +266,10 @@ struct App {
     /// (`getIsolatedEntryPoint`).
     isolated: bool,
     entry_point: Option<(String, Vec<String>)>,
+    /// The application it is bound with when not its package's
+    /// (`ProcessRecord.info`): an external service's, the defining
+    /// package's under the client's name and uid.
+    application_info: Option<Arc<package::info::ApplicationInfo>>,
     pid: i32,
     started: Instant,
     /// `SystemClock.elapsedRealtime` and `uptimeMillis` at the start.
@@ -379,6 +384,7 @@ pub struct AppHost {
     /// `ProcessList.mGlobalIsolatedUids`.
     isolated_uids: Mutex<IsolatedUids>,
     app_standby: app_standby::AppStandby,
+    webview_zygote: webview_zygote::WebViewZygote,
     storage: storage::Volumes,
     text_input: input_method::TextInput,
     content_service: OnceLock<Arc<content_service::ContentService>>,
@@ -448,6 +454,7 @@ impl AppHost {
             app_errors: Default::default(),
             isolated_uids: Mutex::new(IsolatedUids { used: HashSet::new(), next: FIRST_ISOLATED_UID }),
             app_standby: Default::default(),
+            webview_zygote: Default::default(),
             storage: Default::default(),
             text_input: Default::default(),
             content_service: OnceLock::new(),
@@ -761,14 +768,16 @@ impl AppHost {
             seinfo: format!("null{SEINFO_COMPLETE}"),
             instruction_set: Some(instruction_set(abi)),
             app_data_dir: None,
-            package_name: "android".into(),
+            start_child_zygote: false,
+            package_name: Some("android".into()),
             is_top_app: true,
             pkg_data_info: Vec::new(),
             allowlisted_data_info: Vec::new(),
             bind_mount_app_storage_dirs: false,
             bind_mount_app_data_dirs: false,
             disabled_compat_changes: inputs.compat.disabled_changes("android", sdk),
-            start_seq,
+            process_class: zygote::ACTIVITY_THREAD.into(),
+            extra_args: vec![zygote::start_seq_arg(start_seq)],
         };
         let started = Instant::now();
         let pid = {
@@ -796,6 +805,7 @@ impl AppHost {
                 package_uid: SYSTEM_UID,
                 isolated: true,
                 entry_point: Some((entry.to_string(), args.to_vec())),
+                application_info: None,
                 pid,
                 started,
                 start_elapsed: clock_ms(libc::CLOCK_MONOTONIC_RAW),
@@ -812,6 +822,86 @@ impl AppHost {
             },
         );
         Ok(pid)
+    }
+
+    /// A new isolated process `process` for a service of `info`'s,
+    /// started by the WebView zygote (`ProcessList.startProcess` with a
+    /// hosting record `byWebviewZygote`: `Process.startWebView`), bound
+    /// with `info`: its start and pid.
+    pub(super) fn start_webview_service_process(&self, info: Arc<package::info::ApplicationInfo>, process: &str) -> Result<(i64, i32), Exception> {
+        let inputs = self.inputs()?;
+        let owner = info.uid as u32;
+        let package = info.item.package_name.clone().unwrap_or_default();
+        let uid = self
+            .isolated_uids
+            .lock()
+            .unwrap()
+            .allocate(owner / PER_USER_RANGE)
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, format!("no isolated uid left for {process}")))?;
+        let start_seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        let start = zygote::Start {
+            uid,
+            gids: Vec::new(),
+            runtime_flags: hidden_api_policy(
+                info.flags,
+                info.private_flags,
+                info.private_flags_ext,
+                inputs.settings.get(settings::Table::Global, "hidden_api_policy").as_deref(),
+            ) << API_ENFORCEMENT_POLICY_SHIFT
+                | memory_safety(&inputs.compat, &package, info.flags, info.target_sdk_version),
+            mount_external: zygote::MountExternal::None,
+            target_sdk_version: info.target_sdk_version,
+            nice_name: process.to_string(),
+            seinfo: format!("{}{}", info.se_info.as_deref().unwrap_or("null"), info.se_info_user.as_deref().unwrap_or("")),
+            instruction_set: info.primary_cpu_abi.as_deref().map(instruction_set),
+            app_data_dir: info.data_dir.clone(),
+            start_child_zygote: false,
+            package_name: Some(package.clone()),
+            is_top_app: false,
+            pkg_data_info: Vec::new(),
+            allowlisted_data_info: Vec::new(),
+            bind_mount_app_storage_dirs: false,
+            bind_mount_app_data_dirs: false,
+            disabled_compat_changes: inputs.compat.disabled_changes(&package, info.target_sdk_version),
+            process_class: zygote::ACTIVITY_THREAD.into(),
+            extra_args: vec![zygote::start_seq_arg(start_seq)],
+        };
+        let started = Instant::now();
+        let pid = match self.start_webview(&start) {
+            Ok(pid) => pid,
+            Err(e) => {
+                self.isolated_uids.lock().unwrap().used.remove(&uid);
+                return Err(e);
+            }
+        };
+        eprintln!("app host: Start proc {pid}:{process}/{uid} by the WebView zygote in {:?}", started.elapsed());
+        self.isolated_owners_changed(|owners| owners.push((uid as i32, owner as i32)))?;
+        self.apps.lock().unwrap().insert(
+            start_seq,
+            App {
+                package,
+                process: process.to_string(),
+                uid,
+                package_uid: owner,
+                isolated: true,
+                entry_point: None,
+                application_info: Some(info),
+                pid,
+                started,
+                start_elapsed: clock_ms(libc::CLOCK_MONOTONIC_RAW),
+                start_uptime: clock_ms(libc::CLOCK_UPTIME_RAW),
+                thread: None,
+                activities: Vec::new(),
+                config: None,
+                providers: Vec::new(),
+                removed: false,
+                first_frame: None,
+                last_activity: 0,
+                persistent: false,
+                package_deps: Vec::new(),
+            },
+        );
+        Ok((start_seq, pid))
     }
 
     fn start_app_process(&self, name: &str, process: &str, request: Option<activity_start::StartRequest>, from_background: bool, isolated: bool) -> Result<(i64, i32), Exception> {
@@ -922,14 +1012,16 @@ impl AppHost {
             seinfo: format!("{}{SEINFO_COMPLETE}", listed.seinfo),
             instruction_set: setting.primary_cpu_abi.as_deref().map(instruction_set),
             app_data_dir: Some(listed.data_dir.clone()),
-            package_name: name.to_string(),
+            start_child_zygote: false,
+            package_name: Some(name.to_string()),
             is_top_app: true,
             pkg_data_info: isolation.packages,
             allowlisted_data_info: isolation.allowlisted,
             bind_mount_app_storage_dirs: isolation.storage_dirs,
             bind_mount_app_data_dirs: isolation.data_dirs,
             disabled_compat_changes: inputs.compat.disabled_changes(name, target_sdk),
-            start_seq,
+            process_class: zygote::ACTIVITY_THREAD.into(),
+            extra_args: vec![zygote::start_seq_arg(start_seq)],
         };
         let started = Instant::now();
         // Starts are serialized: a process of this name and uid that runs
@@ -980,6 +1072,7 @@ impl AppHost {
                 package_uid,
                 isolated,
                 entry_point: None,
+                application_info: None,
                 pid,
                 started,
                 start_elapsed: clock_ms(libc::CLOCK_MONOTONIC_RAW),
@@ -2300,10 +2393,13 @@ impl AppHost {
     fn bind_application(&self, app: &App, providers: Vec<package::info::ProviderInfo>) -> Result<(Parcel, config::Configuration), Exception> {
         let inputs = self.inputs()?;
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
-        let info = inputs
-            .packages
-            .application_info(&app.package, STOCK_PM_FLAGS)
-            .ok_or_else(|| state(format!("no application info of {}", app.package)))?;
+        let info = match &app.application_info {
+            Some(info) => (**info).clone(),
+            None => inputs
+                .packages
+                .application_info(&app.package, STOCK_PM_FLAGS)
+                .ok_or_else(|| state(format!("no application info of {}", app.package)))?,
+        };
         let config = self.global_configuration()?;
         let compat_info = config::CompatibilityInfo::of(&info, &config, inputs.device_density);
         let analog_clock_fps = inputs
@@ -2690,7 +2786,7 @@ impl Service for Activity {
                 };
                 reply(
                     self.0
-                        .bind_service(a.caller, call.sender_euid as i32, a.token, intent, a.resolved_type, a.connection, a.flags, a.instance_name, a.user_id)
+                        .bind_service(a.caller, call.sender_euid as i32, a.token, intent, a.resolved_type, a.connection, a.flags, a.instance_name, a.calling_package, a.user_id)
                         .map(|r| {
                             let mut p = Parcel::new();
                             am::write_bind_service_instance_reply(&mut p, r);
