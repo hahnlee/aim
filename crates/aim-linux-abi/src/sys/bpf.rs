@@ -130,6 +130,7 @@ fn ncpu() -> usize {
 }
 
 /// A map mapped into this process.
+#[derive(Clone, Copy)]
 struct Map {
     base: u64,
     header: *const Header,
@@ -192,6 +193,28 @@ impl Map {
     fn value_of(&self, i: usize) -> *mut u8 {
         // SAFETY: inside slot i.
         unsafe { self.slot(i).add(8 + round8(self.h().key_size)) }
+    }
+
+    /// The slot to store `key` in under `flags`, taking a free one for a
+    /// new key. Under the lock.
+    fn claim(&self, key: &[u8], flags: u64) -> Result<usize, i64> {
+        let h = self.h();
+        match self.probe(key) {
+            Ok(_) if flags == BPF_NOEXIST => Err(-(EEXIST as i64)),
+            Ok(i) => Ok(i),
+            Err(_) if flags == BPF_EXIST => Err(-(ENOENT as i64)),
+            Err(Some(i)) if h.count.load(Ordering::Relaxed) < h.max_entries => {
+                let s = self.slot(i);
+                // SAFETY: a free slot of the mapping.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(key.as_ptr(), s.add(8), key.len());
+                    (s as *mut u32).write(SLOT_USED);
+                }
+                h.count.fetch_add(1, Ordering::Relaxed);
+                Ok(i)
+            }
+            Err(_) => Err(-(E2BIG as i64)),
+        }
     }
 
     /// The slot of `key` (Ok), or the first free slot on its probe path.
@@ -303,8 +326,13 @@ fn read_header(fd: i32) -> Option<(Header, libc::stat)> {
     Some((h, st))
 }
 
-/// Run `f` on the map behind `fd`, mapping it into this process once.
+/// Run `f` on the map behind `fd`.
 fn with_map<R>(fd: i32, f: impl FnOnce(&Map) -> Result<R, i64>) -> Result<R, i64> {
+    f(&mapped(fd)?)
+}
+
+/// The map behind `fd`, mapped into this process once.
+fn mapped(fd: i32) -> Result<Map, i64> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: fstat into a local buffer.
     if unsafe { libc::fstat(fd, &mut st) } != 0 {
@@ -344,7 +372,79 @@ fn with_map<R>(fd: i32, f: impl FnOnce(&Map) -> Result<R, i64>) -> Result<R, i64
             })
         }
     };
-    f(map)
+    Ok(*map)
+}
+
+/// A map as the kernel's programs reach it: what `bpf_map_lookup_elem`
+/// and `bpf_map_update_elem` do from a program, for the effects the layer
+/// provides in their place (`net::traffic`). Programs write frozen maps,
+/// and see one CPU's value of a per-CPU map (the first's, here).
+#[derive(Clone, Copy)]
+pub(super) struct Kernel(Map);
+
+impl Kernel {
+    /// The map pinned at guest `path`, if there is one.
+    pub(super) fn pinned(path: &[u8]) -> Option<Kernel> {
+        let r = vfs::resolve(LINUX_AT_FDCWD, path, true).ok()?;
+        let file = PrivateFile::allocate(|| {
+            std::fs::File::options()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_CLOEXEC)
+                .open(std::ffi::OsStr::from_bytes(r.host.as_bytes()))
+        })
+        .ok()?;
+        Kernel::of(file.as_raw_fd())
+    }
+
+    /// The map behind `fd`, if it is one.
+    pub(super) fn of(fd: i32) -> Option<Kernel> {
+        mapped(fd).ok().map(Kernel)
+    }
+
+    /// The value of `key`.
+    pub(super) fn lookup(&self, key: &[u8]) -> Option<Vec<u8>> {
+        let m = &self.0;
+        if key.len() != m.h().key_size as usize {
+            return None;
+        }
+        let _g = m.lock();
+        let v = m.find(key)?;
+        // SAFETY: the value in the mapping.
+        Some(unsafe { std::slice::from_raw_parts(v, m.h().value_size as usize) }.to_vec())
+    }
+
+    /// Run `f` on the value of `key`, created zeroed (BPF_NOEXIST) when the
+    /// map has no such key and room for it. False: no such element.
+    pub(super) fn update(&self, key: &[u8], f: impl FnOnce(&mut [u8])) -> bool {
+        let m = &self.0;
+        if key.len() != m.h().key_size as usize {
+            return false;
+        }
+        let _g = m.lock();
+        let v = if hashed(m.h().ty) {
+            match m.probe(key) {
+                Ok(i) => m.value_of(i),
+                Err(_) => match m.claim(key, BPF_NOEXIST) {
+                    Ok(i) => {
+                        let v = m.value_of(i);
+                        // SAFETY: the new slot's value.
+                        unsafe { std::ptr::write_bytes(v, 0, m.value_len()) };
+                        v
+                    }
+                    Err(_) => return false,
+                },
+            }
+        } else {
+            match m.find(key) {
+                Some(v) => v,
+                None => return false,
+            }
+        };
+        // SAFETY: the value in the mapping, under the map's lock.
+        f(unsafe { std::slice::from_raw_parts_mut(v, m.h().value_size as usize) });
+        true
+    }
 }
 
 /// Copy `len` guest bytes at `p`.
@@ -462,22 +562,7 @@ fn elem(cmd: u64, a: &[u64]) -> i64 {
                     unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), v, vlen) };
                     return Ok(0);
                 }
-                let slot = match m.probe(&key) {
-                    Ok(_) if flags == BPF_NOEXIST => return Err(-(EEXIST as i64)),
-                    Ok(i) => i,
-                    Err(_) if flags == BPF_EXIST => return Err(-(ENOENT as i64)),
-                    Err(Some(i)) if h.count.load(Ordering::Relaxed) < h.max_entries => {
-                        let s = m.slot(i);
-                        // SAFETY: a free slot of the mapping.
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(key.as_ptr(), s.add(8), key.len());
-                            (s as *mut u32).write(SLOT_USED);
-                        }
-                        h.count.fetch_add(1, Ordering::Relaxed);
-                        i
-                    }
-                    Err(_) => return Err(-(E2BIG as i64)),
-                };
+                let slot = m.claim(&key, flags)?;
                 // SAFETY: the slot's value.
                 unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), m.value_of(slot), vlen) };
                 Ok(0)

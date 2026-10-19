@@ -395,7 +395,9 @@ Details in [boot-status.md](../boot-status.md), "Java world".
   original vold_prepare_subdirs, as pinned FsCrypt.cpp does, and propagates its
   failure (#948); this retains original SDK CE/DE root modes, owners and labels.
 - **eBPF scope:** `bpf()` maps live in shared memory and pin into bpffs;
-  programs and BTF load but never run (#224).
+  programs and BTF load but never run (#224). The socket layer does what
+  netd's cgroup skb stats programs do for each send and receive
+  (`sys/net/traffic.rs`); the interface counters are #1720.
 - **Kernel features added to the contract:** per-process mount namespaces
   as path-map entries, cgroup v2 and bpffs as path-map areas, xattrs with
   SELinux labels (from the original inodes and `genfscon`), and threads with
@@ -617,8 +619,9 @@ the remaining original daemons use, evdev, and memfd/ashmem.
 - **eBPF:** the `bpf()` syscall with maps backed by shared memory. Programs
   attached to kernel hooks are not run; statistics the stack expects are
   filled in from the syscall layer, which sees every socket operation.
-  Settled in P3: maps and pins work, programs and BTF load, and nothing
-  runs yet (#224).
+  Settled in P3: maps and pins work, and programs and BTF load. The
+  per-uid counters of netd's `cgroupskb/*/stats` are filled from the
+  socket layer; nothing else runs (#224, #1720).
 - **Mount namespaces** retain authenticated per-process owner inventories,
   stable mount IDs and private/shared/slave propagation. Native init has
   bootstrap and default owners. Its pinned original per-service selection

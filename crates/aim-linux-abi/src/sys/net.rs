@@ -43,6 +43,7 @@ mod proc_table;
 mod socket_inode;
 mod regular_scm;
 mod socket_scm;
+mod traffic;
 pub(crate) use socket_scm::{classify as classify_socket_scm, reset as reset_socket_scm, init as init_socket_carriers, drain as drain_socket_carriers};
 pub(crate) use socket_scm::{Export as BinderSocketExport, export as export_binder_socket};
 pub(crate) use socket_inode::stat as socket_inode_stat;
@@ -1717,8 +1718,26 @@ fn prefix(iov: &[libc::iovec], mut n: usize) -> Vec<libc::iovec> {
     out
 }
 
-/// One Linux sendmsg on `fd`.
+/// One Linux sendmsg on `fd`, and its traffic accounted.
 fn send(
+    input: &SocketInput,
+    iov: &[libc::iovec],
+    name: Option<(u64, u32)>,
+    ctrl: Option<(u64, usize)>,
+    flags: u64,
+) -> i64 {
+    let r = transmit(input, iov, name, ctrl, flags);
+    if r > 0
+        && let Some(s) = any_sock(input)
+    {
+        // SAFETY: the guest's sockaddr, which the send just read.
+        let name = name.filter(|n| n.0 != 0).map(|(p, l)| unsafe { std::slice::from_raw_parts(p as *const u8, l as usize) });
+        traffic::account(&s, input.fd(), true, r, name);
+    }
+    r
+}
+
+fn transmit(
     input: &SocketInput,
     iov: &[libc::iovec],
     name: Option<(u64, u32)>,
@@ -2063,6 +2082,22 @@ fn recv_exact(fd: i32, mut iov: Vec<libc::iovec>, flags: i32) -> Result<usize, i
 }
 
 fn recv(
+    input: &SocketInput,
+    iov: &[libc::iovec],
+    want_name: bool,
+    ctrl_cap: usize,
+    flags: u64,
+) -> Result<Received, i64> {
+    let r = receive(input, iov, want_name, ctrl_cap, flags)?;
+    if flags & L_MSG_PEEK == 0
+        && let Some(s) = any_sock(input)
+    {
+        traffic::account(&s, input.fd(), false, r.n, r.name.as_deref());
+    }
+    Ok(r)
+}
+
+fn receive(
     input: &SocketInput,
     iov: &[libc::iovec],
     want_name: bool,
@@ -2420,14 +2455,28 @@ pub fn recvmmsg(a: [u64; 6]) -> i64 {
     })
 }
 
-/// read/readv on a socket with Linux state (a plain host read for
-/// AF_INET options).
+/// fchown on socket `fd` set its owner to `uid`, which, as Linux's
+/// `sockfs_setattr` does, becomes the socket's uid (`sk_uid`) too.
+pub(super) fn socket_chowned(fd: i32, uid: u32) {
+    if let Some(Kind::Sock(s)) = fdtab::get(fd)
+        && let Some(owner) = s.inet_owner.lock().unwrap().as_mut()
+    {
+        owner.uid = uid;
+    }
+}
+
+/// read/readv on a socket with Linux state (a plain host read, accounted,
+/// for AF_INET options).
 pub(super) fn read_pinned(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> {
     let input = match SocketInput::checked(SocketPin::Borrowed(pin)) { Ok(input) => input, Err(error) => return Some(error) };
-    if let Family::Inet(o) = &any_sock(&input)?.family
+    let s = any_sock(&input)?;
+    if let Family::Inet(o) = &s.family
         && !o.icmp4.load(Ordering::Relaxed)
     {
-        return None;
+        // SAFETY: the guest's iovec buffers.
+        let r = errno::check(unsafe { libc::readv(input.fd(), iov.as_ptr(), iov.len() as i32) } as i64);
+        traffic::account(&s, input.fd(), false, r, None);
+        return Some(r);
     }
     Some(match recv(&input, iov, false, 0, 0) {
         Ok(r) => r.n,
@@ -2435,14 +2484,19 @@ pub(super) fn read_pinned(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i6
     })
 }
 
-/// write/writev on a socket with Linux state (a plain host write for
-/// AF_INET options, but for DHCP to the virtual router).
+/// write/writev on a socket with Linux state (a plain host write,
+/// accounted, for AF_INET options, but for DHCP to the virtual router).
 pub(super) fn write_pinned(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> {
     let input = match SocketInput::checked(SocketPin::Borrowed(pin)) { Ok(input) => input, Err(error) => return Some(error) };
     let fd = input.fd();
     let s = any_sock(&input)?;
     if let Family::Inet(_) = &s.family {
-        return dhcp_to_router(fd, &s, iov, None);
+        let r = dhcp_to_router(fd, &s, iov, None).unwrap_or_else(|| {
+            // SAFETY: the guest's iovec buffers.
+            errno::check(unsafe { libc::writev(fd, iov.as_ptr(), iov.len() as i32) } as i64)
+        });
+        traffic::account(&s, fd, true, r, None);
+        return Some(r);
     }
     Some(send(&input, iov, None, None, 0))
 }
