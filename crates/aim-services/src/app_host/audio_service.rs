@@ -141,6 +141,9 @@ pub struct AudioService {
     /// `AudioDeviceInventory.mRoutesObservers`, by handle: the binder and
     /// its death link.
     routes_observers: Arc<Mutex<HashMap<u32, (Strong, u64)>>>,
+    /// `AudioDeviceBroker.mCommDevDispatchers`, by handle: told of a new
+    /// communication device, of which there is none, as nothing sets one.
+    comm_dev_dispatchers: Arc<Mutex<HashMap<u32, (Strong, u64)>>>,
 }
 
 /// `AudioRoutesInfo`: `AudioDeviceInventory.mCurAudioRoutes`, which the
@@ -167,14 +170,21 @@ impl AudioService {
             native,
             ringtone_player: Mutex::new(None),
             routes_observers: Arc::new(Mutex::new(HashMap::new())),
+            comm_dev_dispatchers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// `startWatchingRoutes`' `mRoutesObservers.register`: kept until dead,
     /// notified of no change, as the routes do not change.
     fn watch_routes(&self, observer: u32) {
+        self.keep(&self.routes_observers, observer);
+    }
+
+    /// `RemoteCallbackList.register` into `kept`: the binder kept until it
+    /// dies.
+    fn keep(&self, kept: &Arc<Mutex<HashMap<u32, (Strong, u64)>>>, observer: u32) {
         let strong = self.host.process.strong(observer);
-        let observers = Arc::downgrade(&self.routes_observers);
+        let observers = Arc::downgrade(kept);
         let process = self.host.process.clone();
         let cookie = self.host.process.link_to_death(
             &strong,
@@ -186,7 +196,14 @@ impl AudioService {
                 }
             }),
         );
-        if let Some((strong, cookie)) = self.routes_observers.lock().unwrap().insert(observer, (strong, cookie)) {
+        if let Some((strong, cookie)) = kept.lock().unwrap().insert(observer, (strong, cookie)) {
+            self.host.process.clear_death(&strong, cookie);
+        }
+    }
+
+    /// `RemoteCallbackList.unregister` from `kept`.
+    fn let_go(&self, kept: &Arc<Mutex<HashMap<u32, (Strong, u64)>>>, observer: u32) {
+        if let Some((strong, cookie)) = kept.lock().unwrap().remove(&observer) {
             self.host.process.clear_death(&strong, cookie);
         }
     }
@@ -838,6 +855,36 @@ impl Service for AudioService {
                 }
                 audio::write_register_playback_callback_reply(&mut p);
             }
+            audio::REGISTER_RECORDING_CALLBACK => {
+                let a = audio::RegisterRecordingCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Some(Binder::Handle(handle)) = a.rcdb {
+                    // `checkCallingPermission(MODIFY_AUDIO_ROUTING)`.
+                    let privileged = match host.granted(MODIFY_AUDIO_ROUTING, uid) {
+                        Ok(v) => v,
+                        Err(e) => return reply(Err(e)),
+                    };
+                    let strong = host.process.strong(handle);
+                    let me = host.me.clone();
+                    let cookie = host.process.link_to_death(
+                        &strong,
+                        Box::new(move || {
+                            if let Some(host) = me.upgrade() {
+                                host.playback.lock().unwrap().remove_recording_client(handle);
+                            }
+                        }),
+                    );
+                    host.playback.lock().unwrap().add_recording_client(strong, cookie, privileged);
+                }
+                audio::write_register_recording_callback_reply(&mut p);
+            }
+            audio::UNREGISTER_RECORDING_CALLBACK => {
+                let a = audio::UnregisterRecordingCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Some(Binder::Handle(handle)) = a.rcdb {
+                    for link in host.playback.lock().unwrap().remove_recording_client(handle) {
+                        playback::clear(&host.process, Some(link));
+                    }
+                }
+            }
             audio::UNREGISTER_PLAYBACK_CALLBACK => {
                 let a = audio::UnregisterPlaybackCallback::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 if let Some(Binder::Handle(handle)) = a.pcdb {
@@ -1023,6 +1070,19 @@ impl Service for AudioService {
                     self.watch_routes(observer);
                 }
                 audio::write_start_watching_routes_reply(&mut p, Some(&SpeakerRoute));
+            }
+            audio::REGISTER_COMMUNICATION_DEVICE_DISPATCHER => {
+                let args = audio::RegisterCommunicationDeviceDispatcher::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Some(Binder::Handle(dispatcher)) = args.dispatcher {
+                    self.keep(&self.comm_dev_dispatchers, dispatcher);
+                }
+                audio::write_register_communication_device_dispatcher_reply(&mut p);
+            }
+            audio::UNREGISTER_COMMUNICATION_DEVICE_DISPATCHER => {
+                let args = audio::UnregisterCommunicationDeviceDispatcher::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Some(Binder::Handle(dispatcher)) = args.dispatcher {
+                    self.let_go(&self.comm_dev_dispatchers, dispatcher);
+                }
             }
             audio::IS_STREAM_AFFECTED_BY_MUTE => {
                 let args = audio::IsStreamAffectedByMute::read(&mut call.data).map_err(|_| BAD_VALUE)?;

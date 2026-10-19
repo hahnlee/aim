@@ -126,6 +126,16 @@ enum Next {
     Wait,
 }
 
+/// Of the system process's providers, those `installSystemProviders`
+/// installs (of system apps) that the app host leaves to it: not the
+/// `settings` provider, which the app host serves itself, nor the
+/// `android` package's, system_server's code (#1518).
+fn system_process_provider(p: &ProviderInfo) -> bool {
+    p.info.application_info.flags & crate::package::settings::FLAG_SYSTEM != 0
+        && p.info.item.package_name.as_deref() != Some(super::SYSTEM_PACKAGE)
+        && !p.authority.as_deref().is_some_and(|a| a.split(';').any(|a| a == super::SETTINGS_AUTHORITY))
+}
+
 impl AppHost {
     /// `generateApplicationProvidersLocked`: the providers of the process
     /// `process` of `uid`.
@@ -134,6 +144,12 @@ impl AppHost {
         let query = crate::package::query::Query { state: &model, filter: &resolution.apps_filter, calling_uid: 1000 };
         let flags = STOCK_PM_FLAGS | GET_URI_PERMISSION_PATTERNS | MATCH_DIRECT_BOOT_AUTO;
         match query.query_content_providers(Some(process), uid as i32, flags, None) {
+            // The system process's are `installSystemProviders`' (its
+            // system apps'): the app host serves `settings` itself, and the
+            // `android` package's code it cannot load (#1518).
+            Ok(Ok(providers)) if process == super::SYSTEM_PROCESS && uid == super::SYSTEM_UID => {
+                Ok(providers.into_iter().filter(system_process_provider).collect())
+            }
             Ok(Ok(providers)) => Ok(providers),
             Ok(Err(e)) => Err(e),
             Err(crate::package::apps_filter::NotModelled(reason)) => {
