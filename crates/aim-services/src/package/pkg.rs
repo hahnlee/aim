@@ -535,6 +535,21 @@ pub struct AndroidPackage {
 }
 
 impl AndroidPackage {
+    /// `PackageImpl.setPackageName`: the package's name and its
+    /// components'.
+    pub fn set_package_name(&mut self, name: String) {
+        let components = self.permissions.iter_mut().map(|p| &mut p.component)
+            .chain(self.permission_groups.iter_mut().map(|g| &mut g.component))
+            .chain(self.activities.iter_mut().chain(self.receivers.iter_mut()).map(|a| &mut a.main.component))
+            .chain(self.providers.iter_mut().map(|p| &mut p.main.component))
+            .chain(self.services.iter_mut().map(|s| &mut s.main.component))
+            .chain(self.instrumentations.iter_mut().map(|i| &mut i.component));
+        for component in components {
+            component.package_name.clone_from(&name);
+        }
+        self.package_name = name;
+    }
+
     /// A parser cache entry (`PackageCacher.toCacheEntryStatic`): the
     /// pool's position, the package, the pool.
     pub fn read_cache_entry(bytes: &[u8]) -> Result<AndroidPackage> {

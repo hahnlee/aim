@@ -36,6 +36,25 @@ pub struct Packages {
     access: Option<package::permissions::AccessUser>,
     /// The permissions defined (`access.abx`'s system part).
     permissions: Vec<package::permissions::Permission>,
+    domains: DomainInputs,
+}
+
+/// What DomainVerificationService attaches the packages with at boot
+/// (`addPackage`): the persisted state, each package's identity in the
+/// scan's order, and the system config (its linked apps).
+pub struct DomainInputs {
+    pub state: package::domain_verification::State,
+    pub legacy_info: BTreeMap<String, i32>,
+    pub packages: Vec<DomainPackage>,
+    pub config: system_config::SystemConfig,
+}
+
+/// A package's domain set id, signers and whether it is a system one.
+pub struct DomainPackage {
+    pub name: String,
+    pub id: Option<String>,
+    pub signatures: Option<Vec<Vec<u8>>>,
+    pub system: bool,
 }
 
 /// `ActivityRecord.WindowStyle`: what an activity's theme says of its
@@ -121,7 +140,8 @@ impl Packages {
         // packages declare in their scan's order, and each package's
         // dependencies resolved (`updateAllSharedLibrariesLPw`), native
         // ones as `ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES` asks.
-        let mut libraries = package::libraries::Registry::new(&system_config::SystemConfig::read(root, property));
+        let config = system_config::SystemConfig::read(root, property);
+        let mut libraries = package::libraries::Registry::new(&config);
         for setting in &persisted.settings.packages {
             if let Some(ps) = packages.get(&setting.name) {
                 libraries.add_package(ps, None).map_err(|e| format!("{}: shared libraries: {}", setting.name, e.0))?;
@@ -197,11 +217,31 @@ impl Packages {
             platform,
             access: Some(access),
             permissions,
+            domains: DomainInputs {
+                packages: persisted
+                    .settings
+                    .packages
+                    .iter()
+                    .map(|setting| DomainPackage {
+                        name: setting.name.clone(),
+                        id: setting.domain_set_id.clone(),
+                        signatures: setting.signatures.as_ref().map(|s| s.signatures.clone()),
+                        system: setting.flags & settings::FLAG_SYSTEM != 0,
+                    })
+                    .collect(),
+                state: persisted.settings.domain_verification,
+                legacy_info: persisted.settings.legacy_domain_info,
+                config,
+            },
         })
     }
 
     pub fn state(&self) -> &model::State {
         &self.state
+    }
+
+    pub fn domains(&self) -> &DomainInputs {
+        &self.domains
     }
 
     fn framework_resources(&self) -> crate::package::parse::resources::Resources<'_> {
@@ -556,6 +596,11 @@ fn join(
         .map_err(|e| format!("parse: {e:?}"))?;
     let mut pkg = AndroidPackage::read_cache_entry(&parsed.to_cache_entry().bytes)
         .map_err(|e| format!("parsed package does not read: {e}"))?;
+    // `scanSystemPackageLI`: a static shared library not from an APEX
+    // has its synthetic name (`renameStaticSharedLibraryPackage`).
+    if pkg.static_shared_library_name.is_some() && !setting.code_path.starts_with("/apex/") {
+        pkg.set_package_name(format!("{}_{}", pkg.package_name, pkg.static_shared_lib_version));
+    }
     pkg.uid = setting.app_id;
     pkg.primary_cpu_abi = setting.primary_cpu_abi.clone();
     pkg.secondary_cpu_abi = setting.secondary_cpu_abi.clone();

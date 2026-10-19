@@ -37,6 +37,7 @@ pub mod device_identifiers;
 pub mod device_policy;
 pub mod display;
 pub mod display_service;
+pub mod domain_verification;
 pub mod exit_info;
 pub mod fgs_types;
 pub mod freeform;
@@ -580,6 +581,7 @@ impl AppHost {
             ("webviewupdate", Arc::new(webview_update::WebViewUpdate::new(self.clone()))),
             ("locale", Arc::new(locale_manager::LocaleManager::new(self.clone()))),
             ("grammatical_inflection", Arc::new(grammatical_inflection::GrammaticalInflection::new(self.clone()))),
+            ("domain_verification", Arc::new(domain_verification::DomainVerification::new(self.clone()))),
             ("restrictions", Arc::new(restrictions_service::RestrictionsManager::new(self.clone()))),
             ("legacy_permission", Arc::new(legacy_permission::LegacyPermissionManager::new(self.clone()))),
             ("device_identifiers", Arc::new(device_identifiers::DeviceIdentifiers::new(self.clone()))),
