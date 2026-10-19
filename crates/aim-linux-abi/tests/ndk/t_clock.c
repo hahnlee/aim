@@ -114,8 +114,10 @@ static void cpu_clocks(void) {
   // Busy for 30 ms of the thread's own CPU time, however loaded the host
   // is: the CPU clocks advance only while it runs, and never past the
   // monotonic clock; the process's counts at least the thread's.
-  int64_t w0 = ns_of(CLOCK_MONOTONIC);
-  int64_t t0 = ns_of(CLOCK_THREAD_CPUTIME_ID), p0 = ns_of(CLOCK_PROCESS_CPUTIME_ID);
+  // The process's and the monotonic clocks are read around the thread's,
+  // so their intervals hold the thread's.
+  int64_t w0 = ns_of(CLOCK_MONOTONIC), p0 = ns_of(CLOCK_PROCESS_CPUTIME_ID);
+  int64_t t0 = ns_of(CLOCK_THREAD_CPUTIME_ID);
   int64_t t1;
   while ((t1 = ns_of(CLOCK_THREAD_CPUTIME_ID)) - t0 < 30000000 &&
          ns_of(CLOCK_MONOTONIC) - w0 < 10000000000LL) {
