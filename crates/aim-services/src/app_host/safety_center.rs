@@ -144,30 +144,9 @@ impl SafetyCenter {
         }
     }
 
-    /// `loadResourcesApkContext`: the first activity of the resources
-    /// APK's action, among the system's, that lives in the Permission
-    /// APEX; its package and its APK on the host.
+    /// `loadResourcesApkContext`.
     fn resources_apk(&self) -> Result<Option<(String, PathBuf)>, Exception> {
-        let (_, resolution) = self.host.packages()?;
-        let intent = Intent { action: Some(RESOURCES_APK_ACTION.into()), ..Default::default() };
-        let found = resolution
-            .query_intent_activities(&intent, None, MATCH_SYSTEM_ONLY, 0, SYSTEM_UID)
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("safety_center: resources APK: {e:?}")))?;
-        let found = found.into_iter().find_map(|r| match r.info {
-            Info::Activity(a) => {
-                let app = &a.info.application_info;
-                let source = app.source_dir.clone().filter(|d| d.starts_with(APEX_MODULE_PATH))?;
-                Some((app.item.package_name.clone()?, source))
-            }
-            _ => None,
-        });
-        let Some((package, source)) = found else { return Ok(None) };
-        let relative = source.trim_start_matches('/');
-        let path = match relative.strip_prefix("data/") {
-            Some(rest) => self.host.data()?.join(rest),
-            None => self.host.root()?.join(relative),
-        };
-        Ok(Some((package, path)))
+        resources_apk(&self.host, "safety_center", RESOURCES_APK_ACTION, APEX_MODULE_PATH)
     }
 
     /// `canUseSafetyCenter`.
@@ -460,6 +439,32 @@ impl SafetyCenter {
             Ok(())
         })
     }
+}
+
+/// A module's resources APK: the first activity of its `action`, among the
+/// system's, that lives in the module's APEX at `apex`; its package and its
+/// APK on the host.
+pub(super) fn resources_apk(host: &AppHost, service: &str, action: &str, apex: &str) -> Result<Option<(String, PathBuf)>, Exception> {
+    let (_, resolution) = host.packages()?;
+    let intent = Intent { action: Some(action.into()), ..Default::default() };
+    let found = resolution
+        .query_intent_activities(&intent, None, MATCH_SYSTEM_ONLY, 0, SYSTEM_UID)
+        .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{service}: resources APK: {e:?}")))?;
+    let found = found.into_iter().find_map(|r| match r.info {
+        Info::Activity(a) => {
+            let app = &a.info.application_info;
+            let source = app.source_dir.clone().filter(|d| d.starts_with(apex))?;
+            Some((app.item.package_name.clone()?, source))
+        }
+        _ => None,
+    });
+    let Some((package, source)) = found else { return Ok(None) };
+    let relative = source.trim_start_matches('/');
+    let path = match relative.strip_prefix("data/") {
+        Some(rest) => host.data()?.join(rest),
+        None => host.root()?.join(relative),
+    };
+    Ok(Some((package, path)))
 }
 
 impl Service for SafetyCenter {

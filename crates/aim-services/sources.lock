@@ -302,7 +302,7 @@ INTERFACES=(
   "android.app.usage.IUsageStatsManager|system/framework/framework.jar|isAppStandbyEnabled,isAppInactive,getAppStandbyBucket"
   "android.webkit.IWebViewUpdateService|system/framework/framework.jar|notifyRelroCreationCompleted,waitForAndGetProvider,getValidWebViewPackages,getAllWebViewPackages,getCurrentWebViewPackageName,getCurrentWebViewPackage,getDefaultWebViewPackage"
   "android.net.IConnectivityManager|apex/com.android.tethering/javalib/framework-connectivity.jar|getActiveNetwork,getActiveNetworkForUid,getActiveNetworkInfo,getActiveNetworkInfoForUid,getNetworkInfo,getNetworkInfoForUid,getAllNetworks,getLinkProperties,getNetworkCapabilities,isActiveNetworkMetered,getGlobalProxy,getProxyForNetwork,requestNetwork,listenForNetwork,releaseNetworkRequest,getMultipathPreference,getRestrictBackgroundStatusByCaller,getEnabledConnectivityManagerFeatures,isDefaultNetworkActive,reportNetworkConnectivity"
-  "android.net.wifi.IWifiManager|apex/com.android.wifi/javalib/framework-wifi.jar|getWifiEnabledState,getVerboseLoggingLevel,isScanAlwaysAvailable,getConnectionInfo,getScanResults"
+  "android.net.wifi.IWifiManager|apex/com.android.wifi/javalib/framework-wifi.jar|getWifiEnabledState,getVerboseLoggingLevel,isScanAlwaysAvailable,getConnectionInfo,getScanResults,getConfiguredNetworks"
   "android.os.IStatsManagerService|apex/com.android.os.statsd/javalib/framework-statsd.jar|*"
   "android.os.IStatsd|apex/com.android.os.statsd/javalib/framework-statsd.jar|*"
   "android.os.IStatsCompanionService|apex/com.android.os.statsd/javalib/framework-statsd.jar|*"

@@ -1725,7 +1725,7 @@ impl Query<'_> {
     }
 
     /// `getNameForUid`.
-    fn name_for_uid(&self, uid: i32) -> Result<Option<String>, NotModelled> {
+    pub(crate) fn name_for_uid(&self, uid: i32) -> Result<Option<String>, NotModelled> {
         if apps_filter::instant_app_package_name(self.state, self.calling_uid)?.is_some() {
             return Ok(None);
         }

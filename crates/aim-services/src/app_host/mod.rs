@@ -115,6 +115,7 @@ pub mod trust_service;
 pub mod user_service;
 pub mod volume;
 pub mod vpn_manager;
+pub mod wifi_config;
 pub mod wifi_service;
 pub mod window_layout;
 pub mod window_manager;
