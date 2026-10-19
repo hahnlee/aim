@@ -482,8 +482,12 @@ The migration's state and conformance results are in
   The system process is the `android` package's process `system` of the
   system uid (`setSystemProcess`), and zygote starts it as it starts an
   app's. Components that other system-uid packages declare in
-  `android:process="system"` run there: Telecom's `TelecomService`, which
-  the native TelecomLoaderService binds. Its providers are the system
+  `android:process="system"` run there. Telecom's `TelecomService` cannot
+  yet: TelecomLoaderService creates the telecom service with an in-process
+  call on system_server's main thread, which Telecom's construction relies
+  on (a Bluetooth profile callback it posts to that looper must not run
+  before it returns); a call from the app host lands on a binder thread
+  and races it (#1786). Its providers are the system
   apps' that `installSystemProviders` installs, less `settings`, which the
   app host serves itself. The `android` package's own components are
   system_server's code. They need its class path (`SYSTEMSERVERCLASSPATH`,

@@ -109,7 +109,6 @@ mod strict_mode;
 pub mod surface;
 pub mod task_info;
 pub mod tasks;
-pub mod telecom_loader;
 pub mod telephony_registry;
 pub mod uid_observers;
 pub mod uri_grants;
@@ -441,8 +440,6 @@ pub struct AppHost {
     job_scheduler: OnceLock<Arc<job_scheduler::JobScheduler>>,
     stats: OnceLock<Arc<stats_manager::Stats>>,
     bluetooth: OnceLock<Arc<bluetooth_manager::BluetoothManager>>,
-    /// TelecomLoaderService.
-    telecom_loader: OnceLock<Arc<telecom_loader::TelecomLoader>>,
     /// What DevicePolicyManagerService persisted, read once.
     device_policies: OnceLock<device_policy::Policies>,
     services: services::Services,
@@ -516,7 +513,6 @@ impl AppHost {
             job_scheduler: OnceLock::new(),
             stats: OnceLock::new(),
             bluetooth: OnceLock::new(),
-            telecom_loader: OnceLock::new(),
             device_policies: OnceLock::new(),
             services: Default::default(),
             pending_intents: Default::default(),
@@ -3531,8 +3527,6 @@ impl Service for Control {
                     bluetooth.on_user_starting();
                     bluetooth.on_user_unlocking();
                 }
-                // TelecomLoaderService's `PHASE_ACTIVITY_MANAGER_READY`.
-                host.telecom_loader.get_or_init(|| telecom_loader::TelecomLoader::new(host.clone())).activity_manager_ready();
             });
             let mut p = Parcel::new();
             p.write_no_exception();
