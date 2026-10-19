@@ -51,7 +51,11 @@ use crate::notifications::parcels::{
     self, CALL_STYLE, FLAG_FOREGROUND_SERVICE, FLAG_GROUP_SUMMARY, FLAG_NO_CLEAR,
     FLAG_ONGOING_EVENT, FLAG_PROMOTED_ONGOING, Files,
 };
+use crate::package::component_resolver::Info;
+use crate::package::info::flags::{GET_META_DATA, GET_SERVICES};
+use crate::package::intent::Intent;
 use crate::package::list_slice::{self, Slice};
+use crate::package::query::Query;
 
 /// `Notification.FLAG_*` the service sets or clears.
 const FLAG_AUTO_CANCEL: i32 = 0x10;
@@ -92,6 +96,35 @@ const TRIM_FULL: i32 = 0;
 const MAX_PACKAGE_NOTIFICATIONS: usize = 50;
 const DEFAULT_MAX_ENQUEUE_RATE: f32 = 5.0;
 const NOTIFICATION_MAX_AGE_AT_POST: i64 = 14 * 24 * 60 * 60 * 1000;
+/// `NotificationListenerService.SERVICE_INTERFACE` and the permission its
+/// services require (`NotificationListeners.getConfig`).
+const LISTENER_SERVICE_INTERFACE: &str = "android.service.notification.NotificationListenerService";
+const BIND_NOTIFICATION_LISTENER_SERVICE: &str =
+    "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE";
+
+/// The listeners `user` approved in `<enabled_listeners>` (each
+/// `<service_listing approved=.. user=..>`, primary or not), as
+/// `ManagedServices.readXml` keeps them: the listeners require no
+/// permission, so none is left out.
+fn approved_listeners(policy: &Element, user: i32) -> Vec<String> {
+    policy
+        .children()
+        .filter(|e| e.name == "enabled_listeners")
+        .flat_map(|e| e.children())
+        .filter(|e| {
+            e.name == "service_listing" && e.int("user").ok().flatten().unwrap_or(0) == user
+        })
+        .filter_map(|e| e.string("approved").map(|a| a.into_owned()))
+        .flat_map(|approved| {
+            approved
+                .split(':')
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// `Settings.Global.ZEN_MODE_OFF`.
 const ZEN_MODE_OFF: i32 = 0;
 /// `UserHandle.USER_ALL`, `USER_SYSTEM`.
@@ -733,6 +766,116 @@ impl NotificationManager {
             .host
             .check_permission(Some("android.permission.POST_NOTIFICATIONS"), uid)?
             == 0)
+    }
+
+    /// `checkPolicyAccess` of `package` for its caller `uid`: the package
+    /// in the caller's user (none, `NameNotFoundException`, is denied)
+    /// holding MANAGE_NOTIFICATIONS, approved by the condition providers,
+    /// an enabled notification listener's, or a device or profile owner.
+    /// Both forms of `managedServicesConcurrentMultiuser` ask of the
+    /// caller's user, the app host's one user.
+    fn policy_access_granted(&self, uid: i32, package: Option<&str>) -> Result<bool, Exception> {
+        let Some(package) = package else {
+            return Ok(false);
+        };
+        let user = uid / PER_USER_RANGE as i32;
+        // `getPackageUidAsUser`, in the caller's identity.
+        let package_uid = {
+            let (state, resolution) = self.host.packages()?;
+            let query = Query {
+                state: &state,
+                filter: &resolution.apps_filter,
+                calling_uid: uid,
+            };
+            match query.package_uid(package, 0, user).map_err(|e| {
+                self.host
+                    .unimplemented_named("notification", &format!("getPackageUidAsUser: {}", e.0))
+            })?? {
+                -1 => return Ok(false),
+                package_uid => package_uid,
+            }
+        };
+        if self
+            .host
+            .check_permission(Some("android.permission.MANAGE_NOTIFICATIONS"), package_uid)?
+            == 0
+        {
+            return Ok(true);
+        }
+        let approved = {
+            let guard = self.state()?;
+            let policy = &guard.as_ref().unwrap().policy;
+            zen_config::policy_access_approved(policy, package, user)
+                || self.listener_enabled_for_package(policy, package, user)?
+        };
+        if approved {
+            return Ok(true);
+        }
+        // `DevicePolicyManagerInternal.isActiveProfileOwner` and
+        // `isActiveDeviceOwner`: none without owners.
+        if self.host.device_policies()?.owned() {
+            return Err(self.host.unimplemented_named(
+                "notification",
+                "checkPolicyAccess on a device with a device or profile owner (#1521)",
+            ));
+        }
+        Ok(false)
+    }
+
+    /// `ManagedServices.isComponentEnabledForPackage` of the notification
+    /// listeners: whether a listener `user` approved is `package`'s; an
+    /// approved component counts as its package's, an approved package by
+    /// its listener services (`loadComponentNamesFromValues`).
+    fn listener_enabled_for_package(
+        &self,
+        policy: &Element,
+        package: &str,
+        user: i32,
+    ) -> Result<bool, Exception> {
+        for entry in approved_listeners(policy, user) {
+            match entry.find('/') {
+                Some(sep) if sep + 1 < entry.len() => {
+                    if &entry[..sep] == package {
+                        return Ok(true);
+                    }
+                }
+                _ if entry == package => {
+                    if !self.listener_services(&entry, user)?.is_empty() {
+                        return Ok(true);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(false)
+    }
+
+    /// `queryPackageForServices` of the notification listeners: the
+    /// services of `package` for `NotificationListenerService` that require
+    /// BIND_NOTIFICATION_LISTENER_SERVICE, as the system asks for them.
+    fn listener_services(&self, package: &str, user: i32) -> Result<Vec<String>, Exception> {
+        let (_, resolution) = self.host.packages()?;
+        let intent = Intent {
+            action: Some(LISTENER_SERVICE_INTERFACE.into()),
+            package: Some(package.into()),
+            ..Default::default()
+        };
+        // Asked as the system (`rebindServices`), not as a caller.
+        let found = resolution
+            .query_intent_services(&intent, None, GET_SERVICES | GET_META_DATA, user, 1000)
+            .map_err(|e| {
+                self.host
+                    .unimplemented_named("notification", &format!("queryIntentServices: {e:?}"))
+            })?;
+        Ok(found
+            .into_iter()
+            .filter_map(|r| match r.info {
+                Info::Service(si) => Some(si),
+                _ => None,
+            })
+            .filter(|si| si.permission.as_deref() == Some(BIND_NOTIFICATION_LISTENER_SERVICE))
+            .filter_map(|si| si.info.item.name)
+            .collect())
     }
 
     /// The uid of `package` in `user`.
@@ -2499,6 +2642,18 @@ impl Service for NotificationManager {
             }
             nm::GET_ACTIVE_NOTIFICATIONS_FROM_LISTENER => reply(self.active_from_listener(call)),
             nm::CANCEL_NOTIFICATIONS_FROM_LISTENER => empty(self.cancel_from_listener(call)),
+            nm::IS_NOTIFICATION_POLICY_ACCESS_GRANTED => {
+                let a = nm::IsNotificationPolicyAccessGranted::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                reply(
+                    self.policy_access_granted(call.sender_euid as i32, a.pkg.as_deref())
+                        .map(|granted| {
+                            let mut p = Parcel::new();
+                            nm::write_is_notification_policy_access_granted_reply(&mut p, granted);
+                            p
+                        }),
+                )
+            }
             code => reply(Err(self.host.unimplemented("notification", code))),
         }
     }
@@ -2509,6 +2664,19 @@ mod tests {
     use super::*;
     use crate::notifications::parcels::StatusBarNotification;
     use crate::notifications::parcels::tests::java_notification;
+
+    /// The listeners a user approved, primary and secondary lists alike,
+    /// split as `ManagedServices` splits them.
+    #[test]
+    fn approved_listeners_are_each_user_s_entries() {
+        let xml = br#"<notification-policy><enabled_listeners version="4"><service_listing approved="com.a/com.a.L:com.b" user="0" primary="true" /><service_listing approved="com.c/.L" user="0" primary="false" /><service_listing approved="com.d/.L" user="10" primary="true" /><service_listing approved="" user="0" primary="true" /></enabled_listeners></notification-policy>"#;
+        let policy = aim_android_xml::read(xml).unwrap();
+        assert_eq!(
+            approved_listeners(&policy, 0),
+            ["com.a/com.a.L", "com.b", "com.c/.L"]
+        );
+        assert_eq!(approved_listeners(&policy, 10), ["com.d/.L"]);
+    }
 
     const INTENT: Binder = Binder::Local(0x10);
     const FSI: Binder = Binder::Local(0x20);
