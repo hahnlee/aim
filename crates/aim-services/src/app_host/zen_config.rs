@@ -1,7 +1,8 @@
 //! `ZenModeHelper`'s config for the app host (`android-16.0.0_r1`): the
 //! zen config of `/data/system/notification_policy.xml`
 //! (`ZenModeConfig.readXml`, in its `modes_ui` form, #1647), as
-//! `getZenModeConfig` returns it and `getAutomaticZenRules` its rules
+//! `getZenModeConfig` returns it and `getAutomaticZenRules` and
+//! `getAutomaticZenRule` its rules
 //! (`zenRuleToAutomaticZenRule`), and the packages that
 //! `ConditionProviders` approves for notification policy access
 //! (`<dnd_apps>`). The rules are not run (#1488).
@@ -141,7 +142,7 @@ impl WriteParcelable for Condition {
 /// A `ZenRule` (`readRuleXml`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ZenRule {
-    id: Option<String>,
+    pub id: Option<String>,
     enabled: bool,
     name: Option<String>,
     zen_mode: i32,
@@ -319,51 +320,64 @@ pub struct AzrWithId(ZenRule);
 
 impl WriteParcelable for AzrWithId {
     fn write_to(&self, p: &mut Parcel) {
-        let rule = &self.0;
-        p.write_string8(rule.id.as_deref());
+        p.write_string8(self.0.id.as_deref());
         p.write_string16(Some("android.app.AutomaticZenRule"));
-        p.write_i32(i32::from(rule.enabled));
-        // The constructor's trimmed name, a `Uri.parse` of the trimmed
-        // condition id, and trimmed components.
-        p.write_i32(1);
-        p.write_string8(
-            rule.name
-                .as_deref()
-                .map(|n| trimmed(n, MAX_STRING_LENGTH))
-                .as_deref(),
-        );
-        p.write_i32(match rule.zen_mode {
-            0 => 1,
-            1 => 2,
-            2 => 4,
-            3 => 3,
-            _ => 0,
-        });
-        let condition = trimmed(
-            rule.condition_id.as_deref().unwrap_or_default(),
-            MAX_STRING_LENGTH,
-        );
-        write_uri(p, &condition);
-        write_component(p, rule.component.as_ref(), true);
-        write_component(p, rule.configuration_activity.as_ref(), true);
-        p.write_i64(rule.creation_time);
-        parcelable(
-            p,
-            "android.service.notification.ZenPolicy",
-            rule.policy.as_ref(),
-        );
-        p.write_string8(rule.pkg.as_deref());
-        parcelable(
-            p,
-            "android.service.notification.ZenDeviceEffects",
-            rule.effects.as_ref(),
-        );
-        p.write_bool(rule.allow_manual_invocation);
-        // `drawableResNameToResId`: none without a name.
-        p.write_i32(0);
-        p.write_string8(rule.trigger_description.as_deref());
-        p.write_i32(rule.kind);
+        write_automatic_zen_rule(&self.0, p);
     }
+}
+
+/// The `AutomaticZenRule` of a rule (`zenRuleToAutomaticZenRule`).
+pub struct AutomaticZenRule(ZenRule);
+
+impl WriteParcelable for AutomaticZenRule {
+    fn write_to(&self, p: &mut Parcel) {
+        write_automatic_zen_rule(&self.0, p);
+    }
+}
+
+/// `AutomaticZenRule.writeToParcel` of a rule.
+fn write_automatic_zen_rule(rule: &ZenRule, p: &mut Parcel) {
+    p.write_i32(i32::from(rule.enabled));
+    // The constructor's trimmed name, a `Uri.parse` of the trimmed
+    // condition id, and trimmed components.
+    p.write_i32(1);
+    p.write_string8(
+        rule.name
+            .as_deref()
+            .map(|n| trimmed(n, MAX_STRING_LENGTH))
+            .as_deref(),
+    );
+    p.write_i32(match rule.zen_mode {
+        0 => 1,
+        1 => 2,
+        2 => 4,
+        3 => 3,
+        _ => 0,
+    });
+    let condition = trimmed(
+        rule.condition_id.as_deref().unwrap_or_default(),
+        MAX_STRING_LENGTH,
+    );
+    write_uri(p, &condition);
+    write_component(p, rule.component.as_ref(), true);
+    write_component(p, rule.configuration_activity.as_ref(), true);
+    p.write_i64(rule.creation_time);
+    parcelable(
+        p,
+        "android.service.notification.ZenPolicy",
+        rule.policy.as_ref(),
+    );
+    p.write_string8(rule.pkg.as_deref());
+    parcelable(
+        p,
+        "android.service.notification.ZenDeviceEffects",
+        rule.effects.as_ref(),
+    );
+    p.write_bool(rule.allow_manual_invocation);
+    // `drawableResNameToResId`: none without a name.
+    p.write_i32(0);
+    p.write_string8(rule.trigger_description.as_deref());
+    p.write_i32(rule.kind);
 }
 
 /// `getTrimmedString`: the first `length` UTF-16 units.
@@ -676,22 +690,33 @@ impl ZenModeConfig {
 /// `AutomaticZenRule` with its id, in the order of the `HashMap` that
 /// collects them.
 pub fn automatic_zen_rules(rules: Vec<ZenRule>) -> Result<Vec<AzrWithId>, Exception> {
-    for rule in &rules {
-        // `AutomaticZenRule.Builder` takes a name and condition id.
-        if rule.name.is_none() || rule.condition_id.is_none() {
-            return Err(Exception::new(EX_NULL_POINTER, "AutomaticZenRule.Builder"));
-        }
-        if rule.icon_res_name.as_deref().is_some_and(|n| !n.is_empty()) {
-            return Err(Exception::new(
-                EX_UNSUPPORTED_OPERATION,
-                "notification: a zen rule's icon by name (#1646)",
-            ));
-        }
-    }
+    rules.iter().try_for_each(convertible)?;
     Ok(hash_order(rules, |r| r.id.as_deref().unwrap_or_default())
         .into_iter()
         .map(AzrWithId)
         .collect())
+}
+
+/// `zenRuleToAutomaticZenRule` of one rule.
+pub fn automatic_zen_rule(rule: ZenRule) -> Result<AutomaticZenRule, Exception> {
+    convertible(&rule)?;
+    Ok(AutomaticZenRule(rule))
+}
+
+/// Whether `zenRuleToAutomaticZenRule` makes an `AutomaticZenRule` of
+/// `rule` as the app host can.
+fn convertible(rule: &ZenRule) -> Result<(), Exception> {
+    // `AutomaticZenRule.Builder` takes a name and condition id.
+    if rule.name.is_none() || rule.condition_id.is_none() {
+        return Err(Exception::new(EX_NULL_POINTER, "AutomaticZenRule.Builder"));
+    }
+    if rule.icon_res_name.as_deref().is_some_and(|n| !n.is_empty()) {
+        return Err(Exception::new(
+            EX_UNSUPPORTED_OPERATION,
+            "notification: a zen rule's icon by name (#1646)",
+        ));
+    }
+    Ok(())
 }
 
 /// `ConditionProviders.isPackageOrComponentAllowed`: whether `<dnd_apps>`
@@ -794,6 +819,31 @@ mod tests {
             (ZEN_MODE_IMPORTANT_INTERRUPTIONS, TYPE_UNKNOWN)
         );
         assert!(policy_access_approved(&root, "p", 0) && !policy_access_approved(&root, "q", 0));
+    }
+
+    /// `getAutomaticZenRule`'s `AutomaticZenRule` is the body an
+    /// `AzrWithId` writes after its id and the rule's class.
+    #[test]
+    fn a_rule_parcels_as_its_azr_with_id_does() {
+        let xml = br#"<notification-policy version="1"><zen version="12" user="0">
+<manual enabled="false" zen="0" pkg="android" conditionId="" creationTime="0" callsFrom="3" alarms="1" type="0" />
+<automatic ruleId="r2" name="n" pkg="p" conditionId="c" id="c" />
+</zen></notification-policy>"#;
+        let rule = read(&aim_android_xml::read(xml).unwrap())
+            .unwrap()
+            .rules()
+            .remove(0);
+        let mut with_id = Parcel::new();
+        automatic_zen_rules(vec![rule.clone()]).unwrap()[0].write_to(&mut with_id);
+        let mut alone = Parcel::new();
+        automatic_zen_rule(rule).unwrap().write_to(&mut alone);
+        let mut r = with_id.reader();
+        assert_eq!(r.read_string8().unwrap().as_deref(), Some("r2"));
+        assert_eq!(
+            r.read_string16().unwrap().as_deref(),
+            Some("android.app.AutomaticZenRule")
+        );
+        assert_eq!(&with_id.data()[r.position()..], alone.data());
     }
 
     /// A config of before modes_ui, whose manual rule has no policy, is
