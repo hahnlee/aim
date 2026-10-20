@@ -36,6 +36,18 @@ All three are `device.internal`; the keyboard is `keyboard.builtIn`
 keyboard); the mouse is `touch.deviceType = pointer`. Key layout and
 character map are the image's `Generic.kl` and `Generic.kcm`.
 
+On the app host ([app-host.md](app-host.md)) no InputReader runs: the
+app host agent (`daemons/app-host-agent/src/input.rs`) reads `event0` and
+`event1` itself. It finds the keyboard as EventHub does (its `.idc`, key
+layout and character map by name, `keyboard.builtIn`), maps each key as
+`KeyboardInputMapper` does (`aim_input_transport::keyboard`: the `.kl`
+parser, meta state with the lock keys, the HID usage of `MSC_SCAN`), and
+publishes it to the focused window, repeating a held key as
+InputDispatcher synthesizes repeats with the input settings' timeout and
+delay. InputManager answers the keyboard's `InputDevice` with the device
+id the agent stamps on its keys and its key character map. The window
+manager policy's key interception and the mouse are not modelled (#1434).
+
 ### Decision: the primary button is a finger, the rest a mouse
 
 - **Click and drag** (user's decision, #214). Phone apps are touch-first:

@@ -3537,6 +3537,7 @@ fn write_input(data: &mut Parcel, input: &window_manager::Input) {
     }
     data.write_bool(input.watch_outside);
     data.write_i32(input.owner as i32);
+    data.write_i32(input.owner_pid);
 }
 
 /// `clock`'s milliseconds, as the guest's `SystemClock` reads them: its

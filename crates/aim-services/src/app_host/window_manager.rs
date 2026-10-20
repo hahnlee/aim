@@ -25,8 +25,13 @@ use super::surface::{self, Layer};
 use super::window_layout::{self, Frames, LayoutParams, UNSPECIFIED_LENGTH};
 use super::{AppHost, reply};
 
-/// `WindowManagerGlobal.ADD_FLAG_IN_TOUCH_MODE | ADD_FLAG_APP_VISIBLE`.
-const ADDED: i32 = 0x1 | 0x2;
+/// `WindowManagerGlobal.ADD_FLAG_IN_TOUCH_MODE`, `ADD_FLAG_APP_VISIBLE`.
+const ADD_FLAG_IN_TOUCH_MODE: i32 = 0x1;
+const ADD_FLAG_APP_VISIBLE: i32 = 0x2;
+/// The agent's `setInTouchMode`.
+const SET_IN_TOUCH_MODE: u32 = 13;
+/// `Manifest.permission.MODIFY_TOUCH_MODE_STATE`.
+const MODIFY_TOUCH_MODE_STATE: &str = "android.permission.MODIFY_TOUCH_MODE_STATE";
 /// `WindowManagerGlobal.RELAYOUT_RES_FIRST_TIME`, `RELAYOUT_RES_SURFACE_CHANGED`.
 const RELAYOUT_RES_FIRST_TIME: i32 = 1;
 const RELAYOUT_RES_SURFACE_CHANGED: i32 = 1 << 1;
@@ -79,6 +84,8 @@ struct Window {
 pub struct Windows {
     windows: Mutex<HashMap<u32, Window>>,
     next: Mutex<u32>,
+    /// The display's touch mode, once changed (`DisplayContent.mInTouchMode`).
+    in_touch_mode: Mutex<Option<bool>>,
 }
 
 /// A window context's registration (`WindowContextListenerController`):
@@ -335,6 +342,36 @@ impl Service for WindowManager {
                 wm::IsKeyguardLocked::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 wm::write_is_keyguard_locked_reply(&mut p, false);
             }
+            wm::SET_IN_TOUCH_MODE => {
+                let a = wm::SetInTouchMode::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self
+                    .0
+                    .set_in_touch_mode(call, a.in_touch, Some(a.display_id))
+                {
+                    return reply(Err(e));
+                }
+                wm::write_set_in_touch_mode_reply(&mut p);
+            }
+            wm::SET_IN_TOUCH_MODE_ON_ALL_DISPLAYS => {
+                let a =
+                    wm::SetInTouchModeOnAllDisplays::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if let Err(e) = self.0.set_in_touch_mode(call, a.in_touch, None) {
+                    return reply(Err(e));
+                }
+                wm::write_set_in_touch_mode_on_all_displays_reply(&mut p);
+            }
+            // The one display's mode, else (no such display) the default.
+            wm::IS_IN_TOUCH_MODE => {
+                let a = wm::IsInTouchMode::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let in_touch_mode = match a.display_id {
+                    0 => self.0.in_touch_mode(),
+                    _ => self.0.default_in_touch_mode(),
+                };
+                match in_touch_mode {
+                    Ok(on) => wm::write_is_in_touch_mode_reply(&mut p, on),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
             code => return reply(Err(self.0.unimplemented("window", code))),
         }
         Ok(p)
@@ -441,13 +478,21 @@ impl Session {
         let requested = (UNSPECIFIED_LENGTH, UNSPECIFIED_LENGTH);
         let frames =
             window_layout::compute_frames(&attrs, bounds, attached, freeform.is_some(), requested);
-        let input = Input::of(&attrs, frames.frame, bounds, self.uid);
+        let input = Input::of(&attrs, frames.frame, bounds, (self.uid, self.pid));
         let (index, channel) =
             self.host
                 .open_input_channel(&channel_name, (display.width, display.height), &input)?;
         let mut p = Parcel::new();
         p.write_no_exception();
-        p.write_i32(ADDED);
+        let in_touch_mode = self.host.in_touch_mode()?;
+        p.write_i32(
+            ADD_FLAG_APP_VISIBLE
+                | if in_touch_mode {
+                    ADD_FLAG_IN_TOUCH_MODE
+                } else {
+                    0
+                },
+        );
         // The input channel: present, holding one, an `InputChannelCore`
         // (its name, the client's socket, its token).
         p.write_i32(1);
@@ -691,21 +736,28 @@ fn write_frames(p: &mut Parcel, frames: &Frames, seq: i32) {
 
 /// What the agent's input takes of a window: its frame (where its
 /// coordinates start), the region it takes touches in, whether it is
-/// told of touches outside it, and its app's uid.
+/// told of touches outside it, and its app's uid and pid.
 pub(super) struct Input {
     pub frame: Rect,
     pub touchable: Rect,
     pub watch_outside: bool,
     pub owner: u32,
+    pub owner_pid: i32,
 }
 
 impl Input {
-    fn of(attrs: &LayoutParams, frame: Rect, task_bounds: Rect, owner: u32) -> Input {
+    fn of(
+        attrs: &LayoutParams,
+        frame: Rect,
+        task_bounds: Rect,
+        (owner, owner_pid): (u32, i32),
+    ) -> Input {
         Input {
             frame,
             touchable: window_layout::touchable_region(attrs, frame, task_bounds),
             watch_outside: attrs.watches_outside(),
             owner,
+            owner_pid,
         }
     }
 }
@@ -761,6 +813,61 @@ impl Item for WindowStateResizeItem {
 }
 
 impl super::AppHost {
+    /// `config_defaultInTouchMode`, the display's first touch mode.
+    fn default_in_touch_mode(&self) -> Result<bool, Exception> {
+        Ok(self
+            .inputs()?
+            .packages
+            .framework_bool("config_defaultInTouchMode")
+            .unwrap_or(true))
+    }
+
+    /// The display's touch mode (`DisplayContent.isInTouchMode`).
+    fn in_touch_mode(&self) -> Result<bool, Exception> {
+        match *self.windows.in_touch_mode.lock().unwrap() {
+            Some(on) => Ok(on),
+            None => self.default_in_touch_mode(),
+        }
+    }
+
+    /// `setInTouchMode` of `display` (`None`: `setInTouchModeOnAllDisplays`).
+    /// The app host has one display, without its own focus; with
+    /// `config_perDisplayFocusEnabled` another display id changes none.
+    /// The dispatcher decides whether the caller may change it.
+    fn set_in_touch_mode(
+        &self,
+        call: &Call<'_>,
+        in_touch: bool,
+        display: Option<i32>,
+    ) -> Result<(), Exception> {
+        let per_display_focus = self
+            .inputs()?
+            .packages
+            .framework_bool("config_perDisplayFocusEnabled")
+            .unwrap_or(false);
+        if self.in_touch_mode()? == in_touch
+            || (per_display_focus && display.is_some_and(|d| d != 0))
+        {
+            return Ok(());
+        }
+        let has_permission =
+            self.check_permission(Some(MODIFY_TOUCH_MODE_STATE), call.sender_euid as i32)? == 0;
+        let reply = self.call_agent(SET_IN_TOUCH_MODE, "setInTouchMode", |p| {
+            p.write_bool(in_touch);
+            p.write_i32(call.sender_pid);
+            p.write_i32(call.sender_euid as i32);
+            p.write_bool(has_permission);
+            p.write_i32(0);
+        })?;
+        let mut r = reply.reader();
+        let bad = |s| Exception::new(EX_ILLEGAL_STATE, format!("setInTouchMode reply: {s}"));
+        r.read_exception().map_err(bad)?.ok();
+        if r.read_bool().map_err(bad)? {
+            *self.windows.in_touch_mode.lock().unwrap() = Some(in_touch);
+        }
+        Ok(())
+    }
+
     /// The windows of task `id` come to the front, earlier first, and its
     /// latest takes the input focus.
     pub(super) fn raise_windows_of(&self, id: i32) -> Result<(), String> {
@@ -886,8 +993,11 @@ impl super::AppHost {
                 },
             )])?;
         }
-        self.set_input_frame(w.channel, &Input::of(&w.attrs, frame, bounds, w.uid))
-            .map_err(|e| format!("{e:?}"))
+        self.set_input_frame(
+            w.channel,
+            &Input::of(&w.attrs, frame, bounds, (w.uid, w.pid)),
+        )
+        .map_err(|e| format!("{e:?}"))
     }
 
     /// The windows of the activity `token`, earlier first: each one's
