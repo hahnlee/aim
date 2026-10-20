@@ -195,7 +195,7 @@ INTERFACES=(
   "android.content.pm.ICrossProfileApps|system/framework/framework.jar|getTargetUserProfiles,canInteractAcrossProfiles"
   "android.app.IAppTask|system/framework/framework.jar|getTaskInfo"
   "android.content.om.IOverlayManager|system/framework/framework.jar|getOverlayInfosForTarget"
-  "android.hardware.input.IInputManager|system/framework/framework.jar|getVelocityTrackerStrategy,getInputDevice,getInputDeviceIds,registerInputDevicesChangedListener"
+  "android.hardware.input.IInputManager|system/framework/framework.jar|getVelocityTrackerStrategy,getInputDevice,getInputDeviceIds,getInputDeviceBluetoothAddress,registerInputDevicesChangedListener"
   "com.android.internal.view.IInputMethodManager|system/framework/framework.jar|addClient,getInputMethodList,getEnabledInputMethodList,getInputMethodListLegacy,getEnabledInputMethodListLegacy,showSoftInput,hideSoftInput,getImeTrackerService"
   "com.android.internal.inputmethod.IImeTracker|system/framework/framework.jar|onStart"
   "android.os.IPermissionController|system/framework/framework.jar|*"
