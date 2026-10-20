@@ -116,42 +116,10 @@ pub fn build(input: Inputs) -> Result<Context, String> {
     system.fallback_categories = input.image_system.fallback_categories;
     system.flags = flags;
     system.sdk_sandbox_package = Some(Some(input.sdk_sandbox_package));
-    let resources = crate::package::parse::resources::Resources {
-        tables: vec![&input.platform.framework],
-        overlays: &input.platform.framework_overlays,
-        config: input.resource_config,
-    };
-    use crate::package::parse::resources::{
-        Selected, TYPE_FIRST_INT, TYPE_LAST_INT, TYPE_REFERENCE,
-    };
-    let id = input
-        .platform
-        .framework
-        .id("bool", "config_forceSystemPackagesQueryable")
-        .ok_or("boot AppsFilter system-query resource unavailable")?;
-    let mut selected = Selected {
-        kind: TYPE_REFERENCE,
-        data: id,
-        table: None,
-        resid: 0,
-        flags: 0,
-    };
-    resources.resolve(&mut selected);
-    if !(TYPE_FIRST_INT..=TYPE_LAST_INT).contains(&selected.kind) {
-        return Err("boot AppsFilter boolean resource has no native value".into());
-    }
-    system.force_system_packages_queryable = selected.data != 0;
-    let id = input
-        .platform
-        .framework
-        .id("array", "config_forceQueryablePackages")
-        .ok_or("boot AppsFilter query-list resource unavailable")?;
-    system.force_queryable_packages = resources
-        .string_array(id)
-        .ok_or("boot AppsFilter string-array value unavailable")?
-        .into_iter()
-        .map(|name| name.ok_or("boot AppsFilter query-list contains null".to_owned()))
-        .collect::<Result<_, _>>()?;
+    (
+        system.force_system_packages_queryable,
+        system.force_queryable_packages,
+    ) = apps_filter_config(&input.platform, input.resource_config)?;
     let mut users = BTreeMap::new();
     let mut pre_created = BTreeMap::new();
     for record in input.users {
@@ -590,4 +558,47 @@ mod tests {
         code.path = Some("/apex/other".into());
         assert!(super::permission_uid_owner(setting, Some(&code)).is_err());
     }
+}
+
+/// `AppsFilterImpl.create`'s device configuration, as the framework's
+/// overlays leave it: `config_forceSystemPackagesQueryable` and
+/// `config_forceQueryablePackages`.
+pub(crate) fn apps_filter_config(
+    platform: &Platform,
+    config: crate::package::parse::resources::Config,
+) -> Result<(bool, Vec<String>), String> {
+    use crate::package::parse::resources::{
+        Resources, Selected, TYPE_FIRST_INT, TYPE_LAST_INT, TYPE_REFERENCE,
+    };
+    let resources = Resources {
+        tables: vec![&platform.framework],
+        overlays: &platform.framework_overlays,
+        config,
+    };
+    let id = platform
+        .framework
+        .id("bool", "config_forceSystemPackagesQueryable")
+        .ok_or("boot AppsFilter system-query resource unavailable")?;
+    let mut selected = Selected {
+        kind: TYPE_REFERENCE,
+        data: id,
+        table: None,
+        resid: 0,
+        flags: 0,
+    };
+    resources.resolve(&mut selected);
+    if !(TYPE_FIRST_INT..=TYPE_LAST_INT).contains(&selected.kind) {
+        return Err("boot AppsFilter boolean resource has no native value".into());
+    }
+    let id = platform
+        .framework
+        .id("array", "config_forceQueryablePackages")
+        .ok_or("boot AppsFilter query-list resource unavailable")?;
+    let packages = resources
+        .string_array(id)
+        .ok_or("boot AppsFilter string-array value unavailable")?
+        .into_iter()
+        .map(|name| name.ok_or("boot AppsFilter query-list contains null".to_owned()))
+        .collect::<Result<_, _>>()?;
+    Ok((selected.data != 0, packages))
 }
