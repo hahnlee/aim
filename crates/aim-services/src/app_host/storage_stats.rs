@@ -6,7 +6,7 @@
 //! counting allocated blocks (`getAppSize`, `getUserSize`,
 //! `getExternalSize`). No `StorageStatsAugmenter` is registered in the app
 //! host (AppSearch's runs in its own process, #1520). Cache quotas are
-//! #1824, ART-managed file stats #1825, crates #1826.
+//! `super::cache_quota`'s; ART-managed file stats are #1825, crates #1826.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::fs;
@@ -20,6 +20,7 @@ use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_app_usage_istoragestatsmanager as ss;
 
 use super::appops_service::{self, MODE_ALLOWED, MODE_DEFAULT, MODE_ERRORED};
+use super::cache_quota::CacheQuotas;
 use super::storage::{io_exception, parcelable_io};
 use super::{AppHost, reply, system_boolean};
 use crate::package::info::{ApplicationInfo, FLAG_SYSTEM, FLAG_UPDATED_SYSTEM_APP};
@@ -665,11 +666,13 @@ impl Measure {
 
 pub struct StorageStatsService {
     host: Arc<AppHost>,
+    cache_quotas: Arc<CacheQuotas>,
 }
 
 impl StorageStatsService {
     pub fn new(host: Arc<AppHost>) -> Self {
-        StorageStatsService { host }
+        let cache_quotas = CacheQuotas::new(&host);
+        StorageStatsService { host, cache_quotas }
     }
 
     fn unimplemented(&self, what: &str) -> Exception {
@@ -1010,7 +1013,10 @@ impl Service for StorageStatsService {
             ss::GET_CACHE_QUOTA_BYTES => {
                 let a = ss::GetCacheQuotaBytes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.enforce_stats_permission(uid, a.calling_package.as_deref())
-                    .and_then(|()| Err(self.unimplemented("cache quotas (#1824)")))
+                    .map(|()| {
+                        let quota = self.cache_quotas.quota(a.volume_uuid.as_deref(), a.uid);
+                        ss::write_get_cache_quota_bytes_reply(&mut p, quota)
+                    })
             }
             ss::QUERY_STATS_FOR_PACKAGE => {
                 let a = ss::QueryStatsForPackage::read(&mut call.data).map_err(|_| BAD_VALUE)?;

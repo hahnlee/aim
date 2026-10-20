@@ -34,7 +34,7 @@ const O: i32 = 26;
 const SYSTEM_UID: i32 = 1000;
 /// `ContentResolver.NOTIFY_SYNC_TO_NETWORK`,
 /// `NOTIFY_SKIP_NOTIFY_FOR_DESCENDANTS`.
-const NOTIFY_SYNC_TO_NETWORK: i32 = 1;
+pub(super) const NOTIFY_SYNC_TO_NETWORK: i32 = 1;
 const NOTIFY_SKIP_NOTIFY_FOR_DESCENDANTS: i32 = 1 << 1;
 
 /// `readAccountInfoLocked`'s master sync setting of `user` in the
@@ -464,14 +464,19 @@ impl ContentService {
         )
     }
 
-    /// The system's `notifyChange` of `uri` for `user`, as
-    /// `ContentResolver.notifyChange(uri, null, true, user)` makes it
-    /// (no observer, `NOTIFY_SYNC_TO_NETWORK`).
-    pub(super) fn notify_from_system(&self, uri: Uri, user: i32) -> Result<(), Exception> {
+    /// The system's `notifyChange` of `uri` with `flags` for `user`, as
+    /// `ContentResolver.notifyChange(uri, null, flags, user)` makes it (no
+    /// observer).
+    pub(super) fn notify_from_system(
+        &self,
+        uri: Uri,
+        flags: i32,
+        user: i32,
+    ) -> Result<(), Exception> {
         let change = Change {
             observer: None,
             wants_self: false,
-            flags: NOTIFY_SYNC_TO_NETWORK,
+            flags,
             user,
         };
         self.change(vec![uri], &change)

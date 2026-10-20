@@ -37,6 +37,7 @@ use aim_service_aidl::android_content_icontentprovider as cp;
 use aim_service_aidl::android_os_iremotecallback as remote_callback;
 
 use super::appops_service::{self, MODE_DEFAULT, OP_WRITE_SETTINGS};
+use super::content_service::NOTIFY_SYNC_TO_NETWORK;
 use super::cursor::{BulkCursor, Rows};
 use super::device_config::{self, PUBLIC_NAMESPACES};
 use super::generations::{self, GenerationRegistry, TRACK_GENERATION};
@@ -2114,7 +2115,7 @@ impl SettingsProvider {
     fn notify_uri(&self, table: Table, user: i32, path: &str) {
         let uri = Uri::parse(&format!("content://settings/{}/{path}", table.path()));
         if let Some(content) = self.host.content_service.get()
-            && let Err(e) = content.notify_from_system(uri, user)
+            && let Err(e) = content.notify_from_system(uri, NOTIFY_SYNC_TO_NETWORK, user)
         {
             eprintln!("app host: settings: failed to notify for {user}: {path}: {e:?}");
         }

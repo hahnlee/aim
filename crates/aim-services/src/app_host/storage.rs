@@ -20,7 +20,7 @@ use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_os_storage_istoragemanager as sm;
 
 use super::zygote::MountExternal;
-use super::{AppHost, reply};
+use super::{AppHost, reply, system_boolean};
 
 /// vold's service and `IVold`'s calls the app host makes, in the
 /// interface's order.
@@ -251,7 +251,7 @@ impl AppHost {
         ))
     }
 
-    fn global_setting(&self, name: &str) -> Option<i64> {
+    pub(super) fn global_setting(&self, name: &str) -> Option<i64> {
         self.inputs()
             .ok()?
             .settings
@@ -376,24 +376,68 @@ impl AppHost {
         Ok(*size)
     }
 
+    /// `storage.xml`, as `readSettingsLocked` reads it; none when missing.
+    fn storage_settings(&self) -> Result<Option<aim_android_xml::Element>, Exception> {
+        let path = self.inputs()?.data.join("system/storage.xml");
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_exception(&format!("{}: {e}", path.display()))),
+        };
+        aim_android_xml::read(&bytes)
+            .map(Some)
+            .map_err(|e| io_exception(&format!("{}: {e}", path.display())))
+    }
+
     /// `getVolumeRecords`: `mRecords`, read from `storage.xml`
     /// (`readSettingsLocked`); the records are of volumes on vold's disks,
     /// which the app host does not keep (#1839).
     fn volume_records(&self) -> Result<(), Exception> {
-        let path = self.inputs()?.data.join("system/storage.xml");
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(io_exception(&format!("{}: {e}", path.display()))),
-        };
-        let root = aim_android_xml::read(&bytes)
-            .map_err(|e| io_exception(&format!("{}: {e}", path.display())))?;
-        if root.children().any(|e| e.name == "volume") {
+        if self
+            .storage_settings()?
+            .is_some_and(|root| root.children().any(|e| e.name == "volume"))
+        {
             return Err(
                 self.unimplemented_named("mount", "the volume records of vold's disks (#1839)")
             );
         }
         Ok(())
+    }
+
+    /// `getPrimaryStorageUuid`: `mPrimaryStorageUuid` as
+    /// `readSettingsLocked` reads it from `storage.xml`'s `volumes`, when
+    /// its version has a valid one, else the default
+    /// (`getDefaultPrimaryStorageUuid`: primary physical storage with
+    /// `ro.vold.primary_physical`, else internal storage's none); a file
+    /// that cannot be read leaves the default.
+    fn primary_storage_uuid(&self) -> Option<String> {
+        const VERSION_INIT: i32 = 1;
+        const VERSION_ADD_PRIMARY: i32 = 2;
+        const VERSION_FIX_PRIMARY: i32 = 3;
+        let primary_physical =
+            system_boolean(self.property("ro.vold.primary_physical").as_deref(), false);
+        let default = primary_physical.then(|| "primary_physical".to_owned());
+        let root = match self.storage_settings() {
+            Ok(Some(root)) => root,
+            Ok(None) => return default,
+            Err(e) => {
+                eprintln!("app host: mount: Failed reading metadata: {}", e.message);
+                return default;
+            }
+        };
+        let mut pending = vec![&root];
+        while let Some(e) = pending.pop() {
+            if e.name == "volumes" {
+                let version = e.int("version").ok().flatten().unwrap_or(VERSION_INIT);
+                let valid = version >= VERSION_FIX_PRIMARY
+                    || (version >= VERSION_ADD_PRIMARY && !primary_physical);
+                if valid {
+                    return e.string("primaryStorageUuid").map(|s| s.into_owned());
+                }
+            }
+            pending.extend(e.children());
+        }
+        default
     }
 
     /// Whether user 0's emulated volume is mounted
@@ -1104,6 +1148,12 @@ impl Service for StorageManager {
                     sm::write_get_volume_records_reply::<NoDisk>(&mut p, Some(&[]));
                     p
                 }))
+            }
+            sm::GET_PRIMARY_STORAGE_UUID => {
+                sm::GetPrimaryStorageUuid::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let mut p = Parcel::new();
+                sm::write_get_primary_storage_uuid_reply(&mut p, &self.0.primary_storage_uuid());
+                Ok(p)
             }
             sm::GET_VOLUMES => {
                 sm::GetVolumes::read(&mut call.data).map_err(|_| BAD_VALUE)?;

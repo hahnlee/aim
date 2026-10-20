@@ -32,6 +32,7 @@ pub mod battery_stats;
 pub mod bind;
 pub mod bluetooth_manager;
 pub mod broadcasts;
+mod cache_quota;
 pub mod companion_device;
 pub mod compat;
 pub mod config;
