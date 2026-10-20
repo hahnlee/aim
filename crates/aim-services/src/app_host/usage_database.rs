@@ -700,7 +700,7 @@ fn parse_begin_time(name: &str) -> Option<i64> {
 }
 
 /// `AtomicFile.openRead`: its legacy backup, if any, in its place first.
-fn atomic_read(path: &Path) -> std::io::Result<Vec<u8>> {
+pub(super) fn atomic_read(path: &Path) -> std::io::Result<Vec<u8>> {
     let bak = suffixed(path, BAK_SUFFIX);
     if bak.exists() {
         std::fs::rename(&bak, path)?;
@@ -714,7 +714,7 @@ fn atomic_read(path: &Path) -> std::io::Result<Vec<u8>> {
 
 /// `AtomicFile.startWrite`/`finishWrite`: the bytes to a new file, synced,
 /// then renamed over the file, owned by the system.
-fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let bak = suffixed(path, BAK_SUFFIX);
     if bak.exists() {
         std::fs::rename(&bak, path)?;
