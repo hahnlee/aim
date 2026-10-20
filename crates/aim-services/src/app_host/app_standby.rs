@@ -577,6 +577,22 @@ impl AppHost {
         Ok(c)
     }
 
+    /// UsageStatsService's calls of the controller when user 0's stats
+    /// reload (`postOneTimeCheckIdleStates`) and after a system update
+    /// (`onNewUpdate`: `initializeDefaultsForSystemApps`).
+    pub(super) fn standby_usage_notified(self: &Arc<Self>, new_update: bool) {
+        let checked = self.with_standby(|h, c| {
+            let now = elapsed_realtime();
+            if new_update {
+                h.initialize_defaults_for_system_apps(c, 0, now)?;
+            }
+            h.check_idle_states(c, now)
+        });
+        if let Err(e) = checked {
+            eprintln!("app host: app standby: {}", e.message);
+        }
+    }
+
     /// `initializeDefaultsForSystemApps`: every system app active for the
     /// system update timeout.
     fn initialize_defaults_for_system_apps(

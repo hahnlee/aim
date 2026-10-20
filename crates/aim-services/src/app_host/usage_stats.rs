@@ -7,18 +7,18 @@
 //! bucket and the rest are not implemented (#1723).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, EX_NULL_POINTER, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_app_usage_iusagestatsmanager as us;
 
-use super::usage_events::{
-    self, Event, INTERVAL_BEST, INTERVAL_COUNT, INTERVAL_DAILY, INTERVAL_LENGTH, IntervalStats,
-};
+use super::usage_database::{self, DEFAULT_SELECTION_LOG_RETENTION_LEN, Init};
+use super::usage_events::{self, Clocks, Event, Extra, INTERVAL_DAILY, Notified, UserStats};
 use super::{AppHost, reply};
 use crate::package::list_slice::Slice;
 use crate::package::query::Query;
@@ -34,8 +34,8 @@ const PER_USER_RANGE: i32 = 100_000;
 const FIRST_APPLICATION_UID: i32 = 10_000;
 /// The flag of `UsageEvents`' parcelled form.
 const USE_PARCELED_LIST: &str = "android.app.usage.use_parceled_list";
-/// `UsageStatsDatabase`'s interval directories.
-const INTERVAL_DIRS: [&str; INTERVAL_COUNT] = ["daily", "weekly", "monthly", "yearly"];
+const ACCESS_LOCUS_ID_USAGE_STATS: &str = "android.permission.ACCESS_LOCUS_ID_USAGE_STATS";
+const MANAGE_NOTIFICATIONS: &str = "android.permission.MANAGE_NOTIFICATIONS";
 
 /// `System.currentTimeMillis`.
 pub(super) fn now_millis() -> i64 {
@@ -44,36 +44,212 @@ pub(super) fn now_millis() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-/// The begin times of the stats files of each interval on disk
-/// (`mSortedStatFiles`), which are named by them.
-fn stat_files(dir: &Path) -> [Vec<i64>; INTERVAL_COUNT] {
-    std::array::from_fn(|i| {
-        let mut times: Vec<i64> = std::fs::read_dir(dir.join(INTERVAL_DIRS[i]))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| e.file_name().to_str()?.parse().ok())
-            .collect();
-        times.sort_unstable();
-        times
-    })
+/// `UsageStatsService.FLUSH_INTERVAL`.
+const FLUSH_INTERVAL: Duration = Duration::from_secs(20 * 60);
+/// `UsageStatsDatabase.BACKUP_VERSION`, which the migration status file
+/// records.
+const BACKUP_VERSION: i32 = 4;
+
+/// The clocks usage stats read (`SystemClock.elapsedRealtime`,
+/// `System.currentTimeMillis`).
+fn clocks() -> Clocks {
+    (super::alarm_service::elapsed_ms(), now_millis())
 }
 
-/// `findBestFitBucket`: the interval with a file beginning closest on or
-/// before `begin`; -1 with none.
-fn best_fit_bucket(files: &[Vec<i64>; INTERVAL_COUNT], begin: i64) -> i32 {
-    let mut best = -1;
-    let mut smallest = i64::MAX;
-    for i in (0..INTERVAL_COUNT).rev() {
-        if let Some(&key) = files[i].iter().rev().find(|&&t| t <= begin) {
-            let diff = (key - begin).abs();
-            if diff < smallest {
-                smallest = diff;
-                best = i as i32;
+impl AppHost {
+    /// `f` over user 0's usage stats, unlocked when first needed
+    /// (`onUserUnlocked`), and what they then ask of the service done.
+    pub(super) fn with_usage<T>(
+        &self,
+        f: impl FnOnce(&mut UserStats, Clocks, &mut Notified) -> T,
+    ) -> Result<T, Exception> {
+        let mut notified = Notified::default();
+        let mut new_update = false;
+        let result = {
+            let mut usage = self.usage.lock().unwrap();
+            if usage.is_none() {
+                let (user, init, unlocked) = self.unlock_usage()?;
+                *usage = Some(user);
+                new_update = init.new_update;
+                notified = unlocked;
+            }
+            f(usage.as_mut().unwrap(), clocks(), &mut notified)
+        };
+        self.usage_notified(notified, new_update);
+        Ok(result)
+    }
+
+    /// `onUserUnlocked` of user 0's usage stats: the stats migrated to
+    /// system CE (none to copy, #1869), no pending events (#1869), the
+    /// user's service initialized, the unlock reported and system DE's
+    /// stats deleted. `UsageStatsIdleService`'s mappings job is the
+    /// original's (#1518).
+    fn unlock_usage(&self) -> Result<(UserStats, Init, Notified), Exception> {
+        let data = self.data()?;
+        let dir = data.join("system_ce/0/usagestats");
+        let fail = |e: String| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                format!("usagestats: {e}"),
+            )
+        };
+        let installed = self.usage_installed_packages()?;
+        self.migrate_usage_stats(data, &dir).map_err(fail)?;
+        let pending = data.join("system_de/0/usagestats");
+        if std::fs::read_dir(&pending).is_ok_and(|mut d| d.next().is_some()) {
+            return Err(self.unimplemented_named(
+                "usagestats",
+                "events reported while the user was locked (#1869)",
+            ));
+        }
+        let property = |name: &str| self.property(name).unwrap_or_default();
+        let fingerprint = format!(
+            "{};{};{}",
+            property("ro.build.version.release"),
+            property("ro.build.version.codename"),
+            property("ro.build.version.incremental"),
+        );
+        let retention = self
+            .property("ro.usagestats.chooser.retention")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_SELECTION_LOG_RETENTION_LEN);
+        let (realtime, now) = clocks();
+        let (mut user, init, mut notified) =
+            UserStats::init(&dir, (realtime, now), &fingerprint, retention, &installed).map_err(
+                |e| match e.contains("(#1866)") {
+                    true => self.unimplemented_named("usagestats", &e),
+                    false => fail(e),
+                },
+            )?;
+        let unlock = Event {
+            package: usage_events::DEVICE_EVENT_PACKAGE_NAME.into(),
+            class: None,
+            instance_id: 0,
+            task_root_package: None,
+            task_root_class: None,
+            event_type: usage_events::USER_UNLOCKED,
+            time_stamp: now,
+            flags: 0,
+            extra: Extra::None,
+        };
+        let reported = user.report(unlock, clocks());
+        notified.updated |= reported.updated;
+        notified.reloaded |= reported.reloaded;
+        let _ = std::fs::remove_dir_all(&pending);
+        Ok((user, init, notified))
+    }
+
+    /// `migrateStatsToSystemCeIfNeededLocked`: the stats directory made;
+    /// done once the status file records the migration, else marked done
+    /// when there is no legacy directory to copy (#1869).
+    fn migrate_usage_stats(&self, data: &Path, dir: &Path) -> Result<(), String> {
+        let legacy = data.join("system/usagestats/0");
+        usage_database::mkdirs(dir)
+            .map_err(|e| format!("Usage stats directory does not exist: {e}"))?;
+        let migrated = dir.join("migrated");
+        if let Ok(text) = std::fs::read_to_string(&migrated) {
+            match text.lines().next().and_then(|l| l.parse::<i32>().ok()) {
+                Some(version) if version >= BACKUP_VERSION => {
+                    let _ = std::fs::remove_dir_all(&legacy);
+                    return Ok(());
+                }
+                Some(_) => {}
+                None => {
+                    eprintln!(
+                        "app host: usagestats: Failed to read migration status file, possibly corrupted."
+                    );
+                    std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+                    usage_database::mkdirs(dir).map_err(|e| e.to_string())?;
+                }
             }
         }
+        if legacy.exists() {
+            return Err("copying stats from /data/system/usagestats (#1869)".into());
+        }
+        usage_database::write_lines(&migrated, &[&BACKUP_VERSION.to_string()])
+            .map_err(|e| format!("Failed to write migrated status file: {e}"))
     }
-    best
+
+    /// `getInstalledPackages` of user 0, with `MATCH_UNINSTALLED_PACKAGES`:
+    /// each package's first install time.
+    fn usage_installed_packages(&self) -> Result<HashMap<String, i64>, Exception> {
+        let (state, resolution) = self.packages()?;
+        let query = Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: SYSTEM_UID,
+        };
+        let packages = query
+            .installed_packages(crate::package::info::flags::MATCH_UNINSTALLED_PACKAGES, 0)
+            .map_err(|e| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    format!("usagestats: installed packages: {}", e.0),
+                )
+            })??;
+        Ok(packages
+            .into_iter()
+            .filter_map(|p| Some((p.package_name?, p.first_install_time)))
+            .collect())
+    }
+
+    /// `UserUsageStatsService.queryUsageStats`: the packages' stats of each
+    /// interval in the range (`queryStats` without events); none for an
+    /// invalid range.
+    pub(super) fn usage_stats_in_range(
+        &self,
+        interval: i32,
+        begin: i64,
+        end: i64,
+    ) -> Result<Option<Vec<usage_events::UsageStats>>, Exception> {
+        self.with_usage(|user, clocks, notified| {
+            let now = user.check_and_get_time(clocks, notified);
+            if !(begin <= now && begin < end) {
+                return None;
+            }
+            user.query_stats(interval, begin, end, true, |stats, out| {
+                out.extend(stats.package_stats.values().cloned());
+                true
+            })
+        })
+    }
+
+    /// `reportEvent` of an event the app host reports for user 0.
+    pub(super) fn report_usage_stats_event(&self, event: Event) {
+        let reported = self.with_usage(|user, clocks, notified| {
+            let n = user.report(event, clocks);
+            notified.updated |= n.updated;
+            notified.reloaded |= n.reloaded;
+        });
+        if let Err(e) = reported {
+            eprintln!("app host: usagestats: {}", e.message);
+        }
+    }
+
+    /// The service's listener of the user's stats: a flush to disk after
+    /// `FLUSH_INTERVAL` when they first change (`onStatsUpdated`), the
+    /// apps' standby buckets checked when they reload (`onStatsReloaded`),
+    /// and the system apps' standby defaults after a system update
+    /// (`onNewUpdate`).
+    fn usage_notified(&self, notified: Notified, new_update: bool) {
+        let me = self.me.clone();
+        if notified.updated {
+            std::thread::spawn(move || {
+                std::thread::sleep(FLUSH_INTERVAL);
+                if let Some(host) = me.upgrade() {
+                    let _ = host.with_usage(|user, _, _| user.persist());
+                }
+            });
+        }
+        if notified.reloaded || new_update {
+            let me = self.me.clone();
+            std::thread::spawn(move || {
+                if let Some(host) = me.upgrade() {
+                    host.standby_usage_notified(new_update);
+                }
+            });
+        }
+    }
 }
 
 /// A parcel written ahead, written as is.
@@ -182,53 +358,6 @@ impl UsageStats {
 }
 
 impl UsageStats {
-    /// `queryStats` of the current interval: `f` over it when it is in
-    /// range. The part before it is on disk (#1842): a range that a stats
-    /// file there may cover is not implemented, a file ending within its
-    /// interval's length.
-    fn query_stats<T>(
-        &self,
-        interval: i32,
-        begin: i64,
-        end: i64,
-        f: impl FnOnce(&IntervalStats) -> T,
-    ) -> Result<Option<T>, Exception> {
-        let now = now_millis();
-        // `validRange`.
-        if !(begin <= now && begin < end) {
-            return Ok(None);
-        }
-        let files = stat_files(&self.host.data()?.join("system_ce/0/usagestats"));
-        let interval = match interval {
-            INTERVAL_BEST => match best_fit_bucket(&files, begin) {
-                i if i < 0 => INTERVAL_DAILY as i32,
-                i => i,
-            },
-            i => i,
-        };
-        if interval < 0 || interval >= INTERVAL_COUNT as i32 {
-            return Ok(None);
-        }
-        let interval = interval as usize;
-        let mut usage = self.host.usage.lock().unwrap();
-        let user = usage.get_or_insert_with(|| usage_events::UserStats::new(now));
-        let current = &user.current[interval];
-        if begin >= current.end_time {
-            return Ok(None);
-        }
-        let truncated_end = current.begin_time.min(end);
-        if files[interval]
-            .iter()
-            .any(|&t| t < truncated_end && t + INTERVAL_LENGTH[interval] > begin)
-        {
-            return Err(self.host.unimplemented_named(
-                "usagestats",
-                "the stats of earlier intervals on disk (#1842)",
-            ));
-        }
-        Ok((begin < current.end_time && end > current.begin_time).then(|| f(current)))
-    }
-
     /// `canAccessInstantApps`, asked only when an instant app's events
     /// or stats are in the answer.
     fn can_access_instant_apps(&self, uid: i32) -> Result<bool, Exception> {
@@ -246,29 +375,79 @@ impl UsageStats {
         Ok(false)
     }
 
+    /// The daily events in `[begin, end)` (`queryStats` of
+    /// `INTERVAL_DAILY`), when the range is valid (`validRange`).
+    fn events_in_range(
+        &self,
+        begin: i64,
+        end: i64,
+        keep: impl Fn(&Event) -> bool,
+    ) -> Result<Option<Vec<Event>>, Exception> {
+        self.host.with_usage(|user, clocks, notified| {
+            let now = user.check_and_get_time(clocks, notified);
+            if !(begin <= now && begin < end) {
+                return None;
+            }
+            user.query_stats(INTERVAL_DAILY as i32, begin, end, false, |stats, out| {
+                for e in &stats.events[stats.first_index_on_or_after(begin)..] {
+                    if e.time_stamp >= end {
+                        return false;
+                    }
+                    if keep(e) {
+                        out.push(e.clone());
+                    }
+                }
+                true
+            })
+        })
+    }
+
     /// `UserUsageStatsService.queryEvents` with `queryEventsHelper`'s
-    /// flags: the app host records no shortcut, locus or notification
-    /// events, so only instant apps' obfuscation applies.
+    /// flags: shortcut invocations hidden from a caller without shortcut
+    /// host permission (not implemented, #1870), locus events from one
+    /// without ACCESS_LOCUS_ID_USAGE_STATS, notification events' channels
+    /// obfuscated for one without MANAGE_NOTIFICATIONS, instant apps for
+    /// one that may not see them.
     fn query_events(&self, uid: i32, begin: i64, end: i64) -> Result<Option<Written>, Exception> {
-        let events = self.query_stats(INTERVAL_DAILY as i32, begin, end, |stats| {
-            stats.events[stats.first_index_on_or_after(begin)..]
-                .iter()
-                .take_while(|e| e.time_stamp < end)
-                .cloned()
-                .collect::<Vec<Event>>()
-        })?;
-        let Some(mut events) = events.filter(|e| !e.is_empty()) else {
+        let Some(events) = self.events_in_range(begin, end, |_| true)? else {
             return Ok(None);
+        };
+        let permitted = |permission: &str| -> Result<bool, Exception> {
+            Ok(uid == SYSTEM_UID || self.host.check_permission(Some(permission), uid)? == 0)
         };
         if events
             .iter()
-            .any(|e| e.flags & usage_events::FLAG_IS_PACKAGE_INSTANT_APP != 0)
-            && !self.can_access_instant_apps(uid)?
+            .any(|e| e.event_type == usage_events::SHORTCUT_INVOCATION)
         {
-            events = events
-                .iter()
-                .map(Event::obfuscated_if_instant_app)
-                .collect();
+            return Err(self.host.unimplemented_named(
+                "usagestats",
+                "shortcut invocation events for a caller (#1870)",
+            ));
+        }
+        let hide_locus = events
+            .iter()
+            .any(|e| e.event_type == usage_events::LOCUS_ID_SET)
+            && !permitted(ACCESS_LOCUS_ID_USAGE_STATS)?;
+        let obfuscate_notifications =
+            events.iter().any(Event::is_notification) && !permitted(MANAGE_NOTIFICATIONS)?;
+        let obfuscate_instant = events
+            .iter()
+            .any(|e| e.flags & usage_events::FLAG_IS_PACKAGE_INSTANT_APP != 0)
+            && !self.can_access_instant_apps(uid)?;
+        let events: Vec<Event> = events
+            .into_iter()
+            .filter(|e| !(hide_locus && e.event_type == usage_events::LOCUS_ID_SET))
+            .map(|e| match obfuscate_notifications && e.is_notification() {
+                true => e.obfuscated_notification_event(),
+                false => e,
+            })
+            .map(|e| match obfuscate_instant {
+                true => e.obfuscated_if_instant_app(),
+                false => e,
+            })
+            .collect();
+        if events.is_empty() {
+            return Ok(None);
         }
         self.usage_events(&events, true).map(Some)
     }
@@ -281,15 +460,10 @@ impl UsageStats {
         package: &str,
         include_task_root: bool,
     ) -> Result<Option<Written>, Exception> {
-        let events = self.query_stats(INTERVAL_DAILY as i32, begin, end, |stats| {
-            stats.events[stats.first_index_on_or_after(begin)..]
-                .iter()
-                .take_while(|e| e.time_stamp < end)
-                .filter(|e| e.package == package)
-                .cloned()
-                .collect::<Vec<Event>>()
-        })?;
-        match events.filter(|e| !e.is_empty()) {
+        match self
+            .events_in_range(begin, end, |e| e.package == package)?
+            .filter(|e| !e.is_empty())
+        {
             Some(events) => self.usage_events(&events, include_task_root).map(Some),
             None => Ok(None),
         }
@@ -305,17 +479,13 @@ impl UsageStats {
         let mut p = Parcel::new();
         let parceled_list = self.host.flag(USE_PARCELED_LIST)?;
         usage_events::write_usage_events(&mut p, events, include_task_roots, parceled_list)
-            .ok_or_else(|| {
-                self.host.unimplemented_named(
-                    "usagestats",
-                    "usage events beyond one transaction (#1843)",
-                )
-            })?;
+            .map_err(|what| self.host.unimplemented_named("usagestats", what))?;
         Ok(Written(p))
     }
 
-    /// `queryUsageStats`, the instant apps' names obfuscated by their
-    /// current state for a caller that may not see them.
+    /// `queryUsageStats`: each interval's stats in the range, the instant
+    /// apps' names obfuscated by their current state for a caller that may
+    /// not see them.
     fn query_usage_stats(
         &self,
         uid: i32,
@@ -323,10 +493,7 @@ impl UsageStats {
         begin: i64,
         end: i64,
     ) -> Result<Option<Vec<usage_events::UsageStats>>, Exception> {
-        let stats = self.query_stats(interval, begin, end, |stats| {
-            stats.package_stats.values().cloned().collect::<Vec<_>>()
-        })?;
-        let Some(mut stats) = stats else {
+        let Some(mut stats) = self.host.usage_stats_in_range(interval, begin, end)? else {
             return Ok(None);
         };
         let (state, _) = self.host.packages()?;
