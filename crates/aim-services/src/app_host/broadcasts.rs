@@ -142,6 +142,8 @@ struct Record {
     result_code: i32,
     result_data: Option<String>,
     result_extras: Option<KeptBundle>,
+    /// `BroadcastOptions.getIdForResponseEvent`: 0 when none is recorded.
+    id_for_response_event: i64,
 }
 
 /// A manifest receiver a broadcast goes to (`ResolveInfo`): its
@@ -616,6 +618,7 @@ impl Broadcasts {
                     result_code: 0,
                     result_data: None,
                     result_extras: None,
+                    id_for_response_event: 0,
                 };
                 st.queues
                     .entry(start_seq)
@@ -913,6 +916,7 @@ impl Broadcasts {
             result_code: args.result_code,
             result_data: args.result_data,
             result_extras,
+            id_for_response_event: options.id_for_response_event,
         });
         if args.sticky {
             if !host.check_component_permission(Some(BROADCAST_STICKY), calling_uid, -1, true)? {
@@ -1143,6 +1147,7 @@ impl Broadcasts {
             result_code: 0,
             result_data: None,
             result_extras: None,
+            id_for_response_event: 0,
         });
         let sender = Sender {
             uid: SYSTEM_UID,
@@ -1486,6 +1491,7 @@ impl Broadcasts {
             result_code: 0,
             result_data: None,
             result_extras: None,
+            id_for_response_event: 0,
         });
         {
             let mut st = self.state.lock().unwrap();
@@ -1879,6 +1885,36 @@ impl Broadcasts {
         }
     }
 
+    /// `reportUsageStatsBroadcastDispatched` of `record` scheduled to the
+    /// process of `start_seq`: with an id for its response event and a
+    /// target package (the intent's package or component's), at the uid
+    /// state of the process, which is top while it runs.
+    fn report_dispatched(&self, host: &AppHost, start_seq: i64, record: &Record) {
+        if record.id_for_response_event <= 0 {
+            return;
+        }
+        let intent = &record.intent.intent;
+        let Some(package) = intent
+            .package
+            .as_deref()
+            .or(intent.component.as_ref().map(|c| c.package.as_str()))
+        else {
+            return;
+        };
+        if !host.apps.lock().unwrap().contains_key(&start_seq) {
+            return;
+        }
+        if let Err(e) = host.report_broadcast_dispatched(
+            record.calling_uid,
+            package,
+            record.user,
+            record.id_for_response_event,
+            PROCESS_STATE_TOP,
+        ) {
+            eprintln!("app host: broadcast: response stats: {}", e.message);
+        }
+    }
+
     /// With a shared identity, the receiving app of `start_seq` may see the
     /// sender (`grantImplicitAccess` in `scheduleReceiverWarmLocked` and
     /// `scheduleResultTo`).
@@ -1918,6 +1954,7 @@ impl Broadcasts {
         assume_delivered: bool,
     ) -> bool {
         self.share_identity_access(host, start_seq, record);
+        self.report_dispatched(host, start_seq, record);
         let mut p = Parcel::new();
         thread::ScheduleRegisteredReceiver {
             receiver: Some(Binder::Handle(receiver)),

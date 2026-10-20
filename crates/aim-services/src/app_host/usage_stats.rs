@@ -667,6 +667,58 @@ impl Service for UsageStats {
                     Err(e) => return reply(Err(e)),
                 }
             }
+            us::QUERY_BROADCAST_RESPONSE_STATS => {
+                let a =
+                    us::QueryBroadcastResponseStats::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match self.host.query_broadcast_response_stats(
+                    uid,
+                    a.package_name.as_deref(),
+                    a.id,
+                    a.calling_package.as_deref(),
+                    a.user_id,
+                ) {
+                    Ok(list) => us::write_query_broadcast_response_stats_reply(&mut p, Some(&list)),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            us::CLEAR_BROADCAST_RESPONSE_STATS => {
+                let a =
+                    us::ClearBroadcastResponseStats::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match self.host.clear_broadcast_response_stats(
+                    uid,
+                    a.package_name.as_deref(),
+                    a.id,
+                    a.calling_package.as_deref(),
+                    a.user_id,
+                ) {
+                    Ok(()) => us::write_clear_broadcast_response_stats_reply(&mut p),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            us::CLEAR_BROADCAST_EVENTS => {
+                let a = us::ClearBroadcastEvents::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match self
+                    .host
+                    .clear_broadcast_events(uid, a.calling_package.as_deref(), a.user_id)
+                {
+                    Ok(()) => us::write_clear_broadcast_events_reply(&mut p),
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            us::IS_PACKAGE_EXEMPTED_FROM_BROADCAST_RESPONSE_STATS => {
+                let a = us::IsPackageExemptedFromBroadcastResponseStats::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                match self.host.package_exempted_from_broadcast_response_stats(
+                    uid,
+                    a.package_name.as_deref(),
+                    a.user_id,
+                ) {
+                    Ok(v) => {
+                        us::write_is_package_exempted_from_broadcast_response_stats_reply(&mut p, v)
+                    }
+                    Err(e) => return reply(Err(e)),
+                }
+            }
             us::QUERY_EVENTS => {
                 let a = us::QueryEvents::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let package = a.calling_package.as_deref().unwrap_or_default();

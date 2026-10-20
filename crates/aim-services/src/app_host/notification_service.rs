@@ -1537,6 +1537,15 @@ impl NotificationManager {
             let r = &state.records[at];
             (r.parsed.flags & FLAG_GROUP_SUMMARY != 0).then(|| r.parsed.group.clone())
         });
+        // `reportNotificationPosted` or `Updated`, of the op package.
+        self.host.report_notification(
+            match old {
+                Some(_) => super::broadcast_response::Notified::Updated,
+                None => super::broadcast_response::Notified::Posted,
+            },
+            &record.op_package,
+            record.user,
+        );
         match old {
             Some(at) => state.records[at] = record,
             None => state.records.push(record),
@@ -1664,8 +1673,18 @@ impl NotificationManager {
         }
     }
 
-    /// Tells the listeners of the removal of `record`.
+    /// Tells the listeners, and usage stats of an app's own, of the
+    /// removal of `record`.
     fn notify_removed(&self, state: &State, record: &Record, reason: i32) {
+        // `cancelNotificationLocked`'s usage stats: an app's own
+        // cancellation (`reportNotificationRemoved`).
+        if matches!(reason, REASON_APP_CANCEL | REASON_APP_CANCEL_ALL) {
+            self.host.report_notification(
+                super::broadcast_response::Notified::Cancelled,
+                &record.op_package,
+                record.user,
+            );
+        }
         for l in state
             .listeners
             .iter()
