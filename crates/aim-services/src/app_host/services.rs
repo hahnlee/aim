@@ -177,6 +177,8 @@ struct StartItem {
     /// The URI grants its intent carries, and their owner once delivered
     /// (`neededGrants`, `uriPermissions`).
     grants: Option<(NeededUriGrants, Owner)>,
+    /// The uid that started it (`callingId`); 0 for a sticky restart.
+    calling_uid: i32,
     delivery_count: i32,
     done_executing_count: i32,
     delivered_time: Option<Instant>,
@@ -1085,6 +1087,7 @@ impl AppHost {
             id,
             intent: Some(kept),
             grants,
+            calling_uid: uid,
             delivery_count: 0,
             done_executing_count: 0,
             delivered_time: None,
@@ -1257,6 +1260,8 @@ impl AppHost {
             Lookup::Denied(_) => return Ok(-1),
             Lookup::Found(info) => *info,
         };
+        // Associated with its caller, the service's app may now see it.
+        self.grant_implicit_access(info.info.application_info.uid, client_uid)?;
         let conn = Conn::App(self.process.strong(conn));
         self.bind_found(
             intent,
@@ -1674,6 +1679,7 @@ impl AppHost {
                 id,
                 intent: None,
                 grants: None,
+                calling_uid: 0,
                 delivery_count: 0,
                 done_executing_count: 0,
                 delivered_time: None,
@@ -1745,6 +1751,15 @@ impl AppHost {
             {
                 eprintln!(
                     "app host: service {}/{}: URI grants: {}",
+                    r.package, r.class, e.message
+                );
+            }
+            // The service's app may now see what started it.
+            if let Err(e) =
+                self.grant_implicit_access(r.info.info.application_info.uid, s.calling_uid)
+            {
+                eprintln!(
+                    "app host: service {}/{}: implicit access: {}",
                     r.package, r.class, e.message
                 );
             }
