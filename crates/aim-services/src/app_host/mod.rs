@@ -111,6 +111,7 @@ pub mod storage;
 pub mod storage_stats;
 mod strict_mode;
 pub mod surface;
+pub mod system_update;
 pub mod task_info;
 pub mod tasks;
 pub mod telephony_registry;
@@ -753,6 +754,10 @@ impl AppHost {
             (
                 "storagestats",
                 Arc::new(storage_stats::StorageStatsService::new(self.clone())),
+            ),
+            (
+                "system_update",
+                Arc::new(system_update::SystemUpdate::new(self.clone())),
             ),
             (
                 "media_session",

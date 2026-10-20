@@ -733,7 +733,7 @@ pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// `AtomicFile.delete`.
-fn atomic_delete(path: &Path) {
+pub(super) fn atomic_delete(path: &Path) {
     for p in [
         path.to_path_buf(),
         suffixed(path, NEW_SUFFIX),
