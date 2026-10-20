@@ -17,6 +17,7 @@ pub mod activity_stack;
 pub mod activity_start;
 pub mod alarm_service;
 pub mod apex_manager;
+mod app_data;
 mod app_op_infos;
 mod app_standby;
 pub mod app_widget;
@@ -431,6 +432,10 @@ pub struct AppHost {
     /// Held by each change of the package model from reading it to
     /// storing the changed model, so that no change is lost to another.
     model_writer: Mutex<()>,
+    /// The owner of PackageManager's persisted state, opened by its
+    /// first write (the package service's, the app data's inodes);
+    /// holding it serializes writes (`mLock`).
+    package_store: Mutex<Option<crate::package::owner::Store>>,
     resolver: crate::package::resolve::Resolver,
     activities: activity::Activities,
     display: OnceLock<Arc<(display::Display, display_service::Resources)>>,
@@ -524,6 +529,7 @@ impl AppHost {
             unimplemented: Mutex::new(std::collections::HashSet::new()),
             model: Mutex::new(None),
             model_writer: Mutex::new(()),
+            package_store: Mutex::new(None),
             resolver: Default::default(),
             activities: Default::default(),
             display: OnceLock::new(),

@@ -91,6 +91,9 @@ const SET_KEY_REPEAT_CONFIGURATION: u32 = 12;
 /// boolean hasPermission, int displayId)`: whether the display's touch
 /// mode changed (`InputDispatcher::setInTouchMode`).
 const SET_IN_TOUCH_MODE: u32 = 13;
+/// `IAppHostAgent.enforceSerialNumber(String path, int serialNumber)`:
+/// `UserDataPreparer.enforceSerialNumber` of a user's directory.
+const ENFORCE_SERIAL_NUMBER: u32 = 14;
 /// `InputTransport.cpp`'s `SOCKET_BUFFER_SIZE`.
 const SOCKET_BUFFER_SIZE: libc::c_int = 32 * 1024;
 
@@ -503,6 +506,18 @@ fn on_transact(
             reply.write(&changed)?;
             Ok(())
         }
+        ENFORCE_SERIAL_NUMBER => {
+            let path: String = data.read()?;
+            let serial: i32 = data.read()?;
+            let status = match enforce_serial_number(&path, serial) {
+                Ok(()) => Status::ok(),
+                Err(message) => {
+                    Status::new_exception_str(binder::ExceptionCode::ILLEGAL_STATE, Some(message))
+                }
+            };
+            reply.write(&status)?;
+            Ok(())
+        }
         READ_PROC_STATUS => {
             let tid: i32 = data.read()?;
             reply.write(&Status::ok())?;
@@ -535,6 +550,57 @@ fn on_transact(
         }
         _ => Err(StatusCode::UNKNOWN_TRANSACTION),
     }
+}
+
+/// `UserDataPreparer.enforceSerialNumber`: the serial number in the
+/// directory's `user.serial`, recorded when missing (a failure to record
+/// it only logged), else equal to `serial`.
+fn enforce_serial_number(path: &str, serial: i32) -> Result<(), String> {
+    let file = std::ffi::CString::new(path).map_err(|_| format!("{path}: a NUL in the path"))?;
+    let mut buffer = [0u8; 64];
+    // SAFETY: getxattr into a local buffer of its length.
+    let len = unsafe {
+        libc::getxattr(
+            file.as_ptr(),
+            c"user.serial".as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+        )
+    };
+    if len < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ENODATA) {
+            return Err(format!("Failed to read serial number from {path}: {error}"));
+        }
+        let value = serial.to_string();
+        // SAFETY: setxattr of a local value.
+        let set = unsafe {
+            libc::setxattr(
+                file.as_ptr(),
+                c"user.serial".as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                libc::XATTR_CREATE,
+            )
+        };
+        if set != 0 {
+            log::warn!(
+                "Failed to set serial number on {path}: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        return Ok(());
+    }
+    let text = String::from_utf8_lossy(&buffer[..len as usize]);
+    let found = text
+        .parse::<i32>()
+        .map_err(|_| format!("Bad serial number: {text}"))?;
+    if found != serial {
+        return Err(format!(
+            "Found serial number {found} doesn't match expected {serial}"
+        ));
+    }
+    Ok(())
 }
 
 /// `/proc/<tid>/status` as one `read` of up to 4095 bytes gets it: none

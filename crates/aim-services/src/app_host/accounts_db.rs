@@ -8,8 +8,9 @@
 //! only SQLite reads and writes faithfully, so they go through SQLite
 //! itself (rusqlite's bundled amalgamation), in the journal mode the
 //! original's connections use (`db_default_journal_mode`, `TRUNCATE`).
-//! The databases the original made are opened at its versions (DE 3,
-//! CE 10); none is created, upgraded or migrated from pre-N here (#1504).
+//! A database that does not exist is made as its helper's `onCreate`
+//! makes it; one that does is opened at the original's versions (DE 3,
+//! CE 10); none is upgraded or migrated from pre-N here (#1504).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
@@ -44,6 +45,8 @@ pub struct AccountsDb {
     db: Connection,
     de: PathBuf,
     ce_attached: bool,
+    /// The locale of a CE database it makes.
+    locale: String,
 }
 
 /// Opens `path` as `SQLiteOpenHelper` opens a database of `version`.
@@ -58,33 +61,94 @@ fn check_version(db: &Connection, schema: &str, path: &Path, version: i32) -> Re
     Ok(())
 }
 
+/// `DeDatabaseHelper.onCreate`'s schema.
+const DE_SCHEMA: &str = "CREATE TABLE accounts ( _id INTEGER PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, previous_name TEXT, last_password_entry_time_millis_epoch INTEGER DEFAULT 0, UNIQUE(name,type));
+CREATE TABLE meta ( key TEXT PRIMARY KEY NOT NULL, value TEXT);
+CREATE TABLE grants (  accounts_id INTEGER NOT NULL, auth_token_type STRING NOT NULL,  uid INTEGER NOT NULL,  UNIQUE (accounts_id,auth_token_type,uid));
+CREATE TABLE shared_accounts ( _id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, type TEXT NOT NULL, UNIQUE(name,type));
+ CREATE TRIGGER accountsDelete DELETE ON accounts BEGIN   DELETE FROM grants     WHERE accounts_id=OLD._id ; END;
+CREATE TABLE debug_table ( _id INTEGER,action_type TEXT NOT NULL, time DATETIME,caller_uid INTEGER NOT NULL,table_name TEXT NOT NULL,primary_key INTEGER PRIMARY KEY);
+CREATE INDEX timestamp_index ON debug_table (time);
+CREATE TABLE visibility ( accounts_id INTEGER NOT NULL, _package TEXT NOT NULL, value INTEGER, PRIMARY KEY(accounts_id,_package));
+ CREATE TRIGGER accountsDeleteVisibility DELETE ON accounts BEGIN   DELETE FROM visibility     WHERE accounts_id=OLD._id ; END;";
+/// `CeDatabaseHelper.onCreate`'s schema.
+const CE_SCHEMA: &str = "CREATE TABLE accounts ( _id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, type TEXT NOT NULL, password TEXT, UNIQUE(name,type));
+CREATE TABLE authtokens (  _id INTEGER PRIMARY KEY AUTOINCREMENT,  accounts_id INTEGER NOT NULL, type TEXT NOT NULL,  authtoken TEXT,  UNIQUE (accounts_id,type));
+CREATE TABLE extras ( _id INTEGER PRIMARY KEY AUTOINCREMENT, accounts_id INTEGER, key TEXT NOT NULL, value TEXT, UNIQUE(accounts_id,key));
+ CREATE TRIGGER accountsDelete DELETE ON accounts BEGIN   DELETE FROM authtokens     WHERE accounts_id=OLD._id ;   DELETE FROM extras     WHERE accounts_id=OLD._id ; END;";
+
+/// The system's database files' guest owner and mode (`rw-rw----`, as
+/// `SQLiteOpenHelper.setFilePermissionsForDb` leaves them).
+fn record_system_file(path: &Path) -> Result<()> {
+    let inode = aim_storage::guest_inode::GuestInode {
+        uid: Some(1000),
+        gid: Some(1000),
+        mode: Some(0o660),
+    };
+    aim_storage::guest_inode::record(path, inode)
+        .map_err(|e| DbError(format!("{}: {e}", path.display())))
+}
+
+/// Opens `path` as `SQLiteOpenHelper.getWritableDatabase` opens a
+/// database of `version` and `schema`: one it creates gets its
+/// `android_metadata` of `locale`, then the helper's `onCreate` and
+/// version in one transaction; one that exists must be of `version`.
+fn open_helper(path: &Path, schema: &str, version: i32, locale: &str) -> Result<Connection> {
+    let created = !path.exists();
+    let db = Connection::open(path)?;
+    db.query_row("PRAGMA journal_mode=TRUNCATE", [], |_| Ok(()))?;
+    if !created {
+        check_version(&db, "main", path, version)?;
+        return Ok(db);
+    }
+    record_system_file(path)?;
+    db.execute_batch(&format!(
+        "BEGIN;
+         CREATE TABLE android_metadata (locale TEXT);
+         INSERT INTO android_metadata VALUES ('{}');
+         COMMIT;
+         BEGIN;
+         {schema}
+         PRAGMA user_version = {version};
+         COMMIT;",
+        locale.replace('\'', "''")
+    ))?;
+    let journal = path.with_extension("db-journal");
+    if journal.exists() {
+        record_system_file(&journal)?;
+    }
+    Ok(db)
+}
+
 impl AccountsDb {
-    /// `AccountsDb.create` of the DE database at `de`.
-    pub fn open(de: &Path) -> Result<AccountsDb> {
-        if !de.exists() {
+    /// `AccountsDb.create` of the DE database at `de`, made with the
+    /// device's `locale` (as `Locale.toString` writes it) when there is
+    /// none; a pre-N database (`pre_n`) to migrate is not (#1504).
+    pub fn open(de: &Path, pre_n: &Path, locale: &str) -> Result<AccountsDb> {
+        if !de.exists() && pre_n.exists() {
             return Err(DbError(format!(
-                "{}: no database (the app host does not create one, #1504)",
-                de.display()
+                "{}: migrating a pre-N database is not implemented (#1504)",
+                pre_n.display()
             )));
         }
-        let db = Connection::open(de)?;
-        db.query_row("PRAGMA journal_mode=TRUNCATE", [], |_| Ok(()))?;
-        check_version(&db, "main", de, DE_DATABASE_VERSION)?;
+        let db = open_helper(de, DE_SCHEMA, DE_DATABASE_VERSION, locale)?;
         Ok(AccountsDb {
             db,
             de: de.to_path_buf(),
             ce_attached: false,
+            locale: locale.into(),
         })
     }
 
-    /// `attachCeDatabase`.
+    /// `attachCeDatabase`: the CE database (`CeDatabaseHelper.create`,
+    /// made as the DE one is), attached as `ceDb`.
     pub fn attach_ce(&mut self, ce: &Path) -> Result<()> {
-        if !ce.exists() {
-            return Err(DbError(format!(
-                "{}: no database (the app host does not create one, #1504)",
-                ce.display()
-            )));
-        }
+        drop(open_helper(
+            ce,
+            CE_SCHEMA,
+            CE_DATABASE_VERSION,
+            &self.locale,
+        )?);
         self.db
             .execute("ATTACH DATABASE ?1 AS ceDb", [ce.to_string_lossy()])?;
         self.db
@@ -103,13 +167,7 @@ impl AccountsDb {
     fn wrote(&self) -> Result<()> {
         let journal = self.de.with_extension("db-journal");
         if journal.exists() {
-            let inode = aim_storage::guest_inode::GuestInode {
-                uid: Some(1000),
-                gid: Some(1000),
-                mode: Some(0o660),
-            };
-            aim_storage::guest_inode::record(&journal, inode)
-                .map_err(|e| DbError(format!("{}: {e}", journal.display())))?;
+            record_system_file(&journal)?;
         }
         Ok(())
     }
@@ -295,40 +353,19 @@ impl AccountsDb {
 mod tests {
     use super::*;
 
-    /// A user's databases as `DeDatabaseHelper.onCreate` and
-    /// `CeDatabaseHelper.onCreate` make them, in a directory of their own.
+    /// `AccountsDb.open` of `de`, its pre-N database beside it.
+    fn open(de: &Path) -> Result<AccountsDb> {
+        AccountsDb::open(de, &de.with_file_name("accounts.db"), "en_US")
+    }
+
+    /// A user's databases as the helpers make them, in a directory of
+    /// their own.
     fn create(name: &str) -> (PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!("aim-accounts-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let (de, ce) = (dir.join("accounts_de.db"), dir.join("accounts_ce.db"));
-        Connection::open(&de)
-            .unwrap()
-            .execute_batch(
-                "CREATE TABLE android_metadata (locale TEXT);
-                 CREATE TABLE accounts ( _id INTEGER PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, previous_name TEXT, last_password_entry_time_millis_epoch INTEGER DEFAULT 0, UNIQUE(name,type));
-                 CREATE TABLE meta ( key TEXT PRIMARY KEY NOT NULL, value TEXT);
-                 CREATE TABLE grants (  accounts_id INTEGER NOT NULL, auth_token_type STRING NOT NULL,  uid INTEGER NOT NULL,  UNIQUE (accounts_id,auth_token_type,uid));
-                 CREATE TABLE shared_accounts ( _id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, type TEXT NOT NULL, UNIQUE(name,type));
-                 CREATE TRIGGER accountsDelete DELETE ON accounts BEGIN   DELETE FROM grants     WHERE accounts_id=OLD._id ; END;
-                 CREATE TABLE debug_table ( _id INTEGER,action_type TEXT NOT NULL, time DATETIME,caller_uid INTEGER NOT NULL,table_name TEXT NOT NULL,primary_key INTEGER PRIMARY KEY);
-                 CREATE INDEX timestamp_index ON debug_table (time);
-                 CREATE TABLE visibility ( accounts_id INTEGER NOT NULL, _package TEXT NOT NULL, value INTEGER, PRIMARY KEY(accounts_id,_package));
-                 CREATE TRIGGER accountsDeleteVisibility DELETE ON accounts BEGIN   DELETE FROM visibility     WHERE accounts_id=OLD._id ; END;
-                 PRAGMA user_version = 3;",
-            )
-            .unwrap();
-        Connection::open(&ce)
-            .unwrap()
-            .execute_batch(
-                "CREATE TABLE android_metadata (locale TEXT);
-                 CREATE TABLE accounts ( _id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, type TEXT NOT NULL, password TEXT, UNIQUE(name,type));
-                 CREATE TABLE authtokens (  _id INTEGER PRIMARY KEY AUTOINCREMENT,  accounts_id INTEGER NOT NULL, type TEXT NOT NULL,  authtoken TEXT,  UNIQUE (accounts_id,type));
-                 CREATE TABLE extras ( _id INTEGER PRIMARY KEY AUTOINCREMENT, accounts_id INTEGER, key TEXT NOT NULL, value TEXT, UNIQUE(accounts_id,key));
-                 CREATE TRIGGER accountsDelete DELETE ON accounts BEGIN   DELETE FROM authtokens     WHERE accounts_id=OLD._id ;   DELETE FROM extras     WHERE accounts_id=OLD._id ; END;
-                 PRAGMA user_version = 10;",
-            )
-            .unwrap();
+        open(&de).unwrap().attach_ce(&ce).unwrap();
         (de, ce)
     }
 
@@ -369,7 +406,7 @@ mod tests {
     fn reads_the_original_tables() {
         let (de, ce) = create("reads");
         populate(&de, &ce);
-        let mut db = AccountsDb::open(&de).unwrap();
+        let mut db = open(&de).unwrap();
         assert_eq!(
             db.find_meta_auth_uid().unwrap(),
             vec![("com.example".into(), 10100), ("org.other".into(), 10101)]
@@ -441,7 +478,7 @@ mod tests {
     fn writes_meta_and_grants_as_the_original() {
         let (de, ce) = create("writes");
         populate(&de, &ce);
-        let db = AccountsDb::open(&de).unwrap();
+        let db = open(&de).unwrap();
         db.insert_or_replace_meta_auth_type_and_uid("com.example", 10111)
             .unwrap();
         db.insert_or_replace_meta_auth_type_and_uid("net.new", 10112)
@@ -468,9 +505,85 @@ mod tests {
             .unwrap()
             .execute_batch("PRAGMA user_version = 9;")
             .unwrap();
-        let mut db = AccountsDb::open(&de).unwrap();
+        let mut db = open(&de).unwrap();
         assert!(db.attach_ce(&ce).is_err());
-        assert!(AccountsDb::open(&de.with_file_name("none.db")).is_err());
+        Connection::open(&de)
+            .unwrap()
+            .execute_batch("PRAGMA user_version = 2;")
+            .unwrap();
+        assert!(open(&de).is_err());
         let _ = std::fs::remove_dir_all(de.parent().unwrap());
+    }
+
+    /// A user's first databases are the helpers' `onCreate`'s, of the
+    /// device's locale, the system's `rw-rw----`; a pre-N database to
+    /// migrate is not.
+    #[test]
+    fn a_user_s_first_databases_are_the_helpers() {
+        let (de, ce) = create("first");
+        let db = Connection::open(&de).unwrap();
+        db.execute("ATTACH DATABASE ?1 AS ceDb", [ce.to_string_lossy()])
+            .unwrap();
+        let names = |schema: &str| -> Vec<String> {
+            db.prepare(&format!(
+                "SELECT name FROM {schema}.sqlite_master ORDER BY rowid"
+            ))
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|n| n.unwrap())
+            .filter(|n: &String| !n.starts_with("sqlite_autoindex"))
+            .collect()
+        };
+        assert_eq!(
+            names("main"),
+            [
+                "android_metadata",
+                "accounts",
+                "meta",
+                "grants",
+                "shared_accounts",
+                "sqlite_sequence",
+                "accountsDelete",
+                "debug_table",
+                "timestamp_index",
+                "visibility",
+                "accountsDeleteVisibility",
+            ]
+        );
+        assert_eq!(
+            names("ceDb"),
+            [
+                "android_metadata",
+                "accounts",
+                "sqlite_sequence",
+                "authtokens",
+                "extras",
+                "accountsDelete",
+            ]
+        );
+        for (path, schema, version) in [(&de, "main", 3), (&ce, "ceDb", 10)] {
+            let found: i32 = db
+                .query_row(&format!("PRAGMA {schema}.user_version"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(found, version);
+            let locale: String = db
+                .query_row(
+                    &format!("SELECT locale FROM {schema}.android_metadata"),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(locale, "en_US");
+            let inode = aim_storage::guest_inode::read(path).unwrap().unwrap();
+            assert_eq!(
+                (inode.uid, inode.gid, inode.mode),
+                (Some(1000), Some(1000), Some(0o660))
+            );
+        }
+        let dir = de.parent().unwrap();
+        std::fs::write(dir.join("accounts.db"), b"").unwrap();
+        assert!(open(&dir.join("new_de.db")).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

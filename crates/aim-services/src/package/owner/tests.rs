@@ -3181,3 +3181,33 @@ fn metadata_mutation_retains_real_durable_keyset_allocation_owner_and_rejects_ro
     );
     assert_eq!(store.state.settings.key_sets, allocated.key_sets);
 }
+
+#[test]
+fn data_inodes_follow_the_name_as_the_original_writes_them() {
+    let data = Data::new();
+    let path = data.settings();
+    fs::write(
+        &path,
+        b"<package-restrictions><pkg name='example.app' deDataInode='3' stopped='true' /></package-restrictions>",
+    )
+    .unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    assert!(
+        store
+            .commit_data_inodes(0, &[("other.app".into(), 1, 2)])
+            .is_err()
+    );
+    store
+        .commit_data_inodes(0, &[("example.app".into(), 11, 0)])
+        .unwrap();
+    let reread = State::read(&data.0, &[0]).unwrap().unwrap();
+    assert_eq!(reread, *store.state());
+    let user = &reread.users[0].1.restrictions.packages[0].1;
+    assert_eq!((user.ce_data_inode, user.de_data_inode), (11, 0));
+    let root = aim_android_xml::read(&fs::read(&path).unwrap()).unwrap();
+    let Some(Node::Element(pkg)) = root.content.first() else {
+        panic!("no package")
+    };
+    let names: Vec<&str> = pkg.attrs.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["name", "ceDataInode", "stopped"]);
+}

@@ -671,8 +671,13 @@ impl AccountManager {
         if let Some(accounts) = users.get(&user) {
             return Ok(accounts.clone());
         }
-        let data = &self.host.inputs().map_err(Failure::Thrown)?.data;
-        let mut db = AccountsDb::open(&data.join(format!("system_de/{user}/accounts_de.db")))?;
+        let inputs = self.host.inputs().map_err(Failure::Thrown)?;
+        let data = &inputs.data;
+        let mut db = AccountsDb::open(
+            &data.join(format!("system_de/{user}/accounts_de.db")),
+            &data.join(format!("system/users/{user}/accounts.db")),
+            &super::lock_settings::java_locale(&inputs.locales),
+        )?;
         self.purge_old_grants(&db)?;
         if self.unlocked(user).map_err(Failure::Thrown)? {
             db.attach_ce(&data.join(format!("system_ce/{user}/accounts_ce.db")))?;
