@@ -64,6 +64,7 @@ pub mod job_store;
 pub mod kept;
 pub mod legacy_permission;
 pub mod locale_manager;
+pub mod lock_settings;
 mod loudness;
 mod media_route_providers;
 pub mod media_router;
@@ -762,6 +763,10 @@ impl AppHost {
             (
                 "system_update",
                 Arc::new(system_update::SystemUpdate::new(self.clone())),
+            ),
+            (
+                "lock_settings",
+                Arc::new(lock_settings::LockSettings::new(self.clone())),
             ),
             (
                 "media_session",
