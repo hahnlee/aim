@@ -334,9 +334,26 @@ impl AppHost {
             .lock()
             .unwrap()
             .insert(token, record);
-        // `startActivityInner`: the intent's grants are the activity's.
+        // `startActivityInner`: the intent's grants are the activity's, and
+        // its app may see the one its result goes to.
         if let Err(e) = self.grant_from_intent(grants.as_ref(), Some(Owner::Activity(token))) {
             eprintln!("app host: activity {token:#x}: URI grants: {}", e.message);
+        }
+        let result_to_uid = request.result_to.and_then(|to| {
+            self.activities
+                .records
+                .lock()
+                .unwrap()
+                .get(&to)
+                .map(|r| r.uid)
+        });
+        if let Some(visible) = result_to_uid
+            && let Err(e) = self.grant_implicit_access(uid as i32, visible as i32)
+        {
+            eprintln!(
+                "app host: activity {token:#x}: implicit access: {}",
+                e.message
+            );
         }
         token
     }

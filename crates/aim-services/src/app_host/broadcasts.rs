@@ -1797,6 +1797,7 @@ impl Broadcasts {
         let extras = chain.result_extras.as_ref().map(|e| By(&e.bundle));
         let sent = match app {
             Some(seq) => {
+                self.share_identity_access(host, seq, record);
                 let mut p = Parcel::new();
                 thread::ScheduleRegisteredReceiver {
                     receiver: Some(result_to.binder()),
@@ -1878,6 +1879,30 @@ impl Broadcasts {
         }
     }
 
+    /// With a shared identity, the receiving app of `start_seq` may see the
+    /// sender (`grantImplicitAccess` in `scheduleReceiverWarmLocked` and
+    /// `scheduleResultTo`).
+    fn share_identity_access(&self, host: &AppHost, start_seq: i64, record: &Record) {
+        if !record.share_identity {
+            return;
+        }
+        let Some(uid) = host
+            .apps
+            .lock()
+            .unwrap()
+            .get(&start_seq)
+            .map(|a| a.uid as i32)
+        else {
+            return;
+        };
+        if uid == record.calling_uid {
+            return;
+        }
+        if let Err(e) = host.grant_implicit_access(uid, record.calling_uid) {
+            eprintln!("app host: broadcast: implicit access: {}", e.message);
+        }
+    }
+
     /// `scheduleRegisteredReceiver` of `record` to `receiver` in the
     /// process of `start_seq`: whether it was sent.
     #[allow(clippy::too_many_arguments)]
@@ -1892,6 +1917,7 @@ impl Broadcasts {
         result_extras: Option<&KeptBundle>,
         assume_delivered: bool,
     ) -> bool {
+        self.share_identity_access(host, start_seq, record);
         let mut p = Parcel::new();
         thread::ScheduleRegisteredReceiver {
             receiver: Some(Binder::Handle(receiver)),
@@ -1944,6 +1970,7 @@ impl Broadcasts {
             app.thread.as_ref()?;
             app.config.clone()?
         };
+        self.share_identity_access(host, start_seq, record);
         let compat = super::config::CompatibilityInfo::of(
             &m.info.info.application_info,
             &config,

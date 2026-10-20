@@ -287,6 +287,8 @@ impl AppHost {
                 local: true,
             }));
         }
+        // The provider's app may now see its client (`grantImplicitAccess`).
+        self.grant_implicit_access(owner as i32, uid)?;
         let deadline = Instant::now() + WAIT_TIMEOUT;
         let mut launched = false;
         loop {
