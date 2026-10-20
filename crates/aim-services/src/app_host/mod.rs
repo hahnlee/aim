@@ -32,6 +32,7 @@ pub mod battery_service;
 pub mod battery_stats;
 pub mod bind;
 pub mod bluetooth_manager;
+mod broadcast_response;
 pub mod broadcasts;
 mod cache_quota;
 pub mod companion_device;
@@ -456,6 +457,7 @@ pub struct AppHost {
     /// `ProcessList.mGlobalIsolatedUids`.
     isolated_uids: Mutex<IsolatedUids>,
     app_standby: app_standby::AppStandby,
+    broadcast_responses: broadcast_response::BroadcastResponses,
     webview_zygote: webview_zygote::WebViewZygote,
     storage: storage::Volumes,
     text_input: input_method::TextInput,
@@ -543,6 +545,7 @@ impl AppHost {
                 next: FIRST_ISOLATED_UID,
             }),
             app_standby: Default::default(),
+            broadcast_responses: Default::default(),
             webview_zygote: Default::default(),
             storage: Default::default(),
             text_input: Default::default(),
