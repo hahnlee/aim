@@ -6,6 +6,10 @@
 //! The window a touch goes to is chosen as `InputDispatcher` chooses it
 //! (`findTouchedWindowTargets`).
 
+pub mod keyboard;
+pub mod keychars;
+pub mod keylayout;
+
 /// `InputMessage::Type`.
 const MOTION: u32 = 1;
 const FOCUS: u32 = 3;

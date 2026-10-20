@@ -1,13 +1,18 @@
 //! Key character maps (`.kcm` files), as `KeyCharacterMap::load` parses
-//! them and `KeyCharacterMap::writeToParcel` writes them at
-//! `android-16.0.0_r1` (frameworks/native/libs/input/KeyCharacterMap.cpp,
-//! the keycode labels of `InputEventLabels.cpp`): what an `InputDevice`
-//! carries for an app's `KeyCharacterMap`.
+//! them at `android-16.0.0_r1` (frameworks/native/libs/input/
+//! KeyCharacterMap.cpp, the keycode labels of `InputEventLabels.cpp`): what
+//! an `InputDevice` carries for an app's `KeyCharacterMap`, and what
+//! EventHub maps a keyboard's keys through (`mapKey`, `applyKeyBehavior`)
+//! and the shell turns text into keys with (`getEvents`).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::BTreeMap;
 
-use aim_binder_host::parcel::Parcel;
+use crate::keyboard::{
+    self, AMETA_ALT_LEFT_ON, AMETA_ALT_ON, AMETA_ALT_RIGHT_ON, AMETA_CTRL_LEFT_ON, AMETA_CTRL_ON,
+    AMETA_CTRL_RIGHT_ON, AMETA_META_LEFT_ON, AMETA_META_ON, AMETA_META_RIGHT_ON,
+    AMETA_SHIFT_LEFT_ON, AMETA_SHIFT_ON, AMETA_SHIFT_RIGHT_ON,
+};
 
 /// `KeyCharacterMap::KeyboardType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,50 +75,57 @@ const MODIFIERS: &[(&str, i32)] = &[
     ("scrolllock", 0x400000),
 ];
 
-const WHITESPACE: &str = " \t\r";
+pub(crate) const WHITESPACE: &str = " \t\r";
 const WHITESPACE_OR_PROPERTY_DELIMITER: &str = " \t\r,:";
 
 /// `utils/Tokenizer`: a buffer read token by token within its lines.
-struct Tokenizer<'a> {
+pub(crate) struct Tokenizer<'a> {
     buffer: &'a [u8],
     at: usize,
-    line: usize,
+    pub(crate) line: usize,
 }
 
 impl Tokenizer<'_> {
-    fn is_eof(&self) -> bool {
+    pub(crate) fn new(buffer: &[u8]) -> Tokenizer<'_> {
+        Tokenizer {
+            buffer,
+            at: 0,
+            line: 1,
+        }
+    }
+    pub(crate) fn is_eof(&self) -> bool {
         self.at >= self.buffer.len()
     }
-    fn is_eol(&self) -> bool {
+    pub(crate) fn is_eol(&self) -> bool {
         self.is_eof() || self.buffer[self.at] == b'\n'
     }
-    fn peek_char(&self) -> u8 {
+    pub(crate) fn peek_char(&self) -> u8 {
         if self.is_eof() {
             0
         } else {
             self.buffer[self.at]
         }
     }
-    fn next_char(&mut self) -> u8 {
+    pub(crate) fn next_char(&mut self) -> u8 {
         let ch = self.peek_char();
         if !self.is_eof() {
             self.at += 1;
         }
         ch
     }
-    fn skip_delimiters(&mut self, delimiters: &str) {
+    pub(crate) fn skip_delimiters(&mut self, delimiters: &str) {
         while !self.is_eol() && delimiters.as_bytes().contains(&self.buffer[self.at]) {
             self.at += 1;
         }
     }
-    fn next_token(&mut self, delimiters: &str) -> String {
+    pub(crate) fn next_token(&mut self, delimiters: &str) -> String {
         let start = self.at;
         while !self.is_eol() && !delimiters.as_bytes().contains(&self.buffer[self.at]) {
             self.at += 1;
         }
         String::from_utf8_lossy(&self.buffer[start..self.at]).into_owned()
     }
-    fn next_line(&mut self) {
+    pub(crate) fn next_line(&mut self) {
         while !self.is_eof() && self.buffer[self.at] != b'\n' {
             self.at += 1;
         }
@@ -135,11 +147,7 @@ impl KeyCharacterMap {
             keys_by_scan_code: BTreeMap::new(),
             keys_by_usage_code: BTreeMap::new(),
         };
-        let mut t = Tokenizer {
-            buffer: contents,
-            at: 0,
-            line: 1,
-        };
+        let mut t = Tokenizer::new(contents);
         let mut key_code: Option<i32> = None;
         let err = |t: &Tokenizer<'_>, what: String| format!("{file_name}:{}: {what}", t.line);
         while !t.is_eof() {
@@ -385,33 +393,222 @@ impl KeyCharacterMap {
         Ok(false)
     }
 
-    /// `KeyCharacterMap::writeToParcel`.
-    pub fn write_to(&self, p: &mut Parcel) {
-        p.write_string8(Some(&self.load_file_name));
-        p.write_i32(self.kind as i32);
-        p.write_bool(self.layout_overlay_applied);
-        p.write_i32(self.keys.len() as i32);
-        for (code, key) in &self.keys {
-            p.write_i32(*code);
-            p.write_i32(key.label.into());
-            p.write_i32(key.number.into());
-            for b in &key.behaviors {
-                p.write_i32(1);
-                p.write_i32(b.meta_state);
-                p.write_i32(b.character.into());
-                p.write_i32(b.fallback_key_code);
-                p.write_i32(b.replacement_key_code);
-            }
-            p.write_i32(0);
+    /// `mapKey`: the key code a `map key` line gives the usage, else the
+    /// scan code.
+    pub fn map_key(&self, scan_code: i32, usage_code: i32) -> Option<i32> {
+        if usage_code != 0
+            && let Some(&code) = self.keys_by_usage_code.get(&usage_code)
+        {
+            return Some(code);
         }
-        p.write_i32(0); // no key remapping
-        for map in [&self.keys_by_scan_code, &self.keys_by_usage_code] {
-            p.write_i32(map.len() as i32);
-            for (from, to) in map {
-                p.write_i32(*from);
-                p.write_i32(*to);
+        if scan_code != 0 {
+            return self.keys_by_scan_code.get(&scan_code).copied();
+        }
+        None
+    }
+
+    /// `applyKeyRemapping`: the key codes the user remapped, of which the
+    /// app host has none (`setKeyRemapping` comes from the input settings'
+    /// key remapping, which it does not keep).
+    pub fn apply_key_remapping(&self, key_code: i32) -> i32 {
+        key_code
+    }
+
+    /// `findKeyCodesMappedToKeyCode`: none, without remappings.
+    pub fn find_key_codes_mapped_to_key_code(&self, _key_code: i32) -> Vec<i32> {
+        Vec::new()
+    }
+
+    /// `getKeyBehavior`: the first of the key's behaviors that matches.
+    fn key_behavior(&self, key_code: i32, meta_state: i32) -> Option<&Behavior> {
+        self.keys
+            .get(&key_code)?
+            .behaviors
+            .iter()
+            .find(|b| matches_meta_state(meta_state, b.meta_state))
+    }
+
+    /// `applyKeyBehavior`: a `replace` behavior's key code, with the
+    /// modifiers it consumed taken off the meta state.
+    pub fn apply_key_behavior(&self, key_code: i32, meta_state: i32) -> (i32, i32) {
+        let Some(behavior) = self
+            .key_behavior(key_code, meta_state)
+            .filter(|b| b.replacement_key_code != 0)
+        else {
+            return (key_code, meta_state);
+        };
+        let consumed = behavior.meta_state;
+        let mut to = meta_state & !consumed;
+        for (either, sides) in [
+            (AMETA_ALT_ON, AMETA_ALT_LEFT_ON | AMETA_ALT_RIGHT_ON),
+            (AMETA_CTRL_ON, AMETA_CTRL_LEFT_ON | AMETA_CTRL_RIGHT_ON),
+            (AMETA_SHIFT_ON, AMETA_SHIFT_LEFT_ON | AMETA_SHIFT_RIGHT_ON),
+        ] {
+            if consumed & either != 0 {
+                to &= !sides;
+            }
+            if consumed & sides != 0 {
+                to &= !either;
             }
         }
+        (
+            behavior.replacement_key_code,
+            keyboard::normalize_meta_state(to),
+        )
+    }
+
+    /// `findKey`: the first key (by key code) one of whose behaviors types
+    /// `ch`, with the meta state of the first such behavior declared.
+    fn find_key(&self, ch: u16) -> Option<(i32, i32)> {
+        if ch == 0 {
+            return None;
+        }
+        self.keys.iter().find_map(|(&code, key)| {
+            key.behaviors
+                .iter()
+                .rfind(|b| b.character == ch)
+                .map(|b| (code, b.meta_state))
+        })
+    }
+
+    /// `getEvents`: each character's key, pressed with the modifiers it
+    /// needs (`addMetaKeys`), as (key code, meta state, down); none if a
+    /// character has no key.
+    pub fn get_events(&self, chars: &[u16]) -> Option<Vec<(i32, i32, bool)>> {
+        let mut events = Vec::new();
+        for &ch in chars {
+            let (key_code, meta_state) = self.find_key(ch)?;
+            let mut current = 0;
+            add_meta_keys(&mut events, meta_state, true, &mut current);
+            events.push((key_code, current, true));
+            events.push((key_code, current, false));
+            add_meta_keys(&mut events, meta_state, false, &mut current);
+        }
+        Some(events)
+    }
+}
+
+/// `matchesMetaState`: the behavior's modifiers all held, and no other
+/// of Ctrl, Alt and Meta (either side matching a side or both).
+fn matches_meta_state(event: i32, behavior: i32) -> bool {
+    if event & behavior != behavior {
+        return false;
+    }
+    const EXACT: i32 = AMETA_CTRL_ON
+        | AMETA_CTRL_LEFT_ON
+        | AMETA_CTRL_RIGHT_ON
+        | AMETA_ALT_ON
+        | AMETA_ALT_LEFT_ON
+        | AMETA_ALT_RIGHT_ON
+        | AMETA_META_ON
+        | AMETA_META_LEFT_ON
+        | AMETA_META_RIGHT_ON;
+    let mut unmatched = event & !behavior & EXACT;
+    for (either, sides) in [
+        (AMETA_CTRL_ON, AMETA_CTRL_LEFT_ON | AMETA_CTRL_RIGHT_ON),
+        (AMETA_ALT_ON, AMETA_ALT_LEFT_ON | AMETA_ALT_RIGHT_ON),
+        (AMETA_META_ON, AMETA_META_LEFT_ON | AMETA_META_RIGHT_ON),
+    ] {
+        if behavior & either != 0 {
+            unmatched &= !sides;
+        } else if behavior & sides != 0 {
+            unmatched &= !either;
+        }
+    }
+    unmatched == 0
+}
+
+/// `addMetaKeys`: the locks, then Shift, Alt, Ctrl, Meta, Sym and Fn going
+/// down, or the same in reverse going up.
+fn add_meta_keys(events: &mut Vec<(i32, i32, bool)>, meta: i32, down: bool, current: &mut i32) {
+    use keyboard::*;
+    let locks = [
+        (AKEYCODE_CAPS_LOCK, AMETA_CAPS_LOCK_ON),
+        (AKEYCODE_NUM_LOCK, AMETA_NUM_LOCK_ON),
+        (AKEYCODE_SCROLL_LOCK, AMETA_SCROLL_LOCK_ON),
+    ];
+    let doubles = [
+        (
+            AKEYCODE_SHIFT_LEFT,
+            AMETA_SHIFT_LEFT_ON,
+            AKEYCODE_SHIFT_RIGHT,
+            AMETA_SHIFT_RIGHT_ON,
+            AMETA_SHIFT_ON,
+        ),
+        (
+            AKEYCODE_ALT_LEFT,
+            AMETA_ALT_LEFT_ON,
+            AKEYCODE_ALT_RIGHT,
+            AMETA_ALT_RIGHT_ON,
+            AMETA_ALT_ON,
+        ),
+        (
+            AKEYCODE_CTRL_LEFT,
+            AMETA_CTRL_LEFT_ON,
+            AKEYCODE_CTRL_RIGHT,
+            AMETA_CTRL_RIGHT_ON,
+            AMETA_CTRL_ON,
+        ),
+        (
+            AKEYCODE_META_LEFT,
+            AMETA_META_LEFT_ON,
+            AKEYCODE_META_RIGHT,
+            AMETA_META_RIGHT_ON,
+            AMETA_META_ON,
+        ),
+    ];
+    let singles = [
+        (AKEYCODE_SYM, AMETA_SYM_ON),
+        (AKEYCODE_FUNCTION, AMETA_FUNCTION_ON),
+    ];
+    // `addSingleEphemeralMetaKey`.
+    let single = |events: &mut Vec<(i32, i32, bool)>, current: &mut i32, code, mask| {
+        if meta & mask == mask {
+            *current = update_meta_state(code, down, *current);
+            events.push((code, *current, down));
+            true
+        } else {
+            false
+        }
+    };
+    // `addDoubleEphemeralMetaKey`.
+    let double =
+        |events: &mut Vec<(i32, i32, bool)>,
+         current: &mut i32,
+         (left, left_mask, right, right_mask, either): (i32, i32, i32, i32, i32)| {
+            let specific = single(events, current, left, left_mask)
+                | single(events, current, right, right_mask);
+            if !specific {
+                single(events, current, left, either);
+            }
+        };
+    // `addLockedMetaKey`.
+    let lock = |events: &mut Vec<(i32, i32, bool)>, current: &mut i32, (code, mask): (i32, i32)| {
+        if meta & mask == mask {
+            *current = update_meta_state(code, true, *current);
+            events.push((code, *current, true));
+            *current = update_meta_state(code, false, *current);
+            events.push((code, *current, false));
+        }
+    };
+    if down {
+        locks.into_iter().for_each(|l| lock(events, current, l));
+        doubles.into_iter().for_each(|d| double(events, current, d));
+        for (code, mask) in singles {
+            single(events, current, code, mask);
+        }
+    } else {
+        for (code, mask) in singles.into_iter().rev() {
+            single(events, current, code, mask);
+        }
+        doubles
+            .into_iter()
+            .rev()
+            .for_each(|d| double(events, current, d));
+        locks
+            .into_iter()
+            .rev()
+            .for_each(|l| lock(events, current, l));
     }
 }
 
@@ -486,7 +683,7 @@ fn parse_character_literal(t: &mut Tokenizer<'_>) -> Option<u16> {
 
 /// `strtol(token, &end, 0)` of a whole token: decimal, `0x` hex or `0`
 /// octal.
-fn strtol(token: &str) -> Option<i32> {
+pub(crate) fn strtol(token: &str) -> Option<i32> {
     let (negative, digits) = match token.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, token.strip_prefix('+').unwrap_or(token)),
@@ -882,15 +1079,28 @@ mod tests {
         );
         assert_eq!(map.keys[&31].behaviors[0].character, 0xe7);
         assert_eq!(map.keys_by_scan_code[&0x31], 62);
-        let mut p = Parcel::new();
-        map.write_to(&mut p);
-        // Name, type, overlay, 4 keys (each code, label, number, behaviors of
-        // 5 ints, end), no remapping, one scan code, no usage.
-        let behaviors = 4 + 2 + 4 + 1;
+        assert_eq!(map.map_key(0x31, 0), Some(62));
+    }
+
+    /// `getEvents`: a capital takes Shift around it.
+    #[test]
+    fn text_becomes_keys_with_their_modifiers() {
+        let map = KeyCharacterMap::load("/x.kcm", SAMPLE.as_bytes()).unwrap();
+        let events = map.get_events(&[u16::from(b'A'), u16::from(b'!')]).unwrap();
         assert_eq!(
-            p.data().len(),
-            4 + 8 + 4 + 4 + 4 + 4 * (4 * 4) + behaviors * 20 + 4 + 4 + 8 + 4
+            events,
+            [
+                (59, 0x41, true),
+                (29, 0x41, true),
+                (29, 0x41, false),
+                (59, 0, false),
+                (59, 0x41, true),
+                (8, 0x41, true),
+                (8, 0x41, false),
+                (59, 0, false),
+            ]
         );
+        assert!(map.get_events(&[u16::from(b'z')]).is_none());
     }
 
     #[test]

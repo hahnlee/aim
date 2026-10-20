@@ -77,6 +77,16 @@ const READ_SMAPS: u32 = 8;
 /// `/proc/<tid>/status`, read once as `android_os_Process_readProcLines`
 /// reads it; null when it cannot be opened.
 const READ_PROC_STATUS: u32 = 9;
+/// `IAppHostAgent.getKeyboard()`: the built-in keyboard InputReader found
+/// (present, then its id, name, unique id, bus, vendor, product, version,
+/// sources, keyboard type, whether external, and its key character map's
+/// file); `injectKey(int action, int flags, int keyCode, int scanCode, int
+/// metaState, int repeatCount, long downTimeNanos, long eventTimeNanos,
+/// int source, int displayId)`; `setKeyRepeatConfiguration(long
+/// timeoutNanos, long delayNanos, boolean enabled)`.
+const GET_KEYBOARD: u32 = 10;
+const INJECT_KEY: u32 = 11;
+const SET_KEY_REPEAT_CONFIGURATION: u32 = 12;
 /// `InputTransport.cpp`'s `SOCKET_BUFFER_SIZE`.
 const SOCKET_BUFFER_SIZE: libc::c_int = 32 * 1024;
 
@@ -256,6 +266,8 @@ pub trait IAppHostAgent: Interface {
     fn set_input_channel_frame(&self, index: i32, region: input::Region) -> bool;
     fn play_sound_effect(&self, path: &str, gain: f32) -> Result<(), String>;
     fn inject_motion(&self, motion: &aim_input_transport::Motion);
+    /// The input dispatcher, of the agent itself only.
+    fn dispatcher(&self) -> Option<Arc<input::Dispatcher>>;
 }
 
 declare_binder_interface! {
@@ -284,6 +296,9 @@ impl IAppHostAgent for BpAppHostAgent {
         Err("not the agent".into())
     }
     fn inject_motion(&self, _: &aim_input_transport::Motion) {}
+    fn dispatcher(&self) -> Option<Arc<input::Dispatcher>> {
+        None
+    }
 }
 
 impl IAppHostAgent for binder::binder_impl::Binder<BnAppHostAgent> {
@@ -306,6 +321,9 @@ impl IAppHostAgent for binder::binder_impl::Binder<BnAppHostAgent> {
     }
     fn inject_motion(&self, motion: &aim_input_transport::Motion) {
         self.0.inject_motion(motion)
+    }
+    fn dispatcher(&self) -> Option<Arc<input::Dispatcher>> {
+        self.0.dispatcher()
     }
 }
 
@@ -391,6 +409,79 @@ fn on_transact(
                     Some(format!("injected action {action}")),
                 ),
             })?;
+            Ok(())
+        }
+        GET_KEYBOARD => {
+            let dispatcher = agent.dispatcher().ok_or(StatusCode::UNKNOWN_TRANSACTION)?;
+            reply.write(&Status::ok())?;
+            match dispatcher.keyboard() {
+                None => reply.write(&0i32)?,
+                Some(k) => {
+                    reply.write(&1i32)?;
+                    reply.write(&k.id)?;
+                    reply.write(&k.identifier.name)?;
+                    reply.write(&k.identifier.unique_id)?;
+                    for v in [
+                        k.identifier.bus,
+                        k.identifier.vendor,
+                        k.identifier.product,
+                        k.identifier.version,
+                    ] {
+                        reply.write(&i32::from(v))?;
+                    }
+                    reply.write(&k.sources)?;
+                    reply.write(&k.keyboard_type)?;
+                    reply.write(&i32::from(k.is_external))?;
+                    reply.write(&k.key_character_map)?;
+                }
+            }
+            Ok(())
+        }
+        INJECT_KEY => {
+            let dispatcher = agent.dispatcher().ok_or(StatusCode::UNKNOWN_TRANSACTION)?;
+            let (action, flags, key_code, scan_code, meta_state, repeat_count): (
+                i32,
+                i32,
+                i32,
+                i32,
+                i32,
+                i32,
+            ) = (
+                data.read()?,
+                data.read()?,
+                data.read()?,
+                data.read()?,
+                data.read()?,
+                data.read()?,
+            );
+            let (down_time, event_time): (i64, i64) = (data.read()?, data.read()?);
+            let (source, display): (i32, i32) = (data.read()?, data.read()?);
+            dispatcher.inject_key(aim_input_transport::keyboard::KeyEvent {
+                device: aim_input_transport::keyboard::VIRTUAL_KEYBOARD_ID,
+                source,
+                display,
+                action,
+                flags,
+                key_code,
+                scan_code,
+                meta_state,
+                repeat_count,
+                down_time,
+                event_time,
+            });
+            reply.write(&Status::ok())?;
+            Ok(())
+        }
+        SET_KEY_REPEAT_CONFIGURATION => {
+            let dispatcher = agent.dispatcher().ok_or(StatusCode::UNKNOWN_TRANSACTION)?;
+            let (timeout, delay, enabled): (i64, i64, bool) =
+                (data.read()?, data.read()?, data.read()?);
+            dispatcher.set_key_repeat(aim_input_transport::keyboard::RepeatConfiguration {
+                timeout,
+                delay,
+                enabled,
+            });
+            reply.write(&Status::ok())?;
             Ok(())
         }
         READ_PROC_STATUS => {
@@ -515,6 +606,9 @@ impl IAppHostAgent for Agent {
     }
     fn inject_motion(&self, motion: &aim_input_transport::Motion) {
         self.input.inject(motion)
+    }
+    fn dispatcher(&self) -> Option<Arc<input::Dispatcher>> {
+        Some(self.input.clone())
     }
 }
 

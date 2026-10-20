@@ -316,6 +316,7 @@ dependencies = [
  "aim-host-sensors",
  "aim-host-wifi",
  "aim-hostcall",
+ "aim-input-transport",
  "aim-paths",
  "aim-service-aidl",
  "aim-storage",

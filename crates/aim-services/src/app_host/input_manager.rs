@@ -1,10 +1,15 @@
 //! `input`: InputManager for the app host, what an app's process asks of
 //! it (`InputManagerService` at `android-16.0.0_r1`): the velocity
-//! tracker's strategy, and the input devices. The devices are InputReader's
-//! virtual keyboard (`EventHub::createVirtualKeyboardLocked`), whose key
-//! character map an app's `KeyCharacterMap.load` falls back to; the
-//! touchscreen, keyboard and mouse InputReader would find are not modelled
-//! yet (#1434). Its shell command is `input_shell.rs`.
+//! tracker's strategy, and the input devices: InputReader's virtual
+//! keyboard (`EventHub::createVirtualKeyboardLocked`), whose key character
+//! map an app's `KeyCharacterMap.load` falls back to, and the built-in
+//! keyboard the app host agent reads (`aim-keyboard`, InputReader's
+//! `BUILT_IN_KEYBOARD_ID`), as the agent finds and classifies it, with its
+//! key character map (no keyboard layout overlay: the app host has no
+//! input method subtypes to pick one by). The touchscreen and the mouse are
+//! not modelled yet (#1434). The dispatcher's key repeat follows the
+//! secure settings `InputSettingsObserver` watches. Its shell command is
+//! `input_shell.rs`.
 
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -14,11 +19,30 @@ use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_hardware_input_iinputmanager as im;
 use sha1::{Digest, Sha1};
 
-use super::keychars::KeyCharacterMap;
+use aim_input_transport::keychars::KeyCharacterMap;
+
+use super::content_service::LocalObserver;
+use super::settings::Table;
 use super::{AppHost, reply};
+use crate::package::uri::Uri;
 
 /// `ReservedInputDeviceId::VIRTUAL_KEYBOARD_ID`.
 const VIRTUAL_KEYBOARD_ID: i32 = -1;
+/// The agent's `getKeyboard()` and `setKeyRepeatConfiguration(long
+/// timeoutNanos, long delayNanos, boolean enabled)`.
+const GET_KEYBOARD: u32 = 10;
+const SET_KEY_REPEAT_CONFIGURATION: u32 = 12;
+/// `Settings.Secure.KEY_REPEAT_*`, and `ViewConfiguration`'s defaults
+/// (`DEFAULT_KEY_REPEAT_TIMEOUT_MS`, the long press timeout, and
+/// `DEFAULT_KEY_REPEAT_DELAY_MS`).
+const KEY_REPEAT_ENABLED: &str = "key_repeat_enabled";
+const KEY_REPEAT_TIMEOUT_MS: &str = "key_repeat_timeout_ms";
+const KEY_REPEAT_DELAY_MS: &str = "key_repeat_delay_ms";
+const DEFAULT_KEY_REPEAT_TIMEOUT_MS: i64 = 400;
+const DEFAULT_KEY_REPEAT_DELAY_MS: i64 = 50;
+/// `com.android.input.flags.keyboard_repeat_keys`: the dispatcher heeds
+/// whether keys repeat.
+const KEYBOARD_REPEAT_KEYS: &str = "com.android.input.flags.keyboard_repeat_keys";
 /// `InputDevice.SOURCE_KEYBOARD | SOURCE_DPAD`; `KEYBOARD_TYPE_ALPHABETIC`;
 /// `ADISPLAY_ID_NONE`.
 const SOURCE_KEYBOARD_DPAD: i32 = 0x101 | 0x201;
@@ -45,7 +69,11 @@ pub struct InputDevice {
     id: i32,
     generation: i32,
     name: String,
+    vendor: i32,
+    product: i32,
+    bus: i32,
     descriptor: String,
+    is_external: bool,
     sources: i32,
     keyboard_type: i32,
     key_character_map: KeyCharacterMap,
@@ -57,16 +85,16 @@ impl WriteParcelable for InputDevice {
         // `KeyCharacterMap.writeToParcel`: its device, and the map.
         p.write_i32(self.id);
         p.write_bool(true);
-        self.key_character_map.write_to(p);
+        write_key_character_map(&self.key_character_map, p);
         p.write_i32(self.id);
         p.write_i32(self.generation);
         p.write_i32(0); // controller number
         p.write_string16(Some(&self.name));
-        p.write_i32(0); // vendor
-        p.write_i32(0); // product
-        p.write_i32(0); // bus
+        p.write_i32(self.vendor);
+        p.write_i32(self.product);
+        p.write_i32(self.bus);
         p.write_string16(Some(&self.descriptor));
-        p.write_i32(0); // built in
+        p.write_i32(self.is_external as i32);
         p.write_i32(self.sources);
         p.write_i32(self.keyboard_type);
         p.write_string8(None); // keyboard language tag
@@ -81,16 +109,138 @@ impl WriteParcelable for InputDevice {
     }
 }
 
-/// `EventHub`'s `generateDescriptor` of a device without vendor or
-/// product: the SHA-1 of its unique id and name.
-fn descriptor(unique_id: &str, name: &str) -> String {
-    let digest = Sha1::digest(format!(":0000:0000:uniqueId:{unique_id}name:{name}").as_bytes());
+/// `KeyCharacterMap::writeToParcel`.
+fn write_key_character_map(map: &KeyCharacterMap, p: &mut Parcel) {
+    p.write_string8(Some(&map.load_file_name));
+    p.write_i32(map.kind as i32);
+    p.write_bool(map.layout_overlay_applied);
+    p.write_i32(map.keys.len() as i32);
+    for (code, key) in &map.keys {
+        p.write_i32(*code);
+        p.write_i32(key.label.into());
+        p.write_i32(key.number.into());
+        for b in &key.behaviors {
+            p.write_i32(1);
+            p.write_i32(b.meta_state);
+            p.write_i32(b.character.into());
+            p.write_i32(b.fallback_key_code);
+            p.write_i32(b.replacement_key_code);
+        }
+        p.write_i32(0);
+    }
+    p.write_i32(0); // no key remapping
+    for codes in [&map.keys_by_scan_code, &map.keys_by_usage_code] {
+        p.write_i32(codes.len() as i32);
+        for (from, to) in codes {
+            p.write_i32(*from);
+            p.write_i32(*to);
+        }
+    }
+}
+
+/// `EventHub`'s `generateDescriptor`: the SHA-1 of the raw descriptor.
+fn sha1_hex(raw: &str) -> String {
+    let digest = Sha1::digest(raw.as_bytes());
     digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The virtual keyboard's descriptor, of its unique id and name.
+fn descriptor(unique_id: &str, name: &str) -> String {
+    sha1_hex(&format!(":0000:0000:uniqueId:{unique_id}name:{name}"))
+}
+
+/// The virtual keyboard's key character map: `Virtual.kcm` from the image,
+/// as `KeyMap::load` finds it by the device's name.
+pub(super) fn virtual_key_character_map(host: &AppHost) -> Result<KeyCharacterMap, Exception> {
+    let root = host.root()?;
+    let (path, contents) = CONFIGURATION_DIRS
+        .iter()
+        .find_map(|dir| {
+            let path = format!("/{dir}/keychars/Virtual.kcm");
+            std::fs::read(root.join(&path[1..])).ok().map(|c| (path, c))
+        })
+        .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no Virtual.kcm"))?;
+    KeyCharacterMap::load(&path, &contents).map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))
+}
+
+/// The image's or the data volume's file at a guest path.
+fn guest_file(host: &AppHost, path: &str) -> Result<Vec<u8>, Exception> {
+    let host_path = match path.strip_prefix("/data/") {
+        Some(rest) => host.data()?.join(rest),
+        None => host.root()?.join(path.trim_start_matches('/')),
+    };
+    std::fs::read(&host_path).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{path}: {e}")))
+}
+
+/// `InputSettingsObserver.updateKeyRepeatInfo`: the key repeat settings,
+/// given to the dispatcher (the agent).
+pub(super) fn update_key_repeat_info(host: &AppHost) -> Result<(), Exception> {
+    let settings = &host.inputs()?.settings;
+    let int = |name: &str, default: i64| {
+        settings
+            .get(Table::Secure, name)
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(default)
+    };
+    let enabled = int(KEY_REPEAT_ENABLED, 1) != 0;
+    let timeout = int(KEY_REPEAT_TIMEOUT_MS, DEFAULT_KEY_REPEAT_TIMEOUT_MS);
+    let delay = int(KEY_REPEAT_DELAY_MS, DEFAULT_KEY_REPEAT_DELAY_MS);
+    // The dispatcher heeds `enabled` with the flag only (`notifyKey`).
+    let (state, _) = host.packages()?;
+    let flag = state
+        .system
+        .flags
+        .iter()
+        .any(|(n, on)| n == KEYBOARD_REPEAT_KEYS && *on);
+    host.call_agent(
+        SET_KEY_REPEAT_CONFIGURATION,
+        "setKeyRepeatConfiguration",
+        |p| {
+            p.write_i64(timeout * 1_000_000);
+            p.write_i64(delay * 1_000_000);
+            p.write_bool(enabled || !flag);
+        },
+    )
+    .map(|_| ())
+}
+
+/// The key repeat settings' observer (`InputSettingsObserver`).
+struct KeyRepeatObserver(std::sync::Weak<AppHost>);
+
+impl LocalObserver for KeyRepeatObserver {
+    fn on_change(&self, _self_change: bool, _uris: &[Uri], _flags: i32, _user: i32) {
+        if let Some(host) = self.0.upgrade()
+            && let Err(e) = update_key_repeat_info(&host)
+        {
+            eprintln!("app host: input: key repeat settings: {}", e.message);
+        }
+    }
+}
+
+/// `InputSettingsObserver.registerAndUpdate` of the key repeat settings,
+/// once the dispatcher (the agent) is there.
+pub(super) fn watch_key_repeat(host: &Arc<AppHost>) -> Result<(), Exception> {
+    let content = host
+        .content_service
+        .get()
+        .cloned()
+        .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no content service"))?;
+    let observer: Arc<dyn LocalObserver> = Arc::new(KeyRepeatObserver(Arc::downgrade(host)));
+    for name in [
+        KEY_REPEAT_TIMEOUT_MS,
+        KEY_REPEAT_DELAY_MS,
+        KEY_REPEAT_ENABLED,
+    ] {
+        let uri = Uri::parse(&format!("content://settings/secure/{name}"));
+        content.register_local(&uri, false, 0, observer.clone())?;
+    }
+    update_key_repeat_info(host)
 }
 
 pub struct InputManager {
     host: Arc<AppHost>,
     virtual_keyboard: OnceLock<Arc<InputDevice>>,
+    keyboard: OnceLock<Option<Arc<InputDevice>>>,
     listeners: Mutex<Vec<Binder>>,
 }
 
@@ -99,6 +249,7 @@ impl InputManager {
         InputManager {
             host,
             virtual_keyboard: OnceLock::new(),
+            keyboard: OnceLock::new(),
             listeners: Mutex::new(Vec::new()),
         }
     }
@@ -109,27 +260,70 @@ impl InputManager {
         if let Some(device) = self.virtual_keyboard.get() {
             return Ok(device.clone());
         }
-        let root = self.host.root()?;
-        let (path, contents) = CONFIGURATION_DIRS
-            .iter()
-            .find_map(|dir| {
-                let path = format!("/{dir}/keychars/Virtual.kcm");
-                std::fs::read(root.join(&path[1..])).ok().map(|c| (path, c))
-            })
-            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no Virtual.kcm"))?;
-        let map = KeyCharacterMap::load(&path, &contents)
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        let map = virtual_key_character_map(&self.host)?;
         let device = Arc::new(InputDevice {
             id: VIRTUAL_KEYBOARD_ID,
             generation: 1,
             name: "Virtual".into(),
+            vendor: 0,
+            product: 0,
+            bus: 0,
             descriptor: descriptor("<virtual>", "Virtual"),
+            is_external: false,
             sources: SOURCE_KEYBOARD_DPAD,
             keyboard_type: KEYBOARD_TYPE_ALPHABETIC,
             key_character_map: map,
             associated_display: DISPLAY_NONE,
         });
         Ok(self.virtual_keyboard.get_or_init(|| device).clone())
+    }
+
+    /// The built-in keyboard, as the agent (InputReader) found it: none if
+    /// it found none. Its devices are the display's, which do not change.
+    fn keyboard(&self) -> Result<Option<Arc<InputDevice>>, Exception> {
+        if let Some(device) = self.keyboard.get() {
+            return Ok(device.clone());
+        }
+        let reply = self.host.call_agent(GET_KEYBOARD, "getKeyboard", |_| {})?;
+        let mut r = reply.reader();
+        let bad = |e| Exception::new(EX_ILLEGAL_STATE, format!("getKeyboard: {e}"));
+        r.read_exception().map_err(bad)?.ok();
+        let device = if r.read_i32().map_err(bad)? == 0 {
+            None
+        } else {
+            let id = r.read_i32().map_err(bad)?;
+            let name = r.read_string16().map_err(bad)?.unwrap_or_default();
+            let unique_id = r.read_string16().map_err(bad)?.unwrap_or_default();
+            let mut int = || r.read_i32().map_err(bad);
+            let (bus, vendor, product, version) = (int()?, int()?, int()?, int()?);
+            let (sources, keyboard_type, is_external) = (int()?, int()?, int()? != 0);
+            let kcm = r.read_string16().map_err(bad)?.unwrap_or_default();
+            let identifier = aim_input_transport::keyboard::Identifier {
+                name: name.clone(),
+                bus: bus as u16,
+                vendor: vendor as u16,
+                product: product as u16,
+                version: version as u16,
+                unique_id,
+            };
+            let map = KeyCharacterMap::load(&kcm, &guest_file(&self.host, &kcm)?)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+            Some(Arc::new(InputDevice {
+                id,
+                generation: 2,
+                name,
+                vendor,
+                product,
+                bus,
+                descriptor: sha1_hex(&identifier.raw_descriptor()),
+                is_external,
+                sources,
+                keyboard_type,
+                key_character_map: map,
+                associated_display: DISPLAY_NONE,
+            }))
+        };
+        Ok(self.keyboard.get_or_init(|| device).clone())
     }
 }
 
@@ -160,7 +354,12 @@ impl Service for InputManager {
             }
             im::GET_INPUT_DEVICE_IDS => {
                 im::GetInputDeviceIds::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                im::write_get_input_device_ids_reply(&mut p, &Some(vec![VIRTUAL_KEYBOARD_ID]));
+                let mut ids = vec![VIRTUAL_KEYBOARD_ID];
+                match self.keyboard() {
+                    Ok(keyboard) => ids.extend(keyboard.map(|k| k.id)),
+                    Err(e) => return reply(Err(e)),
+                }
+                im::write_get_input_device_ids_reply(&mut p, &Some(ids));
             }
             im::GET_INPUT_DEVICE => {
                 let args = im::GetInputDevice::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -169,7 +368,10 @@ impl Service for InputManager {
                         Ok(device) => Some(device),
                         Err(e) => return reply(Err(e)),
                     },
-                    _ => None,
+                    id => match self.keyboard() {
+                        Ok(keyboard) => keyboard.filter(|k| k.id == id),
+                        Err(e) => return reply(Err(e)),
+                    },
                 };
                 im::write_get_input_device_reply(&mut p, device.as_deref());
             }
@@ -207,6 +409,36 @@ mod tests {
         assert_eq!(
             descriptor("<virtual>", "Virtual"),
             "a718a782d34bc767f4689c232d64d527998ea7fd"
+        );
+    }
+
+    /// `KeyCharacterMap::writeToParcel` of four keys and a scan code map.
+    #[test]
+    fn a_key_character_map_parcels_as_the_original() {
+        let kcm = "type FULL\nkey A {\n label: 'A'\n base: 'a'\n shift, capslock: 'A'\n shift+capslock: 'a'\n}\nkey 1 {\n label: '1'\n base: '1'\n shift: '!'\n}\nkey SPACE {\n label: ' '\n base: ' '\n alt, meta: fallback SEARCH\n ctrl: fallback LANGUAGE_SWITCH\n}\nkey C {\n alt: '\\u00e7'\n}\nmap key 0x31 SPACE\n";
+        let map = KeyCharacterMap::load("/x.kcm", kcm.as_bytes()).unwrap();
+        let mut p = Parcel::new();
+        write_key_character_map(&map, &mut p);
+        // Name, type, overlay, 4 keys (each code, label, number, behaviors of
+        // 5 ints, end), no remapping, one scan code, no usage.
+        let behaviors = 4 + 2 + 4 + 1;
+        assert_eq!(
+            p.data().len(),
+            4 + 8 + 4 + 4 + 4 + 4 * (4 * 4) + behaviors * 20 + 4 + 4 + 8 + 4
+        );
+    }
+
+    /// The built-in keyboard's descriptor, of its name alone.
+    #[test]
+    fn the_keyboard_has_its_descriptor() {
+        let id = aim_input_transport::keyboard::Identifier {
+            name: "aim-keyboard".into(),
+            bus: 6,
+            ..Default::default()
+        };
+        assert_eq!(
+            sha1_hex(&id.raw_descriptor()),
+            sha1_hex(":0000:0000:name:aim-keyboard")
         );
     }
 }
