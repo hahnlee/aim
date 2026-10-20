@@ -4,22 +4,27 @@
 //! credential type of the device's lock, which is the Mac's (the owner's
 //! choice, 2026-10-20, as `trust`'s `isDeviceSecure`): a password while
 //! the Mac's user has one (`aim_host_lock`), none otherwise. No credential
-//! is set, read or verified here. The writes, the special users (FRP,
-//! repair mode), strong auth, escrow tokens and recovery are not
-//! implemented (#1888).
+//! is set, read or verified here. Of the recoverable keystore, the
+//! recovery secret types an agent set (`recoverablekeystore.db`). The
+//! writes, the special users (FRP, repair mode), strong auth, escrow tokens
+//! and the rest of recovery are not implemented (#1888).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use aim_binder_host::local::{Call, Reply, Service};
+use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
-    BAD_VALUE, EX_ILLEGAL_ARGUMENT, EX_ILLEGAL_STATE, Exception, Parcel,
+    BAD_VALUE, Binder, EX_ILLEGAL_ARGUMENT, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel,
 };
 use aim_service_aidl::com_android_internal_widget_ilocksettings as ls;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use super::{AppHost, reply};
+
+const RECOVER_KEYSTORE: &str = "android.permission.RECOVER_KEYSTORE";
+const PER_USER_RANGE: i32 = 100_000;
 
 /// `LockSettingsService.PERMISSION`.
 const ACCESS_KEYGUARD_SECURE_STORAGE: &str = "android.permission.ACCESS_KEYGUARD_SECURE_STORAGE";
@@ -32,6 +37,11 @@ const CREDENTIAL_TYPE_PASSWORD: i32 = 4;
 /// `LockPatternUtils.USER_FRP`, `USER_REPAIR_MODE` (`USER_NULL` + 1, + 2).
 const USER_FRP: i32 = -9999;
 const USER_REPAIR_MODE: i32 = -9998;
+
+/// A recoverable keystore database failure.
+fn db_error(path: &Path, e: rusqlite::Error) -> Exception {
+    Exception::new(BAD_VALUE, format!("{}: {e}", path.display()))
+}
 
 /// `LockPatternUtils.isSpecialUserId`.
 fn is_special_user(user: i32) -> bool {
@@ -58,11 +68,18 @@ fn read_key_value(db: &Path, key: &str, user: i32) -> Result<Option<String>, Str
 
 pub struct LockSettings {
     host: Arc<AppHost>,
+    /// `RecoverySnapshotListenersStorage`: each agent's snapshot intent.
+    /// It is sent when a snapshot is created, which needs the lock
+    /// screen's knowledge factor the app host never has.
+    snapshot_listeners: Mutex<HashMap<i32, Strong>>,
 }
 
 impl LockSettings {
     pub fn new(host: Arc<AppHost>) -> Self {
-        LockSettings { host }
+        LockSettings {
+            host,
+            snapshot_listeners: Mutex::new(HashMap::new()),
+        }
     }
 
     /// `checkPasswordHavePermission`.
@@ -143,6 +160,84 @@ impl LockSettings {
         })
     }
 
+    /// `checkRecoverKeyStorePermission` for the agent `uid`:
+    /// RECOVER_KEYSTORE, and its user registered
+    /// (`CleanupManager.registerRecoveryAgent`, which records the user's
+    /// serial number once). The keystore's database, open.
+    fn check_recovery_agent(&self, uid: i32) -> Result<(Connection, PathBuf), Exception> {
+        if self.host.check_permission(Some(RECOVER_KEYSTORE), uid)? != 0 {
+            return Err(Exception::security(format!(
+                "Caller {uid} doesn't have RecoverKeyStore permission.: Neither user {uid} nor current process has {RECOVER_KEYSTORE}."
+            )));
+        }
+        let path = self.host.data()?.join("system/recoverablekeystore.db");
+        if !path.exists() {
+            return Err(self.host.unimplemented_named(
+                "lock_settings",
+                "registering a recovery agent's user in a new recoverable keystore (#1888)",
+            ));
+        }
+        let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| db_error(&path, e))?;
+        let serial: Option<i64> = db
+            .query_row(
+                "SELECT user_serial_number FROM user_metadata WHERE user_id=?1",
+                params![uid / PER_USER_RANGE],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| db_error(&path, e))?;
+        if serial.is_none_or(|s| s == -1) {
+            return Err(self.host.unimplemented_named(
+                "lock_settings",
+                "registering a recovery agent's user (#1888)",
+            ));
+        }
+        Ok((db, path))
+    }
+
+    /// `RecoverableKeyStoreManager.getRecoverySecretTypes` for `uid`: the
+    /// types the agent set (`RecoverableKeyStoreDb.getRecoverySecretTypes`),
+    /// none if it set none.
+    fn recovery_secret_types(&self, uid: i32) -> Result<Vec<i32>, Exception> {
+        let (db, path) = self.check_recovery_agent(uid)?;
+        let failed = |e| db_error(&path, e);
+        let user = uid / PER_USER_RANGE;
+        let mut rows = db
+            .prepare(
+                "SELECT secret_types FROM recovery_service_metadata WHERE user_id=?1 AND uid=?2",
+            )
+            .map_err(failed)?;
+        let found: Vec<Option<String>> = rows
+            .query_map(params![user, uid], |r| r.get(0))
+            .map_err(failed)?
+            .collect::<Result<_, _>>()
+            .map_err(failed)?;
+        // One entry at most; none, more or an empty one are no types.
+        let [Some(csv)] = found.as_slice() else {
+            return Ok(Vec::new());
+        };
+        // A part that is no number is logged by the original and left 0.
+        Ok(csv
+            .split(',')
+            .filter(|_| !csv.is_empty())
+            .map(|t| t.parse().unwrap_or(0))
+            .collect())
+    }
+
+    /// `RecoverableKeyStoreDb.getServerParams` of the agent `uid`.
+    fn server_params(&self, uid: i32) -> Result<Option<Vec<u8>>, Exception> {
+        let (db, path) = self.check_recovery_agent(uid)?;
+        db.query_row(
+            "SELECT server_params FROM recovery_service_metadata WHERE user_id=?1 AND uid=?2",
+            params![uid / PER_USER_RANGE, uid],
+            |r| r.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()
+        .map(Option::flatten)
+        .map_err(|e| db_error(&path, e))
+    }
+
     /// `hasSystemFeature(FEATURE_SECURE_LOCK_SCREEN)`, as `systemReady`
     /// reads it.
     fn has_secure_lock_screen(&self) -> Result<bool, Exception> {
@@ -197,6 +292,65 @@ impl Service for LockSettings {
                 self.check_database_read(uid, SEPARATE_PROFILE_CHALLENGE_KEY, a.user_id)
                     .and_then(|()| self.boolean(SEPARATE_PROFILE_CHALLENGE_KEY, false, a.user_id))
                     .map(|v| ls::write_get_separate_profile_challenge_enabled_reply(&mut p, v))
+            }
+            ls::GET_RECOVERY_SECRET_TYPES => {
+                ls::GetRecoverySecretTypes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.recovery_secret_types(uid)
+                    .map(|t| ls::write_get_recovery_secret_types_reply(&mut p, &Some(t)))
+            }
+            // `RecoverableKeyStoreManager.setRecoverySecretTypes`: the
+            // types the agent already has change nothing; setting others
+            // is a write (#1888).
+            ls::SET_RECOVERY_SECRET_TYPES => {
+                let a = ls::SetRecoverySecretTypes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.recovery_secret_types(uid).and_then(|current| {
+                    let types = a
+                        .secret_types
+                        .ok_or_else(|| Exception::new(EX_NULL_POINTER, "secretTypes is null"))?;
+                    if types != current {
+                        return Err(self.host.unimplemented_named(
+                            "lock_settings",
+                            "setting other recovery secret types (#1888)",
+                        ));
+                    }
+                    ls::write_set_recovery_secret_types_reply(&mut p);
+                    Ok(())
+                })
+            }
+            // `RecoverableKeyStoreManager.setServerParams`: the agent's
+            // own params again change nothing; others are a write (#1888).
+            ls::SET_SERVER_PARAMS => {
+                let a = ls::SetServerParams::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.server_params(uid).and_then(|current| {
+                    if a.server_params != current {
+                        return Err(self.host.unimplemented_named(
+                            "lock_settings",
+                            "setting other recovery server params (#1888)",
+                        ));
+                    }
+                    ls::write_set_server_params_reply(&mut p);
+                    Ok(())
+                })
+            }
+            // `RecoverableKeyStoreManager.setSnapshotCreatedPendingIntent`:
+            // the agent's intent kept (`setSnapshotListener`).
+            ls::SET_SNAPSHOT_CREATED_PENDING_INTENT => {
+                let a = ls::SetSnapshotCreatedPendingIntent::<
+                    crate::location::parcels::PendingIntent,
+                >::read(&mut call.data)
+                .map_err(|_| BAD_VALUE)?;
+                self.check_recovery_agent(uid).map(|_| {
+                    let mut listeners = self.snapshot_listeners.lock().unwrap();
+                    match a.intent {
+                        Some(crate::location::parcels::PendingIntent(Binder::Handle(h))) => {
+                            listeners.insert(uid, self.host.process.strong(h));
+                        }
+                        _ => {
+                            listeners.remove(&uid);
+                        }
+                    }
+                    ls::write_set_snapshot_created_pending_intent_reply(&mut p);
+                })
             }
             ls::HAS_SECURE_LOCK_SCREEN => {
                 ls::HasSecureLockScreen::read(&mut call.data).map_err(|_| BAD_VALUE)?;
