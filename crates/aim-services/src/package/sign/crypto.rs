@@ -16,7 +16,7 @@ use super::asn1::{self, BIT_STRING, OID, Reader, SEQUENCE};
 const RSA_MAX_MODULUS_BITS: usize = 16384;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Hash {
+pub(crate) enum Hash {
     Md5,
     Sha1,
     Sha224,
@@ -76,7 +76,7 @@ impl Hash {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Key {
+pub(crate) enum Key {
     Rsa,
     Ec,
     Dsa,
@@ -85,7 +85,7 @@ pub(super) enum Key {
 /// A signature algorithm: the key's type, the digest, and for RSA whether
 /// it is PSS (with MGF1 over the same digest and a salt of its size).
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Algorithm {
+pub(crate) struct Algorithm {
     pub key: Key,
     pub hash: Hash,
     pub pss: bool,
@@ -104,7 +104,7 @@ pub(super) fn key_type(spki: &[u8]) -> Result<Key, String> {
 }
 
 /// Verifies `signature` over `data` with the key `spki`.
-pub(super) fn verify(
+pub(crate) fn verify(
     alg: Algorithm,
     spki: &[u8],
     data: &[u8],
