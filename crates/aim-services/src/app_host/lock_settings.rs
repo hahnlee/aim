@@ -280,6 +280,112 @@ fn secret_types(db: &Connection, path: &Path, uid: i32) -> Result<Vec<i32>, Exce
     Ok(csv.split(',').map(|t| t.parse().unwrap_or(0)).collect())
 }
 
+/// `RecoverableKeyStoreDbHelper.DATABASE_VERSION_7`.
+const KEYSTORE_DB_VERSION: i32 = 7;
+
+/// The recoverable keystore database at `path`, opened as
+/// `RecoverableKeyStoreDbHelper` opens it: created with its schema
+/// (`onCreate`) and, as `SQLiteOpenHelper` makes a database, its
+/// `android_metadata` of the device's `locale`, in write-ahead logging.
+fn open_keystore(path: &Path, locale: &str) -> rusqlite::Result<Connection> {
+    let created = !path.exists();
+    let db = Connection::open(path)?;
+    if created {
+        db.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
+        db.execute_batch(&format!(
+            "BEGIN;
+             CREATE TABLE android_metadata (locale TEXT);
+             INSERT INTO android_metadata VALUES ('{}');
+             CREATE TABLE keys( _id INTEGER PRIMARY KEY,user_id INTEGER,uid INTEGER,alias TEXT,nonce BLOB,wrapped_key BLOB,platform_key_generation_id INTEGER,last_synced_at INTEGER,recovery_status INTEGER,key_metadata BLOB,UNIQUE(uid,alias));
+             CREATE TABLE user_metadata( _id INTEGER PRIMARY KEY,user_id INTEGER UNIQUE,platform_key_generation_id INTEGER,user_serial_number INTEGER DEFAULT -1,bad_remote_guess_counter INTEGER DEFAULT 0);
+             CREATE TABLE recovery_service_metadata (_id INTEGER PRIMARY KEY,user_id INTEGER,uid INTEGER,snapshot_version INTEGER,should_create_snapshot INTEGER,active_root_of_trust TEXT,public_key BLOB,cert_path BLOB,cert_serial INTEGER,secret_types TEXT,counter_id INTEGER,server_params BLOB,UNIQUE(user_id,uid));
+             CREATE TABLE root_of_trust (_id INTEGER PRIMARY KEY,user_id INTEGER,uid INTEGER,root_alias TEXT,cert_path BLOB,cert_serial INTEGER,UNIQUE(user_id,uid,root_alias));
+             PRAGMA user_version = {KEYSTORE_DB_VERSION};
+             COMMIT;",
+            java_locale(locale).replace('\'', "''")
+        ))?;
+    }
+    Ok(db)
+}
+
+/// `Locale.getDefault().toString()` of the device's locales
+/// (`persist.sys.locale`, a list of language tags): the first's
+/// language, region, variant and `#` script, as `Locale.toString` joins
+/// them.
+fn java_locale(locales: &str) -> String {
+    let tag = locales.split(',').next().unwrap_or_default();
+    let mut parts = tag.split(['-', '_']);
+    let language = parts.next().unwrap_or_default().to_ascii_lowercase();
+    let (mut script, mut region, mut variants) = (String::new(), String::new(), Vec::new());
+    for part in parts {
+        let alpha = part.chars().all(|c| c.is_ascii_alphabetic());
+        if script.is_empty() && region.is_empty() && variants.is_empty() && part.len() == 4 && alpha
+        {
+            script = format!(
+                "{}{}",
+                part[..1].to_ascii_uppercase(),
+                part[1..].to_ascii_lowercase()
+            );
+        } else if region.is_empty()
+            && variants.is_empty()
+            && ((part.len() == 2 && alpha)
+                || (part.len() == 3 && part.chars().all(|c| c.is_ascii_digit())))
+        {
+            region = part.to_ascii_uppercase();
+        } else {
+            variants.push(part.to_string());
+        }
+    }
+    let variant = variants.join("_");
+    let mut s = language;
+    if !region.is_empty() || !variant.is_empty() || !script.is_empty() {
+        s.push('_');
+        s.push_str(&region);
+    }
+    if !variant.is_empty() {
+        s.push('_');
+        s.push_str(&variant);
+    }
+    if !script.is_empty() {
+        s.push_str("_#");
+        s.push_str(&script);
+    }
+    s
+}
+
+/// `RecoverableKeyStoreDb.setUserSerialNumber`, after
+/// `ensureUserMetadataEntryExists`.
+fn set_user_serial_number(db: &Connection, user: i32, serial: i32) -> rusqlite::Result<()> {
+    db.execute(
+        "INSERT OR IGNORE INTO user_metadata (user_id) VALUES (?1)",
+        params![user],
+    )?;
+    db.execute(
+        "UPDATE user_metadata SET user_id=?1, user_serial_number=?2 WHERE user_id=?1",
+        params![user, serial],
+    )?;
+    Ok(())
+}
+
+/// The keystore database and the log SQLite keeps beside it, as the
+/// system's (`rw-rw----`), as system_server's files are.
+fn keep_system_owned(path: &Path) -> std::io::Result<()> {
+    let inode = aim_storage::guest_inode::GuestInode {
+        uid: Some(1000),
+        gid: Some(1000),
+        mode: Some(0o660),
+    };
+    for suffix in ["", "-wal", "-shm"] {
+        let mut file = path.as_os_str().to_owned();
+        file.push(suffix);
+        let file = PathBuf::from(file);
+        if file.exists() {
+            aim_storage::guest_inode::record(&file, inode)?;
+        }
+    }
+    Ok(())
+}
+
 /// A recoverable keystore database failure.
 fn db_error(path: &Path, e: rusqlite::Error) -> Exception {
     Exception::new(BAD_VALUE, format!("{}: {e}", path.display()))
@@ -413,28 +519,26 @@ impl LockSettings {
             )));
         }
         let path = self.host.data()?.join("system/recoverablekeystore.db");
-        if !path.exists() {
-            return Err(self.host.unimplemented_named(
-                "lock_settings",
-                "registering a recovery agent's user in a new recoverable keystore (#1888)",
-            ));
-        }
-        let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-            .map_err(|e| db_error(&path, e))?;
-        let serial: Option<i64> = db
+        let locale = self.host.inputs()?.locales.clone();
+        let db = open_keystore(&path, &locale).map_err(|e| db_error(&path, e))?;
+        // `CleanupManager.registerRecoveryAgent`: a user whose serial
+        // number is not stored yet gets it, if the user exists.
+        let user = uid / PER_USER_RANGE;
+        let stored: Option<i64> = db
             .query_row(
                 "SELECT user_serial_number FROM user_metadata WHERE user_id=?1",
-                params![uid / PER_USER_RANGE],
+                params![user],
                 |r| r.get(0),
             )
             .optional()
             .map_err(|e| db_error(&path, e))?;
-        if serial.is_none_or(|s| s == -1) {
-            return Err(self.host.unimplemented_named(
-                "lock_settings",
-                "registering a recovery agent's user (#1888)",
-            ));
+        if stored.is_none_or(|s| s == -1)
+            && let Some(serial) = super::user_service::serial_number(&self.host, user)?
+        {
+            set_user_serial_number(&db, user, serial).map_err(|e| db_error(&path, e))?;
         }
+        keep_system_owned(&path)
+            .map_err(|e| Exception::new(BAD_VALUE, format!("{}: {e}", path.display())))?;
         Ok((db, path))
     }
 
@@ -755,6 +859,58 @@ impl Service for LockSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Locale.toString` of the device's first locale.
+    #[test]
+    fn locales_are_written_as_java_writes_them() {
+        assert_eq!(java_locale("ko-KR"), "ko_KR");
+        assert_eq!(java_locale("en-US,ko-KR"), "en_US");
+        assert_eq!(java_locale("zh-Hans-CN"), "zh_CN_#Hans");
+        assert_eq!(java_locale("sr-Latn"), "sr__#Latn");
+        assert_eq!(java_locale("es-419"), "es_419");
+    }
+
+    /// A new keystore database is `onCreate`'s at version 7, in
+    /// write-ahead logging, and a serial number is stored for a user
+    /// without one.
+    #[test]
+    fn a_new_keystore_database_is_the_helper_s() {
+        let dir = std::env::temp_dir().join(format!("aim-rks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("recoverablekeystore.db");
+        let db = open_keystore(&path, "ko-KR").unwrap();
+        let version: i32 = db
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        let mode: String = db
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        let locale: String = db
+            .query_row("SELECT locale FROM android_metadata", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            (version, mode.as_str(), locale.as_str()),
+            (7, "wal", "ko_KR")
+        );
+        set_user_serial_number(&db, 0, 0).unwrap();
+        let row: (i64, i64) = db
+            .query_row(
+                "SELECT user_serial_number, bad_remote_guess_counter FROM user_metadata WHERE user_id=0",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (0, 0));
+        drop(db);
+        // Opened again, it is kept.
+        let db = open_keystore(&path, "en-US").unwrap();
+        let locale: String = db
+            .query_row("SELECT locale FROM android_metadata", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(locale, "ko_KR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Values are read by user and key, as `readKeyValue` queries them.
     #[test]
