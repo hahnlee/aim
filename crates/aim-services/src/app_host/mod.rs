@@ -27,6 +27,7 @@ pub mod audio_focus;
 pub mod audio_permissions;
 pub mod audio_policy;
 pub mod audio_service;
+pub mod auth_service;
 pub mod battery_service;
 pub mod battery_stats;
 pub mod bind;
@@ -656,6 +657,10 @@ impl AppHost {
             (
                 "trust",
                 Arc::new(trust_service::TrustManager::new(self.clone())),
+            ),
+            (
+                "auth",
+                Arc::new(auth_service::AuthService::new(self.clone())),
             ),
             (
                 "permission",
