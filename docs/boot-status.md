@@ -84,8 +84,9 @@ past the services their main threads waited for (`performance_hint`,
 `sensorservice`; cameraserver now starts with the camera provider), and
 past `TrafficStats` (`netstats getUidStats` reads netd's per-uid map, which
 the Linux layer's socket accounting fills): Maps gets past its terms
-(WebView) and its sign-in page to its Explore screen, whose map draws no
-tiles: none is requested (#1743); the AOSP Camera app fails on a Mac without a camera, which
+(WebView) and its sign-in page to its Explore screen, whose map draws its
+tiles: Play Store is visible to it as `config_forceQueryablePackages`
+makes it, so it uses Play services (2026-10-20); the AOSP Camera app fails on a Mac without a camera, which
 no longer declares one (#646). Gmail draws its welcome page and its
 add-an-address page; Calendar its month view (Play services' account
 sign-in starts from its add-account session and shows its Google
