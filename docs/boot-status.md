@@ -109,9 +109,12 @@ dialog (YouTube's notification permission; `ecm_enhanced_confirmation`,
 `getPermissionPolicy`), and the permission service grants, revokes and
 persists runtime permissions; YouTube itself still dies on
 `finishActivityAffinity` (#1861). Clock asks the app host nothing it does
-not answer but battery stats (#1513). Settings' home shows the storage used and free
-(`storagestats`); its storage page stops at cache quotas, which need
-usage stats (#1824, #1723). Play services' persistent process gets its
+not answer but battery stats (#1513); usage stats now persist, and where
+they hold configuration changes (a tree the original booted) Clock's and
+Android System Intelligence's usage event queries die on #1868. Settings' home shows the storage used and free
+(`storagestats`), and its storage page draws (cache quotas from
+ExtServices over the persisted usage stats); its System page dies on the
+missing `system_update` (#1874). Play services' persistent process gets its
 installed modules, Wi-Fi scan results (none, the Mac's radio being off),
 statsd, DeviceConfig writes, usb, Safety Center and app op mode watches;
 AppSearch is the original module, run by the app host's `aim-appsearch`
