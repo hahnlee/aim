@@ -87,6 +87,10 @@ const READ_PROC_STATUS: u32 = 9;
 const GET_KEYBOARD: u32 = 10;
 const INJECT_KEY: u32 = 11;
 const SET_KEY_REPEAT_CONFIGURATION: u32 = 12;
+/// `IAppHostAgent.setInTouchMode(boolean inTouchMode, int pid, int uid,
+/// boolean hasPermission, int displayId)`: whether the display's touch
+/// mode changed (`InputDispatcher::setInTouchMode`).
+const SET_IN_TOUCH_MODE: u32 = 13;
 /// `InputTransport.cpp`'s `SOCKET_BUFFER_SIZE`.
 const SOCKET_BUFFER_SIZE: libc::c_int = 32 * 1024;
 
@@ -484,6 +488,21 @@ fn on_transact(
             reply.write(&Status::ok())?;
             Ok(())
         }
+        SET_IN_TOUCH_MODE => {
+            let dispatcher = agent.dispatcher().ok_or(StatusCode::UNKNOWN_TRANSACTION)?;
+            let (in_touch_mode, pid, uid, has_permission, display): (bool, i32, i32, bool, i32) = (
+                data.read()?,
+                data.read()?,
+                data.read()?,
+                data.read()?,
+                data.read()?,
+            );
+            let changed =
+                dispatcher.set_in_touch_mode(in_touch_mode, (pid, uid), has_permission, display);
+            reply.write(&Status::ok())?;
+            reply.write(&changed)?;
+            Ok(())
+        }
         READ_PROC_STATUS => {
             let tid: i32 = data.read()?;
             reply.write(&Status::ok())?;
@@ -534,13 +553,14 @@ fn read_rect(data: &BorrowedParcel<'_>) -> Result<[i32; 4], StatusCode> {
 }
 
 /// A window's frame, the region it takes touches in, whether it watches
-/// touches outside it, and its owner's uid.
+/// touches outside it, and its owner's uid and pid.
 fn read_region(data: &BorrowedParcel<'_>) -> Result<input::Region, StatusCode> {
     Ok(input::Region {
         frame: read_rect(data)?,
         touchable: read_rect(data)?,
         watch_outside: data.read()?,
         owner: data.read()?,
+        owner_pid: data.read()?,
     })
 }
 

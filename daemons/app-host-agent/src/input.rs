@@ -7,7 +7,8 @@
 //! only for the target's own app). Windows stack in the order they were added or focused;
 //! the front one has the focus and is told so (`publishFocusEvent`). What
 //! a window sends back (finished and timeline messages) is read and
-//! dropped: no input times out (no ANR). The built-in keyboard's keys go
+//! dropped: no input times out (no ANR). A display's touch mode changes
+//! as `setInTouchMode` allows it, and its windows are told. The built-in keyboard's keys go
 //! to the focused window as `KeyboardInputMapper` maps them through the
 //! device's key layout and key character map, which EventHub finds by its
 //! name; the dispatcher repeats a held key (`synthesizeKeyRepeatLocked`)
@@ -17,6 +18,7 @@
 //! Motions and keys the app host injects (`input tap`, `input swipe`,
 //! `input keyevent`, `input text`) are dispatched as the devices' are.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -27,7 +29,12 @@ use aim_input_transport::keyboard::{
     self, ConfigFile, ConfigFiles, Identifier, KeyEvent, KeyMap, Keyboard, Mapper, Repeat,
     RepeatConfiguration,
 };
-use aim_input_transport::{ABS_MT_POSITION_X, ABS_MT_POSITION_Y, Motion, Touch, focus, touched};
+use aim_input_transport::{
+    ABS_MT_POSITION_X, ABS_MT_POSITION_Y, Motion, Touch, focus, touch_mode, touched,
+};
+
+/// The display the windows are on.
+const DEFAULT_DISPLAY: i32 = 0;
 
 /// `IdGenerator::Source::INPUT_DISPATCHER`, in an event id's top bits.
 const ID_SOURCE_DISPATCHER: i32 = 1 << 30;
@@ -83,6 +90,11 @@ struct Windows {
     display: (f32, f32),
     /// The window of the gesture under way.
     gesture: Option<i32>,
+    /// The windows the last key or motion went to, but for its outside
+    /// targets (`mInteractionConnectionTokens`).
+    interactions: Vec<i32>,
+    /// Each display's touch mode, once set (`mTouchModePerDisplay`).
+    touch_mode: HashMap<i32, bool>,
 }
 
 /// The built-in keyboard as InputReader describes it
@@ -177,8 +189,11 @@ impl Dispatcher {
 
     /// Publishes `event` to the focused window, if any.
     fn send_key(&self, event: &KeyEvent) {
-        let windows = self.windows.lock().unwrap();
+        let windows = &mut *self.windows.lock().unwrap();
         if let Some(target) = windows.stack.last() {
+            if event.action != keyboard::ACTION_UP {
+                windows.interactions = vec![target.index];
+            }
             let (seq, id) = self.ids();
             send(&target.channel, &event.message(seq, id));
         }
@@ -305,6 +320,7 @@ impl Dispatcher {
         let mut windows = self.windows.lock().unwrap();
         let previous = windows.stack.last().map(|t| t.index);
         windows.stack.retain(|t| t.index != index);
+        windows.interactions.retain(|&i| i != index);
         if windows.gesture == Some(index) {
             windows.gesture = None;
         }
@@ -362,10 +378,51 @@ impl Dispatcher {
         if let Some(target) = target {
             let (seq, id) = self.ids();
             send(&target.channel, &motion.message(seq, id, target.origin()));
+            if motion.interacts() {
+                windows.interactions = vec![target.index];
+            }
         }
         if motion.ends_gesture() {
             windows.gesture = None;
         }
+    }
+
+    /// `setInTouchMode`: `display` takes touch mode `in_touch_mode`, unless
+    /// it has it, or the caller (`pid`, `uid`) has no permission and owns
+    /// neither the focused window nor one interacted with last; its
+    /// windows are told. Whether the mode changed.
+    pub fn set_in_touch_mode(
+        &self,
+        in_touch_mode: bool,
+        (pid, uid): (i32, i32),
+        has_permission: bool,
+        display: i32,
+    ) -> bool {
+        let mut windows = self.windows.lock().unwrap();
+        if windows.touch_mode.get(&display) == Some(&in_touch_mode) {
+            return false;
+        }
+        let owned = |t: &Target| t.region.owner_pid == pid && t.region.owner == uid;
+        if !has_permission
+            && !windows.stack.last().is_some_and(owned)
+            && !windows
+                .stack
+                .iter()
+                .any(|t| windows.interactions.contains(&t.index) && owned(t))
+        {
+            log::debug!(
+                "Touch mode switch rejected, caller (pid={pid}, uid={uid}) doesn't own the focused window nor none of the previously interacted window"
+            );
+            return false;
+        }
+        windows.touch_mode.insert(display, in_touch_mode);
+        if display == DEFAULT_DISPLAY {
+            for target in &windows.stack {
+                let (seq, id) = self.ids();
+                send(&target.channel, &touch_mode(seq, id, in_touch_mode));
+            }
+        }
+        true
     }
 
     /// Reads the touchscreen, as long as the agent runs.

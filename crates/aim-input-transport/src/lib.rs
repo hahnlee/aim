@@ -13,6 +13,7 @@ pub mod keylayout;
 /// `InputMessage::Type`.
 const MOTION: u32 = 1;
 const FOCUS: u32 = 3;
+const TOUCH_MODE: u32 = 7;
 /// `AINPUT_SOURCE_TOUCHSCREEN`, `ToolType::FINGER`.
 const SOURCE_TOUCHSCREEN: i32 = 0x1002;
 const TOOL_FINGER: i32 = 1;
@@ -20,6 +21,7 @@ const TOOL_FINGER: i32 = 1;
 const ACTION_DOWN: i32 = 0;
 const ACTION_UP: i32 = 1;
 const ACTION_MOVE: i32 = 2;
+const ACTION_CANCEL: i32 = 3;
 const ACTION_OUTSIDE: i32 = 4;
 const ACTION_POINTER_DOWN: i32 = 5;
 const ACTION_POINTER_UP: i32 = 6;
@@ -53,16 +55,26 @@ pub fn focus(seq: u32, id: i32, has_focus: bool) -> Vec<u8> {
     m
 }
 
+/// `InputMessage` of type `TOUCH_MODE`: the display's touch mode changed
+/// (`publishTouchModeEvent`).
+pub fn touch_mode(seq: u32, id: i32, in_touch_mode: bool) -> Vec<u8> {
+    let mut m = header(TOUCH_MODE, seq);
+    m.extend_from_slice(&id.to_ne_bytes());
+    m.extend_from_slice(&[in_touch_mode as u8, 0, 0, 0]);
+    m
+}
+
 /// What WindowManager tells of a window's input (`InputWindowInfo`): its
 /// frame and the region it takes touches in, on the display (left, top,
 /// right, bottom, in pixels), whether it watches touches outside it, and
-/// the uid of its app.
+/// the uid and pid of its owner.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Region {
     pub frame: [i32; 4],
     pub touchable: [i32; 4],
     pub watch_outside: bool,
     pub owner: i32,
+    pub owner_pid: i32,
 }
 
 impl Region {
@@ -293,6 +305,15 @@ impl Motion {
         }
     }
 
+    /// Whether the window it goes to is interacted with: anything but a
+    /// pointer's up or a cancel (`processInteractionsLocked`).
+    pub fn interacts(&self) -> bool {
+        !matches!(
+            self.action & 0xff,
+            ACTION_UP | ACTION_CANCEL | ACTION_POINTER_UP
+        )
+    }
+
     /// Whether the gesture ends with it (the last pointer's up).
     pub fn ends_gesture(&self) -> bool {
         self.action == ACTION_UP
@@ -363,6 +384,7 @@ mod tests {
             touchable,
             watch_outside,
             owner: 10_001,
+            owner_pid: 4_000,
         }
     }
 
