@@ -20,6 +20,7 @@ const VAL_NULL: i32 = -1;
 const VAL_STRING: i32 = 0;
 pub(crate) const VAL_INTEGER: i32 = 1;
 const VAL_MAP: i32 = 2;
+const VAL_BUNDLE: i32 = 3;
 pub(crate) const VAL_PARCELABLE: i32 = 4;
 const VAL_LONG: i32 = 6;
 const VAL_FLOAT: i32 = 7;
@@ -72,6 +73,8 @@ pub enum Value {
     },
     /// A `PersistableBundle` (`writePersistableBundle`) of entries.
     PersistableBundle(Vec<(String, Value)>),
+    /// A `Bundle` (`putBundle`, `writeBundle`) of entries.
+    Bundle(Vec<(String, Value)>),
     /// A `MemoryIntArray` (`writeParcelable`): its shared memory, as the
     /// `ParcelFileDescriptor` its `writeToParcel` writes.
     MemoryIntArray(SharedFile),
@@ -171,8 +174,12 @@ impl Value {
                 p.write_string16(Some(class));
                 aim_service_aidl::write_byte_array(p, Some(data));
             }),
-            Value::PersistableBundle(entries) => {
-                p.write_i32(VAL_PERSISTABLEBUNDLE);
+            Value::PersistableBundle(entries) | Value::Bundle(entries) => {
+                p.write_i32(if matches!(self, Value::Bundle(_)) {
+                    VAL_BUNDLE
+                } else {
+                    VAL_PERSISTABLEBUNDLE
+                });
                 let entries: Vec<(&str, Value)> = entries
                     .iter()
                     .map(|(k, v)| (k.as_str(), v.clone()))

@@ -116,6 +116,7 @@ pub mod telephony_registry;
 pub mod trust_service;
 pub mod uid_observers;
 pub mod uri_grants;
+mod usage_database;
 mod usage_events;
 pub mod usage_stats;
 pub mod usb_service;
@@ -2746,12 +2747,9 @@ impl AppHost {
             } else {
                 0
             },
+            extra: usage_events::Extra::None,
         };
-        self.usage
-            .lock()
-            .unwrap()
-            .get_or_insert_with(|| usage_events::UserStats::new(event.time_stamp))
-            .report(event);
+        self.report_usage_stats_event(event);
     }
 
     /// What DevicePolicyManagerService persisted, read once.
