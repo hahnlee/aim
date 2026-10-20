@@ -1013,6 +1013,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Configuration changes as `reportConfigurationChange` reports them:
+    /// the stats activate the whole configuration, the event after the
+    /// first keeps the delta, and an answer parcels it as `Configuration`.
+    #[test]
+    fn configuration_changes_keep_deltas_and_parcel() {
+        use super::super::config::Configuration;
+        let dir = temp("config");
+        let mut user = user(&dir, 0);
+        let mut day = Configuration::from_proto(&[]).unwrap();
+        (day.font_scale, day.ui_mode, day.locales) = (1.0, 0x11, "ko-KR".into());
+        let night = Configuration {
+            ui_mode: 0x21,
+            ..day.clone()
+        };
+        for (config, t) in [(&day, 10), (&night, 20), (&day, 30)] {
+            let mut e = Event::device(CONFIGURATION_CHANGE, t);
+            e.package = "android".into();
+            e.extra = Extra::Configuration(config.to_proto());
+            user.report(e, (t, t));
+        }
+        let daily = &user.current[INTERVAL_DAILY];
+        let counts: Vec<i32> = daily
+            .configurations
+            .iter()
+            .map(|c| c.activation_count)
+            .collect();
+        assert_eq!(counts, [2, 1]);
+        assert_eq!(daily.active_configuration, Some(0));
+        let changes: Vec<&Event> = daily
+            .events
+            .iter()
+            .filter(|e| e.event_type == CONFIGURATION_CHANGE)
+            .collect();
+        let Extra::Configuration(delta) = &changes[1].extra else {
+            panic!("no configuration");
+        };
+        let delta = Configuration::from_proto(delta).unwrap();
+        assert_eq!(delta.ui_mode, 0x20);
+        assert_eq!(delta.font_scale, 0.0);
+        let mut p = Parcel::new();
+        write_usage_events(&mut p, &daily.events, false, true).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A resume of the package last paused is no new app launch.
     #[test]
     fn returning_to_the_last_package_is_no_app_launch() {
