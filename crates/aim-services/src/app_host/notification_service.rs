@@ -99,6 +99,23 @@ const NOTIFICATION_MAX_AGE_AT_POST: i64 = 14 * 24 * 60 * 60 * 1000;
 /// `NotificationListenerService.SERVICE_INTERFACE` and the permission its
 /// services require (`NotificationListeners.getConfig`).
 const LISTENER_SERVICE_INTERFACE: &str = "android.service.notification.NotificationListenerService";
+const STATUS_BAR_SERVICE: &str = "android.permission.STATUS_BAR_SERVICE";
+/// `Process.SHELL_UID`.
+const SHELL_UID: i32 = 2000;
+/// The class `ParceledListSlice`s of conversations create their items
+/// with.
+const CONVERSATION_CLASS: &str = "android.service.notification.ConversationChannelWrapper";
+
+/// A `ConversationChannelWrapper`: none is answered, a conversation's
+/// shortcut being #1894.
+enum NoConversation {}
+
+impl WriteParcelable for NoConversation {
+    fn write_to(&self, _: &mut Parcel) {
+        match *self {}
+    }
+}
+
 const ASSISTANT_SERVICE_INTERFACE: &str =
     "android.service.notification.NotificationAssistantService";
 const BIND_NOTIFICATION_ASSISTANT_SERVICE: &str =
@@ -106,14 +123,19 @@ const BIND_NOTIFICATION_ASSISTANT_SERVICE: &str =
 const BIND_NOTIFICATION_LISTENER_SERVICE: &str =
     "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE";
 
-/// The listeners `user` approved in `<enabled_listeners>` (each
-/// `<service_listing approved=.. user=..>`, primary or not), as
-/// `ManagedServices.readXml` keeps them: the listeners require no
-/// permission, so none is left out.
+/// The listeners `user` approved in `<enabled_listeners>`: the listeners
+/// require no permission, so none is left out.
 fn approved_listeners(policy: &Element, user: i32) -> Vec<String> {
+    approved(policy, "enabled_listeners", user)
+}
+
+/// What `user` approved in a managed services element `tag` (each
+/// `<service_listing approved=.. user=..>`, primary or not), as
+/// `ManagedServices.readXml` keeps it (`mApproved`).
+fn approved(policy: &Element, tag: &str, user: i32) -> Vec<String> {
     policy
         .children()
-        .filter(|e| e.name == "enabled_listeners")
+        .filter(|e| e.name == tag)
         .flat_map(|e| e.children())
         .filter(|e| {
             e.name == "service_listing" && e.int("user").ok().flatten().unwrap_or(0) == user
@@ -897,6 +919,99 @@ impl NotificationManager {
             .filter(|si| si.permission.as_deref() == Some(permission))
             .filter_map(|si| si.info.item.name)
             .collect())
+    }
+
+    /// `getAllowedNotificationAssistant`: `checkCallerIsSystemOrSystemUiOrShell`,
+    /// then the calling user's approved assistant
+    /// (`getAllowedComponents`), as the policy file holds it; the default
+    /// assistant the original approves at boot when the user set none
+    /// (`resetDefaultAssistantsIfNecessary`) is persisted there.
+    fn allowed_assistant(
+        &self,
+        uid: i32,
+    ) -> Result<Option<crate::package::intent::ComponentName>, Exception> {
+        if uid != 0
+            && uid != SHELL_UID
+            && !is_system(uid)
+            && self.host.check_permission(Some(STATUS_BAR_SERVICE), uid)? != 0
+        {
+            return Err(Exception::security(format!(
+                "uid {uid} does not have {STATUS_BAR_SERVICE}."
+            )));
+        }
+        let guard = self.state()?;
+        let policy = &guard.as_ref().unwrap().policy;
+        let user = uid / PER_USER_RANGE as i32;
+        let mut allowed: Vec<_> = approved(policy, "enabled_assistants", user)
+            .iter()
+            .filter_map(|a| crate::package::preferred::unflatten(a))
+            .collect();
+        if allowed.len() > 1 {
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                format!("At most one NotificationAssistant: {}", allowed.len()),
+            ));
+        }
+        Ok(allowed.pop())
+    }
+
+    /// `shouldHideSilentStatusIcons`: `checkCallerIsSameApp`, then the
+    /// preference for the system, the phone or a notification listener's
+    /// package. The app host binds no listener (#1488), so an approved
+    /// listener's package is not answered.
+    fn hide_silent_status_icons(&self, uid: i32, package: Option<&str>) -> Result<bool, Exception> {
+        let owned = match package {
+            Some("root") if uid == 0 => true,
+            Some(package) => self.host.owns_package(uid, package)?,
+            None => false,
+        };
+        if !owned {
+            return Err(Exception::security(format!(
+                "Package {} is not owned by uid {uid}",
+                package.unwrap_or("null")
+            )));
+        }
+        let guard = self.state()?;
+        let state = guard.as_ref().unwrap();
+        if is_system(uid) {
+            return Ok(state.prefs.hide_silent_status_icons());
+        }
+        let package = package.unwrap_or_default();
+        let user = uid / PER_USER_RANGE as i32;
+        if approved_listeners(&state.policy, user)
+            .iter()
+            .any(|a| a.split('/').next() == Some(package))
+        {
+            return Err(self.host.unimplemented_named(
+                "notification",
+                "shouldHideSilentStatusIcons of a listener's package (#1488)",
+            ));
+        }
+        Err(Exception::security(
+            "Only available for notification listeners",
+        ))
+    }
+
+    /// `getConversations`: `enforceSystemOrSystemUI`, then the current
+    /// user's conversation channels; looking up each one's shortcut
+    /// (`ShortcutHelper.getValidShortcutInfo`) is not implemented (#1894).
+    fn conversations(&self, uid: i32, only_important: bool) -> Result<(), Exception> {
+        self.enforce_system_or_system_ui(
+            uid,
+            &format!("getConversations: uid {uid} does not have {STATUS_BAR_SERVICE}."),
+        )?;
+        let guard = self.state()?;
+        let found = guard
+            .as_ref()
+            .unwrap()
+            .prefs
+            .conversations(&[0], only_important);
+        if !found.is_empty() {
+            return Err(self
+                .host
+                .unimplemented_named("notification", "a conversation's shortcut (#1894)"));
+        }
+        Ok(())
     }
 
     /// `NotificationAssistants.getDefaultFromConfig`: the component of
@@ -2669,6 +2784,43 @@ impl Service for NotificationManager {
                         }),
                 )
             }
+            nm::GET_ALLOWED_NOTIFICATION_ASSISTANT => {
+                nm::GetAllowedNotificationAssistant::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply(self.allowed_assistant(call.sender_euid as i32).map(|c| {
+                    let mut p = Parcel::new();
+                    nm::write_get_allowed_notification_assistant_reply(&mut p, c.as_ref());
+                    p
+                }))
+            }
+            nm::SHOULD_HIDE_SILENT_STATUS_ICONS => {
+                let a =
+                    nm::ShouldHideSilentStatusIcons::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let uid = call.sender_euid as i32;
+                reply(
+                    self.hide_silent_status_icons(uid, a.calling_pkg.as_deref())
+                        .map(|hide| {
+                            let mut p = Parcel::new();
+                            nm::write_should_hide_silent_status_icons_reply(&mut p, hide);
+                            p
+                        }),
+                )
+            }
+            nm::GET_CONVERSATIONS => {
+                let a = nm::GetConversations::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let uid = call.sender_euid as i32;
+                reply(self.conversations(uid, a.only_important).map(|()| {
+                    let mut p = Parcel::new();
+                    nm::write_get_conversations_reply(
+                        &mut p,
+                        Some(&Slice::<NoConversation>::new(
+                            self.host.process.clone(),
+                            CONVERSATION_CLASS,
+                            Vec::new(),
+                        )),
+                    );
+                    p
+                }))
+            }
             nm::GET_DEFAULT_NOTIFICATION_ASSISTANT => {
                 nm::GetDefaultNotificationAssistant::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply((|| {
@@ -2737,6 +2889,14 @@ mod tests {
 
     /// The listeners a user approved, primary and secondary lists alike,
     /// split as `ManagedServices` splits them.
+    #[test]
+    fn approved_assistants_are_the_policy_s() {
+        let xml = br#"<notification-policy><enabled_assistants version="4" defaults="a/.N"><service_listing approved="a/a.N" user="0" primary="true" user_changed="false" /></enabled_assistants><enabled_listeners version="4"><service_listing approved="b/.L" user="0" primary="true" /></enabled_listeners></notification-policy>"#;
+        let policy = aim_android_xml::read(xml).unwrap();
+        assert_eq!(approved(&policy, "enabled_assistants", 0), ["a/a.N"]);
+        assert!(approved(&policy, "enabled_assistants", 10).is_empty());
+    }
+
     #[test]
     fn approved_listeners_are_each_user_s_entries() {
         let xml = br#"<notification-policy><enabled_listeners version="4"><service_listing approved="com.a/com.a.L:com.b" user="0" primary="true" /><service_listing approved="com.c/.L" user="0" primary="false" /><service_listing approved="com.d/.L" user="10" primary="true" /><service_listing approved="" user="0" primary="true" /></enabled_listeners></notification-policy>"#;
