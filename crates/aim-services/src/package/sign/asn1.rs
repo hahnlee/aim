@@ -6,22 +6,22 @@
 
 /// An element: its tag, contents and whole encoding.
 #[derive(Clone, Copy)]
-pub(super) struct Tlv<'a> {
+pub(crate) struct Tlv<'a> {
     pub tag: u8,
     pub value: &'a [u8],
     pub raw: &'a [u8],
 }
 
-pub(super) const INTEGER: u8 = 0x02;
-pub(super) const BIT_STRING: u8 = 0x03;
-pub(super) const OCTET_STRING: u8 = 0x04;
-pub(super) const OID: u8 = 0x06;
-pub(super) const SEQUENCE: u8 = 0x30;
+pub(crate) const INTEGER: u8 = 0x02;
+pub(crate) const BIT_STRING: u8 = 0x03;
+pub(crate) const OCTET_STRING: u8 = 0x04;
+pub(crate) const OID: u8 = 0x06;
+pub(crate) const SEQUENCE: u8 = 0x30;
 pub(super) const SET: u8 = 0x31;
-const BOOLEAN: u8 = 0x01;
+pub(crate) const BOOLEAN: u8 = 0x01;
 
 /// The elements of a definite-length encoding, in order.
-pub(super) struct Reader<'a>(&'a [u8]);
+pub(crate) struct Reader<'a>(&'a [u8]);
 
 impl<'a> Reader<'a> {
     pub fn new(data: &'a [u8]) -> Reader<'a> {
@@ -173,7 +173,7 @@ pub(super) fn has_indefinite(b: &[u8]) -> bool {
 
 /// An INTEGER's value with its redundant leading octets removed, so that
 /// equal numbers compare equal (`BigInteger.equals`).
-pub(super) fn integer(value: &[u8]) -> &[u8] {
+pub(crate) fn integer(value: &[u8]) -> &[u8] {
     let mut v = value;
     while v.len() > 1 && ((v[0] == 0 && v[1] & 0x80 == 0) || (v[0] == 0xff && v[1] & 0x80 != 0)) {
         v = &v[1..];

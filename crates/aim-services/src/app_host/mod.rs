@@ -94,6 +94,7 @@ pub mod platform_compat;
 pub mod playback;
 pub mod power_service;
 pub mod providers;
+mod recovery_certificates;
 pub mod restrictions_service;
 pub mod role_service;
 pub mod safety_center;

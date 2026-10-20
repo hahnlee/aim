@@ -23,9 +23,9 @@
 //! `PKCS9Attributes`), Copyright (C) The Android Open Source Project,
 //! Licensed under the Apache License, Version 2.0.
 
-mod asn1;
+pub(crate) mod asn1;
 mod block;
-mod crypto;
+pub(crate) mod crypto;
 mod history;
 mod merge;
 mod overrides;
