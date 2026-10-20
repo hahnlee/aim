@@ -61,7 +61,6 @@ pub mod job_info;
 pub mod job_scheduler;
 pub mod job_store;
 pub mod kept;
-pub mod keychars;
 pub mod legacy_permission;
 pub mod locale_manager;
 mod loudness;
@@ -4772,6 +4771,9 @@ impl Service for Control {
             std::thread::spawn(move || {
                 if let Err(e) = host.inputs().and_then(|_| host.packages()) {
                     eprintln!("app host: loading its inputs: {e:?}");
+                }
+                if let Err(e) = input_manager::watch_key_repeat(&host) {
+                    eprintln!("app host: input: key repeat settings: {}", e.message);
                 }
                 // The Mac's appearance is the configuration's night mode, as
                 // UiModeManagerService's is.
