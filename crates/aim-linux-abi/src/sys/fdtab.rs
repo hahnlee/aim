@@ -142,7 +142,13 @@ pub fn export_scm(fd: i32) -> Result<ScmExport, crate::errno::Errno> {
         Some(Kind::Regular(description)) => {
             super::regular_file::export(pin, description).map(ScmExport::Regular)
         }
-        Some(Kind::Sock(_)) => super::net::export_socket_pinned(pin).map(ScmExport::Socket),
+        // A socket with its sockfs record travels by its receipt. One that
+        // came from outside the guest (a program's inherited stdio) has
+        // none, and is passed as itself; its receiver recognizes it as
+        // the sender did (`net::adopt`).
+        Some(Kind::Sock(socket)) if socket.inode_allocation.lock().unwrap().is_some() => {
+            super::net::export_socket_pinned(pin).map(ScmExport::Socket)
+        }
         _ => export_pinned(pin).map(ScmExport::Other),
     }
 }
