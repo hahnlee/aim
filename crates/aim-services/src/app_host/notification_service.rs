@@ -99,6 +99,10 @@ const NOTIFICATION_MAX_AGE_AT_POST: i64 = 14 * 24 * 60 * 60 * 1000;
 /// `NotificationListenerService.SERVICE_INTERFACE` and the permission its
 /// services require (`NotificationListeners.getConfig`).
 const LISTENER_SERVICE_INTERFACE: &str = "android.service.notification.NotificationListenerService";
+const ASSISTANT_SERVICE_INTERFACE: &str =
+    "android.service.notification.NotificationAssistantService";
+const BIND_NOTIFICATION_ASSISTANT_SERVICE: &str =
+    "android.permission.BIND_NOTIFICATION_ASSISTANT_SERVICE";
 const BIND_NOTIFICATION_LISTENER_SERVICE: &str =
     "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE";
 
@@ -854,9 +858,26 @@ impl NotificationManager {
     /// services of `package` for `NotificationListenerService` that require
     /// BIND_NOTIFICATION_LISTENER_SERVICE, as the system asks for them.
     fn listener_services(&self, package: &str, user: i32) -> Result<Vec<String>, Exception> {
+        self.managed_services(
+            LISTENER_SERVICE_INTERFACE,
+            BIND_NOTIFICATION_LISTENER_SERVICE,
+            package,
+            user,
+        )
+    }
+
+    /// `ManagedServices.queryPackageForServices`: the services of
+    /// `package` for `interface` that require `permission`, by class.
+    fn managed_services(
+        &self,
+        interface: &str,
+        permission: &str,
+        package: &str,
+        user: i32,
+    ) -> Result<Vec<String>, Exception> {
         let (_, resolution) = self.host.packages()?;
         let intent = Intent {
-            action: Some(LISTENER_SERVICE_INTERFACE.into()),
+            action: Some(interface.into()),
             package: Some(package.into()),
             ..Default::default()
         };
@@ -873,9 +894,40 @@ impl NotificationManager {
                 Info::Service(si) => Some(si),
                 _ => None,
             })
-            .filter(|si| si.permission.as_deref() == Some(BIND_NOTIFICATION_LISTENER_SERVICE))
+            .filter(|si| si.permission.as_deref() == Some(permission))
             .filter_map(|si| si.info.item.name)
             .collect())
+    }
+
+    /// `NotificationAssistants.getDefaultFromConfig`: the component of
+    /// `config_defaultAssistantAccessComponent` that is an assistant
+    /// service of its package for the system user.
+    fn default_assistant(
+        &self,
+    ) -> Result<Option<crate::package::intent::ComponentName>, Exception> {
+        let config = self
+            .host
+            .inputs()?
+            .packages
+            .framework_string("config_defaultAssistantAccessComponent")
+            .unwrap_or_default();
+        for entry in config.split(':') {
+            let component = crate::package::preferred::unflatten(entry);
+            let package = component.as_ref().map_or(entry, |c| c.package.as_str());
+            if package.is_empty() {
+                continue;
+            }
+            let approved = self.managed_services(
+                ASSISTANT_SERVICE_INTERFACE,
+                BIND_NOTIFICATION_ASSISTANT_SERVICE,
+                package,
+                0,
+            )?;
+            if let Some(c) = component.filter(|c| approved.contains(&c.class)) {
+                return Ok(Some(c));
+            }
+        }
+        Ok(None)
     }
 
     /// The uid of `package` in `user`.
@@ -2616,6 +2668,24 @@ impl Service for NotificationManager {
                             p
                         }),
                 )
+            }
+            nm::GET_DEFAULT_NOTIFICATION_ASSISTANT => {
+                nm::GetDefaultNotificationAssistant::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                reply((|| {
+                    // `checkCallerIsSystem`.
+                    if !is_system(call.sender_euid as i32) {
+                        return Err(Exception::security(format!(
+                            "Disallowed call for uid {}",
+                            call.sender_euid
+                        )));
+                    }
+                    let mut p = Parcel::new();
+                    nm::write_get_default_notification_assistant_reply(
+                        &mut p,
+                        self.default_assistant()?.as_ref(),
+                    );
+                    Ok(p)
+                })())
             }
             nm::GET_ZEN_MODE => {
                 nm::GetZenMode::read(&mut call.data).map_err(|_| BAD_VALUE)?;
