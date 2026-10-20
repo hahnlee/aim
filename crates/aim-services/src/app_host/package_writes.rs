@@ -134,6 +134,7 @@ impl Writes {
         settings: &[Setting],
     ) -> Result<(), Exception> {
         let mut store = self.store.lock().unwrap();
+        let writer = self.host.model_writer.lock().unwrap();
         let (before, resolution) = self.host.packages()?;
         let query = Query {
             state: &before,
@@ -170,6 +171,7 @@ impl Writes {
         let (written, error) = persist(store.as_mut().expect("opened"), user, &after);
         self.host
             .user_states_changed(&before, Arc::new(applied(&before, user, &written)))?;
+        drop(writer);
         drop(store);
         if let Some(e) = error {
             return Err(e);

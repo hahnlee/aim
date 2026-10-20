@@ -1281,6 +1281,7 @@ impl PermissionManager {
         state: &AccessUser,
         changes: &[FlagsChanged],
     ) -> Result<(), Exception> {
+        let _writer = self.host.model_writer.lock().unwrap();
         let (before, _) = self.host.packages()?;
         let mut model = (*before).clone();
         for ps in model.packages.values_mut() {

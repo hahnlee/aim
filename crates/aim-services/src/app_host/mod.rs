@@ -424,6 +424,9 @@ pub struct AppHost {
     /// The package model's state, replaced as PackageManager's writes
     /// change it.
     model: Mutex<Option<Arc<crate::package::model::State>>>,
+    /// Held by each change of the package model from reading it to
+    /// storing the changed model, so that no change is lost to another.
+    model_writer: Mutex<()>,
     resolver: crate::package::resolve::Resolver,
     activities: activity::Activities,
     display: OnceLock<Arc<(display::Display, display_service::Resources)>>,
@@ -512,6 +515,7 @@ impl AppHost {
             config_seq: AtomicI64::new(1),
             unimplemented: Mutex::new(std::collections::HashSet::new()),
             model: Mutex::new(None),
+            model_writer: Mutex::new(()),
             resolver: Default::default(),
             activities: Default::default(),
             display: OnceLock::new(),
@@ -2919,6 +2923,7 @@ impl AppHost {
         &self,
         change: impl FnOnce(&mut Vec<(i32, i32)>),
     ) -> Result<(), Exception> {
+        let _writer = self.model_writer.lock().unwrap();
         let (before, _) = self.packages()?;
         let mut state = (*before).clone();
         change(&mut state.system.isolated_owners);
@@ -2933,6 +2938,7 @@ impl AppHost {
         recipient: i32,
         visible: i32,
     ) -> Result<(), Exception> {
+        let _writer = self.model_writer.lock().unwrap();
         let (before, resolution) = self.packages()?;
         let query = crate::package::query::Query {
             state: &before,
