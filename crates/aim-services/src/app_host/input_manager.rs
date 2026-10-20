@@ -28,6 +28,7 @@ use crate::package::uri::Uri;
 
 /// `ReservedInputDeviceId::VIRTUAL_KEYBOARD_ID`.
 const VIRTUAL_KEYBOARD_ID: i32 = -1;
+const BLUETOOTH: &str = "android.permission.BLUETOOTH";
 /// The agent's `getKeyboard()` and `setKeyRepeatConfiguration(long
 /// timeoutNanos, long delayNanos, boolean enabled)`.
 const GET_KEYBOARD: u32 = 10;
@@ -374,6 +375,22 @@ impl Service for InputManager {
                     },
                 };
                 im::write_get_input_device_reply(&mut p, device.as_deref());
+            }
+            // `@EnforcePermission(BLUETOOTH)`, then EventHub's Bluetooth
+            // address of the device: none, as no device the app host has
+            // is a Bluetooth one (the built-in keyboard is `BUS_VIRTUAL`).
+            im::GET_INPUT_DEVICE_BLUETOOTH_ADDRESS => {
+                im::GetInputDeviceBluetoothAddress::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let uid = call.sender_euid as i32;
+                match self.host.check_permission(Some(BLUETOOTH), uid) {
+                    Ok(0) => im::write_get_input_device_bluetooth_address_reply(&mut p, &None),
+                    Ok(_) => {
+                        return reply(Err(Exception::security(format!(
+                            "Access denied, requires: {BLUETOOTH}"
+                        ))));
+                    }
+                    Err(e) => return reply(Err(e)),
+                }
             }
             // The devices do not change: listeners are kept, never called.
             im::REGISTER_INPUT_DEVICES_CHANGED_LISTENER => {
