@@ -447,7 +447,13 @@ impl IntervalStats {
             c.last_time_active = time_stamp - 1;
         }
         if let Some(config) = config {
-            let at = match self.configurations.iter().position(|c| c.config == config) {
+            // `getOrCreateConfigurationStats`: by `Configuration.equals`.
+            let wanted = super::config::Configuration::from_proto(config).ok();
+            let at = match self.configurations.iter().position(|c| {
+                c.config == config
+                    || (wanted.is_some()
+                        && super::config::Configuration::from_proto(&c.config).ok() == wanted)
+            }) {
                 Some(at) => at,
                 None => {
                     self.configurations.push(ConfigurationStats {
@@ -574,7 +580,7 @@ impl UserStats {
 
     /// `reportEvent` of an event the app host reports, its time already
     /// the wall time.
-    pub fn report(&mut self, event: Event, clocks: Clocks) -> Notified {
+    pub fn report(&mut self, mut event: Event, clocks: Clocks) -> Notified {
         let mut notified = Notified::default();
         if event.event_type != USER_INTERACTION && event.event_type != APP_COMPONENT_USED {
             self.check_and_get_time(clocks, &mut notified);
@@ -590,6 +596,26 @@ impl UserStats {
                 | DEVICE_SHUTDOWN
                 | APP_COMPONENT_USED
         );
+        // A configuration change's event keeps the delta from the daily
+        // interval's active configuration; the stats keep the whole one.
+        let mut new_full_config = None;
+        if event.event_type == CONFIGURATION_CHANGE
+            && let Extra::Configuration(full) = &event.extra
+        {
+            let full = full.clone();
+            let daily = &self.current[INTERVAL_DAILY];
+            if let Some(active) = daily.active_configuration
+                && let (Ok(base), Ok(change)) = (
+                    super::config::Configuration::from_proto(&daily.configurations[active].config),
+                    super::config::Configuration::from_proto(&full),
+                )
+            {
+                event.extra = Extra::Configuration(
+                    super::config::Configuration::generate_delta(&base, &change).to_proto(),
+                );
+            }
+            new_full_config = Some(full);
+        }
         let mut increment_app_launch = false;
         match event.event_type {
             ACTIVITY_RESUMED => {
@@ -616,6 +642,11 @@ impl UserStats {
                 KEYGUARD_HIDDEN => {
                     stats.trackers[KEYGUARD_HIDDEN_TRACKER].update(event.time_stamp);
                     stats.trackers[KEYGUARD_SHOWN_TRACKER].commit_time(event.time_stamp);
+                }
+                CONFIGURATION_CHANGE => {
+                    if let Some(full) = &new_full_config {
+                        stats.update_configuration_stats(Some(full), event.time_stamp);
+                    }
                 }
                 _ => {
                     stats.update(
@@ -774,8 +805,7 @@ impl UserStats {
 /// `UsageEvents` of `events` with the sorted names they use, written as
 /// the original writes it with `use_parceled_list` on
 /// (`ParcelableUsageEventList`) or off (a blob of the events against the
-/// string table); an error when it does not fit one transaction, or holds
-/// a configuration change (#1868).
+/// string table); an error when it does not fit one transaction.
 pub fn write_usage_events(
     p: &mut Parcel,
     events: &[Event],
@@ -862,9 +892,16 @@ pub fn write_usage_events(
 /// `writeEventToParcel`'s fields of the event's type.
 fn write_extra(p: &mut Parcel, e: &Event) -> Result<(), &'static str> {
     match (e.event_type, &e.extra) {
-        (CONFIGURATION_CHANGE, _) => {
-            return Err("a configuration change's configuration in usage events (#1868)");
+        // `mConfiguration.writeToParcel` of the configuration the stats
+        // file kept as its `ConfigurationProto`.
+        (CONFIGURATION_CHANGE, Extra::Configuration(proto)) => {
+            super::config::Configuration::from_proto(proto)
+                .map_err(|_| "a configuration change's malformed ConfigurationProto")?
+                .write_to(p);
         }
+        (CONFIGURATION_CHANGE, _) => super::config::Configuration::from_proto(&[])
+            .expect("an empty message reads")
+            .write_to(p),
         (SHORTCUT_INVOCATION, Extra::ShortcutId(s))
         | (NOTIFICATION_INTERRUPTION, Extra::ChannelId(s))
         | (LOCUS_ID_SET, Extra::LocusId(s)) => p.write_string16(Some(s)),

@@ -3359,6 +3359,18 @@ impl AppHost {
         self.config_seq.fetch_add(1, Ordering::Relaxed);
         let global = self.global_configuration()?;
         eprintln!("app host: Config changes={changes:x}");
+        // `UsageStatsManagerInternal.reportConfigurationChange`.
+        self.report_usage_stats_event(usage_events::Event {
+            package: "android".into(),
+            class: None,
+            instance_id: 0,
+            task_root_package: None,
+            task_root_class: None,
+            event_type: usage_events::CONFIGURATION_CHANGE,
+            time_stamp: usage_stats::now_millis(),
+            flags: 0,
+            extra: usage_events::Extra::Configuration(global.to_proto()),
+        });
         let bound: Vec<i64> = {
             let mut apps = self.apps.lock().unwrap();
             apps.iter_mut()

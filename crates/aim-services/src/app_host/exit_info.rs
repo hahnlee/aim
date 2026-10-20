@@ -688,7 +688,8 @@ fn now_ms() -> i64 {
 pub(super) enum Value<'a> {
     Varint(u64),
     Bytes(&'a [u8]),
-    Fixed,
+    /// A fixed32 or fixed64 field's little-endian bytes.
+    Fixed(&'a [u8]),
 }
 
 impl Value<'_> {
@@ -699,6 +700,14 @@ impl Value<'_> {
     fn long(&self) -> Result<i64, String> {
         match self {
             Value::Varint(v) => Ok(*v as i64),
+            _ => Err("wire type mismatch".into()),
+        }
+    }
+
+    /// A `float` (fixed32) field.
+    pub(super) fn float(&self) -> Result<f32, String> {
+        match self {
+            Value::Fixed(b) if b.len() == 4 => Ok(f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
             _ => Err("wire type mismatch".into()),
         }
     }
@@ -740,11 +749,10 @@ pub(super) fn fields(
         let value = match key & 7 {
             0 => Value::Varint(varint(data, &mut at)?),
             1 | 5 => {
-                at += if key & 7 == 1 { 8 } else { 4 };
-                if at > data.len() {
-                    return Err("truncated field".into());
-                }
-                Value::Fixed
+                let len = if key & 7 == 1 { 8 } else { 4 };
+                let bytes = data.get(at..at + len).ok_or("truncated field")?;
+                at += len;
+                Value::Fixed(bytes)
             }
             2 => {
                 let len = varint(data, &mut at)? as usize;
