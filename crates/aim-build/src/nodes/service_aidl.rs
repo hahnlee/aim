@@ -1195,8 +1195,19 @@ fn dex_stub_codes(
         let dex = Dex::parse(dex)?;
         for name in [&class, &stub] {
             let Some(def) = dex.class(name) else { continue };
+            // A stable interface's stub computes its DESCRIPTOR at class
+            // initialization (`"a$b$I".replace('$', '.')`), so it has no
+            // constant; its stub's class names it.
+            if name == &stub {
+                found_descriptor.get_or_insert_with(|| descriptor.to_string());
+            }
             for (field, value) in dex.static_values(def)? {
                 match (field.strip_prefix("TRANSACTION_"), value) {
+                    // A versioned interface's meta transactions, which
+                    // its AIDL does not declare: `getInterfaceVersion`
+                    // and `getInterfaceHash` (`IBinder.LAST_CALL_TRANSACTION`
+                    // and the one before it).
+                    (Some(_), Value::Int(0x00ff_fffe..=0x00ff_ffff)) => {}
                     (Some(method), Value::Int(code)) if name == &stub => {
                         codes.insert(method.to_string(), code as u32);
                     }

@@ -7,10 +7,11 @@
 //! is set, read or verified here. Of the recoverable keystore
 //! (`recoverablekeystore.db`), a recovery agent's own state: its recovery
 //! service's certificates (`initRecoveryServiceWithSigFile`), secret types,
-//! server params and its keys' recovery statuses. It never has a snapshot
-//! to take, which needs the lock screen's knowledge factor. The other
-//! writes, the special users (FRP, repair mode), strong auth, escrow
-//! tokens, the agents' keys and the rest of recovery are not implemented
+//! server params, its keys' recovery statuses and grants (keystore2). It
+//! never has a snapshot to take, which needs the lock screen's knowledge
+//! factor. The other writes, the special users (FRP, repair mode), strong
+//! auth, escrow tokens, the agents' keys' generation, import and removal
+//! (the platform key) and the rest of recovery are not implemented
 //! (#1888).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -19,12 +20,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
+use aim_binder_host::parcel::Reader;
 use aim_binder_host::parcel::{
     BAD_VALUE, Binder, EX_ILLEGAL_ARGUMENT, EX_ILLEGAL_STATE, EX_NULL_POINTER, EX_SERVICE_SPECIFIC,
     Exception, Parcel,
 };
-use aim_service_aidl::ParcelValue;
 use aim_service_aidl::com_android_internal_widget_ilocksettings as ls;
+use aim_service_aidl::{
+    ParcelValue, ReadParcelable, WriteParcelable, android_system_keystore2_ikeystoreservice as ks,
+};
 use rusqlite::types::FromSql;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, ToSql, params};
 
@@ -51,9 +55,58 @@ const USER_REPAIR_MODE: i32 = -9998;
 /// `RecoveryController.ERROR_*`, the recoverable keystore's
 /// `ServiceSpecificException`s.
 const ERROR_NO_SNAPSHOT_PENDING: i32 = 21;
+const ERROR_SERVICE_INTERNAL_ERROR: i32 = 22;
 const ERROR_BAD_CERTIFICATE_FORMAT: i32 = 25;
 const ERROR_INVALID_CERTIFICATE: i32 = 28;
 const ERROR_DOWNGRADE_CERTIFICATE: i32 = 29;
+const ERROR_KEY_NOT_FOUND: i32 = 30;
+/// keystore2's service, and its `ResponseCode.KEY_NOT_FOUND`.
+const KEYSTORE: &str = "android.system.keystore2.IKeystoreService/default";
+const KEYSTORE_KEY_NOT_FOUND: i32 = 7;
+/// `ApplicationKeyStorage`'s aliases of the agents' keys in the system's
+/// keystore namespace, and of their grants.
+const APPLICATION_KEY_ALIAS_PREFIX: &str =
+    "com.android.server.locksettings.recoverablekeystore/application/";
+const APPLICATION_KEY_GRANT_PREFIX: &str = "recoverable_key:";
+/// `Domain.APP`, `KeyProperties.NAMESPACE_APPLICATION`.
+const DOMAIN_APP: i32 = 0;
+const NAMESPACE_APPLICATION: i64 = -1;
+/// `KeyPermission.USE | GET_INFO | DELETE`, a grant's access.
+const GRANT_ACCESS: i32 = 0x100 | 0x4 | 0x1;
+
+/// keystore2's `KeyDescriptor`.
+struct KeyDescriptor {
+    domain: i32,
+    nspace: i64,
+    alias: Option<String>,
+    blob: Option<Vec<u8>>,
+}
+
+impl WriteParcelable for KeyDescriptor {
+    /// A structured parcelable: its size, then its fields.
+    fn write_to(&self, p: &mut Parcel) {
+        let start = p.position();
+        p.write_i32(0);
+        p.write_i32(self.domain);
+        p.write_i64(self.nspace);
+        p.write_string16(self.alias.as_deref());
+        aim_service_aidl::write_byte_array(p, self.blob.as_deref());
+        p.set_i32_at(start, (p.position() - start) as i32);
+    }
+}
+
+impl ReadParcelable for KeyDescriptor {
+    fn read_from(r: &mut Reader<'_>) -> aim_binder_host::parcel::Result<Self> {
+        super::display::parcelable(r, |r| {
+            Ok(KeyDescriptor {
+                domain: r.read_i32()?,
+                nspace: r.read_i64()?,
+                alias: r.read_string16()?,
+                blob: aim_service_aidl::read_byte_array(r)?,
+            })
+        })
+    }
+}
 /// `RecoverableKeyStoreDbContract`'s tables of an agent's state.
 const METADATA: &str = "recovery_service_metadata";
 const ROOT_OF_TRUST: &str = "root_of_trust";
@@ -151,6 +204,68 @@ fn snapshot_outdated(db: &Connection, uid: i32) -> rusqlite::Result<()> {
         set_agent_value(db, METADATA, "should_create_snapshot", uid, None, &1)?;
     }
     Ok(())
+}
+
+/// `RecoverableKeyStoreManager.initRecoveryService` of the agent `uid`
+/// with its certificate file, `root` the root `alias` names and `date`
+/// its validation date.
+fn init_recovery_service(
+    db: &Connection,
+    path: &Path,
+    uid: i32,
+    alias: &str,
+    cert_file: &[u8],
+    root: &[u8],
+    date: i64,
+) -> Result<(), Exception> {
+    // The alias becomes the agent's active root of trust even if the file
+    // turns out not to be valid.
+    let failed = |e| db_error(path, e);
+    set_agent_value(db, METADATA, "active_root_of_trust", uid, None, &alias).map_err(failed)?;
+    let cert_xml = CertXml::parse(cert_file)
+        .map_err(certificate_error)?
+        .map_err(|m| Exception::new(EX_ILLEGAL_ARGUMENT, m))?;
+    let old: Option<i64> =
+        agent_value(db, ROOT_OF_TRUST, "cert_serial", uid, Some(alias)).map_err(failed)?;
+    if let Some(old) = old
+        && old >= cert_xml.serial
+        && alias != TEST_ONLY_INSECURE_CERTIFICATE_ALIAS
+    {
+        if old == cert_xml.serial {
+            return Ok(());
+        }
+        return Err(service_specific(
+            ERROR_DOWNGRADE_CERTIFICATE,
+            "The cert file serial number is older than the one in database.",
+        ));
+    }
+    // `getRandomEndpointCert`.
+    // SAFETY: arc4random_uniform has no preconditions.
+    let index = unsafe { libc::arc4random_uniform(cert_xml.endpoints.len() as u32) } as usize;
+    let cert_path = cert_xml
+        .endpoint_path(index, root, date)
+        .map_err(certificate_error)?;
+    let encoded = certificates::pki_path(&cert_path);
+    let updated = set_agent_value(db, ROOT_OF_TRUST, "cert_path", uid, Some(alias), &encoded)
+        .map_err(failed)?;
+    if updated == 0 {
+        return Ok(());
+    }
+    let mut counter_id = 0i64;
+    // SAFETY: the buffer is the value's own bytes (`SecureRandom.nextLong`).
+    unsafe { libc::arc4random_buf((&raw mut counter_id).cast(), size_of::<i64>()) };
+    set_agent_value(
+        db,
+        ROOT_OF_TRUST,
+        "cert_serial",
+        uid,
+        Some(alias),
+        &cert_xml.serial,
+    )
+    .and_then(|_| snapshot_outdated(db, uid))
+    .and_then(|()| set_agent_value(db, METADATA, "counter_id", uid, None, &counter_id))
+    .map(drop)
+    .map_err(failed)
 }
 
 /// `RecoverableKeyStoreDb.getRecoverySecretTypes` of the agent `uid`:
@@ -402,55 +517,7 @@ impl LockSettings {
         sig.verify_file_signature(&root, &cert_file, date)
             .map_err(certificate_error)?;
 
-        // `initRecoveryService`: the alias becomes the agent's active root
-        // of trust even if the file turns out not to be valid.
-        let failed = |e| db_error(&path, e);
-        set_agent_value(&db, METADATA, "active_root_of_trust", uid, None, &alias)
-            .map_err(failed)?;
-        let cert_xml = CertXml::parse(&cert_file)
-            .map_err(certificate_error)?
-            .map_err(|m| Exception::new(EX_ILLEGAL_ARGUMENT, m))?;
-        let old: Option<i64> =
-            agent_value(&db, ROOT_OF_TRUST, "cert_serial", uid, Some(&alias)).map_err(failed)?;
-        if let Some(old) = old
-            && old >= cert_xml.serial
-            && alias != TEST_ONLY_INSECURE_CERTIFICATE_ALIAS
-        {
-            if old == cert_xml.serial {
-                return Ok(());
-            }
-            return Err(service_specific(
-                ERROR_DOWNGRADE_CERTIFICATE,
-                "The cert file serial number is older than the one in database.",
-            ));
-        }
-        // `getRandomEndpointCert`.
-        // SAFETY: arc4random_uniform has no preconditions.
-        let index = unsafe { libc::arc4random_uniform(cert_xml.endpoints.len() as u32) } as usize;
-        let cert_path = cert_xml
-            .endpoint_path(index, &root, date)
-            .map_err(certificate_error)?;
-        let encoded = certificates::pki_path(&cert_path);
-        let updated = set_agent_value(&db, ROOT_OF_TRUST, "cert_path", uid, Some(&alias), &encoded)
-            .map_err(failed)?;
-        if updated == 0 {
-            return Ok(());
-        }
-        let mut counter_id = 0i64;
-        // SAFETY: the buffer is the value's own bytes (`SecureRandom.nextLong`).
-        unsafe { libc::arc4random_buf((&raw mut counter_id).cast(), size_of::<i64>()) };
-        set_agent_value(
-            &db,
-            ROOT_OF_TRUST,
-            "cert_serial",
-            uid,
-            Some(&alias),
-            &cert_xml.serial,
-        )
-        .and_then(|_| snapshot_outdated(&db, uid))
-        .and_then(|()| set_agent_value(&db, METADATA, "counter_id", uid, None, &counter_id))
-        .map(drop)
-        .map_err(failed)
+        init_recovery_service(&db, &path, uid, &alias, &cert_file, &root, date)
     }
 
     /// `RecoverableKeyStoreManager.setRecoveryStatus`
@@ -469,6 +536,52 @@ impl LockSettings {
         )
         .map(drop)
         .map_err(|e| db_error(&path, e))
+    }
+
+    /// `RecoverableKeyStoreManager.getKey`: a grant to the agent of its
+    /// key in the system's keystore namespace
+    /// (`ApplicationKeyStorage.getGrantAlias`), as keystore2 makes it.
+    fn key(&self, uid: i32, alias: Option<String>) -> Result<Option<String>, Exception> {
+        self.check_recovery_agent(uid)?;
+        let alias = alias.ok_or_else(|| Exception::new(EX_NULL_POINTER, "alias is null"))?;
+        let key = KeyDescriptor {
+            domain: DOMAIN_APP,
+            nspace: NAMESPACE_APPLICATION,
+            alias: Some(format!(
+                "{APPLICATION_KEY_ALIAS_PREFIX}{}/{uid}/{alias}",
+                uid / PER_USER_RANGE
+            )),
+            blob: None,
+        };
+        let mut data = Parcel::new();
+        ks::Grant {
+            key: Some(key),
+            grantee_uid: uid,
+            access_vector: GRANT_ACCESS,
+        }
+        .write(&mut data);
+        // `KeyStore2.grant`: a failure is a `KeyStoreException` of
+        // keystore2's response code, a transport failure a system error.
+        let internal = |m: String| service_specific(ERROR_SERVICE_INTERNAL_ERROR, &m);
+        let reply =
+            super::display::transact_service(&self.host.process, KEYSTORE, ks::GRANT, &data)
+                .map_err(internal)?;
+        match ks::read_grant_reply::<KeyDescriptor>(&mut reply.reader())
+            .map_err(|s| internal(format!("{KEYSTORE}: {s}")))?
+        {
+            Ok(Some(grant)) => Ok(Some(format!(
+                "{APPLICATION_KEY_GRANT_PREFIX}{:016X}",
+                grant.nspace
+            ))),
+            Ok(None) => Err(internal(format!("{KEYSTORE}: no grant"))),
+            Err(e)
+                if e.code == EX_SERVICE_SPECIFIC
+                    && e.service_specific == KEYSTORE_KEY_NOT_FOUND =>
+            {
+                Err(service_specific(ERROR_KEY_NOT_FOUND, &e.message))
+            }
+            Err(e) => Err(internal(e.message)),
+        }
     }
 
     /// `RecoverableKeyStoreManager.getRecoveryStatus`
@@ -590,6 +703,11 @@ impl Service for LockSettings {
                 self.set_recovery_status(uid, a.alias, a.status)
                     .map(|()| ls::write_set_recovery_status_reply(&mut p))
             }
+            ls::GET_KEY => {
+                let a = ls::GetKey::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.key(uid, a.alias)
+                    .map(|k| ls::write_get_key_reply(&mut p, &k))
+            }
             ls::GET_RECOVERY_STATUS => {
                 ls::GetRecoveryStatus::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.recovery_status(uid)
@@ -664,16 +782,88 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// An agent's values are written to its entry, created first, as
-    /// `RecoverableKeyStoreDb` writes them, a root of trust's per alias.
-    #[test]
-    fn agent_values_are_written_as_the_keystore_db_writes_them() {
+    /// `RecoverableKeyStoreDbContract`'s tables of the agents' state.
+    fn keystore_db() -> Connection {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(
             "CREATE TABLE recovery_service_metadata (_id INTEGER PRIMARY KEY,user_id INTEGER,uid INTEGER,snapshot_version INTEGER,should_create_snapshot INTEGER,active_root_of_trust TEXT,public_key BLOB,cert_path BLOB,cert_serial INTEGER,secret_types TEXT,counter_id INTEGER,server_params BLOB,UNIQUE(user_id,uid));
              CREATE TABLE root_of_trust (_id INTEGER PRIMARY KEY,user_id INTEGER,uid INTEGER,root_alias TEXT,cert_path BLOB,cert_serial INTEGER,UNIQUE(user_id,uid,root_alias));",
         )
         .unwrap();
+        db
+    }
+
+    /// An agent's recovery service is recorded, kept or refused by its
+    /// file's serial as `initRecoveryService` records it, here with the
+    /// original's certificate test file (serial 1000), its root and a date
+    /// all its certificates are valid at (`TestData`).
+    #[test]
+    fn a_recovery_service_is_recorded_by_its_serial() {
+        const CERT_XML: &[u8] =
+            include_bytes!("../../tests/fixtures/recoverable_keystore/valid-cert-file.xml");
+        const ROOT: &str =
+            include_str!("../../tests/fixtures/recoverable_keystore/root-ca-trusted.b64");
+        const DATE_ALL_CERTS_VALID: i64 = 1_516_406_400;
+        let root: String = ROOT.chars().filter(|c| !c.is_whitespace()).collect();
+        let root = aim_android_xml::base64::decode(&root).unwrap();
+        let db = keystore_db();
+        let (uid, path) = (10_150, Path::new("db"));
+        let alias = GOOGLE_CLOUD_KEY_VAULT_SERVICE_V1_ALIAS;
+        let init = |db: &Connection, alias| {
+            init_recovery_service(db, path, uid, alias, CERT_XML, &root, DATE_ALL_CERTS_VALID)
+        };
+        let value = |column, alias| agent_value::<i64>(&db, ROOT_OF_TRUST, column, uid, alias);
+        let counter = || agent_value::<i64>(&db, METADATA, "counter_id", uid, None).unwrap();
+        set_agent_value(&db, METADATA, "snapshot_version", uid, None, &3).unwrap();
+
+        init(&db, alias).unwrap();
+        assert_eq!(value("cert_serial", Some(alias)).unwrap(), Some(1000));
+        let cert_path: Vec<u8> = agent_value(&db, ROOT_OF_TRUST, "cert_path", uid, Some(alias))
+            .unwrap()
+            .unwrap();
+        let cert_xml = CertXml::parse(CERT_XML).unwrap().unwrap();
+        assert!(cert_xml.endpoints.iter().any(|e| cert_path.ends_with(e)));
+        assert_eq!(
+            agent_value::<String>(&db, METADATA, "active_root_of_trust", uid, None).unwrap(),
+            Some(alias.to_string())
+        );
+        assert_eq!(
+            agent_value::<i64>(&db, METADATA, "should_create_snapshot", uid, None).unwrap(),
+            Some(1)
+        );
+        let counter_id = counter();
+        assert!(counter_id.is_some());
+
+        // The same serial again changes nothing.
+        init(&db, alias).unwrap();
+        assert_eq!(counter(), counter_id);
+
+        // An older file is refused, but for the test-only root.
+        set_agent_value(&db, ROOT_OF_TRUST, "cert_serial", uid, Some(alias), &1001).unwrap();
+        let e = init(&db, alias).unwrap_err();
+        assert_eq!(
+            (e.code, e.service_specific),
+            (EX_SERVICE_SPECIFIC, ERROR_DOWNGRADE_CERTIFICATE)
+        );
+        let test_only = TEST_ONLY_INSECURE_CERTIFICATE_ALIAS;
+        set_agent_value(
+            &db,
+            ROOT_OF_TRUST,
+            "cert_serial",
+            uid,
+            Some(test_only),
+            &1001,
+        )
+        .unwrap();
+        init(&db, test_only).unwrap();
+        assert_eq!(value("cert_serial", Some(test_only)).unwrap(), Some(1000));
+    }
+
+    /// An agent's values are written to its entry, created first, as
+    /// `RecoverableKeyStoreDb` writes them, a root of trust's per alias.
+    #[test]
+    fn agent_values_are_written_as_the_keystore_db_writes_them() {
+        let db = keystore_db();
         let uid = 1_010_150;
         assert_eq!(
             agent_value::<String>(&db, METADATA, "secret_types", uid, None).unwrap(),
