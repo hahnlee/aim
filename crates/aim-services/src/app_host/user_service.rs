@@ -453,6 +453,71 @@ pub(super) fn serial_number(host: &AppHost, user: i32) -> Result<Option<i32>, Ex
     Ok(Some(info.serial_number))
 }
 
+/// What `UserDataPreparer` and `reconcileAppsData` read of a user's
+/// `UserInfo`: its serial number, `lastLoggedInTime` and
+/// `lastLoggedInFingerprint`; none for a user that does not exist.
+pub(super) fn storage_user(
+    host: &AppHost,
+    user: i32,
+) -> Result<Option<(i32, i64, Option<String>)>, Exception> {
+    if user != SYSTEM_USER {
+        return Ok(None);
+    }
+    let (path, bytes) = host.user_file()?;
+    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+    let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
+    Ok(Some((
+        info.serial_number,
+        info.last_logged_in_time,
+        info.last_logged_in_fingerprint,
+    )))
+}
+
+/// `UserManagerService.onUserLoggedIn` at the user's unlock: its
+/// `lastLoggedInTime` (once the clock is past
+/// `EPOCH_PLUS_30_YEARS`) and `lastLoggedInFingerprint`, written as
+/// `writeUserLP` writes them.
+pub(super) fn user_logged_in(
+    host: &AppHost,
+    user: i32,
+    now: i64,
+    fingerprint: &str,
+) -> Result<(), Exception> {
+    const EPOCH_PLUS_30_YEARS: i64 = 30 * 365 * 24 * 60 * 60 * 1000;
+    if user != SYSTEM_USER {
+        return Ok(());
+    }
+    let (path, bytes) = host.user_file()?;
+    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+    let mut root = aim_android_xml::read(&bytes).map_err(state)?;
+    if read_user(&root).map_err(state)?.0.partial {
+        return Ok(());
+    }
+    if now > EPOCH_PLUS_30_YEARS {
+        set_attr(&mut root, "lastLoggedIn", None, XmlValue::Long(now));
+    }
+    set_attr(
+        &mut root,
+        "lastLoggedInFingerprint",
+        Some("lastLoggedIn"),
+        XmlValue::String(fingerprint.into()),
+    );
+    super::shortcut_service::write_resilient(&path, std::slice::from_ref(&root), USER_FILE_MODE)
+        .map_err(|e| state(e.to_string()))
+}
+
+/// `name`'s value on `e`, in place, or added after `after` (else last).
+fn set_attr(e: &mut Element, name: &str, after: Option<&str>, value: XmlValue) {
+    if let Some(attr) = e.attrs.iter_mut().find(|(n, _)| n == name) {
+        attr.1 = value;
+        return;
+    }
+    let at = after
+        .and_then(|after| e.attrs.iter().position(|(n, _)| n == after))
+        .map_or(e.attrs.len(), |i| i + 1);
+    e.attrs.insert(at, (name.into(), value));
+}
+
 /// The users directory (`rwxrwxr-x`), the system user's file, then the
 /// user list, each as `ResilientAtomicFile` writes it.
 fn write_users(users: &Path, user: &Element, list: &Element) -> Result<(), String> {

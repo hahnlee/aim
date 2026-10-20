@@ -4,7 +4,7 @@
 //! mount user 0's emulated volume (`aim-app-host-agent`, which serves its
 //! FUSE connection in MediaProvider's place), follows the volume's state
 //! from vold's listener calls, answers apps' `getVolumeList`,
-//! `getVolumes`, `mkdirs` and allocations, and tells the listeners apps register of
+//! `getVolumes`, `mkdirs`, `fixupAppDir` and allocations, and tells the listeners apps register of
 //! the volume's state changes (`registerListener`).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -25,12 +25,13 @@ use super::{AppHost, reply, system_boolean};
 /// vold's service and `IVold`'s calls the app host makes, in the
 /// interface's order.
 const VOLD: &str = "vold";
-const VOLD_DESCRIPTOR: &str = "android.os.IVold";
+pub(super) const VOLD_DESCRIPTOR: &str = "android.os.IVold";
 const SET_LISTENER: u32 = 1;
 const RESET: u32 = 4;
 const ON_USER_ADDED: u32 = 6;
 const ON_USER_STARTED: u32 = 8;
 const SETUP_APP_DIR: u32 = 23;
+const FIXUP_APP_DIR: u32 = 24;
 /// `IVoldListener`'s volume calls.
 const LISTENER_DESCRIPTOR: &str = "android.os.IVoldListener";
 const ON_DISK_CREATED: u32 = 1;
@@ -170,8 +171,15 @@ impl WriteParcelable for VolumeInfo {
 
 impl AppHost {
     /// StorageManagerService's start: vold connected and reset, user 0
-    /// added and started, its emulated volume mounted by the agent.
+    /// added, prepared and started, its emulated volume mounted by the
+    /// agent; with PackageManagerService's and UserManagerService's
+    /// preparation of the user's and its apps' data (`app_data`).
     pub(super) fn start_storage(&self) -> Result<(), String> {
+        let installd = self.installd()?;
+        // PackageManagerService's start.
+        if let Err(e) = self.fix_apps_data_on_boot(&installd) {
+            eprintln!("app host: app data: {e}");
+        }
         let deadline = Instant::now() + VOLD_PATIENCE;
         let vold = loop {
             if let Ok(vold) = super::display::check_service(&self.process, VOLD) {
@@ -207,7 +215,25 @@ impl AppHost {
             p.write_i32(SERIAL);
             p.write_i32(-1); // shares storage with no user
         })?;
+        // UserManagerService's `onBeforeStartUser`, then
+        // `onBeforeUnlockUser`: the user's DE, then CE storage and apps'
+        // data, migrated when the build's fingerprint is not the one the
+        // user last logged in with.
+        let fingerprint = super::app_data::fingerprint(|key| self.property(key));
+        let migrate = super::user_service::storage_user(self, USER)
+            .map_err(|e| e.message)?
+            .is_some_and(|(_, _, last)| last.as_deref() != Some(&fingerprint));
+        let prepare = |flags: i32| {
+            if let Err(e) = self.prepare_user_data(&vold, &installd, USER, flags) {
+                eprintln!("app host: user data: {e}");
+            }
+            if let Err(e) = self.reconcile_apps_data(&installd, USER, flags, migrate) {
+                eprintln!("app host: app data: {e}");
+            }
+        };
+        prepare(super::app_data::FLAG_STORAGE_DE);
         call(ON_USER_STARTED, "onUserStarted", &|p| p.write_i32(USER))?;
+        prepare(super::app_data::FLAG_STORAGE_CE);
         *self.storage.vold.lock().unwrap() = Some(vold);
         let daemon = self.media_provider_uid().map_err(|e| format!("{e:?}"))?;
         self.call_agent(MOUNT_STORAGE, "mountStorage", |p| {
@@ -217,6 +243,13 @@ impl AppHost {
         .map(|_| ())
         .map_err(|e| format!("{e:?}"))?;
         eprintln!("app host: {VOLUME} mounted");
+        // `finishUserUnlockedCompleted`: UserManagerService's
+        // `onUserLoggedIn`.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        super::user_service::user_logged_in(self, USER, now, &fingerprint)
+            .map_err(|e| e.message)?;
         Ok(())
     }
 
@@ -677,6 +710,57 @@ impl AppHost {
         let mut p = Parcel::new();
         sm::write_mkdirs_reply(&mut p);
         Ok(p)
+    }
+
+    /// `fixupAppDir`: an app's directory of a known app path, with its
+    /// user, fixed up by vold for the package's uid; what fails is
+    /// logged.
+    fn fixup_app_dir(&self, path: &str) -> Result<(), Exception> {
+        let Some((user, package)) = known_app_dir(path) else {
+            eprintln!("app host: mount: Path {path} is not a valid application-specific directory");
+            return Ok(());
+        };
+        let Some(user) = user else {
+            eprintln!("app host: mount: Asked to fixup an app dir without a userId: {path}");
+            return Ok(());
+        };
+        let Ok(user) = user.parse::<i32>() else {
+            eprintln!("app host: mount: Invalid userId in path: {path}");
+            return Ok(());
+        };
+        let (state, resolution) = self.packages()?;
+        let query = crate::package::query::Query {
+            state: &state,
+            filter: &resolution.apps_filter,
+            calling_uid: crate::package::apps_filter::SYSTEM_UID,
+        };
+        let uid = query
+            .package_uid(&package, 0, user)
+            .map_err(|e| self.unimplemented_named("mount", e.0))??;
+        if uid < 0 {
+            eprintln!("app host: mount: Couldn't find package to fixup app dir {path}");
+            return Ok(());
+        }
+        let vold = self.storage.vold.lock().unwrap();
+        let vold = vold
+            .as_ref()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "vold is not connected"))?;
+        let mut data = Parcel::new();
+        data.write_interface_token(VOLD_DESCRIPTOR);
+        data.write_string16(Some(&format!("{path}/")));
+        data.write_i32(uid);
+        let failed = match vold.transact(FIXUP_APP_DIR, &data, false) {
+            Err(s) => Some(s.to_string()),
+            Ok(reply) => match reply.reader().read_exception() {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(e.message),
+                Err(s) => Some(s.to_string()),
+            },
+        };
+        if let Some(e) = failed {
+            eprintln!("app host: mount: Failed to fixup app dir for {package}: {e}");
+        }
+        Ok(())
     }
 
     /// `isUidOwnerOfPackageOrSystem`, `AppOpsManager.checkPackage`.
@@ -1167,6 +1251,15 @@ impl Service for StorageManager {
                     self.0
                         .mkdirs(call, args.calling_pkg.as_deref(), args.path.as_deref()),
                 )
+            }
+            sm::FIXUP_APP_DIR => {
+                let args = sm::FixupAppDir::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let path = args.path.ok_or(BAD_VALUE)?;
+                reply(self.0.fixup_app_dir(&path).map(|()| {
+                    let mut p = Parcel::new();
+                    sm::write_fixup_app_dir_reply(&mut p);
+                    p
+                }))
             }
             sm::REGISTER_LISTENER => {
                 let args = sm::RegisterListener::read(&mut call.data).map_err(|_| BAD_VALUE)?;

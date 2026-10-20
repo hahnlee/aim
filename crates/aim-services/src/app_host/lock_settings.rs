@@ -312,7 +312,7 @@ fn open_keystore(path: &Path, locale: &str) -> rusqlite::Result<Connection> {
 /// (`persist.sys.locale`, a list of language tags): the first's
 /// language, region, variant and `#` script, as `Locale.toString` joins
 /// them.
-fn java_locale(locales: &str) -> String {
+pub(super) fn java_locale(locales: &str) -> String {
     let tag = locales.split(',').next().unwrap_or_default();
     let mut parts = tag.split(['-', '_']);
     let language = parts.next().unwrap_or_default().to_ascii_lowercase();

@@ -93,9 +93,6 @@ impl Callback {
 
 pub(super) struct Writes {
     host: Arc<AppHost>,
-    /// The owner of the persisted state, opened by the first write;
-    /// holding it serializes writes (`mLock`).
-    store: Mutex<Option<Store>>,
     /// The pending broadcasts, and whether their sending is scheduled.
     pending: Mutex<(Pending, bool)>,
     started: Instant,
@@ -113,7 +110,6 @@ impl Writes {
             .expect("the package handler's thread");
         Arc::new(Writes {
             host,
-            store: Mutex::new(None),
             pending: Mutex::default(),
             started: Instant::now(),
             handler: Mutex::new(sender),
@@ -133,7 +129,7 @@ impl Writes {
         call: &Call<'_>,
         settings: &[Setting],
     ) -> Result<(), Exception> {
-        let mut store = self.store.lock().unwrap();
+        let mut store = self.host.package_store.lock().unwrap();
         let writer = self.host.model_writer.lock().unwrap();
         let (before, resolution) = self.host.packages()?;
         let query = Query {

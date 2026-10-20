@@ -707,6 +707,95 @@ impl Store {
         result
     }
 
+    /// The data directories' inodes installd reported for packages of
+    /// `user` (`PackageSetting.setCeDataInode`, `setDeDataInode`), written to
+    /// its `package-restrictions.xml` as `writePackageRestrictionsLPr`
+    /// writes them: after the name, none for 0.
+    pub fn commit_data_inodes(
+        &mut self,
+        user: u32,
+        inodes: &[(String, i64, i64)],
+    ) -> Result<(), WriteError> {
+        if self.unread_restrictions.contains(&user) {
+            return Err(WriteError::before(
+                "package restrictions were not restored by the settings continuation",
+            ));
+        }
+        let mut root = self
+            .restrictions
+            .get(&user)
+            .cloned()
+            .ok_or_else(|| WriteError::before(format!("unknown user {user}")))?;
+        for (package, ce, de) in inodes {
+            if !self
+                .state
+                .settings
+                .packages
+                .iter()
+                .any(|p| &p.name == package)
+            {
+                return Err(WriteError::before(format!("unknown package {package}")));
+            }
+            let index = root.content.iter().position(|node| {
+                matches!(node,
+                Node::Element(e) if e.name == "pkg" && e.string("name").as_deref() == Some(package))
+            });
+            let index = index.unwrap_or_else(|| {
+                let mut entry = element("pkg");
+                entry
+                    .attrs
+                    .push(("name".into(), Value::String(package.clone())));
+                root.content.push(Node::Element(entry));
+                root.content.len() - 1
+            });
+            let Node::Element(entry) = &mut root.content[index] else {
+                unreachable!()
+            };
+            entry
+                .attrs
+                .retain(|(key, _)| key != "ceDataInode" && key != "deDataInode");
+            let at = entry
+                .attrs
+                .iter()
+                .position(|(key, _)| key == "name")
+                .map_or(0, |i| i + 1);
+            let values = [("deDataInode", *de), ("ceDataInode", *ce)];
+            for (key, value) in values.into_iter().filter(|(_, v)| *v != 0) {
+                entry.attrs.insert(at, (key.into(), Value::Long(value)));
+            }
+        }
+        let restrictions = Restrictions::parse(&root).map_err(WriteError::before)?;
+        let bytes = abx::write(&root).map_err(WriteError::before)?;
+        let dir = self.data.join("system/users").join(user.to_string());
+        let path = dir.join("package-restrictions.xml");
+        let backup = dir.join("package-restrictions-backup.xml");
+        prepare(&path, &backup, &self.durable_restrictions[&user]).map_err(WriteError::before)?;
+        let result = write_resilient(&path, &backup, &bytes);
+        if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
+            self.durable_restrictions.insert(user, root.clone());
+            self.restrictions.insert(user, root);
+            let packages = &mut self
+                .state
+                .users
+                .iter_mut()
+                .find(|(id, _)| *id == user)
+                .expect("opened user")
+                .1
+                .restrictions
+                .packages;
+            for (name, parsed) in restrictions.packages {
+                match packages.iter_mut().find(|(n, _)| *n == name) {
+                    Some(updated) => {
+                        updated.1.ce_data_inode = parsed.ce_data_inode;
+                        updated.1.de_data_inode = parsed.de_data_inode;
+                    }
+                    None => packages.push((name, parsed)),
+                }
+            }
+        }
+        result
+    }
+
     /// Commits an enabled-state change that the service has validated.
     /// The entire user's restriction document is retained; settings,
     /// domain verification and permission files are not rewritten here.
