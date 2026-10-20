@@ -214,6 +214,54 @@ impl AppHost {
         })
     }
 
+    /// `queryConfigurationStats` of user 0: each interval's configurations
+    /// in the range (`sConfigStatsCombiner`), with the interval's begin and
+    /// end (`getOrCreateConfigurationStats`).
+    pub(super) fn configuration_stats_in_range(
+        &self,
+        interval: i32,
+        begin: i64,
+        end: i64,
+    ) -> Result<Option<Vec<ConfigStats>>, Exception> {
+        let stats = self.with_usage(|user, clocks, notified| {
+            let now = user.check_and_get_time(clocks, notified);
+            if !(begin <= now && begin < end) {
+                return None;
+            }
+            user.query_stats(interval, begin, end, true, |stats, out| {
+                out.extend(
+                    stats
+                        .configurations
+                        .iter()
+                        .map(|c| (c.clone(), stats.begin_time, stats.end_time)),
+                );
+                true
+            })
+        })?;
+        stats
+            .map(|all| {
+                all.into_iter()
+                    .map(|(c, begin, end)| {
+                        Ok(ConfigStats {
+                            configuration: super::config::Configuration::from_proto(&c.config)
+                                .map_err(|e| {
+                                    Exception::new(
+                                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                                        format!("usagestats: a persisted configuration: {e}"),
+                                    )
+                                })?,
+                            begin,
+                            end,
+                            last_time_active: c.last_time_active,
+                            total_time_active: c.total_time_active,
+                            activation_count: c.activation_count,
+                        })
+                    })
+                    .collect()
+            })
+            .transpose()
+    }
+
     /// `reportEvent` of an event the app host reports for user 0.
     pub(super) fn report_usage_stats_event(&self, event: Event) {
         let reported = self.with_usage(|user, clocks, notified| {
@@ -551,6 +599,32 @@ impl UsageStats {
     }
 }
 
+/// A `ConfigurationStats` as `writeToParcel` writes it.
+pub(super) struct ConfigStats {
+    configuration: super::config::Configuration,
+    begin: i64,
+    end: i64,
+    last_time_active: i64,
+    total_time_active: i64,
+    activation_count: i32,
+}
+
+impl WriteParcelable for ConfigStats {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i32(1);
+        self.configuration.write_to(p);
+        for v in [
+            self.begin,
+            self.end,
+            self.last_time_active,
+            self.total_time_active,
+        ] {
+            p.write_i64(v);
+        }
+        p.write_i32(self.activation_count);
+    }
+}
+
 impl Service for UsageStats {
     fn descriptor(&self) -> &str {
         us::DESCRIPTOR
@@ -666,6 +740,32 @@ impl Service for UsageStats {
                 match events {
                     Ok(events) => {
                         us::write_query_events_for_package_for_user_reply(&mut p, events.as_ref())
+                    }
+                    Err(e) => return reply(Err(e)),
+                }
+            }
+            // `hasPermission` (as `queryUsageStats` checks), then the
+            // caller's user's configurations.
+            us::QUERY_CONFIGURATION_STATS => {
+                let a = us::QueryConfigurationStats::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let package = a.calling_package.as_deref().unwrap_or_default();
+                let stats = match self.has_query_permission(uid, package) {
+                    Ok(true) if uid / PER_USER_RANGE == 0 => self
+                        .host
+                        .configuration_stats_in_range(a.bucket_type, a.begin_time, a.end_time),
+                    Ok(_) => Ok(None),
+                    Err(e) => Err(e),
+                };
+                match stats {
+                    Ok(stats) => {
+                        let slice = stats.map(|s| {
+                            Slice::new(
+                                self.host.process.clone(),
+                                "android.app.usage.ConfigurationStats",
+                                s,
+                            )
+                        });
+                        us::write_query_configuration_stats_reply(&mut p, slice.as_ref())
                     }
                     Err(e) => return reply(Err(e)),
                 }

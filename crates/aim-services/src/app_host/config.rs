@@ -12,6 +12,7 @@ use aim_binder_host::parcel::Parcel;
 use aim_service_aidl::WriteParcelable;
 
 use super::display::Display;
+use super::exit_info::fields;
 use crate::package::info::ApplicationInfo;
 
 /// `Configuration`'s constants.
@@ -212,6 +213,349 @@ impl WriteParcelable for Configuration {
         ] {
             p.write_i32(v);
         }
+    }
+}
+
+/// `Configuration.unset` and `WindowConfiguration.setToDefaults`: every
+/// field undefined.
+fn unset() -> Configuration {
+    Configuration {
+        font_weight_adjustment: i32::MAX,
+        grammatical_gender: -1,
+        window: WindowConfiguration {
+            rotation: -1,
+            display_rotation: -1,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// `Rect.readFromProto` (`RectProto`: left, top, right, bottom).
+fn rect_from_proto(bytes: &[u8]) -> Result<Rect, String> {
+    let mut r = Rect::default();
+    fields(bytes, |n, v| {
+        match n {
+            1 => r.left = v.int()?,
+            2 => r.top = v.int()?,
+            3 => r.right = v.int()?,
+            4 => r.bottom = v.int()?,
+            _ => {}
+        }
+        Ok(())
+    })?;
+    Ok(r)
+}
+
+/// A `Locale.Builder`'s language tag of a `LocaleProto`'s language,
+/// country, variant and script; none for an ill-formed one.
+fn locale_tag(language: &str, country: &str, variant: &str, script: &str) -> Option<String> {
+    let alpha = |s: &str, lens: &[usize]| {
+        s.is_empty() || (lens.contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphabetic()))
+    };
+    if !alpha(language, &[2, 3, 4, 5, 6, 7, 8])
+        || !alpha(script, &[4])
+        || !(alpha(country, &[2])
+            || (country.len() == 3 && country.chars().all(|c| c.is_ascii_digit())))
+        || !variant.split(['-', '_']).all(|v| {
+            v.is_empty()
+                || ((5..=8).contains(&v.len())
+                    || (v.len() == 4 && v.starts_with(|c: char| c.is_ascii_digit())))
+                    && v.chars().all(|c| c.is_ascii_alphanumeric())
+        })
+    {
+        return None;
+    }
+    let mut parts = vec![if language.is_empty() {
+        "und".to_string()
+    } else {
+        language.to_ascii_lowercase()
+    }];
+    if !script.is_empty() {
+        let mut s = script.to_ascii_lowercase();
+        s[..1].make_ascii_uppercase();
+        parts.push(s);
+    }
+    if !country.is_empty() {
+        parts.push(country.to_ascii_uppercase());
+    }
+    parts.extend(
+        variant
+            .split(['-', '_'])
+            .filter(|v| !v.is_empty())
+            .map(str::to_string),
+    );
+    Some(parts.join("-"))
+}
+
+impl Configuration {
+    /// `new Configuration()`, then `readFromProto` of a `ConfigurationProto`
+    /// (as `UsageStatsProtoV2` reads the configurations it persisted).
+    pub fn from_proto(bytes: &[u8]) -> Result<Configuration, String> {
+        let mut c = unset();
+        let mut list: Vec<String> = Vec::new();
+        fields(bytes, |n, v| {
+            match n {
+                1 => c.font_scale = v.float()?,
+                2 => c.mcc = v.int()?,
+                3 => c.mnc = v.int()?,
+                // A `LocaleProto` of the deprecated repeated locales.
+                4 => {
+                    let (mut language, mut country, mut variant, mut script) =
+                        (String::new(), String::new(), String::new(), String::new());
+                    fields(v.bytes()?, |n, v| {
+                        match n {
+                            1 => language = v.string()?,
+                            2 => country = v.string()?,
+                            3 => variant = v.string()?,
+                            4 => script = v.string()?,
+                            _ => {}
+                        }
+                        Ok(())
+                    })?;
+                    match locale_tag(&language, &country, &variant, &script) {
+                        Some(tag) if list.contains(&tag) => {
+                            eprintln!("app host: Configuration: Repeated locale ({tag}) found")
+                        }
+                        Some(tag) => list.push(tag),
+                        None => eprintln!(
+                            "app host: Configuration: readFromProto error building locale with: language-{language};country-{country};variant-{variant};script-{script}"
+                        ),
+                    }
+                }
+                5 => c.screen_layout = v.int()?,
+                6 => c.color_mode = v.int()?,
+                7 => c.touchscreen = v.int()?,
+                8 => c.keyboard = v.int()?,
+                9 => c.keyboard_hidden = v.int()?,
+                10 => c.hard_keyboard_hidden = v.int()?,
+                11 => c.navigation = v.int()?,
+                12 => c.navigation_hidden = v.int()?,
+                13 => c.orientation = v.int()?,
+                14 => c.ui_mode = v.int()?,
+                15 => c.screen_width_dp = v.int()?,
+                16 => c.screen_height_dp = v.int()?,
+                17 => c.smallest_screen_width_dp = v.int()?,
+                18 => c.density_dpi = v.int()?,
+                // `WindowConfiguration.readFromProto`.
+                19 => fields(v.bytes()?, |n, v| {
+                    let w = &mut c.window;
+                    match n {
+                        1 => w.app_bounds = Some(rect_from_proto(v.bytes()?)?),
+                        2 => w.windowing_mode = v.int()?,
+                        3 => w.activity_type = v.int()?,
+                        4 => w.bounds = rect_from_proto(v.bytes()?)?,
+                        5 => w.max_bounds = rect_from_proto(v.bytes()?)?,
+                        _ => {}
+                    }
+                    Ok(())
+                })?,
+                20 => c.locales = v.string()?,
+                21 => c.font_weight_adjustment = v.int()?,
+                22 => c.grammatical_gender = v.int()?,
+                _ => {}
+            }
+            Ok(())
+        })?;
+        if !list.is_empty() {
+            c.locales = list.join(",");
+        }
+        Ok(c)
+    }
+}
+
+/// A `ProtoOutputStream` as far as `Configuration.dumpDebug` writes:
+/// scalars that are 0 and empty strings and messages are left out.
+#[derive(Default)]
+struct ProtoOut(Vec<u8>);
+
+impl ProtoOut {
+    fn raw_varint(&mut self, mut v: u64) {
+        while v >= 0x80 {
+            self.0.push(v as u8 | 0x80);
+            v >>= 7;
+        }
+        self.0.push(v as u8);
+    }
+
+    /// A `uint32` field.
+    fn uint32(&mut self, field: u64, v: i32) {
+        if v != 0 {
+            self.raw_varint(field << 3);
+            self.raw_varint(u64::from(v as u32));
+        }
+    }
+
+    /// An `int32` field: a negative value takes ten bytes.
+    fn int32(&mut self, field: u64, v: i32) {
+        if v != 0 {
+            self.raw_varint(field << 3);
+            self.raw_varint(v as i64 as u64);
+        }
+    }
+
+    fn float(&mut self, field: u64, v: f32) {
+        if v != 0.0 {
+            self.raw_varint(field << 3 | 5);
+            self.0.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+
+    fn bytes(&mut self, field: u64, v: &[u8]) {
+        if !v.is_empty() {
+            self.raw_varint(field << 3 | 2);
+            self.raw_varint(v.len() as u64);
+            self.0.extend_from_slice(v);
+        }
+    }
+}
+
+impl Rect {
+    /// `Rect.dumpDebug`.
+    fn to_proto(self) -> Vec<u8> {
+        let mut o = ProtoOut::default();
+        o.int32(1, self.left);
+        o.int32(2, self.top);
+        o.int32(3, self.right);
+        o.int32(4, self.bottom);
+        o.0
+    }
+}
+
+/// `Configuration`'s masks of the UI mode's parts.
+const UI_MODE_TYPE_MASK: i32 = 0x0f;
+const UI_MODE_NIGHT_MASK: i32 = 0x30;
+
+impl Configuration {
+    /// `Configuration.dumpDebug(proto, fieldId)`: neither persisted nor
+    /// critical, so with the window configuration.
+    pub fn to_proto(&self) -> Vec<u8> {
+        let mut o = ProtoOut::default();
+        o.float(1, self.font_scale);
+        o.uint32(2, self.mcc);
+        o.uint32(3, self.mnc);
+        o.bytes(20, self.locales.as_bytes());
+        o.uint32(5, self.screen_layout);
+        o.uint32(6, self.color_mode);
+        o.uint32(7, self.touchscreen);
+        o.uint32(8, self.keyboard);
+        o.uint32(9, self.keyboard_hidden);
+        o.uint32(10, self.hard_keyboard_hidden);
+        o.uint32(11, self.navigation);
+        o.uint32(12, self.navigation_hidden);
+        o.uint32(14, self.ui_mode);
+        o.uint32(17, self.smallest_screen_width_dp);
+        o.uint32(18, self.density_dpi);
+        // `WindowConfiguration.dumpDebug`.
+        let w = &self.window;
+        let mut window = ProtoOut::default();
+        if let Some(app_bounds) = w.app_bounds {
+            window.bytes(1, &app_bounds.to_proto());
+        }
+        window.int32(2, w.windowing_mode);
+        window.int32(3, w.activity_type);
+        window.bytes(4, &w.bounds.to_proto());
+        window.bytes(5, &w.max_bounds.to_proto());
+        o.bytes(19, &window.0);
+        o.uint32(21, self.font_weight_adjustment);
+        o.uint32(13, self.orientation);
+        o.uint32(15, self.screen_width_dp);
+        o.uint32(16, self.screen_height_dp);
+        o.uint32(22, self.grammatical_gender);
+        o.0
+    }
+
+    /// `Configuration.generateDelta(base, change)`: the fields of `change`
+    /// that differ from `base`, the rest undefined.
+    pub fn generate_delta(base: &Configuration, change: &Configuration) -> Configuration {
+        let mut d = unset();
+        if base.font_scale != change.font_scale {
+            d.font_scale = change.font_scale;
+        }
+        if base.mcc != change.mcc {
+            d.mcc = change.mcc;
+        }
+        if base.mnc != change.mnc {
+            d.mnc = change.mnc;
+        }
+        if base.locales != change.locales {
+            d.locales = change.locales.clone();
+        }
+        if base.grammatical_gender != change.grammatical_gender {
+            d.grammatical_gender = change.grammatical_gender;
+        }
+        for (b, c, field) in [
+            (base.touchscreen, change.touchscreen, &mut d.touchscreen),
+            (base.keyboard, change.keyboard, &mut d.keyboard),
+            (
+                base.keyboard_hidden,
+                change.keyboard_hidden,
+                &mut d.keyboard_hidden,
+            ),
+            (base.navigation, change.navigation, &mut d.navigation),
+            (
+                base.navigation_hidden,
+                change.navigation_hidden,
+                &mut d.navigation_hidden,
+            ),
+            (base.orientation, change.orientation, &mut d.orientation),
+            (
+                base.screen_width_dp,
+                change.screen_width_dp,
+                &mut d.screen_width_dp,
+            ),
+            (
+                base.screen_height_dp,
+                change.screen_height_dp,
+                &mut d.screen_height_dp,
+            ),
+            (
+                base.smallest_screen_width_dp,
+                change.smallest_screen_width_dp,
+                &mut d.smallest_screen_width_dp,
+            ),
+            (base.density_dpi, change.density_dpi, &mut d.density_dpi),
+            (base.assets_seq, change.assets_seq, &mut d.assets_seq),
+            (
+                base.font_weight_adjustment,
+                change.font_weight_adjustment,
+                &mut d.font_weight_adjustment,
+            ),
+        ] {
+            if b != c {
+                *field = c;
+            }
+        }
+        let parts = |b: i32, c: i32, masks: &[i32]| {
+            masks
+                .iter()
+                .filter(|&&m| b & m != c & m)
+                .fold(0, |delta, &m| delta | (c & m))
+        };
+        d.screen_layout = parts(
+            base.screen_layout,
+            change.screen_layout,
+            &[
+                SCREENLAYOUT_SIZE_MASK,
+                SCREENLAYOUT_LAYOUTDIR_MASK,
+                SCREENLAYOUT_LONG_MASK,
+                SCREENLAYOUT_ROUND_MASK,
+            ],
+        );
+        d.color_mode = parts(
+            base.color_mode,
+            change.color_mode,
+            &[COLOR_MODE_WIDE_COLOR_GAMUT_MASK, COLOR_MODE_HDR_MASK],
+        );
+        d.ui_mode = parts(
+            base.ui_mode,
+            change.ui_mode,
+            &[UI_MODE_TYPE_MASK, UI_MODE_NIGHT_MASK],
+        );
+        if base.window != change.window {
+            d.window = change.window.clone();
+        }
+        d
     }
 }
 
@@ -722,6 +1066,76 @@ impl CompatibilityInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn phone(night: bool) -> Configuration {
+        let device = Device {
+            locales: "ko-KR",
+            right_to_left: false,
+            night,
+            font_scale: 1.0,
+            font_weight_adjustment: 0,
+            seq: 13,
+        };
+        Configuration::of(&Display::phone_for_test(), &device)
+    }
+
+    /// `dumpDebug` then `readFromProto` keeps what the proto carries; the
+    /// sequence numbers, compat sizes and the set-locale flag are not in it,
+    /// and a field of 0 is left out, so one undefined by default reads back
+    /// undefined (as the original's does).
+    #[test]
+    fn a_configuration_reads_back_from_its_proto() {
+        let c = phone(false);
+        let back = Configuration::from_proto(&c.to_proto()).unwrap();
+        assert_eq!(
+            back,
+            Configuration {
+                seq: 0,
+                assets_seq: 0,
+                compat_screen_width_dp: 0,
+                compat_screen_height_dp: 0,
+                compat_smallest_screen_width_dp: 0,
+                user_set_locale: false,
+                font_weight_adjustment: i32::MAX,
+                grammatical_gender: -1,
+                window: WindowConfiguration {
+                    always_on_top: 0,
+                    rotation: -1,
+                    display_rotation: -1,
+                    ..c.window.clone()
+                },
+                ..c
+            }
+        );
+        // An empty message is `new Configuration()`.
+        assert_eq!(Configuration::from_proto(&[]).unwrap(), unset());
+    }
+
+    /// The deprecated repeated locales win over the locale list.
+    #[test]
+    fn repeated_locales_build_the_list() {
+        let mut o = ProtoOut::default();
+        o.bytes(20, b"fr-FR");
+        for (language, country) in [("en", "us"), ("ko", "KR"), ("en", "US")] {
+            let mut l = ProtoOut::default();
+            l.bytes(1, language.as_bytes());
+            l.bytes(2, country.as_bytes());
+            o.bytes(4, &l.0);
+        }
+        assert_eq!(
+            Configuration::from_proto(&o.0).unwrap().locales,
+            "en-US,ko-KR"
+        );
+    }
+
+    /// `generateDelta` of a night mode change: the night bits alone.
+    #[test]
+    fn a_delta_has_only_what_changed() {
+        let (day, night) = (phone(false), phone(true));
+        let d = Configuration::generate_delta(&day, &night);
+        assert_eq!(d.ui_mode, night.ui_mode & UI_MODE_NIGHT_MASK);
+        assert_eq!(Configuration { ui_mode: 0, ..d }, unset());
+    }
 
     /// The original's configuration of a 1080x1920 display at 320 dpi
     /// (system_server's `bindApplication` to Calculator, captured on the
