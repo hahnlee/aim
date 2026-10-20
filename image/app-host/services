@@ -14,7 +14,9 @@
 # aim-appsearch runs the original AppSearch module, which only system_server
 # would run; tombstoned keeps the tombstones crash_dump writes and the stack
 # traces processes dump on SIGQUIT; installd creates apps' data directories
-# as the package side asks (`createAppData`).
+# as the package side asks (`createAppData`); vdc is post-fs-data's
+# `init_user0`, vold preparing /data/data and user 0's DE storage before
+# them.
 apexd-bootstrap
 apexd
 keystore2
@@ -42,6 +44,7 @@ system_aconfigd_mainline_init
 system_aconfigd_socket_service
 mainline_aconfigd_socket_service
 vold
+vdc
 bpfloader
 netd
 system_suspend

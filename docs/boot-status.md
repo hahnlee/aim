@@ -58,9 +58,10 @@ package's CE and DE data directories through it (285 packages, their
 inodes in the package restrictions), and AccountManager creates
 `accounts_de.db` and `accounts_ce.db`, so the Contacts provider, AdServices
 and Play Store no longer stop at missing directories or databases
-(2026-10-20). installd's batched `createAppData` fails for a directory
-that already exists and succeeds on the recovery after it is destroyed
-(#1907).
+(2026-10-20); vdc runs post-fs-data's `init_user0`, without which
+`/data/data` did not exist when the package side's start asked for the
+core apps' data. A second boot of the same data directory keeps the
+apps' data (no directory destroyed or recreated).
 The times above are from before these joined. Calculator, started through
 the app host, draws its first frame about 0.36 s after its process starts,
 its window is on the display, and taps on the display's touchscreen
