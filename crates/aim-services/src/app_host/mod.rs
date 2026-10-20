@@ -484,6 +484,9 @@ pub struct AppHost {
     broadcasts: broadcasts::Broadcasts,
     /// User 0's restrictions.
     user_restrictions: OnceLock<std::collections::BTreeSet<String>>,
+    /// Whether the system user's first boot records were made
+    /// (`user_service::ensure_system_user`).
+    system_user: OnceLock<Result<(), String>>,
     /// What SensorPrivacyService persisted, read once.
     sensor_privacy: OnceLock<sensor_privacy::Persisted>,
     /// audioserver, once it registered, and the stream volumes.
@@ -563,6 +566,7 @@ impl AppHost {
             pending_intents: Default::default(),
             broadcasts: Default::default(),
             user_restrictions: OnceLock::new(),
+            system_user: OnceLock::new(),
             sensor_privacy: OnceLock::new(),
             audio_policy: OnceLock::new(),
             volumes: Mutex::new(None),
@@ -2006,11 +2010,29 @@ impl AppHost {
         }
     }
 
+    /// The system user's records, made once if this is the data's first
+    /// boot, before anything reads them, as UserManagerService's
+    /// construction makes them before its first call.
+    fn ensure_system_user(&self) -> Result<(), String> {
+        self.system_user
+            .get_or_init(|| user_service::ensure_system_user(self))
+            .clone()
+    }
+
+    /// User 0's file (`/data/system/users/0.xml`) and its path.
+    pub(super) fn user_file(&self) -> Result<(PathBuf, Vec<u8>), Exception> {
+        let path = self.data()?.join("system/users/0.xml");
+        let state =
+            |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+        self.ensure_system_user().map_err(state)?;
+        let bytes = std::fs::read(&path).map_err(|e| state(e.to_string()))?;
+        Ok((path, bytes))
+    }
+
     /// User 0's `UserInfo` attribute `name` (`/data/system/users/0.xml`).
     fn user_attribute(&self, name: &str) -> Result<i32, Exception> {
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
-        let path = self.data()?.join("system/users/0.xml");
-        let bytes = std::fs::read(&path).map_err(|e| state(format!("{}: {e}", path.display())))?;
+        let (path, bytes) = self.user_file()?;
         let root =
             aim_android_xml::read(&bytes).map_err(|e| state(format!("{}: {e}", path.display())))?;
         root.int(name)
@@ -2023,8 +2045,7 @@ impl AppHost {
     /// 0 or 1).
     fn user_properties(&self) -> Result<Vec<(String, i32)>, Exception> {
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
-        let path = self.data()?.join("system/users/0.xml");
-        let bytes = std::fs::read(&path).map_err(|e| state(format!("{}: {e}", path.display())))?;
+        let (path, bytes) = self.user_file()?;
         let root =
             aim_android_xml::read(&bytes).map_err(|e| state(format!("{}: {e}", path.display())))?;
         let mut out = Vec::new();
@@ -2222,8 +2243,7 @@ impl AppHost {
             return Ok(r);
         }
         let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
-        let path = self.data()?.join("system/users/0.xml");
-        let bytes = std::fs::read(&path).map_err(|e| state(format!("{}: {e}", path.display())))?;
+        let (path, bytes) = self.user_file()?;
         let root =
             aim_android_xml::read(&bytes).map_err(|e| state(format!("{}: {e}", path.display())))?;
         let restrictions = root
@@ -4805,6 +4825,11 @@ impl Service for Control {
             std::thread::spawn(move || {
                 if let Err(e) = host.inputs().and_then(|_| host.packages()) {
                     eprintln!("app host: loading its inputs: {e:?}");
+                }
+                // UserManagerService's construction: the system user
+                // recorded at first boot.
+                if let Err(e) = host.ensure_system_user() {
+                    eprintln!("app host: user: the system user: {e}");
                 }
                 if let Err(e) = input_manager::watch_key_repeat(&host) {
                     eprintln!("app host: input: key repeat settings: {}", e.message);

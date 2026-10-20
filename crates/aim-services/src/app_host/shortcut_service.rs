@@ -965,7 +965,7 @@ impl Package {
         } else {
             std::slice::from_ref(&self.root)
         };
-        write_resilient(&self.file, roots)
+        write_resilient(&self.file, roots, 0o600)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", self.file.display())))
     }
 
@@ -1311,8 +1311,8 @@ fn read_resilient(file: &Path) -> Result<Option<Element>, String> {
 }
 
 /// `ResilientAtomicFile.finishWrite`: the file, then its reserve copy, as
-/// the system's.
-fn write_resilient(file: &Path, roots: &[Element]) -> std::io::Result<()> {
+/// the system's, of `mode`.
+pub(super) fn write_resilient(file: &Path, roots: &[Element], mode: u32) -> std::io::Result<()> {
     let bytes = aim_android_xml::abx::write_sequence(roots).map_err(std::io::Error::other)?;
     let mut reserve = file.as_os_str().to_owned();
     reserve.push(".reservecopy");
@@ -1324,7 +1324,7 @@ fn write_resilient(file: &Path, roots: &[Element]) -> std::io::Result<()> {
             .write(true)
             .create(true)
             .truncate(true)
-            .mode(0o600)
+            .mode(mode)
             .open(&new)?;
         std::io::Write::write_all(&mut f, &bytes)?;
         crate::fsync(&f)?;
@@ -1333,7 +1333,7 @@ fn write_resilient(file: &Path, roots: &[Element]) -> std::io::Result<()> {
             aim_storage::guest_inode::GuestInode {
                 uid: Some(1000),
                 gid: Some(1000),
-                mode: Some(0o600),
+                mode: Some(mode),
             },
         )?;
         std::fs::rename(&new, &path)?;
@@ -2158,7 +2158,7 @@ impl ShortcutManager {
         user.root
             .attrs
             .push(("last-app-scan-fp".into(), Xml::String(fingerprint)));
-        write_resilient(&user.file, std::slice::from_ref(&user.root))
+        write_resilient(&user.file, std::slice::from_ref(&user.root), 0o600)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", user.file.display())))
     }
 
@@ -2261,7 +2261,7 @@ impl ShortcutManager {
                 attrs: Vec::new(),
                 content: vec![Node::Element(value)],
             };
-            write_resilient(&file, &[root]).map_err(|e| {
+            write_resilient(&file, &[root], 0o600).map_err(|e| {
                 Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", file.display()))
             })?;
         }

@@ -433,6 +433,12 @@ impl Packages {
         self.framework_resources().resource_string(id)
     }
 
+    /// The framework's string array resource `name` (`getStringArray`).
+    pub fn framework_string_array(&self, name: &str) -> Option<Vec<Option<String>>> {
+        let id = self.platform.framework.id("array", name)?;
+        self.framework_resources().string_array(id)
+    }
+
     /// The permissions defined.
     pub fn permissions(&self) -> &[package::permissions::Permission] {
         &self.permissions

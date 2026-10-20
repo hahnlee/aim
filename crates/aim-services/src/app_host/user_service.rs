@@ -1,11 +1,15 @@
 //! `user`: UserManager for the app host, which runs user 0 alone,
 //! unlocked, visible and in the foreground, as UserManagerService last
 //! persisted it (`/data/system/users/0.xml`: its `UserInfo` and
-//! restrictions).
+//! restrictions), or as it records the system user at first boot when no
+//! user list was persisted (`fallbackToSingleUserLP`).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::sync::Arc;
+
+use aim_android_xml::{Element, Node, TEXT, Value as XmlValue};
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel};
@@ -31,6 +35,31 @@ const FLAG_INITIALIZED: i32 = 0x10;
 /// `UserManager.USER_TYPE_FULL_GUEST`, `USER_TYPE_FULL_RESTRICTED`.
 const USER_TYPE_FULL_GUEST: &str = "android.os.usertype.full.GUEST";
 const USER_TYPE_FULL_RESTRICTED: &str = "android.os.usertype.full.RESTRICTED";
+
+/// `UserInfo.FLAG_SYSTEM`.
+const FLAG_SYSTEM: i32 = 0x800;
+/// `UserManager.USER_TYPE_FULL_SYSTEM`, `USER_TYPE_SYSTEM_HEADLESS`.
+const USER_TYPE_FULL_SYSTEM: &str = "android.os.usertype.full.SYSTEM";
+const USER_TYPE_SYSTEM_HEADLESS: &str = "android.os.usertype.system.HEADLESS";
+/// `UserManagerService.MIN_USER_ID` (`UserHandle.MIN_SECONDARY_USER_ID`),
+/// `USER_VERSION`.
+const MIN_USER_ID: i32 = 10;
+const USER_VERSION: i32 = 11;
+/// `UserTypeFactory.getDefaultGuestUserRestrictions`, which the guest
+/// type adds to `mGuestRestrictions` (`initDefaultGuestRestrictions`).
+const DEFAULT_GUEST_RESTRICTIONS: [&str; 5] = [
+    "no_outgoing_calls",
+    "no_sms",
+    "no_config_wifi",
+    "no_install_unknown_sources",
+    "no_config_credentials",
+];
+/// `Flags.saveGlobalAndGuestRestrictionsOnSystemUserXmlReadOnly`.
+const SAVE_ON_SYSTEM_USER_XML: &str =
+    "android.multiuser.save_global_and_guest_restrictions_on_system_user_xml_read_only";
+/// `ResilientAtomicFile`'s mode of the user files (`getUserFile`,
+/// `getUserListFile`): `rwxrwx--x`.
+const USER_FILE_MODE: u32 = 0o771;
 
 const MANAGE_USERS: &str = "android.permission.MANAGE_USERS";
 const CREATE_USERS: &str = "android.permission.CREATE_USERS";
@@ -272,6 +301,194 @@ pub(super) fn profile_ids(user: i32) -> Vec<i32> {
     }
 }
 
+/// `readUserListLP`'s first boot: with no user list persisted,
+/// `fallbackToSingleUserLP` records the system user (`writeUserLP`, then
+/// `writeUserListLP`), as the app host does at its start.
+pub(super) fn ensure_system_user(host: &AppHost) -> Result<(), String> {
+    let data = host.data().map_err(|e| e.message)?;
+    let users = data.join("system/users");
+    if users.join("userlist.xml").exists() {
+        return Ok(());
+    }
+    let inputs = host.inputs().map_err(|e| e.message)?;
+    let packages = &inputs.packages;
+    let (state, _) = host.packages().map_err(|e| e.message)?;
+    let save_on_system_user = state
+        .system
+        .flags
+        .iter()
+        .any(|(n, on)| n == SAVE_ON_SYSTEM_USER_XML && *on);
+    // `isDefaultHeadlessSystemUserMode` of a user build:
+    // `ro.fw.mu.headless_system_user`.
+    let headless = super::system_boolean(
+        host.property("ro.fw.mu.headless_system_user").as_deref(),
+        false,
+    );
+    let user_types = packages
+        .framework_file(
+            host.root().map_err(|e| e.message)?,
+            "xml",
+            "config_user_types",
+        )
+        .map(|xml| aim_apps::res::xml(&xml).map_err(|e| format!("config_user_types: {e:?}")))
+        .transpose()?;
+    if user_types.as_ref().is_some_and(|t| !t.children.is_empty()) {
+        return Err(
+            "the user types' customization (config_user_types) is not implemented (#1900)".into(),
+        );
+    }
+    // `UserTypeFactory.getUserTypeVersion`.
+    let user_type_version = match user_types.as_ref().and_then(|t| t.named("version")) {
+        Some(aim_apps::res::Value::String(v)) => v.parse().unwrap_or(0),
+        Some(aim_apps::res::Value::Int(v)) => *v,
+        _ => 0,
+    };
+    let first_user_restrictions: Vec<String> = packages
+        .framework_string_array("config_defaultFirstUserRestrictions")
+        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .collect();
+    if !first_user_restrictions.is_empty() {
+        return Err("config_defaultFirstUserRestrictions' restrictions (#1900)".into());
+    }
+    let (user_type, flags) = if headless {
+        (
+            USER_TYPE_SYSTEM_HEADLESS,
+            FLAG_SYSTEM | FLAG_PRIMARY | FLAG_ADMIN,
+        )
+    } else {
+        (
+            USER_TYPE_FULL_SYSTEM,
+            FLAG_SYSTEM | FLAG_FULL | FLAG_PRIMARY | FLAG_ADMIN | FLAG_MAIN,
+        )
+    };
+    let (user, list) = first_user_records(user_type, flags, user_type_version, save_on_system_user);
+    write_users(&users, &user, &list)
+}
+
+/// `writeUserLP` and `writeUserListLP` of the system user as
+/// `fallbackToSingleUserLP` makes it: of `user_type` with its type's
+/// `flags`, initialized, no restrictions but the guests' defaults, kept
+/// in the system user's file when `save_on_system_user`, else in the list.
+fn first_user_records(
+    user_type: &str,
+    flags: i32,
+    user_type_version: i32,
+    save_on_system_user: bool,
+) -> (Element, Element) {
+    let restrictions = |tag: &str, keys: &[&str]| {
+        element(
+            tag,
+            crate::package::info::array_order(keys.to_vec(), |k| k)
+                .into_iter()
+                .map(|k| (k, XmlValue::Bool(true)))
+                .collect(),
+            Vec::new(),
+        )
+    };
+    let guests = || {
+        element(
+            "guestRestrictions",
+            Vec::new(),
+            vec![restrictions("restrictions", &DEFAULT_GUEST_RESTRICTIONS)],
+        )
+    };
+    let mut children = vec![
+        restrictions("restrictions", &[]),
+        restrictions("device_policy_global_restrictions", &[]),
+    ];
+    if save_on_system_user {
+        children.push(guests());
+    }
+    children.push(restrictions("device_policy_local_restrictions", &[]));
+    children.push(element("userProperties", Vec::new(), Vec::new()));
+    let mut ignore = element("ignorePrepareStorageErrors", Vec::new(), Vec::new());
+    ignore.content.push(Node::Token(TEXT, Some("false".into())));
+    children.push(ignore);
+    let user = element(
+        "user",
+        vec![
+            ("id", XmlValue::Int(SYSTEM_USER)),
+            ("serialNumber", XmlValue::Int(SYSTEM_USER)),
+            ("flags", XmlValue::Int(flags | FLAG_INITIALIZED)),
+            ("type", XmlValue::String(user_type.into())),
+            ("created", XmlValue::Long(0)),
+            ("lastLoggedIn", XmlValue::Long(0)),
+            ("lastEnteredForeground", XmlValue::Long(0)),
+            ("profileBadge", XmlValue::Int(0)),
+        ],
+        children,
+    );
+    let mut list_children = Vec::new();
+    if !save_on_system_user {
+        list_children.push(guests());
+    }
+    list_children.push(element(
+        "user",
+        vec![("id", XmlValue::Int(SYSTEM_USER))],
+        Vec::new(),
+    ));
+    let list = element(
+        "users",
+        vec![
+            ("nextSerialNumber", XmlValue::Int(MIN_USER_ID)),
+            ("version", XmlValue::Int(USER_VERSION)),
+            ("userTypeConfigVersion", XmlValue::Int(user_type_version)),
+        ],
+        list_children,
+    );
+    (user, list)
+}
+
+/// `UserManager.getSerialNumberForUser`: the user's serial number, as
+/// its file holds it; none for a user that does not exist.
+pub(super) fn serial_number(host: &AppHost, user: i32) -> Result<Option<i32>, Exception> {
+    if user != SYSTEM_USER {
+        return Ok(None);
+    }
+    let (path, bytes) = host.user_file()?;
+    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+    let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
+    Ok(Some(info.serial_number))
+}
+
+/// The users directory (`rwxrwxr-x`), the system user's file, then the
+/// user list, each as `ResilientAtomicFile` writes it.
+fn write_users(users: &Path, user: &Element, list: &Element) -> Result<(), String> {
+    let failed = |e: std::io::Error| format!("{}: {e}", users.display());
+    if !users.exists() {
+        std::fs::create_dir_all(users).map_err(failed)?;
+        aim_storage::guest_inode::record(
+            users,
+            aim_storage::guest_inode::GuestInode {
+                uid: Some(1000),
+                gid: Some(1000),
+                mode: Some(0o775),
+            },
+        )
+        .map_err(failed)?;
+    }
+    let write = |name: &str, root: &Element| {
+        super::shortcut_service::write_resilient(
+            &users.join(name),
+            std::slice::from_ref(root),
+            USER_FILE_MODE,
+        )
+        .map_err(failed)
+    };
+    write("0.xml", user)?;
+    write("userlist.xml", list)
+}
+
+fn element(name: &str, attrs: Vec<(&str, XmlValue)>, children: Vec<Element>) -> Element {
+    Element {
+        name: name.into(),
+        attrs: attrs.into_iter().map(|(n, v)| (n.to_string(), v)).collect(),
+        content: children.into_iter().map(Node::Element).collect(),
+    }
+}
+
 pub struct UserManager {
     host: Arc<AppHost>,
 }
@@ -283,10 +500,9 @@ impl UserManager {
 
     /// User 0's file: its `UserInfo` and effective restrictions.
     fn user_data(&self) -> Result<(UserInfo, BTreeSet<String>), Exception> {
-        let path = self.host.data()?.join("system/users/0.xml");
+        let (path, bytes) = self.host.user_file()?;
         let state =
             |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
-        let bytes = std::fs::read(&path).map_err(|e| state(e.to_string()))?;
         read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)
     }
 
@@ -300,10 +516,9 @@ impl UserManager {
         if self.user(id)?.is_none() {
             return Ok(None);
         }
-        let path = self.host.data()?.join("system/users/0.xml");
+        let (path, bytes) = self.host.user_file()?;
         let state =
             |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
-        let bytes = std::fs::read(&path).map_err(|e| state(e.to_string()))?;
         let root = aim_android_xml::read(&bytes).map_err(state)?;
         let string = |name: &str| root.string(name).map(|s| s.into_owned());
         Ok(Some((
@@ -1031,6 +1246,65 @@ pub(super) fn application_restrictions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `fallbackToSingleUserLP`'s records of a full system user, written
+    /// and read back: the original's first boot's attributes, the guests'
+    /// defaults in their `ArrayMap` order in the system user's file, and
+    /// the list's serial number and versions.
+    #[test]
+    fn the_first_boot_records_the_system_user_as_the_original() {
+        let full = FLAG_SYSTEM | FLAG_FULL | FLAG_PRIMARY | FLAG_ADMIN | FLAG_MAIN;
+        let (user, list) = first_user_records(USER_TYPE_FULL_SYSTEM, full, 0, true);
+        let user = aim_android_xml::read(&aim_android_xml::abx::write(&user).unwrap()).unwrap();
+        let (info, restrictions) = read_user(&user).unwrap();
+        assert_eq!((info.id, info.serial_number, info.flags), (0, 0, 19475));
+        assert_eq!(info.user_type.as_deref(), Some(USER_TYPE_FULL_SYSTEM));
+        assert!(restrictions.is_empty());
+        let guests: Vec<&str> = user
+            .children()
+            .find(|e| e.name == "guestRestrictions")
+            .and_then(|g| g.children().next())
+            .map(|r| r.attrs.iter().map(|(n, _)| n.as_str()).collect())
+            .unwrap();
+        assert_eq!(
+            guests,
+            [
+                "no_sms",
+                "no_install_unknown_sources",
+                "no_config_wifi",
+                "no_config_credentials",
+                "no_outgoing_calls"
+            ]
+        );
+        let names: Vec<&str> = user.children().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "restrictions",
+                "device_policy_global_restrictions",
+                "guestRestrictions",
+                "device_policy_local_restrictions",
+                "userProperties",
+                "ignorePrepareStorageErrors"
+            ]
+        );
+        assert_eq!(
+            list.attrs,
+            [
+                ("nextSerialNumber".to_string(), XmlValue::Int(10)),
+                ("version".to_string(), XmlValue::Int(11)),
+                ("userTypeConfigVersion".to_string(), XmlValue::Int(0)),
+            ]
+        );
+        assert_eq!(
+            list.children().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["user"]
+        );
+        // Without the flag the guests' defaults are the list's.
+        let (user, list) = first_user_records(USER_TYPE_FULL_SYSTEM, full, 0, false);
+        assert!(user.children().all(|e| e.name != "guestRestrictions"));
+        assert_eq!(list.children().next().unwrap().name, "guestRestrictions");
+    }
 
     /// The attributes, the name's text, and the base and device policy
     /// restrictions set, as `readUserLP` reads them.
