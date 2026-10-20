@@ -253,6 +253,17 @@ impl AppHost {
     /// data (DE, and CE without file-based encryption), installd's
     /// `fixupAppData`, then the other apps'.
     pub(super) fn fix_apps_data_on_boot(&self, installd: &Strong) -> Result<(), String> {
+        // system_server is zygote's child, so PackageManagerService starts
+        // after init's `zygote-start`, once post-fs-data's `init_user0`
+        // has made `/data/data` (`/data/user/0`) and user 0's DE storage;
+        // installd, of class main, is up before that.
+        let deadline = Instant::now() + INSTALLD_PATIENCE;
+        while self.property("init.svc.zygote").is_none() {
+            if Instant::now() > deadline {
+                return Err("zygote did not start".into());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
         let flags = if self.file_encrypted() {
             FLAG_STORAGE_DE
         } else {
