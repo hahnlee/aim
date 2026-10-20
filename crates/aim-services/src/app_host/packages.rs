@@ -5,8 +5,10 @@
 //!
 //! Only what an app's start reads is joined: the package's code, its
 //! app id, ABI and native library directories, its seinfo, signatures
-//! and shared user, and user 0's state. Shared libraries, overlays,
-//! permissions and the apps filter's inputs are not (#1426).
+//! and shared user, user 0's state, and the apps filter's device
+//! configuration (`config_forceSystemPackagesQueryable`,
+//! `config_forceQueryablePackages`). Shared libraries, overlays and
+//! permissions are not (#1426).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -237,6 +239,11 @@ impl Packages {
         let mut system =
             system_config::system(root, property, &system_config::Framework::load(root)?)?;
         system.sdk_sandbox_package = Some(Some(sdk_sandbox_package(&packages)?));
+        // The apps filter's device configuration (`AppsFilterImpl.create`).
+        (
+            system.force_system_packages_queryable,
+            system.force_queryable_packages,
+        ) = package::scan_snapshot::boot_context::apps_filter_config(&platform, platform.config())?;
         // `<protected-broadcast>` counts in system packages only
         // (`ScanPackageUtils.applyPolicy` clears the others').
         let protected_broadcasts = packages
