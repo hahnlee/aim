@@ -383,6 +383,49 @@ static void inet_loopback(void) {
   close(d2);
 }
 
+// connect(2) of a stream socket that is connecting: EALREADY while it
+// still is, then the connection reported once (0, inet_stream_connect's
+// SS_CONNECTING), then EISCONN. A blocking connect interrupted by a signal
+// is restarted or retried this way.
+static void inet_connect_again(void) {
+  int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  CHECK(s >= 0);
+  struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+  CHECK(bind(s, (struct sockaddr*)&a, sizeof a) == 0);
+  socklen_t al = sizeof a;
+  CHECK(getsockname(s, (struct sockaddr*)&a, &al) == 0);
+  CHECK(listen(s, 4) == 0);
+  int c = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  CHECK(c >= 0);
+  int r = connect(c, (struct sockaddr*)&a, sizeof a);
+  CHECK(r == 0 || errno == EINPROGRESS);
+  if (r == 0) {
+    CHECK(connect(c, (struct sockaddr*)&a, sizeof a) == -1 && errno == EISCONN);
+  } else {
+    struct pollfd p = {.fd = c, .events = POLLOUT};
+    CHECK(poll(&p, 1, 5000) == 1 && (p.revents & POLLOUT));
+    CHECK(connect(c, (struct sockaddr*)&a, sizeof a) == 0);
+    CHECK(connect(c, (struct sockaddr*)&a, sizeof a) == -1 && errno == EISCONN);
+  }
+  // A blocking socket's repeated connect waits for the connection.
+  int b = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  CHECK(b >= 0);
+  r = connect(b, (struct sockaddr*)&a, sizeof a);
+  CHECK(r == 0 || errno == EINPROGRESS);
+  CHECK(fcntl(b, F_SETFL, fcntl(b, F_GETFL) & ~O_NONBLOCK) == 0);
+  CHECK(r == 0 || connect(b, (struct sockaddr*)&a, sizeof a) == 0);
+  int d = accept(s, NULL, NULL);
+  CHECK(d >= 0);
+  int e = accept(s, NULL, NULL);
+  CHECK(e >= 0);
+  CHECK(write(b, "b", 1) == 1);
+  close(c);
+  close(b);
+  close(d);
+  close(e);
+  close(s);
+}
+
 int main(int argc, char** argv) {
   dir = argc > 1 ? argv[1] : "/data/local/tmp";
   RUN(seqpacket_pair_boundaries);
@@ -394,5 +437,6 @@ int main(int argc, char** argv) {
   RUN(stream_passcred_and_shutdown);
   RUN(options);
   RUN(inet_loopback);
+  RUN(inet_connect_again);
   DONE();
 }

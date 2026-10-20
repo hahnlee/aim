@@ -112,8 +112,9 @@ pub enum Family {
 
 /// SO_MARK, SO_BINDTODEVICE and IP_MULTICAST_ALL of an AF_INET/AF_INET6
 /// socket, whether it is connected to port 0 (`datagram_to_port_zero`) or
-/// to the virtual DHCP server (`connect_to_router`), and whether it is an
-/// IPv4 ping socket (`recv_ping`).
+/// to the virtual DHCP server (`connect_to_router`), whether it is an IPv4
+/// ping socket (`recv_ping`), and whether a stream connect is in progress
+/// (`reconnect`).
 #[derive(Default)]
 pub struct InetOpts {
     mark: std::sync::atomic::AtomicU32,
@@ -125,6 +126,9 @@ pub struct InetOpts {
     port_zero: AtomicBool,
     router: AtomicBool,
     icmp4: AtomicBool,
+    /// Linux's `SS_CONNECTING`: a connect started (EINPROGRESS, or a
+    /// blocking one interrupted) whose result no connect has reported yet.
+    connecting: AtomicBool,
 }
 
 /// A socket's Linux state: an AF_UNIX socket's, or another family's.
@@ -1176,6 +1180,12 @@ pub fn connect(a: [u64; 6]) -> i64 {
     let mut r = with_target(&t, |sa, len| {
         errno::check(unsafe { libc::connect(fd, sa, len) } as i64)
     });
+    if let Some(s) = any_sock(&input)
+        && let Family::Inet(o) = &s.family
+        && matches!(s.ty, SockType::Stream)
+    {
+        r = reconnect(fd, o, r);
+    }
     if r == -(libc::ENOENT as i64) && is_abstract(&name) {
         // An abstract name nobody bound: refused, not missing.
         r = -111;
@@ -1196,6 +1206,72 @@ pub fn connect(a: [u64; 6]) -> i64 {
         }
     }
     r
+}
+
+/// `inet_stream_connect`'s answer to a stream connect whose Darwin result
+/// is `r`. Darwin answers a connect of a socket that is still connecting
+/// with EALREADY, and of one connected since with EISCONN. Linux reports
+/// the connection to the first connect after it (`SS_CONNECTING`): with 0
+/// once established, and a blocking socket waits for it. A blocking
+/// connect interrupted by a signal is such a repeat when it restarts, as
+/// is libcore's retry of it after EINTR.
+fn reconnect(fd: i32, o: &InetOpts, r: i64) -> i64 {
+    const EINTR: i64 = errno::EINTR as i64;
+    const EINPROGRESS: i64 = errno::from_darwin(libc::EINPROGRESS) as i64;
+    const EALREADY: i64 = errno::from_darwin(libc::EALREADY) as i64;
+    const EISCONN: i64 = errno::from_darwin(libc::EISCONN) as i64;
+    let connecting = o.connecting.load(Ordering::Relaxed);
+    let r = match -r {
+        EALREADY if connecting && !nonblocking(fd) => connected(fd),
+        EISCONN if connecting => 0,
+        _ => r,
+    };
+    o.connecting.store(
+        matches!(-r, EINTR | EINPROGRESS | EALREADY),
+        Ordering::Relaxed,
+    );
+    r
+}
+
+/// Whether the host descriptor is in non-blocking mode.
+fn nonblocking(fd: i32) -> bool {
+    // SAFETY: F_GETFL on a descriptor the caller holds.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    flags & libc::O_NONBLOCK != 0
+}
+
+/// `inet_wait_for_connect` on a blocking socket, then the connection's
+/// result (SO_ERROR); EINTR when a signal interrupts the wait, as the
+/// connect is then restarted or retried.
+fn connected(fd: i32) -> i64 {
+    let mut p = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: one pollfd on the stack, for a descriptor the caller holds.
+    if unsafe { libc::poll(&mut p, 1, -1) } < 0 {
+        return -(errno::last() as i64);
+    }
+    let mut e: libc::c_int = 0;
+    let mut l = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: an int and its length on the stack.
+    let r = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_ERROR,
+            (&mut e as *mut libc::c_int).cast(),
+            &mut l,
+        )
+    };
+    if r < 0 {
+        -(errno::last() as i64)
+    } else if e != 0 {
+        -(errno::from_darwin(e) as i64)
+    } else {
+        0
+    }
 }
 
 /// A datagram socket bound to a device other than the loopback that
