@@ -803,6 +803,17 @@ impl Package {
     }
 }
 
+/// `ConversationChannelWrapper` without its shortcut: a conversation
+/// channel, its package and uid, and its group's and parent's names.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Conversation {
+    pub package: String,
+    pub uid: i32,
+    pub channel: Channel,
+    pub group_label: Option<String>,
+    pub parent_label: Option<String>,
+}
+
 /// What a package's preferences need of PackageManager: whether it
 /// targets an SDK before O, and the default channel's label.
 pub struct Defaults<'a> {
@@ -886,6 +897,55 @@ impl Preferences {
             attrs: self.ranking_attrs.clone(),
             content,
         }
+    }
+
+    /// `shouldHideSilentStatusIcons`: `<silent_status_icons hide_gentle>`,
+    /// false unless set (`DEFAULT_HIDE_SILENT_STATUS_BAR_ICONS`).
+    pub fn hide_silent_status_icons(&self) -> bool {
+        self.other
+            .iter()
+            .find(|e| e.name == "silent_status_icons")
+            .and_then(|e| e.bool("hide_gentle").ok().flatten())
+            .unwrap_or(false)
+    }
+
+    /// `getConversations(userIds, onlyImportant)`: each conversation
+    /// channel of the users' packages that is not deleted or demoted
+    /// (only the important ones with `only_important`), with its parent's
+    /// name and its group's, leaving out those of a blocked group.
+    pub fn conversations(&self, users: &[i32], only_important: bool) -> Vec<Conversation> {
+        let mut out = Vec::new();
+        for p in &self.packages {
+            if !users.contains(&p.uid().div_euclid(super::PER_USER_RANGE as i32)) {
+                continue;
+            }
+            for c in &p.channels {
+                if c.conversation_id.as_deref().is_none_or(str::is_empty)
+                    || c.deleted
+                    || c.demoted
+                    || (only_important && !c.important_conversation)
+                {
+                    continue;
+                }
+                let parent_label = c
+                    .parent_id
+                    .as_deref()
+                    .and_then(|id| p.channel(id))
+                    .and_then(|parent| parent.name.clone());
+                let group = c.group.as_deref().and_then(|id| p.group(id));
+                if group.is_some_and(|g| g.blocked) {
+                    continue;
+                }
+                out.push(Conversation {
+                    package: p.name().to_string(),
+                    uid: p.uid(),
+                    channel: c.clone(),
+                    group_label: group.and_then(|g| g.name.clone()),
+                    parent_label,
+                });
+            }
+        }
+        out
     }
 
     /// `getPackagePreferencesLocked`.
@@ -1573,6 +1633,38 @@ mod tests {
         );
         prefs.revoke_delegate("app", 10001);
         assert_eq!(delegate(&prefs).bool("enabled").unwrap(), Some(false));
+    }
+
+    /// `getConversations`: the current users' conversation channels that
+    /// are neither deleted nor demoted (only important ones when asked),
+    /// with their parent's and group's names, a blocked group's left out;
+    /// and the silent status icons preference.
+    #[test]
+    fn conversations_and_silent_icons_are_read_as_the_original() {
+        let xml = br#"<ranking version="4"><silent_status_icons hide_gentle="true" /><package name="app" uid="10001"><channelGroup id="g" name="G" blocked="false" /><channelGroup id="b" name="B" blocked="true" /><channel id="p" name="Parent" importance="3" /><channel id="c1" name="C1" importance="3" parent="p" conv_id="x" group="g" imp_conv="true" /><channel id="c2" name="C2" importance="3" parent="p" conv_id="y" /><channel id="c3" name="C3" importance="3" conv_id="z" dem="true" /><channel id="c4" name="C4" importance="3" conv_id="w" group="b" /></package><package name="other" uid="1010001"><channel id="o" name="O" importance="3" conv_id="v" /></package></ranking>"#;
+        let ranking = aim_android_xml::read(xml).unwrap();
+        let prefs = Preferences::read(&ranking, &defaults(), 0);
+        assert!(prefs.hide_silent_status_icons());
+        let all: Vec<_> = prefs
+            .conversations(&[0], false)
+            .into_iter()
+            .map(|c| (c.channel.id, c.group_label, c.parent_label))
+            .collect();
+        assert_eq!(
+            all,
+            [
+                ("c1".into(), Some("G".into()), Some("Parent".into())),
+                ("c2".into(), None, Some("Parent".into())),
+            ]
+        );
+        let important = prefs.conversations(&[0], true);
+        assert_eq!(important.len(), 1);
+        assert_eq!(
+            (important[0].package.as_str(), important[0].uid),
+            ("app", 10001)
+        );
+        let none = aim_android_xml::read(br#"<ranking version="4" />"#).unwrap();
+        assert!(!Preferences::read(&none, &defaults(), 0).hide_silent_status_icons());
     }
 
     /// The `<ranking>` element is written back with what it held.
