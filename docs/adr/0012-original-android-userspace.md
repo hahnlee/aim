@@ -698,6 +698,20 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   The handler performs the store itself (the plain A64 stores: single and
   pair, general and SIMD&FP registers, every addressing mode, and
   store-release) and moves the thread past it, one signal per store.
+- Code a JIT writes into memory that is already RWX is not scanned (#271).
+  V8 pre-commits its whole code range RWX and writes code into it
+  afterwards, so no `mprotect` or `mmap` marks the moment it becomes code.
+  Darwin gives no way to find what was written: once a thread is switched
+  to writable it writes every `MAP_JIT` page without a fault, the pages'
+  protection cannot change, and a page's modified bit stays set after its
+  first write. Scanning the whole region at each switch back to executable
+  would cost as much as the region (V8's is 128 MiB) thousands of times a
+  second, and would rewrite constant-pool words that look like the
+  instructions. V8 and ART emit no instruction that needs rewriting; a JIT
+  that emits a raw `svc #0` or reads `tpidr_el0` or `ctr_el0` from code it
+  writes into RWX memory (some emulators, FFI trampolines, Wasm runtimes)
+  is, like one that allocates x18 below, an app-compatibility risk handled
+  case by case.
 - A JIT that allocates x18 as a general register is an app-compatibility
   risk handled case by case.
 
