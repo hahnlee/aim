@@ -1409,6 +1409,14 @@ impl Service for AudioService {
                 audio::IsBluetoothA2dpOn::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 audio::write_is_bluetooth_a2dp_on_reply(&mut p, false);
             }
+            // `mBtScoOnByApp || AudioDeviceBroker.isBluetoothScoOn`: no app
+            // turns SCO on here (`setBluetoothScoOn` is not served), and no
+            // communication route or SCO audio connection makes a SCO
+            // headset the preferred communication device.
+            audio::IS_BLUETOOTH_SCO_ON => {
+                audio::IsBluetoothScoOn::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                audio::write_is_bluetooth_sco_on_reply(&mut p, false);
+            }
             audio::START_WATCHING_ROUTES => {
                 let args =
                     audio::StartWatchingRoutes::read(&mut call.data).map_err(|_| BAD_VALUE)?;

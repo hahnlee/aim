@@ -122,6 +122,29 @@ const START_TYPE_FAILED: i32 = 0;
 const START_TYPE_STARTED: i32 = 1;
 /// `OnOpStartedListener.START_TYPE_RESUMED`.
 const START_TYPE_RESUMED: i32 = 2;
+const MANAGE_APP_OPS_MODES: &str = "android.permission.MANAGE_APP_OPS_MODES";
+/// `AppOpsManager.OP_VIBRATE`, `OP_PLAY_AUDIO`.
+const OP_VIBRATE: i32 = 3;
+const OP_PLAY_AUDIO: i32 = 28;
+/// `CameraDevice.AUDIO_RESTRICTION_NONE`, `AUDIO_RESTRICTION_VIBRATION_SOUND`.
+const AUDIO_RESTRICTION_NONE: i32 = 0;
+const AUDIO_RESTRICTION_VIBRATION_SOUND: i32 = 3;
+
+/// `AudioRestrictionManager.checkAudioOperation`'s camera part: under a
+/// camera restriction, vibration (and sound, with
+/// AUDIO_RESTRICTION_VIBRATION_SOUND) of the SDK usages that
+/// `AudioAttributes.SUPPRESSIBLE_USAGES` marks notification, call or alarm
+/// (`CAMERA_AUDIO_RESTRICTIONS`) is ignored.
+fn camera_audio_muted(restriction: i32, code: i32, usage: i32) -> bool {
+    // USAGE_ALARM, USAGE_NOTIFICATION, _RINGTONE,
+    // _COMMUNICATION_REQUEST, _INSTANT, _DELAYED, _EVENT.
+    const MUTED_USAGES: [i32; 7] = [4, 5, 6, 7, 8, 9, 10];
+    restriction != AUDIO_RESTRICTION_NONE
+        && (code == OP_VIBRATE
+            || code == OP_PLAY_AUDIO && restriction == AUDIO_RESTRICTION_VIBRATION_SOUND)
+        && MUTED_USAGES.contains(&usage)
+}
+
 /// `AppOpsService.UID_ANY`, `UserHandle.USER_ALL`.
 const UID_ANY: i32 = -2;
 const USER_ALL: i32 = -1;
@@ -2185,6 +2208,8 @@ pub(super) struct State {
     async_noted: Mutex<Async>,
     restrictions: Mutex<(UserRestrictions<Link>, HashMap<u32, Strong>)>,
     mode_watchers: Mutex<ModeWatchers<Link>>,
+    /// `AudioRestrictionManager.mCameraAudioRestriction`.
+    camera_audio_restriction: std::sync::atomic::AtomicI32,
 }
 
 /// Holds a reference to each token the user restrictions key, and to no
@@ -3039,11 +3064,21 @@ impl Service for AppOps {
                     Err(e) => return reply(Err(e)),
                 }
             }
-            // `checkAudioOperationImpl`: no audio restriction is set in the
-            // app host (`setAudioRestriction`), so the op's check decides.
+            // `checkAudioOperationImpl`: the camera's audio restriction,
+            // then the op's check; no zen mode restriction is set in the
+            // app host (`setAudioRestriction`).
             appops::CHECK_AUDIO_OPERATION => {
                 let args =
                     appops::CheckAudioOperation::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let restriction = self
+                    .host
+                    .app_ops
+                    .camera_audio_restriction
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if camera_audio_muted(restriction, args.code, args.usage) {
+                    appops::write_check_audio_operation_reply(&mut p, MODE_IGNORED);
+                    return Ok(p);
+                }
                 match check(
                     &Host(&self.host),
                     caller,
@@ -3056,6 +3091,32 @@ impl Service for AppOps {
                     Ok(mode) => appops::write_check_audio_operation_reply(&mut p, mode),
                     Err(e) => return reply(Err(e)),
                 }
+            }
+            appops::SET_CAMERA_AUDIO_RESTRICTION => {
+                let args = appops::SetCameraAudioRestriction::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                // `enforceManageAppOpsModes(pid, uid, -1)`: no caller is the
+                // app host itself (`Process.myPid()`), and with no target uid
+                // a profile owner does not match; MANAGE_APP_OPS_MODES.
+                match self
+                    .host
+                    .check_permission(Some(MANAGE_APP_OPS_MODES), caller)
+                {
+                    Ok(0) => {}
+                    Ok(_) => {
+                        return reply(Err(Exception::security(format!(
+                            "Neither user {caller} nor current process has {MANAGE_APP_OPS_MODES}."
+                        ))));
+                    }
+                    Err(e) => return reply(Err(e)),
+                }
+                self.host
+                    .app_ops
+                    .camera_audio_restriction
+                    .store(args.mode, std::sync::atomic::Ordering::Relaxed);
+                notify_mode_watchers(&self.host, OP_PLAY_AUDIO);
+                notify_mode_watchers(&self.host, OP_VIBRATE);
+                appops::write_set_camera_audio_restriction_reply(&mut p);
             }
             appops::CHECK_OPERATION_FOR_DEVICE => {
                 let args =
@@ -3452,6 +3513,43 @@ mod tests {
     const APP: i32 = 10_100;
     const PRIV_APP: i32 = 10_101;
     const OP_COARSE_LOCATION: i32 = 0;
+
+    /// `CAMERA_AUDIO_RESTRICTIONS`: vibration under any restriction, sound
+    /// only under VIBRATION_SOUND, and only for notification, call and alarm
+    /// usages.
+    #[test]
+    fn camera_audio_restriction_mutes_the_original_usages() {
+        const VIBRATION: i32 = 1;
+        const USAGE_MEDIA: i32 = 1;
+        const USAGE_ALARM: i32 = 4;
+        const USAGE_RINGTONE: i32 = 6;
+        assert!(!camera_audio_muted(
+            AUDIO_RESTRICTION_NONE,
+            OP_VIBRATE,
+            USAGE_ALARM
+        ));
+        assert!(camera_audio_muted(VIBRATION, OP_VIBRATE, USAGE_RINGTONE));
+        assert!(!camera_audio_muted(
+            VIBRATION,
+            OP_PLAY_AUDIO,
+            USAGE_RINGTONE
+        ));
+        assert!(camera_audio_muted(
+            AUDIO_RESTRICTION_VIBRATION_SOUND,
+            OP_PLAY_AUDIO,
+            USAGE_ALARM
+        ));
+        assert!(!camera_audio_muted(
+            AUDIO_RESTRICTION_VIBRATION_SOUND,
+            OP_PLAY_AUDIO,
+            USAGE_MEDIA
+        ));
+        assert!(!camera_audio_muted(
+            AUDIO_RESTRICTION_VIBRATION_SOUND,
+            OP_COARSE_LOCATION,
+            USAGE_ALARM
+        ));
+    }
     const OP_GPS: i32 = 2;
     const OP_VIBRATE: i32 = 3;
     const OP_WIFI_SCAN: i32 = 10;
