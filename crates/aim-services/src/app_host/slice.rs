@@ -4,8 +4,10 @@
 //! it is last unpinned (`PinnedSliceState`); the access of the default
 //! home, the assistant and of what a provider or the user granted, kept in
 //! `/data/system/slice` as `SlicePermissionManager` keeps it, one file per
-//! client and per provider, written as KXmlSerializer writes them. A
-//! removed package's grants, the shell command and dump are #1941.
+//! client and per provider, written as KXmlSerializer writes them; a
+//! package's grants go when its data is cleared (`mReceiver`). A removed
+//! package's grants (the app host removes none, #1757), the shell command
+//! and dump are #1941.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
@@ -24,7 +26,11 @@ use aim_service_aidl::android_app_slice_islicemanager as sm;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
 use super::content_service::ParcelUri;
+use super::package_writes::{DataCleared, PackageMonitor};
 use super::{AppHost, PER_USER_RANGE, reply, usage_events, usage_stats};
+
+/// `UserHandle.USER_ALL`.
+const USER_ALL: i32 = -1;
 use crate::bundle::Value;
 use crate::package::info::java_hash;
 use crate::package::uri::{self, Uri};
@@ -612,6 +618,39 @@ impl Store {
         }
     }
 
+    /// `removePkg`: the package's authorities taken from the clients they
+    /// were granted to, then (`handleRemove`) its files deleted and its
+    /// client and provider forgotten with their unwritten changes.
+    fn remove_pkg(&mut self, pkg: &str, user: i32) {
+        let pkg_user = PkgUser::new(pkg, user);
+        for (authority, clients) in self.provider(&pkg_user).auths.clone() {
+            let key = PkgUser::new(&authority, user);
+            for c in clients {
+                let client = self.client(&c);
+                let before = client.auths.len();
+                client.auths.retain(|a| a.key() != key);
+                if client.auths.len() != before {
+                    self.dirty(Persisted::Client(c));
+                }
+            }
+        }
+        let own = [
+            Persisted::Client(pkg_user.clone()),
+            Persisted::Provider(pkg_user.clone()),
+        ];
+        for p in &own {
+            let file = self.dir.join(p.file_name());
+            if let Err(e) = std::fs::remove_file(&file)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                eprintln!("app host: slice: deleting {}: {e}", file.display());
+            }
+        }
+        self.clients.remove(&pkg_user);
+        self.providers.remove(&pkg_user);
+        self.dirty.retain(|p| !own.contains(p));
+    }
+
     fn has_full_access(&mut self, pkg: &str, user: i32) -> bool {
         self.client(&PkgUser::new(pkg, user)).full_access
     }
@@ -862,6 +901,8 @@ enum Work {
     Usage(String, i32),
     /// A change to write after the grace period.
     Persist,
+    /// `ACTION_PACKAGE_DATA_CLEARED` of a package in a user.
+    DataCleared(String, i32),
 }
 
 struct State {
@@ -891,12 +932,19 @@ pub struct SliceManager {
 
 impl SliceManager {
     pub fn new(host: Arc<AppHost>) -> Arc<SliceManager> {
-        Arc::new_cyclic(|me| SliceManager {
+        let service = Arc::new_cyclic(|me| SliceManager {
             host,
             state: Mutex::new(None),
             work: Mutex::new(None),
             me: me.clone(),
-        })
+        });
+        // `registerReceiverAsUser(mReceiver, UserHandle.ALL, ...)`.
+        let receiver = service.clone() as Arc<dyn PackageMonitor>;
+        service
+            .host
+            .package_monitors
+            .register(USER_ALL, Arc::downgrade(&receiver));
+        service
     }
 
     fn with<T>(&self, f: impl FnOnce(&mut State) -> T) -> Result<T> {
@@ -1384,12 +1432,25 @@ fn handler(me: Weak<SliceManager>, rx: mpsc::Receiver<Work>) {
             Ok(Work::Persist) => persist_at = Some(Instant::now() + WRITE_GRACE_PERIOD),
             Ok(Work::Notify(uri, pinned)) => service.notify(&uri, pinned),
             Ok(Work::Usage(pkg, event_type)) => service.report(pkg, event_type),
+            Ok(Work::DataCleared(pkg, user)) => {
+                if let Err(e) = service.with(|s| s.store.remove_pkg(&pkg, user)) {
+                    eprintln!("app host: slice: {pkg}'s grants: {}", e.message);
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {
                 persist_at = None;
                 service.persist();
             }
             Err(RecvTimeoutError::Disconnected) => return,
         }
+    }
+}
+
+impl PackageMonitor for SliceManager {
+    /// `mReceiver` on the service's handler: the package's grants removed
+    /// (`SlicePermissionManager.removePkg`).
+    fn package_data_cleared(&self, cleared: &DataCleared<'_>) {
+        self.post(Work::DataCleared(cleared.package.into(), cleared.user));
     }
 }
 
@@ -1738,6 +1799,28 @@ mod tests {
         old.restore(br#"<slice-access-list version="1"><client pkg="a@0" fullAccess="1" /></slice-access-list>"#)
             .unwrap();
         assert!(!old.has_full_access("a", 0));
+    }
+
+    /// `removePkg` of a provider whose data was cleared: its clients lose
+    /// its authorities and its files go; of a client: its grants go.
+    #[test]
+    fn a_cleared_package_s_grants_go() {
+        let dir = tmp().join("slice");
+        let uri = Uri::parse("content://com.example.slices/wifi");
+        let mut store = Store::new(dir.clone());
+        store
+            .grant("com.client", 0, Some("com.example"), 0, &uri)
+            .unwrap();
+        store.grant_full_access("com.full", 0);
+        store.persist();
+        store.remove_pkg("com.example", 0);
+        assert!(!store.has_permission("com.client", 0, &uri));
+        assert!(!dir.join("provider_com.example@0").exists());
+        store.persist();
+        assert!(!Store::new(dir.clone()).has_permission("com.client", 0, &uri));
+        store.remove_pkg("com.full", 0);
+        assert!(!dir.join("client_com.full@0").exists());
+        assert!(!Store::new(dir).has_full_access("com.full", 0));
     }
 
     /// A grant to a provider with no package fails after the client's
