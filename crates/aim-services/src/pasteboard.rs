@@ -20,8 +20,9 @@ aim_hostcall::dylib! {
     }
 }
 
-/// `NSPasteboardTypeString`.
+/// `NSPasteboardTypeString`, `NSPasteboardTypeHTML`.
 const STRING_TYPE: &CStr = c"public.utf8-plain-text";
+const HTML_TYPE: &CStr = c"public.html";
 /// `NSUTF8StringEncoding`.
 const UTF8: usize = 4;
 
@@ -73,19 +74,17 @@ pub fn change_count() -> i64 {
     send!(general(), c"changeCount" => i64)
 }
 
-/// Whether the pasteboard holds text, without reading it.
-pub fn has_text() -> bool {
+fn has(kind: &CStr) -> bool {
     let _pool = Pool::new();
     // SAFETY: as above.
     let class = unsafe { objc_getClass(c"NSArray".as_ptr()) };
-    let types = send!(class, c"arrayWithObject:" => Id, Id = nsstring(STRING_TYPE.to_bytes()));
+    let types = send!(class, c"arrayWithObject:" => Id, Id = nsstring(kind.to_bytes()));
     !send!(general(), c"availableTypeFromArray:" => Id, Id = types).is_null()
 }
 
-/// The pasteboard's text.
-pub fn text() -> Option<String> {
+fn string(kind: &CStr) -> Option<String> {
     let _pool = Pool::new();
-    let s = send!(general(), c"stringForType:" => Id, Id = nsstring(STRING_TYPE.to_bytes()));
+    let s = send!(general(), c"stringForType:" => Id, Id = nsstring(kind.to_bytes()));
     if s.is_null() {
         return None;
     }
@@ -94,15 +93,37 @@ pub fn text() -> Option<String> {
     (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
 }
 
-/// Replaces the pasteboard's content with `text` (or nothing); returns
-/// the change count it then has.
-pub fn set_text(text: Option<&str>) -> i64 {
+/// Whether the pasteboard holds text, without reading it.
+pub fn has_text() -> bool {
+    has(STRING_TYPE)
+}
+
+/// Whether the pasteboard holds HTML, without reading it.
+pub fn has_html() -> bool {
+    has(HTML_TYPE)
+}
+
+/// The pasteboard's text.
+pub fn text() -> Option<String> {
+    string(STRING_TYPE)
+}
+
+/// The pasteboard's HTML.
+pub fn html() -> Option<String> {
+    string(HTML_TYPE)
+}
+
+/// Replaces the pasteboard's content with `text` and its `html` (or
+/// nothing); returns the change count it then has.
+pub fn set_text(text: Option<&str>, html: Option<&str>) -> i64 {
     let _pool = Pool::new();
     let board = general();
     send!(board, c"clearContents" => i64);
-    if let Some(text) = text {
-        send!(board, c"setString:forType:" => bool,
-            Id = nsstring(text.as_bytes()), Id = nsstring(STRING_TYPE.to_bytes()));
+    for (value, kind) in [(text, STRING_TYPE), (html, HTML_TYPE)] {
+        if let Some(value) = value {
+            send!(board, c"setString:forType:" => bool,
+                Id = nsstring(value.as_bytes()), Id = nsstring(kind.to_bytes()));
+        }
     }
     send!(board, c"changeCount" => i64)
 }

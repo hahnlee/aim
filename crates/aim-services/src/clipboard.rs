@@ -345,16 +345,18 @@ impl ClipboardService {
     ) -> Result<()> {
         let user_id = user_of(uid);
         if device_id == DEVICE_ID_DEFAULT {
-            // EmulatorClipboardMonitor.accept: the text goes to the Mac;
-            // a clear clears the Mac's pasteboard only while it holds the
-            // clip this service put there.
-            let text = clip
-                .as_ref()
-                .and_then(|(c, _)| c.items.first()?.text.clone());
+            // EmulatorClipboardMonitor.accept: the text, and its HTML,
+            // go to the Mac; a clear clears the Mac's pasteboard only
+            // while it holds the clip this service put there.
+            let first = clip.as_ref().and_then(|(c, _)| c.items.first());
+            let text = first.and_then(|i| i.text.clone());
+            let html = first.and_then(|i| i.html.clone());
             let mut st = self.state.lock().unwrap();
             if clip.is_some() || st.mac_seen == st.mac_written {
-                st.mac_written =
-                    pasteboard::set_text(text.as_deref().or(clip.as_ref().map(|_| "")));
+                st.mac_written = pasteboard::set_text(
+                    text.as_deref().or(clip.as_ref().map(|_| "")),
+                    html.as_deref(),
+                );
                 st.mac_seen = st.mac_written;
             }
         }
@@ -477,16 +479,18 @@ impl ClipboardService {
     fn clip_of(primary: &Primary) -> Option<ClipData> {
         match primary {
             Primary::Clip { clip, .. } => Some((**clip).clone()),
-            Primary::Mac { timestamp } => {
-                pasteboard::text().map(|text| ClipData::host_text(&text, *timestamp))
-            }
+            Primary::Mac { timestamp } => pasteboard::text()
+                .map(|text| ClipData::host(&text, pasteboard::html().as_deref(), *timestamp)),
         }
     }
 
     fn description_of(primary: &Primary) -> ClipDescription {
         match primary {
             Primary::Clip { clip, .. } => clip.description.clone(),
-            Primary::Mac { timestamp } => ClipData::host_text("", *timestamp).description,
+            Primary::Mac { timestamp } => {
+                let html = pasteboard::has_html().then_some("");
+                ClipData::host("", html, *timestamp).description
+            }
         }
     }
 
