@@ -61,13 +61,11 @@ const REASON_SUB_PREDICTED_RESTORED: i32 = 0x0001;
 const FIRST_APPLICATION_UID: i32 = 10_000;
 const SYSTEM_UID: i32 = 1000;
 /// `ApplicationInfo.FLAG_SYSTEM`; `PackageManager.MATCH_DISABLED_COMPONENTS`,
-/// `MATCH_SYSTEM_ONLY`, `MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE`,
-/// `MATCH_ANY_USER`.
+/// `MATCH_SYSTEM_ONLY`, `MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE`.
 const FLAG_SYSTEM: i32 = 0x1;
 const MATCH_DISABLED_COMPONENTS: i64 = 0x200;
 const MATCH_SYSTEM_ONLY: i64 = 0x0010_0000;
 const MATCH_DIRECT_BOOT_AWARE_UNAWARE: i64 = 0x0004_0000 | 0x0008_0000;
-const MATCH_ANY_USER: i64 = 0x0040_0000;
 const ACCESS_BACKGROUND_LOCATION: &str = "android.permission.ACCESS_BACKGROUND_LOCATION";
 const USE_EXACT_ALARM: &str = "android.permission.USE_EXACT_ALARM";
 const SCHEDULE_EXACT_ALARM: &str = "android.permission.SCHEDULE_EXACT_ALARM";
@@ -483,9 +481,6 @@ struct Controller {
     enabled: bool,
     constants: Constants,
     history: History,
-    /// `mPowerWhitelistedApps`: DeviceIdleController's
-    /// `getFullPowerWhitelistExceptIdle`.
-    power_allowlist: BTreeSet<String>,
     /// `mHeadlessSystemApps`.
     headless: BTreeSet<String>,
     /// `Flags.screenTimeBypass`.
@@ -566,7 +561,6 @@ impl AppHost {
             enabled,
             constants,
             history,
-            power_allowlist: self.power_allowlist()?,
             headless: self.headless_system_apps()?,
             screen_time_bypass: self.flag("com.android.server.usage.screen_time_bypass")?,
         };
@@ -618,7 +612,11 @@ impl AppHost {
 
     /// The packages installed for `user` with `flags`: name, uid and
     /// application flags.
-    fn installed(&self, flags: i64, user: i32) -> Result<Vec<(String, i32, i32)>, Exception> {
+    pub(super) fn installed(
+        &self,
+        flags: i64,
+        user: i32,
+    ) -> Result<Vec<(String, i32, i32)>, Exception> {
         let (state, resolution) = self.packages()?;
         let query = Query {
             state: &state,
@@ -638,43 +636,6 @@ impl AppHost {
                 Some((p.package_name?, info.uid, info.flags))
             })
             .collect())
-    }
-
-    /// DeviceIdleController's `getFullPowerWhitelistExceptIdle`: the
-    /// installed system apps SystemConfig allows in power save (except
-    /// idle, or at all), and the user's (`deviceidle.xml`'s `wl`).
-    fn power_allowlist(&self) -> Result<BTreeSet<String>, Exception> {
-        let (state, _) = self.packages()?;
-        let system: BTreeSet<String> = self
-            .installed(MATCH_ANY_USER | MATCH_SYSTEM_ONLY, 0)?
-            .into_iter()
-            .map(|(n, _, _)| n)
-            .collect();
-        let mut apps: BTreeSet<String> = state
-            .system
-            .allow_in_power_save_except_idle
-            .iter()
-            .chain(&state.system.allow_in_power_save)
-            .filter(|p| system.contains(*p))
-            .cloned()
-            .collect();
-        let installed: BTreeSet<String> = self
-            .installed(MATCH_ANY_USER, 0)?
-            .into_iter()
-            .map(|(n, _, _)| n)
-            .collect();
-        if let Ok(bytes) = std::fs::read(self.inputs()?.data.join("system/deviceidle.xml")) {
-            let root = aim_android_xml::read(&bytes)
-                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("deviceidle.xml: {e}")))?;
-            apps.extend(
-                root.children()
-                    .filter(|e| e.name == "wl")
-                    .filter_map(|e| e.string("n"))
-                    .map(|n| n.into_owned())
-                    .filter(|n| installed.contains(n)),
-            );
-        }
-        Ok(apps)
     }
 
     /// `loadHeadlessSystemAppCache`: the system apps without a launcher
@@ -822,7 +783,9 @@ impl AppHost {
         if !c.enabled
             || app_id < FIRST_APPLICATION_UID
             || package == "android"
-            || c.power_allowlist.contains(package)
+            // `isNonIdleWhitelisted`: DeviceIdleController's allowlist
+            // except idle.
+            || self.device_idle().allowed_except_idle(package)?
         {
             return Ok(STANDBY_BUCKET_EXEMPTED);
         }

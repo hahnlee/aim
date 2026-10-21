@@ -9,7 +9,6 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, EX_NULL_POINTER, Exception, Parcel};
@@ -17,10 +16,8 @@ use aim_service_aidl::com_android_internal_telecom_ideviceidlecontrolleradapter 
 use aim_service_aidl::com_android_internal_telecom_iinternalserviceretriever as retriever;
 use aim_service_aidl::dev_aim_server_isystemprocess as sp;
 
-use super::{AppHost, PER_USER_RANGE, SYSTEM_UID, reply};
+use super::{AppHost, SYSTEM_UID, reply};
 
-/// `DeviceIdleController.Constants.MAX_TEMP_APP_ALLOWLIST_DURATION_MS`.
-const MAX_TEMP_APP_ALLOWLIST_DURATION: Duration = Duration::from_secs(5 * 60);
 /// `PowerExemptionManager.REASON_UNKNOWN`.
 const REASON_UNKNOWN: i32 = 0;
 
@@ -129,26 +126,6 @@ impl Service for Repository {
 /// `mDeviceIdleControllerAdapter`.
 struct IdleAdapter(Arc<AppHost>);
 
-impl IdleAdapter {
-    /// `DeviceIdleInternal.addPowerSaveTempWhitelistApp(myUid, ...)` with
-    /// `TEMPORARY_ALLOW_LIST_TYPE_FOREGROUND_SERVICE_ALLOWED`: the
-    /// package's uid allowed foreground service starts for the duration,
-    /// at most `MAX_TEMP_APP_ALLOWLIST_DURATION_MS`
-    /// (`updateDeviceIdleTempAllowlist`); the app host is never idle, so
-    /// the idle exemption itself has no effect. An unknown package is
-    /// ignored (`NameNotFoundException`).
-    fn exempt(&self, package: &str, duration_ms: i64, user: i32) -> Result<(), Exception> {
-        let Some(info) = self.0.inputs()?.packages.application_info(package, 0) else {
-            return Ok(());
-        };
-        let uid = user * PER_USER_RANGE as i32 + info.uid % PER_USER_RANGE as i32;
-        let duration =
-            Duration::from_millis(duration_ms.max(0) as u64).min(MAX_TEMP_APP_ALLOWLIST_DURATION);
-        self.0.temp_allowlist_for_fgs(uid, duration, REASON_UNKNOWN);
-        Ok(())
-    }
-}
-
 impl Service for IdleAdapter {
     fn descriptor(&self) -> &str {
         idle::DESCRIPTOR
@@ -160,9 +137,20 @@ impl Service for IdleAdapter {
             idle::EXEMPT_APP_TEMPORARILY_FOR_EVENT => {
                 let a = idle::ExemptAppTemporarilyForEvent::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
+                // `DeviceIdleInternal.addPowerSaveTempWhitelistApp(myUid,
+                // ...)`: foreground service starts allowed for the duration.
                 match a.package_name.as_deref() {
                     Some(package) => self
-                        .exempt(package, a.duration, a.user_handle)
+                        .0
+                        .device_idle()
+                        .add_temp(
+                            Some(package),
+                            a.duration,
+                            super::device_idle::TEMPORARY_ALLOW_LIST_TYPE_FOREGROUND_SERVICE_ALLOWED,
+                            a.user_handle,
+                            REASON_UNKNOWN,
+                            a.reason,
+                        )
                         .map(|()| idle::write_exempt_app_temporarily_for_event_reply(&mut p)),
                     // `getPackageUidAsUser(null, ..)`.
                     None => Err(Exception::new(EX_NULL_POINTER, "")),

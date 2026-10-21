@@ -635,13 +635,22 @@ fn run(host: Weak<AppHost>, shared: Arc<Shared>) {
         for (operation, listener, count, package, fgs_allowlist) in due {
             if let Some(op) = operation {
                 // Sent with its options' temporary allowlist, for the
-                // PendingIntent's creator (`tempAllowlistForPendingIntent`).
+                // PendingIntent's creator (`tempAllowlistForPendingIntent`,
+                // whose `pushTempAllowlist` tells DeviceIdleController).
                 if let (Some(reason), Some(uid)) = (fgs_allowlist, host.intent_sender_uid(op)) {
-                    host.temp_allowlist_for_fgs(
+                    let duration = super::services::ALLOW_WHILE_IDLE_ALLOWLIST_DURATION;
+                    if let Err(e) = host.device_idle().add_temp_direct(
                         uid,
-                        super::services::ALLOW_WHILE_IDLE_ALLOWLIST_DURATION,
+                        duration.as_millis() as i64,
+                        super::device_idle::TEMPORARY_ALLOW_LIST_TYPE_FOREGROUND_SERVICE_ALLOWED,
                         reason,
-                    );
+                        None,
+                    ) {
+                        eprintln!(
+                            "app host: alarm: temporary allowlist of {uid}: {}",
+                            e.message
+                        );
+                    }
                 }
                 let fill = RawIntent::of(
                     None,

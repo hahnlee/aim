@@ -781,7 +781,7 @@ fn read_document(path: &Path) -> std::result::Result<Option<aim_android_xml::Ele
 
 /// Writes `name` in `dir` as `AtomicFile` writes it, making `dir` as
 /// `File.mkdir` does: the system's, 0700, its files 0600.
-fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+pub(super) fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let system = aim_storage::guest_inode::GuestInode {
         uid: Some(1000),

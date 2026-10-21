@@ -51,6 +51,7 @@ pub mod cross_profile_apps;
 pub mod cursor;
 pub mod device_config;
 pub mod device_identifiers;
+pub mod device_idle;
 pub mod device_policy;
 pub mod display;
 pub mod display_service;
@@ -509,6 +510,7 @@ pub struct AppHost {
     dropbox: OnceLock<Arc<dropbox::DropBox>>,
     bluetooth: OnceLock<Arc<bluetooth_manager::BluetoothManager>>,
     text_services: OnceLock<Arc<text_services::TextServices>>,
+    device_idle: OnceLock<Arc<device_idle::DeviceIdle>>,
     /// The services' package monitors.
     package_monitors: package_writes::NativeMonitors,
     /// PackageManager's writes and their handler, the package service's.
@@ -602,6 +604,7 @@ impl AppHost {
             dropbox: OnceLock::new(),
             bluetooth: OnceLock::new(),
             text_services: OnceLock::new(),
+            device_idle: OnceLock::new(),
             package_monitors: Default::default(),
             package_writes: OnceLock::new(),
             device_policies: OnceLock::new(),
@@ -930,6 +933,7 @@ impl AppHost {
                     .get_or_init(|| Arc::new(power_service::PowerManager::new(self.clone())))
                     .clone(),
             ),
+            ("deviceidle", self.device_idle()),
             (
                 "alarm",
                 self.alarm_service
@@ -3562,6 +3566,13 @@ impl AppHost {
                 None => inputs.compat.default_value(change),
             }),
         )
+    }
+
+    /// DeviceIdleController, made when first needed.
+    fn device_idle(&self) -> Arc<device_idle::DeviceIdle> {
+        self.device_idle
+            .get_or_init(|| device_idle::DeviceIdle::new(self.me.upgrade().unwrap()))
+            .clone()
     }
 
     /// The exception of a method of `service` (of the interface
