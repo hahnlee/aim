@@ -215,6 +215,14 @@ of our own.
   A few Google app libraries use x18 as an ordinary register, which is an
   app-compatibility risk the current runtime already has. The guest must not
   advertise SME, so libc's SME helper never holds a value in x18.
+- **Executables linked below 4 GiB:** a non-relocatable `ET_EXEC` lives at
+  its link address, and linux-run's `__PAGEZERO` covers 0 to 4 GiB (arm64
+  macOS kills an executable with a smaller one at exec), so one linked there
+  cannot run; the loader says so (#340). The pinned image has one,
+  `snapuserd` (Virtual A/B snapshot merges, which AIM does not run); the
+  NDK's `-static` links at 0x200000. Bionic has no static-pie startup (only
+  the linker relocates itself), so a `-static-pie` program fails as it does
+  on a device.
 - **TPIDR_EL0 (bionic's thread pointer):** not preserved. Darwin writes a
   per-CPU value there on context switch. At load time, alongside `svc #0`,
   `mrs`/`msr tpidr_el0` are rewritten to load and store a per-thread slot:
