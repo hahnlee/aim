@@ -234,6 +234,13 @@ pub fn waitid(a: [u64; 6]) -> i64 {
         P_PIDFD => match pidfd_lookup(id as i32) {
             Some((pid, nonblock)) => {
                 nohang |= nonblock;
+                // A readable pidfd's process has exited, and Linux has made
+                // it a zombie by then. Darwin posts NOTE_EXIT a moment
+                // before the zombie can be waited for: wait that moment
+                // out rather than find nothing.
+                if nohang && options & WEXITED != 0 && pidfd_readable(id as i32) {
+                    nohang = false;
+                }
                 (libc::P_PID, pid as u32)
             }
             None => return -(EBADF as i64),
@@ -423,6 +430,18 @@ pub(super) fn open_pidfd(pid: i32, nonblock: bool) -> i64 {
         return -(error as i64);
     }
     kq as i64
+}
+
+/// Whether pidfd `fd` polls readable: its process exited. Polling the
+/// kqueue leaves its events for the guest.
+fn pidfd_readable(fd: i32) -> bool {
+    let mut p = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one local pollfd, no wait.
+    unsafe { libc::poll(&mut p, 1, 0) == 1 && p.revents & libc::POLLIN != 0 }
 }
 
 /// The pid and O_NONBLOCK flag behind a pidfd.
