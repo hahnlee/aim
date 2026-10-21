@@ -170,12 +170,13 @@ enum Collection {
     Async,
 }
 
-enum ServiceOwner {
+/// A service's node: another process's, or this process's own.
+pub enum ServiceOwner {
     Remote(Arc<Strong>),
     Local(LocalService),
 }
 impl ServiceOwner {
-    fn transact(
+    pub fn transact(
         &self,
         code: u32,
         data: &Parcel,
@@ -6353,14 +6354,15 @@ impl System {
 
     /// `IActivityManager.getContentProviderExternal(name, user, token,
     /// tag)`: the provider, held for `token`. Its `ProviderInfo` carries
-    /// no binder, so the holder's first binder is the provider's.
+    /// no binder, so the holder's first binder is the provider's; one this
+    /// process serves is its own node.
     pub fn content_provider_external(
         self: &Arc<Self>,
         name: &str,
         user_id: i32,
         token: Binder,
         tag: &str,
-    ) -> Result<Option<Strong>> {
+    ) -> Result<Option<ServiceOwner>> {
         let service = self.service("activity")?;
         let mut data = Parcel::new();
         am::GetContentProviderExternal {
@@ -6377,9 +6379,13 @@ impl System {
             &mut reply.reader(),
         )
         .map_err(|s| unreachable_service("activity", s))??;
-        Ok(holder
-            .and_then(|h| h.provider)
-            .map(|handle| self.process.strong(handle)))
+        Ok(match holder.and_then(|h| h.provider) {
+            Some(Binder::Handle(handle)) => {
+                Some(ServiceOwner::Remote(Arc::new(self.process.strong(handle))))
+            }
+            Some(Binder::Local(ptr)) => self.process.local_service(ptr).map(ServiceOwner::Local),
+            None => None,
+        })
     }
 
     /// `UriGrantsManagerInternal.checkGrantUriPermission(uid, null, uri,
@@ -6849,7 +6855,7 @@ impl System {
 /// `ContentProviderHolder`, up to its provider: the first binder past
 /// its `ProviderInfo`.
 struct ContentProviderHolder {
-    provider: Option<u32>,
+    provider: Option<Binder>,
 }
 
 impl ReadParcelable for ContentProviderHolder {
@@ -6859,10 +6865,7 @@ impl ReadParcelable for ContentProviderHolder {
         };
         r.set_position(at);
         Ok(Self {
-            provider: match r.read_binder()? {
-                Some(Binder::Handle(h)) => Some(h),
-                _ => None,
-            },
+            provider: r.read_binder()?,
         })
     }
 }
