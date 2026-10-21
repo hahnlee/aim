@@ -1032,7 +1032,7 @@ impl LockSettings {
         let mut user = 0;
         let mut old = String::new();
         // `parseArgs`.
-        while let Some(opt) = next_option(c) {
+        while let Some(opt) = c.next_option()? {
             match opt.as_str() {
                 "--old" => old = c.next_arg_required()?,
                 "--user" => {
@@ -1159,22 +1159,6 @@ impl LockSettings {
             .is_some_and(|v| v > 0);
         let demo_user = demo_mode && super::user_service::is_demo(&self.host, user)?;
         Ok(self.boolean(DISABLE_LOCKSCREEN_KEY, false, user)? || by_default || demo_user)
-    }
-}
-
-/// `ShellCommand.getNextOption`.
-fn next_option(c: &mut ShellCommand) -> Option<String> {
-    let arg = c.peek_next_arg()?.to_string();
-    if !arg.starts_with('-') {
-        return None;
-    }
-    c.next_arg();
-    match arg.as_str() {
-        "--" => None,
-        // A short option's data is attached: the option is its first two
-        // characters.
-        _ if arg.len() > 2 && !arg[1..].starts_with('-') => Some(arg[..2].to_string()),
-        _ => Some(arg),
     }
 }
 
