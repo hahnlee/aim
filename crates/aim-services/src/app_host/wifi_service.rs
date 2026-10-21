@@ -368,45 +368,6 @@ impl WifiService {
         Ok(self.host.check_permission(Some(permission), uid)? == 0)
     }
 
-    /// `WifiPermissionsUtil.isLocationModeEnabled`: the location service's
-    /// answer for the current user, else its `LOCATION_MODE` setting.
-    fn location_mode_enabled(&self) -> Result<bool, Exception> {
-        let mut data = Parcel::new();
-        lm::IsLocationEnabledForUser {
-            user_id: CURRENT_USER,
-        }
-        .write(&mut data);
-        let asked = {
-            let _system = aim_binder_host::local::clear_calling_identity();
-            super::display::transact_service(
-                &self.host.process,
-                "location",
-                lm::IS_LOCATION_ENABLED_FOR_USER,
-                &data,
-            )
-        }
-        .and_then(|reply| {
-            lm::read_is_location_enabled_for_user_reply(&mut reply.reader())
-                .map_err(|s| s.to_string())?
-                .map_err(|e| format!("{e:?}"))
-        });
-        match asked {
-            Ok(enabled) => Ok(enabled),
-            Err(e) => {
-                eprintln!(
-                    "app host: wifi: Failure to get location mode via API, falling back to settings: {e}"
-                );
-                Ok(self
-                    .host
-                    .inputs()?
-                    .settings
-                    .get(Table::Secure, "location_mode")
-                    .as_deref()
-                    == Some(LOCATION_MODE_ON))
-            }
-        }
-    }
-
     /// `noteAppOpAllowed`.
     fn note_allowed(&self, op: i32, package: &str, uid: i32) -> Result<bool, Exception> {
         Ok(super::appops_service::note(&self.host, op, uid, Some(package))? == MODE_ALLOWED)
@@ -459,7 +420,7 @@ impl WifiService {
                 return Ok(());
             }
         }
-        if !self.location_mode_enabled()? {
+        if !location_mode_enabled(&self.host)? {
             return Err(Exception::security(
                 "Location mode is disabled for the device",
             ));
@@ -811,6 +772,44 @@ impl WifiService {
             WIFI_STATE_ENABLED
         } else {
             WIFI_STATE_DISABLED
+        }
+    }
+}
+
+/// `WifiPermissionsUtil.isLocationModeEnabled`: the location service's
+/// answer for the current user, else its `LOCATION_MODE` setting.
+pub(super) fn location_mode_enabled(host: &AppHost) -> Result<bool, Exception> {
+    let mut data = Parcel::new();
+    lm::IsLocationEnabledForUser {
+        user_id: CURRENT_USER,
+    }
+    .write(&mut data);
+    let asked = {
+        let _system = aim_binder_host::local::clear_calling_identity();
+        super::display::transact_service(
+            &host.process,
+            "location",
+            lm::IS_LOCATION_ENABLED_FOR_USER,
+            &data,
+        )
+    }
+    .and_then(|reply| {
+        lm::read_is_location_enabled_for_user_reply(&mut reply.reader())
+            .map_err(|s| s.to_string())?
+            .map_err(|e| format!("{e:?}"))
+    });
+    match asked {
+        Ok(enabled) => Ok(enabled),
+        Err(e) => {
+            eprintln!(
+                "app host: wifi: Failure to get location mode via API, falling back to settings: {e}"
+            );
+            Ok(host
+                .inputs()?
+                .settings
+                .get(Table::Secure, "location_mode")
+                .as_deref()
+                == Some(LOCATION_MODE_ON))
         }
     }
 }

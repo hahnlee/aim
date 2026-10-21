@@ -144,6 +144,7 @@ pub mod vpn_manager;
 pub mod webview_update;
 mod webview_zygote;
 pub mod wifi_config;
+pub mod wifi_scanner;
 pub mod wifi_service;
 pub mod window_layout;
 pub mod window_manager;
@@ -778,6 +779,7 @@ impl AppHost {
                 "wifi",
                 Arc::new(wifi_service::WifiService::new(self.clone())),
             ),
+            ("wifiscanner", wifi_scanner::WifiScanner::new(self.clone())),
             (
                 "usagestats",
                 Arc::new(usage_stats::UsageStats::new(self.clone())),
