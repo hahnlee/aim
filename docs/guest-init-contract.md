@@ -360,8 +360,11 @@ exception: zygote aborts a fork when `createProcessGroup` cannot make
 `cgroup2` path-map entry, a plain per-boot directory: groups can be made,
 joined and removed, but no controller acts on them (no freezing, no memory
 limits). `SetupCgroups` creates `apps` and `system` in it as libprocessgroup's
-`CgroupSetup` does, and `/proc/mounts` lists it as `cgroup2`. `/dev/kmsg` is a regular file in the runtime `/dev` until the layer
-emulates the device.
+`CgroupSetup` does, and `/proc/mounts` lists it as `cgroup2`. The kernel
+log is the layer's (`sys/kmsg.rs`): guest-init creates its ring, an empty
+`/dev/kmsg` in the runtime `/dev`, and `/proc/kmsg` (mode 0400) in the
+runtime `/proc`, by which the layer knows a description of either, opened
+in the guest or passed by a service's `file` line.
 
 ## 8. Property areas and the futex
 

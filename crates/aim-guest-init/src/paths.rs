@@ -592,9 +592,12 @@ impl Layout {
         ] {
             fs::create_dir_all(dir)?;
         }
-        // /dev/kmsg: a regular file stands in for the kernel log device
-        // until the syscall layer emulates it; writes append there.
+        // The kernel log: the syscall layer keeps its ring in /dev/kmsg,
+        // and knows /proc/kmsg by this file (`sys/kmsg.rs`).
         fs::write(self.dev_dir().join("kmsg"), b"")?;
+        let proc_kmsg = self.kernfs_dir().join("proc/kmsg");
+        fs::write(&proc_kmsg, b"")?;
+        fs::set_permissions(&proc_kmsg, fs::Permissions::from_mode(0o400))?;
         Ok(())
     }
 

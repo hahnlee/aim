@@ -49,6 +49,9 @@ impl Guest {
         // A value init wrote (docs/guest-init-contract.md section 7).
         std::fs::create_dir_all(runtime.join("kernfs/proc/sys/kernel")).unwrap();
         std::fs::write(runtime.join("kernfs/proc/sys/kernel/panic_on_oops"), "1\n").unwrap();
+        // The kernel log's ring and /proc/kmsg, as guest-init makes them.
+        std::fs::write(runtime.join("dev/kmsg"), b"").unwrap();
+        std::fs::write(runtime.join("kernfs/proc/kmsg"), b"").unwrap();
         let map = runtime.join("path-map");
         let r = runtime.display();
         std::fs::write(
@@ -328,6 +331,11 @@ fn jit() {
 #[test]
 fn memfd() {
     check("t_memfd", &[]);
+}
+
+#[test]
+fn kernel_log() {
+    check("t_kmsg", &[]);
 }
 
 /// The derived image's lmkd answers ActivityManager's protocol, with the

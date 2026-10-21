@@ -59,6 +59,8 @@ pub enum Kind {
     Ashmem,
     /// A binder device file; the daemon holds its state.
     Binder(aim_binder_host::client::BinderFile),
+    /// `/dev/kmsg` or `/proc/kmsg` (`kmsg`).
+    Kmsg(Arc<super::kmsg::Open>),
 }
 
 pub(super) struct PathProof(std::os::fd::OwnedFd);
@@ -1168,6 +1170,7 @@ pub(super) fn adopt_untyped(fd: i32) {
     memfd::adopt(fd);
     super::ashmem::adopt(fd);
     random::adopt(fd);
+    super::kmsg::adopt(fd);
 }
 
 /// Give the fds inherited across exec their Linux state.
@@ -1234,6 +1237,7 @@ pub fn anon_name(fd: i32) -> Option<String> {
             | Kind::Random
             | Kind::Ashmem
             | Kind::ProxyFile
+            | Kind::Kmsg(_)
             | Kind::Binder(_) => {
                 return None;
             }
@@ -1609,6 +1613,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::Epoll(a) => Arc::as_ptr(a) as *const (),
             Kind::Inotify(a) => Arc::as_ptr(a) as *const (),
             Kind::Dir(a) => Arc::as_ptr(a) as *const (),
+            Kind::Kmsg(a) => Arc::as_ptr(a) as *const (),
             Kind::Memfd(_)
             | Kind::SyncFile
             | Kind::Random
@@ -1696,6 +1701,10 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
                 w.u32(10);
                 w.u64(path.flags);
             }
+            Kind::Kmsg(open) => {
+                w.u32(14);
+                w.bool(matches!(**open, super::kmsg::Open::Proc));
+            }
             Kind::Content | Kind::Knob(_) | Kind::Evdev(_) | Kind::Binder(_) => unreachable!(),
         }
     });
@@ -1727,6 +1736,7 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             8 => Kind::Random,
             13 => Kind::Ashmem,
             9 => Kind::ProxyFile,
+            14 => Kind::Kmsg(Arc::new(super::kmsg::Open::restore(r.bool()))),
             10 => Kind::Path(PathDescription::new(r.u64())),
             11 => {
                 let flags = r.u64();

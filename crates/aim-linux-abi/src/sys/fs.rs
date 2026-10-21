@@ -251,6 +251,12 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     if let Some(fd) = super::selinuxfs::open(&r.guest, flags) {
         return fd;
     }
+    // The kernel log is a character device on Linux: O_TRUNC leaves it.
+    let flags = if r.guest == "/dev/kmsg" {
+        flags & !O_TRUNC
+    } else {
+        flags
+    };
     let hflags = open_flags_to_host(flags);
     if let Some(fd) = procfs::open(&r.guest, flags, hflags) {
         return fd;
@@ -268,13 +274,6 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
             return -(error as i64);
         }
     }
-    // /dev/kmsg is a regular file in the runtime /dev (guest-init contract,
-    // section 7): every write is a record appended to the log.
-    let hflags = if r.guest == "/dev/kmsg" {
-        hflags | libc::O_APPEND
-    } else {
-        hflags
-    };
     // An original ELF with a translation-cache entry is opened as the
     // translated file, before the guest reads its headers.
     if let Some(fd) = crate::xrt::open_translated(&r.host, &r.guest, hflags) {
@@ -451,6 +450,14 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     crate::xrt::on_open(fd, &r.host, &r.guest, hflags);
     if matches!(r.guest.as_str(), "/dev/random" | "/dev/urandom") {
         super::random::adopt(fd);
+    }
+    if r.guest == "/dev/kmsg" && super::kmsg::adopt(fd) {
+        if let Err(error) = super::kmsg::opened(fd, flags) {
+            fdtab::on_close(fd);
+            // SAFETY: the fd this open made.
+            unsafe { libc::close(fd) };
+            return -(error as i64);
+        }
     }
     fd as i64
 }
@@ -825,6 +832,7 @@ fn special_read_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> 
         Kind::Event(_) | Kind::Timer(_) => event::read(fd, buf, len),
         Kind::Inotify(_) => inotify::read(fd, buf, len),
         Kind::Evdev(_) => super::evdev::read(fd, buf, len),
+        Kind::Kmsg(open) => Some(super::kmsg::read(fd, &open, iov)),
         Kind::Sock(_) => net::read_pinned(pin, iov),
         Kind::Dir(_) => Some(-EISDIR),
         Kind::Epoll(_) | Kind::SyncFile | Kind::Binder(_) => Some(-(EINVAL as i64)),
@@ -877,6 +885,7 @@ fn special_write_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64>
         Kind::Event(_) | Kind::Timer(_) => event::write(fd, buf, len),
         Kind::Sock(_) => net::write_pinned(pin, iov),
         Kind::Evdev(_) => super::evdev::write(fd, buf, len),
+        Kind::Kmsg(open) => Some(super::kmsg::write(&open, iov)),
         Kind::Dir(_) => Some(-(EBADF as i64)),
         Kind::Epoll(_) | Kind::Inotify(_) | Kind::SyncFile | Kind::Binder(_) => {
             Some(-(EINVAL as i64))
@@ -941,6 +950,9 @@ fn special_pio_kernel(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> O
         Kind::Random => None,
         Kind::Ashmem if write => Some(-(EINVAL as i64)),
         Kind::Ashmem => None,
+        // devkmsg's reads and writes take no position.
+        Kind::Kmsg(open) if write => Some(super::kmsg::write(&open, &one(buf, len))),
+        Kind::Kmsg(open) => Some(super::kmsg::read(fd, &open, &one(buf, len))),
         _ => Some(-ESPIPE),
     }
 }
@@ -1223,6 +1235,14 @@ pub fn lseek(a: [u64; 6]) -> i64 {
             whence => whence,
         };
         return description.seek(pin.descriptor(), a[1] as i64, whence);
+    }
+    if let Some(Kind::Kmsg(open)) = pin.kind() {
+        return super::kmsg::lseek(
+            pin.descriptor().as_raw_fd(),
+            &open,
+            a[1] as i64,
+            a[2] as i32,
+        );
     }
     let mut a = a;
     a[0] = pin.descriptor().as_raw_fd() as u64;

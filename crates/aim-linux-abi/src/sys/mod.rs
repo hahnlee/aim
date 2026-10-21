@@ -33,6 +33,7 @@ mod host_descriptors;
 mod inotify;
 mod itimer;
 mod jit;
+mod kmsg;
 mod knob;
 mod mem;
 pub(crate) mod regular_file;
@@ -297,6 +298,7 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         87 => event::timerfd_gettime(a),
         102 => itimer::getitimer(a),
         103 => itimer::setitimer(a),
+        116 => kmsg::syslog(a),
         107 => ptimer::timer_create(a),
         108 => ptimer::timer_gettime(a),
         109 => ptimer::timer_getoverrun(a),
