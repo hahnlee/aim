@@ -1152,14 +1152,13 @@ pub(super) struct Running {
     next: u64,
 }
 
-/// `PermissionChecker.checkPermissionForPreflight` of `permission` for
-/// `package` of `uid`, as the system asks it: granted?
-pub(super) fn preflight(
+/// `f` over the checks the system's own `PermissionManager` asks, with
+/// `message` for the ops they note.
+fn as_system<R>(
     host: &AppHost,
-    permission: &str,
-    uid: i32,
-    package: &str,
-) -> Result<bool, Exception> {
+    message: Option<&str>,
+    f: impl FnOnce(Checks<'_, Host<'_>>) -> Result<R, Exception>,
+) -> Result<R, Exception> {
     let me = host.me.upgrade().ok_or_else(|| {
         Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "app host gone")
     })?;
@@ -1168,8 +1167,24 @@ pub(super) fn preflight(
         host: &me,
         permissions: &permissions,
         caller: SYSTEM_UID,
-        message: None,
+        message,
     };
+    f(Checks(&system))
+}
+
+/// `AppOpsManager.permissionToOpCode` as the system asks it.
+pub(super) fn permission_to_op(host: &AppHost, permission: &str) -> Result<i32, Exception> {
+    as_system(host, None, |checks| checks.permission_to_op(permission))
+}
+
+/// `PermissionChecker.checkPermissionForPreflight` of `permission` for
+/// `package` of `uid`, as the system asks it: granted?
+pub(super) fn preflight(
+    host: &AppHost,
+    permission: &str,
+    uid: i32,
+    package: &str,
+) -> Result<bool, Exception> {
     let source = AttributionSourceState {
         pid: -1,
         uid,
@@ -1180,37 +1195,35 @@ pub(super) fn preflight(
         renounced: None,
         next: None,
     };
-    Ok(
-        Checks(&system).check_permission(permission, &[&source], false, false, false, OP_NONE)?
-            == GRANTED,
-    )
+    preflight_source(host, permission, &source)
 }
 
-/// `PermissionManager.checkPermissionForDataDelivery` of `permission` for
-/// the chain of `source`, as the system asks it: granted?
-pub(super) fn data_delivery(
+/// `PermissionManager.checkPermissionForPreflight` of `permission` for the
+/// chain of `source`, as the system asks it: granted?
+pub(super) fn preflight_source(
     host: &AppHost,
     permission: &str,
     source: &AttributionSourceState,
 ) -> Result<bool, Exception> {
-    let me = host.me.upgrade().ok_or_else(|| {
-        Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "app host gone")
-    })?;
-    let permissions = PermissionManager::new(me.clone());
-    let system = Host {
-        host: &me,
-        permissions: &permissions,
-        caller: SYSTEM_UID,
-        message: None,
-    };
-    Ok(Checks(&system).check_permission(
-        permission,
-        &chain(source)?,
-        true,
-        false,
-        false,
-        OP_NONE,
-    )? == GRANTED)
+    let links = chain(source)?;
+    as_system(host, None, |checks| {
+        Ok(checks.check_permission(permission, &links, false, false, false, OP_NONE)? == GRANTED)
+    })
+}
+
+/// `PermissionManager.checkPermissionForDataDelivery` of `permission` for
+/// the chain of `source`, as the system asks it, with `message` for the
+/// op it notes: granted?
+pub(super) fn data_delivery(
+    host: &AppHost,
+    permission: &str,
+    source: &AttributionSourceState,
+    message: Option<&str>,
+) -> Result<bool, Exception> {
+    let links = chain(source)?;
+    as_system(host, message, |checks| {
+        Ok(checks.check_permission(permission, &links, true, false, false, OP_NONE)? == GRANTED)
+    })
 }
 
 /// `PermissionManager.checkPermissionForDataDeliveryFromDataSource` of
@@ -1222,16 +1235,6 @@ pub(super) fn data_delivery_from_datasource(
     permission: &str,
     source: &AttributionSourceState,
 ) -> Result<i32, Exception> {
-    let me = host.me.upgrade().ok_or_else(|| {
-        Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "app host gone")
-    })?;
-    let permissions = PermissionManager::new(me.clone());
-    let system = Host {
-        host: &me,
-        permissions: &permissions,
-        caller: SYSTEM_UID,
-        message: None,
-    };
     let datasource = AttributionSourceState {
         pid: -1,
         uid: SYSTEM_UID,
@@ -1244,7 +1247,9 @@ pub(super) fn data_delivery_from_datasource(
     };
     let mut links = vec![&datasource];
     links.extend(chain(source)?);
-    Checks(&system).check_permission(permission, &links, true, false, true, OP_NONE)
+    as_system(host, None, |checks| {
+        checks.check_permission(permission, &links, true, false, true, OP_NONE)
+    })
 }
 
 /// `ForegroundServiceTypePolicy.RegularPermission.checkPermission` of

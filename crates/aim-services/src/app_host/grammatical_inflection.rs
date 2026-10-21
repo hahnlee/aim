@@ -77,7 +77,7 @@ impl GrammaticalInflection {
 
     /// `checkSystemGrammaticalGenderPermission`.
     fn permitted(&self, source: &AttributionSourceState) -> Result<bool, Exception> {
-        permission_checker::data_delivery(&self.host, READ_SYSTEM_GRAMMATICAL_GENDER, source)
+        permission_checker::data_delivery(&self.host, READ_SYSTEM_GRAMMATICAL_GENDER, source, None)
     }
 
     /// `getSystemGrammaticalGender(userId)`: the user's file read once, as

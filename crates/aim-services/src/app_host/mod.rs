@@ -4662,6 +4662,8 @@ impl Service for Activity {
                 let args = broadcasts::Registration {
                     caller: a.caller,
                     caller_package: a.caller_package,
+                    feature_id: None,
+                    receiver_id: None,
                     receiver: a.receiver,
                     filter: a.filter,
                     permission: a.required_permission,
@@ -4687,6 +4689,8 @@ impl Service for Activity {
                 let args = broadcasts::Registration {
                     caller: a.caller,
                     caller_package: a.caller_package,
+                    feature_id: a.calling_feature_id,
+                    receiver_id: a.receiver_id,
                     receiver: a.receiver,
                     filter: a.filter,
                     permission: a.required_permission,
