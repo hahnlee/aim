@@ -414,6 +414,12 @@ fn cgroup_v1_hierarchies() {
     assert!(ok && out.contains("PASS"), "t_cgroup failed:\n{out}");
 }
 
+/// Anonymous mapping names in maps and smaps (#1993).
+#[test]
+fn anonymous_mapping_names() {
+    check("t_vma_name", &[]);
+}
+
 #[test]
 fn netlink_audit_and_generic() {
     check("t_nlfamilies", &[]);

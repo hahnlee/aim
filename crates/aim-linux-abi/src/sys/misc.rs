@@ -85,8 +85,8 @@ pub fn prctl(a: [u64; 6]) -> i64 {
         return r;
     }
     match a[0] {
-        // Anonymous VMA names are diagnostics only on Linux.
-        PR_SET_VMA | PR_SET_NO_NEW_PRIVS | PR_SET_PTRACER => 0,
+        PR_SET_VMA => super::vma_names::prctl_set_vma(a[1], a[2], a[3], a[4]),
+        PR_SET_NO_NEW_PRIVS | PR_SET_PTRACER => 0,
         PR_GET_NO_NEW_PRIVS => 0,
         PR_SET_DUMPABLE if a[1] <= 1 => {
             DUMPABLE.store(a[1], Relaxed);

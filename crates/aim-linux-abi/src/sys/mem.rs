@@ -236,6 +236,7 @@ pub fn mmap(a: [u64; 6]) -> i64 {
     if result >= 0 {
         let lo = result as u64;
         vm_account::with(|s| s.map(lo, lo + len, kind));
+        super::vma_names::forget(lo, lo + len);
     }
     result
 }
@@ -692,6 +693,7 @@ fn mmap_kernel(a: [u64; 6]) -> i64 {
 /// with what is recorded about it; the heap window is reserved again.
 pub fn exec_reset() {
     let _epoch = super::verity_pager::mutation();
+    super::vma_names::exec_reset();
     if let Err(error) = super::verity_pager::clear() {
         crate::diag!("verity mapping retirement before exec failed: {error}");
     }
@@ -749,6 +751,7 @@ pub fn munmap(ctx: &GuestContext, a: [u64; 6]) -> i64 {
     if len > 0 && frame_lo < addr.saturating_add(len) && ctx.sp > addr {
         DEFERRED_UNMAPS.with(|d| d.borrow_mut().push((addr, len)));
         vm_account::with(|s| s.unmap(addr, addr + len));
+        super::vma_names::forget(addr, addr + len);
         return 0;
     }
     if let Err(error) = super::verity_pager::forget(addr, len) {
@@ -761,6 +764,7 @@ pub fn munmap(ctx: &GuestContext, a: [u64; 6]) -> i64 {
     let result = window::unmap(addr, len);
     if result == 0 {
         vm_account::with(|s| s.unmap(addr, addr + len));
+        super::vma_names::forget(addr, addr + len);
         super::fuse_cache::forget(addr, len);
         if let Err(error) = super::verity_pager::reconcile_memberships() {
             return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64);
@@ -1542,6 +1546,15 @@ pub fn mremap(a: [u64; 6]) -> i64 {
         }
     }
     let result = mremap_guest(a);
+    if result >= 0 {
+        super::vma_names::remap(
+            old,
+            old_len,
+            result as u64,
+            new_len,
+            flags & MREMAP_DONTUNMAP != 0,
+        );
+    }
     if result >= 0
         && let Some(kind) = kind
     {
@@ -2062,6 +2075,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
         }
     }
     vm_account::fork_save(w);
+    super::vma_names::fork_save(w);
 }
 
 pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
@@ -2073,4 +2087,5 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
         limit: v[3],
     };
     vm_account::fork_restore(r);
+    super::vma_names::fork_restore(r);
 }

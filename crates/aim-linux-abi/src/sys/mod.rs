@@ -87,6 +87,7 @@ mod uevent;
 mod uplink;
 pub(crate) mod user_memory;
 mod vm_account;
+mod vma_names;
 mod vmmap;
 mod wait;
 pub mod window;
