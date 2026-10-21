@@ -8,12 +8,16 @@
 //! receivers and package monitors (`PackageMonitorCallbackHelper`), at
 //! once unless `DONT_KILL_APP` defers it (`mPendingBroadcasts`). The
 //! restrictions are written when the setting changes, not on the
-//! original's write delay.
+//! original's write delay. The app host's own services' package monitors
+//! (`PackageMonitor.register`, which the system server's services call)
+//! get the change before the apps' callbacks, as `doHandlePackageEvent`
+//! decodes it; it is the only package event the app host makes (installs
+//! and removals: #1757).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::BTreeMap;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use aim_binder_host::local::{Call, LocalService, Strong};
@@ -59,6 +63,8 @@ const ACCESS_INSTANT_APPS: &str = "android.permission.ACCESS_INSTANT_APPS";
 /// The aconfig flag `BroadcastHelper` follows.
 const REDUCE_BROADCASTS: &str = "android.content.pm.reduce_broadcasts_for_component_state_changes";
 const PLATFORM_PACKAGE: &str = "android";
+/// `UserHandle.USER_ALL`.
+const USER_ALL: i32 = -1;
 
 type Job = Box<dyn FnOnce() + Send>;
 /// `mPendingBroadcasts`: by user and package, the changed components.
@@ -88,6 +94,53 @@ impl Callback {
             Callback::Remote(strong, _) => strong.transact(code, data, true).map(drop),
             Callback::Local(service) => service.transact(code, data, true).map(drop),
         }
+    }
+}
+
+/// `ACTION_PACKAGE_CHANGED` as `PackageMonitor.doHandlePackageEvent`
+/// reads it: the package, the changing user and the changed components
+/// (`EXTRA_CHANGED_COMPONENT_NAME_LIST`).
+pub(super) struct PackageChanged<'a> {
+    pub package: &'a str,
+    pub user: i32,
+    pub components: &'a [String],
+}
+
+impl PackageChanged<'_> {
+    /// `PackageMonitor.onPackageChanged`'s default, which decides
+    /// `onSomePackagesChanged`: the package itself is among the changed
+    /// components.
+    pub fn some_packages_changed(&self) -> bool {
+        self.components.iter().any(|c| c == self.package)
+    }
+}
+
+/// A package monitor of one of the app host's own services.
+pub(super) trait PackageMonitor: Send + Sync {
+    fn package_changed(&self, change: &PackageChanged<'_>);
+}
+
+/// The app host's services' package monitors, each of a user or of all
+/// (`USER_ALL`), in registration order (`PackageMonitorCallbackHelper`'s
+/// `RemoteCallbackList`).
+#[derive(Default)]
+pub(super) struct NativeMonitors(Mutex<Vec<(i32, Weak<dyn PackageMonitor>)>>);
+
+impl NativeMonitors {
+    /// `PackageMonitor.register(context, null, user, true)`.
+    pub(super) fn register(&self, user: i32, monitor: Weak<dyn PackageMonitor>) {
+        self.0.lock().unwrap().push((user, monitor));
+    }
+
+    /// The monitors of `user`; those of dropped services are forgotten.
+    fn of(&self, user: i32) -> Vec<Arc<dyn PackageMonitor>> {
+        let mut monitors = self.0.lock().unwrap();
+        monitors.retain(|(_, m)| m.strong_count() > 0);
+        monitors
+            .iter()
+            .filter(|(u, _)| *u == USER_ALL || *u == user)
+            .filter_map(|(_, m)| m.upgrade())
+            .collect()
     }
 }
 
@@ -343,6 +396,15 @@ impl Writes {
     /// `PackageMonitorCallbackHelper.notifyPackageChanged`: each monitor
     /// of the user that may see the package is sent the intent.
     fn notify_monitors(&self, change: &Changed) {
+        // The system's own monitors may see every package.
+        let changed = PackageChanged {
+            package: &change.package,
+            user: change.user,
+            components: &change.components,
+        };
+        for monitor in self.host.package_monitors.of(change.user) {
+            monitor.package_changed(&changed);
+        }
         let mut request = Parcel::new();
         remote_callback::SendResult {
             data: Some(BundleOf(&change.monitor_result())),
@@ -353,7 +415,7 @@ impl Writes {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|m| m.user == -1 || m.user == change.user)
+                .filter(|m| m.user == USER_ALL || m.user == change.user)
                 .filter(|m| {
                     change.allow_list.as_ref().is_none_or(|allowed| {
                         app_id(m.uid) == SYSTEM_UID || allowed.contains(&m.uid)
@@ -1080,5 +1142,71 @@ mod tests {
             filter.visibility_allow_list(&state, &state.packages[APP], 0),
             Some(vec![10100])
         );
+    }
+
+    struct Seen(Mutex<Vec<(String, i32, bool)>>);
+
+    impl PackageMonitor for Seen {
+        fn package_changed(&self, change: &PackageChanged<'_>) {
+            self.0.lock().unwrap().push((
+                change.package.into(),
+                change.user,
+                change.some_packages_changed(),
+            ));
+        }
+    }
+
+    /// The services' monitors of the changing user or of all, in
+    /// registration order; a dropped service's is forgotten.
+    #[test]
+    fn native_monitors_of_the_user_get_the_change() {
+        let monitors = NativeMonitors::default();
+        let all = Arc::new(Seen(Mutex::default()));
+        let ten = Arc::new(Seen(Mutex::default()));
+        let gone = Arc::new(Seen(Mutex::default()));
+        monitors.register(
+            USER_ALL,
+            Arc::downgrade(&(all.clone() as Arc<dyn PackageMonitor>)),
+        );
+        monitors.register(
+            10,
+            Arc::downgrade(&(ten.clone() as Arc<dyn PackageMonitor>)),
+        );
+        monitors.register(
+            USER_ALL,
+            Arc::downgrade(&(gone.clone() as Arc<dyn PackageMonitor>)),
+        );
+        drop(gone);
+        let components = vec!["org.example.app".to_string()];
+        let changed = PackageChanged {
+            package: "org.example.app",
+            user: 0,
+            components: &components,
+        };
+        let of_user_0 = monitors.of(0);
+        assert_eq!(of_user_0.len(), 1);
+        for m in of_user_0 {
+            m.package_changed(&changed);
+        }
+        assert_eq!(
+            *all.0.lock().unwrap(),
+            [("org.example.app".to_string(), 0, true)]
+        );
+        assert!(ten.0.lock().unwrap().is_empty());
+        assert_eq!(monitors.of(10).len(), 2);
+        assert_eq!(monitors.0.lock().unwrap().len(), 2);
+    }
+
+    /// `onPackageChanged`'s default: only the whole package's change is
+    /// "some packages changed".
+    #[test]
+    fn a_component_change_is_not_the_package_changing() {
+        let components = vec!["org.example.app.Service".to_string()];
+        let changed = PackageChanged {
+            package: "org.example.app",
+            user: 0,
+            components: &components,
+        };
+        assert!(!changed.some_packages_changed());
     }
 }
