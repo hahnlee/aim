@@ -7,11 +7,15 @@
 //! (`scheduleReceiver`) once the process attached; its process waits for
 //! its `finishReceiver` before its next. An ordered broadcast, or one with
 //! a result receiver, goes to one receiver at a time, each finishing before
-//! the next. The app ops of a broadcast's permissions are not decided
-//! (#1463).
+//! the next. A receiver is checked as a broadcast is enqueued, a
+//! preflight's checks (`shouldSkipAtEnqueueMessage`) with
+//! `avoid_note_op_at_enqueue`, its permissions' and the broadcast's app ops
+//! checked rather than noted; the checks are not repeated at its delivery
+//! (#1918).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::slice;
 use std::sync::{Arc, Mutex};
 
 use aim_binder_host::local::{Call, Strong};
@@ -23,7 +27,10 @@ use aim_service_aidl::android_app_iapplicationthread as thread;
 use aim_service_aidl::android_content_iintentreceiver as intent_receiver;
 use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
+use super::app_op_infos::{APP_OP_INFOS, NUM_OP};
+use super::appops_service::{self, MODE_ALLOWED, MODE_IGNORED};
 use super::kept::{By, KeptBundle, RawBundle, RawIntent};
+use super::permission_checker::{self, AttributionSourceState};
 use super::{AppHost, PER_USER_RANGE, PROCESS_STATE_TOP, is_isolated};
 use crate::bundle::{self, Value};
 use crate::package::component_resolver::Info;
@@ -56,9 +63,12 @@ const FLAG_VISIBLE_TO_INSTANT_APP: i32 = 0x0010_0000;
 /// `PermissionInfo.PROTECTION_SIGNATURE`, `PROTECTION_FLAG_PRIVILEGED`.
 const PROTECTION_SIGNATURE: i32 = 2;
 const PROTECTION_FLAG_PRIVILEGED: i32 = 0x10;
-/// `AppOpsManager.OP_RUN_IN_BACKGROUND`, `MODE_IGNORED`.
+/// `AppOpsManager.OP_RUN_IN_BACKGROUND`.
 const OP_RUN_IN_BACKGROUND: i32 = 63;
-const MODE_IGNORED: i32 = 1;
+/// `Context.DEVICE_ID_DEFAULT`.
+const DEVICE_ID_DEFAULT: i32 = 0;
+/// The aconfig flag whose enqueue checks are a preflight's.
+const AVOID_NOTE_OP_AT_ENQUEUE: &str = "com.android.server.am.avoid_note_op_at_enqueue";
 /// `IntentFilter.SYSTEM_HIGH_PRIORITY`.
 const SYSTEM_HIGH_PRIORITY: i32 = 1000;
 const MAX_RECEIVERS_ALLOWED_PER_APP: usize = 1000;
@@ -80,10 +90,8 @@ const ROOT_UID: i32 = 0;
 const SYSTEM_UID: i32 = 1000;
 const SHELL_UID: i32 = 2000;
 const FIRST_APPLICATION_UID: i32 = 10_000;
-/// `PermissionInfo.PROTECTION_*`.
+/// `PermissionInfo.PROTECTION_MASK_BASE`.
 const PROTECTION_MASK_BASE: i32 = 0xf;
-const PROTECTION_DANGEROUS: i32 = 1;
-const PROTECTION_FLAG_APPOP: i32 = 0x40;
 const BROADCAST_STICKY: &str = "android.permission.BROADCAST_STICKY";
 
 /// A parcelled `IntentFilter`.
@@ -99,6 +107,8 @@ impl ReadParcelable for ParcelFilter {
 pub struct Registration {
     pub caller: Option<Binder>,
     pub caller_package: Option<String>,
+    pub feature_id: Option<String>,
+    pub receiver_id: Option<String>,
     pub receiver: Option<Binder>,
     pub filter: Option<ParcelFilter>,
     pub permission: Option<String>,
@@ -120,6 +130,9 @@ struct Receiver {
 struct Filter {
     filter: IntentFilter,
     package: String,
+    /// `featureId`, `receiverId`.
+    feature_id: Option<String>,
+    receiver_id: Option<String>,
     permission: Option<String>,
     instant_app: bool,
     visible_to_instant_apps: bool,
@@ -223,6 +236,9 @@ pub struct Broadcasts {
 /// A sender, as BroadcastSkipPolicy checks a registered receiver for it.
 struct Sender<'a> {
     uid: i32,
+    /// `callerPackage`, `callerFeatureId`.
+    package: Option<&'a str>,
+    feature_id: Option<&'a str>,
     /// The uid the `exported` check is of: a sticky broadcast's original
     /// sender's.
     original_uid: i32,
@@ -234,6 +250,9 @@ struct Sender<'a> {
     excluded_packages: &'a [String],
     app_op: i32,
     require_compat_change: Option<(i64, bool)>,
+    /// Whether the checks are a preflight's, which check app ops rather
+    /// than note them.
+    preflight: bool,
 }
 
 /// What a sender's `BroadcastOptions` ask that the app host acts on.
@@ -350,35 +369,107 @@ impl AppHost {
             .is_some_and(|u| u.instant_app))
     }
 
-    /// Whether `permission` has an app op (`AppOpsManager.permissionToOp`):
-    /// a runtime permission's, or an app op permission's.
-    fn permission_has_op(&self, permission: &str) -> Result<bool, Exception> {
-        Ok(self
-            .inputs()?
-            .packages
-            .permissions()
-            .iter()
-            .find(|p| p.name == permission)
-            .is_some_and(|p| {
-                p.protection_level & PROTECTION_MASK_BASE == PROTECTION_DANGEROUS
-                    || p.protection_level & PROTECTION_FLAG_APPOP != 0
-            }))
+    /// Whether `uid` holds `permission` (`checkComponentPermission` of no
+    /// component).
+    fn holds(&self, permission: &str, uid: i32) -> Result<bool, Exception> {
+        self.check_component_permission(Some(permission), uid, -1, true)
     }
 
-    /// Whether `uid` holds `permission`, and with it its app op, which the
-    /// app host does not decide.
-    fn holds(&self, permission: &str, uid: i32) -> Result<bool, Exception> {
-        if !self.check_component_permission(Some(permission), uid, -1, true)? {
-            return Ok(false);
+    /// `AppOpsManager.permissionToOpCode` of `permission`, if it has one.
+    fn permission_op(&self, permission: &str) -> Result<Option<i32>, Exception> {
+        let op = permission_checker::permission_to_op(self, permission)?;
+        Ok((op != OP_NONE).then_some(op))
+    }
+
+    /// The mode of `op` for `uid`'s `package` and attribution `tag`: checked
+    /// (`checkOpNoThrow`) for a preflight, noted (`noteOpNoThrow`)
+    /// otherwise.
+    fn broadcast_op(
+        &self,
+        preflight: bool,
+        op: i32,
+        uid: i32,
+        package: Option<&str>,
+        tag: Option<&str>,
+    ) -> Result<i32, Exception> {
+        if preflight {
+            appops_service::mode(self, op, uid, package)
+        } else {
+            appops_service::note_from(self, SYSTEM_UID, op, uid, package, tag)
         }
-        if self.permission_has_op(permission)? {
-            return Err(self.unimplemented_named(
-                "activity",
-                &format!("the app op of {permission} in a broadcast (#1463)"),
-            ));
+    }
+
+    /// `hasPermission`: whether each of `sources` holds `permission`, by
+    /// `checkPermissionForPreflight` or `checkPermissionForDataDelivery`
+    /// with `message`.
+    fn has_permission(
+        &self,
+        permission: &str,
+        message: &str,
+        preflight: bool,
+        sources: &[AttributionSourceState],
+    ) -> Result<bool, Exception> {
+        for source in sources {
+            let granted = if preflight {
+                permission_checker::preflight_source(self, permission, source)?
+            } else {
+                permission_checker::data_delivery(self, permission, source, Some(message))?
+            };
+            if !granted {
+                return Ok(false);
+            }
         }
         Ok(true)
     }
+}
+
+/// An `AttributionSource` of `uid`'s `package` and attribution `tag`, of
+/// `pid` if known.
+fn attribution(uid: i32, pid: i32, package: &str, tag: Option<&str>) -> AttributionSourceState {
+    AttributionSourceState {
+        pid,
+        uid,
+        device_id: DEVICE_ID_DEFAULT,
+        package: Some(package.to_string()),
+        tag: tag.map(str::to_string),
+        token: None,
+        renounced: None,
+        next: None,
+    }
+}
+
+/// Whether an excluded permission excludes a receiver `granted` it: with an
+/// app op, only when its mode (`checkOpNoThrow`) is allowed too.
+fn excludes(
+    granted: bool,
+    op: Option<i32>,
+    mode: impl FnOnce(i32) -> Result<i32, Exception>,
+) -> Result<bool, Exception> {
+    Ok(match op {
+        Some(op) => granted && mode(op)? == MODE_ALLOWED,
+        None => granted,
+    })
+}
+
+/// The attribution tags a manifest receiver is checked with
+/// (`createAttributionSourcesForResolveInfo`, `noteOpForManifestReceiver`):
+/// each of its own, or none.
+fn receiver_tags(tags: Option<&[Option<String>]>) -> Vec<Option<&str>> {
+    match tags {
+        Some(tags) if !tags.is_empty() => tags.iter().map(Option::as_deref).collect(),
+        _ => vec![None],
+    }
+}
+
+/// `AppOpsManager.isValidOp`.
+fn valid_op(op: i32) -> bool {
+    (0..NUM_OP).contains(&op)
+}
+
+/// `AppOpsManager.opToPublicName`, `opToName`: an op's names.
+fn op_names(op: i32) -> (&'static str, String) {
+    let public = APP_OP_INFOS[op as usize].name;
+    (public, public.trim_start_matches("android:").to_uppercase())
 }
 
 impl Broadcasts {
@@ -569,6 +660,8 @@ impl Broadcasts {
         receiver.filters.push(Filter {
             filter,
             package: caller_package,
+            feature_id: args.feature_id,
+            receiver_id: args.receiver_id,
             permission: args.permission,
             instant_app,
             visible_to_instant_apps: flags & RECEIVER_VISIBLE_TO_INSTANT_APPS != 0,
@@ -577,6 +670,7 @@ impl Broadcasts {
         // Each matching sticky goes to the new receiver; the first it may
         // have is returned.
         let mut first = None;
+        let preflight = host.flag(AVOID_NOTE_OP_AT_ENQUEUE)?;
         for r in matched {
             if first.is_none()
                 && (exported || r.calling_uid == uid || can_access_unexported(r.calling_uid))
@@ -585,6 +679,8 @@ impl Broadcasts {
             }
             let sender = Sender {
                 uid: INVALID_UID,
+                package: None,
+                feature_id: None,
                 original_uid: r.calling_uid,
                 instant: false,
                 required_permissions: &[],
@@ -593,6 +689,7 @@ impl Broadcasts {
                 excluded_packages: &[],
                 app_op: OP_NONE,
                 require_compat_change: None,
+                preflight,
             };
             let receiver = st
                 .receivers
@@ -962,6 +1059,8 @@ impl Broadcasts {
 
         let sender = Sender {
             uid: calling_uid,
+            package: caller_package.as_deref(),
+            feature_id: args.calling_feature_id.as_deref(),
             original_uid: calling_uid,
             instant: caller_instant,
             required_permissions: &required_permissions,
@@ -975,6 +1074,7 @@ impl Broadcasts {
                     options.flags & OPTION_REQUIRE_COMPAT_CHANGE_ENABLED != 0,
                 )
             }),
+            preflight: host.flag(AVOID_NOTE_OP_AT_ENQUEUE)?,
         };
         // The registered receivers, by priority, one filter per receiver.
         let mut registered: Vec<(i32, u32, i64)> = Vec::new();
@@ -1149,8 +1249,14 @@ impl Broadcasts {
             result_extras: None,
             id_for_response_event: 0,
         });
+        let preflight = match host.flag(AVOID_NOTE_OP_AT_ENQUEUE) {
+            Ok(preflight) => preflight,
+            Err(e) => return eprintln!("app host: a system broadcast: {e:?}"),
+        };
         let sender = Sender {
             uid: SYSTEM_UID,
+            package: Some("android"),
+            feature_id: None,
             original_uid: SYSTEM_UID,
             instant: false,
             required_permissions,
@@ -1159,6 +1265,7 @@ impl Broadcasts {
             excluded_packages: &[],
             app_op: OP_NONE,
             require_compat_change: None,
+            preflight,
         };
         let mut st = self.state.lock().unwrap();
         let i = &record.intent.intent;
@@ -1287,12 +1394,13 @@ impl Broadcasts {
             }));
         }
         if let Some(permission) = &info.permission
-            && host.permission_has_op(permission)?
+            && let Some(op) = host.permission_op(permission)?
+            && host.broadcast_op(s.preflight, op, s.uid, s.package, s.feature_id)? != MODE_ALLOWED
         {
-            return Err(host.unimplemented_named(
-                "activity",
-                &format!("the app op of {permission} in a broadcast (#1463)"),
-            ));
+            return Ok(Some(format!(
+                "Appop Denial: broadcasting {action} to {name} requires appop {}",
+                op_names(op).0
+            )));
         }
         if info.flags & FLAG_SINGLE_USER != 0
             && host.check_permission(Some("android.permission.INTERACT_ACROSS_USERS"), uid)? != 0
@@ -1328,13 +1436,10 @@ impl Broadcasts {
             _ => {}
         }
         for permission in s.excluded_permissions {
-            if host.check_permission(Some(permission), uid)? == 0 {
-                if host.permission_has_op(permission)? {
-                    return Err(host.unimplemented_named(
-                        "activity",
-                        &format!("the app op of {permission} in a broadcast (#1463)"),
-                    ));
-                }
+            let granted = host.check_permission(Some(permission), uid)? == 0;
+            if excludes(granted, host.permission_op(permission)?, |op| {
+                appops_service::mode(host, op, uid, Some(&package))
+            })? {
                 return Ok(Some(format!(
                     "Skipping delivery to {package} due to excluded permission {permission}"
                 )));
@@ -1345,20 +1450,41 @@ impl Broadcasts {
                 "Skipping delivery of excluded package {action} to {name}"
             )));
         }
-        if uid != SYSTEM_UID {
+        let tags = receiver_tags(info.info.attribution_tags.as_deref());
+        if uid != SYSTEM_UID && !s.required_permissions.is_empty() {
+            let sources: Vec<_> = tags
+                .iter()
+                .map(|&tag| attribution(uid, -1, &package, tag))
+                .collect();
+            let message = format!(
+                "Broadcast delivered to {}",
+                info.info.item.name.as_deref().unwrap_or_default()
+            );
             for permission in s.required_permissions {
-                if !host.holds(permission, uid)? {
+                if !host.has_permission(permission, &message, s.preflight, &sources)? {
                     return Ok(Some(format!(
                         "Permission Denial: receiving {action} to {name} requires {permission}"
                     )));
                 }
             }
         }
-        if s.app_op != OP_NONE {
-            return Err(host.unimplemented_named(
-                "activity",
-                &format!("app op {} of a broadcast (#1463)", s.app_op),
-            ));
+        // `noteOpForManifestReceiver`, `checkOpForManifestReceiver`: the
+        // op of each attribution tag.
+        if s.app_op != OP_NONE && valid_op(s.app_op) {
+            for tag in tags {
+                if host.broadcast_op(s.preflight, s.app_op, uid, Some(&package), tag)?
+                    != MODE_ALLOWED
+                {
+                    eprintln!(
+                        "app host: Appop Denial: receiving {action} to {name} requires appop {}",
+                        op_names(s.app_op).1
+                    );
+                    return Ok(Some(format!(
+                        "Skipping delivery to {package} due to required appop {}",
+                        op_names(s.app_op).1
+                    )));
+                }
+            }
         }
         Ok(None)
     }
@@ -1383,7 +1509,7 @@ impl Broadcasts {
             return Ok(StartMode::DelayedRigid);
         }
         Ok(
-            match super::appops_service::note(host, OP_RUN_IN_BACKGROUND, uid, Some(package))? {
+            match appops_service::note(host, OP_RUN_IN_BACKGROUND, uid, Some(package))? {
                 0 => StartMode::Normal,
                 MODE_IGNORED => StartMode::Delayed,
                 _ => StartMode::DelayedRigid,
@@ -1625,19 +1751,37 @@ impl Broadcasts {
         {
             return Ok(true);
         }
-        if let Some(permission) = &f.permission
-            && !host.holds(permission, s.uid)?
-        {
-            return Ok(true);
+        if let Some(permission) = &f.permission {
+            if !host.holds(permission, s.uid)? {
+                return Ok(true);
+            }
+            if let Some(op) = host.permission_op(permission)?
+                && host.broadcast_op(s.preflight, op, s.uid, s.package, s.feature_id)?
+                    != MODE_ALLOWED
+            {
+                return Ok(true);
+            }
         }
         let visible = intent_flags & FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS != 0;
         if (!visible && f.instant_app || !f.visible_to_instant_apps && s.instant) && r.uid != s.uid
         {
             return Ok(true);
         }
-        for permission in s.required_permissions {
-            if !host.holds(permission, r.uid)? {
-                return Ok(true);
+        if !s.required_permissions.is_empty() {
+            let source = attribution(r.uid, r.pid, &f.package, f.feature_id.as_deref());
+            let message = format!(
+                "Broadcast delivered to registered receiver {}",
+                f.receiver_id.as_deref().unwrap_or("null")
+            );
+            for permission in s.required_permissions {
+                if !host.has_permission(
+                    permission,
+                    &message,
+                    s.preflight,
+                    slice::from_ref(&source),
+                )? {
+                    return Ok(true);
+                }
             }
         }
         if s.required_permissions.is_empty()
@@ -1646,18 +1790,27 @@ impl Broadcasts {
             return Ok(true);
         }
         for permission in s.excluded_permissions {
-            if host.holds(permission, r.uid)? {
+            let granted = host.holds(permission, r.uid)?;
+            if excludes(granted, host.permission_op(permission)?, |op| {
+                appops_service::mode(host, op, r.uid, Some(&f.package))
+            })? {
                 return Ok(true);
             }
         }
         if s.excluded_packages.contains(&f.package) {
             return Ok(true);
         }
-        if s.app_op != OP_NONE {
-            return Err(host.unimplemented_named(
-                "activity",
-                &format!("app op {} of a broadcast (#1463)", s.app_op),
-            ));
+        if s.app_op != OP_NONE
+            && valid_op(s.app_op)
+            && host.broadcast_op(
+                s.preflight,
+                s.app_op,
+                r.uid,
+                Some(&f.package),
+                f.feature_id.as_deref(),
+            )? != MODE_ALLOWED
+        {
+            return Ok(true);
         }
         Ok(!f.exported && !host.check_component_permission(None, s.original_uid, r.uid, false)?)
     }
@@ -2074,6 +2227,45 @@ mod tests {
             data: data.map(Uri::parse),
             ..Intent::default()
         }
+    }
+
+    /// An excluded permission excludes its holder; one with an app op only
+    /// when the op is allowed too, its mode not asked of a receiver without
+    /// the permission.
+    #[test]
+    fn an_excluded_permission_excludes_its_holder_with_its_op_allowed() {
+        let mode = |m: i32| move |_: i32| Ok(m);
+        assert!(excludes(true, None, mode(MODE_IGNORED)).unwrap());
+        assert!(!excludes(false, None, mode(MODE_ALLOWED)).unwrap());
+        assert!(excludes(true, Some(4), mode(MODE_ALLOWED)).unwrap());
+        assert!(!excludes(true, Some(4), mode(MODE_IGNORED)).unwrap());
+        assert!(
+            !excludes(false, Some(4), |_| -> Result<i32, Exception> {
+                panic!("asked a receiver without the permission")
+            })
+            .unwrap()
+        );
+    }
+
+    /// A manifest receiver is checked once per attribution tag, or once
+    /// without one.
+    #[test]
+    fn a_manifest_receiver_is_checked_per_attribution_tag() {
+        assert_eq!(receiver_tags(None), vec![None]);
+        assert_eq!(receiver_tags(Some(&[])), vec![None]);
+        let tags = [Some("a".to_string()), None];
+        assert_eq!(receiver_tags(Some(&tags)), vec![Some("a"), None]);
+    }
+
+    /// Ops by code: valid ones named as the original names them.
+    #[test]
+    fn broadcast_ops_are_named() {
+        assert!(valid_op(0) && valid_op(NUM_OP - 1));
+        assert!(!valid_op(OP_NONE) && !valid_op(NUM_OP));
+        assert_eq!(
+            op_names(4),
+            ("android:read_contacts", "READ_CONTACTS".to_string())
+        );
     }
 
     #[test]
