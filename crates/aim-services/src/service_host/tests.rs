@@ -2,7 +2,10 @@
 #[path = "../../tests/common/cohort.rs"]
 mod cohort;
 use crate::{
-    package::{owner::permission_gids::PermissionGidError, system_config::SystemConfig},
+    package::{
+        bootstrap::BootPolicy, owner::permission_gids::PermissionGidError,
+        system_config::SystemConfig,
+    },
     service_host::ServiceHost,
     system::System,
 };

@@ -25,7 +25,7 @@ mod scan;
 pub use apex::{ActiveApex, ApexInventory, ApexPackage};
 pub use query::QueryContextError;
 pub use scan::{
-    BootError, BootOwners, DataBootInputs, SavedBootScan, SavedSystemPhase, ScanPolicy,
+    BootError, BootOwners, BootPolicy, DataBootInputs, SavedBootScan, SavedSystemPhase, ScanPolicy,
 };
 
 pub struct Bridge {

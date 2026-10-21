@@ -2,7 +2,7 @@
 use super::*;
 use crate::{
     package::{
-        bootstrap::{Bridge, DataBootInputs, ScanPolicy},
+        bootstrap::{BootPolicy, Bridge, DataBootInputs, ScanPolicy},
         model,
         owner::{resources::CodeResources, usage::Usage},
         scan::{SavedSystemScanInputs, SigningScan, SystemImagePackages},

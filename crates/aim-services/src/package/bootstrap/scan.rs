@@ -2,15 +2,67 @@
 use super::{ApexInventory, Bridge, OwnerError, ScanUsers};
 use crate::package::{
     owner::seinfo::Policy,
+    pkg::AndroidPackage,
     scan::{
-        AbiPolicy, ApexImage, FirstBootSystemInputs, Image, LibraryCompatibility,
+        AbiPolicy, ApexImage, ApexScanResult, FirstBootSystemInputs, Image, LibraryCompatibility,
         NativeLibraryInstallPolicy, PolicyBridgeError, SavedSystemScanInputs, ScanClock,
-        SeInfoScan, SharedUidMigration, SigningError, SigningScan, SystemImagePackages,
-        SystemImageScan, UserPolicy,
+        SeInfoCompatibility, SeInfoScan, SharedUidMigration, SigningError, SigningScan,
+        SystemImagePackages, SystemImageScan, UserPolicy,
     },
     system_config::SystemConfig,
     write::Apks,
 };
+
+/// The decisions the boot scan takes from outside the package model
+/// (#2021): the default image's system_server makes them through the
+/// bridge, the app host makes them itself.
+pub trait BootPolicy: SeInfoCompatibility {
+    /// `PackageBackwardCompatibility`'s `bootClassPathContainsATB`.
+    fn test_base_on_bootclasspath(&self) -> bool;
+    /// `SharedUidMigration.applyStrategy(BEST_EFFORT)`.
+    fn shared_uid_migration(&self) -> Result<SharedUidMigration, OwnerError>;
+    /// `Settings.getAllUsers` and each user's `isAdbInstallDisallowed`.
+    fn scan_users(&self) -> Result<ScanUsers, OwnerError>;
+    /// ApexManager's `getAllApexInfos` and `getActiveApexInfos`.
+    fn apex_inventory(&self) -> Result<ApexInventory, OwnerError>;
+    /// `ApexManager.notifyScanResult`.
+    fn notify_apex_scan(&self, results: &[ApexScanResult]) -> Result<(), OwnerError>;
+    /// `DomainVerificationManagerInternal.generateNewId`.
+    fn new_domain_id(&self) -> Result<[u8; 16], OwnerError>;
+    /// `AndroidTestBaseUpdater`'s decision for a package: none when it
+    /// needs no compat query, else whether `REMOVE_ANDROID_TEST_BASE` is
+    /// enabled for it.
+    fn remove_test_base(
+        &self,
+        package: &AndroidPackage,
+        is_system: bool,
+    ) -> Result<Option<bool>, OwnerError>;
+
+    /// The boot scan's owners, with the decisions it takes up front.
+    fn resolve_boot<'a>(
+        &'a self,
+        config: &'a SystemConfig,
+        properties: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<BootOwners<'a>, BootError>
+    where
+        Self: Sized,
+    {
+        let compatibility =
+            LibraryCompatibility::new(config, properties, self.test_base_on_bootclasspath())
+                .map_err(|error| BootError::Compatibility(PolicyBridgeError::Policy(error)))?;
+        let migration = self.shared_uid_migration().map_err(BootError::Owner)?;
+        let users = self.scan_users().map_err(BootError::Owner)?;
+        let apex = self.apex_inventory().map_err(BootError::Owner)?;
+        Ok(BootOwners {
+            policy: self,
+            config,
+            apex,
+            users,
+            migration,
+            compatibility,
+        })
+    }
+}
 
 #[derive(Debug)]
 pub enum BootError {
@@ -71,9 +123,9 @@ pub struct DataBootInputs<'a> {
     pub resources: &'a crate::package::owner::resources::CodeResources,
 }
 
-/// All captured inputs belong to this exact retained original bridge.
+/// All captured inputs belong to this exact policy.
 pub struct BootOwners<'a> {
-    bridge: &'a Bridge,
+    policy: &'a dyn BootPolicy,
     config: &'a SystemConfig,
     apex: ApexInventory,
     users: ScanUsers,
@@ -81,26 +133,31 @@ pub struct BootOwners<'a> {
     compatibility: LibraryCompatibility,
 }
 
-impl Bridge {
-    pub fn resolve_boot<'a>(
-        &'a self,
-        config: &'a SystemConfig,
-        properties: &dyn Fn(&str) -> Option<String>,
-    ) -> Result<BootOwners<'a>, BootError> {
-        let compatibility = self
-            .library_compatibility(config, properties)
-            .map_err(BootError::Compatibility)?;
-        let migration = self.shared_uid_migration().map_err(BootError::Owner)?;
-        let users = self.scan_users().map_err(BootError::Owner)?;
-        let apex = self.apex_inventory().map_err(BootError::Owner)?;
-        Ok(BootOwners {
-            bridge: self,
-            config,
-            apex,
-            users,
-            migration,
-            compatibility,
-        })
+impl BootPolicy for Bridge {
+    fn test_base_on_bootclasspath(&self) -> bool {
+        self.test_base_on_bcp
+    }
+    fn shared_uid_migration(&self) -> Result<SharedUidMigration, OwnerError> {
+        Bridge::shared_uid_migration(self)
+    }
+    fn scan_users(&self) -> Result<ScanUsers, OwnerError> {
+        Bridge::scan_users(self)
+    }
+    fn apex_inventory(&self) -> Result<ApexInventory, OwnerError> {
+        Bridge::apex_inventory(self)
+    }
+    fn notify_apex_scan(&self, results: &[ApexScanResult]) -> Result<(), OwnerError> {
+        Bridge::notify_apex_scan(self, results)
+    }
+    fn new_domain_id(&self) -> Result<[u8; 16], OwnerError> {
+        Bridge::new_domain_id(self)
+    }
+    fn remove_test_base(
+        &self,
+        package: &AndroidPackage,
+        is_system: bool,
+    ) -> Result<Option<bool>, OwnerError> {
+        Bridge::remove_test_base(self, package, is_system)
     }
 }
 
@@ -170,13 +227,13 @@ impl BootOwners<'_> {
     ) -> Result<crate::package::scan::DataImagePackages, BootError> {
         let image = crate::package::scan::DataImage::parse(apks, data.volumes)
             .map_err(|error| BootError::Scan(SigningError::Rejected(error)))?;
-        let remove_test_base = |package: &crate::package::pkg::AndroidPackage, system| {
-            self.bridge
+        let remove_test_base = |package: &AndroidPackage, system| {
+            self.policy
                 .remove_test_base(package, system)
                 .map_err(|error| format!("original test-base owner: {error:?}"))
         };
         let domain = || {
-            self.bridge
+            self.policy
                 .new_domain_id()
                 .map_err(|error| format!("original domain owner: {error:?}"))
         };
@@ -188,7 +245,7 @@ impl BootOwners<'_> {
                     certificates: policy.certificates,
                     seinfo: SeInfoScan {
                         policy: policy.seinfo,
-                        compatibility: self.bridge,
+                        compatibility: self.policy,
                     },
                     factories: data.factories,
                     platform: data.platform,
@@ -223,13 +280,13 @@ impl BootOwners<'_> {
     ) -> Result<T, BootError> {
         let apex_image = ApexImage::load(apks, &self.apex, policy.apex_parse_flags)
             .map_err(|error| BootError::Scan(SigningError::Rejected(error)))?;
-        let notify = |results: &[crate::package::scan::ApexScanResult]| {
-            self.bridge
+        let notify = |results: &[ApexScanResult]| {
+            self.policy
                 .notify_apex_scan(results)
                 .map_err(|error| format!("original APEX notification: {error:?}"))
         };
         let domain = || {
-            self.bridge
+            self.policy
                 .new_domain_id()
                 .map_err(|error| format!("original domain owner: {error:?}"))
         };
@@ -237,7 +294,7 @@ impl BootOwners<'_> {
             certificates: policy.certificates,
             seinfo: SeInfoScan {
                 policy: policy.seinfo,
-                compatibility: self.bridge,
+                compatibility: self.policy,
             },
             apex_image: &apex_image,
             notify_apex_scan: &notify,

@@ -117,6 +117,7 @@ use aim_service_aidl::{
 
 use crate::mirror::Mirror;
 use crate::nonces::Nonces;
+use crate::package::bootstrap::BootPolicy;
 
 /// The nonce of `PermissionManager`'s caches (`getPackageInfoCacheKey`
 /// with `pic_separate_permission_notifications`, on in this image).
