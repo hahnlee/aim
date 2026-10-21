@@ -19,6 +19,7 @@ import com.android.internal.os.ClassLoaderFactory;
 import com.android.internal.os.RuntimeInit;
 import com.android.server.SystemService;
 import com.android.server.SystemService.TargetUser;
+import com.android.server.adservices.SystemProcessLifecycle;
 import com.android.server.appsearch.AppSearchModule$Lifecycle;
 
 import dalvik.system.VMRuntime;
@@ -27,7 +28,8 @@ import dalvik.system.VMRuntime;
  * The app host's system process (docs/app-host.md, ADR 0013): a process of
  * the system uid, started by init with `app_process`, which runs what only
  * system_server runs as system_server runs it: the original AppSearch
- * module, the Connectivity module's NearbyService, TelecomLoaderService's
+ * module, the Connectivity module's NearbyService, the AdServices module's
+ * AdServicesManagerService, TelecomLoaderService's
  * part ({@link TelecomLoader}) and the components declared in
  * `android:process="system"`, such as Telecom's.
  * This class plays ZygoteInit's part for the system server
@@ -63,11 +65,13 @@ public final class SystemProcessHost extends RuntimeInit {
      * this main thread; the services started in SystemServer's order and
      * given the boot phases from where SystemServer starts each: Nearby,
      * which ConnectivityServiceInitializer starts before
-     * PHASE_SYSTEM_SERVICES_READY (the app host serves the initializer's
-     * other services natively), then AppSearch's Lifecycle (after
-     * PHASE_DEVICE_SPECIFIC_SERVICES_READY), with user 0 started and
+     * PHASE_LOCK_SETTINGS_READY (the app host serves the initializer's
+     * other services natively), and AdServicesManagerService's Lifecycle
+     * after it ({@link SystemProcessLifecycle}), then AppSearch's Lifecycle
+     * (after PHASE_DEVICE_SPECIFIC_SERVICES_READY), with user 0 started and
      * unlocked; then TelecomLoaderService at PHASE_ACTIVITY_MANAGER_READY.
-     * Nearby publishes `nearby`, AppSearch `app_search`, Telecom `telecom`.
+     * Nearby publishes `nearby`, AdServices `adservices_manager`, AppSearch
+     * `app_search`, Telecom `telecom`.
      */
     public static final class Server {
         private static final String TAG = "AimSystemProcess";
@@ -101,11 +105,16 @@ public final class SystemProcessHost extends RuntimeInit {
                     null, connectivity, Build.VERSION.SDK_INT, true /* isNamespaceShared */,
                     null /* classLoaderName */);
             SystemService nearby = startService(NEARBY_INITIALIZER, nearbyLoader, context);
-            nearby.onBootPhase(SystemService.PHASE_SYSTEM_SERVICES_READY);
-            nearby.onBootPhase(SystemService.PHASE_DEVICE_SPECIFIC_SERVICES_READY);
+            SystemService adServices = SystemProcessLifecycle.start(context);
+            for (int phase : new int[] {SystemService.PHASE_LOCK_SETTINGS_READY,
+                    SystemService.PHASE_SYSTEM_SERVICES_READY,
+                    SystemService.PHASE_DEVICE_SPECIFIC_SERVICES_READY}) {
+                nearby.onBootPhase(phase);
+                adServices.onBootPhase(phase);
+            }
             SystemService appSearch = new AppSearchModule$Lifecycle(context);
             appSearch.onStart();
-            SystemService[] services = {nearby, appSearch};
+            SystemService[] services = {nearby, adServices, appSearch};
             for (int phase : new int[] {SystemService.PHASE_ACTIVITY_MANAGER_READY,
                     SystemService.PHASE_THIRD_PARTY_APPS_CAN_START}) {
                 for (SystemService service : services) {
@@ -127,7 +136,7 @@ public final class SystemProcessHost extends RuntimeInit {
             for (SystemService service : services) {
                 service.onBootPhase(SystemService.PHASE_BOOT_COMPLETED);
             }
-            Slog.i(TAG, "Nearby and AppSearch started");
+            Slog.i(TAG, "Nearby, AdServices and AppSearch started");
             new TelecomLoader(context).onActivityManagerReady();
             Looper.loop();
         }

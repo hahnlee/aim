@@ -508,7 +508,7 @@ The migration's state and conformance results are in
   in SystemServer's order and with the boot phases each gets there, the
   Connectivity module's NearbyService (2026-10-22, #1520), which
   SystemServer's ConnectivityServiceInitializer creates and publishes as
-  `nearby` before PHASE_SYSTEM_SERVICES_READY: the app host serves the
+  `nearby` before PHASE_LOCK_SETTINGS_READY: the app host serves the
   initializer's other services (connectivity, ipsec, nsd, ethernet)
   natively, so the system process starts a stand-in for its part for
   Nearby alone (`java/nearby-initializer`, `aim-nearby.jar`, added by
@@ -516,7 +516,18 @@ The migration's state and conformance results are in
   standalone jar (`startServiceFromJar`: loaded by name from a class
   loader below the jar's, the one ZygoteInit's
   `prefetchStandaloneSystemServerJars` makes for
-  `service-connectivity.jar`); then AppSearch's Lifecycle where
+  `service-connectivity.jar`); the AdServices module's
+  AdServicesManagerService (2026-10-22, #1965), whose Lifecycle SystemServer
+  starts by name after SdkSandboxManagerService, before
+  PHASE_LOCK_SETTINGS_READY: its `onStart` publishes `adservices_manager`
+  and then registers the service with SdkSandboxManagerLocal, throwing
+  without it, and the app host serves no `sdk_sandbox` (#1982), so the
+  system process makes the service as `Lifecycle(Context)` makes it and
+  publishes it as `onStart` does, without that registration, which only
+  feeds `sdk_sandbox`'s `getAdServicesManager` and dumps
+  (`com.android.server.adservices.SystemProcessLifecycle`, in the module's
+  package of aim-services.jar for its package-private constructors, both
+  in system_server's class loader); then AppSearch's Lifecycle where
   SystemServer starts it (after PHASE_DEVICE_SPECIFIC_SERVICES_READY, so
   it is given the later phases)
   with user 0 started and unlocked, and TelecomLoaderService's part
