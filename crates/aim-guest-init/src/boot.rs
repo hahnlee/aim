@@ -531,6 +531,43 @@ pub fn cgroup_mount_points(image: &ImageRoot) -> Vec<String> {
     out
 }
 
+/// The cgroup v1 controllers of `cgroups.json` (`Cgroups`): each one's
+/// controller name, path, mode and owner names.
+pub fn cgroup_v1_controllers(image: &ImageRoot) -> Vec<(String, String, u32, String, String)> {
+    let Ok(bytes) = image.read("/system/etc/cgroups.json") else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let Some(start) = text.find("\"Cgroups\"") else {
+        return Vec::new();
+    };
+    let section = &text[start..];
+    let section = &section[..section.find(']').unwrap_or(section.len())];
+    let mut out = Vec::new();
+    for object in section.split('{').skip(1) {
+        let field = |key: &str| -> Option<String> {
+            let rest = &object[object.find(&format!("\"{key}\""))? + key.len() + 2..];
+            let rest = &rest[rest.find('"')? + 1..];
+            Some(rest[..rest.find('"')?].to_string())
+        };
+        let (Some(controller), Some(path)) = (field("Controller"), field("Path")) else {
+            continue;
+        };
+        let Ok(mode) = u32::from_str_radix(&field("Mode").unwrap_or_else(|| "0755".into()), 8)
+        else {
+            continue;
+        };
+        out.push((
+            controller,
+            path,
+            mode,
+            field("UID").unwrap_or_default(),
+            field("GID").unwrap_or_default(),
+        ));
+    }
+    out
+}
+
 /// The cgroup v2 hierarchy of `cgroups.json` (`Cgroups2`): its path, mode
 /// and owner names. The path map gives it a writable directory
 /// (`paths::MapKind::Cgroup2`).
@@ -1033,11 +1070,39 @@ impl Boot {
             fs.set_mount_namespaces(owner);
         }
         let cgroup2 = cgroup2_hierarchy(&image);
+        // The v1 controllers the syscall layer provides are mounted by
+        // SetupCgroups (`aim_storage::cgroup_v1`), their owners as
+        // libprocessgroup's Mkdir decodes them (an empty one is root).
+        for (name, path, mode, uid, gid) in cgroup_v1_controllers(&image) {
+            let Some(controller) = aim_storage::cgroup_v1::Controller::from_name(&name) else {
+                continue;
+            };
+            let id = |name: &str| {
+                if name.is_empty() {
+                    Some(0)
+                } else {
+                    planner.ids.decode_uid(name).ok()
+                }
+            };
+            let (Some(uid), Some(gid)) = (id(&uid), id(&gid)) else {
+                continue;
+            };
+            fs.cgroup_v1.push(crate::fsops::CgroupV1 {
+                controller,
+                path,
+                mode,
+                uid,
+                gid,
+                host: layout.cgroup_v1_dir(controller),
+            });
+        }
+        let mounted: Vec<String> = fs.cgroup_v1.iter().map(|h| h.path.clone()).collect();
         for root in cgroup_mount_points(&image)
             .iter()
             .map(String::as_str)
             .chain(crate::fsops::LEGACY_CGROUP_ROOTS.iter().copied())
             .filter(|root| cgroup2.as_ref().is_none_or(|(path, ..)| path != root))
+            .filter(|root| !mounted.iter().any(|path| path == root))
         {
             fs.add_unmounted_root(root, crate::fsops::CGROUP_REASON);
         }
@@ -1678,6 +1743,49 @@ mod capability_boot_tests {
         assert!(!data.exists());
         assert!(!root.join("data.asif").exists());
         assert!(!root.join("data.run").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cgroups_json_tests {
+    use super::*;
+
+    /// The v1 controllers of `cgroups.json`, as libprocessgroup reads its
+    /// descriptors.
+    #[test]
+    fn v1_controllers_are_read_with_their_modes_and_owners() {
+        let root = std::env::temp_dir().join(format!("aim-cgroups-json-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("system/etc")).unwrap();
+        std::fs::write(
+            root.join("system/etc/cgroups.json"),
+            r#"{
+  "Cgroups": [
+    { "Controller": "blkio", "Path": "/dev/blkio", "Mode": "0775", "UID": "system", "GID": "system" },
+    { "Controller": "cpuset", "Path": "/dev/cpuset", "Mode": "0755" }
+  ],
+  "Cgroups2": { "Path": "/sys/fs/cgroup", "Mode": "0775", "UID": "system", "GID": "system" }
+}"#,
+        )
+        .unwrap();
+        let image = ImageRoot::new(&root);
+        let own = |c: &str, p: &str, m, u: &str, g: &str| {
+            (
+                c.to_string(),
+                p.to_string(),
+                m,
+                u.to_string(),
+                g.to_string(),
+            )
+        };
+        assert_eq!(
+            cgroup_v1_controllers(&image),
+            vec![
+                own("blkio", "/dev/blkio", 0o775, "system", "system"),
+                own("cpuset", "/dev/cpuset", 0o755, "", ""),
+            ]
+        );
+        assert_eq!(cgroup2_hierarchy(&image).unwrap().0, "/sys/fs/cgroup");
         std::fs::remove_dir_all(root).unwrap();
     }
 }
