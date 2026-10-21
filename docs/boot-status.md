@@ -130,7 +130,9 @@ AppSearch is the original module, run by the app host's system process
 (`aim-system`, of the system uid), so Play services finds its
 `AppSearchManager`; so is the Connectivity module's NearbyService, which
 the system process starts from its standalone jar and publishes as
-`nearby` (2026-10-22). The original Bluetooth app
+`nearby` (2026-10-22), and the AdServices module's AdServicesManagerService,
+published as `adservices_manager`, so AdServices' AdServicesCommonService
+finds it at its start (2026-10-22, #1965; `sdk_sandbox` is #1982). The original Bluetooth app
 runs under the app host: the native `bluetooth_manager` binds its
 AdapterService, which brings the stack up over the Bluetooth HAL to
 STATE_ON (media sessions serve its AVRCP target and media browser).

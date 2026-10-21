@@ -5,6 +5,7 @@ package com.android.server;
 import android.content.Context;
 
 public abstract class SystemService {
+    public static final int PHASE_LOCK_SETTINGS_READY = 480;
     public static final int PHASE_SYSTEM_SERVICES_READY = 500;
     public static final int PHASE_DEVICE_SPECIFIC_SERVICES_READY = 520;
     public static final int PHASE_ACTIVITY_MANAGER_READY = 550;
