@@ -656,13 +656,21 @@ impl AccountManager {
         }
     }
 
+    /// Whether `user` has an account, of those SyncManager's
+    /// `mRunningAccounts` holds (`getRunningAccountsForSystem`).
+    pub(super) fn has_accounts(&self, user: i32) -> Result<bool, Exception> {
+        Ok(!self
+            .accounts(user)?
+            .state
+            .lock()
+            .unwrap()
+            .of(None)
+            .is_empty())
+    }
+
     /// `isLocalUnlockedUser`.
     fn unlocked(&self, user: i32) -> Result<bool, Exception> {
-        let (state, _) = self.host.packages()?;
-        Ok(state
-            .users
-            .get(&user)
-            .is_some_and(|u| u.unlocking_or_unlocked))
+        self.host.user_unlocking_or_unlocked(user)
     }
 
     /// `getUserAccounts`: `user`'s accounts, opened the first time.

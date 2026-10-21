@@ -15,11 +15,13 @@ use std::sync::{Arc, Mutex};
 
 use aim_binder_host::local::{Call, Reply, Service, Strong};
 use aim_binder_host::parcel::{
-    BAD_VALUE, Binder, EX_ILLEGAL_STATE, Exception, Parcel, Reader, Result as ParcelResult,
+    BAD_VALUE, Binder, EX_BAD_PARCELABLE, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel,
+    Reader, Result as ParcelResult,
 };
 use aim_service_aidl::ReadParcelable;
 use aim_service_aidl::android_content_icontentservice as cs;
 
+use super::account_service::Account;
 use super::kept::{By, KeptBundle, RawBundle};
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::package::intent_filter::Plain;
@@ -32,6 +34,10 @@ const OBSERVER_DESCRIPTOR: &str = "android.database.IContentObserver";
 const USER_ALL: i32 = -1;
 const O: i32 = 26;
 const SYSTEM_UID: i32 = 1000;
+const ROOT_UID: i32 = 0;
+const SHELL_UID: i32 = 2000;
+/// `ContentResolver.SYNC_VIRTUAL_EXTRAS_EXEMPTION_FLAG`.
+const SYNC_VIRTUAL_EXTRAS_EXEMPTION_FLAG: &str = "v_exemption";
 /// `ContentResolver.NOTIFY_SYNC_TO_NETWORK`,
 /// `NOTIFY_SKIP_NOTIFY_FOR_DESCENDANTS`.
 pub(super) const NOTIFY_SYNC_TO_NETWORK: i32 = 1;
@@ -64,6 +70,39 @@ pub(super) struct ParcelUri(pub(super) Uri);
 impl ReadParcelable for ParcelUri {
     fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
         Uri::read(r, &mut Plain)?.map(ParcelUri).ok_or(BAD_VALUE)
+    }
+}
+
+/// `SyncRequest(Parcel)`: its extras, whether it is periodic, and its
+/// account.
+pub(super) struct SyncRequest {
+    extras: RawBundle,
+    periodic: bool,
+    account: Option<Account>,
+}
+
+impl ReadParcelable for SyncRequest {
+    fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
+        let extras = RawBundle::read_from(r)?;
+        r.read_i64()?; // mSyncFlexTimeSecs
+        r.read_i64()?; // mSyncRunTimeSecs
+        let periodic = r.read_i32()? != 0;
+        // mDisallowMetered, mIsAuthority, mIsExpedited,
+        // mIsScheduledAsExpeditedJob
+        for _ in 0..4 {
+            r.read_i32()?;
+        }
+        // `readParcelable`: the creator's class, then the account.
+        let account = match r.read_string16()? {
+            Some(_) => Some(Account::read_from(r)?),
+            None => None,
+        };
+        r.read_string16()?; // mAuthority
+        Ok(SyncRequest {
+            extras,
+            periodic,
+            account,
+        })
     }
 }
 
@@ -251,6 +290,43 @@ impl ContentService {
             "android.permission.READ_SYNC_STATS",
             "no permission to read the sync stats",
         )
+    }
+
+    /// `syncAsUser`: `enforceCrossUserPermission`, `validateExtras`, then
+    /// SyncManager's `scheduleSync`, which drops a request for every
+    /// account when the user has none ("no accounts configured"). No sync
+    /// is scheduled for an account, nor a periodic one (#1460).
+    fn sync(&self, uid: i32, request: Option<SyncRequest>, user: i32) -> Result<(), Exception> {
+        if uid / PER_USER_RANGE as i32 != user {
+            self.enforce(
+                uid,
+                "android.permission.INTERACT_ACROSS_USERS_FULL",
+                &format!("no permission to request sync as user: {user}"),
+            )?;
+        }
+        let request = request.ok_or_else(|| {
+            Exception::new(EX_NULL_POINTER, "Attempt to invoke virtual method 'android.accounts.Account android.content.SyncRequest.getAccount()' on a null object reference")
+        })?;
+        if request.account.is_some() || request.periodic {
+            return Err(self.host.unimplemented("content", cs::SYNC_AS_USER));
+        }
+        let exempt = request
+            .extras
+            .contains(SYNC_VIRTUAL_EXTRAS_EXEMPTION_FLAG)
+            .map_err(|_| Exception::new(EX_BAD_PARCELABLE, "syncAsUser: its extras"))?;
+        if exempt && !matches!(uid, ROOT_UID | SHELL_UID | SYSTEM_UID) {
+            eprintln!(
+                "app host: Invalid extras specified. requestsync -f/-F needs to run on 'adb shell'"
+            );
+            return Err(Exception::security("Invalid extras specified."));
+        }
+        let accounts = self.host.account_manager.get().ok_or_else(|| {
+            Exception::new(EX_ILLEGAL_STATE, "the account service is not started")
+        })?;
+        if accounts.has_accounts(user)? {
+            return Err(self.host.unimplemented("content", cs::SYNC_AS_USER));
+        }
+        Ok(())
     }
 
     /// `getMasterSyncAutomaticallyAsUser`: `enforceCrossUserPermission`,
@@ -698,6 +774,16 @@ impl Service for ContentService {
                     p.write_i32(0);
                     p
                 }))
+            }
+            cs::SYNC => {
+                let a = cs::Sync::<SyncRequest>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let uid = call.sender_euid as i32;
+                empty(self.sync(uid, a.request, uid / PER_USER_RANGE as i32))
+            }
+            cs::SYNC_AS_USER => {
+                let a =
+                    cs::SyncAsUser::<SyncRequest>::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                empty(self.sync(call.sender_euid as i32, a.request, a.user_id))
             }
             cs::GET_MASTER_SYNC_AUTOMATICALLY => {
                 cs::GetMasterSyncAutomatically::read(&mut call.data).map_err(|_| BAD_VALUE)?;

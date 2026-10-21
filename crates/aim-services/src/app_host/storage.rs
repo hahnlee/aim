@@ -234,6 +234,7 @@ impl AppHost {
         prepare(super::app_data::FLAG_STORAGE_DE);
         call(ON_USER_STARTED, "onUserStarted", &|p| p.write_i32(USER))?;
         prepare(super::app_data::FLAG_STORAGE_CE);
+        self.user_unlocking(USER).map_err(|e| e.message)?;
         *self.storage.vold.lock().unwrap() = Some(vold);
         let daemon = self.media_provider_uid().map_err(|e| format!("{e:?}"))?;
         self.call_agent(MOUNT_STORAGE, "mountStorage", |p| {
@@ -1210,12 +1211,16 @@ impl Service for StorageManager {
                         .volume_list(call, args.user_id, args.calling_package.as_deref()),
                 )
             }
-            // `mCeUnlockedUsers`: the app host runs user 0, unlocked, as
-            // the user service reports it.
+            // `mCeUnlockedUsers`: the users whose CE storage
+            // `start_storage` prepared.
             sm::IS_CE_STORAGE_UNLOCKED => {
                 let args = sm::IsCeStorageUnlocked::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let unlocked = match self.0.user_unlocking_or_unlocked(args.user_id) {
+                    Ok(unlocked) => unlocked,
+                    Err(e) => return reply(Err(e)),
+                };
                 let mut p = Parcel::new();
-                sm::write_is_ce_storage_unlocked_reply(&mut p, args.user_id == 0);
+                sm::write_is_ce_storage_unlocked_reply(&mut p, unlocked);
                 Ok(p)
             }
             // `mDisks`, of which there are none (#1839).

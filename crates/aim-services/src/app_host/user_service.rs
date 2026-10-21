@@ -1063,7 +1063,10 @@ impl Service for UserManager {
                 {
                     return reply(Err(e));
                 }
-                um::write_is_user_unlocking_or_unlocked_reply(&mut p, args.user_id == SYSTEM_USER);
+                match self.host.user_unlocking_or_unlocked(args.user_id) {
+                    Ok(unlocked) => um::write_is_user_unlocking_or_unlocked_reply(&mut p, unlocked),
+                    Err(e) => return reply(Err(e)),
+                }
             }
             um::IS_USER_RUNNING => {
                 let args = um::IsUserRunning::read(&mut call.data).map_err(|_| BAD_VALUE)?;

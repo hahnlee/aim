@@ -614,6 +614,13 @@ impl RawBundle {
         Ok(RawBundle(bundle_of(magic, parts, has_intent)))
     }
 
+    /// Whether the bundle has `key` (`containsKey`).
+    pub fn contains(&self, key: &str) -> Result<bool> {
+        Ok(self
+            .entries()?
+            .is_some_and(|(_, parts, _)| parts.iter().any(|(k, _)| k == key)))
+    }
+
     /// The string `key` holds (`getString`); none for another type.
     pub fn string(&self, key: &str) -> Result<Option<String>> {
         let Some((_, parts, _)) = self.entries()? else {
