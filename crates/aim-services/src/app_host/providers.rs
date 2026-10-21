@@ -763,6 +763,42 @@ impl AppHost {
         }
         Ok(input)
     }
+
+    /// `call(method, null, extras)` on the client system_server acquires
+    /// for `uri` as the system (`acquireUnstableContentProviderClient`):
+    /// nothing without a provider; else the exception thrown, as it prints.
+    pub(super) fn call_provider(
+        &self,
+        uri: &Uri,
+        method: &str,
+        extras: &[(&str, Value)],
+    ) -> Result<(), String> {
+        let Some((name, user)) =
+            authority_and_user(uri).filter(|_| uri.scheme() == Some("content"))
+        else {
+            return Ok(());
+        };
+        let holder = self
+            .provider(None, SYSTEM_UID, &name, user, false)
+            .map_err(|e| e.message)?;
+        let Some(Binder::Handle(handle)) = holder.and_then(|h| h.provider) else {
+            return Ok(());
+        };
+        let mut p = Parcel::new();
+        p.write_interface_token(cp::DESCRIPTOR);
+        write_attribution_source(&mut p, SYSTEM_UID, Some(SYSTEM_PACKAGE));
+        // The client's authority is the URI's, its user included.
+        p.write_string16(uri.authority().as_deref());
+        p.write_string16(Some(method));
+        p.write_string16(None);
+        bundle::write(&mut p, extras);
+        let reply = self
+            .process
+            .transact(handle, cp::CALL_TRANSACTION, &p, false)
+            .map_err(|status| format!("android.os.DeadObjectException: binder status {status}"))?;
+        provider_status(&mut reply.reader())
+            .map_err(|status| format!("java.io.IOException: bad reply: {status}"))?
+    }
 }
 
 #[cfg(test)]

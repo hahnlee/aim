@@ -168,7 +168,7 @@ impl Uri {
 
     /// `StringUri.parseAuthority`: what follows `//` after the scheme
     /// separator, up to a path, query or fragment.
-    fn encoded_authority(&self) -> Option<&str> {
+    pub fn encoded_authority(&self) -> Option<&str> {
         if self.kind == Kind::Opaque {
             return None;
         }
@@ -354,6 +354,36 @@ impl Uri {
             string.push_str(query);
         }
         if let Some(fragment) = fragment {
+            string.push('#');
+            string.push_str(fragment);
+        }
+        Uri {
+            kind: Kind::Hierarchical,
+            string,
+        }
+    }
+
+    /// `buildUpon().path("").build()`: a hierarchical URI with no path, an
+    /// empty query or fragment left out; an opaque one as `OpaqueUri`
+    /// writes it.
+    pub fn with_empty_path(&self) -> Uri {
+        if !self.is_hierarchical() {
+            return self.with_encoded_authority(None);
+        }
+        let mut string = self.scheme().map(|s| format!("{s}:")).unwrap_or_default();
+        if let Some(authority) = self.encoded_authority() {
+            string.push_str("//");
+            string.push_str(authority);
+        }
+        if let Some(query) = self.encoded_query().filter(|q| !q.is_empty()) {
+            string.push('?');
+            string.push_str(query);
+        }
+        if let Some(fragment) = self
+            .fsi()
+            .map(|fsi| &self.string[fsi + 1..])
+            .filter(|f| !f.is_empty())
+        {
             string.push('#');
             string.push_str(fragment);
         }

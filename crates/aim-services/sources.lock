@@ -194,6 +194,7 @@ SOURCE_FILES=(
   "platform/frameworks/base|apex/blobstore/framework/java/android/app/blob/IBlobCommitCallback.aidl|6f32f895183da9dd2e83bfa9fc1212b85bec23a9f6ac339e3db6b9a78e773f5a"
   "platform/frameworks/base|core/java/android/credentials/ICredentialManager.aidl|49dc274d653974f917d1b88e07ac30566685e06e7642b104d396f515fe1fe7d3"
   "platform/frameworks/base|core/java/android/credentials/ISetEnabledProvidersCallback.aidl|98b311a043541302515b40f4d7f6687a545538844deaa5ad85e5de4c0dea70c2"
+  "platform/frameworks/base|core/java/android/app/slice/ISliceManager.aidl|8de9a02dc16f4aab0edc32edb42f1ff67b554b45bc5164ac0b30995e4de24cf2"
 )
 
 # descriptor|jar of its stub in the image|methods to marshal (`*`: all).
@@ -342,6 +343,7 @@ INTERFACES=(
   "android.os.IDeviceIdentifiersPolicyService|system/framework/framework.jar|getSerial,getSerialForPackage"
   "android.permission.ILegacyPermissionManager|system/framework/framework.jar|checkDeviceIdentifierAccess,checkPhoneNumberAccess"
   "android.content.IRestrictionsManager|system/framework/framework.jar|getApplicationRestrictions,getApplicationRestrictionsPerAdminForUser,hasRestrictionsProvider,requestPermission,notifyPermissionResponse,createLocalApprovalIntent"
+  "android.app.slice.ISliceManager|system/framework/framework.jar|*"
   "android.app.ILocaleManager|system/framework/framework.jar|setApplicationLocales,getApplicationLocales,getSystemLocales,getOverrideLocaleConfig"
   "android.app.IGrammaticalInflectionManager|system/framework/framework.jar|setRequestedApplicationGrammaticalGender,setSystemWideGrammaticalGender,getSystemGrammaticalGender,peekSystemGrammaticalGenderByUserId"
   "com.android.internal.textservice.ITextServicesManager|system/framework/framework.jar|*"
