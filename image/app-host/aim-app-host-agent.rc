@@ -7,7 +7,8 @@
 # connection by a process as MediaProvider's uid and groups, as zygote
 # starts the FUSE daemon with the same capabilities; it reads processes'
 # smaps for `getProcessMemoryInfo`, as system_server does with
-# CAP_SYS_PTRACE.
+# CAP_SYS_PTRACE; it restores the label of what the installer makes
+# (`SELinux.restorecon`), as system_server does.
 service aim-app-host-agent /system_ext/bin/aim-app-host-agent
     class main
     user system

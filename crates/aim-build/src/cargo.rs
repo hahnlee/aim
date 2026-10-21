@@ -376,7 +376,7 @@ fn prepare_guest_links() -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", aim_paths::original_image().display()))?;
     let links = aim_paths::android_link_dir();
     fs::create_dir_all(&links).map_err(|e| e.to_string())?;
-    for lib in ["libbinder_ndk.so", "libnativewindow.so"] {
+    for lib in ["libbinder_ndk.so", "libnativewindow.so", "libselinux.so"] {
         let link = links.join(lib);
         let target = image.join("system/lib64").join(lib);
         if fs::read_link(&link).ok().as_deref() != Some(target.as_path()) {

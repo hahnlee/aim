@@ -26,6 +26,8 @@
 //!   system_server reads it (`Process.readProcLines`).
 //! - It sorts a process's `/proc/<pid>/smaps` into the heaps
 //!   `Debug.MemoryInfo` reports (`aim_meminfo`), as system_server does.
+//! - It restores the SELinux label of what the installer makes
+//!   (`SELinux.restorecon`), as system_server does.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -98,6 +100,10 @@ const SET_IN_TOUCH_MODE: u32 = 13;
 /// `IAppHostAgent.enforceSerialNumber(String path, int serialNumber)`:
 /// `UserDataPreparer.enforceSerialNumber` of a user's directory.
 const ENFORCE_SERIAL_NUMBER: u32 = 14;
+/// `IAppHostAgent.restorecon(String path)`: `SELinux.restorecon` of a path
+/// the installer made (`selinux_android_restorecon` with no flags),
+/// whether it succeeded.
+const RESTORECON: u32 = 15;
 /// `InputTransport.cpp`'s `SOCKET_BUFFER_SIZE`.
 const SOCKET_BUFFER_SIZE: libc::c_int = 32 * 1024;
 
@@ -522,6 +528,12 @@ fn on_transact(
             reply.write(&status)?;
             Ok(())
         }
+        RESTORECON => {
+            let path: String = data.read()?;
+            reply.write(&Status::ok())?;
+            reply.write(&restorecon(&path))?;
+            Ok(())
+        }
         READ_PROC_STATUS => {
             let tid: i32 = data.read()?;
             reply.write(&Status::ok())?;
@@ -557,6 +569,21 @@ fn on_transact(
         }
         _ => Err(StatusCode::UNKNOWN_TRANSACTION),
     }
+}
+
+#[link(name = "selinux")]
+unsafe extern "C" {
+    fn selinux_android_restorecon(file: *const libc::c_char, flags: libc::c_uint) -> libc::c_int;
+}
+
+/// `SELinux.native_restorecon(path, 0)`: the path's label set from the
+/// file contexts.
+fn restorecon(path: &str) -> bool {
+    let Ok(path) = std::ffi::CString::new(path) else {
+        return false;
+    };
+    // SAFETY: a NUL-terminated path; libselinux's function.
+    unsafe { selinux_android_restorecon(path.as_ptr(), 0) == 0 }
 }
 
 /// `UserDataPreparer.enforceSerialNumber`: the serial number in the
