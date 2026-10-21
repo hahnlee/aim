@@ -44,6 +44,7 @@ pub mod config;
 pub mod connectivity_service;
 pub mod content_service;
 pub mod country_detector;
+pub mod credential;
 pub mod cross_profile_apps;
 pub mod cursor;
 pub mod device_config;
@@ -836,6 +837,13 @@ impl AppHost {
             (
                 "safety_center",
                 Arc::new(safety_center::SafetyCenter::new(self.clone())),
+            ),
+            (
+                "credential",
+                Arc::new(credential::CredentialManager::new(
+                    self.clone(),
+                    settings.clone(),
+                )),
             ),
             (
                 "appwidget",

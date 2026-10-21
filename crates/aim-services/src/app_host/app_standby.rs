@@ -948,7 +948,7 @@ impl AppHost {
     }
 
     /// `PackageManager.checkPermission(permission, package)` for `user`.
-    fn check_package_permission(
+    pub(super) fn check_package_permission(
         &self,
         permission: &str,
         package: &str,
