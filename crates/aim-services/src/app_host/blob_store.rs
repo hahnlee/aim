@@ -9,7 +9,9 @@
 //! service's own thread as the original's handler does. Access follows the
 //! committers' access modes (private, public, same signature, allowed
 //! packages), leases count against the caller's quota, and the limits are
-//! DeviceConfig `blobstore`'s. Writing a session's data and revocable
+//! DeviceConfig `blobstore`'s. A package whose data is cleared loses its
+//! sessions, commits and leases (`handlePackageRemoved`; the app host
+//! removes no package or user). Writing a session's data and revocable
 //! reads need revocable file descriptors over AppFuse, which the app host
 //! does not have; they, the idle maintenance job (a job of the `android`
 //! package, #1518), `dump`, the shell command, the storage stats
@@ -38,8 +40,12 @@ use aim_service_aidl::{ReadParcelable, WriteParcelable};
 use aim_storage::guest_inode::{self, GuestInode};
 use sha2::{Digest, Sha256};
 
+use super::package_writes::{DataCleared, PackageMonitor};
 use super::settings::Table;
 use super::{AppHost, PER_USER_RANGE, is_isolated, reply};
+
+/// `UserHandle.USER_ALL`.
+const USER_ALL: i32 = -1;
 use crate::package::query::Query;
 use crate::shell::SHELL_COMMAND_TRANSACTION;
 
@@ -1421,6 +1427,11 @@ impl BlobStore {
                 }
             })
             .expect("the blob store's thread");
+        // `registerReceiverAsUser(new PackageChangedReceiver(), UserHandle.ALL, ...)`.
+        let receiver = this.clone() as Arc<dyn PackageMonitor>;
+        this.host
+            .package_monitors
+            .register(USER_ALL, Arc::downgrade(&receiver));
         this
     }
 
@@ -2205,6 +2216,48 @@ impl BlobStore {
         })
     }
 
+    /// `handlePackageRemoved`, as `PackageChangedReceiver` runs it for a
+    /// package whose data was cleared: its sessions deleted; it is no
+    /// longer a committer or leasee of any blob, and a blob it leaves
+    /// deletable is deleted (a committer's once the lease wait is over).
+    fn handle_package_removed(&self, package: &str, uid: i32) -> Result<()> {
+        let config = self.config()?;
+        self.with(|store| {
+            let owned: Vec<Arc<Session>> = store
+                .sessions
+                .get(&user_of(uid))
+                .into_iter()
+                .flat_map(|s| s.values())
+                .filter(|s| s.owner_uid == uid && s.owner_package == package)
+                .cloned()
+                .collect();
+            for session in owned {
+                Self::delete_session(store, &session);
+                store.remove_session(&session);
+            }
+            self.write_sessions(store);
+            let mut deleted = Vec::new();
+            store.blobs.retain_mut(|blob| {
+                let committer = blob.committer(package, uid).is_some();
+                if committer {
+                    blob.committers
+                        .retain(|c| !(c.uid == uid && c.package == package));
+                }
+                blob.remove_leasee(package, uid);
+                let delete = blob.should_be_deleted(&config, committer);
+                if delete {
+                    deleted.push(blob.id);
+                }
+                !delete
+            });
+            for id in deleted {
+                self.delete_blob(store, id);
+            }
+            let _ = self.write_blobs(store);
+            Ok(())
+        })
+    }
+
     /// `queryBlobsForUserInternal`.
     fn query_blobs(&self, user: i32) -> Result<Vec<BlobInfo>> {
         let blobs = self.with(|store| Ok(store.blobs.clone()))?;
@@ -2562,6 +2615,25 @@ fn generate_session_id(known: &HashSet<i64>) -> Result<i64> {
         }
     }
     Err(illegal_state("Failed to allocate session ID".into()))
+}
+
+impl PackageMonitor for BlobStore {
+    /// `PackageChangedReceiver`, on the service's handler.
+    fn package_data_cleared(&self, cleared: &DataCleared<'_>) {
+        if cleared.uid == -1 {
+            eprintln!(
+                "app host: blob_store: uid is missing in {}'s data cleared",
+                cleared.package
+            );
+            return;
+        }
+        let (package, uid) = (cleared.package.to_string(), cleared.uid);
+        self.post(move |store| {
+            if let Err(e) = store.handle_package_removed(&package, uid) {
+                eprintln!("app host: blob_store: {package}'s data: {}", e.message);
+            }
+        });
+    }
 }
 
 impl Service for BlobStore {
