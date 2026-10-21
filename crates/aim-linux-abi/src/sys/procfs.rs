@@ -518,10 +518,15 @@ pub(super) fn maps() -> String {
 
 /// This process's mappings, from the VM map.
 pub(super) fn vmas() -> Vec<Vma> {
+    vmas_in(0, u64::MAX)
+}
+
+/// This process's mappings in `[lo, hi)`, cut to it.
+pub(super) fn vmas_in(lo: u64, hi: u64) -> Vec<Vma> {
     let paths = vfs::HostPathView::capture();
     let stack = stack().unwrap_or_default();
     let mut out = Vec::new();
-    let mut regions = vmmap::regions(0, u64::MAX).peekable();
+    let mut regions = vmmap::regions(lo, hi).peekable();
     while let Some(mut r) = regions.next() {
         // The string pages are the top of the stack, mapped from the
         // process record (`procrec`): one `[stack]` with the rest.
@@ -577,24 +582,61 @@ pub(super) fn vmas() -> Vec<Vma> {
             name = n;
             shmem = true;
         }
-        let mut line = format!(
-            "{:08x}-{:08x} {perms} {offset:08x} {:02x}:{:02x} {ino}",
-            r.start,
-            r.end,
-            (dev >> 24) & 0xff,
-            dev & 0xff_ffff
-        );
-        if !name.is_empty() {
-            push_name(&mut line, &name);
+        let line = |r: &vmmap::Region, name: &str| {
+            let mut line = format!(
+                "{:08x}-{:08x} {perms} {offset:08x} {:02x}:{:02x} {ino}",
+                r.start,
+                r.end,
+                (dev >> 24) & 0xff,
+                dev & 0xff_ffff
+            );
+            if !name.is_empty() {
+                push_name(&mut line, name);
+            }
+            line.push('\n');
+            line
+        };
+        // `get_vma_name`: an anonymous mapping that is no stack or vDSO
+        // shows its name, and Linux's VMAs end where the name changes.
+        let pieces = if name.is_empty() && !shmem {
+            super::vma_names::pieces(r.start, r.end)
+        } else {
+            Vec::new()
+        };
+        if pieces.iter().all(|(_, _, n)| n.is_none()) {
+            out.push(Vma {
+                line: line(&r, &name),
+                region: r,
+                name,
+                file: ino != 0,
+                shmem,
+            });
+            continue;
         }
-        line.push('\n');
-        out.push(Vma {
-            region: r,
-            line,
-            name,
-            file: ino != 0,
-            shmem,
-        });
+        let pages = (r.end - r.start) / super::mem::PAGE;
+        for (start, end, n) in pieces {
+            let piece = vmmap::Region {
+                start,
+                end,
+                prot: r.prot,
+                shared: r.shared,
+                offset: r.offset,
+                file: r.file.clone(),
+                usage: r.usage.share((end - start) / super::mem::PAGE, pages),
+            };
+            let name = match n {
+                Some(n) if r.shared => format!("[anon_shmem:{n}]"),
+                Some(n) => format!("[anon:{n}]"),
+                None => String::new(),
+            };
+            out.push(Vma {
+                line: line(&piece, &name),
+                region: piece,
+                name,
+                file: false,
+                shmem: false,
+            });
+        }
     }
     out
 }

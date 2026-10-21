@@ -81,6 +81,20 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// The part of an entry's counts `part` of its `whole` pages hold, in
+    /// proportion: Darwin does not count by address within an entry.
+    pub fn share(&self, part: u64, whole: u64) -> Usage {
+        let of = |n: u64| (n * part).checked_div(whole).unwrap_or(0);
+        Usage {
+            resident: of(self.resident),
+            dirtied: of(self.dirtied),
+            swapped_out: of(self.swapped_out),
+            shared_now_private: of(self.shared_now_private),
+            private_resident: of(self.private_resident),
+            ..*self
+        }
+    }
+
     /// The counts of two adjacent entries reported as one, with the
     /// first's sharing.
     pub fn merge(&mut self, n: &Usage) {
