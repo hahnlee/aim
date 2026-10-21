@@ -18,12 +18,12 @@ use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use aim_binder_host::local::{Call, LocalProcess, Received, Reply, Service, Strong};
+use aim_binder_host::local::{Call, LocalProcess, Received, Reply, Service};
 use aim_binder_host::parcel::{BAD_VALUE, Binder, Exception, Parcel};
 use aim_service_aidl::android_content_icontentprovider as provider;
 
 use crate::bundle::{self, Value};
-use crate::system::System;
+use crate::system::{ServiceOwner, System};
 
 type Result<T> = std::result::Result<T, Exception>;
 
@@ -128,8 +128,9 @@ type Key = (&'static str, i32, String);
 
 #[derive(Default)]
 struct Kept {
-    /// The provider, and the cookie of its death notification.
-    provider: Option<(Arc<Strong>, u64)>,
+    /// The provider, and the cookie of its death notification if another
+    /// process serves it.
+    provider: Option<(Arc<ServiceOwner>, Option<u64>)>,
     /// `Settings.Secure` values with their generations.
     values: HashMap<Key, (Option<String>, Generation)>,
     /// `DeviceConfig` namespaces: their generation and the values read
@@ -173,10 +174,13 @@ impl Settings {
 
     /// The settings provider, acquired once and dropped with everything
     /// kept when it dies.
-    fn provider(&self) -> Result<Arc<Strong>> {
+    fn provider(&self) -> Result<Arc<ServiceOwner>> {
         if let Some((p, _)) = &self.kept.lock().unwrap().provider {
             return Ok(p.clone());
         }
+        // The process's own reference, held for its token whichever
+        // caller's read first needed it (`clearCallingIdentity`).
+        let _system = aim_binder_host::local::clear_calling_identity();
         let strong = Arc::new(
             self.system
                 .content_provider_external(AUTHORITY, USER_SYSTEM, self.token, "native services")?
@@ -187,18 +191,25 @@ impl Settings {
                     )
                 })?,
         );
-        let this = self.this.clone();
-        let death = self.process.link_to_death(
-            &strong,
-            Box::new(move || {
-                if let Some(settings) = this.upgrade() {
-                    *settings.kept.lock().unwrap() = Kept::default();
-                }
-            }),
-        );
+        let death = match &*strong {
+            ServiceOwner::Remote(remote) => {
+                let this = self.this.clone();
+                Some(self.process.link_to_death(
+                    remote,
+                    Box::new(move || {
+                        if let Some(settings) = this.upgrade() {
+                            *settings.kept.lock().unwrap() = Kept::default();
+                        }
+                    }),
+                ))
+            }
+            ServiceOwner::Local(_) => None,
+        };
         let mut kept = self.kept.lock().unwrap();
         if let Some((p, _)) = &kept.provider {
-            self.process.clear_death(&strong, death);
+            if let (ServiceOwner::Remote(remote), Some(death)) = (&*strong, death) {
+                self.process.clear_death(remote, death);
+            }
             return Ok(p.clone());
         }
         kept.provider = Some((strong.clone(), death));
