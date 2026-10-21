@@ -5,7 +5,9 @@
 //! timeline, and a frame of layers (window mode's present) is shown once
 //! all its layers' content is ready.
 //!
-//! Opens a small window: run it in a logged-in session.
+//! Opens a small window: run it in a logged-in session whose screen shows
+//! windows. While the Mac's screen is locked or its display asleep, no
+//! window is shown, so the test does not run then (it records why).
 
 use std::io::Read;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
@@ -79,16 +81,28 @@ fn present(acquire: i32) -> OwnedFd {
     unsafe { OwnedFd::from_raw_fd(present.present) }
 }
 
-fn shown_at(fence: &OwnedFd) -> i64 {
+/// The status of a present fence whose frame was not shown: `-ENODEV`.
+const NOT_SHOWN: i32 = -19;
+
+/// When the frame of `fence` was shown; `None` when the Mac stopped
+/// showing windows, so it was not.
+fn shown_at(fence: &OwnedFd) -> Option<i64> {
     assert!(aim_sync_file::wait(fence.as_fd(), 5000), "present fence");
-    let aim_sync_file::State::Signaled {
-        timestamp_ns,
-        status: 1,
-    } = aim_sync_file::state(fence.as_fd())
-    else {
-        panic!("{:?}", aim_sync_file::state(fence.as_fd()));
-    };
-    timestamp_ns
+    match aim_sync_file::state(fence.as_fd()) {
+        aim_sync_file::State::Signaled {
+            timestamp_ns,
+            status: 1,
+        } => Some(timestamp_ns),
+        aim_sync_file::State::Signaled {
+            status: NOT_SHOWN, ..
+        } => {
+            let reason = aim_host_display::screen::hidden()
+                .expect("a frame not shown while the Mac shows windows");
+            aim_paths::skip(reason);
+            None
+        }
+        state => panic!("{state:?}"),
+    }
 }
 
 fn wait_for(path: &Path) -> Vec<u8> {
@@ -110,6 +124,10 @@ fn wait_for(path: &Path) -> Vec<u8> {
 
 #[test]
 fn presents_a_buffer_and_delivers_vsync() {
+    if let Some(reason) = aim_host_display::screen::hidden() {
+        aim_paths::skip(reason);
+        return;
+    }
     let dir =
         PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("display-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -188,7 +206,9 @@ fn presents_a_buffer_and_delivers_vsync() {
     );
     let ready = aim_sync_file::monotonic_ns();
     content.signal(1);
-    let timestamp_ns = shown_at(&shown);
+    let Some(timestamp_ns) = shown_at(&shown) else {
+        return;
+    };
     assert!(
         timestamp_ns > ready,
         "shown at {timestamp_ns}, ready at {ready}"
@@ -258,7 +278,9 @@ fn presents_a_buffer_and_delivers_vsync() {
     );
     let ready = aim_sync_file::monotonic_ns();
     second_content.signal(1);
-    let timestamp_ns = shown_at(&shown);
+    let Some(timestamp_ns) = shown_at(&shown) else {
+        return;
+    };
     assert!(
         timestamp_ns > ready,
         "shown at {timestamp_ns}, ready at {ready}"
@@ -284,7 +306,9 @@ fn presents_a_buffer_and_delivers_vsync() {
 
     // A present fence signals at a vsync, which SurfaceFlinger's vsync
     // model relies on.
-    let at = shown_at(&present(-1));
+    let Some(at) = shown_at(&present(-1)) else {
+        return;
+    };
     let phase = (at - stamps[stamps.len() - 1]).rem_euclid(period);
     assert!(
         phase.min(period - phase) < period / 20,

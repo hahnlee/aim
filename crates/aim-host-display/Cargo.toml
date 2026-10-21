@@ -15,3 +15,6 @@ aim-storage.workspace = true
 aim-hostcall.workspace = true
 aim-sync-file.workspace = true
 libc.workspace = true
+
+[dev-dependencies]
+aim-paths.workspace = true

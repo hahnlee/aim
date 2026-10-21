@@ -643,6 +643,7 @@ fn main() {
     };
     let display = DISPLAY.get_or_init(|| Display::new(renderer, info, display_mode, capture));
     display.set_targets(targets);
+    metal::watch_screen();
 
     if let Err(e) = input::start(&socket, &win) {
         eprintln!(

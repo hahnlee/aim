@@ -62,22 +62,13 @@ static STATE: Mutex<State> = Mutex::new(State {
     indicators: BTreeSet::new(),
 });
 
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-    fn CGSessionCopyCurrentDictionary() -> *const c_void;
-    fn CGMainDisplayID() -> u32;
-    fn CGDisplayIsAsleep(display: u32) -> u32;
-}
-
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
-    fn CFDictionaryGetValue(dict: *const c_void, key: *const c_void) -> *const c_void;
     fn CFStringCreateWithCString(
         alloc: *const c_void,
         s: *const std::ffi::c_char,
         encoding: u32,
     ) -> *const c_void;
-    fn CFBooleanGetValue(b: *const c_void) -> bool;
     fn CFRelease(obj: *const c_void);
 }
 
@@ -92,26 +83,6 @@ const UTF8: u32 = 0x0800_0100;
 fn cf_string(s: &std::ffi::CStr) -> *const c_void {
     // SAFETY: a NUL-terminated string.
     unsafe { CFStringCreateWithCString(std::ptr::null(), s.as_ptr(), UTF8) }
-}
-
-/// Whether the Mac's screen is locked or its main display asleep.
-fn mac_locked() -> bool {
-    // SAFETY: plain queries; the session dictionary and key are released.
-    unsafe {
-        if CGDisplayIsAsleep(CGMainDisplayID()) != 0 {
-            return true;
-        }
-        let session = CGSessionCopyCurrentDictionary();
-        if session.is_null() {
-            return false;
-        }
-        let key = cf_string(c"CGSSessionScreenIsLocked");
-        let v = CFDictionaryGetValue(session, key);
-        let locked = !v.is_null() && CFBooleanGetValue(v);
-        CFRelease(key);
-        CFRelease(session);
-        locked
-    }
 }
 
 /// Wakes the display as the user's activity would (it stays locked).
@@ -191,7 +162,7 @@ pub fn serve_bridge(sock: UnixStream) {
         let package = match &m {
             Message::Post(p) => {
                 let new = s.shown.insert(p.key.clone(), p.clone()).is_none();
-                if new && p.full_screen && mac_locked() {
+                if new && p.full_screen && aim_host_display::screen::hidden().is_some() {
                     wake_display();
                     to_bridge(&mut s, &Message::FullScreen { key: p.key.clone() });
                 }

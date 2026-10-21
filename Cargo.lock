@@ -171,6 +171,7 @@ name = "aim-host-display"
 version = "0.1.0"
 dependencies = [
  "aim-hostcall",
+ "aim-paths",
  "aim-storage",
  "aim-sync-file",
  "libc",

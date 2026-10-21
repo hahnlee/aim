@@ -74,7 +74,14 @@ the composer's `linux-run`:
   The fence's time is the display's first vsync at or after that time, as
   a panel's present fence signals at the refresh that starts showing the
   frame; a dropped drawable, or a window host's read of the frame, is not
-  at a refresh by itself.
+  at a refresh by itself. While the Mac shows no windows (its screen
+  locked or its main display asleep), Core Animation shows no drawable and
+  runs no presented handler until it does again, possibly hours later, so
+  the server follows the screen's locking and the displays' sleep: the
+  drawables waiting when it stops, and those of a present while it lasts,
+  are not shown, and a fence none of whose drawables was shown signals at
+  the vsync with `-ENODEV`, which SurfaceFlinger reads as no present time
+  (#1931).
 - **Display mode.** The window's content in backing pixels: by default the
   main screen's visible frame, `--size WxH` otherwise. In window mode
   (`--mode windows`) it is the main screen and a bar margin, and each task
