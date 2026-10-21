@@ -568,6 +568,12 @@ pub fn open_proc(flags: u64, host_flags: i32) -> i64 {
     fd as i64
 }
 
+/// A record the kernel logs itself (`printk`); one that cannot be stored
+/// is lost, as a full console loses it.
+pub(super) fn printk(facility: u32, level: u32, text: &[u8]) {
+    let _ = with_ring(|ring| ring.append(facility, level, text));
+}
+
 /// `/proc/sys/kernel/<name>` as init wrote it.
 fn sysctl(name: &str) -> Option<String> {
     let (host, _) = vfs::lookup(&format!("/proc/sys/kernel/{name}"));
