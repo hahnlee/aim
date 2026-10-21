@@ -13,6 +13,11 @@
 //! checked rather than noted, and checked again as it is delivered
 //! (`shouldSkipReceiver`), its app ops noted then: a receiver whose
 //! permission or op went meanwhile is skipped, its delivery finished.
+//! Each process's queue waits its turn to run (`updateRunningListLocked`):
+//! at most `MAX_RUNNING_PROCESS_QUEUES` run at once, and one more for an
+//! urgent broadcast, and of the processes not running only one is started
+//! at a time (`mRunningColdStart`), its receivers' deliveries held until
+//! its turn.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -57,6 +62,8 @@ const OPTION_REQUIRE_COMPAT_CHANGE_ENABLED: i32 = 1 << 2;
 const OPTION_IS_ALARM_BROADCAST: i32 = 1 << 3;
 const OPTION_SHARE_IDENTITY: i32 = 1 << 4;
 const OPTION_INTERACTIVE: i32 = 1 << 5;
+/// `Intent.FLAG_RECEIVER_FOREGROUND`.
+const FLAG_RECEIVER_FOREGROUND: i32 = 0x1000_0000;
 /// `Intent.FLAG_RECEIVER_EXCLUDE_BACKGROUND`, `ActivityInfo.FLAG_*`.
 const FLAG_RECEIVER_EXCLUDE_BACKGROUND: i32 = 0x0080_0000;
 const FLAG_SINGLE_USER: i32 = 0x4000_0000;
@@ -161,6 +168,15 @@ struct Record {
     /// `BroadcastOptions.setTemporaryAppAllowlist`: each receiver's uid
     /// is allowed for as long when it is sent the broadcast.
     temp_allowlist: Option<TempAllowlist>,
+    /// `BroadcastRecord.isUrgent`.
+    urgent: bool,
+}
+
+/// `BroadcastRecord.calculateUrgent`: a foreground broadcast, an
+/// interactive or an alarm's.
+fn urgent(intent_flags: i32, option_flags: i32) -> bool {
+    intent_flags & FLAG_RECEIVER_FOREGROUND != 0
+        || option_flags & (OPTION_INTERACTIVE | OPTION_IS_ALARM_BROADCAST) != 0
 }
 
 /// A broadcast's temporary allowlist (`BroadcastOptions`'s duration,
@@ -257,11 +273,73 @@ struct State {
     /// The processes whose first delivery, a chained or a manifest one, was
     /// sent and waits for its finish.
     busy: HashSet<i64>,
+    /// The process queues with a delivery to send, in the order they became
+    /// runnable (`mRunnableHead`).
+    runnable: VecDeque<QueueId>,
+    /// The deliveries to processes not running, each process's in order.
+    cold: Vec<Cold>,
+    /// The queue whose process is being started (`mRunningColdStart`).
+    cold_start: Option<i64>,
+}
+
+/// A process queue (`BroadcastProcessQueue`): a process's, by its start,
+/// or one not running, by its name and uid.
+#[derive(Clone, PartialEq)]
+enum QueueId {
+    Warm(i64),
+    Cold(String, u32),
+}
+
+/// The deliveries waiting for a process that does not run.
+struct Cold {
+    process: String,
+    uid: u32,
+    package: String,
+    deliveries: VecDeque<Delivery>,
+}
+
+/// `BroadcastConstants.MAX_RUNNING_PROCESS_QUEUES` and
+/// `EXTRA_RUNNING_URGENT_PROCESS_QUEUES`.
+#[derive(Clone, Copy)]
+struct Limits {
+    max_running: usize,
+    extra_urgent: usize,
+}
+
+/// A runnable queue as `updateRunningListLocked` weighs it: whether its
+/// next broadcast is urgent (`isPendingUrgent`), and whether its process
+/// is to be started (not `isProcessWarm`).
+#[derive(Clone, Copy)]
+struct Candidate {
+    urgent: bool,
+    cold: bool,
+}
+
+/// Which of the `runnable` queues, in their order, `updateRunningListLocked`
+/// promotes to running next, with `running` queues running (`urgent` of
+/// them delivering an urgent broadcast) and a process starting or not.
+fn next_to_run(
+    runnable: &[Candidate],
+    running: usize,
+    urgent: usize,
+    cold_starting: bool,
+    limits: Limits,
+) -> Option<usize> {
+    // The extra queue lets urgent broadcasts progress; running urgent ones
+    // use it first.
+    let used_extra = urgent.min(limits.extra_urgent);
+    if running + used_extra >= limits.max_running + limits.extra_urgent {
+        return None;
+    }
+    runnable
+        .iter()
+        .position(|c| (running < limits.max_running || c.urgent) && !(c.cold && cold_starting))
 }
 
 #[derive(Default)]
 pub struct Broadcasts {
     state: Mutex<State>,
+    limits: std::sync::OnceLock<Limits>,
 }
 
 /// A sender, as BroadcastSkipPolicy checks a receiver for it.
@@ -547,6 +625,17 @@ fn op_names(op: i32) -> (&'static str, String) {
     (public, public.trim_start_matches("android:").to_uppercase())
 }
 
+/// The package of a manifest receiver.
+fn manifest_package(m: &Manifest) -> String {
+    m.info
+        .info
+        .application_info
+        .item
+        .package_name
+        .clone()
+        .unwrap_or_default()
+}
+
 impl Broadcasts {
     /// `registerReceiverWithFeature`: the first sticky broadcast the
     /// filter matches.
@@ -793,6 +882,7 @@ impl Broadcasts {
                     result_extras: None,
                     id_for_response_event: 0,
                     temp_allowlist: None,
+                    urgent: urgent(r.intent.intent.flags, 0),
                 };
                 st.queues
                     .entry(start_seq)
@@ -807,7 +897,8 @@ impl Broadcasts {
                     ));
             }
         }
-        self.send_next(host, &mut st, start_seq);
+        Self::make_runnable(&mut st, QueueId::Warm(start_seq));
+        self.update_running(host, &mut st);
         Ok(first)
     }
 
@@ -838,6 +929,7 @@ impl Broadcasts {
             st.queues.get_mut(&seq).unwrap().pop_front();
             self.advance(host, &mut st, id);
             self.send_next(host, &mut st, seq);
+            self.update_running(host, &mut st);
         }
         Ok(())
     }
@@ -1101,6 +1193,7 @@ impl Broadcasts {
             }),
         };
         let record = Arc::new(Record {
+            urgent: urgent(intent.intent.flags, options.flags),
             intent,
             binders: Arc::new(binders),
             sender,
@@ -1217,6 +1310,7 @@ impl Broadcasts {
                     },
                 );
                 self.advance(host, &mut st, id);
+                self.update_running(host, &mut st);
             }
         }
         Ok(BROADCAST_SUCCESS)
@@ -1408,6 +1502,7 @@ impl Broadcasts {
             .map(|h| host.process.strong(h))
             .collect();
         let record = Arc::new(Record {
+            urgent: urgent(intent.intent.flags, 0),
             intent,
             binders: Arc::new(binders),
             sender,
@@ -1480,6 +1575,7 @@ impl Broadcasts {
                     },
                 );
                 self.advance(host, &mut st, id);
+                self.update_running(host, &mut st);
             }
             (Err(e), done) => {
                 eprintln!("app host: a system broadcast: {e:?}");
@@ -1740,21 +1836,13 @@ impl Broadcasts {
                 && !signature)
     }
 
-    /// The process a manifest receiver runs in, started for `record` when
-    /// it does not run (`scheduleReceiverColdLocked`: unless the receiver
-    /// is skipped, `startProcessLocked` with hosting type `broadcast`).
-    fn process_for(&self, host: &AppHost, record: &Record, m: &Manifest) -> Option<i64> {
-        let package = m
-            .info
-            .info
-            .application_info
-            .item
-            .package_name
-            .clone()
-            .unwrap_or_default();
+    /// The queue of the process a manifest receiver runs in: a running
+    /// process's, else one waiting for its process to start; none for
+    /// system_server's own receivers.
+    fn manifest_queue(&self, host: &AppHost, m: &Manifest) -> Option<QueueId> {
         // The system process runs the system apps' components declared in
         // it, not system_server's own receivers.
-        if super::is_system_server_code(&package, &m.process) {
+        if super::is_system_server_code(&manifest_package(m), &m.process) {
             let e = host
                 .unimplemented_named("activity", "a receiver of system_server's own code (#1518)");
             eprintln!(
@@ -1763,20 +1851,206 @@ impl Broadcasts {
             );
             return None;
         }
-        if let Some((seq, _)) = host.running_process(&m.process, m.uid) {
-            return Some(seq);
+        Some(match host.running_process(&m.process, m.uid) {
+            Some((seq, _)) => QueueId::Warm(seq),
+            None => QueueId::Cold(m.process.clone(), m.uid),
+        })
+    }
+
+    /// Puts `delivery` on the queue it goes to, which becomes runnable.
+    fn queue_delivery(
+        &self,
+        st: &mut State,
+        to: QueueId,
+        m: Option<&Manifest>,
+        delivery: Delivery,
+    ) {
+        match &to {
+            QueueId::Warm(seq) => st.queues.entry(*seq).or_default().push_back(delivery),
+            QueueId::Cold(process, uid) => match st
+                .cold
+                .iter_mut()
+                .find(|c| &c.process == process && c.uid == *uid)
+            {
+                Some(c) => c.deliveries.push_back(delivery),
+                None => st.cold.push(Cold {
+                    process: process.clone(),
+                    uid: *uid,
+                    package: m.map(manifest_package).unwrap_or_default(),
+                    deliveries: VecDeque::from([delivery]),
+                }),
+            },
         }
-        if self.skipped_manifest(host, record, m) {
-            return None;
+        Self::make_runnable(st, to);
+    }
+
+    /// `updateRunnableList`: the queue waits its turn, unless it runs.
+    fn make_runnable(st: &mut State, queue: QueueId) {
+        if let QueueId::Warm(seq) = queue
+            && (st.busy.contains(&seq) || st.cold_start == Some(seq))
+        {
+            return;
         }
-        if let Err(e) = host.start_process_for(&package, &m.process, None, true) {
-            eprintln!(
-                "app host: unable to launch {} for broadcast: {}",
-                m.process, e.message
-            );
-            return None;
+        if !st.runnable.contains(&queue) {
+            st.runnable.push_back(queue);
         }
-        host.running_process(&m.process, m.uid).map(|(seq, _)| seq)
+    }
+
+    /// The queue limits, from the native boot namespace's properties
+    /// (`BroadcastConstants.updateDeviceConfigConstants`: its `persist.sys.`
+    /// override, else `persist.device_config.`): two running queues on a
+    /// low-RAM device and four otherwise, and one extra for urgent ones.
+    fn limits(&self, host: &AppHost) -> Limits {
+        *self.limits.get_or_init(|| {
+            let int = |key: &str, default: usize| {
+                [
+                    format!("persist.sys.activity_manager_native_boot.{key}"),
+                    format!("persist.device_config.activity_manager_native_boot.{key}"),
+                ]
+                .iter()
+                .find_map(|name| host.property(name).and_then(|v| v.trim().parse().ok()))
+                .unwrap_or(default)
+            };
+            let low_ram = host.property("ro.config.low_ram").as_deref() == Some("true");
+            Limits {
+                max_running: int(
+                    "bcast_max_running_process_queues",
+                    if low_ram { 2 } else { 4 },
+                ),
+                extra_urgent: int("bcast_extra_running_urgent_process_queues", 1),
+            }
+        })
+    }
+
+    /// `isPendingUrgent`: whether the delivery at the front of `queue` is of
+    /// an urgent broadcast.
+    fn pending_urgent(st: &State, queue: &QueueId) -> bool {
+        let front = match queue {
+            QueueId::Warm(seq) => st.queues.get(seq).and_then(|q| q.front()),
+            QueueId::Cold(process, uid) => st
+                .cold
+                .iter()
+                .find(|c| &c.process == process && c.uid == *uid)
+                .and_then(|c| c.deliveries.front()),
+        };
+        match front {
+            Some(Delivery::Once(record, _) | Delivery::Manifest(record, ..)) => record.urgent,
+            Some(Delivery::Chained(id, _)) => st.chains.get(id).is_some_and(|c| c.record.urgent),
+            None => false,
+        }
+    }
+
+    /// `updateRunningListLocked`: the runnable queues promoted to running
+    /// in their order while the limits allow, one process started at a
+    /// time; a warm queue sends what it has, a cold one has its process
+    /// started for its first receiver not skipped.
+    fn update_running(&self, host: &AppHost, st: &mut State) {
+        let limits = self.limits(host);
+        loop {
+            let running: Vec<i64> = st.busy.iter().copied().chain(st.cold_start).collect();
+            let urgent = running
+                .iter()
+                .filter(|seq| Self::pending_urgent(st, &QueueId::Warm(**seq)))
+                .count();
+            let candidates: Vec<Candidate> = st
+                .runnable
+                .iter()
+                .map(|q| Candidate {
+                    urgent: Self::pending_urgent(st, q),
+                    cold: match q {
+                        QueueId::Warm(seq) => Self::needs_start(host, st, *seq),
+                        QueueId::Cold(..) => true,
+                    },
+                })
+                .collect();
+            let Some(at) = next_to_run(
+                &candidates,
+                running.len(),
+                urgent,
+                st.cold_start.is_some(),
+                limits,
+            ) else {
+                return;
+            };
+            match st.runnable.remove(at).unwrap() {
+                QueueId::Warm(seq) if candidates[at].cold => st.cold_start = Some(seq),
+                QueueId::Warm(seq) => self.send_next(host, st, seq),
+                QueueId::Cold(process, uid) => self.start_cold(host, st, &process, uid),
+            }
+        }
+    }
+
+    /// Whether the process of `seq` is still to attach for the delivery at
+    /// the front of its queue (a manifest receiver needs its thread).
+    fn needs_start(host: &AppHost, st: &State, seq: i64) -> bool {
+        matches!(
+            st.queues.get(&seq).and_then(|q| q.front()),
+            Some(Delivery::Manifest(..))
+        ) && !host
+            .apps
+            .lock()
+            .unwrap()
+            .get(&seq)
+            .is_some_and(|a| a.thread.is_some())
+    }
+
+    /// `scheduleReceiverColdLocked`: the process of a cold queue started
+    /// for its first receiver not skipped (`startProcessLocked` with hosting
+    /// type `broadcast`), its deliveries waiting for it to attach; the
+    /// receiver it could not be started for fails.
+    fn start_cold(&self, host: &AppHost, st: &mut State, process: &str, uid: u32) {
+        let Some(at) = st
+            .cold
+            .iter()
+            .position(|c| c.process == process && c.uid == uid)
+        else {
+            return;
+        };
+        let mut cold = st.cold.remove(at);
+        // It may have started meanwhile.
+        if let Some((seq, _)) = host.running_process(process, uid) {
+            st.queues.entry(seq).or_default().extend(cold.deliveries);
+            Self::make_runnable(st, QueueId::Warm(seq));
+            return;
+        }
+        while let Some(Delivery::Manifest(record, m, chain)) = cold.deliveries.front() {
+            if !self.skipped_manifest(host, record, m) {
+                break;
+            }
+            let chain = *chain;
+            cold.deliveries.pop_front();
+            if let Some(id) = chain {
+                self.advance(host, st, id);
+            }
+        }
+        if cold.deliveries.is_empty() {
+            return;
+        }
+        let started = host
+            .start_process_for(&cold.package, process, None, true)
+            .map_err(|e| e.message)
+            .and_then(|_| {
+                host.running_process(process, uid)
+                    .map(|(seq, _)| seq)
+                    .ok_or_else(|| "the process is gone".to_string())
+            });
+        match started {
+            Ok(seq) => {
+                st.queues.entry(seq).or_default().extend(cold.deliveries);
+                st.cold_start = Some(seq);
+                self.send_next(host, st, seq);
+            }
+            Err(e) => {
+                eprintln!("app host: unable to launch {process} for broadcast: {e}");
+                if let Some(Delivery::Manifest(_, _, Some(id))) = cold.deliveries.pop_front() {
+                    self.advance(host, st, id);
+                }
+                if !cold.deliveries.is_empty() {
+                    st.cold.push(cold);
+                    Self::make_runnable(st, QueueId::Cold(process.to_string(), uid));
+                }
+            }
+        }
     }
 
     /// `shouldSkipReceiver`'s `shouldSkipMessage` of a manifest receiver
@@ -1825,21 +2099,23 @@ impl Broadcasts {
     /// Queues `record` to each of `targets`, assumed delivered to the
     /// registered ones, and sends each process what it has next.
     fn enqueue(&self, host: &AppHost, st: &mut State, record: &Arc<Record>, targets: Vec<Target>) {
-        let mut touched = Vec::new();
         for target in targets {
-            let (seq, delivery) = match target {
-                Target::Registered(r) => (r.start_seq, Delivery::Once(record.clone(), r)),
-                Target::Manifest(m) => match self.process_for(host, record, &m) {
-                    Some(seq) => (seq, Delivery::Manifest(record.clone(), m, None)),
-                    None => continue,
-                },
-            };
-            st.queues.entry(seq).or_default().push_back(delivery);
-            touched.push(seq);
+            match target {
+                Target::Registered(r) => self.queue_delivery(
+                    st,
+                    QueueId::Warm(r.start_seq),
+                    None,
+                    Delivery::Once(record.clone(), r),
+                ),
+                Target::Manifest(m) => {
+                    if let Some(to) = self.manifest_queue(host, &m) {
+                        let delivery = Delivery::Manifest(record.clone(), m.clone(), None);
+                        self.queue_delivery(st, to, Some(&m), delivery);
+                    }
+                }
+            }
         }
-        for seq in touched {
-            self.send_next(host, st, seq);
-        }
+        self.update_running(host, st);
     }
 
     /// `ActivityManager.broadcastStickyIntent(intent, OP_NONE,
@@ -1869,6 +2145,7 @@ impl Broadcasts {
             result_extras: None,
             id_for_response_event: 0,
             temp_allowlist: None,
+            urgent: urgent(flags, 0),
         });
         {
             let mut st = self.state.lock().unwrap();
@@ -1886,10 +2163,17 @@ impl Broadcasts {
         self.send_from_system(host, intent);
     }
 
-    /// The process of `start_seq` attached: what waited for it is sent.
+    /// The process of `start_seq` attached: the queue started for it runs
+    /// (`onApplicationAttachedLocked`), and another process may be started.
     pub fn process_attached(&self, host: &AppHost, start_seq: i64) {
         let mut st = self.state.lock().unwrap();
-        self.send_next(host, &mut st, start_seq);
+        if st.cold_start == Some(start_seq) {
+            st.cold_start = None;
+            self.send_next(host, &mut st, start_seq);
+        } else if st.queues.get(&start_seq).is_some_and(|q| !q.is_empty()) {
+            Self::make_runnable(&mut st, QueueId::Warm(start_seq));
+        }
+        self.update_running(host, &mut st);
     }
 
     /// `unbroadcastIntent`: a sticky broadcast goes.
@@ -1971,6 +2255,7 @@ impl Broadcasts {
             self.advance(host, &mut st, id);
         }
         self.send_next(host, &mut st, seq);
+        self.update_running(host, &mut st);
         Ok(())
     }
 
@@ -1980,11 +2265,16 @@ impl Broadcasts {
         let mut st = self.state.lock().unwrap();
         st.receivers.retain(|r| r.start_seq != start_seq);
         st.busy.remove(&start_seq);
+        if st.cold_start == Some(start_seq) {
+            st.cold_start = None;
+        }
+        st.runnable.retain(|q| *q != QueueId::Warm(start_seq));
         for delivery in st.queues.remove(&start_seq).unwrap_or_default() {
             if let Delivery::Chained(id, _) | Delivery::Manifest(_, _, Some(id)) = delivery {
                 self.advance(host, &mut st, id);
             }
         }
+        self.update_running(host, &mut st);
     }
 
     /// BroadcastSkipPolicy's checks of a registered receiver: whether the
@@ -2182,25 +2472,22 @@ impl Broadcasts {
                 self.send_result(host, chain);
                 return;
             };
-            let (seq, delivery) = match target {
+            match target {
                 Target::Registered(r) => {
                     if !st.receivers.iter().any(|x| x.receiver.handle == r.handle) {
                         continue;
                     }
-                    (r.start_seq, Delivery::Chained(id, r))
+                    let delivery = Delivery::Chained(id, r);
+                    self.queue_delivery(st, QueueId::Warm(r.start_seq), None, delivery);
                 }
                 Target::Manifest(m) => {
                     let record = chain.record.clone();
-                    match self.process_for(host, &record, &m) {
-                        Some(seq) => (seq, Delivery::Manifest(record, m, Some(id))),
-                        None => continue,
-                    }
+                    let Some(to) = self.manifest_queue(host, &m) else {
+                        continue;
+                    };
+                    let delivery = Delivery::Manifest(record, m.clone(), Some(id));
+                    self.queue_delivery(st, to, Some(&m), delivery);
                 }
-            };
-            let queue = st.queues.entry(seq).or_default();
-            queue.push_back(delivery);
-            if queue.len() == 1 {
-                self.send_next(host, st, seq);
             }
             return;
         }
@@ -2639,5 +2926,83 @@ mod tests {
         let some = Sender::system(&["android.permission.X".to_string()]);
         assert!(!some.required_null);
         assert_eq!(some.required_permissions, ["android.permission.X"]);
+    }
+
+    const LIMITS: Limits = Limits {
+        max_running: 4,
+        extra_urgent: 1,
+    };
+
+    /// A burst of manifest receivers in processes not running, as at
+    /// BOOT_COMPLETED: one process starts at a time, at most four queues
+    /// run, and they are delivered in the order queued.
+    #[test]
+    fn a_burst_of_cold_receivers_is_started_one_at_a_time() {
+        let cold = Candidate {
+            urgent: false,
+            cold: true,
+        };
+        let mut runnable: VecDeque<usize> = (0..12).collect();
+        // The queues delivering (attached, their receiver not finished).
+        let mut running: VecDeque<usize> = VecDeque::new();
+        let mut starting: Option<usize> = None;
+        let mut delivered = Vec::new();
+        let mut most = 0;
+        while !runnable.is_empty() || !running.is_empty() || starting.is_some() {
+            let candidates: Vec<Candidate> = runnable.iter().map(|_| cold).collect();
+            let active = running.len() + usize::from(starting.is_some());
+            if let Some(at) = next_to_run(&candidates, active, 0, starting.is_some(), LIMITS) {
+                assert!(starting.is_none(), "a second cold start");
+                starting = runnable.remove(at);
+            } else if let Some(queue) = starting.take() {
+                // The process attached; its receiver is sent.
+                delivered.push(queue);
+                running.push_back(queue);
+            } else {
+                // The oldest receiver finished.
+                running.pop_front();
+            }
+            most = most.max(running.len() + usize::from(starting.is_some()));
+        }
+        assert_eq!(delivered, (0..12).collect::<Vec<_>>());
+        assert_eq!(most, 4);
+    }
+
+    /// A warm queue runs while a process starts; past the limit only an
+    /// urgent broadcast's queue runs, in the one extra slot.
+    #[test]
+    fn warm_and_urgent_queues_run_beside_a_cold_start() {
+        let (warm, cold) = (
+            Candidate {
+                urgent: false,
+                cold: false,
+            },
+            Candidate {
+                urgent: false,
+                cold: true,
+            },
+        );
+        let urgent = Candidate {
+            urgent: true,
+            cold: false,
+        };
+        assert_eq!(
+            next_to_run(&[cold, cold, warm], 1, 0, true, LIMITS),
+            Some(2)
+        );
+        assert_eq!(next_to_run(&[cold], 1, 0, true, LIMITS), None);
+        assert_eq!(next_to_run(&[warm, urgent], 4, 0, false, LIMITS), Some(1));
+        assert_eq!(next_to_run(&[urgent], 5, 1, false, LIMITS), None);
+        // A running urgent queue uses the extra slot first.
+        assert_eq!(next_to_run(&[urgent], 4, 1, false, LIMITS), None);
+        assert_eq!(next_to_run(&[warm], 3, 0, false, LIMITS), Some(0));
+    }
+
+    #[test]
+    fn foreground_interactive_and_alarm_broadcasts_are_urgent() {
+        assert!(urgent(FLAG_RECEIVER_FOREGROUND, 0));
+        assert!(urgent(0, OPTION_INTERACTIVE));
+        assert!(urgent(0, OPTION_IS_ALARM_BROADCAST));
+        assert!(!urgent(FLAG_RECEIVER_NO_ABORT, OPTION_SHARE_IDENTITY));
     }
 }
