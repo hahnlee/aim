@@ -504,9 +504,21 @@ The migration's state and conformance results are in
   an in-process call on system_server's main thread, which Telecom's
   construction relies on (a Bluetooth profile callback it posts to that
   looper must not run before it returns), and a call from the app host
-  landed on a binder thread and raced it (#1786). `Server` then starts
-  AppSearch's Lifecycle where SystemServer starts it (after
-  PHASE_DEVICE_SPECIFIC_SERVICES_READY, so it is given the later phases)
+  landed on a binder thread and raced it (#1786). `Server` then starts,
+  in SystemServer's order and with the boot phases each gets there, the
+  Connectivity module's NearbyService (2026-10-22, #1520), which
+  SystemServer's ConnectivityServiceInitializer creates and publishes as
+  `nearby` before PHASE_SYSTEM_SERVICES_READY: the app host serves the
+  initializer's other services (connectivity, ipsec, nsd, ethernet)
+  natively, so the system process starts a stand-in for its part for
+  Nearby alone (`java/nearby-initializer`, `aim-nearby.jar`, added by
+  `tools/app-host-image.sh`), as SystemServiceManager starts a class of a
+  standalone jar (`startServiceFromJar`: loaded by name from a class
+  loader below the jar's, the one ZygoteInit's
+  `prefetchStandaloneSystemServerJars` makes for
+  `service-connectivity.jar`); then AppSearch's Lifecycle where
+  SystemServer starts it (after PHASE_DEVICE_SPECIFIC_SERVICES_READY, so
+  it is given the later phases)
   with user 0 started and unlocked, and TelecomLoaderService's part
   (`TelecomLoader`): its bind, the creation on the connection's main
   thread with the `InternalServiceRepository` the app host serves (its

@@ -6,6 +6,7 @@ import static android.system.OsConstants.S_IRWXO;
 import android.app.ActivityThread;
 import android.app.IApplicationThread;
 import android.content.Context;
+import android.os.Build;
 import android.os.Looper;
 import android.os.RemoteException;
 import android.os.ServiceManager;
@@ -26,8 +27,9 @@ import dalvik.system.VMRuntime;
  * The app host's system process (docs/app-host.md, ADR 0013): a process of
  * the system uid, started by init with `app_process`, which runs what only
  * system_server runs as system_server runs it: the original AppSearch
- * module, TelecomLoaderService's part ({@link TelecomLoader}) and the
- * components declared in `android:process="system"`, such as Telecom's.
+ * module, the Connectivity module's NearbyService, TelecomLoaderService's
+ * part ({@link TelecomLoader}) and the components declared in
+ * `android:process="system"`, such as Telecom's.
  * This class plays ZygoteInit's part for the system server
  * (`handleSystemServerProcess`): its umask, its class loader of
  * SYSTEMSERVERCLASSPATH with a linker namespace (`createPathClassLoader`,
@@ -58,18 +60,29 @@ public final class SystemProcessHost extends RuntimeInit {
      * system process's application thread handed to the app host, as
      * `setSystemProcess` makes it the system process's, which then installs
      * its providers (`installSystemProviders`) and runs its components on
-     * this main thread; AppSearch's Lifecycle started where SystemServer
-     * starts it (after PHASE_DEVICE_SPECIFIC_SERVICES_READY) and so given
-     * the later boot phases, and user 0 started and unlocked; then
-     * TelecomLoaderService at PHASE_ACTIVITY_MANAGER_READY. AppSearch
-     * publishes `app_search`, Telecom `telecom`.
+     * this main thread; the services started in SystemServer's order and
+     * given the boot phases from where SystemServer starts each: Nearby,
+     * which ConnectivityServiceInitializer starts before
+     * PHASE_SYSTEM_SERVICES_READY (the app host serves the initializer's
+     * other services natively), then AppSearch's Lifecycle (after
+     * PHASE_DEVICE_SPECIFIC_SERVICES_READY), with user 0 started and
+     * unlocked; then TelecomLoaderService at PHASE_ACTIVITY_MANAGER_READY.
+     * Nearby publishes `nearby`, AppSearch `app_search`, Telecom `telecom`.
      */
     public static final class Server {
         private static final String TAG = "AimSystemProcess";
+        /** SystemServer's CONNECTIVITY_SERVICE_APEX_PATH. */
+        private static final String CONNECTIVITY_JAR =
+                "/apex/com.android.tethering/javalib/service-connectivity.jar";
+        /** ConnectivityServiceInitializer's part for Nearby (java/nearby-initializer). */
+        private static final String NEARBY_JAR = "/system/framework/aim-nearby.jar";
+        private static final String NEARBY_INITIALIZER =
+                "dev.aim.server.nearby.NearbyServiceInitializer";
 
         private Server() {}
 
-        public static void main(String[] args) throws RemoteException {
+        public static void main(String[] args)
+                throws ReflectiveOperationException, RemoteException {
             Looper.prepareMainLooper();
             ActivityThread thread = ActivityThread.systemMain();
             Context context = thread.getSystemContext();
@@ -77,20 +90,61 @@ public final class SystemProcessHost extends RuntimeInit {
             IApplicationThread applicationThread = thread.getApplicationThread();
             ISystemProcess.Stub.asInterface(ServiceManager.waitForService("aim.system_process"))
                     .attachSystemProcess(applicationThread.asBinder());
+            // ZygoteInit's class loader of the standalone jar
+            // (`prefetchStandaloneSystemServerJars`, as
+            // SystemServerClassLoaderFactory makes it), and the stand-in's
+            // below it.
+            ClassLoader connectivity = ClassLoaderFactory.createClassLoader(CONNECTIVITY_JAR,
+                    null, null, Server.class.getClassLoader(), Build.VERSION.SDK_INT,
+                    true /* isNamespaceShared */, null /* classLoaderName */);
+            ClassLoader nearbyLoader = ClassLoaderFactory.createClassLoader(NEARBY_JAR, null,
+                    null, connectivity, Build.VERSION.SDK_INT, true /* isNamespaceShared */,
+                    null /* classLoaderName */);
+            SystemService nearby = startService(NEARBY_INITIALIZER, nearbyLoader, context);
+            nearby.onBootPhase(SystemService.PHASE_SYSTEM_SERVICES_READY);
+            nearby.onBootPhase(SystemService.PHASE_DEVICE_SPECIFIC_SERVICES_READY);
             SystemService appSearch = new AppSearchModule$Lifecycle(context);
             appSearch.onStart();
-            appSearch.onBootPhase(SystemService.PHASE_ACTIVITY_MANAGER_READY);
-            appSearch.onBootPhase(SystemService.PHASE_THIRD_PARTY_APPS_CAN_START);
+            SystemService[] services = {nearby, appSearch};
+            for (int phase : new int[] {SystemService.PHASE_ACTIVITY_MANAGER_READY,
+                    SystemService.PHASE_THIRD_PARTY_APPS_CAN_START}) {
+                for (SystemService service : services) {
+                    service.onBootPhase(phase);
+                }
+            }
             // The app host runs user 0 alone, unlocked from its start.
             TargetUser user = new TargetUser(context.getSystemService(UserManager.class)
                     .getUserInfo(UserHandle.USER_SYSTEM));
-            appSearch.onUserStarting(user);
-            appSearch.onUserUnlocking(user);
-            appSearch.onUserUnlocked(user);
-            appSearch.onBootPhase(SystemService.PHASE_BOOT_COMPLETED);
-            Slog.i(TAG, "AppSearch started");
+            for (SystemService service : services) {
+                service.onUserStarting(user);
+            }
+            for (SystemService service : services) {
+                service.onUserUnlocking(user);
+            }
+            for (SystemService service : services) {
+                service.onUserUnlocked(user);
+            }
+            for (SystemService service : services) {
+                service.onBootPhase(SystemService.PHASE_BOOT_COMPLETED);
+            }
+            Slog.i(TAG, "Nearby and AppSearch started");
             new TelecomLoader(context).onActivityManagerReady();
             Looper.loop();
+        }
+
+        /**
+         * SystemServiceManager's `startServiceFromJar`: the class SystemServer
+         * names, loaded from the jar's class loader (`loadClassFromLoader`),
+         * constructed with the context and started (`startService`).
+         */
+        private static SystemService startService(String className, ClassLoader classLoader,
+                Context context) throws ReflectiveOperationException {
+            SystemService service = Class.forName(className, true, classLoader)
+                    .asSubclass(SystemService.class)
+                    .getConstructor(Context.class)
+                    .newInstance(context);
+            service.onStart();
+            return service;
         }
     }
 }

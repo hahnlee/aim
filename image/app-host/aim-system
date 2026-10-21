@@ -1,7 +1,8 @@
 #!/system/bin/sh
 # The app host's system process (docs/app-host.md): what runs only in
-# system_server (the original AppSearch module, TelecomLoaderService's
-# part and the components of `android:process="system"`), run by
+# system_server (the original AppSearch module, the Connectivity module's
+# NearbyService, TelecomLoaderService's part and the components of
+# `android:process="system"`), run by
 # aim-services.jar's SystemProcessHost, as /system/bin/am runs its jar;
 # SystemProcessHost makes system_server's class loader of
 # SYSTEMSERVERCLASSPATH itself.

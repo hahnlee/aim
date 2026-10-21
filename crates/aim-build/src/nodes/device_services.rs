@@ -5,6 +5,10 @@
 //!   Java of its AIDL, compiled against the stubs of the image's classes in
 //!   `java/device-services/stubs` and checked against the image
 //!   ([`java::check_linkage`]);
+//! - `aim-nearby.jar`, the app host system process's stand-in for
+//!   ConnectivityServiceInitializer's part for Nearby
+//!   (`java/nearby-initializer`), checked against the image with the
+//!   Connectivity module's standalone jar;
 //! - `systemserverclasspath.pb`, the platform's classpath fragment with the
 //!   jar appended, which the `oat` node compiles like the others;
 //! - `framework-overlay.apk`, the static overlay of framework-res of
@@ -33,6 +37,12 @@ use std::fs;
 use std::path::PathBuf;
 
 const SOURCES: &str = "java/device-services";
+/// The app host system process's stand-in for ConnectivityServiceInitializer's
+/// part for Nearby (`aim-nearby.jar`).
+const NEARBY: &str = "java/nearby-initializer";
+/// SystemServer's CONNECTIVITY_SERVICE_APEX_PATH, the standalone jar below
+/// whose class loader the system process loads `aim-nearby.jar`.
+const CONNECTIVITY_JAR: &str = "/apex/com.android.tethering/javalib/service-connectivity.jar";
 const OVERLAY: &str = "java/framework-overlay";
 const SHELL_OVERLAY: &str = "java/lightweight-shell-overlay";
 /// The jar's guest path.
@@ -84,6 +94,7 @@ pub fn jar() -> PathBuf {
 pub fn node() -> Node {
     let mut inputs = vec![repo(java::LOCK)];
     inputs.extend(files(SOURCES));
+    inputs.extend(files(NEARBY));
     inputs.extend(files(OVERLAY));
     inputs.extend(files(SHELL_OVERLAY));
     for app in &APPS {
@@ -91,6 +102,7 @@ pub fn node() -> Node {
     }
     let mut outputs = vec![
         jar(),
+        out().join("aim-nearby.jar"),
         out().join("systemserverclasspath.pb"),
         out().join("framework-overlay.apk"),
         out().join("lightweight-shell-overlay.apk"),
@@ -102,7 +114,7 @@ pub fn node() -> Node {
         inputs,
         outputs,
         tools: Vec::new(),
-        recipe: 2,
+        recipe: 3,
         action: Action::DeviceServices,
         boot: true,
     }
@@ -142,6 +154,37 @@ pub fn run(log: &mut Log) -> Result<(), String> {
     java::check_linkage(&image, &jars, Some(&stubs_dex), &dex)?;
     service_aidl::check_own_stubs(&dex)?;
     tools.jar(log, &dex, &staged.join("aim-services.jar"))?;
+
+    // The Nearby stand-in links against the system server class path and
+    // the standalone jar its class loader's parent loads.
+    let nearby = repo(NEARBY);
+    let nearby_stubs = work.join("nearby-stubs");
+    tools.javac(
+        log,
+        &[sources.join("stubs"), nearby.join("stubs")],
+        &[],
+        &nearby_stubs,
+        false,
+    )?;
+    let nearby_classes = work.join("nearby-classes");
+    tools.javac(
+        log,
+        &[nearby.join("src")],
+        std::slice::from_ref(&nearby_stubs),
+        &nearby_classes,
+        true,
+    )?;
+    let nearby_stubs_dex = tools.d8(log, &nearby_stubs, None, &work.join("nearby-stubs-dex"))?;
+    let nearby_dex = tools.d8(
+        log,
+        &nearby_classes,
+        Some(&nearby_stubs),
+        &work.join("nearby-dex"),
+    )?;
+    let mut nearby_jars = jars.clone();
+    nearby_jars.push(CONNECTIVITY_JAR.into());
+    java::check_linkage(&image, &nearby_jars, Some(&nearby_stubs_dex), &nearby_dex)?;
+    tools.jar(log, &nearby_dex, &staged.join("aim-nearby.jar"))?;
 
     let mut fragment = fs::read(image.join(FRAGMENT)).map_err(|e| format!("{FRAGMENT}: {e}"))?;
     if classpath::parse(&fragment)?.iter().any(|j| j.path == JAR) {
