@@ -536,6 +536,9 @@ mod publication_tests {
     use super::*;
     #[test]
     fn actual_typed_producers_publish_guest_ends_and_keep_peers_private() {
+        // Publication reaches the guest's view; set it up, as the other
+        // publication tests do, instead of finding one another test made.
+        let _view = crate::vfs::test_view();
         let event = eventfd2([0, O_CLOEXEC, 0, 0, 0, 0]);
         assert!(event >= 0, "eventfd {event}");
         let peer = match fdtab::get(event as i32) {
