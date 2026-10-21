@@ -1014,7 +1014,11 @@ impl Service for TraceRetriever {
                         }),
                 )
             }
-            code => reply(Err(host.unimplemented("app_trace_retriever", code))),
+            code => reply(Err(host.unimplemented(
+                "app_trace_retriever",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }

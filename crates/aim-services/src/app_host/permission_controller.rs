@@ -75,7 +75,13 @@ impl Service for PermissionController {
                 };
                 pc::write_is_runtime_permission_reply(&mut p, runtime);
             }
-            code => return reply(Err(host.unimplemented("permission", code))),
+            code => {
+                return reply(Err(host.unimplemented(
+                    "permission",
+                    self.descriptor(),
+                    code,
+                )));
+            }
         }
         Ok(p)
     }

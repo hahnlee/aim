@@ -78,7 +78,13 @@ impl Service for TrustManager {
                 }
                 trust::write_register_device_locked_state_listener_reply(&mut p);
             }
-            code => return reply(Err(self.host.unimplemented("trust", code))),
+            code => {
+                return reply(Err(self.host.unimplemented(
+                    "trust",
+                    self.descriptor(),
+                    code,
+                )));
+            }
         }
         Ok(p)
     }

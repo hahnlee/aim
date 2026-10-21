@@ -230,7 +230,9 @@ impl Service for SystemUpdate {
                     )),
                 }
             }
-            code => Err(self.host.unimplemented("system_update", code)),
+            code => Err(self
+                .host
+                .unimplemented("system_update", self.descriptor(), code)),
         };
         reply(result.map(|()| p))
     }

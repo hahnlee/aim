@@ -1376,7 +1376,7 @@ impl Service for StorageManager {
                     p
                 }))
             }
-            code => reply(Err(self.0.unimplemented("mount", code))),
+            code => reply(Err(self.0.unimplemented("mount", self.descriptor(), code))),
         }
     }
 }

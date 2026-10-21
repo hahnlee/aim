@@ -173,7 +173,13 @@ impl Service for OverlayManager {
                     Err(e) => return reply(Err(e)),
                 }
             }
-            code => return reply(Err(self.host.unimplemented("overlay", code))),
+            code => {
+                return reply(Err(self.host.unimplemented(
+                    "overlay",
+                    self.descriptor(),
+                    code,
+                )));
+            }
         }
         Ok(p)
     }

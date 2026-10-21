@@ -32,6 +32,8 @@ const ADD_FLAG_APP_VISIBLE: i32 = 0x2;
 const SET_IN_TOUCH_MODE: u32 = 13;
 /// `Manifest.permission.MODIFY_TOUCH_MODE_STATE`.
 const MODIFY_TOUCH_MODE_STATE: &str = "android.permission.MODIFY_TOUCH_MODE_STATE";
+const SUBSCRIBE_TO_KEYGUARD_LOCKED_STATE: &str =
+    "android.permission.SUBSCRIBE_TO_KEYGUARD_LOCKED_STATE";
 /// `WindowManagerGlobal.RELAYOUT_RES_FIRST_TIME`, `RELAYOUT_RES_SURFACE_CHANGED`.
 const RELAYOUT_RES_FIRST_TIME: i32 = 1;
 const RELAYOUT_RES_SURFACE_CHANGED: i32 = 1 << 1;
@@ -342,6 +344,35 @@ impl Service for WindowManager {
                 wm::IsKeyguardLocked::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 wm::write_is_keyguard_locked_reply(&mut p, false);
             }
+            // `addKeyguardLockedStateListener` and its removal, with
+            // `enforceSubscribeToKeyguardLockedStatePermission`. A listener
+            // hears only changes of the keyguard's state
+            // (`dispatchKeyguardLockedState`), and the app host's keyguard
+            // is never shown, so none is kept to be called.
+            wm::ADD_KEYGUARD_LOCKED_STATE_LISTENER | wm::REMOVE_KEYGUARD_LOCKED_STATE_LISTENER => {
+                match self.0.check_permission(
+                    Some(SUBSCRIBE_TO_KEYGUARD_LOCKED_STATE),
+                    call.sender_euid as i32,
+                ) {
+                    Ok(0) => {}
+                    Ok(_) => {
+                        return reply(Err(Exception::security(format!(
+                            "{SUBSCRIBE_TO_KEYGUARD_LOCKED_STATE} permission required to subscribe to keyguard locked state changes: Neither user {} nor current process has {SUBSCRIBE_TO_KEYGUARD_LOCKED_STATE}.",
+                            call.sender_euid
+                        ))));
+                    }
+                    Err(e) => return reply(Err(e)),
+                }
+                if call.code == wm::ADD_KEYGUARD_LOCKED_STATE_LISTENER {
+                    wm::AddKeyguardLockedStateListener::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
+                    wm::write_add_keyguard_locked_state_listener_reply(&mut p);
+                } else {
+                    wm::RemoveKeyguardLockedStateListener::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
+                    wm::write_remove_keyguard_locked_state_listener_reply(&mut p);
+                }
+            }
             wm::SET_IN_TOUCH_MODE => {
                 let a = wm::SetInTouchMode::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 if let Err(e) = self
@@ -372,7 +403,7 @@ impl Service for WindowManager {
                     Err(e) => return reply(Err(e)),
                 }
             }
-            code => return reply(Err(self.0.unimplemented("window", code))),
+            code => return reply(Err(self.0.unimplemented("window", self.descriptor(), code))),
         }
         Ok(p)
     }
@@ -1119,7 +1150,13 @@ impl Service for WindowId {
                 wid::IsFocused::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 wid::write_is_focused_reply(&mut p, self.focused());
             }
-            code => return reply(Err(self.host.unimplemented("window id", code))),
+            code => {
+                return reply(Err(self.host.unimplemented(
+                    "window id",
+                    self.descriptor(),
+                    code,
+                )));
+            }
         }
         Ok(p)
     }
@@ -1248,7 +1285,11 @@ impl Service for Session {
             // magnification (`AccessibilityController`), which no service
             // runs here.
             ws::ON_RECTANGLE_ON_SCREEN_REQUESTED => Ok(Parcel::new()),
-            code => reply(Err(self.host.unimplemented("window session", code))),
+            code => reply(Err(self.host.unimplemented(
+                "window session",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }

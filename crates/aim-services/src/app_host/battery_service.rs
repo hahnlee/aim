@@ -783,9 +783,11 @@ impl Service for HealthInfoCallback {
             return Ok(Parcel::new());
         };
         if call.code != HEALTH_INFO_CHANGED {
-            return reply(Err(battery
-                .host
-                .unimplemented("health callback", call.code)));
+            return reply(Err(battery.host.unimplemented(
+                "health callback",
+                self.descriptor(),
+                call.code,
+            )));
         }
         call.data
             .enforce_interface(CALLBACK_DESCRIPTOR)
@@ -839,7 +841,11 @@ impl Service for BatteryProperties {
                 }
                 Ok(Parcel::new())
             }
-            code => reply(Err(self.0.host.unimplemented("batteryproperties", code))),
+            code => reply(Err(self.0.host.unimplemented(
+                "batteryproperties",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }

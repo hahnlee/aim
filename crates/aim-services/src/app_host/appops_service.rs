@@ -3498,7 +3498,28 @@ impl Service for AppOps {
                     ops.map(|ops| ops.into_iter().map(Some).collect());
                 appops::write_extract_async_ops_reply(&mut p, ops.as_deref());
             }
-            code => return reply(Err(self.host.unimplemented("appops", code))),
+            // The ops' states as `PackageOps` report them carry each op's
+            // accesses and rejections, which the app host does not keep.
+            appops::GET_PACKAGES_FOR_OPS
+            | appops::GET_PACKAGES_FOR_OPS_FOR_DEVICE
+            | appops::GET_OPS_FOR_PACKAGE
+            | appops::GET_UID_OPS
+            | appops::GET_HISTORICAL_OPS
+            | appops::GET_HISTORICAL_OPS_FROM_DISK_RAW => {
+                let name = aim_service_aidl::method_name(self.descriptor(), call.code)
+                    .unwrap_or("an ops query");
+                return reply(Err(self.host.unimplemented_named(
+                    "appops",
+                    &format!("{name}: the ops' access history (#1593)"),
+                )));
+            }
+            code => {
+                return reply(Err(self.host.unimplemented(
+                    "appops",
+                    self.descriptor(),
+                    code,
+                )));
+            }
         }
         Ok(p)
     }

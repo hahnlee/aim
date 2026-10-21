@@ -410,7 +410,13 @@ impl Service for InputManager {
                 }
                 p.write_no_exception();
             }
-            code => return reply(Err(self.host.unimplemented("input", code))),
+            code => {
+                return reply(Err(self.host.unimplemented(
+                    "input",
+                    self.descriptor(),
+                    code,
+                )));
+            }
         }
         Ok(p)
     }

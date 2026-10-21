@@ -336,7 +336,13 @@ impl Service for SettingsProvider {
             | cp::BULK_INSERT_TRANSACTION
             | cp::DELETE_TRANSACTION
             | cp::UPDATE_TRANSACTION => return provider_reply(self.table_transaction(call)),
-            code => return reply(Err(self.host.unimplemented("settings provider", code))),
+            code => {
+                return reply(Err(self.host.unimplemented(
+                    "settings provider",
+                    self.descriptor(),
+                    code,
+                )));
+            }
         }
         let r = &mut call.data;
         r.enforce_interface(cp::DESCRIPTOR).map_err(|_| BAD_VALUE)?;

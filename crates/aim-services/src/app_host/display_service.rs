@@ -458,7 +458,13 @@ impl Service for DisplayManager {
                     Err(e) => return reply(Err(e)),
                 }
             }
-            code => return reply(Err(self.host.unimplemented("display", code))),
+            code => {
+                return reply(Err(self.host.unimplemented(
+                    "display",
+                    self.descriptor(),
+                    code,
+                )));
+            }
         }
         Ok(p)
     }

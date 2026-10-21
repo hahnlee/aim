@@ -2950,7 +2950,11 @@ impl Service for NotificationManager {
                         }),
                 )
             }
-            code => reply(Err(self.host.unimplemented("notification", code))),
+            code => reply(Err(self.host.unimplemented(
+                "notification",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }

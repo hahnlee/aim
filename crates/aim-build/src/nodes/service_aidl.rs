@@ -825,6 +825,33 @@ fn module_name(descriptor: &str) -> String {
     descriptor.replace('.', "_").to_lowercase()
 }
 
+/// `method_name`: the name of an interface's method by its descriptor and
+/// code, over every interface generated.
+fn method_name_code(modules: &[String]) -> String {
+    let mut s = String::new();
+    writeln!(
+        s,
+        "/// The name of `descriptor`'s method `code`, if generated."
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "pub fn method_name(descriptor: &str, code: u32) -> Option<&'static str> {{"
+    )
+    .unwrap();
+    writeln!(s, "    let methods: &[(u32, &str)] = match descriptor {{").unwrap();
+    for m in modules {
+        writeln!(s, "        {m}::DESCRIPTOR => {m}::METHODS,").unwrap();
+    }
+    writeln!(s, "        _ => return None,\n    }};").unwrap();
+    writeln!(
+        s,
+        "    methods.iter().find(|(c, _)| *c == code).map(|(_, name)| *name)\n}}"
+    )
+    .unwrap();
+    s
+}
+
 fn interface_code(iface: &Interface, selected: &[String], origin: &str) -> Result<String, String> {
     let mut s = String::new();
     let descriptor = iface.descriptor();
@@ -1341,6 +1368,7 @@ pub fn run(log: &mut Log) -> Result<(), String> {
         }
     }
     let mut code = PRELUDE.to_string();
+    let mut modules = Vec::new();
     for entry in lock.array("INTERFACES") {
         let fields: Vec<&str> = entry.split('|').collect();
         let [descriptor, jar, methods] = fields[..] else {
@@ -1374,13 +1402,16 @@ pub fn run(log: &mut Log) -> Result<(), String> {
         }
         let selected: Vec<String> = methods.split(',').map(str::to_string).collect();
         code += &interface_code(&iface, &selected, origin)?;
+        modules.push(module_name(descriptor));
     }
     for (mut iface, selected, file) in own_interfaces(&lock)? {
         let text = fs::read_to_string(aim_paths::root().join(&file))
             .map_err(|e| format!("{file}: {e}"))?;
         resolve_enums(&mut iface, &text, &enums)?;
         code += &interface_code(&iface, &selected, &file)?;
+        modules.push(module_name(&iface.descriptor()));
     }
+    code += &method_name_code(&modules);
     for entry in lock.array("CONSTANTS") {
         let fields: Vec<&str> = entry.split('|').collect();
         let [descriptor, jar, names] = fields[..] else {
@@ -1526,6 +1557,21 @@ interface IClipboard {
         assert!(code.contains("pub fd: FileDescriptor,"));
         assert!(code.contains("self.fd.write_to(p);"));
         assert!(code.contains("write_typed(p, self.fonts.as_ref());"));
+    }
+
+    /// `method_name` matches each generated interface's descriptor to its
+    /// `METHODS`.
+    #[test]
+    fn generates_the_method_name_lookup() {
+        let code = method_name_code(&["android_os_ia".into(), "android_os_ib".into()]);
+        assert!(
+            code.contains(
+                "pub fn method_name(descriptor: &str, code: u32) -> Option<&'static str> {"
+            )
+        );
+        assert!(code.contains("        android_os_ia::DESCRIPTOR => android_os_ia::METHODS,\n"));
+        assert!(code.contains("        android_os_ib::DESCRIPTOR => android_os_ib::METHODS,\n"));
+        assert!(code.contains("        _ => return None,\n    };\n"));
     }
 
     #[test]

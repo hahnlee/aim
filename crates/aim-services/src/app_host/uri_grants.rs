@@ -2066,7 +2066,11 @@ impl Service for UriGrantsManager {
                     p
                 }))
             }
-            code => reply(Err(self.0.unimplemented("uri_grants", code))),
+            code => reply(Err(self.0.unimplemented(
+                "uri_grants",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }

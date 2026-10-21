@@ -370,7 +370,11 @@ impl Service for AudioManagerNative {
             }
             // One-way: AudioService only counts these in its metrics.
             PLAYBACK_HARDENING_EVENT => Ok(Parcel::new()),
-            code => reply(Err(self.0.unimplemented("IAudioManagerNative", code))),
+            code => reply(Err(self.0.unimplemented(
+                "IAudioManagerNative",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }
@@ -1638,7 +1642,13 @@ impl Service for AudioService {
                     eprintln!("app host: sound effect {}: {e:?}", args.effect_type);
                 }
             }
-            code => return reply(Err(self.host.unimplemented("audio", code))),
+            code => {
+                return reply(Err(self.host.unimplemented(
+                    "audio",
+                    self.descriptor(),
+                    code,
+                )));
+            }
         }
         Ok(p)
     }

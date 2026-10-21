@@ -1407,7 +1407,9 @@ impl Service for PermissionChecker {
                     })
                     .map(|()| checker::write_finish_data_delivery_reply(&mut p))
             }
-            code => Err(self.host.unimplemented("permission_checker", code)),
+            code => Err(self
+                .host
+                .unimplemented("permission_checker", self.descriptor(), code)),
         };
         reply(result.map(|()| p))
     }
