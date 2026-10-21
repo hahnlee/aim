@@ -842,6 +842,11 @@ source = "target/aim/art/stripped/lib64/libadbconnection.so"
 reason = "the ART exception: the JDWP plugin every zygote runtime loads links the replaced libart's C++ internals"
 
 [[replace]]
+path = "/apex/com.android.art/lib64/libopenjdkjvmti.so"
+source = "target/aim/art/stripped/lib64/libopenjdkjvmti.so"
+reason = "the ART exception: the JVMTI plugin (agents, DDMS, JDWP's class redefinition) links the replaced libart's C++ internals"
+
+[[replace]]
 path = "/apex/com.android.art/bin/dex2oat64"
 source = "target/aim/art/stripped/bin/dex2oat64"
 reason = "the ART exception: compiles for the replaced libart's reference encoding and Thread layout"

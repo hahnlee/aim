@@ -25,6 +25,7 @@ SOURCE_TREES=(
   "platform/art|libprofile|dedb159c178be2df3f4edcc29fb7b3ee4d3ffc262106c32753f6c31fb2ed6fa2"
   "platform/art|odrefresh|f3df6988bc671d602809307f57d37b535e7c39c4144e1d08012d6125cf774008"
   "platform/art|openjdkjvm|9a406a48190957dc9f178fead70a1f3da8c57b7c6034b48b19d97c5292420dde"
+  "platform/art|openjdkjvmti|beb3e684c7a36751797737e0e117714dd97f8a1e41044f11a84ccef4c6b779ce"
   "platform/art|runtime|16aadf73f21d56c37cdaf73821c70c7d8688cdcf9ed5ec26e805af4e90ba0084"
   "platform/art|sigchainlib|6cc6ba72651be1a51c44e46303b3bedd47e4506e71395ecb776d9c9f67a0fb3e"
   "platform/art|tools/cpp-define-generator|1b16436259167776fac99fce5a936f630cadeef48842fd0773e12cef142cae2d"

@@ -353,8 +353,12 @@ The rebuilt set must replace, as a unit, every ART APEX library that links
 libart's C++ internals: libart, libartbase, libdexfile, libprofile,
 libopenjdkjvm (and libopenjdkjvmti, libadbconnection, libperfetto_hprof when
 those plugins are used). The `art` node builds libadbconnection
-too (zygote loads it); libopenjdkjvmti and libperfetto_hprof are not rebuilt
-yet, so their dlopen fails and ART runs without them. Libraries with C APIs (libnativebridge,
+too (zygote loads it) and libopenjdkjvmti (JVMTI agents, DDMS, JDWP's class
+redefinition), from `openjdkjvmti/Android.bp`'s sources with no change;
+libperfetto_hprof is not rebuilt yet (#220: it links Perfetto's client SDK
+and generated trace protos), so its dlopen fails and perfetto's Java heap
+profiles are unavailable; `Debug.dumpHprofData` is libart's own hprof.
+Libraries with C APIs (libnativebridge,
 libnativeloader, libsigchain, libartpalette, libjavacore, libopenjdk) stay
 original.
 

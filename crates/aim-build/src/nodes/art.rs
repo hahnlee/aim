@@ -29,13 +29,14 @@ use std::process::Command;
 const LOCK: &str = "patches/art-android/sources.lock";
 const ART: &str = "platform/art";
 /// What the derived image takes from the build.
-const STRIPPED: [&str; 7] = [
+const STRIPPED: [&str; 8] = [
     "lib64/libartbase.so",
     "lib64/libdexfile.so",
     "lib64/libprofile.so",
     "lib64/libart.so",
     "lib64/libopenjdkjvm.so",
     "lib64/libadbconnection.so",
+    "lib64/libopenjdkjvmti.so",
     "bin/dex2oat64",
 ];
 
