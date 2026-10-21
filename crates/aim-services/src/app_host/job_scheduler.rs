@@ -25,7 +25,8 @@
 //! (`app_host/job_content.rs`), on the app host's ContentService.
 //! Standby buckets, quotas beyond it, doze, flexibility (off by default),
 //! prefetch launch estimates, user-initiated jobs and a job's wake lock
-//! are not run (#1490), nor URI grants (#1573).
+//! are not run (#1490), nor URI grants (#1573). Its shell command runs a
+//! job (`run`, with the job's override state); the rest of it is #1934.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -55,8 +56,10 @@ use super::job_info::{
 use super::job_store::{self, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, Stored};
 use super::network::{self, Network, NetworkCapabilities};
 use super::services::HostConnection;
+use super::settings_service::{java_exception, parse_user_arg};
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::package::uri::Uri;
+use crate::shell::{SHELL_COMMAND_TRANSACTION, ShellCommand};
 
 /// `JobStatus.CONSTRAINT_*` (the first four are `JobInfo`'s).
 const CONSTRAINT_CHARGING: i32 = CONSTRAINT_FLAG_CHARGING;
@@ -79,6 +82,24 @@ const CONSTRAINTS_OF_INTEREST: i32 = CONSTRAINT_CHARGING
     | CONSTRAINT_IDLE
     | CONSTRAINT_CONTENT_TRIGGER
     | CONSTRAINT_PREFETCH;
+/// `JobStatus.SOFT_OVERRIDE_CONSTRAINTS`: all but the functional ones
+/// (less flexibility, as above).
+const SOFT_OVERRIDE_CONSTRAINTS: i32 = CONSTRAINT_CHARGING
+    | CONSTRAINT_BATTERY_NOT_LOW
+    | CONSTRAINT_STORAGE_NOT_LOW
+    | CONSTRAINT_TIMING_DELAY
+    | CONSTRAINT_IDLE
+    | CONSTRAINT_PREFETCH;
+/// `JobStatus.OVERRIDE_*`: how far the shell's `run` overrides a job's
+/// constraints.
+const OVERRIDE_NONE: i32 = 0;
+const OVERRIDE_SORTING: i32 = 1;
+const OVERRIDE_SOFT: i32 = 2;
+const OVERRIDE_FULL: i32 = 3;
+/// `JobSchedulerShellCommand.CMD_ERR_*`.
+const CMD_ERR_NO_PACKAGE: i32 = -1000;
+const CMD_ERR_NO_JOB: i32 = -1001;
+const CMD_ERR_CONSTRAINTS: i32 = -1002;
 /// The device-wide constraints, read from the Mac.
 const DEVICE_CONSTRAINTS: i32 = CONSTRAINT_CHARGING
     | CONSTRAINT_BATTERY_NOT_LOW
@@ -231,6 +252,8 @@ struct JobStatus {
     ready: bool,
     /// `getStopReason`: why it last went from ready to not ready.
     reason_unready: i32,
+    /// `overrideState`, which a rescheduled job starts without.
+    override_state: i32,
     abandoned: bool,
     tracked: bool,
     /// What `ContentObserverController` keeps of it.
@@ -308,6 +331,7 @@ impl JobStatus {
             restricted: false,
             ready: false,
             reason_unready: STOP_REASON_UNDEFINED,
+            override_state: OVERRIDE_NONE,
             abandoned: false,
             tracked: false,
             content: JobContent::default(),
@@ -527,6 +551,7 @@ impl JobStatus {
         let ready = is_ready(
             satisfied,
             self.required,
+            self.override_state,
             self.job.periodic,
             restricted,
             self.process.is_some(),
@@ -600,14 +625,31 @@ impl JobStatus {
 fn is_ready(
     satisfied: i32,
     required: i32,
+    override_state: i32,
     periodic: bool,
     restricted: bool,
     has_process: bool,
 ) -> bool {
-    let interest = required & CONSTRAINTS_OF_INTEREST;
     let deadline =
         !periodic && required & CONSTRAINT_DEADLINE != 0 && satisfied & CONSTRAINT_DEADLINE != 0;
-    !restricted && has_process && (deadline || satisfied & interest == interest)
+    !restricted
+        && has_process
+        && (deadline || constraints_satisfied(satisfied, required, override_state))
+}
+
+/// `JobStatus.isConstraintsSatisfied(satisfiedConstraints)`: all of those
+/// of interest it requires, the soft ones too under a soft override, and
+/// always under a full one.
+fn constraints_satisfied(satisfied: i32, required: i32, override_state: i32) -> bool {
+    if override_state == OVERRIDE_FULL {
+        return true;
+    }
+    let mut satisfied = satisfied;
+    if override_state == OVERRIDE_SOFT {
+        satisfied |= required & SOFT_OVERRIDE_CONSTRAINTS;
+    }
+    let interest = required & CONSTRAINTS_OF_INTEREST;
+    satisfied & interest == interest
 }
 
 /// `constraintToStopReason` of the first of `lost` it maps.
@@ -1713,6 +1755,12 @@ impl JobScheduler {
     /// batched, as `MaybeReadyJobQueueFunctor` batches CPU-only jobs), and
     /// `maybeRunPendingJobsLocked`.
     fn check(&self, state: &mut State, now: i64) {
+        self.queue_ready(state, now, true);
+    }
+
+    /// `maybeQueueReadyJobsForExecutionLocked`, or with `batch` false
+    /// `queueReadyJobsForExecutionLocked`, which queues every ready job.
+    fn queue_ready(&self, state: &mut State, now: i64, batch: bool) {
         if !state.running {
             return;
         }
@@ -1743,7 +1791,10 @@ impl JobScheduler {
             } else {
                 i64::MAX
             };
-            let force_batch = !j.expedited()
+            // A job the shell runs is not batched.
+            let force_batch = batch
+                && j.override_state == OVERRIDE_NONE
+                && !j.expedited()
                 && j.num_failures + j.num_system_stops == 0
                 && batch_flag
                 && self.limit / 3 > 1
@@ -2344,6 +2395,173 @@ impl JobScheduler {
         }])
     }
 
+    /// `JobScheduler.forNamespace(namespace).getPendingJob(id)` of the app
+    /// host's own code, which is the system uid's.
+    pub(super) fn own_pending_job(
+        &self,
+        namespace: &str,
+        id: i32,
+    ) -> Result<Option<JobInfo>, Exception> {
+        Ok(self
+            .jobs_of(1000)?
+            .into_iter()
+            .find(|(n, j)| n.as_deref() == Some(namespace) && j.id == id)
+            .map(|(_, j)| j))
+    }
+
+    /// `JobScheduler.forNamespace(namespace).schedule(job)` of the app
+    /// host's own code.
+    pub(super) fn schedule_own(&self, namespace: &str, job: JobInfo) -> Result<i32, Exception> {
+        self.schedule(1000, Some(namespace.into()), Some(Ok(job)), None, None)
+    }
+
+    /// `JobSchedulerShellCommand.onCommand`, of which `run` (the rest is
+    /// #1934); an exception is printed as its catch prints it.
+    fn shell_command(&self, uid: i32, c: &mut ShellCommand) -> i32 {
+        let result = match c.command() {
+            Some("run") => self.run_job(uid, c),
+            cmd => Err(java_exception(&self.host.unimplemented_named(
+                "jobscheduler",
+                &format!("cmd jobscheduler {} (#1934)", cmd.unwrap_or("help")),
+            ))),
+        };
+        result.unwrap_or_else(|e| {
+            c.println(&format!("Exception: {e}"));
+            -1
+        })
+    }
+
+    /// `runJob`: `executeRunCommand` of the job named, as the system,
+    /// then its error or `Running job`.
+    fn run_job(&self, uid: i32, c: &mut ShellCommand) -> Result<i32, String> {
+        // `checkPermission("force scheduled jobs")`.
+        if uid != 0
+            && self
+                .host
+                .check_permission(Some("android.permission.CHANGE_APP_IDLE_STATE"), uid)
+                .map_err(|e| java_exception(&e))?
+                != 0
+        {
+            return Err(format!(
+                "java.lang.SecurityException: Uid {uid} not permitted to force scheduled jobs"
+            ));
+        }
+        let (mut force, mut satisfied, mut user, mut namespace) = (false, false, 0, None);
+        while let Some(opt) = c.next_option()? {
+            match opt.as_str() {
+                "-f" | "--force" => force = true,
+                "-s" | "--satisfied" => satisfied = true,
+                "-u" | "--user" => user = parse_user_arg(&c.next_arg_required()?)?,
+                "-n" | "--namespace" => namespace = Some(c.next_arg_required()?),
+                _ => {
+                    c.println(&format!("Error: unknown option '{opt}'"));
+                    return Ok(-1);
+                }
+            }
+        }
+        if force && satisfied {
+            c.println("Cannot specify both --force and --satisfied");
+            return Ok(-1);
+        }
+        // `USER_CURRENT`: the app host's one user.
+        if user == -2 {
+            user = 0;
+        }
+        let package = c.next_arg_required()?;
+        let id = c.next_arg_required()?;
+        let id: i32 = id
+            .parse()
+            .map_err(|_| format!("java.lang.NumberFormatException: For input string: \"{id}\""))?;
+        let ret = self
+            .execute_run_command(&package, user, namespace.as_deref(), id, satisfied, force)
+            .map_err(|e| java_exception(&e))?;
+        let (err, ns) = (
+            |c: &mut ShellCommand, text: String| c.eprintln(&text),
+            namespace
+                .as_deref()
+                .map(|n| format!(" / namespace {n}"))
+                .unwrap_or_default(),
+        );
+        match ret {
+            CMD_ERR_NO_PACKAGE => err(c, format!("Package not found: {package} / user {user}")),
+            CMD_ERR_NO_JOB => err(
+                c,
+                format!("Could not find job {id} in package {package}{ns} / user {user}"),
+            ),
+            CMD_ERR_CONSTRAINTS => err(
+                c,
+                format!(
+                    "Job {id} in package {package}{ns} / user {user} has functional constraints but --force not specified"
+                ),
+            ),
+            _ => c.println(if force {
+                "Running job [FORCED]"
+            } else {
+                "Running job"
+            }),
+        }
+        Ok(ret)
+    }
+
+    /// `executeRunCommand`: the job's override set and its constraints
+    /// evaluated again; unless they are satisfied, the override is taken
+    /// back, else the ready jobs are queued and run. A network constraint
+    /// is decided at once here (the original waits up to five seconds for
+    /// its asynchronous signal).
+    fn execute_run_command(
+        &self,
+        package: &str,
+        user: i32,
+        namespace: Option<&str>,
+        id: i32,
+        satisfied: bool,
+        force: bool,
+    ) -> Result<i32, Exception> {
+        eprintln!(
+            "app host: jobs: executeRunCommand(): {package}/{}/{user} {id} s={satisfied} f={force}",
+            namespace.unwrap_or("null")
+        );
+        // `getPackageUid(pkgName, 0, userId)`, `USER_ALL` as the system
+        // user.
+        let (model, resolution) = self.host.packages()?;
+        let query = crate::package::query::Query {
+            state: &model,
+            filter: &resolution.apps_filter,
+            calling_uid: 1000,
+        };
+        let uid = query
+            .package_uid(package, 0, if user == -1 { 0 } else { user })
+            .map_err(|crate::package::apps_filter::NotModelled(reason)| {
+                Exception::new(EX_ILLEGAL_STATE, format!("getPackageUid: {reason}"))
+            })??;
+        if uid < 0 {
+            return Ok(CMD_ERR_NO_PACKAGE);
+        }
+        let mut state = self.state.lock().unwrap();
+        self.ensure_loaded(&mut state)?;
+        let Some(key) = Self::find(&state, uid, namespace, id) else {
+            return Ok(CMD_ERR_NO_JOB);
+        };
+        let now = elapsed_ms();
+        let device = self.device(&mut state, now);
+        let top = self.is_top(uid);
+        let j = state.jobs.get_mut(&key).unwrap();
+        j.override_state = if force {
+            OVERRIDE_FULL
+        } else if satisfied {
+            OVERRIDE_SORTING
+        } else {
+            OVERRIDE_SOFT
+        };
+        j.evaluate(now, &device, top);
+        if !constraints_satisfied(j.satisfied, j.required, j.override_state) {
+            j.override_state = OVERRIDE_NONE;
+            return Ok(CMD_ERR_CONSTRAINTS);
+        }
+        self.queue_ready(&mut state, now, false);
+        Ok(0)
+    }
+
     /// The tracked jobs `uid` scheduled.
     fn jobs_of(&self, uid: i32) -> Result<Vec<(Option<String>, JobInfo)>, Exception> {
         let mut state = self.state.lock().unwrap();
@@ -2686,8 +2904,23 @@ impl Service for JobScheduler {
         js::DESCRIPTOR
     }
 
+    fn accepts_fds(&self) -> bool {
+        true
+    }
+
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let uid = call.sender_euid as i32;
+        if call.code == SHELL_COMMAND_TRANSACTION {
+            let mut command =
+                ShellCommand::read(&self.host.process, &mut call.data).map_err(|_| BAD_VALUE)?;
+            if command.has_output() {
+                let result = self.shell_command(uid, &mut command);
+                command.finish(result);
+            }
+            let mut p = Parcel::new();
+            p.write_no_exception();
+            return Ok(p);
+        }
         let bad = |_| BAD_VALUE;
         // `JobInfo` reads as `JobInfo.read`, which tells what it does not
         // read apart.
@@ -3061,6 +3294,38 @@ mod tests {
         assert!(j.evaluate(0, &saver, true));
         assert!(!j.evaluate(0, &saver, false));
         assert_eq!(j.pending_reasons(true), [PENDING_JOB_REASON_DEVICE_STATE]);
+    }
+
+    /// The shell's `run`: a soft override satisfies all but the functional
+    /// constraints, a full one all, and a sorting one none.
+    #[test]
+    fn a_run_overrides_constraints_as_the_original() {
+        let charging = |j: &mut JobInfo| j.constraint_flags = CONSTRAINT_FLAG_CHARGING;
+        let mut j = status(job(charging), 60_000, NO_LATEST_RUNTIME);
+        let unplugged = Device {
+            power_connected: false,
+            charging: false,
+            ..PLUGGED
+        };
+        assert!(!j.evaluate(0, &unplugged, false));
+        j.override_state = OVERRIDE_SORTING;
+        assert!(!j.evaluate(0, &unplugged, false));
+        j.override_state = OVERRIDE_SOFT;
+        assert!(j.evaluate(0, &unplugged, false));
+        // A content trigger is functional: only a forced run overrides it.
+        let mut none = Parcel::new();
+        none.write_i32(0);
+        let content = |j: &mut JobInfo| j.trigger_content_uris = Some(crate::clip::Raw::of(&none));
+        let mut j = status(job(content), NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME);
+        j.override_state = OVERRIDE_SOFT;
+        assert!(!j.evaluate(0, &PLUGGED, false));
+        j.override_state = OVERRIDE_FULL;
+        assert!(j.evaluate(0, &PLUGGED, false));
+        // The job rescheduled starts without it.
+        assert_eq!(
+            j.rescheduled(0, NO_LATEST_RUNTIME).override_state,
+            OVERRIDE_NONE
+        );
     }
 
     /// No network is known: a network job waits (`ConnectivityController`).

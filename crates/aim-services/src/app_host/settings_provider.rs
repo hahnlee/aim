@@ -11,7 +11,9 @@
 //! holder, the sync disabled mode, and a monitor told of accesses and
 //! updates. A change bumps its generation, then is notified to the observers
 //! of `content://settings/<table>/<name>` (`super::content_service`); no
-//! backup is run, so none is told of it. Its table transactions: `query`
+//! backup is run, so none is told of it (#1925), and the daily copy of the
+//! settings files is scheduled (`WriteFallbackSettingsFilesJobService`,
+//! SettingsProvider's own code in the system process). Its table transactions: `query`
 //! of a setting or a table (a `MatrixCursor` sent as `super::cursor`
 //! sends it), `insert`, `bulkInsert`, `update`, `delete` and `getType`,
 //! with the URI and where clause read as `Arguments` reads them and the
@@ -41,14 +43,22 @@ use super::content_service::NOTIFY_SYNC_TO_NETWORK;
 use super::cursor::{BulkCursor, Rows};
 use super::device_config::{self, PUBLIC_NAMESPACES};
 use super::generations::{self, GenerationRegistry, TRACK_GENERATION};
+use super::job_info::{CONSTRAINT_FLAG_CHARGING, JobInfo};
 use super::settings::{Change, ResetMode, SYSTEM_PACKAGE_NAME, Setting, Table};
 use super::settings_validators::{PRIVATE_SETTINGS, PUBLIC_SETTINGS, validate_system_value};
 use super::{AppHost, FIRST_APPLICATION_UID, PER_USER_RANGE, reply};
 use crate::bundle::{self, Value};
 use crate::package::info::{array_order, flags};
 use crate::package::intent_filter::Plain;
+use crate::package::restrictions::persistable;
 use crate::package::uri::Uri;
 
+/// SettingsProvider's package, and its `SETTINGS_PROVIDER_JOBS_NS`,
+/// `WRITE_FALLBACK_SETTINGS_FILES_JOB_ID` and `ONE_DAY_INTERVAL_MILLIS`.
+const SETTINGS_PACKAGE: &str = "com.android.providers.settings";
+const SETTINGS_PROVIDER_JOBS_NS: &str = "SettingsProviderJobsNamespace";
+const WRITE_FALLBACK_SETTINGS_FILES_JOB_ID: i32 = 1;
+const ONE_DAY_INTERVAL_MILLIS: i64 = 24 * 60 * 60 * 1000;
 /// `Settings.NameValueTable`'s columns: `_ID`, `NAME`, `VALUE`,
 /// `IS_PRESERVED_IN_RESTORE`; `SettingsProvider.ALL_COLUMNS`.
 const ID: &str = "_id";
@@ -264,6 +274,42 @@ pub struct SettingsProvider {
     sync_disabled_until_reboot: AtomicBool,
     /// `mConfigMonitorCallback`.
     monitor: Mutex<Option<Arc<Strong>>>,
+}
+
+/// `SettingsProvider.scheduleWriteFallbackFilesJob`: once daily while
+/// charging, a copy of user 0's settings files, unless one is pending.
+fn schedule_write_fallback_files_job(host: &AppHost) -> Result<(), Exception> {
+    // None before the job scheduler, as the original's SettingsProvider may
+    // be created before JobSchedulerService.
+    let Some(jobs) = host.job_scheduler.get() else {
+        return Ok(());
+    };
+    if jobs
+        .own_pending_job(
+            SETTINGS_PROVIDER_JOBS_NS,
+            WRITE_FALLBACK_SETTINGS_FILES_JOB_ID,
+        )?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let mut job = JobInfo::persisted_builder(
+        WRITE_FALLBACK_SETTINGS_FILES_JOB_ID,
+        SETTINGS_PACKAGE.into(),
+        format!("{SETTINGS_PACKAGE}.WriteFallbackSettingsFilesJobService"),
+    );
+    // `getSettingsFile` of each type for `USER_SYSTEM`.
+    let file = |name: &str| {
+        persistable::Value::String(format!("/data/system/users/0/settings_{name}.xml"))
+    };
+    job.extras.entries = ["global", "system", "secure", "ssaid", "config"]
+        .into_iter()
+        .map(|table| (Some(table.to_string()), file(table)))
+        .collect();
+    job.set_periodic(ONE_DAY_INTERVAL_MILLIS, ONE_DAY_INTERVAL_MILLIS);
+    job.constraint_flags |= CONSTRAINT_FLAG_CHARGING;
+    jobs.schedule_own(SETTINGS_PROVIDER_JOBS_NS, job)?;
+    Ok(())
 }
 
 impl Service for SettingsProvider {
@@ -2108,7 +2154,22 @@ impl SettingsProvider {
     fn notify(&self, table: Table, user: i32, name: &str) -> Result<(), Exception> {
         self.generations()?.increment(table, user, name);
         self.notify_uri(table, user, name);
+        self.data_changed();
         Ok(())
+    }
+
+    /// `MSG_NOTIFY_DATA_CHANGED`, on a handler as the original posts it:
+    /// no backup manager to tell (#1925), then
+    /// `scheduleWriteFallbackFilesJob`.
+    fn data_changed(&self) {
+        self.host.post_job(|host| {
+            if let Err(e) = schedule_write_fallback_files_job(host) {
+                eprintln!(
+                    "app host: settings: scheduling the fallback files job: {}",
+                    e.message
+                );
+            }
+        });
     }
 
     /// `content://settings/<table>/<path>`'s observers told of a change.
@@ -2138,6 +2199,7 @@ impl SettingsProvider {
             path.push('/');
         }
         self.notify_uri(Table::Config, 0, &path);
+        self.data_changed();
         Ok(())
     }
 

@@ -16,8 +16,10 @@ pub const SHELL_COMMAND_TRANSACTION: u32 = u32::from_be_bytes(*b"_CMD");
 /// One shell command's arguments and streams.
 pub struct ShellCommand {
     pub args: Vec<String>,
-    /// The next argument `next_arg` returns.
+    /// The next argument `next_arg` returns, and a short option's data
+    /// attached to it (`mCurArgData`), which comes first.
     next: usize,
+    cur_arg_data: Option<String>,
     input: Option<aim_binder_host::server::RetainedFd>,
     out: Option<aim_binder_host::server::RetainedFd>,
     err: Option<aim_binder_host::server::RetainedFd>,
@@ -65,6 +67,7 @@ impl ShellCommand {
         Ok(Self {
             args,
             next: 1,
+            cur_arg_data: None,
             input,
             out,
             err,
@@ -178,23 +181,56 @@ impl ShellCommand {
         self.args.first().map(String::as_str)
     }
 
+    /// `getNextOption`: the next argument if it is an option (a short
+    /// option's attached data kept for `next_arg`); none at the end, at a
+    /// plain argument or after `--`. An option whose data was not taken
+    /// is the exception it throws, as `toString` prints it.
+    pub fn next_option(&mut self) -> std::result::Result<Option<String>, String> {
+        if self.cur_arg_data.is_some() {
+            let previous = &self.args[self.next - 1];
+            return Err(format!(
+                "java.lang.IllegalArgumentException: No argument expected after \"{previous}\""
+            ));
+        }
+        let Some(arg) = self.args.get(self.next).cloned() else {
+            return Ok(None);
+        };
+        if !arg.starts_with('-') {
+            return Ok(None);
+        }
+        self.next += 1;
+        if arg == "--" {
+            return Ok(None);
+        }
+        if arg.len() > 2 && !arg[1..].starts_with('-') {
+            self.cur_arg_data = Some(arg[2..].to_string());
+            return Ok(Some(arg[..2].to_string()));
+        }
+        Ok(Some(arg))
+    }
+
     /// `getNextArg`.
     pub fn next_arg(&mut self) -> Option<String> {
-        let arg = self.args.get(self.next).cloned();
+        if let Some(data) = self.cur_arg_data.take() {
+            return Some(data);
+        }
+        let arg = self.args.get(self.next).cloned()?;
         self.next += 1;
-        arg
+        Some(arg)
     }
 
     /// `peekNextArg`.
     pub fn peek_next_arg(&self) -> Option<&str> {
-        self.args.get(self.next).map(String::as_str)
+        self.cur_arg_data
+            .as_deref()
+            .or_else(|| self.args.get(self.next).map(String::as_str))
     }
 
     /// `getNextArgRequired`: the argument, or the exception it throws as
     /// `toString` prints it.
     pub fn next_arg_required(&mut self) -> std::result::Result<String, String> {
-        let previous = self.args[self.next - 1].clone();
         self.next_arg().ok_or_else(|| {
+            let previous = &self.args[self.next - 1];
             format!("java.lang.IllegalArgumentException: Argument expected after \"{previous}\"")
         })
     }
@@ -242,5 +278,50 @@ impl ShellCommand {
         }
         .write(&mut data);
         let _ = to.transact(receiver::SEND, &data, true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command(args: &[&str]) -> ShellCommand {
+        ShellCommand {
+            args: args.iter().map(|a| a.to_string()).collect(),
+            next: 1,
+            cur_arg_data: None,
+            input: None,
+            out: None,
+            err: None,
+            result: None,
+            callback: None,
+        }
+    }
+
+    /// `getNextOption`: a short option's attached data is its argument,
+    /// `--` ends the options, and data not taken is an error.
+    #[test]
+    fn options_are_read_as_the_original_reads_them() {
+        let mut c = command(&["run", "-u10", "--force", "-n", "ns", "--", "-p", "1"]);
+        assert_eq!(c.next_option(), Ok(Some("-u".into())));
+        assert_eq!(c.peek_next_arg(), Some("10"));
+        assert_eq!(c.next_arg_required(), Ok("10".into()));
+        assert_eq!(c.next_option(), Ok(Some("--force".into())));
+        assert_eq!(c.next_option(), Ok(Some("-n".into())));
+        assert_eq!(c.next_arg_required(), Ok("ns".into()));
+        assert_eq!(c.next_option(), Ok(None));
+        assert_eq!(c.next_arg(), Some("-p".into()));
+        assert_eq!(c.next_option(), Ok(None));
+        assert_eq!(c.next_arg(), Some("1".into()));
+        assert_eq!(
+            c.next_arg_required(),
+            Err("java.lang.IllegalArgumentException: Argument expected after \"1\"".into())
+        );
+        let mut c = command(&["run", "-fx", "-s"]);
+        assert_eq!(c.next_option(), Ok(Some("-f".into())));
+        assert_eq!(
+            c.next_option(),
+            Err("java.lang.IllegalArgumentException: No argument expected after \"-fx\"".into())
+        );
     }
 }

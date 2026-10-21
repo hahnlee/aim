@@ -2183,7 +2183,7 @@ impl fgs_types::Checker for TypeChecker<'_> {
 impl AppHost {
     /// Runs `job` on the activity manager's handler, after the jobs before
     /// it and outside the services' lock.
-    fn post_job(&self, job: impl FnOnce(&Arc<AppHost>) + Send + 'static) {
+    pub(super) fn post_job(&self, job: impl FnOnce(&Arc<AppHost>) + Send + 'static) {
         let mut handler = self.services.handler.lock().unwrap();
         let sender = handler.get_or_insert_with(|| {
             let (sender, jobs) = mpsc::channel::<Job>();
