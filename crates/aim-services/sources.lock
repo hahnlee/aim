@@ -180,6 +180,7 @@ SOURCE_FILES=(
   "platform/frameworks/base|core/java/android/os/IMessenger.aidl|e907dd5f8beeb9cd47e8dde2b40d0bcb9f8cad42b115809b3ca5cb5537d917cb"
   "platform/frameworks/base|core/java/android/app/admin/IDevicePolicyManager.aidl|55a7082bb0485a5d4c79a8f91b527bdbf90824c7e124196f14fd721b64b2e39c"
   "platform/frameworks/base|core/java/com/android/internal/os/IDropBoxManagerService.aidl|bfeab09d4514d58636eece720e2554f86945d9b609a5d984f39ec7cdfcb5b5e2"
+  "platform/frameworks/base|core/java/android/security/IFileIntegrityService.aidl|11798943b41c553d722fe889ef6cca04dd448932644f6385f582d893015e3816"
 )
 
 # descriptor|jar of its stub in the image|methods to marshal (`*`: all).
@@ -354,6 +355,7 @@ INTERFACES=(
   "android.os.IMessenger|system/framework/framework.jar|*"
   "android.app.admin.IDevicePolicyManager|system/framework/framework.jar|getPasswordQuality,getPermissionPolicy,getStorageEncryptionStatus,getCameraDisabled,getScreenCaptureDisabled,getKeyguardDisabledFeatures,isAdminActive,getActiveAdmins,packageHasActiveAdmins,getDeviceOwnerComponent,getDeviceOwnerComponentOnUser,hasDeviceOwner,getDeviceOwnerName,getDeviceOwnerUserId,getProfileOwnerAsUser,getProfileOwnerOrDeviceOwnerSupervisionComponent,getProfileOwnerName,isOrganizationOwnedDeviceWithManagedProfile,getPermittedAccessibilityServices,getPermittedAccessibilityServicesForUser,getPermittedInputMethods,getPermittedInputMethodsAsUser,getCrossProfileCallerIdDisabled,getCrossProfileCallerIdDisabledForUser,getCrossProfileContactsSearchDisabled,getCrossProfileContactsSearchDisabledForUser,getBluetoothContactSharingDisabled,getAutoTimeRequired,getAutoTimeEnabled,getAutoTimeZoneEnabled,isManagedProfile,getUserProvisioningState,isDeviceProvisioned,isNetworkLoggingEnabled,getDeviceOwnerType,getString,getSystemUpdatePolicy,isCommonCriteriaModeEnabled"
   "com.android.internal.os.IDropBoxManagerService|system/framework/framework.jar|*"
+  "android.security.IFileIntegrityService|system/framework/framework.jar|*"
 )
 
 # Binder interfaces the framework writes by hand, without AIDL:

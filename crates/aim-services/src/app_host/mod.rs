@@ -54,6 +54,7 @@ pub mod dropbox;
 pub mod enhanced_confirmation;
 pub mod exit_info;
 pub mod fgs_types;
+pub mod file_integrity;
 pub mod freeform;
 pub mod game_service;
 pub mod generations;
@@ -798,6 +799,10 @@ impl AppHost {
             (
                 "rollback",
                 Arc::new(rollback_service::Rollback::new(self.clone())),
+            ),
+            (
+                "file_integrity",
+                Arc::new(file_integrity::FileIntegrity::new(self.clone())),
             ),
             (
                 "dropbox",
