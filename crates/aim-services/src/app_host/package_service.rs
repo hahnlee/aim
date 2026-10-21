@@ -165,7 +165,8 @@ fn single(code: u32, uid: u32, data: &mut Reader<'_>) -> Result<Result<Setting, 
 
 impl PackageService {
     /// `PackageManagerShellCommand.onCommand` of `uid` (of `pid`): `clear`;
-    /// the other commands are not implemented (#1939).
+    /// the installation commands run in `transact`; the other commands are
+    /// not implemented (#1939).
     fn shell_command(&self, uid: i32, pid: i32, c: &mut ShellCommand) -> i32 {
         let cmd = c.command().unwrap_or_default().to_string();
         let result = match cmd.as_str() {
@@ -240,7 +241,19 @@ impl Service for PackageService {
         if call.code == SHELL_COMMAND_TRANSACTION {
             let mut command =
                 ShellCommand::read(&self.host.process, &mut call.data).map_err(|_| BAD_VALUE)?;
-            if command.has_output() {
+            if crate::package::shell_install::claims(command.command().unwrap_or_default()) {
+                // The native installation commands, over this package
+                // manager and the app host's installer.
+                let context = crate::package::shell::Context::with_command(
+                    Arc::new(super::package_shell::ShellHost(Arc::downgrade(&self.host))),
+                    self.host.process.clone(),
+                    self,
+                    call.sender_euid,
+                    call.sender_pid,
+                    command,
+                );
+                crate::package::shell::dispatch_by(context, crate::package::shell_install::run);
+            } else if command.has_output() {
                 let result =
                     self.shell_command(call.sender_euid as i32, call.sender_pid, &mut command);
                 command.finish(result);
