@@ -42,6 +42,7 @@ pub mod compat;
 pub mod config;
 pub mod connectivity_service;
 pub mod content_service;
+pub mod country_detector;
 pub mod cross_profile_apps;
 pub mod cursor;
 pub mod device_config;
@@ -783,6 +784,10 @@ impl AppHost {
             (
                 "locale",
                 Arc::new(locale_manager::LocaleManager::new(self.clone())),
+            ),
+            (
+                "country_detector",
+                country_detector::CountryDetector::new(self.clone(), settings.clone()),
             ),
             ("textservices", text_services),
             (
