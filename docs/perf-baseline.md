@@ -11,18 +11,19 @@ cargo aim bench --compare A.json B.json   # the change of every median, A to B
 
 Each run writes nothing outside `target/aim/bench/`: the report
 `<timestamp>.json` (UTC), the guest-init log of each run, the fixtures in
-`bin/` and the data directories `data-<n>` (removed after the run unless
+`bin/` and each run's data image `data-<n>.asif` with its runtime
+directory `data-<n>.run` (docs/storage.md; removed after the run unless
 `--keep`). The report holds the git sha (and whether the tree was dirty),
 the machine (model, CPU, cores, memory, macOS), the method, every run's
 metrics and each metric's median, min, max and count.
 
 ## Method
 
-Every run is one boot of a **fresh data directory** with the flags of
+Every run is one boot of a **fresh data image** with the flags of
 `cargo aim boot`: aim-display (`--size 1080x1920`) and `guest-init --run
---exclude bootanim --gpu <ANGLE> --display <socket>`. `--exclude bootanim`
-is a measurement flag, as in the tests (docs/boot-status.md, "Host security
-agent"); the bench changes no image, device configuration or setting.
+--gpu <ANGLE> --display <socket>`. The image has no boot animation
+(`debug.sf.nobootanimation`, docs/boot-status.md), so nothing is excluded;
+the bench changes no image, device configuration or setting.
 
 Guest commands (`getprop`, `logcat`, `am`, `pm`, `input`, `dumpsys`, the
 fixtures) run as root through another `linux-run` on the boot's path map and
