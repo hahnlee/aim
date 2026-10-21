@@ -7863,8 +7863,7 @@ a shell, and other target directories' binaries, were not affected; by
   To confirm: a boot, then `am start` of Contacts (acore) or the launcher
   with no `CANTOPEN` / "Ignoring missing CE app data dir" in logcat, and
   `ls -ln /data/user/0/<pkg>` from `run-as` (or the app) showing its uid;
-- #236 the ART codegen behind the null-page
-  faults; #237 audio retries after the null sink; #232 the security agent.
+- #232 the security agent.
 
 
 ## P3–P5 acceptance (2026-09-28, third part)
@@ -7961,9 +7960,10 @@ The host's security agent did not flag or block any of the four boots
 
 - #239 boot time and frame times after the spawned fork;
 - #240 wide-gamut EGL configs; #241 phone and GMS startup ANRs; #242
-  battery temperature; #230 traced aborts (traced_probes' were its memory
-  watchdog reading four times its rss from `/proc`, now counted in the
-  guest's 16 KiB pages).
+  battery temperature. traced and traced_probes no longer abort
+  (traced_probes' aborts were its memory watchdog reading four times its
+  rss from `/proc`, now counted in the guest's 16 KiB pages): on
+  2026-10-21 both kept their pids for 14 minutes after boot (#230).
 - #258 remaining memfd seal gaps; #261 app data lost on a second boot of
   the same data directory.
 

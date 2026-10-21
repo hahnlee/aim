@@ -444,22 +444,25 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    locations->SetInAt(0, Location::RequiresRegister());
    locations->SetInAt(1, Location::RegisterOrConstant(instruction->InputAt(1)));
    if (DataType::IsFloatingPointType(instruction->GetType())) {
-@@ -2869,6 +2992,14 @@
+@@ -2869,6 +2992,17 @@
    MacroAssembler* masm = GetVIXLAssembler();
    UseScratchRegisterScope temps(masm);
  
 +  if (ReferenceCodegenARM64<>::kNeedsHeapBase &&
 +      (type != DataType::Type::kReference || !codegen_->EmitReadBarrier())) {
 +    Register native_obj = XRegisterFrom(locations->GetTemp(0));
-+    ReferenceCodegenARM64<>::DecodeNonNull(
-+        GetVIXLAssembler(), native_obj,
-+        RegisterFrom(locations->InAt(0), DataType::Type::kReference));
++    Register managed_obj = RegisterFrom(locations->InAt(0), DataType::Type::kReference);
++    if (codegen_->GetCompilerOptions().GetImplicitNullChecks()) {
++      ReferenceCodegenARM64<>::DecodeNullable(GetVIXLAssembler(), native_obj, managed_obj);
++    } else {
++      ReferenceCodegenARM64<>::DecodeNonNull(GetVIXLAssembler(), native_obj, managed_obj);
++    }
 +    obj = native_obj;
 +  }
    // The non-Baker read barrier instrumentation of object ArrayGet instructions
    // does not support the HIntermediateAddress instruction.
    DCHECK(!((type == DataType::Type::kReference) &&
-@@ -2991,16 +3122,26 @@
+@@ -2991,16 +3125,29 @@
  void LocationsBuilderARM64::VisitArrayLength(HArrayLength* instruction) {
    LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(instruction);
    locations->SetInAt(0, Location::RequiresRegister());
@@ -475,8 +478,11 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
 +  Register array = InputRegisterAt(instruction, 0);
 +  if (ReferenceCodegenARM64<>::kNeedsHeapBase) {
 +    Register native_array = XRegisterFrom(instruction->GetLocations()->GetTemp(0));
-+    ReferenceCodegenARM64<>::DecodeNonNull(
-+        GetVIXLAssembler(), native_array, array);
++    if (codegen_->GetCompilerOptions().GetImplicitNullChecks()) {
++      ReferenceCodegenARM64<>::DecodeNullable(GetVIXLAssembler(), native_array, array);
++    } else {
++      ReferenceCodegenARM64<>::DecodeNonNull(GetVIXLAssembler(), native_array, array);
++    }
 +    array = native_array;
 +  }
    {
@@ -487,7 +493,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
      codegen_->MaybeRecordImplicitNullCheck(instruction);
    }
    // Mask out compression flag from String's array length.
-@@ -3017,6 +3158,13 @@
+@@ -3017,6 +3164,13 @@
        instruction,
        needs_type_check ? LocationSummary::kCallOnSlowPath : LocationSummary::kNoCall);
    locations->SetInAt(0, Location::RequiresRegister());
@@ -501,16 +507,19 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    locations->SetInAt(1, Location::RegisterOrConstant(instruction->GetIndex()));
    HInstruction* value = instruction->GetValue();
    if (IsZeroBitPattern(value)) {
-@@ -3043,10 +3191,18 @@
+@@ -3043,10 +3197,21 @@
    size_t offset = mirror::Array::DataOffset(DataType::Size(value_type)).Uint32Value();
    MemOperand destination = HeapOperand(array);
    MacroAssembler* masm = GetVIXLAssembler();
 +  Register managed_array = array;
 +  if (ReferenceCodegenARM64<>::kNeedsHeapBase) {
 +    Register native_array = XRegisterFrom(locations->GetTemp(0));
-+    ReferenceCodegenARM64<>::DecodeNonNull(
-+        GetVIXLAssembler(), native_array,
-+        RegisterFrom(locations->InAt(0), DataType::Type::kReference));
++    Register reference = RegisterFrom(locations->InAt(0), DataType::Type::kReference);
++    if (codegen_->GetCompilerOptions().GetImplicitNullChecks()) {
++      ReferenceCodegenARM64<>::DecodeNullable(GetVIXLAssembler(), native_array, reference);
++    } else {
++      ReferenceCodegenARM64<>::DecodeNonNull(GetVIXLAssembler(), native_array, reference);
++    }
 +    array = native_array;
 +  }
  
@@ -521,7 +530,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
      }
  
      DCHECK(!needs_type_check);
-@@ -3119,8 +3275,10 @@
+@@ -3119,8 +3284,10 @@
          const uint32_t component_offset = mirror::Class::ComponentTypeOffset().Int32Value();
  
          UseScratchRegisterScope temps(masm);
@@ -534,7 +543,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
  
          // Note that when Baker read barriers are enabled, the type
          // checks are performed without read barriers.  This is fine,
-@@ -3140,9 +3298,23 @@
+@@ -3140,9 +3307,23 @@
          GetAssembler()->MaybeUnpoisonHeapReference(temp);
  
          // /* HeapReference<Class> */ temp = temp->component_type_
@@ -560,7 +569,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
          // If heap poisoning is enabled, no need to unpoison `temp`
          // nor `temp2`, as we are comparing two poisoned references.
          __ Cmp(temp, temp2);
-@@ -3155,7 +3327,14 @@
+@@ -3155,7 +3336,14 @@
            GetAssembler()->MaybeUnpoisonHeapReference(temp);
  
            // /* HeapReference<Class> */ temp = temp->super_class_
@@ -576,7 +585,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
            // If heap poisoning is enabled, no need to unpoison
            // `temp`, as we are comparing against null below.
            __ Cbnz(temp, slow_path->GetEntryLabel());
-@@ -3174,7 +3353,7 @@
+@@ -3174,7 +3362,7 @@
      DCHECK_NE(write_barrier_kind, WriteBarrierKind::kDontEmit);
      DCHECK_IMPLIES(Register(value).IsZero(),
                     write_barrier_kind == WriteBarrierKind::kEmitBeingReliedOn);
@@ -585,7 +594,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
  
      if (skip_marking_gc_card) {
        // Note that we don't check that the GC card is valid as it can be correctly clean.
-@@ -4430,7 +4609,8 @@
+@@ -4430,7 +4618,8 @@
                                         read_barrier_option);
        // If `out` is null, we use it for the result, and jump to `done`.
        __ Cbz(out, &done);
@@ -595,7 +604,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
        static_assert(Primitive::kPrimNot == 0, "Expected 0 for kPrimNot");
        __ Cbnz(out, &zero);
        __ Bind(&exact_check);
-@@ -4480,21 +4660,24 @@
+@@ -4480,21 +4669,24 @@
        Register temp = temps.AcquireW();
        Register temp2 = temps.AcquireW();
        // /* HeapReference<Class> */ temp = obj->klass_
@@ -625,7 +634,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
        __ Sub(out, out, 2);
        // Compare the classes and continue the loop if they do not match.
        __ Cmp(cls, temp2);
-@@ -4718,7 +4901,8 @@
+@@ -4718,7 +4910,8 @@
        __ Cbz(temp, type_check_slow_path->GetEntryLabel());
        // Otherwise, the object is indeed an array. Further check that this component type is not a
        // primitive type.
@@ -635,7 +644,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
        static_assert(Primitive::kPrimNot == 0, "Expected 0 for kPrimNot");
        __ Cbnz(temp, type_check_slow_path->GetEntryLabel());
        break;
-@@ -4752,15 +4936,16 @@
+@@ -4752,15 +4945,16 @@
                                         maybe_temp2_loc,
                                         kWithoutReadBarrier);
        // Load the size of the `IfTable`. The `Class::iftable_` is never null.
@@ -655,7 +664,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
        __ Sub(WRegisterFrom(maybe_temp2_loc), WRegisterFrom(maybe_temp2_loc), 2);
        // Compare the classes and continue the loop if they do not match.
        __ Cmp(cls, WRegisterFrom(maybe_temp3_loc));
-@@ -4868,16 +5053,28 @@
+@@ -4868,16 +5062,28 @@
    // Ensure that between load and MaybeRecordImplicitNullCheck there are no pools emitted.
    if (receiver.IsStackSlot()) {
      __ Ldr(temp.W(), StackOperandFrom(receiver));
@@ -686,7 +695,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
      codegen_->MaybeRecordImplicitNullCheck(invoke);
    }
  
-@@ -4914,6 +5111,7 @@
+@@ -4914,6 +5120,7 @@
          invoke->GetHiddenArgumentLoadKind(), Location::RegisterLocation(ip1.GetCode()), invoke);
    }
  
@@ -694,7 +703,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    __ Ldr(temp,
        MemOperand(temp, mirror::Class::ImtPtrOffset(kArm64PointerSize).Uint32Value()));
    uint32_t method_offset = static_cast<uint32_t>(ImTable::OffsetOfElement(
-@@ -4997,12 +5195,27 @@
+@@ -4997,12 +5204,27 @@
        vixl::aarch64::Label* add_label =
            NewBootImageMethodPatch(invoke->GetResolvedMethodReference(), adrp_label);
        EmitAddPlaceholder(add_label, XRegisterFrom(temp), XRegisterFrom(temp));
@@ -722,7 +731,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
        break;
      }
      case MethodLoadKind::kAppImageRelRo: {
-@@ -5016,6 +5229,8 @@
+@@ -5016,6 +5238,8 @@
        vixl::aarch64::Label* ldr_label =
            NewAppImageMethodPatch(invoke->GetResolvedMethodReference(), adrp_label);
        EmitLdrOffsetPlaceholder(ldr_label, WRegisterFrom(temp), XRegisterFrom(temp));
@@ -731,7 +740,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
        break;
      }
      case MethodLoadKind::kBssEntry: {
-@@ -5049,6 +5264,9 @@
+@@ -5049,6 +5273,9 @@
  
  void CodeGeneratorARM64::GenerateStaticOrDirectCall(
      HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path) {
@@ -741,7 +750,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    // Make sure that ArtMethod* is passed in kArtMethodRegister as per the calling convention.
    Location callee_method = temp;  // For all kinds except kRecursive, callee will be in temp.
    switch (invoke->GetMethodLoadKind()) {
-@@ -5178,11 +5396,20 @@
+@@ -5178,11 +5405,20 @@
  
    DCHECK(receiver.IsRegister());
  
@@ -763,7 +772,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
      MaybeRecordImplicitNullCheck(invoke);
    }
    // Instead of simply (possibly) unpoisoning `temp` here, we should
-@@ -5197,6 +5424,8 @@
+@@ -5197,6 +5433,8 @@
    // If we're compiling baseline, update the inline cache.
    MaybeGenerateInlineCacheCheck(invoke, temp);
  
@@ -772,7 +781,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    // temp = temp->GetMethodAt(method_offset);
    __ Ldr(temp, MemOperand(temp, method_offset));
    // lr = temp->GetEntryPoint();
-@@ -5446,6 +5675,10 @@
+@@ -5446,6 +5684,10 @@
      // Add ADD with its PC-relative type patch.
      vixl::aarch64::Label* add_label = NewBootImageIntrinsicPatch(boot_image_reference, adrp_label);
      EmitAddPlaceholder(add_label, reg.X(), reg.X());
@@ -783,7 +792,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    } else if (GetCompilerOptions().GetCompilePic()) {
      LoadBootImageRelRoEntry(reg, boot_image_reference);
    } else {
-@@ -5469,6 +5702,10 @@
+@@ -5469,6 +5711,10 @@
    vixl::aarch64::Label* add_label =
        NewBootImageTypePatch(*target_type.dex_file, target_type.TypeIndex(), adrp_label);
    EmitAddPlaceholder(add_label, reg.X(), reg.X());
@@ -794,7 +803,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
  }
  
  void CodeGeneratorARM64::LoadIntrinsicDeclaringClass(vixl::aarch64::Register reg, HInvoke* invoke) {
-@@ -5735,6 +5972,7 @@
+@@ -5735,6 +5981,7 @@
    HLoadClass::LoadKind load_kind = cls->GetLoadKind();
    if (load_kind == HLoadClass::LoadKind::kRuntimeCall) {
      codegen_->GenerateLoadClassRuntimeCall(cls);
@@ -802,7 +811,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
      codegen_->MaybeGenerateMarkingRegisterCheck(/* code= */ __LINE__);
      return;
    }
-@@ -5775,6 +6013,10 @@
+@@ -5775,6 +6022,10 @@
        vixl::aarch64::Label* add_label =
            codegen_->NewBootImageTypePatch(dex_file, type_index, adrp_label);
        codegen_->EmitAddPlaceholder(add_label, out.X(), out.X());
@@ -813,7 +822,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
        break;
      }
      case HLoadClass::LoadKind::kBootImageRelRo: {
-@@ -5819,13 +6061,14 @@
+@@ -5819,13 +6070,14 @@
      }
      case HLoadClass::LoadKind::kJitBootImageAddress: {
        DCHECK_EQ(read_barrier_option, kWithoutReadBarrier);
@@ -830,7 +839,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
                                                         cls->GetTypeIndex(),
                                                         cls->GetClass()));
        codegen_->GenerateGcRootFieldLoad(cls,
-@@ -5919,7 +6162,7 @@
+@@ -5919,7 +6171,7 @@
        return;
      }
      case HLoadMethodType::LoadKind::kJitTableAddress: {
@@ -839,7 +848,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
                                                              load->GetProtoIndex(),
                                                              load->GetMethodType()));
        codegen_->GenerateGcRootFieldLoad(load,
-@@ -5933,6 +6176,7 @@
+@@ -5933,6 +6185,7 @@
      default:
        DCHECK_EQ(load->GetLoadKind(), HLoadMethodType::LoadKind::kRuntimeCall);
        codegen_->GenerateLoadMethodTypeRuntimeCall(load);
@@ -847,7 +856,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
        break;
    }
  }
-@@ -5948,7 +6192,9 @@
+@@ -5948,7 +6201,9 @@
  }
  
  void InstructionCodeGeneratorARM64::VisitLoadException(HLoadException* instruction) {
@@ -858,7 +867,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
  }
  
  void LocationsBuilderARM64::VisitClearException(HClearException* clear) {
-@@ -5956,7 +6202,8 @@
+@@ -5956,7 +6211,8 @@
  }
  
  void InstructionCodeGeneratorARM64::VisitClearException([[maybe_unused]] HClearException* clear) {
@@ -868,7 +877,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
  }
  
  HLoadString::LoadKind CodeGeneratorARM64::GetSupportedLoadStringKind(
-@@ -6015,6 +6262,10 @@
+@@ -6015,6 +6271,10 @@
        vixl::aarch64::Label* add_label =
            codegen_->NewBootImageStringPatch(dex_file, string_index, adrp_label);
        codegen_->EmitAddPlaceholder(add_label, out.X(), out.X());
@@ -879,7 +888,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
        return;
      }
      case HLoadString::LoadKind::kBootImageRelRo: {
-@@ -6050,13 +6301,14 @@
+@@ -6050,13 +6310,14 @@
        return;
      }
      case HLoadString::LoadKind::kJitBootImageAddress: {
@@ -896,7 +905,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
                                                          load->GetStringIndex(),
                                                          load->GetString()));
        codegen_->GenerateGcRootFieldLoad(load,
-@@ -6076,6 +6328,9 @@
+@@ -6076,6 +6337,9 @@
    __ Mov(calling_convention.GetRegisterAt(0).W(), load->GetStringIndex().index_);
    codegen_->InvokeRuntime(kQuickResolveString, load);
    CheckEntrypointTypes<kQuickResolveString, void*, uint32_t>();
@@ -906,7 +915,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    codegen_->MaybeGenerateMarkingRegisterCheck(/* code= */ __LINE__);
  }
  
-@@ -6096,6 +6351,10 @@
+@@ -6096,6 +6360,10 @@
  }
  
  void InstructionCodeGeneratorARM64::VisitMonitorOperation(HMonitorOperation* instruction) {
@@ -917,7 +926,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    codegen_->InvokeRuntime(instruction->IsEnter() ? kQuickLockObject : kQuickUnlockObject,
                            instruction);
    if (instruction->IsEnter()) {
-@@ -6196,7 +6455,9 @@
+@@ -6196,7 +6464,9 @@
  void InstructionCodeGeneratorARM64::VisitNewArray(HNewArray* instruction) {
    // Note: if heap poisoning is enabled, the entry point takes care of poisoning the reference.
    QuickEntrypointEnum entrypoint = CodeGenerator::GetArrayAllocationEntrypoint(instruction);
@@ -927,7 +936,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    CheckEntrypointTypes<kQuickAllocArrayResolved, void*, mirror::Class*, int32_t>();
    codegen_->MaybeGenerateMarkingRegisterCheck(/* code= */ __LINE__);
  }
-@@ -6210,7 +6471,9 @@
+@@ -6210,7 +6480,9 @@
  }
  
  void InstructionCodeGeneratorARM64::VisitNewInstance(HNewInstance* instruction) {
@@ -937,7 +946,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
    codegen_->MaybeGenerateMarkingRegisterCheck(/* code= */ __LINE__);
  }
-@@ -6253,10 +6516,21 @@
+@@ -6253,10 +6525,21 @@
      return;
    }
    {
@@ -961,7 +970,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
      RecordPcInfo(instruction);
    }
  }
-@@ -6650,10 +6924,14 @@
+@@ -6650,10 +6933,14 @@
  void InstructionCodeGeneratorARM64::VisitUnresolvedInstanceFieldGet(
      HUnresolvedInstanceFieldGet* instruction) {
    FieldAccessCallingConventionARM64 calling_convention;
@@ -976,7 +985,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
  }
  
  void LocationsBuilderARM64::VisitUnresolvedInstanceFieldSet(
-@@ -6666,6 +6944,10 @@
+@@ -6666,6 +6953,10 @@
  void InstructionCodeGeneratorARM64::VisitUnresolvedInstanceFieldSet(
      HUnresolvedInstanceFieldSet* instruction) {
    FieldAccessCallingConventionARM64 calling_convention;
@@ -987,7 +996,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    codegen_->GenerateUnresolvedFieldAccess(instruction,
                                            instruction->GetFieldType(),
                                            instruction->GetFieldIndex(),
-@@ -6686,6 +6968,9 @@
+@@ -6686,6 +6977,9 @@
                                            instruction->GetFieldType(),
                                            instruction->GetFieldIndex(),
                                            calling_convention);
@@ -997,7 +1006,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
  }
  
  void LocationsBuilderARM64::VisitUnresolvedStaticFieldSet(
-@@ -6698,6 +6983,9 @@
+@@ -6698,6 +6992,9 @@
  void InstructionCodeGeneratorARM64::VisitUnresolvedStaticFieldSet(
      HUnresolvedStaticFieldSet* instruction) {
    FieldAccessCallingConventionARM64 calling_convention;
@@ -1007,7 +1016,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    codegen_->GenerateUnresolvedFieldAccess(instruction,
                                            instruction->GetFieldType(),
                                            instruction->GetFieldIndex(),
-@@ -6740,6 +7028,10 @@
+@@ -6740,6 +7037,10 @@
  }
  
  void InstructionCodeGeneratorARM64::VisitThrow(HThrow* instruction) {
@@ -1018,7 +1027,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    codegen_->InvokeRuntime(kQuickDeliverException, instruction);
    CheckEntrypointTypes<kQuickDeliverException, void, mirror::Object*>();
  }
-@@ -6958,7 +7250,10 @@
+@@ -6958,7 +7259,10 @@
    } else {
      // Plain load with no read barrier.
      // /* HeapReference<Object> */ out = *(out + offset)
@@ -1030,7 +1039,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
      GetAssembler()->MaybeUnpoisonHeapReference(out_reg);
    }
  }
-@@ -6994,7 +7289,10 @@
+@@ -6994,7 +7298,10 @@
    } else {
      // Plain load with no read barrier.
      // /* HeapReference<Object> */ out = *(obj + offset)
@@ -1042,7 +1051,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
      GetAssembler()->MaybeUnpoisonHeapReference(out_reg);
    }
  }
-@@ -7167,6 +7465,27 @@
+@@ -7167,6 +7474,27 @@
                                                                 bool needs_null_check,
                                                                 bool use_load_acquire) {
    DCHECK_ALIGNED(offset, sizeof(mirror::HeapReference<mirror::Object>));
@@ -1070,7 +1079,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    Register base = obj;
    if (use_load_acquire) {
      DCHECK(maybe_temp.IsRegister());
-@@ -7237,10 +7556,26 @@
+@@ -7237,10 +7565,26 @@
        HIntermediateAddress* interm_addr = instruction->GetArray()->AsIntermediateAddress();
        DCHECK_EQ(interm_addr->GetOffset()->AsIntConstant()->GetValueAsUint64(), data_offset);
      }
@@ -1099,7 +1108,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    }
  
    uint32_t custom_data = EncodeBakerReadBarrierArrayData(temp.GetCode());
-@@ -7360,18 +7695,19 @@
+@@ -7360,18 +7704,19 @@
  
  void InstructionCodeGeneratorARM64::VisitClassTableGet(HClassTableGet* instruction) {
    LocationSummary* locations = instruction->GetLocations();
@@ -1124,20 +1133,20 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    }
  }
  
-@@ -7383,6 +7719,12 @@
-     /*out*/ Register* scratch) {
+@@ -7384,6 +7729,12 @@
    LocationSummary* locations = instruction->GetLocations();
    Register base = InputRegisterAt(instruction, 0);
-+
+ 
 +  if (ReferenceCodegenARM64<>::kNeedsHeapBase) {
 +    *scratch = temps_scope->AcquireX();
 +    ReferenceCodegenARM64<>::DecodeNonNull(GetVIXLAssembler(), *scratch, base);
 +    base = *scratch;
 +  }
- 
++
    if (instruction->InputAt(1)->IsIntermediateAddressIndex()) {
      DCHECK(!is_string_char_at);
-@@ -7402,7 +7744,9 @@
+     return MemOperand(base.X(), InputRegisterAt(instruction, 1).X());
+@@ -7402,7 +7753,9 @@
      offset += Int64FromLocation(index) << shift;
      return HeapOperand(base, offset);
    } else {
@@ -1148,7 +1157,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
      __ Add(*scratch, base, Operand(WRegisterFrom(index), LSL, shift));
      return HeapOperand(*scratch, offset);
    }
-@@ -7418,6 +7762,12 @@
+@@ -7418,6 +7771,12 @@
    Register base = InputRegisterAt(instruction, 0);
    Location index = locations->InAt(1);
  
@@ -1161,7 +1170,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    DCHECK(!instruction->InputAt(1)->IsIntermediateAddressIndex());
    DCHECK(!index.IsConstant());
  
-@@ -7430,7 +7780,9 @@
+@@ -7430,7 +7789,9 @@
      return SVEMemOperand(base.X(), XRegisterFrom(index), LSL, shift);
    }
  
@@ -1172,7 +1181,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
    __ Add(*scratch, base, offset);
    return SVEMemOperand(scratch->X(), XRegisterFrom(index), LSL, shift);
  }
-@@ -7525,7 +7877,13 @@
+@@ -7525,7 +7886,13 @@
        // to load the reference and call the entrypoint that performs further checks on the
        // reference and marks it if needed.
        vixl::aarch64::Label slow_path;
@@ -1187,7 +1196,7 @@ diff --git a/compiler/optimizing/code_generator_arm64.cc b/compiler/optimizing/c
        EmitGrayCheckAndFastPath(assembler, base_reg, lock_word, &slow_path, throw_npe);
        __ Bind(&slow_path);
        if (kind == BakerReadBarrierKind::kField) {
-@@ -7583,7 +7941,13 @@
+@@ -7583,7 +7950,13 @@
        temps.Exclude(ip0, ip1);
        vixl::aarch64::Label return_label, not_marked, forwarding_address;
        __ Cbz(root_reg, &return_label);

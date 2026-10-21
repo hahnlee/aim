@@ -35,7 +35,7 @@ nterp rewrites in `crates/art-bootstrap/src/runtime_art/nterp.rs` and the
 `ImageWriter::IsInBootImage` rewrite in `runtime_art/dex2oat.rs` (removed;
 see git history).
 
-The new series is 8 patches, 4,701 lines as files (+1,532 / -348 changed
+The new series is 8 patches, 4,710 lines as files (+1,541 / -348 changed
 lines, 320 hunks), against 9,771 lines for the 184 Darwin patches. It contains
 no Darwin, Mach or Apple code.
 
@@ -118,7 +118,7 @@ subtrees. The files of the patches are disjoint.
 | `0003-image-logical-addresses.patch` | 360 | +104 -39 | Image loader, app-image writer, image writer, OAT code and entry-point addresses: logical <-> window |
 | `0004-quick-entrypoint-boundaries.patch` | 591 | +252 -17 | Quick entrypoints (C++ and arm64 assembly) decode arguments from and encode results for managed code |
 | `0005-nterp-heap-base.patch` | 353 | +81 -8 | nterp (arm64ng mterp) decodes before dereferences and C++ calls |
-| `0006-arm64-codegen-heap-base.patch` | 1,425 | +565 -95 | Optimizing arm64 code generator; the shared `ReferenceCodegenARM64` helper |
+| `0006-arm64-codegen-heap-base.patch` | 1,434 | +574 -95 | Optimizing arm64 code generator; the shared `ReferenceCodegenARM64` helper |
 | `0007-arm64-intrinsics-heap-base.patch` | 993 | +205 -109 | arm64 intrinsics |
 | `0008-arm64-jni-and-baseline-heap-base.patch` | 246 | +94 -12 | JNI compiler and the baseline (fast) compiler |
 
@@ -245,7 +245,8 @@ the thread-local cache holds it decoded.
   `VisitNewArray`, `VisitLoadString`, `VisitLoadMethodType`,
   `VisitMonitorOperation`, `VisitThrow`, `VisitLoadException`,
   `VisitClearException`, unresolved field access); implicit null checks
-  (`GenerateImplicitNullCheck`, nullable receivers); boot-image and JIT
+  (`GenerateImplicitNullCheck`; receivers, field holders and arrays decoded
+  nullable where the access is the null check); boot-image and JIT
   literals (`LoadBootImageAddress`, `LoadMethod`,
   `GenerateStaticOrDirectCall`, `LoadTypeForBootImageIntrinsic`,
   `kJitBootImageAddress` as a 32-bit reference); and the slow paths that call
