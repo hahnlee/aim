@@ -123,6 +123,8 @@ pub struct InetOpts {
     multicast_own: AtomicBool,
     /// TCP_USER_TIMEOUT in milliseconds, as set.
     user_timeout: std::sync::atomic::AtomicU32,
+    /// TCP_MAXSEG as set (`user_mss`; 0: none).
+    user_mss: std::sync::atomic::AtomicU32,
     port_zero: AtomicBool,
     router: AtomicBool,
     icmp4: AtomicBool,
@@ -139,6 +141,9 @@ pub struct Sock {
     inet_owner: Mutex<Option<SocketMetadata>>,
     /// SO_PASSCRED: attach SCM_CREDENTIALS to received messages.
     passcred: AtomicBool,
+    /// The receive timestamps asked for (SO_TIMESTAMP and SO_TIMESTAMPNS,
+    /// old or new): `STAMP_*`.
+    stamp: std::sync::atomic::AtomicU8,
     /// Serializes framed receives, so one message is read whole.
     recv: Mutex<()>,
     /// Linux sockaddr of the local and peer names, when known.
@@ -158,6 +163,7 @@ impl Sock {
             inode_allocation: Mutex::new(None),
             inet_owner: Mutex::new(None),
             passcred: AtomicBool::new(false),
+            stamp: std::sync::atomic::AtomicU8::new(0),
             recv: Mutex::new(()),
             local: Mutex::new(None),
             peer: Mutex::new(None),
@@ -183,6 +189,7 @@ pub(super) fn save_sock(s: &Sock, w: &mut super::fork_state::Writer) {
         w.bool(owner.probes_known);
     });
     w.bool(s.passcred.load(std::sync::atomic::Ordering::Relaxed));
+    w.u32(s.stamp.load(Ordering::Relaxed) as u32);
     w.opt(s.local.lock().unwrap().as_deref(), |w, a| w.bytes(a));
     w.opt(s.peer.lock().unwrap().as_deref(), |w, a| w.bytes(a));
     match &s.family {
@@ -196,6 +203,7 @@ pub(super) fn save_sock(s: &Sock, w: &mut super::fork_state::Writer) {
             w.bool(o.icmp4.load(Ordering::Relaxed));
             w.bool(o.multicast_own.load(Ordering::Relaxed));
             w.u32(o.user_timeout.load(Ordering::Relaxed));
+            w.u32(o.user_mss.load(Ordering::Relaxed));
         }
         Family::Netlink(n) => {
             w.u32(2);
@@ -230,6 +238,7 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
         probes_known: r.bool(),
     });
     let passcred = r.bool();
+    let stamp = r.u32() as u8;
     let local = r.opt(|r| r.bytes());
     let peer = r.opt(|r| r.bytes());
     let family = match r.u32() {
@@ -242,6 +251,7 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
             o.icmp4.store(r.bool(), Ordering::Relaxed);
             o.multicast_own.store(r.bool(), Ordering::Relaxed);
             o.user_timeout.store(r.u32(), Ordering::Relaxed);
+            o.user_mss.store(r.u32(), Ordering::Relaxed);
             Family::Inet(o)
         }
         2 => Family::Netlink(super::netlink::Socket::load(r)),
@@ -252,6 +262,7 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
     *s.inode_allocation.lock().unwrap() = inode_allocation;
     *s.inet_owner.lock().unwrap() = inet_owner;
     s.passcred.store(passcred, Ordering::Relaxed);
+    s.stamp.store(stamp, Ordering::Relaxed);
     *s.local.lock().unwrap() = local;
     *s.peer.lock().unwrap() = peer;
     s
@@ -1185,6 +1196,9 @@ pub fn connect(a: [u64; 6]) -> i64 {
         && matches!(s.ty, SockType::Stream)
     {
         r = reconnect(fd, o, r);
+        if r == 0 {
+            clamp_mss(fd, o);
+        }
     }
     if r == -(libc::ENOENT as i64) && is_abstract(&name) {
         // An abstract name nobody bound: refused, not missing.
@@ -1215,6 +1229,24 @@ pub fn connect(a: [u64; 6]) -> i64 {
 /// once established, and a blocking socket waits for it. A blocking
 /// connect interrupted by a signal is such a repeat when it restarts, as
 /// is libcore's retry of it after EINTR.
+/// `tcp_connect_init`: the MSS the user set clamps the connection's.
+fn clamp_mss(fd: i32, o: &InetOpts) {
+    let user = o.user_mss.load(Ordering::Relaxed) as i32;
+    if user != 0 && get_int(fd, libc::IPPROTO_TCP, libc::TCP_MAXSEG).is_some_and(|h| user < h) {
+        // SAFETY: an int option on the host socket; Darwin takes no less
+        // than its minmss less headers.
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_MAXSEG,
+                (&user as *const i32).cast(),
+                4,
+            )
+        };
+    }
+}
+
 fn reconnect(fd: i32, o: &InetOpts, r: i64) -> i64 {
     const EINTR: i64 = errno::EINTR as i64;
     const EINPROGRESS: i64 = errno::from_darwin(libc::EINPROGRESS) as i64;
@@ -1747,16 +1779,20 @@ fn adopt_received_descriptor(fd: i32) -> Result<(), errno::Errno> {
     }
 }
 
-/// Darwin cmsgs (plus credentials) -> Linux cmsgs in the guest buffer.
-/// Returns (bytes written, MSG_CTRUNC if something did not fit).
+/// Darwin cmsgs (plus credentials) -> Linux cmsgs in the guest buffer:
+/// descriptors, the receive time as `stamp` asks (`__sock_recv_timestamp`),
+/// and IP_TTL and IP_TOS. Returns (bytes written, MSG_CTRUNC if something
+/// did not fit).
 fn control_to_guest(
     host: &mut IncomingControl,
     cred: Option<Cred>,
+    stamp: u8,
     cloexec: bool,
     out: u64,
     cap: usize,
 ) -> Result<(usize, i32), i64> {
-    let mut msgs: Vec<(i32, Vec<u8>)> = Vec::new();
+    let mut msgs: Vec<(i32, i32, Vec<u8>)> = Vec::new();
+    let mut ip: Vec<(i32, i32, Vec<u8>)> = Vec::new();
     let mut off = 0usize;
     while off + 12 <= host.len() {
         let w = |i: usize| u32::from_le_bytes(host[off + i..off + i + 4].try_into().unwrap());
@@ -1764,20 +1800,44 @@ fn control_to_guest(
         if clen < 12 || off + clen > host.len() {
             break;
         }
+        let data = &host[off + 12..off + clen];
         if level == libc::SOL_SOCKET && ty == libc::SCM_RIGHTS {
-            let data = host[off + 12..off + clen].to_vec();
             // Darwin can hand back a bare SCM_RIGHTS header (a sender's
             // empty one); Linux never delivers one, and libbase aborts on it.
             if !data.is_empty() {
-                msgs.push((L_SCM_RIGHTS, data));
+                msgs.push((L_SOL_SOCKET, L_SCM_RIGHTS, data.to_vec()));
             }
+        } else if level == libc::SOL_SOCKET
+            && ty == libc::SCM_TIMESTAMP
+            && stamp & STAMP != 0
+            && data.len() >= 12
+        {
+            // struct timeval { long, int }: Linux's 64-bit timeval or
+            // timespec.
+            let sec = i64::from_le_bytes(data[..8].try_into().unwrap());
+            let usec = i32::from_le_bytes(data[8..12].try_into().unwrap()) as i64;
+            let (ty, frac) = match (stamp & STAMP_NS != 0, stamp & STAMP_NEW != 0) {
+                (false, false) => (L_SO_TIMESTAMP_OLD, usec),
+                (false, true) => (L_SO_TIMESTAMP_NEW, usec),
+                (true, false) => (L_SO_TIMESTAMPNS_OLD, usec * 1000),
+                (true, true) => (L_SO_TIMESTAMPNS_NEW, usec * 1000),
+            };
+            let mut d = sec.to_le_bytes().to_vec();
+            d.extend_from_slice(&frac.to_le_bytes());
+            msgs.push((L_SOL_SOCKET, ty as i32, d));
+        } else if level == libc::IPPROTO_IP && ty == libc::IP_RECVTTL && !data.is_empty() {
+            ip.push((0, L_IP_TTL, (data[0] as i32).to_le_bytes().to_vec()));
+        } else if level == libc::IPPROTO_IP && ty == libc::IP_RECVTOS && !data.is_empty() {
+            ip.push((0, L_IP_TOS, vec![data[0]]));
         }
         off += (clen + 3) & !3;
     }
+    // ip_cmsg_recv_offset's come after the socket's.
+    msgs.extend(ip);
     let received: Vec<i32> = msgs
         .iter()
-        .filter(|(ty, _)| *ty == L_SCM_RIGHTS)
-        .flat_map(|(_, data)| {
+        .filter(|(_, ty, _)| *ty == L_SCM_RIGHTS)
+        .flat_map(|(_, _, data)| {
             data.chunks_exact(4)
                 .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
         })
@@ -1799,11 +1859,11 @@ fn control_to_guest(
         let mut d = c.pid.to_le_bytes().to_vec();
         d.extend_from_slice(&c.uid.to_le_bytes());
         d.extend_from_slice(&c.gid.to_le_bytes());
-        msgs.push((L_SCM_CREDENTIALS, d));
+        msgs.push((L_SOL_SOCKET, L_SCM_CREDENTIALS, d));
     }
     let _admission = (!received.is_empty()).then(fdtab::lifecycle);
     let mut planned = 0;
-    for (ty, data) in &msgs {
+    for (_, ty, data) in &msgs {
         let clen = 16 + data.len();
         if out != 0 && planned + clen <= cap {
             if *ty == L_SCM_RIGHTS {
@@ -1818,7 +1878,7 @@ fn control_to_guest(
         }
     }
     let (mut w, mut flags) = (0usize, 0);
-    for (ty, data) in msgs {
+    for (level, ty, data) in msgs {
         let clen = 16 + data.len();
         let space = (clen + 7) & !7;
         if out == 0 || w + clen > cap {
@@ -1827,7 +1887,7 @@ fn control_to_guest(
         }
         let mut rec = vec![0u8; space.min(cap - w)];
         rec[0..8].copy_from_slice(&(clen as u64).to_le_bytes());
-        rec[8..12].copy_from_slice(&L_SOL_SOCKET.to_le_bytes());
+        rec[8..12].copy_from_slice(&level.to_le_bytes());
         rec[12..16].copy_from_slice(&ty.to_le_bytes());
         rec[16..clen].copy_from_slice(&data);
         // SAFETY: inside the guest control buffer.
@@ -2175,6 +2235,7 @@ fn host_inet_name(fd: i32, peer: bool) -> Option<(u16, [u8; 4])> {
 fn recv_other(
     input: &SocketInput,
     iov: &[libc::iovec],
+    ctrl_cap: usize,
     flags: u64,
 ) -> Option<Result<Received, i64>> {
     let fd = input.fd();
@@ -2231,20 +2292,57 @@ fn recv_other(
                 },
             )
         }
-        Family::Inet(o) if o.icmp4.load(Ordering::Relaxed) => recv_ping(fd, iov, hflags, flags),
+        Family::Inet(o) if o.icmp4.load(Ordering::Relaxed) => {
+            recv_ping(fd, iov, ctrl_cap, hflags, flags)
+        }
         Family::Unix | Family::Inet(_) => return None,
     })
 }
 
+/// Whether host control messages hold one of `level` and `ty`.
+fn has_cmsg(ctrl: &[u8], level: i32, ty: i32) -> bool {
+    let mut off = 0;
+    while off + 12 <= ctrl.len() {
+        let w = |i: usize| u32::from_ne_bytes(ctrl[off + i..off + i + 4].try_into().unwrap());
+        if w(4) as i32 == level && w(8) as i32 == ty {
+            return true;
+        }
+        off += ((w(0) as usize).max(12) + 3) & !3;
+    }
+    false
+}
+
 /// A receive on an IPv4 ping socket (SOCK_DGRAM, IPPROTO_ICMP): Darwin
-/// delivers the IP header too, Linux only the ICMP message.
-fn recv_ping(fd: i32, iov: &[libc::iovec], hflags: i32, flags: u64) -> Result<Received, i64> {
+/// delivers the IP header too, Linux only the ICMP message. The TTL and
+/// TOS a socket asked for come from that header.
+fn recv_ping(
+    fd: i32,
+    iov: &[libc::iovec],
+    ctrl_cap: usize,
+    hflags: i32,
+    flags: u64,
+) -> Result<Received, i64> {
     let mut pkt = vec![0u8; 65536];
     let mut v = [libc::iovec {
         iov_base: pkt.as_mut_ptr().cast(),
         iov_len: pkt.len(),
     }];
-    let (n, _, _, name) = recvmsg_host(fd, &mut v, &mut [], true, hflags)?;
+    let mut ctrl = IncomingControl::buffer(if ctrl_cap > 0 { ctrl_cap + 64 } else { 0 });
+    let (n, _, cl, name) = recvmsg_host(fd, &mut v, &mut ctrl, true, hflags)?;
+    ctrl.truncate(cl);
+    if n >= 20 && ctrl_cap > 0 {
+        for (opt, byte) in [(libc::IP_RECVTTL, pkt[8]), (libc::IP_RECVTOS, pkt[1])] {
+            if get_int(fd, libc::IPPROTO_IP, opt).is_some_and(|v| v != 0)
+                && !has_cmsg(&ctrl, libc::IPPROTO_IP, opt)
+            {
+                // A Darwin cmsghdr { len, level, type } and the byte.
+                for word in [13u32, libc::IPPROTO_IP as u32, opt as u32] {
+                    ctrl.bytes.extend_from_slice(&word.to_ne_bytes());
+                }
+                ctrl.bytes.extend_from_slice(&[byte, 0, 0, 0]);
+            }
+        }
+    }
     let ihl = pkt.first().map_or(0, |b| ((b & 0xf) as usize) * 4).min(n);
     let msg = &pkt[ihl..n];
     let mut at = 0;
@@ -2261,7 +2359,7 @@ fn recv_ping(fd: i32, iov: &[libc::iovec], hflags: i32, flags: u64) -> Result<Re
             at
         } as i64,
         flags: if at < msg.len() { libc::MSG_TRUNC } else { 0 },
-        ctrl: IncomingControl::default(),
+        ctrl,
         cred: None,
         name,
     })
@@ -2363,7 +2461,7 @@ fn receive(
     flags: u64,
 ) -> Result<Received, i64> {
     let fd = input.fd();
-    if let Some(r) = recv_other(&input, iov, flags) {
+    if let Some(r) = recv_other(&input, iov, ctrl_cap, flags) {
         return r;
     }
     let s = sock(&input);
@@ -2632,9 +2730,11 @@ fn recvmsg_one(input: &SocketInput, mp: u64, flags: u64) -> i64 {
         Ok(r) => r,
         Err(e) => return e,
     };
+    let stamp = any_sock(input).map_or(0, |s| s.stamp.load(Ordering::Relaxed));
     let (cl, ctrunc) = match control_to_guest(
         &mut r.ctrl,
         r.cred,
+        stamp,
         flags & L_MSG_CMSG_CLOEXEC != 0,
         m.control,
         m.controllen as usize,
@@ -2817,11 +2917,30 @@ const L_SO_DOMAIN: u64 = 39;
 const L_SO_RCVTIMEO_NEW: u64 = 66;
 const L_SO_SNDTIMEO_NEW: u64 = 67;
 
+const L_SO_TIMESTAMP_OLD: u64 = 29;
+const L_SO_TIMESTAMPNS_OLD: u64 = 35;
+const L_SO_TIMESTAMP_NEW: u64 = 63;
+const L_SO_TIMESTAMPNS_NEW: u64 = 64;
+/// `Sock::stamp`: SOCK_RCVTSTAMP, SOCK_RCVTSTAMPNS, SOCK_TSTAMP_NEW.
+const STAMP: u8 = 1;
+const STAMP_NS: u8 = 2;
+const STAMP_NEW: u8 = 4;
+
 const IPPROTO_IP: u64 = 0;
+const L_IP_TOS: i32 = 1;
+const L_IP_TTL: i32 = 2;
+const L_IP_RETOPTS: u64 = 7;
+/// Darwin's IP_RETOPTS.
+const IP_RETOPTS: i32 = 8;
 const L_IP_MULTICAST_ALL: u64 = 49;
 const IPPROTO_ICMP: u64 = 1;
 const IPPROTO_TCP: u64 = 6;
+const L_TCP_MAXSEG: u64 = 2;
 const L_TCP_USER_TIMEOUT: u64 = 18;
+/// TCP_MIN_MSS, MAX_TCP_WINDOW and TCP_MSS_DEFAULT.
+const TCP_MIN_MSS: i32 = 88;
+const MAX_TCP_WINDOW: i32 = 32767;
+const TCP_MSS_DEFAULT: i32 = 536;
 /// Darwin's TCP_RXT_CONNDROPTIME: seconds of unacknowledged retransmission
 /// before the connection drops.
 const TCP_RXT_CONNDROPTIME: i32 = 0x80;
@@ -2843,12 +2962,13 @@ fn int_option(level: u64, opt: u64) -> Option<(i32, i32)> {
         (1, L_SO_SNDLOWAT) => (libc::SOL_SOCKET, libc::SO_SNDLOWAT),
         (1, L_SO_ACCEPTCONN) => (libc::SOL_SOCKET, libc::SO_ACCEPTCONN),
         (IPPROTO_TCP, 1) => (libc::IPPROTO_TCP, libc::TCP_NODELAY),
-        (IPPROTO_TCP, 2) => (libc::IPPROTO_TCP, libc::TCP_MAXSEG),
         (IPPROTO_TCP, 4) => (libc::IPPROTO_TCP, libc::TCP_KEEPALIVE),
         (IPPROTO_TCP, 5) => (libc::IPPROTO_TCP, libc::TCP_KEEPINTVL),
         (IPPROTO_TCP, 6) => (libc::IPPROTO_TCP, libc::TCP_KEEPCNT),
         (IPPROTO_IP, 1) => (libc::IPPROTO_IP, libc::IP_TOS),
         (IPPROTO_IP, 2) => (libc::IPPROTO_IP, libc::IP_TTL),
+        (IPPROTO_IP, 12) => (libc::IPPROTO_IP, libc::IP_RECVTTL),
+        (IPPROTO_IP, 13) => (libc::IPPROTO_IP, libc::IP_RECVTOS),
         (IPPROTO_IPV6, 16) => (libc::IPPROTO_IPV6, libc::IPV6_UNICAST_HOPS),
         (IPPROTO_IPV6, 26) => (libc::IPPROTO_IPV6, libc::IPV6_V6ONLY),
         _ => return None,
@@ -2921,6 +3041,46 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
         return r;
     }
     match (level, opt) {
+        (
+            1,
+            L_SO_TIMESTAMP_OLD | L_SO_TIMESTAMPNS_OLD | L_SO_TIMESTAMP_NEW | L_SO_TIMESTAMPNS_NEW,
+        ) => {
+            let Some(v) = int() else {
+                return -(EINVAL as i64);
+            };
+            // sock_set_timestamp; Darwin's SO_TIMESTAMP gives the time of
+            // each, to the microsecond.
+            let on = (v != 0) as i32;
+            // SAFETY: an int option on the host socket.
+            let r = unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_TIMESTAMP,
+                    (&on as *const i32).cast(),
+                    4,
+                )
+            };
+            if r < 0 {
+                return -(errno::last() as i64);
+            }
+            if let Some(s) = any_sock(&input) {
+                let new = matches!(opt, L_SO_TIMESTAMP_NEW | L_SO_TIMESTAMPNS_NEW);
+                let ns = matches!(opt, L_SO_TIMESTAMPNS_OLD | L_SO_TIMESTAMPNS_NEW);
+                let stamp = if v == 0 {
+                    0
+                } else {
+                    STAMP | if ns { STAMP_NS } else { 0 }
+                } | if new { STAMP_NEW } else { 0 };
+                s.stamp.store(stamp, Ordering::Relaxed);
+            }
+            0
+        }
+        // The IP options to send (ip(7)); Darwin keeps them alike.
+        (IPPROTO_IP, L_IP_RETOPTS) => errno::check(unsafe {
+            // SAFETY: the guest's option buffer of `len` bytes.
+            libc::setsockopt(fd, libc::IPPROTO_IP, IP_RETOPTS, val as *const _, len)
+        } as i64),
         (1, L_SO_PASSCRED) => {
             let Some(v) = int() else {
                 return -(EINVAL as i64);
@@ -3001,7 +3161,7 @@ fn setsockopt_other(input: &SocketInput, level: u64, opt: u64, val: u64, len: u3
         (1, L_SO_DETACH_FILTER, Some(Family::Packet(p))) => super::packet::detach_filter(p),
         (1, L_SO_MARK | L_SO_BINDTODEVICE, None | Some(Family::Inet(_)))
         | (IPPROTO_IP, L_IP_MULTICAST_ALL, None | Some(Family::Inet(_)))
-        | (IPPROTO_TCP, L_TCP_USER_TIMEOUT, None | Some(Family::Inet(_))) => {
+        | (IPPROTO_TCP, L_TCP_MAXSEG | L_TCP_USER_TIMEOUT, None | Some(Family::Inet(_))) => {
             if let Err(e) = is_socket(fd) {
                 return Some(e);
             }
@@ -3027,6 +3187,34 @@ fn setsockopt_other(input: &SocketInput, level: u64, opt: u64, val: u64, len: u3
 /// flag is recorded for getsockopt; a socket that keeps it on does not get
 /// the groups other sockets joined (#524).
 fn inet_option(fd: i32, o: &InetOpts, opt: u64, val: u64, len: u32) -> i64 {
+    if opt == L_TCP_MAXSEG {
+        // tcp(7): the MSS to announce and clamp to, 88 to 32767 (0
+        // clears it), which takes effect at connect. Darwin only lowers its
+        // current MSS, to no less than its minmss less headers: the host
+        // gets the value where it can take it.
+        if len < 4 {
+            return -(EINVAL as i64);
+        }
+        // SAFETY: a guest int option value.
+        let v = unsafe { (val as *const i32).read_unaligned() };
+        if v != 0 && !(TCP_MIN_MSS..=MAX_TCP_WINDOW).contains(&v) {
+            return -(EINVAL as i64);
+        }
+        if v != 0 && get_int(fd, libc::IPPROTO_TCP, libc::TCP_MAXSEG).is_some_and(|h| v < h) {
+            // SAFETY: an int option on the host socket.
+            unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_MAXSEG,
+                    (&v as *const i32).cast(),
+                    4,
+                )
+            };
+        }
+        o.user_mss.store(v as u32, Ordering::Relaxed);
+        return 0;
+    }
     if opt == L_TCP_USER_TIMEOUT {
         // tcp(7): the milliseconds transmitted data may stay unacknowledged
         // before the connection closes, 0 the system default. Darwin counts
@@ -3158,6 +3346,44 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
             }
             (IPPROTO_TCP, L_TCP_USER_TIMEOUT, Family::Inet(o)) => {
                 return int(o.user_timeout.load(Ordering::Relaxed) as i32);
+            }
+            (IPPROTO_TCP, L_TCP_MAXSEG, Family::Inet(o)) => {
+                // `mss_cache`, or the user's MSS before a connection.
+                let user = o.user_mss.load(Ordering::Relaxed) as i32;
+                // TCPF_CLOSE | TCPF_LISTEN: no peer.
+                let mut sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+                let mut sl = std::mem::size_of::<libc::sockaddr_storage>() as u32;
+                // SAFETY: getpeername into local storage.
+                let connected = unsafe {
+                    libc::getpeername(fd, (&mut sa as *mut libc::sockaddr_storage).cast(), &mut sl)
+                } == 0;
+                if !connected && user != 0 {
+                    return int(user);
+                }
+                if !connected {
+                    return int(TCP_MSS_DEFAULT);
+                }
+                // A connect that completed later (EINPROGRESS) is clamped here.
+                clamp_mss(fd, o);
+                let Some(v) = get_int(fd, libc::IPPROTO_TCP, libc::TCP_MAXSEG) else {
+                    return -(errno::last() as i64);
+                };
+                return int(v);
+            }
+            (
+                1,
+                L_SO_TIMESTAMP_OLD | L_SO_TIMESTAMPNS_OLD | L_SO_TIMESTAMP_NEW
+                | L_SO_TIMESTAMPNS_NEW,
+                _,
+            ) => {
+                let st = s.stamp.load(Ordering::Relaxed);
+                let (on, ns, new) = (st & STAMP != 0, st & STAMP_NS != 0, st & STAMP_NEW != 0);
+                return int(match opt {
+                    L_SO_TIMESTAMP_OLD => on && !new && !ns,
+                    L_SO_TIMESTAMPNS_OLD => ns && !new,
+                    L_SO_TIMESTAMP_NEW => on && new && !ns,
+                    _ => ns && new,
+                } as i32);
             }
             (1, L_SO_BINDTODEVICE, Family::Inet(o)) => {
                 let mut n = o.device.lock().unwrap().as_bytes().to_vec();
@@ -3806,7 +4032,7 @@ mod incoming_control_tests {
         let received = incoming.owned[0].0;
         drop(proof);
         assert_eq!(
-            control_to_guest(&mut incoming, None, false, 0, 0).unwrap(),
+            control_to_guest(&mut incoming, None, 0, false, 0, 0).unwrap(),
             (0, L_MSG_CTRUNC)
         );
         drop(incoming);
@@ -4015,7 +4241,7 @@ mod incoming_control_tests {
         let fd = incoming.owned[0].0;
         let mut output = [0u8; 24];
         assert_eq!(
-            control_to_guest(&mut incoming, None, true, output.as_mut_ptr() as u64, 24).unwrap(),
+            control_to_guest(&mut incoming, None, 0, true, output.as_mut_ptr() as u64, 24).unwrap(),
             (24, 0)
         );
         assert!(fdtab::visible(fd));
@@ -4042,6 +4268,7 @@ mod incoming_control_tests {
             control_to_guest(
                 &mut first,
                 None,
+                0,
                 false,
                 failed_output.as_mut_ptr() as u64,
                 48

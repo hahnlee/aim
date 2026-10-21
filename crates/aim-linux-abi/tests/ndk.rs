@@ -343,6 +343,11 @@ fn netlink_audit_and_generic() {
     check("t_nlfamilies", &[]);
 }
 
+#[test]
+fn ip_receive_options() {
+    check("t_ipopts", &[]);
+}
+
 /// The derived image's lmkd answers ActivityManager's protocol, with the
 /// host-call module `memory` as its pressure source.
 #[test]
