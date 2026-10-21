@@ -947,7 +947,11 @@ impl Service for AlarmManager {
                 alarm::write_set_time_zone_reply(&mut p);
                 Ok(p)
             }
-            code => reply(Err(self.host.unimplemented("alarm", code))),
+            code => reply(Err(self.host.unimplemented(
+                "alarm",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }

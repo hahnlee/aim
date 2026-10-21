@@ -939,7 +939,11 @@ impl Service for ActivityTaskManager {
                 atm::write_unregister_background_activity_start_callback_reply(&mut p);
                 Ok(p)
             }
-            code => reply(Err(self.0.unimplemented("activity_task", code))),
+            code => reply(Err(self.0.unimplemented(
+                "activity_task",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }
@@ -1334,9 +1338,11 @@ impl Service for ActivityClientController {
                     .with(token, |r| r.requested_orientation = orientation);
                 empty()
             }
-            code => reply(Err(self
-                .0
-                .unimplemented("activity client controller", code))),
+            code => reply(Err(self.0.unimplemented(
+                "activity client controller",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }

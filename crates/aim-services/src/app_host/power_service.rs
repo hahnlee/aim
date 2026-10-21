@@ -615,7 +615,11 @@ impl Service for PowerManager {
                 pm::IsLightDeviceIdleMode::read(&mut call.data).map_err(bad)?;
                 bool_reply(Ok(false))
             }
-            code => reply(Err(self.host.unimplemented("power", code))),
+            code => reply(Err(self.host.unimplemented(
+                "power",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }

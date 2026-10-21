@@ -209,7 +209,11 @@ impl Service for StatusBar {
                         }),
                 )
             }
-            code => reply(Err(self.host.unimplemented("statusbar", code))),
+            code => reply(Err(self.host.unimplemented(
+                "statusbar",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }

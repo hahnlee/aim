@@ -83,7 +83,13 @@ impl Service for PlatformCompat {
                     Err(e) => return reply(Err(e)),
                 }
             }
-            code => return reply(Err(self.0.unimplemented("platform_compat", code))),
+            code => {
+                return reply(Err(self.0.unimplemented(
+                    "platform_compat",
+                    self.descriptor(),
+                    code,
+                )));
+            }
         }
         Ok(p)
     }

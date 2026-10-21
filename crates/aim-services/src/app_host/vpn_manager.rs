@@ -73,7 +73,11 @@ impl Service for VpnManager {
                     p
                 }))
             }
-            code => reply(Err(self.host.unimplemented("vpn_management", code))),
+            code => reply(Err(self.host.unimplemented(
+                "vpn_management",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }

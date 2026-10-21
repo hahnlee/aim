@@ -251,7 +251,11 @@ impl Service for InputMethodManager {
                 imm::write_get_ime_tracker_service_reply(&mut p, Some(tracker));
                 Ok(p)
             }
-            code => reply(Err(self.host.unimplemented("input_method", code))),
+            code => reply(Err(self.host.unimplemented(
+                "input_method",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }
@@ -297,7 +301,11 @@ impl Service for ImeTracker {
             | tracker::ON_SHOWN
             | tracker::ON_HIDDEN
             | tracker::ON_DISPATCHED => Ok(Parcel::new()),
-            code => reply(Err(self.0.unimplemented("ime tracker", code))),
+            code => reply(Err(self.0.unimplemented(
+                "ime tracker",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }

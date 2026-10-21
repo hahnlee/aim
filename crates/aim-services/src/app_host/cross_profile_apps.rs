@@ -88,12 +88,22 @@ impl Service for CrossProfileApps {
                         cpa::write_can_interact_across_profiles_reply(&mut p, false)
                     }
                     Ok(_) => {
-                        return reply(Err(self.host.unimplemented("crossprofileapps", call.code)));
+                        return reply(Err(self.host.unimplemented(
+                            "crossprofileapps",
+                            self.descriptor(),
+                            call.code,
+                        )));
                     }
                     Err(e) => return reply(Err(e)),
                 }
             }
-            code => return reply(Err(self.host.unimplemented("crossprofileapps", code))),
+            code => {
+                return reply(Err(self.host.unimplemented(
+                    "crossprofileapps",
+                    self.descriptor(),
+                    code,
+                )));
+            }
         }
         Ok(p)
     }

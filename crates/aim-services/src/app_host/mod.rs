@@ -3564,20 +3564,24 @@ impl AppHost {
         )
     }
 
-    /// The exception of a method of `service` it does not implement,
-    /// logged once.
-    fn unimplemented(&self, service: &str, code: u32) -> Exception {
+    /// The exception of a method of `service` (of the interface
+    /// `descriptor`) it does not implement, named by its AIDL, logged once.
+    fn unimplemented(&self, service: &str, descriptor: &str, code: u32) -> Exception {
+        let method = match aim_service_aidl::method_name(descriptor, code) {
+            Some(name) => format!("{service}#{code} ({name})"),
+            None => format!("{service}#{code}"),
+        };
         if self
             .unimplemented
             .lock()
             .unwrap()
             .insert((service.to_string(), code))
         {
-            eprintln!("app host: {service}#{code} not implemented");
+            eprintln!("app host: {method} not implemented");
         }
         Exception::new(
             EX_UNSUPPORTED_OPERATION,
-            format!("{service}#{code} is not implemented by the app host"),
+            format!("{method} is not implemented by the app host"),
         )
     }
 
@@ -5030,7 +5034,11 @@ impl Service for Activity {
                 am::write_register_strict_mode_callback_reply(&mut p);
                 Ok(p)
             }
-            code => reply(Err(self.0.unimplemented("activity", code))),
+            code => reply(Err(self.0.unimplemented(
+                "activity",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }

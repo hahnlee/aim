@@ -392,7 +392,11 @@ impl Service for EnhancedConfirmation {
                 self.set_clear_restriction_allowed(uid, a.package_name.as_deref(), a.user_id)
                     .map(|()| ecm::write_set_clear_restriction_allowed_reply(&mut p))
             }
-            code => Err(self.host.unimplemented("ecm_enhanced_confirmation", code)),
+            code => {
+                Err(self
+                    .host
+                    .unimplemented("ecm_enhanced_confirmation", self.descriptor(), code))
+            }
         };
         reply(result.map(|()| p))
     }

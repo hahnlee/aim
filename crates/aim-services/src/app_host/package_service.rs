@@ -17,11 +17,20 @@ use aim_service_aidl::android_content_pm_ipackagemanager as pm;
 use super::AppHost;
 use super::package_writes::Writes;
 use super::settings_service::{java_exception, parse_user_arg};
+use crate::package::apps_filter::NotModelled;
 use crate::package::intent::ComponentName;
 use crate::package::query::Query;
 use crate::package::write::enabled::{Batch, Setting};
 use crate::shadow::{Answer, ShadowCall};
 use crate::shell::{SHELL_COMMAND_TRANSACTION, ShellCommand};
+
+const PER_USER_RANGE: i32 = 100_000;
+/// `Process.ROOT_UID`, `SYSTEM_UID`.
+const ROOT_UID: i32 = 0;
+const SYSTEM_UID: i32 = 1000;
+const MANAGE_DEVICE_ADMINS: &str = "android.permission.MANAGE_DEVICE_ADMINS";
+const SUSPEND_APPS: &str = "android.permission.SUSPEND_APPS";
+const INTERACT_ACROSS_USERS_FULL: &str = "android.permission.INTERACT_ACROSS_USERS_FULL";
 
 pub struct PackageService {
     host: Arc<AppHost>,
@@ -132,6 +141,35 @@ impl PackageService {
                     pm::write_clear_application_user_data_reply,
                 )
             }
+            pm::IS_PACKAGE_STATE_PROTECTED => {
+                let Ok(a) = pm::IsPackageStateProtected::read(&mut call.data) else {
+                    return Some(Err(BAD_VALUE));
+                };
+                let mut p = Parcel::new();
+                match self.package_state_protected(query, a.package_name.as_deref(), a.user_id) {
+                    Ok(Ok(protected)) => {
+                        pm::write_is_package_state_protected_reply(&mut p, protected)
+                    }
+                    Ok(Err(e)) => p.write_exception(&e),
+                    Err(NotModelled(reason)) => return Some(self.unmodelled(call.code, reason)),
+                }
+                Ok(p)
+            }
+            pm::GET_UNSUSPENDABLE_PACKAGES_FOR_USER => {
+                let Ok(a) = pm::GetUnsuspendablePackagesForUser::read(&mut call.data) else {
+                    return Some(Err(BAD_VALUE));
+                };
+                reply(
+                    self.unsuspendable_checks(uid as i32, a.package_names.is_some(), a.user_id)
+                        .and_then(|()| {
+                            Err(self.host.unimplemented_named(
+                                "package",
+                                "getUnsuspendablePackagesForUser: package suspension (#1987)",
+                            ))
+                        }),
+                    |_| {},
+                )
+            }
             // One-way; ART Service's `DexUseManagerLocal` records the use.
             pm::NOTIFY_DEX_LOAD => reply(
                 Err(self.host.unimplemented_named(
@@ -142,6 +180,73 @@ impl PackageService {
             ),
             _ => return None,
         })
+    }
+}
+
+impl PackageService {
+    /// `isPackageStateProtected`'s checks (the caller across users, the
+    /// shell's restrictions, MANAGE_DEVICE_ADMINS for others than root and
+    /// the system), then `ProtectedPackages.isPackageStateProtected` of
+    /// the app host.
+    fn package_state_protected(
+        &self,
+        q: &Query<'_>,
+        name: Option<&str>,
+        user: i32,
+    ) -> Result<Result<bool, Exception>, NotModelled> {
+        let uid = q.calling_uid;
+        if let Err(e) =
+            q.internal_enforce_cross_user(uid, user, false, true, "isPackageStateProtected")?
+        {
+            return Ok(Err(e));
+        }
+        if !matches!(uid % PER_USER_RANGE, ROOT_UID | SYSTEM_UID)
+            && !q.uid_has_permission(uid, MANAGE_DEVICE_ADMINS)?
+        {
+            return Ok(Err(Exception::security(format!(
+                "Caller must have the {MANAGE_DEVICE_ADMINS} permission."
+            ))));
+        }
+        let Some(name) = name else {
+            return Ok(Ok(false));
+        };
+        Ok(self.writes.protected(name).and_then(|protected| {
+            protected.ok_or_else(|| {
+                self.host.unimplemented_named(
+                    "package",
+                    "isPackageStateProtected of a device or profile owner's packages (#1521)",
+                )
+            })
+        }))
+    }
+
+    /// `getUnsuspendablePackagesForUser`'s checks: the names, SUSPEND_APPS,
+    /// and INTERACT_ACROSS_USERS_FULL for another user.
+    fn unsuspendable_checks(&self, uid: i32, names: bool, user: i32) -> Result<(), Exception> {
+        if !names {
+            return Err(Exception::new(
+                EX_NULL_POINTER,
+                "packageNames cannot be null",
+            ));
+        }
+        let enforce = |permission: &str, message: &str| -> Result<(), Exception> {
+            match self.host.check_permission(Some(permission), uid)? {
+                0 => Ok(()),
+                _ => Err(Exception::security(format!(
+                    "{message}: Neither user {uid} nor current process has {permission}."
+                ))),
+            }
+        };
+        enforce(SUSPEND_APPS, "getUnsuspendablePackagesForUser")?;
+        if uid / PER_USER_RANGE != user {
+            enforce(
+                INTERACT_ACROSS_USERS_FULL,
+                &format!(
+                    "Calling uid {uid} cannot query getUnsuspendablePackagesForUser for user {user}"
+                ),
+            )?;
+        }
+        Ok(())
     }
 }
 

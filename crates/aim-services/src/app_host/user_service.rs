@@ -823,6 +823,19 @@ impl UserManager {
                     Ok(um::write_get_users_reply(p, Some(&users)))
                 })
             }
+            // `checkCreateUsersPermission`, then the user types' limits,
+            // which the app host does not model, nor does it make profiles.
+            um::CAN_ADD_PRIVATE_PROFILE => require(
+                self.manage_or(uid, Some(CREATE_USERS)),
+                "You either need MANAGE_USERS or CREATE_USERS permission to: canHaveRestrictedProfile"
+                    .into(),
+            )
+            .and_then(|_| {
+                Err(self.host.unimplemented_named(
+                    "user",
+                    "canAddPrivateProfile: user types and profiles (#2015)",
+                ))
+            }),
             um::GET_PROFILES => {
                 let a = um::GetProfiles::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let full = if a.user_id != caller {
@@ -1033,7 +1046,7 @@ impl UserManager {
                     .and_then(|_| self.with_name(self.user(caller)?))
                     .map(|u| um::write_get_user_name_reply(p, &Some(u.and_then(|u| u.name).unwrap_or_default())))
             }
-            code => Err(self.host.unimplemented("user", code)),
+            code => Err(self.host.unimplemented("user", self.descriptor(), code)),
         })
     }
 

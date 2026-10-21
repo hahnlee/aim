@@ -2729,7 +2729,13 @@ impl JobScheduler {
                 }
                 cb::write_handle_abandoned_job_reply(&mut p);
             }
-            code => return reply(Err(self.host.unimplemented("jobscheduler callback", code))),
+            code => {
+                return reply(Err(self.host.unimplemented(
+                    "jobscheduler callback",
+                    self.descriptor(),
+                    code,
+                )));
+            }
         }
         Ok(p)
     }
@@ -3193,7 +3199,11 @@ impl Service for JobScheduler {
                     Ok(p)
                 })())
             }
-            code => reply(Err(self.host.unimplemented("jobscheduler", code))),
+            code => reply(Err(self.host.unimplemented(
+                "jobscheduler",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }

@@ -308,7 +308,9 @@ impl ContentService {
             Exception::new(EX_NULL_POINTER, "Attempt to invoke virtual method 'android.accounts.Account android.content.SyncRequest.getAccount()' on a null object reference")
         })?;
         if request.account.is_some() || request.periodic {
-            return Err(self.host.unimplemented("content", cs::SYNC_AS_USER));
+            return Err(self
+                .host
+                .unimplemented("content", cs::DESCRIPTOR, cs::SYNC_AS_USER));
         }
         let exempt = request
             .extras
@@ -324,7 +326,9 @@ impl ContentService {
             Exception::new(EX_ILLEGAL_STATE, "the account service is not started")
         })?;
         if accounts.has_accounts(user)? {
-            return Err(self.host.unimplemented("content", cs::SYNC_AS_USER));
+            return Err(self
+                .host
+                .unimplemented("content", cs::DESCRIPTOR, cs::SYNC_AS_USER));
         }
         Ok(())
     }
@@ -824,7 +828,11 @@ impl Service for ContentService {
                 }
                 empty(Ok(()))
             }
-            code => reply(Err(self.host.unimplemented("content", code))),
+            code => reply(Err(self.host.unimplemented(
+                "content",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }

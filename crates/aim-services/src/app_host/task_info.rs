@@ -975,7 +975,11 @@ impl Service for AppTask {
                     p
                 }))
             }
-            code => super::reply(Err(self.host.unimplemented("app_task", code))),
+            code => super::reply(Err(self.host.unimplemented(
+                "app_task",
+                self.descriptor(),
+                code,
+            ))),
         }
     }
 }

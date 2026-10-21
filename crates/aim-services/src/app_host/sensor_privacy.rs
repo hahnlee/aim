@@ -296,7 +296,12 @@ impl Service for SensorPrivacy {
                         persisted(&self.host)?.state(a.toggle_type, 0, a.sensor),
                     );
                 }
-                code => return Err(self.host.unimplemented("sensor_privacy", code).into()),
+                code => {
+                    return Err(self
+                        .host
+                        .unimplemented("sensor_privacy", self.descriptor(), code)
+                        .into());
+                }
             }
             Ok(())
         })();
