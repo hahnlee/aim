@@ -16,8 +16,8 @@ pub const MAGIC: i32 = 0x4C44_4E42;
 pub const MAGIC_NATIVE: i32 = 0x4C44_4E44;
 
 /// `Parcel.VAL_*`.
-const VAL_NULL: i32 = -1;
-const VAL_STRING: i32 = 0;
+pub(crate) const VAL_NULL: i32 = -1;
+pub(crate) const VAL_STRING: i32 = 0;
 pub(crate) const VAL_INTEGER: i32 = 1;
 const VAL_MAP: i32 = 2;
 const VAL_BUNDLE: i32 = 3;
@@ -202,7 +202,7 @@ impl Value {
 }
 
 /// `writeValue` of a length-prefixed value of `kind`.
-fn length_prefixed(p: &mut Parcel, kind: i32, value: impl FnOnce(&mut Parcel)) {
+pub(crate) fn length_prefixed(p: &mut Parcel, kind: i32, value: impl FnOnce(&mut Parcel)) {
     p.write_i32(kind);
     let length_at = p.position();
     p.write_i32(-1);
