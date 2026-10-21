@@ -995,6 +995,23 @@ impl Preferences {
         self.packages.last_mut().unwrap()
     }
 
+    /// `clearData`: the package's channels, groups and delegate gone, its
+    /// preferences their defaults, which `writePackageXml` leaves out
+    /// (importance, priority, visibility, bubbles) or writes as such.
+    pub fn clear_data(&mut self, name: &str, uid: i32) {
+        let Some(p) = self.package_mut(name, uid) else {
+            return;
+        };
+        p.channels.clear();
+        p.groups.clear();
+        p.delegate = None;
+        for attr in ["importance", "priority", "visibility", "allow_bubble"] {
+            p.set_attr(attr, None);
+        }
+        p.set_attr("show_badge", Some(Value::Bool(true)));
+        p.set_attr("app_user_locked_fields", Some(Value::Int(0)));
+    }
+
     /// `setNotificationDelegate`: an enabled delegate of the package.
     pub fn set_delegate(
         &mut self,
@@ -1566,6 +1583,32 @@ mod tests {
                 .unwrap()
                 .deleted
         );
+    }
+
+    /// `PreferencesHelper.clearData`: the channels, groups and delegate
+    /// go and the preferences are their defaults; another package keeps
+    /// its own.
+    #[test]
+    fn clear_data_resets_the_package() {
+        let mut prefs = Preferences::default();
+        let d = defaults();
+        for name in ["app", "other"] {
+            prefs
+                .create_channel(name, 1, channel("c", 3), true, false, false, &d)
+                .unwrap();
+        }
+        prefs.set_delegate("app", 1, "delegate", 2, &d);
+        let p = prefs.package_mut("app", 1).unwrap();
+        p.set_attr("importance", Some(Value::Int(4)));
+        p.set_attr("show_badge", Some(Value::Bool(false)));
+        p.set_attr("app_user_locked_fields", Some(Value::Int(1)));
+        prefs.clear_data("app", 1);
+        let p = prefs.package("app", 1).unwrap();
+        assert!(p.channels.is_empty() && p.groups.is_empty() && p.delegate.is_none());
+        assert_eq!(p.importance(), IMPORTANCE_UNSPECIFIED);
+        assert!(p.show_badge());
+        assert_eq!(p.attr_int("app_user_locked_fields", -1), 0);
+        assert!(prefs.package("other", 1).unwrap().channel("c").is_some());
     }
 
     /// A channel goes through `notification_policy.xml` and a parcel as

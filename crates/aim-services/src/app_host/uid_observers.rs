@@ -262,7 +262,7 @@ impl AppHost {
     }
 
     /// Whether a process of `uid` runs (its `UidRecord`, never idle here).
-    fn uid_runs(&self, uid: i32) -> bool {
+    pub(super) fn uid_runs(&self, uid: i32) -> bool {
         self.apps
             .lock()
             .unwrap()

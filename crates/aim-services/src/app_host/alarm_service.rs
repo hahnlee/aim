@@ -242,6 +242,34 @@ impl AlarmManager {
         AlarmManager { host, shared }
     }
 
+    /// `AlarmManagerInternal.removeAlarmsForUid` (`removeForStoppedLocked`):
+    /// the uid's alarms whose app's starts are disabled
+    /// (`isAppStartModeDisabled`: an instant app whose uid runs no
+    /// process), none of the system uid's.
+    pub(super) fn remove_alarms_for_uid(&self, uid: i32) -> Result<(), Exception> {
+        if uid == 1000 {
+            return Ok(());
+        }
+        let (packages, _) = self.host.packages()?;
+        let runs = self.host.uid_runs(uid);
+        let user = uid.div_euclid(PER_USER_RANGE as i32);
+        let mut state = self.shared.state.lock().unwrap();
+        state.alarms.retain(|a| {
+            let disabled = a.uid == uid
+                && !runs
+                && packages
+                    .packages
+                    .get(&a.package)
+                    .is_some_and(|ps| crate::package::info::user_state(ps, user).instant_app);
+            if disabled && let Some((l, death)) = &a.listener {
+                self.host.process.clear_death(l, *death);
+            }
+            !disabled
+        });
+        self.alarm_clocks_changed(&mut state);
+        Ok(())
+    }
+
     /// `isExactAlarmChangeEnabled`: whether `package` needs a permission
     /// for exact alarms.
     fn exact_alarm_change_enabled(&self, package: &str) -> Result<bool, Exception> {

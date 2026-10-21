@@ -135,12 +135,14 @@ const STOP_REASON_CONSTRAINT_CONNECTIVITY: i32 = 7;
 const STOP_REASON_CONSTRAINT_DEVICE_IDLE: i32 = 8;
 const STOP_REASON_CONSTRAINT_STORAGE_NOT_LOW: i32 = 9;
 const STOP_REASON_APP_STANDBY: i32 = 12;
-const STOP_REASON_USER: i32 = 13;
+pub(super) const STOP_REASON_USER: i32 = 13;
 const STOP_REASON_TIMEOUT_ABANDONED: i32 = 16;
 /// `JobParameters.INTERNAL_STOP_REASON_*`.
 const INTERNAL_STOP_REASON_CANCELED: i32 = 0;
 const INTERNAL_STOP_REASON_CONSTRAINTS_NOT_SATISFIED: i32 = 1;
 const INTERNAL_STOP_REASON_TIMEOUT: i32 = 3;
+pub(super) const INTERNAL_STOP_REASON_DATA_CLEARED: i32 = 8;
+const INTERNAL_STOP_REASON_UNINSTALL: i32 = 7;
 const INTERNAL_STOP_REASON_SUCCESSFUL_FINISH: i32 = 10;
 const INTERNAL_STOP_REASON_ANR: i32 = 12;
 const INTERNAL_STOP_REASON_TIMEOUT_ABANDONED: i32 = 13;
@@ -1705,6 +1707,40 @@ impl JobScheduler {
         namespace: Option<Option<String>>,
         debug: &str,
     ) -> Result<(), Exception> {
+        self.cancel_jobs(
+            uid,
+            false,
+            namespace,
+            STOP_REASON_CANCELLED_BY_APP,
+            INTERNAL_STOP_REASON_CANCELED,
+            debug,
+        )
+    }
+
+    /// `JobSchedulerInternal.cancelJobsForUid(uid, includeSourceApp,
+    /// reason, internalReasonCode, debugReason)`.
+    pub(super) fn cancel_jobs_for_uid(
+        &self,
+        uid: i32,
+        include_source_app: bool,
+        reason: i32,
+        internal: i32,
+        debug: &str,
+    ) -> Result<(), Exception> {
+        self.cancel_jobs(uid, include_source_app, None, reason, internal, debug)
+    }
+
+    /// `cancelJobsForUid`: the jobs the uid scheduled, and those scheduled
+    /// for it with `include_source_app` (in `namespace` only, if asked).
+    fn cancel_jobs(
+        &self,
+        uid: i32,
+        include_source_app: bool,
+        namespace: Option<Option<String>>,
+        reason: i32,
+        internal: i32,
+        debug: &str,
+    ) -> Result<(), Exception> {
         if uid == 1000 && namespace.as_ref().is_none_or(Option::is_none) {
             eprintln!("app host: jobs: can't cancel all jobs for system uid");
             return Ok(());
@@ -1715,20 +1751,14 @@ impl JobScheduler {
         let keys: Vec<u64> = state
             .jobs
             .iter()
-            .filter(|(_, j)| j.tracked && j.calling_uid == uid)
+            .filter(|(_, j)| {
+                j.tracked && (j.calling_uid == uid || include_source_app && j.source_uid == uid)
+            })
             .filter(|(_, j)| namespace.as_ref().is_none_or(|n| *n == j.namespace))
             .map(|(k, _)| *k)
             .collect();
         for key in keys {
-            self.cancel_impl(
-                &mut state,
-                key,
-                None,
-                STOP_REASON_CANCELLED_BY_APP,
-                INTERNAL_STOP_REASON_CANCELED,
-                debug,
-                now,
-            );
+            self.cancel_impl(&mut state, key, None, reason, internal, debug, now);
         }
         Ok(())
     }
@@ -2275,6 +2305,15 @@ impl JobScheduler {
         let Some(j) = state.jobs.get(&key) else {
             return;
         };
+        // Cleared from the rest of the tracking already, as the job's
+        // package was removed or its data cleared.
+        if matches!(
+            internal,
+            INTERNAL_STOP_REASON_UNINSTALL | INTERNAL_STOP_REASON_DATA_CLEARED
+        ) {
+            state.jobs.remove(&key);
+            return;
+        }
         let (tracked, periodic) = (j.tracked, j.job.periodic);
         let mut next = if reschedule {
             Some(self.reschedule_for_failure(j, stop, internal, now))

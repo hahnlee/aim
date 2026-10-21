@@ -66,7 +66,9 @@ const PROTECTION_SIGNATURE: i32 = 2;
 const PROTECTION_FLAG_DEVELOPMENT: i32 = 0x20;
 const PROTECTION_FLAG_INSTANT: i32 = 0x1000;
 const PROTECTION_FLAG_ROLE: i32 = 0x400_0000;
-/// `PermissionInfo.FLAG_HARD_RESTRICTED`, `FLAG_SOFT_RESTRICTED`.
+/// `PermissionInfo.FLAG_REMOVED`, `FLAG_HARD_RESTRICTED`,
+/// `FLAG_SOFT_RESTRICTED`.
+const FLAG_REMOVED: i32 = 1 << 1;
 const FLAG_HARD_RESTRICTED: i32 = 1 << 2;
 const FLAG_SOFT_RESTRICTED: i32 = 1 << 3;
 const FLAG_INSTALLED: i32 = 1 << 30;
@@ -613,6 +615,96 @@ impl Access<'_> {
             old & !RUNTIME_GRANTED
         };
         Ok(set_flags(new, ps.app_id, permission, flags))
+    }
+
+    /// `Permission.isRemoved`: its declaration's `PermissionInfo.FLAG_REMOVED`.
+    fn removed(&self, p: &Permission) -> bool {
+        self.state
+            .packages
+            .get(&p.package)
+            .and_then(|ps| ps.pkg.as_deref())
+            .and_then(|pkg| pkg.permissions.iter().find(|d| d.component.name == p.name))
+            .is_some_and(|d| d.component.flags & FLAG_REMOVED != 0)
+    }
+
+    /// `PermissionService.resetRuntimePermissions` of `package` in `user`
+    /// in `new`: `AppIdPermissionPolicy`'s, then `DevicePermissionPolicy`'s,
+    /// which only a virtual device's permissions have (#1508). A runtime
+    /// permission no other package of the app id requests and neither the
+    /// system nor a policy fixed loses what the user set, and its grant
+    /// unless a role or the default grants gave it.
+    fn reset_runtime_permissions(
+        &self,
+        new: &mut AccessUser,
+        package: &str,
+        user: i32,
+    ) -> Result<Vec<FlagsChanged>, Exception> {
+        let Some(ps) = self.state.packages.get(package) else {
+            return Ok(Vec::new());
+        };
+        let Some(pkg) = ps.pkg.as_deref() else {
+            return Ok(Vec::new());
+        };
+        // The access state is user 0's, the model's only user.
+        if user != 0 {
+            return Ok(Vec::new());
+        }
+        let others: Vec<&PackageState> = self
+            .packages_of(ps.app_id)
+            .into_iter()
+            .filter(|other| other.name != ps.name)
+            .collect();
+        let requested_by_others = |permission: &str| {
+            others.iter().any(|other| {
+                other
+                    .pkg
+                    .as_deref()
+                    .is_some_and(|pkg| pkg.requested_permissions.iter().any(|r| r == permission))
+            })
+        };
+        let devices = new
+            .app_id_device_permissions
+            .iter()
+            .any(|(id, devices)| *id == ps.app_id && !devices.is_empty());
+        if devices
+            && pkg
+                .requested_permissions
+                .iter()
+                .any(|p| !requested_by_others(p))
+        {
+            return Err(not_modelled(NotModelled(
+                "a virtual device's permissions (#1508)",
+            )));
+        }
+        let system_or_installed = ps.is.system || info::user_state(ps, user).installed;
+        let mut changes = Vec::new();
+        for permission in &pkg.requested_permissions {
+            let Some(definition) = self.definition(permission) else {
+                continue;
+            };
+            if !is_runtime(definition) || self.removed(definition) {
+                continue;
+            }
+            if requested_by_others(permission) {
+                continue;
+            }
+            let old = new.permission_flags(ps.app_id, permission);
+            if old & (SYSTEM_FIXED | POLICY_FIXED) != 0 {
+                continue;
+            }
+            let mut flags = if system_or_installed && old & (ROLE | PREGRANT) != 0 {
+                old | RUNTIME_GRANTED
+            } else {
+                old & !(RUNTIME_GRANTED | ROLE | PREGRANT)
+            };
+            flags &=
+                !(USER_SET | USER_FIXED | APP_OP_REVOKED | ONE_TIME | HIBERNATION | USER_SELECTED);
+            if flags & LEGACY_GRANTED != 0 {
+                flags |= IMPLICIT;
+            }
+            changes.extend(set_flags(new, ps.app_id, permission, flags));
+        }
+        Ok(changes)
     }
 
     /// `updatePermissionFlags` of a caller.
@@ -1222,6 +1314,19 @@ impl PermissionManager {
         drop(held);
         self.grants_changed(&after, &changes)?;
         self.on_state_mutated(&changes, kill)
+    }
+
+    /// `PermissionManagerServiceInternal.resetRuntimePermissions` of
+    /// `package` in `user`, as PackageManager clears its data: the
+    /// change's effects run as a revocation's (`onStateMutated`).
+    pub(super) fn reset_runtime_permissions(
+        &self,
+        package: &str,
+        user: i32,
+    ) -> Result<(), Exception> {
+        self.mutate(Some(KILL_APP_REASON_PERMISSIONS_REVOKED), |access, new| {
+            access.reset_runtime_permissions(new, package, user)
+        })
     }
 
     /// `AccessPersistence.writeUserState` of user 0 through `AtomicFile`
@@ -2225,6 +2330,57 @@ mod tests {
             },
             &mut new,
         )
+    }
+
+    /// `AppIdPermissionPolicy.resetRuntimePermissions`: the user's choices
+    /// and the grant go, a policy-fixed permission stays, a default grant
+    /// is given again (a legacy one asks for review), and a permission
+    /// another package of the uid requests is left alone.
+    #[test]
+    fn runtime_permissions_are_reset() {
+        let (mut state, defined, mut user0) = fixture();
+        for name in ["granted", "denied", "asked", "shared.a", "shared.b"] {
+            let ps = state.packages.get_mut(name).unwrap();
+            Arc::make_mut(ps.pkg.as_mut().unwrap()).requested_permissions = vec![CAMERA.into()];
+        }
+        user0.app_id_permissions[4].1[0].1 = PREGRANT | USER_SET | LEGACY_GRANTED;
+        user0
+            .app_id_permissions
+            .push((10003, vec![(CAMERA.into(), RUNTIME_GRANTED | USER_FIXED)]));
+        user0.app_id_permissions.sort_by_key(|(id, _)| *id);
+        let groups = permission_groups(&state);
+        let filter = AppsFilter::default();
+        let compat = CompatConfig::default();
+        let a = Access {
+            state: &state,
+            filter: &filter,
+            defined: &defined,
+            groups: &groups,
+            user0: &user0,
+            compat: &compat,
+        };
+        let mut new = user0.clone();
+        let reset = |new: &mut AccessUser, package| {
+            a.reset_runtime_permissions(new, package, 0)
+                .unwrap()
+                .into_iter()
+                .map(|c| (c.old, c.new))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            reset(&mut new, "granted"),
+            [(RUNTIME_GRANTED | USER_SET, 0)]
+        );
+        assert!(reset(&mut new, "denied").is_empty());
+        assert_eq!(
+            reset(&mut new, "asked"),
+            [(
+                PREGRANT | USER_SET | LEGACY_GRANTED,
+                PREGRANT | LEGACY_GRANTED | RUNTIME_GRANTED | IMPLICIT
+            )]
+        );
+        assert!(reset(&mut new, "shared.a").is_empty());
+        assert!(reset(&mut new, "unknown").is_empty());
     }
 
     /// CtsPermissionTestCases' `GrantRuntimePermissionTest` and

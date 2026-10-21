@@ -89,6 +89,7 @@ const REASON_APP_CANCEL_ALL: i32 = 9;
 const REASON_LISTENER_CANCEL: i32 = 10;
 const REASON_GROUP_SUMMARY_CANCELED: i32 = 12;
 const REASON_CHANNEL_REMOVED: i32 = 20;
+const REASON_CLEAR_DATA: i32 = 21;
 /// `NotificationListenerService.TRIM_FULL`.
 const TRIM_FULL: i32 = 0;
 /// `NotificationManagerService.MAX_PACKAGE_NOTIFICATIONS`,
@@ -758,6 +759,60 @@ impl NotificationManager {
             std::fs::rename(&new, &state.path)
         };
         write().map_err(|e| fail(e.to_string()))
+    }
+
+    /// `clearData(package, uid, fromApp)`, which ActivityManager calls as
+    /// the system once the package's data is cleared: its notifications
+    /// cancelled, its preferences reset unless the app cleared its own data,
+    /// the policy saved. The managed services' reset of a package
+    /// (`ConditionProviders.resetPackage`, the listeners' and assistants'
+    /// `resetComponents`) changes nothing for a package none of them
+    /// approves or defaults to; one they do is not implemented (#1488).
+    pub(super) fn clear_data(
+        &self,
+        package: &str,
+        uid: i32,
+        from_app: bool,
+    ) -> Result<(), Exception> {
+        let user = uid.div_euclid(PER_USER_RANGE as i32);
+        let mut guard = self.state()?;
+        let state = guard.as_mut().unwrap();
+        self.cancel(
+            state,
+            &Cancel {
+                package: Some(package),
+                tag: None,
+                id: None,
+                channel: None,
+                must_have: 0,
+                must_not_have: 0,
+                // `UserHandle.getUserId(Binder.getCallingUid())`: the system's.
+                user: USER_SYSTEM,
+                reason: REASON_CLEAR_DATA,
+            },
+        );
+        let of_package = |entry: &str| entry.split('/').next() == Some(package);
+        for tag in ["dnd_apps", "enabled_listeners", "enabled_assistants"] {
+            let defaults = state
+                .policy
+                .children()
+                .filter(|e| e.name == tag)
+                .filter_map(|e| e.string("defaults").map(|d| d.into_owned()))
+                .any(|d| d.split(':').any(of_package));
+            if defaults
+                || approved(&state.policy, tag, user)
+                    .iter()
+                    .any(|e| of_package(e))
+            {
+                return Err(unsupported(&format!(
+                    "resetting {package}'s approved services in <{tag}>"
+                )));
+            }
+        }
+        if !from_app {
+            state.prefs.clear_data(package, uid);
+        }
+        Self::save(state)
     }
 
     /// `checkCallerIsSystemOrSameApp`.
