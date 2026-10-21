@@ -843,6 +843,46 @@ pub struct FuseRoute {
     pub default_permissions: bool,
     pub read_only: bool,
 }
+/// The cgroup v1 hierarchy that holds the normalized guest path: its
+/// controller and the host directory of its root.
+pub fn cgroup_v1(guest: &str) -> Option<(aim_storage::cgroup_v1::Controller, PathBuf)> {
+    let mounts = VFS.get()?.mounts.read().unwrap();
+    let (mount, _) = holder(&mounts, guest)?;
+    let controller = aim_storage::cgroup_v1::Controller::from_map_kind(mount.fstype.as_deref()?)?;
+    Some((controller, mount.host.clone()))
+}
+
+/// The host directory of the root of the mounted kernel filesystem
+/// `fstype` (`cgroup2`, `bpf`).
+pub fn kernel_fs_root(fstype: &str) -> Option<PathBuf> {
+    let mounts = VFS.get()?.mounts.read().unwrap();
+    mounts
+        .iter()
+        .filter(|m| !hidden(&mounts, m))
+        .find(|m| m.fstype.as_deref() == Some(fstype))
+        .map(|m| m.host.clone())
+}
+
+/// The cgroup v1 hierarchies mounted: each one's controller and the host
+/// directory of its root.
+pub fn cgroup_v1_hierarchies() -> Vec<(aim_storage::cgroup_v1::Controller, PathBuf)> {
+    let Some(v) = VFS.get() else {
+        return Vec::new();
+    };
+    let mounts = v.mounts.read().unwrap();
+    let mut out: Vec<_> = mounts
+        .iter()
+        .filter(|m| !hidden(&mounts, m))
+        .filter_map(|m| {
+            let c = aim_storage::cgroup_v1::Controller::from_map_kind(m.fstype.as_deref()?)?;
+            Some((c, m.host.clone()))
+        })
+        .collect();
+    out.sort_by_key(|(c, _)| *c);
+    out.dedup_by_key(|(c, _)| *c);
+    out
+}
+
 pub fn fuse_route(guest: &str) -> Option<FuseRoute> {
     let mounts = vfs().mounts.read().unwrap();
     let (mount, rest) = holder(&mounts, guest)?;
@@ -1091,6 +1131,9 @@ fn parse_map(text: &str) -> Result<(Option<PathBuf>, Vec<Mount>), String> {
             "ro" => Area::Image,
             "rw" | "cgroup2" | "bpf" => Area::Writable,
             "kernfs" => Area::Kernfs,
+            other if aim_storage::cgroup_v1::Controller::from_map_kind(other).is_some() => {
+                Area::Writable
+            }
             other => return Err(format!("line {}: unknown kind '{other}'", n + 1)),
         };
         let guest = guest.trim_end_matches('/');
@@ -1098,8 +1141,10 @@ fn parse_map(text: &str) -> Result<(Option<PathBuf>, Vec<Mount>), String> {
             return Err(format!("line {}: guest path must be absolute", n + 1));
         }
         // A cgroup v2 hierarchy is a plain directory: groups can be made
-        // and joined, but no controller acts on them.
-        let fstype = matches!(kind, "cgroup2" | "bpf").then(|| kind.to_string());
+        // and joined, but no controller acts on them. A cgroup v1
+        // hierarchy's fstype names its controller (`sys::cgroup`).
+        let fstype = (matches!(kind, "cgroup2" | "bpf") || kind.starts_with("cgroup:"))
+            .then(|| kind.to_string());
         mounts.push(Mount {
             guest: guest.to_string(),
             host: PathBuf::from(host),
@@ -1479,7 +1524,9 @@ fn record_points(records: &[aim_storage::mount_namespace::MountRecord]) -> Vec<M
             },
             fstype: if record.kind == "root" {
                 Some("erofs".into())
-            } else if matches!(record.kind.as_str(), "bpf" | "cgroup2") {
+            } else if matches!(record.kind.as_str(), "bpf" | "cgroup2")
+                || record.kind.starts_with("cgroup:")
+            {
                 Some(record.kind.clone())
             } else if record.fstype.is_empty() {
                 None
@@ -2036,7 +2083,14 @@ pub fn fs_path(guest: &str) -> Option<(String, String)> {
         .max_by_key(|(m, _)| m.guest.len())
         .map(|(m, rest)| {
             let rest = if rest.is_empty() { "/" } else { rest };
-            (m.fstype.clone().unwrap(), rest.to_string())
+            // A cgroup v1 hierarchy is a `cgroup` filesystem.
+            let fstype = m.fstype.clone().unwrap();
+            let fstype = if fstype.starts_with("cgroup:") {
+                "cgroup".to_string()
+            } else {
+                fstype
+            };
+            (fstype, rest.to_string())
         })
 }
 

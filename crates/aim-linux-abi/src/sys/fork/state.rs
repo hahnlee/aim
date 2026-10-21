@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use crate::sys::{
-    ashmem, attrs, copies, cred, fdtab, mem, memfd, misc, process, procfs, pstate, ptrace,
+    ashmem, attrs, cgroup, copies, cred, fdtab, mem, memfd, misc, process, procfs, pstate, ptrace,
     selinuxfs, signal, sync_file, thread, wait,
 };
 
@@ -224,7 +224,7 @@ impl<'a> Reader<'a> {
 
 /// Every module's state, in restore order.
 pub fn save(w: &mut Writer, mounts: &str) {
-    w.u32(0x46444e05);
+    w.u32(0x46444e06);
     crate::xrt::fork_save(w);
     crate::diag::fork_save(w);
     crate::patch::fork_save(w);
@@ -247,6 +247,7 @@ pub fn save(w: &mut Writer, mounts: &str) {
     sync_file::fork_save(w);
     signal::fork_save(w);
     thread::fork_save(w);
+    cgroup::fork_save(w);
     w.bytes(&aim_host_gpu::fork_state());
 }
 
@@ -255,8 +256,8 @@ pub fn save(w: &mut Writer, mounts: &str) {
 pub fn restore(r: &mut Reader) -> bool {
     r.stage("state-version");
     let version = r.u32();
-    if version != 0x46444e05 {
-        eprintln!("fork state version: received={version:#x} expected=0x46444e05");
+    if version != 0x46444e06 {
+        eprintln!("fork state version: received={version:#x} expected=0x46444e06");
         r.invalidate();
         return false;
     }
@@ -307,6 +308,8 @@ pub fn restore(r: &mut Reader) -> bool {
     signal::fork_restore(r);
     r.stage("thread");
     thread::fork_restore(r);
+    r.stage("cgroup");
+    cgroup::fork_restore(r);
     r.stage("gpu");
     let gpu = r.bytes();
     if gpu != aim_host_gpu::fork_state() {

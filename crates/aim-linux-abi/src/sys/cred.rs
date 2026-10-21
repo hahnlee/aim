@@ -761,6 +761,14 @@ pub fn may_ptrace(pid: i32, fs: bool) -> bool {
     })
 }
 
+/// `__cgroup1_procs_write`: an opener with effective uid `euid` (root, or
+/// the target's real or saved uid) may move process `pid`; CAP_SYS_NICE is
+/// the caller's to check.
+pub fn may_attach_task(pid: i32, euid: u32) -> bool {
+    let t = target(pid);
+    euid == 0 || euid == t.uid[0] || euid == t.uid[2]
+}
+
 /// `set_one_prio_perm` and the scheduler's `check_same_owner`
 /// (kernel/sys.c, kernel/sched/syscalls.c): the caller's effective uid is
 /// the target's real or effective uid, or it has CAP_SYS_NICE.

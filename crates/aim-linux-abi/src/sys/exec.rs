@@ -398,6 +398,7 @@ fn in_place(
     crate::patch::exec_reset();
     super::signal::exec_reset();
     super::thread::exec_reset();
+    super::cgroup::exec_reset();
     super::misc::exec_reset();
     super::cred::exec();
     trace_stage("in-place.load");

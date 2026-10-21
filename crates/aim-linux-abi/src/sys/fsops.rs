@@ -11,6 +11,7 @@ use crate::errno::{self, EINVAL, ENOENT, ENOSPC};
 use crate::sys::{guest_cstr, procfs};
 use crate::vfs::{self, Resolved};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt as _;
 
 const AT_REMOVEDIR: u64 = 0x200;
 const AT_SYMLINK_FOLLOW: u64 = 0x400;
@@ -75,6 +76,10 @@ pub fn mkdirat(a: [u64; 6]) -> i64 {
                             },
                         );
                     }
+                }
+                let dir = std::path::Path::new(std::ffi::OsStr::from_bytes(r.host.as_bytes()));
+                if let Err(error) = super::cgroup::made_group(dir, &r.guest) {
+                    return -(error as i64);
                 }
             }
             res
@@ -293,6 +298,10 @@ fn unlinkat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
             if vfs::is_mountpoint(&r.guest) {
                 return -crate::errno::EBUSY as i64;
             }
+            let host = std::path::Path::new(std::ffi::OsStr::from_bytes(r.host.as_bytes()));
+            if let Some(result) = super::cgroup::remove(&r.guest, host, directory) {
+                return result;
+            }
             // SAFETY: resolved host path.
             let result = unsafe {
                 if a[2] & AT_REMOVEDIR != 0 {
@@ -436,6 +445,19 @@ pub fn renameat2(a: [u64; 6]) -> i64 {
         }
         (Some(_), None) | (None, Some(_)) => return -EXDEV,
         _ => {}
+    }
+    let path =
+        |r: &Resolved| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(r.host.as_bytes()));
+    if vfs::cgroup_v1(&old.guest).is_some() || vfs::cgroup_v1(&new.guest).is_some() {
+        // kernfs_iop_rename takes no flags.
+        if flags != 0 {
+            return -(EINVAL as i64);
+        }
+        if let Some(result) =
+            super::cgroup::rename(&old.guest, &path(&old), &new.guest, &path(&new))
+        {
+            return result;
+        }
     }
     let hflags = if flags & RENAME_NOREPLACE != 0 {
         libc::RENAME_EXCL

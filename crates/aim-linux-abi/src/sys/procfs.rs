@@ -892,7 +892,7 @@ fn cpu_range() -> String {
 
 /// The processes `/proc` lists: the guest's pid namespace (`pidns`), not
 /// the Mac's; every host process without one.
-fn pids() -> Vec<i32> {
+pub(super) fn pids() -> Vec<i32> {
     let mut v = match super::pidns::members() {
         Some(mut v) => {
             v.retain(|&p| task_info(p).is_some());
@@ -919,7 +919,7 @@ fn pids() -> Vec<i32> {
 
 /// The tids of process `p`: its guest threads, another process's from its
 /// record.
-fn tids(p: i32) -> Vec<i32> {
+pub(super) fn tids(p: i32) -> Vec<i32> {
     let t = if p == pid() {
         let mut t = super::thread::tids();
         t.extend(super::procrec::foreign_tids());
@@ -939,6 +939,7 @@ fn entries(names: &[(&str, u8)]) -> Vec<Entry> {
 
 const PID_ENTRIES: &[(&str, u8)] = &[
     ("attr", dir::DT_DIR),
+    ("cgroup", dir::DT_REG),
     ("cmdline", dir::DT_REG),
     ("comm", dir::DT_REG),
     ("cwd", dir::DT_LNK),
@@ -966,10 +967,21 @@ const BLOCK_MOUNTS: &[&str] = &["/data", "/metadata", "/cache"];
 
 /// The mount table: the read-only image at `/` and the path map's areas.
 /// Each is `(source, target, fstype, options)`.
-fn mount_table(points: Vec<vfs::MountPoint>) -> Vec<(String, String, String, &'static str)> {
+fn mount_table(points: Vec<vfs::MountPoint>) -> Vec<(String, String, String, String)> {
     let mut out = Vec::new();
     for mp in points {
         let guest = mp.guest;
+        // A cgroup v1 hierarchy: a `cgroup` filesystem with its controller
+        // (`cgroup1_show_options`).
+        if let Some(c) = mp
+            .fstype
+            .as_deref()
+            .and_then(aim_storage::cgroup_v1::Controller::from_map_kind)
+        {
+            let options = format!("rw,nosuid,nodev,noexec,relatime,{}", c.mount_options());
+            out.push(("none".into(), guest, "cgroup".into(), options));
+            continue;
+        }
         // A kernel filesystem of the path map (cgroup2, bpf) or a mount the
         // process made.
         if let (Some(source), Some(fstype)) = (mp.source, mp.fstype) {
@@ -978,7 +990,7 @@ fn mount_table(points: Vec<vfs::MountPoint>) -> Vec<(String, String, String, &'s
             } else {
                 "rw,nosuid,nodev,noexec,relatime"
             };
-            out.push((source, guest, fstype, options));
+            out.push((source, guest, fstype, options.to_string()));
             continue;
         }
         let (source, fstype, options) = match (mp.area, guest.as_str()) {
@@ -997,7 +1009,7 @@ fn mount_table(points: Vec<vfs::MountPoint>) -> Vec<(String, String, String, &'s
             (vfs::Area::Writable, _) => ("tmpfs".into(), "tmpfs", "rw,nosuid,relatime"),
             _ => continue,
         };
-        out.push((source, guest, fstype.to_string(), options));
+        out.push((source, guest, fstype.to_string(), options.to_string()));
     }
     out
 }
@@ -1083,6 +1095,7 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
             Node::NetTable(kind.to_owned())
         }
         "cmdline" => Node::File(cmdline(p)),
+        "cgroup" => Node::File(super::cgroup::proc_cgroup(p, thread.unwrap_or(p)).into_bytes()),
         "comm" => {
             let named = thread.and_then(|t| thread_comm(p, t));
             Node::File(format!("{}\n", named.unwrap_or_else(|| comm(p))).into_bytes())

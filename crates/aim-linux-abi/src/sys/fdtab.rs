@@ -61,6 +61,8 @@ pub enum Kind {
     Binder(aim_binder_host::client::BinderFile),
     /// `/dev/kmsg` or `/proc/kmsg` (`kmsg`).
     Kmsg(Arc<super::kmsg::Open>),
+    /// A control file of a cgroup v1 hierarchy (`cgroup`).
+    Cgroup(Arc<super::cgroup::Open>),
 }
 
 pub(super) struct PathProof(std::os::fd::OwnedFd);
@@ -1171,6 +1173,7 @@ pub(super) fn adopt_untyped(fd: i32) {
     super::ashmem::adopt(fd);
     random::adopt(fd);
     super::kmsg::adopt(fd);
+    super::cgroup::adopt(fd);
 }
 
 /// Give the fds inherited across exec their Linux state.
@@ -1238,6 +1241,7 @@ pub fn anon_name(fd: i32) -> Option<String> {
             | Kind::Ashmem
             | Kind::ProxyFile
             | Kind::Kmsg(_)
+            | Kind::Cgroup(_)
             | Kind::Binder(_) => {
                 return None;
             }
@@ -1614,6 +1618,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::Inotify(a) => Arc::as_ptr(a) as *const (),
             Kind::Dir(a) => Arc::as_ptr(a) as *const (),
             Kind::Kmsg(a) => Arc::as_ptr(a) as *const (),
+            Kind::Cgroup(a) => Arc::as_ptr(a) as *const (),
             Kind::Memfd(_)
             | Kind::SyncFile
             | Kind::Random
@@ -1705,6 +1710,10 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
                 w.u32(14);
                 w.bool(matches!(**open, super::kmsg::Open::Proc));
             }
+            Kind::Cgroup(open) => {
+                w.u32(15);
+                super::cgroup::save_open(w, open);
+            }
             Kind::Content | Kind::Knob(_) | Kind::Evdev(_) | Kind::Binder(_) => unreachable!(),
         }
     });
@@ -1737,6 +1746,11 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             13 => Kind::Ashmem,
             9 => Kind::ProxyFile,
             14 => Kind::Kmsg(Arc::new(super::kmsg::Open::restore(r.bool()))),
+            // A group removed since keeps its open files as plain ones.
+            15 => match super::cgroup::restore_open(r) {
+                Some(open) => Kind::Cgroup(open),
+                None => return (fd, None),
+            },
             10 => Kind::Path(PathDescription::new(r.u64())),
             11 => {
                 let flags = r.u64();

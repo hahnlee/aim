@@ -650,6 +650,13 @@ the remaining original daemons use, evdev, and memfd/ashmem.
 - **cgroup v2 and bpffs** are writable areas of the path map: the
   hierarchy holds the directories libprocessgroup creates, and no
   controller acts.
+- **cgroup v1 hierarchies** (`blkio`, `cpu`, `cpuset` of `cgroups.json`)
+  are the layer's, as the android16-6.12 kernel's: groups with their
+  control files, values checked and stored as the kernel's, tasks moved
+  with `tasks` and `cgroup.procs` (with the opener's credentials), new
+  threads and fork children in their creator's groups, and
+  `/proc/<pid>/cgroup`. CFS bandwidth control, which Darwin cannot
+  enforce, is not offered. No Darwin policy follows a group yet (#297).
 - **Extended attributes** are host attributes under their own prefix;
   `security.selinux` is the original inode's label, a `genfscon` label, or
   `unlabeled`.
@@ -674,8 +681,8 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   and hugetlb are 0, and VmFlags has only what protections, sharing, the
   stack and mlock tell. Names set with `PR_SET_VMA_ANON_NAME` are not
   kept (#1581).
-- **Answered "unsupported" (Android falls back):** cgroup v1 controllers,
-  the other namespaces, SELinux enforcement (permissive), userfaultfd (ART
+- **Answered "unsupported" (Android falls back):** cgroup v1 controllers
+  other than `blkio`, `cpu` and `cpuset`, the other namespaces, SELinux enforcement (permissive), userfaultfd (ART
   uses its copying collector) and BINDER_FREEZE.
 
 ### Application JITs

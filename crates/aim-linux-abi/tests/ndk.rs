@@ -385,6 +385,35 @@ fn kernel_log() {
     check("t_kmsg", &[]);
 }
 
+/// cgroup v1 hierarchies mounted as guest-init's SetupCgroups mounts them.
+#[test]
+fn cgroup_v1_hierarchies() {
+    use aim_storage::cgroup_v1::{Controller, populate};
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let g = Guest::new(&image, "t_cgroup");
+    let prog = g.build(&clang, "t_cgroup");
+    for (controller, guest) in [
+        (Controller::Cpu, "/dev/cpuctl"),
+        (Controller::Cpuset, "/dev/cpuset"),
+    ] {
+        let host = g.runtime.join("cgroup-v1").join(controller.name());
+        std::fs::create_dir_all(&host).unwrap();
+        populate(controller, &host, None).unwrap();
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&g.map)
+            .unwrap();
+        writeln!(f, "{}\t{guest}\t{}", controller.map_kind(), host.display()).unwrap();
+    }
+    let (ok, out) = g.run(&[&prog]);
+    println!("{out}");
+    assert!(ok && out.contains("PASS"), "t_cgroup failed:\n{out}");
+}
+
 #[test]
 fn netlink_audit_and_generic() {
     check("t_nlfamilies", &[]);
