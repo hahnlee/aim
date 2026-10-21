@@ -169,12 +169,25 @@ impl WriteParcelable for VolumeInfo {
     }
 }
 
+/// User 0 started and its DE storage prepared, its CE storage still to
+/// unlock (`UserController.finishUserUnlocking`).
+pub(super) struct StartedUser {
+    vold: Strong,
+    installd: Strong,
+    /// The build's fingerprint, and whether it is not the one the user
+    /// last logged in with (a system update: `PRE_BOOT_COMPLETED`).
+    fingerprint: String,
+    pub updated: bool,
+}
+
 impl AppHost {
     /// StorageManagerService's start: vold connected and reset, user 0
-    /// added, prepared and started, its emulated volume mounted by the
-    /// agent; with PackageManagerService's and UserManagerService's
-    /// preparation of the user's and its apps' data (`app_data`).
-    pub(super) fn start_storage(&self) -> Result<(), String> {
+    /// added and started, its DE storage prepared and its emulated volume
+    /// mounted by the agent; with
+    /// PackageManagerService's and UserManagerService's preparation of the
+    /// user's and its apps' data (`app_data`). Its CE storage is unlocked
+    /// later (`unlock_user_storage`), as `finishUserBoot` unlocks it.
+    pub(super) fn start_storage(&self) -> Result<StartedUser, String> {
         let installd = self.installd()?;
         // PackageManagerService's start.
         if let Err(e) = self.fix_apps_data_on_boot(&installd) {
@@ -215,27 +228,25 @@ impl AppHost {
             p.write_i32(SERIAL);
             p.write_i32(-1); // shares storage with no user
         })?;
-        // UserManagerService's `onBeforeStartUser`, then
-        // `onBeforeUnlockUser`: the user's DE, then CE storage and apps'
-        // data, migrated when the build's fingerprint is not the one the
+        // UserManagerService's `onBeforeStartUser`: the user's DE
+        // storage and apps' data (the CE storage at its unlock),
+        // migrated when the build's fingerprint is not the one the
         // user last logged in with.
         let fingerprint = super::app_data::fingerprint(|key| self.property(key));
-        let migrate = super::user_service::storage_user(self, USER)
+        let updated = super::user_service::storage_user(self, USER)
             .map_err(|e| e.message)?
             .is_some_and(|(_, _, last)| last.as_deref() != Some(&fingerprint));
-        let prepare = |flags: i32| {
-            if let Err(e) = self.prepare_user_data(&vold, &installd, USER, flags) {
-                eprintln!("app host: user data: {e}");
-            }
-            if let Err(e) = self.reconcile_apps_data(&installd, USER, flags, migrate) {
-                eprintln!("app host: app data: {e}");
-            }
+        let started = StartedUser {
+            vold: self.process.strong(vold.handle),
+            installd,
+            fingerprint,
+            updated,
         };
-        prepare(super::app_data::FLAG_STORAGE_DE);
+        self.prepare_user_storage(&started, super::app_data::FLAG_STORAGE_DE);
         call(ON_USER_STARTED, "onUserStarted", &|p| p.write_i32(USER))?;
-        prepare(super::app_data::FLAG_STORAGE_CE);
-        self.user_unlocking(USER).map_err(|e| e.message)?;
-        *self.storage.vold.lock().unwrap() = Some(vold);
+        // The started user's emulated volume, mounted while the user is
+        // locked (`onUserStarted` → `mount`).
+        *self.storage.vold.lock().unwrap() = Some(self.process.strong(vold.handle));
         let daemon = self.media_provider_uid().map_err(|e| format!("{e:?}"))?;
         self.call_agent(MOUNT_STORAGE, "mountStorage", |p| {
             p.write_i32(USER);
@@ -244,14 +255,36 @@ impl AppHost {
         .map(|_| ())
         .map_err(|e| format!("{e:?}"))?;
         eprintln!("app host: {VOLUME} mounted");
-        // `finishUserUnlockedCompleted`: UserManagerService's
-        // `onUserLoggedIn`.
+        Ok(started)
+    }
+
+    /// The user's and its apps' data of the storage of `flags`
+    /// (`prepareUserData`, `reconcileAppsData`).
+    fn prepare_user_storage(&self, user: &StartedUser, flags: i32) {
+        if let Err(e) = self.prepare_user_data(&user.vold, &user.installd, USER, flags) {
+            eprintln!("app host: user data: {e}");
+        }
+        if let Err(e) = self.reconcile_apps_data(&user.installd, USER, flags, user.updated) {
+            eprintln!("app host: app data: {e}");
+        }
+    }
+
+    /// `finishUserUnlocking` of user 0: UserManagerService's
+    /// `onBeforeUnlockUser`, its CE storage and apps' data, then the user
+    /// unlocking.
+    pub(super) fn unlock_user_storage(&self, user: &StartedUser) -> Result<(), String> {
+        self.prepare_user_storage(user, super::app_data::FLAG_STORAGE_CE);
+        self.user_unlocking(USER).map_err(|e| e.message)
+    }
+
+    /// `finishUserUnlockedCompleted`: UserManagerService's
+    /// `onUserLoggedIn` of user 0, with the build's fingerprint.
+    pub(super) fn user_logged_in(&self, user: &StartedUser) -> Result<(), String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
-        super::user_service::user_logged_in(self, USER, now, &fingerprint)
-            .map_err(|e| e.message)?;
-        Ok(())
+        super::user_service::user_logged_in(self, USER, now, &user.fingerprint)
+            .map_err(|e| e.message)
     }
 
     /// `getVolumes`: `mVolumes`, internal storage and the emulated

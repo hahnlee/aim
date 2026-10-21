@@ -158,7 +158,23 @@ struct Record {
     result_extras: Option<KeptBundle>,
     /// `BroadcastOptions.getIdForResponseEvent`: 0 when none is recorded.
     id_for_response_event: i64,
+    /// `BroadcastOptions.setTemporaryAppAllowlist`: each receiver's uid
+    /// is allowed for as long when it is sent the broadcast.
+    temp_allowlist: Option<TempAllowlist>,
 }
+
+/// A broadcast's temporary allowlist (`BroadcastOptions`'s duration,
+/// type and reason code).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TempAllowlist {
+    pub duration_ms: i64,
+    pub kind: i32,
+    pub reason: i32,
+}
+
+/// `PowerExemptionManager.TEMPORARY_ALLOW_LIST_TYPE_*`.
+pub(super) const TEMPORARY_ALLOW_LIST_TYPE_NONE: i32 = -1;
+pub(super) const TEMPORARY_ALLOW_LIST_TYPE_FOREGROUND_SERVICE_ALLOWED: i32 = 0;
 
 /// A manifest receiver a broadcast goes to (`ResolveInfo`): its
 /// `ActivityInfo`, its process and uid, and its priority.
@@ -211,7 +227,13 @@ struct Chain {
     aborted: bool,
     /// The result receiver, and the start of its process if an app's.
     result_to: Option<(Strong, Option<i64>)>,
+    /// A system service's own result receiver (`IIntentReceiver.Stub`).
+    done: Option<Done>,
 }
+
+/// What a system service of the app host runs when its ordered broadcast
+/// has gone through its receivers.
+pub type Done = Box<dyn FnOnce() + Send>;
 
 /// A delivery a process waits for, by its receiver.
 enum Delivery {
@@ -285,6 +307,8 @@ impl Sender {
 struct Options {
     flags: i32,
     temporary_allowlist_duration: i64,
+    temporary_allowlist_type: i32,
+    temporary_allowlist_reason: i32,
     id_for_response_event: i64,
     require_compat_change: Option<i64>,
 }
@@ -303,12 +327,20 @@ impl Options {
             Some(Value::Long(v)) => Some(*v),
             _ => None,
         };
+        let int = |key: &str| match entries.get(key) {
+            Some(Value::Int(v)) => Some(*v),
+            _ => None,
+        };
         Ok(Options {
             flags: match entries.get("android:broadcast.flags") {
                 Some(Value::Int(v)) => *v,
                 _ => 0,
             },
             temporary_allowlist_duration: long("android:broadcast.temporaryAppAllowlistDuration")
+                .unwrap_or(0),
+            temporary_allowlist_type: int("android:broadcast.temporaryAppAllowlistType")
+                .unwrap_or(TEMPORARY_ALLOW_LIST_TYPE_NONE),
+            temporary_allowlist_reason: int("android:broadcast.temporaryAppAllowlistReasonCode")
                 .unwrap_or(0),
             id_for_response_event: long("android:broadcast.idForResponseEvent").unwrap_or(0),
             // `CHANGE_INVALID` is no change.
@@ -320,6 +352,24 @@ impl Options {
 
 fn strings(list: Option<Vec<Option<String>>>) -> Vec<String> {
     list.unwrap_or_default().into_iter().flatten().collect()
+}
+
+/// `scheduleReceiverWarmLocked`'s temporary allowlist of a receiving
+/// `uid` (`tempAllowlistUidLocked`): foreground services allowed for the
+/// broadcast's duration when its type allows them. Device idle's own
+/// temporary allowlist and a freezer's delay are not the app host's, which
+/// is never idle and freezes no process.
+fn temp_allowlist(host: &AppHost, uid: i32, record: &Record) {
+    let Some(t) = record.temp_allowlist else {
+        return;
+    };
+    if t.kind == TEMPORARY_ALLOW_LIST_TYPE_FOREGROUND_SERVICE_ALLOWED {
+        host.temp_allowlist_for_fgs(
+            uid,
+            std::time::Duration::from_millis(t.duration_ms.max(0) as u64),
+            t.reason,
+        );
+    }
 }
 
 /// `UserHandle.isCore`.
@@ -742,6 +792,7 @@ impl Broadcasts {
                     result_data: None,
                     result_extras: None,
                     id_for_response_event: 0,
+                    temp_allowlist: None,
                 };
                 st.queues
                     .entry(start_seq)
@@ -1061,6 +1112,11 @@ impl Broadcasts {
             result_data: args.result_data,
             result_extras,
             id_for_response_event: options.id_for_response_event,
+            temp_allowlist: (options.temporary_allowlist_duration > 0).then_some(TempAllowlist {
+                duration_ms: options.temporary_allowlist_duration,
+                kind: options.temporary_allowlist_type,
+                reason: options.temporary_allowlist_reason,
+            }),
         });
         if args.sticky {
             if !host.check_component_permission(Some(BROADCAST_STICKY), calling_uid, -1, true)? {
@@ -1157,6 +1213,7 @@ impl Broadcasts {
                         targets: targets.into(),
                         aborted: false,
                         result_to: result_to.map(|h| (host.process.strong(h), result_to_app)),
+                        done: None,
                     },
                 );
                 self.advance(host, &mut st, id);
@@ -1282,13 +1339,55 @@ impl Broadcasts {
         );
     }
 
+    /// `broadcastIntentLocked(..., resultTo, ..., requiredPermissions,
+    /// appOp NONE, options, serialized, ...)` of a system service of the
+    /// app host (`MY_PID`, `SYSTEM_UID`): to `user`'s receivers holding
+    /// `required_permissions`, each allowed for `temp_allowlist` as it is
+    /// sent it; serialized, receiver after receiver, when it has a `done`,
+    /// which runs once it has gone through them, as the service's
+    /// `IIntentReceiver.Stub` would.
+    pub fn send_from_system_with(
+        &self,
+        host: &AppHost,
+        intent: RawIntent,
+        user: i32,
+        required_permissions: &[String],
+        temp_allowlist: Option<TempAllowlist>,
+        done: Option<Done>,
+    ) {
+        self.send_with(
+            host,
+            intent,
+            user,
+            None,
+            Sender::system(required_permissions),
+            temp_allowlist,
+            done,
+        );
+    }
+
     fn send_as(
+        &self,
+        host: &AppHost,
+        intent: RawIntent,
+        user: i32,
+        allow_list: Option<&[i32]>,
+        sender: Sender,
+    ) {
+        self.send_with(host, intent, user, allow_list, sender, None, None);
+    }
+
+    /// A system service's broadcast: ordered when it has a `done`.
+    #[allow(clippy::too_many_arguments)]
+    fn send_with(
         &self,
         host: &AppHost,
         mut intent: RawIntent,
         user: i32,
         allow_list: Option<&[i32]>,
         sender: Sender,
+        temp_allowlist: Option<TempAllowlist>,
+        done: Option<Done>,
     ) {
         let mut flags = intent.intent.flags | FLAG_EXCLUDE_STOPPED_PACKAGES;
         let allowed_implicit = host.packages().map(|(model, _)| {
@@ -1312,7 +1411,7 @@ impl Broadcasts {
             intent,
             binders: Arc::new(binders),
             sender,
-            ordered: false,
+            ordered: done.is_some(),
             initial_sticky: false,
             user,
             share_identity: false,
@@ -1320,10 +1419,16 @@ impl Broadcasts {
             result_data: None,
             result_extras: None,
             id_for_response_event: 0,
+            temp_allowlist,
         });
         let preflight = match host.flag(AVOID_NOTE_OP_AT_ENQUEUE) {
             Ok(preflight) => preflight,
-            Err(e) => return eprintln!("app host: a system broadcast: {e:?}"),
+            Err(e) => {
+                if let Some(done) = done {
+                    std::thread::spawn(done);
+                }
+                return eprintln!("app host: a system broadcast: {e:?}");
+            }
         };
         let mut st = self.state.lock().unwrap();
         let i = &record.intent.intent;
@@ -1356,9 +1461,32 @@ impl Broadcasts {
                 };
                 Ok(merge(manifest, registered))
             });
-        match targets {
-            Ok(targets) => self.enqueue(host, &mut st, &record, targets),
-            Err(e) => eprintln!("app host: a system broadcast: {e:?}"),
+        match (targets, done) {
+            (Ok(targets), None) => self.enqueue(host, &mut st, &record, targets),
+            (Ok(targets), Some(done)) => {
+                let id = st.next_chain;
+                st.next_chain += 1;
+                st.chains.insert(
+                    id,
+                    Chain {
+                        result_code: 0,
+                        result_data: None,
+                        result_extras: None,
+                        record: record.clone(),
+                        targets: targets.into(),
+                        aborted: false,
+                        result_to: None,
+                        done: Some(done),
+                    },
+                );
+                self.advance(host, &mut st, id);
+            }
+            (Err(e), done) => {
+                eprintln!("app host: a system broadcast: {e:?}");
+                if let Some(done) = done {
+                    std::thread::spawn(done);
+                }
+            }
         }
         drop(st);
         // `broadcastIntentLocked`'s own handling of the zone's change.
@@ -1616,12 +1744,6 @@ impl Broadcasts {
     /// it does not run (`scheduleReceiverColdLocked`: unless the receiver
     /// is skipped, `startProcessLocked` with hosting type `broadcast`).
     fn process_for(&self, host: &AppHost, record: &Record, m: &Manifest) -> Option<i64> {
-        if let Some((seq, _)) = host.running_process(&m.process, m.uid) {
-            return Some(seq);
-        }
-        if self.skipped_manifest(host, record, m) {
-            return None;
-        }
         let package = m
             .info
             .info
@@ -1630,6 +1752,23 @@ impl Broadcasts {
             .package_name
             .clone()
             .unwrap_or_default();
+        // The system process runs the system apps' components declared in
+        // it, not system_server's own receivers.
+        if super::is_system_server_code(&package, &m.process) {
+            let e = host
+                .unimplemented_named("activity", "a receiver of system_server's own code (#1518)");
+            eprintln!(
+                "app host: unable to deliver a broadcast to {}: {}",
+                m.process, e.message
+            );
+            return None;
+        }
+        if let Some((seq, _)) = host.running_process(&m.process, m.uid) {
+            return Some(seq);
+        }
+        if self.skipped_manifest(host, record, m) {
+            return None;
+        }
         if let Err(e) = host.start_process_for(&package, &m.process, None, true) {
             eprintln!(
                 "app host: unable to launch {} for broadcast: {}",
@@ -1729,6 +1868,7 @@ impl Broadcasts {
             result_data: None,
             result_extras: None,
             id_for_response_event: 0,
+            temp_allowlist: None,
         });
         {
             let mut st = self.state.lock().unwrap();
@@ -2034,7 +2174,11 @@ impl Broadcasts {
                 chain.targets.pop_front()
             };
             let Some(target) = next else {
-                let chain = st.chains.remove(&id).unwrap();
+                let mut chain = st.chains.remove(&id).unwrap();
+                // Off the queue's lock: it may broadcast again.
+                if let Some(done) = chain.done.take() {
+                    std::thread::spawn(done);
+                }
                 self.send_result(host, chain);
                 return;
             };
@@ -2224,6 +2368,10 @@ impl Broadcasts {
     ) -> bool {
         self.share_identity_access(host, start_seq, record);
         self.report_dispatched(host, start_seq, record);
+        let uid = host.apps.lock().unwrap().get(&start_seq).map(|a| a.uid);
+        if let Some(uid) = uid {
+            temp_allowlist(host, uid as i32, record);
+        }
         let mut p = Parcel::new();
         thread::ScheduleRegisteredReceiver {
             receiver: Some(Binder::Handle(receiver)),
@@ -2279,6 +2427,7 @@ impl Broadcasts {
         if self.skipped_manifest(host, record, m) {
             return Some(false);
         }
+        temp_allowlist(host, m.uid as i32, record);
         self.share_identity_access(host, start_seq, record);
         let compat = super::config::CompatibilityInfo::of(
             &m.info.info.application_info,
