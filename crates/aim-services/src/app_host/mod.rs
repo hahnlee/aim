@@ -33,6 +33,7 @@ mod battery_history;
 pub mod battery_service;
 pub mod battery_stats;
 pub mod bind;
+mod blob_store;
 pub mod bluetooth_manager;
 mod broadcast_response;
 pub mod broadcasts;
@@ -762,6 +763,7 @@ impl AppHost {
                 "game",
                 Arc::new(game_service::GameManager::new(self.clone())),
             ),
+            ("blob_store", blob_store::BlobStore::new(self.clone())),
             (
                 "performance_hint",
                 self.hint_manager
