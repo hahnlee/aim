@@ -120,6 +120,8 @@ fn main() {
         if internal_args.len() != 2 {
             usage();
         }
+        // The guest process that spawned it passes nothing but the path.
+        aim_storage::inherited::close_above_stdio();
         if let Err(error) =
             aim_linux_abi::sys::fuse::serve_broker(&PathBuf::from(&internal_args[1]))
         {
