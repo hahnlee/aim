@@ -99,6 +99,7 @@ pub mod providers;
 mod recovery_certificates;
 pub mod restrictions_service;
 pub mod role_service;
+pub mod rollback_service;
 pub mod safety_center;
 pub mod safety_center_config;
 pub mod safety_center_data;
@@ -782,6 +783,10 @@ impl AppHost {
             (
                 "system_update",
                 Arc::new(system_update::SystemUpdate::new(self.clone())),
+            ),
+            (
+                "rollback",
+                Arc::new(rollback_service::Rollback::new(self.clone())),
             ),
             (
                 "lock_settings",
