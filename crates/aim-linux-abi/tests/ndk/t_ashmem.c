@@ -4,16 +4,54 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <linux/ashmem.h>
+#include <stdlib.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include "check.h"
 
 #define PAGE 16384
+
+// The name of the mapping at `p` in /proc/self/maps, or "" (into `out`).
+static const char* maps_name(const void* p, char* out, size_t len) {
+  out[0] = 0;
+  FILE* f = fopen("/proc/self/maps", "r");
+  if (!f) return out;
+  char line[512];
+  while (fgets(line, sizeof line, f)) {
+    unsigned long lo = strtoul(line, NULL, 16);
+    if (lo != (unsigned long)p) continue;
+    char* name = line;
+    for (int field = 0; field < 5 && name; field++) name = strchr(name + 1, ' ');
+    if (name) {
+      while (*name == ' ') name++;
+      name[strcspn(name, "\n")] = 0;
+      snprintf(out, len, "%s", name);
+    }
+    break;
+  }
+  fclose(f);
+  return out;
+}
+
+// The driver's file has no write: write(2) and its kin fail with EINVAL.
+static int writes_refused(int fd) {
+  char c = 'w';
+  struct iovec v = {&c, 1};
+  errno = 0;
+  if (write(fd, &c, 1) != -1 || errno != EINVAL) return 0;
+  errno = 0;
+  if (pwrite(fd, &c, 1, 0) != -1 || errno != EINVAL) return 0;
+  errno = 0;
+  if (writev(fd, &v, 1) != -1 || errno != EINVAL) return 0;
+  errno = 0;
+  return pwritev(fd, &v, 1, 0) == -1 && errno == EINVAL;
+}
 
 static void region_ioctls(void) {
   int fd = open("/dev/ashmem", O_RDWR | O_CLOEXEC);
@@ -40,6 +78,12 @@ static void region_ioctls(void) {
   CHECK(p != MAP_FAILED);
   p[0] = 'a';
   p[2 * PAGE - 1] = 'z';
+  char mapped[128];
+  CHECK(!strcmp(maps_name(p, mapped, sizeof mapped), "/dev/ashmem/audio client (deleted)"));
+  CHECK(writes_refused(fd));
+  char c = 0;
+  CHECK(pread(fd, &c, 1, 2 * PAGE - 1) == 1 && c == 'z');
+  CHECK(p[0] == 'a');
   errno = 0;
   CHECK(ioctl(fd, ASHMEM_SET_SIZE, PAGE) == -1 && errno == EINVAL);
   CHECK(ioctl(fd, ASHMEM_UNPIN, &pin) == ASHMEM_IS_UNPINNED);
@@ -65,6 +109,18 @@ static void region_ioctls(void) {
   CHECK(!strcmp(link, "/dev/ashmem"));
   munmap(ro, PAGE);
   munmap(p, 2 * PAGE);
+  close(fd);
+}
+
+// A region without a name maps as the driver's default name.
+static void unnamed_region(void) {
+  int fd = open("/dev/ashmem", O_RDWR | O_CLOEXEC);
+  CHECK(fd >= 0 && ioctl(fd, ASHMEM_SET_SIZE, PAGE) == 0);
+  char* p = mmap(NULL, PAGE, PROT_READ, MAP_SHARED, fd, 0);
+  CHECK(p != MAP_FAILED);
+  char mapped[128];
+  CHECK(!strcmp(maps_name(p, mapped, sizeof mapped), "/dev/ashmem (deleted)"));
+  munmap(p, PAGE);
   close(fd);
 }
 
@@ -111,6 +167,11 @@ static void shared_across_processes(void) {
     if (ioctl(fd, ASHMEM_GET_NAME, name) != 0 || strcmp(name, "sensor queue")) _exit(3);
     volatile char* q = mmap(NULL, PAGE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (q == MAP_FAILED || q[1] != 'p') _exit(4);
+    // A region that arrived by SCM_RIGHTS is ashmem here too.
+    char mapped[128];
+    if (strcmp(maps_name((void*)q, mapped, sizeof mapped), "/dev/ashmem/sensor queue (deleted)"))
+      _exit(5);
+    if (!writes_refused(fd)) _exit(6);
     q[2] = 'c';
     _exit(0);
   }
@@ -129,6 +190,10 @@ static void shared_across_processes(void) {
   // A fork child shares the mapping itself.
   FORK_OR_SKIP(pid2);
   if (pid2 == 0) {
+    char mapped[128];
+    if (strcmp(maps_name((void*)p, mapped, sizeof mapped), "/dev/ashmem/sensor queue (deleted)"))
+      _exit(5);
+    if (!writes_refused(fd)) _exit(6);
     p[3] = 'f';
     _exit(0);
   }
@@ -155,6 +220,8 @@ static void libcutils_region(void) {
   CHECK(fd >= 0 && valid(fd) == 1 && get_size(fd) == 3 * PAGE);
   char* p = mmap(NULL, 3 * PAGE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   CHECK(p != MAP_FAILED);
+  char mapped[128];
+  CHECK(!strcmp(maps_name(p, mapped, sizeof mapped), "/dev/ashmem/power hint session (deleted)"));
   p[PAGE] = 1;
   CHECK(set_prot(fd, PROT_READ) == 0);
   munmap(p, 3 * PAGE);
@@ -163,6 +230,7 @@ static void libcutils_region(void) {
 
 int main(void) {
   RUN(region_ioctls);
+  RUN(unnamed_region);
   RUN(shared_across_processes);
   RUN(libcutils_region);
   DONE();
