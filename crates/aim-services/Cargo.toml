@@ -18,6 +18,7 @@ aim-host-audio = { path = "../aim-host-audio" }
 aim-host-display = { path = "../aim-host-display" }
 aim-host-location = { path = "../aim-host-location" }
 aim-input-transport.workspace = true
+aim-meminfo.workspace = true
 aim-host-memory = { path = "../aim-host-memory" }
 aim-host-sensors = { path = "../aim-host-sensors" }
 aim-hostcall.workspace = true
