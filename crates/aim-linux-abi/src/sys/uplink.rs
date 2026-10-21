@@ -6,7 +6,9 @@
 //! A boot's test hook, `<runtime>/net/simulate`, changes what the guest
 //! sees without touching the Mac's network: a line `down` takes the
 //! network away; `addr A/P`, `gateway G`, `dns S...` and `lease SECONDS`
-//! replace those values of a present one.
+//! replace those values of a present one, and `interface NAME` puts the
+//! Mac's host interface NAME behind it (the Mac moving from Wi-Fi to
+//! cable).
 
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,6 +68,10 @@ fn simulate(text: &str, up: Uplink, dns: Vec<Ipv4Addr>) -> Option<Lease> {
                     .collect()
             }
             (Some("lease"), Some(s)) => l.secs = s.parse().unwrap_or(l.secs),
+            (Some("interface"), Some(n)) => match host_index(n) {
+                0 => {}
+                i => l.up.index = i,
+            },
             _ => {}
         }
     }
@@ -132,5 +138,9 @@ mod tests {
             [Ipv4Addr::new(9, 9, 9, 9), Ipv4Addr::new(1, 1, 1, 1)]
         );
         assert_eq!((l.secs, l.up.index), (120, 4));
+        let moved = simulate("interface lo0\n", up.clone(), Vec::new()).unwrap();
+        assert_eq!(moved.up.index, host_index("lo0"));
+        let unknown = simulate("interface no-such-if\n", up, Vec::new()).unwrap();
+        assert_eq!(unknown.up.index, 4);
     }
 }
