@@ -61,59 +61,55 @@ impl ImageScanInputs {
     }
 }
 
+/// The platform facts the boot scan reads from the running system
+/// (`PackageManagerService`'s constructor at android-16.0.0_r1:
+/// `Build.SUPPORTED_ABIS` and its 32- and 64-bit lists,
+/// `VMRuntime.is64Bit`, the 32-bit app library directory, the current
+/// time, `Os.sysconf(_SC_PAGESIZE)` and `Build.IS_DEBUGGABLE`).
+pub struct ScanFacts {
+    pub abis: Vec<String>,
+    pub abis32: Vec<String>,
+    pub abis64: Vec<String>,
+    pub runtime_64: bool,
+    pub app_lib32: String,
+    pub current_time: i64,
+    pub page_size: i64,
+    pub debuggable: bool,
+}
+
+/// Where the boot scan takes its platform facts and live properties from.
+pub trait PlatformFacts {
+    fn scan_facts(&self) -> Result<ScanFacts>;
+    /// A live property, none when unset or empty.
+    fn property(&self, name: &str) -> Result<Option<String>>;
+}
+
 impl ImageScanInputs {
     pub fn load(
         image: &Path,
         platform: &Platform,
-        initial: &crate::system::package_boot_scan::InitialOwner,
+        facts: &dyn PlatformFacts,
         lifecycle: &crate::package::lifecycle::Owner,
         cli: Cli,
     ) -> Result<Self> {
-        let bytes = initial.capture_scan_inputs()?;
-        let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
-        let error = |code| {
-            Exception::new(
-                aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                format!("original scan facts: {code}"),
-            )
-        };
-        if reader.read_i32().map_err(error)? != 1 {
-            return Err(Exception::new(
-                aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                "scan facts schema",
-            ));
-        }
-        let strings = |reader: &mut aim_binder_host::parcel::Reader<'_>| -> Result<Vec<String>> {
-            let count = reader.read_i32().map_err(error)?;
-            if count < 0 {
-                return Err(error(-22));
+        let ScanFacts {
+            abis: all,
+            abis32: bit32,
+            abis64: bit64,
+            runtime_64,
+            app_lib32,
+            current_time,
+            page_size,
+            debuggable,
+        } = facts.scan_facts()?;
+        let first_error = std::cell::RefCell::new(None);
+        let prop = |name: &str| match facts.property(name) {
+            Ok(value) => value,
+            Err(error) => {
+                first_error.borrow_mut().get_or_insert(error);
+                None
             }
-            let mut output = Vec::new();
-            for _ in 0..count {
-                output.push(
-                    reader
-                        .read_string16()
-                        .map_err(error)?
-                        .ok_or_else(|| error(-22))?,
-                );
-            }
-            Ok(output)
         };
-        let all = strings(&mut reader)?;
-        let bit32 = strings(&mut reader)?;
-        let bit64 = strings(&mut reader)?;
-        let runtime_64 = reader.read_bool().map_err(error)?;
-        let app_lib32 = reader
-            .read_string16()
-            .map_err(error)?
-            .ok_or_else(|| error(-22))?;
-        let current_time = reader.read_i64().map_err(error)?;
-        let page_size = reader.read_i64().map_err(error)?;
-        let debuggable = reader.read_bool().map_err(error)?;
-        if reader.remaining() != 0 || page_size <= 0 {
-            return Err(error(-22));
-        }
-        let prop = |name: &str| initial.property_value(name);
         let abi = AbiPolicy::from_platform(
             platform,
             &all,
@@ -124,9 +120,11 @@ impl ImageScanInputs {
             &prop,
         )
         .map_err(|message| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, message))?;
-        initial.check()?;
+        if let Some(error) = first_error.into_inner() {
+            return Err(error);
+        }
         let number = |name: &str| -> Result<i32> {
-            initial
+            facts
                 .property(name)?
                 .ok_or_else(|| {
                     Exception::new(
@@ -385,7 +383,7 @@ impl System {
         let inputs = ImageScanInputs::load(
             &begin.image,
             &apks.platform,
-            &begin.initial,
+            begin.initial.as_ref(),
             &begin.lifecycle.owner,
             cli,
         )?;
