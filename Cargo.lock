@@ -190,6 +190,7 @@ dependencies = [
 name = "aim-host-health"
 version = "0.1.0"
 dependencies = [
+ "aim-host-sensors",
  "aim-hostcall",
 ]
 

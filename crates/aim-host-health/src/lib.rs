@@ -4,7 +4,8 @@
 //! Status, level and times come from the power-source API
 //! (`IOPSCopyPowerSourcesInfo`), the same source as the menu bar battery.
 //! Charge in mAh, cycle count and (where macOS still publishes it)
-//! temperature come from the `AppleSmartBattery` registry entry.
+//! temperature come from the `AppleSmartBattery` registry entry; without
+//! it, the temperature is the gauge's HID sensor, as the thermal HAL's.
 
 use std::ffi::{CStr, c_char, c_void};
 
@@ -266,8 +267,10 @@ fn from_smart_battery(b: &mut Battery) {
         if let Some(c) = capacity(c"DesignCapacity", c"DesignCapacity") {
             b.full_charge_design_uah = c;
         }
-        if let Some(t) = top(c"Temperature") {
-            b.temperature_tenths_celsius = (t / 10) as i32; // hundredths of a degree
+        if let Some(t) = temperature_tenths(top(c"Temperature"), || {
+            aim_host_sensors::read_thermal().battery_celsius
+        }) {
+            b.temperature_tenths_celsius = t;
         }
         if let Some(c) = top(c"CycleCount") {
             b.cycle_count = c as i32;
@@ -284,6 +287,20 @@ fn from_smart_battery(b: &mut Battery) {
         }
         IOObjectRelease(service);
     }
+}
+
+/// The battery's temperature in tenths of a degree: the smart battery's
+/// `Temperature` (hundredths of a degree), else the gauge's HID sensor the
+/// thermal HAL reads (`aim_host_sensors`), so the two agree; none if
+/// neither reads.
+fn temperature_tenths(
+    smart_hundredths: Option<i64>,
+    gauge_celsius: impl FnOnce() -> f32,
+) -> Option<i32> {
+    smart_hundredths.map(|t| (t / 10) as i32).or_else(|| {
+        let celsius = gauge_celsius();
+        celsius.is_finite().then(|| (celsius * 10.0).round() as i32)
+    })
 }
 
 #[cfg(test)]
@@ -317,6 +334,14 @@ mod tests {
             (0, 0, 0)
         );
         assert_eq!((b.time_to_full_seconds, b.time_to_empty_seconds), (-1, -1));
+    }
+
+    #[test]
+    fn temperature_is_the_smart_batterys_else_the_gauges() {
+        let unread = || -> f32 { panic!("the gauge is read only without Temperature") };
+        assert_eq!(temperature_tenths(Some(3075), unread), Some(307));
+        assert_eq!(temperature_tenths(None, || 33.75), Some(338));
+        assert_eq!(temperature_tenths(None, || f32::NAN), None);
     }
 
     #[test]
