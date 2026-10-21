@@ -33,9 +33,13 @@
 //!
 //! Seals: SHRINK/GROW refuse ftruncate, fallocate and an `O_TRUNC` reopen;
 //! WRITE/FUTURE_WRITE refuse write, hole punching and writable shared
-//! mappings. Adding WRITE while this process has a writable shared mapping
-//! fails with EBUSY; a writable mapping in another process is not seen, and
-//! mprotect can still make a read-only view writable (#258).
+//! mappings, and a read-only shared view mapped while they are set can
+//! never become writable (Linux clears its `VM_MAYWRITE`: here its maximum
+//! protection loses write, so mprotect fails with EACCES). Adding WRITE
+//! while this process has a shared view that may be written (its maximum
+//! protection has write, as `VM_SHARED | VM_MAYWRITE` counts in
+//! `i_mmap_writable`) fails with EBUSY; one in another process is not seen
+//! (#258). EXEC refuses a chmod of the exec bits (`shmem_setattr`).
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -412,11 +416,33 @@ pub fn get_seals(fd: i32) -> i64 {
     }
 }
 
-/// A shared writable mapping of `k` by the guest of this process.
+/// A shared mapping of `k` by the guest of this process that may be
+/// written (`vma_is_shared_maywrite`).
 fn mapped_writable(k: Key) -> bool {
     vmmap::shared_regions(super::arena::LO, super::arena::HI)
         .into_iter()
-        .any(|r| r.prot & 2 != 0 && r.file.as_ref().is_some_and(|f| (f.1, f.2) == k))
+        .any(|r| {
+            r.usage.max_prot & libc::PROT_WRITE as u32 != 0
+                && r.file.as_ref().is_some_and(|f| (f.1, f.2) == k)
+        })
+}
+
+/// A new shared view `[base, base + len)` of `fd` with protection `prot`:
+/// read-only while a write seal is set, it may never be written
+/// (`memfd_check_seals_mmap` clears `VM_MAYWRITE`).
+pub fn seal_view(fd: i32, base: u64, len: u64, prot: i32) {
+    if prot & libc::PROT_WRITE == 0
+        && seals(fd).is_some_and(|s| s & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE) != 0)
+    {
+        // SAFETY: lowering the maximum protection of our own new view.
+        unsafe { crate::patch::vm::mach_vm_protect(crate::patch::vm::task(), base, len, 1, prot) };
+    }
+}
+
+/// Whether chmod to `mode` from `old` is refused by F_SEAL_EXEC
+/// (`shmem_setattr`: the exec bits cannot change).
+pub fn chmod_sealed(fd: i32, old: u32, mode: u32) -> bool {
+    (old ^ mode) & 0o111 != 0 && seals(fd).is_some_and(|s| s & F_SEAL_EXEC != 0)
 }
 
 /// Serializes this process's check-and-add of seals.
@@ -705,6 +731,7 @@ pub fn map_shared(fd: i32, addr: u64, len: u64, prot: i32, fixed: bool, off: u64
     if unsafe { libc::mprotect(target as *mut _, len as usize, prot) } < 0 {
         return Shared::Done(-(errno::last() as i64));
     }
+    seal_view(fd, target, len, prot);
     Shared::Done(target as i64)
 }
 

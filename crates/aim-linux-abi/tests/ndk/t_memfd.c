@@ -4,6 +4,7 @@
 // fd or the process.
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -245,11 +246,74 @@ static void seals_across_scm_rights(void) {
   close(sv[0]);
 }
 
+// What a write seal does to mappings (mm/memfd.c, mm/mmap.c): a read-only
+// shared view of a sealed memfd can never be made writable, and any shared
+// view of a writable fd, even read-only, may be written, so it keeps
+// F_SEAL_WRITE out (EBUSY).
+static void seals_and_views(void) {
+  int fd = memfd_create("views", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  CHECK(fd >= 0 && ftruncate(fd, PAGE) == 0);
+  char* ro = mmap(NULL, PAGE, PROT_READ, MAP_SHARED, fd, 0);
+  CHECK(ro != MAP_FAILED);
+  errno = 0;
+  CHECK(fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) == -1 && errno == EBUSY);
+  // A private view never writes the file.
+  munmap(ro, PAGE);
+  char* priv = mmap(NULL, PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+  CHECK(priv != MAP_FAILED);
+  CHECK(fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) == 0);
+  munmap(priv, PAGE);
+  ro = mmap(NULL, PAGE, PROT_READ, MAP_SHARED, fd, 0);
+  CHECK(ro != MAP_FAILED);
+  errno = 0;
+  CHECK(mprotect(ro, PAGE, PROT_READ | PROT_WRITE) == -1 && errno == EACCES);
+  munmap(ro, PAGE);
+  close(fd);
+  // F_SEAL_FUTURE_WRITE alike, and a view mapped before the seal stays
+  // writable.
+  fd = memfd_create("future", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  CHECK(fd >= 0 && ftruncate(fd, PAGE) == 0);
+  char* before = mmap(NULL, PAGE, PROT_READ, MAP_SHARED, fd, 0);
+  CHECK(before != MAP_FAILED);
+  CHECK(fcntl(fd, F_ADD_SEALS, F_SEAL_FUTURE_WRITE) == 0);
+  ro = mmap(NULL, PAGE, PROT_READ, MAP_SHARED, fd, 0);
+  CHECK(ro != MAP_FAILED);
+  errno = 0;
+  CHECK(mprotect(ro, PAGE, PROT_READ | PROT_WRITE) == -1 && errno == EACCES);
+  CHECK(mprotect(before, PAGE, PROT_READ | PROT_WRITE) == 0);
+  before[0] = 'b';
+  CHECK(ro[0] == 'b');
+  munmap(ro, PAGE);
+  munmap(before, PAGE);
+  close(fd);
+}
+
+// F_SEAL_EXEC: the exec bits cannot change (shmem_setattr); the rest can.
+static void exec_seal_chmod(void) {
+  int fd = memfd_create("exec", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  CHECK(fd >= 0);
+  struct stat st;
+  CHECK(fstat(fd, &st) == 0);
+  CHECK(fcntl(fd, F_ADD_SEALS, F_SEAL_EXEC) == 0);
+  errno = 0;
+  CHECK(fchmod(fd, st.st_mode & 0666) == -1 && errno == EPERM);
+  CHECK(fchmod(fd, (st.st_mode & 07777) & ~0060) == 0);
+  close(fd);
+  int noexec = memfd_create("noexec", MFD_CLOEXEC | MFD_NOEXEC_SEAL);
+  CHECK(noexec >= 0);
+  errno = 0;
+  CHECK(fchmod(noexec, 0755) == -1 && errno == EPERM);
+  CHECK(fchmod(noexec, 0600) == 0);
+  close(noexec);
+}
+
 int main(void) {
   RUN(reopen_proc_self_fd);
   RUN(seal_rules);
   RUN(seals_across_dup);
   RUN(seals_across_fork);
   RUN(seals_across_scm_rights);
+  RUN(seals_and_views);
+  RUN(exec_seal_chmod);
   DONE();
 }

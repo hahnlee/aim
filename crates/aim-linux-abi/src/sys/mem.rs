@@ -532,6 +532,7 @@ fn mmap_kernel(a: [u64; 6]) -> i64 {
             Ok(b) => {
                 if let Some(k) = memfd {
                     super::memfd::note_view(k, b, len, off);
+                    super::memfd::seal_view(fd, b, len, host_prot(prot));
                 }
                 (b, Finish::Nothing)
             }
