@@ -68,7 +68,7 @@ fn definition(line: &str, own: bool) -> io::Result<Option<MountRecord>> {
         || !matches!(
             fields[0],
             "root" | "ro" | "rw" | "kernfs" | "cgroup2" | "bpf" | "input" | "host-device"
-        )
+        ) && crate::cgroup_v1::Controller::from_map_kind(fields[0]).is_none()
     {
         return Ok(None);
     }
