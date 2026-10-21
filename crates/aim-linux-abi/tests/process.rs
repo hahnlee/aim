@@ -315,6 +315,11 @@ fn signals_and_priorities_need_permission() {
 /// Another process's /proc owner and credentials, and the sender of its
 /// SIGCHLD, as Linux reports them.
 #[test]
+fn another_processs_thread_and_real_time_signals() {
+    check("peer_thread_signals");
+}
+
+#[test]
 fn other_processes_ids_in_proc_and_siginfo() {
     check("peer_ids");
 }
