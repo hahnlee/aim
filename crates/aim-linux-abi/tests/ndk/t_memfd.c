@@ -288,6 +288,58 @@ static void seals_and_views(void) {
   close(fd);
 }
 
+// A view that may be written keeps F_SEAL_WRITE out in whichever process
+// it is (i_mmap_writable belongs to the file): one a fork child maps
+// itself, one it inherited, until it goes or the child exits.
+static void views_in_other_processes(void) {
+  int fd = memfd_create("elsewhere", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  CHECK(fd >= 0 && ftruncate(fd, PAGE) == 0);
+  int up[2], down[2];
+  CHECK(pipe(up) == 0 && pipe(down) == 0);
+  FORK_OR_SKIP(pid);
+  if (pid == 0) {
+    char c;
+    char* v = mmap(NULL, PAGE, PROT_READ, MAP_SHARED, fd, 0);
+    if (v == MAP_FAILED || write(up[1], "m", 1) != 1) _exit(2);
+    if (read(down[0], &c, 1) != 1 || munmap(v, PAGE) != 0) _exit(3);
+    if (write(up[1], "u", 1) != 1) _exit(4);
+    _exit(0);
+  }
+  char c;
+  CHECK(read(up[0], &c, 1) == 1);
+  errno = 0;
+  CHECK(fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) == -1 && errno == EBUSY);
+  CHECK(write(down[1], "g", 1) == 1 && read(up[0], &c, 1) == 1);
+  int status = 0;
+  CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  // The child's view went before it exited.
+  CHECK(fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) == 0);
+  close(fd);
+  // A view the child inherits keeps the seal out after the parent's goes.
+  fd = memfd_create("inherited", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  CHECK(fd >= 0 && ftruncate(fd, PAGE) == 0);
+  char* v = mmap(NULL, PAGE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  CHECK(v != MAP_FAILED);
+  FORK_OR_SKIP(child);
+  if (child == 0) {
+    if (write(up[1], "f", 1) != 1 || read(down[0], &c, 1) != 1) _exit(2);
+    v[0] = 'c';
+    _exit(0);
+  }
+  CHECK(read(up[0], &c, 1) == 1 && munmap(v, PAGE) == 0);
+  errno = 0;
+  CHECK(fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) == -1 && errno == EBUSY);
+  CHECK(write(down[1], "g", 1) == 1);
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  CHECK(pread(fd, &c, 1, 0) == 1 && c == 'c');
+  CHECK(fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) == 0);
+  close(fd);
+  close(up[0]);
+  close(up[1]);
+  close(down[0]);
+  close(down[1]);
+}
+
 // F_SEAL_EXEC: the exec bits cannot change (shmem_setattr); the rest can.
 static void exec_seal_chmod(void) {
   int fd = memfd_create("exec", MFD_CLOEXEC | MFD_ALLOW_SEALING);
@@ -314,6 +366,7 @@ int main(void) {
   RUN(seals_across_fork);
   RUN(seals_across_scm_rights);
   RUN(seals_and_views);
+  RUN(views_in_other_processes);
   RUN(exec_seal_chmod);
   DONE();
 }

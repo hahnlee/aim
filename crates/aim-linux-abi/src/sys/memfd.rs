@@ -36,16 +36,23 @@
 //! mappings, and a read-only shared view mapped while they are set can
 //! never become writable (Linux clears its `VM_MAYWRITE`: here its maximum
 //! protection loses write, so mprotect fails with EACCES). Adding WRITE
-//! while this process has a shared view that may be written (its maximum
+//! while any process has a shared view that may be written (its maximum
 //! protection has write, as `VM_SHARED | VM_MAYWRITE` counts in
-//! `i_mmap_writable`) fails with EBUSY; one in another process is not seen
-//! (#258). EXEC refuses a chmod of the exec bits (`shmem_setattr`).
+//! `i_mmap_writable`) fails with EBUSY: a process mapping the file shared
+//! through a description open for writing puts its pid on the file
+//! ([`VIEW_ATTR`], a fork child its own), and the sealer looks at those
+//! processes' regions (`PROC_PIDREGIONPATHINFO`), with [`DENY_ATTR`]
+//! holding new views back meanwhile. Views of a memfd a process moved to
+//! anonymous memory are not file regions and are not seen, in this
+//! process or another. EXEC refuses a chmod of the exec bits
+//! (`shmem_setattr`).
 //! `vm.memfd_noexec` (the `/proc/sys` value init writes) picks MFD_EXEC or
 //! MFD_NOEXEC_SEAL for a memfd asked for with neither, and from scope 2
 //! refuses one without MFD_NOEXEC_SEAL.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -75,6 +82,13 @@ const PAGE: u64 = 16384;
 const MARK: u32 = libc::UF_NODUMP | libc::UF_HIDDEN;
 const NAME_ATTR: &CStr = c"dev.aim.memfd";
 const SEAL_ATTR: &str = "dev.aim.memfd.seal.";
+/// One per process (`<prefix><host pid>`) that has had a shared view of
+/// the file that may be written, so adding F_SEAL_WRITE in another process
+/// looks at its views.
+const VIEW_ATTR: &str = "dev.aim.memfd.view.";
+/// The host pid of a process adding F_SEAL_WRITE while it looks for views
+/// (`mapping_deny_writable`): a new view that may be written waits for it.
+const DENY_ATTR: &CStr = c"dev.aim.memfd.deny";
 /// A process sweeps at every this many memfd_create calls. Not at its
 /// first: a sweep opens every file in the directory (milliseconds of host
 /// kernel time with a few dozen memfds alive), and every app would pay it
@@ -96,6 +110,9 @@ struct Memfd {
     /// Where this process mapped the file (start, length, file offset),
     /// until it is converted: a mapping may since have gone.
     views: Vec<(u64, u64, u64)>,
+    /// The file's path once this process put its [`VIEW_ATTR`] on it (a
+    /// fork child puts its own there by it).
+    viewer: Option<PathBuf>,
 }
 
 impl Memfd {
@@ -104,6 +121,7 @@ impl Memfd {
             name,
             anon: None,
             views: Vec::new(),
+            viewer: None,
         }
     }
 }
@@ -216,14 +234,199 @@ fn set_seals(fd: i32, seals: u32) -> i64 {
 }
 
 fn read_seals(fd: i32) -> u32 {
-    let mut buf = [0u8; 1024];
-    // SAFETY: listing attributes into a local buffer.
-    let n = unsafe { libc::flistxattr(fd, buf.as_mut_ptr().cast(), buf.len(), 0) };
-    buf[..n.max(0) as usize]
-        .split(|&c| c == 0)
-        .filter_map(|a| std::str::from_utf8(a).ok()?.strip_prefix(SEAL_ATTR))
+    attr_names(fd)
+        .iter()
+        .filter_map(|a| a.strip_prefix(SEAL_ATTR))
         .filter_map(|b| u32::from_str_radix(b, 16).ok())
         .fold(0, |s, b| s | b)
+}
+
+/// The names of the file's attributes.
+fn attr_names(fd: i32) -> Vec<String> {
+    let mut buf = vec![0u8; 1024];
+    loop {
+        // SAFETY: listing attributes into our buffer of its length.
+        let n = unsafe { libc::flistxattr(fd, buf.as_mut_ptr().cast(), buf.len(), 0) };
+        if n < 0 && errno::last() == 34 {
+            // ERANGE: attributes added since; size it again.
+            // SAFETY: sizing call.
+            let size = unsafe { libc::flistxattr(fd, std::ptr::null_mut(), 0, 0) };
+            buf.resize(size.max(buf.len() as isize * 2) as usize, 0);
+            continue;
+        }
+        return buf[..n.max(0) as usize]
+            .split(|&c| c == 0)
+            .filter_map(|a| std::str::from_utf8(a).ok())
+            .filter(|a| !a.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
+}
+
+/// Whether host process `pid` exists (one of another user is).
+fn alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks.
+    unsafe { libc::kill(pid, 0) == 0 || *libc::__error() == libc::EPERM }
+}
+
+/// The host pid an attribute of the file holds, if it has it.
+fn attr_pid(fd: i32, name: &CStr) -> Option<i32> {
+    let mut buf = [0u8; 16];
+    // SAFETY: reading our attribute into a local buffer.
+    let n = unsafe { libc::fgetxattr(fd, name.as_ptr(), buf.as_mut_ptr().cast(), buf.len(), 0, 0) };
+    std::str::from_utf8(&buf[..usize::try_from(n).ok()?])
+        .ok()?
+        .parse()
+        .ok()
+}
+
+/// Set attribute `name` of the file at `path` (or of `fd`) to `value`.
+fn set_attr(fd: Option<i32>, path: Option<&std::path::Path>, name: &str, value: &str) -> bool {
+    let Ok(name) = CString::new(name) else {
+        return false;
+    };
+    // SAFETY: setting an attribute of our file from local buffers.
+    unsafe {
+        match (fd, path) {
+            (Some(fd), _) => {
+                libc::fsetxattr(fd, name.as_ptr(), value.as_ptr().cast(), value.len(), 0, 0) == 0
+            }
+            (None, Some(path)) => {
+                let Ok(path) = CString::new(path.as_os_str().as_encoded_bytes()) else {
+                    return false;
+                };
+                libc::setxattr(
+                    path.as_ptr(),
+                    name.as_ptr(),
+                    value.as_ptr().cast(),
+                    value.len(),
+                    0,
+                    0,
+                ) == 0
+            }
+            (None, None) => false,
+        }
+    }
+}
+
+/// Before a shared view of memfd `fd` that may be written: this process
+/// puts its [`VIEW_ATTR`] on the file once, then waits while a live
+/// process adding F_SEAL_WRITE looks for views, so that either the seal
+/// sees the view or the view sees the seal (`mapping_map_writable`).
+fn note_viewer(k: Key, fd: i32) {
+    if !with(|m| m.get(&k).is_some_and(|f| f.viewer.is_some())) {
+        let mut path = [0u8; libc::PATH_MAX as usize];
+        // SAFETY: F_GETPATH into a buffer of PATH_MAX bytes.
+        let path =
+            (unsafe { libc::fcntl(fd, libc::F_GETPATH, path.as_mut_ptr()) } == 0).then(|| {
+                let end = path.iter().position(|&b| b == 0).unwrap_or(path.len());
+                PathBuf::from(std::ffi::OsStr::from_bytes(&path[..end]))
+            });
+        let me = std::process::id();
+        if set_attr(Some(fd), None, &format!("{VIEW_ATTR}{me}"), "") {
+            with(|m| {
+                if let Some(f) = m.get_mut(&k) {
+                    f.viewer = path.or_else(|| Some(PathBuf::new()));
+                }
+            });
+        }
+    }
+    while attr_pid(fd, DENY_ATTR).is_some_and(alive) {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// `proc_regioninfo` (`<sys/proc_info.h>`).
+#[repr(C)]
+struct RegionInfo {
+    protection: u32,
+    max_protection: u32,
+    inheritance: u32,
+    flags: u32,
+    offset: u64,
+    behavior: u32,
+    user_wired_count: u32,
+    user_tag: u32,
+    pages_resident: u32,
+    pages_shared_now_private: u32,
+    pages_swapped_out: u32,
+    pages_dirtied: u32,
+    ref_count: u32,
+    shadow_depth: u32,
+    share_mode: u32,
+    private_pages_resident: u32,
+    shared_pages_resident: u32,
+    obj_id: u32,
+    depth: u32,
+    address: u64,
+    size: u64,
+}
+
+/// `proc_regionwithpathinfo`.
+#[repr(C)]
+struct RegionWithPath {
+    info: RegionInfo,
+    vip: libc::vnode_info_path,
+}
+
+/// `PROC_PIDREGIONPATHINFO`.
+const PROC_PIDREGIONPATHINFO: i32 = 8;
+
+/// Whether host process `pid` has a guest shared view of `k` that may be
+/// written (its maximum protection has write), as [`mapped_writable`]
+/// looks in this process.
+fn viewed_writable_by(pid: i32, k: Key) -> bool {
+    let size = std::mem::size_of::<RegionWithPath>() as i32;
+    let mut at = super::arena::LO;
+    while at < super::arena::HI {
+        // SAFETY: zeroed plain data, filled by proc_pidinfo up to its size.
+        let mut r: RegionWithPath = unsafe { std::mem::zeroed() };
+        let n = unsafe {
+            libc::proc_pidinfo(pid, PROC_PIDREGIONPATHINFO, at, (&raw mut r).cast(), size)
+        };
+        if n < size || r.info.address >= super::arena::HI {
+            return false;
+        }
+        let st = &r.vip.vip_vi.vi_stat;
+        if r.info.inheritance == 0
+            && r.info.max_protection & libc::PROT_WRITE as u32 != 0
+            && r.info.user_tag != super::window::TAG
+            && (st.vst_dev as u32 as u64, st.vst_ino) == k
+        {
+            return true;
+        }
+        at = r.info.address + r.info.size.max(1);
+    }
+    false
+}
+
+/// Whether another process that put its [`VIEW_ATTR`] on the file of `fd`
+/// has a view of `k` that may be written; the attributes of processes
+/// that are gone are removed.
+fn viewed_writable_elsewhere(fd: i32, k: Key) -> bool {
+    let me = std::process::id() as i32;
+    for name in attr_names(fd) {
+        let Some(pid) = name
+            .strip_prefix(VIEW_ATTR)
+            .and_then(|p| p.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if pid == me {
+            continue;
+        }
+        if !alive(pid) {
+            if let Ok(name) = CString::new(name) {
+                // SAFETY: removing our attribute of our file.
+                unsafe { libc::fremovexattr(fd, name.as_ptr(), 0) };
+            }
+            continue;
+        }
+        if viewed_writable_by(pid, k) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Remove the names of memfd files in `dir` no open file description
@@ -521,15 +724,32 @@ pub fn add_seals(fd: i32, add: u32) -> i64 {
     if cur & F_SEAL_SEAL != 0 {
         return -(EPERM as i64);
     }
-    if add & F_SEAL_WRITE != 0 && cur & F_SEAL_WRITE == 0 && mapped_writable(key_of(&st)) {
-        return -(libc::EBUSY as i64);
-    }
     let mut add = add;
     // SEAL_EXEC implies the write seals on an executable memfd (W^X).
     if add & F_SEAL_EXEC != 0 && st.st_mode & 0o111 != 0 {
         add |= F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_FUTURE_WRITE;
     }
-    set_seals(fd, add & !cur)
+    if add & F_SEAL_WRITE == 0 || cur & F_SEAL_WRITE != 0 {
+        return set_seals(fd, add & !cur);
+    }
+    // `mapping_deny_writable`: views that may be written in any process
+    // are EBUSY; new ones wait while this looks (`note_viewer`).
+    let me = std::process::id().to_string();
+    if !set_attr(Some(fd), None, DENY_ATTR.to_str().unwrap(), &me) {
+        return -(errno::last() as i64);
+    }
+    let k = key_of(&st);
+    let r = if mapped_writable(k) || viewed_writable_elsewhere(fd, k) {
+        -(libc::EBUSY as i64)
+    } else {
+        set_seals(fd, add & !cur)
+    };
+    // Another process sealing at once may have put its own pid there since.
+    if attr_pid(fd, DENY_ATTR) == Some(std::process::id() as i32) {
+        // SAFETY: removing our attribute of our file.
+        unsafe { libc::fremovexattr(fd, DENY_ATTR.as_ptr(), 0) };
+    }
+    r
 }
 
 /// Whether a write through `fd` is refused by a seal.
@@ -751,6 +971,12 @@ pub fn map_shared(fd: i32, addr: u64, len: u64, prot: i32, fixed: bool, off: u64
     };
     let k = key_of(&st);
     know(k, fd);
+    // A shared view of a description open for writing may be written
+    // (`VM_MAYWRITE`), whatever its protection now.
+    // SAFETY: plain fcntl.
+    if unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_ACCMODE == libc::O_RDWR {
+        note_viewer(k, fd);
+    }
     let seals = read_seals(fd);
     if prot & libc::PROT_WRITE != 0 && seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE) != 0 {
         return Shared::Done(-(EPERM as i64));
@@ -859,9 +1085,12 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             w.u64(v.1);
             w.u64(v.2);
         });
+        w.opt(f.viewer.as_ref(), |w, p| w.str(&p.to_string_lossy()));
     });
 }
 
+/// The child has its parent's shared views, so it puts its own
+/// [`VIEW_ATTR`] on the files the parent had put its on.
 pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
     let v = r.seq(|r| {
         (
@@ -870,9 +1099,16 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
                 name: r.str(),
                 anon: r.opt(|r| (r.u64(), r.u64())),
                 views: r.seq(|r| (r.u64(), r.u64(), r.u64())),
+                viewer: r.opt(|r| PathBuf::from(r.str())),
             },
         )
     });
+    let me = std::process::id();
+    for (_, f) in &v {
+        if let Some(path) = &f.viewer {
+            set_attr(None, Some(path), &format!("{VIEW_ATTR}{me}"), "");
+        }
+    }
     with(|m| m.extend(v));
 }
 
