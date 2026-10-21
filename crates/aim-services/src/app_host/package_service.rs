@@ -16,10 +16,12 @@ use aim_service_aidl::android_content_pm_ipackagemanager as pm;
 
 use super::AppHost;
 use super::package_writes::Writes;
+use super::settings_service::{java_exception, parse_user_arg};
 use crate::package::intent::ComponentName;
 use crate::package::query::Query;
 use crate::package::write::enabled::{Batch, Setting};
 use crate::shadow::{Answer, ShadowCall};
+use crate::shell::{SHELL_COMMAND_TRANSACTION, ShellCommand};
 
 pub struct PackageService {
     host: Arc<AppHost>,
@@ -31,7 +33,10 @@ pub struct PackageService {
 
 impl PackageService {
     pub fn new(host: Arc<AppHost>) -> Self {
-        let writes = Writes::new(host.clone());
+        let writes = host
+            .package_writes
+            .get_or_init(|| Writes::new(host.clone()))
+            .clone();
         let installer =
             host.process
                 .add_service(Arc::new(super::package_installer::PackageInstaller::new(
@@ -115,6 +120,18 @@ impl PackageService {
                     });
                 reply(result, pm::write_set_component_enabled_settings_reply)
             }
+            pm::CLEAR_APPLICATION_USER_DATA => {
+                let Ok(a) = pm::ClearApplicationUserData::read(&mut call.data) else {
+                    return Some(Err(BAD_VALUE));
+                };
+                let package = a.package_name.as_deref();
+                let done = super::clear_data::observer_of(&self.host, package, a.observer);
+                reply(
+                    self.host
+                        .clear_package_data(uid as i32, package, a.user_id, done),
+                    pm::write_clear_application_user_data_reply,
+                )
+            }
             // One-way; ART Service's `DexUseManagerLocal` records the use.
             pm::NOTIFY_DEX_LOAD => reply(
                 Err(self.host.unimplemented_named(
@@ -146,12 +163,92 @@ fn single(code: u32, uid: u32, data: &mut Reader<'_>) -> Result<Result<Setting, 
     }))
 }
 
+impl PackageService {
+    /// `PackageManagerShellCommand.onCommand` of `uid` (of `pid`): `clear`;
+    /// the other commands are not implemented (#1939).
+    fn shell_command(&self, uid: i32, pid: i32, c: &mut ShellCommand) -> i32 {
+        let cmd = c.command().unwrap_or_default().to_string();
+        let result = match cmd.as_str() {
+            "clear" => self.run_clear(uid, pid, c),
+            _ => Err(java_exception(&self.host.unimplemented_named(
+                "package",
+                &format!("the shell command {cmd:?} (#1939)"),
+            ))),
+        };
+        result.unwrap_or_else(|exception| {
+            c.exception(&exception);
+            -1
+        })
+    }
+
+    /// `runClear`: the package's data cleared through ActivityManager, as
+    /// the shell, and waited for.
+    fn run_clear(&self, uid: i32, pid: i32, c: &mut ShellCommand) -> Result<i32, String> {
+        const USER_SYSTEM: i32 = 0;
+        let mut user = USER_SYSTEM;
+        let mut cache_only = false;
+        while let Some(opt) = c.next_option()? {
+            match opt.as_str() {
+                "--user" => user = parse_user_arg(&c.next_arg_required()?)?,
+                "--cache-only" => cache_only = true,
+                _ => {
+                    c.println(&format!("Error: Unknown option: {opt}"));
+                    return Ok(1);
+                }
+            }
+        }
+        let Some(package) = c.next_arg() else {
+            c.eprintln("Error: no package specified");
+            return Ok(1);
+        };
+        let java = |e: Exception| java_exception(&e);
+        // `translateUserId(user, USER_NULL, "runClear")`.
+        let user = self.host.incoming_user(uid, user, false).map_err(java)?;
+        if cache_only {
+            return Err(java(self.host.unimplemented_named(
+                "package",
+                "the shell command \"clear --cache-only\" (#1939)",
+            )));
+        }
+        let (sender, outcome) = std::sync::mpsc::channel();
+        let done: super::clear_data::Done = Box::new(move |succeeded| {
+            let _ = sender.send(succeeded);
+        });
+        self.host
+            .clear_application_user_data(uid, pid, Some(&package), false, done, user)
+            .map_err(java)?;
+        if outcome.recv().unwrap_or(false) {
+            c.println("Success");
+            Ok(0)
+        } else {
+            c.eprintln("Failed");
+            Ok(1)
+        }
+    }
+}
+
 impl Service for PackageService {
     fn descriptor(&self) -> &str {
         pm::DESCRIPTOR
     }
 
+    fn accepts_fds(&self) -> bool {
+        true
+    }
+
     fn transact(&self, call: &mut Call<'_>) -> Reply {
+        if call.code == SHELL_COMMAND_TRANSACTION {
+            let mut command =
+                ShellCommand::read(&self.host.process, &mut call.data).map_err(|_| BAD_VALUE)?;
+            if command.has_output() {
+                let result =
+                    self.shell_command(call.sender_euid as i32, call.sender_pid, &mut command);
+                command.finish(result);
+            }
+            let mut p = Parcel::new();
+            p.write_no_exception();
+            return Ok(p);
+        }
         if call.code == pm::GET_PACKAGE_INSTALLER {
             pm::GetPackageInstaller::read(&mut call.data).map_err(|_| BAD_VALUE)?;
             let mut reply = Parcel::new();

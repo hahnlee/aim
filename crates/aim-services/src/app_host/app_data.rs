@@ -744,9 +744,41 @@ impl AppHost {
         }
     }
 
+    /// `AppDataHelper.clearAppDataLeafLIF` of `ps` in `user`: installd's
+    /// `clearAppData` of its storage `flags`, a failure logged as the
+    /// original logs it. Its ART profiles are ART Service's
+    /// (`destroyAppProfilesLIF`), which the app host does not start, so
+    /// they stay, as the original leaves them before ART Service runs.
+    pub(super) fn clear_app_data(
+        &self,
+        installd: &Strong,
+        ps: &PackageState,
+        user: i32,
+        flags: i32,
+    ) {
+        let mut data = Parcel::new();
+        installd::ClearAppData {
+            uuid: ps.volume_uuid.clone(),
+            package_name: Some(ps.name.clone()),
+            user_id: user,
+            flags,
+            ce_data_inode: crate::package::info::user_state(ps, user).ce_data_inode,
+        }
+        .write(&mut data);
+        if let Err(e) = call(
+            installd,
+            "clearAppData",
+            installd::CLEAR_APP_DATA,
+            &data,
+            installd::read_clear_app_data_reply,
+        ) {
+            eprintln!("app host: app data: {e}");
+        }
+    }
+
     /// `prepareAppDataContentsLeafLIF`: in CE, the native library link
     /// of a package whose primary ABI is 32-bit.
-    fn prepare_app_data_contents(
+    pub(super) fn prepare_app_data_contents(
         &self,
         installd: &Strong,
         ps: &PackageState,

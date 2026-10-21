@@ -39,6 +39,7 @@ mod broadcast_response;
 pub mod broadcasts;
 pub mod bugreport;
 mod cache_quota;
+mod clear_data;
 pub mod companion_device;
 pub mod compat;
 pub mod config;
@@ -501,6 +502,8 @@ pub struct AppHost {
     text_services: OnceLock<Arc<text_services::TextServices>>,
     /// The services' package monitors.
     package_monitors: package_writes::NativeMonitors,
+    /// PackageManager's writes and their handler, the package service's.
+    package_writes: OnceLock<Arc<package_writes::Writes>>,
     /// What DevicePolicyManagerService persisted, read once.
     device_policies: OnceLock<device_policy::Policies>,
     services: services::Services,
@@ -591,6 +594,7 @@ impl AppHost {
             bluetooth: OnceLock::new(),
             text_services: OnceLock::new(),
             package_monitors: Default::default(),
+            package_writes: OnceLock::new(),
             device_policies: OnceLock::new(),
             services: Default::default(),
             pending_intents: Default::default(),
@@ -2693,6 +2697,48 @@ impl AppHost {
         }
     }
 
+    /// `forceStopPackageLocked(package, app_id, ..., user, reason)` as the
+    /// user requested it, in the app host: the package's crash times reset
+    /// (`resetProcessCrashTime`), its processes and those of the user
+    /// depending on it killed (`killPackageProcessesLSP`, not to be
+    /// restarted) and its transient URI grants removed. Its activities,
+    /// services, providers and receivers are not stopped (#1570).
+    fn force_stop_package(&self, package: &str, app_id: i32, user: i32, reason: &str) {
+        eprintln!("app host: Force stopping {package} appid={app_id} user={user}: {reason}");
+        let uid = (user * PER_USER_RANGE as i32 + app_id) as u32;
+        {
+            let mut errors = self.app_errors.lock().unwrap();
+            errors.crash_times.retain(|(_, u), _| *u != uid);
+            errors.crash_counts.retain(|(_, u), _| *u != uid);
+        }
+        let starts: Vec<i64> = self
+            .apps
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, a)| {
+                a.uid / PER_USER_RANGE == uid / PER_USER_RANGE
+                    && (a.package == package && a.uid == uid
+                        || a.package_deps.iter().any(|d| d == package))
+            })
+            .map(|(seq, _)| *seq)
+            .collect();
+        let description = format!("stop {package} due to {reason}");
+        for seq in starts {
+            if let Err(e) = self.kill_process(
+                seq,
+                exit_info::REASON_USER_REQUESTED,
+                exit_info::SUBREASON_FORCE_STOP,
+                &description,
+            ) {
+                eprintln!("app host: killing {package}'s process of start {seq}: {e}");
+            }
+        }
+        if let Err(e) = self.remove_uri_permissions_for_package(package, user, false, false) {
+            eprintln!("app host: {package}'s URI grants: {}", e.message);
+        }
+    }
+
     /// `killUidForPermissionChange`: the processes of `uid`
     /// (`killPackageProcessesLSP` of its app id and user), for a change of
     /// its permissions.
@@ -4490,6 +4536,28 @@ impl Service for Activity {
                         .map(|restricted| {
                             let mut p = Parcel::new();
                             am::write_is_background_restricted_reply(&mut p, restricted);
+                            p
+                        }),
+                )
+            }
+            am::CLEAR_APPLICATION_USER_DATA => {
+                let a =
+                    am::ClearApplicationUserData::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let package = a.package_name.as_deref();
+                let done = clear_data::observer_of(&self.0, package, a.observer);
+                reply(
+                    self.0
+                        .clear_application_user_data(
+                            call.sender_euid as i32,
+                            call.sender_pid,
+                            package,
+                            a.keep_state,
+                            done,
+                            a.user_id,
+                        )
+                        .map(|cleared| {
+                            let mut p = Parcel::new();
+                            am::write_clear_application_user_data_reply(&mut p, cleared);
                             p
                         }),
                 )

@@ -86,6 +86,8 @@ const USER_CURRENT: i32 = -2;
 const USER_NULL: i32 = -10000;
 /// `ContentResolver.SCHEME_CONTENT`.
 const SCHEME_CONTENT: &str = "content";
+/// `Downloads.Impl.AUTHORITY`.
+const DOWNLOADS_AUTHORITY: &str = "downloads";
 const GET_APP_GRANTED_URI_PERMISSIONS: &str = "android.permission.GET_APP_GRANTED_URI_PERMISSIONS";
 const CLEAR_APP_GRANTED_URI_PERMISSIONS: &str =
     "android.permission.CLEAR_APP_GRANTED_URI_PERMISSIONS";
@@ -561,16 +563,42 @@ impl Grants {
     /// every grant to `package` (to any, if none) in `user` revoked.
     /// Whether what persists changed.
     fn clear(&mut self, package: Option<&str>, user: i32) -> bool {
+        self.remove_for_package(package, user, true, true)
+    }
+
+    /// `removeUriPermissionsForPackageLocked`: the grants in `user` (in
+    /// any, with `USER_ALL`) to `package` (or from it, unless
+    /// `target_only`; every grant, with none) revoked, the persisted ones
+    /// too with `persistable`, except DownloadManager's without it; whether
+    /// what persists changed.
+    fn remove_for_package(
+        &mut self,
+        package: Option<&str>,
+        user: i32,
+        persistable: bool,
+        target_only: bool,
+    ) -> bool {
         let mut changed = false;
         for (uid, perms) in self.0.iter_mut() {
             if user != USER_ALL && user != uid / PER_USER_RANGE as i32 {
                 continue;
             }
             perms.retain_mut(|p| {
-                if package.is_some_and(|package| package != p.target_package) {
+                let matches = package.is_none_or(|package| {
+                    (!target_only && p.source_package == package) || p.target_package == package
+                });
+                if !matches
+                    || (!persistable
+                        && p.uri.uri.authority().as_deref() == Some(DOWNLOADS_AUTHORITY))
+                {
                     return true;
                 }
-                changed |= p.revoke_modes(!0, true);
+                let modes = if persistable {
+                    !0
+                } else {
+                    !FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                };
+                changed |= p.revoke_modes(modes, true);
                 p.modes() != 0
             });
         }
@@ -959,6 +987,23 @@ impl AppHost {
                 eprintln!("app host: writing urigrants.xml: {e}");
             }
             out
+        })
+    }
+
+    /// `UriGrantsManagerInternal.removeUriPermissionsForPackage(package,
+    /// user, persistable, target_only)`.
+    pub(super) fn remove_uri_permissions_for_package(
+        &self,
+        package: &str,
+        user: i32,
+        persistable: bool,
+        target_only: bool,
+    ) -> Result<(), Exception> {
+        self.change_grants(|g| {
+            (
+                (),
+                g.remove_for_package(Some(package), user, persistable, target_only),
+            )
         })
     }
 
@@ -2145,6 +2190,30 @@ mod tests {
             true,
         );
         assert!(g.check(&uri, 10_001, READ));
+    }
+
+    /// `removeUriPermissionsForPackageLocked`: a force stop's removal takes
+    /// the package's grants, made by it or to it, but keeps persisted modes
+    /// and DownloadManager's; a data clear's takes the persisted ones too.
+    #[test]
+    fn a_package_s_grants_are_removed() {
+        let mut g = Grants::default();
+        let made = grant_uri("content://a.b/x", 0);
+        g.find_or_create("src", "dst", 10_001, &made)
+            .grant_modes(READ, None);
+        let downloads = grant_uri("content://downloads/1", 0);
+        g.find_or_create("src", "dst", 10_001, &downloads)
+            .grant_modes(READ, None);
+        let persisted = grant_uri("content://a.b/y", 0);
+        g.find_or_create("other", "dst", 10_001, &persisted)
+            .init_persisted_modes(READ, 1);
+        assert!(!g.remove_for_package(Some("src"), 0, false, false));
+        assert!(g.find(10_001, &made).is_none());
+        assert!(g.find(10_001, &downloads).is_some());
+        assert!(!g.remove_for_package(Some("dst"), 0, false, true));
+        assert!(g.find(10_001, &persisted).is_some());
+        assert!(g.remove_for_package(Some("dst"), 0, true, false));
+        assert!(g.0.is_empty());
     }
 
     #[test]
