@@ -751,6 +751,8 @@ fn target_of(ptr: u64, len: u32, bind: bool) -> Result<(Target, Vec<u8>), i64> {
             h[..len.min(28) as usize].copy_from_slice(&g[..len.min(28) as usize]);
             h[0] = 28;
             h[1] = libc::AF_INET6 as u8;
+            // A guest address on eth0 is the Mac's to the host (`nat66`).
+            super::nat66::translate(&mut h, super::nat66::to_host);
             Ok((Target::Host(h), g))
         }
         L_AF_INET | L_AF_INET6 => Err(-(EINVAL as i64)),
@@ -795,6 +797,10 @@ fn linux_addr_of_host(sa: &libc::sockaddr_storage, len: u32) -> Option<Vec<u8>> 
     let mut out = lfam.to_le_bytes().to_vec();
     if fam != libc::AF_UNIX {
         out.extend_from_slice(rest);
+        if fam == libc::AF_INET6 {
+            // The Mac's address is the guest's own on eth0 (`nat66`).
+            super::nat66::translate(&mut out, super::nat66::to_guest);
+        }
         return Some(out);
     }
     let end = rest.iter().position(|&c| c == 0).unwrap_or(rest.len());

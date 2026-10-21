@@ -9,7 +9,8 @@
 //! - `eth0` stands for the Mac's network (`uplink`): it has carrier
 //!   (IFF_RUNNING, IFF_LOWER_UP) while it is up and the Mac has an IPv4
 //!   default route, and its virtual link's DHCP server leases the Mac's
-//!   address (`dhcp`). Its hardware address is a fixed locally
+//!   address (`dhcp`); its virtual router advertises the Mac's IPv6
+//!   network (`addrconf`). Its hardware address is a fixed locally
 //!   administered one.
 //! - The Mac's network is part of the state: each process that reads or
 //!   changes the devices compares it with the Mac's current one first, and
@@ -17,7 +18,9 @@
 //!   lost and back for a different network, so that DHCP runs again).
 //!   Processes listening to link changes look every few seconds and on
 //!   each routing change (`uplink::watch`).
-//! - There is no routing table: routes live in netd's per-network
+//! - Each device has its IPv6 configuration (`ipv6conf`) and its IPv6
+//!   addresses and routes are autoconfigured (`addrconf`). There is no
+//!   IPv4 routing table: those routes live in netd's per-network
 //!   bookkeeping, and the host routes every socket.
 //! - The state is a text file in the runtime directory
 //!   (`<runtime>/net/links`), read and written under `flock`; each change
@@ -619,6 +622,30 @@ fn transact<R>(f: impl FnOnce(&mut Devices, &mut Vec<Event>) -> R) -> R {
 
 pub fn links() -> Vec<Link> {
     transact(|d, _| d.links.clone())
+}
+
+fn state_path() -> &'static std::path::Path {
+    static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| kernel_dir("net").join("links"))
+}
+
+/// The device state as it was last written, read without changing it.
+pub fn peek() -> Option<Devices> {
+    let _own = super::fork::spawn::own_fds();
+    let mut file = std::fs::File::open(state_path()).ok()?;
+    // SAFETY: a shared lock on our open file; released when it closes.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) };
+    let mut text = String::new();
+    file.read_to_string(&mut text).ok()?;
+    parse(&text).map(|(d, _)| d)
+}
+
+/// When the device state was last written, and its size: it changed
+/// when this does.
+pub fn state_stamp() -> Option<(i64, i64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(state_path()).ok()?;
+    Some((m.mtime(), m.mtime_nsec(), m.len()))
 }
 
 /// The kernel's IPv6 routes.

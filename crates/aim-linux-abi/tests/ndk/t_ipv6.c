@@ -420,10 +420,80 @@ static void router(void) {
   close(ev);
 }
 
+// A global IPv6 address the host has (argv[2]), or "".
+static const char* host6;
+
+// eth0's global address in the prefix, of the kind `temporary` asks.
+static int guest_global(struct in6_addr* out, int temporary) {
+  struct v6addr a[8];
+  int n = addrs6(a, 8);
+  for (int i = 0; i < n; i++) {
+    if (a[i].scope == RT_SCOPE_UNIVERSE && !!(a[i].flags & IFA_F_TEMPORARY) == temporary) {
+      *out = a[i].a;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// The guest's SLAAC address stands for the Mac's at the socket layer: a
+// bind to it binds the host's address and reports the guest's, and a
+// socket connected to it has it as its peer. (Connected datagram
+// sockets: no packet needs to reach the host's own address, which an
+// address on a tunnel interface does not loop back.)
+static void nat66(void) {
+  if (!*host6) {
+    printf("skip nat66: the host has no global IPv6 address\n");
+    skipped = 1;
+    return;
+  }
+  char text[128];
+  snprintf(text, sizeof text, "addr6 %s/64\n", host6);
+  simulate(text);
+  CHECK(put(CONF "eth0/dad_transmits", "0") == 0);
+  CHECK(put(CONF "eth0/use_tempaddr", "2") == 0);
+  CHECK(set_up(1) == 0);
+  struct in6_addr stable, temp, mac;
+  inet_pton(AF_INET6, host6, &mac);
+  CHECK(guest_global(&stable, 0) && guest_global(&temp, 1));
+  CHECK(memcmp(&stable, &mac, 16) != 0);
+  int l = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  struct sockaddr_in6 sa = {.sin6_family = AF_INET6, .sin6_addr = stable};
+  CHECK(bind(l, (struct sockaddr*)&sa, sizeof sa) == 0);
+  socklen_t len = sizeof sa;
+  CHECK(getsockname(l, (struct sockaddr*)&sa, &len) == 0 && !memcmp(&sa.sin6_addr, &stable, 16) &&
+        sa.sin6_port != 0);
+  int c = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  struct sockaddr_in6 from = {.sin6_family = AF_INET6, .sin6_addr = temp};
+  CHECK(bind(c, (struct sockaddr*)&from, sizeof from) == 0);
+  CHECK(connect(c, (struct sockaddr*)&sa, sizeof sa) == 0);
+  struct sockaddr_in6 peer;
+  len = sizeof peer;
+  CHECK(getpeername(c, (struct sockaddr*)&peer, &len) == 0 && !memcmp(&peer.sin6_addr, &stable, 16) &&
+        peer.sin6_port == sa.sin6_port);
+  // The Mac has no temporary address: the socket bound to the guest's
+  // temporary address has the Mac's one address, which is the stable one.
+  len = sizeof from;
+  CHECK(getsockname(c, (struct sockaddr*)&from, &len) == 0 && !memcmp(&from.sin6_addr, &stable, 16));
+  // An address of no one's is the host's to refuse.
+  struct sockaddr_in6 none = {.sin6_family = AF_INET6};
+  inet_pton(AF_INET6, "2001:db8:dead::1", &none.sin6_addr);
+  int x = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  CHECK(bind(x, (struct sockaddr*)&none, sizeof none) < 0 && errno == EADDRNOTAVAIL);
+  close(x);
+  close(c);
+  close(l);
+  CHECK(set_up(0) == 0);
+  CHECK(put(CONF "eth0/dad_transmits", "1") == 0);
+  simulate("");
+}
+
 int main(int argc, char** argv) {
   hook = argc > 1 ? argv[1] : "";
+  host6 = argc > 2 ? argv[2] : "";
   RUN(sysctls);
   RUN(autoconf);
   RUN(router);
+  RUN(nat66);
   DONE();
 }

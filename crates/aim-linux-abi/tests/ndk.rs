@@ -257,9 +257,43 @@ fn network_ipv6() {
     std::fs::write(&hook, "").unwrap();
     g.map("/data/local/tmp/simulate", &hook);
     let prog = g.build(&clang, "t_ipv6");
-    let (ok, out) = g.run(&[&prog, "/data/local/tmp/simulate"]);
+    // A global IPv6 address the host has, for the guest's to stand for.
+    let host = host_ipv6().map(|a| a.to_string()).unwrap_or_default();
+    let (ok, out) = g.run(&[&prog, "/data/local/tmp/simulate", &host]);
     println!("{out}");
     assert!(ok && out.contains("PASS"), "t_ipv6 failed:\n{out}");
+}
+
+/// A global (not link-local, loopback or multicast) IPv6 address of the
+/// host's, if it has one.
+fn host_ipv6() -> Option<std::net::Ipv6Addr> {
+    let mut ifa: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs into a list we free below.
+    if unsafe { libc::getifaddrs(&mut ifa) } != 0 {
+        return None;
+    }
+    let mut found = None;
+    let mut p = ifa;
+    // SAFETY: walking the list getifaddrs returned.
+    unsafe {
+        while !p.is_null() && found.is_none() {
+            let e = &*p;
+            p = e.ifa_next;
+            if e.ifa_addr.is_null() || (*e.ifa_addr).sa_family as i32 != libc::AF_INET6 {
+                continue;
+            }
+            let a = std::net::Ipv6Addr::from(
+                (*(e.ifa_addr as *const libc::sockaddr_in6))
+                    .sin6_addr
+                    .s6_addr,
+            );
+            if !(a.is_loopback() || a.is_multicast() || a.segments()[0] & 0xffc0 == 0xfe80) {
+                found = Some(a);
+            }
+        }
+        libc::freeifaddrs(ifa);
+    }
+    found
 }
 
 /// The Mac's network changes, through the boot's test hook
