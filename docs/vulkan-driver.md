@@ -181,9 +181,12 @@ memfd.
 | `YV12` | `G8_B8_R8_3PLANE_420_UNORM` | Cb and Cr swapped |
 | `YCbCr_P010` | `G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16` | identity |
 
-The suggested conversion is BT.601, narrow range, with chroma at the
-midpoint (the allocator's `SITED_INTERSTITIAL`), as HWUI and Skia take it
-for video frames.
+The suggested conversion follows the buffer's DATASPACE metadata (read
+from its metadata area, `aim_gralloc::metadata::ycbcr`): its standard
+(BT.709, BT.2020, else BT.601) and range (full, else narrow), the legacy
+JFIF, BT601 and BT709 values included; a buffer that names neither is
+BT.601 narrow, as video and cameras produce. Chroma is at the midpoint
+(the allocator's `SITED_INTERSTITIAL`), as HWUI and Skia take it.
 
 MoltenVK makes a multi-planar image of one Metal texture per plane, and a
 texture can be set only for plane 0 after creation (`vkSetMTLTextureMVK`),

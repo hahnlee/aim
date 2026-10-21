@@ -65,6 +65,67 @@ impl SharedMetadata {
     }
 }
 
+/// A Y'CbCr encoding's standard (`Dataspace` STANDARD).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum YcbcrStandard {
+    Bt601,
+    Bt709,
+    Bt2020,
+}
+
+// android.hardware.graphics.common.Dataspace: its STANDARD and RANGE
+// fields, and the legacy values YUV buffers still carry.
+const STANDARD_SHIFT: i32 = 16;
+const STANDARD_MASK: i32 = 63 << STANDARD_SHIFT;
+const STANDARD_BT709: i32 = 1;
+const STANDARD_BT2020: i32 = 6;
+const STANDARD_BT2020_CONSTANT_LUMINANCE: i32 = 7;
+const RANGE_SHIFT: i32 = 27;
+const RANGE_MASK: i32 = 7 << RANGE_SHIFT;
+const RANGE_FULL: i32 = 1;
+const LEGACY_JFIF: i32 = 0x101;
+const LEGACY_BT601_625: i32 = 0x102;
+const LEGACY_BT601_525: i32 = 0x103;
+const LEGACY_BT709: i32 = 0x104;
+
+/// The Y'CbCr standard of a YUV buffer of `dataspace`, and whether it is
+/// full range: BT.601 and narrow where the dataspace names neither (what
+/// video and cameras produce).
+pub fn ycbcr(dataspace: i32) -> (YcbcrStandard, bool) {
+    match dataspace {
+        LEGACY_JFIF => return (YcbcrStandard::Bt601, true),
+        LEGACY_BT601_625 | LEGACY_BT601_525 => return (YcbcrStandard::Bt601, false),
+        LEGACY_BT709 => return (YcbcrStandard::Bt709, false),
+        _ => {}
+    }
+    let standard = match (dataspace & STANDARD_MASK) >> STANDARD_SHIFT {
+        STANDARD_BT709 => YcbcrStandard::Bt709,
+        STANDARD_BT2020 | STANDARD_BT2020_CONSTANT_LUMINANCE => YcbcrStandard::Bt2020,
+        // BT.601 (625 or 525 lines) and unspecified.
+        _ => YcbcrStandard::Bt601,
+    };
+    (
+        standard,
+        (dataspace & RANGE_MASK) >> RANGE_SHIFT == RANGE_FULL,
+    )
+}
+
+/// The bytes at the start of the metadata area that hold its DATASPACE,
+/// for a reader that does not map the buffer.
+pub const DATASPACE_PREFIX: usize = std::mem::offset_of!(SharedMetadata, dataspace) + 4;
+
+/// The DATASPACE in `prefix`, the first [`DATASPACE_PREFIX`] bytes of a
+/// buffer's metadata area; None if they are not valid metadata.
+pub fn dataspace(prefix: &[u8]) -> Option<i32> {
+    let word = |at: usize| Some(i32::from_ne_bytes(prefix.get(at..at + 4)?.try_into().ok()?));
+    if word(std::mem::offset_of!(SharedMetadata, magic))? as u32 != MAGIC
+        || word(std::mem::offset_of!(SharedMetadata, version))? as u32 != VERSION
+    {
+        return None;
+    }
+    word(std::mem::offset_of!(SharedMetadata, dataspace))
+}
+
 /// `AIMapper_Error` values.
 pub mod error {
     pub const BAD_BUFFER: i32 = 2;
@@ -392,6 +453,36 @@ mod tests {
         let mut m: Box<SharedMetadata> = unsafe { Box::new(std::mem::zeroed()) };
         m.init(b"test\0junk");
         (h, m)
+    }
+
+    #[test]
+    fn ycbcr_follows_the_dataspace() {
+        use YcbcrStandard::*;
+        // V0_BT709 (BT709 | SMPTE_170M | LIMITED), BT2020 full, V0_JFIF.
+        assert_eq!(ycbcr(0x10C1_0000), (Bt709, false));
+        assert_eq!(ycbcr(6 << 16 | 1 << 27), (Bt2020, true));
+        assert_eq!(ycbcr(2 << 16 | 3 << 22 | 1 << 27), (Bt601, true));
+        assert_eq!(ycbcr(0x101), (Bt601, true));
+        assert_eq!(ycbcr(0x104), (Bt709, false));
+        assert_eq!(ycbcr(0), (Bt601, false));
+    }
+
+    #[test]
+    fn dataspace_reads_from_the_area_prefix() {
+        let (_, mut m) = fixture();
+        m.dataspace = 0x0812_0000;
+        // SAFETY: SharedMetadata is plain data, viewed as its bytes.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&*m as *const SharedMetadata).cast::<u8>(),
+                DATASPACE_PREFIX,
+            )
+        };
+        assert_eq!(dataspace(bytes), Some(0x0812_0000));
+        assert_eq!(dataspace(&bytes[..DATASPACE_PREFIX - 1]), None);
+        let mut stale = bytes.to_vec();
+        stale[0] ^= 1;
+        assert_eq!(dataspace(&stale), None);
     }
 
     fn get(h: &Handle, m: &SharedMetadata, t: i64) -> Vec<u8> {
