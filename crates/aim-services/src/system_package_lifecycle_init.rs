@@ -9,7 +9,7 @@ use crate::{
         settings::{PackageReadAttempt, ReadOwners, Settings},
     },
     system::System,
-    system_package_lifecycle::{Production, Restored},
+    system_package_lifecycle::{LifecycleFacts, Production, Restored},
 };
 use aim_android_init::props::{PropertyService, area::AreaMemory};
 use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception, Parcel};
@@ -102,8 +102,7 @@ impl<M: AreaMemory + Send + 'static> BeforeScan<M> {
         let live = properties.clone();
         let production = Production::construct(
             restored,
-            &bridge,
-            leaf,
+            LifecycleFacts::original(&bridge, leaf)?,
             Box::new(move |name| live.lock().unwrap().get(name)),
         )?;
         system.check_package_bootstrap(&bridge)?;

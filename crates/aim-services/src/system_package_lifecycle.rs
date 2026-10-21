@@ -38,13 +38,17 @@ pub struct Production {
     pub owner: Arc<lifecycle::Owner>,
     pub current_version: crate::package::settings::Version,
 }
-impl Production {
-    pub fn construct(
-        restored: Restored,
-        original: &Arc<Bridge>,
-        storage: Strong,
-        live_native_properties: Properties,
-    ) -> Result<Self, Exception> {
+/// What the package lifecycle takes from the platform: the current
+/// partition version (`Settings.VersionInfo` of `Build.FINGERPRINT` and the
+/// SDK at android-16.0.0_r1) and whether a user's CE storage is unlocked
+/// (`StorageManager.isCeStorageUnlocked`).
+pub struct LifecycleFacts {
+    pub current_version: crate::package::settings::Version,
+    pub ce_storage: lifecycle::CeStorage,
+}
+impl LifecycleFacts {
+    /// system_server's: its bridge's current version and its CE-storage leaf.
+    pub fn original(original: &Arc<Bridge>, storage: Strong) -> Result<Self, Exception> {
         let reply = storage
             .transact(u32::from_be_bytes(*b"_NTF"), &Parcel::new(), false)
             .map_err(|status| {
@@ -74,7 +78,7 @@ impl Production {
         // Original PackageBootstrapBridge constructs this Version from original
         // Build/SystemProperties partition fingerprint inputs. No image filename,
         // environment value or native default substitutes for that fingerprint.
-        let current = original
+        let current_version = original
             .current_package_version()
             .map_err(|error| match error {
                 crate::package::bootstrap::OwnerError::Owner(error) => error,
@@ -83,9 +87,6 @@ impl Production {
                     format!("original package version owner: {other:?}"),
                 ),
             })?;
-        let fingerprint = current.fingerprint.as_deref().ok_or_else(|| {
-            Exception::new(EX_ILLEGAL_STATE, "original partition fingerprint absent")
-        })?;
         let ce_storage: lifecycle::CeStorage = Box::new(move |user| {
             let mut request = Parcel::new();
             leaf::IsCeStorageUnlocked { user_id: user }.write(&mut request);
@@ -101,6 +102,26 @@ impl Production {
             }
             Ok(value)
         });
+        Ok(Self {
+            current_version,
+            ce_storage,
+        })
+    }
+}
+
+impl Production {
+    pub fn construct(
+        restored: Restored,
+        facts: LifecycleFacts,
+        live_native_properties: Properties,
+    ) -> Result<Self, Exception> {
+        let LifecycleFacts {
+            current_version: current,
+            ce_storage,
+        } = facts;
+        let fingerprint = current.fingerprint.as_deref().ok_or_else(|| {
+            Exception::new(EX_ILLEGAL_STATE, "original partition fingerprint absent")
+        })?;
         let owner = lifecycle::Owner::from_settings(
             &restored.settings,
             restored.read_succeeded,
