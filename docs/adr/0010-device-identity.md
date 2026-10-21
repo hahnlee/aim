@@ -42,3 +42,12 @@ SDKs apply that device's quirks and would misreport where the app runs.
 phone model or brand treats this as an unknown device, which is correct.
 Play Integrity and similar attestations still fail; this runtime has no
 attested key (#34).
+
+## In the original image (ADR 0012)
+
+The original userspace reads the image's own build.props. The device's
+`/vendor/build.prop` (`image/overlay.toml`) drops what claims the
+emulator's hardware: `ro.kernel.qemu`, the ranchu power, gralloc and UWB
+device names and `ro.soc.*`, which aim-guest-init sets from the Mac
+(`crates/aim-guest-init/src/soc.rs`); the board is `aim`. The product
+identity of every partition is still the emulator build's (#2024).
