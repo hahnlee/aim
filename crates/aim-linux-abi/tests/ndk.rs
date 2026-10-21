@@ -247,7 +247,19 @@ fn network_devices() {
 /// IPv6 on eth0 (#267).
 #[test]
 fn network_ipv6() {
-    check("t_ipv6", &[]);
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let g = Guest::new(&image, "t_ipv6");
+    let hook = g.runtime.join("net/simulate");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "").unwrap();
+    g.map("/data/local/tmp/simulate", &hook);
+    let prog = g.build(&clang, "t_ipv6");
+    let (ok, out) = g.run(&[&prog, "/data/local/tmp/simulate"]);
+    println!("{out}");
+    assert!(ok && out.contains("PASS"), "t_ipv6 failed:\n{out}");
 }
 
 /// The Mac's network changes, through the boot's test hook

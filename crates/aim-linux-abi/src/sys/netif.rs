@@ -183,6 +183,9 @@ pub struct Link {
     /// IPv6 is configured on it (`IF_READY`): its link became ready with
     /// IPv6 enabled, and it was not taken down since (`addrconf`).
     pub ready6: bool,
+    /// Its `desync_factor` for temporary addresses, plus one (0: not made
+    /// yet).
+    pub desync6: u32,
 }
 
 /// The devices and the IPv6 configurations of `all` and `default`.
@@ -193,6 +196,10 @@ pub struct Devices {
     pub dflt: Conf6,
     /// The kernel's IPv6 routes (`addrconf`).
     pub routes6: Vec<Route6>,
+    /// What `eth0`'s virtual router last advertised, and when it
+    /// advertises next (CLOCK_MONOTONIC ms, 0: not scheduled).
+    pub ra_seen: Option<uplink::Advert>,
+    pub ra_next: u64,
 }
 
 impl Devices {
@@ -245,11 +252,27 @@ pub enum Event {
     DelAddr(Link, Addr),
     NewRoute(Route6),
     DelRoute(Route6),
+    /// A router advertisement's option for userspace (RDNSS), from
+    /// `router`.
+    UserOpt {
+        index: u32,
+        opt: Vec<u8>,
+        router: Ipv6Addr,
+    },
+    /// A prefix information option received (`inet6_prefix_notify`).
+    Prefix {
+        index: u32,
+        prefix: Ipv6Addr,
+        plen: u8,
+        flags: u8,
+        valid: u32,
+        preferred: u32,
+    },
 }
 
 /// The devices at boot: the loopback up with its addresses, `eth0` down
 /// with none.
-fn boot_devices() -> Devices {
+pub(super) fn boot_devices() -> Devices {
     let links = boot_links();
     Devices {
         routes6: addrconf::boot_routes(&links[0]),
@@ -273,6 +296,7 @@ fn boot_links() -> Vec<Link> {
             carrier: true,
             conf6: Conf6::default(),
             ready6: true,
+            desync6: 0,
         },
         Link {
             index: ETH0,
@@ -284,6 +308,7 @@ fn boot_links() -> Vec<Link> {
             carrier: false,
             conf6: Conf6::default(),
             ready6: false,
+            desync6: 0,
         },
     ]
 }
@@ -334,9 +359,18 @@ fn serialize(d: &Devices, up: &Option<Uplink>) -> String {
         if l.ready6 {
             s += &format!("ready6 {}\n", l.index);
         }
+        if l.desync6 != 0 {
+            s += &format!("desync6 {} {}\n", l.index, l.desync6);
+        }
     }
     for r in &d.routes6 {
         s += &r.line();
+    }
+    if let Some(a) = &d.ra_seen {
+        s += &a.line();
+    }
+    if d.ra_next != 0 {
+        s += &format!("ra_next {}\n", d.ra_next);
     }
     s
 }
@@ -373,8 +407,15 @@ fn parse(text: &str) -> Option<(Devices, Option<Uplink>)> {
                     carrier: false,
                     conf6: Conf6::default(),
                     ready6: false,
+                    desync6: 0,
                 });
             }
+            ["desync6", index, v] => {
+                let index: u32 = index.parse().ok()?;
+                d.links.iter_mut().find(|l| l.index == index)?.desync6 = v.parse().ok()?;
+            }
+            ["uplink6", rest @ ..] => d.ra_seen = Some(uplink::Advert::parse(rest)?),
+            ["ra_next", t] => d.ra_next = t.parse().ok()?,
             ["ready6", index] => {
                 let index: u32 = index.parse().ok()?;
                 d.links.iter_mut().find(|l| l.index == index)?.ready6 = true;
@@ -561,9 +602,11 @@ fn transact<R>(f: impl FnOnce(&mut Devices, &mut Vec<Event>) -> R) -> R {
     }
     let t = now_ms();
     expire(&mut d, t, &mut events);
-    addrconf::reconcile(&mut d, t, &mut events);
+    let solicited = addrconf::reconcile(&mut d, t, &mut events);
+    addrconf::advertise(&mut d, uplink::advert, &solicited, t, &mut events);
     let r = f(&mut d, &mut events);
-    addrconf::reconcile(&mut d, t, &mut events);
+    let solicited = addrconf::reconcile(&mut d, t, &mut events);
+    addrconf::advertise(&mut d, uplink::advert, &solicited, t, &mut events);
     let new = serialize(&d, &now);
     if new != text {
         let _ = file.set_len(0);
