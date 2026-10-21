@@ -192,6 +192,8 @@ SOURCE_FILES=(
   "platform/frameworks/base|apex/blobstore/framework/java/android/app/blob/IBlobStoreManager.aidl|8273568de77b8bc56351b6c55434cc8723402777e8ea227384bfc7385924fd8d"
   "platform/frameworks/base|apex/blobstore/framework/java/android/app/blob/IBlobStoreSession.aidl|df891d04495d6a434bddbefd29fc4048413321f0621d1d3bb27593644abda688"
   "platform/frameworks/base|apex/blobstore/framework/java/android/app/blob/IBlobCommitCallback.aidl|6f32f895183da9dd2e83bfa9fc1212b85bec23a9f6ac339e3db6b9a78e773f5a"
+  "platform/frameworks/base|core/java/android/credentials/ICredentialManager.aidl|49dc274d653974f917d1b88e07ac30566685e06e7642b104d396f515fe1fe7d3"
+  "platform/frameworks/base|core/java/android/credentials/ISetEnabledProvidersCallback.aidl|98b311a043541302515b40f4d7f6687a545538844deaa5ad85e5de4c0dea70c2"
 )
 
 # descriptor|jar of its stub in the image|methods to marshal (`*`: all).
@@ -376,6 +378,8 @@ INTERFACES=(
   "android.app.blob.IBlobStoreManager|system/framework/framework.jar|*"
   "android.app.blob.IBlobStoreSession|system/framework/framework.jar|*"
   "android.app.blob.IBlobCommitCallback|system/framework/framework.jar|*"
+  "android.credentials.ICredentialManager|system/framework/framework.jar|setEnabledProviders,isEnabledCredentialProviderService,getCredentialProviderServices,getCredentialProviderServicesForTesting,isServiceEnabled"
+  "android.credentials.ISetEnabledProvidersCallback|system/framework/framework.jar|*"
 )
 
 # Binder interfaces the framework writes by hand, without AIDL:
