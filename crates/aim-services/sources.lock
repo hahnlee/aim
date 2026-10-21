@@ -195,6 +195,8 @@ SOURCE_FILES=(
   "platform/frameworks/base|core/java/android/credentials/ICredentialManager.aidl|49dc274d653974f917d1b88e07ac30566685e06e7642b104d396f515fe1fe7d3"
   "platform/frameworks/base|core/java/android/credentials/ISetEnabledProvidersCallback.aidl|98b311a043541302515b40f4d7f6687a545538844deaa5ad85e5de4c0dea70c2"
   "platform/frameworks/base|core/java/android/app/slice/ISliceManager.aidl|8de9a02dc16f4aab0edc32edb42f1ff67b554b45bc5164ac0b30995e4de24cf2"
+  "platform/frameworks/native|cmds/dumpstate/binder/android/os/IDumpstate.aidl|d4de6424249f229309e8a253c0a94a78945405ac50d35484759fe5a24ea0a0c4"
+  "platform/frameworks/native|cmds/dumpstate/binder/android/os/IDumpstateListener.aidl|5932dc9336d873520f68bf45fff9521d6af81bba685bb7d2396a060bde3903e2"
 )
 
 # descriptor|jar of its stub in the image|methods to marshal (`*`: all).
@@ -344,6 +346,8 @@ INTERFACES=(
   "android.permission.ILegacyPermissionManager|system/framework/framework.jar|checkDeviceIdentifierAccess,checkPhoneNumberAccess"
   "android.content.IRestrictionsManager|system/framework/framework.jar|getApplicationRestrictions,getApplicationRestrictionsPerAdminForUser,hasRestrictionsProvider,requestPermission,notifyPermissionResponse,createLocalApprovalIntent"
   "android.app.slice.ISliceManager|system/framework/framework.jar|*"
+  "android.os.IDumpstate|system/framework/framework.jar|*"
+  "android.os.IDumpstateListener|system/framework/framework.jar|*"
   "android.app.ILocaleManager|system/framework/framework.jar|setApplicationLocales,getApplicationLocales,getSystemLocales,getOverrideLocaleConfig"
   "android.app.IGrammaticalInflectionManager|system/framework/framework.jar|setRequestedApplicationGrammaticalGender,setSystemWideGrammaticalGender,getSystemGrammaticalGender,peekSystemGrammaticalGenderByUserId"
   "com.android.internal.textservice.ITextServicesManager|system/framework/framework.jar|*"

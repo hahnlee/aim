@@ -37,6 +37,7 @@ mod blob_store;
 pub mod bluetooth_manager;
 mod broadcast_response;
 pub mod broadcasts;
+pub mod bugreport;
 mod cache_quota;
 pub mod companion_device;
 pub mod compat;
@@ -855,6 +856,7 @@ impl AppHost {
                 Arc::new(restrictions_service::RestrictionsManager::new(self.clone())),
             ),
             ("slice", slice::SliceManager::new(self.clone())),
+            ("bugreport", bugreport::Bugreport::new(self.clone())),
             (
                 "legacy_permission",
                 Arc::new(legacy_permission::LegacyPermissionManager::new(
