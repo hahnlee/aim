@@ -11,8 +11,8 @@
 # bpfloader has marked the BPF programs loaded; statsd takes the atoms apps
 # log and serves the stats manager's calls; the Bluetooth HAL is the
 # controller the Bluetooth app's stack drives over the Mac's CoreBluetooth;
-# aim-appsearch runs the original AppSearch module, which only system_server
-# would run; tombstoned keeps the tombstones crash_dump writes and the stack
+# aim-system is the system process, which runs what only system_server
+# would run (the original AppSearch module, Telecom); tombstoned keeps the tombstones crash_dump writes and the stack
 # traces processes dump on SIGQUIT; installd creates apps' data directories
 # as the package side asks (`createAppData`); vdc is post-fs-data's
 # `init_user0`, vold preparing /data/data and user 0's DE storage before
@@ -58,5 +58,5 @@ cameraserver
 vendor.camera-provider-aim
 vendor.bluetooth-aim
 statsd
-aim-appsearch
+aim-system
 aim-app-host-agent

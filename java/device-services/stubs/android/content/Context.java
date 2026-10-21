@@ -14,6 +14,13 @@ public abstract class Context {
     public static final String PLATFORM_COMPAT_SERVICE = "platform_compat";
     public static final String VR_SERVICE = "vrmanager";
     public static final int CONTEXT_RESTRICTED = 4;
+    public static final String TELECOM_SERVICE = "telecom";
+    public static final int BIND_AUTO_CREATE = 0x0001;
+    public static final int BIND_IMPORTANT = 0x0040;
+    public static final int BIND_FOREGROUND_SERVICE = 0x04000000;
+
+    public boolean bindServiceAsUser(Intent service, ServiceConnection conn, int flags, UserHandle user) { throw new RuntimeException("stub"); }
+    public void unbindService(ServiceConnection conn) { throw new RuntimeException("stub"); }
 
     public Resources getResources() { throw new RuntimeException("stub"); }
     public abstract void setTheme(int resid);

@@ -1570,7 +1570,7 @@ impl AppHost {
         }
         let package = r.package.clone();
         // The `android` package's services are system_server's own code,
-        // which no process the app host starts can load (#1518).
+        // which the system process does not run (#1518).
         if package == super::SYSTEM_PACKAGE {
             return Err(self
                 .unimplemented_named("activity", "a service of system_server's own code (#1518)"));

@@ -167,7 +167,7 @@ impl AppHost {
         match query.query_content_providers(Some(process), uid as i32, flags, None) {
             // The system process's are `installSystemProviders`' (its
             // system apps'): the app host serves `settings` itself, and the
-            // `android` package's code it cannot load (#1518).
+            // `android` package's are system_server's services' code (#1518).
             Ok(Ok(providers)) if process == super::SYSTEM_PROCESS && uid == super::SYSTEM_UID => {
                 Ok(providers
                     .into_iter()
