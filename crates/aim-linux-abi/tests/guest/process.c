@@ -1154,6 +1154,99 @@ static void peer_ids(void) {
   printf("ok peer_ids\n");
 }
 
+// Signals to another process's thread, and real-time signals (Darwin has
+// none) to another process: tgkill reaches the named thread only, and
+// queued signals keep their code and value (signal(7), tgkill(2),
+// rt_sigqueueinfo(2)).
+static volatile pid_t peer_handled_tid;
+static volatile int peer_handled_code;
+static void on_peer_signal(int sig, siginfo_t* si, void* uc) {
+  (void)sig;
+  (void)uc;
+  peer_handled_code = si->si_code;
+  peer_handled_tid = gettid();
+}
+static int peer_out;
+static void* peer_worker(void* arg) {
+  (void)arg;
+  sigset_t rt1;
+  sigemptyset(&rt1);
+  sigaddset(&rt1, SIGRTMIN + 1);
+  pthread_sigmask(SIG_UNBLOCK, &rt1, NULL);
+  pid_t tid = gettid();
+  write(peer_out, &tid, sizeof(tid));
+  for (int i = 0; i < 5000 && !peer_handled_tid; i++) usleep(1000);
+  int r[2] = {peer_handled_tid, peer_handled_code};
+  write(peer_out, r, sizeof(r));
+  // A process-directed queued signal, then one directed at this thread.
+  sigset_t queued;
+  sigemptyset(&queued);
+  sigaddset(&queued, SIGRTMIN + 2);
+  sigaddset(&queued, SIGRTMIN + 3);
+  for (int k = 0; k < 2; k++) {
+    siginfo_t si = {0};
+    struct timespec ts = {5, 0};
+    int got = sigtimedwait(&queued, &si, &ts);
+    int q[4] = {got, si.si_code, si.si_value.sival_int, si.si_pid};
+    write(peer_out, q, sizeof(q));
+  }
+  return NULL;
+}
+static void peer_thread_signals(void) {
+  int out[2];
+  CHECK(pipe(out) == 0, "pipe");
+  pid_t me = getpid();
+  pid_t child = fork();
+  CHECK(child >= 0, "fork");
+  if (child == 0) {
+    peer_out = out[1];
+    struct sigaction sa = {.sa_sigaction = on_peer_signal, .sa_flags = SA_SIGINFO};
+    sigaction(SIGRTMIN + 1, &sa, NULL);
+    sigset_t all;
+    sigemptyset(&all);
+    sigaddset(&all, SIGRTMIN + 1);
+    sigaddset(&all, SIGRTMIN + 2);
+    sigaddset(&all, SIGRTMIN + 3);
+    pthread_sigmask(SIG_BLOCK, &all, NULL);
+    pthread_t t;
+    if (pthread_create(&t, NULL, peer_worker, NULL) != 0) _exit(9);
+    pthread_join(t, NULL);
+    _exit(0);
+  }
+  close(out[1]);
+  pid_t tid;
+  CHECK(read(out[0], &tid, sizeof(tid)) == sizeof(tid) && tid != child, "worker tid %d", tid);
+  CHECK(syscall(SYS_tgkill, child, tid, SIGRTMIN + 1) == 0, "tgkill");
+  int r[2];
+  CHECK(read(out[0], r, sizeof(r)) == sizeof(r), "handled");
+  CHECK(r[0] == tid && r[1] == SI_TKILL, "handled on %d code %d, sent to %d", r[0], r[1], tid);
+  siginfo_t si = {0};
+  si.si_code = SI_QUEUE;
+  si.si_pid = me;
+  si.si_uid = getuid();
+  si.si_value.sival_int = 77;
+  CHECK(syscall(SYS_rt_sigqueueinfo, child, SIGRTMIN + 2, &si) == 0, "rt_sigqueueinfo");
+  int q[4];
+  CHECK(read(out[0], q, sizeof(q)) == sizeof(q), "queued");
+  CHECK(q[0] == SIGRTMIN + 2 && q[1] == SI_QUEUE && q[2] == 77 && q[3] == me,
+        "got %d code %d value %d pid %d", q[0], q[1], q[2], q[3]);
+  // A kernel code claimed towards another process is refused.
+  si.si_code = SI_KERNEL;
+  CHECK(syscall(SYS_rt_sigqueueinfo, child, SIGRTMIN + 2, &si) == -1 && errno == EPERM,
+        "SI_KERNEL claim");
+  si.si_code = SI_QUEUE;
+  si.si_value.sival_int = 78;
+  CHECK(syscall(SYS_rt_tgsigqueueinfo, child, tid, SIGRTMIN + 3, &si) == 0, "rt_tgsigqueueinfo");
+  CHECK(read(out[0], q, sizeof(q)) == sizeof(q), "thread queued");
+  CHECK(q[0] == SIGRTMIN + 3 && q[1] == SI_QUEUE && q[2] == 78 && q[3] == me,
+        "got %d code %d value %d pid %d", q[0], q[1], q[2], q[3]);
+  int status;
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+        "child status %x", status);
+  close(out[0]);
+  printf("ok peer_thread_signals\n");
+}
+
 // A process rewrites its entry in place on every credential change: a
 // reader never sees one half done. The child flips between one group and
 // many while this process reads its status.
@@ -1586,6 +1679,7 @@ int main(int argc, char** argv) {
       {"random_writes", random_writes},
       {"empty_rights", empty_rights}, {"own_files_thread", own_files_thread},
       {"permissions", permissions}, {"peer_ids", peer_ids},
+      {"peer_thread_signals", peer_thread_signals},
       {"entry_rewrites", entry_rewrites}, {"other_procs", other_procs},
       {"bench", bench},             {"ns_init_exit", ns_init_exit},
   };
