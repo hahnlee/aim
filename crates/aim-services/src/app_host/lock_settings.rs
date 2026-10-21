@@ -1,6 +1,7 @@
 //! `lock_settings`: LockSettingsService for the app host
 //! (`android-16.0.0_r1`): the settings the original persisted in
-//! `/data/system/locksettings.db` (`LockSettingsStorage`), and the
+//! `/data/system/locksettings.db` (`LockSettingsStorage`), read and
+//! written, the separate profile challenge among them, and the
 //! credential type of the device's lock, which is the Mac's (the owner's
 //! choice, 2026-10-20, as `trust`'s `isDeviceSecure`): a password while
 //! the Mac's user has one (`aim_host_lock`), none otherwise. No credential
@@ -9,10 +10,10 @@
 //! service's certificates (`initRecoveryServiceWithSigFile`), secret types,
 //! server params, its keys' recovery statuses and grants (keystore2). It
 //! never has a snapshot to take, which needs the lock screen's knowledge
-//! factor. The other writes, the special users (FRP, repair mode), strong
-//! auth, escrow tokens, the agents' keys' generation, import and removal
-//! (the platform key) and the rest of recovery are not implemented
-//! (#1888).
+//! factor. Tying a profile's lock to its parent's, the special users'
+//! credentials (FRP, repair mode), strong auth, escrow tokens, the
+//! agents' keys' generation, import and removal (the platform key) and
+//! the rest of recovery are not implemented (#1888).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
@@ -46,6 +47,15 @@ const ACCESS_KEYGUARD_SECURE_STORAGE: &str = "android.permission.ACCESS_KEYGUARD
 const FEATURE_SECURE_LOCK_SCREEN: &str = "android.software.secure_lock_screen";
 /// `LockSettingsService.SEPARATE_PROFILE_CHALLENGE_KEY`.
 const SEPARATE_PROFILE_CHALLENGE_KEY: &str = "lockscreen.profilechallenge";
+/// `LockPatternUtils.DISABLE_LOCKSCREEN_KEY`.
+const DISABLE_LOCKSCREEN_KEY: &str = "lockscreen.disabled";
+/// `LockSettingsStorage.CHILD_PROFILE_LOCK_FILE`.
+const CHILD_PROFILE_LOCK_FILE: &str = "gatekeeper.profile.key";
+/// `LockSettingsService.PROFILE_KEY_NAME_ENCRYPT`, `PROFILE_KEY_NAME_DECRYPT`.
+const PROFILE_KEY_NAME_ENCRYPT: &str = "profile_key_name_encrypt_";
+const PROFILE_KEY_NAME_DECRYPT: &str = "profile_key_name_decrypt_";
+/// `LockSettingsStorage.DatabaseHelper.DATABASE_VERSION`.
+const LOCK_SETTINGS_DB_VERSION: i32 = 2;
 /// `LockPatternUtils.CREDENTIAL_TYPE_*`.
 const CREDENTIAL_TYPE_NONE: i32 = -1;
 const CREDENTIAL_TYPE_PASSWORD: i32 = 4;
@@ -71,6 +81,10 @@ const APPLICATION_KEY_GRANT_PREFIX: &str = "recoverable_key:";
 /// `Domain.APP`, `KeyProperties.NAMESPACE_APPLICATION`.
 const DOMAIN_APP: i32 = 0;
 const NAMESPACE_APPLICATION: i64 = -1;
+/// `Domain.SELINUX`, and LockSettingsService's keystore namespace
+/// (`SyntheticPasswordCrypto.keyNamespace`, `NAMESPACE_LOCKSETTINGS`).
+const DOMAIN_SELINUX: i32 = 2;
+const NAMESPACE_LOCKSETTINGS: i64 = 103;
 /// `KeyPermission.USE | GET_INFO | DELETE`, a grant's access.
 const GRANT_ACCESS: i32 = 0x100 | 0x4 | 0x1;
 
@@ -367,15 +381,15 @@ fn set_user_serial_number(db: &Connection, user: i32, serial: i32) -> rusqlite::
     Ok(())
 }
 
-/// The keystore database and the log SQLite keeps beside it, as the
-/// system's (`rw-rw----`), as system_server's files are.
+/// A database and the journal or log SQLite keeps beside it, as the
+/// system's (`rw-rw----`), as system_server's databases are.
 fn keep_system_owned(path: &Path) -> std::io::Result<()> {
     let inode = aim_storage::guest_inode::GuestInode {
         uid: Some(1000),
         gid: Some(1000),
         mode: Some(0o660),
     };
-    for suffix in ["", "-wal", "-shm"] {
+    for suffix in ["", "-journal", "-wal", "-shm"] {
         let mut file = path.as_os_str().to_owned();
         file.push(suffix);
         let file = PathBuf::from(file);
@@ -389,6 +403,110 @@ fn keep_system_owned(path: &Path) -> std::io::Result<()> {
 /// A recoverable keystore database failure.
 fn db_error(path: &Path, e: rusqlite::Error) -> Exception {
     Exception::new(BAD_VALUE, format!("{}: {e}", path.display()))
+}
+
+/// The lock settings database at `path`, opened as
+/// `LockSettingsStorage.DatabaseHelper` opens it: created with its table
+/// (`onCreate`) and, as `SQLiteOpenHelper` makes a database, its
+/// `android_metadata` of the device's `locale`, in the platform's journal
+/// mode as it has no write-ahead logging (`db_default_journal_mode`), and
+/// the lock screen disabled for user 0 if `ro.lockscreen.disable.default`
+/// says so (`Injector.getStorage`'s callback).
+fn open_lock_settings(
+    path: &Path,
+    locale: &str,
+    lockscreen_disabled: bool,
+) -> rusqlite::Result<Connection> {
+    let created = !path.exists();
+    let db = Connection::open(path)?;
+    if created {
+        db.query_row("PRAGMA journal_mode=TRUNCATE", [], |_| Ok(()))?;
+        db.execute_batch(&format!(
+            "BEGIN;
+             CREATE TABLE android_metadata (locale TEXT);
+             INSERT INTO android_metadata VALUES ('{}');
+             CREATE TABLE locksettings (_id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,user INTEGER,value TEXT);
+             PRAGMA user_version = {LOCK_SETTINGS_DB_VERSION};
+             COMMIT;",
+            java_locale(locale).replace('\'', "''")
+        ))?;
+        if lockscreen_disabled {
+            write_key_value(&db, DISABLE_LOCKSCREEN_KEY, Some("1"), 0)?;
+        }
+    }
+    Ok(db)
+}
+
+/// `LockSettingsStorage.writeKeyValue`: the user's row of the key
+/// replaced, in one transaction.
+fn write_key_value(
+    db: &Connection,
+    key: &str,
+    value: Option<&str>,
+    user: i32,
+) -> rusqlite::Result<()> {
+    let tx = db.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM locksettings WHERE name=?1 AND user=?2",
+        params![key, user.to_string()],
+    )?;
+    tx.execute(
+        "INSERT INTO locksettings (name, user, value) VALUES (?1, ?2, ?3)",
+        params![key, user, value],
+    )?;
+    tx.commit()
+}
+
+/// `LockscreenCredential`, of which only the type is kept: the secret is
+/// read past and dropped.
+struct CredentialType(i32);
+
+impl ReadParcelable for CredentialType {
+    fn read_from(r: &mut Reader<'_>) -> aim_binder_host::parcel::Result<Self> {
+        let kind = r.read_i32()?;
+        aim_service_aidl::read_byte_array(r)?;
+        r.read_bool()?;
+        Ok(CredentialType(kind))
+    }
+}
+
+/// `LockSettingsStorage.deleteFile`: the file zeroed, to make its contents
+/// harder to recover, then deleted with what an interrupted write left
+/// (`AtomicFile.delete`). The original logs a failure to zero it and
+/// ignores one to delete; both are logged here.
+fn remove_zeroed(path: &Path) {
+    if let Ok(len) = std::fs::metadata(path).map(|m| m.len()) {
+        let zeroed = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|mut f| {
+                std::io::Write::write_all(&mut f, &vec![0; len as usize])?;
+                f.sync_all()
+            });
+        if let Err(e) = zeroed {
+            eprintln!("lock_settings: Failed to zeroize {}: {e}", path.display());
+        }
+    }
+    for suffix in ["", ".new", ".bak"] {
+        let mut file = path.as_os_str().to_owned();
+        file.push(suffix);
+        let file = PathBuf::from(file);
+        if let Err(e) = std::fs::remove_file(&file)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("lock_settings: delete {}: {e}", file.display());
+        }
+    }
+}
+
+/// keystore2's `ResponseCode.KEY_NOT_FOUND`.
+fn is_key_not_found(e: &Exception) -> bool {
+    e.code == EX_SERVICE_SPECIFIC && e.service_specific == KEYSTORE_KEY_NOT_FOUND
+}
+
+/// `Objects.requireNonNull(key)`.
+fn non_null_key(key: Option<String>) -> Result<String, Exception> {
+    key.ok_or_else(|| Exception::new(EX_NULL_POINTER, ""))
 }
 
 /// `LockPatternUtils.isSpecialUserId`.
@@ -416,6 +534,8 @@ fn read_key_value(db: &Path, key: &str, user: i32) -> Result<Option<String>, Str
 
 pub struct LockSettings {
     host: Arc<AppHost>,
+    /// `mSeparateChallengeLock`.
+    separate_challenge: Mutex<()>,
     /// `RecoverySnapshotListenersStorage`: each agent's snapshot intent.
     /// It is sent when a snapshot is created, which needs the lock
     /// screen's knowledge factor the app host never has.
@@ -426,19 +546,21 @@ impl LockSettings {
     pub fn new(host: Arc<AppHost>) -> Self {
         LockSettings {
             host,
+            separate_challenge: Mutex::new(()),
             snapshot_listeners: Mutex::new(HashMap::new()),
         }
     }
 
-    /// `checkPasswordHavePermission`.
-    fn check_password_have(&self, uid: i32) -> Result<(), Exception> {
+    /// `enforceCallingOrSelfPermission(PERMISSION, message)`, as
+    /// `checkPasswordHavePermission` and `checkWritePermission` make it.
+    fn enforce(&self, uid: i32, message: &str) -> Result<(), Exception> {
         if self
             .host
             .check_permission(Some(ACCESS_KEYGUARD_SECURE_STORAGE), uid)?
             != 0
         {
             return Err(Exception::security(format!(
-                "LockSettingsHave: Neither user {uid} nor current process has {ACCESS_KEYGUARD_SECURE_STORAGE}."
+                "{message}: Neither user {uid} nor current process has {ACCESS_KEYGUARD_SECURE_STORAGE}."
             )));
         }
         Ok(())
@@ -466,6 +588,154 @@ impl LockSettings {
         let db = self.host.data()?.join("system/locksettings.db");
         read_key_value(&db, key, user)
             .map_err(|e| Exception::new(BAD_VALUE, format!("{}: {e}", db.display())))
+    }
+
+    /// `LockSettingsStorage.setString`: refused for a special user. Of the
+    /// keys backed up with the settings (`SETTINGS_TO_BACKUP`),
+    /// `BackupManager.dataChanged` finds no `backup` service in the app
+    /// host to tell (#1925).
+    fn set_string(&self, key: &str, value: Option<&str>, user: i32) -> Result<(), Exception> {
+        if is_special_user(user) {
+            return Err(Exception::new(
+                EX_ILLEGAL_ARGUMENT,
+                format!("cannot store lock settings for special user: {user}"),
+            ));
+        }
+        let path = self.host.data()?.join("system/locksettings.db");
+        let locale = self.host.inputs()?.locales.clone();
+        let disabled = super::system_boolean(
+            self.host
+                .property("ro.lockscreen.disable.default")
+                .as_deref(),
+            false,
+        );
+        let failed = |e| db_error(&path, e);
+        let db = open_lock_settings(&path, &locale, disabled).map_err(failed)?;
+        write_key_value(&db, key, value, user).map_err(failed)?;
+        keep_system_owned(&path)
+            .map_err(|e| Exception::new(BAD_VALUE, format!("{}: {e}", path.display())))
+    }
+
+    /// `LockSettingsStorage.setBoolean`.
+    fn set_boolean(&self, key: &str, value: bool, user: i32) -> Result<(), Exception> {
+        self.set_string(key, Some(if value { "1" } else { "0" }), user)
+    }
+
+    /// `setSeparateProfileChallengeEnabled` of `user`, with the type of
+    /// the profile's credential if one is given.
+    fn set_separate_profile_challenge_enabled(
+        &self,
+        user: i32,
+        enabled: bool,
+        credential: Option<i32>,
+    ) -> Result<(), Exception> {
+        if !self.has_secure_lock_screen()? && credential.is_some_and(|t| t != CREDENTIAL_TYPE_NONE)
+        {
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION,
+                "This operation requires secure lock screen feature.",
+            ));
+        }
+        // `tieProfileLockIfNecessary`, for a profile that shares its
+        // parent's credential. Of the app host's users only the system
+        // user exists, whose type shares none.
+        if !enabled && user != 0 && super::user_service::serial_number(&self.host, user)?.is_some()
+        {
+            return Err(self
+                .host
+                .unimplemented_named("lock_settings", "tying a profile's lock (#1888)"));
+        }
+        let _locked = self.separate_challenge.lock().unwrap();
+        self.set_boolean(SEPARATE_PROFILE_CHALLENGE_KEY, enabled, user)?;
+        if enabled {
+            self.remove_child_profile_lock(user)?;
+            self.remove_keystore_profile_key(user);
+        }
+        // `notifySeparateProfileChallengeChanged`: device policy's
+        // `reportSeparateProfileChallengeChanged` updates the time to lock
+        // and the password quality of its admins', and the app host's
+        // device_policy has no admins (#1521).
+        Ok(())
+    }
+
+    /// `LockSettingsStorage.removeChildProfileLock`: the file zeroed, then
+    /// deleted with what an interrupted write left (`AtomicFile.delete`).
+    fn remove_child_profile_lock(&self, user: i32) -> Result<(), Exception> {
+        let system = self.host.data()?.join("system");
+        let path = match user {
+            0 => system.join(CHILD_PROFILE_LOCK_FILE),
+            _ => system.join(format!("users/{user}/{CHILD_PROFILE_LOCK_FILE}")),
+        };
+        remove_zeroed(&path);
+        Ok(())
+    }
+
+    /// `removeKeystoreProfileKey`: the profile's keys in LockSettings'
+    /// keystore namespace deleted if either exists. A keystore failure is
+    /// logged, as the original logs it.
+    fn remove_keystore_profile_key(&self, user: i32) {
+        let encrypt = format!("{PROFILE_KEY_NAME_ENCRYPT}{user}");
+        let decrypt = format!("{PROFILE_KEY_NAME_DECRYPT}{user}");
+        if !self.contains_profile_key(&encrypt) && !self.contains_profile_key(&decrypt) {
+            return;
+        }
+        eprintln!("lock_settings: Removing keystore profile key for user {user}");
+        if let Err(e) = self
+            .delete_profile_key(&encrypt)
+            .and_then(|()| self.delete_profile_key(&decrypt))
+        {
+            eprintln!("lock_settings: Error removing keystore profile key for user {user}: {e}");
+        }
+    }
+
+    /// keystore2's `code` of LockSettings' key `alias`
+    /// (`AndroidKeyStoreSpi.makeKeyDescriptor`): its exception, if any.
+    fn keystore_call(
+        &self,
+        code: u32,
+        write: impl FnOnce(KeyDescriptor, &mut Parcel),
+        alias: &str,
+    ) -> Result<Option<Exception>, String> {
+        let key = KeyDescriptor {
+            domain: DOMAIN_SELINUX,
+            nspace: NAMESPACE_LOCKSETTINGS,
+            alias: Some(alias.to_string()),
+            blob: None,
+        };
+        let mut data = Parcel::new();
+        write(key, &mut data);
+        let reply = super::display::transact_service(&self.host.process, KEYSTORE, code, &data)?;
+        reply
+            .reader()
+            .read_exception()
+            .map(Result::err)
+            .map_err(|s| format!("{KEYSTORE}: {s}"))
+    }
+
+    /// `AndroidKeyStoreSpi.engineContainsAlias`: whether keystore2 has the
+    /// key. A failure other than its absence is logged and counts as none.
+    fn contains_profile_key(&self, alias: &str) -> bool {
+        let write = |key, p: &mut Parcel| ks::GetKeyEntry { key: Some(key) }.write(p);
+        let failure = match self.keystore_call(ks::GET_KEY_ENTRY, write, alias) {
+            Ok(None) => return true,
+            Ok(Some(e)) if is_key_not_found(&e) => return false,
+            Ok(Some(e)) => e.message,
+            Err(e) => e,
+        };
+        eprintln!("lock_settings: Could not get key metadata from Keystore: {failure}");
+        false
+    }
+
+    /// `AndroidKeyStoreSpi.engineDeleteEntry`: a key that is not there
+    /// counts as deleted.
+    fn delete_profile_key(&self, alias: &str) -> Result<(), String> {
+        let write = |key, p: &mut Parcel| ks::DeleteKey { key: Some(key) }.write(p);
+        match self.keystore_call(ks::DELETE_KEY, write, alias)? {
+            Some(e) if !is_key_not_found(&e) => {
+                Err(format!("Failed to delete entry: {alias}: {}", e.message))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// `LockSettingsStorage.getBoolean`.
@@ -757,7 +1027,7 @@ impl Service for LockSettings {
             }
             ls::GET_CREDENTIAL_TYPE => {
                 let a = ls::GetCredentialType::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                self.check_password_have(uid)
+                self.enforce(uid, "LockSettingsHave")
                     .and_then(|()| self.credential_type(a.user_id))
                     .map(|t| ls::write_get_credential_type_reply(&mut p, t))
             }
@@ -767,6 +1037,41 @@ impl Service for LockSettings {
                 self.check_database_read(uid, SEPARATE_PROFILE_CHALLENGE_KEY, a.user_id)
                     .and_then(|()| self.boolean(SEPARATE_PROFILE_CHALLENGE_KEY, false, a.user_id))
                     .map(|v| ls::write_get_separate_profile_challenge_enabled_reply(&mut p, v))
+            }
+            ls::SET_BOOLEAN => {
+                let a = ls::SetBoolean::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.enforce(uid, "LockSettingsWrite")
+                    .and_then(|()| non_null_key(a.key))
+                    .and_then(|key| self.set_boolean(&key, a.value, a.user_id))
+                    .map(|()| ls::write_set_boolean_reply(&mut p))
+            }
+            ls::SET_LONG => {
+                let a = ls::SetLong::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.enforce(uid, "LockSettingsWrite")
+                    .and_then(|()| non_null_key(a.key))
+                    .and_then(|key| self.set_string(&key, Some(&a.value.to_string()), a.user_id))
+                    .map(|()| ls::write_set_long_reply(&mut p))
+            }
+            ls::SET_STRING => {
+                let a = ls::SetString::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.enforce(uid, "LockSettingsWrite")
+                    .and_then(|()| non_null_key(a.key))
+                    .and_then(|key| self.set_string(&key, a.value.as_deref(), a.user_id))
+                    .map(|()| ls::write_set_string_reply(&mut p))
+            }
+            ls::SET_SEPARATE_PROFILE_CHALLENGE_ENABLED => {
+                let a =
+                    ls::SetSeparateProfileChallengeEnabled::<CredentialType>::read(&mut call.data)
+                        .map_err(|_| BAD_VALUE)?;
+                self.enforce(uid, "LockSettingsWrite")
+                    .and_then(|()| {
+                        self.set_separate_profile_challenge_enabled(
+                            a.user_id,
+                            a.enabled,
+                            a.managed_user_password.map(|c| c.0),
+                        )
+                    })
+                    .map(|()| ls::write_set_separate_profile_challenge_enabled_reply(&mut p))
             }
             ls::GET_RECOVERY_SECRET_TYPES => {
                 ls::GetRecoverySecretTypes::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -936,6 +1241,113 @@ mod tests {
             None
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A new lock settings database is `DatabaseHelper`'s at version 2, in
+    /// TRUNCATE journaling, with the lock screen disabled only when the
+    /// image says so; a write replaces the user's row of the key, which
+    /// `readKeyValue` then reads.
+    #[test]
+    fn values_are_written_as_the_storage_writes_them() {
+        let dir = std::env::temp_dir().join(format!("aim-locksettings-w-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("locksettings.db");
+        let db = open_lock_settings(&path, "ko-KR", false).unwrap();
+        let version: i32 = db
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        let mode: String = db
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        let locale: String = db
+            .query_row("SELECT locale FROM android_metadata", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            (version, mode.as_str(), locale.as_str()),
+            (2, "truncate", "ko_KR")
+        );
+        assert_eq!(
+            read_key_value(&path, DISABLE_LOCKSCREEN_KEY, 0).unwrap(),
+            None
+        );
+
+        write_key_value(&db, SEPARATE_PROFILE_CHALLENGE_KEY, Some("1"), 0).unwrap();
+        write_key_value(&db, SEPARATE_PROFILE_CHALLENGE_KEY, Some("0"), 0).unwrap();
+        write_key_value(&db, SEPARATE_PROFILE_CHALLENGE_KEY, Some("1"), 10).unwrap();
+        write_key_value(&db, "lock_screen_owner_info", None, 0).unwrap();
+        let rows: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM locksettings WHERE name=?1",
+                [SEPARATE_PROFILE_CHALLENGE_KEY],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(
+            read_key_value(&path, SEPARATE_PROFILE_CHALLENGE_KEY, 0)
+                .unwrap()
+                .as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            read_key_value(&path, SEPARATE_PROFILE_CHALLENGE_KEY, 10)
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            read_key_value(&path, "lock_screen_owner_info", 0).unwrap(),
+            None
+        );
+        drop(db);
+
+        // `ro.lockscreen.disable.default` applies to a new database only.
+        let disabled = dir.join("disabled.db");
+        drop(open_lock_settings(&disabled, "ko-KR", true).unwrap());
+        assert_eq!(
+            read_key_value(&disabled, DISABLE_LOCKSCREEN_KEY, 0)
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+        drop(open_lock_settings(&path, "ko-KR", true).unwrap());
+        assert_eq!(
+            read_key_value(&path, DISABLE_LOCKSCREEN_KEY, 0).unwrap(),
+            None
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The child profile lock goes with what an interrupted write left.
+    #[test]
+    fn a_child_profile_lock_is_removed_with_its_atomic_files() {
+        let dir = std::env::temp_dir().join(format!("aim-locksettings-c-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CHILD_PROFILE_LOCK_FILE);
+        std::fs::write(&path, b"lock").unwrap();
+        std::fs::write(dir.join("gatekeeper.profile.key.new"), b"new").unwrap();
+        remove_zeroed(&path);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        // Again, with nothing left to remove.
+        remove_zeroed(&path);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Of a `LockscreenCredential`, its type is read and the rest passed.
+    #[test]
+    fn a_credential_is_read_for_its_type() {
+        let mut p = Parcel::new();
+        crate::statusbar::parcels::LockscreenCredential::new(CREDENTIAL_TYPE_PASSWORD, "pw")
+            .write_to(&mut p);
+        p.write_i32(7);
+        let mut r = p.reader();
+        assert_eq!(
+            CredentialType::read_from(&mut r).unwrap().0,
+            CREDENTIAL_TYPE_PASSWORD
+        );
+        assert_eq!(r.read_i32().unwrap(), 7);
     }
 
     /// `RecoverableKeyStoreDbContract`'s tables of the agents' state.
