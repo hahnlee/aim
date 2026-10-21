@@ -338,6 +338,11 @@ fn kernel_log() {
     check("t_kmsg", &[]);
 }
 
+#[test]
+fn netlink_audit_and_generic() {
+    check("t_nlfamilies", &[]);
+}
+
 /// The derived image's lmkd answers ActivityManager's protocol, with the
 /// host-call module `memory` as its pressure source.
 #[test]

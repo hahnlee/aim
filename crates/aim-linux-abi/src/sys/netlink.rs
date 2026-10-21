@@ -4,7 +4,9 @@
 //! and the link and address groups (EthernetTracker's and IpClient's
 //! NetlinkMonitors); and NETLINK_KOBJECT_UEVENT, whose one group carries
 //! the kernel's uevents (`uevent`) and the ones a privileged process hands
-//! the kernel to announce. Other netlink families are EPROTONOSUPPORT.
+//! the kernel to announce; NETLINK_AUDIT (`netlink_audit`) and
+//! NETLINK_GENERIC (`genetlink`). Other netlink families are
+//! EPROTONOSUPPORT.
 //!
 //! A netlink socket is a host AF_UNIX datagram socket bound to
 //! `<runtime>/netlink/<protocol>:<portid>-<groups>`, so poll, epoll and
@@ -34,15 +36,17 @@ use crate::errno::{self, EINVAL, ENODEV, EPERM, Errno};
 
 pub const NETLINK_ROUTE: u64 = 0;
 pub const NETLINK_KOBJECT_UEVENT: u64 = 15;
+pub const NETLINK_GENERIC: u64 = 16;
+use super::netlink_audit::NETLINK_AUDIT;
 pub const L_AF_NETLINK: u16 = 16;
 pub const SOL_NETLINK: u64 = 270;
 
 const NLMSG_ERROR: u16 = 2;
-const NLMSG_DONE: u16 = 3;
+pub(super) const NLMSG_DONE: u16 = 3;
 const NLM_F_REQUEST: u16 = 0x1;
-const NLM_F_MULTI: u16 = 0x2;
+pub(super) const NLM_F_MULTI: u16 = 0x2;
 const NLM_F_ACK: u16 = 0x4;
-const NLM_F_DUMP: u16 = 0x300;
+pub(super) const NLM_F_DUMP: u16 = 0x300;
 const NLM_F_REPLACE: u16 = 0x100;
 const NLM_F_EXCL: u16 = 0x200;
 
@@ -134,8 +138,9 @@ fn parse_name(name: &str) -> Option<(u64, u32, u32)> {
     ))
 }
 
-/// Autobind counters, per protocol: port ids are per protocol on Linux.
-static NEXT: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+/// Autobind counters, per protocol (MAX_LINKS): port ids are per protocol
+/// on Linux.
+static NEXT: [AtomicU32; 32] = [const { AtomicU32::new(0) }; 32];
 
 /// Bind host socket `fd` to the name of `portid` (and `groups`), replacing
 /// a stale name of the same port.
@@ -159,7 +164,7 @@ fn bind_name(fd: i32, proto: u64, portid: u32, groups: u32) -> Result<PathBuf, E
 }
 
 /// Whether a live socket of `proto` holds port id `portid`, with any groups.
-fn taken(proto: u64, portid: u32) -> bool {
+pub(super) fn taken(proto: u64, portid: u32) -> bool {
     let Ok(entries) = std::fs::read_dir(dir()) else {
         return false;
     };
@@ -190,7 +195,7 @@ fn alive(p: &std::path::Path) -> bool {
 /// then negative numbers unique to the process, as Linux autobinds.
 fn new_portid(proto: u64) -> u32 {
     let pid = super::process::getpid() as u32;
-    let next = &NEXT[(proto == NETLINK_KOBJECT_UEVENT) as usize];
+    let next = &NEXT[proto as usize];
     match next.fetch_add(1, Ordering::Relaxed) {
         0 => pid,
         n => (-((pid as i32 & 0xf_ffff) << 11 | (n as i32 & 0x7ff)) - 4096) as u32,
@@ -199,7 +204,14 @@ fn new_portid(proto: u64) -> u32 {
 
 /// `socket(AF_NETLINK, ty, proto)`: a bound host datagram socket.
 pub fn socket(ty: u64, proto: u64) -> Result<(i32, Socket), i64> {
-    if proto != NETLINK_ROUTE && proto != NETLINK_KOBJECT_UEVENT {
+    if ![
+        NETLINK_ROUTE,
+        NETLINK_AUDIT,
+        NETLINK_KOBJECT_UEVENT,
+        NETLINK_GENERIC,
+    ]
+    .contains(&proto)
+    {
         return Err(-93); // EPROTONOSUPPORT
     }
     // SAFETY: a plain datagram socket.
@@ -339,6 +351,14 @@ pub fn bind(s: &Socket, portid: u32, groups: u32) -> i64 {
     } else {
         portid
     };
+    let groups = if s.proto == NETLINK_AUDIT {
+        match super::netlink_audit::bind_groups(groups) {
+            Ok(groups) => groups,
+            Err(e) => return -(e as i64),
+        }
+    } else {
+        groups
+    };
     match s.rename(portid, groups) {
         Ok(()) => 0,
         Err(e) => -(e as i64),
@@ -465,6 +485,26 @@ fn broadcast(
     }
 }
 
+/// The kernel's message to the socket of `proto` bound to `portid`;
+/// whether it got there.
+pub(super) fn unicast(proto: u64, portid: u32, msg: &[u8]) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir()) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.file_name()
+            .to_str()
+            .and_then(parse_name)
+            .is_some_and(|(p, id, _)| p == proto && id == portid)
+            && deliver(&e.path(), 0, KERNEL, msg).is_none()
+    })
+}
+
+/// The kernel's message to the sockets of `proto` in `group`.
+pub(super) fn multicast(proto: u64, group: u32, msg: &[u8]) {
+    broadcast(proto, &[(group, msg.to_vec())], KERNEL, None);
+}
+
 /// Announce device changes to the sockets listening to their groups.
 pub fn announce(events: &[Event]) {
     if events.is_empty() {
@@ -500,18 +540,18 @@ pub fn uevent(msg: &[u8]) {
 
 // ---- messages ---------------------------------------------------------------
 
-fn align(n: usize) -> usize {
+pub(super) fn align(n: usize) -> usize {
     (n + 3) & !3
 }
 
-fn attr(out: &mut Vec<u8>, ty: u16, data: &[u8]) {
+pub(super) fn attr(out: &mut Vec<u8>, ty: u16, data: &[u8]) {
     out.extend_from_slice(&((4 + data.len()) as u16).to_le_bytes());
     out.extend_from_slice(&ty.to_le_bytes());
     out.extend_from_slice(data);
     out.resize(align(out.len()), 0);
 }
 
-fn nlmsg(ty: u16, flags: u16, seq: u32, portid: u32, body: &[u8]) -> Vec<u8> {
+pub(super) fn nlmsg(ty: u16, flags: u16, seq: u32, portid: u32, body: &[u8]) -> Vec<u8> {
     let mut m = Vec::with_capacity(16 + body.len());
     m.extend_from_slice(&((16 + body.len()) as u32).to_le_bytes());
     m.extend_from_slice(&ty.to_le_bytes());
@@ -584,7 +624,7 @@ fn addr_msg(ty: u16, flags: u16, seq: u32, portid: u32, l: &Link, a: &Addr) -> V
 }
 
 /// The attributes after a fixed header of `hdr` bytes in `body`.
-fn attrs(body: &[u8], hdr: usize) -> Vec<(u16, &[u8])> {
+pub(super) fn attrs(body: &[u8], hdr: usize) -> Vec<(u16, &[u8])> {
     let mut out = Vec::new();
     let mut at = hdr;
     while at + 4 <= body.len() {
@@ -802,10 +842,15 @@ pub fn send(s: &Socket, data: &[u8], dst: Option<(u32, u32)>) -> i64 {
         let seq = u32::from_le_bytes(m[8..12].try_into().unwrap());
         // Control messages and non-requests are not answered.
         if flags & NLM_F_REQUEST != 0 && ty >= 16 {
-            let err = if s.proto == NETLINK_ROUTE {
-                request(ty, flags, seq, portid, &m[16..], &mut replies)
-            } else {
-                inject(&m[16..], cred)
+            let err = match s.proto {
+                NETLINK_ROUTE => request(ty, flags, seq, portid, &m[16..], &mut replies),
+                NETLINK_AUDIT => {
+                    super::netlink_audit::request(ty, seq, portid, &m[16..], &mut replies)
+                }
+                NETLINK_GENERIC => {
+                    super::genetlink::request(ty, flags, seq, portid, &m[16..], &mut replies)
+                }
+                _ => inject(&m[16..], cred),
             };
             if err != 0 || flags & NLM_F_ACK != 0 {
                 // struct nlmsgerr: the error and the request's header,

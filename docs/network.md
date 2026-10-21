@@ -251,8 +251,8 @@ sockets. What it takes, below the original stack:
   device's provisioning), without its secret: the supplicant never needs
   it.
 - **wificond over an nl80211 subset.** The original wificond stays. The
-  netlink module gains NETLINK_GENERIC with the `nlctrl` family resolution
-  and an `nl80211` family: GET_WIPHY (bands and channels), GET_INTERFACE,
+  netlink module's NETLINK_GENERIC (`nlctrl` family resolution, served)
+  gains an `nl80211` family: GET_WIPHY (bands and channels), GET_INTERFACE,
   TRIGGER_SCAN and GET_SCAN (results from `CWInterface.scanForNetworks`),
   GET_STATION (signal, tx bitrate) and the `scan`, `mlme` and
   `regulatory` multicast groups; unsupported commands are EOPNOTSUPP.

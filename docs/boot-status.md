@@ -7562,7 +7562,7 @@ keeps exiting and init restarts it every 5 s.
 | Service | State | Why |
 | --- | --- | --- |
 | servicemanager, hwservicemanager | running | |
-| logd | running | its kernel-log listener's sources are the layer's kernel log (`/proc/kmsg`, `syslog(2)`, #207; readiness #1944), not yet seen in a boot; its audit listener does not start (no `NETLINK_AUDIT`, #201) |
+| logd | running | its kernel-log listener's sources are the layer's kernel log (`/proc/kmsg`, `syslog(2)`, #207; readiness #1944), not yet seen in a boot; its audit listener's `NETLINK_AUDIT` registration and status are served (#201; rules #1952), not yet seen in a boot |
 | vndservicemanager | not declared | the image has no `vndservicemanager` service |
 | prng_seeder | running | |
 | keystore2 | running | waits for `apexservice` (`IApexService.getActivePackages`) for the module hash (#200) |
@@ -7583,7 +7583,7 @@ keeps exiting and init restarts it every 5 s.
 | media.swcodec, mediaextractor | running | their minijail seccomp filters are accepted but not enforced |
 | cameraserver | running | no camera HAL declared |
 | installd, idmap2d, incidentd, storaged | running | |
-| wificond | running | no nl80211 (`AF_NETLINK`, #201) |
+| wificond | running | NETLINK_GENERIC resolves only `nlctrl`: no `nl80211` family without a Wi-Fi driver (#265) |
 | gpu | running | |
 | boringssl_self_test64, boringssl_self_test64_vendor, boringssl_self_test_apex64 | exit 0 | |
 | system_aconfigd_platform_init, system_aconfigd_socket_service, mainline_aconfigd_init, mainline_aconfigd_socket_service | exit 0 | |

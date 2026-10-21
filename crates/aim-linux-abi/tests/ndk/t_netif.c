@@ -174,7 +174,7 @@ static void netlink(void) {
   // Unknown requests are EOPNOTSUPP; other netlink families do not exist.
   struct nlmsghdr bad = {sizeof bad, RTM_NEWQDISC, 0, 1, 0};
   CHECK(ack(s, &bad) == -EOPNOTSUPP);
-  CHECK(socket(AF_NETLINK, SOCK_RAW, NETLINK_AUDIT) == -1 && errno == EPROTONOSUPPORT);
+  CHECK(socket(AF_NETLINK, SOCK_RAW, NETLINK_XFRM) == -1 && errno == EPROTONOSUPPORT);
   close(i);
   close(s);
   close(ev);
