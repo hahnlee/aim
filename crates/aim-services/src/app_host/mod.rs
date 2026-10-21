@@ -499,6 +499,8 @@ pub struct AppHost {
     dropbox: OnceLock<Arc<dropbox::DropBox>>,
     bluetooth: OnceLock<Arc<bluetooth_manager::BluetoothManager>>,
     text_services: OnceLock<Arc<text_services::TextServices>>,
+    /// The services' package monitors.
+    package_monitors: package_writes::NativeMonitors,
     /// What DevicePolicyManagerService persisted, read once.
     device_policies: OnceLock<device_policy::Policies>,
     services: services::Services,
@@ -588,6 +590,7 @@ impl AppHost {
             dropbox: OnceLock::new(),
             bluetooth: OnceLock::new(),
             text_services: OnceLock::new(),
+            package_monitors: Default::default(),
             device_policies: OnceLock::new(),
             services: Default::default(),
             pending_intents: Default::default(),
