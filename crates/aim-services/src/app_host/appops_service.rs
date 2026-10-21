@@ -2087,23 +2087,7 @@ impl System for Host<'_> {
     }
 
     fn filtered(&self, package: &str, caller: i32, user: i32) -> Result<bool, Exception> {
-        let (state, resolution) = self.0.packages()?;
-        let ps = state.packages.get(package);
-        crate::package::apps_filter::should_filter_application(
-            &state,
-            &resolution.apps_filter,
-            ps,
-            caller,
-            user,
-            true,
-            true,
-        )
-        .map_err(|e| {
-            Exception::new(
-                EX_UNSUPPORTED_OPERATION,
-                format!("appops filterAppAccess: {}", e.0),
-            )
-        })
+        self.0.filter_package_access(package, caller, user)
     }
 
     fn holds(&self, uid: i32, permission: &str) -> Result<bool, Exception> {
