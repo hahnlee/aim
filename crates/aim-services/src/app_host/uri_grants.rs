@@ -2388,7 +2388,7 @@ mod tests {
             "content://a.b/data",
             |p| {
                 p.write_i32(1);
-                clip::ClipData::host_text("", 0).description.write_to(p);
+                clip::ClipData::host("", None, 0).description.write_to(p);
                 p.write_i32(0); // icon
                 p.write_i32(3);
                 item(p, None, Some("content://a.b/clip"));

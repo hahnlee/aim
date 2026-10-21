@@ -22,8 +22,9 @@ use aim_service_aidl::{ReadParcelable, WriteParcelable};
 
 use crate::bundle::{self as bundles, Value};
 
-/// `ClipDescription.MIMETYPE_TEXT_PLAIN`.
+/// `ClipDescription.MIMETYPE_TEXT_PLAIN`, `MIMETYPE_TEXT_HTML`.
 pub const MIMETYPE_TEXT_PLAIN: &str = "text/plain";
+pub const MIMETYPE_TEXT_HTML: &str = "text/html";
 /// `ClipDescription.CLASSIFICATION_NOT_PERFORMED`.
 const CLASSIFICATION_NOT_PERFORMED: i32 = 2;
 /// What EmulatorClipboardMonitor puts in a host clip's extras, so that
@@ -230,6 +231,8 @@ pub struct ClipDescription {
 pub struct Item {
     /// The item's text (`getText().toString()`).
     pub text: Option<String>,
+    /// Its HTML text (`getHtmlText()`).
+    pub html: Option<String>,
     /// Its URI (`getUri()`).
     pub uri: Option<String>,
     /// Its intent's data URI (`getIntent().getData()`).
@@ -244,8 +247,6 @@ pub struct ClipData {
 }
 
 impl ClipData {
-    /// A clip of the Mac's text, as EmulatorClipboardMonitor makes the
-    /// host's: labelled "host clipboard", with no clipboard overlay.
     /// `ClipData.newPlainText(label, text)`: no extras, no timestamp.
     pub fn new_plain_text(label: Option<&str>, text: Option<&str>) -> ClipData {
         let mut label_raw = Parcel::new();
@@ -272,6 +273,7 @@ impl ClipData {
             },
             items: vec![Item {
                 text: text.map(Into::into),
+                html: None,
                 uri: None,
                 intent_data: None,
                 raw: Raw::of(&item),
@@ -279,7 +281,11 @@ impl ClipData {
         }
     }
 
-    pub fn host_text(text: &str, timestamp: i64) -> ClipData {
+    /// A clip of the Mac's text, as EmulatorClipboardMonitor makes the
+    /// host's: labelled "host clipboard", with no clipboard overlay; with
+    /// the pasteboard's HTML when it has some, as `ClipData.newHtmlText`
+    /// makes one (`MIMETYPE_TEXT_HTML` alone), else plain text.
+    pub fn host(text: &str, html: Option<&str>, timestamp: i64) -> ClipData {
         let mut label = Parcel::new();
         write_char_sequence(&mut label, Some("host clipboard"));
         let mut extras = Parcel::new();
@@ -291,14 +297,18 @@ impl ClipData {
         bundles::write(&mut empty, &[]);
         let mut item = Parcel::new();
         write_char_sequence(&mut item, Some(text));
-        item.write_string8(None); // html
+        item.write_string8(html);
         for _ in 0..5 {
             item.write_i32(0); // intent, sender, uri, activity info, links
         }
+        let mime_type = match html {
+            Some(_) => MIMETYPE_TEXT_HTML,
+            None => MIMETYPE_TEXT_PLAIN,
+        };
         ClipData {
             description: ClipDescription {
                 label: Raw::of(&label),
-                mime_types: Some(vec![Some(MIMETYPE_TEXT_PLAIN.into())]),
+                mime_types: Some(vec![Some(mime_type.into())]),
                 extras: Raw::of(&extras),
                 timestamp,
                 is_styled_text: false,
@@ -307,6 +317,7 @@ impl ClipData {
             },
             items: vec![Item {
                 text: Some(text.into()),
+                html: html.map(Into::into),
                 uri: None,
                 intent_data: None,
                 raw: Raw::of(&item),
@@ -391,7 +402,7 @@ impl ReadParcelable for ClipData {
         for _ in 0..count.max(0) {
             let start = r.position();
             let text = char_sequence(r)?;
-            r.read_string8()?; // html
+            let html = r.read_string8()?;
             let mut intent_data = None;
             if r.read_i32()? != 0 {
                 intent_data = intent(r)?;
@@ -411,6 +422,7 @@ impl ReadParcelable for ClipData {
             }
             items.push(Item {
                 text,
+                html,
                 uri: item_uri,
                 intent_data,
                 raw: Raw::capture(r, start),
@@ -735,6 +747,7 @@ mod tests {
         assert_eq!(clip.items.len(), 2);
         assert_eq!(clip.items[0].uri.as_deref(), Some("content://media/1"));
         assert_eq!(clip.items[1].text.as_deref(), Some("héllo"));
+        assert_eq!(clip.items[1].html.as_deref(), Some("<b>h</b>"));
         assert_eq!(
             clip.items[1].intent_data.as_deref(),
             Some("https://example.com")
@@ -863,10 +876,28 @@ mod tests {
 
     #[test]
     fn host_clip_round_trips() {
-        let clip = ClipData::host_text("from the Mac", 42);
-        let mut p = Parcel::new();
-        clip.write_to(&mut p);
-        let mut r = Reader::new(p.data(), &[]);
-        assert_eq!(ClipData::read_from(&mut r).unwrap(), clip);
+        for html in [None, Some("<p>from the <b>Mac</b></p>")] {
+            let clip = ClipData::host("from the Mac", html, 42);
+            let mut p = Parcel::new();
+            clip.write_to(&mut p);
+            let mut r = Reader::new(p.data(), &[]);
+            let read = ClipData::read_from(&mut r).unwrap();
+            assert_eq!(read, clip);
+            assert_eq!(read.items[0].html.as_deref(), html);
+        }
+    }
+
+    /// `ClipData.newHtmlText`'s description has the HTML MIME type alone.
+    #[test]
+    fn a_host_clip_with_html_is_html_text() {
+        let mime = |c: ClipData| c.description.mime_types.unwrap();
+        assert_eq!(
+            mime(ClipData::host("t", Some("<i>t</i>"), 0)),
+            vec![Some(MIMETYPE_TEXT_HTML.to_string())]
+        );
+        assert_eq!(
+            mime(ClipData::host("t", None, 0)),
+            vec![Some(MIMETYPE_TEXT_PLAIN.to_string())]
+        );
     }
 }

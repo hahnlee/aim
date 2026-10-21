@@ -858,8 +858,10 @@ descriptors (held as files while the clip is, as its binders are); a
 dump writes nothing, as the original's.
 
 The Mac takes the emulator's place (`EmulatorClipboardMonitor`): a clip set
-on the default device puts its first item's text on the Mac's pasteboard;
-text copied on the Mac becomes user 0's clip, labelled "host clipboard"
+on the default device puts its first item's text on the Mac's pasteboard,
+with the item's HTML text as `public.html` when it has some; text copied
+on the Mac becomes user 0's clip, as `ClipData.newHtmlText` makes one
+when the pasteboard also has HTML (`text/html`), else plain text, labelled "host clipboard"
 with SystemUI's `SUPPRESS_CLIPBOARD_OVERLAY`, and set as a mirrored
 device's clipboard sync sets it: by the shell uid, from
 `com.android.shell`, the one source SystemUI honours the extra for off
