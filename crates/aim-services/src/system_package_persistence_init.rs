@@ -80,6 +80,28 @@ pub type ReadCompletion = Box<
         &mut PackageReadAttempt,
     ) -> Result<(), ReadError>,
 >;
+/// What reading the package settings takes from the platform: whether a
+/// domain set's UUID is validated strictly
+/// (`DomainVerificationPersistence`'s compat change) and the current
+/// partition version `Settings.readLPw` compares the restored one with.
+pub struct PersistenceFacts {
+    pub domain_uuid_strict: bool,
+    pub current_version: package::settings::Version,
+}
+impl PersistenceFacts {
+    /// system_server's, from its bridge.
+    pub fn original(bridge: &Bridge) -> Result<Self, Exception> {
+        Ok(Self {
+            domain_uuid_strict: bridge
+                .domain_uuid_strict_validation()
+                .map_err(|error| illegal(format!("Settings UUID policy: {error:?}")))?,
+            current_version: bridge
+                .current_package_version()
+                .map_err(|error| illegal(format!("Settings build owner: {error:?}")))?,
+        })
+    }
+}
+
 pub fn prepare(
     system: &Arc<System>,
     bridge: &Arc<Bridge>,
@@ -88,11 +110,15 @@ pub fn prepare(
     readers: &mut impl ReadOwners,
     mut complete: ReadCompletion,
 ) -> Result<Prepared, Exception> {
-    prepare_native(system, bridge, inputs, config, readers, complete, None)
+    let facts = PersistenceFacts::original(bridge)?;
+    prepare_native(
+        system, bridge, facts, inputs, config, readers, complete, None,
+    )
 }
 fn prepare_native(
     system: &Arc<System>,
     bridge: &Arc<Bridge>,
+    facts: PersistenceFacts,
     inputs: &Inputs,
     config: &package::system_config::SystemConfig,
     readers: &mut impl ReadOwners,
@@ -155,12 +181,10 @@ fn prepare_native(
     system.initialize_package_shared_users(bridge, config, &mut settings, &mut ids, readers)?;
     let mut attempt = PackageReadAttempt::default();
     let mut retained_versions = Vec::new();
-    let strict = bridge
-        .domain_uuid_strict_validation()
-        .map_err(|error| illegal(format!("Settings UUID policy: {error:?}")))?;
-    let current = bridge
-        .current_package_version()
-        .map_err(|error| illegal(format!("Settings build owner: {error:?}")))?;
+    let PersistenceFacts {
+        domain_uuid_strict: strict,
+        current_version: current,
+    } = facts;
     system.check_package_bootstrap(bridge)?;
     let plan = owner::recovery::Plan::inspect(&data).map_err(|error| illegal(error.to_string()))?;
     let native_completion = native_readers.clone();
@@ -243,6 +267,7 @@ pub fn construct_package_persistence_owned(
     let prepared = prepare_native(
         system,
         bridge,
+        PersistenceFacts::original(bridge)?,
         inputs,
         config,
         &mut readers,
