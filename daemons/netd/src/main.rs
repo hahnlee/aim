@@ -19,6 +19,7 @@ mod interfaces;
 mod networks;
 mod readiness;
 mod resolv;
+mod sysctl;
 
 use std::sync::Mutex;
 
@@ -174,14 +175,7 @@ impl INetd::INetd for Netd {
         ifname: &str,
         parameter: &str,
     ) -> binder::Result<String> {
-        let key = networks::proc_sys_key(ipversion, which, ifname, parameter);
-        let g = networks::state();
-        Ok(g.as_ref()
-            .unwrap()
-            .proc_sys
-            .get(&key)
-            .cloned()
-            .unwrap_or_else(|| "0".into()))
+        kernel(sysctl::get(ipversion, which, ifname, parameter))
     }
     fn setProcSysNet(
         &self,
@@ -191,13 +185,7 @@ impl INetd::INetd for Netd {
         parameter: &str,
         value: &str,
     ) -> binder::Result<()> {
-        let key = networks::proc_sys_key(ipversion, which, ifname, parameter);
-        networks::state()
-            .as_mut()
-            .unwrap()
-            .proc_sys
-            .insert(key, value.to_string());
-        Ok(())
+        kernel(sysctl::set(ipversion, which, ifname, parameter, value))
     }
     fn ipSecSetEncapSocketOwner(&self, _: &ParcelFileDescriptor, _: i32) -> binder::Result<()> {
         unsupported("ipSecSetEncapSocketOwner")
@@ -330,8 +318,8 @@ impl INetd::INetd for Netd {
     fn wakeupDelInterface(&self, _: &str, _: &str, _: i32, _: i32) -> binder::Result<()> {
         Ok(())
     }
-    fn setIPv6AddrGenMode(&self, _: &str, _: i32) -> binder::Result<()> {
-        Ok(())
+    fn setIPv6AddrGenMode(&self, ifname: &str, mode: i32) -> binder::Result<()> {
+        kernel(sysctl::set_addr_gen_mode(ifname, mode))
     }
     fn idletimerAddInterface(&self, _: &str, _: i32, _: &str) -> binder::Result<()> {
         Ok(())
@@ -552,14 +540,14 @@ impl INetd::INetd for Netd {
     fn interfaceSetCfg(&self, cfg: &InterfaceConfigurationParcel) -> binder::Result<()> {
         kernel(interfaces::set_cfg(cfg))
     }
-    fn interfaceSetIPv6PrivacyExtensions(&self, _: &str, _: bool) -> binder::Result<()> {
-        Ok(())
+    fn interfaceSetIPv6PrivacyExtensions(&self, ifname: &str, on: bool) -> binder::Result<()> {
+        kernel(sysctl::set_privacy_extensions(ifname, on))
     }
     fn interfaceClearAddrs(&self, ifname: &str) -> binder::Result<()> {
         kernel(interfaces::clear(ifname))
     }
-    fn interfaceSetEnableIPv6(&self, _: &str, _: bool) -> binder::Result<()> {
-        Ok(())
+    fn interfaceSetEnableIPv6(&self, ifname: &str, on: bool) -> binder::Result<()> {
+        kernel(sysctl::set_enable_ipv6(ifname, on))
     }
     fn interfaceSetMtu(&self, ifname: &str, mtu: i32) -> binder::Result<()> {
         kernel(interfaces::set_mtu(ifname, mtu))
@@ -624,6 +612,7 @@ fn control_socket(name: &str) -> Option<i32> {
 fn main() {
     daemon_log::init("netd");
     readiness::wait();
+    sysctl::initialize_all();
     if let Err(e) = resolv::start() {
         log::error!("DnsResolver: {e}");
         std::process::exit(1);

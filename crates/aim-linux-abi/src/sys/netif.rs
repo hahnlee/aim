@@ -30,6 +30,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use super::ipv6conf::{self, Conf6, Scope};
 use super::netlink;
 use super::uplink::{self, Uplink};
 use crate::errno::{EFAULT, EINVAL, ENODEV, EPERM, Errno};
@@ -165,6 +166,30 @@ pub struct Link {
     /// Whether the link has carrier: always for the loopback, while the
     /// Mac has a network for `eth0`.
     pub carrier: bool,
+    /// Its IPv6 configuration (`ipv6conf`).
+    pub conf6: Conf6,
+}
+
+/// The devices and the IPv6 configurations of `all` and `default`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Devices {
+    pub links: Vec<Link>,
+    pub all: Conf6,
+    pub dflt: Conf6,
+}
+
+impl Devices {
+    /// The configuration of `scope` and the MTU its `mtu` defaults to.
+    fn conf6(&mut self, scope: Scope) -> Result<(&mut Conf6, u32), Errno> {
+        Ok(match scope {
+            Scope::All => (&mut self.all, 0),
+            Scope::Default => (&mut self.dflt, 0),
+            Scope::Dev(i) => {
+                let l = find(&mut self.links, i)?;
+                (&mut l.conf6, l.mtu)
+            }
+        })
+    }
 }
 
 impl Link {
@@ -205,6 +230,13 @@ pub enum Event {
 
 /// The devices at boot: the loopback up with its addresses, `eth0` down
 /// with none.
+fn boot_devices() -> Devices {
+    Devices {
+        links: boot_links(),
+        ..Devices::default()
+    }
+}
+
 fn boot_links() -> Vec<Link> {
     vec![
         Link {
@@ -218,6 +250,7 @@ fn boot_links() -> Vec<Link> {
                 Addr::new(Ipv6Addr::LOCALHOST.into(), 128),
             ],
             carrier: true,
+            conf6: Conf6::default(),
         },
         Link {
             index: ETH0,
@@ -227,6 +260,7 @@ fn boot_links() -> Vec<Link> {
             mac: ETH0_MAC,
             addrs: Vec::new(),
             carrier: false,
+            conf6: Conf6::default(),
         },
     ]
 }
@@ -238,7 +272,7 @@ fn mac_text(m: &[u8; 6]) -> String {
         .join(":")
 }
 
-fn serialize(links: &[Link], up: &Option<Uplink>) -> String {
+fn serialize(d: &Devices, up: &Option<Uplink>) -> String {
     let mut s = String::new();
     if let Some(u) = up {
         s += &format!(
@@ -246,7 +280,9 @@ fn serialize(links: &[Link], up: &Option<Uplink>) -> String {
             u.index, u.addr, u.prefix, u.gateway, u.mtu
         );
     }
-    for l in links {
+    s += &d.all.lines("all");
+    s += &d.dflt.lines("default");
+    for l in &d.links {
         s += &format!(
             "link {} {} {:x} {} {}\n",
             l.index,
@@ -269,13 +305,14 @@ fn serialize(links: &[Link], up: &Option<Uplink>) -> String {
                 t.deprecated as u8
             );
         }
+        s += &l.conf6.lines(&l.index.to_string());
     }
     s
 }
 
 /// The devices and the Mac's network they last saw.
-fn parse(text: &str) -> Option<(Vec<Link>, Option<Uplink>)> {
-    let mut links: Vec<Link> = Vec::new();
+fn parse(text: &str) -> Option<(Devices, Option<Uplink>)> {
+    let mut d = Devices::default();
     let mut up = None;
     for line in text.lines() {
         let w: Vec<&str> = line.split(' ').collect();
@@ -295,7 +332,7 @@ fn parse(text: &str) -> Option<(Vec<Link>, Option<Uplink>)> {
                 for (i, b) in mac.split(':').enumerate() {
                     *m.get_mut(i)? = u8::from_str_radix(b, 16).ok()?;
                 }
-                links.push(Link {
+                d.links.push(Link {
                     index: index.parse().ok()?,
                     name: name.to_string(),
                     flags: u32::from_str_radix(flags, 16).ok()?,
@@ -303,7 +340,15 @@ fn parse(text: &str) -> Option<(Vec<Link>, Option<Uplink>)> {
                     mac: m,
                     addrs: Vec::new(),
                     carrier: false,
+                    conf6: Conf6::default(),
                 });
+            }
+            ["conf6", scope, key, value] => {
+                let v = value.parse().ok()?;
+                conf_of(&mut d, scope)?.put(key, v);
+            }
+            ["secret6", scope, secret] => {
+                conf_of(&mut d, scope)?.secret = Some(secret.parse().ok()?)
             }
             [
                 "addr",
@@ -317,7 +362,7 @@ fn parse(text: &str) -> Option<(Vec<Link>, Option<Uplink>)> {
             ] => {
                 let (ip, prefix) = addr.split_once('/')?;
                 let index: u32 = index.parse().ok()?;
-                links
+                d.links
                     .iter_mut()
                     .find(|l| l.index == index)?
                     .addrs
@@ -336,10 +381,25 @@ fn parse(text: &str) -> Option<(Vec<Link>, Option<Uplink>)> {
             _ => return None,
         }
     }
-    for l in &mut links {
+    for l in &mut d.links {
         l.carrier = l.loopback() || up.is_some();
     }
-    Some((links, up))
+    Some((d, up))
+}
+
+/// The configuration a state line's scope names.
+fn conf_of<'a>(d: &'a mut Devices, scope: &str) -> Option<&'a mut Conf6> {
+    match scope {
+        "all" => Some(&mut d.all),
+        "default" => Some(&mut d.dflt),
+        i => {
+            let i: u32 = i.parse().ok()?;
+            d.links
+                .iter_mut()
+                .find(|l| l.index == i)
+                .map(|l| &mut l.conf6)
+        }
+    }
 }
 
 /// `check_lifetime` at `now`: an address whose valid lifetime ran out
@@ -419,7 +479,7 @@ pub fn kernel_dir(name: &str) -> PathBuf {
 
 /// Run `f` on the device state under its lock, after following the Mac's
 /// network; write back what changed and announce the events.
-fn transact<R>(f: impl FnOnce(&mut Vec<Link>, &mut Vec<Event>) -> R) -> R {
+fn transact<R>(f: impl FnOnce(&mut Devices, &mut Vec<Event>) -> R) -> R {
     // The locked file must not reach a fork child (`spawn::own_fds`).
     let _own = super::fork::spawn::own_fds();
     let path = kernel_dir("net").join("links");
@@ -431,20 +491,20 @@ fn transact<R>(f: impl FnOnce(&mut Vec<Link>, &mut Vec<Event>) -> R) -> R {
         .open(&path);
     let Ok(mut file) = file else {
         // No shared state to be had: this process's own view.
-        let mut links = boot_links();
-        follow_uplink(&mut links, &None, &uplink::current(), &mut Vec::new());
-        return f(&mut links, &mut Vec::new());
+        let mut d = boot_devices();
+        follow_uplink(&mut d.links, &None, &uplink::current(), &mut Vec::new());
+        return f(&mut d, &mut Vec::new());
     };
     // SAFETY: locking our open file; released when it closes.
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
     let mut text = String::new();
     let _ = file.read_to_string(&mut text);
-    let (mut links, was) = parse(&text)
-        .filter(|(l, _)| !l.is_empty())
-        .unwrap_or_else(|| (boot_links(), None));
+    let (mut d, was) = parse(&text)
+        .filter(|(d, _)| !d.links.is_empty())
+        .unwrap_or_else(|| (boot_devices(), None));
     let mut events = Vec::new();
     let now = uplink::current();
-    if follow_uplink(&mut links, &was, &now, &mut events) {
+    if follow_uplink(&mut d.links, &was, &now, &mut events) {
         match &now {
             Some(u) => crate::diag!(
                 "[linux-abi] net: the Mac's network is {}/{} via {} (host interface {})",
@@ -456,9 +516,9 @@ fn transact<R>(f: impl FnOnce(&mut Vec<Link>, &mut Vec<Event>) -> R) -> R {
             None => crate::diag!("[linux-abi] net: the Mac has no network; eth0 has no carrier"),
         }
     }
-    expire(&mut links, now_ms(), &mut events);
-    let r = f(&mut links, &mut events);
-    let new = serialize(&links, &now);
+    expire(&mut d.links, now_ms(), &mut events);
+    let r = f(&mut d, &mut events);
+    let new = serialize(&d, &now);
     if new != text {
         let _ = file.set_len(0);
         let _ = file.rewind();
@@ -469,7 +529,48 @@ fn transact<R>(f: impl FnOnce(&mut Vec<Link>, &mut Vec<Event>) -> R) -> R {
 }
 
 pub fn links() -> Vec<Link> {
-    transact(|l, _| l.clone())
+    transact(|d, _| d.links.clone())
+}
+
+/// The IPv6 configuration of `scope`, and the MTU a device's `mtu`
+/// defaults to.
+pub fn conf6(scope: Scope) -> Result<(Conf6, u32), Errno> {
+    transact(|d, _| d.conf6(scope).map(|(c, mtu)| (c.clone(), mtu)))
+}
+
+/// A write of `name` in `scope`'s IPv6 configuration, as its
+/// `addrconf_sysctl_*` handler makes it: `all`'s `disable_ipv6`,
+/// `forwarding` and `addr_gen_mode` go to `default` and every device too.
+pub fn set_conf6(scope: Scope, name: &str, value: i32) -> Result<(), Errno> {
+    transact(|d, _| {
+        d.conf6(scope)?.0.put(name, value);
+        if scope == Scope::All && matches!(name, "disable_ipv6" | "forwarding" | "addr_gen_mode") {
+            d.dflt.put(name, value);
+            for l in &mut d.links {
+                l.conf6.put(name, value);
+            }
+        }
+        Ok(())
+    })
+}
+
+/// `stable_secret`'s write: the secret, and the stable privacy mode for
+/// the device (for `default`, for every device).
+pub fn set_secret6(scope: Scope, secret: Ipv6Addr) -> Result<(), Errno> {
+    transact(|d, _| {
+        if scope == Scope::Default {
+            d.dflt.secret = Some(secret);
+            for l in &mut d.links {
+                l.conf6
+                    .put("addr_gen_mode", ipv6conf::ADDR_GEN_STABLE_PRIVACY);
+            }
+        } else {
+            let c = d.conf6(scope)?.0;
+            c.secret = Some(secret);
+            c.put("addr_gen_mode", ipv6conf::ADDR_GEN_STABLE_PRIVACY);
+        }
+        Ok(())
+    })
 }
 
 /// Follow the Mac's network (`uplink::watch`): the shared device state,
@@ -498,8 +599,8 @@ fn find(links: &mut [Link], index: u32) -> Result<&mut Link, Errno> {
 
 /// Set the flags in `mask` to `flags`, and the MTU.
 pub fn change_link(index: u32, mask: u32, flags: u32, mtu: Option<u32>) -> Result<(), Errno> {
-    transact(|links, ev| {
-        let l = find(links, index)?;
+    transact(|d, ev| {
+        let l = find(&mut d.links, index)?;
         let mask = mask & SETTABLE;
         let before = (l.flags, l.mtu);
         l.flags = (l.flags & !mask) | (flags & mask);
@@ -522,8 +623,8 @@ pub fn add_addr(index: u32, a: Addr, replace: bool) -> Result<(), Errno> {
     if a.prefix > max {
         return Err(EINVAL);
     }
-    transact(|links, ev| {
-        let l = find(links, index)?;
+    transact(|d, ev| {
+        let l = find(&mut d.links, index)?;
         let a = match l.addrs.iter_mut().find(|x| x.ip == a.ip) {
             Some(_) if !replace => return Err(EEXIST),
             // A replaced address keeps when it was added (`ifa_cstamp`).
@@ -545,8 +646,8 @@ pub fn add_addr(index: u32, a: Addr, replace: bool) -> Result<(), Errno> {
 
 /// Remove the link's address `ip` (with `prefix`, when given).
 pub fn del_addr(index: u32, ip: IpAddr, prefix: Option<u8>) -> Result<(), Errno> {
-    transact(|links, ev| {
-        let l = find(links, index)?;
+    transact(|d, ev| {
+        let l = find(&mut d.links, index)?;
         let i = l
             .addrs
             .iter()
@@ -569,8 +670,8 @@ fn classful(a: Ipv4Addr) -> u8 {
 
 /// `SIOCSIFADDR`: replace the primary IPv4 address; 0.0.0.0 removes it.
 fn set_primary_v4(index: u32, ip: Ipv4Addr) -> Result<(), Errno> {
-    transact(|links, ev| {
-        let l = find(links, index)?;
+    transact(|d, ev| {
+        let l = find(&mut d.links, index)?;
         if let Some(i) = l.primary_v4() {
             if l.addrs[i].ip == IpAddr::V4(ip) {
                 return Ok(());
@@ -594,8 +695,8 @@ fn set_netmask_v4(index: u32, mask: Ipv4Addr) -> Result<(), Errno> {
     if m.checked_shl(prefix).unwrap_or(0) != 0 {
         return Err(EINVAL);
     }
-    transact(|links, ev| {
-        let l = find(links, index)?;
+    transact(|d, ev| {
+        let l = find(&mut d.links, index)?;
         let i = l.primary_v4().ok_or(EADDRNOTAVAIL)?;
         if l.addrs[i].prefix as u32 != prefix {
             let old = l.addrs[i];
@@ -822,11 +923,16 @@ mod tests {
 
     #[test]
     fn state_round_trips() {
-        let mut l = boot_links();
-        l[1].flags |= IFF_UP;
-        l[1].addrs
+        let mut d = boot_devices();
+        d.links[1].flags |= IFF_UP;
+        d.links[1]
+            .addrs
             .push(Addr::new("192.168.1.20".parse().unwrap(), 24));
-        assert_eq!(parse(&serialize(&l, &None)).unwrap(), (l.clone(), None));
+        d.links[1].conf6.put("use_tempaddr", 2);
+        d.links[1].conf6.secret = Some("2001:db8::7".parse().unwrap());
+        d.all.put("forwarding", 1);
+        d.dflt.put("accept_ra", 2);
+        assert_eq!(parse(&serialize(&d, &None)).unwrap(), (d.clone(), None));
         let up = Some(Uplink {
             index: 4,
             addr: "192.168.1.20".parse().unwrap(),
@@ -834,8 +940,8 @@ mod tests {
             gateway: "192.168.1.1".parse().unwrap(),
             mtu: 1500,
         });
-        l[1].carrier = true;
-        assert_eq!(parse(&serialize(&l, &up)).unwrap(), (l, up));
+        d.links[1].carrier = true;
+        assert_eq!(parse(&serialize(&d, &up)).unwrap(), (d, up));
     }
 
     /// `set_ifa_lifetime` and `check_lifetime`: a lease's address is
@@ -852,9 +958,10 @@ mod tests {
         assert!(!a.life.permanent());
         assert_eq!(a.life.left(t + 600_000), (3000, 1200));
         assert_eq!(a.life.left(t + 2_000_000), (1600, 0));
-        let mut l = boot_links();
-        l[1].addrs.push(a);
-        assert_eq!(parse(&serialize(&l, &None)).unwrap().0, l);
+        let mut d = boot_devices();
+        d.links[1].addrs.push(a);
+        assert_eq!(parse(&serialize(&d, &None)).unwrap().0, d);
+        let mut l = d.links;
         let mut ev = Vec::new();
         expire(&mut l, t + 1_000_000, &mut ev);
         assert!(ev.is_empty());
