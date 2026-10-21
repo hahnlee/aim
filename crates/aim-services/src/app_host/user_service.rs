@@ -455,13 +455,24 @@ pub(super) fn serial_number(host: &AppHost, user: i32) -> Result<Option<i32>, Ex
 
 /// `UserInfo.isDemo` of the user; false for one that does not exist.
 pub(super) fn is_demo(host: &AppHost, user: i32) -> Result<bool, Exception> {
+    Ok(user_flags(host, user)?.is_some_and(|f| f & FLAG_DEMO != 0))
+}
+
+/// `UserManager.isUserAdmin`: `UserInfo.isAdmin` of the user; false for
+/// one that does not exist.
+pub(super) fn is_admin(host: &AppHost, user: i32) -> Result<bool, Exception> {
+    Ok(user_flags(host, user)?.is_some_and(|f| f & FLAG_ADMIN != 0))
+}
+
+/// The flags of a user that exists and is not partial.
+fn user_flags(host: &AppHost, user: i32) -> Result<Option<i32>, Exception> {
     if user != SYSTEM_USER {
-        return Ok(false);
+        return Ok(None);
     }
     let (path, bytes) = host.user_file()?;
     let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
     let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
-    Ok(!info.partial && info.flags & FLAG_DEMO != 0)
+    Ok((!info.partial).then_some(info.flags))
 }
 
 /// What `UserDataPreparer` and `reconcileAppsData` read of a user's

@@ -518,6 +518,22 @@ impl Packages {
         })
     }
 
+    /// `getResourcesForApplication`'s `getIdentifier(name, "string",
+    /// package)` in `pkg`'s resources: 0 when there is none.
+    pub fn string_identifier(
+        &self,
+        root: &Path,
+        data: &Path,
+        pkg: &AndroidPackage,
+        name: &str,
+    ) -> Result<u32, String> {
+        self.with_resources(root, data, pkg, |resources, _, _| {
+            Ok(resources
+                .identifier(&pkg.package_name, "string", name)
+                .unwrap_or(0))
+        })
+    }
+
     /// `ActivityRecord.WindowStyle` of the theme `theme` of `pkg`, an app
     /// targeting `target_sdk` (`getThemeResource`, else `Theme` or
     /// `Theme_Holo`): the `R.styleable.Window` attributes
