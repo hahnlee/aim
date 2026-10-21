@@ -8,15 +8,20 @@
 //! `ACTION_DISCHARGING`, and the charge and discharge step trackers
 //! (`LevelStepTracker`) `computeChargeTimeRemaining` and
 //! `computeBatteryTimeRemaining` read, fed by the battery service as
-//! BatteryService feeds them. The stats themselves (wake locks, power
-//! use, history, `batterystats.bin`): #1513.
+//! BatteryService feeds them. `takeUidSnapshotsAsync` answers its result
+//! receiver as the original does (its BATTERY_STATS check), the snapshots
+//! themselves failing as not implemented. The stats themselves (wake
+//! locks, power use, history, `batterystats.bin`): #1513.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, Exception, Parcel};
+use aim_binder_host::parcel::{
+    BAD_VALUE, Binder, Exception, Parcel, Reader, Result as ParcelResult,
+};
+use aim_service_aidl::ReadParcelable;
 use aim_service_aidl::com_android_internal_app_ibatterystats as bs;
 
 use super::kept::RawIntent;
@@ -25,6 +30,51 @@ use super::{AppHost, reply};
 /// `BatteryManager.BATTERY_STATUS_UNKNOWN`, `BATTERY_STATUS_FULL`,
 /// `BATTERY_PLUGGED_NONE`.
 const UPDATE_DEVICE_STATS: &str = "android.permission.UPDATE_DEVICE_STATS";
+const BATTERY_STATS: &str = "android.permission.BATTERY_STATS";
+/// `IBatteryStats.RESULT_RUNTIME_EXCEPTION`, `RESULT_SECURITY_EXCEPTION`,
+/// `KEY_EXCEPTION_MESSAGE`; `IResultReceiver.send`.
+const RESULT_RUNTIME_EXCEPTION: i32 = 1;
+const RESULT_SECURITY_EXCEPTION: i32 = 2;
+const KEY_EXCEPTION_MESSAGE: &str = "exception";
+const RESULT_RECEIVER_DESCRIPTOR: &str = "com.android.internal.os.IResultReceiver";
+const RESULT_RECEIVER_SEND: u32 = 1;
+
+/// A `ResultReceiver`: its `IResultReceiver`.
+struct ResultReceiver(Option<Binder>);
+
+impl ReadParcelable for ResultReceiver {
+    fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
+        Ok(ResultReceiver(r.read_binder()?))
+    }
+}
+
+/// `ResultReceiver.send(code, Bundle.forPair(KEY_EXCEPTION_MESSAGE,
+/// message))`, one-way.
+fn send_failure(host: &AppHost, receiver: Option<Binder>, code: i32, message: &str) {
+    let Some(Binder::Handle(handle)) = receiver else {
+        return;
+    };
+    let _ =
+        host.process
+            .strong(handle)
+            .transact(RESULT_RECEIVER_SEND, &failure(code, message), true);
+}
+
+/// `IResultReceiver.send`'s data of a failure.
+fn failure(code: i32, message: &str) -> Parcel {
+    let mut p = Parcel::new();
+    p.write_interface_token(RESULT_RECEIVER_DESCRIPTOR);
+    p.write_i32(code);
+    p.write_i32(1);
+    crate::bundle::write(
+        &mut p,
+        &[(
+            KEY_EXCEPTION_MESSAGE,
+            crate::bundle::Value::String(Some(message.into())),
+        )],
+    );
+    p
+}
 const STATUS_UNKNOWN: i32 = 1;
 const STATUS_FULL: i32 = 5;
 const PLUGGED_NONE: i32 = 0;
@@ -458,6 +508,37 @@ impl Service for BatteryStats {
                         }),
                 );
             }
+            // One-way: what fails reaches the caller's receiver. Asking
+            // for other uids than its own needs BATTERY_STATS
+            // (`onlyCaller`); the snapshots (`getHealthStatsForUidLocked`)
+            // are #1513, sent as the original sends a failure to make them.
+            bs::TAKE_UID_SNAPSHOTS_ASYNC => {
+                let a = bs::TakeUidSnapshotsAsync::<ResultReceiver>::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                drop(s);
+                let Some(host) = self.host.upgrade() else {
+                    return Err(BAD_VALUE);
+                };
+                let uid = call.sender_euid as i32;
+                let receiver = a.result.and_then(|r| r.0);
+                let only_caller = a.uid.unwrap_or_default().iter().all(|&u| u == uid);
+                match host.check_permission(Some(BATTERY_STATS), uid) {
+                    Ok(0) => {}
+                    Ok(_) if only_caller => {}
+                    Ok(_) => {
+                        send_failure(
+                            &host,
+                            receiver,
+                            RESULT_SECURITY_EXCEPTION,
+                            &format!("Neither user {uid} nor current process has {BATTERY_STATS}."),
+                        );
+                        return Ok(p);
+                    }
+                    Err(e) => return reply(Err(e)),
+                }
+                let e = host.unimplemented_named("batterystats", "a uid's health stats (#1513)");
+                send_failure(&host, receiver, RESULT_RUNTIME_EXCEPTION, &e.message);
+            }
             code => {
                 drop(s);
                 let Some(host) = self.host.upgrade() else {
@@ -475,6 +556,22 @@ impl Service for BatteryStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failure reaches the receiver as `ResultReceiver.send` writes it:
+    /// the code, then a bundle of the message.
+    #[test]
+    fn a_failure_is_sent_with_its_message() {
+        let p = failure(RESULT_SECURITY_EXCEPTION, "denied");
+        let mut r = p.reader();
+        r.enforce_interface(RESULT_RECEIVER_DESCRIPTOR).unwrap();
+        assert_eq!(r.read_i32().unwrap(), RESULT_SECURITY_EXCEPTION);
+        assert_eq!(r.read_i32().unwrap(), 1);
+        let bundle = crate::bundle::read(&mut r).unwrap().unwrap();
+        assert!(matches!(
+            bundle.get(KEY_EXCEPTION_MESSAGE),
+            Some(crate::bundle::Value::String(Some(m))) if m == "denied"
+        ));
+    }
 
     const C: Config = Config {
         charged_delay_ms: 900_000,
