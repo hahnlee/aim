@@ -12,15 +12,18 @@ writes.
 | Piece | Where |
 | --- | --- |
 | Devices `lo` and `eth0`: flags, MTU, addresses, shared by a boot's processes | `crates/aim-linux-abi/src/sys/netif.rs` |
-| The Mac's network: default route, address, gateway, MTU, DNS servers; watching it | `crates/aim-uplink` (also the app host's `connectivity`); the test hook and the lease: `sys/uplink.rs` |
+| The devices' IPv6 configuration, `/proc/sys/net/ipv6/conf/*` | `sys/ipv6conf.rs` |
+| IPv6 autoconfiguration, the IPv6 routes, the virtual router's advertisements | `sys/addrconf.rs` |
+| The guest's IPv6 addresses standing for the Mac's (NAT66) | `sys/nat66.rs` |
+| The Mac's network: default routes, addresses, gateways, MTU, DNS servers; watching it | `crates/aim-uplink` (also the app host's `connectivity`); the test hook, the lease and the advertisement: `sys/uplink.rs` |
 | NETLINK_ROUTE: dumps, changes, group announcements | `sys/netlink.rs` |
 | AF_PACKET SOCK_RAW and classic BPF filters | `sys/packet.rs` |
 | `eth0`'s virtual router: DHCP and ARP | `sys/dhcp.rs` |
 | Interface ioctls (`SIOCGIFFLAGS`, `SIOCSIFADDR`, `SIOCGIFINDEX`, ...) | `netif::ioctl` |
 | SO_MARK, SO_BINDTODEVICE, IP_MULTICAST_ALL, ping sockets, UDP connect to port 0 | `sys/net.rs` (`Family::Inet`) |
-| INetd interface calls over ioctls and rtnetlink | `daemons/netd/src/interfaces.rs` |
+| INetd interface calls over ioctls and rtnetlink; `/proc/sys/net` as InterfaceController writes it | `daemons/netd/src/interfaces.rs`, `sysctl.rs` |
 | `android.hardware.ethernet` | `image/vendor/etc/permissions/android.hardware.ethernet.xml` |
-| NDK tests | `crates/aim-linux-abi/tests/ndk/t_netif.c`, `t_netwatch.c` |
+| NDK tests | `crates/aim-linux-abi/tests/ndk/t_netif.c`, `t_netwatch.c`, `t_ipv6.c` |
 
 ## Bring-up
 
@@ -56,6 +59,17 @@ NetworkMonitor: DNS through DnsResolver, HTTP and HTTPS generate_204 probes
   request for another address is NAKed.
 - **Hardware addresses** are fixed and locally administered: `eth0`
   `02:61:69:6d:00:02`, the router `02:61:69:6d:00:01`.
+- **IPv6.** netd sets the devices' IPv6 configuration at start as
+  InterfaceController's `initializeAll` does (`accept_ra` 2, RA routes in
+  per-interface tables, optimistic DAD), and IpClient's `startIPv6` sets
+  `accept_ra`, `use_tempaddr` 2, stable privacy addresses (the persisted
+  `persist.netd.stable_secret`) and `disable_ipv6` 0. eth0 then gets its
+  link-local address; when its DAD completes it solicits routers, and
+  the virtual router (`fe80::61:69ff:fe6d:1`) answers with the Mac's IPv6
+  network if the Mac has one: its prefix (SLAAC and temporary addresses,
+  the prefix's route), a default route and its DNS servers (RDNSS).
+  IpClient provisions IPv6 from the netlink messages of these as on a
+  device (RTM_NEWADDR, RTM_NEWROUTE, RTM_NEWNDUSEROPT). See "IPv6".
 - **The emulator's overlay goes.** Its vendor overlay made `eth0` a
   restricted network (`config_ethernet_interfaces` "eth0;11,12,14;;"),
   because the emulator's `eth0` is its modem link. Ours is an ordinary
@@ -111,7 +125,11 @@ Mac: new DNS servers only        the next renewal (a DHCPACK with them)
   `down` takes the network away; `addr A/P`, `gateway G`, `dns S...` and
   `lease SECONDS` replace those values of the Mac's network, and
   `interface NAME` puts host interface NAME behind it, as the Mac moving
-  from Wi-Fi to cable does. An empty or
+  from Wi-Fi to cable does. For IPv6, `down6` takes the Mac's IPv6 away,
+  `addr6 A/P` gives it global address A in prefix P (an IPv6 network on
+  the IPv4 one's interface, router `fe80::1`, when it has none), and
+  `temp6 A`, `gateway6 G` and `dns6 S...` its temporary address, router
+  and DNS servers. An empty or
   missing file is the Mac's network as it is. Guest sockets still use the
   Mac's real network, so a simulated address is only what Android is told.
 
@@ -122,8 +140,9 @@ echo down > target/aim/boot/data.run/net/simulate   # outage
 
 ## The kernel side
 
-**State.** `<runtime>/net/links` holds the devices as text (`link` and
-`addr` lines), read and rewritten under `flock` by whichever process makes
+**State.** `<runtime>/net/links` holds the devices as text (`link`,
+`addr`, `conf6` and `route6` lines, and what the virtual router last
+advertised), read and rewritten under `flock` by whichever process makes
 a change, which then announces it. `lo` starts up with 127.0.0.1/8 and
 ::1/128, `eth0` down with no address. Changes need CAP_NET_ADMIN.
 
@@ -134,16 +153,29 @@ reply and each announcement is one datagram sent to the listening names
 (a dump is several reads, as on Linux). Port ids are the process id, then
 negative numbers, as Linux autobinds. Supported: RTM_GETLINK (dump and by
 index or name), RTM_GETADDR dumps, RTM_NEWLINK/RTM_SETLINK (flags, MTU),
-RTM_NEWADDR, RTM_DELADDR, and the groups RTNLGRP_LINK, RTNLGRP_IPV4_IFADDR
-and RTNLGRP_IPV6_IFADDR. An address keeps the lifetimes RTM_NEWADDR gives
+RTM_NEWADDR, RTM_DELADDR, RTM_GETROUTE dumps of the IPv6 table, and the
+groups RTNLGRP_LINK, RTNLGRP_IPV4_IFADDR, RTNLGRP_IPV6_IFADDR,
+RTNLGRP_IPV6_ROUTE, RTNLGRP_IPV6_PREFIX and RTNLGRP_ND_USEROPT. An address
+keeps the lifetimes RTM_NEWADDR gives
 it (IFA_CACHEINFO, as IpClient sets a lease's): it is reported with the
 seconds left, deprecated when its preferred lifetime runs out and removed
 when its valid one does, both announced; they are checked whenever a
 process looks at the devices, which a process following the Mac's network
-does every 2 s. RTM_GETROUTE, RTM_GETNEIGH and RTM_GETRULE dump
-nothing: there is no routing table (netd keeps routes as bookkeeping, and
-the host routes). Other requests are EOPNOTSUPP, other netlink families
+does every 2 s. There is no IPv4 routing table (netd keeps those routes as
+bookkeeping, and the host routes); RTM_GETNEIGH and RTM_GETRULE dump
+nothing. Other requests are EOPNOTSUPP, other netlink families
 EPROTONOSUPPORT.
+
+**IPv6 configuration.** `/proc/sys/net/ipv6/conf/{all,default,lo,eth0}`
+hold Linux 6.6's per-device IPv6 configuration (`ipv6_devconf`, and
+Android's `accept_ra_rt_table`), kept with the devices: reads and writes
+as `proc_dointvec` with the handlers' ranges and modes (`stable_secret`
+0600, `mc_forwarding` read-only), `all`'s `disable_ipv6`, `forwarding`
+and `addr_gen_mode` going to `default` and every device, `stable_secret`
+taking an address and turning on stable privacy (EIO for `all`, a bad
+address, or a read before one is set). `ipv4/conf` and the neighbour
+directories list the devices; their values are kept as written, not
+emulated.
 
 **Packet sockets.** SOCK_RAW only, with CAP_NET_RAW. A frame sent on
 `eth0` goes to the virtual router and to the sending process's ETH_P_ALL
@@ -196,6 +228,55 @@ would, with the socket's uid, tag, counter set and interface (`lo` for
 loopback addresses, `eth0` for the rest). One call counts as one packet
 behind its headers, split at the MTU as the programs split a GSO skb;
 TCP's control packets are not counted. The interface counters are #1720.
+
+## IPv6 (#267)
+
+The guest gets IPv6 as a Linux host behind a router does; the router is
+the Mac's IPv6 network (`aim-uplink`: the interface of its IPv6 default
+route, its usable global address and the temporary one by their
+`IN6_IFF_*` flags, its router, its global IPv6 nameservers).
+
+- **Autoconfiguration** (`sys/addrconf.rs`, Linux's `addrconf.c`). A
+  device whose link becomes ready (up, with carrier) with IPv6 enabled
+  gets a link-local address by its `addr_gen_mode`: EUI-64 from its
+  hardware address, or RFC 7217 stable privacy from `stable_secret`
+  (`ipv6_generate_stable_address`, with the one-block `sha1_transform`).
+  Addresses are tentative while DAD runs (`dad_transmits` seconds),
+  optimistic where `optimistic_dad` allows. Taking a device down or
+  disabling IPv6 clears its IPv6 addresses and routes.
+- **The router.** When `eth0`'s link-local address completes DAD it
+  solicits routers, and the virtual router (`fe80::61:69ff:fe6d:1`)
+  answers with the Mac's prefix (valid 30 days, preferred 7), its MTU and
+  DNS servers (RDNSS, 1800 s), router lifetime 1800 s. It advertises
+  again every 600 s and at once when the Mac's IPv6 changes: an old
+  prefix and servers with zero lifetimes, and a zero router lifetime when
+  the Mac has none. Receiving an advertisement is `ndisc_router_discovery`
+  as the device's configuration allows: the default route (proto ra,
+  `ra_defrtr_metric`, not below `accept_ra_min_lft`), the hop limit and
+  MTU, the prefix's route, the SLAAC address with RFC 4862's two-hour
+  rule, RFC 8981 temporary addresses with `use_tempaddr` (regenerated
+  before they deprecate), RTM_NEWPREFIX, and RDNSS as RTM_NEWNDUSEROPT.
+- **Routes.** The kernel's IPv6 table holds prefix routes, fe80::/64, the
+  default route, the local table's routes of usable addresses and
+  ff00::/8, in the table `accept_ra_rt_table` names (netd's -1000: table
+  1002 for `eth0`). Nothing routes by it: the host routes every socket.
+- **NAT66** (`sys/nat66.rs`). SLAAC and temporary addresses are not the
+  Mac's, and guest sockets are host sockets. As a NAT66 router does (RFC
+  6296), the socket layer gives the host the Mac's address where the
+  guest names one of its own in the advertised prefix (bind, connect,
+  sendto) and the guest its own where the host reports the Mac's
+  (getsockname, getpeername, recvfrom, accept): a temporary address
+  stands for the Mac's temporary one, the stable one for its stable one.
+  Back, the Mac's temporary address is the newest temporary one; with no
+  temporary address on the Mac, every guest address stands for its one
+  address, which comes back as the stable one.
+
+Not done: the router's frames on packet sockets (the advertisement is
+received by the kernel side only; nothing in the pinned NetworkStack
+reads it there but ApfFilter, which needs APF the device does not
+offer), DHCPv6, and IPv6 control messages (`IPV6_PKTINFO`). A boot on a
+Mac with IPv6 has not been verified yet: this Mac has none, and the
+ndk test (`t_ipv6.c`) drives the Mac's IPv6 through the test hook.
 
 ## Verified (2026-09-28)
 
@@ -283,8 +364,8 @@ sockets. What it takes, below the original stack:
 
 ## Open
 
-- #267 no IPv6 on `eth0` (no router advertisements or SLAAC); IPv6 sockets
-  still reach the Internet through the host;
+- #267 IPv6 on `eth0`: verify on a Mac with IPv6 (`dumpsys connectivity`
+  with an IPv6 address, default route and DNS on eth0, `ping6`);
 - #260 Chrome's renderer: "V8 process OOM (Failed to reserve virtual
   memory for CodeRange)";
 - #268 socket options: IP_RECVTTL, IP_RETOPTS, SO_TIMESTAMP (iputils
