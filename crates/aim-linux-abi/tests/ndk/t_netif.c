@@ -180,6 +180,52 @@ static void netlink(void) {
   close(ev);
 }
 
+// An address given a lease's lifetimes (IpClient's
+// populateLinkAddressLifetime) is announced with them counting down, not
+// as permanent; a zero valid lifetime or a preferred one above it is
+// EINVAL (rtm_to_ifaddr).
+static void lifetimes(void) {
+  int ev = rtnl(RTMGRP_IPV4_IFADDR);
+  int s = rtnl(0);
+  CHECK(ev >= 0 && s >= 0);
+  struct {
+    struct addr_req r;
+    struct rtattr ca;
+    struct ifa_cacheinfo ci;
+  } a;
+  memset(&a, 0, sizeof a);
+  addr(&a.r, RTM_NEWADDR, "10.0.2.16", 24);
+  a.r.h.nlmsg_len = sizeof a;
+  a.r.h.nlmsg_flags = NLM_F_CREATE | NLM_F_REPLACE;
+  a.ca.rta_len = RTA_LENGTH(sizeof a.ci);
+  a.ca.rta_type = IFA_CACHEINFO;
+  a.ci.ifa_valid = 0;
+  a.ci.ifa_prefered = 0;
+  CHECK(ack(s, &a.r.h) == -EINVAL);
+  a.ci.ifa_valid = 60;
+  a.ci.ifa_prefered = 120;
+  CHECK(ack(s, &a.r.h) == -EINVAL);
+  a.ci.ifa_valid = 3600;
+  a.ci.ifa_prefered = 1800;
+  CHECK(ack(s, &a.r.h) == 0);
+  char buf[8192];
+  int n = wait_msg(ev, RTM_NEWADDR, buf, sizeof buf);
+  CHECK(n > 0);
+  struct ifaddrmsg* am = NLMSG_DATA(buf);
+  CHECK(!(am->ifa_flags & IFA_F_PERMANENT));
+  struct ifa_cacheinfo* got = NULL;
+  int len = IFA_PAYLOAD((struct nlmsghdr*)buf);
+  for (struct rtattr* ra = IFA_RTA(am); RTA_OK(ra, len); ra = RTA_NEXT(ra, len)) {
+    if (ra->rta_type == IFA_CACHEINFO) got = RTA_DATA(ra);
+  }
+  CHECK(got && got->ifa_valid <= 3600 && got->ifa_valid >= 3598 && got->ifa_prefered <= 1800 &&
+        got->ifa_prefered >= 1798);
+  addr(&a.r, RTM_DELADDR, "10.0.2.16", 24);
+  CHECK(ack(s, &a.r.h) == 0);
+  close(s);
+  close(ev);
+}
+
 // SIOCSIFADDR in one process is announced to a listener in another.
 static void across_processes(void) {
   int ev = rtnl(RTMGRP_IPV4_IFADDR);
@@ -383,6 +429,7 @@ int main(void) {
   RUN(interfaces);
   RUN(ioctls);
   RUN(netlink);
+  RUN(lifetimes);
   RUN(across_processes);
   RUN(socket_options);
   RUN(ping_socket);
