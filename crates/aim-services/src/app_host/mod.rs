@@ -29,6 +29,7 @@ pub mod audio_permissions;
 pub mod audio_policy;
 pub mod audio_service;
 pub mod auth_service;
+mod battery_history;
 pub mod battery_service;
 pub mod battery_stats;
 pub mod bind;

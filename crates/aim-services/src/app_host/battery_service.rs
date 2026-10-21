@@ -671,10 +671,16 @@ impl BatteryService {
         // the level (`IBatteryStats.setBatteryState`).
         if let Some(stats) = self.host.battery_stats.get() {
             stats.set_battery_state(
-                info.status,
-                info.plug_type(),
-                info.level,
-                info.charge_time_to_full,
+                super::battery_stats::BatteryState {
+                    status: info.status,
+                    health: info.health,
+                    plug_type: info.plug_type(),
+                    level: info.level,
+                    temperature: info.temperature,
+                    voltage: info.voltage,
+                    charge_uah: info.charge_counter,
+                    time_to_full: info.charge_time_to_full,
+                },
                 now,
             );
         }
