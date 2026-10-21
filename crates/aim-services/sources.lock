@@ -194,7 +194,7 @@ INTERFACES=(
   "android.view.IWindowSession|system/framework/framework.jar|getWindowId"
   "android.view.IWindowId|system/framework/framework.jar|*"
   "android.os.storage.IStorageManager|system/framework/framework.jar|getVolumeList,getVolumes,mkdirs,registerListener,unregisterListener,setCloudMediaProvider,getCloudMediaProvider,isCeStorageUnlocked,getAllocatableBytes,allocateBytes,getDisks,getVolumeRecords,getInternalStorageBlockDeviceSize,getPrimaryStorageUuid,fixupAppDir"
-  "android.content.IContentService|system/framework/framework.jar|registerContentObserver,unregisterContentObserver,notifyChange,putCache,getCache,getMasterSyncAutomatically,getMasterSyncAutomaticallyAsUser,addStatusChangeListener,removeStatusChangeListener,getCurrentSyncs,getCurrentSyncsAsUser"
+  "android.content.IContentService|system/framework/framework.jar|registerContentObserver,unregisterContentObserver,notifyChange,putCache,getCache,getMasterSyncAutomatically,getMasterSyncAutomaticallyAsUser,addStatusChangeListener,removeStatusChangeListener,getCurrentSyncs,getCurrentSyncsAsUser,sync,syncAsUser"
   "android.hardware.ISensorPrivacyManager|system/framework/framework.jar|supportsSensorToggle,addSensorPrivacyListener,addToggleSensorPrivacyListener,removeSensorPrivacyListener,removeToggleSensorPrivacyListener,isSensorPrivacyEnabled,isCombinedToggleSensorPrivacyEnabled,isToggleSensorPrivacyEnabled,getToggleSensorPrivacyState"
   "android.content.pm.ICrossProfileApps|system/framework/framework.jar|getTargetUserProfiles,canInteractAcrossProfiles"
   "android.app.IAppTask|system/framework/framework.jar|getTaskInfo"

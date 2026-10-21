@@ -468,6 +468,7 @@ pub struct AppHost {
     storage: storage::Volumes,
     text_input: input_method::TextInput,
     content_service: OnceLock<Arc<content_service::ContentService>>,
+    account_manager: OnceLock<Arc<account_service::AccountManager>>,
     role_service: OnceLock<Arc<role_service::RoleManager>>,
     /// The window contexts attached, by their client token's handle.
     window_contexts: Arc<Mutex<HashMap<u32, window_manager::WindowContext>>>,
@@ -557,6 +558,7 @@ impl AppHost {
             storage: Default::default(),
             text_input: Default::default(),
             content_service: OnceLock::new(),
+            account_manager: OnceLock::new(),
             role_service: OnceLock::new(),
             window_contexts: Arc::new(Mutex::new(HashMap::new())),
             notification_service: OnceLock::new(),
@@ -893,7 +895,9 @@ impl AppHost {
             ),
             (
                 "account",
-                account_service::AccountManager::new(self.clone()),
+                self.account_manager
+                    .get_or_init(|| account_service::AccountManager::new(self.clone()))
+                    .clone(),
             ),
             (
                 "device_policy",
@@ -2230,8 +2234,8 @@ impl AppHost {
         )? != appops_service::MODE_ALLOWED)
     }
 
-    /// `UserController.isUserRunning`: user 0 runs, unlocked; no other user
-    /// is started.
+    /// `UserController.isUserRunning`: user 0 runs, locked until its CE
+    /// storage is prepared; no other user is started.
     fn user_running(&self, call: &Call<'_>, user: i32, flags: i32) -> Result<bool, Exception> {
         const FLAG_OR_STOPPED: i32 = 1 << 0;
         const FLAG_AND_LOCKED: i32 = 1 << 1;
@@ -2247,7 +2251,9 @@ impl AppHost {
         if user != 0 {
             return Ok(false);
         }
-        Ok(flags & FLAG_OR_STOPPED != 0 || flags & FLAG_AND_LOCKED == 0)
+        Ok(flags & FLAG_OR_STOPPED != 0
+            || flags & FLAG_AND_LOCKED == 0
+            || !self.user_unlocking_or_unlocked(user)?)
     }
 
     /// User 0's base restrictions, as UserManagerService last persisted
@@ -2973,6 +2979,28 @@ impl AppHost {
         let mut state = (*before).clone();
         change(&mut state.system.isolated_owners);
         self.user_states_changed(&before, Arc::new(state))
+    }
+
+    /// `UserController.finishUserUnlocking`: `user`'s credential-encrypted
+    /// storage is prepared, so it is unlocking and its components that are
+    /// not direct-boot aware resolve.
+    fn user_unlocking(&self, user: i32) -> Result<(), Exception> {
+        let _writer = self.model_writer.lock().unwrap();
+        let (before, _) = self.packages()?;
+        let mut state = (*before).clone();
+        if let Some(u) = state.users.get_mut(&user) {
+            u.unlocking_or_unlocked = true;
+        }
+        self.user_states_changed(&before, Arc::new(state))
+    }
+
+    /// `UserManagerInternal.isUserUnlockingOrUnlocked`.
+    pub(super) fn user_unlocking_or_unlocked(&self, user: i32) -> Result<bool, Exception> {
+        let (state, _) = self.packages()?;
+        Ok(state
+            .users
+            .get(&user)
+            .is_some_and(|u| u.unlocking_or_unlocked))
     }
 
     /// `PackageManagerInternal.grantImplicitAccess(user, null,

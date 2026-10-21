@@ -227,7 +227,6 @@ impl Packages {
             0,
             model::User {
                 id: 0,
-                unlocking_or_unlocked: true,
                 ..Default::default()
             },
         );
