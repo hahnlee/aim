@@ -39,6 +39,7 @@ pub mod props;
 pub mod propsvc;
 pub mod service_namespace;
 pub mod sku;
+pub mod soc;
 pub mod supervisor;
 pub mod unixsock;
 

@@ -790,6 +790,12 @@ impl Boot {
         for (name, value) in &mac {
             properties.init_set(name, value);
         }
+        // The Mac's SoC, which the device's vendor build.prop leaves to it.
+        if options.mode == RunMode::Run {
+            for (name, value) in crate::soc::properties() {
+                properties.init_set(name, &value);
+            }
+        }
         // ueventd's role: there is no coldboot to wait for.
         properties.init_set(COLD_BOOT_DONE_PROP, "true");
         mark("properties initialized");

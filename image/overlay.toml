@@ -59,6 +59,11 @@ path = "/vendor/etc/fstab.aim"
 source = "image/vendor/etc/fstab.aim"
 reason = "the device's fstab for mount_all and vold: /data without file-based encryption"
 
+[[replace]]
+path = "/vendor/build.prop"
+source = "image/vendor/build.prop"
+reason = "the emulator's own with what claims its hardware gone (ADR 0010): ro.kernel.qemu, the ranchu power, gralloc and UWB device, ro.soc.* (aim-guest-init sets the Mac's), and the board is aim; a set ro.* property cannot be unset by a later file or setprop"
+
 [[remove]]
 path = "/vendor/etc/init/hw/init.ranchu.rc"
 reason = "the emulator's device script (QEMU props, kernel modules, zram, virtio Wi-Fi); init.aim.rc replaces it"
