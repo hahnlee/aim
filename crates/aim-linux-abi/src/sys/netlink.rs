@@ -19,12 +19,15 @@
 //! SCM_CREDENTIALS. A name whose socket is gone is removed when a send
 //! finds it refused.
 //!
-//! - Dumps: RTM_GETLINK, RTM_GETADDR; RTM_GETROUTE, RTM_GETNEIGH and
-//!   RTM_GETRULE dump nothing (no routing table or neighbours: the host
-//!   routes every socket).
+//! - Dumps: RTM_GETLINK, RTM_GETADDR, RTM_GETROUTE (the kernel's IPv6
+//!   table, `addrconf`; there is no IPv4 one); RTM_GETNEIGH and
+//!   RTM_GETRULE dump nothing (no neighbours or rules: the host routes
+//!   every socket).
 //! - Changes: RTM_NEWLINK/RTM_SETLINK (flags, MTU), RTM_NEWADDR,
 //!   RTM_DELADDR; with CAP_NET_ADMIN.
-//! - Groups: RTNLGRP_LINK, RTNLGRP_IPV4_IFADDR, RTNLGRP_IPV6_IFADDR.
+//! - Groups: RTNLGRP_LINK, RTNLGRP_IPV4_IFADDR, RTNLGRP_IPV6_IFADDR,
+//!   RTNLGRP_IPV6_ROUTE, RTNLGRP_IPV6_PREFIX and RTNLGRP_ND_USEROPT (a
+//!   router advertisement's RDNSS).
 
 use std::net::IpAddr;
 use std::path::PathBuf;

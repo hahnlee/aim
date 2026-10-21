@@ -52,6 +52,7 @@ mod memfd;
 mod misc;
 mod mount;
 pub mod names;
+mod nat66;
 mod net;
 mod netif;
 mod netlink;
