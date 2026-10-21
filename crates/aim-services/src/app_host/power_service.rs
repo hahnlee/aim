@@ -3,10 +3,13 @@
 //! permissions, death and callbacks, and the suspend blockers they hold
 //! in `system_suspend` as the original holds them
 //! (`PowerManagerService.WakeLocks` while one keeps the CPU on,
-//! `PowerManagerService.Display` while the display is on); the device's
-//! state as apps read it. The app host's display is always on, so the
-//! device is awake and interactive (the Mac's display sleep is #669's
-//! follow-up); there is no device idle (doze); battery saver is the
+//! `PowerManagerService.Display` while the display is on); the screen kept
+//! on, by a screen wake lock or a visible keep-screen-on window
+//! (WindowManagerService's hold screen), keeps the Mac's display awake
+//! (`PreventUserIdleDisplaySleep`, docs/power.md); the device's state as
+//! apps read it. The app host's display is always on, so the device is
+//! awake and interactive (the Mac's display sleep: #670); there is no
+//! device idle (doze); battery saver is the
 //! persisted `low_power` setting, its policies not run (#1489).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
@@ -52,6 +55,8 @@ const ACQUIRE_WAKE_LOCK: u32 = 1;
 const WAKE_LOCK_PARTIAL: i32 = 0;
 const WAKE_LOCK_DESCRIPTOR: &str = "android.system.suspend.IWakeLock";
 const RELEASE: u32 = 1;
+/// The name of the Mac's display assertion (`pmset -g assertions`).
+const SCREEN_ASSERTION: &str = "Android keeps the screen on";
 /// `IWakeLockCallback.onStateChanged`.
 const CALLBACK_DESCRIPTOR: &str = "android.os.IWakeLockCallback";
 const ON_STATE_CHANGED: u32 = 1;
@@ -123,6 +128,20 @@ impl WakeLock {
             PARTIAL_WAKE_LOCK | FULL_WAKE_LOCK | SCREEN_BRIGHT_WAKE_LOCK | SCREEN_DIM_WAKE_LOCK
         )
     }
+
+    fn keeps_screen(&self) -> bool {
+        keeps_screen(self.flags)
+    }
+}
+
+/// Whether a wake lock of `flags` keeps the screen on
+/// (`WAKE_LOCK_SCREEN_BRIGHT` or `WAKE_LOCK_SCREEN_DIM` of the summary
+/// while awake).
+fn keeps_screen(flags: i32) -> bool {
+    matches!(
+        flags & WAKE_LOCK_LEVEL_MASK,
+        FULL_WAKE_LOCK | SCREEN_BRIGHT_WAKE_LOCK | SCREEN_DIM_WAKE_LOCK
+    )
 }
 
 /// A suspend blocker held in `system_suspend`.
@@ -146,6 +165,11 @@ struct State {
     /// `PowerManagerService.WakeLocks`, `.Display`.
     wake_locks: Option<Blocker>,
     display: Option<Blocker>,
+    /// Whether a visible window keeps the screen on (WindowManagerService's
+    /// `mHoldingScreenWakeLock`, a screen-bright wake lock).
+    window_holds_screen: bool,
+    /// The Mac's display kept awake while the screen is kept on.
+    screen_assertion: Option<crate::power_assertion::Assertion>,
 }
 
 pub struct PowerManager {
@@ -273,6 +297,26 @@ impl PowerManager {
         take(&mut state.display, "PowerManagerService.Display");
         if !need {
             state.wake_locks = None;
+        }
+        // The screen kept on is the Mac's display kept awake.
+        let screen = state.window_holds_screen || state.locks.iter().any(WakeLock::keeps_screen);
+        if !screen {
+            state.screen_assertion = None;
+        } else if state.screen_assertion.is_none() {
+            match crate::power_assertion::Assertion::prevent_display_sleep(SCREEN_ASSERTION) {
+                Ok(a) => state.screen_assertion = Some(a),
+                Err(e) => eprintln!("app host: power: {SCREEN_ASSERTION}: IOKit error {e:#x}"),
+            }
+        }
+    }
+
+    /// WindowManagerService's `setHoldScreenLocked`: a visible window keeps
+    /// the screen on, or none does.
+    pub(super) fn set_window_holds_screen(&self, hold: bool) {
+        let mut state = self.state.lock().unwrap();
+        if state.window_holds_screen != hold {
+            state.window_holds_screen = hold;
+            self.update_blockers(&mut state);
         }
     }
 
@@ -627,6 +671,27 @@ impl Service for PowerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The screen levels keep the screen (and so the Mac's display) on;
+    /// a partial lock, proximity, doze and draw locks do not.
+    #[test]
+    fn screen_levels_keep_the_screen_on() {
+        for level in [
+            FULL_WAKE_LOCK,
+            SCREEN_BRIGHT_WAKE_LOCK,
+            SCREEN_DIM_WAKE_LOCK,
+        ] {
+            assert!(keeps_screen(level | SYSTEM_WAKELOCK), "{level:#x}");
+        }
+        for level in [
+            PARTIAL_WAKE_LOCK,
+            PROXIMITY_SCREEN_OFF_WAKE_LOCK,
+            DOZE_WAKE_LOCK,
+            DRAW_WAKE_LOCK,
+        ] {
+            assert!(!keeps_screen(level), "{level:#x}");
+        }
+    }
 
     #[test]
     fn wake_lock_parameters_are_validated() {

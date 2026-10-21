@@ -25,6 +25,7 @@ mod nonces;
 pub mod notifications;
 pub mod package;
 mod pasteboard;
+mod power_assertion;
 mod service_host;
 mod settings;
 pub mod shadow;
