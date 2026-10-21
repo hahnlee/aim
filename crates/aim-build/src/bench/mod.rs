@@ -24,6 +24,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CHROME: &str = "org.chromium.chrome";
@@ -53,7 +54,67 @@ pub struct Options {
     pub keep: bool,
 }
 
+/// The run in progress: aim-display's and guest-init's pids, which a
+/// signal stopping the bench stops as dropping its `Session` would.
+static RUNNING: Mutex<(Option<u32>, Option<u32>)> = Mutex::new((None, None));
+
+/// SIGINT, SIGTERM and SIGHUP go to a thread of their own, which stops the
+/// run in progress and exits as the signal would have.
+fn stop_on_signals() {
+    // SAFETY: a local signal set, blocked in this thread before any other
+    // starts, so every later thread inherits the mask; children get the
+    // default mask from `Command`.
+    let set = unsafe {
+        let mut set: libc::sigset_t = 0;
+        libc::sigemptyset(&mut set);
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            libc::sigaddset(&mut set, signal);
+        }
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        set
+    };
+    std::thread::spawn(move || {
+        let mut signal = 0;
+        // SAFETY: waiting for one of the signals blocked above.
+        unsafe { libc::sigwait(&set, &mut signal) };
+        let (display, init) = *RUNNING.lock().unwrap();
+        eprintln!("bench: signal {signal}: stopping the run");
+        stop_run(display, init);
+        std::process::exit(128 + signal);
+    });
+}
+
+/// Stops guest-init (which stops its services on SIGTERM), killing it
+/// after a minute, then aim-display.
+fn stop_run(display: Option<u32>, init: Option<u32>) {
+    let reaped = |pid: u32| {
+        let mut status = 0;
+        // SAFETY: polling a child we started.
+        unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) != 0 }
+    };
+    if let Some(init) = init {
+        // SAFETY: signals a child we started, not yet reaped.
+        unsafe { libc::kill(init as i32, libc::SIGTERM) };
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !reaped(init) {
+            if Instant::now() > deadline {
+                // SAFETY: as above.
+                unsafe { libc::kill(init as i32, libc::SIGKILL) };
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    if let Some(display) = display {
+        // SAFETY: as above.
+        unsafe { libc::kill(display as i32, libc::SIGTERM) };
+        while !reaped(display) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
 pub fn run(ctx: &Ctx, options: &Options) -> Result<ExitCode, String> {
+    stop_on_signals();
     let dir = aim_paths::out().join("bench");
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let fixtures = Fixtures::build(&dir.join("bin"))?;
@@ -173,6 +234,7 @@ pub(crate) struct Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        *RUNNING.lock().unwrap() = (None, None);
         // guest-init stops its services on SIGTERM.
         if matches!(self.init.try_wait(), Ok(None)) {
             // SAFETY: signals a child we started, not yet reaped.
@@ -615,6 +677,7 @@ fn one_run(
     let log =
         fs::File::create(dir.join(format!("guest-init-{n}.log"))).map_err(|e| e.to_string())?;
     let display = boot::start_display(ctx, dir, false)?;
+    *RUNNING.lock().unwrap() = (Some(display.id()), None);
     let epoch0 = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -630,11 +693,13 @@ fn one_run(
         Ok(init) => init,
         Err(e) => {
             let mut display = display;
+            *RUNNING.lock().unwrap() = (None, None);
             let _ = display.kill();
             let _ = display.wait();
             return Err(e);
         }
     };
+    RUNNING.lock().unwrap().1 = Some(init.id());
     let mut session = Session { display, init };
     let guest = Guest {
         linux_run: ctx.workspace.host_bin("linux-run"),
@@ -875,6 +940,33 @@ mod guest_command_tests {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", script]);
         command
+    }
+
+    /// A stopped bench stops guest-init (on SIGTERM, as it stops its
+    /// services) and then aim-display, and reaps both (#301).
+    #[test]
+    fn stopping_a_run_stops_both_children() {
+        let marker = std::env::temp_dir().join(format!("bench-stop-{}", std::process::id()));
+        let _ = fs::remove_file(&marker);
+        let script = format!(
+            "trap 'touch {}; exit 0' TERM; while :; do sleep 0.1; done",
+            marker.display()
+        );
+        let init = sh(&script).spawn().unwrap();
+        let display = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        // Let the trap be set before the signal.
+        std::thread::sleep(Duration::from_millis(300));
+        stop_run(Some(display.id()), Some(init.id()));
+        assert!(marker.exists(), "guest-init got no SIGTERM");
+        for pid in [init.id(), display.id()] {
+            // SAFETY: probing a pid this test started and stop_run reaped.
+            assert_eq!(
+                unsafe { libc::kill(pid as i32, 0) },
+                -1,
+                "pid {pid} still there"
+            );
+        }
+        let _ = fs::remove_file(&marker);
     }
 
     #[test]
