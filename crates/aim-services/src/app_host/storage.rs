@@ -369,7 +369,7 @@ impl AppHost {
     /// (`PackageManagerService.freeStorage`), which needs no clearing when
     /// the volume has the space; clearing caches is not implemented
     /// (#1819).
-    fn allocate_bytes(
+    pub(super) fn allocate_bytes(
         &self,
         uuid: Option<&str>,
         bytes: i64,
