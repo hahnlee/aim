@@ -94,6 +94,7 @@ pub mod overlay_service;
 mod package_checksums;
 pub mod package_installer;
 pub mod package_service;
+pub mod package_shell;
 mod package_writes;
 pub mod packages;
 pub mod pending_intents;

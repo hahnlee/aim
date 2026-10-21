@@ -12,18 +12,193 @@ pub struct Context<'a> {
     pub command: crate::shell::ShellCommand,
     process: Arc<LocalProcess>,
     public: &'a dyn Service,
-    system: std::sync::Weak<crate::system::System>,
+    host: Arc<dyn Host>,
     receivers: std::sync::Mutex<std::collections::BTreeMap<u64, Arc<Receiver>>>,
     _synchronous: PhantomData<Rc<()>>,
 }
-pub struct OwnerDeath {
+/// What the shell's operations ask of the server whose package manager
+/// runs them: the system server's native owners, or the app host's.
+pub trait Host: Send + Sync {
+    /// The system server's native owners, which the operations that read
+    /// its scan and permission state need; none for another host.
+    fn system(&self) -> Option<Arc<crate::system::System>> {
+        None
+    }
+    /// `translateUserId`: `ActivityManager.handleIncomingUser` of the
+    /// caller, `USER_ALL` as `all_default`.
+    fn translate_user(
+        &self,
+        pid: i32,
+        uid: u32,
+        user: i32,
+        all_default: i32,
+        operation: &str,
+    ) -> Result<i32, Exception>;
+    /// `UserManagerInternal.getUserInfo(user) != null`.
+    fn user_exists(&self, user: i32) -> Result<bool, Exception>;
+    /// `sys.boot_completed`.
+    fn boot_completed(&self) -> Result<bool, Exception>;
+    /// Calls `on_death` when the owner of package sessions dies, as a
+    /// command running inside it would end with it; the guard clears it.
+    fn link_package_owner_death(
+        &self,
+        on_death: Box<dyn FnOnce() + Send>,
+    ) -> Result<OwnerDeath, Exception>;
+    /// Whether an installed package of `user` is a system one and an APEX.
+    fn uninstall_package_flags(
+        &self,
+        name: &str,
+        user: i32,
+    ) -> Result<Option<(bool, bool)>, Exception>;
+    #[allow(clippy::too_many_arguments)]
+    fn uninstall_apex(
+        &self,
+        uid: u32,
+        pid: i32,
+        name: &str,
+        version: i64,
+        user: i32,
+        receiver: super::installer::preapproval::IntentSender,
+        flags: i32,
+    ) -> Result<(), Exception>;
+    /// `InstallLocationUtils.calculateInstalledSize` of the opened APK.
+    fn install_size(
+        &self,
+        uid: u32,
+        pid: i32,
+        file: aim_binder_host::server::RetainedFd,
+        path: &str,
+        abi: Option<&str>,
+    ) -> Result<i64, Exception>;
+    /// `checkAbiArgument`.
+    fn validate_install_abi(&self, uid: u32, pid: i32, abi: &str) -> Result<(), Exception>;
+    /// `DexoptParams.Builder.setCompilerFilter`'s check.
+    fn validate_install_compiler_filter(
+        &self,
+        uid: u32,
+        pid: i32,
+        filter: &str,
+    ) -> Result<(), Exception>;
+    /// `Flags.sdkDependencyInstaller()`.
+    fn sdk_dependency_installer_enabled(&self, uid: u32, pid: i32) -> Result<bool, Exception>;
+}
+/// A link to the package owner's death, cleared when dropped.
+pub struct OwnerDeath(#[allow(dead_code)] Box<dyn Send>);
+impl OwnerDeath {
+    pub fn new(guard: impl Send + 'static) -> Self {
+        Self(Box::new(guard))
+    }
+}
+struct BridgeDeath {
     bridge: Arc<super::bootstrap::Bridge>,
     id: u64,
 }
-impl Drop for OwnerDeath {
+impl Drop for BridgeDeath {
     fn drop(&mut self) {
         self.bridge.clear_death(self.id);
     }
+}
+impl Host for std::sync::Weak<crate::system::System> {
+    fn system(&self) -> Option<Arc<crate::system::System>> {
+        self.upgrade()
+    }
+    fn translate_user(
+        &self,
+        pid: i32,
+        uid: u32,
+        user: i32,
+        all_default: i32,
+        operation: &str,
+    ) -> Result<i32, Exception> {
+        stopped(self)?.shell_handle_incoming_user(pid, uid, user, all_default, operation)
+    }
+    fn user_exists(&self, user: i32) -> Result<bool, Exception> {
+        Ok(stopped(self)?
+            .capture_package_queries()?
+            .state()
+            .users
+            .contains_key(&user))
+    }
+    fn boot_completed(&self) -> Result<bool, Exception> {
+        stopped(self)?.shell_boot_completed()
+    }
+    fn link_package_owner_death(
+        &self,
+        on_death: Box<dyn FnOnce() + Send>,
+    ) -> Result<OwnerDeath, Exception> {
+        let bridge = stopped(self)?.package_bootstrap()?;
+        let id = bridge.on_death(on_death);
+        Ok(OwnerDeath::new(BridgeDeath { bridge, id }))
+    }
+    fn uninstall_package_flags(
+        &self,
+        name: &str,
+        user: i32,
+    ) -> Result<Option<(bool, bool)>, Exception> {
+        let capture = stopped(self)?.capture_package_queries()?;
+        Ok(uninstall_flags(capture.state(), name, user))
+    }
+    fn uninstall_apex(
+        &self,
+        uid: u32,
+        pid: i32,
+        name: &str,
+        version: i64,
+        user: i32,
+        receiver: super::installer::preapproval::IntentSender,
+        flags: i32,
+    ) -> Result<(), Exception> {
+        stopped(self)?.shell_uninstall_apex(uid, pid, name, version, user, receiver, flags)
+    }
+    fn install_size(
+        &self,
+        uid: u32,
+        pid: i32,
+        file: aim_binder_host::server::RetainedFd,
+        path: &str,
+        abi: Option<&str>,
+    ) -> Result<i64, Exception> {
+        stopped(self)?.shell_install_size(uid, pid, file, path, abi)
+    }
+    fn validate_install_abi(&self, uid: u32, pid: i32, abi: &str) -> Result<(), Exception> {
+        stopped(self)?.shell_validate_install_abi(uid, pid, abi)
+    }
+    fn validate_install_compiler_filter(
+        &self,
+        uid: u32,
+        pid: i32,
+        filter: &str,
+    ) -> Result<(), Exception> {
+        stopped(self)?.shell_validate_install_compiler_filter(uid, pid, filter)
+    }
+    fn sdk_dependency_installer_enabled(&self, uid: u32, pid: i32) -> Result<bool, Exception> {
+        stopped(self)?.shell_dependency_installer_enabled(uid, pid)
+    }
+}
+/// Of a package installed for `user`: whether it is a system one, and an
+/// APEX.
+pub fn uninstall_flags(state: &super::model::State, name: &str, user: i32) -> Option<(bool, bool)> {
+    let package = state.packages.get(name)?;
+    package
+        .users
+        .get(&user)
+        .is_some_and(|state| state.installed)
+        .then(|| {
+            (
+                package.is.system,
+                package
+                    .pkg
+                    .as_ref()
+                    .is_some_and(|code| code.is2(super::pkg::booleans2::APEX)),
+            )
+        })
+}
+fn stopped(
+    system: &std::sync::Weak<crate::system::System>,
+) -> Result<Arc<crate::system::System>, Exception> {
+    system
+        .upgrade()
+        .ok_or_else(|| failure("shell native system stopped"))
 }
 impl<'a> Context<'a> {
     pub fn new(
@@ -36,20 +211,38 @@ impl<'a> Context<'a> {
         if call.data.remaining() != 0 {
             return Err(aim_binder_host::parcel::BAD_VALUE);
         }
-        Ok(Self {
-            uid: call.sender_euid,
-            pid: call.sender_pid,
+        Ok(Self::with_command(
+            Arc::new(Arc::downgrade(system)),
+            process,
+            public,
+            call.sender_euid,
+            call.sender_pid,
+            command,
+        ))
+    }
+    /// A command already read, of `uid` (of `pid`), in `host`'s process.
+    pub fn with_command(
+        host: Arc<dyn Host>,
+        process: Arc<LocalProcess>,
+        public: &'a dyn Service,
+        uid: u32,
+        pid: i32,
+        command: crate::shell::ShellCommand,
+    ) -> Self {
+        Self {
+            uid,
+            pid,
             command,
             process,
             public,
-            system: Arc::downgrade(system),
+            host,
             receivers: Default::default(),
             _synchronous: PhantomData,
-        })
+        }
     }
     pub fn system(&self) -> Result<Arc<crate::system::System>, Exception> {
-        self.system
-            .upgrade()
+        self.host
+            .system()
             .ok_or_else(|| failure("shell native system stopped"))
     }
     pub fn capture(&self) -> Result<Arc<super::scan_snapshot::query_state::Capture>, Exception> {
@@ -65,9 +258,7 @@ impl<'a> Context<'a> {
         &self,
         on_death: Box<dyn FnOnce() + Send>,
     ) -> Result<OwnerDeath, Exception> {
-        let bridge = self.system()?.package_bootstrap()?;
-        let id = bridge.on_death(on_death);
-        Ok(OwnerDeath { bridge, id })
+        self.host.link_package_owner_death(on_death)
     }
     pub fn input_clone(&mut self) -> Result<aim_binder_host::server::RetainedFd, Exception> {
         self.command
@@ -112,14 +303,14 @@ impl<'a> Context<'a> {
         all_default: i32,
         operation: &str,
     ) -> Result<i32, Exception> {
-        self.system()?
-            .shell_handle_incoming_user(self.pid, self.uid, user, all_default, operation)
+        self.host
+            .translate_user(self.pid, self.uid, user, all_default, operation)
     }
     pub fn user_exists(&self, user: i32) -> Result<bool, Exception> {
-        Ok(self.capture()?.state().users.contains_key(&user))
+        self.host.user_exists(user)
     }
     pub fn boot_completed(&self) -> Result<bool, Exception> {
-        self.system()?.shell_boot_completed()
+        self.host.boot_completed()
     }
     pub fn invoke_permission(&self, code: u32, request: Parcel) -> Result<Parcel, Exception> {
         self.system()?
@@ -155,24 +346,7 @@ impl<'a> Context<'a> {
         name: &str,
         user: i32,
     ) -> Result<Option<(bool, bool)>, Exception> {
-        let capture = self.capture()?;
-        let Some(package) = capture.state().packages.get(name) else {
-            return Ok(None);
-        };
-        if !package
-            .users
-            .get(&user)
-            .is_some_and(|state| state.installed)
-        {
-            return Ok(None);
-        }
-        Ok(Some((
-            package.is.system,
-            package
-                .pkg
-                .as_ref()
-                .is_some_and(|code| code.is2(super::pkg::booleans2::APEX)),
-        )))
+        self.host.uninstall_package_flags(name, user)
     }
     pub fn uninstall_apex(
         &self,
@@ -182,8 +356,8 @@ impl<'a> Context<'a> {
         receiver: super::installer::preapproval::IntentSender,
         flags: i32,
     ) -> Result<(), Exception> {
-        self.system()?
-            .shell_uninstall_apex(self.uid, self.pid, name, version, user, receiver, flags)
+        self.host
+            .uninstall_apex(self.uid, self.pid, name, version, user, receiver, flags)
     }
     pub fn install_size(&mut self, path: &str, abi: Option<&str>) -> Result<i64, Exception> {
         // setParamsSize: an unopened file ends the command.
@@ -194,20 +368,18 @@ impl<'a> Context<'a> {
                 "Error: Can't open file: {path}"
             )));
         };
-        self.system()?
-            .shell_install_size(self.uid, self.pid, file, path, abi)
+        self.host.install_size(self.uid, self.pid, file, path, abi)
     }
     pub fn validate_install_abi(&self, abi: &str) -> Result<(), Exception> {
-        self.system()?
-            .shell_validate_install_abi(self.uid, self.pid, abi)
+        self.host.validate_install_abi(self.uid, self.pid, abi)
     }
     pub fn validate_install_compiler_filter(&self, filter: &str) -> Result<(), Exception> {
-        self.system()?
-            .shell_validate_install_compiler_filter(self.uid, self.pid, filter)
+        self.host
+            .validate_install_compiler_filter(self.uid, self.pid, filter)
     }
     pub fn sdk_dependency_installer_enabled(&self) -> Result<bool, Exception> {
-        self.system()?
-            .shell_dependency_installer_enabled(self.uid, self.pid)
+        self.host
+            .sdk_dependency_installer_enabled(self.uid, self.pid)
     }
     pub fn invoke_public(&self, code: u32, request: Parcel) -> Result<Parcel, Exception> {
         let identity = self
@@ -290,7 +462,15 @@ fn transport(status: i32) -> Exception {
     failure(format!("native shell AIDL transport: {status}"))
 }
 
-pub fn dispatch(mut context: Context<'_>) {
+pub fn dispatch(context: Context<'_>) {
+    dispatch_by(context, run)
+}
+/// Runs the command with `run`, prints what it threw as `exec` does, and
+/// sends its result.
+pub fn dispatch_by(
+    mut context: Context<'_>,
+    run: impl FnOnce(&mut Context<'_>) -> Result<Option<i32>, Exception>,
+) {
     if !context.command.has_output() {
         return;
     }
@@ -309,6 +489,9 @@ pub fn dispatch(mut context: Context<'_>) {
                 aim_binder_host::parcel::EX_SECURITY => "java.lang.SecurityException",
                 aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT => {
                     "java.lang.IllegalArgumentException"
+                }
+                aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION => {
+                    "java.lang.UnsupportedOperationException"
                 }
                 _ => "java.lang.IllegalStateException",
             };

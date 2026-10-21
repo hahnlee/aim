@@ -922,11 +922,10 @@ fn bypass(
     checked(ctx.invoke(owner, code, p)?)?;
     Ok(0)
 }
-/// `None` leaves unrelated commands to the remaining native shell cohorts.
-pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
-    let command = ctx.command.command().unwrap_or_default().to_owned();
-    if !matches!(
-        command.as_str(),
+/// Whether `command` is one of these.
+pub fn claims(command: &str) -> bool {
+    matches!(
+        command,
         "install"
             | "install-create"
             | "install-write"
@@ -940,7 +939,12 @@ pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
             | "install-existing"
             | "bypass-staged-installer-check"
             | "bypass-allowed-apex-update-check"
-    ) {
+    )
+}
+/// `None` leaves unrelated commands to the remaining native shell cohorts.
+pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
+    let command = ctx.command.command().unwrap_or_default().to_owned();
+    if !claims(&command) {
         return Ok(None);
     }
     let args = ctx.command.args[1..].to_vec();
