@@ -799,6 +799,19 @@ fn join(
             pkg.booleans |= flag;
         }
     }
+    // `ScanPackageUtils.applyPolicy`: a system app that is direct boot
+    // aware has all its components so.
+    if system && pkg.is(booleans::DIRECT_BOOT_AWARE) {
+        for c in pkg.activities.iter_mut().chain(&mut pkg.receivers) {
+            c.main.direct_boot_aware = true;
+        }
+        for c in &mut pkg.services {
+            c.main.direct_boot_aware = true;
+        }
+        for c in &mut pkg.providers {
+            c.main.direct_boot_aware = true;
+        }
+    }
     let updated_system = false;
     NativeLibraryPaths::derive(
         &pkg,
