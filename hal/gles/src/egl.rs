@@ -197,8 +197,15 @@ const OURS: &[&str] = &[
     "EGL_KHR_swap_buffers_with_damage",
     "EGL_ANDROID_native_fence_sync",
 ];
-/// Host extensions that need callbacks into the guest.
-const WITHHELD: &[&str] = &["EGL_ANDROID_blob_cache", "EGL_KHR_debug"];
+/// Host extensions that need callbacks into the guest, and
+/// EGL_EXT_pixel_format_float, which ANGLE's front end always reports
+/// while its Metal back end has no float config: HWUI takes the extension
+/// for wide-gamut support and looks for an FP16 window config.
+const WITHHELD: &[&str] = &[
+    "EGL_ANDROID_blob_cache",
+    "EGL_KHR_debug",
+    "EGL_EXT_pixel_format_float",
+];
 
 /// # Safety
 /// EGL's contract.
