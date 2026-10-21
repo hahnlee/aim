@@ -476,50 +476,50 @@ The migration's state and conformance results are in
   the agent as MediaProvider's uid): files keep the original's owners on
   `/data/media`. MediaStore's per-file ownership and database come later
   (#1455).
-- **The system process (2026-10-19).** Original code that runs only in
-  system_server runs in the app host in a process the app host starts for
-  it, until a native replacement takes its place (decision of 2026-10-19).
-  The system process is the `android` package's process `system` of the
-  system uid (`setSystemProcess`), and zygote starts it as it starts an
-  app's. Components that other system-uid packages declare in
-  `android:process="system"` run there. Telecom's `TelecomService` cannot
-  yet: TelecomLoaderService creates the telecom service with an in-process
-  call on system_server's main thread, which Telecom's construction relies
-  on (a Bluetooth profile callback it posts to that looper must not run
-  before it returns); a call from the app host lands on a binder thread
-  and races it (#1786). Its providers are the system
-  apps' that `installSystemProviders` installs, less `settings`, which the
-  app host serves itself. The `android` package's own components are
-  system_server's code. They need its class path (`SYSTEMSERVERCLASSPATH`,
-  the system class loader that `LoadedApk` gives `android`), which a
-  process zygote starts as an app's does not have. They stay
-  unimplemented (#1518), and so does the AppSearch module's service
-  (#1761), which needs `services.jar`'s `SystemService` as well.
-- **Originals only system_server runs (2026-10-19, #1761).** Where a
-  service exists only inside system_server and a native port is not yet
-  worth it, the app host runs the original in a process of the system
-  uid, with the smallest explicit stand-in for what starts it there.
-  AppSearch's module runs in `aim-appsearch`, an init service of the app
-  host image (`image/app-host/aim-appsearch.rc`, `tools/app-host-image.sh`)
-  that runs `app_process` on `aim-services.jar`, as `/system/bin/am` runs
-  its jar. `AppSearchHost` plays ZygoteInit's part for the system server
+- **The system process (2026-10-19, 2026-10-21).** Original code that
+  runs only in system_server runs in the app host in a process of the
+  system uid, until a native replacement takes its place (decision of
+  2026-10-19), with the smallest explicit stand-in for what starts it
+  there. That process is `aim-system`, an init service of the app host
+  image (`image/app-host/aim-system.rc`, `tools/app-host-image.sh`) that
+  runs `app_process` on `aim-services.jar`, as `/system/bin/am` runs its
+  jar. `SystemProcessHost` plays ZygoteInit's part for the system server
   (`handleSystemServerProcess`): the umask, the class loader of
-  `SYSTEMSERVERCLASSPATH` with its linker namespace
-  (`ClassLoaderFactory`, as `createPathClassLoader` makes it; the module's
-  JNI library loads through it) and the start of its `Server` in that
-  loader by `RuntimeInit.applicationInit`, as `zygoteInit` does after
-  `commonInit`, which `app_process` has run. `Server` plays SystemServer's
-  and SystemServiceManager's part for the module: the system context
-  (`createSystemContext`), `initializeMainlineModules`, the module's
-  Lifecycle started where SystemServer starts it (after
+  `SYSTEMSERVERCLASSPATH` with its linker namespace (`ClassLoaderFactory`,
+  as `createPathClassLoader` makes it; AppSearch's JNI library loads
+  through it) and the start of its `Server` in that loader by
+  `RuntimeInit.applicationInit`, as `zygoteInit` does after `commonInit`,
+  which `app_process` has run. `Server` plays SystemServer's part: the
+  system context (`ActivityThread.systemMain`), `initializeMainlineModules`,
+  and `setSystemProcess`, for which the app host serves
+  `dev.aim.server.ISystemProcess` as `aim.system_process` (the system uid
+  only): the process hands it its application thread, and the app host
+  makes it the `android` package's process `system`, active and not bound
+  (`makeActive`), installs its providers in it (`installSystemProviders`:
+  the system apps' of that process, less `settings`, which the app host
+  serves itself) and runs there, on its main thread, the components that
+  other system-uid packages declare in `android:process="system"`. Until
+  2026-10-21 zygote started the system process as an app's; Telecom could
+  not load there, as TelecomLoaderService creates the telecom service with
+  an in-process call on system_server's main thread, which Telecom's
+  construction relies on (a Bluetooth profile callback it posts to that
+  looper must not run before it returns), and a call from the app host
+  landed on a binder thread and raced it (#1786). `Server` then starts
+  AppSearch's Lifecycle where SystemServer starts it (after
   PHASE_DEVICE_SPECIFIC_SERVICES_READY, so it is given the later phases)
-  and user 0 started and unlocked. The module publishes `app_search`
-  itself. What it asks of system_server's internals that this process has
+  with user 0 started and unlocked, and TelecomLoaderService's part
+  (`TelecomLoader`): its bind, the creation on the connection's main
+  thread with the `InternalServiceRepository` the app host serves (its
+  DeviceIdleInternal is the app host's) and the publishing of `telecom`;
+  its default app providers and role and carrier config listeners feed
+  only the default permission grant policy, which the app host does not
+  run. What they ask of system_server's internals that this process has
   not shows as the original reacts to it: StorageStatsService's
-  `StorageStatsManagerLocal` (#1520), on which the module's `onStart`
-  stops after publishing its binder and registering its receivers, and
-  its maintenance `JobService`, a component of the `android` package
-  (#1518), which JobScheduler refuses.
+  `StorageStatsManagerLocal` (#1520), on which AppSearch's `onStart` stops
+  after publishing its binder and registering its receivers, and its
+  maintenance `JobService`, a component of the `android` package, whose
+  own components are system_server's services' code and stay
+  unimplemented (#1518).
 
 ### CTS-derived conformance (2026-10-16)
 

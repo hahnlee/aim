@@ -3,4 +3,7 @@
 package android.app;
 
 public interface IApplicationThread extends android.os.IInterface {
+    abstract class Stub extends android.os.Binder implements IApplicationThread {
+        public android.os.IBinder asBinder() { throw new RuntimeException("stub"); }
+    }
 }

@@ -118,6 +118,7 @@ pub mod storage;
 pub mod storage_stats;
 mod strict_mode;
 pub mod surface;
+pub mod system_process;
 pub mod system_update;
 pub mod task_info;
 pub mod tasks;
@@ -648,6 +649,10 @@ impl AppHost {
             (
                 "activity",
                 Arc::new(Activity(self.clone())) as Arc<dyn Service>,
+            ),
+            (
+                "aim.system_process",
+                Arc::new(system_process::SystemProcess::new(self.clone())),
             ),
             (
                 "package",
@@ -1345,12 +1350,11 @@ impl AppHost {
     ) -> Result<(i64, i32), Exception> {
         let inputs = self.inputs()?;
         // The system process (`setSystemProcess`) is the `android`
-        // package's, `system` of the system uid: a component of another
-        // system package declared in it runs there. The `android`
-        // package's own components are system_server's code, which needs
-        // its class path (`SYSTEMSERVERCLASSPATH`, the system class loader
-        // `LoadedApk` gives `android`); a process zygote starts as an app
-        // does not have it (#1518).
+        // package's, `system` of the system uid, which `aim-system`
+        // attaches (`attach_system_process`) and nothing starts: a
+        // component of another system package declared in it runs there.
+        // The `android` package's own components are system_server's
+        // services' code, which the system process does not run (#1518).
         if process == SYSTEM_PROCESS && !isolated {
             let uid = inputs
                 .packages
@@ -1363,13 +1367,23 @@ impl AppHost {
                         "a component of system_server's own code (#1518)",
                     ));
                 }
-                return self.start_package_process(
-                    SYSTEM_PACKAGE,
-                    process,
-                    request,
-                    from_background,
-                    false,
-                );
+                let attached = self
+                    .apps
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|(_, a)| a.process == SYSTEM_PROCESS && a.uid == SYSTEM_UID)
+                    .map(|(seq, a)| (*seq, a.pid));
+                let Some((seq, pid)) = attached else {
+                    return Err(Exception::new(
+                        EX_ILLEGAL_STATE,
+                        format!("{name}: the system process has not attached"),
+                    ));
+                };
+                if let Some(request) = request {
+                    self.launch_in_attached(seq, SYSTEM_UID, SYSTEM_PACKAGE, request)?;
+                }
+                return Ok((seq, pid));
             }
         }
         self.start_package_process(name, process, request, from_background, isolated)
@@ -1808,6 +1822,91 @@ impl AppHost {
         }
         // `onApplicationAttachedLocked`: the broadcasts waiting for it.
         self.broadcasts.process_attached(self, seq);
+        Ok(())
+    }
+
+    /// `setSystemProcess`: the caller is the system process, `thread` its
+    /// application thread, active as `makeActive` makes it and not bound
+    /// (its ActivityThread is `systemMain`'s, bound to `android` already).
+    /// Its providers are installed in it (`installSystemProviders`), and
+    /// what waited for its process runs.
+    pub(super) fn attach_system_process(
+        &self,
+        call: &Call<'_>,
+        thread: Option<Binder>,
+    ) -> Result<(), Exception> {
+        let Some(Binder::Handle(handle)) = thread else {
+            return Err(Exception::illegal_argument(
+                "attachSystemProcess without a thread",
+            ));
+        };
+        if self.running_process(SYSTEM_PROCESS, SYSTEM_UID).is_some() {
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "the system process is attached",
+            ));
+        }
+        let config = self.global_configuration()?;
+        let providers = self.process_providers(SYSTEM_PROCESS, SYSTEM_UID)?;
+        let strong = self.process.strong(handle);
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        let pid = call.sender_pid;
+        let host = self.me.clone();
+        self.process.link_to_death(
+            &strong,
+            Box::new(move || {
+                eprintln!("app host: the system process (pid {pid}) died");
+                if let Some(host) = host.upgrade() {
+                    host.process_died(seq, pid);
+                }
+            }),
+        );
+        let mut apps = self.apps.lock().unwrap();
+        let first = !apps
+            .values()
+            .any(|a| a.uid == SYSTEM_UID && a.thread.is_some());
+        apps.insert(
+            seq,
+            App {
+                package: SYSTEM_PACKAGE.to_string(),
+                process: SYSTEM_PROCESS.to_string(),
+                uid: SYSTEM_UID,
+                package_uid: SYSTEM_UID,
+                isolated: false,
+                entry_point: None,
+                application_info: None,
+                pid,
+                started: Instant::now(),
+                start_elapsed: clock_ms(libc::CLOCK_MONOTONIC_RAW),
+                start_uptime: clock_ms(libc::CLOCK_UPTIME_RAW),
+                thread: Some(strong),
+                activities: Vec::new(),
+                config: Some(config),
+                providers: providers.clone(),
+                removed: false,
+                first_frame: None,
+                last_activity: 0,
+                persistent: true,
+                package_deps: Vec::new(),
+                last_mem_info: None,
+            },
+        );
+        drop(apps);
+        eprintln!("app host: the system process (pid {pid}) attached");
+        for provider in providers {
+            let mut p = Parcel::new();
+            thread::ScheduleInstallProvider {
+                provider: Some(provider),
+            }
+            .write(&mut p);
+            self.call_thread(seq, thread::SCHEDULE_INSTALL_PROVIDER, &p)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        }
+        if first {
+            self.uid_changed(SYSTEM_UID as i32, uid_observers::Change::Active);
+        }
+        self.broadcasts.process_attached(self, seq);
+        self.services_attached(seq);
         Ok(())
     }
 

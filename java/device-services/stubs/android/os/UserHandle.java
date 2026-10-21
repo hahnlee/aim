@@ -8,6 +8,7 @@ public final class UserHandle implements Parcelable {
  public static final int USER_ALL=-1; public int describeContents(){throw new RuntimeException("stub");}
  public void writeToParcel(Parcel out,int flags){throw new RuntimeException("stub");}
     public static final UserHandle ALL = null;
+    public static final UserHandle SYSTEM = null;
     public static final UserHandle CURRENT = null;
     public static final int USER_CURRENT = -2;
 

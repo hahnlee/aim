@@ -12,4 +12,9 @@ public final class ActivityThread extends ClientTransactionHandler {
     public static android.content.pm.IPackageManager getPackageManager() { throw new RuntimeException("stub"); }
     public ContextImpl getSystemContext() { throw new RuntimeException("stub"); }
     public Context getSystemUiContext() { throw new RuntimeException("stub"); }
+    public ApplicationThread getApplicationThread() { throw new RuntimeException("stub"); }
+
+    public class ApplicationThread extends IApplicationThread.Stub {
+        ApplicationThread() { throw new RuntimeException("stub"); }
+    }
 }

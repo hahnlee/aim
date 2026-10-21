@@ -1,7 +1,0 @@
-#!/system/bin/sh
-# The app host's AppSearch (docs/app-host.md): the original AppSearch
-# module, which runs only in system_server, run by aim-services.jar's
-# AppSearchHost, as /system/bin/am runs its jar; AppSearchHost makes
-# system_server's class loader of SYSTEMSERVERCLASSPATH itself.
-export CLASSPATH=/system/framework/aim-services.jar
-exec app_process /system/bin dev.aim.server.AppSearchHost "$@"

@@ -126,15 +126,17 @@ ExtServices over the persisted usage stats); `system_update`, which its
 System page asks, is served (2026-10-20). Play services' persistent process gets its
 installed modules, Wi-Fi scan results (none, the Mac's radio being off),
 statsd, DeviceConfig writes, usb, Safety Center and app op mode watches;
-AppSearch is the original module, run by the app host's `aim-appsearch`
-in a process of the system uid, so Play services finds its
+AppSearch is the original module, run by the app host's system process
+(`aim-system`, of the system uid), so Play services finds its
 `AppSearchManager`. The original Bluetooth app
 runs under the app host: the native `bluetooth_manager` binds its
 AdapterService, which brings the stack up over the Bluetooth HAL to
 STATE_ON (media sessions serve its AVRCP target and media browser).
-Telecom is not loaded: its creation must run on the system process's main
-thread, as an in-process call from TelecomLoaderService (#1786); Phone
-would stop at `carrier_config` anyway, as on any device without telephony.
+Telecom is loaded in the system process: TelecomLoaderService's part
+there binds its TelecomService and creates and publishes `telecom` on that
+process's main thread, also with Bluetooth on and after the process is
+restarted (2026-10-21); Phone stops at `carrier_config`, as on any device
+without telephony (#1919, #1923).
 
 ## Native system services (2026-09-29, ADR 0013)
 
