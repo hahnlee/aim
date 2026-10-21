@@ -10,7 +10,12 @@
 //! layer is BGRA) and scales when the sizes differ. A layer may show part
 //! of the buffer (a task's window in window mode, docs/windows.md). The
 //! present fence signals when Core Animation has shown every drawable of
-//! the present, with the latest time.
+//! the present, with the latest time. While the Mac shows no windows (its
+//! screen locked or its display asleep, [`aim_host_display::screen`]), Core
+//! Animation shows no drawable and runs no presented handler until it does
+//! again, so a present then is not shown: its fence signals at the vsync
+//! with an error status, which SurfaceFlinger reads as no present time,
+//! rather than waiting for the unlock or claiming the frame was shown.
 //!
 //! In window mode a present is a frame of layers ([`LayerFrame`],
 //! docs/layers.md): each window's pass draws its own layers, each a quad
@@ -20,6 +25,7 @@
 
 use std::ffi::c_void;
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -287,36 +293,74 @@ pub struct Frame {
 /// predicts vsync from these times, and not every one is a refresh's: a
 /// drawable Core Animation dropped for a newer one counts when its handler
 /// ran, and a window host when it read the frame. The present itself holds
-/// one count until [`Fence::done`].
+/// one count until [`Fence::done`]. A frame none of whose drawables could
+/// be shown ([`Fence::unseen`]) signals with [`NOT_SHOWN`].
 #[derive(Clone)]
-pub struct Fence(Arc<Mutex<(usize, i64, Option<Writer>)>>);
+pub struct Fence(Arc<Mutex<Pending>>);
+
+struct Pending {
+    count: usize,
+    latest: i64,
+    writer: Option<Writer>,
+    /// A drawable was shown.
+    seen: bool,
+    /// A drawable could not be shown.
+    unseen: bool,
+}
+
+/// The status of a present fence whose frame no display showed:
+/// `-ENODEV`.
+const NOT_SHOWN: i32 = -19;
 
 impl Fence {
     pub fn new(writer: Writer) -> Fence {
-        Fence(Arc::new(Mutex::new((1, 0, Some(writer)))))
+        Fence(Arc::new(Mutex::new(Pending {
+            count: 1,
+            latest: 0,
+            writer: Some(writer),
+            seen: false,
+            unseen: false,
+        })))
     }
 
     /// One more to wait for.
     pub fn expect(&self) {
-        self.0.lock().unwrap().0 += 1;
+        self.0.lock().unwrap().count += 1;
     }
 
     /// One shown at `ns`.
     pub fn shown(&self, ns: i64) {
-        let mut p = self.0.lock().unwrap();
-        p.1 = p.1.max(ns);
-        p.0 -= 1;
-        if p.0 == 0
-            && let Some(w) = p.2.take()
-        {
-            let at = if p.1 > 0 { p.1 } else { vsync::monotonic_ns() };
-            w.signal_at(vsync::vsync_at_or_after(at), 1);
-        }
+        self.settle(|p| {
+            p.latest = p.latest.max(ns);
+            p.seen = true;
+        });
+    }
+
+    /// One drawable that will not be shown: the Mac shows no windows.
+    fn unseen(&self) {
+        self.settle(|p| p.unseen = true);
     }
 
     /// The present has handed out all it waits for.
     pub fn done(&self) {
-        self.shown(0);
+        self.settle(|_| {});
+    }
+
+    fn settle(&self, f: impl FnOnce(&mut Pending)) {
+        let mut p = self.0.lock().unwrap();
+        f(&mut p);
+        p.count -= 1;
+        if p.count == 0
+            && let Some(w) = p.writer.take()
+        {
+            let at = if p.latest > 0 {
+                p.latest
+            } else {
+                vsync::monotonic_ns()
+            };
+            let status = if p.unseen && !p.seen { NOT_SHOWN } else { 1 };
+            w.signal_at(vsync::vsync_at_or_after(at), status);
+        }
     }
 }
 
@@ -347,6 +391,43 @@ fn take_shown(drawable: Id) -> Option<Fence> {
     p.iter()
         .position(|(d, _)| *d == drawable as usize)
         .map(|i| p.swap_remove(i).1)
+}
+
+/// Whether the Mac shows no windows, as [`watch_screen`] keeps it.
+static HIDDEN: AtomicBool = AtomicBool::new(false);
+
+/// Follow whether the Mac shows windows: its screen's locking and
+/// unlocking, its displays' sleep and wake. When it stops, the drawables
+/// waiting to be shown will not be until it starts again, so their fences
+/// signal as not shown now. Main thread.
+pub fn watch_screen() {
+    static BLOCK: OnceLock<GlobalBlock> = OnceLock::new();
+    let block = BLOCK.get_or_init(|| GlobalBlock::new(screen_changed as *const c_void));
+    let distributed = send!(class(c"NSDistributedNotificationCenter"), c"defaultCenter" => Id);
+    let workspace = send!(class(c"NSWorkspace"), c"sharedWorkspace" => Id);
+    let workspace = send!(workspace, c"notificationCenter" => Id);
+    for (center, name) in [
+        (distributed, "com.apple.screenIsLocked"),
+        (distributed, "com.apple.screenIsUnlocked"),
+        (workspace, "NSWorkspaceScreensDidSleepNotification"),
+        (workspace, "NSWorkspaceScreensDidWakeNotification"),
+    ] {
+        send!(center, c"addObserverForName:object:queue:usingBlock:" => Id,
+            Id = nsstring(name), Id = std::ptr::null_mut(), Id = std::ptr::null_mut(),
+            *const GlobalBlock = block);
+    }
+    screen_changed(block, std::ptr::null_mut());
+}
+
+extern "C" fn screen_changed(_block: *const GlobalBlock, _note: Id) {
+    let hidden = aim_host_display::screen::hidden();
+    HIDDEN.store(hidden.is_some(), Ordering::Relaxed);
+    if hidden.is_some() {
+        let waiting = std::mem::take(&mut *PRESENTED.lock().unwrap());
+        for (_, fence) in waiting {
+            fence.unseen();
+        }
+    }
 }
 
 /// A drawable's presented handler: count it shown for its present's fence,
@@ -498,9 +579,16 @@ impl Renderer {
             drawables.push(drawable);
         }
         if let Some(f) = fence {
-            expect_shown(f, &drawables, |d| {
-                send!(d, c"addPresentedHandler:" => (), *const GlobalBlock = presented_block());
-            });
+            if HIDDEN.load(Ordering::Relaxed) {
+                for _ in &drawables {
+                    f.expect();
+                    f.unseen();
+                }
+            } else {
+                expect_shown(f, &drawables, |d| {
+                    send!(d, c"addPresentedHandler:" => (), *const GlobalBlock = presented_block());
+                });
+            }
         }
         for &d in &drawables {
             send!(commands, c"presentDrawable:" => (), Id = d);
@@ -749,5 +837,29 @@ mod tests {
         assert!(!aim_sync_file::wait(file.as_fd(), 0));
         fence.done();
         assert!(aim_sync_file::wait(file.as_fd(), 1000));
+    }
+
+    /// The status a present fence settles with: shown when a drawable was
+    /// (or none was waited for), not shown when its only drawables could
+    /// not be.
+    #[test]
+    fn a_frame_no_drawable_showed_signals_not_shown() {
+        let status = |drawables: &[bool]| {
+            let (file, writer) = aim_sync_file::pair().unwrap();
+            let fence = Fence::new(writer);
+            for &seen in drawables {
+                fence.expect();
+                if seen { fence.shown(5) } else { fence.unseen() }
+            }
+            fence.done();
+            match aim_sync_file::state(file.as_fd()) {
+                aim_sync_file::State::Signaled { status, .. } => status,
+                s => panic!("{s:?}"),
+            }
+        };
+        assert_eq!(status(&[]), 1);
+        assert_eq!(status(&[true]), 1);
+        assert_eq!(status(&[false]), NOT_SHOWN);
+        assert_eq!(status(&[false, true]), 1);
     }
 }
