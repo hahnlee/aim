@@ -50,6 +50,9 @@ const SECBITS_MASK: u32 = 0x3f;
 const NGROUPS_MAX: usize = 65536;
 /// Linux RLIM_NLIMITS.
 const RLIM_NLIMITS: usize = 16;
+/// `RLIMIT_DATA`, `RLIMIT_AS`.
+const RLIMIT_DATA: usize = 2;
+const RLIMIT_AS: usize = 9;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Identity {
@@ -593,6 +596,16 @@ pub(crate) fn publish_current_for_owner(
         return Err(crate::errno::EIO);
     }
     Ok(table.clone())
+}
+
+/// The soft RLIMIT_AS and the RLIMIT_DATA pair the layer enforces
+/// (`vm_account`); an unrecorded limit is unlimited, as getrlimit
+/// reports it.
+pub(super) fn memory_limits() -> super::vm_account::Limits {
+    read(|id| super::vm_account::Limits {
+        address_space: id.rlimits[RLIMIT_AS].map_or(u64::MAX, |l| l.0),
+        data: id.rlimits[RLIMIT_DATA].unwrap_or((u64::MAX, u64::MAX)),
+    })
 }
 
 fn read<R>(f: impl FnOnce(&Identity) -> R) -> R {
@@ -1203,8 +1216,12 @@ pub fn prlimit(nr: u64, a: [u64; 6]) -> i64 {
         if r < 0 {
             return r;
         }
-        // Enforce what the host allows; the guest sees what it set.
-        super::process::prlimit(261, [0, res, new, 0, 0, 0]);
+        // Enforce what the host allows; the guest sees what it set. The
+        // layer enforces RLIMIT_AS and RLIMIT_DATA itself (`vm_account`):
+        // the host's limits would count the layer's memory too.
+        if !matches!(res as usize, RLIMIT_DATA | RLIMIT_AS) {
+            super::process::prlimit(261, [0, res, new, 0, 0, 0]);
+        }
     }
     if old != 0 {
         // SAFETY: guest struct rlimit64.

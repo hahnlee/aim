@@ -281,6 +281,7 @@ pub fn load_program(
             let r = vfs::resolve(vfs::LINUX_AT_FDCWD, interp.as_bytes(), true)
                 .map_err(|e| format!("interpreter {interp}: cannot resolve (errno {e})"))?;
             let i = loader::load_elf(&r.host, &r.guest)?;
+            sys::account_image(&i.loads, i.bias, false);
             if sys::tracing() {
                 trace_image(&r.guest, &i);
             }
@@ -291,6 +292,7 @@ pub fn load_program(
     if sys::tracing() {
         trace_image(&program.guest, &image);
     }
+    sys::account_image(&image.loads, image.bias, true);
     sys::init_brk(image.end);
     sys::name_program(execfn);
     let sp = loader::build_stack(&loader::StackInputs {

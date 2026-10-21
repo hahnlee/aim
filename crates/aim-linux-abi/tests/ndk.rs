@@ -288,6 +288,12 @@ fn memory() {
     check("t_mem", &[]);
 }
 
+/// RLIMIT_AS and RLIMIT_DATA count the guest's mappings (#270).
+#[test]
+fn memory_limits() {
+    check("t_rlimit", &[]);
+}
+
 #[test]
 fn procfs() {
     check("t_proc", &["two", "args"]);
