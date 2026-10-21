@@ -30,6 +30,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use super::addrconf::{self, Route6};
 use super::ipv6conf::{self, Conf6, Scope};
 use super::netlink;
 use super::uplink::{self, Uplink};
@@ -50,6 +51,7 @@ pub const ARPHRD_LOOPBACK: u16 = 772;
 
 const EADDRNOTAVAIL: Errno = 99;
 const EEXIST: Errno = 17;
+const EACCES: Errno = 13;
 const CAP_NET_ADMIN: u32 = 12;
 
 pub const LO: u32 = 1;
@@ -62,6 +64,10 @@ pub struct Addr {
     pub ip: IpAddr,
     pub prefix: u8,
     pub life: Life,
+    /// The IPv6 flags the kernel keeps (`addrconf::IFA_F_*`).
+    pub flags: u32,
+    /// When a tentative address's DAD completes (CLOCK_MONOTONIC ms).
+    pub dad_end: u64,
 }
 
 /// `INFINITY_LIFE_TIME`.
@@ -129,7 +135,13 @@ impl Addr {
     /// A permanent address, added now.
     pub fn new(ip: IpAddr, prefix: u8) -> Addr {
         let life = Life::new(INFINITY, INFINITY).unwrap();
-        Addr { ip, prefix, life }
+        Addr {
+            ip,
+            prefix,
+            life,
+            flags: 0,
+            dad_end: 0,
+        }
     }
 
     /// RT_SCOPE_HOST for loopback addresses, RT_SCOPE_LINK for IPv6
@@ -168,6 +180,9 @@ pub struct Link {
     pub carrier: bool,
     /// Its IPv6 configuration (`ipv6conf`).
     pub conf6: Conf6,
+    /// IPv6 is configured on it (`IF_READY`): its link became ready with
+    /// IPv6 enabled, and it was not taken down since (`addrconf`).
+    pub ready6: bool,
 }
 
 /// The devices and the IPv6 configurations of `all` and `default`.
@@ -176,6 +191,8 @@ pub struct Devices {
     pub links: Vec<Link>,
     pub all: Conf6,
     pub dflt: Conf6,
+    /// The kernel's IPv6 routes (`addrconf`).
+    pub routes6: Vec<Route6>,
 }
 
 impl Devices {
@@ -226,13 +243,17 @@ pub enum Event {
     Link(Link),
     NewAddr(Link, Addr),
     DelAddr(Link, Addr),
+    NewRoute(Route6),
+    DelRoute(Route6),
 }
 
 /// The devices at boot: the loopback up with its addresses, `eth0` down
 /// with none.
 fn boot_devices() -> Devices {
+    let links = boot_links();
     Devices {
-        links: boot_links(),
+        routes6: addrconf::boot_routes(&links[0]),
+        links,
         ..Devices::default()
     }
 }
@@ -251,6 +272,7 @@ fn boot_links() -> Vec<Link> {
             ],
             carrier: true,
             conf6: Conf6::default(),
+            ready6: true,
         },
         Link {
             index: ETH0,
@@ -261,6 +283,7 @@ fn boot_links() -> Vec<Link> {
             addrs: Vec::new(),
             carrier: false,
             conf6: Conf6::default(),
+            ready6: false,
         },
     ]
 }
@@ -294,7 +317,7 @@ fn serialize(d: &Devices, up: &Option<Uplink>) -> String {
         for a in &l.addrs {
             let t = &a.life;
             s += &format!(
-                "addr {} {}/{} {} {} {} {} {}\n",
+                "addr {} {}/{} {} {} {} {} {} {:x} {}\n",
                 l.index,
                 a.ip,
                 a.prefix,
@@ -302,10 +325,18 @@ fn serialize(d: &Devices, up: &Option<Uplink>) -> String {
                 t.preferred,
                 t.created,
                 t.stamp,
-                t.deprecated as u8
+                t.deprecated as u8,
+                a.flags,
+                a.dad_end
             );
         }
         s += &l.conf6.lines(&l.index.to_string());
+        if l.ready6 {
+            s += &format!("ready6 {}\n", l.index);
+        }
+    }
+    for r in &d.routes6 {
+        s += &r.line();
     }
     s
 }
@@ -341,8 +372,14 @@ fn parse(text: &str) -> Option<(Devices, Option<Uplink>)> {
                     addrs: Vec::new(),
                     carrier: false,
                     conf6: Conf6::default(),
+                    ready6: false,
                 });
             }
+            ["ready6", index] => {
+                let index: u32 = index.parse().ok()?;
+                d.links.iter_mut().find(|l| l.index == index)?.ready6 = true;
+            }
+            ["route6", rest @ ..] => d.routes6.push(Route6::parse(rest)?),
             ["conf6", scope, key, value] => {
                 let v = value.parse().ok()?;
                 conf_of(&mut d, scope)?.put(key, v);
@@ -359,6 +396,8 @@ fn parse(text: &str) -> Option<(Devices, Option<Uplink>)> {
                 created,
                 stamp,
                 deprecated,
+                flags,
+                dad_end,
             ] => {
                 let (ip, prefix) = addr.split_once('/')?;
                 let index: u32 = index.parse().ok()?;
@@ -376,6 +415,8 @@ fn parse(text: &str) -> Option<(Devices, Option<Uplink>)> {
                             stamp: stamp.parse().ok()?,
                             deprecated: *deprecated == "1",
                         },
+                        flags: u32::from_str_radix(flags, 16).ok()?,
+                        dad_end: dad_end.parse().ok()?,
                     });
             }
             _ => return None,
@@ -407,24 +448,26 @@ fn conf_of<'a>(d: &'a mut Devices, scope: &str) -> Option<&'a mut Conf6> {
 /// announced. Lifetimes are looked at whenever the device state is, which
 /// a process following the Mac's network does every
 /// `aim_uplink::WATCH_PERIOD`.
-fn expire(links: &mut [Link], now: u64, ev: &mut Vec<Event>) {
-    for l in links.iter_mut() {
+fn expire(d: &mut Devices, now: u64, ev: &mut Vec<Event>) {
+    for li in 0..d.links.len() {
         let mut i = 0;
-        while i < l.addrs.len() {
-            let a = l.addrs[i];
+        while i < d.links[li].addrs.len() {
+            let a = d.links[li].addrs[i];
             if a.life.permanent() {
                 i += 1;
                 continue;
             }
             let (valid, preferred) = a.life.left(now);
             if valid == 0 {
-                l.addrs.remove(i);
+                d.links[li].addrs.remove(i);
+                let l = d.links[li].clone();
                 ev.push(Event::DelAddr(l.clone(), a));
+                addrconf::removed(d, &l, &a, ev);
                 continue;
             }
             if preferred == 0 && !a.life.deprecated {
-                l.addrs[i].life.deprecated = true;
-                ev.push(Event::NewAddr(l.clone(), l.addrs[i]));
+                d.links[li].addrs[i].life.deprecated = true;
+                ev.push(Event::NewAddr(d.links[li].clone(), d.links[li].addrs[i]));
             }
             i += 1;
         }
@@ -516,8 +559,11 @@ fn transact<R>(f: impl FnOnce(&mut Devices, &mut Vec<Event>) -> R) -> R {
             None => crate::diag!("[linux-abi] net: the Mac has no network; eth0 has no carrier"),
         }
     }
-    expire(&mut d.links, now_ms(), &mut events);
+    let t = now_ms();
+    expire(&mut d, t, &mut events);
+    addrconf::reconcile(&mut d, t, &mut events);
     let r = f(&mut d, &mut events);
+    addrconf::reconcile(&mut d, t, &mut events);
     let new = serialize(&d, &now);
     if new != text {
         let _ = file.set_len(0);
@@ -530,6 +576,11 @@ fn transact<R>(f: impl FnOnce(&mut Devices, &mut Vec<Event>) -> R) -> R {
 
 pub fn links() -> Vec<Link> {
     transact(|d, _| d.links.clone())
+}
+
+/// The kernel's IPv6 routes.
+pub fn routes6() -> Vec<Route6> {
+    transact(|d, _| d.routes6.clone())
 }
 
 /// The IPv6 configuration of `scope`, and the MTU a device's `mtu`
@@ -618,33 +669,58 @@ pub fn change_link(index: u32, mask: u32, flags: u32, mtu: Option<u32>) -> Resul
 }
 
 /// Add `a` to the link; an existing address is EEXIST unless `replace`.
+/// An IPv6 address takes the flags userspace may give it, runs DAD and
+/// gets its prefix route (`inet6_addr_add`); IPv6 disabled on the device
+/// is EACCES.
 pub fn add_addr(index: u32, a: Addr, replace: bool) -> Result<(), Errno> {
     let max = if a.ip.is_ipv4() { 32 } else { 128 };
     if a.prefix > max {
         return Err(EINVAL);
     }
     transact(|d, ev| {
-        let l = find(&mut d.links, index)?;
-        let a = match l.addrs.iter_mut().find(|x| x.ip == a.ip) {
-            Some(_) if !replace => return Err(EEXIST),
-            // A replaced address keeps when it was added (`ifa_cstamp`).
-            Some(x) => {
-                let created = x.life.created;
-                *x = a;
-                x.life.created = created;
-                *x
+        let i = d
+            .links
+            .iter()
+            .position(|l| l.index == index)
+            .ok_or(ENODEV)?;
+        let l = &mut d.links[i];
+        if let Some(x) = l.addrs.iter_mut().find(|x| x.ip == a.ip) {
+            if !replace {
+                return Err(EEXIST);
             }
-            None => {
-                l.addrs.push(a);
-                a
-            }
+            // `inet6_addr_modify`: new lifetimes and flags; it keeps when
+            // it was added (`ifa_cstamp`) and its DAD state.
+            let created = x.life.created;
+            let kept = x.flags & (addrconf::IFA_F_TENTATIVE | addrconf::IFA_F_OPTIMISTIC);
+            *x = Addr {
+                flags: (a.flags & addrconf::IFA_F_USER) | kept,
+                dad_end: x.dad_end,
+                ..a
+            };
+            x.life.created = created;
+            let x = *x;
+            ev.push(Event::NewAddr(l.clone(), x));
+            return Ok(());
+        }
+        if a.ip.is_ipv4() {
+            l.addrs.push(a);
+            ev.push(Event::NewAddr(l.clone(), a));
+            return Ok(());
+        }
+        if l.conf6.get("disable_ipv6", Scope::Dev(l.index), l.mtu) != 0 {
+            return Err(EACCES);
+        }
+        let a = Addr {
+            flags: a.flags & addrconf::IFA_F_USER,
+            ..a
         };
-        ev.push(Event::NewAddr(l.clone(), a));
+        addrconf::add(d, i, a, now_ms(), ev);
         Ok(())
     })
 }
 
-/// Remove the link's address `ip` (with `prefix`, when given).
+/// Remove the link's address `ip` (with `prefix`, when given), and an
+/// IPv6 address's routes.
 pub fn del_addr(index: u32, ip: IpAddr, prefix: Option<u8>) -> Result<(), Errno> {
     transact(|d, ev| {
         let l = find(&mut d.links, index)?;
@@ -654,7 +730,9 @@ pub fn del_addr(index: u32, ip: IpAddr, prefix: Option<u8>) -> Result<(), Errno>
             .position(|x| x.ip == ip && prefix.is_none_or(|p| p == x.prefix))
             .ok_or(EADDRNOTAVAIL)?;
         let a = l.addrs.remove(i);
+        let l = l.clone();
         ev.push(Event::DelAddr(l.clone(), a));
+        addrconf::removed(d, &l, &a, ev);
         Ok(())
     })
 }
@@ -961,19 +1039,18 @@ mod tests {
         let mut d = boot_devices();
         d.links[1].addrs.push(a);
         assert_eq!(parse(&serialize(&d, &None)).unwrap().0, d);
-        let mut l = d.links;
         let mut ev = Vec::new();
-        expire(&mut l, t + 1_000_000, &mut ev);
+        expire(&mut d, t + 1_000_000, &mut ev);
         assert!(ev.is_empty());
-        expire(&mut l, t + 1_800_000, &mut ev);
+        expire(&mut d, t + 1_800_000, &mut ev);
         assert!(matches!(&ev[..], [Event::NewAddr(_, x)] if x.life.deprecated));
-        expire(&mut l, t + 1_900_000, &mut ev);
+        expire(&mut d, t + 1_900_000, &mut ev);
         assert_eq!(ev.len(), 1);
-        expire(&mut l, t + 3_600_000, &mut ev);
+        expire(&mut d, t + 3_600_000, &mut ev);
         assert!(matches!(&ev[1..], [Event::DelAddr(_, x)] if x.ip == a.ip));
-        assert!(l[1].addrs.is_empty());
+        assert!(d.links[1].addrs.is_empty());
         // The loopback's are permanent.
-        assert_eq!(l[0].addrs.len(), 2);
+        assert_eq!(d.links[0].addrs.len(), 2);
     }
 
     #[test]

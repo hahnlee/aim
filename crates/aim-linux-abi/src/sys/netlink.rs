@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use super::addrconf::Route6;
 use super::netif::{self, Addr, Event, Link};
 use crate::errno::{self, EINVAL, ENODEV, EPERM, Errno};
 
@@ -57,6 +58,8 @@ const RTM_SETLINK: u16 = 19;
 const RTM_NEWADDR: u16 = 20;
 const RTM_DELADDR: u16 = 21;
 const RTM_GETADDR: u16 = 22;
+const RTM_NEWROUTE: u16 = 24;
+const RTM_DELROUTE: u16 = 25;
 const RTM_GETROUTE: u16 = 26;
 const RTM_GETNEIGH: u16 = 30;
 const RTM_GETRULE: u16 = 34;
@@ -77,10 +80,24 @@ const IFA_FLAGS: u16 = 8;
 const IFA_F_DEPRECATED: u32 = 0x20;
 const IFA_F_PERMANENT: u32 = 0x80;
 
-/// RTNLGRP_LINK, RTNLGRP_IPV4_IFADDR, RTNLGRP_IPV6_IFADDR as bind masks.
+const RTA_DST: u16 = 1;
+const RTA_OIF: u16 = 4;
+const RTA_GATEWAY: u16 = 5;
+const RTA_PRIORITY: u16 = 6;
+const RTA_METRICS: u16 = 8;
+const RTA_CACHEINFO: u16 = 12;
+const RTA_TABLE: u16 = 15;
+const RTA_PREF: u16 = 20;
+const RTAX_HOPLIMIT: u16 = 10;
+/// `RT_TABLE_COMPAT`: what rtm_table says of a table above 255.
+const RT_TABLE_COMPAT: u8 = 252;
+
+/// RTNLGRP_LINK, RTNLGRP_IPV4_IFADDR, RTNLGRP_IPV6_IFADDR,
+/// RTNLGRP_IPV6_ROUTE as bind masks.
 const GRP_LINK: u32 = 1 << 0;
 const GRP_IPV4_IFADDR: u32 = 1 << 4;
 const GRP_IPV6_IFADDR: u32 = 1 << 8;
+const GRP_IPV6_ROUTE: u32 = 1 << 10;
 
 const NETLINK_ADD_MEMBERSHIP: u64 = 1;
 const NETLINK_DROP_MEMBERSHIP: u64 = 2;
@@ -528,6 +545,8 @@ pub fn announce(events: &[Event]) {
                 };
                 (g, addr_msg(ty, 0, 0, 0, l, a))
             }
+            Event::NewRoute(r) => (GRP_IPV6_ROUTE, route_msg(RTM_NEWROUTE, 0, 0, 0, r)),
+            Event::DelRoute(r) => (GRP_IPV6_ROUTE, route_msg(RTM_DELROUTE, 0, 0, 0, r)),
         })
         .collect();
     broadcast(NETLINK_ROUTE, &msgs, KERNEL, None);
@@ -601,7 +620,7 @@ fn ip_bytes(ip: &IpAddr) -> Vec<u8> {
 /// RTM_NEWADDR or RTM_DELADDR for address `a` of `l`.
 fn addr_msg(ty: u16, flags: u16, seq: u32, portid: u32, l: &Link, a: &Addr) -> Vec<u8> {
     let family = if a.ip.is_ipv4() { 2u8 } else { 10 };
-    let mut ifa_flags = 0;
+    let mut ifa_flags = a.flags;
     if a.life.permanent() {
         ifa_flags |= IFA_F_PERMANENT;
     }
@@ -635,6 +654,40 @@ fn addr_msg(ty: u16, flags: u16, seq: u32, portid: u32, l: &Link, a: &Addr) -> V
     }
     attr(&mut b, IFA_CACHEINFO, &ci);
     attr(&mut b, IFA_FLAGS, &ifa_flags.to_le_bytes());
+    nlmsg(ty, flags, seq, portid, &b)
+}
+
+/// RTM_NEWROUTE or RTM_DELROUTE for IPv6 route `r` (`rt6_fill_node`).
+fn route_msg(ty: u16, flags: u16, seq: u32, portid: u32, r: &Route6) -> Vec<u8> {
+    let table = u8::try_from(r.table).unwrap_or(RT_TABLE_COMPAT);
+    // struct rtmsg: family, dst_len, src_len, tos, table, protocol, scope
+    // (universe for every IPv6 route), type, flags.
+    let mut b = vec![10u8, r.plen, 0, 0, table, r.proto, 0, r.kind];
+    b.extend_from_slice(&0u32.to_le_bytes());
+    attr(&mut b, RTA_TABLE, &r.table.to_le_bytes());
+    if r.plen > 0 {
+        attr(&mut b, RTA_DST, &r.dst.octets());
+    }
+    if r.hoplimit != 0 {
+        let mut m = Vec::new();
+        attr(&mut m, RTAX_HOPLIMIT, &(r.hoplimit as u32).to_le_bytes());
+        attr(&mut b, RTA_METRICS, &m);
+    }
+    attr(&mut b, RTA_PRIORITY, &r.metric.to_le_bytes());
+    if let Some(g) = r.gateway {
+        attr(&mut b, RTA_GATEWAY, &g.octets());
+    }
+    attr(&mut b, RTA_OIF, &r.index.to_le_bytes());
+    // struct rta_cacheinfo; the expiry in USER_HZ.
+    let left = if r.expires == 0 {
+        0
+    } else {
+        (r.expires.saturating_sub(netif::now_ms()) / 10).min(i32::MAX as u64) as i32
+    };
+    let mut ci = vec![0u8; 32];
+    ci[8..12].copy_from_slice(&left.to_le_bytes());
+    attr(&mut b, RTA_CACHEINFO, &ci);
+    attr(&mut b, RTA_PREF, &[0]);
     nlmsg(ty, flags, seq, portid, &b)
 }
 
@@ -732,7 +785,17 @@ fn request(
             }
             Ok(())
         }
-        RTM_GETROUTE | RTM_GETNEIGH | RTM_GETRULE if dump => Ok(()),
+        RTM_GETROUTE if dump => {
+            // The IPv6 table; there is no IPv4 one (netd's routes are its
+            // bookkeeping).
+            if matches!(body.first(), None | Some(0) | Some(10)) {
+                for r in netif::routes6() {
+                    out.push(route_msg(RTM_NEWROUTE, multi, seq, portid, &r));
+                }
+            }
+            Ok(())
+        }
+        RTM_GETNEIGH | RTM_GETRULE if dump => Ok(()),
         RTM_NEWLINK | RTM_SETLINK => admin().and_then(|()| {
             if body.len() < 16 {
                 return Err(EINVAL);
@@ -792,7 +855,23 @@ fn request(
                     Some(_) => return Err(EINVAL),
                     None => netif::Life::new(netif::INFINITY, netif::INFINITY)?,
                 };
-                netif::add_addr(index, Addr { ip, prefix, life }, replace)
+                // ifa_flags, or IFA_FLAGS's 32 bits.
+                let flags = a
+                    .iter()
+                    .find(|(t, _)| *t == IFA_FLAGS)
+                    .and_then(|(_, v)| Some(u32::from_le_bytes((*v).try_into().ok()?)))
+                    .unwrap_or(body[2] as u32);
+                netif::add_addr(
+                    index,
+                    Addr {
+                        ip,
+                        prefix,
+                        life,
+                        flags,
+                        dad_end: 0,
+                    },
+                    replace,
+                )
             } else {
                 netif::del_addr(index, ip, (prefix != 0).then_some(prefix))
             }
@@ -923,6 +1002,7 @@ mod tests {
             addrs: Vec::new(),
             carrier: true,
             conf6: Default::default(),
+            ready6: false,
         };
         let a = Addr::new("192.168.1.20".parse().unwrap(), 24);
         let m = addr_msg(RTM_NEWADDR, 0, 7, 99, &l, &a);

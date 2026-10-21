@@ -3,6 +3,7 @@
 //! The syscall number is in x8, arguments in x0-x5; the result (or -errno,
 //! with Linux errno values) goes back in x0. Each subsystem owns its calls.
 
+mod addrconf;
 mod arena;
 mod ashmem;
 mod attrs;
