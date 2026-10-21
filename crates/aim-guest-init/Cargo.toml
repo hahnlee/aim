@@ -22,6 +22,7 @@ aim-host-sensors = { path = "../aim-host-sensors" }
 aim-services = { path = "../aim-services" }
 aim-hostcall.workspace = true
 aim-storage.workspace = true
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 libc.workspace = true
 
 [dev-dependencies]

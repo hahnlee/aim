@@ -136,6 +136,7 @@ dependencies = [
  "aim-paths",
  "aim-services",
  "aim-storage",
+ "flate2",
  "libc",
 ]
 

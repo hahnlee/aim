@@ -3,14 +3,16 @@
 //! image").
 //!
 //! Each `/apex/<name>` directory with an `apex_manifest.pb` is an active
-//! APEX. The package it came from is looked up in the partitions' `apex`
-//! directories to give the `partition` and `modulePath` apexd reports;
-//! init uses the partition to run vendor APEX scripts in the vendor
-//! subcontext and linkerconfig reads the whole list.
+//! APEX. The package it came from is the partitions' `apex` file whose own
+//! `apex_manifest.pb` names the module, the highest version if several do,
+//! as apexd reads each package (`ApexFile::Open`). It gives the
+//! `partition` and `modulePath` apexd reports; init uses the partition to
+//! run vendor APEX scripts in the vendor subcontext and linkerconfig reads
+//! the whole list.
 
 use std::fmt::Write as _;
 use std::fs;
-use std::io;
+use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::path::Path;
 
 use aim_android_init::ImageRoot;
@@ -66,49 +68,95 @@ pub fn parse_apex_manifest(bytes: &[u8]) -> Result<Manifest, String> {
     Ok(manifest)
 }
 
-/// Whether a package file name belongs to the module: `com.android.art`
-/// matches `com.android.art.apex`, `com.android.art-1234.apex` and the
-/// Google-signed `com.google.android.art.capex`.
-#[cfg(test)]
-fn package_matches(module: &str, file: &str) -> bool {
-    package_match_quality(module, file).is_some()
+const MANIFEST_ENTRY: &[u8] = b"apex_manifest.pb";
+
+fn u16_at(b: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?))
 }
 
-/// 0 for an exact name, 1 for a suffixed variant (`-<version>`,
-/// `.nonsecure`, or a format generation such as Google's
-/// `com.google.android.tzdata6`), `None` otherwise.
-fn package_match_quality(module: &str, file: &str) -> Option<u8> {
-    let stem = file
-        .strip_suffix(".capex")
-        .or_else(|| file.strip_suffix(".apex"))?;
-    let candidates = [
-        module.to_string(),
-        module.replacen("com.android.", "com.google.android.", 1),
-    ];
-    let mut best = None;
-    for name in &candidates {
-        if stem == name {
-            return Some(0);
+fn u32_at(b: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
+}
+
+fn bad(what: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, what.to_string())
+}
+
+/// The `apex_manifest.pb` of an APEX or compressed APEX package, a zip
+/// file with the manifest at its top level (stored or deflated).
+fn package_manifest(path: &Path) -> io::Result<Manifest> {
+    let mut file = fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    // The end of central directory record, at most a comment's 64 KiB
+    // from the end.
+    let tail_len = size.min(22 + 0xffff);
+    file.seek(SeekFrom::Start(size - tail_len))?;
+    let mut tail = vec![0; tail_len as usize];
+    file.read_exact(&mut tail)?;
+    let end = (0..tail.len().saturating_sub(21))
+        .rev()
+        .find(|&at| u32_at(&tail, at) == Some(0x0605_4b50))
+        .ok_or_else(|| bad("no end of central directory"))?;
+    let (entries, dir_size, dir_offset) = (
+        u16_at(&tail, end + 10).unwrap_or(0),
+        u32_at(&tail, end + 12).unwrap_or(0),
+        u32_at(&tail, end + 16).unwrap_or(0),
+    );
+    file.seek(SeekFrom::Start(dir_offset.into()))?;
+    let mut dir = vec![0; dir_size as usize];
+    file.read_exact(&mut dir)?;
+    let mut at = 0;
+    for _ in 0..entries {
+        if u32_at(&dir, at) != Some(0x0201_4b50) {
+            return Err(bad("bad central directory"));
         }
-        let Some(rest) = stem.strip_prefix(name.as_str()) else {
-            continue;
-        };
-        if rest.starts_with(['-', '_', '.'])
-            || (!rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
-        {
-            best = Some(1);
+        let field = |offset| u16_at(&dir, at + offset).unwrap_or(0) as usize;
+        let (method, name_len) = (field(10), field(28));
+        let next = at + 46 + name_len + field(30) + field(32);
+        if dir.get(at + 46..at + 46 + name_len) == Some(MANIFEST_ENTRY) {
+            let compressed = u32_at(&dir, at + 20).unwrap_or(0) as usize;
+            let local = u32_at(&dir, at + 42).unwrap_or(0) as u64;
+            let mut header = [0; 30];
+            file.seek(SeekFrom::Start(local))?;
+            file.read_exact(&mut header)?;
+            if u32_at(&header, 0) != Some(0x0403_4b50) {
+                return Err(bad("bad local header"));
+            }
+            let skip =
+                u16_at(&header, 26).unwrap_or(0) as u64 + u16_at(&header, 28).unwrap_or(0) as u64;
+            file.seek(SeekFrom::Start(local + 30 + skip))?;
+            let mut data = vec![0; compressed];
+            file.read_exact(&mut data)?;
+            let bytes = match method {
+                0 => data,
+                8 => {
+                    let mut out = Vec::new();
+                    flate2::read::DeflateDecoder::new(&data[..]).read_to_end(&mut out)?;
+                    out
+                }
+                _ => return Err(bad("unsupported compression")),
+            };
+            return parse_apex_manifest(&bytes).map_err(|e| bad(&e));
         }
+        at = next;
     }
-    best
+    Err(bad("no apex_manifest.pb"))
 }
 
 /// Scans the image's flattened `/apex`.
 pub fn scan(image: &ImageRoot) -> Vec<ApexEntry> {
-    let mut packages: Vec<(String, &str)> = Vec::new();
+    // Each package with its manifest's name and version; one that cannot
+    // be read is not a package apexd would activate.
+    let mut packages: Vec<(String, i64, String, &str)> = Vec::new();
     for (dir, partition) in PARTITIONS {
         if let Ok(files) = image.regular_files(dir) {
             for file in files {
-                packages.push((file, partition));
+                if !file.ends_with(".apex") && !file.ends_with(".capex") {
+                    continue;
+                }
+                if let Ok(m) = package_manifest(&image.host_path(&file)) {
+                    packages.push((m.name, m.version, file, partition));
+                }
             }
         }
     }
@@ -127,14 +175,13 @@ pub fn scan(image: &ImageRoot) -> Vec<ApexEntry> {
         } else {
             manifest.name
         };
+        // The highest version; of equal ones, the first partition's.
         let package = packages
             .iter()
-            .filter_map(|(path, partition)| {
-                package_match_quality(&module_name, path.rsplit('/').next().unwrap_or(""))
-                    .map(|quality| (quality, path, partition))
-            })
-            .min_by_key(|(quality, path, _)| (*quality, path.len()))
-            .map(|(_, path, partition)| (path, partition));
+            .filter(|(name, ..)| *name == module_name)
+            .rev()
+            .max_by_key(|(_, version, ..)| *version)
+            .map(|(_, _, path, partition)| (path, partition));
         let (module_path, partition) = match package {
             Some((path, partition)) => (path.clone(), partition.to_string()),
             None => (format!("/apex/{dir}"), "SYSTEM".to_string()),
@@ -245,34 +292,6 @@ mod tests {
         let gatekeeper = [0x0a, 0x02, b'g', b'k', 0x10, 0x01, 0x78, 0x01];
         let parsed = parse_apex_manifest(&gatekeeper).unwrap();
         assert!(parsed.vendor_bootstrap && parsed.version == 1);
-        assert!(package_matches(
-            "com.android.art",
-            "com.google.android.art.capex"
-        ));
-        assert_eq!(
-            package_match_quality("com.android.media", "com.google.android.media.capex"),
-            Some(0)
-        );
-        assert_eq!(
-            package_match_quality(
-                "com.android.media",
-                "com.google.android.media.swcodec.capex"
-            ),
-            Some(1)
-        );
-        assert!(package_matches(
-            "com.google.android.widevine",
-            "com.google.android.widevine-13130248.apex"
-        ));
-        assert!(package_matches(
-            "com.android.hardware.gatekeeper",
-            "com.android.hardware.gatekeeper.nonsecure.apex"
-        ));
-        assert!(!package_matches("com.android.art", "com.android.artx.apex"));
-        assert_eq!(
-            package_match_quality("com.android.tzdata", "com.google.android.tzdata6.apex"),
-            Some(1)
-        );
         let xml = apex_info_list_xml(&[ApexEntry {
             module_name: "com.android.hardware.power".into(),
             module_path: "/vendor/apex/com.android.hardware.power.apex".into(),
@@ -285,6 +304,127 @@ mod tests {
         assert_eq!(parsed[0].module_name, "com.android.hardware.power");
         assert_eq!(parsed[0].partition, "VENDOR");
         assert!(parsed[0].is_active);
+    }
+
+    /// A zip of `entries` (name, data, deflated), as an APEX package is.
+    fn zip(entries: &[(&str, &[u8], bool)]) -> Vec<u8> {
+        use std::io::Write as _;
+        let (mut out, mut dir) = (Vec::new(), Vec::new());
+        for (name, data, deflate) in entries {
+            let body = if *deflate {
+                let mut e =
+                    flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+                e.write_all(data).unwrap();
+                e.finish().unwrap()
+            } else {
+                data.to_vec()
+            };
+            let method: u16 = if *deflate { 8 } else { 0 };
+            let offset = out.len() as u32;
+            out.extend(0x0403_4b50u32.to_le_bytes());
+            out.extend([20, 0, 0, 0]);
+            out.extend(method.to_le_bytes());
+            out.extend([0; 8]);
+            out.extend((body.len() as u32).to_le_bytes());
+            out.extend((data.len() as u32).to_le_bytes());
+            out.extend((name.len() as u16).to_le_bytes());
+            out.extend(3u16.to_le_bytes());
+            out.extend(name.as_bytes());
+            out.extend([1, 2, 3]);
+            out.extend(&body);
+            dir.extend(0x0201_4b50u32.to_le_bytes());
+            dir.extend([20, 0, 20, 0, 0, 0]);
+            dir.extend(method.to_le_bytes());
+            dir.extend([0; 8]);
+            dir.extend((body.len() as u32).to_le_bytes());
+            dir.extend((data.len() as u32).to_le_bytes());
+            dir.extend((name.len() as u16).to_le_bytes());
+            dir.extend([0; 12]);
+            dir.extend(offset.to_le_bytes());
+            dir.extend(name.as_bytes());
+        }
+        let dir_offset = out.len() as u32;
+        out.extend(&dir);
+        out.extend(0x0605_4b50u32.to_le_bytes());
+        out.extend([0; 4]);
+        out.extend((entries.len() as u16).to_le_bytes());
+        out.extend((entries.len() as u16).to_le_bytes());
+        out.extend((dir.len() as u32).to_le_bytes());
+        out.extend(dir_offset.to_le_bytes());
+        out.extend(2u16.to_le_bytes());
+        out.extend(b"zz");
+        out
+    }
+
+    /// `ApexManifest` with a name and a version.
+    fn manifest(name: &str, version: u8) -> Vec<u8> {
+        let mut m = vec![0x0a, name.len() as u8];
+        m.extend(name.as_bytes());
+        m.extend([0x10, version]);
+        m
+    }
+
+    /// Packages are matched by their manifests, whatever their file names:
+    /// Google's `com.google.android.tzdata6.apex` is `com.android.tzdata`.
+    #[test]
+    fn packages_are_matched_by_their_manifests() {
+        let root = std::env::temp_dir().join(format!("gi-apex-scan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let write = |guest: &str, bytes: &[u8]| {
+            let path = root.join(guest.trim_start_matches('/'));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        };
+        let tzdata = manifest("com.android.tzdata", 6);
+        write("/apex/com.android.tzdata/apex_manifest.pb", &tzdata);
+        write(
+            "/system/apex/com.google.android.tzdata6.apex",
+            &zip(&[
+                ("apex_payload.img", b"payload", false),
+                ("apex_manifest.pb", &tzdata, true),
+            ]),
+        );
+        let art = manifest("com.android.art", 2);
+        write("/apex/com.android.art/apex_manifest.pb", &art);
+        write(
+            "/system/apex/com.google.android.art.capex",
+            &zip(&[
+                ("apex_manifest.pb", &art, false),
+                ("original_apex", b"apex", false),
+            ]),
+        );
+        // A name-alike that is another module, and an older art.
+        write(
+            "/system/apex/com.android.art.apex",
+            &zip(&[("apex_manifest.pb", &manifest("com.android.art", 1), true)]),
+        );
+        write(
+            "/vendor/apex/com.android.artx.apex",
+            &zip(&[("apex_manifest.pb", &manifest("com.android.artx", 9), true)]),
+        );
+        write("/system/apex/broken.apex", b"not a zip");
+        let entries = scan(&ImageRoot::new(&root));
+        let path = |name: &str| {
+            entries
+                .iter()
+                .find(|e| e.module_name == name)
+                .map(|e| (e.module_path.clone(), e.partition.clone()))
+        };
+        assert_eq!(
+            path("com.android.tzdata"),
+            Some((
+                "/system/apex/com.google.android.tzdata6.apex".into(),
+                "SYSTEM".into()
+            ))
+        );
+        assert_eq!(
+            path("com.android.art"),
+            Some((
+                "/system/apex/com.google.android.art.capex".into(),
+                "SYSTEM".into()
+            ))
+        );
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
