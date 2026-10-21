@@ -5,7 +5,8 @@
 //! credential type of the device's lock, which is the Mac's (the owner's
 //! choice, 2026-10-20, as `trust`'s `isDeviceSecure`): a password while
 //! the Mac's user has one (`aim_host_lock`), none otherwise. No credential
-//! is set, read or verified here. Of the recoverable keystore
+//! is set, read or verified here. Its shell command
+//! (`LockSettingsShellCommand`) runs what needs none. Of the recoverable keystore
 //! (`recoverablekeystore.db`), a recovery agent's own state: its recovery
 //! service's certificates (`initRecoveryServiceWithSigFile`), secret types,
 //! server params, its keys' recovery statuses and grants (keystore2). It
@@ -37,8 +38,18 @@ use super::recovery_certificates::{
     self as certificates, CertError, CertXml, GOOGLE_CLOUD_KEY_VAULT_SERVICE_V1_ALIAS, SigXml,
     TEST_ONLY_INSECURE_CERTIFICATE_ALIAS,
 };
+use super::settings_service::{java_exception, parse_user_arg};
 use super::{AppHost, reply};
+use crate::shell::{SHELL_COMMAND_TRANSACTION, ShellCommand};
 
+/// `Process.ROOT_UID`, `SHELL_UID`.
+const ROOT_UID: i32 = 0;
+const SHELL_UID: i32 = 2000;
+/// `UserHandle.USER_CURRENT`.
+const USER_CURRENT: i32 = -2;
+/// `ResumeOnRebootServiceProvider.PROP_ROR_PROVIDER_PACKAGE`.
+const PROP_ROR_PROVIDER_PACKAGE: &str = "persist.sys.resume_on_reboot_provider_package";
+const BIND_RESUME_ON_REBOOT_SERVICE: &str = "android.permission.BIND_RESUME_ON_REBOOT_SERVICE";
 const RECOVER_KEYSTORE: &str = "android.permission.RECOVER_KEYSTORE";
 const PER_USER_RANGE: i32 = 100_000;
 
@@ -993,17 +1004,262 @@ impl LockSettings {
             .iter()
             .any(|(n, version)| n == FEATURE_SECURE_LOCK_SCREEN && *version >= 0))
     }
+
+    // `LockSettingsShellCommand`, run as the system
+    // (`onShellCommand` clears the calling identity).
+
+    /// `onCommand`: its result; an exception is printed as the original's
+    /// catch prints it.
+    fn shell_command(&self, uid: i32, c: &mut ShellCommand) -> i32 {
+        let Some(cmd) = c.command().map(str::to_string) else {
+            // `handleDefaultCommands(null)`.
+            shell_help(c);
+            return -1;
+        };
+        match self.run_shell_command(uid, &cmd, c) {
+            Ok(result) => result,
+            Err(e) => {
+                c.eprintln(&format!("Error while executing command: {cmd}"));
+                c.eprintln(&e);
+                -1
+            }
+        }
+    }
+
+    fn run_shell_command(&self, uid: i32, cmd: &str, c: &mut ShellCommand) -> Result<i32, String> {
+        let java = |e: Exception| java_exception(&e);
+        // `getCurrentUser().id`: the app host's only user.
+        let mut user = 0;
+        let mut old = String::new();
+        // `parseArgs`.
+        while let Some(opt) = next_option(c) {
+            match opt.as_str() {
+                "--old" => old = c.next_arg_required()?,
+                "--user" => {
+                    user = parse_user_arg(&c.next_arg_required()?)?;
+                    if user == USER_CURRENT {
+                        user = 0;
+                    }
+                }
+                _ => {
+                    c.eprintln(&format!("Unknown option: {opt}"));
+                    return Err("java.lang.IllegalArgumentException".into());
+                }
+            }
+        }
+        let new = c.next_arg();
+        if !self.has_secure_lock_screen().map_err(java)?
+            && !matches!(
+                cmd,
+                "help" | "get-disabled" | "set-disabled" | "set-resume-on-reboot-provider-package"
+            )
+        {
+            c.eprintln("The device does not support lock screen - ignoring the command.");
+            return Ok(-1);
+        }
+        match cmd {
+            "remove-cache" | "require-strong-auth" => {
+                if cmd == "require-strong-auth"
+                    && new.as_deref() != Some("STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN")
+                {
+                    let reason = new.as_deref().unwrap_or("null");
+                    c.eprintln(&format!("Unsupported reason: {reason}"));
+                    return Ok(0);
+                }
+                return Err(java(self.host.unimplemented_named(
+                    "lock_settings",
+                    &format!("cmd lock_settings {cmd}: strong auth and profiles (#1888)"),
+                )));
+            }
+            "set-resume-on-reboot-provider-package" => {
+                // `enforcePermission(BIND_RESUME_ON_REBOOT_SERVICE, callingPid,
+                // callingUid, TAG)`.
+                if self
+                    .host
+                    .check_permission(Some(BIND_RESUME_ON_REBOOT_SERVICE), uid)
+                    .map_err(java)?
+                    != 0
+                {
+                    return Err(format!(
+                        "java.lang.SecurityException: ShellCommand: Neither user {uid} nor current process has {BIND_RESUME_ON_REBOOT_SERVICE}."
+                    ));
+                }
+                let package = new.unwrap_or_default();
+                eprintln!("lock_settings: Setting {PROP_ROR_PROVIDER_PACKAGE} to {package}");
+                self.host.set_property(PROP_ROR_PROVIDER_PACKAGE, &package);
+                return Ok(0);
+            }
+            "help" => {
+                shell_help(c);
+                return Ok(0);
+            }
+            "get-disabled" => {
+                let disabled = self.lock_screen_disabled(user).map_err(java)?;
+                c.println(&disabled.to_string());
+                return Ok(0);
+            }
+            "set-disabled" => {
+                // `Boolean.parseBoolean`.
+                let disabled = new.is_some_and(|v| v.eq_ignore_ascii_case("true"));
+                self.set_boolean(DISABLE_LOCKSCREEN_KEY, disabled, user)
+                    .map_err(java)?;
+                c.println(&format!("Lock screen disabled set to {disabled}"));
+                return Ok(0);
+            }
+            _ => {}
+        }
+        // `checkCredential`: the system user is no profile, so never one
+        // with a unified challenge.
+        if self.credential_type(user).map_err(java)? != CREDENTIAL_TYPE_NONE {
+            if old.is_empty() {
+                c.println("User has a lock credential, but old credential was not provided");
+                return Ok(-1);
+            }
+            return Err(java(self.host.unimplemented_named(
+                "lock_settings",
+                "cmd lock_settings: checking a credential (#1888)",
+            )));
+        }
+        if !old.is_empty() {
+            c.println("Old password provided but user has no password");
+            return Ok(-1);
+        }
+        match cmd {
+            "set-pattern" | "set-password" | "set-pin" | "clear" => {
+                Err(java(self.host.unimplemented_named(
+                    "lock_settings",
+                    &format!("cmd lock_settings {cmd}: setting a credential (#1888)"),
+                )))
+            }
+            "verify" => {
+                c.println("Lock credential verified successfully");
+                Ok(0)
+            }
+            _ => {
+                c.eprintln(&format!("Unknown command: {cmd}"));
+                Ok(0)
+            }
+        }
+    }
+
+    /// `LockPatternUtils.isLockScreenDisabled`.
+    fn lock_screen_disabled(&self, user: i32) -> Result<bool, Exception> {
+        if self.credential_type(user)? != CREDENTIAL_TYPE_NONE {
+            return Ok(false);
+        }
+        let inputs = self.host.inputs()?;
+        let by_default = inputs
+            .packages
+            .framework_bool("config_disableLockscreenByDefault")
+            .unwrap_or(false);
+        let demo_mode = inputs
+            .settings
+            .get(super::settings::Table::Global, "device_demo_mode")
+            .and_then(|v| v.parse::<i32>().ok())
+            .is_some_and(|v| v > 0);
+        let demo_user = demo_mode && super::user_service::is_demo(&self.host, user)?;
+        Ok(self.boolean(DISABLE_LOCKSCREEN_KEY, false, user)? || by_default || demo_user)
+    }
 }
+
+/// `ShellCommand.getNextOption`.
+fn next_option(c: &mut ShellCommand) -> Option<String> {
+    let arg = c.peek_next_arg()?.to_string();
+    if !arg.starts_with('-') {
+        return None;
+    }
+    c.next_arg();
+    match arg.as_str() {
+        "--" => None,
+        // A short option's data is attached: the option is its first two
+        // characters.
+        _ if arg.len() > 2 && !arg[1..].starts_with('-') => Some(arg[..2].to_string()),
+        _ => Some(arg),
+    }
+}
+
+/// `LockSettingsShellCommand.onHelp`.
+fn shell_help(c: &mut ShellCommand) {
+    c.print(SHELL_HELP);
+}
+
+const SHELL_HELP: &str = "\
+lockSettings service commands:
+
+NOTE: when a secure lock screen is set, most commands require the
+--old <CREDENTIAL> option.
+
+  help
+    Prints this help text.
+
+  get-disabled [--user USER_ID]
+    Prints true if the lock screen is completely disabled, i.e. set to None.
+    Otherwise prints false.
+
+  set-disabled [--user USER_ID] <true|false>
+    Sets whether the lock screen is disabled. If the lock screen is secure, this
+    has no immediate effect. I.e. this can only change between Swipe and None.
+
+  set-pattern [--old <CREDENTIAL>] [--user USER_ID] <PATTERN>
+    Sets a secure lock screen that uses the given PATTERN. PATTERN is a series
+    of digits 1-9 that identify the cells of the pattern.
+
+  set-pin [--old <CREDENTIAL>] [--user USER_ID] <PIN>
+    Sets a secure lock screen that uses the given PIN.
+
+  set-password [--old <CREDENTIAL>] [--user USER_ID] <PASSWORD>
+    Sets a secure lock screen that uses the given PASSWORD.
+
+  clear [--old <CREDENTIAL>] [--user USER_ID]
+    Clears the lock credential.
+
+  verify [--old <CREDENTIAL>] [--user USER_ID]
+    Verifies the lock credential.
+
+  remove-cache [--user USER_ID]
+    Removes cached unified challenge for the managed profile.
+
+  set-resume-on-reboot-provider-package <package_name>
+    Sets the package name for server based resume on reboot service provider.
+
+  require-strong-auth [--user USER_ID] <reason>
+    Requires strong authentication. The current supported reasons:
+    STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN.
+
+";
 
 impl Service for LockSettings {
     fn descriptor(&self) -> &str {
         ls::DESCRIPTOR
     }
 
+    fn accepts_fds(&self) -> bool {
+        true
+    }
+
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let uid = call.sender_euid as i32;
         let mut p = Parcel::new();
         let result = match call.code {
+            SHELL_COMMAND_TRANSACTION => {
+                let mut command = ShellCommand::read(&self.host.process, &mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                if !command.has_output() {
+                    Ok(())
+                } else if uid != SHELL_UID && uid != ROOT_UID {
+                    // `enforceShell`.
+                    Err(Exception::security("Caller must be shell"))
+                } else {
+                    eprintln!(
+                        "lock_settings: Executing shell command '{}'; callingPid={}, callingUid={uid}",
+                        command.command().unwrap_or_default(),
+                        call.sender_pid
+                    );
+                    let result = self.shell_command(uid, &mut command);
+                    command.finish(result);
+                    Ok(())
+                }
+            }
             ls::GET_BOOLEAN => {
                 let a = ls::GetBoolean::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let key = a.key.unwrap_or_default();

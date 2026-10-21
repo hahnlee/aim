@@ -100,7 +100,7 @@ struct Command {
 }
 
 /// An exception `exec` prints.
-fn java_exception(e: &Exception) -> String {
+pub(super) fn java_exception(e: &Exception) -> String {
     let class = match e.code {
         EX_SECURITY => "java.lang.SecurityException",
         EX_ILLEGAL_ARGUMENT => "java.lang.IllegalArgumentException",
@@ -114,7 +114,7 @@ fn java_exception(e: &Exception) -> String {
 }
 
 /// `UserHandle.parseUserArg`.
-fn parse_user_arg(arg: &str) -> Result<i32, String> {
+pub(super) fn parse_user_arg(arg: &str) -> Result<i32, String> {
     match arg {
         "all" => Ok(USER_ALL),
         "current" | "cur" => Ok(USER_CURRENT),
