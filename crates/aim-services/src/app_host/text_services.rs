@@ -12,8 +12,9 @@
 //! request's session asked of it once connected and handed to the
 //! client's listener, the binding dropped with its last client. A user's
 //! data is made as it unlocks (`onUnlockUser`), or when first asked for
-//! once it is unlocking. The package monitor that refreshes the spell
-//! checkers when packages change is not implemented (#1936).
+//! once it is unlocking. Its package monitor (`TextServicesMonitor`, of
+//! all users) finds a user's spell checkers again when a package changes,
+//! and selects a system one if none is selected.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
@@ -29,6 +30,7 @@ use aim_service_aidl::com_android_internal_textservice_itextservicesmanager as t
 use aim_service_aidl::com_android_internal_textservice_itextservicessessionlistener as ts_listener;
 
 use super::kept::{KeptBundle, RawBundle};
+use super::package_writes::{PackageChanged, PackageMonitor};
 use super::services::HostConnection;
 use super::settings_provider::{Caller, SettingsProvider};
 use super::{AppHost, PER_USER_RANGE, reply};
@@ -56,6 +58,8 @@ const BIND_IMPORTANT_BACKGROUND: i64 = 0x80_0000;
 /// `ApplicationInfo.FLAG_SYSTEM`.
 const FLAG_SYSTEM: i32 = 1;
 const SYSTEM_UID: i32 = 1000;
+/// `UserHandle.USER_ALL`.
+const USER_ALL: i32 = -1;
 
 /// `java.util.Locale`, as far as spell checkers compare them: its
 /// language, script, country, variant and extensions.
@@ -363,13 +367,41 @@ impl TextServices {
             .name("textservices".into())
             .spawn(move || jobs.into_iter().for_each(|job| job()))
             .expect("the textservices thread");
-        Arc::new_cyclic(|me| TextServices {
+        let service = Arc::new_cyclic(|me| TextServices {
             host,
             settings,
             users: Mutex::default(),
             handler: Mutex::new(sender),
             me: me.clone(),
-        })
+        });
+        // `mMonitor.register(context, null, UserHandle.ALL, true)`.
+        let monitor = service.clone() as Arc<dyn PackageMonitor>;
+        service
+            .host
+            .package_monitors
+            .register(USER_ALL, Arc::downgrade(&monitor));
+        service
+    }
+
+    /// `TextServicesMonitor.onSomePackagesChanged`: the user's spell
+    /// checkers found again (`initializeTextServicesData`) and, while
+    /// enabled, a system one selected if none was. A changed package is not
+    /// disappearing (`isPackageDisappearing`), so a selected one stays.
+    fn packages_changed(&self, user: i32) -> Result<(), Exception> {
+        let mut users = self.users.lock().unwrap();
+        let Some(data) = users.get_mut(&user) else {
+            return Ok(());
+        };
+        let selected = self.current(data, user)?;
+        data.checkers = self.find_checkers(user)?;
+        if !self.enabled(user)? {
+            return Ok(());
+        }
+        if selected.is_none() {
+            let sci = self.avail_system_checker(&data.checkers);
+            self.set_current(sci.as_deref(), user)?;
+        }
+        Ok(())
     }
 
     fn post(&self, job: impl FnOnce() + Send + 'static) {
@@ -951,6 +983,27 @@ impl TextServices {
 }
 
 /// `InternalServiceConnection`.
+impl PackageMonitor for TextServices {
+    /// On its handler (`register(context, null, ...)`), when the whole
+    /// package changed (`onPackageChanged`'s default).
+    fn package_changed(&self, change: &PackageChanged<'_>) {
+        if !change.some_packages_changed() {
+            return;
+        }
+        let (me, user) = (self.me.clone(), change.user);
+        self.post(move || {
+            if let Some(me) = me.upgrade()
+                && let Err(e) = me.packages_changed(user)
+            {
+                eprintln!(
+                    "app host: textservices: packages of user {user}: {}",
+                    e.message
+                );
+            }
+        });
+    }
+}
+
 struct Connection {
     services: Weak<TextServices>,
     user: i32,
