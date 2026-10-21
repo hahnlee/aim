@@ -78,11 +78,13 @@ pub fn open(guest: &str, flags: u64) -> Option<i64> {
             return Some(-(e as i64));
         }
         super::fdtab::set_flags(fd, false, flags & O_CLOEXEC != 0);
-        super::fdtab::insert(fd, super::fdtab::Kind::Ashmem);
+        // Recorded once published: a region that never reached the guest
+        // leaves no entry behind its closed fd.
         if let Err(error) = super::fdtab::publish_typed_guest(fd) {
             libc::close(fd);
             return Some(-(error as i64));
         }
+        super::fdtab::insert(fd, super::fdtab::Kind::Ashmem);
         fd as i64
     })
 }
@@ -555,8 +557,8 @@ mod tests {
         );
         assert_eq!(ioctl(fd, GET_NAME, buf.as_mut_ptr() as u64), Some(0));
         assert_eq!(&buf[..13], &name);
-        // SAFETY: our fds.
-        unsafe { libc::close(fd) };
+        // The guest's close, which drops the region's entry.
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
     }
 
     #[test]
@@ -579,7 +581,7 @@ mod tests {
             ioctl(fd, GET_PIN_STATUS, all.as_ptr() as u64),
             Some(IS_UNPINNED)
         );
-        // SAFETY: our fd.
-        unsafe { libc::close(fd) };
+        // The guest's close, which drops the region's entry.
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
     }
 }
