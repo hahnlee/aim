@@ -167,12 +167,10 @@ fn account_value(account: &Account) -> ParcelValue {
 
 /// `UUID.randomUUID().toString()`.
 fn random_uuid() -> String {
-    let mut b = [0u8; 16];
-    // SAFETY: fills the buffer it is given.
-    unsafe { libc::arc4random_buf(b.as_mut_ptr().cast(), b.len()) };
-    b[6] = b[6] & 0x0f | 0x40;
-    b[8] = b[8] & 0x3f | 0x80;
-    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    let hex: String = super::boot_policy::random_uuid()
+        .iter()
+        .map(|x| format!("{x:02x}"))
+        .collect();
     format!(
         "{}-{}-{}-{}-{}",
         &hex[..8],

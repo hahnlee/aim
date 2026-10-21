@@ -36,6 +36,7 @@ pub mod battery_stats;
 pub mod bind;
 mod blob_store;
 pub mod bluetooth_manager;
+pub mod boot_policy;
 mod broadcast_response;
 pub mod broadcasts;
 pub mod bugreport;

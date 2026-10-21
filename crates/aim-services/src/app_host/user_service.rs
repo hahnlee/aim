@@ -22,6 +22,8 @@ use crate::bundle::Value;
 
 /// The only user.
 const SYSTEM_USER: i32 = 0;
+/// `UserManager.DISALLOW_DEBUGGING_FEATURES`.
+const DISALLOW_DEBUGGING_FEATURES: &str = "no_debugging_features";
 /// `UserHandle.USER_NULL`, also `UserInfo.NO_PROFILE_GROUP_ID`.
 const USER_NULL: i32 = -10000;
 /// `UserInfo.FLAG_PRIMARY`, `FLAG_ADMIN`, `FLAG_DISABLED`, `FLAG_DEMO`,
@@ -507,6 +509,31 @@ pub(super) fn managed_profiles(host: &AppHost, user: i32) -> Result<Vec<i32>, Ex
         }
     }
     Ok(managed)
+}
+
+/// The users the package boot scan installs for (`Settings.getAllUsers`:
+/// `getUsers(true, false, false)`, no partial user), with each one's
+/// `isAdbInstallDisallowed` (`hasUserRestriction(DISALLOW_DEBUGGING_FEATURES)`).
+pub(super) fn scan_users(host: &AppHost) -> Result<Vec<crate::package::scan::User>, Exception> {
+    if host.device_policies()?.owned() {
+        return Err(host.unimplemented_named(
+            "user",
+            "a device or profile owner's user restrictions (#1521)",
+        ));
+    }
+    let (path, bytes) = host.user_file()?;
+    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+    let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
+    if info.partial {
+        return Ok(Vec::new());
+    }
+    Ok(vec![crate::package::scan::User {
+        id: info.id,
+        pre_created: info.pre_created,
+        adb_install_disallowed: host
+            .user_restrictions()?
+            .contains(DISALLOW_DEBUGGING_FEATURES),
+    }])
 }
 
 /// The flags of a user that exists and is not partial.
