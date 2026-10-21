@@ -922,6 +922,7 @@ mod tests {
             mac: netif::ETH0_MAC,
             addrs: Vec::new(),
             carrier: true,
+            conf6: Default::default(),
         };
         let a = Addr::new("192.168.1.20".parse().unwrap(), 24);
         let m = addr_msg(RTM_NEWADDR, 0, 7, 99, &l, &a);

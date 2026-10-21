@@ -244,6 +244,12 @@ fn network_devices() {
     check("t_netif", &[]);
 }
 
+/// IPv6 on eth0 (#267).
+#[test]
+fn network_ipv6() {
+    check("t_ipv6", &[]);
+}
+
 /// The Mac's network changes, through the boot's test hook
 /// (`<runtime>/net/simulate`) shown to the program.
 #[test]

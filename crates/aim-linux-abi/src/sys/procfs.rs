@@ -1354,8 +1354,11 @@ pub fn node(guest: &str) -> Option<Node> {
 }
 
 fn sys_node(tail: &str) -> Option<Node> {
+    if tail == "net" || tail.starts_with("net/") {
+        return super::ipv6conf::node(tail.strip_prefix("net").unwrap().trim_start_matches('/'));
+    }
     Some(match tail {
-        "" => Node::Dir(entries(&[("kernel", dir::DT_DIR)])),
+        "" => Node::Dir(entries(&[("kernel", dir::DT_DIR), ("net", dir::DT_DIR)])),
         "kernel" => Node::Dir(entries(&[
             ("hostname", dir::DT_REG),
             ("osrelease", dir::DT_REG),
@@ -1747,6 +1750,11 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
     if canonical(guest) == "/proc/kmsg" {
         return Some(super::kmsg::open_proc(flags, host_flags));
     }
+    if let Some(rest) = canonical(guest).strip_prefix("/proc/sys/net/ipv6/conf/")
+        && let Some(r) = super::ipv6conf::open(rest, flags & O_ACCMODE != 1, write, cloexec)
+    {
+        return Some(r);
+    }
     if let Some((host, st)) = recorded(guest)
         && st.st_mode & libc::S_IFMT != libc::S_IFDIR
     {
@@ -1989,7 +1997,12 @@ pub fn stat(guest: &str, follow: bool) -> Option<Result<libc::stat, Errno>> {
             stat
         }));
     }
-    if let Some((_, mut st)) = recorded(guest) {
+    let conf6 = canon
+        .strip_prefix("/proc/sys/net/ipv6/conf/")
+        .and_then(super::ipv6conf::file_mode);
+    if conf6.is_none()
+        && let Some((_, mut st)) = recorded(guest)
+    {
         (st.st_uid, st.st_gid) = owner;
         return Some(Ok(st));
     }
@@ -2006,6 +2019,10 @@ pub fn stat(guest: &str, follow: bool) -> Option<Result<libc::stat, Errno>> {
     st.st_mtime = now;
     st.st_ctime = now;
     match node(&canon) {
+        Some(Node::File(_)) if conf6.is_some() => {
+            st.st_mode = libc::S_IFREG as u16 | conf6.unwrap() as u16;
+            st.st_nlink = 1;
+        }
         Some(Node::File(_) | Node::NetTable(_) | Node::MountTable { .. }) => {
             st.st_mode = libc::S_IFREG | 0o444;
             st.st_nlink = 1;

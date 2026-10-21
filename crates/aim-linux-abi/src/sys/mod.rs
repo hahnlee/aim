@@ -33,6 +33,7 @@ mod genetlink;
 mod genfs;
 mod host_descriptors;
 mod inotify;
+mod ipv6conf;
 mod itimer;
 mod jit;
 mod kmsg;
