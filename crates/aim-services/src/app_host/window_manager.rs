@@ -47,6 +47,8 @@ const FIRST_SEQ: i32 = i32::MIN + 1;
 /// `InsetsSource.ID_IME`, `WindowInsets.Type.ime()`.
 const ID_IME: i32 = 3;
 const TYPE_IME: i32 = 1 << 3;
+/// `WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON`.
+const FLAG_KEEP_SCREEN_ON: i32 = 0x80;
 
 /// A window added through a session, its `IWindow` held.
 struct Window {
@@ -1055,6 +1057,24 @@ impl super::AppHost {
             w.pid != pid
         });
         self.remove_layers(gone);
+        self.update_holds_screen();
+    }
+
+    /// `RootWindowContainer.handleNotObscuredLocked`'s hold screen: a
+    /// window with a surface that asks `FLAG_KEEP_SCREEN_ON` keeps the
+    /// screen on. No window is obscured: each task is a Mac window of its
+    /// own.
+    pub(super) fn update_holds_screen(&self) {
+        let hold = self
+            .windows
+            .windows
+            .lock()
+            .unwrap()
+            .values()
+            .any(|w| w.layer.is_some() && w.attrs.flags & FLAG_KEEP_SCREEN_ON != 0);
+        if let Some(power) = self.power_service.get() {
+            power.set_window_holds_screen(hold);
+        }
     }
 
     /// `Transaction.remove` of `layers`, which go with their children.
@@ -1230,6 +1250,7 @@ impl Service for Session {
                 let removed = self.host.windows.windows.lock().unwrap().remove(&window);
                 self.host
                     .remove_layers(removed.and_then(|w| w.container).into_iter().collect());
+                self.host.update_holds_screen();
                 let mut p = Parcel::new();
                 p.write_no_exception();
                 Ok(p)
@@ -1239,7 +1260,9 @@ impl Service for Session {
                 // seq, lastSyncSeqId.
                 let (window, tail) = Self::window_and_tail(call, 6)?;
                 let attrs = Self::attrs_of(call)?;
-                reply(self.relayout(window, attrs, (tail[0], tail[1]), tail[2]))
+                let relayout = self.relayout(window, attrs, (tail[0], tail[1]), tail[2]);
+                self.host.update_holds_screen();
+                reply(relayout)
             }
             // A relayout whose results the window does not wait for
             // (oneway): its layer is made and its sequence numbers go on
@@ -1250,6 +1273,7 @@ impl Service for Session {
                 if let Err(e) = self.relayout(window, attrs, (tail[0], tail[1]), tail[2]) {
                     eprintln!("app host: relayoutAsync: {e:?}");
                 }
+                self.host.update_holds_screen();
                 Ok(Parcel::new())
             }
             // Oneway: kept as `WindowState.setRequestedVisibleTypes` keeps
