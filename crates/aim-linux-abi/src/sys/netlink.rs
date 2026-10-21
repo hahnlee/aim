@@ -58,6 +58,8 @@ const RTM_SETLINK: u16 = 19;
 const RTM_NEWADDR: u16 = 20;
 const RTM_DELADDR: u16 = 21;
 const RTM_GETADDR: u16 = 22;
+const RTM_NEWPREFIX: u16 = 52;
+const RTM_NEWNDUSEROPT: u16 = 68;
 const RTM_NEWROUTE: u16 = 24;
 const RTM_DELROUTE: u16 = 25;
 const RTM_GETROUTE: u16 = 26;
@@ -98,6 +100,15 @@ const GRP_LINK: u32 = 1 << 0;
 const GRP_IPV4_IFADDR: u32 = 1 << 4;
 const GRP_IPV6_IFADDR: u32 = 1 << 8;
 const GRP_IPV6_ROUTE: u32 = 1 << 10;
+const GRP_IPV6_PREFIX: u32 = 1 << 17;
+const GRP_ND_USEROPT: u32 = 1 << 19;
+/// `NDUSEROPT_SRCADDR`, `PREFIX_ADDRESS`, `PREFIX_CACHEINFO`.
+const NDUSEROPT_SRCADDR: u16 = 1;
+const PREFIX_ADDRESS: u16 = 1;
+const PREFIX_CACHEINFO: u16 = 2;
+/// `ICMPV6_ROUTER_ADVERTISEMENT`, `ND_OPT_PREFIX_INFORMATION`.
+const ICMPV6_ROUTER_ADVERTISEMENT: u8 = 134;
+const ND_OPT_PREFIX_INFORMATION: u8 = 3;
 
 const NETLINK_ADD_MEMBERSHIP: u64 = 1;
 const NETLINK_DROP_MEMBERSHIP: u64 = 2;
@@ -547,6 +558,37 @@ pub fn announce(events: &[Event]) {
             }
             Event::NewRoute(r) => (GRP_IPV6_ROUTE, route_msg(RTM_NEWROUTE, 0, 0, 0, r)),
             Event::DelRoute(r) => (GRP_IPV6_ROUTE, route_msg(RTM_DELROUTE, 0, 0, 0, r)),
+            Event::UserOpt { index, opt, router } => {
+                // struct nduseroptmsg, the option, NDUSEROPT_SRCADDR
+                // (`ndisc_ra_useropt`).
+                let mut b = vec![10u8, 0];
+                b.extend_from_slice(&(opt.len() as u16).to_le_bytes());
+                b.extend_from_slice(&(*index as i32).to_le_bytes());
+                b.extend_from_slice(&[ICMPV6_ROUTER_ADVERTISEMENT, 0, 0, 0, 0, 0, 0, 0]);
+                b.extend_from_slice(opt);
+                b.resize(align(b.len()), 0);
+                attr(&mut b, NDUSEROPT_SRCADDR, &router.octets());
+                (GRP_ND_USEROPT, nlmsg(RTM_NEWNDUSEROPT, 0, 0, 0, &b))
+            }
+            Event::Prefix {
+                index,
+                prefix,
+                plen,
+                flags,
+                valid,
+                preferred,
+            } => {
+                // struct prefixmsg, PREFIX_ADDRESS, PREFIX_CACHEINFO
+                // (`inet6_fill_prefix`).
+                let mut b = vec![10u8, 0, 0, 0];
+                b.extend_from_slice(&(*index as i32).to_le_bytes());
+                b.extend_from_slice(&[ND_OPT_PREFIX_INFORMATION, *plen, *flags, 0]);
+                attr(&mut b, PREFIX_ADDRESS, &prefix.octets());
+                let mut ci = preferred.to_le_bytes().to_vec();
+                ci.extend_from_slice(&valid.to_le_bytes());
+                attr(&mut b, PREFIX_CACHEINFO, &ci);
+                (GRP_IPV6_PREFIX, nlmsg(RTM_NEWPREFIX, 0, 0, 0, &b))
+            }
         })
         .collect();
     broadcast(NETLINK_ROUTE, &msgs, KERNEL, None);
@@ -1003,6 +1045,7 @@ mod tests {
             carrier: true,
             conf6: Default::default(),
             ready6: false,
+            desync6: 0,
         };
         let a = Addr::new("192.168.1.20".parse().unwrap(), 24);
         let m = addr_msg(RTM_NEWADDR, 0, 7, 99, &l, &a);

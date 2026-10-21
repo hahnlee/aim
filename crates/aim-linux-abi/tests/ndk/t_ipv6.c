@@ -337,8 +337,93 @@ static void autoconf(void) {
   close(ev);
 }
 
-int main(void) {
+// The boot's test hook (`<runtime>/net/simulate`), shown at argv[1].
+static const char* hook;
+
+static void simulate(const char* text) {
+  int fd = open(hook, O_WRONLY | O_TRUNC | O_CLOEXEC);
+  if (fd >= 0) {
+    write(fd, text, strlen(text));
+    close(fd);
+  }
+}
+
+static int is_rdnss(struct nlmsghdr* h) {
+  struct nduseroptmsg* m = NLMSG_DATA(h);
+  unsigned char* opt = (unsigned char*)(m + 1);
+  return m->nduseropt_family == AF_INET6 && m->nduseropt_ifindex == 2 &&
+         m->nduseropt_icmp_type == 134 && opt[0] == 25;
+}
+
+static int has_addr(struct v6addr* a, int n, const char* ip, int flags) {
+  struct in6_addr x;
+  inet_pton(AF_INET6, ip, &x);
+  for (int i = 0; i < n; i++) {
+    if (!memcmp(&a[i].a, &x, 16) && (a[i].flags & flags) == flags) return 1;
+  }
+  return 0;
+}
+
+// The Mac's IPv6 network through the test hook: eth0's solicitation is
+// answered with the Mac's prefix, so SLAAC and temporary addresses, a
+// default route via the router's link-local address, and RDNSS for
+// userspace; the router follows the Mac to another network and away.
+static void router(void) {
+  simulate("addr6 2001:db8:1:2::5/64\ndns6 2001:db8::53\n");
+  CHECK(put(CONF "eth0/dad_transmits", "0") == 0);
+  CHECK(put(CONF "eth0/use_tempaddr", "2") == 0);
+  int ev = rtnl(1 << (RTNLGRP_ND_USEROPT - 1));
+  CHECK(ev >= 0);
+  CHECK(set_up(1) == 0);
+  char buf[8192];
+  CHECK(wait_msg(ev, RTM_NEWNDUSEROPT, buf, sizeof buf, is_rdnss) > 0);
+  struct nduseroptmsg* m = NLMSG_DATA(buf);
+  unsigned char* opt = (unsigned char*)(m + 1);
+  struct in6_addr dns;
+  inet_pton(AF_INET6, "2001:db8::53", &dns);
+  CHECK(m->nduseropt_opts_len == 24 && opt[1] == 3 && !memcmp(opt + 8, &dns, 16));
+  CHECK(opt[4] == 0 && opt[5] == 0 && opt[6] == 0x07 && opt[7] == 0x08);  // 1800 s
+  struct v6addr a[8];
+  int n = addrs6(a, 8);
+  CHECK(has_addr(a, n, "2001:db8:1:2:61:69ff:fe6d:2", 0));
+  CHECK(!has_addr(a, n, "2001:db8:1:2:61:69ff:fe6d:2", IFA_F_PERMANENT));
+  int temps = 0;
+  for (int i = 0; i < n; i++) temps += (a[i].flags & IFA_F_TEMPORARY) && a[i].a.s6_addr[0] == 0x20;
+  CHECK(temps == 1);
+  struct v6route r[32];
+  int nr = routes6(r, 32);
+  struct in6_addr gw;
+  inet_pton(AF_INET6, "fe80::61:69ff:fe6d:1", &gw);
+  int dflt = 0;
+  for (int i = 0; i < nr; i++) {
+    dflt |= r[i].plen == 0 && r[i].has_gw && !memcmp(&r[i].gw, &gw, 16) &&
+            r[i].proto == RTPROT_RA && r[i].metric == 1024 && r[i].oif == 2;
+  }
+  CHECK(dflt);
+  CHECK(has_prefix_route("2001:db8:1:2::"));
+  CHECK(strcmp(get(CONF "eth0/hop_limit"), "64\n") == 0);
+  // Another IPv6 network: the old prefix deprecated, the new one taken.
+  simulate("addr6 2001:db8:9:9::5/64\n");
+  n = addrs6(a, 8);
+  CHECK(has_addr(a, n, "2001:db8:9:9:61:69ff:fe6d:2", 0));
+  CHECK(has_addr(a, n, "2001:db8:1:2:61:69ff:fe6d:2", IFA_F_DEPRECATED));
+  CHECK(!has_prefix_route("2001:db8:1:2::") && has_prefix_route("2001:db8:9:9::"));
+  // No IPv6 on the Mac: the router's lifetime goes to zero.
+  simulate("down6\n");
+  nr = routes6(r, 32);
+  dflt = 0;
+  for (int i = 0; i < nr; i++) dflt |= r[i].plen == 0;
+  CHECK(!dflt);
+  CHECK(set_up(0) == 0);
+  CHECK(put(CONF "eth0/dad_transmits", "1") == 0);
+  simulate("");
+  close(ev);
+}
+
+int main(int argc, char** argv) {
+  hook = argc > 1 ? argv[1] : "";
   RUN(sysctls);
   RUN(autoconf);
+  RUN(router);
   DONE();
 }
