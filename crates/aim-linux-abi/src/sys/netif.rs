@@ -28,6 +28,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::netlink;
 use super::uplink::{self, Uplink};
@@ -352,9 +353,16 @@ pub fn links() -> Vec<Link> {
     transact(|l, _| l.clone())
 }
 
-/// Follow the Mac's network (`uplink::watch`).
+/// Follow the Mac's network (`uplink::watch`): the shared device state,
+/// and this process's sockets bound to a device when the Mac's interface
+/// behind it changed.
 pub fn refresh() {
+    static HOST_INDEX: AtomicU32 = AtomicU32::new(0);
     transact(|_, _| ());
+    let index = uplink::current().map_or(0, |u| u.index);
+    if HOST_INDEX.swap(index, Ordering::Relaxed) != index {
+        super::net::rebind_devices(index);
+    }
 }
 
 pub fn by_index(index: u32) -> Option<Link> {
@@ -478,6 +486,12 @@ fn set_netmask_v4(index: u32, mask: Ipv4Addr) -> Result<(), Errno> {
 /// The host interface a guest socket bound to device `name` uses
 /// (`SO_BINDTODEVICE` as `IP_BOUND_IF`): 0 for none.
 pub fn host_index_of(name: &str) -> Result<u32, Errno> {
+    host_index_with(name, uplink::current().map_or(0, |u| u.index))
+}
+
+/// The same, with the Mac's interface `uplink` (0 for none) behind the
+/// guest's network devices.
+pub fn host_index_with(name: &str, uplink: u32) -> Result<u32, Errno> {
     if name.is_empty() {
         return Ok(0);
     }
@@ -485,7 +499,7 @@ pub fn host_index_of(name: &str) -> Result<u32, Errno> {
     Ok(if l.loopback() {
         uplink::host_index("lo0")
     } else {
-        uplink::current().map_or(0, |u| u.index)
+        uplink
     })
 }
 

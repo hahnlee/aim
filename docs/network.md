@@ -109,7 +109,9 @@ Mac: new DNS servers only        the next renewal (a DHCPACK with them)
 - **Test hook.** `<runtime>/net/simulate` (`<data>.run/net/simulate` for
   `cargo aim boot`) changes what the guest sees without touching the Mac:
   `down` takes the network away; `addr A/P`, `gateway G`, `dns S...` and
-  `lease SECONDS` replace those values of the Mac's network. An empty or
+  `lease SECONDS` replace those values of the Mac's network, and
+  `interface NAME` puts host interface NAME behind it, as the Mac moving
+  from Wi-Fi to cable does. An empty or
   missing file is the Mac's network as it is. Guest sockets still use the
   Mac's real network, so a simulated address is only what Android is told.
 
@@ -149,7 +151,9 @@ SKF_NET_OFF). Packet sockets of other processes do not see these frames.
 
 - `SO_MARK` is kept per socket (DnsResolver marks its queries; a failure
   failed every lookup); `SO_BINDTODEVICE` binds the host socket to the
-  interface behind the device (`IP_BOUND_IF`/`IPV6_BOUND_IF`).
+  interface behind the device (`IP_BOUND_IF`/`IPV6_BOUND_IF`). The
+  process then follows the Mac's network, and when another of the Mac's
+  interfaces comes behind the device its bound sockets move to it.
 - `SO_PROTOCOL` is the host socket's protocol. libcore exempts UDP
   `connect` from StrictMode's network-on-main-thread check by it.
 - An AF_INET6 address on an AF_INET socket is EAFNOSUPPORT (Darwin says

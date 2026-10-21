@@ -3282,25 +3282,59 @@ fn inet_option(fd: i32, o: &InetOpts, opt: u64, val: u64, len: u32) -> i64 {
         Ok(i) => i,
         Err(e) => return -(e as i64),
     };
-    // IP_BOUND_IF or IPV6_BOUND_IF, by the socket's family.
+    if let Err(e) = bind_host_interface(fd, index) {
+        return -(e as i64);
+    }
+    let bound = !name.is_empty();
+    *o.device.lock().unwrap() = name;
+    // The device stays bound when the Mac's interface behind it changes:
+    // this process follows the Mac's network to bind the new one
+    // (`rebind_devices`).
+    if bound {
+        super::uplink::watch(super::netif::refresh);
+    }
+    0
+}
+
+/// Binds host socket `fd` to host interface `index` (0 for none):
+/// IP_BOUND_IF or IPV6_BOUND_IF, by the socket's family.
+fn bind_host_interface(fd: i32, index: u32) -> Result<(), errno::Errno> {
     let mut sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
     let mut sl = std::mem::size_of::<libc::sockaddr_storage>() as u32;
     // SAFETY: getsockname into local storage.
     unsafe { libc::getsockname(fd, (&mut sa as *mut libc::sockaddr_storage).cast(), &mut sl) };
     let v6 = sa.ss_family as i32 == libc::AF_INET6;
-    let (l, o2) = if v6 {
+    let (l, o) = if v6 {
         (libc::IPPROTO_IPV6, libc::IPV6_BOUND_IF)
     } else {
         (libc::IPPROTO_IP, libc::IP_BOUND_IF)
     };
     let i = index as i32;
     // SAFETY: an int option on the host socket.
-    let r = unsafe { libc::setsockopt(fd, l, o2, (&i as *const i32).cast(), 4) };
-    if r < 0 {
-        return -(errno::last() as i64);
+    if unsafe { libc::setsockopt(fd, l, o, (&i as *const i32).cast(), 4) } < 0 {
+        return Err(errno::last());
     }
-    *o.device.lock().unwrap() = name;
-    0
+    Ok(())
+}
+
+/// SO_BINDTODEVICE binds a socket to the device, whichever of the Mac's
+/// interfaces is behind it: this process's sockets bound to a device move
+/// to the interface behind it now, `uplink` (the Mac moving from Wi-Fi to
+/// cable).
+pub(super) fn rebind_devices(uplink: u32) {
+    let bound = fdtab::fds_where(
+        |k| matches!(k, Kind::Sock(s) if matches!(&s.family, Family::Inet(o) if !o.device.lock().unwrap().is_empty())),
+    );
+    for (fd, kind) in bound {
+        let Kind::Sock(s) = kind else { continue };
+        let Family::Inet(o) = &s.family else { continue };
+        let name = o.device.lock().unwrap().clone();
+        let rebound =
+            super::netif::host_index_with(&name, uplink).and_then(|i| bind_host_interface(fd, i));
+        if let Err(e) = rebound {
+            crate::diag!("[linux-abi] net: rebinding fd {fd} to device {name}: errno {e}");
+        }
+    }
 }
 
 /// The protocol of a host socket (`soi_protocol` of its
