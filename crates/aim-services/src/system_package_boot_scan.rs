@@ -8,7 +8,7 @@ use crate::{
         scan::{SavedSystemScanInputs, SigningScan, SystemImagePackages},
         scan_snapshot::query_state::Capture,
     },
-    system_package_lifecycle::{Production, Restored},
+    system_package_lifecycle::{LifecycleFacts, Production, Restored},
     system_package_persistence_init::Prepared,
 };
 use aim_service_aidl::dev_aim_server_ipackageinitialcontextleaf as initial;
@@ -385,8 +385,7 @@ impl System {
         let live = initial.clone();
         let lifecycle = Production::construct(
             restored,
-            bridge,
-            ce_leaf,
+            LifecycleFacts::original(bridge, ce_leaf)?,
             Box::new(move |name| live.property_value(name)),
         )?;
         let values = initial.clone();
