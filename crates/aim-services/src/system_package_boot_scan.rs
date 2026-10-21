@@ -413,7 +413,7 @@ impl System {
         self: &Arc<Self>,
         bridge: &Arc<Bridge>,
         mut begin: Begun,
-        original_context: Strong,
+        mut original: crate::package::scan_snapshot::boot_context::Original,
         runtime_system: model::System,
         classes: Arc<aim_android_image::linkage::Hierarchy>,
         apks: &crate::package::write::Apks,
@@ -434,17 +434,6 @@ impl System {
         let boot = bridge
             .resolve_boot(&begin.system_config, &props)
             .map_err(|error| failure(format!("actual boot inputs: {error:?}")))?;
-        let settings_leaf = Arc::new(self.binder_process().strong(original_context.handle));
-        let mut original =
-            crate::package::scan_snapshot::boot_context::Original::capture(&original_context)
-                .map_err(failure)?
-                .bind_settings(settings_leaf);
-        original
-            .resolver
-            .settings_owner
-            .as_ref()
-            .ok_or_else(|| failure("native initial settings owner absent"))?
-            .register_updates(&self.binder_process())?;
         let source = begin.prepared.disk.lock().unwrap();
         let saved_users = source
             .state()

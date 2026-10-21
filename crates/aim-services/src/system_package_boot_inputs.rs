@@ -569,10 +569,24 @@ impl System {
                 )
                 .map_err(|error| format!("incremental filesystem owner: {error:?}"))
         };
+        // The boot context as system_server's leaf captures it (UserManager's
+        // users, the resolver resources, compatibility mode), with the leaf
+        // as the live settings owner.
+        self.check_package_bootstrap(bridge)?;
+        let settings_leaf = Arc::new(self.binder_process().strong(context.handle));
+        let original = crate::package::scan_snapshot::boot_context::Original::capture(&context)
+            .map_err(failed)?
+            .bind_settings(settings_leaf);
+        original
+            .resolver
+            .settings_owner
+            .as_ref()
+            .ok_or_else(|| failed("native initial settings owner absent".into()))?
+            .register_updates(&self.binder_process())?;
         self.finish_raw_native_package_scan(
             bridge,
             begin,
-            context,
+            original,
             runtime,
             classes,
             apks,
