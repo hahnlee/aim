@@ -15,6 +15,8 @@ use aim_service_aidl::dev_aim_server_ipackageinitialcontextleaf as initial;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use super::package_boot_inputs::{PlatformFacts, ScanFacts};
+
 /// Root binds exactly one early original serializer, constructed independently
 /// of PMS after the original D2 UserManagerService singleton is installed.
 pub struct InitialOwner {
@@ -127,15 +129,6 @@ impl InitialOwner {
             ))
         })
     }
-    pub(super) fn capture_scan_inputs(&self) -> Result<Vec<u8>> {
-        self.invoke(
-            initial::CAPTURE_IMAGE_SCAN_INPUTS,
-            |_| {},
-            |reader| {
-                aim_service_aidl::read_byte_array(reader)?.ok_or(aim_binder_host::parcel::BAD_VALUE)
-            },
-        )
-    }
     pub(super) fn property_value(&self, name: &str) -> Option<String> {
         match self.property(name) {
             Ok(value) => value,
@@ -155,6 +148,66 @@ impl InitialOwner {
         }
     }
     pub(super) fn property(&self, name: &str) -> Result<Option<String>> {
+        <Self as PlatformFacts>::property(self, name)
+    }
+}
+/// system_server's facts, as its initial-context leaf captures them.
+impl PlatformFacts for InitialOwner {
+    fn scan_facts(&self) -> Result<ScanFacts> {
+        let bytes = self.invoke(
+            initial::CAPTURE_IMAGE_SCAN_INPUTS,
+            |_| {},
+            |reader| {
+                aim_service_aidl::read_byte_array(reader)?.ok_or(aim_binder_host::parcel::BAD_VALUE)
+            },
+        )?;
+        let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+        let error = |code| failure(format!("original scan facts: {code}"));
+        if reader.read_i32().map_err(error)? != 1 {
+            return Err(failure("scan facts schema"));
+        }
+        let strings = |reader: &mut aim_binder_host::parcel::Reader<'_>| -> Result<Vec<String>> {
+            let count = reader.read_i32().map_err(error)?;
+            if count < 0 {
+                return Err(error(-22));
+            }
+            let mut output = Vec::new();
+            for _ in 0..count {
+                output.push(
+                    reader
+                        .read_string16()
+                        .map_err(error)?
+                        .ok_or_else(|| error(-22))?,
+                );
+            }
+            Ok(output)
+        };
+        let abis = strings(&mut reader)?;
+        let abis32 = strings(&mut reader)?;
+        let abis64 = strings(&mut reader)?;
+        let runtime_64 = reader.read_bool().map_err(error)?;
+        let app_lib32 = reader
+            .read_string16()
+            .map_err(error)?
+            .ok_or_else(|| error(-22))?;
+        let current_time = reader.read_i64().map_err(error)?;
+        let page_size = reader.read_i64().map_err(error)?;
+        let debuggable = reader.read_bool().map_err(error)?;
+        if reader.remaining() != 0 || page_size <= 0 {
+            return Err(error(-22));
+        }
+        Ok(ScanFacts {
+            abis,
+            abis32,
+            abis64,
+            runtime_64,
+            app_lib32,
+            current_time,
+            page_size,
+            debuggable,
+        })
+    }
+    fn property(&self, name: &str) -> Result<Option<String>> {
         let mut request = Parcel::new();
         initial::GetLiveProperty {
             name: Some(name.into()),
