@@ -2,7 +2,9 @@
 //! snapshot. No endpoint reconstructs a live owner from a displaced PMS feed.
 mod home;
 mod mutations;
-pub use home::{activities as home_activities, default_home as default_home_for_instant};
+pub use home::{
+    activities as home_activities, default_home as default_home_for_instant, home_plan,
+};
 pub use mutations::{METHODS as MUTATION_METHODS, answer as mutation};
 
 use super::*;

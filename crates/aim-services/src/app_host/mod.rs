@@ -117,6 +117,7 @@ pub mod settings_provider;
 pub mod settings_service;
 pub mod settings_validators;
 pub mod shortcut_service;
+pub mod slice;
 pub mod stats_manager;
 pub mod status_bar;
 pub mod storage;
@@ -853,6 +854,7 @@ impl AppHost {
                 "restrictions",
                 Arc::new(restrictions_service::RestrictionsManager::new(self.clone())),
             ),
+            ("slice", slice::SliceManager::new(self.clone())),
             (
                 "legacy_permission",
                 Arc::new(legacy_permission::LegacyPermissionManager::new(
