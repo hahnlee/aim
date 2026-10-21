@@ -12,6 +12,10 @@
 //!   ranges are in an extended attribute.
 //!
 //! Unpinned pages are never purged: PIN reports ASHMEM_NOT_PURGED.
+//!
+//! As the driver's file has no write, writes through the fd fail with
+//! EINVAL, and a mapping is named in `/proc/self/maps` as the shmem file
+//! the driver maps is (`ashmem_mmap`).
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, OnceLock};
@@ -74,6 +78,7 @@ pub fn open(guest: &str, flags: u64) -> Option<i64> {
             return Some(-(e as i64));
         }
         super::fdtab::set_flags(fd, false, flags & O_CLOEXEC != 0);
+        super::fdtab::insert(fd, super::fdtab::Kind::Ashmem);
         if let Err(error) = super::fdtab::publish_typed_guest(fd) {
             libc::close(fd);
             return Some(-(error as i64));
@@ -141,6 +146,60 @@ pub fn stat(guest: &str) -> Option<libc::stat> {
 /// Link text for `/proc/self/fd/N`.
 pub fn link_name(st: &libc::stat) -> Option<String> {
     marked(st).then(|| "/dev/ashmem".to_string())
+}
+
+/// A region's fd that arrived (by fork, exec, binder or `SCM_RIGHTS`) as a
+/// plain fd.
+pub fn adopt(fd: i32) {
+    if stat_of(fd).is_some() {
+        super::fdtab::insert(fd, super::fdtab::Kind::Ashmem);
+    }
+}
+
+/// The names of the regions this process mapped, by (device, inode): a
+/// region's name is fixed once it is mapped.
+static MAPPED: LazyLock<Mutex<HashMap<(u64, u64), Vec<u8>>>> = LazyLock::new(Default::default);
+
+/// Regions are not seen unmapping: past this many names, those of regions
+/// no longer mapped are dropped.
+const MAPPED_KEPT: usize = 1024;
+
+fn record_mapped(key: (u64, u64), name: Vec<u8>) {
+    let mut names = MAPPED.lock().unwrap_or_else(|e| e.into_inner());
+    if names.len() >= MAPPED_KEPT && !names.contains_key(&key) {
+        let live: std::collections::HashSet<(u64, u64)> = super::vmmap::regions(0, u64::MAX)
+            .filter_map(|r| r.file.map(|(_, d, i)| (d, i)))
+            .collect();
+        names.retain(|k, _| live.contains(k));
+    }
+    names.insert(key, name);
+}
+
+/// `/dev/ashmem/<name> (deleted)` for a mapping of a region in
+/// `/proc/self/maps`: the driver maps a shmem file named `dev/ashmem/<name>`,
+/// or `dev/ashmem` for a region without a name.
+pub fn map_name(dev: u64, ino: u64) -> Option<String> {
+    let names = MAPPED.lock().unwrap_or_else(|e| e.into_inner());
+    let name = names.get(&(dev, ino))?;
+    Some(if name.is_empty() {
+        "/dev/ashmem (deleted)".into()
+    } else {
+        format!("/dev/ashmem/{} (deleted)", String::from_utf8_lossy(name))
+    })
+}
+
+pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
+    let names = MAPPED.lock().unwrap_or_else(|e| e.into_inner());
+    w.seq(names.iter(), |w, ((d, i), name)| {
+        w.u64(*d);
+        w.u64(*i);
+        w.bytes(name);
+    });
+}
+
+pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
+    let v = r.seq(|r| ((r.u64(), r.u64()), r.bytes()));
+    *MAPPED.lock().unwrap_or_else(|e| e.into_inner()) = v.into_iter().collect();
 }
 
 /// This process's last copy of each region's state, by (device, inode),
@@ -216,6 +275,7 @@ fn page_up(n: u64) -> u64 {
 /// (its name and size are fixed from then on). None: not ashmem or fine.
 pub fn before_mmap(fd: i32, len: u64, prot: u64) -> Option<i64> {
     let st = stat_of(fd)?;
+    let mut name = Vec::new();
     let r = update(fd, &st, |s| {
         if st.st_size == 0 {
             return -(EINVAL as i64);
@@ -227,9 +287,14 @@ pub fn before_mmap(fd: i32, len: u64, prot: u64) -> Option<i64> {
             return -(EINVAL as i64);
         }
         s.mapped = true;
+        name = s.name.clone();
         0
     });
-    (r < 0).then_some(r)
+    if r < 0 {
+        return Some(r);
+    }
+    record_mapped((st.st_dev as u32 as u64, st.st_ino), name);
+    None
 }
 
 /// Add `[a, b]` to disjoint sorted ranges, or remove it.

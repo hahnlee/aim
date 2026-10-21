@@ -14,8 +14,8 @@
 use std::path::PathBuf;
 
 use crate::sys::{
-    attrs, copies, cred, fdtab, mem, memfd, misc, process, procfs, pstate, ptrace, selinuxfs,
-    signal, sync_file, thread, wait,
+    ashmem, attrs, copies, cred, fdtab, mem, memfd, misc, process, procfs, pstate, ptrace,
+    selinuxfs, signal, sync_file, thread, wait,
 };
 
 #[derive(Default)]
@@ -237,6 +237,7 @@ pub fn save(w: &mut Writer, mounts: &str) {
     mem::fork_save(w);
     copies::fork_save(w);
     memfd::fork_save(w);
+    ashmem::fork_save(w);
     attrs::fork_save(w);
     selinuxfs::fork_save(w);
     wait::fork_save(w);
@@ -283,6 +284,8 @@ pub fn restore(r: &mut Reader) -> bool {
     copies::fork_restore(r);
     r.stage("memfd");
     memfd::fork_restore(r);
+    r.stage("ashmem");
+    ashmem::fork_restore(r);
     r.stage("attrs");
     attrs::fork_restore(r);
     r.stage("selinuxfs");

@@ -54,6 +54,9 @@ pub enum Kind {
     SyncFile,
     /// `/dev/random` or `/dev/urandom` open for writing (`random`).
     Random,
+    /// An ashmem region (`ashmem`): read and mapped through its host file,
+    /// never written (the driver has no write).
+    Ashmem,
     /// A binder device file; the daemon holds its state.
     Binder(aim_binder_host::client::BinderFile),
 }
@@ -1163,6 +1166,7 @@ pub(super) fn adopt_untyped(fd: i32) {
     }
     net::adopt(fd);
     memfd::adopt(fd);
+    super::ashmem::adopt(fd);
     random::adopt(fd);
 }
 
@@ -1228,6 +1232,7 @@ pub fn anon_name(fd: i32) -> Option<String> {
             | Kind::Content
             | Kind::Knob(_)
             | Kind::Random
+            | Kind::Ashmem
             | Kind::ProxyFile
             | Kind::Binder(_) => {
                 return None;
@@ -1604,9 +1609,12 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::Epoll(a) => Arc::as_ptr(a) as *const (),
             Kind::Inotify(a) => Arc::as_ptr(a) as *const (),
             Kind::Dir(a) => Arc::as_ptr(a) as *const (),
-            Kind::Memfd(_) | Kind::SyncFile | Kind::Random | Kind::ProxyFile | Kind::Path(_) => {
-                std::ptr::null()
-            }
+            Kind::Memfd(_)
+            | Kind::SyncFile
+            | Kind::Random
+            | Kind::Ashmem
+            | Kind::ProxyFile
+            | Kind::Path(_) => std::ptr::null(),
             Kind::Content | Kind::Knob(_) | Kind::Evdev(_) | Kind::Binder(_) => continue,
         };
         let (i, new) = match objects.iter().position(|&o| !p.is_null() && o == p) {
@@ -1682,6 +1690,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             }
             Kind::SyncFile => w.u32(7),
             Kind::Random => w.u32(8),
+            Kind::Ashmem => w.u32(13),
             Kind::ProxyFile => w.u32(9),
             Kind::Path(path) => {
                 w.u32(10);
@@ -1716,6 +1725,7 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             5 => Kind::Dir(Arc::new(Mutex::new(super::dir::load(r)))),
             7 => Kind::SyncFile,
             8 => Kind::Random,
+            13 => Kind::Ashmem,
             9 => Kind::ProxyFile,
             10 => Kind::Path(PathDescription::new(r.u64())),
             11 => {

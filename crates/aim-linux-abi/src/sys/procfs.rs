@@ -542,13 +542,12 @@ pub(super) fn vmas() -> Vec<Vma> {
         // A host file outside the guest's view (linux-run, dyld, host
         // libraries, the process record) reads as anonymous memory: its
         // path is the Mac's, not a file of the guest.
-        let memfd = r
-            .file
-            .as_ref()
-            .and_then(|(path, d, i)| super::memfd::link_name(path, *d, *i));
-        let mut shmem = memfd.is_some();
+        let shmem_file = r.file.as_ref().and_then(|(path, d, i)| {
+            super::memfd::link_name(path, *d, *i).or_else(|| super::ashmem::map_name(*d, *i))
+        });
+        let mut shmem = shmem_file.is_some();
         let guest_file = r.file.as_ref().and_then(|(path, d, i)| {
-            memfd
+            shmem_file
                 .or_else(|| crate::xrt::original_guest_path_of_host(path))
                 .or_else(|| paths.as_ref().and_then(|view| view.guest_path(path)))
                 .map(|n| (n, *d, *i))
