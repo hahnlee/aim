@@ -280,6 +280,11 @@ fn cmdline(p: i32) -> Vec<u8> {
     out
 }
 
+/// This process's `comm`.
+pub(super) fn own_comm() -> String {
+    comm(pid())
+}
+
 /// The `comm` of process `p`: its main thread's.
 fn comm(p: i32) -> String {
     if let Some(n) = thread_comm(p, p) {
@@ -1684,6 +1689,9 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
     }
     let cloexec = flags & O_CLOEXEC != 0;
     let write = flags & O_ACCMODE != 0;
+    if canonical(guest) == "/proc/kmsg" {
+        return Some(super::kmsg::open_proc(flags, host_flags));
+    }
     if let Some((host, st)) = recorded(guest)
         && st.st_mode & libc::S_IFMT != libc::S_IFDIR
     {

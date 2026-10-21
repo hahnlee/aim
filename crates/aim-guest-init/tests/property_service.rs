@@ -239,11 +239,13 @@ fn ctl_messages_start_and_stop_services_with_passed_socket_fds() {
             "fd {fd}: {probe}"
         );
     }
-    // /dev/kmsg is the runtime's log file; /proc/kmsg does not exist, so
-    // its variable is not published.
+    // logd.rc's `file /proc/kmsg r` and `file /dev/kmsg w`, in order,
+    // after its sockets.
+    assert!(probe.contains("ANDROID_FILE__proc_kmsg=6"), "{probe}");
     assert!(probe.contains("ANDROID_FILE__dev_kmsg=7"), "{probe}");
-    assert!(probe.contains("fd7=open"), "{probe}");
-    assert!(!probe.contains("ANDROID_FILE__proc_kmsg"), "{probe}");
+    for fd in [6, 7] {
+        assert!(probe.contains(&format!("fd{fd}=open")), "fd {fd}: {probe}");
+    }
     let identity = std::fs::read_to_string(&identity_file).unwrap();
     assert!(identity.contains("uid\t1036\n"), "{identity}");
     assert!(identity.contains("groups\t1000 1032 3009\n"), "{identity}");

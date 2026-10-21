@@ -1413,6 +1413,11 @@ pub fn read_only_root() -> bool {
         .is_some_and(|v| v.mapped || v.read_only_dev.is_some())
 }
 
+/// Whether the guest's view has been set up.
+pub fn initialized() -> bool {
+    VFS.get().is_some()
+}
+
 fn vfs() -> &'static Vfs {
     VFS.get().expect("vfs not initialized")
 }
