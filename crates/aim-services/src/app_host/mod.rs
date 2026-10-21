@@ -140,6 +140,7 @@ mod usage_database;
 mod usage_events;
 pub mod usage_stats;
 pub mod usb_service;
+pub mod user_boot;
 pub mod user_service;
 pub mod volume;
 pub mod vpn_manager;
@@ -383,6 +384,13 @@ const SYSTEM_UID: u32 = 1000;
 /// `android` package's process.
 const SYSTEM_PROCESS: &str = "system";
 const SYSTEM_PACKAGE: &str = "android";
+
+/// Whether a component of `package` in `process` is system_server's own
+/// code: the `android` package's, in the system process, which
+/// `aim-system` does not run (#1518).
+pub(super) fn is_system_server_code(package: &str, process: &str) -> bool {
+    package == SYSTEM_PACKAGE && process == SYSTEM_PROCESS
+}
 /// `UserHandle.USER_ALL`.
 const USER_ALL: i32 = -1;
 const INTERACT_ACROSS_USERS_FULL: &str = "android.permission.INTERACT_ACROSS_USERS_FULL";
@@ -1412,7 +1420,7 @@ impl AppHost {
                 .application_info(name, STOCK_PM_FLAGS)
                 .map(|ai| ai.uid as u32);
             if uid == Some(SYSTEM_UID) {
-                if name == SYSTEM_PACKAGE {
+                if is_system_server_code(name, process) {
                     return Err(self.unimplemented_named(
                         "activity",
                         "a component of system_server's own code (#1518)",
@@ -5128,18 +5136,19 @@ impl Service for Control {
                         }
                     });
                 }
-                if let Err(e) = host.start_storage() {
-                    eprintln!("app host: external storage: {e}");
+                // The system user started, its DE storage prepared.
+                let user = match host.start_storage() {
+                    Ok(user) => user,
+                    Err(e) => return eprintln!("app host: external storage: {e}"),
+                };
+                // BluetoothService's `onUserStarting` of the system user.
+                if let Some(bluetooth) = host.bluetooth.get() {
+                    bluetooth.on_user_starting();
                 }
-                // Apps' storage is mounted: the persisted jobs are read and
-                // run, as at JobSchedulerService's
-                // `PHASE_THIRD_PARTY_APPS_CAN_START`.
-                if let Some(jobs) = host.job_scheduler.get() {
-                    jobs.start();
-                }
+                // `systemReady`.
+                host.send_user_start_broadcasts();
                 // StatsCompanionService's `PHASE_THIRD_PARTY_APPS_CAN_START`
-                // and `PHASE_BOOT_COMPLETED`: the app host's boot completes
-                // with its start.
+                // and `PHASE_BOOT_COMPLETED`, then `finishBooting`'s.
                 if let Some(stats) = host.stats.get() {
                     stats.system_ready();
                     stats.boot_completed();
@@ -5147,15 +5156,27 @@ impl Service for Control {
                 if let Some(dropbox) = host.dropbox.get() {
                     dropbox.boot_completed();
                 }
-                // BluetoothService's `onUserStarting` and `onUserUnlocking`
-                // of the system user, once apps' storage is mounted.
-                if let Some(bluetooth) = host.bluetooth.get() {
-                    bluetooth.on_user_starting();
-                    bluetooth.on_user_unlocking();
-                }
-                // TextServicesManagerService's `onUserUnlocking`.
-                if let Some(text_services) = host.text_services.get() {
-                    text_services.on_user_unlocking(0);
+                let services = host.clone();
+                let unlocking = move || {
+                    // BluetoothService's and TextServicesManagerService's
+                    // `onUserUnlocking`.
+                    if let Some(bluetooth) = services.bluetooth.get() {
+                        bluetooth.on_user_unlocking();
+                    }
+                    if let Some(text_services) = services.text_services.get() {
+                        text_services.on_user_unlocking(0);
+                    }
+                    // Apps' storage is mounted: the persisted jobs are read
+                    // and run (JobSchedulerService's
+                    // `PHASE_THIRD_PARTY_APPS_CAN_START`, its jobs of
+                    // encryption unaware apps runnable once the user is
+                    // unlocked).
+                    if let Some(jobs) = services.job_scheduler.get() {
+                        jobs.start();
+                    }
+                };
+                if let Err(e) = host.finish_booting(user, unlocking) {
+                    eprintln!("app host: the boot: {e}");
                 }
             });
             let mut p = Parcel::new();

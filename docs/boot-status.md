@@ -61,7 +61,17 @@ and Play Store no longer stop at missing directories or databases
 (2026-10-20); vdc runs post-fs-data's `init_user0`, without which
 `/data/data` did not exist when the package side's start asked for the
 core apps' data. A second boot of the same data directory keeps the
-apps' data (no directory destroyed or recreated).
+apps' data (no directory destroyed or recreated). The app host finishes the boot
+as `finishBooting` does (2026-10-22): `sys.boot_completed=1` and
+`dev.bootcomplete=1` are set, so init's `on property:sys.boot_completed=1`
+triggers run (keystore2's `wait_for_boot_completed` returns), then
+`LOCKED_BOOT_COMPLETED` (the direct boot aware apps' processes start
+before user 0's CE storage is prepared), `USER_UNLOCKED`, after a system
+update `PRE_BOOT_COMPLETED` (8 system receivers in turn, then on), and
+`BOOT_COMPLETED`, whose receivers (Clock's alarms, WorkManager's
+reschedules, Settings, Play services, ...) start about 40 processes at once
+(#2005). Some receivers fail once per boot on gaps of their owners
+(#1521, #1843, #1919, #2001-#2004).
 The times above are from before these joined. Calculator, started through
 the app host, draws its first frame about 0.36 s after its process starts,
 its window is on the display, and taps on the display's touchscreen
