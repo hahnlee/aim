@@ -96,6 +96,7 @@ BP_FILES = [
     "art/libprofile/Android.bp",
     "art/libelffile/Android.bp",
     "art/dex2oat/Android.bp",
+    "art/openjdkjvmti/Android.bp",
 ]
 
 
@@ -516,6 +517,14 @@ class Build:
                         [libart, artbase, libbase,
                          img("apex/com.android.adbd/lib64/libadbconnection_client.so"),
                          libcxx_so] + libc)
+
+        # libopenjdkjvmti: the JVMTI plugin (agents, DDMS, JDWP's class
+        # redefinition); it uses libart internals.
+        jvmti_objs = self.objects(
+            "libopenjdkjvmti", self.srcs("libopenjdkjvmti"),
+            flags_for("libopenjdkjvmti", [f"-I{os.path.join(self.art, 'openjdkjvmti/include')}"]))
+        self.shared_lib("libopenjdkjvmti", jvmti_objs, [],
+                        [libart, artbase, dexfile, libbase, libcxx_so] + libc)
 
         # dex2oat64: regenerates the boot image with the same reference encoding.
         # It links BoringSSL's libcrypto_static (for the SHA-1 build id) as

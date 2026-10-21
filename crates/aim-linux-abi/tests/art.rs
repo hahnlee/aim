@@ -231,6 +231,14 @@ fn hello_world_runs_on_the_art_exception() {
     let no_image_int: Vec<&str> = no_image.iter().copied().chain(["-Xint"]).collect();
     let (stdout, _) = guest.hello(&no_image_int, &[]);
     eprint!("{stdout}");
+    // The JVMTI plugin links the replaced libart's internals; a plugin that
+    // fails to load is fatal (Runtime::Init).
+    let with_jvmti: Vec<&str> = no_image_int
+        .iter()
+        .copied()
+        .chain(["-Xplugin:libopenjdkjvmti.so"])
+        .collect();
+    guest.hello(&with_jvmti, &[]);
 
     // The regenerated boot image at its default location, with the boot
     // class path init exports: the image's DEX2OATBOOTCLASSPATH, then the
