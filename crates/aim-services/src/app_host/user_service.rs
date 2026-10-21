@@ -453,6 +453,17 @@ pub(super) fn serial_number(host: &AppHost, user: i32) -> Result<Option<i32>, Ex
     Ok(Some(info.serial_number))
 }
 
+/// `UserInfo.isDemo` of the user; false for one that does not exist.
+pub(super) fn is_demo(host: &AppHost, user: i32) -> Result<bool, Exception> {
+    if user != SYSTEM_USER {
+        return Ok(false);
+    }
+    let (path, bytes) = host.user_file()?;
+    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+    let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
+    Ok(!info.partial && info.flags & FLAG_DEMO != 0)
+}
+
 /// What `UserDataPreparer` and `reconcileAppsData` read of a user's
 /// `UserInfo`: its serial number, `lastLoggedInTime` and
 /// `lastLoggedInFingerprint`; none for a user that does not exist.
