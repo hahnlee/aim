@@ -2017,13 +2017,22 @@ mod tests {
     impl Data {
         fn new() -> Self {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "aim-native-installer-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
+            // A killed earlier run with this pid leaves its directory behind;
+            // creating the root exclusively keeps each test off that state.
+            let path = loop {
+                let path = std::env::temp_dir().join(format!(
+                    "aim-native-installer-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ));
+                match std::fs::create_dir(&path) {
+                    Ok(()) => break path,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => panic!("{}: {error}", path.display()),
+                }
+            };
             for name in ["system", "app", "app-staging"] {
-                std::fs::create_dir_all(path.join(name)).unwrap();
+                std::fs::create_dir(path.join(name)).unwrap();
             }
             Self(path)
         }
