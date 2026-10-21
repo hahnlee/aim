@@ -1233,6 +1233,23 @@ impl Broadcasts {
         self.send_as_system(host, intent, user, None, &[permission.to_string()]);
     }
 
+    /// `Context.sendBroadcastAsUser(intent, user, receiverPermission,
+    /// options)` of a system service of the app host whose options
+    /// require `change` enabled, or disabled, for each receiver's app
+    /// (`BroadcastOptions.setRequireCompatChange`).
+    pub fn send_from_system_requiring_change(
+        &self,
+        host: &AppHost,
+        intent: RawIntent,
+        user: i32,
+        permission: &str,
+        change: (i64, bool),
+    ) {
+        let mut sender = Sender::system(&[permission.to_string()]);
+        sender.require_compat_change = Some(change);
+        self.send_as(host, intent, user, None, sender);
+    }
+
     /// `ActivityManagerInternal.broadcastIntentWithCallback` of
     /// PackageManager: to `user`'s registered receivers holding
     /// `required_permissions`, an application's only if its app id is in
@@ -1251,10 +1268,27 @@ impl Broadcasts {
     fn send_as_system(
         &self,
         host: &AppHost,
-        mut intent: RawIntent,
+        intent: RawIntent,
         user: i32,
         allow_list: Option<&[i32]>,
         required_permissions: &[String],
+    ) {
+        self.send_as(
+            host,
+            intent,
+            user,
+            allow_list,
+            Sender::system(required_permissions),
+        );
+    }
+
+    fn send_as(
+        &self,
+        host: &AppHost,
+        mut intent: RawIntent,
+        user: i32,
+        allow_list: Option<&[i32]>,
+        sender: Sender,
     ) {
         let mut flags = intent.intent.flags | FLAG_EXCLUDE_STOPPED_PACKAGES;
         let allowed_implicit = host.packages().map(|(model, _)| {
@@ -1277,7 +1311,7 @@ impl Broadcasts {
         let record = Arc::new(Record {
             intent,
             binders: Arc::new(binders),
-            sender: Sender::system(required_permissions),
+            sender,
             ordered: false,
             initial_sticky: false,
             user,

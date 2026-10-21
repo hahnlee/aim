@@ -50,6 +50,7 @@ pub mod device_policy;
 pub mod display;
 pub mod display_service;
 pub mod domain_verification;
+pub mod dropbox;
 pub mod enhanced_confirmation;
 pub mod exit_info;
 pub mod fgs_types;
@@ -487,6 +488,7 @@ pub struct AppHost {
     job_scheduler: OnceLock<Arc<job_scheduler::JobScheduler>>,
     hint_manager: OnceLock<Arc<hint_manager::HintManager>>,
     stats: OnceLock<Arc<stats_manager::Stats>>,
+    dropbox: OnceLock<Arc<dropbox::DropBox>>,
     bluetooth: OnceLock<Arc<bluetooth_manager::BluetoothManager>>,
     /// What DevicePolicyManagerService persisted, read once.
     device_policies: OnceLock<device_policy::Policies>,
@@ -574,6 +576,7 @@ impl AppHost {
             job_scheduler: OnceLock::new(),
             hint_manager: OnceLock::new(),
             stats: OnceLock::new(),
+            dropbox: OnceLock::new(),
             bluetooth: OnceLock::new(),
             device_policies: OnceLock::new(),
             services: Default::default(),
@@ -795,6 +798,12 @@ impl AppHost {
             (
                 "rollback",
                 Arc::new(rollback_service::Rollback::new(self.clone())),
+            ),
+            (
+                "dropbox",
+                self.dropbox
+                    .get_or_init(|| dropbox::DropBox::new(self.clone()))
+                    .clone(),
             ),
             (
                 "lock_settings",
@@ -4980,6 +4989,12 @@ impl Service for Control {
                 if let Err(e) = input_manager::watch_key_repeat(&host) {
                     eprintln!("app host: input: key repeat settings: {}", e.message);
                 }
+                // DropBoxManagerService's `PHASE_SYSTEM_SERVICES_READY`.
+                if let Some(dropbox) = host.dropbox.get()
+                    && let Err(e) = dropbox.system_services_ready()
+                {
+                    eprintln!("app host: dropbox: {}", e.message);
+                }
                 // The Mac's appearance is the configuration's night mode, as
                 // UiModeManagerService's is.
                 let weak = Arc::downgrade(&host);
@@ -5022,6 +5037,9 @@ impl Service for Control {
                 if let Some(stats) = host.stats.get() {
                     stats.system_ready();
                     stats.boot_completed();
+                }
+                if let Some(dropbox) = host.dropbox.get() {
+                    dropbox.boot_completed();
                 }
                 // BluetoothService's `onUserStarting` and `onUserUnlocking`
                 // of the system user, once apps' storage is mounted.
