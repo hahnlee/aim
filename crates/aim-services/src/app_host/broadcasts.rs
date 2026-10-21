@@ -10,8 +10,9 @@
 //! the next. A receiver is checked as a broadcast is enqueued, a
 //! preflight's checks (`shouldSkipAtEnqueueMessage`) with
 //! `avoid_note_op_at_enqueue`, its permissions' and the broadcast's app ops
-//! checked rather than noted; the checks are not repeated at its delivery
-//! (#1918).
+//! checked rather than noted, and checked again as it is delivered
+//! (`shouldSkipReceiver`), its app ops noted then: a receiver whose
+//! permission or op went meanwhile is skipped, its delivery finished.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -144,8 +145,8 @@ struct Record {
     intent: RawIntent,
     /// The binders among the intent, held.
     binders: Arc<Vec<Strong>>,
-    calling_uid: i32,
-    calling_package: Option<String>,
+    /// The sender, its receivers checked for it at enqueue and delivery.
+    sender: Sender,
     ordered: bool,
     /// `initialSticky`: a sticky broadcast sent on to a new receiver.
     initial_sticky: bool,
@@ -168,10 +169,18 @@ struct Manifest {
     priority: i32,
 }
 
-/// A receiver a broadcast goes to: a registered one, by its handle and its
-/// process's start, or a manifest one.
+/// A registered receiver a broadcast goes to: its handle, the index of
+/// the filter it matched (`BroadcastFilter`), its process's start.
+#[derive(Clone, Copy)]
+struct Registered {
+    handle: u32,
+    filter: usize,
+    start_seq: i64,
+}
+
+/// A receiver a broadcast goes to: a registered one or a manifest one.
 enum Target {
-    Registered(u32, i64),
+    Registered(Registered),
     Manifest(Arc<Manifest>),
 }
 
@@ -207,9 +216,9 @@ struct Chain {
 /// A delivery a process waits for, by its receiver.
 enum Delivery {
     /// Sent and assumed delivered.
-    Once(Arc<Record>, u32),
+    Once(Arc<Record>, Registered),
     /// A receiver of the chain with that id, which reports its finish.
-    Chained(u64, u32),
+    Chained(u64, Registered),
     /// A manifest receiver, of a chain if one, which reports its finish.
     Manifest(Arc<Record>, Arc<Manifest>, Option<u64>),
 }
@@ -233,26 +242,42 @@ pub struct Broadcasts {
     state: Mutex<State>,
 }
 
-/// A sender, as BroadcastSkipPolicy checks a registered receiver for it.
-struct Sender<'a> {
+/// A sender, as BroadcastSkipPolicy checks a receiver for it.
+struct Sender {
     uid: i32,
     /// `callerPackage`, `callerFeatureId`.
-    package: Option<&'a str>,
-    feature_id: Option<&'a str>,
+    package: Option<String>,
+    feature_id: Option<String>,
     /// The uid the `exported` check is of: a sticky broadcast's original
     /// sender's.
     original_uid: i32,
     instant: bool,
-    required_permissions: &'a [String],
+    required_permissions: Vec<String>,
     /// Whether the sender named no required permissions (rather than none).
     required_null: bool,
-    excluded_permissions: &'a [String],
-    excluded_packages: &'a [String],
+    excluded_permissions: Vec<String>,
+    excluded_packages: Vec<String>,
     app_op: i32,
     require_compat_change: Option<(i64, bool)>,
-    /// Whether the checks are a preflight's, which check app ops rather
-    /// than note them.
-    preflight: bool,
+}
+
+impl Sender {
+    /// The system's (`android`), requiring `required_permissions`.
+    fn system(required_permissions: &[String]) -> Sender {
+        Sender {
+            uid: SYSTEM_UID,
+            package: Some("android".into()),
+            feature_id: None,
+            original_uid: SYSTEM_UID,
+            instant: false,
+            required_permissions: required_permissions.to_vec(),
+            required_null: required_permissions.is_empty(),
+            excluded_permissions: Vec::new(),
+            excluded_packages: Vec::new(),
+            app_op: OP_NONE,
+            require_compat_change: None,
+        }
+    }
 }
 
 /// What a sender's `BroadcastOptions` ask that the app host acts on.
@@ -334,14 +359,14 @@ fn takes(
 
 /// `broadcastIntentLocked`'s merge of the manifest receivers into the
 /// registered ones by priority, a registered one first on a tie.
-fn merge(manifest: Vec<Arc<Manifest>>, registered: Vec<(i32, u32, i64)>) -> Vec<Target> {
+fn merge(manifest: Vec<Arc<Manifest>>, registered: Vec<(i32, Registered)>) -> Vec<Target> {
     let mut merged = Vec::with_capacity(manifest.len() + registered.len());
     let mut manifest = manifest.into_iter().peekable();
-    for (priority, handle, seq) in registered {
+    for (priority, r) in registered {
         while let Some(m) = manifest.next_if(|m| m.priority > priority) {
             merged.push(Target::Manifest(m));
         }
-        merged.push(Target::Registered(handle, seq));
+        merged.push(Target::Registered(r));
     }
     merged.extend(manifest.map(Target::Manifest));
     merged
@@ -672,8 +697,9 @@ impl Broadcasts {
         let mut first = None;
         let preflight = host.flag(AVOID_NOTE_OP_AT_ENQUEUE)?;
         for r in matched {
+            let calling_uid = r.sender.uid;
             if first.is_none()
-                && (exported || r.calling_uid == uid || can_access_unexported(r.calling_uid))
+                && (exported || calling_uid == uid || can_access_unexported(calling_uid))
             {
                 first = Some(r.intent.clone());
             }
@@ -681,33 +707,33 @@ impl Broadcasts {
                 uid: INVALID_UID,
                 package: None,
                 feature_id: None,
-                original_uid: r.calling_uid,
+                original_uid: calling_uid,
                 instant: false,
-                required_permissions: &[],
+                required_permissions: Vec::new(),
                 required_null: true,
-                excluded_permissions: &[],
-                excluded_packages: &[],
+                excluded_permissions: Vec::new(),
+                excluded_packages: Vec::new(),
                 app_op: OP_NONE,
                 require_compat_change: None,
-                preflight,
             };
             let receiver = st
                 .receivers
                 .iter()
                 .find(|r| r.receiver.handle == handle)
                 .unwrap();
+            let filter = receiver.filters.len() - 1;
             if !self.skip(
                 host,
                 &sender,
                 receiver,
-                receiver.filters.last().unwrap(),
+                &receiver.filters[filter],
                 r.intent.intent.flags,
+                preflight,
             )? {
                 let replay = Record {
                     intent: r.intent.clone(),
                     binders: r.binders.clone(),
-                    calling_uid: INVALID_UID,
-                    calling_package: None,
+                    sender,
                     ordered: false,
                     initial_sticky: true,
                     user: USER_ALL,
@@ -720,7 +746,14 @@ impl Broadcasts {
                 st.queues
                     .entry(start_seq)
                     .or_default()
-                    .push_back(Delivery::Once(Arc::new(replay), handle));
+                    .push_back(Delivery::Once(
+                        Arc::new(replay),
+                        Registered {
+                            handle,
+                            filter,
+                            start_seq,
+                        },
+                    ));
             }
         }
         self.send_next(host, &mut st, start_seq);
@@ -747,7 +780,7 @@ impl Broadcasts {
             .get(&seq)
             .and_then(|q| q.front())
             .and_then(|d| match d {
-                Delivery::Chained(id, h) if *h == handle => Some(*id),
+                Delivery::Chained(id, r) if r.handle == handle => Some(*id),
                 _ => None,
             });
         if let Some(id) = waiting.filter(|_| st.busy.remove(&seq)) {
@@ -987,9 +1020,6 @@ impl Broadcasts {
         }
         intent.set_flags(flags, extended_flags);
         let required_null = args.required_permissions.is_none();
-        let required_permissions = strings(args.required_permissions);
-        let excluded_permissions = strings(args.exclude_permissions);
-        let excluded_packages = strings(args.exclude_packages);
         let resolved_type = args.resolved_type;
         let binders = intent
             .handles()
@@ -1001,11 +1031,28 @@ impl Broadcasts {
             .map(|m| KeptBundle::new(m, &host.process))
             .transpose()
             .map_err(|_| Exception::illegal_argument("result extras"))?;
+        let sender = Sender {
+            uid: calling_uid,
+            package: caller_package.clone(),
+            feature_id: args.calling_feature_id,
+            original_uid: calling_uid,
+            instant: caller_instant,
+            required_permissions: strings(args.required_permissions),
+            required_null,
+            excluded_permissions: strings(args.exclude_permissions),
+            excluded_packages: strings(args.exclude_packages),
+            app_op: args.app_op,
+            require_compat_change: options.require_compat_change.map(|id| {
+                (
+                    id,
+                    options.flags & OPTION_REQUIRE_COMPAT_CHANGE_ENABLED != 0,
+                )
+            }),
+        };
         let record = Arc::new(Record {
             intent,
             binders: Arc::new(binders),
-            calling_uid,
-            calling_package: caller_package.clone(),
+            sender,
             ordered: args.serialized,
             initial_sticky: false,
             user,
@@ -1022,7 +1069,7 @@ impl Broadcasts {
                     calling_pid
                 )));
             }
-            if !required_permissions.is_empty() {
+            if !record.sender.required_permissions.is_empty() {
                 self.cancel_result_to(host, &record.intent, result_to, result_to_app, user);
                 return Ok(BROADCAST_STICKY_CANT_HAVE_PERMISSION);
             }
@@ -1057,27 +1104,9 @@ impl Broadcasts {
             }
         }
 
-        let sender = Sender {
-            uid: calling_uid,
-            package: caller_package.as_deref(),
-            feature_id: args.calling_feature_id.as_deref(),
-            original_uid: calling_uid,
-            instant: caller_instant,
-            required_permissions: &required_permissions,
-            required_null,
-            excluded_permissions: &excluded_permissions,
-            excluded_packages: &excluded_packages,
-            app_op: args.app_op,
-            require_compat_change: options.require_compat_change.map(|id| {
-                (
-                    id,
-                    options.flags & OPTION_REQUIRE_COMPAT_CHANGE_ENABLED != 0,
-                )
-            }),
-            preflight: host.flag(AVOID_NOTE_OP_AT_ENQUEUE)?,
-        };
+        let preflight = host.flag(AVOID_NOTE_OP_AT_ENQUEUE)?;
         // The registered receivers, by priority, one filter per receiver.
-        let mut registered: Vec<(i32, u32, i64)> = Vec::new();
+        let mut registered: Vec<(i32, Registered)> = Vec::new();
         let block_null_action = action.is_none()
             && !can_access_unexported(calling_uid)
             && model
@@ -1093,7 +1122,8 @@ impl Broadcasts {
                 &record.intent.intent,
                 resolved_type.as_deref(),
                 user,
-                &sender,
+                &record.sender,
+                preflight,
             )?;
         }
         let manifest = if flags & FLAG_RECEIVER_REGISTERED_ONLY == 0 {
@@ -1102,7 +1132,8 @@ impl Broadcasts {
                 &record.intent.intent,
                 resolved_type.as_deref(),
                 user,
-                &sender,
+                &record.sender,
+                preflight,
             )?
         } else {
             Vec::new()
@@ -1137,6 +1168,7 @@ impl Broadcasts {
     /// The registered receivers `intent` goes to, by priority, one filter
     /// per receiver (`mReceiverResolver.queryIntent`, then
     /// BroadcastSkipPolicy): priority, receiver, its process's start.
+    #[allow(clippy::too_many_arguments)]
     fn registered_targets(
         &self,
         host: &AppHost,
@@ -1144,26 +1176,33 @@ impl Broadcasts {
         i: &Intent,
         resolved_type: Option<&str>,
         user: i32,
-        sender: &Sender<'_>,
-    ) -> Result<Vec<(i32, u32, i64)>, Exception> {
+        sender: &Sender,
+        preflight: bool,
+    ) -> Result<Vec<(i32, Registered)>, Exception> {
         let mut targets = Vec::new();
         for r in &st.receivers {
             if user != USER_ALL && r.user != USER_ALL && r.user != user {
                 continue;
             }
             let mut taken = None;
-            for f in &r.filters {
+            for (at, f) in r.filters.iter().enumerate() {
                 if i.package.as_ref().is_some_and(|p| *p != f.package)
                     || !takes(&f.filter, i, resolved_type)?
                 {
                     continue;
                 }
-                taken = Some(f);
+                taken = Some(at);
                 break;
             }
-            let Some(f) = taken else { continue };
-            if !self.skip(host, sender, r, f, i.flags)? {
-                targets.push((f.filter.priority, r.receiver.handle, r.start_seq));
+            let Some(filter) = taken else { continue };
+            let f = &r.filters[filter];
+            if !self.skip(host, sender, r, f, i.flags, preflight)? {
+                let target = Registered {
+                    handle: r.receiver.handle,
+                    filter,
+                    start_seq: r.start_seq,
+                };
+                targets.push((f.filter.priority, target));
             }
         }
         targets.sort_by_key(|t| std::cmp::Reverse(t.0));
@@ -1238,8 +1277,7 @@ impl Broadcasts {
         let record = Arc::new(Record {
             intent,
             binders: Arc::new(binders),
-            calling_uid: SYSTEM_UID,
-            calling_package: Some("android".into()),
+            sender: Sender::system(required_permissions),
             ordered: false,
             initial_sticky: false,
             user,
@@ -1253,20 +1291,6 @@ impl Broadcasts {
             Ok(preflight) => preflight,
             Err(e) => return eprintln!("app host: a system broadcast: {e:?}"),
         };
-        let sender = Sender {
-            uid: SYSTEM_UID,
-            package: Some("android"),
-            feature_id: None,
-            original_uid: SYSTEM_UID,
-            instant: false,
-            required_permissions,
-            required_null: required_permissions.is_empty(),
-            excluded_permissions: &[],
-            excluded_packages: &[],
-            app_op: OP_NONE,
-            require_compat_change: None,
-            preflight,
-        };
         let mut st = self.state.lock().unwrap();
         let i = &record.intent.intent;
         let allowed = |uid: i32| {
@@ -1276,7 +1300,7 @@ impl Broadcasts {
             })
         };
         let targets = self
-            .registered_targets(host, &st, i, None, user, &sender)
+            .registered_targets(host, &st, i, None, user, &record.sender, preflight)
             .and_then(|registered| {
                 let owner = |handle: u32| {
                     st.receivers
@@ -1286,10 +1310,10 @@ impl Broadcasts {
                 };
                 let registered = registered
                     .into_iter()
-                    .filter(|&(_, handle, _)| allowed(owner(handle).unwrap_or_default()))
+                    .filter(|(_, r)| allowed(owner(r.handle).unwrap_or_default()))
                     .collect();
                 let manifest = if flags & FLAG_RECEIVER_REGISTERED_ONLY == 0 {
-                    self.manifest_targets(host, i, None, user, &sender)?
+                    self.manifest_targets(host, i, None, user, &record.sender, preflight)?
                         .into_iter()
                         .filter(|m| allowed(m.uid as i32))
                         .collect()
@@ -1318,7 +1342,8 @@ impl Broadcasts {
         intent: &Intent,
         resolved_type: Option<&str>,
         user: i32,
-        s: &Sender<'_>,
+        s: &Sender,
+        preflight: bool,
     ) -> Result<Vec<Arc<Manifest>>, Exception> {
         let (_, resolution) = host.packages()?;
         let found = resolution
@@ -1337,7 +1362,7 @@ impl Broadcasts {
             let Info::Activity(info) = ri.info else {
                 continue;
             };
-            if let Some(why) = self.skip_manifest(host, s, &info, intent)? {
+            if let Some(why) = self.skip_manifest(host, s, &info, intent, preflight)? {
                 eprintln!("app host: {why}");
                 continue;
             }
@@ -1358,9 +1383,10 @@ impl Broadcasts {
     fn skip_manifest(
         &self,
         host: &AppHost,
-        s: &Sender<'_>,
+        s: &Sender,
         info: &ActivityInfo,
         intent: &Intent,
+        preflight: bool,
     ) -> Result<Option<String>, Exception> {
         let app = &info.info.application_info;
         let (uid, package) = (app.uid, app.item.package_name.clone().unwrap_or_default());
@@ -1395,7 +1421,13 @@ impl Broadcasts {
         }
         if let Some(permission) = &info.permission
             && let Some(op) = host.permission_op(permission)?
-            && host.broadcast_op(s.preflight, op, s.uid, s.package, s.feature_id)? != MODE_ALLOWED
+            && host.broadcast_op(
+                preflight,
+                op,
+                s.uid,
+                s.package.as_deref(),
+                s.feature_id.as_deref(),
+            )? != MODE_ALLOWED
         {
             return Ok(Some(format!(
                 "Appop Denial: broadcasting {action} to {name} requires appop {}",
@@ -1435,7 +1467,7 @@ impl Broadcasts {
             }
             _ => {}
         }
-        for permission in s.excluded_permissions {
+        for permission in &s.excluded_permissions {
             let granted = host.check_permission(Some(permission), uid)? == 0;
             if excludes(granted, host.permission_op(permission)?, |op| {
                 appops_service::mode(host, op, uid, Some(&package))
@@ -1460,8 +1492,8 @@ impl Broadcasts {
                 "Broadcast delivered to {}",
                 info.info.item.name.as_deref().unwrap_or_default()
             );
-            for permission in s.required_permissions {
-                if !host.has_permission(permission, &message, s.preflight, &sources)? {
+            for permission in &s.required_permissions {
+                if !host.has_permission(permission, &message, preflight, &sources)? {
                     return Ok(Some(format!(
                         "Permission Denial: receiving {action} to {name} requires {permission}"
                     )));
@@ -1472,8 +1504,7 @@ impl Broadcasts {
         // op of each attribution tag.
         if s.app_op != OP_NONE && valid_op(s.app_op) {
             for tag in tags {
-                if host.broadcast_op(s.preflight, s.app_op, uid, Some(&package), tag)?
-                    != MODE_ALLOWED
+                if host.broadcast_op(preflight, s.app_op, uid, Some(&package), tag)? != MODE_ALLOWED
                 {
                     eprintln!(
                         "app host: Appop Denial: receiving {action} to {name} requires appop {}",
@@ -1524,7 +1555,7 @@ impl Broadcasts {
         &self,
         host: &AppHost,
         intent: &Intent,
-        s: &Sender<'_>,
+        s: &Sender,
     ) -> Result<bool, Exception> {
         let signature = !s.required_null
             && s.required_permissions.iter().all(|name| {
@@ -1547,11 +1578,15 @@ impl Broadcasts {
                 && !signature)
     }
 
-    /// The process a manifest receiver runs in, started for it when it does
-    /// not run (`startProcessLocked` with hosting type `broadcast`).
-    fn process_for(&self, host: &AppHost, m: &Manifest) -> Option<i64> {
+    /// The process a manifest receiver runs in, started for `record` when
+    /// it does not run (`scheduleReceiverColdLocked`: unless the receiver
+    /// is skipped, `startProcessLocked` with hosting type `broadcast`).
+    fn process_for(&self, host: &AppHost, record: &Record, m: &Manifest) -> Option<i64> {
         if let Some((seq, _)) = host.running_process(&m.process, m.uid) {
             return Some(seq);
+        }
+        if self.skipped_manifest(host, record, m) {
+            return None;
         }
         let package = m
             .info
@@ -1571,14 +1606,57 @@ impl Broadcasts {
         host.running_process(&m.process, m.uid).map(|(seq, _)| seq)
     }
 
+    /// `shouldSkipReceiver`'s `shouldSkipMessage` of a manifest receiver
+    /// as `record` is delivered to it, its app ops noted: whether it is
+    /// skipped, its delivery finished.
+    fn skipped_manifest(&self, host: &AppHost, record: &Record, m: &Manifest) -> bool {
+        match self.skip_manifest(host, &record.sender, &m.info, &record.intent.intent, false) {
+            Ok(None) => false,
+            Ok(Some(why)) => {
+                eprintln!("app host: {why}");
+                true
+            }
+            Err(e) => {
+                eprintln!(
+                    "app host: a broadcast to {} was not checked: {}",
+                    m.process, e.message
+                );
+                true
+            }
+        }
+    }
+
+    /// `shouldSkipReceiver`'s `shouldSkipMessage` of a registered receiver
+    /// as `record` is delivered to it, its app ops noted: whether it is
+    /// skipped, as one no longer registered is.
+    fn skipped_registered(
+        &self,
+        host: &AppHost,
+        st: &State,
+        record: &Record,
+        to: Registered,
+    ) -> bool {
+        let Some(r) = st.receivers.iter().find(|r| r.receiver.handle == to.handle) else {
+            return true;
+        };
+        let flags = record.intent.intent.flags;
+        match self.skip(host, &record.sender, r, &r.filters[to.filter], flags, false) {
+            Ok(skipped) => skipped,
+            Err(e) => {
+                eprintln!("app host: a broadcast was not checked: {}", e.message);
+                true
+            }
+        }
+    }
+
     /// Queues `record` to each of `targets`, assumed delivered to the
     /// registered ones, and sends each process what it has next.
     fn enqueue(&self, host: &AppHost, st: &mut State, record: &Arc<Record>, targets: Vec<Target>) {
         let mut touched = Vec::new();
         for target in targets {
             let (seq, delivery) = match target {
-                Target::Registered(handle, seq) => (seq, Delivery::Once(record.clone(), handle)),
-                Target::Manifest(m) => match self.process_for(host, &m) {
+                Target::Registered(r) => (r.start_seq, Delivery::Once(record.clone(), r)),
+                Target::Manifest(m) => match self.process_for(host, record, &m) {
                     Some(seq) => (seq, Delivery::Manifest(record.clone(), m, None)),
                     None => continue,
                 },
@@ -1608,8 +1686,7 @@ impl Broadcasts {
                     .map(|h| host.process.strong(h))
                     .collect(),
             ),
-            calling_uid: SYSTEM_UID,
-            calling_package: Some("android".into()),
+            sender: Sender::system(&[]),
             ordered: false,
             initial_sticky: false,
             user: USER_ALL,
@@ -1741,10 +1818,11 @@ impl Broadcasts {
     fn skip(
         &self,
         host: &AppHost,
-        s: &Sender<'_>,
+        s: &Sender,
         r: &Receiver,
         f: &Filter,
         intent_flags: i32,
+        preflight: bool,
     ) -> Result<bool, Exception> {
         if let Some((change, enabled)) = s.require_compat_change
             && host.change_enabled(change, r.uid)? != enabled
@@ -1756,8 +1834,13 @@ impl Broadcasts {
                 return Ok(true);
             }
             if let Some(op) = host.permission_op(permission)?
-                && host.broadcast_op(s.preflight, op, s.uid, s.package, s.feature_id)?
-                    != MODE_ALLOWED
+                && host.broadcast_op(
+                    preflight,
+                    op,
+                    s.uid,
+                    s.package.as_deref(),
+                    s.feature_id.as_deref(),
+                )? != MODE_ALLOWED
             {
                 return Ok(true);
             }
@@ -1773,11 +1856,11 @@ impl Broadcasts {
                 "Broadcast delivered to registered receiver {}",
                 f.receiver_id.as_deref().unwrap_or("null")
             );
-            for permission in s.required_permissions {
+            for permission in &s.required_permissions {
                 if !host.has_permission(
                     permission,
                     &message,
-                    s.preflight,
+                    preflight,
                     slice::from_ref(&source),
                 )? {
                     return Ok(true);
@@ -1789,7 +1872,7 @@ impl Broadcasts {
         {
             return Ok(true);
         }
-        for permission in s.excluded_permissions {
+        for permission in &s.excluded_permissions {
             let granted = host.holds(permission, r.uid)?;
             if excludes(granted, host.permission_op(permission)?, |op| {
                 appops_service::mode(host, op, r.uid, Some(&f.package))
@@ -1803,7 +1886,7 @@ impl Broadcasts {
         if s.app_op != OP_NONE
             && valid_op(s.app_op)
             && host.broadcast_op(
-                s.preflight,
+                preflight,
                 s.app_op,
                 r.uid,
                 Some(&f.package),
@@ -1859,10 +1942,10 @@ impl Broadcasts {
                     }
                 }
             }
-            let (record, handle, chain) = match front {
-                Delivery::Once(record, handle) => (record.clone(), *handle, None),
-                Delivery::Chained(id, handle) => match st.chains.get(id) {
-                    Some(chain) => (chain.record.clone(), *handle, Some(*id)),
+            let (record, to, chain) = match front {
+                Delivery::Once(record, to) => (record.clone(), *to, None),
+                Delivery::Chained(id, to) => match st.chains.get(id) {
+                    Some(chain) => (chain.record.clone(), *to, Some(*id)),
                     None => {
                         st.queues.get_mut(&start_seq).unwrap().pop_front();
                         continue;
@@ -1870,13 +1953,12 @@ impl Broadcasts {
                 },
                 Delivery::Manifest(..) => unreachable!(),
             };
-            let registered = st.receivers.iter().any(|r| r.receiver.handle == handle);
-            let sent = registered
+            let sent = !self.skipped_registered(host, st, &record, to)
                 && match chain.and_then(|id| st.chains.get(&id)) {
                     Some(c) => self.deliver(
                         host,
                         start_seq,
-                        handle,
+                        to.handle,
                         &record,
                         c.result_code,
                         c.result_data.as_deref(),
@@ -1886,7 +1968,7 @@ impl Broadcasts {
                     None => self.deliver(
                         host,
                         start_seq,
-                        handle,
+                        to.handle,
                         &record,
                         record.result_code,
                         record.result_data.as_deref(),
@@ -1923,15 +2005,15 @@ impl Broadcasts {
                 return;
             };
             let (seq, delivery) = match target {
-                Target::Registered(handle, seq) => {
-                    if !st.receivers.iter().any(|r| r.receiver.handle == handle) {
+                Target::Registered(r) => {
+                    if !st.receivers.iter().any(|x| x.receiver.handle == r.handle) {
                         continue;
                     }
-                    (seq, Delivery::Chained(id, handle))
+                    (r.start_seq, Delivery::Chained(id, r))
                 }
                 Target::Manifest(m) => {
                     let record = chain.record.clone();
-                    match self.process_for(host, &m) {
+                    match self.process_for(host, &record, &m) {
                         Some(seq) => (seq, Delivery::Manifest(record, m, Some(id))),
                         None => continue,
                     }
@@ -1970,13 +2052,13 @@ impl Broadcasts {
                     sending_user: record.user,
                     process_state: PROCESS_STATE_TOP,
                     sent_from_uid: if record.share_identity {
-                        record.calling_uid
+                        record.sender.uid
                     } else {
                         INVALID_UID
                     },
                     sent_from_package: record
                         .share_identity
-                        .then(|| record.calling_package.clone())
+                        .then(|| record.sender.package.clone())
                         .flatten(),
                 }
                 .write(&mut p);
@@ -2058,7 +2140,7 @@ impl Broadcasts {
             return;
         }
         if let Err(e) = host.report_broadcast_dispatched(
-            record.calling_uid,
+            record.sender.uid,
             package,
             record.user,
             record.id_for_response_event,
@@ -2084,10 +2166,10 @@ impl Broadcasts {
         else {
             return;
         };
-        if uid == record.calling_uid {
+        if uid == record.sender.uid {
             return;
         }
-        if let Err(e) = host.grant_implicit_access(uid, record.calling_uid) {
+        if let Err(e) = host.grant_implicit_access(uid, record.sender.uid) {
             eprintln!("app host: broadcast: implicit access: {}", e.message);
         }
     }
@@ -2121,13 +2203,13 @@ impl Broadcasts {
             sending_user: record.user,
             process_state: PROCESS_STATE_TOP,
             sent_from_uid: if record.share_identity {
-                record.calling_uid
+                record.sender.uid
             } else {
                 INVALID_UID
             },
             sent_from_package: record
                 .share_identity
-                .then(|| record.calling_package.clone())
+                .then(|| record.sender.package.clone())
                 .flatten(),
         }
         .write(&mut p);
@@ -2141,8 +2223,8 @@ impl Broadcasts {
     }
 
     /// `scheduleReceiver` of `record` to the manifest receiver `m` in the
-    /// process of `start_seq`, the intent naming it: whether it was sent,
-    /// none while the process has not attached.
+    /// process of `start_seq`, the intent naming it, unless it is skipped:
+    /// whether it was sent, none while the process has not attached.
     #[allow(clippy::too_many_arguments)]
     fn deliver_manifest(
         &self,
@@ -2160,6 +2242,9 @@ impl Broadcasts {
             app.thread.as_ref()?;
             app.config.clone()?
         };
+        if self.skipped_manifest(host, record, m) {
+            return Some(false);
+        }
         self.share_identity_access(host, start_seq, record);
         let compat = super::config::CompatibilityInfo::of(
             &m.info.info.application_info,
@@ -2191,13 +2276,13 @@ impl Broadcasts {
             sending_user: record.user,
             process_state: PROCESS_STATE_TOP,
             sent_from_uid: if record.share_identity {
-                record.calling_uid
+                record.sender.uid
             } else {
                 INVALID_UID
             },
             sent_from_package: record
                 .share_identity
-                .then(|| record.calling_package.clone())
+                .then(|| record.sender.package.clone())
                 .flatten(),
         }
         .write(&mut p);
@@ -2336,5 +2421,40 @@ mod tests {
         assert!(is_core(1000) && is_core(101_000) && !is_core(10_154));
         assert!(is_isolated(99_001) && is_isolated(190_001) && !is_isolated(10_154));
         assert!(can_access_unexported(1000) && !can_access_unexported(2000));
+    }
+
+    /// A registered target keeps the filter it matched, which its delivery
+    /// is checked against again.
+    #[test]
+    fn registered_targets_keep_their_matched_filter() {
+        let to = |handle, filter| Registered {
+            handle,
+            filter,
+            start_seq: 7,
+        };
+        let merged = merge(Vec::new(), vec![(5, to(1, 2)), (0, to(3, 0))]);
+        let kept: Vec<_> = merged
+            .iter()
+            .map(|t| match t {
+                Target::Registered(r) => (r.handle, r.filter, r.start_seq),
+                Target::Manifest(_) => panic!("no manifest receiver"),
+            })
+            .collect();
+        assert_eq!(kept, vec![(1, 2, 7), (3, 0, 7)]);
+    }
+
+    /// The system sends as `android`, with no op, naming no required
+    /// permissions when it requires none.
+    #[test]
+    fn the_system_sender_requires_what_it_names() {
+        let none = Sender::system(&[]);
+        assert_eq!(
+            (none.uid, none.original_uid, none.package.as_deref()),
+            (SYSTEM_UID, SYSTEM_UID, Some("android"))
+        );
+        assert!(none.required_null && none.app_op == OP_NONE);
+        let some = Sender::system(&["android.permission.X".to_string()]);
+        assert!(!some.required_null);
+        assert_eq!(some.required_permissions, ["android.permission.X"]);
     }
 }
