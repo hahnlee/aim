@@ -218,15 +218,15 @@ HAL (linux-run)                                   linux-run --audio-io
 Every request to the CoreAudio process has a timeout: 3 seconds for the
 device query and opens (the first request also starts the process, and it
 is the first contact with coreaudiod), 2 seconds for start, stop and close.
-A request that is not answered in time gives the process up for the rest
-of the HAL process's life (no retry yet, #237): the module closes the
-socket and the lifeline (the process tears down whenever CoreAudio lets
-it), and
+A request that is not answered in time gives the process up: the module
+closes the socket and the lifeline (the process tears down whenever
+CoreAudio lets it), and
 
 - the devices are a stereo 48 kHz output named "Null output" with a
   480-frame buffer, and no input, so audioserver's policy has its speaker
   and takes its no-microphone path;
-- every stream, open or opened later, plays into the **null sink**: a
+- every stream, open or opened until a new process starts, plays into the
+  **null sink**: a
   thread that runs the render callback's own ring logic at the stream's
   rate (10 ms periods against CLOCK_MONOTONIC), so output is consumed,
   the position stamps advance as a device's would, xruns are counted, and
@@ -235,6 +235,14 @@ it), and
 - A stream that was on the CoreAudio process gets `Ring::detached` set
   first: from then on its callbacks (should they still run) leave the ring
   alone, so the ring keeps one consumer.
+
+A device query or a stream open 5 seconds after the give-up starts a new
+CoreAudio process, and the wait doubles with each give-up, up to 5
+minutes, so a coreaudiod that keeps hanging costs an open's timeout at
+most that often. Streams opened on the new process play on it; streams
+of a process given up stay on the null sink (each stream's requests go to
+the process it was opened on), and the devices audioserver read at
+registration stay the null ones until it reads the module again.
 
 Returning errors instead was rejected: audioserver treats a failed open of
 the primary output as a missing module and retries it, and system_server's

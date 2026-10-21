@@ -59,8 +59,9 @@ pub static MODULE: HostModule = HostModule {
 
 /// Where a stream's frames go.
 enum Backend {
-    /// A unit in the CoreAudio process, by its handle there.
-    Device(u64),
+    /// A unit in a CoreAudio process, by its handle there and the
+    /// process's generation.
+    Device(u64, u64),
     /// The null sink, while running.
     Null(Option<null::NullSink>),
 }
@@ -90,11 +91,15 @@ struct Streams {
 }
 
 impl Streams {
-    /// The CoreAudio process is gone: move every stream to the null sink,
-    /// telling its callbacks (should they still run) to leave the ring.
-    fn detach_all(&mut self) {
+    /// A CoreAudio process is gone: move every stream that is not on the
+    /// running one to the null sink, telling its callbacks (should they
+    /// still run) to leave the ring.
+    fn detach_stale(&mut self) {
+        let running = client::running();
         for e in self.open.values_mut() {
-            if let Backend::Device(_) = e.backend {
+            if let Backend::Device(_, generation) = e.backend
+                && Some(generation) != running
+            {
                 e.shared
                     .ring()
                     .detached
@@ -121,14 +126,21 @@ fn neg(e: i32) -> i64 {
     -(e as i64)
 }
 
-fn request(op: u32, stream: u64, open: Option<&Open>) -> Result<wire::Reply, client::Error> {
+/// A request to the running CoreAudio process, or for a stream to the one
+/// of `generation`.
+fn request(
+    op: u32,
+    stream: u64,
+    open: Option<&Open>,
+    generation: Option<u64>,
+) -> Result<(wire::Reply, u64), client::Error> {
     let req = wire::Request {
         op,
         stream,
         open: open.copied().unwrap_or_default(),
         ..Default::default()
     };
-    client::request(&req, open.map(|o| o.fd))
+    client::request(&req, open.map(|o| o.fd), generation)
 }
 
 unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
@@ -137,9 +149,12 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
             // SAFETY: the registry passes the guest's argument block.
             match unsafe { args_mut::<Devices>(args, len) } {
                 Ok(out) => {
-                    *out = match request(FN_DEVICES, 0, None) {
-                        Ok(reply) => reply.devices,
-                        Err(_) => null_devices(),
+                    *out = match request(FN_DEVICES, 0, None, None) {
+                        Ok((reply, _)) => reply.devices,
+                        Err(_) => {
+                            with_streams(Streams::detach_stale);
+                            null_devices()
+                        }
                     };
                     0
                 }
@@ -156,14 +171,14 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
                 Ok(s) => s.into(),
                 Err(e) => return neg(e),
             };
-            let backend = match request(FN_OPEN, 0, Some(open)) {
-                Ok(reply) => Backend::Device(reply.stream),
+            let backend = match request(FN_OPEN, 0, Some(open), None) {
+                Ok((reply, generation)) => Backend::Device(reply.stream, generation),
                 Err(client::Error::Errno(e)) => return neg(e),
                 Err(client::Error::Gone) => Backend::Null(None),
             };
             with_streams(|streams| {
                 if let Backend::Null(_) = backend {
-                    streams.detach_all();
+                    streams.detach_stale();
                 }
                 let id = streams.next;
                 streams.next += 1;
@@ -192,11 +207,11 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
                     return neg(errno::EINVAL);
                 };
                 let running = func == FN_START;
-                if let Backend::Device(handle) = entry.backend {
-                    match request(func, handle, None) {
+                if let Backend::Device(handle, generation) = entry.backend {
+                    match request(func, handle, None, Some(generation)) {
                         Ok(_) => entry.running = running,
                         Err(client::Error::Errno(e)) => return neg(e),
-                        Err(client::Error::Gone) => streams.detach_all(),
+                        Err(client::Error::Gone) => streams.detach_stale(),
                     }
                 }
                 let entry = streams.open.get_mut(&id).unwrap();
