@@ -412,7 +412,7 @@ fn parcelable_exception(class: &str, message: String) -> Exception {
 }
 
 /// `ComponentName.flattenToShortString`.
-fn short_name(package: &str, class: &str) -> String {
+pub(super) fn short_name(package: &str, class: &str) -> String {
     match class
         .strip_prefix(package)
         .filter(|rest| rest.starts_with('.'))

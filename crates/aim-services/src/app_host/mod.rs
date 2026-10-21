@@ -125,6 +125,7 @@ pub mod system_update;
 pub mod task_info;
 pub mod tasks;
 pub mod telephony_registry;
+pub mod text_services;
 pub mod trust_service;
 pub mod uid_observers;
 pub mod uri_grants;
@@ -491,6 +492,7 @@ pub struct AppHost {
     stats: OnceLock<Arc<stats_manager::Stats>>,
     dropbox: OnceLock<Arc<dropbox::DropBox>>,
     bluetooth: OnceLock<Arc<bluetooth_manager::BluetoothManager>>,
+    text_services: OnceLock<Arc<text_services::TextServices>>,
     /// What DevicePolicyManagerService persisted, read once.
     device_policies: OnceLock<device_policy::Policies>,
     services: services::Services,
@@ -579,6 +581,7 @@ impl AppHost {
             stats: OnceLock::new(),
             dropbox: OnceLock::new(),
             bluetooth: OnceLock::new(),
+            text_services: OnceLock::new(),
             device_policies: OnceLock::new(),
             services: Default::default(),
             pending_intents: Default::default(),
@@ -648,6 +651,10 @@ impl AppHost {
             .get_or_init(|| {
                 bluetooth_manager::BluetoothManager::new(self.clone(), settings.clone())
             })
+            .clone();
+        let text_services = self
+            .text_services
+            .get_or_init(|| text_services::TextServices::new(self.clone(), settings.clone()))
             .clone();
         vec![
             (
@@ -777,6 +784,7 @@ impl AppHost {
                 "locale",
                 Arc::new(locale_manager::LocaleManager::new(self.clone())),
             ),
+            ("textservices", text_services),
             (
                 "grammatical_inflection",
                 Arc::new(grammatical_inflection::GrammaticalInflection::new(
@@ -5051,6 +5059,10 @@ impl Service for Control {
                 if let Some(bluetooth) = host.bluetooth.get() {
                     bluetooth.on_user_starting();
                     bluetooth.on_user_unlocking();
+                }
+                // TextServicesManagerService's `onUserUnlocking`.
+                if let Some(text_services) = host.text_services.get() {
+                    text_services.on_user_unlocking(0);
                 }
             });
             let mut p = Parcel::new();
