@@ -24,6 +24,8 @@
 //! - It plays the sound effects AudioService plays (`effects`).
 //! - It reads a thread's `/proc/<tid>/status` for the host, as
 //!   system_server reads it (`Process.readProcLines`).
+//! - It sorts a process's `/proc/<pid>/smaps` into the heaps
+//!   `Debug.MemoryInfo` reports (`aim_meminfo`), as system_server does.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -70,9 +72,11 @@ const PLAY_SOUND_EFFECT: u32 = 6;
 /// eventTimeNanos, float x, float y, float pressure)`: a one-finger
 /// touchscreen motion in the display's pixels.
 const INJECT_MOTION: u32 = 7;
-/// `IAppHostAgent.readSmaps(int pid)`: the process's `/proc/<pid>/smaps`,
-/// null when it cannot be opened (the process is gone).
-const READ_SMAPS: u32 = 8;
+/// `IAppHostAgent.readMemoryInfo(int pid)`: the heaps of the process's
+/// `/proc/<pid>/smaps` (`aim_meminfo::MemoryInfo::ints`), sorted here where
+/// it is read, as system_server's `Debug.getMemoryInfo` sorts it; null
+/// when it cannot be read (the process is gone) or parsed.
+const READ_MEMORY_INFO: u32 = 8;
 /// `IAppHostAgent.readProcStatus(int tid)`: the first 4095 bytes of
 /// `/proc/<tid>/status`, read once as `android_os_Process_readProcLines`
 /// reads it; null when it cannot be opened.
@@ -541,11 +545,14 @@ fn on_transact(
         }
         // Read as system_server reads it for `Debug.getMemoryInfo`, with
         // CAP_SYS_PTRACE.
-        READ_SMAPS => {
+        READ_MEMORY_INFO => {
             let pid: i32 = data.read()?;
-            let smaps = std::fs::read_to_string(format!("/proc/{pid}/smaps")).ok();
+            let heaps = std::fs::read_to_string(format!("/proc/{pid}/smaps"))
+                .ok()
+                .and_then(|smaps| aim_meminfo::memory_info_of(&smaps))
+                .map(|info| info.ints());
             reply.write(&Status::ok())?;
-            reply.write(&smaps)?;
+            reply.write(&heaps)?;
             Ok(())
         }
         _ => Err(StatusCode::UNKNOWN_TRANSACTION),

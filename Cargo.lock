@@ -46,6 +46,7 @@ version = "0.1.0"
 dependencies = [
  "aim-emulated-storage",
  "aim-input-transport",
+ "aim-meminfo",
  "android_os_vold",
  "binder",
  "daemon-log",
@@ -288,6 +289,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aim-meminfo"
+version = "0.1.0"
+
+[[package]]
 name = "aim-paths"
 version = "0.1.0"
 
@@ -318,6 +323,7 @@ dependencies = [
  "aim-host-wifi",
  "aim-hostcall",
  "aim-input-transport",
+ "aim-meminfo",
  "aim-paths",
  "aim-service-aidl",
  "aim-storage",

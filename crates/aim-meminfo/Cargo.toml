@@ -1,0 +1,7 @@
+[package]
+license.workspace = true
+name = "aim-meminfo"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "A process's smaps sorted into the heaps Debug.MemoryInfo reports, as libmeminfo sorts it"
