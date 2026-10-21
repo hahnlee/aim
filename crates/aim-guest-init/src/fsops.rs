@@ -12,11 +12,16 @@
 //!   are recorded for the syscall layer's `stat` on the host inode of a
 //!   writable area ([`crate::guest_inode`]), and for the read-only image and
 //!   paths with no host inode in the fs-attrs table.
+//! - cgroup v1 hierarchies (`SetupCgroups`): a new group gets its control
+//!   files and a write to one is the kernel's (`aim_storage::cgroup_v1`);
+//!   no other file can be made there.
 
 use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+
+use aim_storage::cgroup_v1::{self, Controller};
 
 use crate::paths::{Area, MapEntry, MapKind, PathMap, Resolved};
 
@@ -112,10 +117,29 @@ pub struct FsOps {
     unmounted: Vec<(String, String)>,
     /// The cgroup v2 hierarchy (path, mode, uid, gid), a plain directory.
     pub cgroup2: Option<(String, u32, u32, u32)>,
+    /// The cgroup v1 hierarchies `SetupCgroups` mounts.
+    pub cgroup_v1: Vec<CgroupV1>,
     /// The `--path-map` file processes start with; init's bind mounts
     /// become entries of it.
     path_map_file: Option<PathBuf>,
     namespaces: Option<crate::mount_namespace::MountNamespaces>,
+}
+
+/// A cgroup v1 hierarchy of `cgroups.json`: its controller, mount point,
+/// the mode and owner `Mkdir` gives the mount point, and the host directory
+/// that holds it.
+#[derive(Clone, Debug)]
+pub struct CgroupV1 {
+    pub controller: Controller,
+    pub path: String,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub host: PathBuf,
+}
+
+fn errno_text(errno: i32) -> std::io::Error {
+    std::io::Error::from_raw_os_error(errno)
 }
 
 /// Legacy cgroup v1 controllers init.rc still addresses although the
@@ -137,6 +161,7 @@ impl FsOps {
             attrs: Vec::new(),
             unmounted: Vec::new(),
             cgroup2: None,
+            cgroup_v1: Vec::new(),
             path_map_file: None,
             namespaces: None,
         }
@@ -252,6 +277,152 @@ impl FsOps {
             to.guest,
             from.host.display()
         ))))
+    }
+
+    /// `MountV1CgroupController`: the mount point made with the
+    /// descriptor's mode and owner, then the hierarchy mounted over it with
+    /// its root group (owned by root, 0755, as a new cgroup filesystem's).
+    pub fn mount_cgroup_v1(&mut self, hierarchy: &CgroupV1) -> FsResult {
+        let CgroupV1 {
+            controller,
+            path,
+            mode,
+            uid,
+            gid,
+            host,
+        } = hierarchy.clone();
+        self.mkdir(&path, Some(mode), Some(uid), Some(gid))?;
+        let fresh = self.apply && !host.exists();
+        let made = if fresh {
+            fs::create_dir_all(&host).map_err(|e| format!("mount {path}: {e}"))?;
+            cgroup_v1::populate(controller, &host, None)
+                .map_err(|e| format!("mount {path}: {e}"))?
+        } else {
+            Vec::new()
+        };
+        self.map.add(MapEntry {
+            guest: path.clone(),
+            host: host.clone(),
+            kind: MapKind::Cgroup(controller),
+        });
+        if self.apply {
+            if let Some(file) = &self.path_map_file {
+                fs::write(file, self.map.to_file_text()).map_err(|e| e.to_string())?;
+            }
+            self.publish_mount_owner()?;
+        }
+        if fresh {
+            let root = self.resolve(&path, true)?;
+            self.record_attrs(&root, Some(0), Some(0), Some(0o755));
+            self.record_cgroup_files(&path, &made, 0, 0)?;
+        }
+        Ok(Effect::Applied(format!(
+            "mount cgroup {path} ({}): a cgroup v1 hierarchy ({})",
+            controller.mount_options(),
+            host.display()
+        )))
+    }
+
+    /// The owner and modes of new control files (`cgroup_kn_set_ugid`).
+    fn record_cgroup_files(
+        &mut self,
+        dir: &str,
+        made: &[(PathBuf, u32)],
+        uid: u32,
+        gid: u32,
+    ) -> Result<(), String> {
+        for (file, mode) in made {
+            let name = file.file_name().unwrap_or_default().to_string_lossy();
+            let resolved = self.resolve(&format!("{dir}/{name}"), false)?;
+            self.record_attrs(&resolved, Some(uid), Some(gid), Some(*mode));
+        }
+        Ok(())
+    }
+
+    /// The cgroup v1 hierarchy `resolved` is in: its controller and root.
+    fn cgroup_of(&self, resolved: &Resolved) -> Option<(Controller, PathBuf)> {
+        self.map
+            .entries()
+            .iter()
+            .find_map(|entry| match entry.kind {
+                MapKind::Cgroup(c)
+                    if resolved.guest == entry.guest
+                        || resolved
+                            .guest
+                            .strip_prefix(entry.guest.as_str())
+                            .is_some_and(|rest| rest.starts_with('/')) =>
+                {
+                    Some((c, entry.host.clone()))
+                }
+                _ => None,
+            })
+    }
+
+    /// A write to a control file of a cgroup v1 hierarchy, as init's
+    /// `WriteFile` makes it: the file must exist (cgroupfs makes none).
+    fn write_cgroup(
+        &self,
+        path: &str,
+        resolved: &Resolved,
+        controller: Controller,
+        root: &Path,
+        content: &str,
+    ) -> FsResult {
+        let failed = |errno| format!("Unable to write to file '{path}': {}", errno_text(errno));
+        let Some(dir) = resolved.host.parent().filter(|_| resolved.host.is_file()) else {
+            return Err(failed(if resolved.host.is_dir() {
+                libc::EISDIR
+            } else {
+                cgroup_v1::EACCES
+            }));
+        };
+        let name = resolved
+            .host
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let file = cgroup_v1::file(controller, dir == root, &name)
+            .ok_or_else(|| failed(cgroup_v1::EACCES))?;
+        if self.apply {
+            let populated = fs::read_to_string(cgroup_v1::state_path(root))
+                .map(|text| {
+                    cgroup_v1::Membership::parse(&text).names(&cgroup_v1::group_path(dir, root))
+                })
+                .unwrap_or(false);
+            cgroup_v1::write(file, dir, root, content.as_bytes(), 0, populated).map_err(failed)?;
+        }
+        Ok(Effect::Applied(format!(
+            "write {} ({} bytes, cgroup {})",
+            resolved.guest,
+            content.len(),
+            controller.name()
+        )))
+    }
+
+    /// An rmdir in a cgroup v1 hierarchy (`cgroup_destroy_locked`): not the
+    /// root, nor a group with children or tasks; its control files go with
+    /// it. A control file cannot be removed.
+    fn remove_cgroup(&self, resolved: &Resolved, root: &Path, directory: bool) -> FsResult {
+        let verb = if directory { "rmdir" } else { "unlink" };
+        let failed = |errno| format!("{verb}() failed: {}", errno_text(errno));
+        if !directory || !resolved.host.is_dir() {
+            return Err(failed(if directory {
+                libc::ENOTDIR
+            } else {
+                cgroup_v1::EPERM
+            }));
+        }
+        let group = cgroup_v1::group_path(&resolved.host, root);
+        let tasks = fs::read_to_string(cgroup_v1::state_path(root))
+            .map(|text| cgroup_v1::Membership::parse(&text).names(&group))
+            .unwrap_or(false);
+        if resolved.host == root || tasks || !cgroup_v1::children(&resolved.host).is_empty() {
+            return Err(failed(cgroup_v1::EBUSY));
+        }
+        if self.apply {
+            fs::remove_dir_all(&resolved.host).map_err(|e| format!("{verb}() failed: {e}"))?;
+        }
+        Ok(Effect::Applied(format!("{verb} {}", resolved.guest)))
     }
 
     /// A kernel filesystem mount point that stays unmounted (a cgroup
@@ -380,6 +551,16 @@ impl FsOps {
                     fs::set_permissions(&resolved.host, host_permissions(mode, &resolved.host))
                         .map_err(|e| format!("fchmodat() failed on {path}: {e}"))?;
                 }
+                if let Some((controller, root)) = self.cgroup_of(&resolved)
+                    && self.apply
+                    && fs::read_dir(&resolved.host).is_ok_and(|mut d| d.next().is_none())
+                {
+                    let parent = resolved.host.parent().filter(|_| resolved.host != root);
+                    let made = cgroup_v1::populate(controller, &resolved.host, parent)
+                        .map_err(|e| format!("mkdir() failed on {path}: {e}"))?;
+                    // init is root: the group's files keep root's owner.
+                    self.record_cgroup_files(&resolved.guest, &made, 0, 0)?;
+                }
                 self.record_attrs(
                     &resolved,
                     Some(uid.unwrap_or(0)),
@@ -481,6 +662,9 @@ impl FsOps {
             return Ok(effect);
         }
         let resolved = self.resolve(path, true)?;
+        if let Some((controller, root)) = self.cgroup_of(&resolved) {
+            return self.write_cgroup(path, &resolved, controller, &root, content);
+        }
         match &resolved.area {
             Area::Writable { .. } => {
                 if self.apply {
@@ -579,6 +763,12 @@ impl FsOps {
             return Ok(effect);
         }
         let resolved = self.resolve(link, false)?;
+        if self.cgroup_of(&resolved).is_some() {
+            return Err(format!(
+                "symlink() failed to create {link} -> {target}: {}",
+                errno_text(cgroup_v1::EPERM)
+            ));
+        }
         match &resolved.area {
             Area::Writable { .. } => {
                 if self.apply {
@@ -613,6 +803,9 @@ impl FsOps {
             return Ok(effect);
         }
         let resolved = self.resolve(path, false)?;
+        if let Some((_, root)) = self.cgroup_of(&resolved) {
+            return self.remove_cgroup(&resolved, &root, directory);
+        }
         let verb = if directory { "rmdir" } else { "unlink" };
         match &resolved.area {
             Area::Writable { .. } => {

@@ -1096,21 +1096,37 @@ impl GuestExecutor {
                 InitAction::WaitForColdbootDone
                 | InitAction::QueuePropertyTriggers
                 | InitAction::EnablePropertyTrigger => Effect::Engine(action.name().to_string()),
-                // libprocessgroup's CgroupSetup: v1 controllers stay
-                // unmounted; the v2 hierarchy gets its system/app
-                // isolation directories.
-                InitAction::SetupCgroups => match self.fs.cgroup2.clone() {
-                    Some((root, mode, uid, gid)) => {
-                        setup_cgroup_hierarchy(&mut self.fs, &root, mode, uid, gid)?;
-                        Effect::Applied(format!(
-                            "SetupCgroups: {root}/apps and {root}/system (cgroup v2; no controller acts)"
-                        ))
+                // libprocessgroup's CgroupSetup, in descriptor name order:
+                // the v1 hierarchies the syscall layer provides are mounted,
+                // and the v2 hierarchy gets its system/app isolation
+                // directories.
+                InitAction::SetupCgroups => {
+                    let mut done = Vec::new();
+                    let mut v1 = self.fs.cgroup_v1.clone();
+                    v1.sort_by_key(|h| h.controller);
+                    for hierarchy in &v1 {
+                        self.fs.mount_cgroup_v1(hierarchy)?;
+                        done.push(format!(
+                            "{} ({})",
+                            hierarchy.path,
+                            hierarchy.controller.name()
+                        ));
                     }
-                    None => Effect::NoOp(
-                        "SetupCgroups: cgroups are answered unsupported (ADR 0012 appendix)"
-                            .to_string(),
-                    ),
-                },
+                    if let Some((root, mode, uid, gid)) = self.fs.cgroup2.clone() {
+                        setup_cgroup_hierarchy(&mut self.fs, &root, mode, uid, gid)?;
+                        done.push(format!(
+                            "{root}/apps and {root}/system (cgroup v2; no controller acts)"
+                        ));
+                    }
+                    if done.is_empty() {
+                        Effect::NoOp(
+                            "SetupCgroups: cgroups are answered unsupported (ADR 0012 appendix)"
+                                .to_string(),
+                        )
+                    } else {
+                        Effect::Applied(format!("SetupCgroups: {}", done.join(", ")))
+                    }
+                }
                 InitAction::SetKptrRestrict => {
                     Effect::NoOp("SetKptrRestrict: no kernel pointers are exposed".to_string())
                 }
@@ -1165,6 +1181,72 @@ impl InitProperties for PropsAdapter {
 mod cgroup_tests {
     use super::*;
     use crate::paths::Layout;
+
+    /// SetupCgroups mounts a v1 hierarchy over its mount point; init.rc's
+    /// mkdir, copy, write and rmdir on it are the kernel's.
+    #[test]
+    fn v1_hierarchies_mount_with_their_groups_and_control_files() {
+        use aim_storage::cgroup_v1::Controller;
+        let directory =
+            std::env::temp_dir().join(format!("aim-cgroup-v1-setup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(directory.join("image")).unwrap();
+        let layout = Layout::new(
+            directory.join("image"),
+            directory.join("data"),
+            Some(directory.join("run")),
+        );
+        layout.prepare().unwrap();
+        let mut fs = FsOps::new(layout.path_map(), layout.fs_attrs_file(), true);
+        let hierarchy = crate::fsops::CgroupV1 {
+            controller: Controller::Cpuset,
+            path: "/dev/cpuset".into(),
+            mode: 0o755,
+            uid: 1000,
+            gid: 1000,
+            host: layout.cgroup_v1_dir(Controller::Cpuset),
+        };
+        fs.mount_cgroup_v1(&hierarchy).unwrap();
+        let root = layout.cgroup_v1_dir(Controller::Cpuset);
+        // The mount point keeps Mkdir's owner; the new root is root's.
+        let point = crate::guest_inode::read(&layout.runtime.join("dev/cpuset"))
+            .unwrap()
+            .unwrap();
+        assert_eq!((point.uid, point.gid), (Some(1000), Some(1000)));
+        let mounted = crate::guest_inode::read(&root).unwrap().unwrap();
+        assert_eq!(
+            (mounted.uid, mounted.gid, mounted.mode),
+            (Some(0), Some(0), Some(0o755))
+        );
+        assert!(
+            fs.map
+                .to_file_text()
+                .contains(&format!("cgroup:cpuset\t/dev/cpuset\t{}\n", root.display()))
+        );
+        fs.mkdir("/dev/cpuset/background", None, None, None)
+            .unwrap();
+        let group = root.join("background");
+        assert_eq!(std::fs::read_to_string(group.join("cpus")).unwrap(), "\n");
+        let tasks = crate::guest_inode::read(&group.join("tasks"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(tasks.mode, Some(0o644));
+        fs.copy("/dev/cpuset/cpus", "/dev/cpuset/background/cpus")
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(group.join("cpus")).unwrap(),
+            std::fs::read_to_string(root.join("cpus")).unwrap()
+        );
+        // The root's cpus are the kernel's, and cgroupfs makes no files.
+        assert!(fs.write("/dev/cpuset/cpus", "0").is_err());
+        assert!(fs.write("/dev/cpuset/background/extra", "1").is_err());
+        assert!(!group.join("extra").exists());
+        assert!(fs.remove("/dev/cpuset/background/cpus", false).is_err());
+        fs.remove("/dev/cpuset/background", true).unwrap();
+        assert!(!group.exists());
+        assert!(fs.remove("/dev/cpuset", true).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn setup_cgroups_applies_configured_owner_to_mounted_root_before_children() {

@@ -85,6 +85,7 @@ kernfs	/proc	<runtime>/kernfs/proc
 | `/data/user/0` | `<data>/data/data` | `rw` | persistent (vold's bind of `/data/data`) |
 | `/proc`, `/sys` | `<runtime>/kernfs/{proc,sys}` | `kernfs` | per boot |
 | `/sys/fs/cgroup` | `<runtime>/cgroup` | `cgroup2` | per boot |
+| `/dev/blkio`, `/dev/cpuctl`, `/dev/cpuset` | `<runtime>/cgroup-v1/<controller>` | `cgroup:<controller>` | per boot, added by `SetupCgroups` |
 | `/sys/fs/bpf` | `<runtime>/bpf` | `bpf` | per boot |
 | init's `mount none SRC DST bind` between `rw` areas | SRC's host path | `rw` | added when init runs it; with `rec`, the entries below SRC are copied below DST |
 | everything else | `<image>/...` | `root`, read-only | derived image |
@@ -349,10 +350,22 @@ A dry run of the pinned image records 43 values (dry run, 2026-09-27):
 (5), `/proc/sys/abi/swp`, `/proc/cpu/alignment`, `/sys/module/dm_*`,
 `/sys/block/zram0/*`, `/sys/kernel/debug/*` and `/sys/class/*`.
 
-Kernel filesystems init mounts stay unmounted: the cgroup v1 controllers
-from `cgroups.json` plus `/dev/memcg` and `/dev/stune`, configfs, tracefs,
-pstore, bpf, functionfs and binderfs. Commands on their files are logged as
-no-ops.
+Kernel filesystems init mounts stay unmounted: `/dev/memcg` and
+`/dev/stune` (not in `cgroups.json`), configfs, tracefs, pstore, bpf,
+functionfs and binderfs. Commands on their files are logged as no-ops.
+
+The cgroup v1 controllers of `cgroups.json` the layer provides (`blkio`,
+`cpu`, `cpuset`, `aim_storage::cgroup_v1`) are mounted by `SetupCgroups` as
+libprocessgroup's `MountV1CgroupController` mounts them: the mount point is
+made with the descriptor's mode and owner, then the hierarchy's root group
+(root's, 0755, with its control files) is mounted over it as a
+`cgroup:<controller>` path-map entry, and `/proc/mounts` lists it as a
+`cgroup` filesystem with its controller (`cpuset,noprefix,...` for the
+legacy cpuset). init's `mkdir` there makes a group with its control files,
+`write` and `copy` set a control file as the kernel does (or fail as it
+does: no file can be made, the root cpuset's masks are read-only), and
+`rmdir` removes an empty group. Which group each task is in is the layer's
+(`sys/cgroup.rs`), in `<runtime>/cgroup-v1/<controller>.tasks`.
 
 The cgroup v2 hierarchy (`Cgroups2` in `cgroups.json`) is the one
 exception: zygote aborts a fork when `createProcessGroup` cannot make

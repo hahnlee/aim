@@ -16,6 +16,7 @@
 //! | `/data/user/0` | `<data>/data/data` | writable | persistent (vold's bind of `/data/data`) |
 //! | `/proc`, `/sys` | `<runtime>/kernfs/{proc,sys}` | kernfs | per boot: values init wrote |
 //! | `/sys/fs/cgroup` | `<runtime>/cgroup` | cgroup2 | per boot: a plain directory tree |
+//! | `/dev/blkio`, `/dev/cpuctl`, `/dev/cpuset` | `<runtime>/cgroup-v1/<controller>` | `cgroup:<controller>` | per boot, from `SetupCgroups`: cgroup v1 hierarchies |
 //! | `/sys/fs/bpf` | `<runtime>/bpf` | bpf | per boot: pinned eBPF objects |
 //! | everything else | `<image>/...` | read-only image | |
 //!
@@ -58,16 +59,20 @@ pub enum MapKind {
     /// bpffs: where the syscall layer's eBPF maps and programs are pinned
     /// (hard links to their object files).
     Bpf,
+    /// A cgroup v1 hierarchy of one controller (`aim_storage::cgroup_v1`):
+    /// its groups and control files, written as the kernel's.
+    Cgroup(aim_storage::cgroup_v1::Controller),
 }
 
 impl MapKind {
-    pub fn keyword(self) -> &'static str {
+    pub fn keyword(self) -> String {
         match self {
-            MapKind::ReadOnly => "ro",
-            MapKind::Writable => "rw",
-            MapKind::Kernfs => "kernfs",
-            MapKind::Cgroup2 => "cgroup2",
-            MapKind::Bpf => "bpf",
+            MapKind::ReadOnly => "ro".into(),
+            MapKind::Writable => "rw".into(),
+            MapKind::Kernfs => "kernfs".into(),
+            MapKind::Cgroup2 => "cgroup2".into(),
+            MapKind::Bpf => "bpf".into(),
+            MapKind::Cgroup(c) => c.map_kind(),
         }
     }
 }
@@ -189,9 +194,11 @@ impl PathMap {
                     entry.host.join(rest)
                 };
                 let area = match entry.kind {
-                    MapKind::Writable | MapKind::Cgroup2 | MapKind::Bpf => Area::Writable {
-                        prefix: entry.guest.clone(),
-                    },
+                    MapKind::Writable | MapKind::Cgroup2 | MapKind::Bpf | MapKind::Cgroup(_) => {
+                        Area::Writable {
+                            prefix: entry.guest.clone(),
+                        }
+                    }
                     MapKind::ReadOnly => Area::ReadOnlyImage,
                     MapKind::Kernfs => Area::Kernfs {
                         prefix: entry.guest.clone(),
@@ -360,7 +367,14 @@ impl PathMap {
                         _ => MapKind::Bpf,
                     },
                 }),
-                other => return Err(format!("line {}: unknown kind '{other}'", number + 1)),
+                other => match aim_storage::cgroup_v1::Controller::from_map_kind(other) {
+                    Some(c) => entries.push(MapEntry {
+                        guest: guest.to_string(),
+                        host: PathBuf::from(host),
+                        kind: MapKind::Cgroup(c),
+                    }),
+                    None => return Err(format!("line {}: unknown kind '{other}'", number + 1)),
+                },
             }
         }
         let image = image.ok_or("missing root line")?;
@@ -437,6 +451,10 @@ impl Layout {
     /// Host directory the guest sees as the cgroup v2 hierarchy.
     pub fn cgroup_dir(&self) -> PathBuf {
         self.runtime.join("cgroup")
+    }
+    /// Host directory of the cgroup v1 hierarchy of `controller`.
+    pub fn cgroup_v1_dir(&self, controller: aim_storage::cgroup_v1::Controller) -> PathBuf {
+        self.runtime.join("cgroup-v1").join(controller.name())
     }
     /// Host directory the guest sees as bpffs.
     pub fn bpf_dir(&self) -> PathBuf {
