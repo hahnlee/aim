@@ -74,6 +74,7 @@ const IFA_LABEL: u16 = 3;
 const IFA_BROADCAST: u16 = 4;
 const IFA_CACHEINFO: u16 = 6;
 const IFA_FLAGS: u16 = 8;
+const IFA_F_DEPRECATED: u32 = 0x20;
 const IFA_F_PERMANENT: u32 = 0x80;
 
 /// RTNLGRP_LINK, RTNLGRP_IPV4_IFADDR, RTNLGRP_IPV6_IFADDR as bind masks.
@@ -600,7 +601,14 @@ fn ip_bytes(ip: &IpAddr) -> Vec<u8> {
 /// RTM_NEWADDR or RTM_DELADDR for address `a` of `l`.
 fn addr_msg(ty: u16, flags: u16, seq: u32, portid: u32, l: &Link, a: &Addr) -> Vec<u8> {
     let family = if a.ip.is_ipv4() { 2u8 } else { 10 };
-    let mut b = vec![family, a.prefix, IFA_F_PERMANENT as u8, a.scope()];
+    let mut ifa_flags = 0;
+    if a.life.permanent() {
+        ifa_flags |= IFA_F_PERMANENT;
+    }
+    if a.life.deprecated {
+        ifa_flags |= IFA_F_DEPRECATED;
+    }
+    let mut b = vec![family, a.prefix, ifa_flags as u8, a.scope()];
     b.extend_from_slice(&l.index.to_le_bytes());
     let ip = ip_bytes(&a.ip);
     attr(&mut b, IFA_ADDRESS, &ip);
@@ -613,13 +621,20 @@ fn addr_msg(ty: u16, flags: u16, seq: u32, portid: u32, l: &Link, a: &Addr) -> V
         label.push(0);
         attr(&mut b, IFA_LABEL, &label);
     }
-    // Permanent: infinite preferred and valid lifetimes.
+    // `put_cacheinfo`: the preferred and valid seconds left, and when it
+    // was added and last set in hundredths of a second since boot.
+    let (valid, preferred) = a.life.left(netif::now_ms());
     let mut ci = Vec::new();
-    for v in [u32::MAX, u32::MAX, 0, 0] {
+    for v in [
+        preferred,
+        valid,
+        (a.life.created / 10) as u32,
+        (a.life.stamp / 10) as u32,
+    ] {
         ci.extend_from_slice(&v.to_le_bytes());
     }
     attr(&mut b, IFA_CACHEINFO, &ci);
-    attr(&mut b, IFA_FLAGS, &IFA_F_PERMANENT.to_le_bytes());
+    attr(&mut b, IFA_FLAGS, &ifa_flags.to_le_bytes());
     nlmsg(ty, flags, seq, portid, &b)
 }
 
@@ -767,7 +782,17 @@ fn request(
                 .ok_or(EINVAL)?;
             if ty == RTM_NEWADDR {
                 let replace = flags & NLM_F_REPLACE != 0 && flags & NLM_F_EXCL == 0;
-                netif::add_addr(index, Addr { ip, prefix }, replace)
+                // IFA_CACHEINFO's preferred and valid lifetimes, else
+                // permanent (`rtm_to_ifaddr`).
+                let life = match a.iter().find(|(t, _)| *t == IFA_CACHEINFO) {
+                    Some((_, v)) if v.len() >= 8 => {
+                        let word = |i: usize| u32::from_le_bytes(v[i..i + 4].try_into().unwrap());
+                        netif::Life::new(word(4), word(0))?
+                    }
+                    Some(_) => return Err(EINVAL),
+                    None => netif::Life::new(netif::INFINITY, netif::INFINITY)?,
+                };
+                netif::add_addr(index, Addr { ip, prefix, life }, replace)
             } else {
                 netif::del_addr(index, ip, (prefix != 0).then_some(prefix))
             }
@@ -898,10 +923,7 @@ mod tests {
             addrs: Vec::new(),
             carrier: true,
         };
-        let a = Addr {
-            ip: "192.168.1.20".parse().unwrap(),
-            prefix: 24,
-        };
+        let a = Addr::new("192.168.1.20".parse().unwrap(), 24);
         let m = addr_msg(RTM_NEWADDR, 0, 7, 99, &l, &a);
         assert_eq!(
             u32::from_le_bytes(m[..4].try_into().unwrap()) as usize,
@@ -913,6 +935,18 @@ mod tests {
         let at = attrs(&m[16..], 8);
         assert!(at.contains(&(IFA_LOCAL, &[192u8, 168, 1, 20][..])));
         assert!(at.contains(&(IFA_BROADCAST, &[192u8, 168, 1, 255][..])));
+        // A lease's address: neither permanent nor deprecated, with the
+        // seconds it has left (`inet_fill_ifaddr`).
+        let mut leased = a;
+        leased.life = netif::Life::new(3600, 1800).unwrap();
+        let m = addr_msg(RTM_NEWADDR, 0, 7, 99, &l, &leased);
+        assert_eq!(m[18], 0);
+        let at = attrs(&m[16..], 8);
+        let (_, ci) = at.iter().find(|(t, _)| *t == IFA_CACHEINFO).unwrap();
+        let word = |i: usize| u32::from_le_bytes(ci[i..i + 4].try_into().unwrap());
+        assert!((1799..=1800).contains(&word(0)) && (3599..=3600).contains(&word(4)));
+        let (_, f) = at.iter().find(|(t, _)| *t == IFA_FLAGS).unwrap();
+        assert_eq!(u32::from_le_bytes((*f).try_into().unwrap()), 0);
     }
 
     #[test]

@@ -135,7 +135,12 @@ reply and each announcement is one datagram sent to the listening names
 negative numbers, as Linux autobinds. Supported: RTM_GETLINK (dump and by
 index or name), RTM_GETADDR dumps, RTM_NEWLINK/RTM_SETLINK (flags, MTU),
 RTM_NEWADDR, RTM_DELADDR, and the groups RTNLGRP_LINK, RTNLGRP_IPV4_IFADDR
-and RTNLGRP_IPV6_IFADDR. RTM_GETROUTE, RTM_GETNEIGH and RTM_GETRULE dump
+and RTNLGRP_IPV6_IFADDR. An address keeps the lifetimes RTM_NEWADDR gives
+it (IFA_CACHEINFO, as IpClient sets a lease's): it is reported with the
+seconds left, deprecated when its preferred lifetime runs out and removed
+when its valid one does, both announced; they are checked whenever a
+process looks at the devices, which a process following the Mac's network
+does every 2 s. RTM_GETROUTE, RTM_GETNEIGH and RTM_GETRULE dump
 nothing: there is no routing table (netd keeps routes as bookkeeping, and
 the host routes). Other requests are EOPNOTSUPP, other netlink families
 EPROTONOSUPPORT.

@@ -60,9 +60,77 @@ pub const ETH0_MAC: [u8; 6] = [0x02, 0x61, 0x69, 0x6d, 0x00, 0x02];
 pub struct Addr {
     pub ip: IpAddr,
     pub prefix: u8,
+    pub life: Life,
+}
+
+/// `INFINITY_LIFE_TIME`.
+pub const INFINITY: u32 = u32::MAX;
+
+/// An address's lifetimes, as `set_ifa_lifetime` keeps them: seconds valid
+/// and preferred from `stamp`, INFINITY for none; `created` is when it was
+/// added and `stamp` when its lifetimes were last set (CLOCK_MONOTONIC
+/// milliseconds, the kernel's `ifa_cstamp` and `ifa_tstamp`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Life {
+    pub valid: u32,
+    pub preferred: u32,
+    pub created: u64,
+    pub stamp: u64,
+    /// IFA_F_DEPRECATED: set with no preferred lifetime, or since it ran out.
+    pub deprecated: bool,
+}
+
+impl Life {
+    /// Lifetimes set now: valid must be nonzero and not below preferred
+    /// (`rtm_to_ifaddr`, `inet6_rtm_newaddr`).
+    pub fn new(valid: u32, preferred: u32) -> Result<Life, Errno> {
+        if valid == 0 || preferred > valid {
+            return Err(EINVAL);
+        }
+        let now = now_ms();
+        Ok(Life {
+            valid,
+            preferred,
+            created: now,
+            stamp: now,
+            deprecated: preferred == 0,
+        })
+    }
+
+    /// IFA_F_PERMANENT: an infinite valid lifetime.
+    pub fn permanent(&self) -> bool {
+        self.valid == INFINITY
+    }
+
+    /// The valid and preferred seconds left at `now`, as `inet_fill_ifaddr`
+    /// reports them: both INFINITY for a permanent address.
+    pub fn left(&self, now: u64) -> (u32, u32) {
+        if self.permanent() {
+            return (INFINITY, INFINITY);
+        }
+        if self.preferred == INFINITY {
+            return (self.valid, INFINITY);
+        }
+        let age = ((now.saturating_sub(self.stamp)) / 1000).min(u32::MAX as u64) as u32;
+        (
+            self.valid.saturating_sub(age),
+            self.preferred.saturating_sub(age),
+        )
+    }
+}
+
+/// CLOCK_MONOTONIC in milliseconds, which every process of the boot shares.
+pub fn now_ms() -> u64 {
+    super::clock::Base::Monotonic.now() / 1_000_000
 }
 
 impl Addr {
+    /// A permanent address, added now.
+    pub fn new(ip: IpAddr, prefix: u8) -> Addr {
+        let life = Life::new(INFINITY, INFINITY).unwrap();
+        Addr { ip, prefix, life }
+    }
+
     /// RT_SCOPE_HOST for loopback addresses, RT_SCOPE_LINK for IPv6
     /// link-local ones, RT_SCOPE_UNIVERSE for the rest.
     pub fn scope(&self) -> u8 {
@@ -146,14 +214,8 @@ fn boot_links() -> Vec<Link> {
             mtu: 65536,
             mac: [0; 6],
             addrs: vec![
-                Addr {
-                    ip: Ipv4Addr::LOCALHOST.into(),
-                    prefix: 8,
-                },
-                Addr {
-                    ip: Ipv6Addr::LOCALHOST.into(),
-                    prefix: 128,
-                },
+                Addr::new(Ipv4Addr::LOCALHOST.into(), 8),
+                Addr::new(Ipv6Addr::LOCALHOST.into(), 128),
             ],
             carrier: true,
         },
@@ -194,7 +256,18 @@ fn serialize(links: &[Link], up: &Option<Uplink>) -> String {
             mac_text(&l.mac)
         );
         for a in &l.addrs {
-            s += &format!("addr {} {}/{}\n", l.index, a.ip, a.prefix);
+            let t = &a.life;
+            s += &format!(
+                "addr {} {}/{} {} {} {} {} {}\n",
+                l.index,
+                a.ip,
+                a.prefix,
+                t.valid,
+                t.preferred,
+                t.created,
+                t.stamp,
+                t.deprecated as u8
+            );
         }
     }
     s
@@ -232,7 +305,16 @@ fn parse(text: &str) -> Option<(Vec<Link>, Option<Uplink>)> {
                     carrier: false,
                 });
             }
-            ["addr", index, addr] => {
+            [
+                "addr",
+                index,
+                addr,
+                valid,
+                preferred,
+                created,
+                stamp,
+                deprecated,
+            ] => {
                 let (ip, prefix) = addr.split_once('/')?;
                 let index: u32 = index.parse().ok()?;
                 links
@@ -242,6 +324,13 @@ fn parse(text: &str) -> Option<(Vec<Link>, Option<Uplink>)> {
                     .push(Addr {
                         ip: ip.parse().ok()?,
                         prefix: prefix.parse().ok()?,
+                        life: Life {
+                            valid: valid.parse().ok()?,
+                            preferred: preferred.parse().ok()?,
+                            created: created.parse().ok()?,
+                            stamp: stamp.parse().ok()?,
+                            deprecated: *deprecated == "1",
+                        },
                     });
             }
             _ => return None,
@@ -251,6 +340,35 @@ fn parse(text: &str) -> Option<(Vec<Link>, Option<Uplink>)> {
         l.carrier = l.loopback() || up.is_some();
     }
     Some((links, up))
+}
+
+/// `check_lifetime` at `now`: an address whose valid lifetime ran out
+/// goes, and one whose preferred lifetime ran out is deprecated, each
+/// announced. Lifetimes are looked at whenever the device state is, which
+/// a process following the Mac's network does every
+/// `aim_uplink::WATCH_PERIOD`.
+fn expire(links: &mut [Link], now: u64, ev: &mut Vec<Event>) {
+    for l in links.iter_mut() {
+        let mut i = 0;
+        while i < l.addrs.len() {
+            let a = l.addrs[i];
+            if a.life.permanent() {
+                i += 1;
+                continue;
+            }
+            let (valid, preferred) = a.life.left(now);
+            if valid == 0 {
+                l.addrs.remove(i);
+                ev.push(Event::DelAddr(l.clone(), a));
+                continue;
+            }
+            if preferred == 0 && !a.life.deprecated {
+                l.addrs[i].life.deprecated = true;
+                ev.push(Event::NewAddr(l.clone(), l.addrs[i]));
+            }
+            i += 1;
+        }
+    }
 }
 
 /// Bring the devices from the Mac's network `was` to `now`: carrier
@@ -338,6 +456,7 @@ fn transact<R>(f: impl FnOnce(&mut Vec<Link>, &mut Vec<Event>) -> R) -> R {
             None => crate::diag!("[linux-abi] net: the Mac has no network; eth0 has no carrier"),
         }
     }
+    expire(&mut links, now_ms(), &mut events);
     let r = f(&mut links, &mut events);
     let new = serialize(&links, &now);
     if new != text {
@@ -405,11 +524,20 @@ pub fn add_addr(index: u32, a: Addr, replace: bool) -> Result<(), Errno> {
     }
     transact(|links, ev| {
         let l = find(links, index)?;
-        match l.addrs.iter_mut().find(|x| x.ip == a.ip) {
+        let a = match l.addrs.iter_mut().find(|x| x.ip == a.ip) {
             Some(_) if !replace => return Err(EEXIST),
-            Some(x) => *x = a,
-            None => l.addrs.push(a),
-        }
+            // A replaced address keeps when it was added (`ifa_cstamp`).
+            Some(x) => {
+                let created = x.life.created;
+                *x = a;
+                x.life.created = created;
+                *x
+            }
+            None => {
+                l.addrs.push(a);
+                a
+            }
+        };
         ev.push(Event::NewAddr(l.clone(), a));
         Ok(())
     })
@@ -451,10 +579,7 @@ fn set_primary_v4(index: u32, ip: Ipv4Addr) -> Result<(), Errno> {
             ev.push(Event::DelAddr(l.clone(), old));
         }
         if !ip.is_unspecified() {
-            let a = Addr {
-                ip: ip.into(),
-                prefix: classful(ip),
-            };
+            let a = Addr::new(ip.into(), classful(ip));
             l.addrs.insert(0, a);
             ev.push(Event::NewAddr(l.clone(), a));
         }
@@ -624,12 +749,9 @@ fn named(cmd: u64, req: &mut [u8; IFREQ]) -> Result<(), Errno> {
             let v = match cmd {
                 SIOCGIFADDR => a,
                 SIOCGIFNETMASK => prefix_mask(p),
-                _ => Addr {
-                    ip: a.into(),
-                    prefix: p,
-                }
-                .broadcast()
-                .unwrap_or(Ipv4Addr::UNSPECIFIED),
+                _ => Addr::new(a.into(), p)
+                    .broadcast()
+                    .unwrap_or(Ipv4Addr::UNSPECIFIED),
             };
             data[..16].copy_from_slice(&sockaddr_in(v));
         }
@@ -702,10 +824,8 @@ mod tests {
     fn state_round_trips() {
         let mut l = boot_links();
         l[1].flags |= IFF_UP;
-        l[1].addrs.push(Addr {
-            ip: "192.168.1.20".parse().unwrap(),
-            prefix: 24,
-        });
+        l[1].addrs
+            .push(Addr::new("192.168.1.20".parse().unwrap(), 24));
         assert_eq!(parse(&serialize(&l, &None)).unwrap(), (l.clone(), None));
         let up = Some(Uplink {
             index: 4,
@@ -716,6 +836,37 @@ mod tests {
         });
         l[1].carrier = true;
         assert_eq!(parse(&serialize(&l, &up)).unwrap(), (l, up));
+    }
+
+    /// `set_ifa_lifetime` and `check_lifetime`: a lease's address is
+    /// deprecated when its preferred lifetime runs out and goes when its
+    /// valid one does; the state keeps them.
+    #[test]
+    fn address_lifetimes_count_down_and_expire() {
+        assert_eq!(Life::new(0, 0), Err(EINVAL));
+        assert_eq!(Life::new(60, 120), Err(EINVAL));
+        assert!(Life::new(INFINITY, 0).unwrap().deprecated);
+        let mut a = Addr::new("192.168.1.20".parse().unwrap(), 24);
+        a.life = Life::new(3600, 1800).unwrap();
+        let t = a.life.stamp;
+        assert!(!a.life.permanent());
+        assert_eq!(a.life.left(t + 600_000), (3000, 1200));
+        assert_eq!(a.life.left(t + 2_000_000), (1600, 0));
+        let mut l = boot_links();
+        l[1].addrs.push(a);
+        assert_eq!(parse(&serialize(&l, &None)).unwrap().0, l);
+        let mut ev = Vec::new();
+        expire(&mut l, t + 1_000_000, &mut ev);
+        assert!(ev.is_empty());
+        expire(&mut l, t + 1_800_000, &mut ev);
+        assert!(matches!(&ev[..], [Event::NewAddr(_, x)] if x.life.deprecated));
+        expire(&mut l, t + 1_900_000, &mut ev);
+        assert_eq!(ev.len(), 1);
+        expire(&mut l, t + 3_600_000, &mut ev);
+        assert!(matches!(&ev[1..], [Event::DelAddr(_, x)] if x.ip == a.ip));
+        assert!(l[1].addrs.is_empty());
+        // The loopback's are permanent.
+        assert_eq!(l[0].addrs.len(), 2);
     }
 
     #[test]
@@ -760,10 +911,7 @@ mod tests {
 
     #[test]
     fn scopes_and_broadcast() {
-        let a = |s: &str, p| Addr {
-            ip: s.parse().unwrap(),
-            prefix: p,
-        };
+        let a = |s: &str, p| Addr::new(s.parse().unwrap(), p);
         assert_eq!(a("127.0.0.1", 8).scope(), 254);
         assert_eq!(a("fe80::1", 64).scope(), 253);
         assert_eq!(a("10.1.2.3", 8).scope(), 0);
