@@ -1,7 +1,8 @@
 # The app host's system process (docs/app-host.md, #1761, #1786): what runs
 # only in system_server, which the app host does not have, runs in a
 # process of the system uid (aim-services.jar's SystemProcessHost,
-# system_server's class path): the original AppSearch module, and the
+# system_server's class path): the original AppSearch module, the
+# Connectivity module's NearbyService (aim-nearby.jar), and the
 # components of `android:process="system"` such as Telecom's, which the app
 # host runs there once it attaches as `setSystemProcess` makes the system
 # process.

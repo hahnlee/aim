@@ -8,8 +8,9 @@ public class Build {
     static { IS_ENG = false; IS_USERDEBUG = false; }
     public static class VERSION {
         public static final int RESOURCES_SDK_INT;
+        public static final int SDK_INT;
         public static String INCREMENTAL;
-        static { RESOURCES_SDK_INT = 0; }
+        static { RESOURCES_SDK_INT = 0; SDK_INT = 0; }
     }
     public static boolean isDebuggable() { throw new RuntimeException("stub"); }
     public static final String[] SUPPORTED_64_BIT_ABIS = null;

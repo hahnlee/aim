@@ -128,7 +128,9 @@ installed modules, Wi-Fi scan results (none, the Mac's radio being off),
 statsd, DeviceConfig writes, usb, Safety Center and app op mode watches;
 AppSearch is the original module, run by the app host's system process
 (`aim-system`, of the system uid), so Play services finds its
-`AppSearchManager`. The original Bluetooth app
+`AppSearchManager`; so is the Connectivity module's NearbyService, which
+the system process starts from its standalone jar and publishes as
+`nearby` (2026-10-22). The original Bluetooth app
 runs under the app host: the native `bluetooth_manager` binds its
 AdapterService, which brings the stack up over the Bluetooth HAL to
 STATE_ON (media sessions serve its AVRCP target and media browser).

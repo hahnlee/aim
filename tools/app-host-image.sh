@@ -27,6 +27,7 @@ cp "$root/image/app-host/aim-app-host-agent.rc" "$out/system_ext/etc/init/aim-ap
 cp "$root/image/app-host/aim-system" "$out/system_ext/bin/aim-system"
 chmod 755 "$out/system_ext/bin/aim-system"
 cp "$root/image/app-host/aim-system.rc" "$out/system_ext/etc/init/aim-system.rc"
+cp "$root/target/aim/device-services/aim-nearby.jar" "$out/system/framework/aim-nearby.jar"
 # The services init starts for it (`aimctl` and `guest-init --only`).
 cp "$root/image/app-host/services" "$out/system/etc/aim/app-host-services"
 printf 'activity         com.android.server.am.ActivityManagerService$Lifecycle\n' >> "$out/system/etc/aim/native-services"
