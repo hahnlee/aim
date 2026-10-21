@@ -21,6 +21,7 @@ mod app_data;
 mod app_op_infos;
 mod app_standby;
 pub mod app_widget;
+pub mod appops_history;
 pub mod appops_restrictions;
 pub mod appops_sampling;
 pub mod appops_service;
