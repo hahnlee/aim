@@ -13,12 +13,22 @@
 //! video notes, which, with the image's `streamlined_misc_battery_stats`
 //! on, are attributed from it rather than from per-uid timers; their
 //! device timers (`mAudioOnTimer`, `mVideoOnTimer`) run on the on-battery
-//! time base. `takeUidSnapshotsAsync` answers its result receiver as the
-//! original does (its BATTERY_STATS check), the snapshots themselves
-//! failing as not implemented. The other notes, the readers and
+//! time base. The Bluetooth scan notes (`noteBleScanStarted`, `Stopped`,
+//! `Reset`, `Results`) record the history and the device timer
+//! (`mBluetoothScanTimer`), and the uids' stats the original keeps however
+//! the collectors are: each uid's scan timers (`DualTimer`s, the scan's
+//! battery time shared among the uids scanning at once, their background
+//! time on the uid's background time base) and result counters. A uid's
+//! process state (`noteUidProcessStateLocked`, from the uid's first
+//! process to its last) runs its process state timers and background time
+//! base, and is recorded in the history. `takeUidSnapshotsAsync` answers
+//! its result receiver as the original does (its BATTERY_STATS check), the
+//! snapshots themselves failing as not implemented. The other notes, the
+//! readers, the counters a process state change switches and
 //! `batterystats.bin`: #1928.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
@@ -30,10 +40,12 @@ use aim_service_aidl::ReadParcelable;
 use aim_service_aidl::com_android_internal_app_ibatterystats as bs;
 
 use super::battery_history::{
-    Directory, History, MonotonicClock, STATE_AUDIO_ON_FLAG, STATE2_VIDEO_ON_FLAG,
+    Directory, History, MonotonicClock, STATE_AUDIO_ON_FLAG, STATE2_BLUETOOTH_SCAN_FLAG,
+    STATE2_VIDEO_ON_FLAG,
 };
 use super::kept::RawIntent;
 use super::{AppHost, reply};
+use crate::location::parcels::WorkSource;
 
 /// `BatteryManager.BATTERY_STATUS_UNKNOWN`, `BATTERY_STATUS_FULL`,
 /// `BATTERY_PLUGGED_NONE`.
@@ -138,6 +150,21 @@ impl TimeBase {
                 0
             }
     }
+
+    /// `setRunning`: if it changed, the base's realtime its observers are
+    /// told it started or stopped at.
+    fn set_running(&mut self, running: bool, now_us: i64) -> Option<i64> {
+        if self.running == running {
+            return None;
+        }
+        self.running = running;
+        if running {
+            self.realtime_start_us = now_us;
+        } else {
+            self.past_realtime_us += now_us - self.realtime_start_us;
+        }
+        Some(self.realtime(now_us))
+    }
 }
 
 /// A `StopwatchTimer` of the device, in no timer pool.
@@ -151,44 +178,71 @@ struct StopwatchTimer {
 }
 
 impl StopwatchTimer {
-    /// `computeRunTimeLocked`.
-    fn run_time(&self, battery_realtime_us: i64) -> i64 {
+    /// `computeRunTimeLocked`, its time shared among the `pool` running
+    /// timers of its pool.
+    fn run_time_in(&self, battery_realtime_us: i64, pool: usize) -> i64 {
         self.total_time_us
             + if self.nesting > 0 {
-                battery_realtime_us - self.update_time_us
+                (battery_realtime_us - self.update_time_us) / pool.max(1) as i64
             } else {
                 0
             }
     }
 
-    /// `startRunningLocked`.
-    fn start(&mut self, base: &TimeBase, now: i64) {
-        let n = self.nesting;
+    fn run_time(&self, battery_realtime_us: i64) -> i64 {
+        self.run_time_in(battery_realtime_us, 0)
+    }
+
+    /// `startRunningLocked` up to its pool: whether it is the first start.
+    fn begin_start(&mut self, battery_realtime_us: i64) -> bool {
         self.nesting += 1;
-        if n == 0 {
-            self.update_time_us = base.realtime(now * 1000);
-            if base.running {
-                self.count += 1;
-                self.acquire_time_us = self.total_time_us;
-            } else {
-                self.acquire_time_us = -1;
-            }
+        if self.nesting == 1 {
+            self.update_time_us = battery_realtime_us;
+        }
+        self.nesting == 1
+    }
+
+    /// `startRunningLocked` after its pool, of a first start.
+    fn finish_start(&mut self, base: &TimeBase) {
+        if base.running {
+            self.count += 1;
+            self.acquire_time_us = self.total_time_us;
+        } else {
+            self.acquire_time_us = -1;
         }
     }
 
-    /// `stopRunningLocked`.
-    fn stop(&mut self, base: &TimeBase, now: i64) {
+    /// `startRunningLocked`, in no pool.
+    fn start(&mut self, base: &TimeBase, now: i64) {
+        if self.begin_start(base.realtime(now * 1000)) {
+            self.finish_start(base);
+        }
+    }
+
+    /// `stopRunningLocked` up to its pool: whether it is the last stop.
+    fn begin_stop(&mut self) -> bool {
         if self.nesting == 0 {
-            return;
+            return false;
         }
         self.nesting -= 1;
-        if self.nesting == 0 {
+        self.nesting == 0
+    }
+
+    /// `stopRunningLocked` after its pool, of a last stop: a start that
+    /// added no time is not counted.
+    fn finish_stop(&mut self) {
+        if self.acquire_time_us >= 0 && self.total_time_us == self.acquire_time_us {
+            self.count -= 1;
+        }
+    }
+
+    /// `stopRunningLocked`, in no pool.
+    fn stop(&mut self, base: &TimeBase, now: i64) {
+        if self.begin_stop() {
             self.nesting = 1;
             self.total_time_us = self.run_time(base.realtime(now * 1000));
             self.nesting = 0;
-            if self.acquire_time_us >= 0 && self.total_time_us == self.acquire_time_us {
-                self.count -= 1;
-            }
+            self.finish_stop();
         }
     }
 
@@ -210,9 +264,263 @@ impl StopwatchTimer {
 
     /// `onTimeStopped`: the time it ran while the base did.
     fn time_stopped(&mut self, battery_realtime_us: i64) {
+        self.time_stopped_in(battery_realtime_us, 0);
+    }
+
+    fn time_stopped_in(&mut self, battery_realtime_us: i64, pool: usize) {
         if self.nesting > 0 {
-            self.total_time_us = self.run_time(battery_realtime_us);
+            self.total_time_us = self.run_time_in(battery_realtime_us, pool);
             self.update_time_us = battery_realtime_us;
+        }
+    }
+}
+
+/// `refreshTimersLocked` of the Bluetooth scan pool (the uids whose scan
+/// timer runs, in the order they started): the time held since each was
+/// last updated, shared among them all.
+fn refresh_scan_pool(battery_realtime_us: i64, pool: &[i32], uids: &mut BTreeMap<i32, Uid>) {
+    let n = pool.len() as i64;
+    for uid in pool.iter().rev() {
+        let Some(t) = uids.get_mut(uid).and_then(|u| u.bluetooth_scan.as_mut()) else {
+            continue;
+        };
+        let t = &mut t.timer.timer;
+        let held = battery_realtime_us - t.update_time_us;
+        if held > 0 {
+            t.total_time_us += held / n;
+        }
+        t.update_time_us = battery_realtime_us;
+    }
+}
+
+/// A `DurationTimer`: a `StopwatchTimer` that also keeps its longest and
+/// total spans, which a pool does not share.
+#[derive(Debug)]
+struct DurationTimer {
+    timer: StopwatchTimer,
+    start_time_ms: i64,
+    max_duration_ms: i64,
+    current_duration_ms: i64,
+    total_duration_ms: i64,
+}
+
+impl Default for DurationTimer {
+    fn default() -> Self {
+        DurationTimer {
+            timer: StopwatchTimer::default(),
+            start_time_ms: -1,
+            max_duration_ms: 0,
+            current_duration_ms: 0,
+            total_duration_ms: 0,
+        }
+    }
+}
+
+impl DurationTimer {
+    /// `startRunningLocked` after the stopwatch's.
+    fn started(&mut self, base: &TimeBase, now: i64) {
+        if self.timer.nesting == 1 && base.running {
+            self.start_time_ms = base.realtime(now * 1000) / 1000;
+        }
+    }
+
+    /// `stopRunningLocked` before the stopwatch's.
+    fn stopping(&mut self, base: &TimeBase, now: i64) {
+        if self.timer.nesting == 1 {
+            let duration = self.current_duration_ms(base, now);
+            self.total_duration_ms += duration;
+            self.max_duration_ms = self.max_duration_ms.max(duration);
+            self.start_time_ms = -1;
+            self.current_duration_ms = 0;
+        }
+    }
+
+    /// `getCurrentDurationMsLocked`.
+    fn current_duration_ms(&self, base: &TimeBase, now: i64) -> i64 {
+        self.current_duration_ms
+            + if self.timer.nesting > 0 && base.running {
+                base.realtime(now * 1000) / 1000 - self.start_time_ms
+            } else {
+                0
+            }
+    }
+
+    /// `startRunningLocked`, in no pool.
+    fn start(&mut self, base: &TimeBase, now: i64) {
+        self.timer.start(base, now);
+        self.started(base, now);
+    }
+
+    /// `stopRunningLocked`, in no pool.
+    fn stop(&mut self, base: &TimeBase, now: i64) {
+        self.stopping(base, now);
+        self.timer.stop(base, now);
+    }
+
+    /// `stopAllRunningLocked`, in no pool.
+    fn stop_all(&mut self, base: &TimeBase, now: i64) {
+        if self.timer.nesting > 0 {
+            self.timer.nesting = 1;
+            self.stop(base, now);
+        }
+    }
+
+    /// `onTimeStarted`.
+    fn time_started(&mut self, battery_realtime_us: i64) {
+        if self.timer.nesting > 0 {
+            self.start_time_ms = battery_realtime_us / 1000;
+        }
+    }
+
+    /// `onTimeStopped`, its stopwatch's time shared among `pool` timers.
+    fn time_stopped_in(&mut self, battery_realtime_us: i64, pool: usize) {
+        self.timer.time_stopped_in(battery_realtime_us, pool);
+        if self.timer.nesting > 0 {
+            self.current_duration_ms += battery_realtime_us / 1000 - self.start_time_ms;
+        }
+        self.start_time_ms = -1;
+    }
+}
+
+/// A `DualTimer`: its time on the battery (`timer`) and in the
+/// background (`background`, in no pool).
+#[derive(Debug, Default)]
+struct DualTimer {
+    timer: DurationTimer,
+    background: DurationTimer,
+}
+
+/// A `Counter`: what is added while its time base runs.
+#[derive(Debug, Default)]
+struct Counter {
+    count: i32,
+}
+
+impl Counter {
+    /// `addAtomic`.
+    fn add(&mut self, base: &TimeBase, delta: i32) {
+        if base.running {
+            self.count += delta;
+        }
+    }
+}
+
+/// `BatteryStats.Uid.PROCESS_STATE_*`, `NUM_PROCESS_STATE`.
+const UID_PROCESS_STATE_TOP: usize = 0;
+const UID_PROCESS_STATE_FOREGROUND_SERVICE: usize = 1;
+const UID_PROCESS_STATE_FOREGROUND: usize = 2;
+const UID_PROCESS_STATE_BACKGROUND: usize = 3;
+const UID_PROCESS_STATE_TOP_SLEEPING: usize = 4;
+const UID_PROCESS_STATE_HEAVY_WEIGHT: usize = 5;
+const UID_PROCESS_STATE_CACHED: usize = 6;
+const NUM_PROCESS_STATE: usize = 7;
+const UID_PROCESS_STATE_NONEXISTENT: usize = NUM_PROCESS_STATE;
+/// `ActivityManager.PROCESS_STATE_*` that `mapToInternalProcessState`
+/// tells apart.
+const PROCESS_STATE_TOP: i32 = 2;
+const PROCESS_STATE_BOUND_TOP: i32 = 3;
+const PROCESS_STATE_FOREGROUND_SERVICE: i32 = 4;
+const PROCESS_STATE_BOUND_FOREGROUND_SERVICE: i32 = 5;
+const PROCESS_STATE_IMPORTANT_FOREGROUND: i32 = 6;
+const PROCESS_STATE_RECEIVER: i32 = 11;
+const PROCESS_STATE_TOP_SLEEPING: i32 = 12;
+const PROCESS_STATE_HEAVY_WEIGHT: i32 = 13;
+const PROCESS_STATE_NONEXISTENT: i32 = 20;
+/// `BatteryConsumer.PROCESS_STATE_*`.
+const CONSUMER_PROCESS_STATE_UNSPECIFIED: i32 = 0;
+const CONSUMER_PROCESS_STATE_FOREGROUND: i32 = 1;
+const CONSUMER_PROCESS_STATE_BACKGROUND: i32 = 2;
+const CONSUMER_PROCESS_STATE_FOREGROUND_SERVICE: i32 = 3;
+const CONSUMER_PROCESS_STATE_CACHED: i32 = 4;
+
+/// `BatteryStats.mapToInternalProcessState`.
+fn internal_process_state(state: i32) -> usize {
+    match state {
+        PROCESS_STATE_NONEXISTENT => UID_PROCESS_STATE_NONEXISTENT,
+        PROCESS_STATE_TOP => UID_PROCESS_STATE_TOP,
+        PROCESS_STATE_BOUND_TOP => UID_PROCESS_STATE_BACKGROUND,
+        PROCESS_STATE_FOREGROUND_SERVICE | PROCESS_STATE_BOUND_FOREGROUND_SERVICE => {
+            UID_PROCESS_STATE_FOREGROUND_SERVICE
+        }
+        s if s <= PROCESS_STATE_IMPORTANT_FOREGROUND => UID_PROCESS_STATE_FOREGROUND,
+        s if s <= PROCESS_STATE_RECEIVER => UID_PROCESS_STATE_BACKGROUND,
+        s if s <= PROCESS_STATE_TOP_SLEEPING => UID_PROCESS_STATE_TOP_SLEEPING,
+        s if s <= PROCESS_STATE_HEAVY_WEIGHT => UID_PROCESS_STATE_HEAVY_WEIGHT,
+        _ => UID_PROCESS_STATE_CACHED,
+    }
+}
+
+/// `BatteryStats.mapUidProcessStateToBatteryConsumerProcessState`.
+fn consumer_process_state(state: usize) -> i32 {
+    match state {
+        UID_PROCESS_STATE_TOP | UID_PROCESS_STATE_FOREGROUND => CONSUMER_PROCESS_STATE_FOREGROUND,
+        UID_PROCESS_STATE_BACKGROUND | UID_PROCESS_STATE_TOP_SLEEPING => {
+            CONSUMER_PROCESS_STATE_BACKGROUND
+        }
+        UID_PROCESS_STATE_FOREGROUND_SERVICE => CONSUMER_PROCESS_STATE_FOREGROUND_SERVICE,
+        UID_PROCESS_STATE_CACHED => CONSUMER_PROCESS_STATE_CACHED,
+        _ => CONSUMER_PROCESS_STATE_UNSPECIFIED,
+    }
+}
+
+/// `BatteryStatsImpl.Uid`, as far as its process state and Bluetooth
+/// scans go.
+#[derive(Debug)]
+struct Uid {
+    process_state: usize,
+    /// `mProcessStateTimer`, on the on-battery time base.
+    process_state_timers: [Option<StopwatchTimer>; NUM_PROCESS_STATE],
+    /// `mOnBatteryBackgroundTimeBase`.
+    background: TimeBase,
+    /// `mBluetoothScanTimer`: its battery time is pooled with the other
+    /// uids' (`mBluetoothScanOnTimers`).
+    bluetooth_scan: Option<DualTimer>,
+    bluetooth_unoptimized_scan: Option<DualTimer>,
+    bluetooth_scan_results: Option<Counter>,
+    bluetooth_scan_results_background: Option<Counter>,
+}
+
+impl Uid {
+    /// `new Uid`: no process yet, its background time base stopped.
+    fn new(now: i64) -> Self {
+        Uid {
+            process_state: UID_PROCESS_STATE_NONEXISTENT,
+            process_state_timers: Default::default(),
+            background: TimeBase {
+                realtime_start_us: now * 1000,
+                ..TimeBase::default()
+            },
+            bluetooth_scan: None,
+            bluetooth_unoptimized_scan: None,
+            bluetooth_scan_results: None,
+            bluetooth_scan_results_background: None,
+        }
+    }
+
+    /// `isInBackground`: neither top nor foreground (nor in a foreground
+    /// service), a uid with no process too.
+    fn in_background(&self) -> bool {
+        self.process_state >= UID_PROCESS_STATE_BACKGROUND
+    }
+
+    /// `updateOnBatteryBgTimeBase`, and the timers on it.
+    fn update_background(&mut self, on_battery: bool, now: i64) {
+        let running = on_battery && self.in_background();
+        let Some(base_us) = self.background.set_running(running, now * 1000) else {
+            return;
+        };
+        for t in [
+            &mut self.bluetooth_scan,
+            &mut self.bluetooth_unoptimized_scan,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if running {
+                t.background.time_started(base_us);
+            } else {
+                t.background.time_stopped_in(base_us, 0);
+            }
         }
     }
 }
@@ -329,6 +637,12 @@ struct Stats {
     audio_on_timer: StopwatchTimer,
     video_on_nesting: i32,
     video_on_timer: StopwatchTimer,
+    bluetooth_scan_nesting: i32,
+    bluetooth_scan_timer: StopwatchTimer,
+    /// The uids whose Bluetooth scan timer runs (`mBluetoothScanOnTimers`).
+    bluetooth_scan_pool: Vec<i32>,
+    /// `mUidStats`.
+    uids: BTreeMap<i32, Uid>,
 }
 
 /// The configuration the stats are decided by.
@@ -548,22 +862,212 @@ impl Stats {
         changed
     }
 
-    /// `updateTimeBasesLocked`'s on-battery time base, and its timers.
+    /// `updateTimeBasesLocked`'s on-battery time base, the timers on it,
+    /// and the uids' background time bases.
     fn update_time_base(&mut self, unplugged: bool, now: i64) {
-        let base = &mut self.on_battery_time_base;
-        if base.running == unplugged {
+        let Some(base_us) = self.on_battery_time_base.set_running(unplugged, now * 1000) else {
+            return;
+        };
+        let pool = self.bluetooth_scan_pool.len();
+        if unplugged {
+            for u in self.uids.values_mut() {
+                for t in [&mut u.bluetooth_scan, &mut u.bluetooth_unoptimized_scan]
+                    .into_iter()
+                    .flatten()
+                {
+                    t.timer.time_started(base_us);
+                }
+            }
+        } else {
+            self.audio_on_timer.time_stopped(base_us);
+            self.video_on_timer.time_stopped(base_us);
+            self.bluetooth_scan_timer.time_stopped(base_us);
+            for u in self.uids.values_mut() {
+                if let Some(t) = &mut u.bluetooth_scan {
+                    t.timer.time_stopped_in(base_us, pool);
+                }
+                if let Some(t) = &mut u.bluetooth_unoptimized_scan {
+                    t.timer.time_stopped_in(base_us, 0);
+                }
+                for t in u.process_state_timers.iter_mut().flatten() {
+                    t.time_stopped(base_us);
+                }
+            }
+        }
+        for u in self.uids.values_mut() {
+            u.update_background(unplugged, now);
+        }
+    }
+
+    /// `getUidStatsLocked`.
+    fn uid(&mut self, uid: i32, now: i64) -> &mut Uid {
+        self.uids.entry(uid).or_insert_with(|| Uid::new(now))
+    }
+
+    /// `noteUidProcessStateLocked` of the mapped `uid` (an isolated uid's
+    /// state being its owner's already): `updateUidProcessStateLocked`'s
+    /// process state timers, background time base and history.
+    fn note_uid_process_state(&mut self, uid: i32, isolated: bool, state: i32, now: i64) {
+        if isolated {
             return;
         }
-        let now_us = now * 1000;
-        base.running = unplugged;
-        if unplugged {
-            base.realtime_start_us = now_us;
-        } else {
-            base.past_realtime_us += now_us - base.realtime_start_us;
-            let battery_realtime_us = base.realtime(now_us);
-            self.audio_on_timer.time_stopped(battery_realtime_us);
-            self.video_on_timer.time_stopped(battery_realtime_us);
+        let on_battery = self.on_battery_time_base.running;
+        let state = internal_process_state(state);
+        let u = self.uids.entry(uid).or_insert_with(|| Uid::new(now));
+        if u.process_state == state {
+            return;
         }
+        if u.process_state != UID_PROCESS_STATE_NONEXISTENT
+            && let Some(t) = &mut u.process_state_timers[u.process_state]
+        {
+            t.stop(&self.on_battery_time_base, now);
+        }
+        if state != UID_PROCESS_STATE_NONEXISTENT {
+            u.process_state_timers[state]
+                .get_or_insert_with(StopwatchTimer::default)
+                .start(&self.on_battery_time_base, now);
+        }
+        u.process_state = state;
+        u.update_background(on_battery, now);
+        if let Some(h) = &mut self.history {
+            h.record_process_state_change(now, uid, consumer_process_state(state));
+        }
+    }
+
+    /// `noteBluetoothScanStartedLocked` of the mapped `uid`.
+    fn note_bluetooth_scan_started(&mut self, uid: i32, unoptimized: bool, now: i64) {
+        if self.bluetooth_scan_nesting == 0 {
+            if let Some(h) = &mut self.history {
+                h.record_state2(now, STATE2_BLUETOOTH_SCAN_FLAG, true, None);
+            }
+            self.bluetooth_scan_timer
+                .start(&self.on_battery_time_base, now);
+        }
+        self.bluetooth_scan_nesting += 1;
+        // `Uid.noteBluetoothScanStartedLocked`: the pooled scan timer,
+        // then its background half.
+        let base = &self.on_battery_time_base;
+        let rt = base.realtime(now * 1000);
+        let u = self.uids.entry(uid).or_insert_with(|| Uid::new(now));
+        let t = u.bluetooth_scan.get_or_insert_with(DualTimer::default);
+        if t.timer.timer.begin_start(rt) {
+            refresh_scan_pool(rt, &self.bluetooth_scan_pool, &mut self.uids);
+            self.bluetooth_scan_pool.push(uid);
+            let u = self.uids.get_mut(&uid).expect("just made");
+            let t = u.bluetooth_scan.as_mut().expect("just made");
+            t.timer.timer.finish_start(base);
+        }
+        let u = self.uids.get_mut(&uid).expect("just made");
+        let t = u.bluetooth_scan.as_mut().expect("just made");
+        t.timer.started(base, now);
+        t.background.start(&u.background, now);
+        if unoptimized {
+            let t = u
+                .bluetooth_unoptimized_scan
+                .get_or_insert_with(DualTimer::default);
+            t.timer.start(base, now);
+            t.background.start(&u.background, now);
+        }
+    }
+
+    /// `noteBluetoothScanStoppedLocked` of the mapped `uid`.
+    fn note_bluetooth_scan_stopped(&mut self, uid: i32, unoptimized: bool, now: i64) {
+        self.bluetooth_scan_nesting -= 1;
+        if self.bluetooth_scan_nesting == 0 {
+            if let Some(h) = &mut self.history {
+                h.record_state2(now, STATE2_BLUETOOTH_SCAN_FLAG, false, None);
+            }
+            self.bluetooth_scan_timer
+                .stop(&self.on_battery_time_base, now);
+        }
+        let u = self.uid(uid, now);
+        if u.bluetooth_scan.is_some() {
+            self.stop_bluetooth_scan(uid, now);
+        }
+        let base = &self.on_battery_time_base;
+        let u = self.uids.get_mut(&uid).expect("just made");
+        if unoptimized && let Some(t) = &mut u.bluetooth_unoptimized_scan {
+            t.timer.stop(base, now);
+            t.background.stop(&u.background, now);
+        }
+    }
+
+    /// `DualTimer.stopRunningLocked` of `uid`'s pooled scan timer.
+    fn stop_bluetooth_scan(&mut self, uid: i32, now: i64) {
+        let base = &self.on_battery_time_base;
+        let rt = base.realtime(now * 1000);
+        let t = self
+            .uids
+            .get_mut(&uid)
+            .and_then(|u| u.bluetooth_scan.as_mut());
+        let Some(t) = t else { return };
+        t.timer.stopping(base, now);
+        if t.timer.timer.begin_stop() {
+            refresh_scan_pool(rt, &self.bluetooth_scan_pool, &mut self.uids);
+            self.bluetooth_scan_pool.retain(|&u| u != uid);
+            let u = self.uids.get_mut(&uid).expect("scanning");
+            let t = u.bluetooth_scan.as_mut().expect("scanning");
+            t.timer.timer.finish_stop();
+        }
+        let u = self.uids.get_mut(&uid).expect("scanning");
+        let t = u.bluetooth_scan.as_mut().expect("scanning");
+        t.background.stop(&u.background, now);
+    }
+
+    /// `noteResetBluetoothScanLocked`.
+    fn reset_bluetooth_scan(&mut self, now: i64) {
+        if self.bluetooth_scan_nesting <= 0 {
+            return;
+        }
+        self.bluetooth_scan_nesting = 0;
+        if let Some(h) = &mut self.history {
+            h.record_state2(now, STATE2_BLUETOOTH_SCAN_FLAG, false, None);
+        }
+        self.bluetooth_scan_timer
+            .stop_all(&self.on_battery_time_base, now);
+        let uids: Vec<i32> = self.uids.keys().copied().collect();
+        for uid in uids {
+            // `DualTimer.stopAllRunningLocked`: stopped once as a whole,
+            // then its background half all the way.
+            let running = self.uids[&uid]
+                .bluetooth_scan
+                .as_ref()
+                .is_some_and(|t| t.timer.timer.nesting > 0);
+            if running {
+                let t = self
+                    .uids
+                    .get_mut(&uid)
+                    .and_then(|u| u.bluetooth_scan.as_mut());
+                t.expect("running").timer.timer.nesting = 1;
+                self.stop_bluetooth_scan(uid, now);
+            }
+            let base = &self.on_battery_time_base;
+            let u = self.uids.get_mut(&uid).expect("listed");
+            if let Some(t) = &mut u.bluetooth_scan {
+                t.background.stop_all(&u.background, now);
+            }
+            if let Some(t) = &mut u.bluetooth_unoptimized_scan {
+                if t.timer.timer.nesting > 0 {
+                    t.timer.timer.nesting = 1;
+                    t.timer.stop(base, now);
+                    t.background.stop(&u.background, now);
+                }
+                t.background.stop_all(&u.background, now);
+            }
+        }
+    }
+
+    /// `noteBluetoothScanResultsLocked` of the mapped `uid`.
+    fn note_bluetooth_scan_results(&mut self, uid: i32, results: i32, now: i64) {
+        let base = &self.on_battery_time_base;
+        let u = self.uids.entry(uid).or_insert_with(|| Uid::new(now));
+        u.bluetooth_scan_results
+            .get_or_insert_with(Counter::default)
+            .add(base, results);
+        // On the background time base: counted only in the background.
+        u.bluetooth_scan_results_background
+            .get_or_insert_with(Counter::default)
+            .add(&u.background, results);
     }
 
     /// `setChargingLocked`: whether it changed.
@@ -851,6 +1355,55 @@ impl BatteryStats {
         apply(&mut s, &map_uid, now);
         Ok(())
     }
+
+    /// `noteUidProcessState`, as the activity manager tells it a uid's
+    /// process state (`ProcessList.addProcessNameLocked` and
+    /// `removeProcessNameLocked`: a uid's first process and its last).
+    pub(super) fn note_uid_process_state(&self, uid: i32, state: i32) {
+        let Some(host) = self.host.upgrade() else {
+            return;
+        };
+        let now = elapsed_realtime();
+        let (state_model, _) = match host.packages() {
+            Ok(p) => p,
+            Err(e) => return eprintln!("app host: batterystats: {}", e.message),
+        };
+        let parent = map_uid(&state_model.system.isolated_owners, uid);
+        let isolated = parent != uid && super::is_isolated(uid);
+        let mut s = self.stats.lock().unwrap();
+        if let Some(config) = self.config(&host) {
+            self.start_history(&host, &config, &mut s);
+        }
+        s.note_uid_process_state(parent, isolated, state, now);
+    }
+}
+
+/// `noteBluetoothScan*FromSourceLocked`: each uid of `ws`, then each work
+/// chain's attribution uid, mapped.
+fn work_source_uids(ws: &WorkSource, map: &dyn Fn(i32) -> i32) -> Vec<i32> {
+    ws.uids
+        .iter()
+        .copied()
+        .chain(
+            ws.chains
+                .iter()
+                .flatten()
+                // `WorkChain.getAttributionUid`.
+                .map(|c| c.uids.first().copied().unwrap_or(-1)),
+        )
+        .map(map)
+        .collect()
+}
+
+/// A work source the original's handler would throw on
+/// (`WorkSource.size()` of a null one) answered as that exception.
+fn work_source(ws: Option<WorkSource>) -> Result<WorkSource, Exception> {
+    ws.ok_or_else(|| {
+        Exception::new(
+            aim_binder_host::parcel::EX_NULL_POINTER,
+            "Attempt to invoke virtual method 'int android.os.WorkSource.size()' on a null object reference",
+        )
+    })
 }
 
 /// `SystemClock.elapsedRealtime`, as the app host keeps it.
@@ -909,6 +1462,44 @@ impl Service for BatteryStats {
                 let r = self.note(caller, |s, _, now| s.reset_video(now));
                 Some(r.map(|()| bs::write_note_reset_video_reply(&mut p)))
             }
+            bs::NOTE_BLE_SCAN_STARTED => {
+                let a = bs::NoteBleScanStarted::<WorkSource>::read(&mut call.data).map_err(bad)?;
+                let r = work_source(a.ws).and_then(|ws| {
+                    self.note(caller, |s, map, now| {
+                        for uid in work_source_uids(&ws, map) {
+                            s.note_bluetooth_scan_started(uid, a.is_unoptimized, now);
+                        }
+                    })
+                });
+                Some(r.map(|()| bs::write_note_ble_scan_started_reply(&mut p)))
+            }
+            bs::NOTE_BLE_SCAN_STOPPED => {
+                let a = bs::NoteBleScanStopped::<WorkSource>::read(&mut call.data).map_err(bad)?;
+                let r = work_source(a.ws).and_then(|ws| {
+                    self.note(caller, |s, map, now| {
+                        for uid in work_source_uids(&ws, map) {
+                            s.note_bluetooth_scan_stopped(uid, a.is_unoptimized, now);
+                        }
+                    })
+                });
+                Some(r.map(|()| bs::write_note_ble_scan_stopped_reply(&mut p)))
+            }
+            bs::NOTE_BLE_SCAN_RESET => {
+                bs::NoteBleScanReset::read(&mut call.data).map_err(bad)?;
+                let r = self.note(caller, |s, _, now| s.reset_bluetooth_scan(now));
+                Some(r.map(|()| bs::write_note_ble_scan_reset_reply(&mut p)))
+            }
+            bs::NOTE_BLE_SCAN_RESULTS => {
+                let a = bs::NoteBleScanResults::<WorkSource>::read(&mut call.data).map_err(bad)?;
+                let r = work_source(a.ws).and_then(|ws| {
+                    self.note(caller, |s, map, now| {
+                        for uid in work_source_uids(&ws, map) {
+                            s.note_bluetooth_scan_results(uid, a.num_new_results, now);
+                        }
+                    })
+                });
+                Some(r.map(|()| bs::write_note_ble_scan_results_reply(&mut p)))
+            }
             _ => None,
         };
         if let Some(noted) = noted {
@@ -934,31 +1525,6 @@ impl Service for BatteryStats {
                 bs::write_compute_charge_time_remaining_reply(
                     &mut p,
                     ms(s.charge_time_remaining()),
-                );
-            }
-            // `noteResetBluetoothScanLocked` stops the BLE scan timers that
-            // run. None does: their starts (`noteBleScanStarted` and the
-            // rest) are not taken (#1928), so the reset changes nothing.
-            bs::NOTE_BLE_SCAN_RESET => {
-                bs::NoteBleScanReset::read(&mut call.data).map_err(|_| BAD_VALUE)?;
-                drop(s);
-                let Some(host) = self.host.upgrade() else {
-                    return Err(BAD_VALUE);
-                };
-                let permitted =
-                    host.check_permission(Some(UPDATE_DEVICE_STATS), call.sender_euid as i32);
-                return reply(
-                    permitted
-                        .and_then(|held| match held {
-                            0 => Ok(p),
-                            _ => Err(Exception::security(format!(
-                                "Access denied, requires: {UPDATE_DEVICE_STATS}"
-                            ))),
-                        })
-                        .map(|mut p| {
-                            bs::write_note_ble_scan_reset_reply(&mut p);
-                            p
-                        }),
                 );
             }
             // One-way: what fails reaches the caller's receiver. Asking
@@ -1189,5 +1755,173 @@ mod tests {
         assert_eq!(map_uid(&owners, 20_123), 10_123);
         assert_eq!(map_uid(&owners, 1_020_123), 1_010_123);
         assert_eq!(map_uid(&owners, 10_200), 10_200);
+    }
+
+    fn scan(s: &Stats, uid: i32) -> &DualTimer {
+        s.uids[&uid].bluetooth_scan.as_ref().unwrap()
+    }
+
+    #[test]
+    fn concurrent_scans_share_their_battery_time() {
+        let mut s = stats();
+        s.set_battery_state(&C, b(3, PLUGGED_NONE, 50, -1), 0);
+        s.note_bluetooth_scan_started(10_100, false, 1_000);
+        s.note_bluetooth_scan_started(10_200, false, 3_000);
+        s.note_bluetooth_scan_stopped(10_100, false, 5_000);
+        s.note_bluetooth_scan_stopped(10_200, false, 9_000);
+        // Alone 1 s to 3 s, then half of 3 s to 5 s; the other half and
+        // alone after.
+        assert_eq!(scan(&s, 10_100).timer.timer.total_time_us, 3_000_000);
+        assert_eq!(scan(&s, 10_200).timer.timer.total_time_us, 5_000_000);
+        // Durations are not pooled.
+        assert_eq!(scan(&s, 10_100).timer.total_duration_ms, 4_000);
+        assert_eq!(scan(&s, 10_200).timer.total_duration_ms, 6_000);
+        assert_eq!(s.bluetooth_scan_timer.total_time_us, 8_000_000);
+        assert!(s.bluetooth_scan_pool.is_empty());
+        assert_eq!(s.bluetooth_scan_nesting, 0);
+    }
+
+    #[test]
+    fn background_scan_time_follows_the_uids_process_state() {
+        let mut s = stats();
+        s.set_battery_state(&C, b(3, PLUGGED_NONE, 50, -1), 0);
+        s.note_uid_process_state(10_100, false, PROCESS_STATE_TOP, 0);
+        s.note_bluetooth_scan_started(10_100, true, 1_000);
+        s.note_bluetooth_scan_results(10_100, 5, 2_000);
+        // Its last process goes: in the background from then on.
+        s.note_uid_process_state(10_100, false, PROCESS_STATE_NONEXISTENT, 3_000);
+        s.note_bluetooth_scan_results(10_100, 3, 4_000);
+        s.note_bluetooth_scan_stopped(10_100, true, 7_000);
+        let u = &s.uids[&10_100];
+        let t = u.bluetooth_scan.as_ref().unwrap();
+        assert_eq!(t.timer.timer.total_time_us, 6_000_000);
+        assert_eq!(t.background.timer.total_time_us, 4_000_000);
+        assert_eq!(t.background.total_duration_ms, 4_000);
+        let unoptimized = u.bluetooth_unoptimized_scan.as_ref().unwrap();
+        assert_eq!(unoptimized.timer.timer.total_time_us, 6_000_000);
+        assert_eq!(unoptimized.background.timer.total_time_us, 4_000_000);
+        assert_eq!(u.bluetooth_scan_results.as_ref().unwrap().count, 8);
+        assert_eq!(
+            u.bluetooth_scan_results_background.as_ref().unwrap().count,
+            3
+        );
+        // Top from 0 s to 3 s, on the battery.
+        let top = u.process_state_timers[UID_PROCESS_STATE_TOP]
+            .as_ref()
+            .unwrap();
+        assert_eq!(top.total_time_us, 3_000_000);
+    }
+
+    #[test]
+    fn plugging_in_stops_the_scan_times() {
+        let mut s = stats();
+        s.set_battery_state(&C, b(3, PLUGGED_NONE, 50, -1), 0);
+        s.note_bluetooth_scan_started(10_100, false, 1_000);
+        s.note_bluetooth_scan_started(10_200, false, 1_000);
+        s.set_battery_state(&C, b(2, 1, 50, -1), 5_000);
+        s.note_bluetooth_scan_stopped(10_100, false, 8_000);
+        s.note_bluetooth_scan_stopped(10_200, false, 9_000);
+        // 4 s on the battery, shared by two.
+        assert_eq!(scan(&s, 10_100).timer.timer.total_time_us, 2_000_000);
+        assert_eq!(scan(&s, 10_200).timer.timer.total_time_us, 2_000_000);
+        assert_eq!(scan(&s, 10_100).timer.total_duration_ms, 4_000);
+        // Neither ever was in the background on the battery: a uid with
+        // no process noted is, but its background base starts only with
+        // a change.
+        assert_eq!(scan(&s, 10_100).background.timer.total_time_us, 0);
+    }
+
+    #[test]
+    fn a_reset_stops_every_scan_however_nested() {
+        let dir = temp_dir("stats-scan-reset");
+        let mut s = stats();
+        s.history = Some(history(&dir, 128 * 1024, 0));
+        s.set_battery_state(&C, b(3, PLUGGED_NONE, 50, -1), 0);
+        s.note_bluetooth_scan_started(10_100, true, 2_000);
+        s.note_bluetooth_scan_started(10_100, true, 3_000);
+        let items = decode(s.history.as_ref().unwrap().buffer());
+        assert_ne!(
+            items.last().unwrap().states2 & STATE2_BLUETOOTH_SCAN_FLAG,
+            0
+        );
+        s.reset_bluetooth_scan(6_000);
+        assert_eq!(s.bluetooth_scan_nesting, 0);
+        assert!(s.bluetooth_scan_pool.is_empty());
+        let u = &s.uids[&10_100];
+        for t in [&u.bluetooth_scan, &u.bluetooth_unoptimized_scan] {
+            let t = t.as_ref().unwrap();
+            assert_eq!((t.timer.timer.nesting, t.background.timer.nesting), (0, 0));
+            assert_eq!(t.timer.timer.total_time_us, 4_000_000);
+        }
+        assert_eq!(s.bluetooth_scan_timer.nesting, 0);
+        let items = decode(s.history.as_ref().unwrap().buffer());
+        assert_eq!(
+            items.last().unwrap().states2 & STATE2_BLUETOOTH_SCAN_FLAG,
+            0
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn process_states_are_recorded_in_the_history() {
+        let dir = temp_dir("stats-proc-state");
+        let mut s = stats();
+        s.history = Some(history(&dir, 128 * 1024, 0));
+        s.set_battery_state(&C, b(3, PLUGGED_NONE, 50, -1), 0);
+        s.note_uid_process_state(10_100, false, PROCESS_STATE_TOP, 5_000);
+        s.note_uid_process_state(10_100, false, PROCESS_STATE_TOP, 6_000);
+        s.note_uid_process_state(10_100, false, PROCESS_STATE_NONEXISTENT, 9_000);
+        // An isolated uid's state is its owner's.
+        s.note_uid_process_state(10_100, true, PROCESS_STATE_TOP, 12_000);
+        let changes: Vec<_> = decode(s.history.as_ref().unwrap().buffer())
+            .into_iter()
+            .filter_map(|d| d.process_state_change)
+            .collect();
+        assert_eq!(
+            changes,
+            [
+                (10_100, CONSUMER_PROCESS_STATE_FOREGROUND),
+                (10_100, CONSUMER_PROCESS_STATE_UNSPECIFIED)
+            ]
+        );
+        assert_eq!(s.uids[&10_100].process_state, UID_PROCESS_STATE_NONEXISTENT);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn process_states_map_as_the_original_maps_them() {
+        assert_eq!(internal_process_state(0), UID_PROCESS_STATE_FOREGROUND);
+        assert_eq!(internal_process_state(3), UID_PROCESS_STATE_BACKGROUND);
+        assert_eq!(
+            internal_process_state(5),
+            UID_PROCESS_STATE_FOREGROUND_SERVICE
+        );
+        assert_eq!(internal_process_state(10), UID_PROCESS_STATE_BACKGROUND);
+        assert_eq!(internal_process_state(12), UID_PROCESS_STATE_TOP_SLEEPING);
+        assert_eq!(internal_process_state(13), UID_PROCESS_STATE_HEAVY_WEIGHT);
+        assert_eq!(internal_process_state(19), UID_PROCESS_STATE_CACHED);
+        assert_eq!(
+            consumer_process_state(UID_PROCESS_STATE_TOP_SLEEPING),
+            CONSUMER_PROCESS_STATE_BACKGROUND
+        );
+        assert_eq!(
+            consumer_process_state(UID_PROCESS_STATE_HEAVY_WEIGHT),
+            CONSUMER_PROCESS_STATE_UNSPECIFIED
+        );
+    }
+
+    #[test]
+    fn a_work_sources_uids_and_chains_are_noted() {
+        let ws = WorkSource {
+            uids: vec![10_100, 99_001],
+            names: None,
+            chains: Some(vec![crate::location::parcels::WorkChain {
+                uids: vec![10_300, 10_400],
+                tags: vec![None, None],
+            }]),
+        };
+        let map = |uid: i32| if uid == 99_001 { 10_200 } else { uid };
+        assert_eq!(work_source_uids(&ws, &map), [10_100, 10_200, 10_300]);
+        assert!(work_source(None).is_err());
     }
 }

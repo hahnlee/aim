@@ -6,9 +6,10 @@
 //! and its fragments: the buffer is backed up into the active fragment and
 //! a full buffer starts the next one, a completed fragment compressed and
 //! the oldest trimmed past the store's size. The items the app host
-//! records carry the battery state, the state flags and their events;
-//! wake lock and wake reason tags, step details, power stats and process
-//! state changes have no producer here (#1928).
+//! records carry the battery state, the state flags and their events,
+//! and uids' process state changes (`ProcessStateChange`, an extension);
+//! wake lock and wake reason tags, step details and power stats have no
+//! producer here (#1928).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
@@ -55,6 +56,12 @@ const TAG_FIRST_OCCURRENCE_FLAG: i32 = 0x8000;
 const HISTORY_TAG_INDEX_LIMIT: i32 = 0x7ffe;
 const MAX_HISTORY_TAG_STRING_LENGTH: usize = 1024;
 const STATE2_EXTENSIONS_FLAG: i32 = 1 << 17;
+/// `BatteryStatsHistory.EXTENSION_PROCESS_STATE_CHANGE_FLAG`.
+const EXTENSION_PROCESS_STATE_CHANGE_FLAG: i32 = 0x0000_0004;
+/// `ProcessStateChange`'s packing.
+const LARGE_UID_FLAG: i32 = 0x8000_0000_u32 as i32;
+const SMALL_UID_MASK: i32 = 0x00ff_ffff;
+const PROC_STATE_SHIFT: i32 = 24;
 /// `BatteryManager.BATTERY_PLUGGED_AC`, `_USB`, `_WIRELESS`.
 const PLUGGED_AC: i8 = 1;
 const PLUGGED_USB: i8 = 2;
@@ -71,6 +78,7 @@ pub const STATE_AUDIO_ON_FLAG: i32 = 1 << 22;
 pub const STATE_BATTERY_PLUGGED_FLAG: i32 = 1 << 19;
 pub const STATE2_VIDEO_ON_FLAG: i32 = 1 << 30;
 pub const STATE2_CHARGING_FLAG: i32 = 1 << 24;
+pub const STATE2_BLUETOOTH_SCAN_FLAG: i32 = 1 << 20;
 const STATE2_GPS_SIGNAL_QUALITY_SHIFT: i32 = 7;
 const GNSS_SIGNAL_QUALITY_NONE: i32 = 2;
 /// `HistoryItem.EVENT_*`.
@@ -115,6 +123,9 @@ pub struct HistoryItem {
     pub event_tag: Option<HistoryTag>,
     pub tags_first_occurrence: bool,
     pub current_time: i64,
+    /// A uid's process state change (`ProcessStateChange`): its uid and
+    /// `BatteryConsumer` process state.
+    pub process_state_change: Option<(i32, i32)>,
 }
 
 impl Default for HistoryItem {
@@ -136,6 +147,7 @@ impl Default for HistoryItem {
             event_tag: None,
             tags_first_occurrence: false,
             current_time: 0,
+            process_state_change: None,
         }
     }
 }
@@ -186,6 +198,17 @@ impl HistoryItem {
 /// `Parcel.writeDouble`.
 fn write_f64(p: &mut Parcel, value: f64) {
     p.write_i64(value.to_bits() as i64);
+}
+
+/// `ProcessStateChange.writeToParcel`.
+fn write_process_state_change(p: &mut Parcel, (uid, state): (i32, i32)) {
+    let bits = state << PROC_STATE_SHIFT;
+    if uid & !SMALL_UID_MASK == 0 {
+        p.write_i32(bits | uid);
+    } else {
+        p.write_i32(bits | LARGE_UID_FLAG);
+        p.write_i32(uid);
+    }
 }
 
 /// `HistoryTag.writeToParcel`.
@@ -321,9 +344,18 @@ fn write_delta(dest: &mut Parcel, pool: &mut TagPool, cur: &mut HistoryItem, las
     if state_int_changed {
         first_token |= DELTA_STATE_FLAG;
     }
-    // No extensions: the item has no power stats or process state change.
-    cur.states2 &= !STATE2_EXTENSIONS_FLAG;
-    let state2_int_changed = cur.states2 != last.states2;
+    // Of the extensions, a process state change: no power stats here.
+    let extension_flags = if cur.process_state_change.is_some() {
+        EXTENSION_PROCESS_STATE_CHANGE_FLAG
+    } else {
+        0
+    };
+    set_flags(
+        &mut cur.states2,
+        STATE2_EXTENSIONS_FLAG,
+        extension_flags != 0,
+    );
+    let state2_int_changed = cur.states2 != last.states2 || extension_flags != 0;
     if state2_int_changed {
         first_token |= DELTA_STATE2_FLAG;
     }
@@ -367,6 +399,12 @@ fn write_delta(dest: &mut Parcel, pool: &mut TagPool, cur: &mut HistoryItem, las
     }
     write_f64(dest, 0.0);
     write_f64(dest, 0.0);
+    if extension_flags != 0 {
+        dest.write_i32(extension_flags);
+        if let Some(change) = cur.process_state_change {
+            write_process_state_change(dest, change);
+        }
+    }
 }
 
 /// `MonotonicClock`: the elapsed realtime shifted to keep increasing
@@ -820,6 +858,14 @@ impl History {
         self.write_item(now);
     }
 
+    /// `recordProcessStateChange`: `uid`'s `BatteryConsumer` process
+    /// state.
+    pub fn record_process_state_change(&mut self, now: i64, uid: i32, state: i32) {
+        self.cur.process_state_change = Some((uid, state));
+        self.cur.states2 |= STATE2_EXTENSIONS_FLAG;
+        self.write_item(now);
+    }
+
     /// `recordStateStartEvent`/`recordStateStopEvent`, the latter as
     /// `on` false, with their state change event if `event` names it.
     pub fn record_state(&mut self, now: i64, flags: i32, on: bool, event: Option<(i32, &str)>) {
@@ -854,7 +900,8 @@ impl History {
     /// merged into the last one written when only states that toggled
     /// neither now nor before it changed, within a second.
     pub fn write_item(&mut self, mut now: i64) {
-        if !self.have_battery_level || !self.recording {
+        if (!self.have_battery_level || !self.recording) && self.cur.process_state_change.is_none()
+        {
             return;
         }
         let (cur, last, last_last) = (&self.cur, &self.last_written, &self.last_last_written);
@@ -877,6 +924,7 @@ impl History {
             && last.battery_plug_type == cur.battery_plug_type
             && last.battery_temperature == cur.battery_temperature
             && last.battery_voltage == cur.battery_voltage
+            && last.process_state_change.is_none()
         {
             self.monotonic_size -= (self.buffer.len() - pos) as i64;
             self.buffer.truncate(pos);
@@ -903,6 +951,7 @@ impl History {
                 event_code: EVENT_NONE,
                 event_tag: None,
                 tags_first_occurrence: false,
+                process_state_change: None,
                 ..self.cur.clone()
             };
             self.write_cmd(now, copy, CMD_RESET);
@@ -937,6 +986,7 @@ impl History {
         cur.event_code = EVENT_NONE;
         cur.event_tag = None;
         cur.tags_first_occurrence = false;
+        cur.process_state_change = None;
         cur
     }
 
@@ -1021,6 +1071,7 @@ pub(super) mod tests {
         pub states: i32,
         pub states2: i32,
         event: Option<DecodedEvent>,
+        pub process_state_change: Option<(i32, i32)>,
     }
 
     impl History {
@@ -1099,6 +1150,19 @@ pub(super) mod tests {
                 }
                 r.read_i64().unwrap();
                 r.read_i64().unwrap();
+                if d.states2 & STATE2_EXTENSIONS_FLAG != 0 {
+                    let flags = r.read_i32().unwrap();
+                    assert_eq!(flags, EXTENSION_PROCESS_STATE_CHANGE_FLAG);
+                    // `ProcessStateChange.readFromParcel`.
+                    let bits = r.read_i32().unwrap();
+                    let state = (bits & 0x7f00_0000) >> PROC_STATE_SHIFT;
+                    let uid = if bits & LARGE_UID_FLAG == 0 {
+                        bits & !0x7f00_0000
+                    } else {
+                        r.read_i32().unwrap()
+                    };
+                    d.process_state_change = Some((uid, state));
+                }
             }
             out.push(d);
         }
@@ -1249,6 +1313,30 @@ pub(super) mod tests {
         }
         s.write(3, &[0; 60], true);
         assert_eq!(s.fragments().clone(), [3]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_process_state_change_is_an_extension_of_its_item() {
+        let dir = temp_dir("proc-state");
+        let mut h = history(&dir, 128 * 1024, 0);
+        h.set_initial_battery_state(true, 3, 50, 0);
+        h.start_recording(0, true);
+        h.record_battery_state(2_000, 50, false);
+        h.record_process_state_change(2_200, 10_123, 1);
+        // A large uid is written after its packed state.
+        h.record_process_state_change(4_000, 1_010_123, 0);
+        h.record_battery_state(6_000, 49, false);
+        let items = decode(&h.buffer);
+        // The first change merges into the item a moment before it; an
+        // item with one takes none merged into it.
+        assert_eq!(items.len(), 4);
+        assert_eq!((items[1].time, items[1].level), (2_000, 50));
+        assert_eq!(items[1].process_state_change, Some((10_123, 1)));
+        assert_eq!(items[2].process_state_change, Some((1_010_123, 0)));
+        assert_eq!(items[3].process_state_change, None);
+        assert_eq!(items[3].states2 & STATE2_EXTENSIONS_FLAG, 0);
+        assert_eq!(items[3].level, 49);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

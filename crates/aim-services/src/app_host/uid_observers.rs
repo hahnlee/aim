@@ -319,6 +319,18 @@ impl AppHost {
         {
             o.dispatch(uid, change, seq);
         }
+        // `noteUidProcessState` as a uid's first process comes
+        // (`addProcessNameLocked`) and its last goes
+        // (`removeProcessNameLocked`); in between it stays top.
+        if let Some(stats) = self.battery_stats.get() {
+            stats.note_uid_process_state(
+                uid,
+                match change {
+                    Change::Active => PROCESS_STATE_TOP,
+                    Change::Gone => PROCESS_STATE_NONEXISTENT,
+                },
+            );
+        }
         // HintManagerService's own observer (`MyUidObserver`): a uid's
         // process state only ever is top, so only its going matters.
         if let (Change::Gone, Some(hints)) = (change, self.hint_manager.get()) {
