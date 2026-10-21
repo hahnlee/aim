@@ -8,6 +8,7 @@ mod ashmem;
 mod attrs;
 mod binder;
 mod bpf;
+mod cgroup;
 pub(crate) mod clock;
 mod copies;
 mod copy;
@@ -98,6 +99,7 @@ use crate::errno::ENOSYS;
 
 pub use arena::map_anon as map_guest_anon;
 pub use binder::init as init_binder;
+pub use cgroup::exec_reset as reset_exec_cgroups;
 pub use copies::note as note_copy;
 pub use dir::synthesized_path as synthesized_dir_path;
 pub use exec::{ExecState, init as init_exec, interpret as interpret_script};

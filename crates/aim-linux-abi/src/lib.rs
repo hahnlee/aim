@@ -208,6 +208,10 @@ pub fn run(mut opts: RunOptions) -> String {
         sys::enter_pid_namespace(&by_pid);
     }
     sys::cred::init(opts.identity, Some(by_pid));
+    // A member's execve that relaunched this process.
+    if opts.execfn.is_some() {
+        sys::reset_exec_cgroups();
+    }
     sys::start_ptrace_agent();
     sys::init_exec(opts.runtime_args);
     context::init_thread();

@@ -539,6 +539,7 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
         return -(EAGAIN as i64);
     };
     let tid = th.tid;
+    super::cgroup::thread_created(parent.tid, tid);
     if let Some(e) = &traced {
         super::ptrace::born_traced(tid, e.tracer, e.options);
     }
@@ -582,6 +583,7 @@ fn spawn(ctx: &GuestContext, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: 
     if !ok {
         with_table_mut(|t| t.remove(&tid));
         super::procrec::gone(tid);
+        super::cgroup::thread_gone(tid);
         super::ptrace::forget(tid);
         // SAFETY: the child never started; reclaim what it would own.
         unsafe {
@@ -641,6 +643,7 @@ pub fn exit(a: [u64; 6]) -> ! {
         t.len()
     });
     super::procrec::gone(th.tid);
+    super::cgroup::thread_gone(th.tid);
     if left > 0 {
         super::ptrace::thread_ended(th.tid, code << 8);
     }

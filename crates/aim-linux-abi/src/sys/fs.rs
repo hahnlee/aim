@@ -9,7 +9,7 @@ use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
 
 use super::fdtab::{self, Kind};
 use super::{attrs, dir, event, inotify, memfd, net, space};
-use crate::errno::{self, EBADF, EINVAL, ENOENT, ENOTTY, ERANGE};
+use crate::errno::{self, EACCES, EBADF, EINVAL, ENOENT, ENOTTY, ERANGE};
 use crate::sys::{guest_cstr, procfs};
 use crate::vfs;
 
@@ -252,7 +252,13 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
         return fd;
     }
     // The kernel log is a character device on Linux: O_TRUNC leaves it.
-    let flags = if r.guest == "/dev/kmsg" {
+    // A cgroup hierarchy's files are the kernel's (kernfs): none can be
+    // made, and O_TRUNC leaves a control file.
+    let cgroup = vfs::cgroup_v1(&r.guest);
+    if cgroup.is_some() && flags & O_CREAT != 0 && attrs::absent(&r.host) {
+        return -(EACCES as i64);
+    }
+    let flags = if r.guest == "/dev/kmsg" || cgroup.is_some() {
         flags & !O_TRUNC
     } else {
         flags
@@ -457,6 +463,14 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
             // SAFETY: the fd this open made.
             unsafe { libc::close(fd) };
             return -(error as i64);
+        }
+    }
+    if let Some((controller, root)) = cgroup
+        && flags & O_PATH == 0
+    {
+        let host = std::path::Path::new(std::ffi::OsStr::from_bytes(r.host.as_bytes()));
+        if host.is_file() {
+            super::cgroup::opened(fd, host, controller, root);
         }
     }
     fd as i64
@@ -833,6 +847,7 @@ fn special_read_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> 
         Kind::Inotify(_) => inotify::read(fd, buf, len),
         Kind::Evdev(_) => super::evdev::read(fd, buf, len),
         Kind::Kmsg(open) => Some(super::kmsg::read(fd, &open, iov)),
+        Kind::Cgroup(open) => Some(super::cgroup::read(&open, iov, None)),
         Kind::Sock(_) => net::read_pinned(pin, iov),
         Kind::Dir(_) => Some(-EISDIR),
         Kind::Epoll(_) | Kind::SyncFile | Kind::Binder(_) => Some(-(EINVAL as i64)),
@@ -886,6 +901,7 @@ fn special_write_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64>
         Kind::Sock(_) => net::write_pinned(pin, iov),
         Kind::Evdev(_) => super::evdev::write(fd, buf, len),
         Kind::Kmsg(open) => Some(super::kmsg::write(&open, iov)),
+        Kind::Cgroup(open) => Some(super::cgroup::write(&open, iov, None)),
         Kind::Dir(_) => Some(-(EBADF as i64)),
         Kind::Epoll(_) | Kind::Inotify(_) | Kind::SyncFile | Kind::Binder(_) => {
             Some(-(EINVAL as i64))
@@ -953,6 +969,12 @@ fn special_pio_kernel(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> O
         // devkmsg's reads and writes take no position.
         Kind::Kmsg(open) if write => Some(super::kmsg::write(&open, &one(buf, len))),
         Kind::Kmsg(open) => Some(super::kmsg::read(fd, &open, &one(buf, len))),
+        Kind::Cgroup(open) if write => Some(super::cgroup::write(
+            &open,
+            &one(buf, len),
+            Some(pos as u64),
+        )),
+        Kind::Cgroup(open) => Some(super::cgroup::read(&open, &one(buf, len), Some(pos as u64))),
         _ => Some(-ESPIPE),
     }
 }
@@ -1235,6 +1257,9 @@ pub fn lseek(a: [u64; 6]) -> i64 {
             whence => whence,
         };
         return description.seek(pin.descriptor(), a[1] as i64, whence);
+    }
+    if let Some(Kind::Cgroup(open)) = pin.kind() {
+        return super::cgroup::lseek(&open, a[1] as i64, a[2] as i32);
     }
     if let Some(Kind::Kmsg(open)) = pin.kind() {
         return super::kmsg::lseek(
@@ -1623,6 +1648,7 @@ fn kernel_fs_magic(fstype: &str) -> Option<u64> {
     Some(match fstype {
         "bpf" => 0xcafe_4a11,
         "cgroup2" => 0x6367_7270,
+        t if t.starts_with("cgroup:") => 0x0027_e0eb,
         "tmpfs" => 0x0102_1994,
         _ => return None,
     })

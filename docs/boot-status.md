@@ -8032,9 +8032,9 @@ Measured on a loaded host (load average 90, other agents' boots running),
   level every 250 ms instead.
 
 What is not covered: ActivityManager's process groups
-(`setProcessGroup`) change nothing on the host. Without cgroup
-controllers libprocessgroup's background profile keeps only its timer
-slack action, which has no process form, so the call fails in the guest
+(`setProcessGroup`) change nothing on the host. The `blkio`, `cpu` and
+`cpuset` hierarchies are mounted, so libprocessgroup's profiles join
+their groups as on a device, but no Darwin policy follows a group yet
 (#297). Kills name their process: another process's
 `/proc/<pid>/cmdline` and `comm` come from its record (#238).
 
