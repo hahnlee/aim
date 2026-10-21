@@ -71,6 +71,8 @@ pub struct SystemConfig {
     /// `mAllowInPowerSaveExceptIdle`, `mAllowInPowerSave`.
     pub allow_in_power_save_except_idle: BTreeSet<String>,
     pub allow_in_power_save: BTreeSet<String>,
+    /// `mBugreportWhitelistedPackages`.
+    pub bugreport_allowlist: BTreeSet<String>,
     /// Domain verification's linked apps, in original ArraySet order.
     pub linked_apps: Vec<String>,
     pub staged_installers: BTreeSet<String>,
@@ -450,6 +452,11 @@ impl SystemConfig {
                         self.hidden_api_allowlist.push(package.into_owned());
                     }
                 }
+                "bugreport-whitelisted" => {
+                    if let Some(package) = e.string("package") {
+                        self.bugreport_allowlist.insert(package.into_owned());
+                    }
+                }
                 "enhanced-confirmation-trusted-package"
                 | "enhanced-confirmation-trusted-installer" => {
                     if let Some(signed) = signed_package(&e) {
@@ -718,6 +725,7 @@ pub fn system(
         allow_implicit_broadcasts: config.allow_implicit_broadcasts,
         allow_in_power_save_except_idle: config.allow_in_power_save_except_idle,
         allow_in_power_save: config.allow_in_power_save,
+        bugreport_allowlist: config.bugreport_allowlist,
         named_actors: config.named_actors,
         use_round_icon: framework.use_round_icon,
         // Settings.Global.compatibility_mode's default; PackageManager reads
