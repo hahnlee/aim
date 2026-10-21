@@ -113,8 +113,8 @@ cache made in `ko-KR`, and the package parser's oracle
 configuration, and the original never re-resolves an entry: a phone
 keeps its first boot's values when its user changes the language (an
 AOSP quirk), and its first boot runs in the factory locale
-(`ro.product.locale`). The density is the image's (`ro.sf.lcd_density`,
-init.aim.rc); the locale is the Mac's, which AIM sets before the first
+(`ro.product.locale`). The density is the Mac's main display's (`ro.sf.lcd_density`,
+160 per point of backing scale, set by guest-init); the locale is the Mac's, which AIM sets before the first
 boot (`setprop persist.sys.locale` in `post-fs-data`,
 docs/mac-settings.md).
 

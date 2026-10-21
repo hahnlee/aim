@@ -51,10 +51,9 @@ use super::keymap::{self, Modifier};
 use super::server::Devices;
 use super::{KEYBOARD, MOUSE, TOUCHSCREEN};
 
-/// Display pixels Android scrolls for one scroll unit: 64 dp
-/// (`config_verticalScrollFactor`) at the image's density, 320 dpi
-/// (`ro.sf.lcd_density`, init.aim.rc).
-pub const SCROLL_UNIT_PX: f64 = 128.0;
+/// What Android scrolls for one scroll unit, in dp
+/// (`config_verticalScrollFactor`).
+pub const SCROLL_UNIT_DP: f64 = 64.0;
 /// A horizontal two-finger swipe this far (points) is Back.
 pub const SWIPE_BACK_POINTS: f64 = 80.0;
 /// How far (points) a trackpad gesture moves before it is a swipe or
@@ -263,17 +262,21 @@ pub struct Input {
     height: u32,
     /// Display pixels per millimeter.
     px_per_mm: f64,
+    /// Display pixels of one scroll unit at the device's density.
+    scroll_unit_px: f64,
     state: Mutex<Pointer>,
 }
 
 impl Input {
-    /// `width` x `height`: the display, in pixels, at `dpi`.
-    pub fn new(devices: Devices, width: u32, height: u32, dpi: f64) -> Input {
+    /// `width` x `height`: the display, in pixels, at `dpi`, showing the
+    /// device at `density` (`ro.sf.lcd_density`).
+    pub fn new(devices: Devices, width: u32, height: u32, dpi: f64, density: u32) -> Input {
         Input {
             devices,
             width,
             height,
             px_per_mm: dpi / 25.4,
+            scroll_unit_px: crate::density::pixels(SCROLL_UNIT_DP, density),
             state: Mutex::new(Pointer::default()),
         }
     }
@@ -459,7 +462,8 @@ impl Input {
                 Axis::Scroll => {}
             }
         }
-        let per_unit = |d: f64| if e.precise { d / SCROLL_UNIT_PX } else { d };
+        let unit = self.scroll_unit_px;
+        let per_unit = |d: f64| if e.precise { d / unit } else { d };
         // Down is a positive REL_WHEEL (content moving down), right a
         // negative REL_HWHEEL (content moving right: scrolling left).
         let (v_units, v_whole) = units(&mut s, 0, per_unit(dy));
@@ -803,6 +807,7 @@ mod tests {
             100,
             200,
             254.0,
+            320,
         );
         (input, dir)
     }

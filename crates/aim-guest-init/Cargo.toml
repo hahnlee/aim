@@ -18,6 +18,7 @@ aim-android-image = { path = "../aim-android-image" }
 aim-android-init = { path = "../aim-android-init" }
 aim-binder-host = { path = "../aim-binder-host" }
 aim-host-camera = { path = "../aim-host-camera" }
+aim-host-display = { path = "../aim-host-display" }
 aim-host-sensors = { path = "../aim-host-sensors" }
 aim-services = { path = "../aim-services" }
 aim-hostcall.workspace = true

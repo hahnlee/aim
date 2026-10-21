@@ -237,6 +237,7 @@ pub fn start(device: Id) -> crate::window::Window {
         scale: send!(screen, c"backingScaleFactor" => f64),
     };
     let (width, height) = screen.display_size();
+    let density = crate::window::device_density(screen.scale);
     STATE.with(|s| {
         *s.borrow_mut() = Some(State {
             screen,
@@ -257,6 +258,7 @@ pub fn start(device: Id) -> crate::window::Window {
         height,
         dpi_x,
         dpi_y,
+        density,
         number: None,
     }
 }

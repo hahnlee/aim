@@ -56,7 +56,13 @@ pub fn start(socket: &Path, win: &Window) -> std::io::Result<()> {
             devs.remap(KEYBOARD, usage, key);
         }
     }
-    let _ = INPUT.set(Input::new(devs, win.width, win.height, win.dpi_y));
+    let _ = INPUT.set(Input::new(
+        devs,
+        win.width,
+        win.height,
+        win.dpi_y,
+        win.density,
+    ));
     Ok(())
 }
 
