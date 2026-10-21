@@ -1131,21 +1131,28 @@ fn verify_settings_boot_entry(
         owner::recovery::{Event, ReadError},
         settings::Settings,
     };
-    let root = std::env::temp_dir().join(format!(
-        "aim-settings-entry-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    // Parallel tests and the leftovers of killed runs must not share a root,
+    // so each one takes a new name and creates it exclusively.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let root = loop {
+        let root = std::env::temp_dir().join(format!(
+            "aim-settings-entry-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        match std::fs::create_dir(&root) {
+            Ok(()) => break root,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => panic!("{}: {error}", root.display()),
+        }
+    };
     struct Data(std::path::PathBuf);
     impl Drop for Data {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.0).unwrap();
         }
     }
-    std::fs::create_dir_all(root.join("system")).unwrap();
+    std::fs::create_dir(root.join("system")).unwrap();
     let _data = Data(root.clone());
     let path = root.join("system/packages.xml");
     let bytes = b"<packages><version sdkVersion='36' databaseVersion='3'/><extension value='keep'/></packages>";
