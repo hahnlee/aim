@@ -8,12 +8,13 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::collections::HashMap;
+use std::os::fd::AsFd;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aim_binder_host::local::{Call, Reply, Service};
-use aim_binder_host::parcel::{BAD_VALUE, EX_NULL_POINTER, Exception, Parcel};
+use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_app_usage_iusagestatsmanager as us;
 
@@ -302,12 +303,12 @@ impl AppHost {
     }
 }
 
-/// A parcel written ahead, written as is.
+/// A parcel written ahead, written as is, with its binders and files.
 struct Written(Parcel);
 
 impl WriteParcelable for Written {
     fn write_to(&self, p: &mut Parcel) {
-        p.write_raw(self.0.data(), &[]);
+        p.write_raw_files(self.0.data(), self.0.objects(), self.0.files());
     }
 }
 
@@ -528,8 +529,30 @@ impl UsageStats {
     ) -> Result<Written, Exception> {
         let mut p = Parcel::new();
         let parceled_list = self.host.flag(USE_PARCELED_LIST)?;
-        usage_events::write_usage_events(&mut p, events, include_task_roots, parceled_list)
-            .map_err(|what| self.host.unimplemented_named("usagestats", what))?;
+        let process = &self.host.process;
+        let transfer = usage_events::Transfer {
+            // The reply's no exception and the parcelable's presence.
+            offset: 8,
+            retriever: &|events| {
+                process.add_service(Arc::new(usage_events::EventRetriever(Mutex::new(Some(
+                    events,
+                )))))
+            },
+            shared: &|bytes| {
+                let memory = super::bind::read_only_memory(bytes)
+                    .map_err(|e| format!("usage events' blob: {e}"))?;
+                aim_binder_host::server::file_from_fd(memory.as_fd())
+                    .ok_or_else(|| "usage events' blob: fileport failed".to_string())
+            },
+        };
+        usage_events::write_usage_events(
+            &mut p,
+            events,
+            include_task_roots,
+            parceled_list,
+            &transfer,
+        )
+        .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("usagestats: {e}")))?;
         Ok(Written(p))
     }
 

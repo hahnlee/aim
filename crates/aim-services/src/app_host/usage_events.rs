@@ -804,40 +804,49 @@ impl UserStats {
     }
 }
 
+/// What carries the part of a `UsageEvents` beyond the reply: the bytes
+/// the reply holds before it, the binder of a retriever of the events not
+/// written inline, and a shared memory holding a blob.
+pub struct Transfer<'a> {
+    pub offset: usize,
+    pub retriever: &'a dyn Fn(Vec<Event>) -> aim_binder_host::parcel::Binder,
+    pub shared: &'a dyn Fn(&[u8]) -> Result<aim_binder_driver::File, String>,
+}
+
+/// `IBinder.getSuggestedMaxIpcSizeBytes`.
+const MAX_IPC_SIZE: usize = 64 * 1024;
+
 /// `UsageEvents` of `events` with the sorted names they use, written as
 /// the original writes it with `use_parceled_list` on
-/// (`ParcelableUsageEventList`) or off (a blob of the events against the
-/// string table); an error when it does not fit one transaction.
+/// (`ParcelableUsageEventList`: the events inline while the reply is under
+/// the suggested size, the rest through a retriever) or off (a blob of the
+/// events against the string table, in place or in shared memory as
+/// `Parcel.writeBlob` puts it).
 pub fn write_usage_events(
     p: &mut Parcel,
     events: &[Event],
     include_task_roots: bool,
     parceled_list: bool,
-) -> Result<(), &'static str> {
-    /// `IBinder.getSuggestedMaxIpcSizeBytes`.
-    const MAX_IPC_SIZE: usize = 64 * 1024;
-    /// `Parcel.BLOB_INPLACE_LIMIT`.
+    transfer: &Transfer<'_>,
+) -> Result<(), String> {
+    /// `Parcel.BLOB_INPLACE_LIMIT`, `BLOB_INPLACE`, `BLOB_ASHMEM_IMMUTABLE`.
     const BLOB_INPLACE_LIMIT: usize = 16 * 1024;
-    const BEYOND_ONE_TRANSACTION: &str = "usage events beyond one transaction (#1843)";
+    const BLOB_INPLACE: i32 = 0;
+    const BLOB_ASHMEM_IMMUTABLE: i32 = 1;
     if parceled_list {
         p.write_i32(events.len() as i32);
         p.write_i32(0);
         p.write_string16(Some("android.app.usage.ParcelableUsageEventList"));
         p.write_i32(events.len() as i32);
-        for e in events {
-            if p.data().len() >= MAX_IPC_SIZE {
-                return Err(BEYOND_ONE_TRANSACTION);
-            }
+        let mut i = 0;
+        while i < events.len() && transfer.offset + p.data().len() < MAX_IPC_SIZE {
             p.write_i32(1);
-            p.write_string16(Some(&e.package));
-            p.write_string16(e.class.as_deref());
-            p.write_i32(e.instance_id);
-            p.write_string16(e.task_root_package.as_deref());
-            p.write_string16(e.task_root_class.as_deref());
-            p.write_i32(e.event_type);
-            p.write_i64(e.time_stamp);
-            write_extra(p, e)?;
-            p.write_i32(e.flags);
+            write_event(p, &events[i])?;
+            i += 1;
+        }
+        if i < events.len() {
+            p.write_i32(0);
+            p.write_binder(Some((transfer.retriever)(events.to_vec())));
         }
         return Ok(());
     }
@@ -881,24 +890,92 @@ pub fn write_usage_events(
         data.write_raw(list.data(), &[]);
     }
     let bytes = data.data();
-    if bytes.len() > BLOB_INPLACE_LIMIT {
-        return Err(BEYOND_ONE_TRANSACTION);
-    }
-    // `writeBlob`: the length, then `BLOB_INPLACE` and the bytes.
+    // `writeBlob`: the length, then in place or a read-only ashmem region.
     p.write_i32(bytes.len() as i32);
-    p.write_i32(0);
-    p.write_raw(bytes, &[]);
+    if bytes.len() <= BLOB_INPLACE_LIMIT {
+        p.write_i32(BLOB_INPLACE);
+        p.write_raw(bytes, &[]);
+    } else {
+        p.write_i32(BLOB_ASHMEM_IMMUTABLE);
+        p.write_file((transfer.shared)(bytes)?);
+    }
     Ok(())
 }
 
+/// `ParcelableUsageEventList.writeEventToParcel`.
+fn write_event(p: &mut Parcel, e: &Event) -> Result<(), String> {
+    p.write_string16(Some(&e.package));
+    p.write_string16(e.class.as_deref());
+    p.write_i32(e.instance_id);
+    p.write_string16(e.task_root_package.as_deref());
+    p.write_string16(e.task_root_class.as_deref());
+    p.write_i32(e.event_type);
+    p.write_i64(e.time_stamp);
+    write_extra(p, e)?;
+    p.write_i32(e.flags);
+    Ok(())
+}
+
+/// The retriever of a `ParcelableUsageEventList`'s events not written
+/// inline: `FIRST_CALL_TRANSACTION` with the index of the next answers the
+/// events from it while the reply is under the suggested size, then 0 if
+/// more remain; the list goes once all are transferred.
+pub struct EventRetriever(pub std::sync::Mutex<Option<Vec<Event>>>);
+
+impl aim_binder_host::local::Service for EventRetriever {
+    fn descriptor(&self) -> &str {
+        ""
+    }
+
+    fn has_descriptor(&self) -> bool {
+        false
+    }
+
+    fn transact(
+        &self,
+        call: &mut aim_binder_host::local::Call<'_>,
+    ) -> aim_binder_host::local::Reply {
+        use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception, UNKNOWN_TRANSACTION};
+        if call.code != 1 {
+            return Err(UNKNOWN_TRANSACTION);
+        }
+        let mut i = usize::try_from(call.data.read_i32()?).unwrap_or(usize::MAX);
+        let mut state = self.0.lock().unwrap();
+        let mut reply = Parcel::new();
+        let Some(events) = state.as_ref() else {
+            reply.write_exception(&Exception::illegal_argument(
+                "Attempt to transfer null list, did transfer finish?",
+            ));
+            return Ok(reply);
+        };
+        reply.write_no_exception();
+        while i < events.len() && reply.data().len() < MAX_IPC_SIZE {
+            reply.write_i32(1);
+            if let Err(e) = write_event(&mut reply, &events[i]) {
+                *state = None;
+                let mut failed = Parcel::new();
+                failed.write_exception(&Exception::new(EX_ILLEGAL_STATE, e));
+                return Ok(failed);
+            }
+            i += 1;
+        }
+        if i < events.len() {
+            reply.write_i32(0);
+        } else {
+            *state = None;
+        }
+        Ok(reply)
+    }
+}
+
 /// `writeEventToParcel`'s fields of the event's type.
-fn write_extra(p: &mut Parcel, e: &Event) -> Result<(), &'static str> {
+fn write_extra(p: &mut Parcel, e: &Event) -> Result<(), String> {
     match (e.event_type, &e.extra) {
         // `mConfiguration.writeToParcel` of the configuration the stats
         // file kept as its `ConfigurationProto`.
         (CONFIGURATION_CHANGE, Extra::Configuration(proto)) => {
             super::config::Configuration::from_proto(proto)
-                .map_err(|_| "a configuration change's malformed ConfigurationProto")?
+                .map_err(|_| "a configuration change's malformed ConfigurationProto".to_string())?
                 .write_to(p);
         }
         (CONFIGURATION_CHANGE, _) => super::config::Configuration::from_proto(&[])
@@ -946,6 +1023,15 @@ fn write_extra(p: &mut Parcel, e: &Event) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A transfer for events that fit the reply.
+    fn no_transfer() -> Transfer<'static> {
+        Transfer {
+            offset: 8,
+            retriever: &|_| panic!("no retriever expected"),
+            shared: &|_| panic!("no shared memory expected"),
+        }
+    }
 
     fn event(package: &str, event_type: i32, time_stamp: i64, instance_id: i32) -> Event {
         Event {
@@ -1055,7 +1141,7 @@ mod tests {
         assert_eq!(delta.ui_mode, 0x20);
         assert_eq!(delta.font_scale, 0.0);
         let mut p = Parcel::new();
-        write_usage_events(&mut p, &daily.events, false, true).unwrap();
+        write_usage_events(&mut p, &daily.events, false, true, &no_transfer()).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1150,13 +1236,100 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `ParcelableUsageEventList`: events inline while the reply (with what
+    /// precedes them) is under the suggested size, then 0 and a retriever
+    /// given all of them.
+    #[test]
+    fn a_parceled_list_beyond_one_transaction_hands_the_rest_to_a_retriever() {
+        let events: Vec<Event> = (0..3000)
+            .map(|i| {
+                event(
+                    &format!("com.example.package{i}"),
+                    ACTIVITY_RESUMED,
+                    i,
+                    i as i32,
+                )
+            })
+            .collect();
+        let given = std::cell::Cell::new(0);
+        let transfer = Transfer {
+            offset: 8,
+            retriever: &|all| {
+                given.set(all.len());
+                aim_binder_host::parcel::Binder::Local(0x1000)
+            },
+            shared: &|_| panic!("no shared memory expected"),
+        };
+        let mut p = Parcel::new();
+        write_usage_events(&mut p, &events, false, true, &transfer).unwrap();
+        assert_eq!(given.get(), 3000);
+        assert!(p.data().len() < MAX_IPC_SIZE + 512);
+        let mut r = p.reader();
+        assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap()), (3000, 0));
+        r.read_string16().unwrap();
+        assert_eq!(r.read_i32().unwrap(), 3000);
+        let mut inline = 0;
+        while r.read_i32().unwrap() == 1 {
+            for _ in 0..2 {
+                r.read_string16().unwrap();
+            }
+            r.read_i32().unwrap();
+            for _ in 0..2 {
+                r.read_string16().unwrap();
+            }
+            r.read_i32().unwrap();
+            r.read_i64().unwrap();
+            r.read_i32().unwrap();
+            inline += 1;
+        }
+        assert!(inline > 0 && inline < 3000);
+        assert_eq!(p.objects().len(), 1);
+    }
+
+    /// A blob beyond `BLOB_INPLACE_LIMIT` is read-only shared memory, as
+    /// `Parcel.writeBlob` puts it: its length, `BLOB_ASHMEM_IMMUTABLE`, the
+    /// region's descriptor.
+    #[test]
+    fn a_large_blob_goes_in_shared_memory() {
+        let events: Vec<Event> = (0..2000)
+            .map(|i| {
+                event(
+                    &format!("com.example.package{i}"),
+                    ACTIVITY_RESUMED,
+                    i,
+                    i as i32,
+                )
+            })
+            .collect();
+        let shared_len = std::cell::Cell::new(0);
+        let transfer = Transfer {
+            offset: 8,
+            retriever: &|_| panic!("no retriever expected"),
+            shared: &|bytes| {
+                shared_len.set(bytes.len());
+                let memory =
+                    super::super::bind::read_only_memory(bytes).map_err(|e| e.to_string())?;
+                aim_binder_host::server::file_from_fd(std::os::fd::AsFd::as_fd(&memory))
+                    .ok_or_else(|| "fileport".to_string())
+            },
+        };
+        let mut p = Parcel::new();
+        write_usage_events(&mut p, &events, false, false, &transfer).unwrap();
+        let mut r = p.reader();
+        let len = r.read_i32().unwrap() as usize;
+        assert!(len > 16 * 1024);
+        assert_eq!(shared_len.get(), len);
+        assert_eq!(r.read_i32().unwrap(), 1);
+        assert_eq!(p.files().len(), 1);
+    }
+
     /// The blob form: the length and `BLOB_INPLACE`, then the marshalled
     /// count, index, sorted string pool and events.
     #[test]
     fn events_are_written_against_the_sorted_names() {
         let mut p = Parcel::new();
         let e = event("p", ACTIVITY_RESUMED, 9, 3);
-        write_usage_events(&mut p, &[e], false, false).unwrap();
+        write_usage_events(&mut p, &[e], false, false, &no_transfer()).unwrap();
         let mut r = p.reader();
         let len = r.read_i32().unwrap();
         assert_eq!(r.read_i32().unwrap(), 0);
