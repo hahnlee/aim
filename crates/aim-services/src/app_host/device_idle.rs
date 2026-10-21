@@ -210,6 +210,13 @@ impl Lists {
         self.except_idle.contains(name) || self.user.contains(name)
     }
 
+    /// `isAppOnWhitelistInternal`: in `mPowerSaveWhitelistAllAppIdArray`.
+    fn on_allowlist(&self, app_id: i32) -> bool {
+        app_ids(Some(&self.system), &self.user)
+            .binary_search(&app_id)
+            .is_ok()
+    }
+
     /// `isPowerSaveWhitelistAppInternal`.
     fn allowed(&self, name: &str) -> bool {
         self.system.contains(name) || self.user.contains(name)
@@ -553,6 +560,12 @@ impl DeviceIdle {
         Ok(out)
     }
 
+    /// `LocalService.isAppOnWhitelist`: whether `app_id` is on the system or
+    /// the user's power save allowlist.
+    pub(super) fn app_on_allowlist(&self, app_id: i32) -> Result<bool, Exception> {
+        self.with(|l| l.on_allowlist(app_id))
+    }
+
     /// `isPowerSaveWhitelistExceptIdleApp` of the system: the app host's
     /// own question (`AppStandbyController.isNonIdleWhitelisted`).
     pub(super) fn allowed_except_idle(&self, name: &str) -> Result<bool, Exception> {
@@ -889,6 +902,10 @@ mod tests {
         assert!(!lists.system.contains("sys.full") && lists.removed.contains("sys.full"));
         assert_eq!(lists.user.0, vec![("user.app".to_string(), 10_100)]);
         assert!(lists.allowed_except_idle("sys.full") && !lists.allowed("sys.full"));
+        // The full allowlist's app ids: the user's, not the except-idle or
+        // removed system ones.
+        assert!(lists.on_allowlist(10_100) && !lists.on_allowlist(1001));
+        assert!(!lists.on_allowlist(1002));
         assert_eq!(
             app_ids(Some(&lists.except_idle), &lists.user),
             vec![1001, 1002, 10_100]

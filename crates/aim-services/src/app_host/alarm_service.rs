@@ -284,33 +284,68 @@ impl AlarmManager {
         }))
     }
 
-    /// `isExactAlarmChangeEnabled`, `hasUseExactAlarmInternal`,
-    /// `hasScheduleExactAlarmInternal` and the core uids' exemption: may
-    /// `package` of `uid` set exact alarms?
+    /// `set`'s permission for an exact alarm that needs one:
+    /// `isExactAlarmChangeEnabled`, then `hasUseExactAlarmInternal`,
+    /// `hasScheduleExactAlarmInternal` or
+    /// `isExemptFromExactAlarmPermissionNoLock` (`canScheduleExactAlarms`
+    /// asks the same).
     fn exact_allowed(&self, package: &str, uid: i32) -> Result<bool, Exception> {
+        Ok(!self.exact_alarm_change_enabled(package)?
+            || self.has_use_exact_alarm(package, uid)?
+            || self.has_schedule_exact_alarm(package, uid)?
+            || self.exempt_from_exact_alarm_permission(uid)?)
+    }
+
+    /// `hasUseExactAlarmInternal`.
+    fn has_use_exact_alarm(&self, package: &str, uid: i32) -> Result<bool, Exception> {
         let (state, _) = self.host.packages()?;
-        let Some(ps) = state.packages.get(package) else {
-            return Ok(false);
-        };
         let compat = &self.host.inputs()?.compat;
-        let target = ps.target_sdk_version;
-        if !compat.is_enabled(REQUIRE_EXACT_ALARM_PERMISSION, Some(package), target)
-            || uid.rem_euclid(PER_USER_RANGE as i32) < 10_000
-        {
-            return Ok(true);
+        let enabled = state.packages.get(package).is_some_and(|ps| {
+            compat.is_enabled(ENABLE_USE_EXACT_ALARM, Some(package), ps.target_sdk_version)
+        });
+        Ok(enabled
+            && super::permission_checker::preflight(
+                &self.host,
+                "android.permission.USE_EXACT_ALARM",
+                uid,
+                package,
+            )?)
+    }
+
+    /// `hasScheduleExactAlarmInternal`: the app id among
+    /// `mExactAlarmCandidates` (an installed package of it requests
+    /// SCHEDULE_EXACT_ALARM), the change enabled, then the permission when
+    /// denied by default, else the op's mode, default or allowed.
+    fn has_schedule_exact_alarm(&self, package: &str, uid: i32) -> Result<bool, Exception> {
+        const SCHEDULE_EXACT_ALARM: &str = "android.permission.SCHEDULE_EXACT_ALARM";
+        let (state, _) = self.host.packages()?;
+        let app_id = uid.rem_euclid(PER_USER_RANGE as i32);
+        let candidate = state.packages.values().any(|ps| {
+            ps.app_id == app_id
+                && ps.pkg.as_ref().is_some_and(|pkg| {
+                    pkg.requested_permissions
+                        .iter()
+                        .any(|r| r == SCHEDULE_EXACT_ALARM)
+                })
+        });
+        if !candidate || !self.exact_alarm_change_enabled(package)? {
+            return Ok(false);
         }
-        let requested = |p: &str| {
-            ps.pkg
-                .as_ref()
-                .is_some_and(|pkg| pkg.requested_permissions.iter().any(|r| r == p))
-        };
-        if compat.is_enabled(ENABLE_USE_EXACT_ALARM, Some(package), target)
-            && self
-                .host
-                .check_permission(Some("android.permission.USE_EXACT_ALARM"), uid)?
-                == 0
-        {
-            return Ok(true);
+        let compat = &self.host.inputs()?.compat;
+        let denied_by_default = state.packages.get(package).is_some_and(|ps| {
+            compat.is_enabled(
+                SCHEDULE_EXACT_ALARM_DENIED_BY_DEFAULT,
+                Some(package),
+                ps.target_sdk_version,
+            )
+        });
+        if denied_by_default {
+            return super::permission_checker::preflight(
+                &self.host,
+                SCHEDULE_EXACT_ALARM,
+                uid,
+                package,
+            );
         }
         let mode = super::appops_service::mode(
             &self.host,
@@ -318,18 +353,41 @@ impl AlarmManager {
             uid,
             Some(package),
         )?;
-        Ok(match mode {
-            0 => true,
-            super::appops_service::MODE_DEFAULT => {
-                requested("android.permission.SCHEDULE_EXACT_ALARM")
-                    && !compat.is_enabled(
-                        SCHEDULE_EXACT_ALARM_DENIED_BY_DEFAULT,
-                        Some(package),
-                        target,
-                    )
-            }
-            _ => false,
-        })
+        Ok(mode == super::appops_service::MODE_DEFAULT || mode == 0)
+    }
+
+    /// `isExemptFromExactAlarmPermissionNoLock`: SystemUI's app, a core
+    /// uid, or an app on the power save allowlist
+    /// (`DeviceIdleController.isAppOnWhitelist`).
+    fn exempt_from_exact_alarm_permission(&self, uid: i32) -> Result<bool, Exception> {
+        let app_id = uid.rem_euclid(PER_USER_RANGE as i32);
+        Ok(self.system_ui_app_id()? == Some(app_id)
+            || app_id < 10_000
+            || self.host.device_idle().app_on_allowlist(app_id)?)
+    }
+
+    /// `Injector.getSystemUiUid`'s app: the package of
+    /// `config_systemUIServiceComponent`, a system package.
+    fn system_ui_app_id(&self) -> Result<Option<i32>, Exception> {
+        let (state, _) = self.host.packages()?;
+        let Some(component) = self
+            .host
+            .inputs()?
+            .packages
+            .framework_string("config_systemUIServiceComponent")
+        else {
+            return Ok(None);
+        };
+        let package = component.split('/').next().unwrap_or_default();
+        Ok(state
+            .packages
+            .get(package)
+            .filter(|ps| {
+                ps.pkg
+                    .as_deref()
+                    .is_some_and(|p| p.is(crate::package::pkg::booleans::SYSTEM))
+            })
+            .map(|ps| ps.app_id))
     }
 
     /// `set`: its checks, then `setImpl`.
@@ -896,39 +954,28 @@ impl Service for AlarmManager {
                 let a =
                     alarm::HasScheduleExactAlarm::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 reply((|| {
-                    let user = self.host.incoming_user(uid, a.user_id, false)?;
+                    const FULL: &str = "android.permission.INTERACT_ACROSS_USERS_FULL";
+                    if uid / PER_USER_RANGE as i32 != a.user_id
+                        && self.host.check_permission(Some(FULL), uid)? != 0
+                    {
+                        return Err(Exception::security(format!(
+                            "hasScheduleExactAlarm: Neither user {uid} nor current process has {FULL}."
+                        )));
+                    }
                     let package = a.package_name.unwrap_or_default();
                     let (state, _) = self.host.packages()?;
-                    let Some(ps) = state.packages.get(&package) else {
-                        return Err(Exception::illegal_argument(format!(
-                            "Unknown package {package}"
+                    // `getPackageUid`: -1 for a package not installed.
+                    let target_uid = state
+                        .packages
+                        .get(&package)
+                        .map_or(-1, |ps| a.user_id * PER_USER_RANGE as i32 + ps.app_id);
+                    if uid != target_uid && uid.rem_euclid(PER_USER_RANGE as i32) >= 10_000 {
+                        return Err(Exception::security(format!(
+                            "Uid {uid} cannot query hasScheduleExactAlarm for package {package}"
                         )));
-                    };
-                    let target_uid = user * PER_USER_RANGE as i32 + ps.app_id;
-                    let mode = super::appops_service::mode(
-                        &self.host,
-                        super::appops_service::OP_SCHEDULE_EXACT_ALARM,
-                        target_uid,
-                        Some(&package),
-                    )?;
-                    let requested = ps.pkg.as_ref().is_some_and(|pkg| {
-                        pkg.requested_permissions
-                            .iter()
-                            .any(|r| r == "android.permission.SCHEDULE_EXACT_ALARM")
-                    });
-                    let compat = &self.host.inputs()?.compat;
-                    let has = match mode {
-                        0 => true,
-                        super::appops_service::MODE_DEFAULT => {
-                            requested
-                                && !compat.is_enabled(
-                                    SCHEDULE_EXACT_ALARM_DENIED_BY_DEFAULT,
-                                    Some(&package),
-                                    ps.target_sdk_version,
-                                )
-                        }
-                        _ => false,
-                    };
+                    }
+                    let has =
+                        target_uid > 0 && self.has_schedule_exact_alarm(&package, target_uid)?;
                     let mut p = Parcel::new();
                     alarm::write_has_schedule_exact_alarm_reply(&mut p, has);
                     Ok(p)
