@@ -33,6 +33,8 @@ pub struct Image {
     pub entry: u64,
     pub phdr: u64,
     pub phnum: u64,
+    /// The PT_LOAD headers, as read from the file.
+    pub loads: Vec<elf::Phdr>,
     pub end: u64,
     pub interp: Option<String>,
     /// Where the code came from (translation cache, original, load time).
@@ -680,6 +682,7 @@ fn finish(
         entry: bias + h.hdr.e_entry,
         phdr,
         phnum: h.hdr.e_phnum as u64,
+        loads: h.loads.clone(),
         end: bias + h.hi,
         interp,
         source,

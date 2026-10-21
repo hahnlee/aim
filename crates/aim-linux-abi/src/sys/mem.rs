@@ -30,7 +30,7 @@ use crate::xrt::{self, ExecSource};
 
 use std::os::unix::ffi::OsStrExt;
 
-use super::{arena, copies, vmmap, window};
+use super::{arena, copies, vm_account, vmmap, window};
 
 pub(super) const PAGE: u64 = 16384;
 
@@ -46,6 +46,7 @@ const MAP_SHARED_VALIDATE: u64 = 0x03;
 const MAP_TYPE: u64 = 0x0f;
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANONYMOUS: u64 = 0x20;
+const MAP_GROWSDOWN: u64 = 0x0100;
 const MAP_NORESERVE: u64 = 0x4000;
 const MAP_FIXED_NOREPLACE: u64 = 0x10_0000;
 
@@ -212,7 +213,33 @@ fn store_hash(addr: u64, original: &fips::Hash, new: &fips::Hash) -> bool {
     true
 }
 
-pub fn mmap(mut a: [u64; 6]) -> i64 {
+/// mmap, counted against RLIMIT_AS and RLIMIT_DATA (`mmap_region`).
+pub fn mmap(a: [u64; 6]) -> i64 {
+    let len = page_up(a[1]);
+    let kind = vm_account::Kind {
+        shared: matches!(a[3] & MAP_TYPE, MAP_SHARED | MAP_SHARED_VALIDATE),
+        writable: a[2] & PROT_WRITE != 0,
+        stack: a[3] & MAP_GROWSDOWN != 0,
+    };
+    if len != 0 {
+        let (limits, heap) = (super::cred::memory_limits(), brk_heap());
+        let replaced = if a[3] & MAP_FIXED != 0 {
+            a[0]
+        } else {
+            u64::MAX
+        };
+        if !vm_account::with(|s| s.may_map(limits, heap, replaced, len, kind)) {
+            return -(ENOMEM as i64);
+        }
+    }
+    let result = mmap_guest(a);
+    if result >= 0 {
+        let lo = result as u64;
+        vm_account::with(|s| s.map(lo, lo + len, kind));
+    }
+    result
+}
+fn mmap_guest(mut a: [u64; 6]) -> i64 {
     if a[3] & MAP_ANONYMOUS != 0 {
         let _epoch = super::verity_pager::mutation();
         let result = mmap_owned(a);
@@ -721,6 +748,7 @@ pub fn munmap(ctx: &GuestContext, a: [u64; 6]) -> i64 {
     let frame_lo = ctx.sp.saturating_sub(32);
     if len > 0 && frame_lo < addr.saturating_add(len) && ctx.sp > addr {
         DEFERRED_UNMAPS.with(|d| d.borrow_mut().push((addr, len)));
+        vm_account::with(|s| s.unmap(addr, addr + len));
         return 0;
     }
     if let Err(error) = super::verity_pager::forget(addr, len) {
@@ -732,6 +760,7 @@ pub fn munmap(ctx: &GuestContext, a: [u64; 6]) -> i64 {
     }
     let result = window::unmap(addr, len);
     if result == 0 {
+        vm_account::with(|s| s.unmap(addr, addr + len));
         super::fuse_cache::forget(addr, len);
         if let Err(error) = super::verity_pager::reconcile_memberships() {
             return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64);
@@ -811,10 +840,24 @@ fn file_backed(addr: u64) -> bool {
 ///   gets its own copy of each page written), then protected.
 pub fn mprotect(a: [u64; 6]) -> i64 {
     let _epoch = super::verity_pager::exclusive_mutation();
-    if super::verity_pager::failed_range(a[0], page_up(a[1])) {
+    let (addr, len) = (a[0], page_up(a[1]));
+    if super::verity_pager::failed_range(addr, len) {
         return -(errno::EIO as i64);
     }
-    mprotect_owned(a)
+    // `mprotect_fixup`: a private mapping turning into data must fit
+    // RLIMIT_DATA.
+    let writable = a[2] & PROT_WRITE != 0;
+    if writable && addr & (PAGE - 1) == 0 {
+        let (limits, heap) = (super::cred::memory_limits(), brk_heap());
+        if !vm_account::with(|s| s.may_protect(limits, heap, addr, addr + len)) {
+            return -(ENOMEM as i64);
+        }
+    }
+    let result = mprotect_owned(a);
+    if result == 0 {
+        vm_account::with(|s| s.protect(addr, addr + len, writable));
+    }
+    result
 }
 fn mprotect_owned(a: [u64; 6]) -> i64 {
     let (addr, len, prot) = (a[0], page_up(a[1]), a[2] & !(PROT_BTI | PROT_MTE));
@@ -1487,7 +1530,29 @@ fn move_to(old: u64, old_len: u64, new: u64, new_len: u64, keep_old: bool) -> Re
 
 pub fn mremap(a: [u64; 6]) -> i64 {
     let _epoch = super::verity_pager::mutation();
+    let (old, old_len, new_len, flags) = (a[0], page_up(a[1]), page_up(a[2]), a[3]);
+    let kind = vm_account::with(|s| s.kind_at(old));
+    // `vma_to_resize`: growth is counted against the limits.
+    if let Some(kind) = kind
+        && new_len > old_len
+    {
+        let (limits, heap) = (super::cred::memory_limits(), brk_heap());
+        if !vm_account::with(|s| s.may_expand(limits, heap, kind.data(), new_len - old_len)) {
+            return -(ENOMEM as i64);
+        }
+    }
     let result = mremap_guest(a);
+    if result >= 0
+        && let Some(kind) = kind
+    {
+        let new = result as u64;
+        vm_account::with(|s| {
+            if flags & MREMAP_DONTUNMAP == 0 {
+                s.unmap(old, old + old_len);
+            }
+            s.map(new, new + new_len, kind);
+        });
+    }
     if result >= 0
         && let Err(error) = super::verity_pager::reconcile_memberships()
     {
@@ -1916,10 +1981,22 @@ pub fn init_brk(hint: u64) {
     };
 }
 
+/// brk: a break it cannot move to leaves it where it was, as Linux
+/// answers (`check_data_rlimit`, then `do_brk_flags`' `may_expand_vm`).
 pub fn brk(a: [u64; 6]) -> i64 {
     let want = a[0];
+    let limits = super::cred::memory_limits();
     let mut b = BRK.lock().unwrap();
     if want == 0 || want < b.base || want > b.limit {
+        return b.cur as i64;
+    }
+    if !vm_account::with(|s| s.brk_fits(limits, want - b.base)) {
+        return b.cur as i64;
+    }
+    let (old_heap, new_heap) = (page_up(b.cur) - b.base, page_up(want) - b.base);
+    if new_heap > old_heap
+        && !vm_account::with(|s| s.may_expand(limits, old_heap, true, new_heap - old_heap))
+    {
         return b.cur as i64;
     }
     let need = page_up(want);
@@ -1930,7 +2007,7 @@ pub fn brk(a: [u64; 6]) -> i64 {
             libc::PROT_READ | libc::PROT_WRITE,
         ) != 0
         {
-            return -(ENOMEM as i64);
+            return b.cur as i64;
         }
         b.mapped = need;
     }
@@ -1938,12 +2015,53 @@ pub fn brk(a: [u64; 6]) -> i64 {
     b.cur as i64
 }
 
+/// The program break's heap as Linux maps it (`start_brk` to the page
+/// above the break).
+fn brk_heap() -> u64 {
+    let b = BRK.lock().unwrap();
+    page_up(b.cur).saturating_sub(b.base)
+}
+
+/// Exec: the program's and the interpreter's segments are the guest's
+/// first mappings (`load_elf_binary`), and the program's set the data
+/// segment brk counts (`start_data` is the last segment's address,
+/// `end_data` the furthest end of file data).
+pub fn account_image(loads: &[crate::elf::Phdr], bias: u64, program: bool) {
+    const PF_W: u32 = 2;
+    let (mut start_data, mut end_data) = (0, 0);
+    // The headers as the loader read them from the file: the image's own
+    // pages may not be readable yet (an authenticated image's are verified
+    // on the guest's first touch).
+    vm_account::with(|s| {
+        for h in loads {
+            let p_flags = h.p_flags;
+            let (vaddr, filesz, memsz) = (h.p_vaddr, h.p_filesz, h.p_memsz);
+            let lo = (bias + vaddr) & !(PAGE - 1);
+            let hi = page_up(bias + vaddr + memsz);
+            let kind = vm_account::Kind {
+                shared: false,
+                writable: p_flags & PF_W != 0,
+                stack: false,
+            };
+            s.map(lo, hi, kind);
+            start_data = start_data.max(vaddr);
+            end_data = end_data.max(vaddr + filesz);
+        }
+        if program {
+            s.set_data_segment(end_data.saturating_sub(start_data));
+        }
+    });
+}
+
 /// Fork: the program break (its pages come with the guest's memory).
 pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
-    let b = BRK.lock().unwrap();
-    for v in [b.base, b.cur, b.mapped, b.limit] {
-        w.u64(v);
+    {
+        let b = BRK.lock().unwrap();
+        for v in [b.base, b.cur, b.mapped, b.limit] {
+            w.u64(v);
+        }
     }
+    vm_account::fork_save(w);
 }
 
 pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
@@ -1954,4 +2072,5 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
         mapped: v[2],
         limit: v[3],
     };
+    vm_account::fork_restore(r);
 }
