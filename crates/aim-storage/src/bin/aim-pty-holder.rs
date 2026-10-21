@@ -1,6 +1,8 @@
 //! Native event-driven PTY endpoint owner (#1259).
 use std::{io, path::PathBuf};
 fn main() {
+    // The guest process that spawned it passes nothing but its arguments.
+    aim_storage::inherited::close_above_stdio();
     if let Err(error) = run() {
         eprintln!("aim-pty-holder: {error}");
         std::process::exit(1);

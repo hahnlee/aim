@@ -403,6 +403,13 @@ fn open_on_key(key: &SessionKey, flags: i32, op: u32, payload: &[u8]) -> Result<
     if fd < 0 {
         return Err(errno::last());
     }
+    // The layer's own until it is the guest's: no process spawned while it
+    // talks to the broker inherits it. The guest's O_CLOEXEC decides below.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        let error = errno::last();
+        unsafe { libc::close(fd) };
+        return Err(error);
+    }
     let address = |path: &Path| -> Result<libc::sockaddr_un, Errno> {
         let bytes = path.as_os_str().as_bytes();
         let mut out: libc::sockaddr_un = unsafe { std::mem::zeroed() };
