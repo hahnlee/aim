@@ -358,6 +358,28 @@ fn memfd() {
     check("t_memfd", &[]);
 }
 
+/// vm.memfd_noexec at each scope, as init would write it.
+#[test]
+fn memfd_noexec() {
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let g = Guest::new(&image, "t_memfd_noexec");
+    let vm = g.runtime.join("kernfs/proc/sys/vm");
+    std::fs::create_dir_all(&vm).unwrap();
+    let prog = g.build(&clang, "t_memfd_noexec");
+    for scope in ["0", "1", "2"] {
+        std::fs::write(vm.join("memfd_noexec"), format!("{scope}\n")).unwrap();
+        let (ok, out) = g.run(&[&prog, scope]);
+        println!("{out}");
+        assert!(
+            ok && out.contains("PASS"),
+            "t_memfd_noexec {scope} failed:\n{out}"
+        );
+    }
+}
+
 #[test]
 fn kernel_log() {
     check("t_kmsg", &[]);
