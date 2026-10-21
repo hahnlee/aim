@@ -94,11 +94,7 @@ impl Open {
         if proc {
             Open::Proc
         } else {
-            Open::Dev(Mutex::new(Ratelimit {
-                begin: 0,
-                printed: 0,
-                missed: 0,
-            }))
+            Open::Dev(Mutex::new(Ratelimit::new()))
         }
     }
 }
@@ -572,6 +568,38 @@ pub fn open_proc(flags: u64, host_flags: i32) -> i64 {
 /// is lost, as a full console loses it.
 pub(super) fn printk(facility: u32, level: u32, text: &[u8]) {
     let _ = with_ring(|ring| ring.append(facility, level, text));
+}
+
+impl Ratelimit {
+    pub const fn new() -> Ratelimit {
+        Ratelimit {
+            begin: 0,
+            printed: 0,
+            missed: 0,
+        }
+    }
+}
+
+/// `printk_ratelimited` at a call site whose state is `limit`
+/// (`DEFAULT_RATELIMIT_STATE`): ten records per five seconds; the first of
+/// the next interval is preceded by how many `site` suppressed.
+pub(super) fn printk_ratelimited(limit: &Mutex<Ratelimit>, site: &str, level: u32, text: &[u8]) {
+    let now = super::clock::Base::Monotonic.now();
+    let mut l = limit.lock().unwrap();
+    if l.begin == 0 || now - l.begin >= RATELIMIT_INTERVAL_NS {
+        if l.missed > 0 {
+            let missed = format!("{site}: {} callbacks suppressed", l.missed);
+            printk(0, DEFAULT_LEVEL, missed.as_bytes());
+        }
+        (l.begin, l.printed, l.missed) = (now, 0, 0);
+    }
+    if l.printed >= RATELIMIT_BURST {
+        l.missed += 1;
+        return;
+    }
+    l.printed += 1;
+    drop(l);
+    printk(0, level, text);
 }
 
 /// `/proc/sys/kernel/<name>` as init wrote it.

@@ -40,6 +40,9 @@
 //! protection has write, as `VM_SHARED | VM_MAYWRITE` counts in
 //! `i_mmap_writable`) fails with EBUSY; one in another process is not seen
 //! (#258). EXEC refuses a chmod of the exec bits (`shmem_setattr`).
+//! `vm.memfd_noexec` (the `/proc/sys` value init writes) picks MFD_EXEC or
+//! MFD_NOEXEC_SEAL for a memfd asked for with neither, and from scope 2
+//! refuses one without MFD_NOEXEC_SEAL.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -289,6 +292,26 @@ pub fn memfd_create(a: [u64; 6]) -> i64 {
     {
         return -(EINVAL as i64);
     }
+    let scope = noexec_scope();
+    let flags = match noexec_flags(flags, scope) {
+        Ok(flags) => flags,
+        Err(error) => {
+            static LIMIT: Mutex<super::kmsg::Ratelimit> = Mutex::new(super::kmsg::Ratelimit::new());
+            let text = format!(
+                "{}[{}]: memfd_create() requires MFD_NOEXEC_SEAL with vm.memfd_noexec={scope}",
+                super::procfs::own_comm(),
+                super::thread::gettid(),
+            );
+            // KERN_ERR, as `pr_err_ratelimited` logs it.
+            super::kmsg::printk_ratelimited(
+                &LIMIT,
+                "check_sysctl_memfd_noexec",
+                3,
+                text.as_bytes(),
+            );
+            return -(error as i64);
+        }
+    };
     // SAFETY: guest string.
     let owned_name = match super::user_memory::read_cstr(a[0], 250) {
         Ok(bytes) => bytes,
@@ -361,6 +384,36 @@ pub fn memfd_create(a: [u64; 6]) -> i64 {
         return -(error as i64);
     }
     fd as i64
+}
+
+/// `vm.memfd_noexec` (`MEMFD_NOEXEC_SCOPE_*`): 0 when unset or not a
+/// number, as the sysctl starts.
+fn noexec_scope() -> u32 {
+    let (host, _) = crate::vfs::lookup("/proc/sys/vm/memfd_noexec");
+    std::fs::read_to_string(host)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// `check_sysctl_memfd_noexec`: a memfd asked for with neither MFD_EXEC
+/// nor MFD_NOEXEC_SEAL gets MFD_NOEXEC_SEAL from scope 1 (NOEXEC_SEAL) up,
+/// MFD_EXEC below; from scope 2 (NOEXEC_ENFORCED) one without
+/// MFD_NOEXEC_SEAL is EACCES.
+fn noexec_flags(mut flags: u64, scope: u32) -> Result<u64, crate::errno::Errno> {
+    const NOEXEC_SEAL: u32 = 1;
+    const NOEXEC_ENFORCED: u32 = 2;
+    if flags & (MFD_EXEC | MFD_NOEXEC_SEAL) == 0 {
+        flags |= if scope >= NOEXEC_SEAL {
+            MFD_NOEXEC_SEAL
+        } else {
+            MFD_EXEC
+        };
+    }
+    if flags & MFD_NOEXEC_SEAL == 0 && scope >= NOEXEC_ENFORCED {
+        return Err(crate::errno::EACCES);
+    }
+    Ok(flags)
 }
 
 /// Open of `/proc/<pid>/fd/N` naming memfd `fd`: a new open file
@@ -978,6 +1031,22 @@ mod tests {
         assert!(reopen(other, libc::O_RDONLY).is_none());
         // SAFETY: our fd.
         unsafe { libc::close(other) };
+    }
+
+    /// `check_sysctl_memfd_noexec` at each `vm.memfd_noexec` scope.
+    #[test]
+    fn noexec_scopes() {
+        let none = MFD_CLOEXEC;
+        assert_eq!(noexec_flags(none, 0), Ok(none | MFD_EXEC));
+        assert_eq!(
+            noexec_flags(none | MFD_NOEXEC_SEAL, 0),
+            Ok(none | MFD_NOEXEC_SEAL)
+        );
+        assert_eq!(noexec_flags(none, 1), Ok(none | MFD_NOEXEC_SEAL));
+        assert_eq!(noexec_flags(none | MFD_EXEC, 1), Ok(none | MFD_EXEC));
+        assert_eq!(noexec_flags(none, 2), Ok(none | MFD_NOEXEC_SEAL));
+        assert_eq!(noexec_flags(none | MFD_EXEC, 2), Err(crate::errno::EACCES));
+        assert_eq!(noexec_flags(MFD_NOEXEC_SEAL, 2), Ok(MFD_NOEXEC_SEAL));
     }
 
     /// A process's first memfds do not sweep; every 64th does.
