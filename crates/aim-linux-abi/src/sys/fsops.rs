@@ -1724,6 +1724,14 @@ mod tests {
             -(crate::errno::EROFS as i64)
         );
         assert_eq!(image.metadata().unwrap().len(), 0);
+        // As on a read-only mount (#310): refused before the host file.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = image.metadata().unwrap().permissions().mode();
+        assert_eq!(
+            fchmod([image.as_raw_fd() as u64, 0o600, 0, 0, 0, 0]),
+            -(crate::errno::EROFS as i64)
+        );
+        assert_eq!(image.metadata().unwrap().permissions().mode(), mode);
         super::super::fdtab::withdraw_guest(image.as_raw_fd()).unwrap();
         drop(image);
         std::fs::remove_file(image_path).unwrap();
