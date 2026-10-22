@@ -802,7 +802,17 @@ impl SettingsProvider {
     /// player (#1584).
     fn cache_ringtone(&self, path: &Path, value: &str) {
         let copied = (|| -> Result<(), String> {
-            let mut input = self.host.open_provider_input(&Uri::parse(value))?;
+            let uri = Uri::parse(value);
+            // `openRingtone`: directly, else through the ringtone player.
+            let mut input = match self.host.open_provider_input(&uri) {
+                Ok(input) => input,
+                Err(e) => {
+                    eprintln!(
+                        "app host: settings: Failed to open directly; attempting failover: {e}"
+                    );
+                    self.host.open_ringtone_with_player(&uri)?
+                }
+            };
             let existed = path.exists();
             let mut out = std::fs::File::create(path)
                 .map_err(|e| format!("java.io.FileNotFoundException: {}", open_failed(&e)))?;
