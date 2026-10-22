@@ -248,6 +248,18 @@ static void other_process_proc(void) {
     if (stat(p, &s) != 0 || !S_ISDIR(s.st_mode)) _exit(14);
     snprintf(p, sizeof p, "/proc/%d/fd/0", c);
     if (readlink(p, l, sizeof l) != -1 || errno != EACCES) _exit(15);
+    // mountinfo and mounts need no ptrace access (S_IRUGO,
+    // mounts_open_common): CTS reads init's as an app (#1158).
+    const char* tables[] = {"mountinfo", "mounts"};
+    for (int i = 0; i < 2; i++) {
+      snprintf(p, sizeof p, "/proc/%d/%s", c, tables[i]);
+      int fd = open(p, O_RDONLY);
+      if (fd < 0) _exit(16 + i);
+      char b[64];
+      ssize_t n = read(fd, b, sizeof b);
+      close(fd);
+      if (n <= 0) _exit(18 + i);
+    }
     _exit(0);
   }
   int os = 0;
