@@ -4,10 +4,10 @@
 //! app host's own owners (`boot_policy`'s decisions, the boot leaves, the
 //! current package version, the native-library and SDK-library policies,
 //! the installer's SELinux labels through the agent, the permission gids
-//! of a uid, the package writer's effects, the installer's build flags)
-//! for the native package boot it runs (served as its own node). The
-//! bridge's other owners, its other sub-bridges among them, are not
-//! implemented (#2022).
+//! of a uid, the package writer's effects, the installer's build flags and
+//! its sessions' icon decoder) for the native package boot it runs
+//! (served as its own node). The bridge's other owners, its other
+//! sub-bridges among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex, OnceLock};
@@ -523,6 +523,15 @@ impl Service for PackageBootstrap {
                 bridge::write_get_installer_policy_bridge_reply(&mut p, Some(policy));
                 Ok(())
             }
+            bridge::GET_INSTALLER_RECOVERY_PRESENTATION => {
+                bridge::GetInstallerRecoveryPresentation::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let presentation = self.leaf(Arc::new(
+                    super::installer_recovery::InstallerRecovery::new(host.clone()),
+                ));
+                bridge::write_get_installer_recovery_presentation_reply(&mut p, Some(presentation));
+                Ok(())
+            }
             bridge::GET_PACKAGE_INSTALLED_PERMISSIONS => {
                 let a = bridge::GetPackageInstalledPermissions::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
@@ -747,6 +756,7 @@ mod tests {
             bridge::GET_PACKAGE_BOOT_LIFECYCLE_LEAF,
             bridge::GET_PACKAGE_MUTATION_BRIDGE,
             bridge::GET_INSTALLER_POLICY_BRIDGE,
+            bridge::GET_INSTALLER_RECOVERY_PRESENTATION,
         ] {
             let reply = call(code);
             let mut r = reply.reader();
