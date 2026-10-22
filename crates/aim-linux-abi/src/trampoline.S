@@ -390,3 +390,6 @@ _linux_abi_enter_guest:
     .globl _linux_abi_text_end
     .alt_entry _linux_abi_text_end
 _linux_abi_text_end:
+// Never run: keeps the end label inside the atom, where the linker leaves
+// it (a label at the end of an atom may be placed elsewhere).
+    udf     #0
