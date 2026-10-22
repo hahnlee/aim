@@ -1936,10 +1936,7 @@ mod batch_user_state_tests {
 
     #[test]
     fn batch_user_states_commits_two_inode_receipts_once_and_rejects_invalid_second() {
-        let directory = Directory(std::env::temp_dir().join(
-            format!("aim-batch-app-data-{}-{}",std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()),
-        ));
+        let directory = Directory(aim_paths::scratch_dir("aim-batch-app-data"));
         std::fs::create_dir_all(directory.0.join("system/users/0")).unwrap();
         let settings = crate::package::settings::Settings {
             packages: [("core.one", 10100), ("core.two", 10101)]

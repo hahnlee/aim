@@ -1634,15 +1634,7 @@ mod tests {
     use super::*;
 
     fn tmp() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "aim-slice-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = aim_paths::scratch_dir("aim-slice");
         dir
     }
 

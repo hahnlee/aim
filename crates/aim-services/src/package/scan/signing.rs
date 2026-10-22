@@ -2229,14 +2229,7 @@ mod tests {
             settings::{Package, Settings},
         };
         use std::sync::Arc;
-        let directory = std::env::temp_dir().join(format!(
-            "aim-settings-projection-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let directory = aim_paths::scratch_dir("aim-settings-projection");
         struct Cleanup(std::path::PathBuf);
         impl Drop for Cleanup {
             fn drop(&mut self) {

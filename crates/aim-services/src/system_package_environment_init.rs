@@ -337,14 +337,7 @@ fn installer_guest_context_path(data: &Path, path: &Path) -> std::result::Result
 mod label_tests {
     #[test]
     fn installer_context_maps_reserved_host_paths_to_guest_namespace() {
-        let root = std::env::temp_dir().join(format!(
-            "aim-installer-context-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = aim_paths::scratch_dir("aim-installer-context");
         std::fs::create_dir_all(root.join("app/pkg-reserved/lib/arm64")).unwrap();
         std::fs::write(
             root.join("app/pkg-reserved/base.apk"),

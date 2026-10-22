@@ -772,13 +772,7 @@ mod publication_gate_tests {
                 settings::{Package, Settings},
             };
             use p256::elliptic_curve::sec1::ToEncodedPoint;
-            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "aim-install-publish-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-            std::fs::create_dir(&path).unwrap();
+            let path = aim_paths::scratch_dir("aim-install-publish");
             let settings = Settings {
                 packages: vec![Package {
                     name: "p".into(),
@@ -1050,15 +1044,7 @@ mod committed_effect_tests {
     #[test]
     fn reserved_commit_failure_traverses_real_store_and_pipeline() {
         use std::os::unix::fs::MetadataExt;
-        let root = Directory(std::env::temp_dir().join(format!(
-                "aim-install-commit-fault-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            )));
-        std::fs::create_dir(&root.0).unwrap();
+        let root = Directory(aim_paths::scratch_dir("aim-install-commit-fault"));
         let data = root.0.join("data");
         std::fs::create_dir(&data).unwrap();
         let disk_path = root.0.join("store");

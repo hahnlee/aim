@@ -677,14 +677,7 @@ mod install_regression {
         // Native uninstall must update installed-dependent library records
         // before writing restrictions, then retire code/UID without losing
         // retained user state or the other package's code/runtime owner.
-        let directory = std::env::temp_dir().join(format!(
-            "aim-loaded-removal-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let directory = aim_paths::scratch_dir("aim-loaded-removal");
         struct Cleanup(std::path::PathBuf);
         impl Drop for Cleanup {
             fn drop(&mut self) {
