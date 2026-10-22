@@ -509,10 +509,7 @@ fn handle(op: u32, r: &mut Reader, peer: i32) -> Vec<u8> {
             }
         }
         FDS => {
-            let fds: Vec<i32> = fdtab::open_fds()
-                .into_iter()
-                .filter(|&fd| !fdtab::is_hidden(fd))
-                .collect();
+            let fds = crate::sys::fd_visibility::visible();
             reply(0, |w| w.seq(fds.into_iter(), |w, fd| w.i32(fd)))
         }
         NET_SOCKET_METADATA => {

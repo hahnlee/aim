@@ -1,8 +1,10 @@
 // cgroup v1 hierarchies as libprocessgroup uses them: the mounts it finds in
 // /proc/mounts, groups made and removed, tasks moved with tasks and
 // cgroup.procs (alone and with their thread group), what /proc/<pid>/cgroup
-// shows, inheritance by new threads and fork children, and the control
-// files' values and errors.
+// shows, inheritance by new threads and fork children, the control
+// files' values and errors, and that the files keeping the membership are
+// none of the process's fds.
+#include <dirent.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -205,6 +207,42 @@ static void exec_drops_threads(void) {
   CHECK(rmdir("/dev/cpuset/ex") == 0);
 }
 
+static volatile int churning;
+
+static void* nothing(void* arg) { return arg; }
+
+static void* churn(void* arg) {
+  while (churning) {
+    pthread_t t;
+    if (pthread_create(&t, NULL, nothing, NULL) == 0) pthread_join(t, NULL);
+  }
+  return arg;
+}
+
+// Every fd /proc/self/fd lists is one the process can fstat (zygote restats
+// them all before each fork), while threads come and go and so the groups'
+// membership is read and written.
+static void membership_files_unlisted(void) {
+  pthread_t t;
+  churning = 1;
+  CHECK(pthread_create(&t, NULL, churn, NULL) == 0);
+  int unstattable = 0;
+  for (int i = 0; i < 500; i++) {
+    DIR* d = opendir("/proc/self/fd");
+    CHECK(d != NULL);
+    struct dirent* e;
+    struct stat st;
+    while ((e = readdir(d)) != NULL) {
+      int fd = atoi(e->d_name);
+      if (e->d_name[0] != '.' && fd != dirfd(d) && fstat(fd, &st) != 0) unstattable++;
+    }
+    closedir(d);
+  }
+  churning = 0;
+  CHECK(pthread_join(t, NULL) == 0);
+  CHECK(unstattable == 0);
+}
+
 int main(int argc, char** argv) {
   if (argc > 1 && strcmp(argv[1], "after-exec") == 0) return after_exec();
   program = argv[0];
@@ -212,5 +250,6 @@ int main(int argc, char** argv) {
   RUN(moves);
   RUN(values);
   RUN(exec_drops_threads);
+  RUN(membership_files_unlisted);
   DONE();
 }
