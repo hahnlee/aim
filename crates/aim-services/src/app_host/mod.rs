@@ -153,6 +153,7 @@ pub mod wifi_scanner;
 pub mod wifi_service;
 pub mod window_layout;
 pub mod window_manager;
+pub mod window_shell;
 pub mod zen_config;
 pub mod zygote;
 

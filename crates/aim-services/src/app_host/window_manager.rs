@@ -24,6 +24,7 @@ use super::config::{Configuration, Rect};
 use super::surface::{self, Layer};
 use super::window_layout::{self, Frames, LayoutParams, UNSPECIFIED_LENGTH};
 use super::{AppHost, reply};
+use crate::shell::{SHELL_COMMAND_TRANSACTION, ShellCommand};
 
 /// `WindowManagerGlobal.ADD_FLAG_IN_TOUCH_MODE`, `ADD_FLAG_APP_VISIBLE`.
 const ADD_FLAG_IN_TOUCH_MODE: i32 = 0x1;
@@ -90,6 +91,9 @@ pub struct Windows {
     next: Mutex<u32>,
     /// The display's touch mode, once changed (`DisplayContent.mInTouchMode`).
     in_touch_mode: Mutex<Option<bool>>,
+    /// `DisplayFoldController.mOverrideFoldedArea`: left, top, right,
+    /// bottom; empty for none.
+    pub(super) folded_area_override: Mutex<[i32; 4]>,
 }
 
 /// A window context's registration (`WindowContextListenerController`):
@@ -260,9 +264,24 @@ impl Service for WindowManager {
         wm::DESCRIPTOR
     }
 
+    fn accepts_fds(&self) -> bool {
+        true
+    }
+
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         let mut p = Parcel::new();
         match call.code {
+            // `onShellCommand`, with the caller's identity.
+            SHELL_COMMAND_TRANSACTION => {
+                let mut command =
+                    ShellCommand::read(&self.0.process, &mut call.data).map_err(|_| BAD_VALUE)?;
+                if command.has_output() {
+                    let result =
+                        super::window_shell::run(&self.0, call.sender_euid as i32, &mut command);
+                    command.finish(result);
+                }
+                p.write_no_exception();
+            }
             wm::OPEN_SESSION => {
                 wm::OpenSession::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let session = self.0.process.add_service(Arc::new(Session {
