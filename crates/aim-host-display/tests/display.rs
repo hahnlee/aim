@@ -6,8 +6,9 @@
 //! all its layers' content is ready.
 //!
 //! Opens a small window: run it in a logged-in session whose screen shows
-//! windows. While the Mac's screen is locked or its display asleep, no
-//! window is shown, so the test does not run then (it records why).
+//! windows. While the Mac's screen is locked or its display asleep, or
+//! other windows cover the test window's content (it opens centred), its
+//! frames are not shown, so the test does not run then (it records why).
 
 use std::io::Read;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
@@ -84,10 +85,23 @@ fn present(acquire: i32) -> OwnedFd {
 /// The status of a present fence whose frame was not shown: `-ENODEV`.
 const NOT_SHOWN: i32 = -19;
 
+/// Why the server's window shows none of its frames, if it does not:
+/// other windows cover its content, so Core Animation shows none of it and
+/// runs no presented handler while they do.
+fn window_covered(server: u32) -> Option<&'static str> {
+    let scale = aim_host_display::density::main_display()? as f64 / 160.0;
+    aim_host_display::screen::covered(server as i32, W as f64 / scale, H as f64 / scale)
+        .unwrap_or(false)
+        .then_some("other windows cover the test window's content")
+}
+
 /// When the frame of `fence` was shown; `None` when the Mac stopped
-/// showing windows, so it was not.
-fn shown_at(fence: &OwnedFd) -> Option<i64> {
-    assert!(aim_sync_file::wait(fence.as_fd(), 5000), "present fence");
+/// showing windows, or the test window's content, so it was not.
+fn shown_at(fence: &OwnedFd, server: u32) -> Option<i64> {
+    if !aim_sync_file::wait(fence.as_fd(), 5000) {
+        aim_paths::skip(window_covered(server).expect("present fence"));
+        return None;
+    }
     match aim_sync_file::state(fence.as_fd()) {
         aim_sync_file::State::Signaled {
             timestamp_ns,
@@ -151,6 +165,7 @@ fn presents_a_buffer_and_delivers_vsync() {
         .unwrap()
         .read_exact(&mut banner)
         .unwrap();
+    let pid = server.id();
     let server = Kill(server);
     set_server(&socket);
     // The layer's role: the connection becomes the guest's fd.
@@ -206,7 +221,7 @@ fn presents_a_buffer_and_delivers_vsync() {
     );
     let ready = aim_sync_file::monotonic_ns();
     content.signal(1);
-    let Some(timestamp_ns) = shown_at(&shown) else {
+    let Some(timestamp_ns) = shown_at(&shown, pid) else {
         return;
     };
     assert!(
@@ -278,7 +293,7 @@ fn presents_a_buffer_and_delivers_vsync() {
     );
     let ready = aim_sync_file::monotonic_ns();
     second_content.signal(1);
-    let Some(timestamp_ns) = shown_at(&shown) else {
+    let Some(timestamp_ns) = shown_at(&shown, pid) else {
         return;
     };
     assert!(
@@ -306,7 +321,7 @@ fn presents_a_buffer_and_delivers_vsync() {
 
     // A present fence signals at a vsync, which SurfaceFlinger's vsync
     // model relies on.
-    let Some(at) = shown_at(&present(-1)) else {
+    let Some(at) = shown_at(&present(-1), pid) else {
         return;
     };
     let phase = (at - stamps[stamps.len() - 1]).rem_euclid(period);
