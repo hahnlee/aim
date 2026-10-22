@@ -48,6 +48,16 @@ impl SessionKey {
     pub fn from_transport(path: PathBuf) -> Self {
         Self(path)
     }
+    /// Whether the broker accepts connections on the transport yet.
+    pub fn listening(&self) -> bool {
+        ready_marker(&self.0).exists()
+    }
+}
+/// The file a broker makes beside its socket once it listens.
+fn ready_marker(socket: &Path) -> PathBuf {
+    let mut marker = socket.as_os_str().to_owned();
+    marker.push(".ready");
+    PathBuf::from(marker)
 }
 pub struct Reply {
     pub body: Vec<u8>,
@@ -369,7 +379,7 @@ fn open_device_with_helper(runtime_dir: &Path, flags: i32, helper: &Path) -> Res
         .map_err(io_error)?;
     let started = std::time::Instant::now();
     loop {
-        if key.0.exists() {
+        if key.listening() {
             break;
         }
         if child.try_wait().map_err(io_error)?.is_some() {
