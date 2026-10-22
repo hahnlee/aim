@@ -138,11 +138,17 @@ impl WriteParcelable for Account {
 }
 
 /// `UserHandle`: its user id.
-pub struct UserHandle(i32);
+pub struct UserHandle(pub(super) i32);
 
 impl ReadParcelable for UserHandle {
     fn read_from(r: &mut Reader<'_>) -> ParcelResult<Self> {
         Ok(UserHandle(r.read_i32()?))
+    }
+}
+
+impl WriteParcelable for UserHandle {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i32(self.0);
     }
 }
 

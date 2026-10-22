@@ -52,6 +52,8 @@ const M: i32 = 23;
 const PASSWORD_QUALITY_UNSPECIFIED: i32 = 0;
 const KEYGUARD_DISABLE_FEATURES_NONE: i32 = 0;
 const STATE_USER_UNMANAGED: i32 = 0;
+/// `DevicePolicyManager.PASSWORD_COMPLEXITY_NONE`.
+const PASSWORD_COMPLEXITY_NONE: i32 = 0;
 
 const MANAGE_USERS: &str = "android.permission.MANAGE_USERS";
 const MANAGE_PROFILE_AND_DEVICE_OWNERS: &str =
@@ -376,6 +378,8 @@ trait Device {
     /// User 0's setting.
     fn setting(&self, table: Table, name: &str) -> Result<Option<String>, Exception>;
     fn property(&self, name: &str) -> Option<String>;
+    /// The managed profiles of `user` (`UserManager.getProfiles`).
+    fn managed_profiles(&self, user: i32) -> Result<Vec<i32>, Exception>;
     /// The exception of `what`, not implemented.
     fn unimplemented(&self, what: &str) -> Exception;
 }
@@ -658,6 +662,41 @@ fn answer(device: &impl Device, uid: i32, code: u32, r: &mut Reader<'_>) -> Repl
                     }
                 };
                 dp::write_get_active_admins_reply(&mut p, admins);
+                Ok(())
+            })()
+        }
+        dp::GET_AGGREGATED_PASSWORD_COMPLEXITY_FOR_USER => {
+            let a = dp::GetAggregatedPasswordComplexityForUser::read(r).map_err(|_| BAD_VALUE)?;
+            (|| {
+                if feature()? {
+                    authorize(caller.full_cross_users(a.user_id)?)?;
+                    // The strictest of the admins' or the resolved policies:
+                    // with no admins and no policies, none.
+                    unmanaged()?;
+                }
+                dp::write_get_aggregated_password_complexity_for_user_reply(
+                    &mut p,
+                    PASSWORD_COMPLEXITY_NONE,
+                );
+                Ok(())
+            })()
+        }
+        dp::GET_POLICY_MANAGED_PROFILES => {
+            let a = dp::GetPolicyManagedProfiles::<UserHandle>::read(r).map_err(|_| BAD_VALUE)?;
+            (|| {
+                authorize(caller.permitted(MANAGE_PROFILE_AND_DEVICE_OWNERS)?)?;
+                let user = a.user_handle.ok_or_else(|| {
+                    Exception::new(
+                        EX_NULL_POINTER,
+                        "Attempt to invoke virtual method 'int android.os.UserHandle.getIdentifier()' on a null object reference",
+                    )
+                })?;
+                // The user's managed profiles that have a profile owner.
+                if !device.managed_profiles(user.0)?.is_empty() {
+                    return Err(device.unimplemented("a managed profile's owner (#1521)"));
+                }
+                let none: &[Option<UserHandle>] = &[];
+                dp::write_get_policy_managed_profiles_reply(&mut p, Some(none));
                 Ok(())
             })()
         }
@@ -1097,6 +1136,10 @@ impl Device for DevicePolicy {
         (self.host.configured.get()?.properties)(name)
     }
 
+    fn managed_profiles(&self, user: i32) -> Result<Vec<i32>, Exception> {
+        super::user_service::managed_profiles(&self.host, user)
+    }
+
     fn unimplemented(&self, what: &str) -> Exception {
         self.host.unimplemented_named("device_policy", what)
     }
@@ -1360,6 +1403,8 @@ mod tests {
         permissions: Vec<(i32, &'static str)>,
         settings: Vec<(&'static str, &'static str)>,
         flags: bool,
+        /// User 0's managed profiles.
+        managed: Vec<i32>,
     }
 
     impl Default for Fake {
@@ -1370,6 +1415,7 @@ mod tests {
                 permissions: vec![],
                 settings: vec![],
                 flags: true,
+                managed: vec![],
             }
         }
     }
@@ -1411,6 +1457,10 @@ mod tests {
             (name == "ro.crypto.type").then(|| "file".into())
         }
 
+        fn managed_profiles(&self, user: i32) -> Result<Vec<i32>, Exception> {
+            Ok(self.managed.iter().copied().filter(|_| user == 0).collect())
+        }
+
         fn unimplemented(&self, what: &str) -> Exception {
             Exception::new(aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION, what)
         }
@@ -1448,6 +1498,53 @@ mod tests {
         });
         assert_eq!(
             exception(&r).code,
+            aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION
+        );
+    }
+
+    /// What Settings and ManagedProvisioning read at boot: no password
+    /// complexity with no admins, and no managed profiles with owners;
+    /// each with its check.
+    #[test]
+    fn boot_reads_of_an_unmanaged_device() {
+        let mut device = Fake::default();
+        let complexity = |device: &Fake, uid: i32, user_id: i32| {
+            call(
+                device,
+                uid,
+                dp::GET_AGGREGATED_PASSWORD_COMPLEXITY_FOR_USER,
+                |p| {
+                    dp::GetAggregatedPasswordComplexityForUser {
+                        user_id,
+                        device_wide_only: false,
+                    }
+                    .write(p)
+                },
+            )
+        };
+        let r = complexity(&device, APP, 0);
+        assert_eq!(
+            dp::read_get_aggregated_password_complexity_for_user_reply(&mut r.reader()).unwrap(),
+            Ok(PASSWORD_COMPLEXITY_NONE)
+        );
+        assert_eq!(exception(&complexity(&device, APP, 10)), not_authorized());
+        let profiles = |device: &Fake, uid: i32| {
+            call(device, uid, dp::GET_POLICY_MANAGED_PROFILES, |p| {
+                dp::GetPolicyManagedProfiles {
+                    user_handle: Some(UserHandle(0)),
+                }
+                .write(p)
+            })
+        };
+        assert_eq!(exception(&profiles(&device, APP)), not_authorized());
+        let r = profiles(&device, SYSTEM_UID);
+        let list =
+            dp::read_get_policy_managed_profiles_reply::<UserHandle>(&mut r.reader()).unwrap();
+        assert!(list.unwrap().is_some_and(|l| l.is_empty()));
+        // A managed profile's owner is not modelled.
+        device.managed = vec![10];
+        assert_eq!(
+            exception(&profiles(&device, SYSTEM_UID)).code,
             aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION
         );
     }
