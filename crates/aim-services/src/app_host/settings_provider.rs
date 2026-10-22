@@ -2516,7 +2516,7 @@ impl SettingsProvider {
     fn calling_package<'c>(&self, caller: &'c Caller) -> Result<Option<&'c str>, Exception> {
         let package = caller.package.as_deref();
         let owned = match package {
-            Some(package) => self.host.owns_package(caller.uid, package)?,
+            Some(package) => self.host.app_ops_owns_package(caller.uid, package)?,
             None => false,
         };
         if !owned {

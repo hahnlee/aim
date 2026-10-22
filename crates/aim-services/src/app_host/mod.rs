@@ -202,6 +202,20 @@ const KILL_PROCESS: u32 = 4;
 /// `Process.FIRST_APPLICATION_UID`, `UserHandle.PER_USER_RANGE`.
 const FIRST_APPLICATION_UID: u32 = 10000;
 const PER_USER_RANGE: u32 = 100000;
+
+/// `AppOpsService.resolveNonAppUid`: the uid a non-app package name
+/// stands for (`Process.ROOT_UID`, `SHELL_UID`, `MEDIA_UID`,
+/// `AUDIOSERVER_UID`, `CAMERASERVER_UID`).
+fn resolve_non_app_uid(package: &str) -> Option<i32> {
+    match package {
+        "root" => Some(0),
+        "shell" | "dumpstate" => Some(2000),
+        "media" => Some(1013),
+        "audioserver" => Some(1041),
+        "cameraserver" => Some(1047),
+        _ => None,
+    }
+}
 /// `Process.SHARED_USER_GID`, `FIRST_SHARED_APPLICATION_GID`,
 /// `FIRST_APPLICATION_CACHE_GID`.
 const SHARED_USER_GID: u32 = 9997;
@@ -3541,6 +3555,16 @@ impl AppHost {
             .is_some_and(|ps| ps.app_id == uid.rem_euclid(PER_USER_RANGE as i32)))
     }
 
+    /// `AppOpsService.checkPackage(uid, package)` allows it: the name of a
+    /// non-app uid that is the uid itself (`resolveNonAppUid`: `root`,
+    /// `shell`, ...), or an installed package of the uid's app id.
+    pub(super) fn app_ops_owns_package(&self, uid: i32, package: &str) -> Result<bool, Exception> {
+        match resolve_non_app_uid(package) {
+            Some(non_app) => Ok(non_app == uid),
+            None => self.owns_package(uid, package),
+        }
+    }
+
     /// `CompatChanges.isChangeEnabled(change, uid)`: enabled for every
     /// package of the uid.
     pub(super) fn change_enabled(&self, change: i64, uid: i32) -> Result<bool, Exception> {
@@ -5247,6 +5271,24 @@ impl Service for Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `AppOpsService.resolveNonAppUid`'s names, and no others.
+    #[test]
+    fn non_app_package_names_resolve_to_their_uids() {
+        for (name, uid) in [
+            ("root", 0),
+            ("shell", 2000),
+            ("dumpstate", 2000),
+            ("media", 1013),
+            ("audioserver", 1041),
+            ("cameraserver", 1047),
+        ] {
+            assert_eq!(resolve_non_app_uid(name), Some(uid), "{name}");
+        }
+        for name in ["com.android.shell", "system", "android", "Root", ""] {
+            assert_eq!(resolve_non_app_uid(name), None, "{name}");
+        }
+    }
 
     /// As `IsolatedUidRange.allocateIsolatedUidLocked`: in turn through
     /// the range, per user, skipping uids in use, none when all are.
