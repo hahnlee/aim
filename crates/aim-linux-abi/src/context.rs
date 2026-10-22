@@ -43,9 +43,17 @@ unsafe extern "C" {
     fn linux_abi_text_end();
 }
 
-/// The process id, answered by the lean syscall path without a Darwin call.
-/// Set once in [`init_thread`].
+/// The process id getpid(2) answers on the lean syscall path without a
+/// Darwin call: the thread group's. Set by the first [`init_thread`], and
+/// by [`set_thread_group`] for a thread running as a process of its own.
 pub static mut LINUX_ABI_PID: u64 = 0;
+
+/// This process is a thread of process `tgid`: getpid(2) answers it.
+pub fn set_thread_group(tgid: i32) {
+    // SAFETY: written before the process's guest code runs (the fork
+    // child's resume).
+    unsafe { LINUX_ABI_PID = tgid as u64 };
+}
 
 /// Full guest register state saved at a syscall boundary. The fields up to
 /// `v` and the three after it are shared with `trampoline.S`.
@@ -326,8 +334,13 @@ pub fn init_thread() -> *mut GuestContext {
     if !existing.is_null() {
         return existing;
     }
-    // SAFETY: the process id is written before any guest code runs.
-    unsafe { LINUX_ABI_PID = libc::getpid() as u64 };
+    // SAFETY: the process id is written before any guest code runs, by the
+    // first thread (a later one keeps a thread group set since).
+    unsafe {
+        if LINUX_ABI_PID == 0 {
+            LINUX_ABI_PID = libc::getpid() as u64;
+        }
+    }
     let stack = map_anon(HOST_STACK_SIZE, libc::PROT_READ | libc::PROT_WRITE);
     let mut ctx = Box::new(GuestContext::zeroed());
     ctx.host_sp = stack as u64 + HOST_STACK_SIZE as u64;

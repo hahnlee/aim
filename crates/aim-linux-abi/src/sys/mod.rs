@@ -361,7 +361,7 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         435 if fork::is_fork(fork::clone3_flags(a)) => fork::clone3(ctx, a),
         435 => thread::clone3(ctx, a),
         163 | 164 | 261 => cred::prlimit(nr, a),
-        172 => process::getpid(),
+        172 => process::getpid_tgid(),
         173 => process::getppid(),
         178 => thread::gettid(),
         // signals

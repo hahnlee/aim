@@ -50,6 +50,13 @@ pub fn getpid() -> i64 {
     unsafe { libc::getpid() as i64 }
 }
 
+/// getpid(2): the thread group's id, which for a thread running as a
+/// process of its own (a clone without CLONE_FILES, #228) is the process
+/// it is a thread of.
+pub fn getpid_tgid() -> i64 {
+    super::procrec::own_tgid().map_or_else(getpid, |g| g as i64)
+}
+
 /// getppid: 0 for a parent outside the pid namespace (guest-init, the
 /// shell that started a standalone linux-run), as Linux reports a parent
 /// in an ancestor namespace.
