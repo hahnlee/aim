@@ -965,6 +965,31 @@ static void identity_file(void) {
 // namespace): host process `host`, which leads its own process group, does
 // not exist for the guest, and signals to groups or to every process reach
 // the table's processes only.
+static volatile sig_atomic_t init_usr1;
+static void on_init_usr1(int sig) { (void)sig; init_usr1 = 1; }
+
+// The init of a private namespace gets from inside it only the signals it
+// handles (SIGNAL_UNKILLABLE): the others, SIGKILL and SIGSTOP among them,
+// are dropped and kill() succeeds.
+static void ns_init_unkillable(void) {
+  CHECK(signal(SIGUSR1, on_init_usr1) != SIG_ERR, "handler");
+  pid_t init = getpid();
+  pid_t sender = fork();
+  if (sender == 0) {
+    if (kill(init, SIGTERM) != 0) _exit(1);
+    if (kill(init, SIGKILL) != 0) _exit(2);
+    if (kill(init, SIGSTOP) != 0) _exit(3);
+    if (kill(init, SIGUSR1) != 0) _exit(4);
+    _exit(0);
+  }
+  int st;
+  CHECK(waitpid(sender, &st, 0) == sender && WIFEXITED(st) && WEXITSTATUS(st) == 0,
+        "signals to init: status %d", st);
+  for (int i = 0; i < 100 && !init_usr1; i++) usleep(10000);
+  CHECK(init_usr1, "init's handled signal delivered");
+  printf("ok ns_init_unkillable\n");
+}
+
 static void pid_namespace(pid_t host) {
   char path[64];
 #define GONE(call) CHECK((call) == -1 && errno == ESRCH, "%s", #call)
@@ -1037,6 +1062,7 @@ static void pid_namespace(pid_t host) {
   int st;
   CHECK(waitpid(child, &st, 0) == child && WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL, "child killed");
   close(fd);
+
 #undef GONE
   printf("ok pid_namespace\n");
 }
@@ -1758,11 +1784,12 @@ int main(int argc, char** argv) {
       {"peer_thread_signals", peer_thread_signals},
       {"entry_rewrites", entry_rewrites}, {"other_procs", other_procs},
       {"bench", bench},             {"ns_init_exit", ns_init_exit},
+      {"ns_init_unkillable", ns_init_unkillable},
   };
   for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
     if (strcmp(which, checks[i].name) == 0 ||
         (strcmp(which, "all") == 0 && checks[i].fn != bench && checks[i].fn != identity_file &&
-         checks[i].fn != ns_init_exit)) {
+         checks[i].fn != ns_init_exit && checks[i].fn != ns_init_unkillable)) {
       fflush(stdout);
       checks[i].fn();
       fflush(stdout);

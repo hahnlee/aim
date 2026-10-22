@@ -426,6 +426,26 @@ fn record_external(sig: i32, si: &libc::siginfo_t) {
     EXTERNAL.fetch_or(bit(sig), SeqCst);
 }
 
+/// Whether this process, a private namespace's init, ignores signal `sig`
+/// for thread `tid` (the leader for the process) from inside the
+/// namespace: `sig_task_ignored` with SIGNAL_UNKILLABLE, a signal it has no
+/// handler for, unless that thread blocks it or waits for it
+/// (`sig_ignored`: a blocked signal's handler may change).
+fn unkillable_ignores(tid: i32, sig: i32) -> bool {
+    super::pidns::is_private_init(libc_getpid())
+        && action(sig).handler == SIG_DFL
+        && !thread::find(tid).is_some_and(|th| {
+            (th.sig.mask.load(SeqCst) | th.sig.waitset.load(SeqCst)) & bit(sig) != 0
+        })
+}
+
+/// [`unkillable_ignores`] for a signal from host process `pid`.
+fn unkillable_drops(pid: i32, sig: i32) -> bool {
+    pid != libc_getpid()
+        && super::pidns::contains(pid)
+        && unkillable_ignores(thread::main_tid(), sig)
+}
+
 fn drain_external() {
     let bits = EXTERNAL.swap(0, SeqCst);
     for sig in 1..32 {
@@ -433,6 +453,9 @@ fn drain_external() {
             let e = &EXTERNAL_INFO[sig as usize - 1];
             let (from, code) = (e.from.load(Relaxed), e.code.load(Relaxed));
             let pid = from as u32 as i32;
+            if unkillable_drops(pid, sig) {
+                continue;
+            }
             let mut info = Siginfo::from_sender(
                 sig,
                 code as u32 as i32,
@@ -1319,10 +1342,18 @@ pub(super) fn signal_process(p: i32, sig: i32, h: i32) -> i64 {
     if !(super::cred::may_signal(p) || sig == SIGCONT && same_session()) {
         return -(EPERM as i64);
     }
+    // The namespace's init ignores a signal it has no handler for
+    // (`sig_task_ignored` with SIGNAL_UNKILLABLE): dropped, and the send
+    // succeeds. A private namespace's init drops the others itself
+    // (`drain_external`); SIGKILL and SIGSTOP, which it cannot catch, are
+    // dropped here.
     match super::pidns::init_signal_allowed(p, sig) {
         Ok(true) => {}
-        Ok(false) => return -(EPERM as i64),
+        Ok(false) => return 0,
         Err(error) => return error,
+    }
+    if matches!(sig, SIGKILL | SIGSTOP) && super::pidns::is_private_init(p) {
+        return 0;
     }
     if sig != 0 && (h == 0 || SYNCHRONOUS & bit(sig) != 0) {
         return super::ptrace::remote_signal(p, 0, &sender(sig, sigframe::SI_USER));
@@ -1341,6 +1372,11 @@ fn libc_getpid() -> i32 {
 pub fn from_peer(tid: i32, info: Siginfo) -> i64 {
     if !valid(info.signo as u64) {
         return -(EINVAL as i64);
+    }
+    // Only the namespace's own processes reach the agent: a private
+    // namespace's init drops what it has no handler for, as `kill` does.
+    if unkillable_ignores(if tid == 0 { thread::main_tid() } else { tid }, info.signo) {
+        return 0;
     }
     if tid == 0 {
         return send_process(info);
@@ -1502,7 +1538,8 @@ fn peer(pid: i32, tid: i32, info: Siginfo) -> i64 {
     }
     match super::pidns::init_signal_allowed(pid, info.signo) {
         Ok(true) => {}
-        Ok(false) => return -(EPERM as i64),
+        // Dropped, as `signal_process` drops it.
+        Ok(false) => return 0,
         Err(error) => return error,
     }
     if info.signo == 0 {
