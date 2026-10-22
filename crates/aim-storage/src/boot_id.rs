@@ -129,16 +129,8 @@ fn valid_uuid(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
     fn root(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "aim-boot-id-{name}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+        crate::scratch_dir(&format!("aim-boot-id-{name}"))
     }
     fn registered(runtime: &Path) -> (ProcessIdentity, InitRegistration) {
         let table = runtime.join("identity/by-pid");
