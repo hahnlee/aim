@@ -489,6 +489,12 @@ fn socket_buffer_sizes() {
     check("t_sockbuf", &[]);
 }
 
+/// Path sockets' owners and permissions as unix(7) describes them (#778).
+#[test]
+fn unix_socket_permissions() {
+    check("t_unixperm", &["/data/local/tmp"]);
+}
+
 /// FIONREAD on framed AF_UNIX and netlink sockets, as Linux answers it
 /// (#371).
 #[test]

@@ -564,6 +564,14 @@ fn inode_mutation(
     })
     .unwrap_or_else(|error| -(error as i64))
 }
+/// Whether `resolved` names a socket file. Darwin opens none, not even
+/// with O_EVTONLY (EOPNOTSUPP), so a socket's metadata changes by its
+/// path, which holds no data a swap could redirect.
+fn is_socket_file(resolved: &Resolved) -> bool {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    let found = unsafe { libc::lstat(resolved.host.as_ptr(), &mut stat) } == 0;
+    found && stat.st_mode & libc::S_IFMT == libc::S_IFSOCK
+}
 fn metadata_anchor(resolved: &Resolved, follow: bool, write: bool) -> Result<MetadataFd, i64> {
     let _creating = super::fork::spawn::own_fds();
     // O_EVTONLY does not require content-read access. O_NOFOLLOW prevents a
@@ -804,16 +812,25 @@ fn fchmodat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
             .unwrap_or_else(|error| -(error as i64));
     }
     let anchor = match metadata_anchor(&resolved, true, false) {
-        Ok(fd) => fd,
+        Ok(fd) => Some(fd),
+        Err(error) if error == -EOPNOTSUPP && is_socket_file(&resolved) => None,
         Err(error) => return error,
     };
-    let host = Host::Fd(anchor.as_raw_fd());
+    let host = match &anchor {
+        Some(anchor) => Host::Fd(anchor.as_raw_fd()),
+        None => Host::Path(&resolved.host),
+    };
     inode_mutation(host, &resolved.guest, true, |stat| {
         let mode = match chmod_mode(&stat, a[2] as u32 & 0o7777, id) {
             Ok(mode) => mode,
             Err(error) => return error,
         };
-        if unsafe { libc::fchmod(anchor.as_raw_fd(), host_mode(mode, stat.st_mode)) } < 0 {
+        let host_mode = host_mode(mode, stat.st_mode);
+        let changed = match &anchor {
+            Some(anchor) => unsafe { libc::fchmod(anchor.as_raw_fd(), host_mode) },
+            None => unsafe { libc::chmod(resolved.host.as_ptr(), host_mode) },
+        };
+        if changed < 0 {
             return -(errno::last() as i64);
         }
         attrs::record_checked(
@@ -981,19 +998,26 @@ fn fchownat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
         .unwrap_or_else(|error| -(error as i64));
     }
     let anchor = match metadata_anchor(&resolved, follow, false) {
-        Ok(fd) => fd,
+        Ok(fd) => Some(fd),
+        Err(error) if error == -EOPNOTSUPP && is_socket_file(&resolved) => None,
         Err(error) => return error,
     };
-    let host = Host::Fd(anchor.as_raw_fd());
+    let host = match &anchor {
+        Some(anchor) => Host::Fd(anchor.as_raw_fd()),
+        None => Host::Path(&resolved.host),
+    };
     inode_mutation(host, &resolved.guest, follow, |stat| {
         let change = match chown_change(&stat, uid, gid, id) {
             Ok(change) => change,
             Err(error) => return error,
         };
         if !attrs::recording() {
-            return errno::check(
-                unsafe { libc::fchown(anchor.as_raw_fd(), uid as u32, gid as u32) } as i64,
-            );
+            return errno::check(unsafe {
+                match &anchor {
+                    Some(anchor) => libc::fchown(anchor.as_raw_fd(), uid as u32, gid as u32),
+                    None => libc::lchown(resolved.host.as_ptr(), uid as u32, gid as u32),
+                }
+            } as i64);
         }
         if let Err(error) = kill_file_capabilities(host, &stat) {
             return error;

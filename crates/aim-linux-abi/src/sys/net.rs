@@ -712,6 +712,60 @@ fn family_mismatch(fd: i32, addr: &[u8]) -> bool {
 
 /// Translate a guest sockaddr. `bind`: the last path component is not
 /// followed. Returns the target and the guest name to remember.
+/// unix(7): binding a path makes a socket file in its directory
+/// (`vfs_mknod`: write and search on the directory), and connecting or
+/// sending to one needs write permission on it (`unix_find_bsd`).
+fn path_socket_permission(
+    r: &vfs::Resolved,
+    bind: bool,
+    id: &super::cred::Identity,
+) -> Result<(), errno::Errno> {
+    if !super::attrs::recording() {
+        return Ok(());
+    }
+    let (guest, want) = if bind {
+        let parent = Path::new(&r.guest).parent().ok_or(errno::ENOENT)?;
+        (parent.to_str().ok_or(EINVAL)?.to_owned(), 3)
+    } else {
+        (r.guest.clone(), 2)
+    };
+    let stat = match super::attrs::path_stat(&guest) {
+        Ok(stat) => stat,
+        // A missing socket file is the connect's own ENOENT.
+        Err(errno::ENOENT) if !bind => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if super::attrs::permits(&stat, want, id, super::attrs::FS) {
+        Ok(())
+    } else {
+        Err(errno::EACCES)
+    }
+}
+
+/// A socket file a guest bound belongs to it (`unix_bind_bsd`: mode
+/// `0777 & ~umask`, the binder's fs ids).
+fn record_bound(name: &[u8]) -> Result<(), errno::Errno> {
+    if !super::attrs::recording() {
+        return Ok(());
+    }
+    if name.get(..2) != Some(&L_AF_UNIX.to_le_bytes()[..]) {
+        return Ok(());
+    }
+    let Some(guest) = unix_path_of(name) else {
+        return Ok(());
+    };
+    let r = vfs::resolve(vfs::LINUX_AT_FDCWD, guest.as_bytes(), false)?;
+    super::attrs::created(super::attrs::Host::Path(&r.host), || r.guest.clone())?;
+    super::attrs::record_checked(
+        super::attrs::Host::Path(&r.host),
+        || r.guest.clone(),
+        super::attrs::Attr {
+            mode: Some(0o777 & !super::pstate::current_umask()),
+            ..Default::default()
+        },
+    )
+}
+
 fn target_of(ptr: u64, len: u32, bind: bool) -> Result<(Target, Vec<u8>), i64> {
     if ptr == 0 || !(2..=128).contains(&len) {
         return Err(-(EINVAL as i64));
@@ -736,11 +790,15 @@ fn target_of(ptr: u64, len: u32, bind: bool) -> Result<(Target, Vec<u8>), i64> {
                 ));
             }
             let end = path.iter().position(|&c| c == 0).unwrap_or(path.len());
-            let r =
-                vfs::resolve(vfs::LINUX_AT_FDCWD, &path[..end], !bind).map_err(|e| -(e as i64))?;
+            let id = super::cred::current();
+            let r = vfs::resolve_checked(vfs::LINUX_AT_FDCWD, &path[..end], !bind, |directory| {
+                super::attrs::search(directory, &id, super::attrs::FS)
+            })
+            .map_err(|e| -(e as i64))?;
             if bind && r.read_only() {
                 return Err(-(libc::EROFS as i64));
             }
+            path_socket_permission(&r, bind, &id).map_err(|e| -(e as i64))?;
             let host = PathBuf::from(std::ffi::OsStr::from_bytes(r.host.as_bytes()));
             let mut name = (L_AF_UNIX).to_le_bytes().to_vec();
             name.extend_from_slice(r.guest.as_bytes());
@@ -1160,6 +1218,11 @@ pub fn bind(a: [u64; 6]) -> i64 {
             let _ = std::fs::remove_file(dir.join(std::ffi::OsStr::from_bytes(name)));
             r = bind_once();
         }
+    }
+    if r == 0
+        && let Err(error) = record_bound(&name)
+    {
+        return -(error as i64);
     }
     if r == 0
         && let Some(s) = sock(&input)
