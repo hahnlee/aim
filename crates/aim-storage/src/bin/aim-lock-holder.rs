@@ -46,6 +46,7 @@ mod tests {
     }
 }
 fn main() {
+    aim_storage::inherited::close_above_stdio();
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let result = (|| {
         install_null_stdin()?;
