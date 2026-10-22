@@ -488,6 +488,12 @@ fn cgroup_v1_hierarchies() {
     assert!(ok && out.contains("PASS"), "t_cgroup failed:\n{out}");
 }
 
+/// Extended attributes' permission rules (xattr_permission, #780).
+#[test]
+fn extended_attribute_permissions() {
+    check("t_xattr", &["/data/local/tmp"]);
+}
+
 /// preadv2/pwritev2's offsets and RWF flags (#1205).
 #[test]
 fn vectored_positional_flags() {
