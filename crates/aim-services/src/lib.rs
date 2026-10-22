@@ -272,11 +272,13 @@ impl NativeServices {
 
     /// The app host's inputs (`app_host::AppHost::configure`), when
     /// `activity` is native.
+    #[allow(clippy::too_many_arguments)]
     pub fn configure_app_host(
         &self,
         root: &std::path::Path,
         data: &std::path::Path,
         bpf: &std::path::Path,
+        net: &std::path::Path,
         properties: app_host::Properties,
         set_property: app_host::SetProperty,
         connect: app_host::Connect,
@@ -285,7 +287,7 @@ impl NativeServices {
         let Some(host) = &self.app_host else {
             return Ok(());
         };
-        host.configure(root, data, bpf, properties, set_property, connect)?;
+        host.configure(root, data, bpf, net, properties, set_property, connect)?;
         // Window mode is the display server's (`FN_WINDOWS`).
         if let Some(display) = display {
             host.connect_display(display);

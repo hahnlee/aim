@@ -130,8 +130,11 @@ Mac: new DNS servers only        the next renewal (a DHCPACK with them)
   the IPv4 one's interface, router `fe80::1`, when it has none), and
   `temp6 A`, `gateway6 G` and `dns6 S...` its temporary address, router
   and DNS servers. An empty or
-  missing file is the Mac's network as it is. Guest sockets still use the
-  Mac's real network, so a simulated address is only what Android is told.
+  missing file is the Mac's network as it is. The app host's
+  `connectivity` reads the same hook (`aim_uplink::hook`), so a simulated
+  outage or change is what both the guest's `eth0` and the framework's
+  default network see. Guest sockets still use the Mac's real network, so
+  a simulated address is only what Android is told.
 
 ```sh
 echo down > target/aim/boot/data.run/net/simulate   # outage

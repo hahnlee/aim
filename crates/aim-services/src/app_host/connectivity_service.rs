@@ -661,9 +661,17 @@ struct Shared {
     changed: Condvar,
 }
 
-/// The Mac's network and DNS servers now.
-fn mac_network() -> Option<(Uplink, Vec<Ipv4Addr>)> {
-    aim_uplink::uplink().map(|u| (u, aim_uplink::dns_servers()))
+/// The Mac's network and DNS servers now, with the boot's test hook
+/// applied as the guest's layer applies it to `eth0` (no lease time is
+/// given here).
+fn mac_network(host: &AppHost) -> Option<(Uplink, Vec<Ipv4Addr>)> {
+    network_under(&host.network_hook())
+}
+
+/// The Mac's network and DNS servers with the test hook's `text` applied.
+fn network_under(text: &str) -> Option<(Uplink, Vec<Ipv4Addr>)> {
+    let up = aim_uplink::uplink()?;
+    aim_uplink::simulate(text, up, aim_uplink::dns_servers(), 0).map(|l| (l.up, l.dns))
 }
 
 impl ConnectivityService {
@@ -688,7 +696,7 @@ impl ConnectivityService {
 
     pub fn new(host: Arc<AppHost>) -> ConnectivityService {
         let shared = Arc::new(Shared {
-            state: Mutex::new(State::new(mac_network())),
+            state: Mutex::new(State::new(mac_network(&host))),
             changed: Condvar::new(),
         });
         let weak = Arc::downgrade(&host);
@@ -754,7 +762,7 @@ impl ConnectivityService {
     fn follow(&self) {
         {
             let mut state = self.shared.state.lock().unwrap();
-            let callbacks = state.follow(mac_network());
+            let callbacks = state.follow(mac_network(&self.host));
             self.deliver(&state, &callbacks);
         }
         self.sync_native();
@@ -2019,6 +2027,22 @@ mod tests {
             (lp.mtu, lp.use_private_dns, lp.private_dns_server.as_deref()),
             (0, true, Some("dns.example"))
         );
+    }
+
+    /// The boot's test hook reaches the app host's network as it reaches
+    /// the guest's `eth0` (#1638): an outage loses the network, a
+    /// simulated address replaces the Mac's.
+    #[test]
+    fn the_test_hook_changes_the_network() {
+        assert_eq!(network_under("down\n"), None);
+        if let Some((up, _)) = network_under("") {
+            let (moved, _) = network_under("addr 10.9.8.7/16\n").unwrap();
+            assert_eq!((moved.addr, moved.prefix), (Ipv4Addr::new(10, 9, 8, 7), 16));
+            assert_eq!(moved.gateway, up.gateway);
+        }
+        let mut state = State::new(network_under(""));
+        state.follow(network_under("down\n"));
+        assert!(state.network.is_none());
     }
 
     #[test]
