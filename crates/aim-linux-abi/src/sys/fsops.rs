@@ -1861,6 +1861,13 @@ mod tests {
 
     #[test]
     fn mapped_cgroup_directory_dot_metadata_preserves_real_inode() {
+        // A closed descriptor's /proc/self/fd entry is asserted gone, which
+        // a test opening descriptors on another thread can refill at once.
+        if super::super::fdtab::isolated_kernel_test(
+            "sys::fsops::tests::mapped_cgroup_directory_dot_metadata_preserves_real_inode",
+        ) {
+            return;
+        }
         let (_guard, view) = crate::vfs::test_view();
         let host = view.join("run/cgroup-dot");
         std::fs::create_dir_all(host.join("system/uid_1000")).unwrap();
