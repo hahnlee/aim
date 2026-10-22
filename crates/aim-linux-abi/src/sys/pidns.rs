@@ -257,7 +257,16 @@ pub fn host_pid(guest: i32) -> Result<i32, i64> {
     }
 }
 pub fn is_namespace_init(host: i32) -> Result<bool, i64> {
-    Ok(pid_ready()? && init_registration()?.is_some_and(|init| init.process.host_pid == host))
+    Ok(is_private_init(host)
+        || pid_ready()? && init_registration()?.is_some_and(|init| init.process.host_pid == host))
+}
+
+/// Whether host process `host` is the init of this process's private
+/// namespace: the process the table was made for ([`new_table`]).
+pub fn is_private_init(host: i32) -> bool {
+    super::cred::by_pid_dir().is_some_and(|d| {
+        d.file_name().and_then(|n| n.to_str()) == Some(&format!("{PRIVATE}{host}"))
+    })
 }
 
 /// Native namespace init can receive only a signal whose real host handler is installed.
@@ -500,10 +509,9 @@ mod registration_tests {
         assert!(init_signal_allowed(host, 15).unwrap());
         assert!(!init_signal_allowed(host, 9).unwrap());
         assert!(!init_signal_allowed(host, 19).unwrap());
-        assert_eq!(
-            super::super::signal::kill([1, 9, 0, 0, 0, 0]),
-            -crate::errno::EPERM as i64
-        );
+        // Dropped, as Linux drops a signal init does not handle: the send
+        // succeeds.
+        assert_eq!(super::super::signal::kill([1, 9, 0, 0, 0, 0]), 0);
         assert_eq!(super::super::signal::kill([1, 0, 0, 0, 0, 0]), 0);
         let header = [0x20080522u32, 1];
         let mut capabilities = [0u32; 6];

@@ -427,6 +427,17 @@ fn a_standalone_guest_has_a_private_namespace() {
     host_process_unreachable(root, &[], false);
     host_process_unreachable(root, &[], true);
 
+    // Its init, as a namespace's: signals from inside it that it has no
+    // handler for are dropped.
+    let out = linux_run(root, &[PROGRAM, "ns_init_unkillable"], |_| {});
+    let so = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && so.contains("ok ns_init_unkillable\n"),
+        "{:?}\n{so}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
     let out = linux_run(root, &[PROGRAM, "ns_init_exit"], |_| {});
     let so = String::from_utf8_lossy(&out.stdout);
     let pids: Vec<i32> = so
