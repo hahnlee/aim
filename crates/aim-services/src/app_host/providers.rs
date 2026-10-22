@@ -696,6 +696,87 @@ impl AppHost {
         })
     }
 
+    /// `AudioManager.getRingtonePlayer().openRingtone(uri)` as
+    /// SettingsProvider's `openRingtone` falls back to it, its stream
+    /// (`AutoCloseInputStream`); else the exception it throws, wrapped in
+    /// the `IOException` it becomes there.
+    pub(super) fn open_ringtone_with_player(&self, uri: &Uri) -> Result<ProviderInput, String> {
+        use aim_service_aidl::android_media_iaudioservice as audio;
+        use aim_service_aidl::android_media_iringtoneplayer as player;
+        let io = |e: String| format!("java.io.IOException: {e}");
+        let mut p = Parcel::new();
+        audio::GetRingtonePlayer {}.write(&mut p);
+        let reply = super::display::transact_service(
+            &self.process,
+            "audio",
+            audio::GET_RINGTONE_PLAYER,
+            &p,
+        )
+        .map_err(io)?;
+        let null = || {
+            io("java.lang.NullPointerException: Attempt to invoke interface method \
+                'android.os.ParcelFileDescriptor android.media.IRingtonePlayer.openRingtone(android.net.Uri)' \
+                on a null object reference"
+                .into())
+        };
+        let ringtone_player = audio::read_get_ringtone_player_reply(&mut reply.reader())
+            .map_err(|s| io(format!("android.os.RemoteException: binder status {s}")))?
+            .map_err(|e| io(e.message))?
+            .ok_or_else(null)?;
+        let mut p = Parcel::new();
+        p.write_interface_token(player::DESCRIPTOR);
+        // `writeTypedObject(uri)`.
+        p.write_i32(1);
+        uri.write(&mut p);
+        let reply = match ringtone_player {
+            Binder::Handle(handle) => {
+                self.process
+                    .transact(handle, player::OPEN_RINGTONE, &p, false)
+            }
+            Binder::Local(ptr) => self
+                .process
+                .local_service(ptr)
+                .ok_or(aim_binder_host::parcel::DEAD_OBJECT)
+                .and_then(|s| s.transact(player::OPEN_RINGTONE, &p, false)),
+        }
+        .map_err(|s| io(format!("android.os.DeadObjectException: binder status {s}")))?;
+        let mut r = reply.reader();
+        let bad = |status: i32| io(format!("android.os.RemoteException: bad reply: {status}"));
+        r.read_exception()
+            .map_err(bad)?
+            .map_err(|e| io(e.message))?;
+        // `new AutoCloseInputStream(null)` throws.
+        if r.read_i32().map_err(bad)? == 0 {
+            return Err(io(
+                "java.lang.NullPointerException: Attempt to invoke virtual method \
+                 'java.io.FileDescriptor android.os.ParcelFileDescriptor.getFileDescriptor()' \
+                 on a null object reference"
+                    .into(),
+            ));
+        }
+        // `ParcelFileDescriptor`: whether it has a comm fd, its fd and that.
+        let comm = r.read_i32().map_err(bad)? != 0;
+        let fd = r.read_fd().map_err(bad)?;
+        if comm {
+            r.read_fd().map_err(bad)?;
+        }
+        let fd = self
+            .process
+            .file(fd)
+            .and_then(|f| aim_binder_host::server::file_fd(&f))
+            .ok_or_else(|| io("no descriptor".into()))?;
+        let seekable = fd
+            .metadata()
+            .map(|m| !(m.file_type().is_fifo() || m.file_type().is_socket()))
+            .map_err(|e| io(e.to_string()))?;
+        Ok(ProviderInput {
+            fd,
+            offset: 0,
+            remaining: None,
+            seekable,
+        })
+    }
+
     /// `ContentResolver.openInputStream` of a `content` URI from
     /// system_server as the system: the provider's `openTypedAssetFile` of
     /// any type, read as its `AssetFileDescriptor` says; else the
