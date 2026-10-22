@@ -260,7 +260,7 @@ pub fn run(package: String, activity: String, socket: &Path) -> ! {
     }
     crate::un::start();
     let renderer = Renderer::new(device).unwrap_or_else(|e| fail(&format!("shader: {e}")));
-    let Ok(mut sock) = UnixStream::connect(socket) else {
+    let Ok(mut sock) = aim_host_display::unixsock::connect(socket.as_ref()) else {
         fail(&format!(
             "{package} cannot open: Android (aim) is not running"
         ));

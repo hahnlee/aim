@@ -41,6 +41,6 @@ pub mod service_namespace;
 pub mod sku;
 pub mod soc;
 pub mod supervisor;
-pub mod unixsock;
+pub use aim_host_display::unixsock;
 
 pub use boot::{Boot, BootOptions, BootReport, RunMode};

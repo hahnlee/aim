@@ -53,7 +53,6 @@ mod windows;
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
-use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -653,8 +652,7 @@ fn main() {
         std::process::exit(1);
     }
     input::quit_on_signals();
-    let _ = std::fs::remove_file(&socket);
-    let listener = UnixListener::bind(&socket).unwrap_or_else(|e| {
+    let listener = aim_host_display::unixsock::listen(&socket, 128).unwrap_or_else(|e| {
         eprintln!("aim-display: {}: {e}", socket.display());
         std::process::exit(1)
     });
