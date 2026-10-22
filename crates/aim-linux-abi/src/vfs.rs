@@ -604,14 +604,7 @@ pub fn private_mount_namespace() -> Result<(), Errno> {
         .as_ref()
         .map(|view| view.owner.clone());
     if let Some(owner) = inherited {
-        let id = format!(
-            "ns-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| errno::EIO)?
-                .as_nanos()
-        );
+        let id = namespace_id("ns")?;
         let owner = owner.clone_to(&id).map_err(namespace_error)?;
         let mut inheritance = "namespace\tprivate\n".to_owned();
         for (root, kind) in PROPAGATION_RULES.lock().unwrap().iter() {
@@ -647,6 +640,22 @@ struct NamespaceView {
 static NAMESPACE_VIEW: Mutex<Option<NamespaceView>> = Mutex::new(None);
 static NAMESPACE_REFRESH: Mutex<()> = Mutex::new(());
 thread_local! {static REPLAYING_NAMESPACE:std::cell::Cell<bool>=const{std::cell::Cell::new(false)};}
+/// A new mount namespace's id: the process, the time, and a count of this
+/// process's own, so two clones made within the clock's resolution (a
+/// microsecond) differ, as do those of a later process with the same pid
+/// (#2117).
+fn namespace_id(kind: &str) -> Result<String, Errno> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    Ok(format!(
+        "{kind}-{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| errno::EIO)?
+            .as_nanos(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
+}
 fn namespace_error(error: std::io::Error) -> Errno {
     errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))
 }
@@ -2321,14 +2330,7 @@ pub(crate) fn fork_mounts_text(private: bool) -> Result<String, Errno> {
         .as_ref()
         .map(|view| view.owner.clone())
         .ok_or(errno::ENODEV)?;
-    let id = format!(
-        "fork-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| errno::EIO)?
-            .as_nanos()
-    );
+    let id = namespace_id("fork")?;
     let child = owner.clone_to(&id).map_err(namespace_error)?;
     child
         .append("namespace\tprivate\n")

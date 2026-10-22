@@ -2343,15 +2343,7 @@ mod tests {
     #[test]
     fn local_prepare_abort_restores_actual_private_cow_and_original_mapping() {
         use std::os::fd::AsRawFd;
-        let root = std::env::temp_dir().join(format!(
-            "aim-verity-prepare-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
+        let root = aim_paths::scratch_dir("aim-verity-prepare");
         fs::write(root.join("data"), vec![37; PAGE as usize * 2]).unwrap();
         let file = File::open(root.join("data")).unwrap();
         let store =
@@ -2516,16 +2508,10 @@ mod tests {
     #[test]
     fn private_cow_provenance_is_reported_by_actual_mach_page_owner() {
         use std::os::fd::AsRawFd;
-        let root = std::env::temp_dir().join(format!(
-            "aim-verity-cow-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::write(&root, vec![37; PAGE as usize * 2]).unwrap();
-        let file = File::open(&root).unwrap();
+        let root = aim_paths::scratch_dir("aim-verity-cow");
+        let path = root.join("data");
+        fs::write(&path, vec![37; PAGE as usize * 2]).unwrap();
+        let file = File::open(&path).unwrap();
         let map = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -2545,19 +2531,11 @@ mod tests {
         assert!(!private_page_copied(base + PAGE).unwrap());
         assert_eq!(unsafe { libc::munmap(map, PAGE as usize * 2) }, 0);
         drop(file);
-        fs::remove_file(root).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn worker_verifies_touched_page_before_publish_and_rejects_corrupt_neighbor() {
-        let root = std::env::temp_dir().join(format!(
-            "aim-verity-pager-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
+        let root = aim_paths::scratch_dir("aim-verity-pager");
         let bytes = vec![37; PAGE as usize * 2];
         fs::write(root.join("data"), &bytes).unwrap();
         let data = File::open(root.join("data")).unwrap();

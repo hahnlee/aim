@@ -493,15 +493,7 @@ mod tests {
     }
     #[test]
     fn two_registered_pagers_commit_actual_durable_proof_before_late_admission() {
-        let root = std::env::temp_dir().join(format!(
-            "aimvc-native-{}-{:x}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
+        let root = aim_paths::scratch_dir("aimvc-native");
         fs::write(root.join("data"), vec![37; 32768]).unwrap();
         let file = fs::File::open(root.join("data")).unwrap();
         let store =
@@ -612,15 +604,7 @@ mod tests {
 
     #[test]
     fn remote_issuer_commits_two_actual_pagers() {
-        let root = std::env::temp_dir().join(format!(
-            "aimvc-remote-{}-{:x}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
+        let root = aim_paths::scratch_dir("aimvc-remote");
         fs::write(root.join("data"), vec![37; 32768]).unwrap();
         let file = fs::File::open(root.join("data")).unwrap();
         let store =

@@ -373,16 +373,7 @@ mod tests {
         Arc::new(VerifiedSource::from_proof(PrivateFd::adopt(file.into()).unwrap(), proof).unwrap())
     }
     fn directory(tag: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "aim-verified-derivative-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
-        root
+        aim_paths::scratch_dir(&format!("aim-verified-derivative-{tag}"))
     }
     #[test]
     fn protected_derivative_rejects_output_and_forged_meta_and_original_corruption() {

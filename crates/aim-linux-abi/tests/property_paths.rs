@@ -117,15 +117,7 @@ fn original_property_clients_share_short_and_deep_native_owners() {
     );
     let _lease = aim_storage::system::ImageLease::read_root(&image).unwrap();
     let clang = aim_paths::ndk_clang(35).expect("NOT RUN: missing pinned NDK clang");
-    let root = Path::new("/tmp").join(format!(
-        "aim-prop-path-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir(&root).unwrap();
+    let root = aim_paths::scratch_dir_in(Path::new("/tmp"), "aim-prop-path");
     let scratch = Scratch(root.clone());
     let helper = root.join("serial.c");
     fs::write(&helper,r#"#include <sys/system_properties.h>

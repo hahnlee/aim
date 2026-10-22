@@ -577,15 +577,7 @@ mod registration_tests {
     }
     #[test]
     fn registered_init_maps_actual_process_without_touching_host_pid_one() {
-        let root = std::env::temp_dir().join(format!(
-            "aim-init-map-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&root).unwrap();
+        let root = aim_paths::scratch_dir("aim-init-map");
         let actual =
             aim_storage::process_namespace::ProcessIdentity::running(unsafe { libc::getpid() })
                 .unwrap();
