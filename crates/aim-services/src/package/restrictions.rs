@@ -132,7 +132,7 @@ impl Suspension {
         };
         let user = SuspendingUser::Persisted(e.int("suspending-user").ok().flatten());
         let mut params = SuspendParams {
-            quarantined: e.bool("quarantined").ok().flatten().unwrap_or(false),
+            quarantined: or(e.bool("quarantined"), false),
             ..Default::default()
         };
         while let Some(event) = cursor.next() {
@@ -313,13 +313,11 @@ impl Restrictions {
                         continue;
                     };
                     // The legacy attribute; a later list replaces it.
-                    if e.bool("blockUninstall")?.unwrap_or(false)
-                        && !r.block_uninstall.contains(&name)
-                    {
+                    if or(e.bool("blockUninstall"), false) && !r.block_uninstall.contains(&name) {
                         r.block_uninstall.push(name.clone());
                     }
                     let state = user_state(e)?;
-                    let legacy = e.int("domainVerificationStatus")?.unwrap_or(0);
+                    let legacy = or(e.int("domainVerificationStatus"), 0);
                     r.legacy_domain_states.push((name.clone(), legacy));
                     r.packages.push((name, state));
                 }
@@ -340,28 +338,35 @@ impl Restrictions {
     }
 }
 
+/// `TypedXmlPullParser`'s getters with a default, as
+/// `readPackageRestrictionsLPr` reads every package attribute: a missing
+/// or malformed value is the default.
+fn or<T>(value: Result<Option<T>, String>, default: T) -> T {
+    value.ok().flatten().unwrap_or(default)
+}
+
 fn user_state(e: &Element) -> Result<UserState, String> {
-    let bool = |name, default| e.bool(name).map(|v| v.unwrap_or(default));
-    let suspended = bool("suspended", false)?;
+    let bool = |name, default| or(e.bool(name), default);
+    let suspended = bool("suspended", false);
     let mut s = UserState {
-        ce_data_inode: e.long("ceDataInode")?.unwrap_or(0),
-        de_data_inode: e.long("deDataInode")?.unwrap_or(0),
-        installed: bool("inst", true)?,
-        stopped: bool("stopped", false)?,
-        not_launched: bool("nl", false)?,
+        ce_data_inode: or(e.long("ceDataInode"), 0),
+        de_data_inode: or(e.long("deDataInode"), 0),
+        installed: bool("inst", true),
+        stopped: bool("stopped", false),
+        not_launched: bool("nl", false),
         // `blocked` is `hidden`'s old name.
-        hidden: bool("hidden", false)? || bool("blocked", false)?,
-        distraction_flags: e.int("distraction_flags")?.unwrap_or(0),
-        instant_app: bool("instant-app", false)?,
-        virtual_preload: bool("virtual-preload", false)?,
-        enabled: e.int("enabled")?.unwrap_or(COMPONENT_ENABLED_STATE_DEFAULT),
+        hidden: bool("hidden", false) || bool("blocked", false),
+        distraction_flags: or(e.int("distraction_flags"), 0),
+        instant_app: bool("instant-app", false),
+        virtual_preload: bool("virtual-preload", false),
+        enabled: or(e.int("enabled"), COMPONENT_ENABLED_STATE_DEFAULT),
         last_disable_app_caller: string(e, "enabledCaller"),
-        install_reason: e.int("install-reason")?.unwrap_or(0),
-        uninstall_reason: e.int("uninstall-reason")?.unwrap_or(0),
+        install_reason: or(e.int("install-reason"), 0),
+        uninstall_reason: or(e.int("uninstall-reason"), 0),
         harmful_app_warning: string(e, "harmful-app-warning"),
         splash_screen_theme: string(e, "splash-screen-theme"),
-        first_install_time: e.long_hex("first-install-time")?.unwrap_or(0),
-        min_aspect_ratio: e.int("min-aspect-ratio")?.unwrap_or(0),
+        first_install_time: or(e.long_hex("first-install-time"), 0),
+        min_aspect_ratio: or(e.int("min-aspect-ratio"), 0),
         ..UserState::initialized()
     };
     let mut legacy_dialog = None;
@@ -514,7 +519,33 @@ mod tests {
         assert_eq!(factory.legacy_domain_states, [("p".into(), 3)]);
         let default = read(br#"<package-restrictions><pkg name='p'/></package-restrictions>"#);
         assert_eq!(default.legacy_domain_states, [("p".into(), 0)]);
-        assert!(Restrictions::parse(&aim_android_xml::read(br#"<package-restrictions><pkg name='p' domainVerificationStatus='bad'/></package-restrictions>"#).unwrap()).is_err());
+        // `getAttributeInt(null, ATTR_DOMAIN_VERIFICATION_STATE, 0)`: a
+        // malformed value is the default, as a missing one.
+        let malformed = read(br#"<package-restrictions><pkg name='p' domainVerificationStatus='bad'/></package-restrictions>"#);
+        assert_eq!(malformed.legacy_domain_states, [("p".into(), 0)]);
+    }
+
+    /// `readPackageRestrictionsLPr` reads each package attribute with a
+    /// default, which a malformed value takes as a missing one does (#842).
+    #[test]
+    fn malformed_package_attributes_take_their_defaults() {
+        let malformed = state(
+            br#"<pkg name='p' ceDataInode='x' deDataInode='1.5' inst='maybe' stopped='2' nl='yes'
+                hidden='' blocked='true' distraction_flags='0x1' suspended='nope' instant-app='1'
+                virtual-preload='t' enabled='on' install-reason='-' uninstall-reason='9999999999'
+                first-install-time='zz' min-aspect-ratio='half' blockUninstall='?'/>"#,
+        );
+        // `hidden` malformed, then `blocked`, its old name, read.
+        let expected = UserState {
+            hidden: true,
+            ..UserState::initialized()
+        };
+        assert_eq!(malformed, expected);
+        let read = |xml: &[u8]| Restrictions::parse(&aim_android_xml::read(xml).unwrap()).unwrap();
+        let r = read(
+            br#"<package-restrictions><pkg name='p' blockUninstall='?'/></package-restrictions>"#,
+        );
+        assert!(r.block_uninstall.is_empty());
     }
 
     #[test]
