@@ -98,7 +98,7 @@ The design is the one Cygwin uses on Windows. The parent spawns a fresh
    libraries' code without end (#444). It then restores the
    state and rebuilds what the state names:
    - kqueues for epolls, inotifies and pidfds on their numbers;
-   - the timerfd thread;
+   - the timerfds' expiries on the timer kqueue;
    - its by-pid entry;
    - a new binder connection;
    - writable views of the stub islands.

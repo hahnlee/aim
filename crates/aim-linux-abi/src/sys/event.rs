@@ -8,19 +8,20 @@
 //!   from the hidden peer end; a read drains and sums them (or takes one
 //!   unit with EFD_SEMAPHORE). The count therefore survives fork and is
 //!   shared by every process holding the fd.
-//! - **timerfd:** a host thread sends a token record when a timer expires;
-//!   a read computes the expirations from the timer's settings and drains
-//!   the token. Timer settings are per process. An absolute
-//!   CLOCK_REALTIME timer follows a step of the Mac's wall clock, as an
-//!   hrtimer on the realtime base does, and one set with
-//!   TFD_TIMER_CANCEL_ON_SET is cancelled by it (`timerfd_clock_was_set`):
-//!   its next read fails with ECANCELED.
+//! - **timerfd:** the timer kqueue's thread (`park`) sends a token record
+//!   when a timer expires; a read computes the expirations from the
+//!   timer's settings and drains the token. Timer settings are per
+//!   process. A timer keeps its expiry on its own clock, as an hrtimer
+//!   does on its clock's base: a BOOTTIME or REALTIME one counts the time
+//!   the Mac sleeps, an absolute CLOCK_REALTIME one follows a step of the
+//!   Mac's wall clock, and one set with TFD_TIMER_CANCEL_ON_SET is
+//!   cancelled by it (`timerfd_clock_was_set`): its next read fails with
+//!   ECANCELED.
 
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Arc, Condvar, Mutex, Weak};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use super::clock::{self, Base};
+use super::clock::{self, Base, Deadline};
 use super::fdtab::{self, Kind};
 use crate::errno::{self, EAGAIN, EBADF, EINVAL, EPERM};
 
@@ -214,20 +215,14 @@ const CLOCK_TAI: u64 = 11;
 const TFD_TIMER_ABSTIME: u64 = 1;
 const TFD_TIMER_CANCEL_ON_SET: u64 = 2;
 
-fn mono() -> u64 {
-    Base::Monotonic.now()
-}
-
-#[derive(Default)]
 struct TimerState {
-    /// Monotonic deadline of the next expiration; 0 when disarmed.
+    /// The next expiration on `clock`; 0 when disarmed.
     next: u64,
+    /// The timer's clock as the last setting runs it ([`Base::timer`]).
+    clock: Base,
     interval: u64,
     /// A token record is in the socket.
     token: bool,
-    /// The next expiration on the realtime clock of an absolute realtime
-    /// timer, which a wall-clock step moves; 0 otherwise.
-    realtime_next: u64,
     /// `might_cancel`: an absolute realtime timer set with
     /// TFD_TIMER_CANCEL_ON_SET.
     cancel_on_set: bool,
@@ -247,56 +242,58 @@ impl Drop for TimerFd {
     }
 }
 
-struct Timers {
-    list: Mutex<(bool, Vec<Weak<TimerFd>>)>,
-    wake: Condvar,
-}
+static TIMERS: Mutex<Vec<Weak<TimerFd>>> = Mutex::new(Vec::new());
 
-static TIMERS: Timers = Timers {
-    list: Mutex::new((false, Vec::new())),
-    wake: Condvar::new(),
-};
+/// The timer kqueue's events for the earliest expiry on a clock that stops
+/// while the Mac sleeps and on one that does not.
+static WAKES: OnceLock<[u64; 2]> = OnceLock::new();
 
-/// The timer thread: sends a token for each timer that expired and has none.
-fn timer_thread() {
-    let mut g = TIMERS.list.lock().unwrap();
-    loop {
-        g.1.retain(|w| w.strong_count() > 0);
-        let now = mono();
-        let mut earliest = u64::MAX;
-        for t in g.1.iter().filter_map(Weak::upgrade) {
-            let mut s = t.state.lock().unwrap();
-            if s.next == 0 || s.token {
-                continue;
-            }
-            if s.next <= now {
-                s.token = send_record(t.peer.load(Ordering::Relaxed), 1);
-            } else {
-                earliest = earliest.min(s.next);
-            }
+/// Sends a token for each timer that expired and has none, and arms the
+/// timer kqueue for the earliest expiry yet to come on each kind of clock.
+/// An event that is no longer the earliest fires to no effect.
+fn rearm() {
+    let wakes = WAKES.get_or_init(|| [super::park::timer_id(), super::park::timer_id()]);
+    let mut g = TIMERS.lock().unwrap_or_else(|e| e.into_inner());
+    g.retain(|w| w.strong_count() > 0);
+    let mut earliest: [Option<Deadline>; 2] = [None; 2];
+    for t in g.iter().filter_map(Weak::upgrade) {
+        let s = &mut *t.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.next == 0 || s.token {
+            continue;
         }
-        g = if earliest == u64::MAX {
-            TIMERS.wake.wait(g).unwrap()
-        } else {
-            TIMERS
-                .wake
-                .wait_timeout(g, Duration::from_nanos(earliest - now))
-                .unwrap()
-                .0
+        let d = Deadline {
+            base: s.clock,
+            ns: s.next,
         };
+        if d.passed() {
+            s.token = send_record(t.peer.load(Ordering::Relaxed), 1);
+            continue;
+        }
+        let e = &mut earliest[d.base.counts_sleep() as usize];
+        if e.is_none_or(|e| d.left() < e.left()) {
+            *e = Some(d);
+        }
+    }
+    // The timer kqueue's lock is a leaf: taking it under this one is safe.
+    for (id, d) in wakes.iter().zip(earliest) {
+        if let Some(d) = d {
+            super::park::arm_event(*id, super::park::TIMERFD_EXPIRY, d);
+        }
     }
 }
 
+/// The timer kqueue: a timerfd expiry fired.
+pub fn timerfd_expired() {
+    rearm();
+}
+
 /// `clock_was_set`: the Mac's wall clock was set. Each absolute realtime
-/// timer's deadline is taken again from its realtime expiration, and each
-/// timer that might cancel is cancelled and made readable.
+/// timer is armed again for its expiration, and each timer that might
+/// cancel is cancelled and made readable.
 fn clock_was_set() {
-    let g = TIMERS.list.lock().unwrap();
-    for t in g.1.iter().filter_map(Weak::upgrade) {
+    let g = TIMERS.lock().unwrap_or_else(|e| e.into_inner());
+    for t in g.iter().filter_map(Weak::upgrade) {
         let mut s = t.state.lock().unwrap();
-        if s.next != 0 && s.realtime_next != 0 {
-            s.next = Base::Realtime.deadline(s.realtime_next).max(1);
-        }
         if s.cancel_on_set && !s.canceled {
             s.canceled = true;
             if !s.token {
@@ -305,7 +302,7 @@ fn clock_was_set() {
         }
     }
     drop(g);
-    TIMERS.wake.notify_all();
+    rearm();
 }
 
 /// Whether the clock-set watcher runs in this process.
@@ -355,19 +352,8 @@ fn watch_clock() {
 }
 
 fn register(t: &Arc<TimerFd>) {
-    let mut g = TIMERS.list.lock().unwrap();
-    g.1.push(Arc::downgrade(t));
-    if !g.0 {
-        g.0 = true;
-        std::thread::spawn(timer_thread);
-    }
-}
-
-/// Wake the timer thread to recompute its deadline. Taking the lock first
-/// means the thread is either waiting or will see the new state.
-fn poke() {
-    drop(TIMERS.list.lock().unwrap());
-    TIMERS.wake.notify_all();
+    let mut g = TIMERS.lock().unwrap();
+    g.push(Arc::downgrade(t));
 }
 
 /// Fork: an eventfd is its hidden peer (inherited) and its mode.
@@ -396,9 +382,9 @@ pub(super) fn save_timer(t: &TimerFd, w: &mut super::fork_state::Writer) {
     w.u32(t.base.index());
     let s = t.state.lock().unwrap();
     w.u64(s.next);
+    w.u32(s.clock.index());
     w.u64(s.interval);
     w.bool(s.token);
-    w.u64(s.realtime_next);
     w.bool(s.cancel_on_set);
     w.bool(s.canceled);
 }
@@ -408,9 +394,9 @@ pub(super) fn load_timer(r: &mut super::fork_state::Reader) -> Arc<TimerFd> {
     let base = Base::from_index(r.u32());
     let state = TimerState {
         next: r.u64(),
+        clock: Base::from_index(r.u32()),
         interval: r.u64(),
         token: r.bool(),
-        realtime_next: r.u64(),
         cancel_on_set: r.bool(),
         canceled: r.bool(),
     };
@@ -419,44 +405,41 @@ pub(super) fn load_timer(r: &mut super::fork_state::Reader) -> Arc<TimerFd> {
         base,
         state: Mutex::new(state),
     });
-    TIMERS.list.lock().unwrap().1.push(Arc::downgrade(&t));
+    TIMERS.lock().unwrap().push(Arc::downgrade(&t));
     t
 }
 
-/// Fork child: the timer thread did not survive.
+/// Fork child: the timer kqueue and the clock-set watcher did not survive.
 pub fn after_fork_child() {
     *WATCHING.lock().unwrap_or_else(|e| e.into_inner()) = false;
-    let mut g = TIMERS.list.lock().unwrap_or_else(|e| e.into_inner());
-    g.0 = !g.1.is_empty();
-    if g.0 {
-        std::thread::spawn(timer_thread);
-    }
-    let follows_clock = g.1.iter().filter_map(Weak::upgrade).any(|t| {
-        let s = t.state.lock().unwrap_or_else(|e| e.into_inner());
-        s.realtime_next != 0 || s.cancel_on_set
-    });
-    drop(g);
+    let follows_clock = TIMERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter_map(Weak::upgrade)
+        .any(|t| {
+            let s = t.state.lock().unwrap_or_else(|e| e.into_inner());
+            (s.next != 0 && s.clock == Base::Realtime) || s.cancel_on_set
+        });
+    rearm();
     if follows_clock {
         watch_clock();
     }
 }
 
 impl TimerFd {
-    /// Expirations since the last read, advancing the deadline.
+    /// Expirations by `now` on the timer's clock since the last read,
+    /// advancing the deadline.
     fn take_expirations(s: &mut TimerState, now: u64) -> u64 {
         if s.next == 0 || now < s.next {
             return 0;
         }
         if s.interval == 0 {
             s.next = 0;
-            s.realtime_next = 0;
             return 1;
         }
         let n = 1 + (now - s.next) / s.interval;
         s.next += n * s.interval;
-        if s.realtime_next != 0 {
-            s.realtime_next += n * s.interval;
-        }
         n
     }
 
@@ -467,23 +450,24 @@ impl TimerFd {
         loop {
             {
                 let mut s = self.state.lock().unwrap();
+                let now = s.clock.now();
                 // `timerfd_canceled`: the cancellation is reported once,
                 // and the expirations so far go with it.
                 if s.canceled {
                     s.canceled = false;
-                    Self::take_expirations(&mut s, mono());
+                    Self::take_expirations(&mut s, now);
                     drain(fd);
                     s.token = false;
                     drop(s);
-                    poke();
+                    rearm();
                     return -(ECANCELED as i64);
                 }
-                let n = Self::take_expirations(&mut s, mono());
+                let n = Self::take_expirations(&mut s, now);
                 if n > 0 {
                     drain(fd);
                     s.token = false;
                     drop(s);
-                    poke();
+                    rearm();
                     // SAFETY: guest buffer of at least 8 bytes.
                     unsafe { (buf as *mut u64).write_unaligned(n) };
                     return 8;
@@ -518,7 +502,14 @@ pub fn timerfd_create(a: [u64; 6]) -> i64 {
     let t = Arc::new(TimerFd {
         peer: AtomicI32::new(peer),
         base,
-        state: Mutex::new(TimerState::default()),
+        state: Mutex::new(TimerState {
+            next: 0,
+            clock: base,
+            interval: 0,
+            token: false,
+            cancel_on_set: false,
+            canceled: false,
+        }),
     });
     register(&t);
     fdtab::insert(fd, Kind::Timer(t));
@@ -576,24 +567,25 @@ pub fn timerfd_settime(a: [u64; 6]) -> i64 {
     let (Some(interval), Some(value)) = (ns_of([v[0], v[1]]), ns_of([v[2], v[3]])) else {
         return -(EINVAL as i64);
     };
-    let now = mono();
     let mut s = t.state.lock().unwrap();
     if old != 0 {
+        let now = s.clock.now();
         // SAFETY: guest struct itimerspec.
         unsafe { (old as *mut [i64; 4]).write_unaligned(current(&s, now)) };
     }
-    let absolute_realtime = t.base == Base::Realtime && flags & TFD_TIMER_ABSTIME != 0;
+    let absolute = flags & TFD_TIMER_ABSTIME != 0;
+    let absolute_realtime = t.base == Base::Realtime && absolute;
     // `timerfd_setup_cancel`.
     s.cancel_on_set = absolute_realtime && flags & TFD_TIMER_CANCEL_ON_SET != 0;
     s.canceled = false;
     s.interval = interval;
-    s.realtime_next = if absolute_realtime { value } else { 0 };
+    s.clock = t.base.timer(absolute);
     s.next = if value == 0 {
         0
-    } else if flags & TFD_TIMER_ABSTIME == 0 {
-        now + value
+    } else if !absolute {
+        s.clock.now() + value
     } else {
-        t.base.deadline(value).max(1)
+        value.max(1)
     };
     drain(fd);
     s.token = false;
@@ -601,7 +593,7 @@ pub fn timerfd_settime(a: [u64; 6]) -> i64 {
     if absolute_realtime {
         watch_clock();
     }
-    poke();
+    rearm();
     0
 }
 
@@ -612,7 +604,7 @@ pub fn timerfd_gettime(a: [u64; 6]) -> i64 {
     };
     let s = t.state.lock().unwrap();
     // SAFETY: guest struct itimerspec.
-    unsafe { (a[1] as *mut [i64; 4]).write_unaligned(current(&s, mono())) };
+    unsafe { (a[1] as *mut [i64; 4]).write_unaligned(current(&s, s.clock.now())) };
     0
 }
 
@@ -771,20 +763,55 @@ mod clock_set_tests {
         }
     }
 
-    /// An absolute realtime timer's realtime expiration moves with each
-    /// expiration of an interval timer.
+    /// A timer keeps its expiry on its own clock: an absolute one on the
+    /// clock it was created on, a relative REALTIME one on MONOTONIC
+    /// (`__hrtimer_init`).
     #[test]
-    fn an_absolute_realtime_interval_keeps_its_realtime_expiration() {
-        let mut s = TimerState {
-            next: 100,
-            interval: 10,
-            realtime_next: 1_000,
-            ..TimerState::default()
+    fn a_timer_expires_on_its_own_clock() {
+        let _view = crate::vfs::test_view();
+        const REALTIME: u64 = 0;
+        const BOOTTIME: u64 = 7;
+        let hour = 3_600_000_000_000;
+        let boottime = timerfd_create([BOOTTIME, O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0]);
+        let realtime = timerfd_create([REALTIME, O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0]);
+        let clock = |fd: i64| timer(fd as i32).unwrap().state.lock().unwrap().clock;
+        let at = Base::Boottime.now() + hour;
+        assert_eq!(set(boottime, TFD_TIMER_ABSTIME, at), 0);
+        assert_eq!(clock(boottime), Base::Boottime);
+        assert_eq!(
+            timer(boottime as i32).unwrap().state.lock().unwrap().next,
+            at
+        );
+        assert_eq!(set(realtime, 0, hour), 0);
+        assert_eq!(clock(realtime), Base::Monotonic);
+        assert_eq!(
+            set(realtime, TFD_TIMER_ABSTIME, Base::Realtime.now() + hour),
+            0
+        );
+        assert_eq!(clock(realtime), Base::Realtime);
+        for fd in [boottime, realtime] {
+            assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        }
+    }
+
+    /// An absolute BOOTTIME timer fires at its time on the boot clock,
+    /// through the timer kqueue.
+    #[test]
+    fn an_absolute_boottime_timer_fires() {
+        let _view = crate::vfs::test_view();
+        const BOOTTIME: u64 = 7;
+        let fd = timerfd_create([BOOTTIME, O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0]);
+        let at = Base::Boottime.now() + 20_000_000;
+        assert_eq!(set(fd, TFD_TIMER_ABSTIME, at), 0);
+        let mut pfd = libc::pollfd {
+            fd: fd as i32,
+            events: libc::POLLIN,
+            revents: 0,
         };
-        assert_eq!(TimerFd::take_expirations(&mut s, 125), 3);
-        assert_eq!((s.next, s.realtime_next), (130, 1_030));
-        s.interval = 0;
-        assert_eq!(TimerFd::take_expirations(&mut s, 130), 1);
-        assert_eq!((s.next, s.realtime_next), (0, 0));
+        // SAFETY: one pollfd on the stack.
+        assert_eq!(unsafe { libc::poll(&mut pfd, 1, 2_000) }, 1);
+        assert!(Base::Boottime.now() >= at);
+        assert_eq!(read_once(fd), 8);
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
     }
 }

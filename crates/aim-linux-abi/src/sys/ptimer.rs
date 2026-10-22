@@ -13,7 +13,7 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use super::clock::{self, Base};
+use super::clock::{self, Base, Deadline};
 use super::park::{self, PTIMER_EXPIRY};
 use super::sigframe::Siginfo;
 use crate::errno::{EINVAL, ENOMEM};
@@ -37,8 +37,10 @@ pub struct Timer {
     value: u64,
     /// The SIGEV_THREAD_ID target.
     tid: Option<i32>,
-    /// Monotonic deadline of the next expiry; 0 when disarmed.
+    /// The next expiry on `clock`; 0 when disarmed.
     next: u64,
+    /// `base` as the last setting runs it ([`Base::timer`]).
+    clock: Base,
     interval: u64,
     /// Expiries not signalled while the signal was queued.
     overrun: u64,
@@ -62,7 +64,7 @@ pub fn any() -> bool {
 
 /// Arm the kqueue for `id`'s deadline `next` (outside the table lock: the
 /// timer kqueue's lock is taken before this one across a fork).
-fn arm(id: i32, ident: u64, next: u64) {
+fn arm(id: i32, ident: u64, next: Deadline) {
     let Some(kq) = park::arm_event(ident, PTIMER_EXPIRY, next) else {
         return;
     };
@@ -96,13 +98,13 @@ fn advance(next: u64, interval: u64, now: u64) -> (u64, u64) {
 
 /// The timer thread: the kqueue event `ident` fired.
 pub fn expired(ident: u64) {
-    let now = park::monotonic();
     let (info, tid, rearm) = {
         let mut t = timers();
         let Some(tm) = t.iter_mut().find(|t| t.armed.is_some_and(|a| a.1 == ident)) else {
             return;
         };
-        // Zero leeway fires on time; the monotonic clock may lag slightly.
+        // Zero leeway fires on time; the timer's clock may lag slightly.
+        let now = tm.clock.now();
         let (n, next) = advance(tm.next, tm.interval, now.max(tm.next));
         tm.next = next;
         tm.armed = None;
@@ -123,6 +125,10 @@ pub fn expired(ident: u64) {
         let rearm = (next != 0).then(|| {
             let ident = park::timer_id();
             tm.armed = Some((-1, ident));
+            let next = Deadline {
+                base: tm.clock,
+                ns: next,
+            };
             (tm.id, ident, next)
         });
         (info, tm.tid, rearm)
@@ -200,6 +206,7 @@ pub fn timer_create(a: [u64; 6]) -> i64 {
         value: value.unwrap_or(id as u64),
         tid: target.flatten(),
         next: 0,
+        clock: base,
         interval: 0,
         overrun: 0,
         overrun_last: 0,
@@ -211,8 +218,9 @@ pub fn timer_create(a: [u64; 6]) -> i64 {
     0
 }
 
-/// `struct itimerspec` { it_interval, it_value } of `tm` at `now`.
-fn itimerspec(tm: &Timer, now: u64) -> [u64; 2] {
+/// `struct itimerspec` { it_interval, it_value } of `tm` now.
+fn itimerspec(tm: &Timer) -> [u64; 2] {
+    let now = tm.clock.now();
     let (_, next) = advance(tm.next, tm.interval, now);
     let left = if next == 0 {
         0
@@ -234,27 +242,32 @@ pub fn timer_settime(a: [u64; 6]) -> i64 {
         (Ok(i), Ok(v)) => (i, v),
         _ => return -(EINVAL as i64),
     };
-    let now = park::monotonic();
     let (prev, rearm) = {
         let mut t = timers();
         let Some(tm) = t.iter_mut().find(|t| t.id == id) else {
             return -(EINVAL as i64);
         };
         if old != 0 {
-            write_itimerspec(old, itimerspec(tm, now));
+            write_itimerspec(old, itimerspec(tm));
         }
+        let absolute = flags & TIMER_ABSTIME != 0;
         tm.interval = interval;
+        tm.clock = tm.base.timer(absolute);
         tm.next = match value {
             0 => 0,
-            v if flags & TIMER_ABSTIME == 0 => now.saturating_add(v),
-            v => tm.base.deadline(v).max(1),
+            v if !absolute => tm.clock.now().saturating_add(v),
+            v => v.max(1),
         };
         tm.overrun = 0;
         let prev = tm.armed.take();
         let rearm = (tm.next != 0 && tm.signo.is_some()).then(|| {
             let ident = park::timer_id();
             tm.armed = Some((-1, ident));
-            (ident, tm.next)
+            let next = Deadline {
+                base: tm.clock,
+                ns: tm.next,
+            };
+            (ident, next)
         });
         (prev, rearm)
     };
@@ -273,7 +286,7 @@ pub fn timer_gettime(a: [u64; 6]) -> i64 {
     let Some(tm) = t.iter().find(|t| t.id == a[0] as i32) else {
         return -(EINVAL as i64);
     };
-    write_itimerspec(a[1], itimerspec(tm, park::monotonic()));
+    write_itimerspec(a[1], itimerspec(tm));
     0
 }
 

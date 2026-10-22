@@ -8,14 +8,16 @@
 //! host thread unparks the waiter when it fires, and the wait itself stays
 //! untimed on `os_sync_wait_on_address`.
 //!
-//! Deadlines are guest CLOCK_MONOTONIC nanoseconds (`clock`), the clock
-//! kqueue timers and `__ulock_wait2` count: both stop while the host
-//! sleeps.
+//! A deadline stays on its own clock (`clock::Deadline`). kqueue timers
+//! and `__ulock_wait2` count CLOCK_MONOTONIC, which stops while the host
+//! sleeps; the timer of a deadline on a clock that does not (BOOTTIME,
+//! REALTIME) counts `mach_continuous_time` instead
+//! (NOTE_MACH_CONTINUOUS_TIME).
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::SeqCst};
 
-use super::clock::{self, Base};
+use super::clock::{self, Base, Deadline};
 use crate::errno::{EBADF, EINTR, EINVAL};
 
 unsafe extern "C" {
@@ -57,9 +59,9 @@ pub fn write_timespec(p: u64, ns: u64) {
     unsafe { (p as *mut [i64; 2]).write_unaligned(v) };
 }
 
-/// A deadline `ns` from now.
-pub fn after(ns: u64) -> u64 {
-    monotonic().saturating_add(ns)
+/// A monotonic deadline `ns` from now.
+pub fn after(ns: u64) -> Deadline {
+    Deadline::after(Base::Monotonic, ns)
 }
 
 /// One per guest thread. States: 0 idle, 1 unparked (a token), 2 parked.
@@ -84,7 +86,7 @@ impl Parker {
     /// the wait. Returns early and spuriously; callers re-check their
     /// condition, pending signals and the clock after every return. `tid` is
     /// the caller's (the timer unparks it by tid).
-    pub fn park(&self, tid: i32, deadline: Option<u64>) {
+    pub fn park(&self, tid: i32, deadline: Option<Deadline>) {
         if self.word.swap(0, SeqCst) == 1
             || self.word.compare_exchange(0, 2, SeqCst, SeqCst).is_err()
         {
@@ -95,7 +97,7 @@ impl Parker {
         loop {
             let r = match (deadline, timer) {
                 (Some(d), None) => {
-                    let left = d.saturating_sub(monotonic());
+                    let left = d.left();
                     if left == 0 {
                         break;
                     }
@@ -110,7 +112,7 @@ impl Parker {
             if self.word.load(SeqCst) != 2 || r < 0 {
                 break;
             }
-            if deadline.is_some_and(|d| monotonic() >= d) {
+            if deadline.is_some_and(Deadline::passed) {
                 break;
             }
         }
@@ -177,6 +179,9 @@ fn timer_event(id: u64, flags: u16, fflags: u32, data: i64, udata: u64) -> libc:
 /// unparks the tid in its `udata`.
 pub const PTIMER_EXPIRY: u64 = 1 << 63;
 
+/// `udata` of a timerfd's expiry, handed to `event`.
+pub const TIMERFD_EXPIRY: u64 = 1 << 62;
+
 /// A fresh identifier for [`arm_event`].
 pub fn timer_id() -> u64 {
     NEXT_TIMER.fetch_add(1, SeqCst)
@@ -184,12 +189,17 @@ pub fn timer_id() -> u64 {
 
 /// Fire timer `id` once at `deadline`, delivering `udata`. Returns the
 /// kqueue it is armed on, for [`disarm`].
-pub fn arm_event(id: u64, udata: u64, deadline: u64) -> Option<i32> {
-    let rel = deadline.saturating_sub(monotonic()).max(1);
+pub fn arm_event(id: u64, udata: u64, deadline: Deadline) -> Option<i32> {
+    let rel = deadline.left().max(1);
+    let clock = if deadline.base.counts_sleep() {
+        libc::NOTE_MACH_CONTINUOUS_TIME
+    } else {
+        0
+    };
     let ev = timer_event(
         id,
         libc::EV_ADD | libc::EV_ONESHOT,
-        libc::NOTE_NSECONDS | libc::NOTE_LEEWAY | libc::NOTE_CRITICAL,
+        libc::NOTE_NSECONDS | libc::NOTE_LEEWAY | libc::NOTE_CRITICAL | clock,
         rel.min(i64::MAX as u64) as i64,
         udata,
     );
@@ -208,7 +218,7 @@ pub fn arm_event(id: u64, udata: u64, deadline: u64) -> Option<i32> {
 }
 
 /// Unpark `tid` at `deadline`. None if no timer could be armed.
-fn arm(tid: i32, deadline: u64) -> Option<(i32, u64)> {
+fn arm(tid: i32, deadline: Deadline) -> Option<(i32, u64)> {
     let id = timer_id();
     arm_event(id, tid as u32 as u64, deadline).map(|kq| (kq, id))
 }
@@ -252,6 +262,8 @@ fn timer_loop(kq: i32) {
         for ev in &evs[..n as usize] {
             if ev.udata & PTIMER_EXPIRY != 0 {
                 super::ptimer::expired(ev.ident);
+            } else if ev.udata == TIMERFD_EXPIRY {
+                super::event::timerfd_expired();
             } else {
                 super::thread::unpark(ev.udata as i32);
             }
@@ -265,17 +277,17 @@ const TIMER_ABSTIME: u64 = 1;
 
 /// Sleep until `deadline`. Returns -EINTR (and the time left) when a guest
 /// signal handler is to run; signals with no handler do not interrupt.
-fn sleep_until(deadline: u64) -> Result<(), u64> {
+fn sleep_until(deadline: Deadline) -> Result<(), u64> {
     let Some(th) = super::thread::current() else {
         return Ok(());
     };
     loop {
-        let now = monotonic();
-        if now >= deadline {
+        let left = deadline.left();
+        if left == 0 {
             return Ok(());
         }
         if super::signal::interrupted(th) {
-            return Err(deadline - now);
+            return Err(left);
         }
         th.park.park(th.tid, Some(deadline));
     }
@@ -310,7 +322,11 @@ pub fn clock_nanosleep(a: [u64; 6]) -> i64 {
         Err(e) => return e,
     };
     let abs = flags & TIMER_ABSTIME != 0;
-    let deadline = if abs { base.deadline(ns) } else { after(ns) };
+    let deadline = if abs {
+        Deadline { base, ns }
+    } else {
+        Deadline::after(base.timer(false), ns)
+    };
     match sleep_until(deadline) {
         Ok(()) => 0,
         Err(left) => {
