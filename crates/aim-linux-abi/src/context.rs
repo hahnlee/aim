@@ -440,3 +440,25 @@ pub fn lean_check() -> u64 {
 pub fn full_recheck() -> u64 {
     linux_abi_recheck as usize as u64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The trampoline's labels lie in it, in their order: a label the
+    /// linker placed elsewhere would widen a region over unrelated code.
+    #[test]
+    fn the_trampolines_labels_lie_in_it_in_order() {
+        let a = |f: unsafe extern "C" fn()| f as usize;
+        let labels = [
+            a(linux_abi_syscall_entry),
+            a(linux_abi_lean_check),
+            a(linux_abi_lean_end),
+            a(linux_abi_check),
+            a(linux_abi_tail_end),
+            a(linux_abi_text_end),
+        ];
+        assert!(labels.windows(2).all(|w| w[0] < w[1]), "{labels:x?}");
+        assert!(labels[5] - labels[0] < 16 * 1024, "{labels:x?}");
+    }
+}
