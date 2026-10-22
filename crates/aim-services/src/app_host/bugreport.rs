@@ -1060,17 +1060,23 @@ impl Service for Bugreport {
 mod tests {
     use super::*;
 
+    /// A root of this test's own: the clock's resolution lets two tests
+    /// name the same one, and a killed earlier run's is another run's
+    /// (#1917).
     fn tmp() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "aim-bugreport-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        loop {
+            let dir = std::env::temp_dir().join(format!(
+                "aim-bugreport-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return dir,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => panic!("{}: {e}", dir.display()),
+            }
+        }
     }
 
     /// `writeBugreportDataLocked` and `readBugreportMappingLocked`: the
