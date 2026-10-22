@@ -73,8 +73,8 @@ manager policy's key interception and the mouse are not modelled (#1434).
   - **Scrolling** goes to the window under the pointer (`ACTION_SCROLL` at
     the mouse's position), on both axes, with `REL_WHEEL_HI_RES` and
     `REL_HWHEEL_HI_RES` (120 per unit) and whole units. A unit is what
-    Android scrolls for `AXIS_VSCROLL` 1.0, 64 dp (128 pixels at the
-    image's 320 dpi), so a trackpad's precise deltas (points, turned into
+    Android scrolls for `AXIS_VSCROLL` 1.0, 64 dp (128 pixels at a 2x
+    display's 320 dpi), so a trackpad's precise deltas (points, turned into
     display pixels) move the content as far as the fingers; its momentum
     events keep going as macOS sends them. A wheel's lines are units. The
     sign follows the Mac's setting (natural scrolling): content moves where

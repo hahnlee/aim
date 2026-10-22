@@ -54,7 +54,9 @@ per-process display with per-task bounds on one display without changing the
 host provider protocol, because the provider only exchanges revisions, content
 points and Android pixel extents.
 
-The Android density remains `160 × AIM_WINDOW_SCALE`. Moving a window to
-a screen with a different backing scale changes only the host backing, not the
-Android raster; a later change can make density follow the reported backing
-scale through the same revision path.
+The Android density is 160 × the main display's backing scale when the
+device starts (`ro.sf.lcd_density`, set by guest-init from
+`aim_host_display::density`; 320 on a Retina display, 160 on a 1x one). Moving a
+window to a screen with a different backing scale changes only the host
+backing, not the Android raster; a later change can make density follow the
+reported backing scale through the same revision path.

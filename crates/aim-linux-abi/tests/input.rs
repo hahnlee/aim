@@ -46,7 +46,7 @@ impl Server {
             dir,
             socket,
             cache,
-            input: Input::new(devs, 1080, 1920, 254.0),
+            input: Input::new(devs, 1080, 1920, 254.0, 320),
         }
     }
 

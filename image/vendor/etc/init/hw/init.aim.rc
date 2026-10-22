@@ -16,8 +16,8 @@ on early-init
     # RenderEngine renders with GLES: the Vulkan driver's presents wait on
     # the CPU until there are sync files (docs/vulkan-driver.md).
     setprop debug.renderengine.backend skiaglthreaded
-    # A Retina display at 2x.
-    setprop ro.sf.lcd_density 320
+    # ro.sf.lcd_density is the Mac's main display's, set by guest-init
+    # (aim_host_display::density).
     # No boot animation: bootanimation starts, sees this and exits
     # without reading bootanimation.zip (whose reads the Mac's security
     # agent flagged, #232); the window stays black until the first frame.

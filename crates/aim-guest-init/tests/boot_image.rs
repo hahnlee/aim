@@ -197,7 +197,9 @@ fn real_image_dry_run_boot() {
     // The device: init.aim.rc, not the emulator's init.ranchu.rc.
     assert_eq!(boot.property("ro.hardware").as_deref(), Some("aim"));
     assert_eq!(boot.property("ro.hardware.egl").as_deref(), Some("aim"));
-    assert_eq!(boot.property("ro.sf.lcd_density").as_deref(), Some("320"));
+    // The density is the Mac's main display's, which a dry run does not
+    // read.
+    assert_eq!(boot.property("ro.sf.lcd_density"), None);
     assert!(!launched.contains("qemu-props"));
     assert!(!launched.contains("goldfish-logcat"));
     // adbd listens on the Mac's loopback only (docs/cts.md).

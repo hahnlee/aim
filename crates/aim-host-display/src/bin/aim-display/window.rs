@@ -84,6 +84,8 @@ pub struct Window {
     pub height: u32,
     pub dpi_x: f64,
     pub dpi_y: f64,
+    /// The device's density (`aim_host_display::density`).
+    pub density: u32,
     /// The device window's number; `screencapture -l` takes it.
     pub number: Option<isize>,
 }
@@ -129,6 +131,15 @@ fn app_delegate() -> Id {
         cls
     };
     send!(cls, c"new" => Id)
+}
+
+/// The device's density: the main display's, as guest-init sets
+/// `ro.sf.lcd_density` from it, else that of the screen at `scale` the
+/// server shows.
+pub fn device_density(scale: f64) -> u32 {
+    aim_host_display::density::main_display()
+        .or_else(|| aim_host_display::density::of_scale(scale))
+        .unwrap_or(aim_host_display::density::DENSITY_DEFAULT)
 }
 
 /// The main display's density, in dots per inch of backing pixels.
@@ -250,6 +261,7 @@ pub fn create(size: Option<(u32, u32)>, title: &str, device: Id) -> Window {
         height,
         dpi_x,
         dpi_y,
+        density: device_density(scale),
         number: Some(send!(window, c"windowNumber" => isize)),
     }
 }
