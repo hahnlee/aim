@@ -2952,6 +2952,72 @@ const TCP_MSS_DEFAULT: i32 = 536;
 const TCP_RXT_CONNDROPTIME: i32 = 0x80;
 const IPPROTO_IPV6: u64 = 41;
 
+/// `net.core.wmem_max` and `rmem_max`: the kernel's defaults, which no
+/// guest sysctl changes here.
+const WMEM_MAX: u32 = 212_992;
+const RMEM_MAX: u32 = 212_992;
+/// `SOCK_MIN_SNDBUF`, `SOCK_MIN_RCVBUF`: `TCP_SKB_MIN_TRUESIZE` (2048 and an
+/// aligned `struct sk_buff`), twice for sending.
+const SOCK_MIN_SNDBUF: i32 = 4608;
+const SOCK_MIN_RCVBUF: i32 = 2304;
+/// `CAP_NET_ADMIN`.
+const CAP_NET_ADMIN: u32 = 12;
+
+/// `sk_setsockopt`'s SO_SNDBUF, SO_RCVBUF and their FORCE forms
+/// (socket(7)): the size capped at `wmem_max`/`rmem_max` unless forced
+/// (CAP_NET_ADMIN), then doubled for the kernel's bookkeeping, at least the
+/// minimum, which is what getsockopt reports. The host buffer holds that
+/// size and Darwin reports what it holds; a forced size past Darwin's limit
+/// holds, and reports, that limit.
+fn set_buffer(fd: i32, opt: u64, v: i32) -> i64 {
+    let force = matches!(opt, L_SO_SNDBUFFORCE | L_SO_RCVBUFFORCE);
+    if force && !super::cred::capable(CAP_NET_ADMIN) {
+        return -(errno::EPERM as i64);
+    }
+    let send = matches!(opt, L_SO_SNDBUF | L_SO_SNDBUFFORCE);
+    // A forced size below zero is zero; an unforced one is compared as
+    // unsigned (`min_t(u32, ...)`), so a negative one is the maximum.
+    let requested = match (force, send) {
+        (true, _) => v.max(0),
+        (false, true) => (v as u32).min(WMEM_MAX) as i32,
+        (false, false) => (v as u32).min(RMEM_MAX) as i32,
+    };
+    let (host, min) = if send {
+        (libc::SO_SNDBUF, SOCK_MIN_SNDBUF)
+    } else {
+        (libc::SO_RCVBUF, SOCK_MIN_RCVBUF)
+    };
+    let size = (requested.min(i32::MAX / 2) * 2).max(min);
+    // SAFETY: an int option on the host socket.
+    let set = |n: i32| unsafe {
+        libc::setsockopt(fd, libc::SOL_SOCKET, host, (&n as *const i32).cast(), 4)
+    };
+    if set(size) == 0 {
+        return 0;
+    }
+    let error = errno::last();
+    if error != libc::ENOBUFS {
+        return -(error as i64);
+    }
+    // Past Darwin's limit, `kern.ipc.maxsockbuf`: the most it holds.
+    let mut max = 0i32;
+    let mut len = std::mem::size_of::<i32>();
+    // SAFETY: an int sysctl into a local of its size.
+    let read = unsafe {
+        libc::sysctlbyname(
+            c"kern.ipc.maxsockbuf".as_ptr(),
+            (&mut max as *mut i32).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read == 0 && max < size && set(max) == 0 {
+        return 0;
+    }
+    -(error as i64)
+}
+
 /// Darwin (level, option) of a plain int option.
 fn int_option(level: u64, opt: u64) -> Option<(i32, i32)> {
     Some(match (level, opt) {
@@ -2959,8 +3025,8 @@ fn int_option(level: u64, opt: u64) -> Option<(i32, i32)> {
         (1, L_SO_REUSEADDR) => (libc::SOL_SOCKET, libc::SO_REUSEADDR),
         (1, L_SO_DONTROUTE) => (libc::SOL_SOCKET, libc::SO_DONTROUTE),
         (1, L_SO_BROADCAST) => (libc::SOL_SOCKET, libc::SO_BROADCAST),
-        (1, L_SO_SNDBUF | L_SO_SNDBUFFORCE) => (libc::SOL_SOCKET, libc::SO_SNDBUF),
-        (1, L_SO_RCVBUF | L_SO_RCVBUFFORCE) => (libc::SOL_SOCKET, libc::SO_RCVBUF),
+        (1, L_SO_SNDBUF) => (libc::SOL_SOCKET, libc::SO_SNDBUF),
+        (1, L_SO_RCVBUF) => (libc::SOL_SOCKET, libc::SO_RCVBUF),
         (1, L_SO_KEEPALIVE) => (libc::SOL_SOCKET, libc::SO_KEEPALIVE),
         (1, L_SO_OOBINLINE) => (libc::SOL_SOCKET, libc::SO_OOBINLINE),
         (1, L_SO_REUSEPORT) => (libc::SOL_SOCKET, libc::SO_REUSEPORT),
@@ -3006,15 +3072,21 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
             Some(unsafe { (val as *const i32).read_unaligned() })
         }
     };
-    if let Some((l, o)) = int_option(level, opt) {
-        let Some(mut v) = int() else {
+    if level == 1
+        && matches!(
+            opt,
+            L_SO_SNDBUF | L_SO_RCVBUF | L_SO_SNDBUFFORCE | L_SO_RCVBUFFORCE
+        )
+    {
+        let Some(v) = int() else {
             return -(EINVAL as i64);
         };
-        if l == libc::SOL_SOCKET && (o == libc::SO_RCVBUF || o == libc::SO_SNDBUF) {
-            // Linux raises a small (or zero) size to its minimum (2304
-            // bytes, SOCK_MIN_RCVBUF); Darwin refuses zero.
-            v = v.max(2304);
-        }
+        return set_buffer(fd, opt, v);
+    }
+    if let Some((l, o)) = int_option(level, opt) {
+        let Some(v) = int() else {
+            return -(EINVAL as i64);
+        };
         if l == libc::SOL_SOCKET
             && o == libc::SO_REUSEADDR
             && get_int(fd, libc::SOL_SOCKET, libc::SO_TYPE) == Some(libc::SOCK_DGRAM)

@@ -482,6 +482,13 @@ fn ip_receive_options() {
     check("t_ipopts", &[]);
 }
 
+/// SO_SNDBUF/SO_RCVBUF and their FORCE forms as socket(7) describes them
+/// (#369).
+#[test]
+fn socket_buffer_sizes() {
+    check("t_sockbuf", &[]);
+}
+
 /// The derived image's lmkd answers ActivityManager's protocol, with the
 /// host-call module `memory` as its pressure source.
 #[test]
