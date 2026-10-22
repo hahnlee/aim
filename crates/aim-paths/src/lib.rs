@@ -237,3 +237,29 @@ pub fn skip(reason: &str) {
         );
     }
 }
+
+/// A new directory of this process's own in the system's temporary
+/// directory, `<prefix>-<pid>-<n>`: created exclusively, skipping names
+/// that exist, so tests running at once and a killed earlier run with the
+/// same pid never share one (#2117).
+pub fn scratch_dir(prefix: &str) -> PathBuf {
+    scratch_dir_in(&std::env::temp_dir(), prefix)
+}
+
+/// `scratch_dir` in `parent`.
+pub fn scratch_dir_in(parent: &Path, prefix: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let dir = parent.join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return dir,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => panic!("{}: {error}", dir.display()),
+        }
+    }
+}
