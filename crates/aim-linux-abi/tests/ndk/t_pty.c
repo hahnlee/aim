@@ -326,6 +326,26 @@ static void opaque_exec_description(void) {
   CHECK(close(master) == 0);
 }
 
+// A slave not yet unlocked is an inode like any other: its metadata changes
+// by path without opening the terminal, while opening it for I/O fails
+// until unlockpt (#1161).
+static void locked_slave_metadata(void) {
+  int master = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+  CHECK(master >= 0 && grantpt(master) == 0);
+  char name[64];
+  CHECK(ptsname_r(master, name, sizeof(name)) == 0);
+  CHECK(open(name, O_RDWR | O_NOCTTY) == -1 && errno == EIO);
+  CHECK(chmod(name, 0600) == 0);
+  struct stat st;
+  CHECK(stat(name, &st) == 0 && (st.st_mode & 07777) == 0600);
+  CHECK(chown(name, getuid(), getgid()) == 0);
+  CHECK(fchmodat(AT_FDCWD, name, 0620, 0) == 0);
+  CHECK(unlockpt(master) == 0);
+  int slave = open(name, O_RDWR | O_NOCTTY);
+  CHECK(slave >= 0 && fstat(slave, &st) == 0 && (st.st_mode & 07777) == 0620);
+  CHECK(close(slave) == 0 && close(master) == 0);
+}
+
 static void allocate_and_close(void) {
   char name[64];
   int master = open_master(name, sizeof(name));
@@ -352,6 +372,7 @@ int main(int argc, char** argv) {
     DONE();
   }
   RUN(master_and_slave);
+  RUN(locked_slave_metadata);
   RUN(not_a_terminal);
   RUN(controlling_terminal);
   RUN(unread_output_exit);
