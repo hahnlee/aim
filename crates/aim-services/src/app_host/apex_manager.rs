@@ -15,6 +15,7 @@ use crate::package::bootstrap::{ActiveApex, ApexInventory, ApexPackage};
 
 const SERVICE: &str = "apexservice";
 const DESCRIPTOR: &str = "android.apex.IApexService";
+const GET_STAGED_SESSION_INFO: u32 = 5;
 const GET_ACTIVE_PACKAGES: u32 = 7;
 const GET_ALL_PACKAGES: u32 = 8;
 /// How long `waitForApexService` waits for apexd to register.
@@ -71,20 +72,79 @@ fn packages(service: &Strong, code: u32, name: &str) -> Result<Vec<ApexInfo>, St
     }
 }
 
-/// The packages and the active ones, as `ApexBootFeed.capture` records
-/// them: an active one is mounted at `/apex/<moduleName>`
-/// (`ActiveApexInfo(ApexInfo)`).
-pub fn inventory(process: &LocalProcess) -> Result<ApexInventory, String> {
+/// `waitForApexService`: apexd's service, once it registered.
+fn service(process: &LocalProcess) -> Result<Strong, String> {
     let deadline = Instant::now() + PATIENCE;
-    let service = loop {
+    loop {
         if let Ok(s) = check_service(process, SERVICE) {
-            break s;
+            return Ok(s);
         }
         if Instant::now() > deadline {
             return Err(format!("{SERVICE} did not register"));
         }
         std::thread::sleep(Duration::from_millis(100));
-    };
+    }
+}
+
+/// `android.apex.ApexSessionInfo`'s states, as far as a session's state
+/// reads them.
+#[derive(Debug, Default, PartialEq)]
+pub struct SessionInfo {
+    pub unknown: bool,
+    pub activated: bool,
+    pub activation_failed: bool,
+    pub success: bool,
+    pub reverted: bool,
+    pub revert_failed: bool,
+}
+
+fn read_session(r: &mut Reader<'_>) -> ParcelResult<SessionInfo> {
+    present(r)?;
+    parcelable(r, |r| {
+        r.read_i32()?; // sessionId
+        let unknown = r.read_bool()?;
+        r.read_bool()?; // isVerified
+        r.read_bool()?; // isStaged
+        let activated = r.read_bool()?;
+        r.read_bool()?; // isRevertInProgress
+        Ok(SessionInfo {
+            unknown,
+            activated,
+            activation_failed: r.read_bool()?,
+            success: r.read_bool()?,
+            reverted: r.read_bool()?,
+            revert_failed: r.read_bool()?,
+        })
+    })
+}
+
+/// `ApexManager.getStagedSessionInfo(sessionId)`: apexd's session, none
+/// when it does not know it (`isUnknown`).
+pub fn staged_session_info(process: &LocalProcess, id: i32) -> Result<Option<SessionInfo>, String> {
+    let service = service(process)?;
+    let mut data = Parcel::new();
+    data.write_interface_token(DESCRIPTOR);
+    data.write_i32(id);
+    let reply = service
+        .transact(GET_STAGED_SESSION_INFO, &data, false)
+        .map_err(|s| format!("getStagedSessionInfo: {s}"))?;
+    let mut r = reply.reader();
+    match r.read_exception() {
+        Ok(Ok(())) => {
+            let info =
+                read_session(&mut r).map_err(|s| format!("getStagedSessionInfo reply: {s}"))?;
+            Ok((!info.unknown).then_some(info))
+        }
+        Ok(Err(e)) => Err(format!("getStagedSessionInfo: {e:?}")),
+        Err(s) => Err(format!("getStagedSessionInfo reply: {s}")),
+    }
+}
+
+/// The packages and the active ones, as `ApexBootFeed.capture` records
+/// them: an active one is mounted at `/apex/<moduleName>`
+/// (`ActiveApexInfo(ApexInfo)`).
+pub fn inventory(process: &LocalProcess) -> Result<ApexInventory, String> {
+    let service = service(process)?;
     let path = |p: Option<String>, what: &str| {
         p.ok_or_else(|| format!("{SERVICE}: an APEX without a {what}"))
     };

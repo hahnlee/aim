@@ -689,6 +689,17 @@ impl DropBox {
     }
 
     /// `PHASE_BOOT_COMPLETED`.
+    /// `DropBoxManager.addText(tag, data)`: the text added as an
+    /// `IS_TEXT` entry of the tag (`addData`).
+    pub(super) fn add_text(&self, tag: &str, text: &str) -> Result<(), Exception> {
+        self.add_entry(
+            Some(tag),
+            Source::Data(text.as_bytes()),
+            text.len() as u64,
+            IS_TEXT,
+        )
+    }
+
     pub fn boot_completed(&self) {
         self.booted.store(true, Ordering::Release);
     }

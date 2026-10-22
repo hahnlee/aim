@@ -73,6 +73,13 @@ pub struct SystemConfig {
     pub allow_in_power_save: BTreeSet<String>,
     /// `mBugreportWhitelistedPackages`.
     pub bugreport_allowlist: BTreeSet<String>,
+    /// `mDisabledUntilUsedPreinstalledCarrierApps`, as added (an
+    /// `ArraySet`: each once).
+    pub disabled_until_used_carrier_apps: Vec<String>,
+    /// `mDisabledUntilUsedPreinstalledCarrierAssociatedApps`: by carrier
+    /// app, its associated packages and the SDK each was added in
+    /// (`CarrierAssociatedAppEntry.SDK_UNSPECIFIED` when not given).
+    pub disabled_until_used_carrier_associated_apps: BTreeMap<String, Vec<(String, i32)>>,
     /// Domain verification's linked apps, in original ArraySet order.
     pub linked_apps: Vec<String>,
     pub staged_installers: BTreeSet<String>,
@@ -452,6 +459,45 @@ impl SystemConfig {
                         self.hidden_api_allowlist.push(package.into_owned());
                     }
                 }
+                "disabled-until-used-preinstalled-carrier-associated-app"
+                    if flags & ALLOW_APP_CONFIGS != 0 =>
+                {
+                    if let (Some(package), Some(carrier)) =
+                        (e.string("package"), e.string("carrierAppPackage"))
+                    {
+                        // `CarrierAssociatedAppEntry.SDK_UNSPECIFIED`; an
+                        // addedInSdk that is not an integer skips the entry.
+                        let added = match e.string("addedInSdk").filter(|v| !v.is_empty()) {
+                            None => Some(-1),
+                            Some(v) => v.parse().ok(),
+                        };
+                        if let Some(added) = added {
+                            self.disabled_until_used_carrier_associated_apps
+                                .entry(carrier.into_owned())
+                                .or_default()
+                                .push((package.into_owned(), added));
+                        }
+                    }
+                }
+                "disabled-until-used-preinstalled-carrier-app"
+                    if flags & ALLOW_APP_CONFIGS != 0 =>
+                {
+                    if let Some(package) = e.string("package")
+                        && !self
+                            .disabled_until_used_carrier_apps
+                            .iter()
+                            .any(|p| *p == package)
+                    {
+                        self.disabled_until_used_carrier_apps
+                            .push(package.into_owned());
+                    }
+                }
+                "enabled-in-sku-override" if flags & ALLOW_APP_CONFIGS != 0 => {
+                    if let Some(package) = e.string("package") {
+                        self.disabled_until_used_carrier_apps
+                            .retain(|p| *p != package);
+                    }
+                }
                 "bugreport-whitelisted" => {
                     if let Some(package) = e.string("package") {
                         self.bugreport_allowlist.insert(package.into_owned());
@@ -786,6 +832,38 @@ mod tests {
         assert_eq!(config.system_permissions[&2900], ["p.vendor".into()].into());
         assert!(!config.system_permissions.contains_key(&0));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `disabled-until-used-preinstalled-carrier-app` and its associated
+    /// apps, gated as app configs; a SKU override takes an app back out.
+    #[test]
+    fn carrier_apps_disabled_until_used_are_app_configs() {
+        let document = aim_android_xml::read(b"<permissions><disabled-until-used-preinstalled-carrier-app package='c.one'/><disabled-until-used-preinstalled-carrier-app package='c.two'/><disabled-until-used-preinstalled-carrier-app package='c.one'/><disabled-until-used-preinstalled-carrier-associated-app package='a.one' carrierAppPackage='c.one'/><disabled-until-used-preinstalled-carrier-associated-app package='a.two' carrierAppPackage='c.one' addedInSdk='30'/><disabled-until-used-preinstalled-carrier-associated-app package='a.bad' carrierAppPackage='c.one' addedInSdk='x'/><disabled-until-used-preinstalled-carrier-associated-app package='a.none'/><enabled-in-sku-override package='c.two'/></permissions>").unwrap();
+        let props = |_: &str| None;
+        let root = Path::new("/nonexistent");
+        let mut config = SystemConfig::default();
+        config.read_root(
+            &document,
+            ALLOW_FEATURES,
+            false,
+            root,
+            &props,
+            Path::new("t.xml"),
+        );
+        assert!(config.disabled_until_used_carrier_apps.is_empty());
+        config.read_root(
+            &document,
+            ALLOW_APP_CONFIGS,
+            false,
+            root,
+            &props,
+            Path::new("t.xml"),
+        );
+        assert_eq!(config.disabled_until_used_carrier_apps, ["c.one"]);
+        assert_eq!(
+            config.disabled_until_used_carrier_associated_apps["c.one"],
+            [("a.one".into(), -1), ("a.two".into(), 30)]
+        );
     }
 
     #[test]

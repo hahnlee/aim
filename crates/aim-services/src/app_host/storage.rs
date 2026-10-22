@@ -32,6 +32,16 @@ const ON_USER_ADDED: u32 = 6;
 const ON_USER_STARTED: u32 = 8;
 const SETUP_APP_DIR: u32 = 23;
 const FIXUP_APP_DIR: u32 = 24;
+const FSTRIM: u32 = 28;
+const NEEDS_CHECKPOINT: u32 = 53;
+const SUPPORTS_BLOCK_CHECKPOINT: u32 = 63;
+/// `IVoldTaskListener`'s descriptor and calls.
+const TASK_LISTENER_DESCRIPTOR: &str = "android.os.IVoldTaskListener";
+const ON_STATUS: u32 = 1;
+const ON_FINISHED: u32 = 2;
+/// `StorageManagerService.LAST_FSTRIM_FILE`, `TAG_STORAGE_TRIM`.
+const LAST_FSTRIM_FILE: &str = "system/last-fstrim";
+const TAG_STORAGE_TRIM: &str = "storage_trim";
 /// `IVoldListener`'s volume calls.
 const LISTENER_DESCRIPTOR: &str = "android.os.IVoldListener";
 const ON_DISK_CREATED: u32 = 1;
@@ -96,7 +106,20 @@ pub struct Volumes {
     cloud_media_providers: Mutex<HashMap<i32, Option<String>>>,
     /// `mInternalStorageSize`, once read.
     internal_storage_size: Mutex<i64>,
+    /// The listeners of this process (`StorageEventListener`s registered
+    /// with `StorageManager`), by the id they were registered with.
+    native_listeners: Mutex<Vec<(u64, NativeListener)>>,
+    /// `mLastMaintenance`: when idle maintenance last ran, from
+    /// `last-fstrim`'s time; none until it is first read.
+    last_maintenance: Mutex<Option<i64>>,
 }
+
+/// A listener of this process: told each volume's type, new state and
+/// file system UUID (`onVolumeStateChanged`).
+pub(super) type NativeListener = Arc<dyn Fn(i32, i32, Option<&str>) + Send + Sync>;
+
+/// The ids of this process's storage listeners.
+static NATIVE_LISTENER_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// `VolumeInfo` of user 0's emulated volume, as StorageManagerService
 /// keeps it from vold's calls, or of internal storage.
@@ -977,10 +1000,152 @@ impl AppHost {
         Ok((!filtered).then_some(authority))
     }
 
+    /// `StorageManager.registerListener` of a listener of this process;
+    /// the id to unregister it with.
+    pub(super) fn register_native_storage_listener(&self, listener: NativeListener) -> u64 {
+        let id = NATIVE_LISTENER_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.storage
+            .native_listeners
+            .lock()
+            .unwrap()
+            .push((id, listener));
+        id
+    }
+
+    /// `StorageManager.unregisterListener`.
+    pub(super) fn unregister_native_storage_listener(&self, id: u64) {
+        self.storage
+            .native_listeners
+            .lock()
+            .unwrap()
+            .retain(|(i, _)| *i != id);
+    }
+
+    /// `lastMaintenance`: `mLastMaintenance`, read at the service's start
+    /// from `last-fstrim`'s time, which is made empty when absent (so the
+    /// first maintenance after it runs at once).
+    pub(super) fn last_maintenance(&self) -> Result<i64, Exception> {
+        let mut last = self.storage.last_maintenance.lock().unwrap();
+        if let Some(last) = *last {
+            return Ok(last);
+        }
+        let file = self.data()?.join(LAST_FSTRIM_FILE);
+        let read = match std::fs::metadata(&file).and_then(|m| m.modified()) {
+            Ok(time) => time
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64),
+            Err(_) => {
+                if let Err(e) = std::fs::File::create(&file) {
+                    eprintln!(
+                        "app host: mount: Unable to create fstrim record {}: {e}",
+                        file.display()
+                    );
+                }
+                0
+            }
+        };
+        *last = Some(read);
+        Ok(read)
+    }
+
+    /// `runMaintenance` → `H_FSTRIM`: the time kept and `last-fstrim`
+    /// touched, then `fstrim(0, null)`, on the service's thread.
+    pub(super) fn run_maintenance(&self) -> Result<(), Exception> {
+        let me = self
+            .me
+            .upgrade()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "app host gone"))?;
+        let now = std::time::SystemTime::now();
+        std::thread::spawn(move || {
+            eprintln!("app host: mount: Running fstrim idle maintenance");
+            let millis = now
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64);
+            *me.storage.last_maintenance.lock().unwrap() = Some(millis);
+            let touched = me.data().map_err(|e| e.message).and_then(|data| {
+                std::fs::File::options()
+                    .write(true)
+                    .open(data.join(LAST_FSTRIM_FILE))
+                    .and_then(|f| f.set_modified(now))
+                    .map_err(|e| e.to_string())
+            });
+            if touched.is_err() {
+                eprintln!("app host: mount: Unable to record last fstrim!");
+            }
+            if let Err(e) = me.fstrim() {
+                eprintln!("app host: mount: fstrim: {}", e.message);
+            }
+        });
+        Ok(())
+    }
+
+    /// `fstrim(0, null)`: vold's trim unless a block checkpoint is in
+    /// progress, each trimmed path recorded in the dropbox.
+    fn fstrim(&self) -> Result<(), Exception> {
+        let vold = self.storage.vold.lock().unwrap();
+        let vold = vold
+            .as_ref()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "vold not connected"))?;
+        let call = |code: u32, name: &str, write: &dyn Fn(&mut Parcel)| {
+            let mut data = Parcel::new();
+            data.write_interface_token(VOLD_DESCRIPTOR);
+            write(&mut data);
+            vold.transact(code, &data, false)
+                .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("vold {name}: {s}")))
+        };
+        let boolean = |code: u32, name: &str| -> Result<bool, Exception> {
+            let reply = call(code, name, &|_| {})?;
+            let mut r = reply.reader();
+            r.read_exception()
+                .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("vold {name}: {s}")))??;
+            r.read_bool()
+                .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("vold {name}: {s}")))
+        };
+        if boolean(NEEDS_CHECKPOINT, "needsCheckpoint")?
+            && boolean(SUPPORTS_BLOCK_CHECKPOINT, "supportsBlockCheckpoint")?
+        {
+            eprintln!("app host: mount: Skipping fstrim - block based checkpoint in progress");
+            return Ok(());
+        }
+        let listener = self
+            .process
+            .add_service(Arc::new(TrimListener(self.me.clone())));
+        let reply = call(FSTRIM, "fstrim", &|p| {
+            p.write_i32(0);
+            p.write_binder(Some(listener));
+        })?;
+        reply
+            .reader()
+            .read_exception()
+            .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("vold fstrim: {s}")))?
+    }
+
+    /// `scrubPath`: internal storage's paths, else an adopted volume's age.
+    fn scrub_path(path: &str) -> &'static str {
+        // `Environment.getDataDirectory`.
+        if path.starts_with("/data") {
+            return "internal";
+        }
+        // `findRecordForPath`: the app host keeps no volume records
+        // (#1839), so no adopted volume is known.
+        "unknown"
+    }
+
     /// `onVolumeStateChangedAsync`'s calls of the listeners: the volume's
     /// new state, then, when its environment changed, the storage state of
     /// each user it is visible to (user 0's, unlocked).
     fn volume_state_changed(&self, info: &VolumeInfo, old: i32) {
+        let natives: Vec<NativeListener> = self
+            .storage
+            .native_listeners
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, l)| l.clone())
+            .collect();
+        for listener in natives {
+            listener(info.kind, info.state, info.fs_uuid.as_deref());
+        }
         let listeners: Vec<u32> = self
             .storage
             .listeners
@@ -1391,6 +1556,55 @@ impl Service for StorageManager {
                 }))
             }
             code => reply(Err(self.0.unimplemented("mount", self.descriptor(), code))),
+        }
+    }
+}
+
+/// fstrim's `IVoldTaskListener`: a trimmed path's bytes and time recorded
+/// in the dropbox (`TAG_STORAGE_TRIM`), failures ignored.
+struct TrimListener(std::sync::Weak<AppHost>);
+
+impl Service for TrimListener {
+    fn descriptor(&self) -> &str {
+        TASK_LISTENER_DESCRIPTOR
+    }
+
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        match call.code {
+            ON_STATUS => {
+                let status = call.data.read_i32()?;
+                let extras = crate::bundle::read(&mut call.data)?.unwrap_or_default();
+                if status != 0 {
+                    return Ok(Parcel::new());
+                }
+                let Some(host) = self.0.upgrade() else {
+                    return Ok(Parcel::new());
+                };
+                // `getString("path")`, whose absence the original's
+                // `scrubPath` throws on; `getLong`'s default 0.
+                let Some(crate::bundle::Value::String(Some(path))) = extras.get("path") else {
+                    eprintln!("app host: mount: fstrim status without a path");
+                    return Ok(Parcel::new());
+                };
+                let long = |key: &str| match extras.get(key) {
+                    Some(crate::bundle::Value::Long(v)) => *v,
+                    _ => 0,
+                };
+                let line = format!(
+                    "{} {} {}",
+                    AppHost::scrub_path(path),
+                    long("bytes"),
+                    long("time")
+                );
+                if let Some(dropbox) = host.dropbox.get()
+                    && let Err(e) = dropbox.add_text(TAG_STORAGE_TRIM, &line)
+                {
+                    eprintln!("app host: mount: dropbox: {}", e.message);
+                }
+                Ok(Parcel::new())
+            }
+            ON_FINISHED => Ok(Parcel::new()),
+            _ => Err(aim_binder_host::parcel::UNKNOWN_TRANSACTION),
         }
     }
 }
