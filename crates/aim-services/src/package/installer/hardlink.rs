@@ -10,11 +10,11 @@ use std::sync::{
 };
 
 pub struct Files {
-    bridge: Strong,
+    bridge: crate::system::ServiceOwner,
     closed: AtomicBool,
 }
 impl Files {
-    pub fn new(bridge: Strong) -> Arc<Self> {
+    pub fn new(bridge: crate::system::ServiceOwner) -> Arc<Self> {
         Arc::new(Self {
             bridge,
             closed: AtomicBool::new(false),

@@ -92,7 +92,7 @@ fn key(binder: Binder) -> Key {
 impl Owner {
     pub fn move_primary(
         self: &Arc<Self>,
-        bridge: &Strong,
+        bridge: &crate::system::ServiceOwner,
         volume: Option<String>,
     ) -> Result<i32, Exception> {
         use aim_service_aidl::dev_aim_server_ipackagemovebridge as api;

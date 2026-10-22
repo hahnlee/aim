@@ -634,7 +634,10 @@ mod tests {
         let received = Arc::new(Mutex::new(Vec::new()));
         let process_status = processes(Arc::new(StatusSink(received.clone())), 99901);
         let receiver = process_status.client.add_service(Arc::new(Receiver));
-        let endpoint = super::super::preapproval::BridgeOwner::new(process_status.client.strong(0));
+        let endpoint =
+            super::super::preapproval::BridgeOwner::new(crate::system::ServiceOwner::Remote(
+                std::sync::Arc::new(process_status.client.strong(0)),
+            ));
         endpoint
             .deliver_with_warnings(
                 &super::super::preapproval::Status {

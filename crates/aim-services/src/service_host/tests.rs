@@ -6806,8 +6806,10 @@ fn verify_installer_binding(
         "fixture_installer_effects",
         native.add_service(Arc::new(ExistingEffects)),
     );
-    let effects =
-        crate::package::effects::Owner::new(find(client, "fixture_installer_effects")).unwrap();
+    let effects = crate::package::effects::Owner::new(crate::system::ServiceOwner::Remote(
+        std::sync::Arc::new(find(client, "fixture_installer_effects")),
+    ))
+    .unwrap();
     system
         .new_existing_package_owner(
             bridge.clone(),

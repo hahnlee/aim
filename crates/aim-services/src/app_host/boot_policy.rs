@@ -167,8 +167,8 @@ pub(super) fn notify_apex_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::package::scan::ApexScanResult;
     use crate::package::pkg::ApexSystemService;
+    use crate::package::scan::ApexScanResult;
 
     /// Only a userdebug build reads the property, and only its first two
     /// strategies count (`getCurrentStrategy`).

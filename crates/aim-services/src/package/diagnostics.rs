@@ -87,7 +87,7 @@ pub type UsagePublication =
 /// Concrete bootstrap inputs; all mutable package actions use the same native owners.
 pub struct Inputs {
     pub process: Arc<LocalProcess>,
-    pub maintenance: Arc<Strong>,
+    pub maintenance: Arc<crate::system::ServiceOwner>,
     pub effects: Arc<super::effects::Owner>,
     pub install_serial: Arc<Mutex<()>>,
     pub current: super::diagnostics_storage::Current,
@@ -100,7 +100,7 @@ pub struct Runtime {
     process: Arc<LocalProcess>,
     queue: Arc<Mutex<Option<mpsc::Sender<Job>>>>,
     errors: Arc<Mutex<Vec<String>>>,
-    bridge: Arc<Strong>,
+    bridge: Arc<crate::system::ServiceOwner>,
     art: Mutex<Option<(Binder, Target)>>,
     effects: Arc<super::effects::Owner>,
     install_serial: Arc<Mutex<()>>,
@@ -189,7 +189,7 @@ impl Runtime {
     }
     pub fn new(
         process: Arc<LocalProcess>,
-        bridge: Arc<Strong>,
+        bridge: Arc<crate::system::ServiceOwner>,
         effects: Arc<super::effects::Owner>,
         install_serial: Arc<Mutex<()>>,
         storage: Arc<super::diagnostics_storage::Owner>,

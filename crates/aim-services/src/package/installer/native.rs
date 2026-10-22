@@ -2489,7 +2489,10 @@ mod tests {
             store: native_store.clone(),
             source: owner.source.clone(),
             resolver: Default::default(),
-            effects: crate::package::effects::Owner::new(client.strong(0)).unwrap(),
+            effects: crate::package::effects::Owner::new(crate::system::ServiceOwner::Remote(
+                std::sync::Arc::new(client.strong(0)),
+            ))
+            .unwrap(),
             external: external.clone(),
             policy,
             publisher: owner.publisher.clone(),

@@ -564,7 +564,7 @@ impl Bridge {
             .collect()
     }
 
-    pub fn application_data(&self) -> Result<Strong, OwnerError> {
+    pub fn application_data(&self) -> Result<crate::system::ServiceOwner, OwnerError> {
         let mut request = Parcel::new();
         bridge::GetApplicationDataBridge {}.write(&mut request);
         let reply = self
@@ -579,12 +579,10 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply
-            .retain_remote_binder(binder)
-            .map_err(OwnerError::Transport)
+        crate::system::ServiceOwner::retain(&reply, binder).map_err(OwnerError::Transport)
     }
 
-    pub fn package_relocation(&self) -> Result<Strong, OwnerError> {
+    pub fn package_relocation(&self) -> Result<crate::system::ServiceOwner, OwnerError> {
         let mut request = Parcel::new();
         bridge::GetPackageRelocationBridge {}.write(&mut request);
         let reply = self
@@ -599,12 +597,10 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply
-            .retain_remote_binder(binder)
-            .map_err(OwnerError::Transport)
+        crate::system::ServiceOwner::retain(&reply, binder).map_err(OwnerError::Transport)
     }
 
-    pub fn package_moves(&self) -> Result<Strong, OwnerError> {
+    pub fn package_moves(&self) -> Result<crate::system::ServiceOwner, OwnerError> {
         let mut request = Parcel::new();
         bridge::GetPackageMoveBridge {}.write(&mut request);
         let reply = self
@@ -619,12 +615,10 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply
-            .retain_remote_binder(binder)
-            .map_err(OwnerError::Transport)
+        crate::system::ServiceOwner::retain(&reply, binder).map_err(OwnerError::Transport)
     }
 
-    pub fn package_effects(&self) -> Result<Strong, OwnerError> {
+    pub fn package_effects(&self) -> Result<crate::system::ServiceOwner, OwnerError> {
         let mut data = Parcel::new();
         bridge::GetPackageMutationBridge {}.write(&mut data);
         let reply = self
@@ -639,12 +633,10 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply
-            .retain_remote_binder(binder)
-            .map_err(OwnerError::Transport)
+        crate::system::ServiceOwner::retain(&reply, binder).map_err(OwnerError::Transport)
     }
 
-    pub fn package_maintenance(&self) -> Result<Strong, OwnerError> {
+    pub fn package_maintenance(&self) -> Result<crate::system::ServiceOwner, OwnerError> {
         let mut data = Parcel::new();
         bridge::GetPackageMaintenanceBridge {}.write(&mut data);
         let reply = self
@@ -659,12 +651,10 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply
-            .retain_remote_binder(binder)
-            .map_err(OwnerError::Transport)
+        crate::system::ServiceOwner::retain(&reply, binder).map_err(OwnerError::Transport)
     }
 
-    pub fn installer_external(&self) -> Result<Strong, OwnerError> {
+    pub fn installer_external(&self) -> Result<crate::system::ServiceOwner, OwnerError> {
         let mut data = Parcel::new();
         bridge::GetInstallerExternalBridge {}.write(&mut data);
         let reply = self
@@ -679,12 +669,10 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply
-            .retain_remote_binder(binder)
-            .map_err(OwnerError::Transport)
+        crate::system::ServiceOwner::retain(&reply, binder).map_err(OwnerError::Transport)
     }
 
-    pub fn installer_files(&self) -> Result<Strong, OwnerError> {
+    pub fn installer_files(&self) -> Result<crate::system::ServiceOwner, OwnerError> {
         let mut data = Parcel::new();
         bridge::GetPackageInstallerFiles {}.write(&mut data);
         let reply = self
@@ -699,12 +687,10 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply
-            .retain_remote_binder(binder)
-            .map_err(OwnerError::Transport)
+        crate::system::ServiceOwner::retain(&reply, binder).map_err(OwnerError::Transport)
     }
 
-    pub fn staging_bridge(&self) -> Result<Strong, OwnerError> {
+    pub fn staging_bridge(&self) -> Result<crate::system::ServiceOwner, OwnerError> {
         let mut data = Parcel::new();
         bridge::GetNativeStagingBridge {}.write(&mut data);
         let reply = self
@@ -719,9 +705,7 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        reply
-            .retain_remote_binder(binder)
-            .map_err(OwnerError::Transport)
+        crate::system::ServiceOwner::retain(&reply, binder).map_err(OwnerError::Transport)
     }
 
     pub fn package_monitor_result(

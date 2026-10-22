@@ -10,12 +10,12 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 pub struct Owner {
-    target: Strong,
+    target: crate::system::ServiceOwner,
     closed: AtomicBool,
     revoked: AtomicBool,
 }
 impl Owner {
-    pub fn new(target: Strong) -> Arc<Self> {
+    pub fn new(target: crate::system::ServiceOwner) -> Arc<Self> {
         Arc::new(Self {
             target,
             closed: AtomicBool::new(false),

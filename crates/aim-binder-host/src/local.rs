@@ -268,6 +268,12 @@ impl Received {
         Ok(())
     }
 
+    /// A node of the process that received this reply, as a reply carries
+    /// it when the process answered itself.
+    pub fn local_service(&self, ptr: u64) -> Option<LocalService> {
+        self.process.local_service(ptr)
+    }
+
     /// Retain a remote node in the process that received this reply.
     pub fn retain_remote_binder(&self, binder: Binder) -> Result<Strong, StatusCode> {
         match binder {

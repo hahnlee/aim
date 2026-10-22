@@ -57,7 +57,7 @@ struct Task {
     execute: bool,
 }
 pub struct Owner {
-    bridge: Strong,
+    bridge: crate::system::ServiceOwner,
     process: Arc<LocalProcess>,
     current: Current,
     commit: Commit,
@@ -74,7 +74,7 @@ impl Owner {
         let _ = self.queue.send(None);
     }
     pub fn start(
-        bridge: Strong,
+        bridge: crate::system::ServiceOwner,
         process: Arc<LocalProcess>,
         current: Current,
         commit: Commit,

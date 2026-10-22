@@ -61,10 +61,10 @@ pub struct Volume {
     pub measure_path: String,
 }
 pub struct StorageOwner {
-    binder: Strong,
+    binder: crate::system::ServiceOwner,
 }
 impl StorageOwner {
-    pub fn new(binder: Strong) -> Arc<Self> {
+    pub fn new(binder: crate::system::ServiceOwner) -> Arc<Self> {
         Arc::new(Self { binder })
     }
     fn call<T>(

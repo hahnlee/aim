@@ -404,7 +404,10 @@ impl System {
 impl System {
     fn internal_event_transport(
         &self,
-    ) -> Result<(Arc<crate::package::bootstrap::Bridge>, Arc<Strong>)> {
+    ) -> Result<(
+        Arc<crate::package::bootstrap::Bridge>,
+        Arc<crate::system::ServiceOwner>,
+    )> {
         let bridge = self.package_bootstrap()?;
         use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as api;
         let mut request = Parcel::new();
@@ -419,9 +422,11 @@ impl System {
         if reader.remaining() != 0 {
             return Err(event_error("internal event owner reply tail"));
         }
-        let node = reply
-            .retain_remote_binder(binder.ok_or_else(|| event_error("internal event owner absent"))?)
-            .map_err(|status| event_error(format!("internal event owner capability {status}")))?;
+        let node = crate::system::ServiceOwner::retain(
+            &reply,
+            binder.ok_or_else(|| event_error("internal event owner absent"))?,
+        )
+        .map_err(|status| event_error(format!("internal event owner capability {status}")))?;
         self.check_package_bootstrap(&bridge)?;
         Ok((bridge, Arc::new(node)))
     }
@@ -555,7 +560,7 @@ impl System {
     fn internal_deliver_event(
         self: &Arc<Self>,
         bridge: Arc<crate::package::bootstrap::Bridge>,
-        node: Arc<Strong>,
+        node: Arc<crate::system::ServiceOwner>,
         action: &'static str,
         name: String,
         user: i32,
@@ -647,8 +652,7 @@ impl System {
         if reader.remaining() != 0 {
             return Err(event_error("shutdown owner reply tail"));
         }
-        let owner = reply
-            .retain_remote_binder(binder)
+        let owner = crate::system::ServiceOwner::retain(&reply, binder)
             .map_err(|status| event_error(format!("shutdown statistics capability {status}")))?;
         use aim_service_aidl::dev_aim_server_ipackageshutdownbridge as stats;
         let mut request = Parcel::new();

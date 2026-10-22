@@ -41,7 +41,7 @@ pub struct Status {
     pub pending_installer: Option<String>,
 }
 pub struct BridgeOwner {
-    owner: Strong,
+    owner: crate::system::ServiceOwner,
     closed: std::sync::atomic::AtomicBool,
 }
 pub struct Icon {
@@ -65,7 +65,7 @@ fn transport(code: i32) -> Exception {
     )
 }
 impl BridgeOwner {
-    pub fn new(owner: Strong) -> Arc<Self> {
+    pub fn new(owner: crate::system::ServiceOwner) -> Arc<Self> {
         Arc::new(Self {
             owner,
             closed: std::sync::atomic::AtomicBool::new(false),

@@ -1,8 +1,5 @@
 //! Original process/broadcast owners retained for the native package writer.
-use aim_binder_host::{
-    local::Strong,
-    parcel::{EX_ILLEGAL_STATE, Exception, Parcel, Reader},
-};
+use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception, Parcel, Reader};
 use aim_service_aidl::dev_aim_server_ipackagemutationbridge as api;
 use std::sync::{
     Arc,
@@ -10,7 +7,7 @@ use std::sync::{
 };
 
 pub struct Owner {
-    binder: Strong,
+    binder: crate::system::ServiceOwner,
     revoked: AtomicBool,
 }
 impl std::fmt::Debug for Owner {
@@ -21,15 +18,15 @@ impl std::fmt::Debug for Owner {
     }
 }
 impl Owner {
-    pub fn new(binder: Strong) -> Result<Arc<Self>, Exception> {
+    pub fn new(binder: crate::system::ServiceOwner) -> Result<Arc<Self>, Exception> {
         let code = u32::from_be_bytes(*b"_NTF");
         let reply = binder
             .transact(code, &Parcel::new(), false)
-            .map_err(|status| diagnostic(transport(status), code, binder.handle, "transact"))?;
+            .map_err(|status| diagnostic(transport(status), code, &binder, "transact"))?;
         let mut reader = reply.reader();
         if reader
             .read_string16()
-            .map_err(|status| diagnostic(transport(status), code, binder.handle, "read"))?
+            .map_err(|status| diagnostic(transport(status), code, &binder, "read"))?
             .as_deref()
             != Some(api::DESCRIPTOR)
             || reader.remaining() != 0
@@ -37,7 +34,7 @@ impl Owner {
             return Err(diagnostic(
                 Exception::new(EX_ILLEGAL_STATE, "package effects descriptor differs"),
                 code,
-                binder.handle,
+                &binder,
                 "descriptor",
             ));
         }
@@ -59,7 +56,7 @@ impl Owner {
             return Err(diagnostic(
                 Exception::new(EX_ILLEGAL_STATE, "package effects owner revoked"),
                 code,
-                self.binder.handle,
+                &self.binder,
                 "admission",
             ));
         }
@@ -68,11 +65,9 @@ impl Owner {
         let reply = self
             .binder
             .transact(code, &request, false)
-            .map_err(|status| {
-                diagnostic(transport(status), code, self.binder.handle, "transact")
-            })?;
+            .map_err(|status| diagnostic(transport(status), code, &self.binder, "transact"))?;
         let mut reader = reply.reader();
-        let value = read_reply(code, self.binder.handle, &mut reader, read)?;
+        let value = read_reply(code, &self.binder, &mut reader, read)?;
         if self.revoked.load(Ordering::Acquire) {
             return Err(diagnostic(
                 Exception::new(
@@ -80,7 +75,7 @@ impl Owner {
                     "package effects owner changed during callback",
                 ),
                 code,
-                self.binder.handle,
+                &self.binder,
                 "owner_epoch",
             ));
         }
@@ -581,30 +576,34 @@ fn transport(status: i32) -> Exception {
         format!("package effects transport: {status}"),
     )
 }
-fn diagnostic(mut error: Exception, code: u32, handle: u32, phase: &str) -> Exception {
+fn diagnostic(
+    mut error: Exception,
+    code: u32,
+    node: &dyn std::fmt::Display,
+    phase: &str,
+) -> Exception {
     error.message = format!(
-        "{} [package effects tx={code} handle={handle} phase={phase}]",
+        "{} [package effects tx={code} {node} phase={phase}]",
         error.message
     );
     error
 }
 fn read_reply<T>(
     code: u32,
-    handle: u32,
+    node: &dyn std::fmt::Display,
     reader: &mut Reader<'_>,
     read: impl FnOnce(&mut Reader<'_>) -> Result<T, i32>,
 ) -> Result<T, Exception> {
     reader
         .read_exception()
-        .map_err(|status| diagnostic(transport(status), code, handle, "read_exception"))?
-        .map_err(|error| diagnostic(error, code, handle, "read_exception"))?;
-    let value =
-        read(reader).map_err(|status| diagnostic(transport(status), code, handle, "read"))?;
+        .map_err(|status| diagnostic(transport(status), code, node, "read_exception"))?
+        .map_err(|error| diagnostic(error, code, node, "read_exception"))?;
+    let value = read(reader).map_err(|status| diagnostic(transport(status), code, node, "read"))?;
     if reader.remaining() != 0 {
         return Err(diagnostic(
             Exception::new(EX_ILLEGAL_STATE, "package effects reply has trailing data"),
             code,
-            handle,
+            node,
             "trailing",
         ));
     }
@@ -695,14 +694,17 @@ mod tests {
         assert!(
             read_reply(
                 api::REQUIRE_INSTALLER_PERMISSION,
-                17,
+                &"handle=17",
                 &mut Reader::new(reply.data(), reply.objects()),
                 |r| r.read_bool()
             )
             .unwrap()
         );
         let mut empty = Reader::new(&[], &[]);
-        let error = read_reply(api::POST_INSTALL_PACKAGE, 17, &mut empty, |_| Ok(())).unwrap_err();
+        let error = read_reply(api::POST_INSTALL_PACKAGE, &"handle=17", &mut empty, |_| {
+            Ok(())
+        })
+        .unwrap_err();
         assert_eq!(error.code, EX_ILLEGAL_STATE);
         assert!(
             error
@@ -717,7 +719,7 @@ mod tests {
         reply.write_no_exception();
         let error = read_reply(
             api::REQUIRE_INSTALLER_PERMISSION,
-            19,
+            &"handle=19",
             &mut Reader::new(reply.data(), reply.objects()),
             |r| r.read_bool(),
         )
@@ -726,7 +728,7 @@ mod tests {
         reply.write_i32(23);
         let error = read_reply(
             api::POST_INSTALL_PACKAGE,
-            19,
+            &"handle=19",
             &mut Reader::new(reply.data(), reply.objects()),
             |_| Ok(()),
         )
@@ -748,7 +750,7 @@ mod tests {
             reply.write_exception(&expected);
             let error = read_reply::<()>(
                 api::KILL_PACKAGE,
-                31,
+                &"handle=31",
                 &mut Reader::new(reply.data(), reply.objects()),
                 |_| panic!("failed exception must not read a return value"),
             )
@@ -765,7 +767,7 @@ mod tests {
         let error = diagnostic(
             transport(UNKNOWN_TRANSACTION),
             api::KILL_PACKAGE,
-            31,
+            &"handle=31",
             "transact",
         );
         assert_eq!(error.code, EX_ILLEGAL_STATE);

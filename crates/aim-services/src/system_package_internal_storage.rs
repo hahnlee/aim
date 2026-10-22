@@ -7,7 +7,7 @@ use aim_service_aidl::{
 use std::collections::BTreeMap;
 
 struct StorageLeaf {
-    owner: aim_binder_host::local::Strong,
+    owner: crate::system::ServiceOwner,
 }
 pub(crate) struct BootAppData {
     flags: i32,
@@ -65,8 +65,7 @@ impl System {
         if reader.remaining() != 0 {
             return Err(storage_error("Internal storage attach trailing data"));
         }
-        let owner = reply
-            .retain_remote_binder(binder)
+        let owner = crate::system::ServiceOwner::retain(&reply, binder)
             .map_err(|status| storage_error(format!("Internal storage lifetime: {status}")))?;
         self.check_package_bootstrap(&bridge)?;
         Ok(StorageLeaf { owner })

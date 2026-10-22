@@ -1089,7 +1089,10 @@ mod committed_effect_tests {
                 security_context: None,
             },
         );
-        let effects = crate::package::effects::Owner::new(client.strong(0)).unwrap();
+        let effects = crate::package::effects::Owner::new(crate::system::ServiceOwner::Remote(
+            std::sync::Arc::new(client.strong(0)),
+        ))
+        .unwrap();
         let settings = Settings {
             packages: vec![Package {
                 name: "p".into(),

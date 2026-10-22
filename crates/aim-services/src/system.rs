@@ -177,6 +177,23 @@ pub enum ServiceOwner {
     Local(LocalService),
 }
 impl ServiceOwner {
+    /// A node `reply` carries, retained in the process that received it:
+    /// another process's, or this process's own.
+    pub fn retain(
+        reply: &Received,
+        binder: Binder,
+    ) -> std::result::Result<Self, aim_binder_host::parcel::StatusCode> {
+        match binder {
+            Binder::Local(ptr) => reply
+                .local_service(ptr)
+                .map(Self::Local)
+                .ok_or(aim_binder_host::parcel::BAD_VALUE),
+            remote => reply
+                .retain_remote_binder(remote)
+                .map(|strong| Self::Remote(Arc::new(strong))),
+        }
+    }
+
     pub fn transact(
         &self,
         code: u32,
@@ -186,6 +203,16 @@ impl ServiceOwner {
         match self {
             Self::Remote(service) => service.transact(code, data, oneway),
             Self::Local(service) => service.transact(code, data, oneway),
+        }
+    }
+}
+
+/// How a diagnostic names the node: its handle, or this process's own.
+impl std::fmt::Display for ServiceOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Remote(service) => write!(f, "handle={}", service.handle),
+            Self::Local(_) => f.write_str("local"),
         }
     }
 }
@@ -3437,24 +3464,12 @@ impl System {
                 "package owner reply trailing bytes",
             ));
         }
-        let owner = match binder {
-            Binder::Local(ptr) => {
-                ServiceOwner::Local(self.process.local_service(ptr).ok_or_else(|| {
-                    Exception::new(
-                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                        "package owner: unknown local node",
-                    )
-                })?)
-            }
-            remote => ServiceOwner::Remote(Arc::new(reply.retain_remote_binder(remote).map_err(
-                |status| {
-                    Exception::new(
-                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                        format!("package owner lifetime: {status}"),
-                    )
-                },
-            )?)),
-        };
+        let owner = ServiceOwner::retain(&reply, binder).map_err(|status| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                format!("package owner lifetime: {status}"),
+            )
+        })?;
         self.check_package_bootstrap(bridge)?;
         Ok(owner)
     }
