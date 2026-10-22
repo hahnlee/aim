@@ -1599,6 +1599,73 @@ impl Boot {
         }
     }
 
+    /// `DoReboot`'s service stop: the services that are not shutdown
+    /// critical get SIGTERM in shutdown order and half of
+    /// `ro.build.shutdown_timeout` (6 s by default) to exit, then SIGKILL.
+    /// The shutdown critical and debugging services go with the rest.
+    fn stop_services_for_shutdown(&mut self) {
+        let timeout = self
+            .property("ro.build.shutdown_timeout")
+            .and_then(|v| v.parse::<u64>().ok())
+            .map_or(Duration::from_secs(6), Duration::from_secs);
+        let stop_first = self.executor.supervisor.shutdown_stop_first();
+        if !timeout.is_zero() {
+            let pids = self.executor.supervisor.stop_for_shutdown(
+                &stop_first,
+                true,
+                self.executor.launcher.as_mut(),
+                &self.executor.planner,
+            );
+            self.wait_to_be_reaped(&pids, timeout / 2);
+        }
+        let killed = self.executor.supervisor.stop_for_shutdown(
+            &stop_first,
+            false,
+            self.executor.launcher.as_mut(),
+            &self.executor.planner,
+        );
+        let still: Vec<String> = killed
+            .iter()
+            .filter(|pid| self.executor.supervisor.is_running_pid(**pid))
+            .map(|pid| pid.to_string())
+            .collect();
+        if !still.is_empty() {
+            self.report.log.push(format!(
+                "[service-misbehaving]: processes {} still running {} ms after SIGTERM",
+                still.join(", "),
+                (timeout / 2).as_millis()
+            ));
+        }
+    }
+
+    /// `WaitToBeReaped`: until `pids` have exited or `timeout` passed.
+    fn wait_to_be_reaped(&mut self, pids: &[u32], timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.executor.poll_processes();
+            if pids
+                .iter()
+                .all(|pid| !self.executor.supervisor.is_running_pid(*pid))
+            {
+                return;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            let wait = left.min(Duration::from_millis(50));
+            match &self.events {
+                Some(receiver) => match receiver.recv_timeout(wait) {
+                    Ok(PropertyEvent::Set(request)) => self.handle_set_request(request),
+                    Ok(PropertyEvent::ChildExited)
+                    | Err(RecvTimeoutError::Timeout)
+                    | Err(RecvTimeoutError::Disconnected) => {}
+                },
+                None => std::thread::sleep(wait),
+            }
+        }
+    }
+
     fn finish(&mut self) {
         if self.options.mode == RunMode::Run {
             // Stop new namespace admission before adbd goes offline and the
@@ -1610,6 +1677,7 @@ impl Boot {
                     .fatal
                     .get_or_insert_with(|| format!("init namespace retirement: {error}"));
             }
+            self.stop_services_for_shutdown();
             self.executor
                 .supervisor
                 .kill_all(self.executor.launcher.as_mut());

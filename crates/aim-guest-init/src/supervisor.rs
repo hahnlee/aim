@@ -75,6 +75,9 @@ pub struct ServiceRecord {
     pub time_crashed: Option<Instant>,
     pub crash_count: u32,
     pub starts: u64,
+    /// `Service::start_order_`: the place of its last start among all
+    /// starts (`next_start_order_`).
+    pub start_order: u64,
     mount_namespace: std::cell::Cell<Option<crate::service_namespace::Selection>>,
     origin: crate::service_namespace::LaunchOrigin,
     pub was_last_exit_ok: bool,
@@ -111,6 +114,7 @@ impl ServiceRecord {
             time_crashed: None,
             crash_count: 0,
             starts: 0,
+            start_order: 0,
             mount_namespace: std::cell::Cell::new(None),
             origin: crate::service_namespace::LaunchOrigin::Service,
             was_last_exit_ok: true,
@@ -356,6 +360,8 @@ pub struct Supervisor {
     /// Interface name (`aidl/foo`) → service.
     interfaces: HashMap<String, String>,
     exec_count: u64,
+    /// `Service::next_start_order_`.
+    next_start_order: u64,
     delayed: Vec<String>,
     events: Vec<SupervisorEvent>,
     synced: (usize, usize),
@@ -509,6 +515,8 @@ impl Supervisor {
         record.flags |= flags::RUNNING;
         record.time_started = Some(now);
         record.starts += 1;
+        self.next_start_order += 1;
+        record.start_order = self.next_start_order;
         self.by_pid.insert(pid, name.to_string());
         self.notify(name, "running", planner);
         Ok(StartOutcome::Started {
@@ -885,6 +893,62 @@ impl Supervisor {
     /// Kills every running service (shutdown). They are stopped, as init's
     /// shutdown stops them, so their exits run no `onrestart` and nothing
     /// restarts.
+    /// `DoReboot`'s first stop: the services neither shutdown critical nor
+    /// init's debugging services (`kDebuggingServices`).
+    pub fn shutdown_stop_first(&self) -> Vec<String> {
+        const DEBUGGING: [&str; 4] = ["tombstoned", "logd", "adbd", "console"];
+        self.records
+            .values()
+            .filter(|r| {
+                r.flags & (flags::SHUTDOWN_CRITICAL | flags::TEMPORARY) == 0
+                    && !DEBUGGING.contains(&r.def.name.as_str())
+            })
+            .map(|r| r.def.name.clone())
+            .collect()
+    }
+
+    /// `StopServices`: `Service::Terminate` (SIGTERM) or `Service::Stop`
+    /// (SIGKILL) of `names`, in `services_in_shutdown_order` (the last
+    /// started first). Returns the pids signalled.
+    pub fn stop_for_shutdown(
+        &mut self,
+        names: &[String],
+        terminate: bool,
+        launcher: &mut dyn Launcher,
+        planner: &Planner,
+    ) -> Vec<u32> {
+        let mut order: Vec<(u64, String)> = self
+            .records
+            .values()
+            .filter(|r| r.start_order > 0 && names.contains(&r.def.name))
+            .map(|r| (r.start_order, r.def.name.clone()))
+            .collect();
+        order.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut pids = Vec::new();
+        for (_, name) in order {
+            let record = self.records.get_mut(&name).unwrap();
+            record.flags &= !(flags::RESTARTING | flags::DISABLED_START);
+            record.flags |= flags::DISABLED;
+            let Some(pid) = record.pid else { continue };
+            pids.push(pid);
+            launcher.kill_group(
+                pid,
+                if terminate {
+                    libc::SIGTERM
+                } else {
+                    libc::SIGKILL
+                },
+            );
+            self.notify(&name, "stopping", planner);
+        }
+        pids
+    }
+
+    /// Whether `pid` is a service process not yet reaped.
+    pub fn is_running_pid(&self, pid: u32) -> bool {
+        self.by_pid.contains_key(&pid)
+    }
+
     pub fn kill_all(&mut self, launcher: &mut dyn Launcher) {
         for record in self.records.values_mut() {
             record.flags |= flags::DISABLED;
