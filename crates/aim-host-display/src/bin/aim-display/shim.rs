@@ -217,9 +217,15 @@ pub fn app_name() -> Option<String> {
     is_host().then(|| info("CFBundleDisplayName")).flatten()
 }
 
-/// Tell the user the app cannot open, and quit.
+/// Tell the user the app cannot open, and quit. A host the server started
+/// for notifications was not opened by the user: it quits without asking
+/// anyone to dismiss an alert, which would keep it running after the
+/// server it was started for is gone.
 fn fail(message: &str) -> ! {
     eprintln!("aim-display: {message}");
+    if BACKGROUND.load(Ordering::Relaxed) {
+        std::process::exit(1)
+    }
     let alert = send!(class(c"NSAlert"), c"new" => Id);
     send!(alert, c"setMessageText:" => (), Id = nsstring(message));
     send!(alert, c"runModal" => isize);
