@@ -8,7 +8,9 @@ description = "AOSP libbinder_ndk_sys (vendor variant): bindgen bindings to the 
 links = "binder_ndk"
 
 [lib]
-path = "../../_build/aosp/frameworks/native/libs/binder/rust/sys/lib.rs"
+# The fetched crate root, copied by aidl-gen so formatting stays out of
+# _build (crates/aim-build/src/nodes/aidl.rs).
+path = "../../target/aim/gen/binder-root/binder_ndk_sys/lib.rs"
 
 [dependencies]
 libc.workspace = true
