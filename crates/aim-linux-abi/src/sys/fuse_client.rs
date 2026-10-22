@@ -1202,13 +1202,14 @@ mod private_alias_tests {
         install_private_alias(alias, retained.clone()).unwrap();
         assert!(!super::super::fdtab::visible(alias));
         close(original);
-        unsafe {
-            libc::close(original);
-        }
+        // An unrelated file takes the slot: dup2 closes the original and
+        // installs it at once, so the number is never free for another
+        // thread of the process to take and have replaced.
         let replacement = std::fs::File::open("/dev/null").unwrap();
-        unsafe {
-            libc::dup2(std::os::fd::AsRawFd::as_raw_fd(&replacement), original);
-        }
+        assert_eq!(
+            unsafe { libc::dup2(std::os::fd::AsRawFd::as_raw_fd(&replacement), original) },
+            original
+        );
         assert!(get(original).is_none());
         assert!(std::sync::Arc::ptr_eq(&get(alias).unwrap(), &retained));
         assert!(weak.upgrade().is_some());
