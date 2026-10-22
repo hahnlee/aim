@@ -1641,6 +1641,13 @@ mod tests {
 
     #[test]
     fn fd_metadata_pin_rejects_private_and_preserves_closed_inode() {
+        // The test closes its descriptor and gives the number to another
+        // file; in its own process no other test can take the vacant slot.
+        if super::super::fdtab::isolated_kernel_test(
+            "sys::fsops::tests::fd_metadata_pin_rejects_private_and_preserves_closed_inode",
+        ) {
+            return;
+        }
         let (_guard, view) = crate::vfs::test_view();
         let first = view.join("data/pinned-original");
         let replacement = view.join("data/pinned-replacement");
