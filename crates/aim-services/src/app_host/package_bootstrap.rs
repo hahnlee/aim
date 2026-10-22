@@ -7,7 +7,8 @@
 //! of a uid) for the native package boot it runs (served as its own node),
 //! with the sub-bridges its construction takes: the package writer's
 //! effects, the maintenance owner, and the native installer's build flags,
-//! session icon decoder, confirmation leaves and external owners. The
+//! session icon decoder, confirmation leaves, external owners and staging
+//! input. The
 //! bridge's other owners, its other sub-bridges among them, are not
 //! implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
@@ -550,6 +551,14 @@ impl Service for PackageBootstrap {
                 bridge::write_get_installer_confirmation_bridge_reply(&mut p, Some(confirmation));
                 Ok(())
             }
+            bridge::GET_NATIVE_STAGING_BRIDGE => {
+                bridge::GetNativeStagingBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let staging = self.leaf(Arc::new(super::native_staging::NativeStaging::new(
+                    host.clone(),
+                )));
+                bridge::write_get_native_staging_bridge_reply(&mut p, Some(staging));
+                Ok(())
+            }
             bridge::GET_INSTALLER_POLICY_BRIDGE => {
                 bridge::GetInstallerPolicyBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let policy = self.leaf(Arc::new(
@@ -797,6 +806,7 @@ mod tests {
             bridge::GET_PACKAGE_MAINTENANCE_BRIDGE,
             bridge::GET_INSTALLER_EXTERNAL_BRIDGE,
             bridge::GET_INSTALLER_CONFIRMATION_BRIDGE,
+            bridge::GET_NATIVE_STAGING_BRIDGE,
         ] {
             let reply = call(code);
             let mut r = reply.reader();

@@ -89,6 +89,7 @@ mod media_router2;
 pub mod media_session;
 mod media_session_record;
 pub mod memory_info;
+mod native_staging;
 pub mod netpolicy_service;
 pub mod netstats;
 pub mod network;
