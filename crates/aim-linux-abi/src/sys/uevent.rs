@@ -104,11 +104,30 @@ fn parse_synth(req: &[u8]) -> Result<(&'static str, Vec<String>), Errno> {
     Ok((action, extra))
 }
 
+/// The boot's `uevent_seqnum`: the last sequence number a uevent took, as
+/// `/sys/kernel/uevent_seqnum` shows it; 0 before the first.
+pub(super) fn seqnum() -> u64 {
+    // The locked file must not reach a fork child (`spawn::own_fds`).
+    let _own = super::fork::spawn::own_fds();
+    let Ok(mut f) = std::fs::File::open(seqnum_path()) else {
+        return 0;
+    };
+    // SAFETY: a shared lock on our own file; closing it unlocks.
+    unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_SH) };
+    let mut s = String::new();
+    let _ = f.read_to_string(&mut s);
+    s.trim().parse().unwrap_or(0)
+}
+
+fn seqnum_path() -> std::path::PathBuf {
+    super::netif::kernel_dir("uevent").join("seqnum")
+}
+
 /// The next `uevent_seqnum` of the boot.
 pub(super) fn next_seqnum() -> u64 {
     // The locked file must not reach a fork child (`spawn::own_fds`).
     let _own = super::fork::spawn::own_fds();
-    let path = super::netif::kernel_dir("uevent").join("seqnum");
+    let path = seqnum_path();
     let Ok(mut f) = std::fs::OpenOptions::new()
         .read(true)
         .write(true)

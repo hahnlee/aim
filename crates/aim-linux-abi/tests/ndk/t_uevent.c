@@ -135,6 +135,13 @@ static void synthetic(void) {
   unsigned long a = strtoul(value(&m, "SEQNUM="), NULL, 10);
   unsigned long b = strtoul(value(&c, "SEQNUM="), NULL, 10);
   CHECK(b == a + 1);
+  // /sys/kernel/uevent_seqnum shows the last one taken.
+  fd = open("/sys/kernel/uevent_seqnum", O_RDONLY);
+  char seq[32] = {0};
+  CHECK(fd >= 0 && read(fd, seq, sizeof seq - 1) > 0);
+  close(fd);
+  CHECK(strtoul(seq, NULL, 10) == b && seq[strlen(seq) - 1] == '\n');
+  CHECK(open("/sys/kernel/uevent_seqnum", O_WRONLY) < 0);
   close(s);
 }
 
