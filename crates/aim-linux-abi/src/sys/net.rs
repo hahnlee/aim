@@ -3098,9 +3098,10 @@ const STAMP_NEW: u8 = 4;
 const IPPROTO_IP: u64 = 0;
 const L_IP_TOS: i32 = 1;
 const L_IP_TTL: i32 = 2;
-const L_IP_RETOPTS: u64 = 7;
-/// Darwin's IP_RETOPTS.
-const IP_RETOPTS: i32 = 8;
+/// Darwin's IP_RECVRETOPTS, Linux's IP_RETOPTS (7): a flag asking for the
+/// options of a reply to each datagram received. (Darwin's IP_RETOPTS is
+/// Linux's IP_OPTIONS.)
+const IP_RECVRETOPTS: i32 = 6;
 const L_IP_MULTICAST_ALL: u64 = 49;
 const IPPROTO_ICMP: u64 = 1;
 const IPPROTO_TCP: u64 = 6;
@@ -3202,6 +3203,7 @@ fn int_option(level: u64, opt: u64) -> Option<(i32, i32)> {
         (IPPROTO_TCP, 6) => (libc::IPPROTO_TCP, libc::TCP_KEEPCNT),
         (IPPROTO_IP, 1) => (libc::IPPROTO_IP, libc::IP_TOS),
         (IPPROTO_IP, 2) => (libc::IPPROTO_IP, libc::IP_TTL),
+        (IPPROTO_IP, 7) => (libc::IPPROTO_IP, IP_RECVRETOPTS),
         (IPPROTO_IP, 12) => (libc::IPPROTO_IP, libc::IP_RECVTTL),
         (IPPROTO_IP, 13) => (libc::IPPROTO_IP, libc::IP_RECVTOS),
         (IPPROTO_IPV6, 16) => (libc::IPPROTO_IPV6, libc::IPV6_UNICAST_HOPS),
@@ -3317,11 +3319,6 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
             }
             0
         }
-        // The IP options to send (ip(7)); Darwin keeps them alike.
-        (IPPROTO_IP, L_IP_RETOPTS) => errno::check(unsafe {
-            // SAFETY: the guest's option buffer of `len` bytes.
-            libc::setsockopt(fd, libc::IPPROTO_IP, IP_RETOPTS, val as *const _, len)
-        } as i64),
         (1, L_SO_PASSCRED) => {
             let Some(v) = int() else {
                 return -(EINVAL as i64);
