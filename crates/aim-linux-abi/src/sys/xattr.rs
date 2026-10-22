@@ -16,7 +16,7 @@ use std::{
 
 use super::fs::check_writable;
 use super::{genfs, procfs};
-use crate::errno::{self, E2BIG, EINVAL, ERANGE};
+use crate::errno::{self, E2BIG, EACCES, EINVAL, ENODATA, EPERM, ERANGE};
 use crate::sys::guest_cstr;
 use crate::vfs;
 
@@ -37,6 +37,69 @@ enum Target {
     /// Host path, whether a final symlink is followed, guest path.
     Path(CString, bool, String),
     Fd(i32),
+}
+
+/// `CAP_FOWNER`, `CAP_SYS_ADMIN`.
+const CAP_FOWNER: u64 = 1 << 3;
+const CAP_SYS_ADMIN: u64 = 1 << 21;
+
+/// The guest's view of the target (a final symlink unfollowed for the
+/// l* calls).
+fn target_stat(t: &Target) -> Result<libc::stat, i64> {
+    match t {
+        Target::Fd(fd) => super::fs::stat_fd_kernel(*fd),
+        Target::Path(host, follow, guest) => {
+            if !follow {
+                let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                // SAFETY: host path, local buffer.
+                if unsafe { libc::lstat(host.as_ptr(), &mut st) } < 0 {
+                    return Err(-(errno::last() as i64));
+                }
+                if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
+                    return Ok(st);
+                }
+            }
+            super::attrs::path_stat(guest).map_err(|error| -(error as i64))
+        }
+    }
+}
+
+/// `xattr_permission` (fs/xattr.c): `trusted.*` needs CAP_SYS_ADMIN;
+/// `user.*` is only on regular files and directories, a sticky
+/// directory's only for its owner or CAP_FOWNER to write, and then
+/// `inode_permission` for reading or writing; the other namespaces are
+/// the security modules', which check their own.
+fn permission(t: &Target, name: &[u8], write: bool) -> Result<(), i64> {
+    let refused = -(if write { EPERM } else { ENODATA } as i64);
+    let id = super::cred::current();
+    if name.starts_with(b"trusted.") {
+        return if id.cap_eff & CAP_SYS_ADMIN != 0 {
+            Ok(())
+        } else {
+            Err(refused)
+        };
+    }
+    if !name.starts_with(b"user.") {
+        return Ok(());
+    }
+    let st = target_stat(t)?;
+    let kind = st.st_mode & libc::S_IFMT;
+    if kind != libc::S_IFREG && kind != libc::S_IFDIR {
+        return Err(refused);
+    }
+    if kind == libc::S_IFDIR
+        && write
+        && st.st_mode & libc::S_ISVTX != 0
+        && st.st_uid != id.uid[super::attrs::FS]
+        && id.cap_eff & CAP_FOWNER == 0
+    {
+        return Err(-(EPERM as i64));
+    }
+    let want = if write { 2 } else { 4 };
+    if !super::attrs::permits(&st, want, &id, super::attrs::FS) {
+        return Err(-(EACCES as i64));
+    }
+    Ok(())
 }
 
 fn host_name(name: &[u8]) -> Result<CString, i64> {
@@ -117,6 +180,9 @@ fn get(t: Target, name: u64, value: u64, size: u64) -> i64 {
         Ok(n) => n,
         Err(e) => return e,
     };
+    if let Err(error) = permission(&t, name, false) {
+        return error;
+    }
     let size = size as usize;
     let r = host_get(&t, &hname, value as *mut u8, size);
     // A file without a label, or one the host keeps no attributes on
@@ -166,6 +232,9 @@ fn set(t: Target, name: u64, value: u64, size: u64, flags: u64) -> i64 {
     }
     if size as usize > SIZE_MAX {
         return -(E2BIG as i64);
+    }
+    if let Err(error) = permission(&t, name, true) {
+        return error;
     }
     let mut opts = options(&t);
     if flags & XATTR_CREATE != 0 {
@@ -262,6 +331,9 @@ fn remove(t: Target, name: u64) -> i64 {
         Ok(n) => n,
         Err(e) => return e,
     };
+    if let Err(error) = permission(&t, name, true) {
+        return error;
+    }
     // SAFETY: host path or fd.
     let r = unsafe {
         match &t {

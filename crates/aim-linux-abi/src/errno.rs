@@ -29,6 +29,7 @@ pub const ENOSPC: Errno = 28;
 pub const ERANGE: Errno = 34;
 pub const ENOSYS: Errno = 38;
 pub const ELOOP: Errno = 40;
+pub const ENODATA: Errno = 61;
 
 /// Translate a Darwin errno into its Linux value.
 pub const fn from_darwin(e: i32) -> Errno {
