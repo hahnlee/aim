@@ -256,14 +256,22 @@ mod tests {
     const CONFIG: &str =
         include_str!("../../../image/vendor/etc/aim/init-mount-namespace-policy.conf");
     fn fixture() -> (PathBuf, Layout, Catalog) {
-        let root = std::env::temp_dir().join(format!(
-            "aim-service-namespace-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        // Each test's own root: the tests run in parallel, and the clock
+        // alone can name two of them alike; a root a killed earlier run of
+        // the same pid left is another run's (as #1917's fixtures do).
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = loop {
+            let root = std::env::temp_dir().join(format!(
+                "aim-service-namespace-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            match fs::create_dir(&root) {
+                Ok(()) => break root,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("{}: {error}", root.display()),
+            }
+        };
         let layout = Layout {
             image: root.join("image"),
             data: root.join("data"),
