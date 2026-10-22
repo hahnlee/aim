@@ -13,6 +13,8 @@
 //!   them in its signal struct), which another process writes there
 //!   through `/proc/<pid>/oom_score_adj` and this one reads from its
 //!   mapping;
+//! - the process's `total_vm`, `data_vm` and `hiwater_vm` as the layer
+//!   counts them (`vm_account`), for `/proc/<pid>/status` and `stat`;
 //! - the pages of the main thread's stack that hold its argument and
 //!   environment strings. The process maps those pages from the record,
 //!   shared: the record is that memory, so a program that rewrites its
@@ -47,6 +49,8 @@ struct Header {
     tgid: AtomicU64,
     oom_score_adj: AtomicI32,
     oom_score_adj_min: AtomicI32,
+    /// `total_vm`, `data_vm` and `hiwater_vm` in bytes (`vm_account`).
+    vm: [AtomicU64; 3],
 }
 
 #[repr(C)]
@@ -81,6 +85,11 @@ static TGID: AtomicI32 = AtomicI32::new(0);
 /// Offset of `oom_score_adj` in the header; `oom_score_adj_min` follows.
 const OOM_AT: u64 = 56;
 const _: () = assert!(std::mem::offset_of!(Header, oom_score_adj) as u64 == OOM_AT);
+/// This process's memory totals while it has no record.
+static VM: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+/// Offset of the memory totals in the header.
+const VM_AT: u64 = 64;
+const _: () = assert!(std::mem::offset_of!(Header, vm) as u64 == VM_AT);
 
 /// The string pages mapped from the record: start and end.
 static MAPPED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
@@ -154,6 +163,9 @@ pub fn init(s: &StackInfo) {
     let [adj, min] = oom();
     h.oom_score_adj.store(adj, Relaxed);
     h.oom_score_adj_min.store(min, Relaxed);
+    for (slot, value) in h.vm.iter().zip(&VM) {
+        slot.store(value.load(Relaxed), Relaxed);
+    }
     h.tgid.store(TGID.load(Relaxed) as u64, Relaxed);
     for (slot, v) in [&h.lo, &h.len, &h.args[0], &h.args[1], &h.env[0], &h.env[1]]
         .into_iter()
@@ -214,6 +226,33 @@ pub fn set_oom(values: [i32; 2]) {
         h.oom_score_adj.store(values[0], Relaxed);
         h.oom_score_adj_min.store(values[1], Relaxed);
     }
+}
+
+/// Show this process's `total_vm`, `data_vm` and `hiwater_vm` (bytes) to
+/// the others.
+pub fn set_vm(values: [u64; 3]) {
+    for (slot, value) in VM.iter().zip(values) {
+        slot.store(value, Relaxed);
+    }
+    let t = OWN.load(Acquire);
+    if !t.is_null() {
+        // SAFETY: our own table, mapped for the life of the record.
+        let h = unsafe { &(*t).header };
+        for (slot, value) in h.vm.iter().zip(values) {
+            slot.store(value, Relaxed);
+        }
+    }
+}
+
+/// The `total_vm`, `data_vm` and `hiwater_vm` of process `pid`, this one's
+/// as last set; none without a record.
+pub fn vm_of(pid: i32) -> Option<[u64; 3]> {
+    // SAFETY: trivial.
+    if pid == unsafe { libc::getpid() } {
+        return Some(VM.each_ref().map(|value| value.load(Relaxed)));
+    }
+    let b = read_at(&open(pid)?, VM_AT, 24);
+    (b.len() == 24).then(|| [u64_at(&b, 0), u64_at(&b, 8), u64_at(&b, 16)])
 }
 
 /// The `oom_score_adj` and `oom_score_adj_min` of process `pid`; none
