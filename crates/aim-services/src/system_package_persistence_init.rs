@@ -11,10 +11,10 @@ use crate::{
         },
         settings::{PackageReadAttempt, ReadOwners, Settings},
     },
-    system::System,
+    system::{ServiceOwner, System},
 };
 use aim_binder_host::{
-    local::{LocalProcess, Strong},
+    local::LocalProcess,
     parcel::{EX_ILLEGAL_STATE, Exception, Parcel},
 };
 use aim_service_aidl::dev_aim_server_iinstallerrecoverypresentation as presentation;
@@ -277,11 +277,13 @@ pub fn construct_package_persistence_owned(
     Ok(OwnedPrepared { prepared, readers })
 }
 
+/// The icons' decoder: another process's node, or this process's own
+/// where it serves the bridge.
 pub struct IconOwner {
-    node: Strong,
+    node: ServiceOwner,
 }
 impl IconOwner {
-    pub fn new(node: Strong) -> Arc<Self> {
+    pub fn new(node: ServiceOwner) -> Arc<Self> {
         Arc::new(Self { node })
     }
     fn decode(&self, png: &[u8]) -> Result<Option<installer::codec::Object>, Exception> {

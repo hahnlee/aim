@@ -10,12 +10,9 @@ use crate::{
         },
         write::Apks,
     },
-    system::System,
+    system::{ServiceOwner, System},
 };
-use aim_binder_host::{
-    local::Strong,
-    parcel::{EX_ILLEGAL_STATE, Exception, Parcel},
-};
+use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::{
     dev_aim_server_iinstallerpolicybridge as api,
     dev_aim_server_ipackagemaintenancebridge as maintenance,
@@ -33,7 +30,9 @@ fn illegal(message: impl Into<String>) -> Exception {
 struct DeviceOwner {
     system: std::sync::Weak<System>,
     bridge: Arc<Bridge>,
-    leaf: Strong,
+    /// The flags' owner: another process's node, or this process's own
+    /// where it serves the bridge.
+    leaf: ServiceOwner,
     permissions: CallingPermissions,
 }
 impl DeviceOwner {
@@ -145,7 +144,7 @@ impl DeviceOwner {
 pub fn policy_source(
     system: &Arc<System>,
     bridge: &Arc<Bridge>,
-    leaf: Strong,
+    leaf: ServiceOwner,
 ) -> Result<PolicySource, Exception> {
     system.check_package_bootstrap(bridge)?;
     let permissions = permission_source(system, bridge)?;

@@ -156,12 +156,11 @@ impl System {
             changes,
             Arc::new(installer::existing::Restores::default()),
         )?;
-        let policy_leaf =
-            self.package_bootstrap_binder_leaf(bridge, api::GET_INSTALLER_POLICY_BRIDGE)?;
+        let policy_leaf = self.package_bootstrap_node(bridge, api::GET_INSTALLER_POLICY_BRIDGE)?;
         let policy =
             crate::system_package_installer_init::policy_source(self, bridge, policy_leaf)?;
         let icons = crate::system_package_persistence_init::IconOwner::new(
-            self.package_bootstrap_binder_leaf(bridge, api::GET_INSTALLER_RECOVERY_PRESENTATION)?,
+            self.package_bootstrap_node(bridge, api::GET_INSTALLER_RECOVERY_PRESENTATION)?,
         );
         let publisher = self.package_installer_publisher()?;
         let system = Arc::downgrade(self);
