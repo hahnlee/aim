@@ -940,9 +940,42 @@ const GRAY_8: i32 = 14;
 const OPAQUE: i32 = 1;
 const PREMUL: i32 = 2;
 
+/// `Bitmap.writeToParcel`: `Bitmap_writeToParcel`'s pixels, as RGBA if the
+/// format is one the Mac takes, then its gainmap (`writeBoolean`, then
+/// `writeTypedObject(Gainmap)`), read past: the Mac shows the base image,
+/// as a display without HDR does.
+pub(crate) fn bitmap(r: &mut Reader<'_>, files: &dyn Files) -> Result<Option<Image>> {
+    bitmap_at(r, files, 0)
+}
+
+fn bitmap_at(r: &mut Reader<'_>, files: &dyn Files, depth: usize) -> Result<Option<Image>> {
+    let image = native_bitmap(r, files)?;
+    if r.read_i32()? != 0 {
+        gainmap(r, files, depth)?;
+    }
+    Ok(image)
+}
+
+/// `Gainmap.writeToParcel` as `writeTypedObject` writes it: its contents
+/// (`writeTypedObject(Bitmap)`), then `Gainmap_writeToParcel`'s metadata,
+/// 17 floats (ratio min, max, gamma and epsilon SDR and HDR, three each,
+/// and the SDR and HDR display ratios) and the base image's type.
+fn gainmap(r: &mut Reader<'_>, files: &dyn Files, depth: usize) -> Result<()> {
+    if depth >= 8 {
+        return Err(BAD_VALUE);
+    }
+    if r.read_i32()? == 0 {
+        return Ok(());
+    }
+    if r.read_i32()? != 0 {
+        bitmap_at(r, files, depth + 1)?;
+    }
+    r.skip(18 * 4)
+}
+
 /// `Bitmap_writeToParcel`: its pixels as RGBA, if the format is one the
 /// Mac takes.
-pub(crate) fn bitmap(r: &mut Reader<'_>, files: &dyn Files) -> Result<Option<Image>> {
+fn native_bitmap(r: &mut Reader<'_>, files: &dyn Files) -> Result<Option<Image>> {
     r.read_i32()?; // mutable
     let color_type = r.read_i32()?;
     let alpha_type = r.read_i32()?;
@@ -1473,6 +1506,7 @@ pub(crate) mod tests {
         p.write_i32(0);
         p.write_i32(4);
         p.write_i32(i32::from_le_bytes([1, 2, 3, 4]));
+        p.write_i32(0); // no gainmap
     }
 
     /// `ApplicationInfo.writeToParcel` of an app with one shared library,
@@ -1847,6 +1881,47 @@ pub(crate) mod tests {
             Icon::Image(Image::Encoded(png.to_vec()))
         );
         assert_eq!(r.remaining(), 0);
+    }
+
+    /// `Bitmap.writeToParcel` of a bitmap with a gainmap: the base image is
+    /// read, and the gainmap's contents and metadata are read past to the
+    /// next field; a truncated gainmap is refused.
+    #[test]
+    fn reads_past_a_gainmap() {
+        let with_gainmap = |metadata: usize| {
+            let mut p = Parcel::new();
+            java_bitmap(&mut p);
+            let n = p.data().len();
+            // The base bitmap's own `writeBoolean(false)` becomes true.
+            let mut data = p.data()[..n - 4].to_vec();
+            data.extend_from_slice(&1i32.to_le_bytes());
+            let mut p = Parcel::new();
+            p.write_raw(&data, &[]);
+            p.write_i32(1); // writeTypedObject(Gainmap): present
+            p.write_i32(1); // its contents, writeTypedObject(Bitmap)
+            java_bitmap(&mut p);
+            for _ in 0..metadata {
+                p.write_f32(1.0);
+            }
+            p
+        };
+        let mut p = with_gainmap(17);
+        p.write_i32(0); // base image type
+        p.write_i32(-1977);
+        let mut r = Reader::new(p.data(), p.objects());
+        assert_eq!(
+            bitmap(&mut r, &NoFiles).unwrap(),
+            Some(Image::Rgba {
+                width: 1,
+                height: 1,
+                premultiplied: true,
+                pixels: vec![1, 2, 3, 4],
+            })
+        );
+        assert_eq!(r.read_i32().unwrap(), -1977);
+        let p = with_gainmap(10);
+        let mut r = Reader::new(p.data(), p.objects());
+        assert!(bitmap(&mut r, &NoFiles).is_err());
     }
 
     #[test]
