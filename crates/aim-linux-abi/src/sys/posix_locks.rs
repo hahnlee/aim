@@ -439,10 +439,20 @@ mod lifecycle_tests {
             return;
         }
         let actual = ProcessIdentity::running(unsafe { libc::getpid() }).unwrap();
-        let root = std::env::temp_dir().join(format!("aim-posix-bootstrap-{}", actual.host_pid));
-        std::fs::create_dir(&root).unwrap();
-        // Removed however the test leaves: a later process given this pid
-        // creates the same directory.
+        // A directory an earlier run of the same pid left (one killed before
+        // its guard ran) is another run's; take the next name, as #1917's
+        // fixtures do.
+        let root = (0u32..)
+            .map(|n| {
+                std::env::temp_dir().join(format!("aim-posix-bootstrap-{}-{n}", actual.host_pid))
+            })
+            .find(|root| match std::fs::create_dir(root) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+                Err(error) => panic!("{}: {error}", root.display()),
+            })
+            .unwrap();
+        // Removed however the test leaves.
         struct Root(std::path::PathBuf);
         impl Drop for Root {
             fn drop(&mut self) {
