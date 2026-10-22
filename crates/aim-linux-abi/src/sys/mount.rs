@@ -372,8 +372,8 @@ mod tests {
         let flags = 0o2 | 0o100 | 0o2000000; // O_RDWR | O_CREAT | O_CLOEXEC
         let fd = super::super::fs::openat([fd, p(&db), flags, 0o660, 0, 0]);
         assert!(fd >= 0, "open: {fd}");
-        // SAFETY: the fd just opened.
-        unsafe { libc::close(fd as i32) };
+        // Through the layer, which forgets its description (#2113).
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
         assert!(data.join("databases/contacts2.db").is_file());
         // Other apps' directories are hidden.
         assert!(!host("/data/user/0/com.other").exists());
