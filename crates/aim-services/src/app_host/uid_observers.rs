@@ -336,5 +336,8 @@ impl AppHost {
         if let (Change::Gone, Some(hints)) = (change, self.hint_manager.get()) {
             hints.uid_gone(uid);
         }
+        // AppOpsService's own observer: the uid crosses the foreground
+        // either way.
+        appops_service::uid_state_changed(self, uid);
     }
 }
