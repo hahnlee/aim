@@ -192,6 +192,27 @@ impl Display {
         }
     }
 
+    /// Start or stop a client's vsyncs. The flag changes under the lock
+    /// [`Self::on_vsync`] checks it and sends under, so every vsync sent
+    /// for the client is in its socket before a stop's `VSYNC_STOPPED`.
+    fn set_vsync(&self, client: &Client, enabled: bool) {
+        {
+            let _clients = self.clients.lock().unwrap();
+            client.vsync.store(enabled, Ordering::Relaxed);
+        }
+        if !enabled {
+            let e = Event {
+                kind: event::VSYNC_STOPPED,
+                sent_ns: vsync::monotonic_ns(),
+                ..Default::default()
+            };
+            // Unlike a vsync it waits for room, outside the lock, as the
+            // reader drains what came before it; a reader that went away
+            // gets none.
+            let _ = wire::send(client.sock.as_fd(), wire::bytes(&e), None);
+        }
+    }
+
     /// Run the display link while a client wants vsync.
     fn update_vsync(&self) {
         vsync::update(|| {
@@ -443,7 +464,7 @@ impl Display {
                     cursor::serve(r.id, textures.get(&r.id), changed, acquire, r.x, r.y);
                 }
                 wire::OP_SET_VSYNC => {
-                    client.vsync.store(r.flag != 0, Ordering::Relaxed);
+                    self.set_vsync(&client, r.flag != 0);
                     self.update_vsync();
                 }
                 wire::OP_WINDOWS if r.id == wire::VERSION => {

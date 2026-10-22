@@ -1,7 +1,6 @@
 //! `IComposerClient`: display 0, the macOS window, with one configuration
 //! (the window's size, the screen's density and refresh period).
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aim_hostcall::display::mode;
@@ -83,7 +82,9 @@ pub struct Shared {
     pub host: Host,
     pub display: Mutex<Display>,
     pub callback: Mutex<Option<Strong<dyn IComposerCallback>>>,
-    pub vsync: AtomicBool,
+    /// Whether SurfaceFlinger wants vsyncs, held while one is delivered so
+    /// that none is after `setVsyncEnabled(false)` returns.
+    pub vsync: Mutex<bool>,
 }
 
 impl Shared {
@@ -93,7 +94,7 @@ impl Shared {
             host,
             display,
             callback: Mutex::new(None),
-            vsync: AtomicBool::new(false),
+            vsync: Mutex::new(false),
         })
     }
 
@@ -102,7 +103,10 @@ impl Shared {
     pub fn run_vsync(&self) {
         let mut stats = VsyncStats::default();
         self.host.run_events(|e| {
-            if !self.vsync.load(Ordering::Relaxed) {
+            // onVsync is oneway, so holding the flag over it blocks a
+            // setVsyncEnabled only while the call is sent.
+            let wanted = self.vsync.lock().unwrap();
+            if !*wanted {
                 return;
             }
             let callback = self.callback.lock().unwrap().clone();
@@ -551,7 +555,7 @@ impl IComposerClient for Client {
 
     fn setVsyncEnabled(&self, display: i64, enabled: bool) -> binder::Result<()> {
         check_display(display)?;
-        self.0.vsync.store(enabled, Ordering::Relaxed);
+        *self.0.vsync.lock().unwrap() = enabled;
         self.0.host.set_vsync(enabled).map_err(|e| {
             log::error!("vsync {enabled}: {e:?}");
             error(EX_BAD_DISPLAY)
