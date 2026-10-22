@@ -21,7 +21,9 @@
 
 use super::mem::PAGE;
 use super::vmmap;
-use crate::patch::vm::{VM_FLAGS_FIXED, VM_FLAGS_OVERWRITE, mach_vm_protect, task};
+use crate::patch::vm::{
+    VM_FLAGS_FIXED, VM_FLAGS_OVERWRITE, mach_vm_deallocate, mach_vm_protect, task,
+};
 
 /// `ART_HEAP_REFERENCE_BASE` of the ART exception build.
 pub const BASE: u64 = 0x100_0000_0000;
@@ -101,18 +103,44 @@ pub fn touches_reserved(lo: u64, hi: u64) -> bool {
     false
 }
 
+/// Deallocate `[lo, hi)` of guest memory as Linux's munmap does, holes
+/// included (munmap(2): no error when the range has unmapped pages).
+/// Darwin's munmap and vm_deallocate raise a guard exception for a hole
+/// (`kGUARD_EXC_DEALLOC_GAP`), so the range first becomes one allocation,
+/// replacing what is mapped there as the unmap would remove it, and that
+/// goes. Without it (an address Darwin will not allocate), munmap answers.
+fn deallocate(lo: u64, hi: u64) -> i64 {
+    let mut at = lo;
+    // SAFETY: guest-requested unmap of guest memory: whatever is mapped in
+    // the range goes either way.
+    if hi > lo
+        && unsafe {
+            mach_vm_allocate(
+                task(),
+                &mut at,
+                hi - lo,
+                VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+            )
+        } == 0
+    {
+        // SAFETY: the allocation just made.
+        unsafe { mach_vm_deallocate(task(), lo, hi - lo) };
+        return 0;
+    }
+    // SAFETY: guest-requested unmap of guest memory.
+    crate::errno::check(unsafe { libc::munmap(lo as *mut _, (hi - lo) as usize) } as i64)
+}
+
 /// Unmap `[addr, addr+len)` for the guest: the part inside the window is
 /// reserved again, the rest is deallocated.
 pub fn unmap(addr: u64, len: u64) -> i64 {
     let hi = addr.saturating_add(len);
     let Some((wlo, whi)) = clip(addr, hi) else {
-        // SAFETY: guest-requested unmap of guest memory.
-        return crate::errno::check(unsafe { libc::munmap(addr as *mut _, len as usize) } as i64);
+        return deallocate(addr, hi);
     };
     for (lo, hi) in [(addr, wlo), (whi, hi)] {
         if lo < hi {
-            // SAFETY: guest-requested unmap of guest memory outside the window.
-            unsafe { libc::munmap(lo as *mut _, (hi - lo) as usize) };
+            deallocate(lo, hi);
         }
     }
     debug_assert!(wlo % PAGE == 0 && whi % PAGE == 0);
@@ -182,5 +210,31 @@ mod tests {
         assert_eq!(unmap(at, 4 * PAGE), 0);
         assert_eq!(msync(at), -(libc::ENOMEM as i64));
         assert!(is_free(at, 4 * PAGE));
+    }
+
+    /// munmap(2) over a range with a hole: no error, everything in it goes.
+    #[test]
+    fn unmapping_over_a_hole_removes_the_mapped_pages() {
+        // SAFETY: a fresh anonymous mapping of our own, outside the window.
+        let p = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                (3 * PAGE) as usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        } as u64;
+        assert!(!(BASE..END).contains(&p));
+        // SAFETY: the middle page of that mapping.
+        assert_eq!(
+            unsafe { libc::munmap((p + PAGE) as *mut _, PAGE as usize) },
+            0
+        );
+        assert_eq!(vmmap::regions(p, p + 3 * PAGE).count(), 2);
+        assert_eq!(unmap(p, 3 * PAGE), 0);
+        assert!(vmmap::regions(p, p + 3 * PAGE).next().is_none());
+        assert_eq!(unmap(p, 0), -(libc::EINVAL as i64));
     }
 }
