@@ -47,3 +47,25 @@ pub mod pipe_identity;
 pub mod bpf_object;
 
 pub mod cgroup_v1;
+
+/// A new test directory of this process's own, `<prefix>-<pid>-<n>` in the
+/// system's temporary directory: created exclusively, skipping names that
+/// exist, so tests running at once and a killed earlier run with the same
+/// pid never share one (#2117).
+#[cfg(test)]
+pub(crate) fn scratch_dir(prefix: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let dir = std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return dir,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => panic!("{}: {error}", dir.display()),
+        }
+    }
+}

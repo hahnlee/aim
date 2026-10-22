@@ -412,16 +412,23 @@ pub fn init_caught_signals(table: &Path, process: ProcessIdentity) -> io::Result
 /// flushed to the disk.
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
+    // The time, and a count of this process's own: two writers of one
+    // process within the clock's resolution (a microsecond) get two
+    // names (#2117).
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let temporary: PathBuf = path.with_extension(format!("{}-{nonce}.tmp", std::process::id()));
+    let count = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary: PathBuf =
+        path.with_extension(format!("{}-{nonce}-{count}.tmp", std::process::id()));
+    // A name that exists is another writer's, not this one's to remove.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
     let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
         file.write_all(bytes)?;
         fs::rename(&temporary, path)
     })();
@@ -445,15 +452,7 @@ mod tests {
     }
     #[test]
     fn actual_process_start_time_rejects_reused_or_dead_init_identity() {
-        let root = std::env::temp_dir().join(format!(
-            "aim-pid-owner-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
+        let root = crate::scratch_dir("aim-pid-owner");
         let mut child = Child(
             Command::new("sleep")
                 .arg("30")
@@ -500,14 +499,7 @@ mod tests {
     }
     #[test]
     fn retirement_closes_namespace_admission_while_owner_process_is_live() {
-        let root = std::env::temp_dir().join(format!(
-            "aim-retire-admission-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = crate::scratch_dir("aim-retire-admission");
         let table = root.join("identity/by-pid");
         let image = root.join("image");
         fs::create_dir_all(&image).unwrap();
@@ -540,14 +532,7 @@ mod tests {
     }
     #[test]
     fn retirement_preserves_new_namespace_and_foreign_process_records() {
-        let root = std::env::temp_dir().join(format!(
-            "aim-retire-cas-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = crate::scratch_dir("aim-retire-cas");
         let process = ProcessIdentity::running_strict(std::process::id() as i32).unwrap();
         let old = InitRegistration::register(&root, process, "old").unwrap();
         let new = InitRegistration::register(&root, process, "new").unwrap();

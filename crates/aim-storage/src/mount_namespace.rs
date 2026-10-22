@@ -481,15 +481,7 @@ mod tests {
     }
     #[test]
     fn cross_process_commit_updates_existing_generation_mapping() {
-        let root = std::env::temp_dir().join(format!(
-            "aim-mount-child-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
+        let root = crate::scratch_dir("aim-mount-child");
         let owner = Namespace::open(&root, "shared-child").unwrap();
         owner.initialize("root\t/\t/actual-root\n").unwrap();
         let generation = owner.generation().unwrap();
@@ -521,15 +513,7 @@ mod tests {
     }
     #[test]
     fn shared_generation_and_private_clone_preserve_actual_mutation_order() {
-        let root = std::env::temp_dir().join(format!(
-            "aim-mount-owner-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
+        let root = crate::scratch_dir("aim-mount-owner");
         let first = Namespace::open(&root, "initial").unwrap();
         first.initialize("root\t/\t/image\n").unwrap();
         let second = Namespace::open(&root, "initial").unwrap();

@@ -272,15 +272,7 @@ mod tests {
             ffi::CString,
             os::unix::{ffi::OsStrExt, fs::PermissionsExt},
         };
-        let root = std::env::temp_dir().join(format!(
-            "aim-constructor-group-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
+        let root = crate::scratch_dir("aim-constructor-group");
         let data = root.join("data");
         fs::create_dir(&data).unwrap();
         for file in FILES {
@@ -349,15 +341,7 @@ mod tests {
     }
     #[test]
     fn only_committed_immutable_constructor_can_be_consumed() {
-        let root = std::env::temp_dir().join(format!(
-            "aim-constructor-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
+        let root = crate::scratch_dir("aim-constructor");
         let data = root.join("data");
         fs::create_dir(&data).unwrap();
         for file in FILES {
