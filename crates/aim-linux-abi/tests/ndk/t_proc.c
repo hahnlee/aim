@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <sys/utsname.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -249,6 +250,14 @@ static void system_files(void) {
   // A value init recorded under kernfs.
   CHECK(slurp("/proc/sys/kernel/panic_on_oops", big, sizeof big) > 0 && !strcmp(big, "1\n"));
   CHECK(slurp("/proc/version", big, sizeof big) > 0 && !strncmp(big, "Linux version", 13));
+  // All three are utsname()->release.
+  struct utsname u;
+  CHECK(uname(&u) == 0);
+  char release[80];
+  snprintf(release, sizeof release, "Linux version %s ", u.release);
+  CHECK(!strncmp(big, release, strlen(release)) && strstr(big, u.version) != NULL);
+  snprintf(release, sizeof release, "%s\n", u.release);
+  CHECK(slurp("/proc/sys/kernel/osrelease", big, sizeof big) > 0 && !strcmp(big, release));
 }
 
 static void proc_dirs(void) {

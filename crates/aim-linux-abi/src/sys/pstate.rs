@@ -235,13 +235,16 @@ pub fn kernel_release() -> &'static str {
     })
 }
 
+/// `utsname()->version`, which `/proc/version` shows too.
+pub const KERNEL_VERSION: &str = "#1 SMP PREEMPT";
+
 /// Linux `struct utsname`: six 65-byte fields.
 pub fn uname(a: [u64; 6]) -> i64 {
     let fields: [&[u8]; 6] = [
         b"Linux",
         b"localhost",
         kernel_release().as_bytes(),
-        b"#1 SMP PREEMPT",
+        KERNEL_VERSION.as_bytes(),
         b"aarch64",
         b"(none)",
     ];
