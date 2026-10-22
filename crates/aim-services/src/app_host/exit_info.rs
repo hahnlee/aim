@@ -35,6 +35,7 @@ pub(super) const REASON_UNKNOWN: i32 = 0;
 pub(super) const REASON_CRASH: i32 = 4;
 pub(super) const REASON_CRASH_NATIVE: i32 = 5;
 pub(super) const REASON_ANR: i32 = 6;
+pub(super) const REASON_INITIALIZATION_FAILURE: i32 = 7;
 pub(super) const REASON_PERMISSION_CHANGE: i32 = 8;
 pub(super) const REASON_USER_REQUESTED: i32 = 10;
 pub(super) const REASON_DEPENDENCY_DIED: i32 = 12;

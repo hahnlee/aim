@@ -343,12 +343,19 @@ impl WebViewUpdate {
                 continue;
             };
             started += 1;
+            let (shared, crashed) = (self.shared.clone(), abi.clone());
             if let Err(e) = self.host.start_isolated_entry_point(
                 RELRO_FILE_CREATOR,
                 &[package.clone(), library.clone()],
                 &format!("WebViewLoader-{abi}"),
                 &abi,
                 SHARED_RELRO_UID,
+                Arc::new(move || {
+                    eprintln!(
+                        "app host: webviewupdate: relro file creator for {crashed} crashed. Proceeding without"
+                    );
+                    relro_finished(&shared);
+                }),
             ) {
                 eprintln!(
                     "app host: webviewupdate: error starting relro file creator for abi {abi}: {}",
@@ -395,11 +402,16 @@ impl WebViewUpdate {
         if caller != SHARED_RELRO_UID as i32 && caller != SYSTEM_UID {
             return;
         }
-        if let Some(s) = self.shared.0.lock().unwrap().as_mut() {
-            s.relros_finished += 1;
-        }
-        self.shared.1.notify_all();
+        relro_finished(&self.shared);
     }
+}
+
+/// `notifyRelroCreationCompleted`: one more RELRO file creator finished.
+fn relro_finished(shared: &(Mutex<Option<State>>, Condvar)) {
+    if let Some(s) = shared.0.lock().unwrap().as_mut() {
+        s.relros_finished += 1;
+    }
+    shared.1.notify_all();
 }
 
 /// `webViewIsReadyLocked`.

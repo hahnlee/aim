@@ -343,6 +343,9 @@ struct App {
     /// (`getIsolatedEntryPoint`).
     isolated: bool,
     entry_point: Option<(String, Vec<String>)>,
+    /// What runs when it crashes (`ProcessErrorStateRecord
+    /// .getCrashHandler`).
+    crash_handler: Option<Arc<dyn Fn() + Send + Sync>>,
     /// The application it is bound with when not its package's
     /// (`ProcessRecord.info`): an external service's, the defining
     /// package's under the client's name and uid.
@@ -360,8 +363,9 @@ struct App {
     config: Option<config::Configuration>,
     /// The providers it was handed (`ProcessRecord.mProviders`).
     providers: Vec<package::info::ProviderInfo>,
-    /// Whether it crashed too often to keep its services
-    /// (`ProcessRecord.setRemoved`, without `allowRestart`).
+    /// Whether its services go with it: it crashed too often to keep
+    /// them (`ProcessRecord.setRemoved`, without `allowRestart`), or its
+    /// start timed out.
     removed: bool,
     /// Its start's first frame (`ApplicationStartInfo
     /// .TIMESTAMP_INITIAL_RENDERTHREAD_FRAME`,
@@ -1222,8 +1226,9 @@ impl AppHost {
     /// `ActivityManagerInternal.startIsolatedProcess`: a process `process`
     /// of the system (`android`) with `uid`, isolated, that runs `entry`'s
     /// `main` with `args` once it attaches (`runIsolatedEntryPoint`)
-    /// instead of an application, for `abi`. The package manager knows
-    /// `uid` to be the system's until it dies.
+    /// instead of an application, for `abi`, and `crash_handler` when it
+    /// crashes. The package manager knows `uid` to be the system's until
+    /// it dies.
     pub(super) fn start_isolated_entry_point(
         &self,
         entry: &str,
@@ -1231,6 +1236,7 @@ impl AppHost {
         process: &str,
         abi: &str,
         uid: u32,
+        crash_handler: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<i32, Exception> {
         let inputs = self.inputs()?;
         let configured = self
@@ -1302,6 +1308,7 @@ impl AppHost {
                 package_uid: SYSTEM_UID,
                 isolated: true,
                 entry_point: Some((entry.to_string(), args.to_vec())),
+                crash_handler: Some(crash_handler),
                 application_info: None,
                 pid,
                 started,
@@ -1319,6 +1326,7 @@ impl AppHost {
                 last_mem_info: None,
             },
         );
+        self.watch_start(start_seq);
         Ok(pid)
     }
 
@@ -1409,6 +1417,7 @@ impl AppHost {
                 package_uid: owner,
                 isolated: true,
                 entry_point: None,
+                crash_handler: None,
                 application_info: Some(info),
                 pid,
                 started,
@@ -1426,6 +1435,7 @@ impl AppHost {
                 last_mem_info: None,
             },
         );
+        self.watch_start(start_seq);
         Ok((start_seq, pid))
     }
 
@@ -1685,6 +1695,7 @@ impl AppHost {
                 package_uid,
                 isolated,
                 entry_point: None,
+                crash_handler: None,
                 application_info: None,
                 pid,
                 started,
@@ -1705,6 +1716,7 @@ impl AppHost {
                 last_mem_info: None,
             },
         );
+        self.watch_start(start_seq);
         Ok((start_seq, pid))
     }
 
@@ -1963,6 +1975,7 @@ impl AppHost {
                 package_uid: SYSTEM_UID,
                 isolated: false,
                 entry_point: None,
+                crash_handler: None,
                 application_info: None,
                 pid,
                 started: Instant::now(),
@@ -2022,6 +2035,51 @@ impl AppHost {
             .any(|a| a.uid as i32 == uid)
     }
 
+    /// `PROC_START_TIMEOUT_MSG` for the start `start_seq`, posted once it
+    /// started (`handleProcessStartedLocked`).
+    fn watch_start(&self, start_seq: i64) {
+        const PROC_START_TIMEOUT: Duration = Duration::from_secs(10);
+        let multiplier = self
+            .property("ro.hw_timeout_multiplier")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
+        let host = self.me.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(PROC_START_TIMEOUT * multiplier);
+            if let Some(host) = host.upgrade() {
+                host.start_timed_out(start_seq);
+            }
+        });
+    }
+
+    /// `handleProcessStartOrKillTimeoutLocked` of a start: a process that
+    /// has not attached is killed (`REASON_INITIALIZATION_FAILURE`), and
+    /// what it had goes as for a death, its services brought down
+    /// (`ActiveServices.processStartTimedOutLocked`) rather than restarted.
+    fn start_timed_out(&self, start_seq: i64) {
+        let pid = {
+            let mut apps = self.apps.lock().unwrap();
+            let Some(app) = apps.get_mut(&start_seq).filter(|a| a.thread.is_none()) else {
+                return;
+            };
+            eprintln!(
+                "app host: Process {}/{} (pid {}) failed to attach",
+                app.process, app.uid, app.pid
+            );
+            app.removed = true;
+            app.pid
+        };
+        if let Err(e) = self.kill_process(
+            start_seq,
+            exit_info::REASON_INITIALIZATION_FAILURE,
+            exit_info::SUBREASON_UNKNOWN,
+            "start timeout",
+        ) {
+            eprintln!("app host: kill of pid {pid}: {e}");
+        }
+        self.process_died(start_seq, pid);
+    }
+
     /// The process of `start_seq`, `pid`, died: what it had goes, and its
     /// exit is noted (`noteProcessDiedLocked`).
     fn process_died(&self, start_seq: i64, pid: i32) {
@@ -2074,11 +2132,12 @@ impl AppHost {
     /// `AppErrors.crashApplicationInner` for the process of `pid` and
     /// `uid`: its exit is noted as a crash (`native` for a native one), and
     /// as `handleAppCrashLSPB` does, its services' crash counts go up, and
-    /// a process that crashed again within `MIN_CRASH_INTERVAL`, or too
-    /// often in the last hours, is removed: its services are not started
-    /// again, unless a foreground one may be (`removeProcessLocked`'s
-    /// `allowRestart`), and it is marked bad, so broadcasts no longer start
-    /// it until something else does (`markBadProcess`).
+    /// a process that is not isolated and crashed again within
+    /// `MIN_CRASH_INTERVAL`, or too often in the last hours, is removed:
+    /// its services are not started again, unless a foreground one may be
+    /// (`removeProcessLocked`'s `allowRestart`), and it is marked bad, so
+    /// broadcasts no longer start it until something else does
+    /// (`markBadProcess`). Otherwise its crash handler runs.
     fn app_crashed(&self, pid: i32, uid: u32, native: bool) {
         const PROCESS_CRASH_COUNT_RESET_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
         const PROCESS_CRASH_COUNT_LIMIT: u32 = 12;
@@ -2092,6 +2151,8 @@ impl AppHost {
                 (
                     *seq,
                     a.process.clone(),
+                    a.isolated,
+                    a.crash_handler.clone(),
                     exit_info::ExitInfo::raw(
                         &a.package,
                         &a.process,
@@ -2102,7 +2163,7 @@ impl AppHost {
                     ),
                 )
             });
-        let Some((start_seq, process, mut exit)) = found else {
+        let Some((start_seq, process, isolated, crash_handler, mut exit)) = found else {
             return;
         };
         exit.reason = if native {
@@ -2113,42 +2174,50 @@ impl AppHost {
         exit.description = Some("crash".into());
         self.note_exit(&exit, true);
         let try_again = self.services_crashed(start_seq);
-        let now = Instant::now();
-        let key = (process, uid);
-        let mut errors = self.app_errors.lock().unwrap();
-        let quick = errors
-            .crash_times
-            .get(&key)
-            .is_some_and(|t| now < *t + services::MIN_CRASH_INTERVAL);
-        let over = errors.crash_counts.get(&key).is_some_and(|(first, n)| {
-            now < *first + PROCESS_CRASH_COUNT_RESET_INTERVAL && *n >= PROCESS_CRASH_COUNT_LIMIT
-        });
-        if quick || over {
-            let reason = if quick {
-                "crashed quickly"
-            } else {
-                "over process crash limit"
+        // An isolated process has no persistent identity to count its
+        // crashes by.
+        if !isolated {
+            let now = Instant::now();
+            let key = (process, uid);
+            let mut errors = self.app_errors.lock().unwrap();
+            let quick = errors
+                .crash_times
+                .get(&key)
+                .is_some_and(|t| now < *t + services::MIN_CRASH_INTERVAL);
+            let over = errors.crash_counts.get(&key).is_some_and(|(first, n)| {
+                now < *first + PROCESS_CRASH_COUNT_RESET_INTERVAL && *n >= PROCESS_CRASH_COUNT_LIMIT
+            });
+            if quick || over {
+                let reason = if quick {
+                    "crashed quickly"
+                } else {
+                    "over process crash limit"
+                };
+                eprintln!(
+                    "app host: process {} has crashed too many times, killing! Reason: {reason}",
+                    key.0
+                );
+                errors.crash_times.remove(&key);
+                errors.crash_counts.remove(&key);
+                errors.bad.insert(key);
+                if let Some(app) = self.apps.lock().unwrap().get_mut(&start_seq) {
+                    app.removed = !try_again;
+                }
+                return;
+            }
+            errors.crash_times.insert(key.clone(), now);
+            let count = match errors.crash_counts.get(&key) {
+                Some((first, n)) if *first + PROCESS_CRASH_COUNT_RESET_INTERVAL >= now => {
+                    (*first, n + 1)
+                }
+                _ => (now, 1),
             };
-            eprintln!(
-                "app host: process {} has crashed too many times, killing! Reason: {reason}",
-                key.0
-            );
-            errors.crash_times.remove(&key);
-            errors.crash_counts.remove(&key);
-            errors.bad.insert(key);
-            if let Some(app) = self.apps.lock().unwrap().get_mut(&start_seq) {
-                app.removed = !try_again;
-            }
-            return;
+            errors.crash_counts.insert(key, count);
         }
-        errors.crash_times.insert(key.clone(), now);
-        let count = match errors.crash_counts.get(&key) {
-            Some((first, n)) if *first + PROCESS_CRASH_COUNT_RESET_INTERVAL >= now => {
-                (*first, n + 1)
-            }
-            _ => (now, 1),
-        };
-        errors.crash_counts.insert(key, count);
+        // Posted to the handler.
+        if let Some(handler) = crash_handler {
+            std::thread::spawn(move || handler());
+        }
     }
 
     /// `UserController.handleIncomingUser` for `uid`: the user it acts as.
@@ -5392,5 +5461,73 @@ mod tests {
             GWP_ASAN_LEVEL_ALWAYS | NATIVE_HEAP_ZERO_INIT_ENABLED
         );
         assert_eq!(instruction_set("arm64-v8a"), "arm64");
+    }
+
+    /// An app host of no image, and an isolated start of it, `seq`, with
+    /// `crash_handler`.
+    fn host_with_start(seq: i64, crash_handler: Arc<dyn Fn() + Send + Sync>) -> Arc<AppHost> {
+        let driver = aim_binder_driver::Driver::new();
+        let credentials = aim_binder_driver::Credentials {
+            pid: 97_301,
+            euid: 1000,
+            security_context: None,
+        };
+        let host = AppHost::new(LocalProcess::open(
+            &driver,
+            aim_binder_driver::Device::Binder,
+            credentials,
+        ));
+        host.apps.lock().unwrap().insert(
+            seq,
+            App {
+                package: "android".into(),
+                process: "WebViewLoader-arm64-v8a".into(),
+                uid: FIRST_ISOLATED_UID,
+                package_uid: SYSTEM_UID,
+                isolated: true,
+                entry_point: Some(("E".into(), Vec::new())),
+                crash_handler: Some(crash_handler),
+                application_info: None,
+                pid: 4321,
+                started: Instant::now(),
+                start_elapsed: 0,
+                start_uptime: 0,
+                thread: None,
+                activities: Vec::new(),
+                config: None,
+                providers: Vec::new(),
+                removed: false,
+                first_frame: None,
+                last_activity: 0,
+                persistent: false,
+                package_deps: Vec::new(),
+                last_mem_info: None,
+            },
+        );
+        host
+    }
+
+    /// `handleProcessStartOrKillTimeoutLocked`: a start that has not
+    /// attached goes, its services with it.
+    #[test]
+    fn a_start_that_never_attaches_times_out() {
+        let host = host_with_start(7, Arc::new(|| {}));
+        host.start_timed_out(7);
+        assert!(host.apps.lock().unwrap().is_empty());
+    }
+
+    /// `handleAppCrashLSPB`: an isolated process's crash runs its crash
+    /// handler and counts no crash of its name.
+    #[test]
+    fn an_isolated_crash_runs_its_crash_handler() {
+        let (ran, ran_rx) = std::sync::mpsc::channel();
+        let ran = Mutex::new(ran);
+        let host = host_with_start(7, Arc::new(move || ran.lock().unwrap().send(()).unwrap()));
+        for _ in 0..2 {
+            host.app_crashed(4321, FIRST_ISOLATED_UID, true);
+            ran_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        let errors = host.app_errors.lock().unwrap();
+        assert!(errors.crash_times.is_empty() && errors.bad.is_empty());
     }
 }
