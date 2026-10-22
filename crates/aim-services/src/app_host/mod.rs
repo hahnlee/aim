@@ -100,6 +100,7 @@ pub mod package_boot_context;
 pub mod package_boot_lifecycle;
 pub mod package_bootstrap;
 mod package_checksums;
+mod package_effects;
 pub mod package_initial_context;
 pub mod package_installer;
 pub mod package_resolution_policy;
@@ -5311,7 +5312,7 @@ impl Service for Control {
             std::thread::spawn(move || {
                 if let Some(system) = host.system.get() {
                     match package_boot::run(&host, system) {
-                        Ok(()) => eprintln!("app host: package boot: through the initial scan"),
+                        Ok(()) => eprintln!("app host: package boot: through its construction"),
                         Err(e) => eprintln!("app host: package boot: {e:?}"),
                     }
                 }

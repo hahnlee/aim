@@ -1,7 +1,8 @@
 //! The native package boot, run by the app host as system_server's
 //! `NativePackageBootstrap` runs it (`begin`, then `Construction.finish`):
 //! the app host's own bootstrap bridge attached as this process's node,
-//! the boot session begun and its raw scan finished.
+//! the boot session begun, its scans finished and its construction
+//! finished.
 
 use std::sync::Arc;
 
@@ -28,7 +29,7 @@ fn call<T>(
     read(&mut reply.reader()).map_err(state)?
 }
 
-/// `NativePackageBootstrap.begin` and the raw scan of `finish`.
+/// `NativePackageBootstrap.begin`, and `finish` through its construction.
 pub(super) fn run(host: &Arc<AppHost>, system: &Arc<System>) -> Result<(), Exception> {
     let Binder::Local(ptr) = host
         .process
@@ -57,5 +58,11 @@ pub(super) fn run(host: &Arc<AppHost>, system: &Arc<System>) -> Result<(), Excep
         session::FINISH_INITIAL_SCAN,
         |p| session::FinishInitialScan {}.write(p),
         session::read_finish_initial_scan_reply,
+    )?;
+    call(
+        &boot,
+        session::FINISH_CONSTRUCTION,
+        |p| session::FinishConstruction {}.write(p),
+        session::read_finish_construction_reply,
     )
 }

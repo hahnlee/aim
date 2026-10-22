@@ -126,7 +126,7 @@ impl AppHost {
 
     /// `ProtectedPackages.isPackageDataProtected`: as its state is (a
     /// device or profile owner's packages are #1521).
-    fn data_protected(&self, package: &str) -> Result<bool, Exception> {
+    pub(super) fn data_protected(&self, package: &str) -> Result<bool, Exception> {
         self.writes()?.protected(package)?.ok_or_else(|| {
             self.unimplemented_named("activity", "a device or profile owner's packages (#1521)")
         })

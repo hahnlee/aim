@@ -4,9 +4,9 @@
 //! app host's own owners (`boot_policy`'s decisions, the boot leaves, the
 //! current package version, the native-library and SDK-library policies,
 //! the installer's SELinux labels through the agent, the permission gids
-//! of a uid) for the native package boot it runs (served as its own
-//! node). The bridge's other owners, its sub-bridges among them, are not
-//! implemented (#2022).
+//! of a uid, the package writer's effects) for the native package boot
+//! it runs (served as its own node). The bridge's other owners, its
+//! other sub-bridges among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex, OnceLock};
@@ -504,6 +504,14 @@ impl Service for PackageBootstrap {
                 bridge::GetWebInstantAppsState::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let state = self.leaf(super::web_instant_apps::WebInstantApps::new(host.clone()));
                 bridge::write_get_web_instant_apps_state_reply(&mut p, Some(state));
+                Ok(())
+            }
+            bridge::GET_PACKAGE_MUTATION_BRIDGE => {
+                bridge::GetPackageMutationBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let effects = self.leaf(Arc::new(super::package_effects::PackageEffects::new(
+                    host.clone(),
+                )));
+                bridge::write_get_package_mutation_bridge_reply(&mut p, Some(effects));
                 Ok(())
             }
             bridge::GET_PACKAGE_INSTALLED_PERMISSIONS => {
