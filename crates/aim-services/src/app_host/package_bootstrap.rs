@@ -5,9 +5,10 @@
 //! current package version, the native-library and SDK-library policies,
 //! the installer's SELinux labels through the agent, the permission gids
 //! of a uid, the package writer's effects, the installer's build flags and
-//! its sessions' icon decoder, the maintenance owner) for the native
-//! package boot it runs (served as its own node). The bridge's other
-//! owners, its other sub-bridges among them, are not implemented (#2022).
+//! its sessions' icon decoder and external owners, the maintenance owner)
+//! for the native package boot it runs (served as its own node). The
+//! bridge's other owners, its other sub-bridges among them, are not
+//! implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex, OnceLock};
@@ -49,6 +50,8 @@ pub struct PackageBootstrap {
     apex_system_services: Mutex<Vec<String>>,
     /// `SystemConfig.getInstance()`, read once.
     config: OnceLock<SystemConfig>,
+    /// The installer's external owner, made once (`installerExternal`).
+    installer_external: OnceLock<aim_binder_host::parcel::Binder>,
 }
 
 /// `Build.FINGERPRINT`: `ro.build.fingerprint`, else made of the build's
@@ -117,6 +120,7 @@ impl PackageBootstrap {
             host,
             apex_system_services: Mutex::new(Vec::new()),
             config: OnceLock::new(),
+            installer_external: OnceLock::new(),
         }
     }
 
@@ -523,6 +527,16 @@ impl Service for PackageBootstrap {
                 bridge::write_get_package_maintenance_bridge_reply(&mut p, Some(maintenance));
                 Ok(())
             }
+            bridge::GET_INSTALLER_EXTERNAL_BRIDGE => {
+                bridge::GetInstallerExternalBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let external = *self.installer_external.get_or_init(|| {
+                    self.leaf(Arc::new(super::installer_external::InstallerExternal::new(
+                        host.clone(),
+                    )))
+                });
+                bridge::write_get_installer_external_bridge_reply(&mut p, Some(external));
+                Ok(())
+            }
             bridge::GET_INSTALLER_POLICY_BRIDGE => {
                 bridge::GetInstallerPolicyBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let policy = self.leaf(Arc::new(
@@ -766,6 +780,7 @@ mod tests {
             bridge::GET_INSTALLER_POLICY_BRIDGE,
             bridge::GET_INSTALLER_RECOVERY_PRESENTATION,
             bridge::GET_PACKAGE_MAINTENANCE_BRIDGE,
+            bridge::GET_INSTALLER_EXTERNAL_BRIDGE,
         ] {
             let reply = call(code);
             let mut r = reply.reader();

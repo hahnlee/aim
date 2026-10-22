@@ -37,7 +37,7 @@ const RESTRICTIONS: [&str; 2] = [
 const FIX_SYSTEM_APPS_FIRST_INSTALL_TIME: &str =
     "android.content.pm.fix_system_apps_first_install_time";
 /// The guest's page size: the layer's `AT_PAGESZ`, 16 KiB.
-const PAGE_SIZE: i64 = 16_384;
+pub(super) const PAGE_SIZE: i64 = 16_384;
 /// `SdkSandboxManagerLocal.SERVICE_INTERFACE`.
 const SDK_SANDBOX_SERVICE: &str = "com.android.sdksandbox.SdkSandboxService";
 

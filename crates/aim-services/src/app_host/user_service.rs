@@ -32,7 +32,7 @@ const FLAG_PRIMARY: i32 = 0x1;
 const FLAG_ADMIN: i32 = 0x2;
 const FLAG_DISABLED: i32 = 0x40;
 const FLAG_DEMO: i32 = 0x200;
-const FLAG_FULL: i32 = 0x400;
+pub(super) const FLAG_FULL: i32 = 0x400;
 const FLAG_MAIN: i32 = 0x4000;
 const FLAG_INITIALIZED: i32 = 0x10;
 /// `UserManager.USER_TYPE_FULL_GUEST`, `USER_TYPE_FULL_RESTRICTED`.
