@@ -1294,7 +1294,7 @@ pub fn rt_sigtimedwait(a: [u64; 6]) -> i64 {
             }
             break i.signo as i64;
         }
-        if deadline.is_some_and(|d| park::monotonic() >= d) {
+        if deadline.is_some_and(super::clock::Deadline::passed) {
             break -(EAGAIN as i64);
         }
         if interrupted(th) {

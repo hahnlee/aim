@@ -17,8 +17,8 @@
 //! MONOTONIC, BOOTTIME and REALTIME reads without a syscall, from the same
 //! sources and with the same arithmetic.
 //!
-//! Timers and sleeps keep their deadlines on the monotonic clock
-//! ([`Base::deadline`]).
+//! Timers and sleeps keep their deadlines on their own clock
+//! ([`Deadline`]).
 
 use aim_hostcall::clock::{boottime_ns, monotonic_ns, ticks_to_ns};
 
@@ -71,12 +71,18 @@ impl Base {
         }) as u64
     }
 
-    /// An absolute time on this clock as a monotonic deadline. A REALTIME
-    /// or BOOTTIME deadline is converted once, when it is set.
-    pub fn deadline(self, ns: u64) -> u64 {
+    /// Whether the clock runs on while the Mac sleeps.
+    pub fn counts_sleep(self) -> bool {
+        self != Base::Monotonic
+    }
+
+    /// The clock a timer set on this one runs on: `__hrtimer_init` moves a
+    /// relative REALTIME timer to MONOTONIC, so a wall-clock step does not
+    /// move it.
+    pub fn timer(self, absolute: bool) -> Base {
         match self {
-            Base::Monotonic => ns,
-            _ => (monotonic_ns() as u64).saturating_add(ns.saturating_sub(self.now())),
+            Base::Realtime if !absolute => Base::Monotonic,
+            b => b,
         }
     }
 
@@ -87,6 +93,34 @@ impl Base {
 
     pub fn from_index(i: u32) -> Base {
         [Base::Realtime, Base::Monotonic, Base::Boottime][i.min(2) as usize]
+    }
+}
+
+/// A time a timer or sleep waits for, kept on its own clock as an hrtimer
+/// is on its clock's base: a BOOTTIME or REALTIME deadline passes while
+/// the Mac sleeps, and a MONOTONIC one does not.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Deadline {
+    pub base: Base,
+    pub ns: u64,
+}
+
+impl Deadline {
+    /// `ns` from now on `base`.
+    pub fn after(base: Base, ns: u64) -> Deadline {
+        Deadline {
+            base,
+            ns: base.now().saturating_add(ns),
+        }
+    }
+
+    /// The time left, 0 once it has passed.
+    pub fn left(self) -> u64 {
+        self.ns.saturating_sub(self.base.now())
+    }
+
+    pub fn passed(self) -> bool {
+        self.left() == 0
     }
 }
 
@@ -369,4 +403,39 @@ pub fn gettimeofday(a: [u64; 6]) -> i64 {
         };
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A relative REALTIME timer runs on MONOTONIC; every other setting
+    /// keeps its clock, and only MONOTONIC stops while the Mac sleeps.
+    #[test]
+    fn timers_run_on_their_own_clock() {
+        assert_eq!(Base::Realtime.timer(false), Base::Monotonic);
+        assert_eq!(Base::Realtime.timer(true), Base::Realtime);
+        for absolute in [false, true] {
+            assert_eq!(Base::Monotonic.timer(absolute), Base::Monotonic);
+            assert_eq!(Base::Boottime.timer(absolute), Base::Boottime);
+        }
+        assert!(!Base::Monotonic.counts_sleep());
+        assert!(Base::Boottime.counts_sleep() && Base::Realtime.counts_sleep());
+    }
+
+    /// A deadline is counted down on its own clock, not converted to
+    /// another one.
+    #[test]
+    fn a_deadline_stays_on_its_clock() {
+        for base in [Base::Realtime, Base::Monotonic, Base::Boottime] {
+            let d = Deadline::after(base, 3_600_000_000_000);
+            assert!(!d.passed());
+            assert!(d.left() <= 3_600_000_000_000 && d.left() > 3_599_000_000_000);
+            let now = Deadline {
+                base,
+                ns: base.now(),
+            };
+            assert!(now.passed());
+        }
+    }
 }

@@ -20,7 +20,7 @@ use std::cell::UnsafeCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::SeqCst};
 
-use super::clock::Base;
+use super::clock::{Base, Deadline};
 use super::park;
 use super::signal;
 use super::thread::{self, Thread};
@@ -206,7 +206,7 @@ fn table_wait(
     addr: u64,
     bitset: u32,
     pi: bool,
-    deadline: Option<u64>,
+    deadline: Option<Deadline>,
     check: impl FnOnce() -> Option<i64>,
 ) -> i64 {
     let Some(th) = thread::current() else {
@@ -234,7 +234,7 @@ fn table_wait(
         if w.woken.load(SeqCst) != 0 {
             break 0;
         }
-        if deadline.is_some_and(|d| park::monotonic() >= d) {
+        if deadline.is_some_and(Deadline::passed) {
             break -ETIMEDOUT;
         }
         if signal::interrupted(th) {
@@ -398,7 +398,7 @@ unsafe fn pi_handoff(b: &Bucket, addr: u64, keep: u32, none: u32, wakes: &mut Wa
     unsafe { wakes.claim(w) };
 }
 
-fn lock_pi(addr: u64, deadline: Option<u64>, try_only: bool) -> i64 {
+fn lock_pi(addr: u64, deadline: Option<Deadline>, try_only: bool) -> i64 {
     let Some(th) = thread::current() else {
         return -(EINVAL as i64);
     };
@@ -484,7 +484,7 @@ fn mapping_is_shared(addr: u64) -> bool {
 /// the waiter checks the attention flag after arming, so a signal that
 /// comes before the kernel wait is seen there or reaches it. The wait is
 /// one kernel wait, so no wake is lost to a gap between waits.
-fn shared_wait(addr: u64, val: u32, deadline: Option<u64>) -> i64 {
+fn shared_wait(addr: u64, val: u32, deadline: Option<Deadline>) -> i64 {
     if word(addr).load(SeqCst) != val {
         return -(EAGAIN as i64);
     }
@@ -513,9 +513,9 @@ fn shared_wait(addr: u64, val: u32, deadline: Option<u64>) -> i64 {
     };
     let wait = || loop {
         let timeout = match deadline {
-            Some(d) => match d.checked_sub(park::monotonic()) {
-                Some(t) if t > 0 => t,
-                _ => return -ETIMEDOUT,
+            Some(d) => match d.left() {
+                0 => return -ETIMEDOUT,
+                t => t,
             },
             None => 0,
         };
@@ -646,7 +646,7 @@ pub fn exit_robust_list(head: u64, tid: i32) {
 
 // ---- the syscall -------------------------------------------------------------------
 
-fn deadline(ts: u64, relative: bool, realtime: bool) -> Result<Option<u64>, i64> {
+fn deadline(ts: u64, relative: bool, realtime: bool) -> Result<Option<Deadline>, i64> {
     if ts == 0 {
         return Ok(None);
     }
@@ -654,12 +654,12 @@ fn deadline(ts: u64, relative: bool, realtime: bool) -> Result<Option<u64>, i64>
     Ok(Some(if relative {
         park::after(ns)
     } else {
-        if realtime {
+        let base = if realtime {
             Base::Realtime
         } else {
             Base::Monotonic
-        }
-        .deadline(ns)
+        };
+        Deadline { base, ns }
     }))
 }
 
@@ -820,7 +820,7 @@ mod tests {
             )
         } as u64;
         let deadline = Box::leak(Box::new([0i64; 2])).as_mut_ptr() as u64;
-        park::write_timespec(deadline, park::after(10_000_000_000));
+        park::write_timespec(deadline, park::after(10_000_000_000).ns);
         let (tx, rx) = std::sync::mpsc::channel();
         let wait = move |bits: u64| {
             let tx = tx.clone();
