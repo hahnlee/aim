@@ -221,6 +221,18 @@ static void sizes_and_sync(void) {
   CHECK(fstat(fd, &st) == 0 && st.st_size == 100000);
   CHECK(fallocate(fd, 0, 0, 200000) == 0 && fstat(fd, &st) == 0 && st.st_size == 200000);
   CHECK(fallocate(fd, FALLOC_FL_KEEP_SIZE, 0, 300000) == 0 && fstat(fd, &st) == 0 && st.st_size == 200000);
+  // The blocks are reserved, past the size with KEEP_SIZE.
+  CHECK(st.st_blocks * 512 >= 300000);
+  // A sparse file's blocks below its size are reserved too.
+  int sparse = open(p("sparse"), O_RDWR | O_CREAT | O_TRUNC, 0600);
+  CHECK(sparse >= 0 && ftruncate(sparse, 1 << 20) == 0);
+  CHECK(fallocate(sparse, 0, 0, 1 << 20) == 0 && fstat(sparse, &st) == 0);
+  CHECK(st.st_size == 1 << 20 && st.st_blocks * 512 >= 1 << 20);
+  close(sparse);
+  CHECK(fstat(fd, &st) == 0);
+  // A reservation the volume cannot hold fails, and the size stays.
+  CHECK(fallocate(fd, 0, 0, (off_t)1 << 40) == -1 && errno == ENOSPC);
+  CHECK(fstat(fd, &st) == 0 && st.st_size == 200000);
   CHECK(fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, 65536) == 0);
   char z;
   CHECK(pread(fd, &z, 1, 0) == 1 && z == 0);

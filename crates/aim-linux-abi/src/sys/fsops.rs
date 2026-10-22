@@ -1424,11 +1424,15 @@ pub fn fallocate(a: [u64; 6]) -> i64 {
     if mode & FALLOC_FL_KEEP_SIZE == 0 && end > st.st_size && memfd::resize_sealed(fd, end as u64) {
         return -EPERM;
     }
+    // Linux reserves the blocks up to `end` or fails (ENOSPC, EOPNOTSUPP
+    // where the filesystem cannot): reserve from the file's physical end,
+    // what it has allocated, and report the reservation's failure.
+    let allocated = st.st_blocks * 512;
     let mut fs = libc::fstore_t {
         fst_flags: libc::F_ALLOCATEALL,
         fst_posmode: libc::F_PEOFPOSMODE,
         fst_offset: 0,
-        fst_length: (end - st.st_size).max(0),
+        fst_length: (end - allocated).max(0),
         fst_bytesalloc: 0,
     };
     if fs.fst_length > 0 {
@@ -1437,8 +1441,10 @@ pub fn fallocate(a: [u64; 6]) -> i64 {
             Ok(_) => return -(ENOSPC as i64),
             Err(e) => return e,
         }
-        // SAFETY: F_PREALLOCATE with a local fstore; advisory on APFS.
-        unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &mut fs) };
+        // SAFETY: F_PREALLOCATE with a local fstore.
+        if unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &mut fs) } < 0 {
+            return -(errno::last() as i64);
+        }
     }
     if mode & FALLOC_FL_KEEP_SIZE == 0 && end > st.st_size {
         // SAFETY: plain ftruncate.
