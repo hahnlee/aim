@@ -57,6 +57,7 @@ const TYPE_PRIVATE: i32 = 1;
 /// `VolumeInfo.STATE_*` (`IVold.VOLUME_STATE_*`).
 const STATE_UNMOUNTED: i32 = 0;
 const STATE_MOUNTED: i32 = 2;
+const STATE_MOUNTED_READ_ONLY: i32 = 3;
 /// User 0's emulated volume, its paths and its serial number
 /// (`UserInfo.serialNumber` of the system user).
 const VOLUME: &str = "emulated;0";
@@ -295,6 +296,19 @@ impl AppHost {
         crate::package::info::array_order(volumes, |v| v.id)
             .into_iter()
             .map(Some)
+            .collect()
+    }
+
+    /// The file system UUIDs of the private volumes mounted readable
+    /// (`getVolumes`, `TYPE_PRIVATE`, `isMountedReadable`, a `fsUuid`).
+    pub(super) fn mounted_private_volume_uuids(&self) -> Vec<String> {
+        self.volume_infos()
+            .into_iter()
+            .flatten()
+            .filter(|v| {
+                v.kind == TYPE_PRIVATE && matches!(v.state, STATE_MOUNTED | STATE_MOUNTED_READ_ONLY)
+            })
+            .filter_map(|v| v.fs_uuid)
             .collect()
     }
 

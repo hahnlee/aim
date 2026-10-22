@@ -20,13 +20,14 @@ use super::package_boot_inputs::{PlatformFacts, ScanFacts};
 /// Root binds exactly one early original serializer, constructed independently
 /// of PMS after the original D2 UserManagerService singleton is installed.
 pub struct InitialOwner {
-    node: Arc<Strong>,
+    node: crate::system::ServiceOwner,
     error: Mutex<Option<Exception>>,
 }
 impl InitialOwner {
-    pub fn new(node: Strong) -> Arc<Self> {
+    /// The leaf at `node`: system_server's, or one this process serves.
+    pub fn new(node: crate::system::ServiceOwner) -> Arc<Self> {
         Arc::new(Self {
-            node: Arc::new(node),
+            node,
             error: Mutex::new(None),
         })
     }

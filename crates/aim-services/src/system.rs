@@ -3356,6 +3356,35 @@ impl System {
         code: u32,
         write: impl FnOnce(&mut Parcel),
     ) -> Result<Strong> {
+        match self.package_bootstrap_node_with(bridge, code, write)? {
+            // A new reference: the leaf's only owner.
+            ServiceOwner::Remote(owner) => Arc::try_unwrap(owner).map_err(|_| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "package owner reference shared",
+                )
+            }),
+            ServiceOwner::Local(_) => Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "package owner is this process's own node",
+            )),
+        }
+    }
+    /// The bridge's leaf `code`, another process's node or, where this
+    /// process serves the bridge, its own.
+    pub(crate) fn package_bootstrap_node(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        code: u32,
+    ) -> Result<ServiceOwner> {
+        self.package_bootstrap_node_with(bridge, code, |_| {})
+    }
+    fn package_bootstrap_node_with(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        code: u32,
+        write: impl FnOnce(&mut Parcel),
+    ) -> Result<ServiceOwner> {
         self.check_package_bootstrap(bridge)?;
         let mut request = Parcel::new();
         request.write_interface_token(
@@ -3398,12 +3427,24 @@ impl System {
                 "package owner reply trailing bytes",
             ));
         }
-        let owner = reply.retain_remote_binder(binder).map_err(|status| {
-            Exception::new(
-                aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                format!("package owner lifetime: {status}"),
-            )
-        })?;
+        let owner = match binder {
+            Binder::Local(ptr) => {
+                ServiceOwner::Local(self.process.local_service(ptr).ok_or_else(|| {
+                    Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        "package owner: unknown local node",
+                    )
+                })?)
+            }
+            remote => ServiceOwner::Remote(Arc::new(reply.retain_remote_binder(remote).map_err(
+                |status| {
+                    Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        format!("package owner lifetime: {status}"),
+                    )
+                },
+            )?)),
+        };
         self.check_package_bootstrap(bridge)?;
         Ok(owner)
     }
@@ -7574,8 +7615,7 @@ impl System {
             system: self,
             bridge: bridge.clone(),
         };
-        let leaf =
-            self.package_bootstrap_binder_leaf(&bridge, api::GET_PACKAGE_INITIAL_CONTEXT_LEAF)?;
+        let leaf = self.package_bootstrap_node(&bridge, api::GET_PACKAGE_INITIAL_CONTEXT_LEAF)?;
         let initial = package_boot_scan::InitialOwner::new(leaf);
         let config = crate::package::system_config::SystemConfig::read(&image.image, &|name| {
             initial.property_value(name)
@@ -7625,8 +7665,7 @@ impl System {
         use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as api;
         self.check_package_bootstrap(bridge)?;
         let image = self.native_package_image()?;
-        let leaf =
-            self.package_bootstrap_binder_leaf(bridge, api::GET_PACKAGE_INITIAL_CONTEXT_LEAF)?;
+        let leaf = self.package_bootstrap_node(bridge, api::GET_PACKAGE_INITIAL_CONTEXT_LEAF)?;
         let initial = package_boot_scan::InitialOwner::new(leaf);
         let area = self
             .package_property_area

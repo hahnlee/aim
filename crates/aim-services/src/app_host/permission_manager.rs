@@ -1272,6 +1272,16 @@ impl PermissionManager {
         self.access_with(&user0, f)
     }
 
+    /// `getPermissionGroupInfo` from `caller`.
+    pub(super) fn group_info(
+        &self,
+        caller: i32,
+        group: &str,
+        flags: i32,
+    ) -> Result<Option<PermissionGroupInfo>, Exception> {
+        self.access(|access| access.permission_group_info(caller, group, flags))
+    }
+
     fn access_with<T>(
         &self,
         user0: &AccessUser,
