@@ -203,6 +203,15 @@ pub fn run(mut opts: RunOptions) -> String {
         Ok(d) => d,
         Err(e) => return format!("pid namespace: {e}"),
     };
+    // The guest never returns here: a return is a load error, which ends
+    // the process as the guest's exit would, its private table with it.
+    struct LeaveOnError;
+    impl Drop for LeaveOnError {
+        fn drop(&mut self) {
+            sys::leave_pid_namespace();
+        }
+    }
+    let _leave = LeaveOnError;
     // Started from outside the namespace, not by a member's execve.
     if opts.execfn.is_none() {
         sys::enter_pid_namespace(&by_pid);

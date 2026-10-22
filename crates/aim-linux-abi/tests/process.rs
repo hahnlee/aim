@@ -454,6 +454,21 @@ fn a_standalone_guest_has_a_private_namespace() {
     );
     let table = std::env::temp_dir().join(format!("aim-pidns-{init}"));
     assert!(!table.exists(), "{} removed", table.display());
+
+    // A load error ends the process as the guest's exit would: the table
+    // goes too.
+    let failed = Command::new(env!("CARGO_BIN_EXE_linux-run"))
+        .arg("--no-cache")
+        .arg("--root")
+        .arg(root)
+        .arg("/nonexistent")
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = failed.id();
+    assert_eq!(failed.wait_with_output().unwrap().status.code(), Some(127));
+    let table = std::env::temp_dir().join(format!("aim-pidns-{pid}"));
+    assert!(!table.exists(), "{} removed", table.display());
 }
 
 /// `pid_namespace` of `tests/guest/process.c` with a host process's pid.
