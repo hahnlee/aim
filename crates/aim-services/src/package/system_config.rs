@@ -728,8 +728,9 @@ pub fn system(
         bugreport_allowlist: config.bugreport_allowlist,
         named_actors: config.named_actors,
         use_round_icon: framework.use_round_icon,
-        // Settings.Global.compatibility_mode's default; PackageManager reads
-        // the setting at systemReady (#737).
+        // Settings.Global.compatibility_mode's default until the boot's
+        // settings-ready step reads the setting, as PackageManager's
+        // systemReady does (`enter_native_package_settings_ready`).
         compatibility_mode: true,
         fallback_categories: fallback_categories(framework.fallback_categories.as_deref(), prop)?,
         flags: framework.flags.clone(),
