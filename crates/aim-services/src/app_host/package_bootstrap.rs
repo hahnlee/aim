@@ -32,6 +32,8 @@ const ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES: i64 = 142191088;
 const CURRENT_DATABASE_VERSION: i32 = 3;
 /// `android.content.pm.Flags.sdkLibIndependence`.
 const SDK_LIB_INDEPENDENCE: &str = "android.content.pm.sdk_lib_independence";
+/// `AppsFilterUtils`' query filtering change (`@EnabledSince(R)`).
+const APPLICATION_QUERY_FILTERING: i64 = 135549675;
 /// The agent's `restorecon(String path)`.
 const RESTORECON: u32 = 15;
 
@@ -119,6 +121,66 @@ impl PackageBootstrap {
         }
         let config = SystemConfig::read(self.host.root()?, &|name| self.host.property(name));
         Ok(self.config.get_or_init(|| config))
+    }
+
+    /// `transactBatch`: each of `calls` (a count, then each call's code and
+    /// data) answered as its own call, in order, until the replies pass
+    /// `BATCH_REPLY_BUDGET`; a call's failure in its reply. The count of
+    /// the calls answered, then each reply's bytes.
+    fn transact_batch(&self, outer: &Call<'_>, calls: &[u8]) -> Result<Vec<u8>, Exception> {
+        /// `PackageBootstrapBridge.BATCH_REPLY_BUDGET`.
+        const BATCH_REPLY_BUDGET: usize = 256 * 1024;
+        let invalid = |m: &str| Exception::illegal_argument(m);
+        let mut r = aim_binder_host::parcel::Reader::new(calls, &[]);
+        let count = r.read_i32().map_err(|_| invalid("invalid batch count"))?;
+        if count < 0 || count as usize > r.remaining() / 8 {
+            return Err(invalid("invalid batch count"));
+        }
+        let mut out = Parcel::new();
+        out.write_i32(0);
+        let mut answered = 0;
+        while answered < count && (answered == 0 || out.data().len() < BATCH_REPLY_BUDGET) {
+            let code = r.read_i32().map_err(|_| invalid("invalid batched call"))? as u32;
+            let request = aim_service_aidl::read_byte_array(&mut r)
+                .map_err(|_| invalid("invalid batched call"))?;
+            let request = match request {
+                Some(request) if code != bridge::TRANSACT_BATCH => request,
+                _ => return Err(invalid("invalid batched call")),
+            };
+            let mut inner = Call {
+                code,
+                flags: 0,
+                sender_pid: outer.sender_pid,
+                sender_euid: outer.sender_euid,
+                data: aim_binder_host::parcel::Reader::new(&request, &[]),
+            };
+            // `Binder.execTransact` reports a call's failure in its reply.
+            let reply = match self.transact(&mut inner) {
+                Ok(reply) => reply,
+                Err(status) => {
+                    let mut reply = Parcel::new();
+                    reply.write_exception(&invalid(match status {
+                        aim_binder_host::parcel::UNKNOWN_TRANSACTION => "unknown batched call",
+                        _ => "malformed batched call",
+                    }));
+                    reply
+                }
+            };
+            if !reply.objects().is_empty() {
+                return Err(Exception::new(
+                    EX_ILLEGAL_STATE,
+                    "Tried to marshall a Parcel that contained Binder objects.",
+                ));
+            }
+            aim_service_aidl::write_byte_array(&mut out, Some(reply.data()));
+            answered += 1;
+        }
+        if answered == count && r.remaining() != 0 {
+            return Err(invalid("batch trailing data"));
+        }
+        let mut bytes = out.data().to_vec();
+        bytes[..4].copy_from_slice(&answered.to_le_bytes());
+        Ok(bytes)
     }
 
     /// A leaf of this process, a new one for each call as the original
@@ -340,6 +402,56 @@ impl Service for PackageBootstrap {
                     bridge::write_is_sdk_library_independence_enabled_reply(&mut p, on)
                 })
             }
+            // `UUID.ENABLE_STRICT_VALIDATION`: `VMRuntime.getSdkVersion()`
+            // from U, and the change, which system_server's process has no
+            // `AppCompatCallbacks` to disable (`handleBindApplication`
+            // installs them; the system process binds no application).
+            bridge::IS_DOMAIN_SET_UUID_STRICT_VALIDATION_ENABLED => {
+                bridge::IsDomainSetUuidStrictValidationEnabled::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let sdk = host
+                    .property("ro.build.version.sdk")
+                    .and_then(|v| v.parse::<i32>().ok())
+                    .unwrap_or(0);
+                bridge::write_is_domain_set_uuid_strict_validation_enabled_reply(&mut p, sdk >= 34);
+                Ok(())
+            }
+            // `platform_compat`'s `getAppConfig(info).isChangeEnabled` of
+            // the query filtering change for the package at its target SDK.
+            bridge::IS_APPLICATION_QUERY_FILTERING_ENABLED => {
+                let a = bridge::IsApplicationQueryFilteringEnabled::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                match a.package_name.filter(|n| !n.is_empty()) {
+                    Some(name) if a.target_sdk >= 0 => host.platform().map(|platform| {
+                        let on = platform.compat.is_enabled(
+                            APPLICATION_QUERY_FILTERING,
+                            Some(&name),
+                            a.target_sdk,
+                        );
+                        bridge::write_is_application_query_filtering_enabled_reply(&mut p, on)
+                    }),
+                    _ => Err(Exception::illegal_argument(
+                        "invalid query compatibility identity",
+                    )),
+                }
+            }
+            bridge::TRANSACT_BATCH => {
+                let a = bridge::TransactBatch::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match a.calls {
+                    None => Err(Exception::new(EX_NULL_POINTER, "")),
+                    Some(calls) => self
+                        .transact_batch(call, &calls)
+                        .map(|bytes| bridge::write_transact_batch_reply(&mut p, &Some(bytes))),
+                }
+            }
+            bridge::GET_PACKAGE_RESOLUTION_POLICY => {
+                bridge::GetPackageResolutionPolicy::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let policy = self.leaf(Arc::new(
+                    super::package_resolution_policy::ResolutionPolicy::new(host.clone()),
+                ));
+                bridge::write_get_package_resolution_policy_reply(&mut p, Some(policy));
+                Ok(())
+            }
             bridge::GET_PERMISSION_GIDS_FOR_UID => {
                 let a =
                     bridge::GetPermissionGidsForUid::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -560,6 +672,99 @@ mod tests {
             [3003]
         );
         assert!(config.permission_error.is_none());
+        // The resolution policy: user 0 and a user that does not exist are
+        // of no one profile group, so INTERACT_ACROSS_PROFILES is not asked.
+        let reply = call(bridge::GET_PACKAGE_RESOLUTION_POLICY);
+        let Some(aim_binder_host::parcel::Binder::Local(ptr)) =
+            bridge::read_get_package_resolution_policy_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("the policy is this process's");
+        };
+        let resolution = host.process.local_service(ptr).unwrap();
+        use aim_service_aidl::dev_aim_server_ipackageresolutionpolicy as policy;
+        let mut p = Parcel::new();
+        policy::ProfilePermission {
+            calling_uid: 10_100,
+            target_user: 10,
+            package_name: Some("a.b".into()),
+        }
+        .write(&mut p);
+        let reply = resolution
+            .transact(policy::PROFILE_PERMISSION, &p, false)
+            .unwrap();
+        assert!(
+            !policy::read_profile_permission_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap()
+        );
+        let mut p = Parcel::new();
+        policy::IsKnownIsolatedComputeApp { uid: 99_000 }.write(&mut p);
+        let reply = resolution
+            .transact(policy::IS_KNOWN_ISOLATED_COMPUTE_APP, &p, false)
+            .unwrap();
+        assert!(
+            !policy::read_is_known_isolated_compute_app_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap()
+        );
+        assert!(super::super::user_service::same_profile_group(&host, 0, 0).unwrap());
+        // Query filtering from R.
+        assert!(bridge.application_query_filtering("a.b", 36).unwrap());
+        assert!(!bridge.application_query_filtering("a.b", 29).unwrap());
+        // A batch: each call answered in its own reply, a failing one with
+        // its exception, in order.
+        let (gids_code, gids) = crate::package::bootstrap::permission_gids_call(-1);
+        let mut debuggable = Parcel::new();
+        bridge::IsSigningDebuggable {}.write(&mut debuggable);
+        let mut calls = Parcel::new();
+        calls.write_i32(2);
+        for (code, data) in [
+            (gids_code, &gids),
+            (bridge::IS_SIGNING_DEBUGGABLE, &debuggable),
+        ] {
+            calls.write_i32(code as i32);
+            aim_service_aidl::write_byte_array(&mut calls, Some(data.data()));
+        }
+        let mut p = Parcel::new();
+        bridge::TransactBatch {
+            calls: Some(calls.data().to_vec()),
+        }
+        .write(&mut p);
+        let reply = match &bridge.owner {
+            ServiceOwner::Local(node) => node.transact(bridge::TRANSACT_BATCH, &p, false).unwrap(),
+            ServiceOwner::Remote(_) => unreachable!(),
+        };
+        let bytes = bridge::read_transact_batch_reply(&mut reply.reader())
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let mut r = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+        assert_eq!(r.read_i32().unwrap(), 2);
+        let first = aim_service_aidl::read_byte_array(&mut r).unwrap().unwrap();
+        let e = bridge::read_get_permission_gids_for_uid_reply(
+            &mut aim_binder_host::parcel::Reader::new(&first, &[]),
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(e.message, "negative permission UID");
+        let second = aim_service_aidl::read_byte_array(&mut r).unwrap().unwrap();
+        assert!(
+            !bridge::read_is_signing_debuggable_reply(&mut aim_binder_host::parcel::Reader::new(
+                &second,
+                &[]
+            ))
+            .unwrap()
+            .unwrap()
+        );
+        // From U, with no app compat callbacks in the system process.
+        let reply = call(bridge::IS_DOMAIN_SET_UUID_STRICT_VALIDATION_ENABLED);
+        assert!(
+            bridge::read_is_domain_set_uuid_strict_validation_enabled_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap()
+        );
         let reply = call(bridge::GET_PACKAGE_POLICY_BRIDGE);
         let e = reply.reader().read_exception().unwrap().unwrap_err();
         assert!(e.message.contains("#2022"), "{}", e.message);

@@ -98,6 +98,7 @@ pub mod package_boot_configuration;
 pub mod package_boot_context;
 pub mod package_boot_lifecycle;
 pub mod package_bootstrap;
+pub mod package_resolution_policy;
 mod package_checksums;
 pub mod package_initial_context;
 pub mod package_installer;

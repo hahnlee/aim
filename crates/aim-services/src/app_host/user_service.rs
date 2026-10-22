@@ -591,6 +591,23 @@ fn user_info(host: &AppHost, user: i32) -> Result<Option<UserInfo>, Exception> {
     Ok((!info.partial).then_some(info))
 }
 
+/// `UserManagerService.isSameProfileGroup` (`isSameProfileGroupNoChecks`):
+/// one user, or two existing users of one profile group.
+pub(super) fn same_profile_group(host: &AppHost, user: i32, other: i32) -> Result<bool, Exception> {
+    if user == other {
+        return Ok(true);
+    }
+    let group = |id| -> Result<Option<i32>, Exception> {
+        Ok(user_info(host, id)?
+            .map(|u| u.profile_group_id)
+            .filter(|&g| g != USER_NULL))
+    };
+    Ok(match (group(user)?, group(other)?) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    })
+}
+
 /// What `UserDataPreparer` and `reconcileAppsData` read of a user's
 /// `UserInfo`: its serial number, `lastLoggedInTime` and
 /// `lastLoggedInFingerprint`; none for a user that does not exist.
