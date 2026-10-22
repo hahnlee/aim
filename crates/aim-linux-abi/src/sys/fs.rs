@@ -1149,10 +1149,38 @@ fn charge_iov(fd: i32, v: &[libc::iovec]) -> Result<Cow<'_, [libc::iovec]>, i64>
     Ok(Cow::Owned(out))
 }
 
-/// preadv/pwritev (69/70) and preadv2/pwritev2 (286/287; flags ignored).
-pub fn preadv(write: bool, a: [u64; 6]) -> i64 {
+/// `RWF_*` (`include/uapi/linux/fs.h`, 6.12): `RWF_SUPPORTED` is every
+/// bit through `RWF_ATOMIC`.
+const RWF_HIPRI: u32 = 0x01;
+const RWF_DSYNC: u32 = 0x02;
+const RWF_SYNC: u32 = 0x04;
+const RWF_NOWAIT: u32 = 0x08;
+const RWF_APPEND: u32 = 0x10;
+const RWF_NOAPPEND: u32 = 0x20;
+const RWF_ATOMIC: u32 = 0x40;
+const RWF_SUPPORTED: u32 =
+    RWF_HIPRI | RWF_DSYNC | RWF_SYNC | RWF_NOWAIT | RWF_APPEND | RWF_NOAPPEND | RWF_ATOMIC;
+
+/// `kiocb_set_rw_flags`: unknown flags, and the two no descriptor here
+/// offers (FMODE_NOWAIT, FMODE_CAN_ATOMIC_WRITE), are EOPNOTSUPP;
+/// RWF_HIPRI only polls direct I/O, which buffered I/O ignores.
+fn rw_flags(flags: u32) -> Result<(), errno::Errno> {
+    if flags & !RWF_SUPPORTED != 0 || flags & (RWF_NOWAIT | RWF_ATOMIC) != 0 {
+        return Err(errno::EOPNOTSUPP);
+    }
+    Ok(())
+}
+
+/// preadv/pwritev (69/70) and preadv2/pwritev2 (286/287), whose offset -1
+/// is the current position and whose flags apply to this call.
+pub fn preadv(write: bool, v2: bool, a: [u64; 6]) -> i64 {
     let fd = a[0] as i32;
-    let pos = a[3] as i64;
+    let mut pos = a[3] as i64;
+    // do_preadv: a negative offset is EINVAL, before the descriptor.
+    if pos < 0 && !(v2 && pos == -1) {
+        return -(EINVAL as i64);
+    }
+    let flags = if v2 { a[5] as u32 } else { 0 };
     let pin = match fdtab::pin_guest_io(fd) {
         Ok(pin) => pin,
         Err(error) => return -(error as i64),
@@ -1165,6 +1193,68 @@ pub fn preadv(write: bool, a: [u64; 6]) -> i64 {
     if let Err(error) = prepare_iov(&pin, vectors, write) {
         return -(error as i64);
     }
+    if let Err(error) = rw_flags(flags) {
+        return -(error as i64);
+    }
+    use std::os::fd::AsRawFd;
+    let actual = pin.descriptor().as_raw_fd();
+    // After the write: the position a current-position write moves to when
+    // it was made at an explicit one.
+    let mut advance = None;
+    if write && flags & (RWF_APPEND | RWF_NOAPPEND) != 0 {
+        // generic_write_checks: IOCB_APPEND (the description's O_APPEND or
+        // RWF_APPEND, less RWF_NOAPPEND) writes a regular file at its end.
+        let regular = stat_fd(fd)
+            .ok()
+            .filter(|st| st.st_mode & libc::S_IFMT == libc::S_IFREG);
+        let described = unsafe { libc::fcntl(actual, libc::F_GETFL) } & libc::O_APPEND != 0;
+        let append = flags & RWF_APPEND != 0 || described && flags & RWF_NOAPPEND == 0;
+        match (regular, append) {
+            (Some(st), true) if pos != -1 => pos = st.st_size,
+            (Some(st), true) => {
+                pos = st.st_size;
+                advance = Some(());
+            }
+            // A current-position write the description would append: at
+            // the position instead, which it then moves.
+            (Some(_), false) if described && pos == -1 => {
+                let current = lseek([fd as u64, 0, libc::SEEK_CUR as u64, 0, 0, 0]);
+                if current < 0 {
+                    return current;
+                }
+                pos = current;
+                advance = Some(());
+            }
+            _ => {}
+        }
+    }
+    let result = preadv_at(&pin, vectors, pos, write);
+    if result >= 0 && advance.is_some() {
+        let moved = lseek([
+            fd as u64,
+            (pos + result) as u64,
+            libc::SEEK_SET as u64,
+            0,
+            0,
+            0,
+        ]);
+        if moved < 0 {
+            return moved;
+        }
+    }
+    // generic_write_sync: IOCB_DSYNC syncs the written range, IOCB_SYNC
+    // its metadata too; reads ignore them.
+    if write && result > 0 && flags & (RWF_DSYNC | RWF_SYNC) != 0 {
+        let synced = super::fsops::fsync([fd as u64, 0, 0, 0, 0, 0]);
+        if synced < 0 {
+            return synced;
+        }
+    }
+    result
+}
+
+/// The transfer at `pos`, or the current position for -1.
+fn preadv_at(pin: &fdtab::Pinned, vectors: &[libc::iovec], pos: i64, write: bool) -> i64 {
     if let Some(Kind::Regular(description)) = pin.kind() {
         if write {
             if let Err(error) = description.check_write() {

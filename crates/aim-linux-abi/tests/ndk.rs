@@ -488,6 +488,12 @@ fn cgroup_v1_hierarchies() {
     assert!(ok && out.contains("PASS"), "t_cgroup failed:\n{out}");
 }
 
+/// preadv2/pwritev2's offsets and RWF flags (#1205).
+#[test]
+fn vectored_positional_flags() {
+    check("t_rwf", &["/data/local/tmp"]);
+}
+
 /// Anonymous mapping names in maps and smaps (#1993).
 #[test]
 fn anonymous_mapping_names() {
