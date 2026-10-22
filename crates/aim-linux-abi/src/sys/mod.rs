@@ -117,6 +117,7 @@ pub use mem::account_image;
 pub use mem::init_brk;
 pub use mem::run_deferred_unmaps;
 pub use pidns::enter as enter_pid_namespace;
+pub use pidns::leave as leave_pid_namespace;
 pub use pidns::new_table as new_pid_namespace;
 pub use process::set_exe;
 pub use procfs::{StackInfo, note_stack};
