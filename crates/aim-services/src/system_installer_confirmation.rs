@@ -11,10 +11,8 @@ use crate::package::{
     query::Query,
     resolve::Resolver,
 };
-use aim_binder_host::{
-    local::Strong,
-    parcel::{EX_ILLEGAL_STATE, Exception, Parcel, Reader},
-};
+use crate::system::ServiceOwner;
+use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception, Parcel, Reader};
 use aim_service_aidl::dev_aim_server_iinstallerconfirmationbridge as api;
 use std::{path::PathBuf, sync::Arc};
 
@@ -25,7 +23,9 @@ pub type StagePath = Box<
 /// Root supplies its captured immutable native package state, never a PMS feed.
 pub type QuerySource = Arc<dyn Fn() -> Result<Arc<State>, Exception> + Send + Sync>;
 pub struct Source {
-    leaf: Strong,
+    /// The leaf: another process's node, or this process's own where it
+    /// serves the bridge.
+    leaf: ServiceOwner,
     state: QuerySource,
     resolver: Arc<Resolver>,
     stages: StagePath,
@@ -34,7 +34,7 @@ pub struct Source {
 }
 impl Source {
     pub fn new(
-        leaf: Strong,
+        leaf: ServiceOwner,
         state: QuerySource,
         resolver: Arc<Resolver>,
         stages: StagePath,
