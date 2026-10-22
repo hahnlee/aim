@@ -2828,10 +2828,10 @@ fn noted_op(key: &aim_service_aidl::ParcelValue) -> Option<NotedOp> {
 
 /// `checkPackage`: whether `package` is `uid`'s.
 fn check_package(host: &AppHost, uid: i32, package: Option<&str>) -> Result<i32, Exception> {
-    let (state, _) = host.packages()?;
-    let owns = package
-        .and_then(|p| state.packages.get(p))
-        .is_some_and(|ps| ps.app_id == uid.rem_euclid(100_000));
+    let owns = match package {
+        Some(package) => host.app_ops_owns_package(uid, package)?,
+        None => false,
+    };
     Ok(if owns { MODE_ALLOWED } else { MODE_ERRORED })
 }
 
