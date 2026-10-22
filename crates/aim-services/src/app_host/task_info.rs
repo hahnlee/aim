@@ -794,6 +794,7 @@ mod tests {
             night: false,
             font_scale: 1.0,
             font_weight_adjustment: 0,
+            grammatical_gender: 0,
             seq: 1,
         };
         let bounds = Rect {

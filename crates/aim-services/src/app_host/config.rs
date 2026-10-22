@@ -568,6 +568,8 @@ pub struct Device<'a> {
     /// `Settings.System.FONT_SCALE`; `Settings.Secure.FONT_WEIGHT_ADJUSTMENT`.
     pub font_scale: f32,
     pub font_weight_adjustment: i32,
+    /// `mergedFinalSystemGrammaticalGender`.
+    pub grammatical_gender: i32,
     pub seq: i32,
 }
 
@@ -642,7 +644,7 @@ impl Configuration {
             assets_seq: 0,
             seq: device.seq,
             font_weight_adjustment: device.font_weight_adjustment,
-            grammatical_gender: 0,
+            grammatical_gender: device.grammatical_gender,
         }
     }
 }
@@ -1074,6 +1076,7 @@ mod tests {
             night,
             font_scale: 1.0,
             font_weight_adjustment: 0,
+            grammatical_gender: 0,
             seq: 13,
         };
         Configuration::of(&Display::phone_for_test(), &device)
@@ -1149,6 +1152,7 @@ mod tests {
             night: false,
             font_scale: 1.0,
             font_weight_adjustment: 0,
+            grammatical_gender: 0,
             seq: 13,
         };
         let c = Configuration::of(&display, &device);
@@ -1208,6 +1212,7 @@ mod tests {
                 night: false,
                 font_scale: 1.0,
                 font_weight_adjustment: 0,
+                grammatical_gender: 0,
                 seq: 1,
             },
         );
@@ -1240,6 +1245,7 @@ mod tests {
             night: false,
             font_scale: 1.0,
             font_weight_adjustment: 0,
+            grammatical_gender: 0,
             seq: 1,
         };
         let global = Configuration::of(&display, &device);
@@ -1284,6 +1290,7 @@ mod tests {
             night: false,
             font_scale: 1.0,
             font_weight_adjustment: 0,
+            grammatical_gender: 0,
             seq: 1,
         };
         let global = Configuration::of(&display, &device);

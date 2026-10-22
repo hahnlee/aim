@@ -467,6 +467,9 @@ pub struct AppHost {
     published: Mutex<Vec<(String, Binder)>>,
     /// The global configuration's sequence number.
     config_seq: AtomicI64,
+    /// GrammaticalInflectionService's `mGrammaticalGenderCache`: each
+    /// user's system grammatical gender, read from its file once.
+    grammatical_genders: Mutex<HashMap<i32, i32>>,
     unimplemented: Mutex<std::collections::HashSet<(String, u32)>>,
     /// The package model's state, replaced as PackageManager's writes
     /// change it.
@@ -576,6 +579,7 @@ impl AppHost {
             apps: Mutex::new(HashMap::new()),
             published: Mutex::new(Vec::new()),
             config_seq: AtomicI64::new(1),
+            grammatical_genders: Mutex::new(HashMap::new()),
             unimplemented: Mutex::new(std::collections::HashSet::new()),
             model: Mutex::new(None),
             model_writer: Mutex::new(()),
@@ -3660,6 +3664,7 @@ impl AppHost {
                     .get(settings::Table::Secure, "font_weight_adjustment")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0),
+                grammatical_gender: grammatical_inflection::merged_final(self)?,
                 seq: self.config_seq.load(Ordering::Relaxed) as i32,
             },
         ))
