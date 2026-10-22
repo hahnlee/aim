@@ -47,6 +47,13 @@ fn pixel(x: u32, y: u32) -> [u8; 4] {
 
 /// The next vsync event, or `None` after `timeout_ms`.
 fn next_vsync(events: &OwnedFd, timeout_ms: i32) -> Option<Event> {
+    let e = next_event(events, timeout_ms)?;
+    assert_eq!(e.kind, event::VSYNC);
+    Some(e)
+}
+
+/// The next event, or `None` after `timeout_ms`.
+fn next_event(events: &OwnedFd, timeout_ms: i32) -> Option<Event> {
     let mut pfd = libc::pollfd {
         fd: events.as_raw_fd(),
         events: libc::POLLIN,
@@ -66,8 +73,31 @@ fn next_vsync(events: &OwnedFd, timeout_ms: i32) -> Option<Event> {
         )
     };
     assert_eq!(n, size_of::<Event>() as isize);
-    assert_eq!(e.kind, event::VSYNC);
     Some(e)
+}
+
+/// Stop vsync: the vsyncs sent before the stop come first, then its
+/// marker, then none (HWC2's setVsyncEnabled(DISABLE)).
+fn stop_vsync(events: &OwnedFd) {
+    assert_eq!(call(FN_SET_VSYNC, &mut SetVsync { enabled: 0 }), 0);
+    loop {
+        let e = next_event(events, 1000).expect("vsync stop");
+        if e.kind == event::VSYNC_STOPPED {
+            break;
+        }
+        assert_eq!(e.kind, event::VSYNC);
+    }
+    assert!(next_event(events, 300).is_none(), "vsync while disabled");
+}
+
+/// Vsyncs start and stop whether or not the window shows: the display link
+/// follows the display, not the window.
+fn vsync_stops(events: &OwnedFd) {
+    assert_eq!(call(FN_SET_VSYNC, &mut SetVsync { enabled: 1 }), 0);
+    for _ in 0..3 {
+        next_vsync(events, 1000).expect("vsync");
+    }
+    stop_vsync(events);
 }
 
 /// Present buffer 7 with `acquire` (-1 for none); its present fence.
@@ -187,6 +217,7 @@ fn presents_a_buffer_and_delivers_vsync() {
     let events = unsafe { OwnedFd::from_raw_fd(fd as i32) };
     assert_eq!((info.width, info.height), (W, H));
     assert!(info.vsync_period_ns > 1_000_000, "{info:?}");
+    vsync_stops(&events);
 
     // A buffer: RGBA rows of STRIDE bytes in a page-sized file.
     let file = dir.join("buffer");
@@ -331,13 +362,7 @@ fn presents_a_buffer_and_delivers_vsync() {
     );
 
     // Disabled, no more vsyncs arrive (after those already sent).
-    assert_eq!(call(FN_SET_VSYNC, &mut SetVsync { enabled: 0 }), 0);
-    for _ in 0..10 {
-        if next_vsync(&events, 50).is_none() {
-            break;
-        }
-    }
-    assert!(next_vsync(&events, 300).is_none(), "vsync while disabled");
+    stop_vsync(&events);
 
     // The presented buffer, read back by the server while vsync is off.
     // SAFETY: a signal to the server we started.

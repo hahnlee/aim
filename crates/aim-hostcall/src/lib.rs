@@ -267,7 +267,8 @@ pub mod display {
     /// Forget an imported buffer ([`Buffer`]). Returns 0 or `-ENOTCONN`.
     pub const FN_RELEASE: u32 = 4;
     /// Start or stop [`event::VSYNC`] records ([`SetVsync`]). Returns 0 or
-    /// `-ENOTCONN`.
+    /// `-ENOTCONN`. A stop takes effect in the server after the call
+    /// returns; [`event::VSYNC_STOPPED`] marks it on the events fd.
     pub const FN_SET_VSYNC: u32 = 5;
     /// Connect to the display server as the guest's task bridge
     /// ([`Windows`]). Returns a new guest fd that carries [`Window`]
@@ -447,6 +448,9 @@ pub mod display {
         /// A vsync: [`super::Event::timestamp_ns`] is when it happened and
         /// [`super::Event::period_ns`] the time to the next one.
         pub const VSYNC: u32 = 1;
+        /// The server has stopped this connection's vsyncs: no
+        /// [`VSYNC`] record follows it until they are started again.
+        pub const VSYNC_STOPPED: u32 = 2;
     }
 
     /// A record read from the fd [`FN_CONNECT`] returns. Times are the

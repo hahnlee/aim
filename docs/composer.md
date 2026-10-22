@@ -103,8 +103,12 @@ in the guest's `CLOCK_MONOTONIC`, which counts the same host ticks.
 Host code never calls guest code, so vsyncs travel as 32-byte
 `display::Event` records on the server connection, whose fd the HAL
 receives from `FN_CONNECT`. A thread in the HAL reads them and calls
-`IComposerCallback.onVsync` while SurfaceFlinger has vsync enabled. The
-server runs the display link only while a client has vsync enabled, as a
+`IComposerCallback.onVsync` while SurfaceFlinger has vsync enabled; the
+flag is held over each call, so none follows `setVsyncEnabled(false)`
+(HWC2's `setVsyncEnabled(DISABLE)`). A stop reaches the server after the
+call returns: the server changes a client's flag under the lock it sends
+vsyncs under, then sends `VSYNC_STOPPED`, which no vsync of that client
+follows until it starts them again. The server runs the display link only while a client has vsync enabled, as a
 display controller raises its vsync interrupt only while the driver asks
 for it; the first vsync comes 5–14 ms after enabling. The server declares
 its activity latency-critical, so App Nap does not throttle the link while
