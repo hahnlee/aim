@@ -10,7 +10,11 @@
 //!   shared by every process holding the fd.
 //! - **timerfd:** a host thread sends a token record when a timer expires;
 //!   a read computes the expirations from the timer's settings and drains
-//!   the token. Timer settings are per process.
+//!   the token. Timer settings are per process. An absolute
+//!   CLOCK_REALTIME timer follows a step of the Mac's wall clock, as an
+//!   hrtimer on the realtime base does, and one set with
+//!   TFD_TIMER_CANCEL_ON_SET is cancelled by it (`timerfd_clock_was_set`):
+//!   its next read fails with ECANCELED.
 
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
@@ -19,6 +23,9 @@ use std::time::Duration;
 use super::clock::{self, Base};
 use super::fdtab::{self, Kind};
 use crate::errno::{self, EAGAIN, EBADF, EINVAL, EPERM};
+
+/// Linux's ECANCELED.
+const ECANCELED: crate::errno::Errno = 125;
 
 static TRACE_EVENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 fn trace_event(fd: i32, operation: &str, value: u64, semaphore: bool) {
@@ -218,6 +225,14 @@ struct TimerState {
     interval: u64,
     /// A token record is in the socket.
     token: bool,
+    /// The next expiration on the realtime clock of an absolute realtime
+    /// timer, which a wall-clock step moves; 0 otherwise.
+    realtime_next: u64,
+    /// `might_cancel`: an absolute realtime timer set with
+    /// TFD_TIMER_CANCEL_ON_SET.
+    cancel_on_set: bool,
+    /// The wall clock was set since; the next read fails with ECANCELED.
+    canceled: bool,
 }
 
 pub struct TimerFd {
@@ -272,6 +287,73 @@ fn timer_thread() {
     }
 }
 
+/// `clock_was_set`: the Mac's wall clock was set. Each absolute realtime
+/// timer's deadline is taken again from its realtime expiration, and each
+/// timer that might cancel is cancelled and made readable.
+fn clock_was_set() {
+    let g = TIMERS.list.lock().unwrap();
+    for t in g.1.iter().filter_map(Weak::upgrade) {
+        let mut s = t.state.lock().unwrap();
+        if s.next != 0 && s.realtime_next != 0 {
+            s.next = Base::Realtime.deadline(s.realtime_next).max(1);
+        }
+        if s.cancel_on_set && !s.canceled {
+            s.canceled = true;
+            if !s.token {
+                s.token = send_record(t.peer.load(Ordering::Relaxed), 1);
+            }
+        }
+    }
+    drop(g);
+    TIMERS.wake.notify_all();
+}
+
+/// Whether the clock-set watcher runs in this process.
+static WATCHING: Mutex<bool> = Mutex::new(false);
+
+/// Starts following the Mac's wall clock: notifyd posts
+/// `com.apple.system.clock_set` (`kNotifyClockSet`) when it is set.
+fn watch_clock() {
+    let mut watching = WATCHING.lock().unwrap_or_else(|e| e.into_inner());
+    if *watching {
+        return;
+    }
+    unsafe extern "C" {
+        fn notify_register_file_descriptor(
+            name: *const libc::c_char,
+            notify_fd: *mut i32,
+            flags: i32,
+            out_token: *mut i32,
+        ) -> u32;
+    }
+    let (mut fd, mut token) = (-1, 0);
+    // SAFETY: a NUL-terminated name and two out-parameters on our stack.
+    let status = unsafe {
+        notify_register_file_descriptor(
+            c"com.apple.system.clock_set".as_ptr(),
+            &mut fd,
+            0,
+            &mut token,
+        )
+    };
+    if status != 0 {
+        crate::diag!("timerfd: clock_set notification: status {status}");
+        return;
+    }
+    // The pipe notifyd writes each posted token to, out of the guest's way.
+    let fd = fdtab::hide(fd);
+    *watching = std::thread::Builder::new()
+        .name("linux-abi-clock-set".into())
+        .spawn(move || {
+            let mut posted = [0u8; 4];
+            // SAFETY: reading into a buffer of its size.
+            while unsafe { libc::read(fd, posted.as_mut_ptr().cast(), posted.len()) } == 4 {
+                clock_was_set();
+            }
+        })
+        .is_ok();
+}
+
 fn register(t: &Arc<TimerFd>) {
     let mut g = TIMERS.list.lock().unwrap();
     g.1.push(Arc::downgrade(t));
@@ -316,6 +398,9 @@ pub(super) fn save_timer(t: &TimerFd, w: &mut super::fork_state::Writer) {
     w.u64(s.next);
     w.u64(s.interval);
     w.bool(s.token);
+    w.u64(s.realtime_next);
+    w.bool(s.cancel_on_set);
+    w.bool(s.canceled);
 }
 
 pub(super) fn load_timer(r: &mut super::fork_state::Reader) -> Arc<TimerFd> {
@@ -325,6 +410,9 @@ pub(super) fn load_timer(r: &mut super::fork_state::Reader) -> Arc<TimerFd> {
         next: r.u64(),
         interval: r.u64(),
         token: r.bool(),
+        realtime_next: r.u64(),
+        cancel_on_set: r.bool(),
+        canceled: r.bool(),
     };
     let t = Arc::new(TimerFd {
         peer: AtomicI32::new(peer),
@@ -337,10 +425,19 @@ pub(super) fn load_timer(r: &mut super::fork_state::Reader) -> Arc<TimerFd> {
 
 /// Fork child: the timer thread did not survive.
 pub fn after_fork_child() {
+    *WATCHING.lock().unwrap_or_else(|e| e.into_inner()) = false;
     let mut g = TIMERS.list.lock().unwrap_or_else(|e| e.into_inner());
     g.0 = !g.1.is_empty();
     if g.0 {
         std::thread::spawn(timer_thread);
+    }
+    let follows_clock = g.1.iter().filter_map(Weak::upgrade).any(|t| {
+        let s = t.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.realtime_next != 0 || s.cancel_on_set
+    });
+    drop(g);
+    if follows_clock {
+        watch_clock();
     }
 }
 
@@ -352,10 +449,14 @@ impl TimerFd {
         }
         if s.interval == 0 {
             s.next = 0;
+            s.realtime_next = 0;
             return 1;
         }
         let n = 1 + (now - s.next) / s.interval;
         s.next += n * s.interval;
+        if s.realtime_next != 0 {
+            s.realtime_next += n * s.interval;
+        }
         n
     }
 
@@ -366,6 +467,17 @@ impl TimerFd {
         loop {
             {
                 let mut s = self.state.lock().unwrap();
+                // `timerfd_canceled`: the cancellation is reported once,
+                // and the expirations so far go with it.
+                if s.canceled {
+                    s.canceled = false;
+                    Self::take_expirations(&mut s, mono());
+                    drain(fd);
+                    s.token = false;
+                    drop(s);
+                    poke();
+                    return -(ECANCELED as i64);
+                }
                 let n = Self::take_expirations(&mut s, mono());
                 if n > 0 {
                     drain(fd);
@@ -470,7 +582,12 @@ pub fn timerfd_settime(a: [u64; 6]) -> i64 {
         // SAFETY: guest struct itimerspec.
         unsafe { (old as *mut [i64; 4]).write_unaligned(current(&s, now)) };
     }
+    let absolute_realtime = t.base == Base::Realtime && flags & TFD_TIMER_ABSTIME != 0;
+    // `timerfd_setup_cancel`.
+    s.cancel_on_set = absolute_realtime && flags & TFD_TIMER_CANCEL_ON_SET != 0;
+    s.canceled = false;
     s.interval = interval;
+    s.realtime_next = if absolute_realtime { value } else { 0 };
     s.next = if value == 0 {
         0
     } else if flags & TFD_TIMER_ABSTIME == 0 {
@@ -481,6 +598,9 @@ pub fn timerfd_settime(a: [u64; 6]) -> i64 {
     drain(fd);
     s.token = false;
     drop(s);
+    if absolute_realtime {
+        watch_clock();
+    }
     poke();
     0
 }
@@ -580,5 +700,84 @@ mod publication_tests {
             assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
             assert!(!fdtab::visible(fd as i32));
         }
+    }
+}
+
+#[cfg(test)]
+mod clock_set_tests {
+    use super::*;
+
+    fn set(fd: i64, flags: u64, value_ns: u64) -> i64 {
+        let spec = [
+            0i64,
+            0,
+            (value_ns / 1_000_000_000) as i64,
+            (value_ns % 1_000_000_000) as i64,
+        ];
+        timerfd_settime([fd as u64, flags, spec.as_ptr() as u64, 0, 0, 0])
+    }
+
+    fn read_once(fd: i64) -> i64 {
+        let mut n = 0u64;
+        super::read(fd as i32, &mut n as *mut u64 as u64, 8).unwrap()
+    }
+
+    /// `timerfd_clock_was_set`: only an absolute CLOCK_REALTIME timer set
+    /// with TFD_TIMER_CANCEL_ON_SET is cancelled, its next read fails with
+    /// ECANCELED once, and a later settime clears it.
+    #[test]
+    fn a_wall_clock_step_cancels_the_timers_that_might_cancel() {
+        let _view = crate::vfs::test_view();
+        const REALTIME: u64 = 0;
+        let hour = 3_600_000_000_000;
+        let later = Base::Realtime.now() + hour;
+        let cancelling = timerfd_create([REALTIME, O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0]);
+        let absolute = timerfd_create([REALTIME, O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0]);
+        let relative = timerfd_create([REALTIME, O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0]);
+        assert_eq!(
+            set(
+                cancelling,
+                TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET,
+                later
+            ),
+            0
+        );
+        assert_eq!(set(absolute, TFD_TIMER_ABSTIME, later), 0);
+        assert_eq!(set(relative, TFD_TIMER_CANCEL_ON_SET, hour), 0);
+        clock_was_set();
+        assert_eq!(read_once(cancelling), -(ECANCELED as i64));
+        assert_eq!(read_once(cancelling), -(EAGAIN as i64));
+        assert_eq!(read_once(absolute), -(EAGAIN as i64));
+        assert_eq!(read_once(relative), -(EAGAIN as i64));
+        clock_was_set();
+        assert_eq!(
+            set(
+                cancelling,
+                TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET,
+                later
+            ),
+            0
+        );
+        assert_eq!(read_once(cancelling), -(EAGAIN as i64));
+        for fd in [cancelling, absolute, relative] {
+            assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        }
+    }
+
+    /// An absolute realtime timer's realtime expiration moves with each
+    /// expiration of an interval timer.
+    #[test]
+    fn an_absolute_realtime_interval_keeps_its_realtime_expiration() {
+        let mut s = TimerState {
+            next: 100,
+            interval: 10,
+            realtime_next: 1_000,
+            ..TimerState::default()
+        };
+        assert_eq!(TimerFd::take_expirations(&mut s, 125), 3);
+        assert_eq!((s.next, s.realtime_next), (130, 1_030));
+        s.interval = 0;
+        assert_eq!(TimerFd::take_expirations(&mut s, 130), 1);
+        assert_eq!((s.next, s.realtime_next), (0, 0));
     }
 }
