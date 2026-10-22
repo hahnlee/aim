@@ -13,6 +13,7 @@ program = "aim-app-host-agent"
 
 [dependencies]
 aim-emulated-storage.workspace = true
+aim-f2fs.workspace = true
 aim-input-transport.workspace = true
 aim-meminfo.workspace = true
 android_os_vold = { path = "../aidl/android_os_vold" }

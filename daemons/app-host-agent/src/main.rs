@@ -104,6 +104,11 @@ const ENFORCE_SERIAL_NUMBER: u32 = 14;
 /// the installer made (`selinux_android_restorecon` with no flags),
 /// whether it succeeded.
 const RESTORECON: u32 = 15;
+/// `IAppHostAgent.releaseCompressedBlocks(String[] paths, boolean
+/// release)`: `F2fsUtils.releaseCompressedBlocks` of each path, last first
+/// (`aim_f2fs`), with the `RELEASE_COMPRESS_BLOCKS_ON_INSTALL` setting the host
+/// read.
+const RELEASE_COMPRESSED_BLOCKS: u32 = 16;
 /// `InputTransport.cpp`'s `SOCKET_BUFFER_SIZE`.
 const SOCKET_BUFFER_SIZE: libc::c_int = 32 * 1024;
 
@@ -526,6 +531,13 @@ fn on_transact(
                 }
             };
             reply.write(&status)?;
+            Ok(())
+        }
+        RELEASE_COMPRESSED_BLOCKS => {
+            let paths: Vec<String> = data.read()?;
+            let release: bool = data.read()?;
+            aim_f2fs::release(&paths, release);
+            reply.write(&Status::ok())?;
             Ok(())
         }
         RESTORECON => {
