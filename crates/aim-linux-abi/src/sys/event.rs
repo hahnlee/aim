@@ -656,6 +656,13 @@ mod publication_tests {
     use super::*;
     #[test]
     fn actual_typed_producers_publish_guest_ends_and_keep_peers_private() {
+        // A closed number is asserted vacant, which only this process's own
+        // descriptors can keep true: tests on other threads open them too.
+        if fdtab::isolated_kernel_test(
+            "sys::event::publication_tests::actual_typed_producers_publish_guest_ends_and_keep_peers_private",
+        ) {
+            return;
+        }
         // Publication reaches the guest's view; set it up, as the other
         // publication tests do, instead of finding one another test made.
         let _view = crate::vfs::test_view();
