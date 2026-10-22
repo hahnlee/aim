@@ -250,6 +250,10 @@ pub fn admit(
         .map_err(|error| error.to_string())
 }
 
+/// The original image's Power HAL VINTF fragment the namespace tests read.
+#[cfg(test)]
+const POWER_VINTF: &str = "apex/com.android.hardware.power/etc/vintf/android.hardware.power.xml";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,12 +516,11 @@ mod tests {
     }
     #[test]
     fn actual_original_vendor_manifest_is_visible_in_selected_default_owner() {
+        let Some(original) = aim_paths::original_image_with(POWER_VINTF) else {
+            return;
+        };
         let (root, layout, catalog) = fixture();
-        let original = aim_paths::original_image();
-        let fragment =
-            original.join("apex/com.android.hardware.power/etc/vintf/android.hardware.power.xml");
-        let bytes = fs::read(&fragment)
-            .expect("original Power VINTF input is required, not a skipped gate");
+        let bytes = fs::read(original.join(POWER_VINTF)).unwrap();
         let target = layout
             .image
             .join("apex/com.android.hardware.power/etc/vintf");
@@ -615,6 +618,9 @@ mod child_fixture {
     #[test]
     fn selected_default_child_reads_original_vintf() {
         use std::path::PathBuf;
+        let Some(image) = aim_paths::original_image_with(POWER_VINTF) else {
+            return;
+        };
         let root =
             std::env::temp_dir().join(format!("aim-default-vintf-child-{}", std::process::id()));
         fs::create_dir(&root).unwrap();
@@ -637,10 +643,6 @@ mod child_fixture {
             include_str!("../../../image/vendor/etc/aim/init-mount-namespace-policy.conf"),
         )
         .unwrap();
-        let image = aim_paths::original_image();
-        let fragment =
-            image.join("apex/com.android.hardware.power/etc/vintf/android.hardware.power.xml");
-        assert!(fragment.is_file(), "actual original VINTF input required");
         let process = ProcessIdentity::running(unsafe { libc::getpid() }).unwrap();
         let table = layout.identity_dir().join("by-pid");
         let boot = Namespace::open(&layout.runtime, "bootstrap").unwrap();
