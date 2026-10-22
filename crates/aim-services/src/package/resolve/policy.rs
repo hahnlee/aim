@@ -1,15 +1,17 @@
 //! Original UM/PermissionChecker preflight producer for private resolution.
-use aim_binder_host::{
-    local::Strong,
-    parcel::{EX_ILLEGAL_STATE, Exception, Parcel},
-};
+use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::dev_aim_server_ipackageresolutionpolicy as api;
 use std::sync::Arc;
+
+use crate::system::ServiceOwner;
+
+/// The policy: another process's node, or this process's own where it
+/// serves the bridge.
 pub struct Owner {
-    owner: Strong,
+    owner: ServiceOwner,
 }
 impl Owner {
-    pub fn new(owner: Strong) -> Arc<Self> {
+    pub fn new(owner: ServiceOwner) -> Arc<Self> {
         Arc::new(Self { owner })
     }
     pub fn known_isolated_compute(&self, uid: i32) -> Result<bool, Exception> {

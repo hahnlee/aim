@@ -3357,7 +3357,7 @@ fn uid_package_queries_distinguish_regular_isolated_compute_and_sdk_sandbox() {
     client.start();
     let mut state = state();
     state.system.resolution_policy = Some(crate::package::resolve::policy::Owner::new(
-        client.strong(0),
+        crate::system::ServiceOwner::Remote(std::sync::Arc::new(client.strong(0))),
     ));
     state.system.isolated_owners = vec![(99000, 10100), (99002, 10100)];
     state.packages.insert(

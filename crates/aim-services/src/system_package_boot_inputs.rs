@@ -248,7 +248,7 @@ impl System {
                 Ok(value)
             })),
         ));
-        let resolution_leaf = self.package_bootstrap_binder_leaf(
+        let resolution_leaf = self.package_bootstrap_node(
             bridge,
             aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::GET_PACKAGE_RESOLUTION_POLICY,
         )?;
