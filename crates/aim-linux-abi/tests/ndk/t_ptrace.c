@@ -233,6 +233,25 @@ static void other_process_proc(void) {
   snprintf(path, sizeof path, "/proc/%d/fd/9999", c);
   char t[16];
   CHECK(readlink(path, t, sizeof t) == -1 && errno == ENOENT);
+  // Without ptrace read access the nodes exist but are refused (EACCES),
+  // as proc_maps_open and proc_fd_permission refuse them.
+  pid_t o = fork();
+  if (o == 0) {
+    if (setresuid(10001, 10001, 10001) != 0) _exit(10);
+    char p[64], l[16];
+    struct stat s;
+    snprintf(p, sizeof p, "/proc/%d/maps", c);
+    if (open(p, O_RDONLY) != -1 || errno != EACCES) _exit(11);
+    if (stat(p, &s) != 0 || !S_ISREG(s.st_mode)) _exit(12);
+    snprintf(p, sizeof p, "/proc/%d/fd", c);
+    if (open(p, O_RDONLY | O_DIRECTORY) != -1 || errno != EACCES) _exit(13);
+    if (stat(p, &s) != 0 || !S_ISDIR(s.st_mode)) _exit(14);
+    snprintf(p, sizeof p, "/proc/%d/fd/0", c);
+    if (readlink(p, l, sizeof l) != -1 || errno != EACCES) _exit(15);
+    _exit(0);
+  }
+  int os = 0;
+  CHECK(o > 0 && waitpid(o, &os, 0) == o && WIFEXITED(os) && WEXITSTATUS(os) == 0);
   CHECK(write(w, "x", 1) == 1);
   int st = 0;
   CHECK(waitpid(c, &st, 0) == c && WIFEXITED(st));

@@ -26,9 +26,16 @@ use crate::vfs::{self, Area};
 pub enum Node {
     File(Vec<u8>),
     NetTable(String),
-    MountTable { host_pid: i32, info: bool },
+    MountTable {
+        host_pid: i32,
+        info: bool,
+    },
     Dir(Vec<Entry>),
     Link(String),
+    /// Another process's node the caller may not read
+    /// (PTRACE_MODE_READ_FSCREDS): with the mode `stat` shows, else
+    /// refused at lookup (`proc_fd_permission` on the `fd` directory).
+    Denied(Option<u32>),
 }
 
 /// The main thread's stack and argument areas, recorded by the loader.
@@ -1173,6 +1180,9 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
         "status" => Node::File(status(p, thread)?.into_bytes()),
         "statm" => Node::File(statm(p)?.into_bytes()),
         "maps" if me => Node::File(maps().into_bytes()),
+        "maps" | "smaps" | "smaps_rollup" if !me && !super::cred::may_ptrace(p, true) => {
+            Node::Denied(Some(libc::S_IFREG as u32 | 0o444))
+        }
         "maps" => Node::File(super::ptrace::remote_maps(p)?.into_bytes()),
         "smaps" | "smaps_rollup" if me => {
             Node::File(super::smaps::smaps(rest == "smaps_rollup").into_bytes())
@@ -1203,6 +1213,9 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
                 .map(|fd| Entry::new(fd as u64 + 1, dir::DT_LNK, fd.to_string()))
                 .collect(),
         ),
+        "fd" if !super::cred::may_ptrace(p, true) => {
+            Node::Denied(Some(libc::S_IFDIR as u32 | 0o500))
+        }
         "fd" => Node::Dir(
             super::ptrace::remote_fds(p)?
                 .into_iter()
@@ -1219,6 +1232,9 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
         _ => {
             if let Some(n) = rest.strip_prefix("fd/") {
                 let fd: i32 = n.parse().ok()?;
+                if !me && !super::cred::may_ptrace(p, true) {
+                    return Some(Node::Denied(None));
+                }
                 return if me {
                     fd_link(fd)
                 } else {
@@ -1783,6 +1799,7 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
                 -(errno::EACCES as i64)
             }
             Ok(Node::Link(_)) => -(errno::EINVAL as i64),
+            Ok(Node::Denied(_)) => -(errno::EACCES as i64),
             Err(error) => -(error as i64),
         });
     }
@@ -1925,6 +1942,7 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
             content_fd(&data, cloexec)
         }
         Some(Node::Dir(list)) => dir_fd(&canon, list, cloexec),
+        Some(Node::Denied(_)) => -(EACCES as i64),
         Some(Node::Link(t)) => {
             let target = if t.starts_with('/') {
                 t
@@ -2088,6 +2106,15 @@ pub fn stat(guest: &str, follow: bool) -> Option<Result<libc::stat, Errno>> {
             st.st_mode = libc::S_IFDIR | 0o555;
             st.st_nlink = 2;
         }
+        Some(Node::Denied(Some(mode))) => {
+            st.st_mode = mode as libc::mode_t;
+            st.st_nlink = if st.st_mode & libc::S_IFMT == libc::S_IFDIR {
+                2
+            } else {
+                1
+            };
+        }
+        Some(Node::Denied(None)) => return Some(Err(EACCES)),
         Some(Node::Link(t)) if follow => {
             let fd_n = canon
                 .strip_prefix(&format!("/proc/{me}/fd/"))
@@ -2139,6 +2166,7 @@ pub fn readlink(path: &[u8]) -> Option<Result<Vec<u8>, Errno>> {
     let canon = canonical(guest);
     Some(match node(&canon) {
         Some(Node::Link(t)) => Ok(t.into_bytes()),
+        Some(Node::Denied(_)) => Err(EACCES),
         Some(_) => Err(crate::errno::EINVAL),
         None => Err(ENOENT),
     })
