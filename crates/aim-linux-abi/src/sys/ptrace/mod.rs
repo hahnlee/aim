@@ -328,6 +328,21 @@ pub fn remote_vm(write: bool, pid: i32, local: &[(u64, u64)], remote: &[(u64, u6
     done
 }
 
+/// prlimit64 setting another process's limit `res`, which the process
+/// applies (`cred::own_rlimit`): the limit before. The caller has checked
+/// `check_prlimit_permission`; `may_raise` is its CAP_SYS_RESOURCE.
+pub fn remote_rlimit(pid: i32, res: u32, new: [u64; 2], may_raise: bool) -> Result<[u64; 2], i64> {
+    let req = request(agent::RLIMIT, |w| {
+        w.u32(res);
+        w.u64(new[0]);
+        w.u64(new[1]);
+        w.bool(may_raise);
+    });
+    let rest = call_result(pid, &req)?;
+    let mut r = Reader::new(&rest);
+    Ok([r.u64(), r.u64()])
+}
+
 fn gather(local: &[(u64, u64)]) -> Vec<u8> {
     let mut v = Vec::new();
     for &(a, n) in local {
