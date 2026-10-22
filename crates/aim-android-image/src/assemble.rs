@@ -74,11 +74,16 @@ pub fn assemble(
         ));
     }
     fs::create_dir_all(&parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+    // The time, and a count of this process's own: two assemblies of one
+    // process within the clock's resolution (a microsecond) must not share
+    // a staging tree, which a failure removes (#2117).
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
+    let count = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let staging = parent.join(format!(
-        ".{}.tmp-{}-{nanos}",
+        ".{}.tmp-{}-{nanos}-{count}",
         name.to_string_lossy(),
         std::process::id()
     ));
