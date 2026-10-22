@@ -16,6 +16,7 @@ use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::WriteParcelable;
 use aim_service_aidl::android_os_iusermanager as um;
 
+use super::user_types::{self, UserType};
 use super::{AppHost, PER_USER_RANGE, reply};
 use crate::bundle::Value;
 
@@ -37,6 +38,20 @@ const USER_TYPE_FULL_GUEST: &str = "android.os.usertype.full.GUEST";
 const USER_TYPE_FULL_RESTRICTED: &str = "android.os.usertype.full.RESTRICTED";
 /// `UserManager.USER_TYPE_PROFILE_MANAGED`.
 const USER_TYPE_PROFILE_MANAGED: &str = "android.os.usertype.profile.MANAGED";
+
+/// The multiuser flags the user types and limits read.
+const BLOCK_PRIVATE_SPACE_CREATION: &str = "android.multiuser.block_private_space_creation";
+const ALLOW_SUPERVISING_PROFILE: &str = "android.multiuser.allow_supervising_profile";
+const PROFILES_FOR_ALL: &str = "android.multiuser.profiles_for_all";
+/// `UserManager.DEV_CREATE_OVERRIDE_PROPERTY`, `DISALLOW_ADD_PRIVATE_PROFILE`.
+const DEV_CREATE_OVERRIDE_PROPERTY: &str = "debug.user.creation_override";
+const DISALLOW_ADD_PRIVATE_PROFILE: &str = "no_add_private_profile";
+/// `PackageManager.FEATURE_*` the limits and private space read.
+const FEATURE_MANAGED_USERS: &str = "android.software.managed_users";
+const FEATURE_EMBEDDED: &str = "android.hardware.type.embedded";
+const FEATURE_WATCH: &str = "android.hardware.type.watch";
+const FEATURE_LEANBACK: &str = "android.software.leanback";
+const FEATURE_AUTOMOTIVE: &str = "android.hardware.type.automotive";
 
 /// `UserInfo.FLAG_SYSTEM`.
 const FLAG_SYSTEM: i32 = 0x800;
@@ -70,28 +85,41 @@ const INTERACT_ACROSS_USERS: &str = "android.permission.INTERACT_ACROSS_USERS";
 const GET_ACCOUNTS_PRIVILEGED: &str = "android.permission.GET_ACCOUNTS_PRIVILEGED";
 
 /// `UserInfo` as `readUserLP` reads it and `writeToParcel` writes it.
-#[derive(Clone, Debug, PartialEq)]
-struct UserInfo {
-    id: i32,
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct UserInfo {
+    pub(super) id: i32,
     name: Option<String>,
     icon_path: Option<String>,
-    flags: i32,
-    user_type: Option<String>,
+    pub(super) flags: i32,
+    pub(super) user_type: Option<String>,
     serial_number: i32,
     creation_time: i64,
     last_logged_in_time: i64,
     last_logged_in_fingerprint: Option<String>,
-    partial: bool,
-    pre_created: bool,
-    profile_group_id: i32,
-    guest_to_remove: bool,
+    pub(super) partial: bool,
+    pub(super) pre_created: bool,
+    pub(super) profile_group_id: i32,
+    pub(super) guest_to_remove: bool,
     restricted_profile_parent_id: i32,
     profile_badge: i32,
 }
 
 impl UserInfo {
+    /// A user of `user_type` with `flags` in profile group
+    /// `profile_group_id`, for the user types' tests.
+    #[cfg(test)]
+    pub(super) fn of_type(id: i32, flags: i32, user_type: &str, profile_group_id: i32) -> Self {
+        UserInfo {
+            id,
+            flags,
+            user_type: Some(user_type.into()),
+            profile_group_id,
+            ..UserInfo::default()
+        }
+    }
+
     /// `UserManagerService.isSameProfileGroup`.
-    fn same_profile_group(&self, other: &UserInfo) -> bool {
+    pub(super) fn same_profile_group(&self, other: &UserInfo) -> bool {
         self.id == other.id
             || self.profile_group_id != USER_NULL && self.profile_group_id == other.profile_group_id
     }
@@ -600,11 +628,184 @@ fn element(name: &str, attrs: Vec<(&str, XmlValue)>, children: Vec<Element>) -> 
 
 pub struct UserManager {
     host: Arc<AppHost>,
+    /// `mUserTypes`, made once as the constructor makes them.
+    types: std::sync::OnceLock<Vec<UserType>>,
 }
 
 impl UserManager {
     pub fn new(host: Arc<AppHost>) -> Self {
-        UserManager { host }
+        UserManager {
+            host,
+            types: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn flag(&self, name: &str) -> Result<bool, Exception> {
+        let (state, _) = self.host.packages()?;
+        Ok(state.system.flags.iter().any(|(n, on)| n == name && *on))
+    }
+
+    fn feature(&self, name: &str) -> Result<bool, Exception> {
+        let (state, _) = self.host.packages()?;
+        Ok(state.system.features.iter().any(|(n, _)| n == name))
+    }
+
+    /// `Build.IS_DEBUGGABLE`.
+    fn debuggable(&self) -> bool {
+        self.host.property("ro.debuggable").as_deref() == Some("1")
+    }
+
+    /// `SystemProperties.getInt(name, default)`.
+    fn int_property(&self, name: &str, default: i32) -> i32 {
+        self.host
+            .property(name)
+            .and_then(|v| v.trim_start().parse().ok())
+            .unwrap_or(default)
+    }
+
+    /// `UserTypeFactory.getUserTypes` over the device's
+    /// `config_user_types`.
+    fn user_types(&self) -> Result<&[UserType], Exception> {
+        if let Some(types) = self.types.get() {
+            return Ok(types);
+        }
+        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("user types: {e}"));
+        let packages = &self.host.inputs()?.packages;
+        let communal = super::system_boolean(
+            self.host
+                .property("persist.fw.omnipresent_communal_user")
+                .as_deref(),
+            packages
+                .framework_bool("config_omnipresentCommunalUser")
+                .unwrap_or(false),
+        );
+        // `UserManager.isPrivateProfileEnabled`: not on a low-RAM device
+        // once private space creation is blocked there.
+        let low_ram = self.host.property("ro.config.low_ram").as_deref() == Some("true");
+        let private = !self.flag(BLOCK_PRIVATE_SPACE_CREATION)? || !low_ram;
+        let facts = user_types::Facts {
+            debuggable: self.debuggable(),
+            communal,
+            private,
+            supervising: self.flag(ALLOW_SUPERVISING_PROFILE)?,
+        };
+        let customize = packages
+            .framework_file(self.host.root()?, "xml", "config_user_types")
+            .map(|bytes| aim_apps::res::xml(&bytes).map_err(|e| state(e.to_string())))
+            .transpose()?;
+        let types = user_types::user_types(&facts, customize.as_ref()).map_err(state)?;
+        Ok(self.types.get_or_init(|| types))
+    }
+
+    /// `mUserTypes.get(name)`.
+    fn user_type(&self, name: Option<&str>) -> Result<Option<&UserType>, Exception> {
+        let types = self.user_types()?;
+        Ok(name.and_then(|name| types.iter().find(|t| t.name == name)))
+    }
+
+    /// What the limits read at a call: `getMaxSupportedUsers`,
+    /// `isCreationOverrideEnabled`, FEATURE_MANAGED_USERS and
+    /// `Flags.profilesForAll`.
+    fn limits(&self) -> Result<user_types::Limits, Exception> {
+        let build_id = self.host.property("ro.build.id").unwrap_or_default();
+        let max_users = if build_id.starts_with("JVP") {
+            1
+        } else {
+            let config = self
+                .host
+                .inputs()?
+                .packages
+                .framework_integer("config_multiuserMaximumUsers")
+                .unwrap_or(0);
+            self.int_property("fw.max_users", config).max(1)
+        };
+        Ok(user_types::Limits {
+            max_users,
+            creation_override: self.debuggable()
+                && super::system_boolean(
+                    self.host.property(DEV_CREATE_OVERRIDE_PROPERTY).as_deref(),
+                    false,
+                ),
+            managed_users: self.feature(FEATURE_MANAGED_USERS)?,
+            profiles_for_all: self.flag(PROFILES_FOR_ALL)?,
+        })
+    }
+
+    /// `mUsers`: the system user.
+    fn users(&self) -> Result<Vec<UserInfo>, Exception> {
+        Ok(vec![self.user_data()?.0])
+    }
+
+    /// `getRemainingCreatableProfileCount(type, user, allowedToRemoveOne)`.
+    fn remaining_profiles(
+        &self,
+        uid: i32,
+        user_type: Option<&str>,
+        user: i32,
+        allowed_to_remove_one: bool,
+    ) -> Result<i32, Exception> {
+        self.check_query_or_create(
+            uid,
+            "get the remaining number of profiles that can be added to the given user.",
+        )?;
+        let t = self.user_type(user_type)?;
+        // `getMaxUsersOfTypePerParent`: `persist.sys.max_profiles` for a
+        // managed profile on a debuggable build.
+        let managed_per_parent = t
+            .filter(|t| self.debuggable() && t.managed_profile())
+            .map(|t| self.int_property("persist.sys.max_profiles", t.max_allowed_per_parent));
+        Ok(user_types::remaining_profiles(
+            t,
+            &self.users()?,
+            user,
+            allowed_to_remove_one,
+            &self.limits()?,
+            managed_per_parent,
+        ))
+    }
+
+    /// `canAddMoreProfilesToUser`.
+    fn can_add_more_profiles(
+        &self,
+        uid: i32,
+        user_type: Option<&str>,
+        user: i32,
+        allowed_to_remove_one: bool,
+    ) -> Result<bool, Exception> {
+        Ok(
+            0 < self.remaining_profiles(uid, user_type, user, allowed_to_remove_one)?
+                || self.limits()?.creation_override,
+        )
+    }
+
+    /// `checkCreateUsersPermission(message)`.
+    fn check_create(&self, uid: i32, message: &str) -> Result<(), Exception> {
+        if self.manage_or(uid, Some(CREATE_USERS))? {
+            return Ok(());
+        }
+        Err(Exception::security(format!(
+            "You either need MANAGE_USERS or CREATE_USERS permission to: {message}"
+        )))
+    }
+
+    /// `checkManageOrInteractPermissionIfCallerInOtherProfileGroup`.
+    fn check_manage_or_interact_other(
+        &self,
+        uid: i32,
+        user: i32,
+        name: &str,
+    ) -> Result<(), Exception> {
+        let caller = uid / PER_USER_RANGE as i32;
+        let same_group = match (self.user(caller)?, self.user(user)?) {
+            (Some(a), Some(b)) => a.same_profile_group(&b),
+            _ => false,
+        };
+        if caller == user || same_group || self.manage_or(uid, Some(INTERACT_ACROSS_USERS))? {
+            return Ok(());
+        }
+        Err(Exception::security(format!(
+            "You need INTERACT_ACROSS_USERS or MANAGE_USERS permission to: check {name}"
+        )))
     }
 
     /// User 0's file: its `UserInfo` and effective restrictions.
@@ -845,19 +1046,119 @@ impl UserManager {
                     Ok(um::write_get_users_reply(p, Some(&users)))
                 })
             }
-            // `checkCreateUsersPermission`, then the user types' limits,
-            // which the app host does not model, nor does it make profiles.
-            um::CAN_ADD_PRIVATE_PROFILE => require(
-                self.manage_or(uid, Some(CREATE_USERS)),
-                "You either need MANAGE_USERS or CREATE_USERS permission to: canHaveRestrictedProfile"
-                    .into(),
-            )
-            .and_then(|_| {
-                Err(self.host.unimplemented_named(
-                    "user",
-                    "canAddPrivateProfile: user types and profiles (#2015)",
-                ))
-            }),
+            um::CAN_ADD_PRIVATE_PROFILE => {
+                let a = um::CanAddPrivateProfile::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                (|| {
+                    self.check_create(uid, "canHaveRestrictedProfile")?;
+                    let parent = self.user(a.user_id)?;
+                    let limits = self.limits()?;
+                    let enabled = self
+                        .user_type(Some(user_types::PROFILE_PRIVATE))?
+                        .is_some_and(|t| user_types::type_enabled(t, &limits));
+                    // `doesDeviceHardwareSupportPrivateSpace`.
+                    let hardware = !(self.feature(FEATURE_EMBEDDED)?
+                        || self.feature(FEATURE_WATCH)?
+                        || self.feature(FEATURE_LEANBACK)?
+                        || self.feature(FEATURE_AUTOMOTIVE)?);
+                    let can = enabled
+                        && self.can_add_more_profiles(
+                            uid,
+                            Some(user_types::PROFILE_PRIVATE),
+                            a.user_id,
+                            false,
+                        )?
+                        && parent.is_some_and(|u| u.flags & FLAG_MAIN == FLAG_MAIN)
+                        && hardware
+                        && !(a.user_id == SYSTEM_USER
+                            && self
+                                .host
+                                .user_restrictions()?
+                                .contains(DISALLOW_ADD_PRIVATE_PROFILE));
+                    um::write_can_add_private_profile_reply(p, can);
+                    Ok(())
+                })()
+            }
+            um::IS_USER_TYPE_ENABLED => {
+                let a = um::IsUserTypeEnabled::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                (|| {
+                    self.check_create(uid, "check if user type is enabled.")?;
+                    let limits = self.limits()?;
+                    let enabled = self
+                        .user_type(a.user_type.as_deref())?
+                        .is_some_and(|t| user_types::type_enabled(t, &limits));
+                    um::write_is_user_type_enabled_reply(p, enabled);
+                    Ok(())
+                })()
+            }
+            um::CAN_ADD_MORE_USERS_OF_TYPE => {
+                let a = um::CanAddMoreUsersOfType::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                (|| {
+                    self.check_create(uid, "check if more users can be added.")?;
+                    let (users, limits) = (self.users()?, self.limits()?);
+                    let can = self.user_type(a.user_type.as_deref())?.is_some_and(|t| {
+                        user_types::can_add_more_users_of_type(t, &users, &limits)
+                    });
+                    um::write_can_add_more_users_of_type_reply(p, can);
+                    Ok(())
+                })()
+            }
+            um::GET_REMAINING_CREATABLE_USER_COUNT => {
+                let a = um::GetRemainingCreatableUserCount::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                (|| {
+                    self.check_query_or_create(
+                        uid,
+                        "get the remaining number of users that can be added.",
+                    )?;
+                    let count = user_types::remaining_users(
+                        self.user_type(a.user_type.as_deref())?,
+                        &self.users()?,
+                        &self.limits()?,
+                    );
+                    um::write_get_remaining_creatable_user_count_reply(p, count);
+                    Ok(())
+                })()
+            }
+            um::GET_REMAINING_CREATABLE_PROFILE_COUNT => {
+                let a = um::GetRemainingCreatableProfileCount::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.remaining_profiles(uid, a.user_type.as_deref(), a.user_id, false)
+                    .map(|count| um::write_get_remaining_creatable_profile_count_reply(p, count))
+            }
+            um::CAN_ADD_MORE_PROFILES_TO_USER => {
+                let a =
+                    um::CanAddMoreProfilesToUser::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.can_add_more_profiles(
+                    uid,
+                    a.user_type.as_deref(),
+                    a.user_id,
+                    a.allowed_to_remove_one,
+                )
+                .map(|can| um::write_can_add_more_profiles_to_user_reply(p, can))
+            }
+            um::CAN_ADD_MORE_MANAGED_PROFILES => {
+                let a =
+                    um::CanAddMoreManagedProfiles::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                self.can_add_more_profiles(
+                    uid,
+                    Some(user_types::PROFILE_MANAGED),
+                    a.user_id,
+                    a.allowed_to_remove_one,
+                )
+                .map(|can| um::write_can_add_more_managed_profiles_reply(p, can))
+            }
+            um::HAS_BADGE => {
+                let a = um::HasBadge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                (|| {
+                    self.check_manage_or_interact_other(uid, a.user_id, "hasBadge")?;
+                    let user = self.user(a.user_id)?;
+                    let badged = self
+                        .user_type(user.and_then(|u| u.user_type).as_deref())?
+                        .is_some_and(|t| t.has_badge);
+                    um::write_has_badge_reply(p, badged);
+                    Ok(())
+                })()
+            }
             um::GET_PROFILES => {
                 let a = um::GetProfiles::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let full = if a.user_id != caller {

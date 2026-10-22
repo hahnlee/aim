@@ -144,6 +144,7 @@ pub mod usage_stats;
 pub mod usb_service;
 pub mod user_boot;
 pub mod user_service;
+pub mod user_types;
 pub mod volume;
 pub mod vpn_manager;
 pub mod webview_update;
