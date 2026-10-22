@@ -1159,6 +1159,16 @@ static void app_permissions(void) {
   CHECK(setpriority(PRIO_PROCESS, own, 5) == 0, "renice own");
   CHECK(setpriority(PRIO_PROCESS, own, -1) == -1 && errno == EACCES, "below RLIMIT_NICE");
   CHECK(sched_setscheduler(own, SCHED_BATCH, &sp) == 0, "own scheduling");
+  // It sets its own processes' limits, but raises no hard limit.
+  struct rlimit lower = {10, 15};
+  CHECK(prlimit(own, RLIMIT_NICE, &lower, &rl) == 0 && rl.rlim_cur == 20 && rl.rlim_max == 20,
+        "set own process's limit, old %lu", (unsigned long)rl.rlim_cur);
+  CHECK(prlimit(own, RLIMIT_NICE, NULL, &rl) == 0 && rl.rlim_cur == 10 && rl.rlim_max == 15,
+        "own process's new limit %lu", (unsigned long)rl.rlim_cur);
+  struct rlimit raise = {15, 16}, inverted = {12, 11};
+  DENIED(prlimit(own, RLIMIT_NICE, &raise, NULL));
+  CHECK(prlimit(own, RLIMIT_NICE, &inverted, NULL) == -1 && errno == EINVAL, "soft above hard");
+  CHECK(setpriority(PRIO_PROCESS, own, 4) == -1 && errno == EACCES, "below the new RLIMIT_NICE");
   CHECK(kill(own, SIGKILL) == 0 && waitpid(own, NULL, 0) == own, "kill own");
 }
 

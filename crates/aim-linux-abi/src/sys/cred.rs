@@ -1277,52 +1277,63 @@ pub fn prlimit(nr: u64, a: [u64; 6]) -> i64 {
     if res as usize >= RLIM_NLIMITS {
         return super::process::prlimit(261, [0, res, new, old, 0, 0]);
     }
-    let res_i = res as usize;
-    let current = match read(|id| id.rlimits[res_i]) {
-        Some(l) => l,
+    // SAFETY: guest struct rlimit64.
+    let new = (new != 0).then(|| unsafe { (new as *const [u64; 2]).read_unaligned() });
+    let may_raise = read(|id| id.capable(CAP_SYS_RESOURCE));
+    match own_rlimit(res as u32, new, may_raise) {
+        Ok(current) => {
+            if old != 0 {
+                // SAFETY: guest struct rlimit64.
+                unsafe { (old as *mut [u64; 2]).write_unaligned(current) };
+            }
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// `do_prlimit` on this process, for itself or for another that may
+/// (`ptrace`'s agent): limit `res` before `new` is set. Raising the hard
+/// limit takes the caller's CAP_SYS_RESOURCE, `may_raise`.
+pub fn own_rlimit(res: u32, new: Option<[u64; 2]>, may_raise: bool) -> Result<[u64; 2], i64> {
+    let res = res as usize;
+    if res >= RLIM_NLIMITS {
+        return Err(-(EINVAL as i64));
+    }
+    let current = match read(|id| id.rlimits[res]) {
+        Some(l) => [l.0, l.1],
         None => {
             let mut l = [0u64; 2];
-            let r = super::process::prlimit(261, [0, res, 0, l.as_mut_ptr() as u64, 0, 0]);
+            let r = super::process::prlimit(261, [0, res as u64, 0, l.as_mut_ptr() as u64, 0, 0]);
             if r < 0 {
-                return r;
+                return Err(r);
             }
-            (l[0], l[1])
+            l
         }
     };
-    if new != 0 {
-        // SAFETY: guest struct rlimit64.
-        let [soft, hard] = unsafe { (new as *const [u64; 2]).read_unaligned() };
+    if let Some([soft, hard]) = new {
         if soft > hard {
-            return -(EINVAL as i64);
+            return Err(-(EINVAL as i64));
         }
-        let r = with(|id| {
-            if hard > current.1 && !id.capable(CAP_SYS_RESOURCE) {
-                return -(EPERM as i64);
-            }
-            id.rlimits[res_i] = Some((soft, hard));
-            0
-        });
-        if r < 0 {
-            return r;
+        if hard > current[1] && !may_raise {
+            return Err(-(EPERM as i64));
         }
+        with(|id| id.rlimits[res] = Some((soft, hard)));
         // Enforce what the host allows; the guest sees what it set. The
         // layer enforces RLIMIT_AS and RLIMIT_DATA itself (`vm_account`):
         // the host's limits would count the layer's memory too.
-        if !matches!(res as usize, RLIMIT_DATA | RLIMIT_AS) {
-            super::process::prlimit(261, [0, res, new, 0, 0, 0]);
+        if !matches!(res, RLIMIT_DATA | RLIMIT_AS) {
+            let l = [soft, hard];
+            super::process::prlimit(261, [0, res as u64, l.as_ptr() as u64, 0, 0, 0]);
         }
     }
-    if old != 0 {
-        // SAFETY: guest struct rlimit64.
-        unsafe { (old as *mut [u64; 2]).write_unaligned([current.0, current.1]) };
-    }
-    0
+    Ok(current)
 }
 
 /// prlimit64 on another process of the namespace, with
 /// `check_prlimit_permission`: its limits as its table entry records them.
 /// Darwin changes a process's limits only from inside it, so a new limit
-/// for another process is refused (EPERM).
+/// is set by the process itself, through its agent ([`own_rlimit`]).
 fn prlimit_other(pid: i32, res: u64, new: u64, old: u64) -> i64 {
     let pid = match super::pidns::syscall_pid(pid) {
         Ok(pid) => pid,
@@ -1339,7 +1350,19 @@ fn prlimit_other(pid: i32, res: u64, new: u64, old: u64) -> i64 {
         return -(EINVAL as i64);
     }
     if new != 0 {
-        return -(EPERM as i64);
+        // SAFETY: guest struct rlimit64.
+        let new = unsafe { (new as *const [u64; 2]).read_unaligned() };
+        let may_raise = read(|id| id.capable(CAP_SYS_RESOURCE));
+        return match super::ptrace::remote_rlimit(pid, res as u32, new, may_raise) {
+            Ok(limit) => {
+                if old != 0 {
+                    // SAFETY: guest struct rlimit64.
+                    unsafe { (old as *mut [u64; 2]).write_unaligned(limit) };
+                }
+                0
+            }
+            Err(e) => e,
+        };
     }
     if old != 0 {
         let limit = match t.rlimits[res as usize] {

@@ -36,6 +36,7 @@ pub(super) const NET_SOCKET_METADATA: u32 = 16;
 pub(super) const STOPPED: u32 = 14;
 pub(super) const SIGNAL: u32 = 15;
 pub(super) const SMAPS: u32 = 17;
+pub(super) const RLIMIT: u32 = 18;
 
 const NT_PRSTATUS: u32 = 1;
 const NT_PRFPREG: u32 = 2;
@@ -496,6 +497,17 @@ fn handle(op: u32, r: &mut Reader, peer: i32) -> Vec<u8> {
         }
         MAPS => reply(0, |w| w.str(&procfs::maps())),
         SMAPS => reply(0, |w| w.str(&smaps::smaps(r.bool()))),
+        RLIMIT => {
+            let res = r.u32();
+            let new = [r.u64(), r.u64()];
+            match crate::sys::cred::own_rlimit(res, Some(new), r.bool()) {
+                Ok(old) => reply(0, |w| {
+                    w.u64(old[0]);
+                    w.u64(old[1]);
+                }),
+                Err(e) => reply(e, |_| {}),
+            }
+        }
         FDS => {
             let fds: Vec<i32> = fdtab::open_fds()
                 .into_iter()
