@@ -432,6 +432,28 @@ fn memfd_noexec() {
     }
 }
 
+/// fs.protected_hardlinks off, the kernel's default, and on (#779).
+#[test]
+fn protected_hardlinks() {
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let g = Guest::new(&image, "t_hardlink");
+    let fs = g.runtime.join("kernfs/proc/sys/fs");
+    std::fs::create_dir_all(&fs).unwrap();
+    let prog = g.build(&clang, "t_hardlink");
+    for value in ["0", "1"] {
+        std::fs::write(fs.join("protected_hardlinks"), format!("{value}\n")).unwrap();
+        let (ok, out) = g.run(&[&prog, "/data/local/tmp", value]);
+        println!("{out}");
+        assert!(
+            ok && out.contains("PASS"),
+            "t_hardlink {value} failed:\n{out}"
+        );
+    }
+}
+
 #[test]
 fn kernel_log() {
     check("t_kmsg", &[]);

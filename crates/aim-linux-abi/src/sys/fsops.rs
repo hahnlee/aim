@@ -361,6 +361,34 @@ pub fn symlinkat(a: [u64; 6]) -> i64 {
     }
 }
 
+/// `fs.protected_hardlinks`: 0, the kernel's default, when unset or not a
+/// number.
+fn protected_hardlinks() -> bool {
+    let (host, _) = vfs::lookup("/proc/sys/fs/protected_hardlinks");
+    std::fs::read_to_string(host)
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        == Some(1)
+}
+
+/// `may_linkat`: with `fs.protected_hardlinks`, only the source's owner
+/// (or CAP_FOWNER) links what is not a safe source (`safe_hardlink_source`:
+/// a regular file, not setuid or executable setgid, that the caller can
+/// read and write).
+fn may_linkat(old: &Resolved, id: &super::cred::Identity) -> Result<(), i64> {
+    if !protected_hardlinks() || !attrs::recording() {
+        return Ok(());
+    }
+    let stat = metadata_stat(Host::Path(&old.host), &old.guest, false)?;
+    let mode = stat.st_mode as u32;
+    let safe = mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
+        && mode & libc::S_ISUID as u32 == 0
+        && mode & (libc::S_ISGID as u32 | 0o010) != libc::S_ISGID as u32 | 0o010
+        && attrs::permits(&stat, 6, id, attrs::FS);
+    let owner = stat.st_uid == id.uid[attrs::FS] || id.cap_eff & (1 << 3) != 0;
+    if safe || owner { Ok(()) } else { Err(-EPERM) }
+}
+
 pub fn linkat(a: [u64; 6]) -> i64 {
     let flags = a[4];
     if flags & !(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
@@ -409,6 +437,9 @@ pub fn linkat(a: [u64; 6]) -> i64 {
         (Some(fd), _) => tmpfile::link_fd(fd, &new),
         // SAFETY: host paths.
         (None, Some(old)) => {
+            if let Err(error) = may_linkat(&old, &super::cred::current()) {
+                return error;
+            }
             errno::check(unsafe { libc::link(old.host.as_ptr(), new.host.as_ptr()) } as i64)
         }
         (None, None) => unreachable!(),
