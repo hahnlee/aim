@@ -547,6 +547,17 @@ fn run(nodes: &[&Node], ctx: &Ctx, log: &mut Log) -> Result<Vec<Vec<PathBuf>>, S
     nodes::run(node, ctx, log).map(|found| vec![found])
 }
 
+/// The stale upstreams that make `node` stale: only the dependencies of its
+/// key; an order-only one is built first but does not rebuild it (`build`'s
+/// rule).
+fn stale_upstream<'a>(node: &'a Node, stale: &BTreeSet<String>) -> Vec<&'a str> {
+    node.deps
+        .iter()
+        .filter(|d| !d.order_only && stale.contains(&d.node))
+        .map(|d| d.node.as_str())
+        .collect()
+}
+
 /// Prints every node of `targets`' closure: fresh, or stale and why.
 pub fn status(graph: &Graph, targets: &[String], ctx: &Ctx) -> Result<usize, String> {
     let order = graph.order(targets)?;
@@ -570,12 +581,7 @@ pub fn status(graph: &Graph, targets: &[String], ctx: &Ctx) -> Result<usize, Str
                 Some(format!("cannot check: {error}"))
             }
         };
-        let upstream: Vec<&str> = node
-            .deps
-            .iter()
-            .filter(|d| stale.contains(&d.node))
-            .map(|d| d.node.as_str())
-            .collect();
+        let upstream = stale_upstream(node, &stale);
         match (reason, upstream.is_empty()) {
             (None, true) => println!("  {name:width$}  fresh"),
             (None, false) => {
@@ -607,6 +613,17 @@ mod tests {
             action: Action::Image,
             boot: true,
         }
+    }
+
+    /// A stale order-only upstream does not make its downstream stale (#534).
+    #[test]
+    fn only_key_dependencies_propagate_staleness() {
+        let mut image = node("image", &["config"], vec![]);
+        image.deps.push(Dep::order_only("host/extract"));
+        let stale = BTreeSet::from(["host/extract".to_string()]);
+        assert!(stale_upstream(&image, &stale).is_empty());
+        let stale = BTreeSet::from(["host/extract".to_string(), "config".to_string()]);
+        assert_eq!(stale_upstream(&image, &stale), ["config"]);
     }
 
     #[test]
