@@ -1,7 +1,7 @@
 //! `ZenModeHelper`'s config for the app host (`android-16.0.0_r1`): the
 //! zen config of `/data/system/notification_policy.xml`
-//! (`ZenModeConfig.readXml`, in its `modes_ui` form, #1647), as
-//! `getZenModeConfig` returns it and `getAutomaticZenRules` and
+//! (`ZenModeConfig.readXml` with `modes_ui` on, as this image builds it),
+//! as `getZenModeConfig` returns it and `getAutomaticZenRules` and
 //! `getAutomaticZenRule` its rules
 //! (`zenRuleToAutomaticZenRule`), and the packages that
 //! `ConditionProviders` approves for notification policy access
@@ -29,6 +29,7 @@ const STATE_ALLOW: i32 = 1;
 const STATE_DISALLOW: i32 = 2;
 /// `ZenPolicy.PEOPLE_TYPE_*`, `CONVERSATION_SENDERS_*`.
 const PEOPLE_TYPE_ANYONE: i32 = 1;
+const PEOPLE_TYPE_CONTACTS: i32 = 2;
 const PEOPLE_TYPE_STARRED: i32 = 3;
 const PEOPLE_TYPE_NONE: i32 = 4;
 const CONVERSATION_SENDERS_ANYONE: i32 = 1;
@@ -50,11 +51,29 @@ const CONVERSATIONS: usize = 8;
 /// `Global.ZEN_MODE_IMPORTANT_INTERRUPTIONS`, `ZEN_MODE_NO_INTERRUPTIONS`.
 const ZEN_MODE_IMPORTANT_INTERRUPTIONS: i32 = 1;
 const ZEN_MODE_NO_INTERRUPTIONS: i32 = 3;
-/// `AutomaticZenRule.TYPE_UNKNOWN`, `MAX_STRING_LENGTH`.
+/// `AutomaticZenRule.TYPE_UNKNOWN`, `TYPE_OTHER`, `MAX_STRING_LENGTH`.
 const TYPE_UNKNOWN: i32 = -1;
+const TYPE_OTHER: i32 = 0;
 const MAX_STRING_LENGTH: usize = 500;
 /// `Condition.MAX_STRING_LENGTH`.
 const CONDITION_MAX_STRING_LENGTH: usize = 1000;
+/// `Condition.STATE_TRUE`, `SOURCE_UNKNOWN`, `FLAG_RELEVANT_ALWAYS`.
+const CONDITION_STATE_TRUE: i32 = 1;
+const SOURCE_UNKNOWN: i32 = 0;
+const FLAG_RELEVANT_ALWAYS: i32 = 1 << 1;
+/// `ZenModeConfig.SOURCE_ANYONE`, `SOURCE_CONTACT`, `SOURCE_STAR`.
+const SOURCE_ANYONE: i32 = 0;
+const SOURCE_CONTACT: i32 = 1;
+const SOURCE_STAR: i32 = 2;
+/// `Policy.SUPPRESSED_EFFECT_*`.
+const SUPPRESSED_EFFECT_SCREEN_OFF: i32 = 1 << 0;
+const SUPPRESSED_EFFECT_FULL_SCREEN_INTENT: i32 = 1 << 2;
+const SUPPRESSED_EFFECT_LIGHTS: i32 = 1 << 3;
+const SUPPRESSED_EFFECT_PEEK: i32 = 1 << 4;
+const SUPPRESSED_EFFECT_STATUS_BAR: i32 = 1 << 5;
+const SUPPRESSED_EFFECT_BADGE: i32 = 1 << 6;
+const SUPPRESSED_EFFECT_AMBIENT: i32 = 1 << 7;
+const SUPPRESSED_EFFECT_NOTIFICATION_LIST: i32 = 1 << 8;
 /// `ZenModeConfig.ORIGIN_UNKNOWN`, `ZenRule.OVERRIDE_NONE`.
 const ORIGIN_UNKNOWN: i32 = 0;
 const OVERRIDE_NONE: i32 = 0;
@@ -116,7 +135,7 @@ impl WriteParcelable for ZenDeviceEffects {
 /// A `Condition` (`readConditionXml`), its id and texts trimmed.
 #[derive(Clone, Debug, PartialEq)]
 struct Condition {
-    id: String,
+    id: Uri,
     summary: String,
     line1: Option<String>,
     line2: Option<String>,
@@ -146,7 +165,7 @@ pub struct ZenRule {
     enabled: bool,
     name: Option<String>,
     zen_mode: i32,
-    condition_id: Option<String>,
+    condition_id: Option<Uri>,
     condition: Option<Condition>,
     component: Option<(String, String)>,
     configuration_activity: Option<(String, String)>,
@@ -223,7 +242,7 @@ impl WriteParcelable for ZenRule {
             None => p.write_i32(0),
         };
         instant(p, self.deletion_instant);
-        // `modes_ui` and `modes_cleanup_implicit` on (#1647).
+        // `modes_ui` and `modes_cleanup_implicit` on.
         p.write_i32(self.disabled_origin);
         p.write_i32(self.legacy_suppressed_effects);
         p.write_i32(self.condition_override);
@@ -242,9 +261,8 @@ fn parcelable(p: &mut Parcel, class: &str, value: Option<&impl WriteParcelable>)
     }
 }
 
-/// `writeParcelable` of `Uri.parse(s)`.
-fn write_uri(p: &mut Parcel, s: &str) {
-    let uri = Uri::parse(s);
+/// `writeParcelable` of `uri`.
+fn write_uri(p: &mut Parcel, uri: &Uri) {
     p.write_string16(Some(uri.class_name()));
     uri.write(p);
 }
@@ -269,7 +287,7 @@ fn write_component(p: &mut Parcel, component: Option<&(String, String)>, trim: b
     }
 }
 
-/// `ZenModeConfig` (`modes_ui` on, #1647), in `writeToParcel`'s order.
+/// `ZenModeConfig` (`modes_ui` on), in `writeToParcel`'s order.
 pub struct ZenModeConfig {
     user: i32,
     manual: ZenRule,
@@ -342,8 +360,7 @@ impl WriteParcelable for AutomaticZenRule {
 /// `AutomaticZenRule.writeToParcel` of a rule.
 fn write_automatic_zen_rule(rule: &ZenRule, icon: u32, p: &mut Parcel) {
     p.write_i32(i32::from(rule.enabled));
-    // The constructor's trimmed name, a `Uri.parse` of the trimmed
-    // condition id, and trimmed components.
+    // The constructor's trimmed name, condition id and components.
     p.write_i32(1);
     p.write_string8(
         rule.name
@@ -358,11 +375,8 @@ fn write_automatic_zen_rule(rule: &ZenRule, icon: u32, p: &mut Parcel) {
         3 => 3,
         _ => 0,
     });
-    let condition = trimmed(
-        rule.condition_id.as_deref().unwrap_or_default(),
-        MAX_STRING_LENGTH,
-    );
-    write_uri(p, &condition);
+    let condition = rule.condition_id.clone().unwrap_or_else(|| Uri::parse(""));
+    write_uri(p, &trimmed_uri(condition, MAX_STRING_LENGTH));
     write_component(p, rule.component.as_ref(), true);
     write_component(p, rule.configuration_activity.as_ref(), true);
     p.write_i64(rule.creation_time);
@@ -390,6 +404,15 @@ fn trimmed(s: &str, length: usize) -> String {
         return s.to_owned();
     }
     String::from_utf16_lossy(&units[..length])
+}
+
+/// `getTrimmedUri`: a `Uri.parse` of the trimmed string of a longer one.
+fn trimmed_uri(uri: Uri, length: usize) -> Uri {
+    if uri.as_str().encode_utf16().count() > length {
+        Uri::parse(&trimmed(uri.as_str(), length))
+    } else {
+        uri
+    }
 }
 
 /// `getAttributeInt(null, name, default)`.
@@ -570,7 +593,7 @@ fn read_condition(e: &Element) -> Option<Condition> {
             .map(|s| trimmed(&s, CONDITION_MAX_STRING_LENGTH))
     };
     Some(Condition {
-        id: trimmed(&id, CONDITION_MAX_STRING_LENGTH),
+        id: trimmed_uri(Uri::parse(&id), CONDITION_MAX_STRING_LENGTH),
         summary: trimmed(&summary, CONDITION_MAX_STRING_LENGTH),
         line1: text("line1"),
         line2: text("line2"),
@@ -598,7 +621,7 @@ fn read_rule(e: &Element) -> ZenRule {
         } else {
             ZEN_MODE_IMPORTANT_INTERRUPTIONS
         },
-        condition_id: string("conditionId"),
+        condition_id: e.string("conditionId").map(|s| Uri::parse(&s)),
         condition: read_condition(e),
         pkg: string("pkg").or_else(|| owner.as_ref().map(|c| c.0.clone())),
         component: owner,
@@ -622,26 +645,220 @@ fn read_rule(e: &Element) -> ZenRule {
     }
 }
 
+/// The config's own policy fields (`allow*`, `suppressedVisualEffects`),
+/// which `readXml` reads from `<allow>` and `<disallow>` and migrates into
+/// a manual rule that has no policy.
+struct LegacyPolicy {
+    calls: bool,
+    repeat_callers: bool,
+    messages: bool,
+    reminders: bool,
+    events: bool,
+    conversations: bool,
+    calls_from: i32,
+    messages_from: i32,
+    conversations_from: i32,
+    alarms: bool,
+    media: bool,
+    system: bool,
+    priority_channels: bool,
+    suppressed_effects: i32,
+}
+
+impl Default for LegacyPolicy {
+    /// `ZenModeConfig`'s `DEFAULT_*`.
+    fn default() -> LegacyPolicy {
+        LegacyPolicy {
+            calls: true,
+            repeat_callers: true,
+            messages: true,
+            reminders: false,
+            events: false,
+            conversations: true,
+            calls_from: SOURCE_STAR,
+            messages_from: SOURCE_STAR,
+            conversations_from: CONVERSATION_SENDERS_IMPORTANT,
+            alarms: true,
+            media: true,
+            system: false,
+            priority_channels: true,
+            suppressed_effects: SUPPRESSED_EFFECT_SCREEN_OFF
+                | SUPPRESSED_EFFECT_FULL_SCREEN_INTENT
+                | SUPPRESSED_EFFECT_LIGHTS
+                | SUPPRESSED_EFFECT_PEEK
+                | SUPPRESSED_EFFECT_AMBIENT,
+        }
+    }
+}
+
+impl LegacyPolicy {
+    /// `readXml` of `<allow>` over `self`: whether it migrated the visual
+    /// effects of `visualScreenOff` and `visualScreenOn`.
+    fn read_allow(&mut self, e: &Element) -> bool {
+        let valid = |source: i32| (SOURCE_ANYONE..=SOURCE_STAR).contains(&source);
+        let from = int(e, "from", -1);
+        let calls_from = int(e, "callsFrom", -1);
+        let messages_from = int(e, "messagesFrom", -1);
+        (self.calls_from, self.messages_from) = if valid(calls_from) && valid(messages_from) {
+            (calls_from, messages_from)
+        } else if valid(from) {
+            (from, from)
+        } else {
+            (SOURCE_STAR, SOURCE_STAR)
+        };
+        let defaults = LegacyPolicy::default();
+        self.calls = boolean(e, "calls", defaults.calls);
+        self.repeat_callers = boolean(e, "repeatCallers", defaults.repeat_callers);
+        self.messages = boolean(e, "messages", defaults.messages);
+        self.reminders = boolean(e, "reminders", defaults.reminders);
+        self.conversations = boolean(e, "convos", defaults.conversations);
+        self.events = boolean(e, "events", defaults.events);
+        self.conversations_from = int(e, "convosFrom", defaults.conversations_from);
+        self.alarms = boolean(e, "alarms", defaults.alarms);
+        self.media = boolean(e, "media", defaults.media);
+        self.system = boolean(e, "system", defaults.system);
+        self.priority_channels = boolean(e, "priorityChannelsAllowed", defaults.priority_channels);
+        // `unsafeBoolean`: none when missing or not a boolean.
+        let screen_off = e.bool("visualScreenOff").ok().flatten();
+        let screen_on = e.bool("visualScreenOn").ok().flatten();
+        let migrated = screen_off.is_some() || screen_on.is_some();
+        if migrated {
+            self.suppressed_effects = 0;
+        }
+        if screen_off == Some(false) {
+            self.suppressed_effects |= SUPPRESSED_EFFECT_LIGHTS
+                | SUPPRESSED_EFFECT_FULL_SCREEN_INTENT
+                | SUPPRESSED_EFFECT_AMBIENT;
+        }
+        if screen_on == Some(false) {
+            self.suppressed_effects |= SUPPRESSED_EFFECT_PEEK;
+        }
+        migrated
+    }
+
+    /// `toZenPolicy`.
+    fn to_zen_policy(&self) -> ZenPolicy {
+        let state = |allow: bool| if allow { STATE_ALLOW } else { STATE_DISALLOW };
+        // `prioritySendersToPeopleType`.
+        let people = |allow: bool, from: i32| match (allow, from) {
+            (false, _) => PEOPLE_TYPE_NONE,
+            (true, SOURCE_ANYONE) => PEOPLE_TYPE_ANYONE,
+            (true, SOURCE_CONTACT) => PEOPLE_TYPE_CONTACTS,
+            (true, _) => PEOPLE_TYPE_STARRED,
+        };
+        let mut policy = ZenPolicy {
+            calls: people(self.calls, self.calls_from),
+            messages: people(self.messages, self.messages_from),
+            channels: if self.priority_channels {
+                CHANNEL_POLICY_PRIORITY
+            } else {
+                CHANNEL_POLICY_NONE
+            },
+            ..ZenPolicy::default()
+        };
+        policy.categories[CALLS] = state(policy.calls != PEOPLE_TYPE_NONE);
+        policy.categories[MESSAGES] = state(policy.messages != PEOPLE_TYPE_NONE);
+        for (category, allow) in [
+            (REPEAT_CALLERS, self.repeat_callers),
+            (REMINDERS, self.reminders),
+            (EVENTS, self.events),
+            (ALARMS, self.alarms),
+            (MEDIA, self.media),
+            (SYSTEM, self.system),
+        ] {
+            policy.categories[category] = state(allow);
+        }
+        // `allowConversations`: other sender types leave it unset.
+        let conversations = if self.conversations {
+            self.conversations_from
+        } else {
+            CONVERSATION_SENDERS_NONE
+        };
+        if matches!(
+            conversations,
+            CONVERSATION_SENDERS_ANYONE
+                | CONVERSATION_SENDERS_IMPORTANT
+                | CONVERSATION_SENDERS_NONE
+        ) {
+            policy.categories[CONVERSATIONS] = state(conversations != CONVERSATION_SENDERS_NONE);
+            policy.conversations = conversations;
+        }
+        // `VISUAL_EFFECT_*`, each shown unless its effect is suppressed
+        // (all shown when none is).
+        let effects = [
+            SUPPRESSED_EFFECT_FULL_SCREEN_INTENT,
+            SUPPRESSED_EFFECT_LIGHTS,
+            SUPPRESSED_EFFECT_PEEK,
+            SUPPRESSED_EFFECT_STATUS_BAR,
+            SUPPRESSED_EFFECT_BADGE,
+            SUPPRESSED_EFFECT_AMBIENT,
+            SUPPRESSED_EFFECT_NOTIFICATION_LIST,
+        ];
+        for (i, effect) in effects.into_iter().enumerate() {
+            policy.effects[i] = state(self.suppressed_effects & effect == 0);
+        }
+        policy
+    }
+}
+
+/// `ensureManualZenRule`'s manual rule, given `policy`.
+fn new_manual_rule(policy: ZenPolicy) -> ZenRule {
+    ZenRule {
+        id: None,
+        enabled: true,
+        name: None,
+        zen_mode: 0,
+        condition_id: Some(Uri::empty()),
+        condition: None,
+        component: None,
+        configuration_activity: None,
+        pkg: Some("android".into()),
+        creation_time: 0,
+        enabler: None,
+        policy: Some(policy),
+        effects: None,
+        allow_manual_invocation: true,
+        icon_res_name: None,
+        trigger_description: None,
+        kind: TYPE_OTHER,
+        user_modified_fields: 0,
+        policy_user_modified_fields: 0,
+        effects_user_modified_fields: 0,
+        deletion_instant: None,
+        disabled_origin: ORIGIN_UNKNOWN,
+        legacy_suppressed_effects: 0,
+        condition_override: OVERRIDE_NONE,
+        last_activation: None,
+    }
+}
+
 /// `ZenModeConfig.readXml` of the zen config of `policy`, the root of
 /// `notification_policy.xml`: its rules in the order of the config's
-/// `ArrayMap`s. Only the `modes_ui` form, with a manual rule that has a
-/// policy, is read (#1647).
+/// `ArrayMap`s, and a manual rule without a policy, or none, given the
+/// config's own as `modes_ui` migrates it.
 pub fn read(policy: &Element) -> Result<ZenModeConfig, Exception> {
-    let unsupported = |what: &str| {
+    let zen = policy.children().find(|e| e.name == "zen").ok_or_else(|| {
         Exception::new(
             EX_UNSUPPORTED_OPERATION,
-            format!("notification: {what} (#1647)"),
+            "notification: the default zen config (#2143)",
         )
-    };
-    let zen = policy
-        .children()
-        .find(|e| e.name == "zen")
-        .ok_or_else(|| unsupported("the default zen config"))?;
+    })?;
     let mut manual = None;
     let (mut automatic, mut deleted) = (Vec::new(), Vec::new());
     let mut has_priority_channels = false;
+    let mut legacy = LegacyPolicy::default();
+    let mut migrated_effects = false;
     for e in zen.children() {
         match e.name.as_str() {
+            "allow" => migrated_effects |= legacy.read_allow(e),
+            // Unless `<allow>` migrated them, lest it wipe them out.
+            "disallow" if !migrated_effects => {
+                legacy.suppressed_effects = int(
+                    e,
+                    "visualEffects",
+                    LegacyPolicy::default().suppressed_effects,
+                );
+            }
             "manual" => {
                 let mut rule = read_rule(e);
                 rule.enabled = true;
@@ -659,16 +876,39 @@ pub fn read(policy: &Element) -> Result<ZenModeConfig, Exception> {
                     automatic.push(rule);
                 } else if let (Some(pkg), Some(condition)) = (&rule.pkg, &rule.condition_id) {
                     // `deletedRuleKey`.
-                    deleted.push((format!("{pkg}|{condition}"), rule));
+                    deleted.push((format!("{pkg}|{}", condition.as_str()), rule));
                 }
             }
             "state" => has_priority_channels = boolean(e, "areChannelsBypassingDnd", false),
             _ => {}
         }
     }
-    let manual = manual
-        .filter(|m| m.policy.is_some())
-        .ok_or_else(|| unsupported("a zen config before modes_ui"))?;
+    let manual = match manual {
+        Some(rule) if rule.policy.is_some() => rule,
+        // A manual rule of before `modes_ui` is active, as
+        // `setManualZenMode` would have made it.
+        Some(rule) => {
+            let condition_id = rule.condition_id.unwrap_or_else(Uri::empty);
+            ZenRule {
+                pkg: Some("android".into()),
+                kind: TYPE_OTHER,
+                condition: Some(Condition {
+                    id: condition_id.clone(),
+                    summary: String::new(),
+                    line1: Some(String::new()),
+                    line2: Some(String::new()),
+                    icon: -1,
+                    state: CONDITION_STATE_TRUE,
+                    source: SOURCE_UNKNOWN,
+                    flags: FLAG_RELEVANT_ALWAYS,
+                }),
+                condition_id: Some(condition_id),
+                policy: Some(legacy.to_zen_policy()),
+                ..rule
+            }
+        }
+        None => new_manual_rule(legacy.to_zen_policy()),
+    };
     Ok(ZenModeConfig {
         user: int(zen, "user", 0),
         manual,
@@ -854,12 +1094,67 @@ mod tests {
         assert_eq!(&with_id.data()[r.position()..], alone.data());
     }
 
-    /// A config of before modes_ui, whose manual rule has no policy, is
-    /// not read.
+    /// A manual rule of before modes_ui is given the config's own policy,
+    /// its `<allow>` migrating the shared `from` and the screen-off
+    /// effects, and is made active.
     #[test]
-    fn a_manual_rule_without_policy_is_not_read() {
-        let xml = br#"<notification-policy><zen version="8"><manual enabled="true" zen="1" /></zen></notification-policy>"#;
-        assert!(read(&aim_android_xml::read(xml).unwrap()).is_err());
+    fn a_manual_rule_without_policy_is_migrated() {
+        let xml = br#"<notification-policy><zen version="8">
+<allow calls="true" messages="false" from="0" alarms="false" convos="true" convosFrom="1" visualScreenOff="false" />
+<disallow visualEffects="0" />
+<manual enabled="false" zen="1" />
+</zen></notification-policy>"#;
+        let manual = read(&aim_android_xml::read(xml).unwrap()).unwrap().manual;
+        assert!(manual.enabled);
+        assert_eq!(
+            (manual.pkg.as_deref(), manual.kind, manual.zen_mode),
+            (Some("android"), TYPE_OTHER, 1)
+        );
+        assert_eq!(manual.condition_id, Some(Uri::empty()));
+        let condition = manual.condition.unwrap();
+        assert_eq!(
+            (condition.id, condition.state, condition.flags),
+            (Uri::empty(), CONDITION_STATE_TRUE, FLAG_RELEVANT_ALWAYS)
+        );
+        let (a, d) = (STATE_ALLOW, STATE_DISALLOW);
+        assert_eq!(
+            manual.policy,
+            Some(ZenPolicy {
+                categories: [d, d, d, a, a, d, a, d, a],
+                // `<disallow>` is not read after the migration.
+                effects: [d, d, a, a, a, d, a],
+                messages: PEOPLE_TYPE_NONE,
+                calls: PEOPLE_TYPE_ANYONE,
+                conversations: CONVERSATION_SENDERS_ANYONE,
+                channels: CHANNEL_POLICY_PRIORITY,
+            })
+        );
+    }
+
+    /// A config without a manual rule gets `ensureManualZenRule`'s, with
+    /// the config's default policy.
+    #[test]
+    fn a_config_without_a_manual_rule_gets_one() {
+        let xml = br#"<notification-policy><zen version="8" /></notification-policy>"#;
+        let manual = read(&aim_android_xml::read(xml).unwrap()).unwrap().manual;
+        assert!(manual.enabled && manual.allow_manual_invocation && manual.condition.is_none());
+        assert_eq!(
+            (manual.pkg.as_deref(), manual.kind, manual.condition_id),
+            (Some("android"), TYPE_OTHER, Some(Uri::empty()))
+        );
+        let (a, d) = (STATE_ALLOW, STATE_DISALLOW);
+        // `getDefaultZenPolicy`'s.
+        assert_eq!(
+            manual.policy,
+            Some(ZenPolicy {
+                categories: [d, d, a, a, a, a, a, d, a],
+                effects: [d, d, d, a, a, d, a],
+                messages: PEOPLE_TYPE_STARRED,
+                calls: PEOPLE_TYPE_STARRED,
+                conversations: CONVERSATION_SENDERS_IMPORTANT,
+                channels: CHANNEL_POLICY_PRIORITY,
+            })
+        );
     }
 
     /// `safeStringSet` splits on each comma no backslash precedes (one
