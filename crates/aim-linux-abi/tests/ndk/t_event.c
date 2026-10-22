@@ -162,6 +162,44 @@ static void epoll_hup_and_out(void) {
   close(ep);
 }
 
+// One event per fd with all its ready bits, and the fds past maxevents
+// stay ready for the next wait, edge-triggered and one-shot ones too.
+static void epoll_maxevents(void) {
+  int a[2], b[2], c[2];
+  CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, a) == 0);
+  CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, b) == 0);
+  CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, c) == 0);
+  CHECK(write(a[1], "x", 1) == 1 && write(b[1], "x", 1) == 1 && write(c[1], "x", 1) == 1);
+  int ep = epoll_create1(0);
+  struct epoll_event ev = {.events = EPOLLIN | EPOLLOUT, .data.fd = a[0]};
+  CHECK(epoll_ctl(ep, EPOLL_CTL_ADD, a[0], &ev) == 0);
+  ev = (struct epoll_event){.events = EPOLLIN | EPOLLOUT | EPOLLET, .data.fd = b[0]};
+  CHECK(epoll_ctl(ep, EPOLL_CTL_ADD, b[0], &ev) == 0);
+  ev = (struct epoll_event){.events = EPOLLIN | EPOLLOUT | EPOLLONESHOT, .data.fd = c[0]};
+  CHECK(epoll_ctl(ep, EPOLL_CTL_ADD, c[0], &ev) == 0);
+  int seen = 0;
+  for (int i = 0; i < 3; i++) {
+    struct epoll_event out[1];
+    CHECK(epoll_wait(ep, out, 1, 0) == 1);
+    CHECK(out[0].events == (EPOLLIN | EPOLLOUT));
+    int fd = out[0].data.fd;
+    CHECK(fd == a[0] || fd == b[0] || fd == c[0]);
+    seen |= fd == a[0] ? 1 : fd == b[0] ? 2 : 4;
+    // The level-triggered one would come back; set it aside.
+    if (fd == a[0]) CHECK(epoll_ctl(ep, EPOLL_CTL_DEL, a[0], NULL) == 0);
+  }
+  CHECK(seen == 7);
+  // Delivered: the edge-triggered and the one-shot ones are not ready again.
+  struct epoll_event out[4];
+  CHECK(epoll_wait(ep, out, 4, 0) == 0);
+  for (int i = 0; i < 2; i++) {
+    close(a[i]);
+    close(b[i]);
+    close(c[i]);
+  }
+  close(ep);
+}
+
 static void epoll_nested_and_poll(void) {
   int inner = epoll_create1(0), outer = epoll_create1(0);
   int efd = eventfd(0, EFD_NONBLOCK);
@@ -341,6 +379,7 @@ int main(void) {
   RUN(epoll_exclusive);
   RUN(epoll_level_edge_oneshot);
   RUN(epoll_hup_and_out);
+  RUN(epoll_maxevents);
   RUN(epoll_nested_and_poll);
   RUN(epoll_survives_fork);
   RUN(epoll_timeout);
