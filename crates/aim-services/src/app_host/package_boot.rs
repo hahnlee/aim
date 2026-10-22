@@ -51,5 +51,11 @@ pub(super) fn run(host: &Arc<AppHost>, system: &Arc<System>) -> Result<(), Excep
         session::FINISH_RAW_SCAN,
         |p| session::FinishRawScan {}.write(p),
         session::read_finish_raw_scan_reply,
+    )?;
+    call(
+        &boot,
+        session::FINISH_INITIAL_SCAN,
+        |p| session::FinishInitialScan {}.write(p),
+        session::read_finish_initial_scan_reply,
     )
 }

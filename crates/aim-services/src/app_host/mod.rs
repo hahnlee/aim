@@ -155,6 +155,7 @@ pub mod user_service;
 pub mod user_types;
 pub mod volume;
 pub mod vpn_manager;
+mod web_instant_apps;
 pub mod webview_update;
 mod webview_zygote;
 pub mod wifi_config;
@@ -516,8 +517,8 @@ pub struct AppHost {
     resolver: crate::package::resolve::Resolver,
     activities: activity::Activities,
     display: OnceLock<Arc<(display::Display, display_service::Resources)>>,
-    /// The settings provider and its connection token.
-    settings_provider: OnceLock<(Binder, Binder)>,
+    /// The settings provider, its binder and its connection token.
+    settings_provider: OnceLock<(Arc<settings_provider::SettingsProvider>, Binder, Binder)>,
     windows: window_manager::Windows,
     composer: OnceLock<surface::Composer>,
     agent: Mutex<Option<Strong>>,
@@ -728,6 +729,7 @@ impl AppHost {
     pub fn services(self: &Arc<Self>) -> Vec<(&'static str, Arc<dyn Service>)> {
         let settings = Arc::new(settings_provider::SettingsProvider::new(self.clone()));
         let _ = self.settings_provider.set((
+            settings.clone(),
             self.process.add_service(settings.clone()),
             self.process.add_service(Arc::new(activity::Token)),
         ));
@@ -3507,6 +3509,14 @@ impl AppHost {
         self.settings_holder()
     }
 
+    /// The settings provider, once published.
+    fn settings_provider(&self) -> Result<&Arc<settings_provider::SettingsProvider>, Exception> {
+        self.settings_provider
+            .get()
+            .map(|(provider, ..)| provider)
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "no settings provider"))
+    }
+
     /// The `settings` provider's holder: the app host's, a system provider.
     fn settings_holder(&self) -> Result<Option<providers::Holder>, Exception> {
         let (state, resolution) = self.packages()?;
@@ -3543,14 +3553,14 @@ impl AppHost {
                 return Err(state_error(format!("provider info: {reason}")));
             }
         };
-        let (provider, connection) = *self
+        let (_, provider, connection) = self
             .settings_provider
             .get()
             .ok_or_else(|| state_error("no settings provider binder".into()))?;
         Ok(Some(providers::Holder {
             info,
-            provider: Some(provider),
-            connection: Some(connection),
+            provider: Some(*provider),
+            connection: Some(*connection),
             no_release_needed: true,
             local: false,
         }))
@@ -5301,7 +5311,7 @@ impl Service for Control {
             std::thread::spawn(move || {
                 if let Some(system) = host.system.get() {
                     match package_boot::run(&host, system) {
-                        Ok(()) => eprintln!("app host: package boot: through the raw scan"),
+                        Ok(()) => eprintln!("app host: package boot: through the initial scan"),
                         Err(e) => eprintln!("app host: package boot: {e:?}"),
                     }
                 }

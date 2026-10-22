@@ -500,6 +500,12 @@ impl Service for PackageBootstrap {
                 bridge::write_get_package_resolution_policy_reply(&mut p, Some(policy));
                 Ok(())
             }
+            bridge::GET_WEB_INSTANT_APPS_STATE => {
+                bridge::GetWebInstantAppsState::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let state = self.leaf(super::web_instant_apps::WebInstantApps::new(host.clone()));
+                bridge::write_get_web_instant_apps_state_reply(&mut p, Some(state));
+                Ok(())
+            }
             bridge::GET_PACKAGE_INSTALLED_PERMISSIONS => {
                 let a = bridge::GetPackageInstalledPermissions::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;

@@ -7,7 +7,7 @@ use aim_service_aidl::{
 };
 
 pub struct Runtime {
-    owner: Strong,
+    owner: ServiceOwner,
     policy: Arc<Owner>,
     callback: Binder,
     started: Mutex<Option<Result<()>>>,
@@ -115,8 +115,7 @@ impl System {
         {
             return Ok(runtime);
         }
-        let node =
-            self.package_bootstrap_binder_leaf(bridge, bootstrap::GET_WEB_INSTANT_APPS_STATE)?;
+        let node = self.package_bootstrap_node(bridge, bootstrap::GET_WEB_INSTANT_APPS_STATE)?;
         let mut request = Parcel::new();
         leaf::Capture {}.write(&mut request);
         let reply = node
