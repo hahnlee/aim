@@ -1460,9 +1460,23 @@ impl Boot {
             }
             let at = self.elapsed();
             let step = {
-                let mut adapter = PropsAdapter(self.props.clone());
-                self.manager
-                    .execute_one_command(&mut adapter, &mut self.executor)
+                let mut adapter = PropsAdapter {
+                    props: self.props.clone(),
+                    persist: false,
+                };
+                let step = self
+                    .manager
+                    .execute_one_command(&mut adapter, &mut self.executor);
+                // A builtin's `persist.*` set reached the property service
+                // through its socket (`WritePersistentProperty`).
+                if adapter.persist
+                    && let Err(error) = self.executor.write_persistent_properties()
+                {
+                    self.report
+                        .log
+                        .push(format!("persistent properties: {error}"));
+                }
+                step
             };
             if !matches!(step, Step::WaitingForProperty { .. } | Step::WaitingForExec)
                 && let Some((since, what)) = waiting.take()

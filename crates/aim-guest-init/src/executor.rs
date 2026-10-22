@@ -1162,18 +1162,26 @@ impl CommandExecutor for GuestExecutor {
     }
 }
 
-/// The engine's view of the shared property service.
-pub struct PropsAdapter(pub Rc<RefCell<Properties>>);
+/// The engine's view of the shared property service, and whether a set of
+/// its asked for the persistent properties to be written.
+pub struct PropsAdapter {
+    pub props: Rc<RefCell<Properties>>,
+    pub persist: bool,
+}
 
 impl PropertyLookup for PropsAdapter {
     fn property(&self, name: &str) -> Option<String> {
-        self.0.borrow().property(name)
+        self.props.borrow().property(name)
     }
 }
 
 impl InitProperties for PropsAdapter {
-    fn init_set(&mut self, name: &str, value: &str) -> Result<Vec<(String, String)>, String> {
-        InitProperties::init_set(&mut *self.0.borrow_mut(), name, value)
+    fn init_set(&mut self, name: &str, value: &str) -> Result<Vec<SetEffect>, String> {
+        let effects = InitProperties::init_set(&mut *self.props.borrow_mut(), name, value)?;
+        self.persist |= effects
+            .iter()
+            .any(|effect| matches!(effect, SetEffect::Persist { .. }));
+        Ok(effects)
     }
 }
 

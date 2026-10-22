@@ -28,35 +28,32 @@ pub const PERSISTENT_PROPERTIES_READY_PROP: &str = "ro.persistent_properties.rea
 /// Properties as the engine needs them: reads for triggers and expansion,
 /// and init's own writes (the `setprop` builtin).
 pub trait InitProperties: PropertyLookup {
-    /// `SetProperty` from init; returns the property changes to notify
-    /// (normally the one set), or init's error text.
-    fn init_set(&mut self, name: &str, value: &str) -> Result<Vec<(String, String)>, String>;
+    /// `SetProperty` from init's builtins; returns the set's effects (the
+    /// property changes to notify, normally the one set, and a persistent
+    /// value's write), or init's error text.
+    fn init_set(&mut self, name: &str, value: &str) -> Result<Vec<SetEffect>, String>;
 }
 
 impl<M: AreaMemory> InitProperties for PropertyService<M> {
-    fn init_set(&mut self, name: &str, value: &str) -> Result<Vec<(String, String)>, String> {
-        let outcome = PropertyService::init_set(self, name, value);
+    fn init_set(&mut self, name: &str, value: &str) -> Result<Vec<SetEffect>, String> {
+        let outcome = PropertyService::builtin_set(self, name, value);
         if !outcome.is_success() {
             return Err(outcome.error.unwrap_or_default());
         }
-        Ok(outcome
-            .effects
-            .into_iter()
-            .filter_map(|effect| match effect {
-                SetEffect::Changed { name, value } => Some((name, value)),
-                _ => None,
-            })
-            .collect())
+        Ok(outcome.effects)
     }
 }
 
 impl InitProperties for BTreeMap<String, String> {
-    fn init_set(&mut self, name: &str, value: &str) -> Result<Vec<(String, String)>, String> {
+    fn init_set(&mut self, name: &str, value: &str) -> Result<Vec<SetEffect>, String> {
         if name.starts_with("ro.") && self.contains_key(name) {
             return Err("Read-only property was already set".to_string());
         }
         self.insert(name.to_string(), value.to_string());
-        Ok(vec![(name.to_string(), value.to_string())])
+        Ok(vec![SetEffect::Changed {
+            name: name.to_string(),
+            value: value.to_string(),
+        }])
     }
 }
 
@@ -484,9 +481,11 @@ impl ActionManager {
                     ));
                 }
                 // SetProperty's failures are only logged by the service.
-                if let Ok(changes) = properties.init_set(name, value) {
-                    for (name, value) in changes {
-                        self.property_changed(&name, &value);
+                if let Ok(effects) = properties.init_set(name, value) {
+                    for effect in effects {
+                        if let SetEffect::Changed { name, value } = effect {
+                            self.property_changed(&name, &value);
+                        }
                     }
                 }
             }

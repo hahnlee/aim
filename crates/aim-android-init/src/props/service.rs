@@ -350,6 +350,14 @@ impl<M: AreaMemory> PropertyService<M> {
         self.handle_set(name, value.as_bytes(), INIT_CONTEXT, &Ucred::INIT, false)
     }
 
+    /// `android::base::SetProperty` from init's builtins (`do_setprop`):
+    /// through the property socket to init's property service thread, as
+    /// init, so a `persist.*` value is persisted once persistent properties
+    /// are loaded.
+    pub fn builtin_set(&mut self, name: &str, value: &str) -> SetOutcome {
+        self.handle_set(name, value.as_bytes(), INIT_CONTEXT, &Ucred::INIT, true)
+    }
+
     /// `PropertySetNoSocket`: used while loading `.prop` files and deriving
     /// defaults (no permission checks).
     pub fn set_no_socket(&mut self, name: &str, value: &str) -> SetOutcome {
@@ -365,5 +373,47 @@ impl<M: AreaMemory> PropertyService<M> {
 impl<M: AreaMemory> PropertyLookup for PropertyService<M> {
     fn property(&self, name: &str) -> Option<String> {
         self.areas.get(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{PropertyInfoEntry, build_trie};
+    use super::*;
+
+    fn service() -> PropertyService {
+        let info = build_trie(
+            &[PropertyInfoEntry::new(
+                "persist.",
+                "u:object_r:default_prop:s0",
+                "string",
+                false,
+            )],
+            "u:object_r:default_prop:s0",
+            "string",
+        )
+        .unwrap();
+        PropertyService::new(info).unwrap()
+    }
+
+    fn persists(outcome: &SetOutcome) -> bool {
+        outcome
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, SetEffect::Persist { .. }))
+    }
+
+    /// `do_setprop` goes through the property socket, so its `persist.*`
+    /// value is written once persistent properties are loaded;
+    /// `InitPropertySet` never writes one.
+    #[test]
+    fn a_builtin_set_persists_once_persistent_properties_are_loaded() {
+        let mut service = service();
+        assert!(!persists(&service.builtin_set("persist.a", "1")));
+        service.persistent_properties_loaded = true;
+        let outcome = service.builtin_set("persist.a", "2");
+        assert!(outcome.is_success() && persists(&outcome));
+        assert!(!persists(&service.init_set("persist.b", "1")));
+        assert_eq!(service.get("persist.a").as_deref(), Some("2"));
     }
 }
