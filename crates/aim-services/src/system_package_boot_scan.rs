@@ -239,7 +239,7 @@ pub struct Begun {
     pub image: PathBuf,
     pub data: PathBuf,
     pub initial: Arc<InitialOwner>,
-    pub original_context: Option<Strong>,
+    pub original_context: Option<crate::system::ServiceOwner>,
     pub retained_readers: Option<crate::package::settings::native_read::SharedReaders>,
 }
 pub struct Scanned {
@@ -360,7 +360,7 @@ impl RawScanned {
     }
 }
 impl Begun {
-    pub fn bind_original_context(&mut self, context: Strong) -> Result<()> {
+    pub fn bind_original_context(&mut self, context: crate::system::ServiceOwner) -> Result<()> {
         if self.original_context.is_some() {
             return Err(failure("original boot context already bound"));
         }
@@ -378,7 +378,7 @@ impl System {
         image: &Path,
         data: &Path,
         initial: Arc<InitialOwner>,
-        ce_leaf: Strong,
+        ce_leaf: crate::system::ServiceOwner,
     ) -> Result<Begun> {
         self.check_package_bootstrap(bridge)?;
         let original = prepared.settings.clone();

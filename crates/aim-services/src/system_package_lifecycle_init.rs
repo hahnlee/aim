@@ -102,7 +102,7 @@ impl<M: AreaMemory + Send + 'static> BeforeScan<M> {
         let live = properties.clone();
         let production = Production::construct(
             restored,
-            LifecycleFacts::original(&bridge, leaf)?,
+            LifecycleFacts::original(&bridge, crate::system::ServiceOwner::Remote(Arc::new(leaf)))?,
             Box::new(move |name| live.lock().unwrap().get(name)),
         )?;
         system.check_package_bootstrap(&bridge)?;

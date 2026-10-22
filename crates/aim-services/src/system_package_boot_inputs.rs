@@ -573,10 +573,9 @@ impl System {
         // users, the resolver resources, compatibility mode), with the leaf
         // as the live settings owner.
         self.check_package_bootstrap(bridge)?;
-        let settings_leaf = Arc::new(self.binder_process().strong(context.handle));
         let original = crate::package::scan_snapshot::boot_context::Original::capture(&context)
             .map_err(failed)?
-            .bind_settings(settings_leaf);
+            .bind_settings(Arc::new(context));
         original
             .resolver
             .settings_owner

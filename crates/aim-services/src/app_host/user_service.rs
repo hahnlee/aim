@@ -530,6 +530,30 @@ pub(super) fn user_ids(host: &AppHost, include_pre_created: bool) -> Result<Vec<
     )
 }
 
+/// What the package boot's context records of a user.
+pub(super) struct ContextUser {
+    pub id: i32,
+    pub flags: i32,
+    pub pre_created: bool,
+    pub profile_group_id: i32,
+}
+
+/// `getUsers(true, false, false)`: the system user unless it is partial.
+pub(super) fn boot_context_users(host: &AppHost) -> Result<Vec<ContextUser>, Exception> {
+    let (path, bytes) = host.user_file()?;
+    let state = |e: String| Exception::new(EX_ILLEGAL_STATE, format!("{}: {e}", path.display()));
+    let (info, _) = read_user(&aim_android_xml::read(&bytes).map_err(state)?).map_err(state)?;
+    Ok((!info.partial)
+        .then_some(ContextUser {
+            id: info.id,
+            flags: info.flags,
+            pre_created: info.pre_created,
+            profile_group_id: info.profile_group_id,
+        })
+        .into_iter()
+        .collect())
+}
+
 pub(super) fn scan_users(host: &AppHost) -> Result<Vec<crate::package::scan::User>, Exception> {
     if host.device_policies()?.owned() {
         return Err(host.unimplemented_named(

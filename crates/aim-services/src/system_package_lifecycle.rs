@@ -3,10 +3,7 @@ use crate::package::{
     bootstrap::Bridge, lifecycle, owner::recovery::Report, scan_snapshot::query_state::Context,
     settings::Settings, system_config::Properties,
 };
-use aim_binder_host::{
-    local::Strong,
-    parcel::{EX_ILLEGAL_STATE, Exception, Parcel},
-};
+use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::dev_aim_server_ipackagelifecycleleaf as leaf;
 use std::sync::Arc;
 
@@ -48,7 +45,10 @@ pub struct LifecycleFacts {
 }
 impl LifecycleFacts {
     /// system_server's: its bridge's current version and its CE-storage leaf.
-    pub fn original(original: &Arc<Bridge>, storage: Strong) -> Result<Self, Exception> {
+    pub fn original(
+        original: &Arc<Bridge>,
+        storage: crate::system::ServiceOwner,
+    ) -> Result<Self, Exception> {
         let reply = storage
             .transact(u32::from_be_bytes(*b"_NTF"), &Parcel::new(), false)
             .map_err(|status| {

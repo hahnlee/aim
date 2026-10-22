@@ -91,17 +91,7 @@ impl Packages {
     ) -> Result<Self, String> {
         let persisted = package::State::read(data, &[0])?
             .ok_or("no package state: Android never booted on this data")?;
-        let mut platform = Platform::load(root, Default::default())?;
-        platform.density_dpi = Some(density_dpi);
-        // The device's locale, as `persist.sys.locale` holds it (`ko-KR`).
-        if let Some((language, country)) = locale.split_once('-')
-            && let (Ok(language), Ok(country)) = (
-                <[u8; 2]>::try_from(language.as_bytes()),
-                <[u8; 2]>::try_from(country.as_bytes()),
-            )
-        {
-            platform.locale = (language, country);
-        }
+        let platform = device_platform(root, density_dpi, locale)?;
         // `scanApexPackages`: the containers ApexManager reports, parsed
         // with the system's parse flags (`mSystemParseFlags`) and
         // registered before the APKs.
@@ -747,6 +737,26 @@ pub(super) fn permission_granted(flags: i32) -> bool {
         return false;
     }
     has(RUNTIME_GRANTED)
+}
+
+/// The image's platform at the device's density and locale, as
+/// `persist.sys.locale` holds it (`ko-KR`).
+pub(super) fn device_platform(
+    root: &Path,
+    density_dpi: i32,
+    locale: &str,
+) -> Result<Platform, String> {
+    let mut platform = Platform::load(root, Default::default())?;
+    platform.density_dpi = Some(density_dpi);
+    if let Some((language, country)) = locale.split_once('-')
+        && let (Ok(language), Ok(country)) = (
+            <[u8; 2]>::try_from(language.as_bytes()),
+            <[u8; 2]>::try_from(country.as_bytes()),
+        )
+    {
+        platform.locale = (language, country);
+    }
+    Ok(platform)
 }
 
 /// Where the guest's `path` is on the host: below `data` for `/data`,

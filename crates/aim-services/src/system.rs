@@ -7740,7 +7740,7 @@ impl System {
             crate::system_package_persistence_init::construct_package_persistence_owned(
                 self, bridge, &inputs, &config,
             )?;
-        let ce = self.package_bootstrap_binder_leaf(bridge, api::GET_PACKAGE_LIFECYCLE_LEAF)?;
+        let ce = self.package_bootstrap_node(bridge, api::GET_PACKAGE_LIFECYCLE_LEAF)?;
         let mut begun = self.begin_native_package_scan(
             bridge,
             recovered.prepared,
@@ -7767,8 +7767,7 @@ impl System {
                 "initial scan uses another configured image owner",
             ));
         }
-        let context =
-            self.package_bootstrap_binder_leaf(bridge, api::GET_PACKAGE_BOOT_CONTEXT_LEAF)?;
+        let context = self.package_bootstrap_node(bridge, api::GET_PACKAGE_BOOT_CONTEXT_LEAF)?;
         begun.bind_original_context(context)?;
         let early_configuration = self
             .boot_configuration_for(bridge)?

@@ -3107,7 +3107,9 @@ fn provider_info_uses_live_user_unlock_state_after_initial_locked_capture() {
     let mut state = state();
     state.users.get_mut(&0).unwrap().unlocking_or_unlocked = false;
     state.platform.settings_owner = Some(crate::package::resolve::settings::Owner::new(
-        Arc::new(client.strong(0)),
+        Arc::new(crate::system::ServiceOwner::Remote(Arc::new(
+            client.strong(0),
+        ))),
         false,
     ));
     let code = Arc::make_mut(state.packages.get_mut(APP).unwrap().pkg.as_mut().unwrap());

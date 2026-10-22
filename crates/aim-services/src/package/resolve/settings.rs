@@ -1,19 +1,17 @@
 //! Original PMS settings phase: no provider read while native scanning.
-use aim_binder_host::{
-    local::Strong,
-    parcel::{EX_ILLEGAL_STATE, Exception, Parcel},
-};
+use crate::system::ServiceOwner;
+use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception, Parcel};
 use aim_service_aidl::dev_aim_server_ipackagebootcontextleaf as api;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 pub struct Owner {
-    owner: Arc<Strong>,
+    owner: Arc<ServiceOwner>,
     filtering: AtomicBool,
 }
 impl Owner {
-    pub fn new(owner: Arc<Strong>, initial_disabled: bool) -> Arc<Self> {
+    pub fn new(owner: Arc<ServiceOwner>, initial_disabled: bool) -> Arc<Self> {
         Arc::new(Self {
             owner,
             filtering: AtomicBool::new(initial_disabled),
