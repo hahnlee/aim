@@ -579,7 +579,12 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
             return -(error as i64);
         }
     }
-    let mut kevs: Vec<libc::kevent> = Vec::with_capacity(maxevents as usize);
+    // Every pending knote at once (an interest has a read and a write
+    // knote, a pty also its notification), so an fd's filters merge into
+    // one event and the fds past `maxevents` are re-armed, not lost.
+    let knotes = 2 * ep.interest.lock().unwrap().len() + 3 * ep.ptys.lock().unwrap().len();
+    let fetch = knotes.max(maxevents as usize).min(i32::MAX as usize);
+    let mut kevs: Vec<libc::kevent> = Vec::with_capacity(fetch);
     let deadline = timeout.map(|t| now_ns() + t.tv_sec * 1_000_000_000 + t.tv_nsec);
     let (out, rearm) = loop {
         let left = deadline.map(|d| {
@@ -590,14 +595,14 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
             }
         });
         let old_mask = super::poll::swap_sigmask(mask);
-        // SAFETY: output array with capacity `maxevents`.
+        // SAFETY: output array with capacity `fetch`.
         let n = unsafe {
             libc::kevent(
                 epfd,
                 std::ptr::null(),
                 0,
                 kevs.as_mut_ptr(),
-                maxevents,
+                fetch as i32,
                 left.as_ref().map_or(std::ptr::null(), |t| t as *const _),
             )
         };
@@ -608,7 +613,7 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
         }
         // SAFETY: the kernel filled n entries.
         unsafe { kevs.set_len(n as usize) };
-        let found = ready(&ep, &kevs);
+        let found = ready(&ep, &kevs, maxevents as usize);
         // An inotify fd that woke the wait with nothing to read: wait on.
         if !found.0.is_empty() || n == 0 || left.is_some_and(|t| t.tv_sec == 0 && t.tv_nsec == 0) {
             break found;
@@ -631,11 +636,20 @@ fn now_ns() -> i64 {
     super::clock::Base::Monotonic.now() as i64
 }
 
-/// The ready interests among `kevs` as (fd, events, data), and the
-/// changes that disable the other filter of the one-shot ones.
-fn ready(ep: &Epoll, kevs: &[libc::kevent]) -> (Vec<(i32, u32, u64)>, Vec<libc::kevent>) {
-    let mut out: Vec<(i32, u32, u64)> = Vec::with_capacity(kevs.len());
+/// The ready interests among `kevs` as (fd, events, data), at most
+/// `limit` of them with each fd's filters in one event, as epoll's ready
+/// list gives them; and the changes that disable the other filter of the
+/// one-shot ones and re-arm the fds past `limit`, which stay ready for the
+/// next wait as on Linux (a retrieved edge-triggered or dispatched knote
+/// would otherwise not fire again).
+fn ready(
+    ep: &Epoll,
+    kevs: &[libc::kevent],
+    limit: usize,
+) -> (Vec<(i32, u32, u64)>, Vec<libc::kevent>) {
+    let mut out: Vec<(i32, u32, u64)> = Vec::with_capacity(kevs.len().min(limit));
     let mut rearm = Vec::new();
+    let mut rearmed = Vec::new();
     let mut interest = ep.interest.lock().unwrap();
     for k in kevs {
         if !k.udata.is_null() {
@@ -654,6 +668,13 @@ fn ready(ep: &Epoll, kevs: &[libc::kevent]) -> (Vec<(i32, u32, u64)>, Vec<libc::
         }
         if let Some(e) = out.iter_mut().find(|e| e.0 == fd) {
             e.1 |= b;
+            continue;
+        }
+        if out.len() == limit {
+            if !rearmed.contains(&fd) {
+                rearmed.push(fd);
+                rearm.extend(changes(fd, None, Some(i)));
+            }
             continue;
         }
         if i.events & EPOLLONESHOT != 0 {
@@ -713,6 +734,10 @@ fn ready(ep: &Epoll, kevs: &[libc::kevent]) -> (Vec<(i32, u32, u64)>, Vec<libc::
             }
         }
         if bits == 0 {
+            continue;
+        }
+        if out.len() == limit {
+            rearm.extend(pty_changes(&pty.watch, pty.tag, None, Some(&pty.interest)));
             continue;
         }
         if pty.interest.events & EPOLLONESHOT != 0 {
