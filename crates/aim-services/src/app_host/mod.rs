@@ -71,6 +71,7 @@ pub mod hint_manager;
 pub mod input_manager;
 pub mod input_method;
 pub mod input_shell;
+mod installer_confirmation;
 mod installer_external;
 mod installer_recovery;
 pub mod job_content;

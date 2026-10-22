@@ -4,9 +4,10 @@
 //! app host's own owners (`boot_policy`'s decisions, the boot leaves, the
 //! current package version, the native-library and SDK-library policies,
 //! the installer's SELinux labels through the agent, the permission gids
-//! of a uid, the package writer's effects, the installer's build flags and
-//! its sessions' icon decoder and external owners, the maintenance owner)
-//! for the native package boot it runs (served as its own node). The
+//! of a uid) for the native package boot it runs (served as its own node),
+//! with the sub-bridges its construction takes: the package writer's
+//! effects, the maintenance owner, and the native installer's build flags,
+//! session icon decoder, confirmation leaves and external owners. The
 //! bridge's other owners, its other sub-bridges among them, are not
 //! implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
@@ -537,6 +538,18 @@ impl Service for PackageBootstrap {
                 bridge::write_get_installer_external_bridge_reply(&mut p, Some(external));
                 Ok(())
             }
+            bridge::GET_INSTALLER_CONFIRMATION_BRIDGE => {
+                let a = bridge::GetInstallerConfirmationBridge::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let confirmation = self.leaf(Arc::new(
+                    super::installer_confirmation::InstallerConfirmation::new(
+                        host.clone(),
+                        a.dependency_installer_enabled,
+                    ),
+                ));
+                bridge::write_get_installer_confirmation_bridge_reply(&mut p, Some(confirmation));
+                Ok(())
+            }
             bridge::GET_INSTALLER_POLICY_BRIDGE => {
                 bridge::GetInstallerPolicyBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let policy = self.leaf(Arc::new(
@@ -762,7 +775,9 @@ mod tests {
         let call = |code: u32| {
             let mut p = Parcel::new();
             p.write_interface_token(bridge::DESCRIPTOR);
-            if code == bridge::GET_PACKAGE_BOOT_CONFIGURATION_LEAF {
+            if code == bridge::GET_PACKAGE_BOOT_CONFIGURATION_LEAF
+                || code == bridge::GET_INSTALLER_CONFIRMATION_BRIDGE
+            {
                 p.write_bool(false);
             }
             match &bridge.owner {
@@ -781,6 +796,7 @@ mod tests {
             bridge::GET_INSTALLER_RECOVERY_PRESENTATION,
             bridge::GET_PACKAGE_MAINTENANCE_BRIDGE,
             bridge::GET_INSTALLER_EXTERNAL_BRIDGE,
+            bridge::GET_INSTALLER_CONFIRMATION_BRIDGE,
         ] {
             let reply = call(code);
             let mut r = reply.reader();
