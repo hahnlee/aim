@@ -94,14 +94,15 @@ mod network_native;
 pub mod notification_channels;
 pub mod notification_service;
 pub mod overlay_service;
+pub mod package_boot;
 pub mod package_boot_configuration;
 pub mod package_boot_context;
 pub mod package_boot_lifecycle;
 pub mod package_bootstrap;
-pub mod package_resolution_policy;
 mod package_checksums;
 pub mod package_initial_context;
 pub mod package_installer;
+pub mod package_resolution_policy;
 pub mod package_service;
 pub mod package_shell;
 mod package_writes;
@@ -527,6 +528,8 @@ pub struct AppHost {
     uri_grants: uri_grants::UriGrants,
     /// `permissionmgr`, which the app host's own permission checks ask.
     permission_manager: OnceLock<Arc<permission_manager::PermissionManager>>,
+    /// The native services' system, whose package boot the app host runs.
+    system: OnceLock<Arc<crate::system::System>>,
     /// Processes' exit history (`AppExitInfoTracker`), loaded at its first use.
     exit_infos: OnceLock<Arc<exit_info::Tracker>>,
     uid_observers: uid_observers::UidObservers,
@@ -630,6 +633,7 @@ impl AppHost {
             providers: Default::default(),
             uri_grants: Default::default(),
             permission_manager: OnceLock::new(),
+            system: OnceLock::new(),
             exit_infos: OnceLock::new(),
             uid_observers: Default::default(),
             tzdata: OnceLock::new(),
@@ -683,6 +687,11 @@ impl AppHost {
 
     /// The binders of the services published with it, which
     /// `bindApplication` hands apps.
+    /// The native services' system, whose package boot this runs.
+    pub fn set_system(&self, system: Arc<crate::system::System>) {
+        let _ = self.system.set(system);
+    }
+
     pub fn set_published(&self, services: &[(String, Binder)]) {
         *self.published.lock().unwrap() = services.to_vec();
     }
@@ -5290,6 +5299,12 @@ impl Service for Control {
             // start, and not by the first start.
             let host = self.0.clone();
             std::thread::spawn(move || {
+                if let Some(system) = host.system.get() {
+                    match package_boot::run(&host, system) {
+                        Ok(()) => eprintln!("app host: package boot: through the raw scan"),
+                        Err(e) => eprintln!("app host: package boot: {e:?}"),
+                    }
+                }
                 if let Err(e) = host.inputs().and_then(|_| host.packages()) {
                     eprintln!("app host: loading its inputs: {e:?}");
                 }

@@ -253,6 +253,7 @@ impl NativeServices {
             }
         }
         if let Some(host) = &app_host {
+            host.set_system(system.clone());
             host.set_published(&services);
             let host = Arc::downgrade(host);
             system.set_window_manager_internal(Box::new(move |uid| {

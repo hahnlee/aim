@@ -31,4 +31,6 @@ cp "$root/target/aim/device-services/aim-nearby.jar" "$out/system/framework/aim-
 # The services init starts for it (`aimctl` and `guest-init --only`).
 cp "$root/image/app-host/services" "$out/system/etc/aim/app-host-services"
 printf 'activity         com.android.server.am.ActivityManagerService$Lifecycle\n' >> "$out/system/etc/aim/native-services"
+# The native package boot the app host runs (#2022).
+printf 'package          com.android.server.pm.PackageManagerService\n' >> "$out/system/etc/aim/native-services"
 echo "$out"
