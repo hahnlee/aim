@@ -416,6 +416,70 @@ fn uid_gids(
     gids
 }
 
+/// The order of a `TreeSet` of names: by UTF-16 code unit, each once.
+fn tree_order(mut names: Vec<String>) -> Vec<String> {
+    names.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
+    names.dedup();
+    names
+}
+
+/// `PackageLegacyPermissions.validate`: an app id and a user inventory
+/// of distinct users.
+pub(super) fn validate_legacy_identity(app_id: i32, users: &[i32]) -> Result<(), Exception> {
+    if app_id < 0 {
+        return Err(Exception::illegal_argument(
+            "live permission lookup requires an application ID",
+        ));
+    }
+    if app_id >= PER_USER_RANGE || users.is_empty() {
+        return Err(Exception::illegal_argument(
+            "permission capture requires app ID and resolved users",
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    if users.iter().any(|&u| u < 0 || !seen.insert(u)) {
+        return Err(Exception::illegal_argument(
+            "invalid permission user inventory",
+        ));
+    }
+    Ok(())
+}
+
+/// `PackageLegacyPermissions.capture` of the legacy state of `app_id`
+/// whose user 0 state holds `flags`: for each of `users`, never missing,
+/// each permission it holds that is defined (`runtime` says whether, and
+/// if it is a runtime one) in the state's order (an `ArrayMap`: by name
+/// hash), granted or not, with its API flags.
+fn legacy_state_record(
+    app_id: i32,
+    users: &[i32],
+    flags: Option<&permissions::Named>,
+    runtime: impl Fn(&str) -> Option<bool>,
+) -> Vec<u8> {
+    let mut out = Parcel::new();
+    out.write_i32(app_id);
+    out.write_i32(users.len() as i32);
+    for &user in users {
+        out.write_i32(user);
+        out.write_bool(false);
+        let states: Vec<(String, bool, i32)> = match (user, flags) {
+            (0, Some(flags)) => crate::package::info::array_order(flags.clone(), |(n, _)| n)
+                .into_iter()
+                .filter_map(|(name, f)| runtime(&name).map(|r| (name, r, f)))
+                .collect(),
+            _ => Vec::new(),
+        };
+        out.write_i32(states.len() as i32);
+        for (name, runtime, flags) in states {
+            out.write_string16(Some(&name));
+            out.write_bool(runtime);
+            out.write_bool(permission_granted(flags));
+            out.write_i32(to_api_flags(flags));
+        }
+    }
+    out.data().to_vec()
+}
+
 /// What the permission service reads: the package model with its apps
 /// filter, the permissions defined, the permission groups and the access
 /// state of user 0, the model's one user.
@@ -1303,6 +1367,85 @@ impl PermissionManager {
 
     /// `PermissionService.getGidsForUid` (`uid_gids`), of user 0's state,
     /// the model's one user.
+    /// `PermissionService.getInstalledPermissions`: the names of the
+    /// permissions `package` defines, in `TreeSet` order.
+    pub(super) fn installed_permissions(&self, package: &str) -> Result<Vec<String>, Exception> {
+        let user0 = self.user0()?;
+        self.access_with(&user0, |access| {
+            Ok(tree_order(
+                access
+                    .defined
+                    .iter()
+                    .filter(|p| p.package == package)
+                    .map(|p| p.name.clone())
+                    .collect(),
+            ))
+        })
+    }
+
+    /// `PackageBootstrapBridge.getPackageGrantedPermissions`: `package`
+    /// of `app_id`, then `PermissionService.getGrantedPermissions` in
+    /// `user`, in `TreeSet` order.
+    pub(super) fn granted_permissions(
+        &self,
+        package: &str,
+        app_id: i32,
+        user: i32,
+    ) -> Result<Vec<String>, Exception> {
+        let user0 = self.user0()?;
+        self.access_with(&user0, |access| {
+            let ps = access
+                .state
+                .packages
+                .get(package)
+                .filter(|ps| ps.app_id == app_id)
+                .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "permission UID owner differs"))?;
+            // The model has user 0's state alone.
+            let names = match user {
+                0 => user0
+                    .app_id_permissions
+                    .iter()
+                    .find(|(id, _)| *id == app_id)
+                    .map(|(_, flags)| flags.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            Ok(tree_order(
+                names
+                    .into_iter()
+                    .filter(|name| access.granted(ps, user, name))
+                    .collect(),
+            ))
+        })
+    }
+
+    /// `PermissionService.getLegacyPermissionState` of `app_id`, captured
+    /// for `users` as `PackageLegacyPermissions.capture` writes it; the
+    /// model has user 0's state alone.
+    pub(super) fn legacy_permission_state(
+        &self,
+        app_id: i32,
+        users: &[i32],
+        config: &crate::package::system_config::SystemConfig,
+    ) -> Result<Vec<u8>, Exception> {
+        validate_legacy_identity(app_id, users)?;
+        let user0 = self.user0()?;
+        self.access_with(&user0, |access| {
+            let flags = user0
+                .app_id_permissions
+                .iter()
+                .find(|(id, _)| *id == app_id)
+                .map(|(_, flags)| flags);
+            Ok(legacy_state_record(app_id, users, flags, |name| {
+                match access.definition(name) {
+                    Some(permission) => Some(is_runtime(permission)),
+                    // A configured permission no package defines.
+                    None => config.permissions.contains_key(name).then_some(false),
+                }
+            }))
+        })
+    }
+
     pub(super) fn gids_for_uid(
         &self,
         uid: i32,
@@ -1979,6 +2122,56 @@ mod tests {
             [3003, 1_009_997, 1015, 3003]
         );
         assert_eq!(uid_gids(&config, None, 0), [3003]);
+    }
+
+    /// A `TreeSet` of names: `String.compareTo`'s UTF-16 order, each once.
+    #[test]
+    fn names_in_tree_set_order() {
+        let names = ["b", "a", "\u{10000}", "\u{ffff}", "a"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(tree_order(names), ["a", "b", "\u{10000}", "\u{ffff}"]);
+    }
+
+    /// The capture `PackageLegacyPermissions.restore` reads: each user,
+    /// never missing; user 0's defined permissions in hash order with
+    /// their kind, grant and API flags; an undefined one left out.
+    #[test]
+    fn the_legacy_state_record_as_the_bridge_captures_it() {
+        let flags: permissions::Named = vec![
+            ("b".into(), INSTALL_GRANTED),
+            ("undefined".into(), INSTALL_GRANTED),
+            ("a".into(), RUNTIME_GRANTED),
+        ];
+        let runtime = |name: &str| match name {
+            "a" => Some(true),
+            "b" => Some(false),
+            _ => None,
+        };
+        let bytes = legacy_state_record(10_123, &[0, 10], Some(&flags), runtime);
+        let mut r = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+        assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap()), (10_123, 2));
+        assert_eq!((r.read_i32().unwrap(), r.read_i32().unwrap()), (0, 0));
+        assert_eq!(r.read_i32().unwrap(), 2);
+        for (name, runtime, flags) in [("a", true, RUNTIME_GRANTED), ("b", false, INSTALL_GRANTED)]
+        {
+            assert_eq!(r.read_string16().unwrap().as_deref(), Some(name));
+            assert_eq!(r.read_i32().unwrap(), runtime as i32);
+            assert_eq!(r.read_i32().unwrap(), 1);
+            assert_eq!(r.read_i32().unwrap(), to_api_flags(flags));
+        }
+        assert_eq!(
+            (
+                r.read_i32().unwrap(),
+                r.read_i32().unwrap(),
+                r.read_i32().unwrap()
+            ),
+            (10, 0, 0)
+        );
+        assert_eq!(r.remaining(), 0);
+        assert!(validate_legacy_identity(-1, &[0]).is_err());
+        assert!(validate_legacy_identity(10_123, &[0, 0]).is_err());
+        assert!(validate_legacy_identity(10_123, &[]).is_err());
     }
 
     /// `gids_for_uid` reads user 0's app id state, and a fatal

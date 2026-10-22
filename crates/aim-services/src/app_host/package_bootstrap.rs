@@ -32,8 +32,12 @@ const ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES: i64 = 142191088;
 const CURRENT_DATABASE_VERSION: i32 = 3;
 /// `android.content.pm.Flags.sdkLibIndependence`.
 const SDK_LIB_INDEPENDENCE: &str = "android.content.pm.sdk_lib_independence";
-/// `AppsFilterUtils`' query filtering change (`@EnabledSince(R)`).
+/// `AppsFilterUtils`' query filtering change (`@EnabledSince(R)`), and
+/// DomainVerificationService's restricted verification and its second
+/// settings version.
 const APPLICATION_QUERY_FILTERING: i64 = 135549675;
+const DOMAIN_VERIFICATION_RESTRICTED: i64 = 175408749;
+const DOMAIN_VERIFICATION_SETTINGS_V2: i64 = 178111421;
 /// The agent's `restorecon(String path)`.
 const RESTORECON: u32 = 15;
 
@@ -113,6 +117,36 @@ impl PackageBootstrap {
             apex_system_services: Mutex::new(Vec::new()),
             config: OnceLock::new(),
         }
+    }
+
+    /// `platform_compat`'s `getAppConfig(info).isChangeEnabled(change)` of
+    /// an `ApplicationInfo` with only `package` and `target_sdk`
+    /// (`DomainVerificationUtils.buildMockAppInfo`); `invalid` without them.
+    fn app_change(
+        &self,
+        change: i64,
+        package: Option<String>,
+        target_sdk: i32,
+        invalid: &str,
+    ) -> Result<bool, Exception> {
+        match package.filter(|n| !n.is_empty()) {
+            Some(name) if target_sdk >= 0 => {
+                Ok(self
+                    .host
+                    .platform()?
+                    .compat
+                    .is_enabled(change, Some(&name), target_sdk))
+            }
+            _ => Err(Exception::illegal_argument(invalid)),
+        }
+    }
+
+    /// `LocalServices.getService(PermissionManagerServiceInternal.class)`.
+    fn permissions(&self) -> Result<&Arc<super::permission_manager::PermissionManager>, Exception> {
+        self.host
+            .permission_manager
+            .get()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "permission owner is unavailable"))
     }
 
     fn config(&self) -> Result<&SystemConfig, Exception> {
@@ -416,24 +450,38 @@ impl Service for PackageBootstrap {
                 bridge::write_is_domain_set_uuid_strict_validation_enabled_reply(&mut p, sdk >= 34);
                 Ok(())
             }
-            // `platform_compat`'s `getAppConfig(info).isChangeEnabled` of
-            // the query filtering change for the package at its target SDK.
             bridge::IS_APPLICATION_QUERY_FILTERING_ENABLED => {
                 let a = bridge::IsApplicationQueryFilteringEnabled::read(&mut call.data)
                     .map_err(|_| BAD_VALUE)?;
-                match a.package_name.filter(|n| !n.is_empty()) {
-                    Some(name) if a.target_sdk >= 0 => host.platform().map(|platform| {
-                        let on = platform.compat.is_enabled(
-                            APPLICATION_QUERY_FILTERING,
-                            Some(&name),
-                            a.target_sdk,
-                        );
-                        bridge::write_is_application_query_filtering_enabled_reply(&mut p, on)
-                    }),
-                    _ => Err(Exception::illegal_argument(
-                        "invalid query compatibility identity",
-                    )),
-                }
+                self.app_change(
+                    APPLICATION_QUERY_FILTERING,
+                    a.package_name,
+                    a.target_sdk,
+                    "invalid query compatibility identity",
+                )
+                .map(|on| bridge::write_is_application_query_filtering_enabled_reply(&mut p, on))
+            }
+            bridge::IS_DOMAIN_VERIFICATION_RESTRICTED => {
+                let a = bridge::IsDomainVerificationRestricted::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.app_change(
+                    DOMAIN_VERIFICATION_RESTRICTED,
+                    a.package_name,
+                    a.target_sdk,
+                    "invalid domain compatibility identity",
+                )
+                .map(|on| bridge::write_is_domain_verification_restricted_reply(&mut p, on))
+            }
+            bridge::IS_DOMAIN_VERIFICATION_SETTINGS_V2ENABLED => {
+                let a = bridge::IsDomainVerificationSettingsV2Enabled::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                self.app_change(
+                    DOMAIN_VERIFICATION_SETTINGS_V2,
+                    a.package_name,
+                    a.target_sdk,
+                    "invalid domain compatibility identity",
+                )
+                .map(|on| bridge::write_is_domain_verification_settings_v2enabled_reply(&mut p, on))
             }
             bridge::TRANSACT_BATCH => {
                 let a = bridge::TransactBatch::read(&mut call.data).map_err(|_| BAD_VALUE)?;
@@ -451,6 +499,64 @@ impl Service for PackageBootstrap {
                 ));
                 bridge::write_get_package_resolution_policy_reply(&mut p, Some(policy));
                 Ok(())
+            }
+            bridge::GET_PACKAGE_INSTALLED_PERMISSIONS => {
+                let a = bridge::GetPackageInstalledPermissions::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                match a.package_name.filter(|n| !n.is_empty()) {
+                    None => Err(Exception::illegal_argument("missing permission package")),
+                    Some(name) => self
+                        .permissions()
+                        .and_then(|permissions| permissions.installed_permissions(&name))
+                        .map(|names| {
+                            let names = names.into_iter().map(Some).collect();
+                            bridge::write_get_package_installed_permissions_reply(
+                                &mut p,
+                                &Some(names),
+                            )
+                        }),
+                }
+            }
+            bridge::GET_PACKAGE_GRANTED_PERMISSIONS => {
+                let a = bridge::GetPackageGrantedPermissions::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                match a.package_name.filter(|n| !n.is_empty()) {
+                    Some(name) if (0..100_000).contains(&a.app_id) && a.user_id >= 0 => self
+                        .permissions()
+                        .and_then(|permissions| {
+                            permissions.granted_permissions(&name, a.app_id, a.user_id)
+                        })
+                        .map(|names| {
+                            let names = names.into_iter().map(Some).collect();
+                            bridge::write_get_package_granted_permissions_reply(
+                                &mut p,
+                                &Some(names),
+                            )
+                        }),
+                    _ => Err(Exception::illegal_argument("invalid permission identity")),
+                }
+            }
+            bridge::GET_LEGACY_PERMISSION_STATE => {
+                let a = bridge::GetLegacyPermissionState::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                let users = a.user_ids.unwrap_or_default();
+                match super::permission_manager::validate_legacy_identity(a.app_id, &users)
+                    .map(|()| host.permission_manager.get())
+                {
+                    Err(e) => Err(e),
+                    Ok(None) => Err(Exception::new(
+                        EX_ILLEGAL_STATE,
+                        "permission owner is unavailable",
+                    )),
+                    Ok(Some(permissions)) => self
+                        .config()
+                        .and_then(|config| {
+                            permissions.legacy_permission_state(a.app_id, &users, config)
+                        })
+                        .map(|record| {
+                            bridge::write_get_legacy_permission_state_reply(&mut p, &Some(record))
+                        }),
+                }
             }
             bridge::GET_PERMISSION_GIDS_FOR_UID => {
                 let a =
@@ -710,6 +816,36 @@ mod tests {
                 .unwrap()
         );
         assert!(super::super::user_service::same_profile_group(&host, 0, 0).unwrap());
+        // Domain verification's changes, from the compat config; an empty
+        // name is refused.
+        let compat = host.platform().unwrap();
+        let (code, request) =
+            crate::package::bootstrap::domain_verification_restricted_call("a.b", 36);
+        let reply = match &bridge.owner {
+            ServiceOwner::Local(node) => node.transact(code, &request, false).unwrap(),
+            ServiceOwner::Remote(_) => unreachable!(),
+        };
+        assert_eq!(
+            bridge::read_is_domain_verification_restricted_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap(),
+            compat
+                .compat
+                .is_enabled(DOMAIN_VERIFICATION_RESTRICTED, Some("a.b"), 36)
+        );
+        let (code, request) =
+            crate::package::bootstrap::domain_verification_restricted_call("", 36);
+        let reply = match &bridge.owner {
+            ServiceOwner::Local(node) => node.transact(code, &request, false).unwrap(),
+            ServiceOwner::Remote(_) => unreachable!(),
+        };
+        assert_eq!(
+            bridge::read_is_domain_verification_restricted_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap_err()
+                .message,
+            "invalid domain compatibility identity"
+        );
         // Query filtering from R.
         assert!(bridge.application_query_filtering("a.b", 36).unwrap());
         assert!(!bridge.application_query_filtering("a.b", 29).unwrap());
