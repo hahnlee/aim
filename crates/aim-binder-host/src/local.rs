@@ -193,6 +193,9 @@ pub struct LocalProcess {
     handle: ProcHandle,
     credentials: Credentials,
     services: Mutex<HashMap<u64, Arc<dyn Service>>>,
+    /// The weak references the driver reports to each node held only by
+    /// them ([`LocalProcess::add_callback`]).
+    callbacks: Mutex<HashMap<u64, u32>>,
     deaths: Mutex<HashMap<u64, Box<dyn FnOnce() + Send>>>,
     next_cookie: AtomicU64,
     files: Mutex<FileTable>,
@@ -433,6 +436,7 @@ impl LocalProcess {
             handle,
             credentials,
             services: Mutex::new(HashMap::new()),
+            callbacks: Mutex::new(HashMap::new()),
             deaths: Mutex::new(HashMap::new()),
             next_cookie: AtomicU64::new(1),
             files: Mutex::new(FileTable {
@@ -533,11 +537,41 @@ impl LocalProcess {
         self.handle
     }
 
-    /// Serves `service` as a node; the binder to hand out for it.
+    /// Serves `service` as a node; the binder to hand out for it. The node
+    /// lives as long as the process.
     pub fn add_service(&self, service: Arc<dyn Service>) -> Binder {
         let ptr = self.next_cookie.fetch_add(1, Ordering::Relaxed) << 4;
         self.services.lock().unwrap().insert(ptr, service);
         Binder::Local(ptr)
+    }
+
+    /// Serves `service` as a node held only by the references other
+    /// processes take to it (a callback handed out with one call): it goes
+    /// when the driver reports the last one gone (`BR_DECREFS`), as a
+    /// `BBinder` no one else holds does. One never sent is kept.
+    pub fn add_callback(&self, service: Arc<dyn Service>) -> Binder {
+        let binder = self.add_service(service);
+        if let Binder::Local(ptr) = binder {
+            self.callbacks.lock().unwrap().insert(ptr, 0);
+        }
+        binder
+    }
+
+    /// The driver's weak references to callback node `ptr` changed by
+    /// `delta` (`BR_INCREFS`, `BR_DECREFS`); the last one releases it.
+    fn callback_refs(&self, ptr: u64, delta: i32) {
+        let mut callbacks = self.callbacks.lock().unwrap();
+        let Some(refs) = callbacks.get_mut(&ptr) else {
+            return;
+        };
+        *refs = refs.saturating_add_signed(delta);
+        if *refs == 0 && delta < 0 {
+            callbacks.remove(&ptr);
+            drop(callbacks);
+            // Dropped outside the lock: a service's drop may call back.
+            let service = self.services.lock().unwrap().remove(&ptr);
+            drop(service);
+        }
     }
 
     /// Retain a local object returned by the driver to its owning process.
@@ -859,8 +893,17 @@ impl LocalProcess {
             BR_TRANSACTION | BR_TRANSACTION_SEC_CTX => {
                 self.execute(TransactionData::decode(payload), out);
             }
+            BR_DECREFS => {
+                let ptr = u64::from_le_bytes(payload[..8].try_into().unwrap());
+                self.callback_refs(ptr, -1);
+            }
             BR_INCREFS | BR_ACQUIRE => {
-                // Nodes live as long as the process: acknowledge.
+                // A service lives as long as the process, a callback while
+                // the driver holds a weak reference: acknowledge.
+                if cmd == BR_INCREFS {
+                    let ptr = u64::from_le_bytes(payload[..8].try_into().unwrap());
+                    self.callback_refs(ptr, 1);
+                }
                 let done = if cmd == BR_INCREFS {
                     BC_INCREFS_DONE
                 } else {
@@ -879,7 +922,7 @@ impl LocalProcess {
                 out.extend_from_slice(&cookie.to_le_bytes());
             }
             BR_SPAWN_LOOPER => self.spawn_looper(true),
-            _ => {} // NOOP, OK, RELEASE, DECREFS, death cleared, a looper's results
+            _ => {} // NOOP, OK, RELEASE, death cleared, a looper's results
         }
     }
 
@@ -1711,6 +1754,66 @@ mod tests {
         echo.transact(WATCH, &watch, false).unwrap();
         driver.release(client.handle);
         deaths.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    /// Hands out a callback node of its process with each call.
+    struct Gives {
+        process: Mutex<Weak<LocalProcess>>,
+        given: Mutex<Vec<u64>>,
+    }
+
+    impl Service for Gives {
+        fn descriptor(&self) -> &str {
+            "test.IGives"
+        }
+        fn transact(&self, _: &mut Call<'_>) -> Reply {
+            let process = self.process.lock().unwrap().upgrade().unwrap();
+            let callback = process.add_callback(Arc::new(Sink(AtomicI32::new(0))));
+            let Binder::Local(ptr) = callback else {
+                unreachable!()
+            };
+            self.given.lock().unwrap().push(ptr);
+            let mut reply = Parcel::new();
+            reply.write_binder(Some(callback));
+            Ok(reply)
+        }
+    }
+
+    /// A callback node goes when the last process holding it lets it go; a
+    /// service stays.
+    #[test]
+    fn a_callback_node_goes_with_its_last_reference() {
+        let driver = Driver::new();
+        let _manager = start_registry(&driver);
+        let server = open(&driver, 210, 1000);
+        let gives = Arc::new(Gives {
+            process: Mutex::new(Arc::downgrade(&server)),
+            given: Mutex::new(Vec::new()),
+        });
+        let binder = server.add_service(gives.clone());
+        server.start();
+        let client = open(&driver, 310, 10124);
+        let gives_handle = publish(&server, &client, "gives", binder);
+        let reply = gives_handle.transact(0, &Parcel::new(), false).unwrap();
+        let Some(Binder::Handle(h)) = reply.reader().read_binder().unwrap() else {
+            panic!("no callback binder");
+        };
+        let callback = client.strong(h);
+        drop(reply);
+        let ptr = gives.given.lock().unwrap()[0];
+        // Held by the client: still served.
+        callback.transact(1, &Parcel::new(), false).unwrap();
+        assert!(server.local_service(ptr).is_some());
+        drop(callback);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while server.local_service(ptr).is_some() {
+            assert!(std::time::Instant::now() < deadline, "callback node kept");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let Binder::Local(service) = binder else {
+            unreachable!()
+        };
+        assert!(server.local_service(service).is_some());
     }
 
     /// Releases its own process while it serves a call, as a process that
