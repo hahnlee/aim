@@ -2025,6 +2025,7 @@ pub fn brk(a: [u64; 6]) -> i64 {
         b.mapped = need;
     }
     b.cur = want;
+    vm_account::with(|s| s.set_heap(need - b.base));
     b.cur as i64
 }
 
@@ -2087,5 +2088,7 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
         limit: v[3],
     };
     vm_account::fork_restore(r);
+    let heap = brk_heap();
+    vm_account::with(|s| s.set_heap(heap));
     super::vma_names::fork_restore(r);
 }

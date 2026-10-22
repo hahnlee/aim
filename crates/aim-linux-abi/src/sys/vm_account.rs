@@ -34,6 +34,13 @@ impl Area {
 pub(super) struct Space {
     areas: BTreeMap<u64, Area>,
     data_segment: u64,
+    /// Bytes of the areas, and of those that are data.
+    mapped: u64,
+    data_mapped: u64,
+    /// The program break's heap, as `brk` last left it.
+    heap: u64,
+    /// The largest `total_vm` so far (`hiwater_vm`).
+    peak: u64,
 }
 
 /// What a mapping is, as its flags make it.
@@ -58,8 +65,23 @@ pub(super) struct Limits {
 }
 
 impl Space {
+    /// Adds an area that overlaps none.
+    fn insert(&mut self, start: u64, area: Area) {
+        self.mapped += area.end - start;
+        if area.data() {
+            self.data_mapped += area.end - start;
+        }
+        self.areas.insert(start, area);
+    }
+
     /// Takes `[lo, hi)` out of the areas, splitting those it cuts.
     fn cut(&mut self, lo: u64, hi: u64) {
+        for (start, end, area) in self.pieces(lo, hi) {
+            self.mapped -= end - start;
+            if area.data() {
+                self.data_mapped -= end - start;
+            }
+        }
         let mut tail = None;
         if let Some((_, area)) = self.areas.range_mut(..lo).next_back()
             && area.end > lo
@@ -87,7 +109,7 @@ impl Space {
             return;
         }
         self.cut(lo, hi);
-        self.areas.insert(
+        self.insert(
             lo,
             Area {
                 end: hi,
@@ -123,7 +145,7 @@ impl Space {
     pub fn protect(&mut self, lo: u64, hi: u64, writable: bool) {
         for (start, end, area) in self.pieces(lo, hi) {
             self.cut(start, end);
-            self.areas.insert(
+            self.insert(
                 start,
                 Area {
                     end,
@@ -147,14 +169,19 @@ impl Space {
     /// `(total_vm, data_vm)` in bytes, the program break's heap `brk`
     /// bytes counted as data.
     fn totals(&self, brk: u64) -> (u64, u64) {
-        let (mut total, mut data) = (brk, brk);
-        for (&start, area) in &self.areas {
-            total += area.end - start;
-            if area.data() {
-                data += area.end - start;
-            }
-        }
-        (total, data)
+        (self.mapped + brk, self.data_mapped + brk)
+    }
+
+    /// `brk` moved the program break's heap to `bytes`.
+    pub fn set_heap(&mut self, bytes: u64) {
+        self.heap = bytes;
+    }
+
+    /// `(total_vm, data_vm, hiwater_vm)` in bytes, as `/proc/<pid>/status`
+    /// reports them.
+    pub fn usage(&self) -> [u64; 3] {
+        let (total, data) = self.totals(self.heap);
+        [total, data, self.peak.max(total)]
     }
 
     /// Bytes of `[lo, hi)` already mapped (`count_vma_pages_range`).
@@ -218,16 +245,23 @@ impl Space {
 
 static SPACE: Mutex<Option<Space>> = Mutex::new(None);
 
-/// Runs `f` on this process's accounting.
+/// Runs `f` on this process's accounting, then shows the totals to the
+/// other processes (`procrec`).
 pub(super) fn with<R>(f: impl FnOnce(&mut Space) -> R) -> R {
     let mut space = SPACE.lock().unwrap();
-    f(space.get_or_insert_with(Space::default))
+    let space = space.get_or_insert_with(Space::default);
+    let result = f(space);
+    let usage = space.usage();
+    space.peak = usage[2];
+    super::procrec::set_vm(usage);
+    result
 }
 
 /// Fork: the child has the parent's mappings.
 pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
     with(|s| {
         w.u64(s.data_segment);
+        w.u64(s.peak);
         w.seq(s.areas.iter(), |w, (&start, area)| {
             w.u64(start);
             w.u64(area.end);
@@ -240,6 +274,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
 
 pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
     let data_segment = r.u64();
+    let peak = r.u64();
     let areas = r.seq(|r| {
         let start = r.u64();
         let area = Area {
@@ -250,10 +285,16 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
         };
         (start, area)
     });
-    *SPACE.lock().unwrap() = Some(Space {
-        areas: areas.into_iter().collect(),
+    // dup_mm copies the parent's mm, hiwater_vm with it.
+    let mut space = Space {
         data_segment,
-    });
+        peak,
+        ..Space::default()
+    };
+    for (start, area) in areas {
+        space.insert(start, area);
+    }
+    *SPACE.lock().unwrap() = Some(space);
 }
 
 #[cfg(test)]
@@ -282,6 +323,43 @@ mod tests {
             address_space,
             data: (data, data),
         }
+    }
+
+    /// The running totals equal a count of the areas after any sequence of
+    /// overlapping maps, unmaps and protections.
+    #[test]
+    fn running_totals_follow_the_areas() {
+        let mut s = Space::default();
+        let recount = |s: &Space| {
+            s.areas
+                .iter()
+                .fold((0, 0), |(total, data), (&start, area)| {
+                    let len = area.end - start;
+                    (total + len, data + if area.data() { len } else { 0 })
+                })
+        };
+        let kinds = [PRIVATE_RW, PRIVATE_RO, SHARED_RW];
+        let mut seed = 7u64;
+        for step in 0..2000 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let lo = (seed >> 33) % 64 * PAGE;
+            let hi = lo + ((seed >> 20) % 16 + 1) * PAGE;
+            match step % 3 {
+                0 => s.map(lo, hi, kinds[(seed % 3) as usize]),
+                1 => s.unmap(lo, hi),
+                _ => s.protect(lo, hi, seed & 1 == 0),
+            }
+            assert_eq!((s.mapped, s.data_mapped), recount(&s), "step {step}");
+        }
+        s.set_heap(3 * PAGE);
+        let [total, data, peak] = s.usage();
+        assert_eq!(
+            (total, data),
+            (s.mapped + 3 * PAGE, s.data_mapped + 3 * PAGE)
+        );
+        assert!(peak >= total);
     }
 
     #[test]

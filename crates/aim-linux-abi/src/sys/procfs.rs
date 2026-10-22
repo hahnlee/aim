@@ -422,7 +422,7 @@ fn stat_line(p: i32, thread: Option<i32>) -> Option<String> {
         } else {
             ti.pti_threadnum
         },
-        ti.pti_virtual_size,
+        vm(p, ti.pti_virtual_size)[0],
         s.start_stack,
         s.args.0,
         s.args.1,
@@ -435,6 +435,12 @@ fn stat_line(p: i32, thread: Option<i32>) -> Option<String> {
 /// identity (another's from the process table).
 fn cred_lines(p: i32) -> String {
     super::cred::proc_status(p)
+}
+
+/// Process `p`'s `total_vm`, `data_vm` and `hiwater_vm` in bytes, as the
+/// layer counts its mappings; `host` for all three without a record.
+fn vm(p: i32, host: u64) -> [u64; 3] {
+    super::procrec::vm_of(p).unwrap_or([host; 3])
 }
 
 /// `/proc/<p>/status`, or with `thread` its thread's: the thread's `comm`
@@ -450,6 +456,9 @@ fn status(p: i32, thread: Option<i32>) -> Option<String> {
     let kb = |b: u64| b / 1024;
     let n = ncpu();
     let guest_tgid = super::pidns::guest_pid(super::procrec::tgid(p)).ok()?;
+    // task_mem: the guest's own mappings (Darwin's virtual size counts the
+    // whole address space it reserved), Darwin's without a record.
+    let [total, data, peak] = vm(p, t.ptinfo.pti_virtual_size);
     Some(format!(
         "Name:\t{}\nUmask:\t0022\nState:\t{state}\nTgid:\t{guest_tgid}\nNgid:\t0\nPid:\t{}\nPPid:\t{}\nTracerPid:\t{}\n\
          {}FDSize:\t256\n\
@@ -466,12 +475,12 @@ fn status(p: i32, thread: Option<i32>) -> Option<String> {
         super::process::linux_ppid(t.pbsd.pbi_ppid as i32),
         super::pidns::guest_pid(tracer(p, thread.unwrap_or(p))).ok()?,
         cred_lines(p),
-        kb(t.ptinfo.pti_virtual_size),
-        kb(t.ptinfo.pti_virtual_size),
+        kb(peak),
+        kb(total),
         kb(t.ptinfo.pti_resident_size),
         kb(t.ptinfo.pti_resident_size),
         kb(t.ptinfo.pti_resident_size),
-        kb(t.ptinfo.pti_virtual_size),
+        kb(data),
         if p == pid() {
             tids(p).len() as i32
         } else {

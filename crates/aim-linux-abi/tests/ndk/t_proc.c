@@ -225,6 +225,56 @@ static void fds_and_links(void) {
   CHECK(atoi(link) == getpid());
 }
 
+static long status_kb(pid_t pid, const char* field) {
+  char path[64], line[256];
+  snprintf(path, sizeof path, "/proc/%d/status", pid);
+  FILE* f = fopen(path, "r");
+  if (f == NULL) return -1;
+  long value = -1;
+  size_t n = strlen(field);
+  while (fgets(line, sizeof line, f) != NULL) {
+    if (strncmp(line, field, n) == 0 && line[n] == ':') {
+      value = strtol(line + n + 1, NULL, 10);
+      break;
+    }
+  }
+  fclose(f);
+  return value;
+}
+
+// task_mem: VmSize and VmData are the process's own mappings, which an
+// mmap grows by its length and a munmap shrinks; VmPeak keeps the most;
+// another process (a fork child) reads the same.
+static void vm_totals(void) {
+  long size = status_kb(getpid(), "VmSize");
+  long data = status_kb(getpid(), "VmData");
+  CHECK(size > 0 && data > 0);
+  // Not the host's reserved address space (hundreds of GiB).
+  CHECK(size < 64L << 20);
+  size_t len = 64 << 20;
+  void* p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(p != MAP_FAILED);
+  CHECK(status_kb(getpid(), "VmSize") == size + (long)(len >> 10));
+  CHECK(status_kb(getpid(), "VmData") == data + (long)(len >> 10));
+  long peak = status_kb(getpid(), "VmPeak");
+  CHECK(peak >= size + (long)(len >> 10));
+  pid_t parent = getpid();
+  pid_t child = fork();
+  CHECK(child >= 0);
+  if (child == 0) {
+    // The child sees its parent's totals, and inherits its peak.
+    if (status_kb(parent, "VmSize") != size + (long)(len >> 10)) _exit(10);
+    if (status_kb(getpid(), "VmPeak") < peak) _exit(11);
+    _exit(0);
+  }
+  int status = 0;
+  CHECK(waitpid(child, &status, 0) == child);
+  CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  CHECK(munmap(p, len) == 0);
+  CHECK(status_kb(getpid(), "VmSize") == size);
+  CHECK(status_kb(getpid(), "VmPeak") == peak);
+}
+
 // Reopening /proc/self/fd/N opens the file itself, which may_open checks
 // for the new open's access: an inherited descriptor gives no more.
 static void fd_reopen_checks_the_file(void) {
@@ -484,6 +534,7 @@ int main(int argc, char** argv) {
   RUN(setproctitle_area);
   RUN(fds_and_links);
   RUN(fd_reopen_checks_the_file);
+  RUN(vm_totals);
   RUN(system_files);
   RUN(proc_dirs);
   RUN(mount_table);
