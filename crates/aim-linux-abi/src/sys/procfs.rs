@@ -1886,6 +1886,23 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
         if let Some(r) = super::memfd::reopen(n, host_flags) {
             return Some(r);
         }
+        // The link leads to the file itself, which may_open checks for
+        // this open's access as any open of it (proc_fd_link, then
+        // inode_permission).
+        let want = match host_flags & libc::O_ACCMODE {
+            libc::O_RDONLY => 4,
+            libc::O_WRONLY => 2,
+            _ => 6,
+        };
+        match super::fs::stat_fd_kernel(n) {
+            Ok(st)
+                if !super::attrs::permits(&st, want, &super::cred::current(), super::attrs::FS) =>
+            {
+                return Some(-(EACCES as i64));
+            }
+            Ok(_) => {}
+            Err(error) => return Some(error),
+        }
         let mut path = [0u8; libc::PATH_MAX as usize];
         // SAFETY: F_GETPATH into a local buffer; then open or dup.
         return Some(unsafe {

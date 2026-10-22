@@ -225,6 +225,40 @@ static void fds_and_links(void) {
   CHECK(atoi(link) == getpid());
 }
 
+// Reopening /proc/self/fd/N opens the file itself, which may_open checks
+// for the new open's access: an inherited descriptor gives no more.
+static void fd_reopen_checks_the_file(void) {
+  char file[128];
+  snprintf(file, sizeof file, "/data/local/tmp/proc-fd-%d", getpid());
+  int fd = open(file, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+  CHECK(fd >= 0);
+  int inherited = dup(fd);
+  CHECK(inherited >= 0);
+  pid_t child = fork();
+  CHECK(child >= 0);
+  if (child == 0) {
+    if (setresgid(10001, 10001, 10001) != 0) _exit(10);
+    if (setresuid(10001, 10001, 10001) != 0) _exit(11);
+    char path[64];
+    snprintf(path, sizeof path, "/proc/self/fd/%d", inherited);
+    errno = 0;
+    if (open(path, O_RDONLY) != -1 || errno != EACCES) _exit(12);
+    _exit(0);
+  }
+  int status = 0;
+  CHECK(waitpid(child, &status, 0) == child);
+  CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  // Its owner reopens it.
+  char path[64];
+  snprintf(path, sizeof path, "/proc/self/fd/%d", inherited);
+  int again = open(path, O_RDWR);
+  CHECK(again >= 0);
+  close(again);
+  close(inherited);
+  close(fd);
+  unlink(file);
+}
+
 static void system_files(void) {
   CHECK(slurp("/proc/meminfo", big, sizeof big) > 0);
   long total = 0;
@@ -449,6 +483,7 @@ int main(int argc, char** argv) {
   RUN(smaps);
   RUN(setproctitle_area);
   RUN(fds_and_links);
+  RUN(fd_reopen_checks_the_file);
   RUN(system_files);
   RUN(proc_dirs);
   RUN(mount_table);
