@@ -1,9 +1,12 @@
 //! `IPackageBootstrapBridge` for the app host: the outside decisions and
 //! the leaves the native package boot reads, answered as system_server's
 //! `PackageBootstrapBridge` answers them (`android-16.0.0_r1`), from the
-//! app host's own owners (`boot_policy`'s decisions, the boot leaves) for the
-//! native package boot it runs (served as its own node). The bridge's
-//! other owners are not implemented (#2022).
+//! app host's own owners (`boot_policy`'s decisions, the boot leaves, the
+//! current package version, the native-library and SDK-library policies,
+//! the installer's SELinux labels through the agent) for the native
+//! package boot it runs (served as its own node). The bridge's other
+//! owners, its sub-bridges and permission GIDs among them, are not
+//! implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex};
@@ -22,12 +25,74 @@ use crate::package::scan::SharedUidMigration;
 use crate::package::system_config::Sdk;
 
 const SYSTEM_UID: i32 = 1000;
+/// `PackageBootstrapBridge.ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES`.
+const ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES: i64 = 142191088;
+/// `Settings.CURRENT_DATABASE_VERSION`
+/// (`DatabaseVersion.SIGNATURE_MALFORMED_RECOVER`).
+const CURRENT_DATABASE_VERSION: i32 = 3;
+/// `android.content.pm.Flags.sdkLibIndependence`.
+const SDK_LIB_INDEPENDENCE: &str = "android.content.pm.sdk_lib_independence";
+/// The agent's `restorecon(String path)`.
+const RESTORECON: u32 = 15;
 
 pub struct PackageBootstrap {
     host: Arc<AppHost>,
     /// ApexManager's `mApexSystemServices`' names, kept across its
     /// notifications.
     apex_system_services: Mutex<Vec<String>>,
+}
+
+/// `Build.FINGERPRINT`: `ro.build.fingerprint`, else made of the build's
+/// properties (`deriveFingerprint`).
+fn build_fingerprint(property: impl Fn(&str) -> Option<String>) -> String {
+    if let Some(fingerprint) = property("ro.build.fingerprint").filter(|f| !f.is_empty()) {
+        return fingerprint;
+    }
+    let get = |name: &str| property(name).unwrap_or_else(|| "unknown".into());
+    format!(
+        "{}/{}/{}:{}/{}/{}:{}/{}",
+        get("ro.product.brand"),
+        get("ro.product.name"),
+        get("ro.product.device"),
+        get("ro.build.version.release"),
+        get("ro.build.id"),
+        get("ro.build.version.incremental"),
+        get("ro.build.type"),
+        get("ro.build.tags"),
+    )
+}
+
+/// `PackageBootVersion.capture`: `Settings.VersionInfo.forceCurrent`'s
+/// SDK, database version, `Build.FINGERPRINT` and
+/// `PackagePartitions.FINGERPRINT`, parcelled.
+fn current_package_version(property: impl Fn(&str) -> Option<String>) -> Vec<u8> {
+    let sdk = property("ro.build.version.sdk")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mut p = Parcel::new();
+    p.write_i32(sdk);
+    p.write_i32(CURRENT_DATABASE_VERSION);
+    p.write_string16(Some(&build_fingerprint(&property)));
+    p.write_string16(Some(&super::app_data::fingerprint(&property)));
+    p.data().to_vec()
+}
+
+/// `restoreInstallerContext`'s paths: an install's code or staging
+/// directory, or the sessions file and its backups, with no `.` or `..`
+/// component.
+fn installer_context_path(path: &str) -> bool {
+    (path.starts_with("/data/app/")
+        || path.starts_with("/data/app-staging/")
+        || [
+            "/data/system/install_sessions.xml",
+            "/data/system/install_sessions.xml.new",
+            "/data/system/install_sessions.xml.bak",
+        ]
+        .contains(&path))
+        && !path.contains("/../")
+        && !path.contains("/./")
+        && !path.ends_with("/..")
+        && !path.ends_with("/.")
 }
 
 /// `PackageCacher.fromCacheEntryStatic` of a call's parsed package.
@@ -211,6 +276,59 @@ impl Service for PackageBootstrap {
                 bridge::write_get_package_boot_lifecycle_leaf_reply(&mut p, Some(leaf));
                 Ok(())
             }
+            bridge::GET_CURRENT_PACKAGE_VERSION => {
+                bridge::GetCurrentPackageVersion::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let version = current_package_version(|name| host.property(name));
+                bridge::write_get_current_package_version_reply(&mut p, &Some(version));
+                Ok(())
+            }
+            bridge::RESTORE_INSTALLER_CONTEXT => {
+                let a =
+                    bridge::RestoreInstallerContext::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                match a.path.filter(|path| installer_context_path(path)) {
+                    None => Err(Exception::illegal_argument(
+                        "invalid installer context path",
+                    )),
+                    // `SELinux.restorecon`, by the agent.
+                    Some(path) => host
+                        .call_agent(RESTORECON, "restorecon", |p| p.write_string16(Some(&path)))
+                        .and_then(|reply| {
+                            let mut r = reply.reader();
+                            r.read_exception()
+                                .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("{s}")))??;
+                            r.read_i32()
+                                .map_err(|s| Exception::new(EX_ILLEGAL_STATE, format!("{s}")))
+                        })
+                        .and_then(|restored| match restored {
+                            0 => Err(Exception::new(
+                                EX_ILLEGAL_STATE,
+                                format!("installer restorecon failed: {path}"),
+                            )),
+                            _ => Ok(bridge::write_restore_installer_context_reply(&mut p)),
+                        }),
+                }
+            }
+            // `PlatformCompat.isChangeEnabledInternal`.
+            bridge::ARE_NATIVE_LIBRARY_DEPENDENCIES_ENFORCED => {
+                let a = bridge::AreNativeLibraryDependenciesEnforced::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                host.platform().map(|platform| {
+                    let enforced = platform.compat.is_enabled(
+                        ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES,
+                        a.package_name.as_deref(),
+                        a.target_sdk,
+                    );
+                    bridge::write_are_native_library_dependencies_enforced_reply(&mut p, enforced)
+                })
+            }
+            bridge::IS_SDK_LIBRARY_INDEPENDENCE_ENABLED => {
+                bridge::IsSdkLibraryIndependenceEnabled::read(&mut call.data)
+                    .map_err(|_| BAD_VALUE)?;
+                host.framework().map(|framework| {
+                    let on = framework.0.flags.get(SDK_LIB_INDEPENDENCE) == Some(&true);
+                    bridge::write_is_sdk_library_independence_enabled_reply(&mut p, on)
+                })
+            }
             code => {
                 let name = bridge::METHODS
                     .iter()
@@ -228,6 +346,42 @@ mod tests {
     use super::*;
     use crate::package::bootstrap::Bridge;
     use crate::system::ServiceOwner;
+
+    /// `deriveFingerprint` without `ro.build.fingerprint`, and the paths
+    /// `restoreInstallerContext` labels.
+    #[test]
+    fn the_build_fingerprint_and_installer_paths_as_the_original() {
+        let props = |name: &str| match name {
+            "ro.product.brand" => Some("google".to_string()),
+            "ro.product.name" => Some("sdk".into()),
+            "ro.build.type" => Some("user".into()),
+            _ => None,
+        };
+        assert_eq!(
+            build_fingerprint(props),
+            "google/sdk/unknown:unknown/unknown/unknown:user/unknown"
+        );
+        assert_eq!(
+            build_fingerprint(|n| (n == "ro.build.fingerprint").then(|| "a/b/c".to_string())),
+            "a/b/c"
+        );
+        for ok in [
+            "/data/app/vmdl3.tmp",
+            "/data/app-staging/session_4",
+            "/data/system/install_sessions.xml.bak",
+        ] {
+            assert!(installer_context_path(ok), "{ok}");
+        }
+        for bad in [
+            "/data/app/../x",
+            "/data/app/.",
+            "/data/app/a/..",
+            "/data/system/packages.xml",
+            "/data/app-x",
+        ] {
+            assert!(!installer_context_path(bad), "{bad}");
+        }
+    }
 
     /// The native boot's own bridge (`Bridge`) attached to this one as the
     /// process's node: its handshake and decisions, the users, a parsed
@@ -328,7 +482,30 @@ mod tests {
                 Some(aim_binder_host::parcel::Binder::Local(_))
             ));
         }
-        let reply = call(bridge::GET_CURRENT_PACKAGE_VERSION);
+        let version = bridge.current_package_version().unwrap();
+        assert_eq!((version.sdk_version, version.database_version), (36, 3));
+        assert_eq!(
+            version.build_fingerprint.as_deref(),
+            Some("unknown/unknown/unknown:unknown/unknown/unknown:user/unknown")
+        );
+        assert_eq!(version.fingerprint.map(|f| f.len()), Some(40));
+        let policy = bridge.library_policy("a.b", 36).unwrap();
+        let framework = host.framework().unwrap();
+        assert_eq!(
+            policy.sdk_library_independence,
+            framework.0.flags.get(SDK_LIB_INDEPENDENCE) == Some(&true)
+        );
+        let error = bridge
+            .restore_installer_context("/data/app/../system")
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("invalid installer context path"));
+        // No agent has attached: the label cannot be restored.
+        assert!(
+            bridge
+                .restore_installer_context("/data/app/vmdl1.tmp")
+                .is_err()
+        );
+        let reply = call(bridge::GET_PACKAGE_POLICY_BRIDGE);
         let e = reply.reader().read_exception().unwrap().unwrap_err();
         assert!(e.message.contains("#2022"), "{}", e.message);
         std::fs::remove_dir_all(&data).unwrap();
