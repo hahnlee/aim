@@ -109,7 +109,7 @@ pub fn node(others: &[Node]) -> Result<Node, String> {
         inputs,
         outputs: vec![aim_paths::derived_image().join(".identity")],
         tools: Vec::new(),
-        recipe: 2,
+        recipe: 3,
         action: Action::DerivedImage,
         boot: true,
     })
@@ -147,15 +147,30 @@ pub fn run(log: &mut Log) -> Result<(), String> {
             return Ok(());
         }
         log.line(&format!("replacing {}", mount.display()));
-        system::detach(&image, Some(&shadow))?;
-        fs::remove_file(&shadow).map_err(|e| format!("{}: {e}", shadow.display()))?;
     }
-    // Written through the shadow; its identity last, so an interrupted
-    // build is replaced on the next run.
-    system::attach(&image, Some(&shadow), &mount, true)?;
-    let applied = assemble::apply(&plan, &derived, &system::root(&mount));
+    // Written through a new shadow beside the old one, its identity last,
+    // so a failed or interrupted build leaves the previous image (#411);
+    // the new one takes the old one's place only once it is complete.
+    let sibling = |p: &std::path::Path| {
+        let mut name = p.file_name().unwrap_or_default().to_os_string();
+        name.push(".new");
+        p.with_file_name(name)
+    };
+    let (new_shadow, new_mount) = (sibling(&shadow), sibling(&mount));
+    system::detach(&image, Some(&new_shadow))?;
+    if new_shadow.exists() {
+        fs::remove_file(&new_shadow).map_err(|e| format!("{}: {e}", new_shadow.display()))?;
+    }
+    system::attach(&image, Some(&new_shadow), &new_mount, true)?;
+    let applied = assemble::apply(&plan, &derived, &system::root(&new_mount));
+    system::detach(&image, Some(&new_shadow))?;
+    if let Err(error) = applied {
+        let _ = fs::remove_file(&new_shadow);
+        return Err(error);
+    }
     system::detach(&image, Some(&shadow))?;
-    applied?;
+    fs::rename(&new_shadow, &shadow).map_err(|e| format!("{}: {e}", shadow.display()))?;
+    let _ = fs::remove_dir(&new_mount);
     system::attach(&image, Some(&shadow), &mount, false)?;
     log.line(&format!("built {} ({})", mount.display(), derived.hex));
     Ok(())
