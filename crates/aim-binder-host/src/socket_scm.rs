@@ -574,12 +574,17 @@ fn serve_channel(server: UnixStream, queue_root: aim_storage::socket_queue_root:
         eprintln!("socket token terminal retirement: {failure}");
     }
 }
+/// Until `length` bytes are queued on stream socket `fd`. The receive low
+/// water mark makes poll report it readable only then, or at EOF or an
+/// error, so a partial frame blocks instead of spinning; readable with
+/// fewer bytes is the peer's EOF.
 fn wait_frame(fd: i32, length: usize, timeout_ms: i32) -> io::Result<()> {
+    let watermark = Watermark::set(fd, length)?;
     let start = std::time::Instant::now();
-    loop {
+    let result = loop {
         let remaining = timeout_ms as i64 - start.elapsed().as_millis() as i64;
         if remaining <= 0 {
-            return Err(io::Error::new(
+            break Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "socket SCM frame timeout",
             ));
@@ -595,22 +600,75 @@ fn wait_frame(fd: i32, length: usize, timeout_ms: i32) -> io::Result<()> {
             if failure.kind() == io::ErrorKind::Interrupted {
                 continue;
             }
-            return Err(failure);
+            break Err(failure);
         }
         if ready == 0 {
             continue;
         }
         let mut available = 0i32;
         if unsafe { libc::ioctl(fd, libc::FIONREAD, &mut available) } < 0 {
-            return Err(io::Error::last_os_error());
+            break Err(io::Error::last_os_error());
         }
         if available >= length as i32 {
-            return Ok(());
+            break Ok(());
         }
-        if descriptor.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
-            return Err(error(libc::ECONNRESET));
+        break Err(error(libc::ECONNRESET));
+    };
+    drop(watermark);
+    result
+}
+
+/// `SO_RCVLOWAT` raised for a wait and put back after it.
+struct Watermark {
+    fd: i32,
+    previous: i32,
+}
+impl Watermark {
+    fn set(fd: i32, length: usize) -> io::Result<Option<Self>> {
+        let mut previous = 0i32;
+        let mut size = std::mem::size_of::<i32>() as libc::socklen_t;
+        if unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVLOWAT,
+                (&mut previous as *mut i32).cast(),
+                &mut size,
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        match set_watermark(fd, length as i32) {
+            Ok(()) => Ok(Some(Self { fd, previous })),
+            // XNU's sosetopt refuses any option once both directions are
+            // shut down: the peer is gone, and poll already reports EOF.
+            Err(failure) if failure.raw_os_error() == Some(libc::EINVAL) => Ok(None),
+            Err(failure) => Err(failure),
         }
     }
+}
+impl Drop for Watermark {
+    fn drop(&mut self) {
+        if let Err(failure) = set_watermark(self.fd, self.previous) {
+            eprintln!("socket SCM: restoring SO_RCVLOWAT: {failure}");
+        }
+    }
+}
+fn set_watermark(fd: i32, value: i32) -> io::Result<()> {
+    if unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVLOWAT,
+            (&value as *const i32).cast(),
+            std::mem::size_of::<i32>() as libc::socklen_t,
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 fn request(channel: i32, opcode: u8, descriptor: i32, receipt: Option<Receipt>) -> io::Result<()> {
     let mut bytes = [0; REQUEST];
@@ -732,6 +790,52 @@ pub(crate) fn registered_class(fd: i32) -> io::Result<u32> {
 pub(crate) mod tests {
     use super::*;
     use std::io::Read;
+
+    /// A peer's EOF ends the wait at once; half a frame blocks, idle,
+    /// until the rest, and the low water mark is put back.
+    #[test]
+    fn a_frame_wait_neither_spins_nor_outlives_the_peer() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        drop(theirs);
+        let start = std::time::Instant::now();
+        let failure = wait_frame(ours.as_raw_fd(), 16, 1000).unwrap_err();
+        assert_eq!(failure.raw_os_error(), Some(libc::ECONNRESET));
+        assert!(start.elapsed() < std::time::Duration::from_millis(200));
+
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        theirs.write_all(&[0; 8]).unwrap();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            theirs.write_all(&[0; 8]).unwrap();
+            theirs
+        });
+        let mut before = unsafe { std::mem::zeroed::<libc::rusage>() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut before) };
+        wait_frame(ours.as_raw_fd(), 16, 2000).unwrap();
+        let mut after = unsafe { std::mem::zeroed::<libc::rusage>() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut after) };
+        let micros = |t: libc::timeval| t.tv_sec * 1_000_000 + t.tv_usec as i64;
+        let cpu = micros(after.ru_utime) + micros(after.ru_stime)
+            - micros(before.ru_utime)
+            - micros(before.ru_stime);
+        // A busy wait would spend the whole 300 ms on the CPU.
+        assert!(cpu < 100_000, "{cpu} µs of CPU waiting");
+        let mut lowat = 0i32;
+        let mut size = std::mem::size_of::<i32>() as libc::socklen_t;
+        unsafe {
+            libc::getsockopt(
+                ours.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVLOWAT,
+                (&mut lowat as *mut i32).cast(),
+                &mut size,
+            )
+        };
+        assert_eq!(lowat, 1);
+        drop(writer.join().unwrap());
+    }
     pub(crate) fn receive_ready(channel: i32) -> io::Result<Reply> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
         loop {
