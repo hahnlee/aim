@@ -222,6 +222,72 @@ static void pf_key(void) {
   printf("ok pf_key\n");
 }
 
+// A process's oom_score_adj (proc(5), Linux's proc_oom_score_adj_write):
+// its own value, read back by itself and by others, inherited by a fork
+// child and written from another process (lmkd for ActivityManager);
+// kstrtoint of the stripped text, EINVAL outside [-1000, 1000]; without
+// CAP_SYS_RESOURCE it cannot go below the floor a privileged write set.
+static int read_adj(pid_t pid) {
+  char path[64], buf[32] = {0};
+  snprintf(path, sizeof path, "/proc/%d/oom_score_adj", pid);
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return -10000;
+  ssize_t n = read(fd, buf, sizeof buf - 1);
+  close(fd);
+  return n > 0 ? atoi(buf) : -10001;
+}
+
+static int write_adj(pid_t pid, const char* text) {
+  char path[64];
+  snprintf(path, sizeof path, "/proc/%d/oom_score_adj", pid);
+  int fd = open(path, O_WRONLY | O_CLOEXEC);
+  if (fd < 0) return -errno;
+  int r = write(fd, text, strlen(text)) < 0 ? -errno : 0;
+  close(fd);
+  return r;
+}
+
+static void oom_score_adj(void) {
+  pid_t me = getpid();
+  CHECK(read_adj(me) == 0, "initial value %d", read_adj(me));
+  CHECK(write_adj(me, "500") == 0 && read_adj(me) == 500, "own write");
+  CHECK(write_adj(me, "abc") == -EINVAL, "not a number");
+  CHECK(write_adj(me, "1001") == -EINVAL, "above the range");
+  CHECK(write_adj(me, " 0x10\n") == 0 && read_adj(me) == 16, "hex, stripped");
+  int go[2], done[2];
+  CHECK(pipe(go) == 0 && pipe(done) == 0, "pipes");
+  pid_t child = fork();
+  CHECK(child >= 0, "fork");
+  if (child == 0) {
+    int ok = read_adj(getpid()) == 16;
+    char c;
+    write(done[1], "r", 1);
+    read(go[0], &c, 1);
+    ok = ok && read_adj(getpid()) == -17;
+    // A privileged write set the floor; without CAP_SYS_RESOURCE the value
+    // cannot go below it.
+    ok = ok && write_adj(getpid(), "300") == 0;
+    struct __user_cap_header_struct h = {_LINUX_CAPABILITY_VERSION_3, 0};
+    struct __user_cap_data_struct d[2];
+    ok = ok && syscall(SYS_capget, &h, d) == 0;
+    d[0].effective &= ~(1u << CAP_SYS_RESOURCE);
+    ok = ok && syscall(SYS_capset, &h, d) == 0;
+    ok = ok && write_adj(getpid(), "200") == -EACCES && read_adj(getpid()) == 300;
+    ok = ok && write_adj(getpid(), "400") == 0 && read_adj(getpid()) == 400;
+    _exit(ok ? 0 : 1);
+  }
+  char c;
+  CHECK(read(done[0], &c, 1) == 1, "child ready");
+  CHECK(read_adj(child) == 16, "the child's value, read from outside");
+  CHECK(write_adj(child, "-17") == 0 && read_adj(child) == -17, "write from outside");
+  CHECK(read_adj(me) == 16, "the writer's own value unchanged");
+  write(go[1], "g", 1);
+  int st;
+  CHECK(waitpid(child, &st, 0) == child && WIFEXITED(st) && WEXITSTATUS(st) == 0,
+        "the child saw it, and its floor");
+  printf("ok oom_score_adj\n");
+}
+
 // random(4): any process may write /dev/random and /dev/urandom (mode
 // 0666); the bytes are mixed in without entropy credit and every write
 // returns its length, through dup and fork too. Reads stay random.
@@ -1665,7 +1731,7 @@ int main(int argc, char** argv) {
       {"socket_inode_owner_fork", socket_inode_owner_fork},
       {"default_sigchld_sigtimedwait", default_sigchld_sigtimedwait},
       {"clone_new_mount_namespace", clone_new_mount_namespace},
-      {"fork_wait", fork_wait},     {"fork_new_code", fork_new_code},
+      {"oom_score_adj", oom_score_adj}, {"fork_wait", fork_wait},     {"fork_new_code", fork_new_code},
       {"pipe_echo", pipe_echo},     {"mount_ns", mount_ns},
       {"exec_image", exec_image},   {"exec_argv", exec_argv},
       {"exec_script", exec_script}, {"exec_state", exec_state},

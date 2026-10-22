@@ -36,6 +36,7 @@ const CAP_SETPCAP: u32 = 8;
 const CAP_SYS_PTRACE: u32 = 19;
 const CAP_SYS_NICE: u32 = 23;
 const RLIMIT_NICE: usize = 13;
+const CAP_DAC_OVERRIDE: u32 = 1;
 const CAP_SYS_RESOURCE: u32 = 24;
 /// Capabilities that follow the fsuid (CAP_FS_MASK).
 const CAP_FS_MASK: u64 =
@@ -522,6 +523,9 @@ pub fn exec() {
 /// directory, when the process belongs to one; its entry is written there.
 pub fn init(id: Identity, by_pid: Option<PathBuf>) {
     publish(&id);
+    // init sets a service's value as root, with CAP_SYS_RESOURCE, which
+    // makes it the floor too (`__set_oom_adj`).
+    super::procrec::set_oom([id.oom_score_adj, id.oom_score_adj]);
     if let Some(d) = by_pid {
         let _ = BY_PID.set(d);
         write_own_entry(&id);
@@ -657,6 +661,10 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
         .find(|t| t.0 == tid)
         .map(|t| t.1);
     w.opt(nice, |w, n| w.i32(n));
+    // The child has the parent's signal struct.
+    let [adj, min] = super::procrec::oom();
+    w.i32(adj);
+    w.i32(min);
 }
 
 pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
@@ -673,7 +681,9 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             .unwrap()
             .push((unsafe { libc::getpid() }, nice));
     }
+    let oom = [r.i32(), r.i32()];
     init(id, by_pid);
+    super::procrec::set_oom(oom);
 }
 
 /// In the parent of a fork: the child's entry, before the child takes its
@@ -822,9 +832,80 @@ pub fn seclabel_of(pid: i32) -> String {
     }
 }
 
-/// `/proc/self/oom_score_adj`.
-pub fn oom_score_adj() -> i32 {
-    current().oom_score_adj
+/// `generic_permission` for writing a file of process `pid`'s /proc
+/// directory (mode 0644, owned by its effective ids): the owner, or
+/// CAP_DAC_OVERRIDE.
+pub fn may_write_owned_by(pid: i32) -> bool {
+    let owner = peer(pid).uid;
+    read(|id| id.uid[3] == owner || id.capable(CAP_DAC_OVERRIDE))
+}
+
+/// `/proc/<pid>/oom_score_adj`: this process's, another's from its record
+/// (none without one).
+pub fn oom_score_adj_of(pid: i32) -> Option<i32> {
+    // SAFETY: trivial.
+    if pid == unsafe { libc::getpid() } {
+        return Some(super::procrec::oom()[0]);
+    }
+    super::procrec::oom_of(pid).map(|v| v[0])
+}
+
+/// A write of `text` to `/proc/<pid>/oom_score_adj` (`proc_oom_score_adj_write`
+/// and `__set_oom_adj`): a number in [-1000, 1000] (`kstrtoint` of the
+/// stripped text, any base); lowering it below the process's floor needs
+/// CAP_SYS_RESOURCE, and a writer with CAP_SYS_RESOURCE moves the floor to
+/// it.
+pub fn write_oom_score_adj(pid: i32, text: &[u8]) -> Result<(), crate::errno::Errno> {
+    const OOM_SCORE_ADJ_MAX: i32 = 1000;
+    // PROC_NUMBUF: the first 12 bytes count.
+    let text = &text[..text.len().min(12)];
+    let value = std::str::from_utf8(text)
+        .ok()
+        .and_then(|t| kstrtoint(t.trim()))
+        .filter(|v| (-OOM_SCORE_ADJ_MAX..=OOM_SCORE_ADJ_MAX).contains(v))
+        .ok_or(crate::errno::EINVAL)?;
+    // SAFETY: trivial.
+    let me = pid == unsafe { libc::getpid() };
+    let [_, min] = if me {
+        super::procrec::oom()
+    } else {
+        super::procrec::oom_of(pid).ok_or(crate::errno::ESRCH)?
+    };
+    let resource = capable(CAP_SYS_RESOURCE);
+    if value < min && !resource {
+        return Err(crate::errno::EACCES);
+    }
+    let values = [value, if resource { value } else { min }];
+    if me {
+        super::procrec::set_oom(values);
+    } else if !super::procrec::set_oom_of(pid, values) {
+        return Err(crate::errno::ESRCH);
+    }
+    Ok(())
+}
+
+/// `kstrtoint(s, 0)`: an optional sign, then decimal, `0x` hex or `0`
+/// octal, within i32.
+fn kstrtoint(s: &str) -> Option<i32> {
+    let (negative, digits) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let (radix, digits) = if let Some(hex) = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
+        (16, hex)
+    } else if digits.len() > 1 && digits.starts_with('0') {
+        (8, &digits[1..])
+    } else {
+        (10, digits)
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+        return None;
+    }
+    let magnitude = i64::from_str_radix(digits, radix).ok()?;
+    i32::try_from(if negative { -magnitude } else { magnitude }).ok()
 }
 
 pub fn getuid(nr: u64) -> i64 {

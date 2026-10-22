@@ -1162,10 +1162,9 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
             host_pid: p,
             info: true,
         },
-        "oom_score_adj" if me => {
-            Node::File(format!("{}\n", super::cred::oom_score_adj()).into_bytes())
+        "oom_score_adj" => {
+            Node::File(format!("{}\n", super::cred::oom_score_adj_of(p).unwrap_or(0)).into_bytes())
         }
-        "oom_score_adj" => Node::File(b"0\n".to_vec()),
         "attr" => Node::Dir(entries(&[("current", dir::DT_REG)])),
         "attr/current" => Node::File(attr_current(p)),
         "exe" if me => Node::Link(super::process::exe_guest_path()),
@@ -1716,6 +1715,16 @@ fn comm_tid(canon: &str) -> Option<i32> {
     (p == pid() && super::thread::find(tid).is_some()).then_some(tid)
 }
 
+/// The process of `/proc/<pid>/oom_score_adj` or
+/// `/proc/<pid>/task/<tid>/oom_score_adj`, when it exists.
+fn oom_score_adj_pid(canon: &str) -> Option<i32> {
+    let rest = canon
+        .strip_prefix("/proc/")?
+        .strip_suffix("/oom_score_adj")?;
+    let p: i32 = rest.split('/').next()?.parse().ok()?;
+    node(canon).is_some().then_some(p)
+}
+
 const O_ACCMODE: u64 = 3;
 const O_CREAT: u64 = 0o100;
 const O_CLOEXEC: u64 = 0o2000000;
@@ -1760,6 +1769,18 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
         && let Some(r) = super::ipv6conf::open(rest, flags & O_ACCMODE != 1, write, cloexec)
     {
         return Some(r);
+    }
+    // A process's oom_score_adj is its own value, not a recorded file.
+    if write && let Some(p) = oom_score_adj_pid(&canonical(guest)) {
+        if !super::cred::may_write_owned_by(p) {
+            return Some(-(EACCES as i64));
+        }
+        let value = super::cred::oom_score_adj_of(p).unwrap_or(0);
+        return Some(super::knob::open(
+            format!("{value}\n").as_bytes(),
+            cloexec,
+            move |b| super::cred::write_oom_score_adj(p, b).map(|()| None),
+        ));
     }
     if let Some((host, st)) = recorded(guest)
         && st.st_mode & libc::S_IFMT != libc::S_IFDIR
