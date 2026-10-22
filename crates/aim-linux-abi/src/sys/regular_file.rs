@@ -357,12 +357,41 @@ impl Description {
         position: Option<i64>,
         write: bool,
     ) -> i64 {
-        match self.rw_result(fd, iov, position, write) {
+        let result = match position {
+            Some(_) => self.transfer(fd, iov, position, write),
+            None => self
+                .inode
+                .offset_lock()
+                .map_err(io)
+                .and_then(|_offset| self.transfer(fd, iov, None, write)),
+        };
+        match result {
             Ok(result) => result,
             Err(error) => -(error as i64),
         }
     }
-    fn rw_result(
+    /// A positioned write on an O_APPEND description (`generic_write_checks`'
+    /// IOCB_APPEND): appended at the file's end, as the host's append
+    /// writes are, leaving the description's offset where it was.
+    pub fn append(&self, fd: BorrowedFd<'_>, iov: &[libc::iovec]) -> i64 {
+        let result = self.inode.offset_lock().map_err(io).and_then(|_offset| {
+            let current = unsafe { libc::lseek(fd.as_raw_fd(), 0, libc::SEEK_CUR) };
+            if current < 0 {
+                return Err(errno::last());
+            }
+            let written = self.transfer(fd, iov, None, true);
+            if unsafe { libc::lseek(fd.as_raw_fd(), current, libc::SEEK_SET) } < 0 {
+                return Err(errno::last());
+            }
+            written
+        });
+        match result {
+            Ok(result) => result,
+            Err(error) => -(error as i64),
+        }
+    }
+    /// The transfer, with the offset lock held for a current-position one.
+    fn transfer(
         &self,
         fd: BorrowedFd<'_>,
         iov: &[libc::iovec],
@@ -378,11 +407,6 @@ impl Description {
         if Identity::from_fd(fd).map_err(io)? != self.identity {
             return Err(errno::EBADF);
         }
-        let _offset = if position.is_none() {
-            Some(self.inode.offset_lock().map_err(io)?)
-        } else {
-            None
-        };
         let admission = self.admission.lock().map_err(core)?;
         let enabled = admission.enabled().map_err(core)?;
         if write && enabled.is_some() {

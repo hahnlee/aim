@@ -1,7 +1,8 @@
 // preadv/pwritev and preadv2/pwritev2 as readv(2) has them: only the v2
 // calls take offset -1 (the current position); RWF_APPEND writes at the
 // end and RWF_NOAPPEND at the position, whatever the description's
-// O_APPEND; RWF_DSYNC and RWF_SYNC write through; unknown flags, and
+// O_APPEND; a positioned write on an O_APPEND description appends, as
+// pwrite(2) BUGS has it; RWF_DSYNC and RWF_SYNC write through; unknown flags, and
 // RWF_NOWAIT and RWF_ATOMIC no descriptor here offers, are EOPNOTSUPP.
 #include <fcntl.h>
 #include <linux/fs.h>
@@ -92,6 +93,27 @@ static void append(void) {
   close(fd);
 }
 
+// pwrite(2) BUGS: on an O_APPEND description a positioned write appends
+// whatever its offset, and leaves the position; RWF_NOAPPEND writes at it.
+static void described_append(void) {
+  char out[32];
+  int fd = file("described", O_APPEND);
+  CHECK(fd >= 0);
+  CHECK(lseek(fd, 1, SEEK_SET) == 1);
+  CHECK(pwrite(fd, "P", 1, 0) == 1);
+  struct iovec v = {"V", 1};
+  CHECK(pwritev(fd, &v, 1, 0) == 1);
+  struct iovec w = {"W", 1};
+  CHECK(pwritev2(fd, &w, 1, 0, 0) == 1);
+  CHECK(contents(fd, out, sizeof out) == 9 && strcmp(out, "abcdefPVW") == 0);
+  CHECK(lseek(fd, 0, SEEK_CUR) == 1);
+  struct iovec n = {"N", 1};
+  CHECK(pwritev2(fd, &n, 1, 0, RWF_NOAPPEND) == 1);
+  CHECK(contents(fd, out, sizeof out) == 9 && strcmp(out, "NbcdefPVW") == 0);
+  CHECK(lseek(fd, 0, SEEK_CUR) == 1);
+  close(fd);
+}
+
 static void sync_flags(void) {
   int fd = file("sync", 0);
   CHECK(fd >= 0);
@@ -109,6 +131,7 @@ int main(int argc, char** argv) {
   RUN(offsets);
   RUN(unsupported);
   RUN(append);
+  RUN(described_append);
   RUN(sync_flags);
   DONE();
 }

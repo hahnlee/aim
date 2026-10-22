@@ -769,6 +769,24 @@ fn special_write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
         errno::check(unsafe { libc::writev(actual, iov.as_ptr(), iov.len() as i32) } as i64)
     }))
 }
+/// Whether the host descriptor is O_APPEND, as F_SETFL leaves it.
+fn appends(actual: i32) -> bool {
+    (unsafe { libc::fcntl(actual, libc::F_GETFL) }) & libc::O_APPEND != 0
+}
+
+/// `generic_write_checks`: a positioned write on an O_APPEND description
+/// of a regular file is at its end (pwrite(2) BUGS); none for others.
+fn append_end(actual: i32) -> Option<Result<i64, i64>> {
+    if !appends(actual) {
+        return None;
+    }
+    match stat_fd_kernel(actual) {
+        Ok(st) if st.st_mode & libc::S_IFMT == libc::S_IFREG => Some(Ok(st.st_size)),
+        Ok(_) => None,
+        Err(error) => Some(Err(error)),
+    }
+}
+
 fn special_pio(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> Option<i64> {
     let pin = match fdtab::pin_guest_io(fd) {
         Ok(pin) => pin,
@@ -793,8 +811,16 @@ fn special_pio(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> Option<i
         } else {
             len
         };
+        if write && appends(actual) {
+            return Some(description.append(pin.descriptor(), &one(buf, len)));
+        }
         return Some(description.rw(pin.descriptor(), &one(buf, len), Some(pos), write));
     }
+    let pos = match write.then(|| append_end(actual)).flatten() {
+        Some(Ok(end)) => end,
+        Some(Err(error)) => return Some(error),
+        None => pos,
+    };
     Some(
         special_pio_kernel(actual, buf, len, pos, write).unwrap_or_else(|| {
             let len = if write {
@@ -1201,13 +1227,29 @@ pub fn preadv(write: bool, v2: bool, a: [u64; 6]) -> i64 {
     // After the write: the position a current-position write moves to when
     // it was made at an explicit one.
     let mut advance = None;
-    if write && flags & (RWF_APPEND | RWF_NOAPPEND) != 0 {
+    // A positioned write on an O_APPEND description appends, unless
+    // RWF_NOAPPEND (pwrite(2) BUGS); a regular description appends
+    // atomically, as the host's append writes do.
+    if write && pos != -1 && flags & RWF_NOAPPEND == 0 && appends(actual) {
+        if let Some(Kind::Regular(description)) = pin.kind() {
+            if let Err(error) = description.check_write() {
+                return -(error as i64);
+            }
+            let vectors = match charge_iov(actual, vectors) {
+                Ok(vectors) => vectors,
+                Err(error) => return error,
+            };
+            let result = description.append(pin.descriptor(), &vectors);
+            return synced(fd, result, flags);
+        }
+    }
+    if write && (flags & (RWF_APPEND | RWF_NOAPPEND) != 0 || pos != -1) {
         // generic_write_checks: IOCB_APPEND (the description's O_APPEND or
         // RWF_APPEND, less RWF_NOAPPEND) writes a regular file at its end.
         let regular = stat_fd(fd)
             .ok()
             .filter(|st| st.st_mode & libc::S_IFMT == libc::S_IFREG);
-        let described = unsafe { libc::fcntl(actual, libc::F_GETFL) } & libc::O_APPEND != 0;
+        let described = appends(actual);
         let append = flags & RWF_APPEND != 0 || described && flags & RWF_NOAPPEND == 0;
         match (regular, append) {
             (Some(st), true) if pos != -1 => pos = st.st_size,
@@ -1242,9 +1284,16 @@ pub fn preadv(write: bool, v2: bool, a: [u64; 6]) -> i64 {
             return moved;
         }
     }
-    // generic_write_sync: IOCB_DSYNC syncs the written range, IOCB_SYNC
-    // its metadata too; reads ignore them.
-    if write && result > 0 && flags & (RWF_DSYNC | RWF_SYNC) != 0 {
+    if write {
+        return synced(fd, result, flags);
+    }
+    result
+}
+
+/// `generic_write_sync`: IOCB_DSYNC syncs the written range, IOCB_SYNC
+/// its metadata too.
+fn synced(fd: i32, result: i64, flags: u32) -> i64 {
+    if result > 0 && flags & (RWF_DSYNC | RWF_SYNC) != 0 {
         let synced = super::fsops::fsync([fd as u64, 0, 0, 0, 0, 0]);
         if synced < 0 {
             return synced;
