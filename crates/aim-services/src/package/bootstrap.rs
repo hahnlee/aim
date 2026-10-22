@@ -29,7 +29,7 @@ pub use scan::{
 };
 
 pub struct Bridge {
-    pub(crate) owner: Strong,
+    pub(crate) owner: crate::system::ServiceOwner,
     test_base_on_bcp: bool,
     pub(crate) signing_debuggable: bool,
     deaths: Deaths,
@@ -128,6 +128,26 @@ impl ScanUsers {
             return Err(BAD_VALUE);
         }
         Ok(Self { users })
+    }
+
+    /// The record `read_original_record` reads (`PackageScanUsers
+    /// .capture`): whether UserManager is initialized, then each user's id,
+    /// whether it is pre-created and whether ADB installs are disallowed.
+    pub fn write_original_record(&self) -> Vec<u8> {
+        let mut p = Parcel::new();
+        match &self.users {
+            None => p.write_i32(0),
+            Some(users) => {
+                p.write_i32(1);
+                p.write_i32(users.len() as i32);
+                for user in users {
+                    p.write_i32(user.id);
+                    p.write_bool(user.pre_created);
+                    p.write_bool(user.adb_install_disallowed);
+                }
+            }
+        }
+        p.data().to_vec()
     }
 }
 
@@ -987,7 +1007,7 @@ impl Bridge {
         Ok(target)
     }
 
-    pub(crate) fn new(owner: Strong) -> Result<Self, Exception> {
+    pub(crate) fn new(owner: crate::system::ServiceOwner) -> Result<Self, Exception> {
         // Binder's standard descriptor handshake, before retaining an endpoint.
         let reply = owner
             .transact(u32::from_be_bytes(*b"_NTF"), &Parcel::new(), false)
@@ -1333,7 +1353,7 @@ mod tests {
         server.start();
         client.start();
         let owner = Bridge {
-            owner: client.strong(0),
+            owner: crate::system::ServiceOwner::Remote(std::sync::Arc::new(client.strong(0))),
             test_base_on_bcp: false,
             signing_debuggable: false,
             deaths: Deaths::default(),
@@ -1488,7 +1508,7 @@ mod tests {
         server.start();
         client.start();
         let owner = Bridge {
-            owner: client.strong(0),
+            owner: crate::system::ServiceOwner::Remote(std::sync::Arc::new(client.strong(0))),
             test_base_on_bcp: false,
             signing_debuggable: false,
             deaths: Deaths::default(),

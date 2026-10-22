@@ -2981,10 +2981,18 @@ fn verify_boot_scan(
         write::Apks,
     };
     // A fresh wrapper around the same Binder is not the captured boot owner.
-    let Binder::Handle(handle) = bridge.owner.binder() else {
+    let crate::system::ServiceOwner::Remote(remote) = &bridge.owner else {
         unreachable!()
     };
-    let foreign = Arc::new(crate::package::bootstrap::Bridge::new(native.strong(handle)).unwrap());
+    let Binder::Handle(handle) = remote.binder() else {
+        unreachable!()
+    };
+    let foreign = Arc::new(
+        crate::package::bootstrap::Bridge::new(crate::system::ServiceOwner::Remote(Arc::new(
+            native.strong(handle),
+        )))
+        .unwrap(),
+    );
     assert!(system.check_package_bootstrap(&foreign).is_err());
     let original = aim_paths::original_image();
     let root = std::env::temp_dir().join(format!(

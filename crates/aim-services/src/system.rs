@@ -855,9 +855,15 @@ impl System {
 
     /// Synchronous early package-owner attachment, independent of late listeners.
     pub fn attach_package_bootstrap(self: &Arc<Self>, handle: u32) -> Result<()> {
-        let bridge = Arc::new(crate::package::bootstrap::Bridge::new(
+        self.attach_package_bootstrap_owner(ServiceOwner::Remote(Arc::new(
             self.process.strong(handle),
-        )?);
+        )))
+    }
+
+    /// The package bootstrap bridge attached: system_server's, or this
+    /// process's own where it serves the bridge.
+    pub fn attach_package_bootstrap_owner(self: &Arc<Self>, owner: ServiceOwner) -> Result<()> {
+        let bridge = Arc::new(crate::package::bootstrap::Bridge::new(owner)?);
         let mut signing = self.package_signing.lock().unwrap();
         match signing.as_ref() {
             Some(owner) if owner.is_debuggable() != bridge.signing_debuggable => {
@@ -1085,8 +1091,12 @@ impl System {
             }
             drop(previous);
         }
+        // This process's own bridge dies with it.
+        let ServiceOwner::Remote(owner) = &bridge.owner else {
+            return Ok(());
+        };
         self.process.link_to_death(
-            &bridge.owner,
+            owner,
             Box::new(move || {
                 if let Some(attached) = attached.upgrade() {
                     attached.died();

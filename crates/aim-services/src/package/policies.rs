@@ -21,7 +21,7 @@ impl Owner {
         Self { bridge }
     }
     /// Retain the concrete policy Binder returned by the current original bootstrap.
-    pub fn capture(bootstrap_owner: &Strong) -> Result<Self, Exception> {
+    pub fn capture(bootstrap_owner: &crate::system::ServiceOwner) -> Result<Self, Exception> {
         let mut p = Parcel::new();
         bootstrap::GetPackagePolicyBridge {}.write(&mut p);
         let reply = bootstrap_owner

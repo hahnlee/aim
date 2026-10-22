@@ -58,6 +58,55 @@ impl ApexScanResult {
         }
         Ok(out.data().to_vec())
     }
+
+    /// The APEXes and their parsed packages a payload of
+    /// `notification_payload` names (`ApexBootFeed.notifyScanResults`'s
+    /// read), their past signers skipped.
+    pub fn read_notification_payload(
+        bytes: &[u8],
+    ) -> Result<Vec<(ApexPackage, AndroidPackage)>, String> {
+        use aim_binder_host::parcel::Reader;
+        let mut r = Reader::new(bytes, &[]);
+        let fail = |e| format!("APEX notification: {e:?}");
+        let count = r.read_i32().map_err(fail)?;
+        if count < 0 {
+            return Err("APEX notification: negative count".into());
+        }
+        let mut results = Vec::new();
+        for _ in 0..count {
+            let module_name = r.read_string16().map_err(fail)?;
+            let path = |r: &mut Reader<'_>| {
+                r.read_string16()
+                    .map_err(fail)?
+                    .ok_or_else(|| "APEX notification: a null path".to_string())
+            };
+            let module_path = path(&mut r)?;
+            let preinstalled_path = path(&mut r)?;
+            let info = ApexPackage {
+                module_name,
+                module_path,
+                preinstalled_path,
+                version_code: r.read_i64().map_err(fail)?,
+                factory: r.read_bool().map_err(fail)?,
+                active: r.read_bool().map_err(fail)?,
+                active_changed: r.read_bool().map_err(fail)?,
+            };
+            let cache = aim_service_aidl::read_byte_array(&mut r)
+                .map_err(fail)?
+                .ok_or("APEX notification: no parsed package")?;
+            let package = AndroidPackage::read_cache_entry(&cache).map_err(fail)?;
+            let past = r.read_i32().map_err(fail)?;
+            for _ in 0..past.max(0) {
+                aim_service_aidl::read_byte_array(&mut r).map_err(fail)?;
+                r.read_i32().map_err(fail)?;
+            }
+            results.push((info, package));
+        }
+        if r.remaining() != 0 {
+            return Err("APEX notification: trailing data".into());
+        }
+        Ok(results)
+    }
 }
 
 impl SigningScan {

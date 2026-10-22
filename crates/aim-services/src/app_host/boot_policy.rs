@@ -5,20 +5,15 @@
 //! `Settings.getAllUsers`, ApexManager's inventory and
 //! `notifyScanResult`, `DomainVerificationService.generateNewId`,
 //! `AndroidTestBaseUpdater`'s compat change and `SELinuxMMAC`'s target
-//! SDK. The default image takes the same decisions through the bootstrap
-//! bridge.
+//! SDK, for the app host's bootstrap bridge (`package_bootstrap`).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::path::Path;
-use std::sync::Mutex;
 
-use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
-
-use super::AppHost;
 use super::compat::CompatConfig;
-use crate::package::bootstrap::{ApexInventory, BootPolicy, OwnerError, ScanUsers};
+use crate::package::bootstrap::ApexPackage;
 use crate::package::pkg::AndroidPackage;
-use crate::package::scan::{ApexScanResult, SeInfoCompatibility, SharedUidMigration, User};
+use crate::package::scan::SharedUidMigration;
 use crate::package::system_config::Sdk;
 
 /// `PackageBackwardCompatibility.addUpdaterForAndroidTestBase`'s class,
@@ -33,49 +28,13 @@ const SELINUX_R_CHANGES: i64 = 168_782_947;
 const CUR_DEVELOPMENT: i32 = 10_000;
 const R: i32 = 30;
 /// `SharedUidMigration.PROPERTY_KEY`.
-const SHARED_UID_MIGRATION_STRATEGY: &str = "persist.debug.pm.shared_uid_migration_strategy";
-
-/// What the decisions read, taken once for a boot scan.
-pub struct NativeBootPolicy<'a> {
-    compat: &'a CompatConfig,
-    sdk: Sdk,
-    test_base_on_bootclasspath: bool,
-    migration: SharedUidMigration,
-    users: Vec<User>,
-    apex: ApexInventory,
-    /// ApexManager's `mApexSystemServices`' names, kept across scans.
-    apex_system_services: Mutex<Vec<String>>,
-}
-
-impl<'a> NativeBootPolicy<'a> {
-    /// The decisions for the app host's image, its properties and users,
-    /// apexd's packages, and `compat`.
-    pub fn new(host: &AppHost, compat: &'a CompatConfig) -> Result<Self, Exception> {
-        let state = |e: String| Exception::new(EX_ILLEGAL_STATE, e);
-        let root = &host
-            .configured
-            .get()
-            .ok_or_else(|| state("app host not configured".into()))?
-            .root;
-        Ok(Self {
-            compat,
-            sdk: Sdk::new(&|name| host.property(name)),
-            test_base_on_bootclasspath: test_base_on_bootclasspath(root).map_err(state)?,
-            migration: shared_uid_migration(
-                host.property("ro.build.type").as_deref(),
-                host.property(SHARED_UID_MIGRATION_STRATEGY).as_deref(),
-            ),
-            users: super::user_service::scan_users(host)?,
-            apex: super::apex_manager::inventory(&host.process).map_err(state)?,
-            apex_system_services: Mutex::new(Vec::new()),
-        })
-    }
-}
+pub(super) const SHARED_UID_MIGRATION_STRATEGY: &str =
+    "persist.debug.pm.shared_uid_migration_strategy";
 
 /// `PackageBackwardCompatibility`'s `bootClassPathContainsATB`: the boot
 /// class loader (`ParsingPackage`'s) does not find
 /// `AndroidTestBaseUpdater`.
-fn test_base_on_bootclasspath(root: &Path) -> Result<bool, String> {
+pub(super) fn test_base_on_bootclasspath(root: &Path) -> Result<bool, String> {
     let jars = aim_android_image::classpath::jars(
         root,
         "bootclasspath.pb",
@@ -88,7 +47,10 @@ fn test_base_on_bootclasspath(root: &Path) -> Result<bool, String> {
 /// `SharedUidMigration.applyStrategy(BEST_EFFORT)`:
 /// `ENABLE_SHARED_UID_MIGRATION` holds, and on a userdebug build the
 /// property's strategy (`getCurrentStrategy`, at most BEST_EFFORT) is it.
-fn shared_uid_migration(build_type: Option<&str>, strategy: Option<&str>) -> SharedUidMigration {
+pub(super) fn shared_uid_migration(
+    build_type: Option<&str>,
+    strategy: Option<&str>,
+) -> SharedUidMigration {
     const NEW_INSTALL_ONLY: i32 = 1;
     const BEST_EFFORT: i32 = 2;
     let current = if build_type != Some("userdebug") {
@@ -107,7 +69,7 @@ fn shared_uid_migration(build_type: Option<&str>, strategy: Option<&str>) -> Sha
 }
 
 /// `SELinuxMMAC.getTargetSdkVersionForSeInfo`.
-fn seinfo_target_sdk(compat: &CompatConfig, package: &AndroidPackage) -> i32 {
+pub(super) fn seinfo_target_sdk(compat: &CompatConfig, package: &AndroidPackage) -> i32 {
     let enabled = |change| {
         compat.is_enabled(
             change,
@@ -127,14 +89,14 @@ fn seinfo_target_sdk(compat: &CompatConfig, package: &AndroidPackage) -> i32 {
 /// `ApexManagerImpl.notifyScanResultLocked`'s checks: an active APEX's
 /// system services for this SDK (`UnboundedSdkLevel`) are new, and no two
 /// active packages have one module name.
-fn check_apex_scan(
+fn check_apex_scan<'r>(
     sdk: &Sdk,
     services: &mut Vec<String>,
-    results: &[ApexScanResult],
+    results: impl IntoIterator<Item = (&'r ApexPackage, &'r AndroidPackage)>,
 ) -> Result<(), String> {
     let mut modules = std::collections::BTreeSet::new();
-    for result in results {
-        for service in &result.package.apex_system_services {
+    for (info, package) in results {
+        for service in &package.apex_system_services {
             if let Some(min) = &service.min_sdk_version
                 && !sdk.at_least_checked(min)?
             {
@@ -145,21 +107,21 @@ fn check_apex_scan(
             {
                 continue;
             }
-            if result.info.active {
+            if info.active {
                 let name = service.name.clone().unwrap_or_default();
                 if services.contains(&name) {
                     return Err(format!(
                         "Duplicate apex-system-service {name} from {}",
-                        result.info.module_path
+                        info.module_path
                     ));
                 }
                 services.push(name);
             }
         }
-        if result.info.active && !modules.insert(result.info.module_name.clone()) {
+        if info.active && !modules.insert(info.module_name.clone()) {
             return Err(format!(
                 "Two active packages have the same APEX module name: {}",
-                result.info.module_name.as_deref().unwrap_or("null")
+                info.module_name.as_deref().unwrap_or("null")
             ));
         }
     }
@@ -176,59 +138,36 @@ pub(super) fn random_uuid() -> [u8; 16] {
     b
 }
 
-impl SeInfoCompatibility for NativeBootPolicy<'_> {
-    fn target_sdk(&self, package: &AndroidPackage) -> Result<i32, String> {
-        Ok(seinfo_target_sdk(self.compat, package))
-    }
+/// `REMOVE_ANDROID_TEST_BASE` for the package's application
+/// (`isChangeEnabled(133396946, generateAppInfoWithoutState(pkg))`).
+pub(super) fn test_base_change(compat: &CompatConfig, package: &AndroidPackage) -> bool {
+    compat.is_enabled(
+        REMOVE_ANDROID_TEST_BASE,
+        Some(&package.package_name),
+        package.target_sdk_version,
+    )
 }
 
-impl BootPolicy for NativeBootPolicy<'_> {
-    fn test_base_on_bootclasspath(&self) -> bool {
-        self.test_base_on_bootclasspath
-    }
-    fn shared_uid_migration(&self) -> Result<SharedUidMigration, OwnerError> {
-        Ok(self.migration)
-    }
-    fn scan_users(&self) -> Result<ScanUsers, OwnerError> {
-        Ok(ScanUsers {
-            users: Some(self.users.clone()),
-        })
-    }
-    fn apex_inventory(&self) -> Result<ApexInventory, OwnerError> {
-        Ok(self.apex.clone())
-    }
-    fn notify_apex_scan(&self, results: &[ApexScanResult]) -> Result<(), OwnerError> {
-        check_apex_scan(
-            &self.sdk,
-            &mut self.apex_system_services.lock().unwrap(),
-            results,
-        )
-        .map_err(OwnerError::Code)
-    }
-    fn new_domain_id(&self) -> Result<[u8; 16], OwnerError> {
-        // `generateNewId`: `UUID.randomUUID()`.
-        Ok(random_uuid())
-    }
-    fn remove_test_base(
-        &self,
-        package: &AndroidPackage,
-        is_system: bool,
-    ) -> Result<Option<bool>, OwnerError> {
-        if self.test_base_on_bootclasspath || is_system {
-            return Ok(None);
-        }
-        Ok(Some(self.compat.is_enabled(
-            REMOVE_ANDROID_TEST_BASE,
-            Some(&package.package_name),
-            package.target_sdk_version,
-        )))
-    }
+/// `ApexBootFeed.notifyScanResults` of the payload the boot scan sends
+/// (`ApexScanResult::notification_payload`), ApexManager's system
+/// services kept in `services`.
+pub(super) fn notify_apex_payload(
+    sdk: &Sdk,
+    services: &mut Vec<String>,
+    payload: &[u8],
+) -> Result<(), String> {
+    let results = crate::package::scan::ApexScanResult::read_notification_payload(payload)?;
+    check_apex_scan(
+        sdk,
+        services,
+        results.iter().map(|(info, package)| (info, package)),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::package::bootstrap::ApexPackage;
+    use crate::package::scan::ApexScanResult;
     use crate::package::pkg::ApexSystemService;
 
     /// Only a userdebug build reads the property, and only its first two
@@ -281,7 +220,11 @@ mod tests {
         );
     }
 
-    fn result(module: &str, active: bool, services: &[(&str, Option<&str>)]) -> ApexScanResult {
+    fn result(
+        module: &str,
+        active: bool,
+        services: &[(&str, Option<&str>)],
+    ) -> (ApexPackage, AndroidPackage) {
         let mut package = package(&format!("com.{module}"), 36);
         package.apex_system_services = services
             .iter()
@@ -293,8 +236,8 @@ mod tests {
                 init_order: 0,
             })
             .collect();
-        ApexScanResult {
-            info: ApexPackage {
+        (
+            ApexPackage {
                 module_name: Some(module.into()),
                 module_path: format!("/system/apex/{module}.apex"),
                 preinstalled_path: format!("/system/apex/{module}.apex"),
@@ -304,8 +247,13 @@ mod tests {
                 active_changed: false,
             },
             package,
-            signing: crate::package::sign::SigningDetails::unknown(),
-        }
+        )
+    }
+
+    fn pairs(
+        results: &[(ApexPackage, AndroidPackage)],
+    ) -> impl Iterator<Item = (&ApexPackage, &AndroidPackage)> {
+        results.iter().map(|(info, package)| (info, package))
     }
 
     /// A service name taken twice by active APEXes, or a module active
@@ -324,17 +272,17 @@ mod tests {
             result("a", false, &[("s", None)]),
             result("b", true, &[("s", Some("37"))]),
         ];
-        assert!(check_apex_scan(&sdk, &mut services, &ok).is_ok());
+        assert!(check_apex_scan(&sdk, &mut services, pairs(&ok)).is_ok());
         assert_eq!(services, ["s"]);
         let mut services = Vec::new();
         assert!(
             check_apex_scan(
                 &sdk,
                 &mut services,
-                &[
+                pairs(&[
                     result("a", true, &[("s", None)]),
                     result("b", true, &[("s", None)])
-                ]
+                ])
             )
             .unwrap_err()
             .contains("Duplicate apex-system-service s")
@@ -344,11 +292,38 @@ mod tests {
             check_apex_scan(
                 &sdk,
                 &mut services,
-                &[result("a", true, &[]), result("a", true, &[])]
+                pairs(&[result("a", true, &[]), result("a", true, &[])])
             )
             .unwrap_err()
             .contains("same APEX module name: a")
         );
+    }
+
+    /// The boot scan's notification read back as the bridge receives it:
+    /// each APEX and its parsed package, past signers skipped.
+    #[test]
+    fn the_apex_notification_is_read_back() {
+        let (info, mut package) = result("a", true, &[("s", None)]);
+        package.feature_flag_state = Some(Vec::new());
+        let mut p = aim_binder_host::parcel::Parcel::new();
+        p.write_i32(1);
+        p.write_string16(info.module_name.as_deref());
+        p.write_string16(Some(&info.module_path));
+        p.write_string16(Some(&info.preinstalled_path));
+        p.write_i64(info.version_code);
+        p.write_bool(info.factory);
+        p.write_bool(info.active);
+        p.write_bool(info.active_changed);
+        aim_service_aidl::write_byte_array(&mut p, Some(&package.to_cache_entry().unwrap().bytes));
+        p.write_i32(1);
+        aim_service_aidl::write_byte_array(&mut p, Some(b"certificate"));
+        p.write_i32(0);
+        let read = ApexScanResult::read_notification_payload(p.data()).unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].0, info);
+        assert_eq!(read[0].1.package_name, package.package_name);
+        assert_eq!(read[0].1.apex_system_services.len(), 1);
+        assert!(ApexScanResult::read_notification_payload(&p.data()[..8]).is_err());
     }
 
     /// The pinned image's boot classpath has the updater exactly when it

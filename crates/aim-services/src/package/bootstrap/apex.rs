@@ -90,6 +90,38 @@ impl ApexInventory {
         Ok(Self { packages, active })
     }
 
+    /// The record `read_original_record` reads (`ApexBootFeed.capture`):
+    /// all the packages (-1 before ApexManager read them), then the active
+    /// ones.
+    pub fn write_original_record(&self) -> Vec<u8> {
+        let mut p = aim_binder_host::parcel::Parcel::new();
+        match &self.packages {
+            None => p.write_i32(-1),
+            Some(packages) => {
+                p.write_i32(packages.len() as i32);
+                for package in packages {
+                    p.write_string16(package.module_name.as_deref());
+                    p.write_string16(Some(&package.module_path));
+                    p.write_string16(Some(&package.preinstalled_path));
+                    p.write_i64(package.version_code);
+                    p.write_bool(package.factory);
+                    p.write_bool(package.active);
+                    p.write_bool(package.active_changed);
+                }
+            }
+        }
+        p.write_i32(self.active.len() as i32);
+        for active in &self.active {
+            p.write_string16(active.module_name.as_deref());
+            p.write_string16(Some(&active.mount_path));
+            p.write_string16(Some(&active.preinstalled_path));
+            p.write_bool(active.factory);
+            p.write_string16(Some(&active.module_path));
+            p.write_bool(active.active_changed);
+        }
+        p.data().to_vec()
+    }
+
     /// Unknown preinstalled origins do not become scan partitions. The original
     /// returns null for them; mount names never determine the origin or module.
     pub fn scan_apexes(&self) -> Vec<Apex> {
