@@ -53,6 +53,31 @@ fn unsupported<T>(what: &str) -> binder::Result<T> {
     ))
 }
 
+/// VoldNativeServiceValidation's CheckArgumentHex.
+fn check_argument_hex(hex: &str) -> binder::Result<()> {
+    if hex
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '-')
+    {
+        return Ok(());
+    }
+    Err(Status::new_exception_str(
+        ExceptionCode::ILLEGAL_ARGUMENT,
+        Some(format!("Hex {hex} is malformed")),
+    ))
+}
+
+/// Utils' NormalizeHex: the hex digits, lower case, of an even count of
+/// them among spaces, dashes and colons.
+fn normalize_hex(hex: &str) -> Option<String> {
+    let digits: String = hex
+        .chars()
+        .filter(|c| !matches!(c, ' ' | '-' | ':'))
+        .map(|c| c.to_digit(16).and_then(|d| char::from_digit(d, 16)))
+        .collect::<Option<_>>()?;
+    (digits.len() % 2 == 0).then_some(digits)
+}
+
 fn io_error(what: &str, e: std::io::Error) -> Status {
     log::error!("{what}: {e}");
     Status::new_service_specific_error_str(
@@ -206,6 +231,8 @@ impl IVold::IVold for Vold {
         Ok(())
     }
     fn monitor(&self) -> binder::Result<()> {
+        // The original takes and releases its locks for the watchdog; each
+        // call here takes its own.
         Ok(())
     }
     fn reset(&self) -> binder::Result<()> {
@@ -231,6 +258,9 @@ impl IVold::IVold for Vold {
         self.reset()
     }
     fn onUserAdded(&self, _: i32, _: i32, _: i32) -> binder::Result<()> {
+        // VolumeManager::onUserAdded records the user's serial and the user
+        // it shares storage with, which only public volumes' bind mounts
+        // read; this device has no disks, so no public volumes.
         Ok(())
     }
     fn onUserRemoved(&self, user: i32) -> binder::Result<()> {
@@ -251,6 +281,7 @@ impl IVold::IVold for Vold {
     fn onUserStopped(&self, user: i32) -> binder::Result<()> {
         self.destroy_emulated(user)
     }
+    // The original's addAppIds and addSandboxIds do nothing.
     fn addAppIds(&self, _: &[String], _: &[i32]) -> binder::Result<()> {
         Ok(())
     }
@@ -258,12 +289,28 @@ impl IVold::IVold for Vold {
         Ok(())
     }
     fn onSecureKeyguardStateChanged(&self, _: bool) -> binder::Result<()> {
+        // The keyguard's state only holds back the creation of pending
+        // disks; this device has none.
         Ok(())
     }
     fn partition(&self, _: &str, _: i32, _: i32) -> binder::Result<()> {
         unsupported("partition")
     }
-    fn forgetPartition(&self, _: &str, _: &str) -> binder::Result<()> {
+    fn forgetPartition(&self, part_guid: &str, fs_uuid: &str) -> binder::Result<()> {
+        // VoldNativeService::forgetPartition: VolumeManager::forgetPartition
+        // unlinks the adopted partition's key; fscrypt_destroy_volume_keys
+        // succeeds at once without FBE, as here.
+        check_argument_hex(part_guid)?;
+        check_argument_hex(fs_uuid)?;
+        let Some(guid) = normalize_hex(part_guid) else {
+            log::warn!("Invalid GUID {part_guid}");
+            return Err(Status::new_service_specific_error(0, None));
+        };
+        let key = format!("/data/misc/vold/expand_{guid}.key");
+        if let Err(error) = std::fs::remove_file(&key) {
+            log::error!("Failed to unlink {key}: {error}");
+            return Err(Status::new_service_specific_error(0, None));
+        }
         Ok(())
     }
     fn mount(
@@ -431,6 +478,8 @@ impl IVold::IVold for Vold {
         unsupported("createObb")
     }
     fn destroyObb(&self, _: &str) -> binder::Result<()> {
+        // VolumeManager::destroyObb destroys the OBB volumes of that id and
+        // succeeds when there are none; createObb makes none here.
         Ok(())
     }
     fn fstrim(&self, _: i32, listener: &Strong<dyn IVoldTaskListener>) -> binder::Result<()> {
@@ -462,6 +511,8 @@ impl IVold::IVold for Vold {
         Ok(())
     }
     fn refreshLatestWrite(&self) -> binder::Result<()> {
+        // RefreshLatestWrite samples the storage device's write counter
+        // getWriteAmount reports; there is none (getWriteAmount is -1).
         Ok(())
     }
     fn getWriteAmount(&self) -> binder::Result<i32> {
@@ -473,6 +524,8 @@ impl IVold::IVold for Vold {
     fn unmountAppFuse(&self, _: i32, _: i32) -> binder::Result<()> {
         unsupported("unmountAppFuse")
     }
+    // No file-based encryption: user storage has no keys to make, protect
+    // or destroy, nor a binding seed to keep.
     fn fbeEnable(&self) -> binder::Result<()> {
         Ok(())
     }
@@ -542,6 +595,8 @@ impl IVold::IVold for Vold {
         );
         Ok(())
     }
+    // The original's prepareSandboxForApp and destroySandboxForApp do
+    // nothing.
     fn prepareSandboxForApp(&self, _: &str, _: i32, _: &str, _: i32) -> binder::Result<()> {
         Ok(())
     }
@@ -560,6 +615,8 @@ impl IVold::IVold for Vold {
     fn isCheckpointing(&self) -> binder::Result<bool> {
         Ok(false)
     }
+    // No checkpointing (supportsCheckpoint is false): there are no changes
+    // to abort or commit and no checkpoint to prepare, restore or reset.
     fn abortChanges(&self, _: &str, _: bool) -> binder::Result<()> {
         Ok(())
     }
@@ -591,6 +648,8 @@ impl IVold::IVold for Vold {
         Ok(())
     }
     fn earlyBootEnded(&self) -> binder::Result<()> {
+        // It tells keystore's metadata encryption and the checkpoint, which
+        // this device has neither of.
         Ok(())
     }
     fn createStubVolume(
@@ -605,6 +664,8 @@ impl IVold::IVold for Vold {
         unsupported("createStubVolume")
     }
     fn destroyStubVolume(&self, _: &str) -> binder::Result<()> {
+        // VolumeManager::destroyStubVolume removes the stub disk of that id,
+        // if any; createStubVolume makes none here.
         Ok(())
     }
     fn openAppFuseFile(
@@ -644,6 +705,7 @@ impl IVold::IVold for Vold {
         unsupported("bindMount")
     }
     fn destroyDsuMetadataKey(&self, _: &str) -> binder::Result<()> {
+        // No DSU is installed here, so no slot has a metadata key.
         Ok(())
     }
     fn getStorageSize(&self) -> binder::Result<i64> {
