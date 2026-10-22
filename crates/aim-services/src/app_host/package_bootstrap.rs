@@ -5,9 +5,9 @@
 //! current package version, the native-library and SDK-library policies,
 //! the installer's SELinux labels through the agent, the permission gids
 //! of a uid, the package writer's effects, the installer's build flags and
-//! its sessions' icon decoder) for the native package boot it runs
-//! (served as its own node). The bridge's other owners, its other
-//! sub-bridges among them, are not implemented (#2022).
+//! its sessions' icon decoder, the maintenance owner) for the native
+//! package boot it runs (served as its own node). The bridge's other
+//! owners, its other sub-bridges among them, are not implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use std::sync::{Arc, Mutex, OnceLock};
@@ -515,6 +515,14 @@ impl Service for PackageBootstrap {
                 bridge::write_get_package_mutation_bridge_reply(&mut p, Some(effects));
                 Ok(())
             }
+            bridge::GET_PACKAGE_MAINTENANCE_BRIDGE => {
+                bridge::GetPackageMaintenanceBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                let maintenance = self.leaf(Arc::new(
+                    super::package_maintenance::PackageMaintenance::new(host.clone()),
+                ));
+                bridge::write_get_package_maintenance_bridge_reply(&mut p, Some(maintenance));
+                Ok(())
+            }
             bridge::GET_INSTALLER_POLICY_BRIDGE => {
                 bridge::GetInstallerPolicyBridge::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 let policy = self.leaf(Arc::new(
@@ -757,6 +765,7 @@ mod tests {
             bridge::GET_PACKAGE_MUTATION_BRIDGE,
             bridge::GET_INSTALLER_POLICY_BRIDGE,
             bridge::GET_INSTALLER_RECOVERY_PRESENTATION,
+            bridge::GET_PACKAGE_MAINTENANCE_BRIDGE,
         ] {
             let reply = call(code);
             let mut r = reply.reader();

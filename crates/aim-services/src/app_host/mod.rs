@@ -105,6 +105,7 @@ mod package_effects;
 pub mod package_initial_context;
 pub mod package_installer;
 mod package_installer_policy;
+mod package_maintenance;
 pub mod package_resolution_policy;
 pub mod package_service;
 pub mod package_shell;
