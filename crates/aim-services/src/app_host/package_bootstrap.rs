@@ -3,13 +3,13 @@
 //! `PackageBootstrapBridge` answers them (`android-16.0.0_r1`), from the
 //! app host's own owners (`boot_policy`'s decisions, the boot leaves, the
 //! current package version, the native-library and SDK-library policies,
-//! the installer's SELinux labels through the agent) for the native
-//! package boot it runs (served as its own node). The bridge's other
-//! owners, its sub-bridges and permission GIDs among them, are not
+//! the installer's SELinux labels through the agent, the permission gids
+//! of a uid) for the native package boot it runs (served as its own
+//! node). The bridge's other owners, its sub-bridges among them, are not
 //! implemented (#2022).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{
@@ -22,7 +22,7 @@ use super::{AppHost, reply};
 use crate::package::bootstrap::ScanUsers;
 use crate::package::pkg::AndroidPackage;
 use crate::package::scan::SharedUidMigration;
-use crate::package::system_config::Sdk;
+use crate::package::system_config::{Sdk, SystemConfig};
 
 const SYSTEM_UID: i32 = 1000;
 /// `PackageBootstrapBridge.ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES`.
@@ -40,6 +40,8 @@ pub struct PackageBootstrap {
     /// ApexManager's `mApexSystemServices`' names, kept across its
     /// notifications.
     apex_system_services: Mutex<Vec<String>>,
+    /// `SystemConfig.getInstance()`, read once.
+    config: OnceLock<SystemConfig>,
 }
 
 /// `Build.FINGERPRINT`: `ro.build.fingerprint`, else made of the build's
@@ -107,7 +109,16 @@ impl PackageBootstrap {
         PackageBootstrap {
             host,
             apex_system_services: Mutex::new(Vec::new()),
+            config: OnceLock::new(),
         }
+    }
+
+    fn config(&self) -> Result<&SystemConfig, Exception> {
+        if let Some(config) = self.config.get() {
+            return Ok(config);
+        }
+        let config = SystemConfig::read(self.host.root()?, &|name| self.host.property(name));
+        Ok(self.config.get_or_init(|| config))
     }
 
     /// A leaf of this process, a new one for each call as the original
@@ -329,6 +340,26 @@ impl Service for PackageBootstrap {
                     bridge::write_is_sdk_library_independence_enabled_reply(&mut p, on)
                 })
             }
+            bridge::GET_PERMISSION_GIDS_FOR_UID => {
+                let a =
+                    bridge::GetPermissionGidsForUid::read(&mut call.data).map_err(|_| BAD_VALUE)?;
+                if a.uid < 0 {
+                    Err(Exception::illegal_argument("negative permission UID"))
+                } else {
+                    match host.permission_manager.get() {
+                        None => Err(Exception::new(
+                            EX_ILLEGAL_STATE,
+                            "permission owner is unavailable",
+                        )),
+                        Some(permissions) => self
+                            .config()
+                            .and_then(|config| permissions.gids_for_uid(a.uid, config))
+                            .map(|gids| {
+                                bridge::write_get_permission_gids_for_uid_reply(&mut p, &Some(gids))
+                            }),
+                    }
+                }
+            }
             code => {
                 let name = bridge::METHODS
                     .iter()
@@ -505,6 +536,30 @@ mod tests {
                 .restore_installer_context("/data/app/vmdl1.tmp")
                 .is_err()
         );
+        let gids = |uid: i32| {
+            let mut p = Parcel::new();
+            bridge::GetPermissionGidsForUid { uid }.write(&mut p);
+            let reply = match &bridge.owner {
+                ServiceOwner::Local(node) => node
+                    .transact(bridge::GET_PERMISSION_GIDS_FOR_UID, &p, false)
+                    .unwrap(),
+                ServiceOwner::Remote(_) => unreachable!(),
+            };
+            bridge::read_get_permission_gids_for_uid_reply(&mut reply.reader()).unwrap()
+        };
+        let e = gids(-1).unwrap_err();
+        assert_eq!(e.message, "negative permission UID");
+        // The services are not made here: no permission owner.
+        let e = gids(10_100).unwrap_err();
+        assert_eq!(e.message, "permission owner is unavailable");
+        // platform.xml's `INTERNET`: `inet`.
+        let bootstrap = PackageBootstrap::new(host.clone());
+        let config = bootstrap.config().unwrap();
+        assert_eq!(
+            config.permissions["android.permission.INTERNET"].gids,
+            [3003]
+        );
+        assert!(config.permission_error.is_none());
         let reply = call(bridge::GET_PACKAGE_POLICY_BRIDGE);
         let e = reply.reader().read_exception().unwrap().unwrap_err();
         assert!(e.message.contains("#2022"), "{}", e.message);

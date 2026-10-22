@@ -58,6 +58,13 @@ pub struct SystemConfig {
     pub libraries: BTreeMap<String, Library>,
     /// SystemConfig exact Linux UID permission assignments.
     pub system_permissions: BTreeMap<i32, BTreeSet<String>>,
+    /// `mGlobalGids`, as appended (`ArrayUtils.appendInt`: each once).
+    pub global_gids: Vec<i32>,
+    /// `mPermissions`: the gids each configured permission gives.
+    pub permissions: BTreeMap<String, ConfigPermission>,
+    /// `readPermission`'s duplicate definition, fatal to the original's
+    /// reading.
+    pub permission_error: Option<String>,
     /// First insertion order, retained for ArrayMap hash-collision ordering.
     pub library_order: Vec<String>,
     /// `mAvailableFeatures`, as added: name and version.
@@ -107,6 +114,14 @@ pub struct SystemConfig {
     pub ecm_trusted_packages: Vec<(String, Vec<u8>)>,
     pub ecm_trusted_installers: Vec<(String, Vec<u8>)>,
     unavailable: Vec<String>,
+}
+
+/// `SystemConfig.PermissionEntry`: a permission's gids and whether they
+/// are per user.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ConfigPermission {
+    pub per_user: bool,
+    pub gids: Vec<i32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -277,6 +292,55 @@ impl SystemConfig {
         for e in root.children() {
             let name = e.string("name").map(|s| s.into_owned());
             match e.name.as_str() {
+                "group" if flags == ALLOW_ALL => match e.string("gid") {
+                    Some(gid) => {
+                        let gid = gid_for_name(image, prop, &gid);
+                        if !self.global_gids.contains(&gid) {
+                            self.global_gids.push(gid);
+                        }
+                    }
+                    None => eprintln!(
+                        "package SystemConfig: <group> without gid in {}",
+                        file.display()
+                    ),
+                },
+                "permission" if flags & ALLOW_PERMISSIONS != 0 => match name {
+                    None => eprintln!(
+                        "package SystemConfig: <permission> without name in {}",
+                        file.display()
+                    ),
+                    Some(name) if self.permissions.contains_key(&name) => {
+                        self.permission_error
+                            .get_or_insert(format!("Duplicate permission definition for {name}"));
+                    }
+                    // `readPermission`.
+                    Some(name) => {
+                        let mut permission = ConfigPermission {
+                            per_user: e
+                                .string("perUser")
+                                .is_some_and(|v| v.eq_ignore_ascii_case("true")),
+                            gids: Vec::new(),
+                        };
+                        for group in e.children().filter(|c| c.name == "group") {
+                            let Some(gid) = group.string("gid") else {
+                                eprintln!(
+                                    "package SystemConfig: <group> without gid for {name} in {}",
+                                    file.display()
+                                );
+                                continue;
+                            };
+                            match gid_for_name(image, prop, &gid) {
+                                -1 => eprintln!(
+                                    "package SystemConfig: <group> with unknown gid \"{gid}\" for permission {name} in {}",
+                                    file.display()
+                                ),
+                                gid if !permission.gids.contains(&gid) => permission.gids.push(gid),
+                                _ => {}
+                            }
+                        }
+                        self.permissions.insert(name, permission);
+                    }
+                },
                 "assign-permission" if flags & ALLOW_PERMISSIONS != 0 => {
                     if let (Some(permission), Some(uid)) = (name, e.string("uid")) {
                         if let Some(uid) = permission_uid(image, prop, &uid) {
@@ -611,6 +675,29 @@ fn permission_uid(image: &Path, prop: &dyn Fn(&str) -> Option<String>, name: &st
     (uid >= 0).then_some(uid)
 }
 
+/// `Process.getGidForName`: a group's gid, digits as `atoi` reads them, or
+/// -1.
+fn gid_for_name(image: &Path, prop: &dyn Fn(&str) -> Option<String>, name: &str) -> i32 {
+    if name.is_empty() {
+        return -1;
+    }
+    if name.bytes().all(|b| b.is_ascii_digit()) {
+        return name.parse::<i64>().unwrap_or(i64::MAX) as i32;
+    }
+    struct Properties<'a>(&'a dyn Fn(&str) -> Option<String>);
+    impl aim_android_init::PropertyLookup for Properties<'_> {
+        fn property(&self, name: &str) -> Option<String> {
+            (self.0)(name)
+        }
+    }
+    aim_android_init::rc::IdResolver::from_image(
+        &aim_android_init::ImageRoot::new(image),
+        &Properties(prop),
+    )
+    .getgrnam(name)
+    .map_or(-1, |gid| gid as i32)
+}
+
 pub(crate) fn decimal_uid(s: &str) -> Option<i32> {
     const ZEROES: &[u32] = &[
         0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66,
@@ -836,6 +923,59 @@ mod tests {
 
     /// `disabled-until-used-preinstalled-carrier-app` and its associated
     /// apps, gated as app configs; a SKU override takes an app back out.
+    /// `<group>` adds a global gid only where all is allowed;
+    /// `readPermission` keeps each known gid once, refuses a duplicate
+    /// definition, and reads `perUser` as `Boolean.parseBoolean`.
+    #[test]
+    fn global_and_permission_gids_by_name_or_number() {
+        let document = aim_android_xml::read(b"<permissions><group gid='inet'/><group gid='3003'/><group/><permission name='p.net'><group gid='inet'/><group gid='1015'/><group gid='inet'/><group gid='no_such'/></permission><permission name='p.user' perUser='TRUE'><group gid='9997'/></permission><permission/><permission name='p.net'/></permissions>").unwrap();
+        let props = |_: &str| None;
+        let root = Path::new("/nonexistent");
+        let mut config = SystemConfig::default();
+        config.read_root(
+            &document,
+            ALLOW_ALL,
+            false,
+            root,
+            &props,
+            Path::new("t.xml"),
+        );
+        assert_eq!(config.global_gids, [3003]);
+        assert_eq!(
+            config.permissions["p.net"],
+            ConfigPermission {
+                per_user: false,
+                gids: vec![3003, 1015],
+            }
+        );
+        assert!(config.permissions["p.user"].per_user);
+        assert_eq!(
+            config.permission_error.as_deref(),
+            Some("Duplicate permission definition for p.net")
+        );
+        let mut vendor = SystemConfig::default();
+        vendor.read_root(
+            &document,
+            ALLOW_PERMISSIONS,
+            false,
+            root,
+            &props,
+            Path::new("t.xml"),
+        );
+        assert!(vendor.global_gids.is_empty());
+        assert_eq!(vendor.permissions.len(), 2);
+        let mut features = SystemConfig::default();
+        features.read_root(
+            &document,
+            ALLOW_FEATURES,
+            false,
+            root,
+            &props,
+            Path::new("t.xml"),
+        );
+        assert!(features.permissions.is_empty());
+    }
+
     #[test]
     fn carrier_apps_disabled_until_used_are_app_configs() {
         let document = aim_android_xml::read(b"<permissions><disabled-until-used-preinstalled-carrier-app package='c.one'/><disabled-until-used-preinstalled-carrier-app package='c.two'/><disabled-until-used-preinstalled-carrier-app package='c.one'/><disabled-until-used-preinstalled-carrier-associated-app package='a.one' carrierAppPackage='c.one'/><disabled-until-used-preinstalled-carrier-associated-app package='a.two' carrierAppPackage='c.one' addedInSdk='30'/><disabled-until-used-preinstalled-carrier-associated-app package='a.bad' carrierAppPackage='c.one' addedInSdk='x'/><disabled-until-used-preinstalled-carrier-associated-app package='a.none'/><enabled-in-sku-override package='c.two'/></permissions>").unwrap();

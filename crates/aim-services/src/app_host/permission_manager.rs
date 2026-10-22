@@ -379,6 +379,43 @@ impl WriteParcelable for SplitPermissionInfo<'_> {
     }
 }
 
+/// `UserHandle.PER_USER_RANGE`.
+const PER_USER_RANGE: i32 = 100_000;
+
+/// `PermissionService.getGidsForUid` of a uid in `user` whose state holds
+/// `flags`: SystemConfig's global gids, then those of each permission it
+/// holds, in the state's order (an `IndexedMap`: by name hash), a per-user
+/// one's as `user`'s uids; the global ones alone with no state.
+fn uid_gids(
+    config: &crate::package::system_config::SystemConfig,
+    flags: Option<&permissions::Named>,
+    user: i32,
+) -> Vec<i32> {
+    let mut gids = config.global_gids.clone();
+    let Some(flags) = flags else {
+        return gids;
+    };
+    for (name, flags) in crate::package::info::array_order(flags.clone(), |(n, _)| n) {
+        let Some(permission) = config.permissions.get(&name) else {
+            continue;
+        };
+        if !permission_granted(flags) {
+            continue;
+        }
+        gids.extend(
+            permission
+                .gids
+                .iter()
+                .map(|&gid| match permission.per_user {
+                    // `UserHandle.getUid`.
+                    true => user * PER_USER_RANGE + gid % PER_USER_RANGE,
+                    false => gid,
+                }),
+        );
+    }
+    gids
+}
+
 /// What the permission service reads: the package model with its apps
 /// filter, the permissions defined, the permission groups and the access
 /// state of user 0, the model's one user.
@@ -1264,6 +1301,30 @@ impl PermissionManager {
         Ok(state)
     }
 
+    /// `PermissionService.getGidsForUid` (`uid_gids`), of user 0's state,
+    /// the model's one user.
+    pub(super) fn gids_for_uid(
+        &self,
+        uid: i32,
+        config: &crate::package::system_config::SystemConfig,
+    ) -> Result<Vec<i32>, Exception> {
+        if let Some(error) = &config.permission_error {
+            return Err(Exception::new(EX_ILLEGAL_STATE, error.clone()));
+        }
+        let user0 = match uid / PER_USER_RANGE {
+            0 => Some(self.user0()?),
+            _ => None,
+        };
+        let flags = user0.as_ref().and_then(|user0| {
+            user0
+                .app_id_permissions
+                .iter()
+                .find(|(id, _)| *id == uid % PER_USER_RANGE)
+                .map(|(_, flags)| flags)
+        });
+        Ok(uid_gids(config, flags, uid / PER_USER_RANGE))
+    }
+
     fn access<T>(
         &self,
         f: impl FnOnce(&Access<'_>) -> Result<T, Exception>,
@@ -1873,6 +1934,97 @@ mod tests {
     const INTERNET: &str = "android.permission.INTERNET";
     const RUNTIME_GRANTED: i32 = 1 << 4;
     const INSTALL_GRANTED: i32 = 1 << 0;
+
+    /// The global gids first, then a granted permission's in the state's
+    /// hash order, duplicates kept; a per-user one's as the user's uids; an
+    /// ungranted or unconfigured one adds none.
+    #[test]
+    fn uid_gids_follow_the_permission_service() {
+        use crate::package::system_config::{ConfigPermission, SystemConfig};
+        let mut config = SystemConfig::default();
+        config.global_gids = vec![3003];
+        config.permissions = [
+            (
+                "b".to_string(),
+                ConfigPermission {
+                    per_user: false,
+                    gids: vec![1015, 3003],
+                },
+            ),
+            (
+                "a".to_string(),
+                ConfigPermission {
+                    per_user: true,
+                    gids: vec![9997],
+                },
+            ),
+            (
+                "c".to_string(),
+                ConfigPermission {
+                    per_user: false,
+                    gids: vec![1],
+                },
+            ),
+        ]
+        .into();
+        let flags: permissions::Named = vec![
+            ("b".into(), INSTALL_GRANTED),
+            ("unconfigured".into(), INSTALL_GRANTED),
+            ("c".into(), 0),
+            ("a".into(), RUNTIME_GRANTED),
+        ];
+        assert_eq!(uid_gids(&config, Some(&flags), 0), [3003, 9997, 1015, 3003]);
+        assert_eq!(
+            uid_gids(&config, Some(&flags), 10),
+            [3003, 1_009_997, 1015, 3003]
+        );
+        assert_eq!(uid_gids(&config, None, 0), [3003]);
+    }
+
+    /// `gids_for_uid` reads user 0's app id state, and a fatal
+    /// SystemConfig fails it.
+    #[test]
+    fn gids_for_uid_of_user_0s_state() {
+        use crate::package::system_config::{ConfigPermission, SystemConfig};
+        let process = aim_binder_host::local::LocalProcess::open(
+            &aim_binder_driver::Driver::new(),
+            aim_binder_driver::Device::Binder,
+            aim_binder_driver::Credentials {
+                pid: std::process::id() as i32,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let permissions = PermissionManager::new(AppHost::new(process));
+        *permissions.user0.lock().unwrap() = Some(Arc::new(AccessUser {
+            app_id_permissions: vec![(10_123, vec![(INTERNET.into(), INSTALL_GRANTED)])],
+            ..Default::default()
+        }));
+        let mut config = SystemConfig::default();
+        config.permissions = [(
+            INTERNET.to_string(),
+            ConfigPermission {
+                per_user: false,
+                gids: vec![3003],
+            },
+        )]
+        .into();
+        assert_eq!(permissions.gids_for_uid(10_123, &config).unwrap(), [3003]);
+        assert!(
+            permissions
+                .gids_for_uid(10_124, &config)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            permissions
+                .gids_for_uid(1_010_123, &config)
+                .unwrap()
+                .is_empty()
+        );
+        config.permission_error = Some("Duplicate permission definition for p".into());
+        assert!(permissions.gids_for_uid(10_123, &config).is_err());
+    }
 
     fn package(
         name: &str,
