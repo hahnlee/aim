@@ -179,6 +179,12 @@ impl Service for FileIntegrity {
                 let a = fi::SetupFsverity::read(&mut call.data).map_err(|_| BAD_VALUE)?;
                 self.setup_fsverity(uid, a)
             }
+            // `Binder.dump`: FileIntegrityService's binder overrides no dump.
+            aim_binder_host::local::DUMP_TRANSACTION => {
+                let mut p = Parcel::new();
+                p.write_no_exception();
+                Ok(Answer::Reply(p))
+            }
             _ => return Err(UNKNOWN_TRANSACTION),
         };
         match answer {

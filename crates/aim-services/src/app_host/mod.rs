@@ -3694,6 +3694,10 @@ impl AppHost {
     fn unimplemented(&self, service: &str, descriptor: &str, code: u32) -> Exception {
         let method = match aim_service_aidl::method_name(descriptor, code) {
             Some(name) => format!("{service}#{code} ({name})"),
+            // `Binder.dump`, which its original overrides.
+            None if code == aim_binder_host::local::DUMP_TRANSACTION => {
+                format!("{service} dump (#2140)")
+            }
             None => format!("{service}#{code}"),
         };
         if self

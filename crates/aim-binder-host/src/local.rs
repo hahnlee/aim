@@ -42,6 +42,9 @@ const READ_SIZE: usize = 4096;
 /// Intrinsic libbinder transactions, dispatched before service AIDL bodies.
 const INTERFACE_TRANSACTION: u32 = u32::from_be_bytes(*b"_NTF");
 const PING_TRANSACTION: u32 = u32::from_be_bytes(*b"_PNG");
+/// `IBinder.DUMP_TRANSACTION`: every binder takes its output's descriptor
+/// (`Binder.onTransact`), whatever its other calls accept.
+pub const DUMP_TRANSACTION: u32 = u32::from_be_bytes(*b"_DMP");
 const DEBUG_PID_TRANSACTION: u32 = u32::from_be_bytes(*b"_PID");
 
 /// BBinder::transact writes its owning process PID directly, without an
@@ -336,7 +339,8 @@ impl LocalService {
             return Err(DEAD_OBJECT);
         }
         let request = self.process.owned_reply(data);
-        if !request.owned_fds.is_empty() && !self.service.accepts_fds() {
+        if !request.owned_fds.is_empty() && !self.service.accepts_fds() && code != DUMP_TRANSACTION
+        {
             return Err(FAILED_TRANSACTION);
         }
         let (pid, uid) = CALLER
@@ -1004,7 +1008,9 @@ impl LocalProcess {
         let _inbound = AuthenticatedInbound::enter(self.handle, tr.buffer);
         let reply = match (&service, tr.code) {
             (None, _) => Err(UNKNOWN_TRANSACTION),
-            (Some(s), _) if !fds.is_empty() && !s.accepts_fds() => Err(FAILED_TRANSACTION),
+            (Some(s), code) if !fds.is_empty() && !s.accepts_fds() && code != DUMP_TRANSACTION => {
+                Err(FAILED_TRANSACTION)
+            }
             (Some(s), INTERFACE_TRANSACTION) => {
                 let mut p = Parcel::new();
                 p.write_string16(s.has_descriptor().then(|| s.descriptor()));
@@ -1498,6 +1504,41 @@ mod tests {
         assert_eq!(reader.read_i32(), Ok(231));
         assert_eq!(reader.remaining(), 0);
         assert_eq!(sink.0.load(Ordering::Relaxed), 0);
+    }
+
+    /// Every binder takes a dump's output descriptor (`Binder.onTransact`);
+    /// a service's other calls still refuse descriptors it does not take.
+    #[test]
+    fn a_dump_reaches_a_service_that_takes_no_descriptors() {
+        struct Counter(AtomicI32);
+        impl Service for Counter {
+            fn descriptor(&self) -> &str {
+                "test.ICounter"
+            }
+            fn transact(&self, _: &mut Call<'_>) -> Reply {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(Parcel::new())
+            }
+        }
+        let driver = Driver::new();
+        let process = open(&driver, 412, 1000);
+        let counter = Arc::new(Counter(AtomicI32::new(0)));
+        let Binder::Local(ptr) = process.add_service(counter.clone()) else {
+            unreachable!()
+        };
+        let local = process.local_service(ptr).unwrap();
+        let with_fd = || {
+            let mut data = Parcel::new();
+            data.write_file(Arc::new(std::fs::File::open("/dev/null").unwrap()));
+            data
+        };
+        assert!(local.transact(DUMP_TRANSACTION, &with_fd(), false).is_ok());
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            local.transact(1, &with_fd(), false).err(),
+            Some(FAILED_TRANSACTION)
+        );
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
     }
 
     #[test]
