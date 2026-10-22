@@ -7,7 +7,9 @@ publish = false
 description = "AOSP libbinder_rs, vendor variant, from the pinned sources"
 
 [lib]
-path = "../../_build/aosp/frameworks/native/libs/binder/rust/src/lib.rs"
+# The fetched crate root, copied by aidl-gen so formatting stays out of
+# _build (crates/aim-build/src/nodes/aidl.rs).
+path = "../../target/aim/gen/binder-root/binder/lib.rs"
 
 [features]
 # The platform variant, for system daemons (`daemons/`).

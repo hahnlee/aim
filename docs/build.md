@@ -206,11 +206,12 @@ afterwards `cargo build -p health --target aarch64-linux-android --profile
 android` also works.
 
 The code is formatted with rustfmt's defaults. Format with `cargo aim
-fmt`, not `cargo fmt`: `hal/binder` and `hal/binder-ndk-sys` build AOSP's
-binder crate from `_build`, and the AIDL crates are generated into
-`target`, so `cargo fmt` would rewrite those sources too (and the
-fetched tree would then fail its content hash). `cargo aim fmt` formats
-only the members whose targets are all in the repository.
+fmt`, which formats only the members whose targets are all in the
+repository. `cargo fmt` would also rewrite the AIDL crates generated into
+`target`; it leaves `_build` alone: `hal/binder` and `hal/binder-ndk-sys`
+build AOSP's binder crate from copies of its crate roots that aidl-gen
+writes into `target/aim/gen/binder-root`, whose modules rustfmt skips, so
+the fetched tree keeps its content hash.
 
 ## n2
 
