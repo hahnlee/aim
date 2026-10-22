@@ -188,8 +188,15 @@ static void empty_rights(void) {
 // (CLONE_THREAD without CLONE_FILES) closes every fd, opens /dev/null as
 // fd 0; the spawner waits on the tid word and keeps its own fds.
 static volatile pid_t pseudo_tid = -1;
+struct pseudo_arg {
+  pid_t group;
+  int report;
+};
 static int pseudo_fn(void* arg) {
-  (void)arg;
+  // A thread: getpid(2) is its thread group's, gettid its own.
+  struct pseudo_arg* a = arg;
+  char ok = syscall(__NR_getpid) == a->group && syscall(__NR_gettid) != a->group ? 'g' : 'b';
+  if (write(a->report, &ok, 1) != 1) _exit(2);
   for (int i = 0; i < 1024; i++) syscall(__NR_close, i);
   int fd = open("/dev/null", O_RDWR);
   _exit(fd == 0 ? 0 : 1);
@@ -198,15 +205,18 @@ static void own_files_thread(void) {
   int p[2];
   CHECK(pipe(p) == 0, "pipe");
   static char stack[64 * 1024];
+  static struct pseudo_arg arg;
+  arg = (struct pseudo_arg){getpid(), p[1]};
   pid_t tid = clone(pseudo_fn, stack + sizeof(stack),
                     CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | CLONE_CHILD_SETTID |
                         CLONE_CHILD_CLEARTID,
-                    NULL, NULL, NULL, (pid_t*)&pseudo_tid);
+                    &arg, NULL, NULL, (pid_t*)&pseudo_tid);
   CHECK(tid > 0, "clone");
   while (pseudo_tid == -1) syscall(__NR_futex, &pseudo_tid, FUTEX_WAIT, -1, NULL, NULL, 0);
   while (pseudo_tid != 0) syscall(__NR_futex, &pseudo_tid, FUTEX_WAIT, pseudo_tid, NULL, NULL, 0);
-  CHECK(write(p[1], "x", 1) == 1, "the spawner's fds stay open");
   char c;
+  CHECK(read(p[0], &c, 1) == 1 && c == 'g', "the pseudothread's getpid is its group's");
+  CHECK(write(p[1], "x", 1) == 1, "the spawner's fds stay open");
   CHECK(read(p[0], &c, 1) == 1 && c == 'x', "read back");
   close(p[0]);
   close(p[1]);

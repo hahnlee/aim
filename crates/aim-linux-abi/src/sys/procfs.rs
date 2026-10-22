@@ -449,7 +449,7 @@ fn status(p: i32, thread: Option<i32>) -> Option<String> {
     };
     let kb = |b: u64| b / 1024;
     let n = ncpu();
-    let guest_tgid = super::pidns::guest_pid(p).ok()?;
+    let guest_tgid = super::pidns::guest_pid(super::procrec::tgid(p)).ok()?;
     Some(format!(
         "Name:\t{}\nUmask:\t0022\nState:\t{state}\nTgid:\t{guest_tgid}\nNgid:\t0\nPid:\t{}\nPPid:\t{}\nTracerPid:\t{}\n\
          {}FDSize:\t256\n\

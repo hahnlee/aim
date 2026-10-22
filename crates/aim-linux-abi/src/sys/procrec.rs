@@ -75,6 +75,9 @@ static OWN: AtomicPtr<Table> = AtomicPtr::new(std::ptr::null_mut());
 /// This process's `oom_score_adj` and `oom_score_adj_min` while it has no
 /// record (outside a pid namespace, or before its first stack is noted).
 static OOM: [AtomicI32; 2] = [const { AtomicI32::new(0) }; 2];
+/// The process this one is a thread of, or 0, whether or not it has a
+/// record.
+static TGID: AtomicI32 = AtomicI32::new(0);
 /// Offset of `oom_score_adj` in the header; `oom_score_adj_min` follows.
 const OOM_AT: u64 = 56;
 const _: () = assert!(std::mem::offset_of!(Header, oom_score_adj) as u64 == OOM_AT);
@@ -151,6 +154,7 @@ pub fn init(s: &StackInfo) {
     let [adj, min] = oom();
     h.oom_score_adj.store(adj, Relaxed);
     h.oom_score_adj_min.store(min, Relaxed);
+    h.tgid.store(TGID.load(Relaxed) as u64, Relaxed);
     for (slot, v) in [&h.lo, &h.len, &h.args[0], &h.args[1], &h.env[0], &h.env[1]]
         .into_iter()
         .zip([lo, hi - lo, s.args.0, s.args.1, s.env.0, s.env.1])
@@ -288,6 +292,8 @@ pub fn foreign_tids() -> Vec<i32> {
 
 /// This process is a thread of process `tgid`.
 pub fn set_tgid(tgid: i32) {
+    TGID.store(tgid, Relaxed);
+    crate::context::set_thread_group(tgid);
     if let Some(t) = table() {
         t.header.tgid.store(tgid as u64, Relaxed);
     }
@@ -385,6 +391,15 @@ pub fn threads(pid: i32) -> Option<Vec<ThreadInfo>> {
         .collect();
     v.sort_unstable_by_key(|t| t.tid);
     Some(v)
+}
+
+/// This process's thread group: another process when it is one of its
+/// threads, else none.
+pub fn own_tgid() -> Option<i32> {
+    match TGID.load(Relaxed) {
+        0 => None,
+        g => Some(g),
+    }
 }
 
 /// The thread group of process `pid`: another process when `pid` is one of
