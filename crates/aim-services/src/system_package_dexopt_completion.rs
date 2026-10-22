@@ -30,7 +30,7 @@ impl System {
     pub(crate) fn native_dexopt_hibernation_leaf(
         &self,
         bridge: &Arc<crate::package::bootstrap::Bridge>,
-    ) -> Result<Strong> {
+    ) -> Result<Arc<ServiceOwner>> {
         self.check_package_bootstrap(bridge)?;
         let state = self.package_bootstrap.lock().unwrap();
         let current = state
@@ -38,18 +38,12 @@ impl System {
             .as_ref()
             .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
             .ok_or_else(|| dexopt_error("Dexopt hibernation bootstrap replaced"))?;
-        let binder = current
+        Ok(current
             .boot_lifecycle
             .as_ref()
             .ok_or_else(|| dexopt_error("Dexopt boot lifecycle unavailable"))?
             .leaf()
-            .binder();
-        match binder {
-            Binder::Handle(handle) => Ok(self.process.strong(handle)),
-            Binder::Local(_) => Err(dexopt_error(
-                "Dexopt hibernation leaf must be a retained original remote owner",
-            )),
-        }
+            .clone())
     }
     pub(crate) fn native_boot_dexopt_start_time(
         &self,

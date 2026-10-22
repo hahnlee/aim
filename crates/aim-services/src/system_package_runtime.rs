@@ -377,7 +377,7 @@ impl System {
         inputs.early_users.attach_after_scan(users)?;
         let user_operations = inputs.early_user_binder;
         let lifecycle_leaf =
-            self.package_bootstrap_binder_leaf(bridge, api::GET_PACKAGE_BOOT_LIFECYCLE_LEAF)?;
+            self.package_bootstrap_node(bridge, api::GET_PACKAGE_BOOT_LIFECYCLE_LEAF)?;
         let boot_lifecycle = self.initialize_package_boot_lifecycle(
             bridge,
             lifecycle_leaf,

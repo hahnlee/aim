@@ -32,7 +32,7 @@ enum Job {
 pub struct Runtime {
     system: Weak<System>,
     bridge: Arc<crate::package::bootstrap::Bridge>,
-    leaf: Strong,
+    leaf: Arc<ServiceOwner>,
     events: Mutex<Option<Binder>>,
     queue: mpsc::Sender<Job>,
     startup: Arc<(Mutex<Option<Result<()>>>, Condvar)>,
@@ -49,7 +49,7 @@ pub struct Worker {
     events: LocalService,
 }
 impl Runtime {
-    pub(crate) fn leaf(&self) -> &Strong {
+    pub(crate) fn leaf(&self) -> &Arc<ServiceOwner> {
         &self.leaf
     }
     pub fn stop(&self) {
@@ -107,7 +107,7 @@ impl System {
     pub fn initialize_package_boot_lifecycle(
         self: &Arc<Self>,
         bridge: &Arc<crate::package::bootstrap::Bridge>,
-        leaf: Strong,
+        leaf: ServiceOwner,
         decompression: Arc<crate::package::scan::boot_compressed::BootDecompression>,
         boot_apex_changed: bool,
     ) -> Result<Worker> {
@@ -122,7 +122,7 @@ impl System {
         let runtime = Arc::new(Runtime {
             system: Arc::downgrade(self),
             bridge: bridge.clone(),
-            leaf,
+            leaf: Arc::new(leaf),
             events: Mutex::new(None),
             queue,
             startup: startup.clone(),

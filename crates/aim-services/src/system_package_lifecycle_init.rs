@@ -78,31 +78,11 @@ impl<M: AreaMemory + Send + 'static> BeforeScan<M> {
     ) -> Result<Self, Exception> {
         system.check_package_bootstrap(&bridge)?;
         let restored = Restored::capture(settings, &recovery);
-        let mut request = Parcel::new();
-        bootstrap::GetPackageLifecycleLeaf {}.write(&mut request);
-        let reply = bridge
-            .owner
-            .transact(bootstrap::GET_PACKAGE_LIFECYCLE_LEAF, &request, false)
-            .map_err(|status| transport("CE leaf transport", status))?;
-        let mut reader = reply.reader();
-        let binder = bootstrap::read_get_package_lifecycle_leaf_reply(&mut reader)
-            .map_err(|status| transport("CE leaf reply", status))??
-            .ok_or_else(|| {
-                Exception::new(EX_ILLEGAL_STATE, "original CE lifecycle leaf unavailable")
-            })?;
-        if reader.remaining() != 0 {
-            return Err(Exception::new(
-                EX_ILLEGAL_STATE,
-                "CE lifecycle leaf reply tail",
-            ));
-        }
-        let leaf = reply
-            .retain_remote_binder(binder)
-            .map_err(|status| transport("CE leaf capability", status))?;
+        let leaf = system.package_bootstrap_node(&bridge, bootstrap::GET_PACKAGE_LIFECYCLE_LEAF)?;
         let live = properties.clone();
         let production = Production::construct(
             restored,
-            LifecycleFacts::original(&bridge, crate::system::ServiceOwner::Remote(Arc::new(leaf)))?,
+            LifecycleFacts::original(&bridge, leaf)?,
             Box::new(move |name| live.lock().unwrap().get(name)),
         )?;
         system.check_package_bootstrap(&bridge)?;
