@@ -1054,15 +1054,7 @@ mod tests {
 
     #[test]
     fn posix_child_stays_stopped_until_native_identity_is_published() {
-        let directory = std::env::temp_dir().join(format!(
-            "aim-posix-launch-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&directory).unwrap();
+        let directory = aim_paths::scratch_dir("aim-posix-launch");
         let marker = directory.join("child-ran");
         let log = fs::File::create(directory.join("log")).unwrap();
         let pid = spawn(
@@ -1241,15 +1233,7 @@ mod capability_failure_tests {
     }
     #[test]
     fn missing_usage_helper_is_a_real_spawn_error() {
-        let root = std::env::temp_dir().join(format!(
-            "aim-capability-missing-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&root).unwrap();
+        let root = aim_paths::scratch_dir("aim-capability-missing");
         let error = LinuxRunOptions::detect(&root.join("absent")).err().unwrap();
         assert!(error.contains("capability query"));
         std::fs::remove_dir(root).unwrap();
