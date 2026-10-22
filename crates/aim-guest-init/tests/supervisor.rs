@@ -194,6 +194,35 @@ fn start_and_stop_publish_init_svc() {
     assert!(due.is_empty());
 }
 
+/// `DoReboot`: the services that are not shutdown critical get SIGTERM in
+/// shutdown order (the last started first), then SIGKILL (#533).
+#[test]
+fn shutdown_terminates_the_last_started_first() {
+    let mut f = fixture("sv-shutdown-order");
+    f.start("other").unwrap();
+    f.start("svc").unwrap();
+    let (other, svc) = (f.pid("other"), f.pid("svc"));
+    let first = f.supervisor.shutdown_stop_first();
+    assert!(first.contains(&"svc".to_string()) && first.contains(&"other".to_string()));
+    let pids = f
+        .supervisor
+        .stop_for_shutdown(&first, true, &mut f.launcher, &f.planner);
+    assert_eq!(pids, [svc, other]);
+    assert_eq!(
+        f.launcher.kills,
+        [(svc, libc::SIGTERM), (other, libc::SIGTERM)]
+    );
+    f.events();
+    assert_eq!(f.props["init.svc.svc"], "stopping");
+    f.launcher.kills.clear();
+    f.supervisor
+        .stop_for_shutdown(&first, false, &mut f.launcher, &f.planner);
+    assert_eq!(
+        f.launcher.kills,
+        [(svc, libc::SIGKILL), (other, libc::SIGKILL)]
+    );
+}
+
 #[test]
 fn shutdown_kill_runs_no_onrestart() {
     let mut f = fixture("sv-shutdown");
