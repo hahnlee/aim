@@ -12,7 +12,7 @@ impl Connection {
         let key = SessionKey(directory.join("c.sock"));
         let path = key.0.clone();
         let worker = std::thread::spawn(move || serve_broker(&path));
-        while !key.0.exists() {
+        while !key.listening() {
             std::thread::sleep(Duration::from_millis(1));
         }
         let fd = open_on_key(&key, 0, OPEN_DEVICE, &[]).unwrap();

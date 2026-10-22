@@ -1248,6 +1248,9 @@ fn handle(owner: Arc<Owner>, stream: UnixStream) {
 pub fn serve(path: &Path) -> Result<(), Errno> {
     let listener = UnixListener::bind(path).map_err(io_error)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(io_error)?;
+    // The socket's path exists from bind, before it listens: clients wait
+    // for this marker, made once connections are accepted.
+    fs::write(super::ready_marker(path), b"").map_err(io_error)?;
     listener.set_nonblocking(true).map_err(io_error)?;
     let owner = Arc::new(Owner {
         key: SessionKey(path.to_owned()),
@@ -1295,6 +1298,7 @@ pub fn serve(path: &Path) -> Result<(), Errno> {
         std::thread::sleep(Duration::from_millis(2));
     }
     owner.abort();
+    let _ = fs::remove_file(super::ready_marker(path));
     let _ = fs::remove_file(path);
     if let Some(parent) = path.parent() {
         let _ = fs::remove_dir(parent);

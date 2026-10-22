@@ -1070,7 +1070,7 @@ mod tests {
             let key = SessionKey::from_transport(dir.join("c.sock"));
             let path = key.transport().to_owned();
             let broker = std::thread::spawn(move || super::super::fuse::serve_broker(&path));
-            while !key.transport().exists() {
+            while !key.listening() {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
             let device = device(&key);
